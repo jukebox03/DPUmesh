@@ -20,10 +20,11 @@ struct dpa_ring_info {
 	doca_dpa_dev_mmap_t dpu_mmap;    /* DPU staging buffer mmap (forward DMA dest) */
 	uint64_t dpu_addr;               /* this ring's DPU staging region base VA */
 	int32_t pod_id;
-	/* Byte offset of THIS forward ring's region within the pod's DPU staging
-	 * buffer. Under per-conn contiguous staging the DPA lands each chunk at the
-	 * host TX byte offset, recovering the pod staging base as dpu_addr - region_off
-	 * (the K-way region split is vestigial). 0 for K=1. */
+	/* Retained in the wire ABI but ALWAYS 0 now: under per-conn contiguous
+	 * staging the DPA lands each chunk at the host TX byte offset, so the pod
+	 * staging base is simply dpu_addr (the old K-way EU-shard region split is
+	 * retired). Kept as a zeroed field so the struct layout + ABI asserts below
+	 * stay frozen; the DPA still computes dpu_addr - region_off (== dpu_addr). */
 	uint32_t region_off;
 } __attribute__((__packed__, aligned(8)));
 
@@ -77,9 +78,10 @@ enum dpa_msg_type {
  * recv callback peeks raw[0] to dispatch). Carries the endpoint tuple so the DPU
  * can route (dst_pod==BLANK -> resolve dst_service) and the host can demux by
  * dst_port; port/seq are OPAQUE passthrough.
- *   src_service is NOT on the wire (16B budget): the DPU derives the caller's
- *   service from src_pod's registration (assumes ONE service per pod — widen the
- *   wire if a pod ever hosts multiple services).
+ *   src_service is NOT on the wire (the 20B budget carries route_group, not
+ *   src_service): the DPU derives the caller's service from src_pod's
+ *   registration (assumes ONE service per pod — widen the wire if a pod ever
+ *   hosts multiple services).
  * Layout is naturally aligned (uint16 on even offsets, pos@12); route_group@16 adds 3B tail pad:
  *   type0 src_pod1 dst_pod2 dst_svc3 src_port4 dst_port6 seq8 length10 pos12 route_group16 = 20B. */
 struct comch_dma_comp_msg {

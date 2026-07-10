@@ -9,7 +9,6 @@
 
 struct objects; /* Forward declaration */
 
-#define CC_SEND_TASK_NUM 8192 /* Number of CC send tasks (HW max ~65536) */
 #define CC_SERVER_RECV_QUEUE_SIZE 1024 /* Size of CC receive queue (server side) */
 
 #ifndef SLEEP_IN_NANOS

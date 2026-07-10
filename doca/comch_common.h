@@ -8,6 +8,11 @@
 
 struct objects;
 
+/* Number of Comch control-path send tasks (HW max ~65536). Defined once here
+ * and shared by BOTH the client and server send pools (each sizes its pool to
+ * this) so the two sides can never drift out of lockstep. */
+#define CC_SEND_TASK_NUM 8192
+
 /* Control-channel message types (Host ↔ DPU ARM, over the DOCA Comch control
  * path). Explicit values, contiguous from 1; 0 is reserved INVALID so a zeroed
  * buffer never decodes to a live type. The verb vocabulary (POD_, MMAP_, FWD_,

@@ -4,10 +4,10 @@
 #include <doca_error.h>
 #include <stdbool.h>
 #include "common.h"
+#include "comch_common.h"  /* CC_SEND_TASK_NUM (single definition, shared with the server) */
 
 struct objects; /* Forward declaration */
 
-#define CC_SEND_TASK_NUM 8192 /* Number of CC send tasks (HW max ~65536) */
 #define CC_CLIENT_RECV_QUEUE_SIZE 8192 /* Size of CC receive queue (client side) */
 
 doca_error_t init_comch_ctrl_path_client(const char *server_name,

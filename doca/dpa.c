@@ -51,8 +51,9 @@ static void dmesh_doca_dpa_msgq_recv_cb(struct doca_comch_consumer_task_post_rec
 
     data_len = doca_comch_consumer_task_post_recv_get_imm_data_len(recv_task);
 
-    /* DPA sends comch_dma_comp_msg directly (<=32 bytes) rather than the full
-     * comch_msg union, so read raw bytes and dispatch by the leading type field. */
+    /* DPA sends comch_dma_comp_msg directly (20 bytes; HW imm-data max 32) rather
+     * than the full comch_msg union, so read raw bytes and dispatch by the leading
+     * type field. */
     uint8_t *raw = (uint8_t *)doca_comch_consumer_task_post_recv_get_imm_data(recv_task);
 
     if (raw == NULL) {
@@ -101,7 +102,7 @@ static void dmesh_doca_dpa_msgq_recv_cb(struct doca_comch_consumer_task_post_rec
             dpu_comp_entry_t entry;
             entry.src_pod_id = src_pod_id;
             entry.dst_pod_id = dst_pod_id;
-            entry.src_service = (int16_t)src_pod->service_id;  /* derived (not on 16B wire) */
+            entry.src_service = (int16_t)src_pod->service_id;  /* derived (not on the 20B wire) */
             entry.dst_service = comp_msg->dst_service;
             entry.src_port = comp_msg->src_port;
             entry.dst_port = comp_msg->dst_port;
@@ -916,7 +917,7 @@ destroy_buf_arr:
  */
 static doca_error_t
 dmesh_fill_dpa_ring_info(struct objects *objs, struct pod_state *pod, int j,
-                         uint64_t dpu_region, struct dpa_ring_info *ring_info)
+                         struct dpa_ring_info *ring_info)
 {
     doca_error_t result;
     doca_dpa_dev_buf_arr_t dpa_buf_arr;
@@ -925,8 +926,9 @@ dmesh_fill_dpa_ring_info(struct objects *objs, struct pod_state *pod, int j,
     /* Forward ring j reads its own descriptor ring (buf_arrs[j]) and shares the
      * host TX data mmap (descriptors carry absolute addrs). Under per-conn
      * contiguous staging the DPA lands each chunk at the sender's host TX byte
-     * offset (staging base = dpu_addr - region_off), so the K-way dpu_region
-     * split is vestigial — region_off just recovers the pod's staging base. */
+     * offset, so every ring's staging base is simply the pod staging buffer:
+     * dpu_addr = dma_buffer, region_off = 0 (the K-way EU-shard split is retired;
+     * region_off is kept 0 for wire-ABI stability). */
     result = doca_buf_arr_get_dpa_handle(pod->buf_arrs[j], &dpa_buf_arr);
     if (result != DOCA_SUCCESS) {
         DOCA_LOG_ERR("Failed to get buf array DPA handle: %s", doca_error_get_name(result));
@@ -950,8 +952,8 @@ dmesh_fill_dpa_ring_info(struct objects *objs, struct pod_state *pod, int j,
     ring_info->host_mmap = host_mmap;
     ring_info->host_addr = (uint64_t)pod->remote_addr;
     ring_info->dpu_mmap = dpu_mmap;
-    ring_info->dpu_addr = (uint64_t)pod->dma_buffer + (uint64_t)j * dpu_region;
-    ring_info->region_off = (uint32_t)((uint64_t)j * dpu_region);
+    ring_info->dpu_addr = (uint64_t)pod->dma_buffer;  /* pod staging base (K-way split retired) */
+    ring_info->region_off = 0;                        /* vestigial; kept 0 for wire-ABI stability */
     ring_info->pod_id = pod->pod_id;
 
     return DOCA_SUCCESS;
@@ -977,15 +979,14 @@ setup_pod_dma(struct objects *objs, struct pod_state *pod)
     int K = objs->k_rings > 0 ? objs->k_rings : 1;
     if (K > N) K = N;
     pod->k_rings = K;
-    uint64_t dpu_region = (uint64_t)DPU_BUFFER_SIZE / (uint64_t)K;
 
     /* 1. One DPU staging buffer per pod. Under PER-CONN CONTIGUOUS STAGING the
      * forward DMA lands each chunk at the sender's host TX byte offset (mirror),
      * so a conn's bytes are contiguous in staging regardless of which forward ring
-     * (EU) carried them; the old K-way EU-region split is now vestigial (the DPA
-     * derives the staging base from dpu_addr - region_off). +128B tail slack: a
-     * final message near the buffer end copies ALIGN_UP_128(size), which could
-     * otherwise round up to 127B past DPU_BUFFER_SIZE. */
+     * (EU) carried them; the old K-way EU-region split is retired (every ring's
+     * staging base is just dma_buffer). +128B tail slack: a final message near the
+     * buffer end copies ALIGN_UP_128(size), which could otherwise round up to 127B
+     * past DPU_BUFFER_SIZE. */
     result = alloc_buffer_and_set_mmap(&pod->local_mmap, objs->dev,
                                        &pod->dma_buffer, DPU_BUFFER_SIZE + 128,
                                        DOCA_ACCESS_FLAG_LOCAL_READ_WRITE | DOCA_ACCESS_FLAG_PCI_READ_WRITE);
@@ -1011,7 +1012,7 @@ setup_pod_dma(struct objects *objs, struct pod_state *pod)
         }
 
         struct dpa_ring_info ring_info;
-        result = dmesh_fill_dpa_ring_info(objs, pod, j, dpu_region, &ring_info);
+        result = dmesh_fill_dpa_ring_info(objs, pod, j, &ring_info);
         if (result != DOCA_SUCCESS) {
             DOCA_LOG_ERR("setup_pod_dma: fill ring info[%d] failed for pod %d: %s",
                          j, pod->pod_id, doca_error_get_descr(result));

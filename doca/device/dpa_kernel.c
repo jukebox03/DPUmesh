@@ -184,8 +184,9 @@ static int process_fwd_ring(struct dpa_thread_arg *thread_arg, uint32_t r)
          * bytes are contiguous in staging (a mirror of its per-conn TX region) and
          * the L7 parser sees a contiguous per-conn byte stream — no arrival-boundary
          * seam. moff = desc->addr - host_addr is the host TX byte offset; the pod's
-         * staging base = dpu_addr - region_off (dpu_addr points at this ring's old
-         * EU-shard region). Occupancy mirrors the host TX byte-ring (bounded by
+         * staging base = dpu_addr - region_off, which is now simply dpu_addr
+         * (region_off is retired to 0; see dpa_common.h). Occupancy mirrors the
+         * host TX byte-ring (bounded by
          * tx_w - tx_f <= conn_bytes) so staging never overflows — no ring wrap. The
          * pod staging buffer carries a small tail slack (dpa.c) so a final message's
          * ALIGN_UP_128 rounding cannot write past the buffer end. */
@@ -196,7 +197,8 @@ static int process_fwd_ring(struct dpa_thread_arg *thread_arg, uint32_t r)
         comp.pos = moff;                         /* staging offset == host TX offset */
         comp.length = (uint16_t)desc->size;
         /* Endpoint tuple — opaque passthrough from the host-posted desc. src_service
-         * is NOT carried (16B budget); the DPU derives it from src_pod. */
+         * is NOT carried (the 20B budget carries route_group, not src_service); the
+         * DPU derives it from src_pod. */
         comp.seq = desc->seq;
         comp.src_port = desc->src_port;
         comp.dst_port = desc->dst_port;
