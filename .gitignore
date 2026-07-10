@@ -1,0 +1,18 @@
+# secrets / local config
+.env
+
+# host build outputs
+/build/
+/doca-libs/
+
+# DPU-side meson build dir
+/doca/build/
+/doca/builddir/
+
+# object / archive artifacts
+*.o
+*.a
+*.so
+*.so.*
+# ...but keep the checked-in bench data
+!bench/*.csv
