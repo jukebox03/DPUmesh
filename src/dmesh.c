@@ -1,15 +1,15 @@
 /*
- * dpm.c — implementation of the socket/epoll-style façade declared in
- * <dpumesh/dpm.h>.
+ * dmesh.c — implementation of the socket/epoll-style façade declared in
+ * <dpumesh/dmesh.h>.
  *
  * Previously the façade was header-only (all functions `static inline` in
- * dpm.h). It now lives here, compiled into libdpumesh.so, so the façade follows
+ * dmesh.h). It now lives here, compiled into libdpumesh.so, so the façade follows
  * the same header-declares / src-implements split as the core dpumesh_* API
- * (dpumesh.h → dpumesh_doca.c) and the LD_PRELOAD shim (dmesh_preload.c). The
- * two structs and all prototypes stay public in dpm.h; only conn_free_rx and
+ * (dmesh_core.h → dmesh_core.c) and the LD_PRELOAD shim (dmesh_preload.c). The
+ * two structs and all prototypes stay public in dmesh.h; only conn_free_rx and
  * dmesh_emit_desc are file-local (they are façade internals).
  */
-#include <dpumesh/dpm.h>
+#include <dpumesh/dmesh.h>
 
 #include <stdlib.h>
 #include <string.h>

@@ -1,13 +1,13 @@
 /*
- * dpumesh.h - DPUmesh transport public C API
+ * dmesh_core.h - DPUmesh transport public C API (raw core engine)
  *
  * Public C API for the NVIDIA DOCA (Comch + DMA) DPUmesh transport,
  * built into libdpumesh.so. Prefer the higher-level socket/epoll-style
- * façade in <dpumesh/dpm.h>; include this header for the raw core API.
+ * façade in <dpumesh/dmesh.h>; include this header for the raw core API.
  */
 
-#ifndef DPUMESH_H
-#define DPUMESH_H
+#ifndef DMESH_CORE_H
+#define DMESH_CORE_H
 
 #ifdef __cplusplus
 extern "C" {
@@ -16,7 +16,7 @@ extern "C" {
 #include <stdint.h>
 #include <stddef.h>
 
-#include "dpumesh_common.h"
+#include "dmesh_common.h"
 
 /* ====== Default constants ====== */
 #define DPUMESH_SLOT_SIZE_DEFAULT       8192            /* 8KB */
@@ -25,7 +25,7 @@ extern "C" {
  * byte-ring occupancy; RX slot admission). */
 #define DPUMESH_NUM_SLOTS_DEFAULT       4096
 /* The host→DPU descriptor ring depth is NOT configurable: it is the wire-ABI
- * constant DMA_RING_SIZE (dpumesh/dpumesh_common.h), which the host and the DPA
+ * constant DMA_RING_SIZE (dpumesh/dmesh_common.h), which the host and the DPA
  * kernel must agree on at build time. */
 
 /* ====== Configuration ====== */
@@ -39,7 +39,7 @@ typedef struct {
 /* ====== SwDescriptor (host-internal RX/TX descriptor, packed) ====== */
 /* Host-internal descriptor (NOT a wire layout): the façade builds it for
  * dpumesh_enqueue (translated to dma_desc) and dpumesh_dequeue fills it from a
- * delivered completion. Carries the oriented endpoint tuple — see api.md §5/§6. */
+ * delivered completion. Carries the oriented endpoint tuple — see design/API.md §5/§6. */
 typedef struct {
     int32_t  body_buf_slot;         /* TX slot (send) | RX landing byte-offset (recv) */
     uint32_t body_len;
@@ -174,4 +174,4 @@ void *dpumesh_next_ready(dpumesh_ctx_t *ctx);
 }
 #endif
 
-#endif /* DPUMESH_H */
+#endif /* DMESH_CORE_H */

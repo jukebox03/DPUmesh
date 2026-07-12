@@ -101,8 +101,9 @@ typedef uint64_t doca_dpa_dev_comch_consumer_t;
 struct dmesh_register_msg {
     enum dmesh_msg_type type;   /* = DMESH_MSG_POD_REGISTER */
     int32_t pod_id;             /* -1 → DPU assigns (the host no longer picks its address) */
-    int32_t service_id;         /* this node's service id; DPU sets service_table[service_id]=pod_id
-                                 * (SVC_NONE = client-only, no service to advertise) */
+    int32_t service_id;         /* this node's service id; the DPU adds this pod to the
+                                 * service's live backend set (an LB candidate for that
+                                 * service). SVC_NONE = client-only, no service to advertise. */
 };
 
 /* DPU→Host: the pod_id the DPU allocated for a pod_id==-1 registration. Byte

@@ -23,7 +23,7 @@ It is a **connection-oriented, full-duplex, byte-stream transport** — close to
   per-message LB, replies on one connection can arrive **out of order**.
 - **Non-blocking**, with **one endpoint fd** + a **ready list** (no per-conn fd, no scan).
 
-Header: `thrift/transport/dpm.h` (header-only, built on the C core `dpumesh.h`).
+Header: `<dpumesh/dmesh.h>` (declares the `dmesh_*` façade; built on the C core `dmesh_core.h`).
 
 ---
 
@@ -204,12 +204,12 @@ client:  c = dmesh_connect(s, service);
 ## 4. Examples
 
 ### 4a. Backend server — a plain server behind the DPU proxy
-`bench/echo_sock.c`. The DPU creates connections to you and routes clients' messages here; you
+`bench/echo_dpumesh.c`. The DPU creates connections to you and routes clients' messages here; you
 `accept`, `read`, reply to the **peer** (the DPU manages who that is), and `close`. One fd is
 registered; on wake you service **new** conns (`dmesh_accept`) and conns **with inbound**
 (`dmesh_next_ready`) — the DPU names them, so no scan, no conn table, no per-conn `epoll_ctl`.
 ```c
-#include <thrift/transport/dpm.h>
+#include <dpumesh/dmesh.h>
 #include <sys/epoll.h>
 
 static int serve(dmesh_conn_t *c) {                 // drain to EAGAIN; reply to each message
@@ -494,7 +494,7 @@ raw-syscall binaries (e.g. Go) bypass `LD_PRELOAD` entirely, and so does **stdio
 (`FILE*` via `fdopen` — glibc stdio calls its internal `__read`/`__write`, not the
 interposable symbols); use direct `read`/`write`/`send`/`recv` on shimmed sockets.
 
-**Validation.** `bench/tcp_echo.c` (vanilla epoll echo) + `bench/tcp_client.c`
+**Validation.** `bench/validators/tcp_echo.c` (vanilla epoll echo) + `bench/validators/tcp_client.c`
 (vanilla **thread-per-conn** blocking client; sets `SO_RCVTIMEO=5s` so a lost message
 is a counted failure, never a hang) run the SAME binaries over kernel TCP and over
 DPUmesh (`./test-bench.sh preload <N> <SIZE> <CONNS>`): 0-fail across 1 KB–32 KB
@@ -595,11 +595,11 @@ straddles a slot. The hook is **stateless, no malloc, no locks**. Assign its ser
 conntrack peer, so per-frame vs whole-arrival segmentation delivers a **byte-identical** stream —
 framing a reply would only add seam cost.
 
-Drive `frame` with `bench/stream_sock.c` (`./test-bench.sh stream <N> <SIZE> [<SVC_LIST>] [<FPW>]`):
+Drive `frame` with `bench/validators/stream_dpumesh.c` (`./bench/bench.sh stream <N> <SIZE> [<SVC_LIST>] [<FPW>]`):
 it sends length-prefixed frames and checks **byte-exact** echo + a **served-byte exact-count**.
 Deploy it two ways: legacy `DPUMESH_PROXY=frame`, or decoupled
-`DPUMESH_PROXY=passthru DPUMESH_PROXY_FRAME_SVC=16` — the latter passes `./test-bench.sh preload`
-(vanilla shim, svc 15) and `./test-bench.sh stream` (frame, svc 16) against the **same** DPU.
+`DPUMESH_PROXY=passthru DPUMESH_PROXY_FRAME_SVC=16` — the latter passes `./bench/bench.sh preload`
+(vanilla shim, svc 15) and `./bench/bench.sh stream` (frame, svc 16) against the **same** DPU.
 Validated (scale_log 07-04): byte-exact for self-loopback (1 KB), a >8 KB frame (seam), several
 frames per write (`FPW`), and fan-out across backends (`SVC_LIST`) — 0 drops. **Status:** the L4
 engine is validated and the L7 plug-in slot (`dpu_l7.c`) is wired; writing the real body parser
@@ -617,14 +617,14 @@ constant/assignment and rebuild** (no env override).
 
 | Setting | Baked value | Constant / assignment | File |
 |---|---|---|---|
-| TX/RX slots per pod | `4096` | `DPUMESH_NUM_SLOTS_DEFAULT` → `ctx->num_slots` | `dpumesh.h` / `dpumesh_doca.c` |
-| Slot size (max wire DMA) | `8192` (8 KB — DPA `dma_copy` cap) | `DPUMESH_SLOT_SIZE_DEFAULT` → `ctx->slot_size` | `dpumesh.h` / `dpumesh_doca.c` |
-| Per-conn TX rings (max concurrent conns) | `256` (128 KB byte-ring each) | `DPUMESH_CONN_POOL` env → `ctx->conn_pool` | `dpumesh_doca.c` |
+| TX/RX slots per pod | `4096` | `DPUMESH_NUM_SLOTS_DEFAULT` → `ctx->num_slots` | `dmesh_core.h` / `dmesh_core.c` |
+| Slot size (max wire DMA) | `8192` (8 KB — DPA `dma_copy` cap) | `DPUMESH_SLOT_SIZE_DEFAULT` → `ctx->slot_size` | `dmesh_core.h` / `dmesh_core.c` |
+| Per-conn TX rings (max concurrent conns) | `256` (128 KB byte-ring each) | `DPUMESH_CONN_POOL` env → `ctx->conn_pool` | `dmesh_core.c` |
 | DPA EU threads (N) | `4` | `objs->num_dpa_threads = 4` | `doca/dpu_worker.c` |
-| Forward rings per pod / EU-sharding (K) | `2` — env `DPUMESH_RINGS_PER_POD` | `DPUMESH_RINGS_PER_POD_DEFAULT` → `k_rings` | `doca/dpumesh_common.h` (DPU + host) |
+| Forward rings per pod / EU-sharding (K) | `2` — env `DPUMESH_RINGS_PER_POD` | `DPUMESH_RINGS_PER_POD_DEFAULT` → `k_rings` | `dmesh_common.h` (DPU + host) |
 | ARM SG-DMA egress workers (n_eng) | `1` — env `DPUMESH_ARM_EGRESS_THREADS` (use `2`) | `getenv` → `px->n_eng` | `doca/dpu_proxy.c` |
 | DPU main loop | event-driven epoll (busy-poll auto-fallback on setup failure) | — (literal path) | `doca/dpu_worker.c` |
-| Host RX (PE) thread | sleep on the notification fd | `want_epoll = 1` | `dpumesh_doca.c` |
+| Host RX (PE) thread | sleep on the notification fd | `want_epoll = 1` | `dmesh_core.c` |
 | Proxy seam cap (max contiguous parser view) | `512 KB` | `PX_SEAM_MAX_DEFAULT` | `doca/dpu_proxy.c` |
 
 Constraints when changing: `K ≤ N ≤ 8` (`MAX_DPA_RINGS`); the **host's K must equal the DPU's K**

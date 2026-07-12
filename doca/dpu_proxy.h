@@ -2,7 +2,7 @@
 #define DPU_PROXY_H
 
 /* ===================================================================
- * DPU L7-proxy L4 engine (plan.md) — proxy_route interface + machinery
+ * DPU L7-proxy L4 engine (design/CORE.md §5) — proxy_route interface + machinery
  * ===================================================================
  *
  * The DPU is an envoy-like L7 proxy: an L7 function (`proxy_route`, MOCK for
@@ -62,7 +62,7 @@
 
 struct objects;
 
-/* ---- proxy return format (plan.md — the deliverable) ---- */
+/* ---- proxy return format (design/CORE.md §5 — the deliverable) ---- */
 
 struct dmesh_route_seg {
     uint32_t off;    /* start within this call's input window (buf) */

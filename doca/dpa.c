@@ -13,7 +13,7 @@
 #include "comch_common.h"
 #include "dpu_worker.h"
 #include "comch_consumer.h"
-#include <dpumesh/dpumesh.h>
+#include <dpumesh/dmesh_core.h>
 #include "ring.h"
 #include "buffer.h"
 #include <stdlib.h>

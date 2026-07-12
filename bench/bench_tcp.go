@@ -1,237 +1,348 @@
-// bench_tcp.go — TCP load-generator daemon (B안)
+// bench_tcp.go — RPC benchmark CLIENT over TCP (bench-tcp pod, baseline).
 //
-// Lifecycle:
-//   1. Listen on TCP control port 9092.
-//   2. On "RUN <rps> <duration_sec> <msg_size> [<conns>]" line:
-//        spawn N persistent TCP connections to the upstream (sidecar:9091
-//        by default, override via BENCH_TARGET env), each running an
-//        open-loop pacer. Each request sends msg_size bytes and reads
-//        msg_size bytes back. Latency = wall time of that round trip.
-//      Reply: "OK <rps_achieved> <p50_us> <p99_us> <p999_us> <ok> <fail> <mb_per_sec>"
-//      Same wire format as bench_dpumesh.
-//   3. Connections are torn down at the end of each run (so each RUN starts
-//      fresh and is reproducible). The control port persists across runs.
+// TCP counterpart of bench/bench_sock.c: the SAME closed-loop RPC methodology,
+// but driving kernel TCP through the Envoy sidecar instead of the DPUmesh DPU
+// transport. This is the service-mesh baseline the DPUmesh side is compared
+// against, measured identically so the numbers line up.
+//
+// Methodology (closed loop, fixed concurrency window, warmup, greeter SayHello
+// with a fixed small reply, per-thread rate summed) — see bench_sock.c. Each
+// client thread owns ONE TCP connection and keeps `concurrency` requests
+// outstanding on it via a writer/reader goroutine pair.
+//
+// Control protocol (TCP :9092):
+//   RUN <req_size> <reply_size> <concurrency> <duration_s> <warmup> <threads>
+//        -> OK mrps=.. gbps=.. p50=.. p95=.. p99=.. avg=.. min=.. max=..
+//              rcnt=.. fail=.. conc=.. threads=.. reqsz=.. repsz=.. durs=..
+//   PING -> PONG
+//
+// env: BENCH_TARGET (upstream, default "sidecar:9091").
 package main
 
 import (
 	"bufio"
+	"encoding/binary"
 	"flag"
 	"fmt"
 	"io"
 	"net"
 	"os"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
 const (
 	ctrlPortDefault = 9092
-	waitTimeoutMs   = 5000
+	reqMagic        = 0x62526571 // "bReq"
+	hdrLen          = 16
+	stopGraceSec    = 15
+	histBuckets     = 1 << 20 // 1us buckets up to ~1.05s
 )
 
 var target = "sidecar:9091"
 
-func nowSec() float64 {
-	return float64(time.Now().UnixNano()) / 1e9
+func nowSec() float64 { return float64(time.Now().UnixNano()) / 1e9 }
+
+// ------------------------------------------------------------ latency histogram
+type hist struct {
+	b        []uint32
+	overflow int64
+	count    int64
+	sum      float64
+	min, max float64
 }
 
-// One worker: maintain one TCP connection, fire requests at scheduled times.
-func worker(
-	id int, target string,
-	budget int64, intervalSec float64,
-	startAt float64, msgSize int,
-	stop *atomic.Bool,
-	ok, fail *atomic.Int64,
-	samples []float64,
-) int {
-	conn, err := net.DialTimeout("tcp", target, 5*time.Second)
-	if err != nil {
-		fail.Add(budget)
+func newHist() *hist { return &hist{b: make([]uint32, histBuckets), min: 1e30} }
+func (h *hist) record(us float64) {
+	if us < 0 {
+		us = 0
+	}
+	if us >= float64(histBuckets) {
+		h.overflow++
+	} else {
+		h.b[int(us)]++
+	}
+	h.count++
+	h.sum += us
+	if us < h.min {
+		h.min = us
+	}
+	if us > h.max {
+		h.max = us
+	}
+}
+func (h *hist) merge(o *hist) {
+	for i := range h.b {
+		h.b[i] += o.b[i]
+	}
+	h.overflow += o.overflow
+	h.count += o.count
+	h.sum += o.sum
+	if o.count > 0 {
+		if o.min < h.min {
+			h.min = o.min
+		}
+		if o.max > h.max {
+			h.max = o.max
+		}
+	}
+}
+func (h *hist) pct(p float64) float64 {
+	if h.count == 0 {
 		return 0
 	}
-	defer conn.Close()
+	rank := int64(p / 100.0 * float64(h.count-1))
+	var cum int64
+	for i, c := range h.b {
+		cum += int64(c)
+		if cum > rank {
+			return float64(i)
+		}
+	}
+	return h.max
+}
+func (h *hist) avg() float64 {
+	if h.count == 0 {
+		return 0
+	}
+	return h.sum / float64(h.count)
+}
 
-	// Disable Nagle for accurate per-request latency
-	if tc, ok2 := conn.(*net.TCPConn); ok2 {
+// ------------------------------------------------------------ one connection
+type connResult struct {
+	rcnt, fail int64
+	dura       float64
+	h          *hist
+	broken     bool
+}
+
+// One client thread: a single TCP conn kept at `W` outstanding requests via a
+// writer goroutine (fed by a credit channel) and this goroutine as the reader.
+func runConn(reqSize, replySize, W int, warmup int64, duration, startAt float64, res *connResult) {
+	res.h = newHist()
+	conn, err := net.DialTimeout("tcp", target, 5*time.Second)
+	if err != nil {
+		res.broken = true
+		return
+	}
+	defer conn.Close()
+	if tc, ok := conn.(*net.TCPConn); ok {
 		_ = tc.SetNoDelay(true)
 	}
 
-	tx := make([]byte, msgSize)
-	for i := range tx {
-		tx[i] = byte('A' + (i & 0xf))
+	payload := make([]byte, reqSize)
+	for i := range payload {
+		payload[i] = 42
 	}
-	rx := make([]byte, msgSize)
+	starts := make([]float64, W)
+	credits := make(chan struct{}, W)
+	for i := 0; i < W; i++ {
+		credits <- struct{}{}
+	}
+	stopCh := make(chan struct{})
 
-	written := 0
-	for i := int64(0); i < budget; i++ {
-		if stop.Load() {
+	for nowSec() < startAt { // barrier: all threads start together
+		time.Sleep(50 * time.Microsecond)
+	}
+	startTime := nowSec()
+	// Backstop so a blocked read/write unwinds if the peer stalls.
+	_ = conn.SetDeadline(time.Now().Add(time.Duration((duration + stopGraceSec) * float64(time.Second))))
+
+	var wseq uint32
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() { // writer
+		defer wg.Done()
+		w := bufio.NewWriterSize(conn, 64<<10)
+		hdr := make([]byte, hdrLen)
+		for {
+			select {
+			case <-stopCh:
+				return
+			case <-credits:
+			}
+			select { // stop may have fired while waiting
+			case <-stopCh:
+				return
+			default:
+			}
+			binary.LittleEndian.PutUint32(hdr[0:4], reqMagic)
+			binary.LittleEndian.PutUint32(hdr[4:8], wseq)
+			binary.LittleEndian.PutUint32(hdr[8:12], uint32(reqSize))
+			binary.LittleEndian.PutUint32(hdr[12:16], uint32(replySize))
+			starts[wseq%uint32(W)] = nowSec()
+			if _, err := w.Write(hdr); err != nil {
+				return
+			}
+			if reqSize > 0 {
+				if _, err := w.Write(payload); err != nil {
+					return
+				}
+			}
+			if err := w.Flush(); err != nil {
+				return
+			}
+			wseq++
+		}
+	}()
+
+	r := bufio.NewReaderSize(conn, 64<<10)
+	hdr := make([]byte, hdrLen)
+	var expSeq uint32
+	var rcnt int64
+	warmupEnd := startTime
+	for {
+		if _, err := io.ReadFull(r, hdr); err != nil {
 			break
 		}
-		// wrk2-style scheduled-time semantics. Latency starts at the tick this
-		// request was supposed to fire, not when this goroutine actually got
-		// to it. Fixes coordinated omission: under saturation, scheduled is
-		// in the past, sleep is skipped, and the captured latency includes
-		// the queuing wait — what a constant-rate client would actually see.
-		scheduled := startAt + float64(i)*intervalSec
+		seq := binary.LittleEndian.Uint32(hdr[4:8])
+		plen := binary.LittleEndian.Uint32(hdr[8:12])
+		if plen > 0 {
+			if _, err := io.CopyN(io.Discard, r, int64(plen)); err != nil {
+				break
+			}
+		}
 		now := nowSec()
-		if scheduled > now {
-			d := time.Duration((scheduled - now) * float64(time.Second))
-			time.Sleep(d)
+		if seq != expSeq {
+			res.fail++
 		}
-
-		t0 := scheduled
-		_ = conn.SetDeadline(time.Now().Add(time.Duration(waitTimeoutMs) * time.Millisecond))
-
-		if _, err := conn.Write(tx); err != nil {
-			fail.Add(1)
-			return written
+		t0 := starts[expSeq%uint32(W)]
+		expSeq++
+		if rcnt >= warmup {
+			res.h.record((now - t0) * 1e6)
 		}
-		if _, err := io.ReadFull(conn, rx); err != nil {
-			fail.Add(1)
-			return written
+		rcnt++
+		if rcnt == warmup {
+			warmupEnd = now
 		}
-
-		latUs := (nowSec() - t0) * 1e6
-		if written < len(samples) {
-			samples[written] = latUs
-			written++
+		if now-startTime > duration {
+			break
 		}
-		ok.Add(1)
-	}
-	return written
-}
-
-func runTest(connOut net.Conn, rps, dur, msgSize, conns int) {
-	if rps < 1 || dur < 1 || msgSize < 1 {
-		fmt.Fprintln(connOut, "ERR invalid args (need rps>=1 dur>=1 size>=1)")
-		return
-	}
-	nWorkers := conns
-	if nWorkers <= 0 {
-		nWorkers = rps / 100
-		if nWorkers < 1 {
-			nWorkers = 1
+		select { // let the writer send one more (non-blocking: never drops in steady state)
+		case credits <- struct{}{}:
+		default:
 		}
 	}
-	totalBudget := int64(rps) * int64(dur)
-	perWorker := totalBudget / int64(nWorkers)
-	remainder := totalBudget % int64(nWorkers)
-	intervalSec := float64(nWorkers) / float64(rps)
-
-	fmt.Fprintf(os.Stderr, "[bench-tcp] RUN rps=%d dur=%d size=%d conns=%d (workers=%d)\n",
-		rps, dur, msgSize, conns, nWorkers)
-
-	var stop atomic.Bool
-	var ok, fail atomic.Int64
-	var wg sync.WaitGroup
-
-	allSamples := make([][]float64, nWorkers)
-	written := make([]int, nWorkers)
-
-	startAt := nowSec() + 0.05
-
-	for i := 0; i < nWorkers; i++ {
-		budget := perWorker
-		if int64(i) < remainder {
-			budget++
-		}
-		allSamples[i] = make([]float64, budget)
-		wg.Add(1)
-		go func(idx int, b int64) {
-			defer wg.Done()
-			written[idx] = worker(idx, target, b, intervalSec,
-				startAt, msgSize, &stop, &ok, &fail, allSamples[idx])
-		}(i, budget)
-	}
-
-	// Hard deadline = dur + grace
-	go func() {
-		time.Sleep(time.Duration(dur+5) * time.Second)
-		stop.Store(true)
-	}()
+	close(stopCh)
+	_ = conn.Close() // unblock a writer parked in Write
 	wg.Wait()
 
-	wall := nowSec() - startAt
-	if wall < 1e-6 {
-		wall = 1e-6
+	res.rcnt = rcnt
+	if rcnt > warmup {
+		res.dura = nowSec() - warmupEnd
 	}
+}
 
-	// Pool samples
-	var pooled []float64
-	for i := 0; i < nWorkers; i++ {
-		pooled = append(pooled, allSamples[i][:written[i]]...)
+// ------------------------------------------------------------ one benchmark run
+func runBench(out net.Conn, reqSize, replySize, concurrency int, duration float64,
+	warmup int64, threads int) {
+	if reqSize < 0 || replySize < 1 || concurrency < 1 || duration <= 0 || threads < 1 {
+		fmt.Fprintln(out, "ERR invalid args")
+		return
 	}
-	sort.Float64s(pooled)
+	fmt.Fprintf(os.Stderr, "[bench-tcp] RUN req=%d reply=%d conc=%d dur=%.1fs warmup=%d threads=%d target=%s\n",
+		reqSize, replySize, concurrency, duration, warmup, threads, target)
 
-	pct := func(p float64) float64 {
-		if len(pooled) == 0 {
-			return 0
+	results := make([]connResult, threads)
+	var wg sync.WaitGroup
+	startAt := nowSec() + 0.1
+	for i := 0; i < threads; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			runConn(reqSize, replySize, concurrency, warmup, duration, startAt, &results[idx])
+		}(i)
+	}
+	wg.Wait()
+
+	agg := newHist()
+	var mrps, gbps float64
+	var totalOk, totalFail int64
+	for i := range results {
+		r := &results[i]
+		measured := r.rcnt - warmup
+		if measured < 0 {
+			measured = 0
 		}
-		idx := int(p * float64(len(pooled)-1))
-		if idx >= len(pooled) {
-			idx = len(pooled) - 1
+		totalFail += r.fail
+		if !r.broken && r.dura > 1e-9 && measured > 0 {
+			mrps += float64(measured) / r.dura * 1e-6
+			gbps += 8e-9 * float64(measured) * float64(reqSize) / r.dura
+			totalOk += measured
+			agg.merge(r.h)
 		}
-		return pooled[idx]
 	}
+	p50, p95, p99 := agg.pct(50), agg.pct(95), agg.pct(99)
 
-	rpsAch := float64(ok.Load()) / wall
-	mbS := rpsAch * float64(msgSize) * 2.0 / (1024.0 * 1024.0)
-	reply := fmt.Sprintf("OK %.1f %.1f %.1f %.1f %d %d %.2f\n",
-		rpsAch, pct(0.50), pct(0.99), pct(0.999),
-		ok.Load(), fail.Load(), mbS)
-	fmt.Fprint(connOut, reply)
+	reply := fmt.Sprintf("OK mrps=%.6f gbps=%.4f p50=%.2f p95=%.2f p99=%.2f avg=%.2f min=%.2f max=%.2f "+
+		"rcnt=%d fail=%d conc=%d threads=%d reqsz=%d repsz=%d durs=%.3f\n",
+		mrps, gbps, p50, p95, p99, agg.avg(), agg.min, agg.max,
+		totalOk, totalFail, concurrency, threads, reqSize, replySize, duration)
+	fmt.Fprint(out, reply)
 	fmt.Fprintf(os.Stderr, "[bench-tcp] DONE %s", reply)
 }
 
-func parseRun(line string) (rps, dur, size, conns int, err error) {
-	tokens := strings.Fields(line)
-	if len(tokens) < 4 || tokens[0] != "RUN" {
-		err = fmt.Errorf("bad command")
-		return
+// ------------------------------------------------------------ control TCP
+func atoiDef(s string, d int) int {
+	if v, err := strconv.Atoi(s); err == nil {
+		return v
 	}
-	if rps, err = strconv.Atoi(tokens[1]); err != nil {
-		return
+	return d
+}
+func atofDef(s string, d float64) float64 {
+	if v, err := strconv.ParseFloat(s, 64); err == nil {
+		return v
 	}
-	if dur, err = strconv.Atoi(tokens[2]); err != nil {
-		return
-	}
-	if size, err = strconv.Atoi(tokens[3]); err != nil {
-		return
-	}
-	if len(tokens) >= 5 {
-		conns, err = strconv.Atoi(tokens[4])
-	}
-	return
+	return d
 }
 
 func handleCtrl(c net.Conn) {
 	defer c.Close()
-	r := bufio.NewReader(c)
-	line, err := r.ReadString('\n')
+	line, err := bufio.NewReader(c).ReadString('\n')
 	if err != nil && line == "" {
 		return
 	}
-	line = strings.TrimSpace(line)
-	if strings.HasPrefix(line, "PING") {
+	f := strings.Fields(strings.TrimSpace(line))
+	if len(f) == 0 {
+		return
+	}
+	switch f[0] {
+	case "PING":
 		fmt.Fprintln(c, "PONG")
-		return
+	case "RUN":
+		// RUN <req> <reply> <conc> <dur> <warmup> <threads>
+		req, rep, conc, threads := 32, 8, 1, 1
+		dur := 10.0
+		var warm int64 = 1000
+		if len(f) > 1 {
+			req = atoiDef(f[1], req)
+		}
+		if len(f) > 2 {
+			rep = atoiDef(f[2], rep)
+		}
+		if len(f) > 3 {
+			conc = atoiDef(f[3], conc)
+		}
+		if len(f) > 4 {
+			dur = atofDef(f[4], dur)
+		}
+		if len(f) > 5 {
+			warm = int64(atoiDef(f[5], 1000))
+		}
+		if len(f) > 6 {
+			threads = atoiDef(f[6], threads)
+		}
+		runBench(c, req, rep, conc, dur, warm, threads)
+	default:
+		fmt.Fprintln(c, "ERR use: RUN <req> <reply> <conc> <dur> <warmup> <threads> | PING")
 	}
-	rps, dur, size, conns, err := parseRun(line)
-	if err != nil {
-		fmt.Fprintln(c, "ERR bad command (use: RUN <rps> <dur> <size> [<conns>])")
-		return
-	}
-	runTest(c, rps, dur, size, conns)
 }
 
 func main() {
 	port := flag.Int("ctrl-port", ctrlPortDefault, "control TCP port")
 	flag.Parse()
-
 	if t := os.Getenv("BENCH_TARGET"); t != "" {
 		target = t
 	}

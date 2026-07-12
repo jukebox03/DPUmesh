@@ -1,5 +1,5 @@
 /*
- * dpu_proxy.c — L4 engine under the L7 proxy seam (plan.md).
+ * dpu_proxy.c — L4 engine under the L7 proxy seam (design/CORE.md §5).
  *
  * Both directions (client request AND backend reply) run the SAME machinery:
  *
@@ -222,6 +222,14 @@ struct px_conn {
     int      is_l7;                   /* 1 = head-only L7 path (px_parse_l7) */
     uint32_t msg_remaining;           /* L7: bytes left to ship of the in-progress message */
     int32_t  msg_dst;                 /* L7: backend resolved once at the message head */
+    /* Connection-scoped LB stickiness (Envoy TCP-proxy / session-affinity): the
+     * backend the LB picked for this session, reused for every later message of the
+     * conn so the src<->dst pairing persists (no per-message re-LB). Scoped to a
+     * cluster: if a message routes to a different service, the pin re-picks. Only
+     * consulted on the DEFER (engine-LB) path; an L7 host-override bypasses it, and
+     * a per-request service (DPUMESH_LB_PER_REQUEST_SVC) never pins. -1 = unpinned. */
+    int32_t  pinned_backend;
+    int16_t  pinned_cluster;
 };
 
 #define MAX_ARM_ENG 8
@@ -257,6 +265,10 @@ struct dmesh_proxy {
     int      default_frame;              /* DPUMESH_PROXY=frame → request default = frame */
     uint8_t  svc_frame[POD_ID_SPACE];    /* DPUMESH_PROXY_FRAME_SVC csv → force-frame these services */
     uint8_t  svc_l7[POD_ID_SPACE];       /* DPUMESH_PROXY_L7_SVC csv → route via the L7 author hook */
+    /* LB stickiness policy per service: default = STICKY (a conn pins to the backend
+     * the LB first picked, Envoy TCP-proxy style). DPUMESH_LB_PER_REQUEST_SVC csv
+     * marks services that load-balance EVERY message instead (Envoy HTTP default). */
+    uint8_t  svc_per_request[POD_ID_SPACE];
     uint32_t seam_max;
     uint32_t sg_pieces_max;
 
@@ -364,6 +376,8 @@ static struct px_conn *px_conn_get(struct dmesh_proxy *px, int32_t pod, uint16_t
     c->pub.is_reply = is_reply;
     c->pub.peer_pod = DMESH_POD_BLANK;
     c->pub.dst_service = DMESH_SVC_NONE;
+    c->pinned_backend = -1;                /* unpinned until the first LB pick */
+    c->pinned_cluster = DMESH_SVC_NONE;
     uint32_t h = px_conn_hash(pod, port);
     c->hnext = px->buckets[h];
     px->buckets[h] = c;
@@ -676,6 +690,44 @@ static void px_queue_fin_unit(struct objects *objs, struct px_conn *c,
     px_lane_enqueue(px, (int)(dst_pod - objs->pods), (int)(out_dst_port % (uint16_t)K), u);
 }
 
+/* Sticky iff the service is NOT marked per-request (default STICKY — a conn keeps
+ * its first-picked backend). DPUMESH_LB_PER_REQUEST_SVC lists per-request services. */
+static inline int px_service_sticky(struct dmesh_proxy *px, int16_t svc) {
+    if (svc >= 0 && svc < POD_ID_SPACE && px->svc_per_request[svc])
+        return 0;
+    return 1;
+}
+
+/* Resolve a REQUEST's backend for cluster `cluster` given the parser/L7 choice
+ * `host` (DMESH_LB_DEFER = let the engine load-balance). Precedence (Envoy):
+ *   1. host override (>=0)  → that pod IFF it is a live/ready backend, else -1 (drop).
+ *   2. connection sticky    → the pin from this session's first pick (same cluster,
+ *                             still live) — the src<->dst pairing persists, no re-LB.
+ *   3. load balancer        → dpu_route_l4 (round-robin over live backends + route-
+ *                             affinity); recorded as the session pin when sticky.
+ * `off` is the stream offset of these bytes (for the route-affinity group lookup). */
+static int32_t px_resolve_backend(struct objects *objs, struct px_conn *c,
+                                  int16_t cluster, int32_t host, uint64_t off) {
+    struct dmesh_proxy *px = objs->proxy;
+    if (host >= 0) {                           /* L7 override host (session persistence) */
+        struct pod_state *tp = find_pod_by_id(objs, host);
+        return (tp && pod_data_ready(tp)) ? host : -1;
+    }
+    int sticky = px_service_sticky(px, cluster);
+    if (sticky && c->pinned_backend >= 0 && c->pinned_cluster == cluster) {
+        struct pod_state *tp = find_pod_by_id(objs, c->pinned_backend);
+        if (tp && pod_data_ready(tp))
+            return c->pinned_backend;          /* session sticks to its backend */
+        /* pinned backend died → fall through and re-pick (self-healing) */
+    }
+    int32_t b = dpu_route_l4(objs, cluster, px_rg_at(c, off));
+    if (b >= 0 && sticky) {
+        c->pinned_backend = b;
+        c->pinned_cluster = cluster;
+    }
+    return b;
+}
+
 /* Execute one seg: resolve its destination, build the unit's staging pieces,
  * claim custody, queue on the destination lane. */
 static void px_ship_seg(struct objects *objs, struct px_conn *c,
@@ -697,7 +749,8 @@ static void px_ship_seg(struct objects *objs, struct px_conn *c,
     } else {
         dst_pod = s->dst;
         if (dst_pod == DMESH_SEG_DST_DEFER)
-            dst_pod = dpu_route_l4(objs, c->pub.dst_service, px_rg_at(c, sbeg));
+            /* engine LB + connection stickiness over the addressed service's backends */
+            dst_pod = px_resolve_backend(objs, c, c->pub.dst_service, DMESH_LB_DEFER, sbeg);
         if (dst_pod < 0) {
             DOCA_LOG_ERR("proxy: unroutable seg (svc=%d) — %u bytes dropped",
                          c->pub.dst_service, s->len);
@@ -879,8 +932,16 @@ static void px_parse_l7(struct objects *objs, struct px_conn *c) {
             px_head_view(objs, c, &buf, &avail);   /* <= PX_HEAD_MAX contiguous */
             if (avail == 0)
                 break;
-            int32_t target = c->pub.dst_service;
-            int r = dmesh_l7_route(buf, avail, &ctx, &target);
+            /* Show the hook this cluster's live endpoints (Envoy: the cluster's
+             * healthy hosts), so it may pick a host itself; else it leaves DEFER. */
+            int32_t hostbuf[MAX_PODS];
+            ctx.hosts   = hostbuf;
+            ctx.n_hosts = collect_live_hosts(objs, c->pub.dst_service, hostbuf);
+            struct dmesh_l7_decision dec;
+            memset(&dec, 0, sizeof(dec));
+            dec.cluster = c->pub.dst_service;      /* default cluster = addressed service */
+            dec.host    = DMESH_LB_DEFER;          /* default: engine load-balances */
+            int r = dmesh_l7_route(buf, avail, &ctx, &dec);
             if (r < 0) {
                 px_poison(objs, c, "l7 route error");
                 return;
@@ -894,13 +955,16 @@ static void px_parse_l7(struct objects *objs, struct px_conn *c) {
                     break;
                 continue;
             }
-            c->msg_remaining = (uint32_t)r;    /* total message length (body need not be here) */
-            /* Resolve the backend ONCE so every chunk of this message pins to it
-             * (in order). A content-chosen service resolves per-message; the
-             * default keeps the L4 route + route-affinity of the head arrival. */
-            c->msg_dst = (target == c->pub.dst_service)
-                         ? dpu_route_l4(objs, c->pub.dst_service, px_rg_at(c, c->parse_pos))
-                         : dpu_route_l4(objs, (int16_t)target, 0);
+            c->msg_remaining = dec.total_len;  /* total message length (body need not be here) */
+            if (c->msg_remaining == 0) {       /* hook contract: total_len>0 when decided */
+                px_poison(objs, c, "l7 total_len 0");
+                return;
+            }
+            /* Resolve the backend ONCE so every chunk of this message pins to it (in
+             * order): L7 host-override > connection stickiness > LB (round-robin +
+             * route-affinity of the head arrival). */
+            c->msg_dst = px_resolve_backend(objs, c, (int16_t)dec.cluster, dec.host,
+                                            c->parse_pos);
         }
 
         /* Ship the next chunk of the in-progress message from staging via SG.
@@ -1598,7 +1662,7 @@ int px_drain(struct objects *objs) {
     return progressed;
 }
 
-/* ====== mocks (plan.md §테스트 — the L7 is NOT built here) ====== */
+/* ====== mocks (design/CORE.md §5.1 — the L7 is NOT built here) ====== */
 
 /* pass-through: one seg per contiguous arrived run, destination deferred to the
  * L4 default route (service table + route-affinity pins). The parity/regression
@@ -1614,7 +1678,7 @@ static int px_mock_passthru(struct objects *objs, dmesh_proxy_conn *conn,
     return 1;
 }
 
-/* frame: deterministic byte-stream framing the mock understands (plan.md):
+/* frame: deterministic byte-stream framing the mock understands (design/CORE.md §5.1):
  *   [u32 LE total_len (incl. 5B header)][u8 svc][payload]
  * Consumes only WHOLE frames (an incomplete tail is kept → exercises the
  * window/seam), routes each frame gateway-style by its svc byte via the
@@ -1637,9 +1701,12 @@ static int px_mock_frame(struct objects *objs, dmesh_proxy_conn *conn,
             dst = conn->peer_pod;
         } else {
             uint8_t svc = buf[off + 4];
-            dst = DMESH_SEG_DST_DEFER;
-            if (svc != 0xFF && svc < POD_ID_SPACE && objs->service_table[svc] >= 0)
-                dst = objs->service_table[svc];
+            dst = DMESH_SEG_DST_DEFER;      /* unknown svc → defer to the addressed service */
+            if (svc != 0xFF && svc < POD_ID_SPACE) {
+                int32_t b = dpu_route_l4(objs, svc, 0);   /* per-frame RR over svc's live backends */
+                if (b >= 0)
+                    dst = b;
+            }
         }
         segs[n].off = off;
         segs[n].len = flen;
@@ -1697,6 +1764,9 @@ int px_init(struct objects *objs) {
     px->default_frame = (env && strcmp(env, "frame") == 0) ? 1 : 0;
     int n_l7_svc    = px_parse_svc_csv(getenv("DPUMESH_PROXY_L7_SVC"),    px->svc_l7);
     int n_frame_svc = px_parse_svc_csv(getenv("DPUMESH_PROXY_FRAME_SVC"), px->svc_frame);
+    /* LB stickiness: default STICKY (connection-scoped, Envoy TCP-proxy). The listed
+     * services load-balance EVERY message instead (Envoy HTTP per-request default). */
+    int n_pr_svc    = px_parse_svc_csv(getenv("DPUMESH_LB_PER_REQUEST_SVC"), px->svc_per_request);
     px->seam_max = PX_SEAM_MAX_DEFAULT;
 
     px->buckets = (struct px_conn **)calloc(PX_CONN_HASH, sizeof(*px->buckets));
@@ -1793,9 +1863,10 @@ int px_init(struct objects *objs) {
         }
     }
     DOCA_LOG_WARN("DPU PROXY MODE ON (SG-DMA egress, egress-threads=%d; request-default=%s, "
-                  "l7-services=%d, frame-services=%d, replies=passthru, seam_max=%u, sg_pieces=%u)",
+                  "l7-services=%d, frame-services=%d, lb=round-robin, per-request-services=%d "
+                  "(default sticky), replies=passthru, seam_max=%u, sg_pieces=%u)",
                   n_eng, px->default_frame ? "frame" : "passthru", n_l7_svc, n_frame_svc,
-                  px->seam_max, px->sg_pieces_max);
+                  n_pr_svc, px->seam_max, px->sg_pieces_max);
     return DOCA_SUCCESS;
 
 oom:

@@ -8,7 +8,7 @@
 #include "comch_client.h"
 #include "comch_server.h"
 #include "dpa.h"
-#include <dpumesh/dpumesh_common.h>
+#include <dpumesh/dmesh_common.h>
 DOCA_LOG_REGISTER(COMCH_COMMON);
 
 

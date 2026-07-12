@@ -675,11 +675,12 @@ pods_register(struct objects *objs, struct doca_comch_connection *conn,
 		if (pod_id >= 0 && pod_id < POD_ID_SPACE)
 			__atomic_store_n(&objs->pod_id_to_slot[pod_id], i, __ATOMIC_RELEASE);
 
-		/* service_id -> pod resolution for dpu_route (first request of a
-		 * connection). Multiple pods registering the same service_id are LB
-		 * candidates; this mock keeps the last writer (future L7 picks). */
-		if (service_id >= 0 && service_id < POD_ID_SPACE)
-			__atomic_store_n(&objs->service_table[service_id], pod_id, __ATOMIC_RELEASE);
+		/* No service->backend table to update: the LB derives a service's live
+		 * backend set from pods[] on demand (registered + service_id + dma_ready),
+		 * so multiple pods on one service_id are ALL load-balance candidates and a
+		 * disconnect drops a backend automatically. `registered` was published with
+		 * RELEASE above, after service_id — so a concurrent lb_pick reader that sees
+		 * registered==1 also sees this pod's service_id. */
 
 		DOCA_LOG_INFO("pods_register: slot %d → pod_id=%d service_id=%d",
 		              i, pod_id, service_id);

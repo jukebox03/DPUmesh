@@ -9,7 +9,7 @@
 
 #include "comch_server.h"
 #include "comch_common.h"
-#include <dpumesh/dpumesh_common.h>
+#include <dpumesh/dmesh_common.h>
 
 struct dmesh_doca_dpa_thread;
 struct dmesh_doca_dpa_comch;
@@ -129,7 +129,8 @@ typedef struct {
 struct pod_state {
     struct doca_comch_connection *connection;
     int32_t pod_id;
-    int32_t service_id;     /* this pod's service id (DPU service_table[service_id]=pod_id); SVC_NONE if none */
+    int32_t service_id;     /* this pod's service id (an LB backend of that service; the live
+                             * set is derived from pods[] by service_id); SVC_NONE if none */
     int registered;         /* 1 = DMESH_MSG_POD_REGISTER received */
     int dma_ready;          /* 1 = both mmaps arrived, DPA ring added */
 
@@ -208,7 +209,7 @@ static inline int pod_data_ready(const struct pod_state *pod) {
  * up_port -> (client_pod, client_port) and rewrites dst_port back to the client's
  * real port. The client's TX_ACK is likewise translated up_port -> client_port
  * so the client frees the right slot. (DMESH_UPORT_BASE is defined in the shared
- * dpumesh_common.h so the host side sees the same split.) */
+ * dmesh_common.h so the host side sees the same split.) */
 
 struct dpu_upstream {
     int      in_use;
@@ -324,7 +325,7 @@ struct objects {
     };
     struct doca_comch_connection *connection;  /* primary (first) connection */
 
-    /* Host-only fields (used by dpumesh_doca.c client side) */
+    /* Host-only fields (used by dmesh_core.c client side) */
     struct doca_mmap *local_mmap;
     void *dma_buffer;
     /* Set by the client recv callback when a DMESH_MSG_POD_ASSIGNED arrives at
@@ -414,12 +415,14 @@ struct objects {
      * Must be initialized to all -1 before the worker starts. */
     int pod_id_to_slot[POD_ID_SPACE];
 
-    /* service_id -> pod_id resolution (DPU routing seam — dpu_route mock).
-     * Populated from pods_register(service_id). -1 = unknown (dpu_route returns
-     * -1 → the forward entry is DROPPED + the sender TX_ACK'd; NO src-pod fallback).
-     * Indexed by service_id [0,POD_ID_SPACE).
-     * The future L7 proxy replaces this lookup. Init to all -1 at startup. */
-    int service_table[POD_ID_SPACE];
+    /* Per-service round-robin cursor for the L4 load balancer (lb_pick). The
+     * healthy backend SET of a service is DERIVED on demand from pods[] (single
+     * source of truth: registered + service_id + dma_ready), so there is no
+     * separate service->backend table to keep in sync — a disconnect removes a
+     * backend from the set automatically (no blackhole). This cursor just rotates
+     * the pick across that live set. Indexed by service_id [0,POD_ID_SPACE).
+     * Single ARM control thread advances it → no lock. Init to 0. */
+    uint32_t svc_rr[POD_ID_SPACE];
 
     /* DPU-owned connection tracking (model B). Heap-allocated (large) in
      * run_dpu_worker; single-threaded (control PE thread) so no lock. */

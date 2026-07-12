@@ -1,6 +1,6 @@
 /*
- * stream_sock.c — byte-stream / L7-proxy validator for the DPU frame mock
- * (plan.md). Proves the L4 engine (dpu_proxy.c) end to end: a per-conn input
+ * stream_dpumesh.c — byte-stream / L7-proxy validator for the DPU frame mock
+ * (design/CORE.md §5). Proves the L4 engine (dpu_proxy.c) end to end: a per-conn input
  * window, the mock length-prefix parser, per-destination SG-DMA egress, custody,
  * and byte-stream delivery.
  *
@@ -16,7 +16,7 @@
  * into one write, or let dmesh_write auto-chunk a large frame across slots — the
  * parser reframes from the length prefix either way (window + seam).
  *
- * Like loopback_sock.c this pod is BOTH the client and (via its echo thread) a
+ * Like loopback_dpumesh.c this pod is BOTH the client and (via its echo thread) a
  * server of its OWN service, so the default run is self-contained and its
  * served-BYTE counter gives an exact-count proof with no cross-pod scraping:
  *
@@ -33,7 +33,7 @@
  *            (default 1; >1 exercises multi-frame-per-window parsing).
  * Reply: `OK <ok> <fail> <served_bytes> <p50us>`.
  *
- * Uses ONLY the façade (dpm.h). No changes to the transport.
+ * Uses ONLY the façade (dmesh.h). No changes to the transport.
  */
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -50,7 +50,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 
-#include <dpumesh/dpm.h>
+#include <dpumesh/dmesh.h>
 
 #define CTRL_PORT   9092
 #define FRAME_HDR   5u                 /* [u32 total_len][u8 svc] — matches the DPU mock */

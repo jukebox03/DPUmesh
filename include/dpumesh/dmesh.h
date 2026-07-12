@@ -1,9 +1,9 @@
 /*
- * dpm.h — socket/epoll-style façade over the DPUmesh C API.
+ * dmesh.h — socket/epoll-style façade over the DPUmesh C API.
  *
- * DECLARATIONS ONLY; the implementation lives in src/dpm.c (compiled into
+ * DECLARATIONS ONLY; the implementation lives in src/dmesh.c (compiled into
  * libdpumesh.so), matching the header-declares / src-implements split of the
- * core dpumesh_* API (dpumesh.h → dpumesh_doca.c). Include this header and link
+ * core dpumesh_* API (dmesh_core.h → dmesh_core.c). Include this header and link
  * -ldpumesh.
  *
  *   socket()/bind()/listen()  ->  dmesh_create_channel()      (registers a service)
@@ -42,14 +42,14 @@
  *     conns) then dmesh_next_ready() (conns with inbound — the PE names them, so no
  *     scan, no per-conn fd). SEND IS EXPLICIT: write buffers, flush ships.
  */
-#ifndef DPM_H
-#define DPM_H
+#ifndef DMESH_H
+#define DMESH_H
 
 #include <stdint.h>
 #include <stddef.h>
 #include <sys/types.h>
 
-#include "dpumesh.h"
+#include "dmesh_core.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -227,7 +227,7 @@ int dmesh_close(dmesh_conn_t *c);
  * and concatenate until you have the length YOUR protocol declares (framing is the
  * app's job, like a byte stream). If a service load-balances across SEVERAL backends,
  * dmesh_pin_route(c) first so the whole conn stays on one backend and the chunks stay
- * in order. bench/bench_sock.c (mode=3) is the worked example. */
+ * in order. bench/bench_dpumesh.c (mode=3) is the worked example. */
 
 /* ===== Event-loop integration =====
  * ONE fd: dmesh_event_fd(s). Register it in a vanilla epoll set; it becomes readable
@@ -240,4 +240,4 @@ int dmesh_close(dmesh_conn_t *c);
 }
 #endif
 
-#endif /* DPM_H */
+#endif /* DMESH_H */

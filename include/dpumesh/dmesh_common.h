@@ -1,5 +1,5 @@
-#ifndef DPUMESH_COMMON_H
-#define DPUMESH_COMMON_H
+#ifndef DMESH_COMMON_H
+#define DMESH_COMMON_H
 
 /* ====== DOCA / DPA limits ====== */
 #define MAX_DPA_RINGS       8   /* per-EU forward ring capacity */
@@ -48,7 +48,7 @@
  * live in [DMESH_UPORT_BASE, 65535]; host client conns use [1, DMESH_UPORT_BASE).
  * The split lets a host that is BOTH client and backend (loopback) keep both
  * kinds of conn in its one ports[] table with no number collision. Shared by the
- * host (dpm.h / dpumesh_doca.c) and the DPU (object.h / dpu_worker.c). */
+ * host (dmesh.h / dmesh_core.c) and the DPU (object.h / dpu_worker.c). */
 #define DMESH_UPORT_BASE    32768
 
-#endif /* DPUMESH_COMMON_H */
+#endif /* DMESH_COMMON_H */

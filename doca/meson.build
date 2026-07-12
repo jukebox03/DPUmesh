@@ -14,7 +14,7 @@ add_project_arguments('-DDOCA_ALLOW_EXPERIMENTAL_API', language: 'c')
 
 inc_dirs = []
 inc_dirs += include_directories('/opt/mellanox/doca/include/')
-inc_dirs += include_directories('../include')   # for dpumesh.h
+inc_dirs += include_directories('../include')   # for dmesh_core.h
 
 deps = []
 deps += dependency('doca-common')

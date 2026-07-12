@@ -1,0 +1,173 @@
+/*
+ * bench.h — shared definitions for the DPUmesh RPC benchmark (client + server).
+ *
+ * The benchmark is a Greeter-style request/response service:
+ *     SayHello(request[req_size])  ->  reply[reply_size]
+ * with reply_size FIXED and SMALL (default 8 B) — an ASYMMETRIC big-request /
+ * tiny-reply RPC, NOT a symmetric echo. Throughput (Gb/s) counts REQUEST bytes.
+ *
+ * DPUmesh delivers a connection-oriented BYTE STREAM (dmesh.h), not typed RPC, so
+ * we frame each request/reply on the wire. The framing lets the server (a) know
+ * when a whole request has arrived (a large request spans many <=8 KB transport
+ * messages) and (b) produce a reply of the requested size, and lets the client
+ * correlate replies to requests by seq under a concurrency window.
+ *
+ * WIRE FRAME (both directions), 16-byte little-endian header + payload:
+ *     u32 magic        BENCH_REQ_MAGIC (request)  |  BENCH_REP_MAGIC (reply)
+ *     u32 seq          request id (client-assigned; echoed verbatim in the reply)
+ *     u32 payload_len  bytes following this header
+ *     u32 aux          request: reply_size the server must return; reply: 0
+ *     u8  payload[payload_len]
+ *
+ * The reframer below fires its callback exactly once per WHOLE frame (header +
+ * all payload consumed), so the server replies only after the full request has
+ * been received — the request latency the client measures then includes the
+ * complete request transfer. Payload bytes are skipped, not buffered (content is
+ * irrelevant to the benchmark), so the reframer is O(1) memory at any size.
+ *
+ * This header is #included by BOTH bench_dpumesh.c (client) and echo_dpumesh.c
+ * (server); everything is `static`/`static inline`, so there is no ODR/link
+ * clash across the two independently-compiled binaries.
+ */
+#ifndef BENCH_H
+#define BENCH_H
+
+#include <stdint.h>
+#include <stddef.h>
+#include <string.h>
+#include <stdlib.h>
+#include <time.h>
+
+#define BENCH_REQ_MAGIC 0x62526571u   /* "bReq" */
+#define BENCH_REP_MAGIC 0x62526570u   /* "bRep" */
+#define BENCH_HDR_LEN   16u
+
+/* ------------------------------------------------------------ time helpers */
+static inline double bench_now_sec(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
+/* ------------------------------------------------------------ frame header */
+static inline void bench_put_hdr(uint8_t *h, uint32_t magic, uint32_t seq,
+                                 uint32_t payload_len, uint32_t aux) {
+    memcpy(h + 0,  &magic,       4);
+    memcpy(h + 4,  &seq,         4);
+    memcpy(h + 8,  &payload_len, 4);
+    memcpy(h + 12, &aux,         4);
+}
+
+/* ------------------------------------------------------------ stream reframer
+ * Feed arbitrary byte-stream chunks; the callback fires once per COMPLETE frame
+ * with (seq, payload_len, aux). Payload is discarded as it streams in (only the
+ * count matters), so a >8 KB frame spread across many transport messages is
+ * reframed with a fixed 16-byte buffer. */
+typedef void (*bench_frame_cb)(uint32_t seq, uint32_t payload_len, uint32_t aux, void *user);
+
+typedef struct {
+    uint8_t  hdr[BENCH_HDR_LEN];
+    uint32_t hdr_got;      /* header bytes accumulated (0..16) */
+    uint32_t skip;         /* payload bytes still to consume for the current frame */
+    uint32_t seq, plen, aux;
+    int      in_payload;   /* header parsed; consuming its payload */
+} bench_reframer_t;
+
+static inline void bench_reframe_reset(bench_reframer_t *rf) {
+    memset(rf, 0, sizeof(*rf));
+}
+
+static inline void bench_reframe_feed(bench_reframer_t *rf, const uint8_t *buf, size_t len,
+                                      bench_frame_cb cb, void *user) {
+    while (len > 0) {
+        if (!rf->in_payload) {
+            uint32_t need = BENCH_HDR_LEN - rf->hdr_got;
+            uint32_t take = (len < need) ? (uint32_t)len : need;
+            memcpy(rf->hdr + rf->hdr_got, buf, take);
+            rf->hdr_got += take; buf += take; len -= take;
+            if (rf->hdr_got == BENCH_HDR_LEN) {
+                memcpy(&rf->seq,  rf->hdr + 4, 4);
+                memcpy(&rf->plen, rf->hdr + 8, 4);
+                memcpy(&rf->aux,  rf->hdr + 12, 4);
+                rf->hdr_got = 0;
+                rf->skip = rf->plen;
+                if (rf->plen == 0) {
+                    cb(rf->seq, rf->plen, rf->aux, user);   /* empty-payload frame */
+                } else {
+                    rf->in_payload = 1;
+                }
+            }
+        } else {
+            uint32_t take = (len < rf->skip) ? (uint32_t)len : rf->skip;
+            buf += take; len -= take; rf->skip -= take;
+            if (rf->skip == 0) {
+                rf->in_payload = 0;
+                cb(rf->seq, rf->plen, rf->aux, user);       /* whole frame done */
+            }
+        }
+    }
+}
+
+/* ------------------------------------------------------------ latency histogram
+ * Fixed-memory histogram: 1 us buckets up to ~1.05 s, plus an overflow bucket and
+ * exact min/max/sum. Per-thread instances are merged at the end; percentiles are
+ * exact to 1 us over the covered range. */
+#define BENCH_HIST_BUCKETS (1u << 20)     /* 0..1048575 us */
+
+typedef struct {
+    uint32_t *b;          /* count per 1-us bucket */
+    uint64_t  overflow;   /* samples >= BENCH_HIST_BUCKETS us */
+    uint64_t  count;
+    double    sum_us;
+    double    min_us, max_us;
+} bench_hist_t;
+
+static inline int bench_hist_init(bench_hist_t *h) {
+    h->b = (uint32_t *)calloc(BENCH_HIST_BUCKETS, sizeof(uint32_t));
+    h->overflow = h->count = 0;
+    h->sum_us = 0.0; h->min_us = 1e30; h->max_us = 0.0;
+    return h->b ? 0 : -1;
+}
+static inline void bench_hist_free(bench_hist_t *h) { free(h->b); h->b = NULL; }
+
+static inline void bench_hist_record(bench_hist_t *h, double us) {
+    if (us < 0) us = 0;
+    uint32_t idx = (us >= (double)BENCH_HIST_BUCKETS) ? BENCH_HIST_BUCKETS
+                                                      : (uint32_t)us;
+    if (idx >= BENCH_HIST_BUCKETS) h->overflow++;
+    else                           h->b[idx]++;
+    h->count++;
+    h->sum_us += us;
+    if (us < h->min_us) h->min_us = us;
+    if (us > h->max_us) h->max_us = us;
+}
+
+static inline void bench_hist_merge(bench_hist_t *dst, const bench_hist_t *src) {
+    for (uint32_t i = 0; i < BENCH_HIST_BUCKETS; i++) dst->b[i] += src->b[i];
+    dst->overflow += src->overflow;
+    dst->count    += src->count;
+    dst->sum_us   += src->sum_us;
+    if (src->count) {
+        if (src->min_us < dst->min_us) dst->min_us = src->min_us;
+        if (src->max_us > dst->max_us) dst->max_us = src->max_us;
+    }
+}
+
+/* p in [0,100]. Returns microseconds. */
+static inline double bench_hist_pct(const bench_hist_t *h, double p) {
+    if (h->count == 0) return 0.0;
+    uint64_t rank = (uint64_t)(p / 100.0 * (double)(h->count - 1));
+    uint64_t cum = 0;
+    for (uint32_t i = 0; i < BENCH_HIST_BUCKETS; i++) {
+        cum += h->b[i];
+        if (cum > rank) return (double)i;
+    }
+    return h->max_us;   /* rank falls in the overflow tail */
+}
+static inline double bench_hist_avg(const bench_hist_t *h) {
+    return h->count ? h->sum_us / (double)h->count : 0.0;
+}
+static inline double bench_hist_min(const bench_hist_t *h) { return h->count ? h->min_us : 0.0; }
+static inline double bench_hist_max(const bench_hist_t *h) { return h->count ? h->max_us : 0.0; }
+
+#endif /* BENCH_H */

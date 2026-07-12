@@ -1,10 +1,10 @@
 /*
  * dmesh_preload.c — LD_PRELOAD socket-compatibility shim over the DPUmesh
- * native API (dpm.h). Lets an UNMODIFIED, dynamically-linked POSIX socket
+ * native API (dmesh.h). Lets an UNMODIFIED, dynamically-linked POSIX socket
  * application run over DPUmesh: selected TCP connects/listens are transparently
  * backed by dmesh connections; every other fd passes through to the kernel.
  *
- * LAYERING (see plan.md): the native dmesh_* API stays the optimized product;
+ * LAYERING (see design/CORE.md §6): the native dmesh_* API stays the optimized product;
  * this shim is a compatibility layer that deliberately re-buys the per-conn-fd
  * readiness model (measured ~half the native ceiling) in exchange for POSIX
  * transparency. Nothing here is on the native hot path.
@@ -31,7 +31,7 @@
  * to the backend picked for its first message — connection-level LB, exactly
  * what a TCP proxy gives you.
  *
- * THREAD MODEL — api.md contract: dmesh_accept/dmesh_next_ready are single-
+ * THREAD MODEL — design/API.md contract: dmesh_accept/dmesh_next_ready are single-
  * consumer. The shim's dispatcher thread is that consumer; it also EXCLUSIVELY
  * runs dmesh_close (app close() only queues), so a ready-list pop can never
  * race a conn free. App threads touch only their own conns (per-entry mutex).
@@ -70,7 +70,7 @@
 #include <sys/sendfile.h>
 #include <netinet/in.h>
 
-#include <dpumesh/dpm.h>
+#include <dpumesh/dmesh.h>
 
 /* ================= real libc entry points (lazy dlsym) ================= */
 
@@ -263,7 +263,7 @@ static void close_q_push(pfd_t *e) {
 
 static void *dispatcher_main(void *arg) {
     (void)arg;
-    int ch_fd = dmesh_event_fd(g_ch);    /* enables readiness delivery (api.md) */
+    int ch_fd = dmesh_event_fd(g_ch);    /* enables readiness delivery (design/API.md) */
     struct pollfd pfds[2] = {
         { .fd = ch_fd,     .events = POLLIN },
         { .fd = g_wake_fd, .events = POLLIN },
@@ -567,7 +567,7 @@ int connect(int fd, const struct sockaddr *addr, socklen_t alen) {
         const struct sockaddr_in *sin = (const struct sockaddr_in *)addr;
         int svc = map_lookup(ntohs(sin->sin_port));
         if (svc >= 0) {
-            /* AF_INET SOCK_STREAM only (api.md §7) — a UDP connect() to a mapped
+            /* AF_INET SOCK_STREAM only (design/API.md §7) — a UDP connect() to a mapped
              * port must stay kernel. */
             int so_type = 0; socklen_t tl = sizeof so_type;
             if (real_getsockopt(fd, SOL_SOCKET, SO_TYPE, &so_type, &tl) < 0 ||

@@ -12,9 +12,15 @@ void run_dpu_worker(struct objects *objs);
  * egress reuses the SAME batched TX_ACK / REV_DONE accumulators and the SAME
  * L4 default route. */
 
-/* L4 default route (service table + route-affinity pin). Used for a DEFERred
- * request seg. Returns a live pod_id or -1 (unroutable). */
+/* L4 default route (load-balance over the service's live backends + route-affinity
+ * pin). Used for a DEFERred request seg. Returns a live pod_id or -1 (unroutable). */
 int32_t dpu_route_l4(struct objects *objs, int16_t svc, uint8_t route_group);
+
+/* Collect the live backend pod_ids advertising service `svc` (derived from pods[]:
+ * registered + service_id==svc + dma_ready). Fills out[0..n) (caller sizes >= MAX_PODS)
+ * and returns n (0 = no healthy backend). The L7 hook is shown this set as its
+ * cluster endpoints (dpu_proxy.c fills dmesh_l7_ctx.hosts from it). */
+int collect_live_hosts(struct objects *objs, int16_t svc, int32_t *out);
 
 /* Accumulate one TX_ACK into src_pod's batch (custody release to the sender). */
 void batch_or_send_tx_ack(struct objects *objs, struct pod_state *src_pod,

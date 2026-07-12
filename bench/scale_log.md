@@ -4068,3 +4068,54 @@ follows the same header-declares/src-implements split as the other two API layer
 frozen (device untouched); `CC_SEND_TASK_NUM` can no longer drift. NB the low-concurrency loopback/stream
 p50 (~1–2.5ms) is the known EU-park/wake floor at single-outstanding closed-loop, not a regression (the
 high-concurrency RPC path shows the correct ~165µs). Deployed state: n_eng=2, passthru default + frame svc16.
+
+---
+
+# 2026-07-13 — L7 multi-backend registry + round-robin LB + connection-sticky sessions (Envoy parity, phase 1)
+
+**Goal.** Make the DPU a real Envoy-like L7 data plane substrate: a *service = a cluster* with
+MULTIPLE backend pods, load-balanced, with connection-scoped session stickiness — so an external L7
+author (writing only `dmesh_l7_route`) rides a working LB/cluster/pool layer. Prior state: `service_table[svc]`
+was a single-int, last-writer-wins mock (no real multi-backend, no LB); a disconnect left a stale entry
+(blackhole). See design/API.md §5/§8, design/CORE.md §4.2.
+
+**What changed (ARM control plane only — wire/DPA/data-path/host `src/` untouched):**
+- `object.h`: `int service_table[128]` → **removed**; replaced by `uint32_t svc_rr[128]` (per-service RR cursor).
+  The service's live backend SET is now DERIVED from `pods[]` on demand (registered + service_id + dma_ready)
+  — single source of truth, so a disconnect drops a backend automatically (no blackhole). `pod_state.service_id`
+  comment updated.
+- `dpu_worker.c`: new `collect_live_hosts(svc,out[])` (pods[] scan → live endpoints); `lb_pick` = **ROUND_ROBIN**
+  over that set via `svc_rr`; `dpu_route_l4` rg==0 path now routes through `lb_pick` (was raw table read).
+- `dpu_l7.h/.c`: hook contract → **struct-based** `dmesh_l7_ctx{+hosts,n_hosts}` + `dmesh_l7_decision{total_len,
+  cluster,host}` (signature frozen; `hash`/`session` are phase-2 append-only). `DMESH_LB_DEFER` = "engine LB picks".
+  The default mock now content-routes by svc byte to `decision.cluster` and DEFERs the host (engine LBs).
+- `dpu_proxy.c`: `px_conn.{pinned_backend,pinned_cluster}` = **connection-scoped session pin** (Envoy TCP-proxy /
+  session-affinity). New `px_resolve_backend()` precedence = **L7 host-override > connection sticky > LB(round-robin
+  + route-affinity)**; `px_service_sticky()` (default STICKY, `DPUMESH_LB_PER_REQUEST_SVC` csv = per-request like
+  Envoy HTTP). `px_parse_l7` fills `ctx.hosts` + uses the decision struct; passthru DEFER + frame both route via the
+  new resolver/`dpu_route_l4` (multi-backend RR). Proxy init parses the per-request csv; start log now prints
+  `lb=round-robin, per-request-services=N (default sticky)`.
+- `comch_server.c`: removed the `service_table[svc]=pod_id` write (no table to maintain now).
+
+**Static validation (local, DOCA installed):**
+- `make lib` (host ABI incl. `dpa_common.h` asserts, `struct objects` layout): **EXIT 0** (service_table→svc_rr is
+  same-size 512B, ABI unchanged).
+- DPU-side `gcc -fsyntax-only -DDOCA_ARCH_DPU` on `dpu_worker.c` / `dpu_proxy.c` / `dpu_l7.c` / `comch_server.c`:
+  **EXIT 0, 0 errors** (only DOCA experimental-API deprecation warnings).
+- Grep: **0** remaining `service_table` code refs (only doc comments, updated).
+
+**HW deploy/test — BLOCKED (infra, not code).** `bench.sh deploy` FAILED at `sync_sources` (rsync to the DPU):
+the remote DPU `jukebox@192.168.100.2` has its **root filesystem `/dev/nvme0n1p2` READ-ONLY with device I/O
+errors** — `touch ~/DPUmesh/.__wtest` → "Read-only file system", `df`/`uptime` → "Input/output error", `/tmp` is
+on the same (ro) root, no separate tmpfs. `/proc/mounts` still reads `rw` but every write EROFS and some binary
+reads/execs return EIO → ext4/NVMe hard-error state (classic `errors=remount-ro` after device I/O failure). This
+prevents rsync of sources, the DPU `ninja` build, and restarting `dpumesh_dpu`. The currently-running
+`dpumesh_dpu` is the **Jul-10 build (does NOT contain this change)**. The failed deploy's `apply_manifest` scaled
+the k8s deployments to replicas=0 (pods down).
+
+**Status: code complete + statically verified; HW validation PENDING DPU filesystem recovery** (reboot/fsck, or
+NVMe replacement if the device is physically failing — requires operator action on the DPU, not remotely fixable/
+safe to attempt). On recovery, resume: `bench.sh deploy` → regression (loopback/stream/preload/RPC vs the 07-10
+baseline above) → multi-backend LB test (set echo-dpumesh-13/-14 `BENCH_WORKER_ID=11` so svc 11 has 3 backends;
+verify load distributes / conn-pins across pods 11/13/14, byte-exact, 0-fail; kill a backend → remaining serve,
+no blackhole). NO HW numbers recorded — none were produced.

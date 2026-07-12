@@ -1,5 +1,5 @@
 /*
- * loopback_sock.c — self-routing / loopback validator for the oriented-tuple
+ * loopback_dpumesh.c — self-routing / loopback validator for the oriented-tuple
  * model. ONE pod is BOTH the server and the client of its OWN service:
  *
  *   create_channel(pod_id)  ->  registers service_id = pod_id (DPU default)
@@ -12,8 +12,8 @@
  * reply lands with dst_port=pc (< BASE -> client conn). The port-range split keeps
  * both kinds of conn in the one ports[] table — that is exactly what this proves.
  *
- * Uses ONLY the façade (dpm.h). No changes to the transport. Control-TCP daemon
- * like bench_sock.c: `RUN <N> <SIZE>` runs N loopback round-trips and replies
+ * Uses ONLY the façade (dmesh.h). No changes to the transport. Control-TCP daemon
+ * like bench_dpumesh.c: `RUN <N> <SIZE>` runs N loopback round-trips and replies
  * `OK <ok> <fail> <served> <p50us>`.
  */
 #define _GNU_SOURCE
@@ -30,7 +30,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 
-#include <dpumesh/dpm.h>
+#include <dpumesh/dmesh.h>
 
 #define CTRL_PORT 9092
 

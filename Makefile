@@ -2,7 +2,7 @@
 #
 # Produces the host transport library + the benchmark/validator binaries.
 # The DPU-side control plane (ARM + DPA kernel) is built separately with meson
-# under doca/ (see doca/meson.build); test-bench.sh drives that on the DPU.
+# under doca/ (see doca/meson.build); bench/bench.sh drives that on the DPU.
 #
 #   make            # libdpumesh.so + all bench binaries (+ Go binaries if `go` present)
 #   make lib        # build/lib/libdpumesh.so only
@@ -21,7 +21,7 @@ BUILD   := build
 LIBDIR  := $(BUILD)/lib
 BINDIR  := $(BUILD)/bin
 
-# -Iinclude → <dpumesh/...> ; -I. → the "doca/..." includes from src/dpumesh_doca.c
+# -Iinclude → <dpumesh/...> ; -I. → the "doca/..." includes from src/dmesh_core.c
 CFLAGS  := -O2 -g -Wall -fPIC -DDOCA_ALLOW_EXPERIMENTAL_API -Iinclude -I. $(DOCA_CFLAGS)
 
 # Runtime search paths. In a container everything is copied to /usr/local/lib;
@@ -33,8 +33,8 @@ RPATHS  := -Wl,-rpath,/usr/local/lib \
 
 # ---- host transport library --------------------------------------------------
 LIB_SRCS := \
-	src/dpumesh_doca.c \
-	src/dpm.c \
+	src/dmesh_core.c \
+	src/dmesh.c \
 	doca/common.c \
 	doca/object.c \
 	doca/buffer.c \
@@ -49,19 +49,19 @@ LIB_SRCS := \
 LIB := $(LIBDIR)/libdpumesh.so
 
 # ---- consumers of the library ------------------------------------------------
-# dmesh_* API clients (socket/epoll façade over dpm.h)
+# dmesh_* API clients (socket/epoll façade over dmesh.h)
 DMESH_BINS := bench_dpumesh echo_dpumesh loopback_dpumesh stream_dpumesh
-bench_dpumesh_SRC    := bench/bench_sock.c
-echo_dpumesh_SRC     := bench/echo_sock.c
-loopback_dpumesh_SRC := bench/loopback_sock.c
-stream_dpumesh_SRC   := bench/stream_sock.c
+bench_dpumesh_SRC    := bench/bench_dpumesh.c
+echo_dpumesh_SRC     := bench/echo_dpumesh.c
+loopback_dpumesh_SRC := bench/validators/loopback_dpumesh.c
+stream_dpumesh_SRC   := bench/validators/stream_dpumesh.c
 
 # LD_PRELOAD shim (interposes libc sockets → dmesh) + its vanilla-TCP validators
 PRELOAD := $(LIBDIR)/libdmesh_preload.so
 PLAIN_BINS := tcp_echo tcp_client preload_runner        # pure POSIX, no dmesh link
-tcp_echo_SRC       := bench/tcp_echo.c
-tcp_client_SRC     := bench/tcp_client.c
-preload_runner_SRC := bench/preload_runner.c
+tcp_echo_SRC       := bench/validators/tcp_echo.c
+tcp_client_SRC     := bench/validators/tcp_client.c
+preload_runner_SRC := bench/validators/preload_runner.c
 
 .PHONY: all lib bench go clean dirs
 all: lib bench go
@@ -93,11 +93,11 @@ $(PRELOAD): src/dmesh_preload.c | dirs lib
 	@echo "  -> $@"
 
 # pure-POSIX validators (no library dependency); tcp_client needs pthread
-$(BINDIR)/tcp_echo: bench/tcp_echo.c | dirs
+$(BINDIR)/tcp_echo: bench/validators/tcp_echo.c | dirs
 	$(CC) -O2 -o $@ $<
-$(BINDIR)/tcp_client: bench/tcp_client.c | dirs
+$(BINDIR)/tcp_client: bench/validators/tcp_client.c | dirs
 	$(CC) -O2 -o $@ $< -lpthread
-$(BINDIR)/preload_runner: bench/preload_runner.c | dirs
+$(BINDIR)/preload_runner: bench/validators/preload_runner.c | dirs
 	$(CC) -O2 -o $@ $<
 
 # Go TCP baseline (skipped with a notice if `go` is absent)

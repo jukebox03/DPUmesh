@@ -7,7 +7,7 @@
  *   tcp_client (persistent client daemon driven over stdin; DMESH_PRELOAD_MAP;
  *               one registration at boot — every RUN opens FRESH connections,
  *               so conn churn is tested without burning MAX_PODS slots)
- * then serves the test-bench control protocol on CTRL_PORT (plain kernel TCP —
+ * then serves the bench control protocol on CTRL_PORT (plain kernel TCP —
  * the runner itself is NOT preloaded):
  *
  *   "RUN <n> <size> <conns>\n"  →  forwarded to tcp_client stdin

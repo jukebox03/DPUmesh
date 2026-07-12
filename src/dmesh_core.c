@@ -1,14 +1,14 @@
 /*
- * dpumesh_doca.c - DPUmesh DOCA transport layer implementation
+ * dmesh_core.c - DPUmesh DOCA transport layer implementation (raw core engine)
  *
  * NVIDIA DOCA (Comch + DMA) host-side backend for the DPUmesh transport.
- * Provides the host-side raw buffer API declared in dpumesh.h: TX/RX
+ * Provides the host-side raw buffer API declared in dmesh_core.h: TX/RX
  * slot pools, descriptor SQ enqueue/dequeue, and a connection-oriented
  * port table (no request/response matching) over the DPU control + DMA
  * data path.
  */
 
-#include <dpumesh/dpumesh.h>
+#include <dpumesh/dmesh_core.h>
 
 #include <stdio.h>
 #include <stdlib.h>

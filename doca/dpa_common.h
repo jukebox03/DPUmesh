@@ -5,7 +5,7 @@
 #include <stddef.h>
 #include <doca_mmap.h>
 
-#include <dpumesh/dpumesh_common.h>
+#include <dpumesh/dmesh_common.h>
 
 typedef uint64_t doca_dpa_dev_uintptr_t;
 typedef uint64_t doca_dpa_dev_buf_arr_t;

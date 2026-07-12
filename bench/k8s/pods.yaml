@@ -1,0 +1,389 @@
+# pods.yaml — k8s manifest for the DPUmesh benchmark environment.
+#
+# Applied by bench/bench.sh (`bench.sh deploy`) via:
+#     envsubst < bench/k8s/pods.yaml | kubectl apply -n <ns> -f -
+# All Deployments start at replicas: 0; bench.sh scales them up (innermost first).
+#
+# Substituted variables (bench.sh exports these, with defaults, before envsubst):
+#   IMG_*                 container image tags
+#   CTRL_PORT TCP_PORT    control (9092) / TCP-baseline (9091) ports
+#   HOST_PCI              host PCIe address of the DPU
+#   LIB_OUT               host path holding libdpumesh.so (bind-mounted into pods)
+#   DPUMESH_RINGS_PER_POD ASYNC_THREADS BENCH_PIPELINE BENCH_COALESCE
+#   ECHO_THREADS DPUMESH_ARENA_SLOTS DMESH_PRELOAD_DEBUG
+#
+# bench-dpumesh (client, pod 10) --DPUmesh--> echo-dpumesh (greeter, pod 11).
+# bench-tcp/echo-tcp: the TCP+Envoy sidecar baseline. loopback/stream/preload:
+# feature validators (see ../validators/README.md).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bench-dpumesh
+spec:
+  replicas: 0
+  selector: { matchLabels: { app: bench-dpumesh } }
+  template:
+    metadata: { labels: { app: bench-dpumesh } }
+    spec:
+      hostname: bench-dpumesh
+      containers:
+      - name: bench-dpumesh
+        image: docker.io/${IMG_BENCH_DPU}
+        imagePullPolicy: Never
+        ports: [{ containerPort: ${CTRL_PORT} }]
+        env:
+        - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
+        - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
+        - { name: BENCH_WORKER_ID, value: "10" }
+        - { name: BENCH_DST_POD_ID, value: "11" }
+        - { name: ASYNC_THREADS, value: "${ASYNC_THREADS}" }
+        - { name: BENCH_PIPELINE, value: "${BENCH_PIPELINE}" }
+        - { name: BENCH_COALESCE, value: "${BENCH_COALESCE}" }
+        securityContext: { privileged: true }
+        volumeMounts:
+        - { mountPath: /dev/infiniband, name: infiniband }
+        - { mountPath: /usr/local/lib/libdpumesh.so, name: libdpumesh-so, subPath: libdpumesh.so }
+      volumes:
+      - { name: infiniband, hostPath: { path: /dev/infiniband } }
+      - { name: libdpumesh-so, hostPath: { path: ${LIB_OUT}, type: Directory } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: bench-dpumesh }
+spec:
+  selector: { app: bench-dpumesh }
+  ports: [{ port: ${CTRL_PORT}, targetPort: ${CTRL_PORT} }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-dpumesh
+spec:
+  replicas: 0
+  selector: { matchLabels: { app: echo-dpumesh } }
+  template:
+    metadata: { labels: { app: echo-dpumesh } }
+    spec:
+      hostname: echo-dpumesh
+      containers:
+      - name: echo-dpumesh
+        image: docker.io/${IMG_ECHO_DPU}
+        imagePullPolicy: Never
+        env:
+        - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
+        - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
+        - { name: BENCH_WORKER_ID, value: "11" }
+        - { name: ECHO_THREADS, value: "${ECHO_THREADS}" }
+        securityContext: { privileged: true }
+        volumeMounts:
+        - { mountPath: /dev/infiniband, name: infiniband }
+        - { mountPath: /usr/local/lib/libdpumesh.so, name: libdpumesh-so, subPath: libdpumesh.so }
+      volumes:
+      - { name: infiniband, hostPath: { path: /dev/infiniband } }
+      - { name: libdpumesh-so, hostPath: { path: ${LIB_OUT}, type: Directory } }
+---
+# echo-dpumesh-13 / -14 (pod_id=13,14): extra backends for the weighted-LB demo
+# (DPU LBs service 11 across pods 11,13,14). Same echo image, different id.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-dpumesh-13
+spec:
+  replicas: 0
+  selector: { matchLabels: { app: echo-dpumesh-13 } }
+  template:
+    metadata: { labels: { app: echo-dpumesh-13 } }
+    spec:
+      hostname: echo-dpumesh-13
+      containers:
+      - name: echo-dpumesh-13
+        image: docker.io/${IMG_ECHO_DPU}
+        imagePullPolicy: Never
+        env:
+        - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
+        - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
+        - { name: BENCH_WORKER_ID, value: "13" }
+        - { name: ECHO_THREADS, value: "${ECHO_THREADS}" }
+        securityContext: { privileged: true }
+        volumeMounts:
+        - { mountPath: /dev/infiniband, name: infiniband }
+        - { mountPath: /usr/local/lib/libdpumesh.so, name: libdpumesh-so, subPath: libdpumesh.so }
+      volumes:
+      - { name: infiniband, hostPath: { path: /dev/infiniband } }
+      - { name: libdpumesh-so, hostPath: { path: ${LIB_OUT}, type: Directory } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-dpumesh-14
+spec:
+  replicas: 0
+  selector: { matchLabels: { app: echo-dpumesh-14 } }
+  template:
+    metadata: { labels: { app: echo-dpumesh-14 } }
+    spec:
+      hostname: echo-dpumesh-14
+      containers:
+      - name: echo-dpumesh-14
+        image: docker.io/${IMG_ECHO_DPU}
+        imagePullPolicy: Never
+        env:
+        - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
+        - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
+        - { name: BENCH_WORKER_ID, value: "14" }
+        - { name: ECHO_THREADS, value: "${ECHO_THREADS}" }
+        securityContext: { privileged: true }
+        volumeMounts:
+        - { mountPath: /dev/infiniband, name: infiniband }
+        - { mountPath: /usr/local/lib/libdpumesh.so, name: libdpumesh-so, subPath: libdpumesh.so }
+      volumes:
+      - { name: infiniband, hostPath: { path: /dev/infiniband } }
+      - { name: libdpumesh-so, hostPath: { path: ${LIB_OUT}, type: Directory } }
+---
+# loopback-dpumesh (pod_id=12): one pod that is both client and server of its own
+# service — proves self-routing + oriented-tuple demux on a single host.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loopback-dpumesh
+spec:
+  replicas: 0
+  selector: { matchLabels: { app: loopback-dpumesh } }
+  template:
+    metadata: { labels: { app: loopback-dpumesh } }
+    spec:
+      hostname: loopback-dpumesh
+      containers:
+      - name: loopback-dpumesh
+        image: docker.io/${IMG_LOOPBACK_DPU}
+        imagePullPolicy: Never
+        ports: [{ containerPort: ${CTRL_PORT} }]
+        env:
+        - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
+        - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
+        - { name: BENCH_WORKER_ID, value: "12" }
+        - { name: DPUMESH_ARENA_SLOTS, value: "${DPUMESH_ARENA_SLOTS}" }
+        securityContext: { privileged: true }
+        volumeMounts:
+        - { mountPath: /dev/infiniband, name: infiniband }
+        - { mountPath: /usr/local/lib/libdpumesh.so, name: libdpumesh-so, subPath: libdpumesh.so }
+      volumes:
+      - { name: infiniband, hostPath: { path: /dev/infiniband } }
+      - { name: libdpumesh-so, hostPath: { path: ${LIB_OUT}, type: Directory } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: loopback-dpumesh }
+spec:
+  selector: { app: loopback-dpumesh }
+  ports: [{ port: ${CTRL_PORT}, targetPort: ${CTRL_PORT} }]
+---
+# stream-dpumesh (pod_id=16): byte-stream / L7-proxy frame validator. Needs the
+# DPU launched with DPUMESH_PROXY=frame. replicas:0 + not in start_pods — the
+# 'stream' command scales it up on demand.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stream-dpumesh
+spec:
+  replicas: 0
+  selector: { matchLabels: { app: stream-dpumesh } }
+  template:
+    metadata: { labels: { app: stream-dpumesh } }
+    spec:
+      hostname: stream-dpumesh
+      containers:
+      - name: stream-dpumesh
+        image: docker.io/${IMG_STREAM_DPU}
+        imagePullPolicy: Never
+        ports: [{ containerPort: ${CTRL_PORT} }]
+        env:
+        - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
+        - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
+        - { name: BENCH_WORKER_ID, value: "16" }
+        securityContext: { privileged: true }
+        volumeMounts:
+        - { mountPath: /dev/infiniband, name: infiniband }
+        - { mountPath: /usr/local/lib/libdpumesh.so, name: libdpumesh-so, subPath: libdpumesh.so }
+      volumes:
+      - { name: infiniband, hostPath: { path: /dev/infiniband } }
+      - { name: libdpumesh-so, hostPath: { path: ${LIB_OUT}, type: Directory } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: stream-dpumesh }
+spec:
+  selector: { app: stream-dpumesh }
+  ports: [{ port: ${CTRL_PORT}, targetPort: ${CTRL_PORT} }]
+---
+# preload-dpumesh (service_id=15): LD_PRELOAD shim validator. Runs vanilla TCP
+# binaries (tcp_echo + tcp_client) under LD_PRELOAD=libdmesh_preload.so.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: preload-dpumesh
+spec:
+  replicas: 0
+  selector: { matchLabels: { app: preload-dpumesh } }
+  template:
+    metadata: { labels: { app: preload-dpumesh } }
+    spec:
+      hostname: preload-dpumesh
+      containers:
+      - name: preload-dpumesh
+        image: docker.io/${IMG_PRELOAD_DPU}
+        imagePullPolicy: Never
+        ports: [{ containerPort: ${CTRL_PORT} }]
+        env:
+        - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
+        - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
+        - { name: PRELOAD_SVC, value: "15" }
+        - { name: ECHO_PORT, value: "9095" }
+        - { name: DMESH_PRELOAD_DEBUG, value: "${DMESH_PRELOAD_DEBUG}" }
+        securityContext: { privileged: true }
+        volumeMounts:
+        - { mountPath: /dev/infiniband, name: infiniband }
+        - { mountPath: /usr/local/lib/libdpumesh.so, name: libdpumesh-so, subPath: libdpumesh.so }
+      volumes:
+      - { name: infiniband, hostPath: { path: /dev/infiniband } }
+      - { name: libdpumesh-so, hostPath: { path: ${LIB_OUT}, type: Directory } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: preload-dpumesh }
+spec:
+  selector: { app: preload-dpumesh }
+  ports: [{ port: ${CTRL_PORT}, targetPort: ${CTRL_PORT} }]
+---
+# bench-tcp: TCP baseline client + sidecar1 (Envoy) in ONE pod sharing 1 host core
+# (the realistic sidecar tax). bench connects to localhost:$TCP_PORT (sidecar1),
+# which forwards to the echo-tcp Service (-> sidecar2). Pinned post-deploy.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bench-tcp
+spec:
+  replicas: 0
+  selector: { matchLabels: { app: bench-tcp } }
+  template:
+    metadata: { labels: { app: bench-tcp } }
+    spec:
+      containers:
+      - name: bench-tcp
+        image: docker.io/${IMG_BENCH_TCP}
+        imagePullPolicy: Never
+        ports: [{ containerPort: ${CTRL_PORT} }]
+        env:
+        - { name: BENCH_TARGET, value: "127.0.0.1:${TCP_PORT}" }
+      - name: sidecar1
+        image: docker.io/${IMG_ENVOY}
+        imagePullPolicy: IfNotPresent
+        args: ["-c", "/etc/envoy/envoy.yaml", "--log-level", "warn"]
+        ports: [{ containerPort: ${TCP_PORT} }]
+        volumeMounts:
+        - { mountPath: /etc/envoy, name: sidecar1-config, readOnly: true }
+      volumes:
+      - { name: sidecar1-config, configMap: { name: sidecar1-config } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: bench-tcp }
+spec:
+  selector: { app: bench-tcp }
+  ports: [{ port: ${CTRL_PORT}, targetPort: ${CTRL_PORT} }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-tcp
+spec:
+  replicas: 0
+  selector: { matchLabels: { app: echo-tcp } }
+  template:
+    metadata: { labels: { app: echo-tcp } }
+    spec:
+      # echo app + sidecar2 in same pod sharing 1 host core. echo listens on 9092;
+      # sidecar2 listens on ${TCP_PORT} and forwards to 127.0.0.1:9092.
+      containers:
+      - name: echo-tcp
+        image: docker.io/${IMG_ECHO_TCP}
+        imagePullPolicy: Never
+        args: ["-port", "9092"]
+        ports: [{ containerPort: 9092 }]
+      - name: sidecar2
+        image: docker.io/${IMG_ENVOY}
+        imagePullPolicy: IfNotPresent
+        args: ["-c", "/etc/envoy/envoy.yaml", "--log-level", "warn"]
+        ports: [{ containerPort: ${TCP_PORT} }]
+        volumeMounts:
+        - { mountPath: /etc/envoy, name: sidecar2-config, readOnly: true }
+      volumes:
+      - { name: sidecar2-config, configMap: { name: sidecar2-config } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: echo-tcp }
+spec:
+  selector: { app: echo-tcp }
+  ports: [{ port: ${TCP_PORT}, targetPort: ${TCP_PORT} }]
+---
+# sidecar1 ConfigMap (bench-tcp pod): tcp_proxy filter only — minimum viable Envoy
+# doing pure TCP forwarding, forwarding to the echo-tcp Service (-> sidecar2).
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: sidecar1-config }
+data:
+  envoy.yaml: |
+    static_resources:
+      listeners:
+      - name: tcp_listener
+        address:
+          socket_address: { address: 0.0.0.0, port_value: ${TCP_PORT} }
+        filter_chains:
+        - filters:
+          - name: envoy.filters.network.tcp_proxy
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
+              stat_prefix: tcp
+              cluster: upstream
+      clusters:
+      - name: upstream
+        type: STRICT_DNS
+        connect_timeout: 5s
+        load_assignment:
+          cluster_name: upstream
+          endpoints:
+          - lb_endpoints:
+            - endpoint:
+                address:
+                  socket_address: { address: echo-tcp, port_value: ${TCP_PORT} }
+---
+# sidecar2 ConfigMap (echo-tcp pod): forwards to the echo container in the SAME
+# pod via 127.0.0.1:9092.
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: sidecar2-config }
+data:
+  envoy.yaml: |
+    static_resources:
+      listeners:
+      - name: tcp_listener
+        address:
+          socket_address: { address: 0.0.0.0, port_value: ${TCP_PORT} }
+        filter_chains:
+        - filters:
+          - name: envoy.filters.network.tcp_proxy
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
+              stat_prefix: tcp
+              cluster: upstream
+      clusters:
+      - name: upstream
+        connect_timeout: 5s
+        load_assignment:
+          cluster_name: upstream
+          endpoints:
+          - lb_endpoints:
+            - endpoint:
+                address:
+                  socket_address: { address: 127.0.0.1, port_value: 9092 }

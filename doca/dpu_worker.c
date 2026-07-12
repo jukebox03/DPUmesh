@@ -13,7 +13,7 @@
 #include "buffer.h"
 #include "ring.h"
 #include "dpu_proxy.h"
-#include <dpumesh/dpumesh.h>
+#include <dpumesh/dmesh_core.h>
 
 #include <doca_log.h>
 #include <doca_dev.h>
@@ -126,21 +126,50 @@ flush_rev_done_batch(struct objects *objs, struct pod_state *pod)
 /* ====== L4 routing ======
  *
  * dpu_route_l4() is the single point where the DPU picks the destination pod for a
- * forward segment: service_table[svc] (one backend per service), with ROUTE-
+ * forward segment: LOAD-BALANCE over the service's live backend set, with ROUTE-
  * AFFINITY layered on top — a non-zero route_group pins every chunk of one large
- * (SAR) message to ONE backend so they reassemble. Single ARM thread → the group
- * table needs no lock. Called by the SG-DMA egress engine (dpu_proxy.c) for
- * DEFERred request segs; a body-parsing L7 proxy is the future step (api.md §8).
+ * (SAR) message to ONE backend so they reassemble. Single ARM thread → the cursor
+ * and group tables need no lock. Called by the SG-DMA egress engine (dpu_proxy.c)
+ * for DEFERred request segs; the L7 hook rides the same LB via dmesh_l7_ctx.hosts.
+ *
+ * The backend SET is DERIVED from pods[] on demand (registered + service_id + dma_ready)
+ * — pods[] is the single source of truth, so a disconnected backend leaves the set
+ * with no bookkeeping (no stale-entry blackhole). Envoy parity: a service == a
+ * cluster; pods[] filtered by service_id == the cluster's healthy endpoints.
  */
+int
+collect_live_hosts(struct objects *objs, int16_t svc, int32_t *out)
+{
+    int n = 0;
+    if (svc < 0 || svc >= POD_ID_SPACE)
+        return 0;
+    int np = __atomic_load_n(&objs->num_pods, __ATOMIC_ACQUIRE);
+    for (int i = 0; i < np && n < MAX_PODS; i++) {
+        struct pod_state *p = &objs->pods[i];
+        /* registered (ACQUIRE) publishes service_id; dma_ready gates the data plane
+         * — an un-ready backend would only drop, so exclude it from the LB set. */
+        if (!__atomic_load_n(&p->registered, __ATOMIC_ACQUIRE))
+            continue;
+        if (p->service_id != svc)
+            continue;
+        if (!pod_data_ready(p))
+            continue;
+        out[n++] = p->pod_id;
+    }
+    return n;
+}
+
+/* ROUND_ROBIN load balancer over the service's live backend set (Envoy default
+ * policy). Single ARM thread advances svc_rr → no lock. -1 = no healthy backend. */
 static inline int32_t
 lb_pick(struct objects *objs, int16_t svc)
 {
-    if (svc >= 0 && svc < POD_ID_SPACE) {   /* single backend per service */
-        int p = objs->service_table[svc];
-        if (p >= 0)
-            return p;
-    }
-    return -1;
+    int32_t hosts[MAX_PODS];
+    int n = collect_live_hosts(objs, svc, hosts);
+    if (n <= 0)
+        return -1;
+    uint32_t i = objs->svc_rr[svc]++;   /* per-service RR cursor */
+    return hosts[i % (uint32_t)n];
 }
 
 /* L4 default route: service table + route-affinity pin. The single point that
@@ -176,14 +205,9 @@ dpu_route_l4(struct objects *objs, int16_t svc, uint8_t rg)
         return b;
     }
 
-    /* No affinity (route_group==0) → normal per-message routing via the service table.
-     * Unknown service → -1 (caller drops + TX_ACKs the sender). */
-    if (svc >= 0 && svc < POD_ID_SPACE) {
-        int p = objs->service_table[svc];
-        if (p >= 0)
-            return p;
-    }
-    return -1;
+    /* No affinity (route_group==0) → per-message round-robin over the live backends.
+     * Unknown/empty service → -1 (caller drops + TX_ACKs the sender). */
+    return lb_pick(objs, svc);
 }
 
 /* ====== Deferred Completion Queue Drain ====== */
@@ -369,12 +393,13 @@ run_dpu_worker(struct objects *objs)
     memset(objs->pods, 0, sizeof(objs->pods));
     objs->num_pods = 0;
 
-    /* find_pod_by_id's O(1) pod_id->slot map + dpu_route's service_id->pod map
-     * start empty (-1 = no live pod / unresolved service). Done before any
-     * PE/thread starts, so plain stores are race-free here. */
+    /* find_pod_by_id's O(1) pod_id->slot map starts empty (-1 = no live pod). The
+     * per-service LB cursor starts at 0. Done before any PE/thread starts, so plain
+     * stores are race-free here. (The service->backend set is derived from pods[]
+     * live, so there is no service table to initialize.) */
     for (int i = 0; i < POD_ID_SPACE; i++) {
         objs->pod_id_to_slot[i] = -1;
-        objs->service_table[i]  = -1;
+        objs->svc_rr[i]         = 0;
     }
 
     /* Route-affinity table ((service, route_group) -> pinned backend) starts empty.
@@ -409,7 +434,7 @@ run_dpu_worker(struct objects *objs)
     objs->num_dpa_threads = 4;
     /* K = forward rings per pod (EU-sharding). Deploy option DPUMESH_RINGS_PER_POD
      * (default 2); clamped to [1, min(N, MAX_EU_PER_POD)]. The HOST reads the SAME
-     * env (dpumesh_doca.c) and MUST land on the same K — forward rings pair 1:1, a
+     * env (dmesh_core.c) and MUST land on the same K — forward rings pair 1:1, a
      * mismatch makes a pod never reach dma_ready. A conn pins to ONE ring
      * (src_port % K); different conns spread across the K rings. K≤N (=4). */
     objs->k_rings = DPUMESH_RINGS_PER_POD_DEFAULT;   /* = 2 */

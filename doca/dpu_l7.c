@@ -3,17 +3,18 @@
  * ===================================================================
  *
  * This is the only file you edit. Implement dmesh_l7_route(): given the HEAD of
- * the front message, say how long the WHOLE message is and (optionally) which
- * service it goes to. The engine ships the whole message (head + body) from
- * staging via scatter-gather — you never see or copy the body. Read dpu_l7.h
- * for the full contract.
+ * the front message, fill in a DECISION — how long the WHOLE message is, and
+ * (optionally) which service/pod it goes to. The engine ships the whole message
+ * (head + body) from staging via scatter-gather — you never see or copy the body.
+ * Read dpu_l7.h for the full contract.
  *
  * The default parses the SAME length-prefixed framing as the byte-stream
- * validator (bench/stream_sock.c):
+ * validator (bench/validators/stream_dpumesh.c):
  *     [u32 LE total_len (incl. this 5-byte header)][u8 svc][payload ...]
- * and routes each message to the service named by its `svc` byte. Because it
- * matches the validator, `./test-bench.sh stream` can drive this L7 path
- * directly (compare against DPUMESH_PROXY=frame — results must be identical).
+ * and routes each message to the service named by its `svc` byte (content
+ * routing → decision.cluster), letting the engine LOAD-BALANCE across that
+ * service's live backends (decision.host = DEFER). Because it matches the
+ * validator, `./bench.sh stream` can drive this L7 path directly.
  * Replace the body with your own protocol.
  * ===================================================================
  */
@@ -25,10 +26,8 @@
 #define L7_MSG_MAX  (16u * 1024u * 1024u)  /* sanity cap on one message */
 
 int dmesh_l7_route(const uint8_t *buf, uint32_t len,
-                   const struct dmesh_l7_ctx *ctx, int32_t *target)
+                   const struct dmesh_l7_ctx *ctx, struct dmesh_l7_decision *out)
 {
-    (void)ctx;                             /* default routes by the svc byte, below */
-
     if (len < L7_HDR)
         return 0;                          /* 5-byte head not fully in the window yet */
 
@@ -37,13 +36,15 @@ int dmesh_l7_route(const uint8_t *buf, uint32_t len,
     if (total < L7_HDR || total > L7_MSG_MAX)
         return -1;                         /* implausible → drop the connection */
 
-    /* Route by the svc byte (content routing). 0xFF or out-of-range → keep the
-     * client's addressed service (*target is pre-set to ctx->service). */
+    out->total_len = total;                /* we know the whole length from the head */
+
+    /* Content routing by the svc byte. 0xFF or out-of-range → keep the client's
+     * addressed service (out->cluster is pre-set to ctx->service). The engine then
+     * load-balances the chosen service across its live backends (out->host stays
+     * DEFER); to pin a specific pod instead, set out->host = one of ctx->hosts. */
     uint8_t svc = buf[4];
     if (svc != 0xFF && svc < 128)
-        *target = (int32_t)svc;
+        out->cluster = svc;
 
-    /* We know the whole length from the head; the body need not be here — the
-     * engine streams it from staging. Return the total message length. */
-    return (int)total;
+    return 1;                              /* decided */
 }
