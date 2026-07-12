@@ -34,6 +34,7 @@ RPATHS  := -Wl,-rpath,/usr/local/lib \
 # ---- host transport library --------------------------------------------------
 LIB_SRCS := \
 	src/dpumesh_doca.c \
+	src/dpm.c \
 	doca/common.c \
 	doca/object.c \
 	doca/buffer.c \

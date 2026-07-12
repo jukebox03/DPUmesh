@@ -3997,3 +3997,74 @@ frame, >8KB seam, multi-frame) 0-fail and byte-exact.**
   DPU otherwise healthy (dpumesh/stream still 0-fail). The SAME binary is **2000/0 on a fresh deploy**
   → a documented shim churn fragility (slot-reclaim under sudden client death), not a code regression.
   Run preload before heavy blasts. Deployed state: n_eng=2, passthru default + frame svc16.
+
+
+# 2026-07-10 (session 4) — Consistency cleanup + façade dpm.h→src/dpm.c refactor — BUILT + HW-VALIDATED (behavior-neutral)
+
+Two coupled housekeeping changes, validated together on one deploy. Both are behavior-neutral by
+construction; this session proves it end-to-end (0-fail, byte-exact, p50 == the 07-10 s3 baseline).
+
+## What changed
+**A. Consistency cleanup (readability-only, ABI frozen — the standing "zero functional removal" rule):**
+- **`CC_SEND_TASK_NUM` deduped**: was `#define`d IDENTICALLY (8192) in BOTH `comch_client.h` and
+  `comch_server.h` (drift hazard). Now a single definition in `comch_common.h`; client.h `#include`s it.
+- **Vestigial `region_off`/`dpu_region` folded to constants** (`dpa.c`): the DPA computes the pod
+  staging base as `dpu_addr - region_off`, and `dpu_addr = dma_buffer + j*dpu_region`,
+  `region_off = j*dpu_region` — so the two ALWAYS cancel to `dma_buffer` (verified: `dpu_addr` is used
+  nowhere else). Host now sets `dpu_addr = dma_buffer, region_off = 0` and drops the `dpu_region` math.
+  **The address handed to `dma_copy` is byte-identical.** WIRE ABI UNCHANGED: `region_off` stays in
+  `struct dpa_ring_info` (kept 0), so all `_Static_assert`s (dpa_ring_info 48B / comch_add_ring_msg 56B
+  / comch_msg 60B) are frozen and the DPA-device code (`dpa_kernel.c`) is UNTOUCHED (comment-only).
+- **Comment drift 16B→20B**: `route_group` grew the completion immediate 16→20B a while back; 3 stale
+  "16B budget/wire" comments (`dpa.c`, `dpa_kernel.c`, `dpa_common.h`) corrected; `dpa.c` "≤32 bytes"
+  clarified to "20 bytes; HW imm-data max 32". `api.md` re-checked — already current (no change).
+
+**B. Façade moved header-only → declarations + src impl (`dpm.h` → `src/dpm.c`):** the socket/epoll
+façade was the ONLY one of the 3 API layers implemented in its header (all `static inline`); the core
+API (`dpumesh.h`→`dpumesh_doca.c`) and the shim (`dmesh_preload.c`) are header-declares/src-implements.
+Brought `dpm.h` into line: it now carries ONLY prototypes + the two public structs; the 16 `dmesh_*`
+bodies moved to new `src/dpm.c` (compiled into `libdpumesh.so`). Two façade internals (`conn_free_rx`,
+`dmesh_emit_desc`) became file-local `static`; **`dmesh_send_fin` was kept PUBLIC** — `dmesh_preload.c`
+calls it directly for `shutdown(SHUT_WR)` half-close (would otherwise be an unresolved symbol).
+
+## Files
+`doca/comch_common.h` (+CC_SEND_TASK_NUM), `comch_client.h` (−dup, +include), `comch_server.h` (−dup);
+`doca/dpa.c` (region_off→0, dpu_region dropped, 2 comments), `doca/device/dpa_kernel.c` (2 comments,
+code untouched), `doca/dpa_common.h` (region_off + 16B→20B comments). `include/dpumesh/dpm.h`
+(decls-only), `src/dpm.c` (NEW, façade impl), `Makefile` (+`src/dpm.c` to LIB_SRCS).
+
+## Local validation (pre-deploy)
+- Host `make lib`: **EXIT 0** — the `dpa_common.h` ABI asserts (outside the DPU guard) PASS → struct
+  layout unchanged by the region_off comment/const edits.
+- `gcc -fsyntax-only -DDOCA_ARCH_DPU` on `dpa.c` + `comch_*.c`: **EXIT 0**.
+- Symbols: `dmesh_*` now EXPORTED (`T`) from `libdpumesh.so`; the rebuilt bench binaries + preload.so
+  reference them as `U` (resolved from the lib), incl. `libdmesh_preload.so: U dmesh_send_fin`; `ldd -r`
+  clean. (Stale pre-refactor binaries had them inlined → had to force-rebuild the consumers.)
+
+## HW validation — `DPUMESH_ARM_EGRESS_THREADS=2 DPUMESH_PROXY_FRAME_SVC=16 ./test-bench.sh deploy`
+DPU up clean: `px_init` = "SG-DMA egress, egress-threads=2; request-default=passthru, l7-services=0,
+frame-services=1". All 8 pods Running, 0 restarts. DPU log 0 err/drop/poison/stale through the whole run.
+
+| test | result | vs 07-10 s3 baseline |
+|---|---|---|
+| preload vanilla-TCP 2000×1KB×32c | 2000/0 · p50 192µs · 13.2K RPS | = baseline |
+| loopback self-route 50000×8KB | 50000/0 · served 50000 | = baseline |
+| stream FRAME 500×1KB (svc16) | 500/0 · served Δ514,500 = 500×1029 | byte-exact |
+| stream FRAME **>8KB** 200×20000 (seam) | 200/0 · served Δ4,001,000 = 200×20005 | byte-exact = s3 |
+| stream FRAME 300×1KB ×3 frames/write | 300/0 · served Δ926,100 = 300×3×1029 | byte-exact |
+| RPC 30K/8s/8KB | 240,000/0 · **p50 165.1µs** · p99 525µs | = baseline (165µs) |
+| RPC 100K/8s/8KB | 800,000/0 · **p50 165.1µs** · p99 257µs | = baseline (162µs) |
+| RPC 200K/8s/8KB | 1,600,000/0 · 198,661 RPS · p50 250µs · p99 1144µs | = baseline (198.9K, 227µs) |
+
+Reliability (no-leak / recovery): back-to-back **200K→198,549 / 200K→198,661 / 30K→29,799**, ALL 0-fail;
+loopback rerun 50000/0 (served cumulative 100000, exact). Stream served-byte counts add up EXACTLY as a
+cumulative counter across the 3 runs (514,500 → +4,001,000 → +926,100) — the frame/proxy path is intact.
+
+## Conclusion
+Both changes are **behavior- and performance-neutral**: every live path (forward staging-mirror,
+passthru RPC, self-route, vanilla shim + `dmesh_send_fin` half-close, frame, >8KB seam) is 0-fail and
+byte-exact, and the RPC p50 (165µs @30/100K, 250µs @200K) matches the 07-10 s3 baseline. The façade now
+follows the same header-declares/src-implements split as the other two API layers; the region_off ABI is
+frozen (device untouched); `CC_SEND_TASK_NUM` can no longer drift. NB the low-concurrency loopback/stream
+p50 (~1–2.5ms) is the known EU-park/wake floor at single-outstanding closed-loop, not a regression (the
+high-concurrency RPC path shows the correct ~165µs). Deployed state: n_eng=2, passthru default + frame svc16.

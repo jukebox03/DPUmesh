@@ -1,5 +1,10 @@
 /*
- * dpm.h — socket/epoll-style façade over the DPUmesh C API. Header-only.
+ * dpm.h — socket/epoll-style façade over the DPUmesh C API.
+ *
+ * DECLARATIONS ONLY; the implementation lives in src/dpm.c (compiled into
+ * libdpumesh.so), matching the header-declares / src-implements split of the
+ * core dpumesh_* API (dpumesh.h → dpumesh_doca.c). Include this header and link
+ * -ldpumesh.
  *
  *   socket()/bind()/listen()  ->  dmesh_create_channel()      (registers a service)
  *   accept()                  ->  dmesh_accept()              (one new conn)
@@ -42,10 +47,6 @@
 
 #include <stdint.h>
 #include <stddef.h>
-#include <stdlib.h>
-#include <string.h>
-#include <errno.h>
-#include <unistd.h>
 #include <sys/types.h>
 
 #include "dpumesh.h"
@@ -110,39 +111,19 @@ typedef struct dmesh_conn {
 
 /* service_id = the service this node advertises (DMESH_SVC_NONE for a pure
  * client). The node's pod_id (its address) is ASSIGNED BY THE DPU at register —
- * the caller never picks it; dmesh_pod_id() returns the assigned value. */
-static inline dmesh_channel_t *dmesh_create_channel(int service_id) {
-    dmesh_channel_t *s = (dmesh_channel_t *)calloc(1, sizeof(*s));
-    if (!s) return NULL;
-    dpumesh_config_t cfg = DPUMESH_CONFIG_DEFAULT;
-    if (dpumesh_init(&s->ctx, service_id, &cfg) != 0 || !s->ctx) {
-        free(s);
-        return NULL;
-    }
-    s->pod_id    = dpumesh_get_pod_id(s->ctx);   /* DPU-assigned (valid after init) */
-    s->slot_size = dpumesh_get_slot_size(s->ctx);
-    return s;
-}
+ * the caller never picks it; dmesh_pod_id() returns the assigned value. Returns
+ * NULL on init failure. */
+dmesh_channel_t *dmesh_create_channel(int service_id);
 
-static inline void dmesh_destroy_channel(dmesh_channel_t *s) {
-    if (!s) return;
-    if (s->ctx) dpumesh_destroy(s->ctx);
-    free(s);
-}
+/* Release the channel + all DOCA resources. Safe on NULL. */
+void dmesh_destroy_channel(dmesh_channel_t *s);
 
-static inline int dmesh_pod_id(dmesh_channel_t *s)  { return s->pod_id; }
-static inline int dmesh_msg_max(dmesh_channel_t *s) { return s->slot_size; }
+int dmesh_pod_id(dmesh_channel_t *s);   /* this node's DPU-assigned pod_id */
+int dmesh_msg_max(dmesh_channel_t *s);  /* max body size (slot_size) */
+
 /* The ONE channel fd: readable when a NEW connection is pending (accept) OR any
  * conn has inbound (next_ready). Calling it enables readiness delivery. */
-static inline int dmesh_event_fd(dmesh_channel_t *s) { return dpumesh_get_event_fd(s->ctx); }
-
-/* ===== internal helpers ===== */
-
-/* Return the held RX-landing credit and clear the inbound view. */
-static inline void conn_free_rx(dmesh_conn_t *c) {
-    if (c->rx_slot >= 0) dpumesh_rx_free(c->ep->ctx, c->rx_slot);
-    c->rx_slot = -1; c->rx_buf = NULL; c->rx_len = 0; c->rx_pos = 0;
-}
+int dmesh_event_fd(dmesh_channel_t *s);
 
 /* ===== Connection setup ===== */
 
@@ -150,53 +131,12 @@ static inline void conn_free_rx(dmesh_conn_t *c) {
  * allocates a SERVER conn that learns the peer (pod,port), and returns it holding
  * the first message body. NULL+EAGAIN if none pending; NULL+ENOMEM on alloc
  * failure (the message is dropped, its RX credit reclaimed). */
-static inline dmesh_conn_t *dmesh_accept(dmesh_channel_t *s) {
-    sw_descriptor_t req;
-    if (dpumesh_dequeue(s->ctx, &req, 0) < 0 || !req.valid) {
-        errno = EAGAIN;
-        return NULL;
-    }
-    dmesh_conn_t *c = (dmesh_conn_t *)calloc(1, sizeof(*c));
-    if (!c) { errno = ENOMEM; dpumesh_rx_free(s->ctx, req.body_buf_slot); return NULL; }
-    /* Model B: the PE created a SERVER_PENDING slot at message-1 delivery (port =
-     * req.dst_port = uP, with any pipelined messages 2..P already coalesced in its
-     * inbox). Promote it to a live SERVER conn and attach THIS handle so
-     * dmesh_next_ready returns it. */
-    uint16_t ps = dpumesh_accept_port(s->ctx, req.dst_port, c);
-    if (ps == 0) { dpumesh_rx_free(s->ctx, req.body_buf_slot); free(c); errno = ENOMEM; return NULL; }
-
-    c->ep          = s;
-    c->role        = DMESH_ROLE_SERVER;
-    c->local_port  = ps;                 /* == req.dst_port == uP */
-    c->remote_pod  = req.src_pod;        /* learned peer (for replies + further sends) */
-    c->remote_port = req.src_port;
-    c->dst_service = req.src_service;
-    c->seq         = 0;
-    c->rx_slot     = req.body_buf_slot;  /* the first message (held; read returns it) */
-    c->rx_buf      = dpumesh_rx_buf(s->ctx, req.body_buf_slot);
-    c->rx_len      = req.body_len;
-    c->rx_pos      = 0;
-    return c;
-}
+dmesh_conn_t *dmesh_accept(dmesh_channel_t *s);
 
 /* connect(): bind a CLIENT conn to a logical SERVICE, addressed by its service_id
  * (the same id the backend passed to dmesh_create_channel). Local; no round-trip.
  * The conn is established (peer learned) on its first inbound. NULL+ENOMEM on OOM. */
-static inline dmesh_conn_t *dmesh_connect(dmesh_channel_t *s, int dst_service_id) {
-    dmesh_conn_t *c = (dmesh_conn_t *)calloc(1, sizeof(*c));
-    if (!c) { errno = ENOMEM; return NULL; }
-    uint16_t pc = dpumesh_alloc_port(s->ctx, DMESH_ROLE_CLIENT, c);   /* c = the port's handle */
-    if (pc == 0) { free(c); errno = ENOMEM; return NULL; }
-    c->ep          = s;
-    c->role        = DMESH_ROLE_CLIENT;
-    c->local_port  = pc;
-    c->dst_service = (int16_t)dst_service_id;
-    c->remote_pod  = DMESH_POD_BLANK;
-    c->remote_port = DMESH_PORT_BLANK;
-    c->seq         = 0;
-    c->rx_slot     = -1;
-    return c;
-}
+dmesh_conn_t *dmesh_connect(dmesh_channel_t *s, int dst_service_id);
 
 /* Pin this connection's outbound routing to ONE backend (connection-level LB).
  * Claims a route-affinity group from the channel's global id source and stamps it
@@ -206,20 +146,14 @@ static inline dmesh_conn_t *dmesh_connect(dmesh_channel_t *s, int dst_service_id
  * right after dmesh_connect, before any write. Idempotent. Meaningless on a
  * SERVER conn (it already sends to its learned peer). Used by the LD_PRELOAD
  * socket shim, where byte-stream total order is part of the contract. */
-static inline void dmesh_pin_route(dmesh_conn_t *c) {
-    if (c->pin_group != 0) return;
-    uint32_t g = __atomic_fetch_add(&c->ep->next_group, 1u, __ATOMIC_RELAXED);
-    c->pin_group = (uint8_t)((g % 255u) + 1u);           /* 1..255, never 0 */
-}
+void dmesh_pin_route(dmesh_conn_t *c);
 
 /* Pop the next conn that has inbound, from the channel's ready list (the PE puts
  * ready conns here, so there is NO scan and NO per-conn fd). Returns the SAME conn
  * handle you created at accept/connect, or NULL when drained. After waking on
  * dmesh_event_fd(s), loop dmesh_next_ready() and drain each returned conn to EAGAIN.
  * Single-consumer: call it from your one event-loop thread. */
-static inline dmesh_conn_t *dmesh_next_ready(dmesh_channel_t *s) {
-    return (dmesh_conn_t *)dpumesh_next_ready(s->ctx);
-}
+dmesh_conn_t *dmesh_next_ready(dmesh_channel_t *s);
 
 /* ===== read / write / send ===== */
 
@@ -230,55 +164,7 @@ static inline dmesh_conn_t *dmesh_next_ready(dmesh_channel_t *s) {
  *   >0 bytes, 0 = EOF (peer closed the conn via FIN; sticky), -1 = EAGAIN.
  * A zero-length inbound message IS the FIN marker (user 0-length sends are no-ops),
  * so read()==0 means the peer closed — close this conn (like a BSD socket EOF). */
-static inline ssize_t dmesh_read(dmesh_conn_t *c, void *buf, size_t len) {
-    if (c->peer_closed) return 0;             /* EOF is sticky once the FIN arrived */
-    if (c->rx_slot < 0) {                     /* no message loaded → fetch the next */
-        sw_descriptor_t d;
-        if (!dpumesh_conn_recv(c->ep->ctx, c->local_port, &d)) { errno = EAGAIN; return -1; }
-        if (d.body_len == 0) {                /* FIN marker → EOF: reclaim its landing, latch closed */
-            dpumesh_rx_free(c->ep->ctx, d.body_buf_slot);
-            c->peer_closed = 1;
-            return 0;
-        }
-        c->rx_slot = d.body_buf_slot;
-        c->rx_buf  = dpumesh_rx_buf(c->ep->ctx, d.body_buf_slot);
-        c->rx_len  = d.body_len;
-        c->rx_pos  = 0;
-        /* Model B: a CLIENT does NOT learn/pin a peer — it keeps addressing its
-         * service (dst_pod=BLANK) and the DPU owns the upstream. A SERVER conn
-         * already learned its peer (client_pod, uP) at accept. So there is no
-         * learn-on-read here. */
-    }
-    size_t avail = c->rx_len - c->rx_pos;
-    size_t n = (len < avail) ? len : avail;
-    if (n && c->rx_buf) memcpy(buf, c->rx_buf + c->rx_pos, n);
-    c->rx_pos += (uint32_t)n;
-    if (c->rx_pos >= c->rx_len)           /* message consumed → free credit, next read fetches a new one */
-        conn_free_rx(c);
-    return (ssize_t)n;
-}
-
-/* INTERNAL: build the oriented tuple for one outbound descriptor of this conn
- * (client → service with per-message LB, or server → its learned peer), stamped
- * with the conn's route-affinity group. `moff` = byte offset in the shared TX mmap,
- * `len` = descriptor length. seq++. Returns 0, or -1 (EBADMSG) on enqueue fault. */
-static inline int dmesh_emit_desc(dmesh_conn_t *c, size_t moff, uint32_t len) {
-    dpumesh_ctx_t *ctx = c->ep->ctx;
-    c->seq++;
-    sw_descriptor_t d;
-    memset(&d, 0, sizeof(d));
-    d.body_buf_slot = (int32_t)moff;                 /* BYTE offset into the TX mmap */
-    d.body_len      = len;
-    d.src_port      = c->local_port;
-    d.seq           = c->seq;
-    d.dst_service   = c->dst_service;
-    if (c->role == DMESH_ROLE_CLIENT) { d.dst_pod = DMESH_POD_BLANK; d.dst_port = DMESH_PORT_BLANK; }
-    else                              { d.dst_pod = c->remote_pod;   d.dst_port = c->remote_port; }
-    d.route_group = c->pin_group;                    /* 0 = per-message LB per descriptor */
-    d.valid = 1;
-    if (dpumesh_enqueue(ctx, &d) < 0) { errno = EBADMSG; return -1; }
-    return 0;
-}
+ssize_t dmesh_read(dmesh_conn_t *c, void *buf, size_t len);
 
 /* write(): APPEND outbound body bytes to this conn's TX byte-ring (shipped by flush).
  * Any length — the bytes just accumulate in the ring; dmesh_flush later carves the
@@ -286,36 +172,10 @@ static inline int dmesh_emit_desc(dmesh_conn_t *c, size_t moff, uint32_t len) {
  * limit and no EMSGSIZE. Ordering on a connection to ONE backend is send order;
  * across backends (only when a service has several) use dmesh_pin_route for socket
  * order. The receiver is a plain dmesh_read loop (it frames its own length). */
-static inline ssize_t dmesh_write(dmesh_conn_t *c, const void *buf, size_t len) {
-    dpumesh_ctx_t *ctx = c->ep->ctx;
-    const uint8_t *p = (const uint8_t *)buf;
-    uint32_t cap = (uint32_t)c->ep->slot_size;         /* reserve in <= slot_size runs */
-    size_t done = 0;
-    while (done < len) {
-        uint32_t chunk = (len - done > cap) ? cap : (uint32_t)(len - done);
-        uint8_t *dst = dpumesh_tx_reserve(ctx, c->local_port, chunk);   /* busy-spins on backpressure */
-        if (!dst) return done ? (ssize_t)done : -1;    /* no region (conn not established) */
-        memcpy(dst, p + done, chunk);
-        dpumesh_tx_commit(ctx, c->local_port, chunk);  /* append to the send stream */
-        done += chunk;
-    }
-    return (ssize_t)len;
-}
+ssize_t dmesh_write(dmesh_conn_t *c, const void *buf, size_t len);
 
 /* sendfile(): append up to count bytes from in_fd into the current message. */
-static inline ssize_t dmesh_sendfile(dmesh_conn_t *c, int in_fd, off_t *offset, size_t count) {
-    dpumesh_ctx_t *ctx = c->ep->ctx;
-    uint32_t cap = (uint32_t)c->ep->slot_size;
-    if (count > cap) count = cap;                      /* one reserve <= slot_size */
-    if (count == 0) { errno = EMSGSIZE; return -1; }
-    uint8_t *dst = dpumesh_tx_reserve(ctx, c->local_port, (uint32_t)count);
-    if (!dst) { errno = EAGAIN; return -1; }
-    ssize_t n = offset ? pread(in_fd, dst, count, *offset) : read(in_fd, dst, count);
-    if (n <= 0) return n;                              /* reserved but not committed → space reused */
-    dpumesh_tx_commit(ctx, c->local_port, (uint32_t)n);
-    if (offset) *offset += n;
-    return n;
-}
+ssize_t dmesh_sendfile(dmesh_conn_t *c, int in_fd, off_t *offset, size_t count);
 
 /* flush(): SHIP the conn's committed-but-unsent bytes. REQUIRED to send. The core
  * byte-ring carves [send, commit) into ≤slot_size descriptors — coalescing many small
@@ -324,15 +184,7 @@ static inline ssize_t dmesh_sendfile(dmesh_conn_t *c, int in_fd, off_t *offset, 
  * dst_pod=BLANK (per-message LB per descriptor; pin the conn for socket order); a SERVER
  * ships to its learned peer. Nothing committed → NO-OP.
  *   0 = sent (or nothing to send); -1 EBADMSG = descriptor fault (close the conn). */
-static inline int dmesh_flush(dmesh_conn_t *c) {
-    dpumesh_ctx_t *ctx = c->ep->ctx;
-    size_t moff; uint32_t len;
-    while (dpumesh_tx_next_send(ctx, c->local_port, &moff, &len)) {
-        if (dmesh_emit_desc(c, moff, len) < 0) return -1;    /* EBADMSG; bytes stay committed */
-        dpumesh_tx_sent(ctx, c->local_port, c->seq, len);    /* c->seq = the seq emit_desc used */
-    }
-    return 0;
-}
+int dmesh_flush(dmesh_conn_t *c);
 
 /* ===== Zero-copy TX (dmesh_alloc / dmesh_commit) =====
  * Fill transport DMA memory directly instead of memcpy'ing through dmesh_write. */
@@ -342,18 +194,13 @@ static inline int dmesh_flush(dmesh_conn_t *c) {
  * dmesh_commit(c, actual_len) + dmesh_flush(c). Busy-spins under backpressure; NULL if
  * len==0, len exceeds the per-conn ring, or the conn is not established. Zero-copy
  * counterpart of dmesh_write — the same byte-ring, filled in place. */
-static inline void *dmesh_alloc(dmesh_conn_t *c, size_t len) {
-    return dpumesh_tx_reserve(c->ep->ctx, c->local_port, (uint32_t)len);
-}
+void *dmesh_alloc(dmesh_conn_t *c, size_t len);
 
 /* dmesh_commit(c, len): finalize `len` (<= the alloc'd len) bytes at the write head as
  * committed message bytes, ready for dmesh_flush. Returns 0. */
-static inline int dmesh_commit(dmesh_conn_t *c, size_t len) {
-    dpumesh_tx_commit(c->ep->ctx, c->local_port, (uint32_t)len);
-    return 0;
-}
+int dmesh_commit(dmesh_conn_t *c, size_t len);
 
-/* INTERNAL: send a FIN — a zero-length message addressed to the established peer.
+/* Low-level: send a FIN — a zero-length message addressed to the established peer.
  * It rides the SAME conn-shard ring as this conn's data (src_port), so it arrives
  * AFTER every prior message (ordering preserved). The peer's PE delivers it to the
  * conn inbox as a 0-length descriptor → the peer's read() returns EOF → the peer
@@ -362,41 +209,15 @@ static inline int dmesh_commit(dmesh_conn_t *c, size_t len) {
  * conn + upstream until the port/uP is reused (there is NO idle reaper — apply your
  * own wall-clock timeout for a service that never answers). A CLIENT FINs to its
  * service (dst_pod=BLANK; the DPU frees the upstream it created); a SERVER FINs to
- * its learned peer. */
-static inline void dmesh_send_fin(dmesh_conn_t *c) {
-    dpumesh_ctx_t *ctx = c->ep->ctx;
-    c->seq++;
-    sw_descriptor_t d;
-    memset(&d, 0, sizeof(d));
-    d.body_buf_slot = 0;                                   /* 0-length FIN: offset unused (0-byte DMA) */
-    d.body_len      = 0;                                   /* FIN marker (0-length) */
-    d.src_port      = c->local_port;
-    d.seq           = c->seq;
-    d.dst_service   = c->dst_service;
-    d.dst_pod       = c->remote_pod;                       /* the learned peer conn */
-    d.dst_port      = c->remote_port;
-    d.route_group   = c->pin_group;
-    d.valid         = 1;
-    /* Best-effort: rides after all prior data (seq order). Holds NO ring bytes, so it
-     * needs no send-unit / reclaim — its TX_ACK is a harmless FIFO no-op. */
-    dpumesh_enqueue(ctx, &d);
-}
+ * its learned peer. Called by dmesh_close(); also exposed for the LD_PRELOAD shim's
+ * shutdown(SHUT_WR) half-close. */
+void dmesh_send_fin(dmesh_conn_t *c);
 
 /* close(): graceful close. Drops any buffered-but-unflushed bytes, then (if established)
  * sends a FIN so the peer + DPU-owned upstream tear down (no leak across runs). Shipped-
  * but-un-ACKed bytes are reclaimed by their own TX_ACKs (the region returns once drained).
  * Reclaims held RX credit. Safe on NULL. Returns 0. */
-static inline int dmesh_close(dmesh_conn_t *c) {
-    if (!c) return 0;
-    dpumesh_ctx_t *ctx = c->ep->ctx;
-    dpumesh_tx_discard_unsent(ctx, c->local_port);        /* buffered, never flushed → drop */
-    if (!c->peer_closed && (c->role == DMESH_ROLE_SERVER || c->seq > 0))
-        dmesh_send_fin(c);
-    conn_free_rx(c);                                       /* return the held RX credit */
-    if (c->local_port) dpumesh_free_port(ctx, c->local_port);
-    free(c);
-    return 0;
-}
+int dmesh_close(dmesh_conn_t *c);
 
 /* ===== Large messages (> slot_size) — transparent, NO special API =====
  * There is no write_large/read_large. A payload larger than one slot is handled by
