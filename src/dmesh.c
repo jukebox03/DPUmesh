@@ -56,8 +56,9 @@ dmesh_channel_t *dmesh_create_channel(int service_id) {
         free(s);
         return NULL;
     }
-    s->pod_id    = dpumesh_get_pod_id(s->ctx);   /* DPU-assigned (valid after init) */
-    s->slot_size = dpumesh_get_slot_size(s->ctx);
+    s->pod_id     = dpumesh_get_pod_id(s->ctx);   /* DPU-assigned (valid after init) */
+    s->slot_size  = dpumesh_get_slot_size(s->ctx);
+    s->block_size = dpumesh_get_block_size(s->ctx);
     return s;
 }
 
@@ -161,12 +162,12 @@ ssize_t dmesh_read(dmesh_conn_t *c, void *buf, size_t len) {
 ssize_t dmesh_write(dmesh_conn_t *c, const void *buf, size_t len) {
     dpumesh_ctx_t *ctx = c->ep->ctx;
     const uint8_t *p = (const uint8_t *)buf;
-    uint32_t cap = (uint32_t)c->ep->slot_size;         /* reserve in <= slot_size runs */
+    uint32_t cap = (uint32_t)c->ep->block_size;        /* one message per <= block_size reserve (contiguous) */
     size_t done = 0;
     while (done < len) {
         uint32_t chunk = (len - done > cap) ? cap : (uint32_t)(len - done);
         uint8_t *dst = dpumesh_tx_reserve(ctx, c->local_port, chunk);   /* busy-spins on backpressure */
-        if (!dst) return done ? (ssize_t)done : -1;    /* no region (conn not established) */
+        if (!dst) return done ? (ssize_t)done : -1;    /* len>block_size or conn not established */
         memcpy(dst, p + done, chunk);
         dpumesh_tx_commit(ctx, c->local_port, chunk);  /* append to the send stream */
         done += chunk;
@@ -176,8 +177,8 @@ ssize_t dmesh_write(dmesh_conn_t *c, const void *buf, size_t len) {
 
 ssize_t dmesh_sendfile(dmesh_conn_t *c, int in_fd, off_t *offset, size_t count) {
     dpumesh_ctx_t *ctx = c->ep->ctx;
-    uint32_t cap = (uint32_t)c->ep->slot_size;
-    if (count > cap) count = cap;                      /* one reserve <= slot_size */
+    uint32_t cap = (uint32_t)c->ep->block_size;
+    if (count > cap) count = cap;                      /* one reserve <= block_size (contiguous) */
     if (count == 0) { errno = EMSGSIZE; return -1; }
     uint8_t *dst = dpumesh_tx_reserve(ctx, c->local_port, (uint32_t)count);
     if (!dst) { errno = EAGAIN; return -1; }

@@ -54,30 +54,42 @@ malloc'd), and the **TX byte-ring cursors** (§1.3). Inbound is demuxed **purely
 conn's inbox. **Publish-role-last**: `user` and buffers are written before `role` is RELEASE-published,
 so the PE never enqueues to a half-built slot.
 
-### 1.3 TX — per-connection byte-ring
-The 32 MB TX mmap is partitioned into `conn_pool` (default 256) contiguous **regions** of
-`conn_bytes` (= 128 KB) each — a conn's socket send buffer. A conn borrows a region at connect/accept
-(`region_free` stack) and owns it as a **4-cursor byte-ring**:
+### 1.3 TX — elastic per-connection block chain
+The 32 MB TX mmap is carved into a shared pool of `n_blocks` fixed **blocks** of `block_size` (default
+**64 KB** = the max contiguous message = the allocation unit). Each conn owns an **elastic chain** of up to
+`maxb` (default 4 ⇒ ≤ 256 KB in-flight) blocks that it grabs on demand and returns as they drain — so its
+footprint tracks its in-flight demand instead of a fixed slab. The pool is a **lock-free Treiber** free-list
+(`block_free = tag<<32 | head`); a conn's chain + FOUR logical byte cursors live in its `dmesh_port_slot`:
 
 ```
-  free(tx_f) ≤ send(tx_s) ≤ commit(tx_c) ≤ write(tx_w),   tx_w − tx_f ≤ conn_bytes
+  free(tx_f) ≤ send(tx_s) ≤ commit(tx_c) ≤ write(tx_w)   — logical offsets that span the chain
+  logical block k = cursor / block_size,  physical block = pblk[k % maxb],  offset = cursor % block_size
 ```
 
-- **reserve(len)** → pointer at `tx_w` into DMA memory (bip-buffer: a body that would straddle the
-  region end pads the tail via `tx_wmark` and wraps to offset 0). Busy-spins under backpressure (waits
-  for the conn's own ACKs to advance `tx_f`).
-- **commit(len)** → advances `tx_w`, `tx_c` (byte-granular; no per-slot waste).
-- **flush** → `tx_next_send` carves `[tx_s, tx_c)` into **≤`slot_size` (8 KB) descriptors**
-  (coalescing many small writes into few large DMAs — the throughput lever), each posted by `enqueue`,
-  then `tx_sent` records `(seq → end cursor)` in the per-conn **send-unit FIFO** (`su_seq`/`su_end`,
-  `TX_SU_DEPTH`=64 deep) and advances `tx_s`.
-- **reclaim** → the DPU's `BATCH_FWD_ACK(port,seq)` pops the FIFO front (FIFO, since a conn ships and is
-  ACKed in seq order) and advances `tx_f`, freeing bytes. A CLOSED conn's region is returned
-  **non-blocking** once its ring drains (`tx_f == tx_w`) — by close if already drained, else by the PE
-  on the last ACK (`try_return_region`). `dmesh_alloc`/`dmesh_commit` is the same ring filled in place.
+- **reserve(len ≤ block_size)** → a pointer into DMA memory. A message never straddles a block (it pads to
+  the next block if it won't fit) so each is contiguous. Each new logical block is backed ONCE
+  (`head_blk_next`), **waiting until block k−maxb has drained** (`k − tail_blk < maxb`) so the live window
+  stays ≤ `maxb` blocks and slot `k%maxb` is free — this is the per-conn in-flight cap and the write-side
+  backpressure (busy-spin on the conn's own ACKs).
+- **commit(len)** → advances `tx_w`, `tx_c` (byte-granular, no per-slot waste); records the block's content
+  end (`blk_used`, so the send side can skip a padded tail).
+- **flush** → `tx_next_send` carves `[tx_s, tx_c)` into **≤ `slot_size` (8 KB) descriptors** — coalescing
+  many small writes into few large DMAs, the throughput lever — never crossing a block boundary; `tx_sent`
+  records `(seq → end cursor)` in the per-conn **send-unit FIFO** (`su_seq`/`su_end`, `TX_SU_DEPTH` = 64 deep).
+- **reclaim** → `BATCH_FWD_ACK(port,seq)` pops the FIFO front (FIFO — a conn ships + is ACKed in seq order)
+  and advances `tx_f`; a fully-drained tail block is **recycled** into a small per-conn free-list (depth ≤
+  `cushion_h`, default 1) for reuse. Steady sliding reuses a recycled block (**0 pool ops**); GROW grabs from
+  the pool only when the free-list is empty; SHRINK returns a block only when it exceeds the cushion; a
+  fully-drained conn compacts back to logical 0. So a conn grows toward `maxb` under load, shrinks toward one
+  block as it quiets, and holds nothing when idle — the grow/shrink hysteresis is exactly the cushion `H`.
+  First block is LAZY (grabbed on the first write). `dmesh_alloc`/`dmesh_commit` fills the same chain in place.
 
-`dmesh_write` = reserve + memcpy + commit; the descriptor's `body_buf_slot` carries a **byte offset**
-into the mmap, and `enqueue` sets `dma->addr = dma_buffer + offset`.
+`dmesh_write` = reserve + memcpy + commit; the descriptor's `body_buf_slot` carries the **byte offset**
+`pblk[k%maxb] × block_size + off` into the mmap, and `enqueue` sets `dma->addr = dma_buffer + offset` — the
+DPA mirrors that offset into staging, so the whole allocator is **host-side only**. A CLOSED conn's blocks
+return once its chain drains — by close if already drained, else by the PE on the last ACK
+(`try_return_blocks`): the chain is **owner-thread-local while live** (the PE only advances `tx_f`), and the
+close handoff uses `block_lock` for exactly-once return, mirroring the port table's publish-role-last rule.
 
 ### 1.4 Forward rings — lock-free MPSC
 `K` = `DPUMESH_RINGS_PER_POD` (default 2) forward descriptor rings; a conn pins to **one** ring
@@ -111,9 +123,10 @@ returns the RX credit).
 Exactly **one internal thread** (the PE). Everything else runs on app threads. Channels are lock-free:
 conn **inbox** (SPSC: PE producer, owning app thread consumer), **ready list** (SPSC: PE producer, the
 one event-loop consumer), **TX byte-ring** (SPSC: app owns `tx_w/c/s`, PE owns `tx_f`), **accept ring**
-(SPMC: PE producer, N worker consumers via CAS), **forward rings** (MPSC). Only two small mutexes exist
-(`region_lock`, `port_lock`), taken at connect/accept/close only — never on the data path. The eventfd
-is written **once per delivery** (no coalescing → a wakeup is never lost).
+(SPMC: PE producer, N worker consumers via CAS), **forward rings** (MPSC). The shared TX block pool is
+lock-free (Treiber); the only two mutexes (`port_lock` at connect/accept/close, `block_lock` at the
+close-drain block handoff) are never on the data path. The eventfd is written **once per delivery** (no
+coalescing → a wakeup is never lost).
 
 ---
 
@@ -169,9 +182,9 @@ still issues a 128 B minimum copy so the engine never sees a zero-length descrip
 
 **Per-conn contiguous staging (the mirror).** Because the DPA lands every chunk at the host TX byte
 offset, a conn's bytes are **contiguous in staging regardless of which EU carried them** — the L7 parser
-sees one contiguous per-conn byte stream. Occupancy mirrors the host TX byte-ring
-(`tx_w − tx_f ≤ conn_bytes`), so `num_slots × slot_size == DPU_BUFFER_SIZE` bounds staging and it never
-overflows or wraps.
+sees one contiguous per-conn byte stream. Occupancy mirrors the host TX blocks (a conn holds ≤ `maxb`
+blocks and the shared pool totals `num_slots × slot_size`), so `num_slots × slot_size == DPU_BUFFER_SIZE`
+bounds staging and it never overflows.
 
 **Park/wake.** On a dedicated EU, the kernel polls continuously for lowest latency and parks only on
 sustained idle (to satisfy the FlexIO watchdog). Parking is guarded by an arm → re-scan → don't-sleep-
@@ -311,6 +324,7 @@ successful read, drain-and-retry-once on `EAGAIN`. `shutdown(SHUT_WR)` sends the
 | Invariant | Why |
 |---|---|
 | `num_slots × slot_size == DPU_BUFFER_SIZE` (32 MB) | staging mirrors the host TX offset-for-offset → bounds occupancy |
+| a conn's live window ≤ `maxb` blocks (`b − tail_blk < maxb` before backing block `b`) | slot `b%maxb` can never alias a still-live block `b−maxb` → no write-side overwrite/wedge |
 | host `K` == DPU `K` (`DPUMESH_RINGS_PER_POD`) | forward rings pair 1:1; a mismatch stalls `dma_ready` |
 | `slot_size ≤ 8192` | the DPA `dma_copy` cap (one wire descriptor) |
 | `sizeof(dma_desc) == 64` (one cache line) | the DPA's line-granular `valid=0` writeback must not touch a neighbour |
@@ -323,7 +337,8 @@ successful read, drain-and-retry-once on `EAGAIN`. `shutdown(SHUT_WR)` sends the
 | a disconnected pod's `host_rx_mmap` is destroyed at slot REUSE, never on disconnect | an egress worker may hold an in-flight `doca_buf` over it; concurrent destroy faults the engine's `doca_dma` ctx |
 
 ## 8. Baked sizing (see API.md §9 for the full env/knob table)
-`num_slots = 4096`, `slot_size = 8192` (32 MB TX/RX/staging per pod); `conn_pool = 256` (128 KB
-byte-ring/conn); `N = 4` DPA EUs; `K = 2` forward rings/pod; `n_eng = 2` ARM egress workers;
+`num_slots = 4096`, `slot_size = 8192` (32 MB TX/RX/staging per pod); TX blocks `block_size = 64 KB`
+(pool of `n_blocks = 512`), `maxb = 4` (≤ 256 KB in-flight/conn), `cushion_h = 1`; `N = 4` DPA EUs;
+`K = 2` forward rings/pod; `n_eng = 2` ARM egress workers;
 `PX_HEAD_MAX = 4 KB`, `PX_SEAM_MAX = 512 KB`. `DPU_BUFFER_SIZE`, `slot_size`, and `K` are the constrained
 ones (§7). A programmatic `dpumesh_config` overrides `num_slots`/`slot_size` without a rebuild.

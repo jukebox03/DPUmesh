@@ -61,7 +61,8 @@ extern "C" {
 typedef struct dmesh_channel {
     dpumesh_ctx_t *ctx;
     int            pod_id;
-    int            slot_size;   /* cached max body size */
+    int            slot_size;   /* cached max body size (wire DMA cap) */
+    int            block_size;  /* cached max contiguous message = TX reserve cap */
     uint32_t       next_group;  /* GLOBAL rolling route-affinity id source (atomic across
                                  * all conns → 1..255): concurrent large messages get
                                  * DISTINCT groups. A per-conn counter would collide —

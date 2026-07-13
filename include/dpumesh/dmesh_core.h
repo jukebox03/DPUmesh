@@ -70,6 +70,8 @@ void dpumesh_destroy(dpumesh_ctx_t *ctx);
 
 /* ====== Query configured values ====== */
 int dpumesh_get_slot_size(dpumesh_ctx_t *ctx);
+/* Max contiguous message = the per-conn TX block size (the reserve/alloc length cap). */
+int dpumesh_get_block_size(dpumesh_ctx_t *ctx);
 
 /* Enable + return a readiness eventfd: a real fd that becomes readable whenever an
  * inbound request/response is delivered. Wait on it with a VANILLA epoll/poll/select
@@ -100,9 +102,10 @@ void dpumesh_rx_free(dpumesh_ctx_t *ctx, int slot);
 /* Per-conn TX BYTE-RING (socket send buffer). A conn owns a contiguous byte region;
  * messages pack at byte granularity. Lifecycle: reserve -> (fill) -> commit -> ship.
  *
- * dpumesh_tx_reserve(port, len): reserve len CONTIGUOUS bytes at the write head and
- *   return a pointer into TX DMA memory to fill (zero-copy). BUSY-SPINS under back-
- *   pressure until the conn's own TX_ACKs free room. NULL if no region / bad len.
+ * dpumesh_tx_reserve(port, len): reserve len CONTIGUOUS bytes (ONE message, <= the TX
+ *   block size) at the write head and return a pointer into TX DMA memory to fill
+ *   (zero-copy). Grabs a block on demand (grow); BUSY-SPINS under backpressure until
+ *   the conn's own TX_ACKs free a block. NULL if len==0 or len>block_size.
  * dpumesh_tx_commit(port, len): finalize len (<= reserved) bytes as a committed
  *   message, ready to ship.
  * dpumesh_tx_discard_unsent(port): drop committed-but-unsent bytes (close-before-flush).
@@ -116,12 +119,6 @@ void     dpumesh_tx_commit(dpumesh_ctx_t *ctx, uint16_t port, uint32_t len);
 void     dpumesh_tx_discard_unsent(dpumesh_ctx_t *ctx, uint16_t port);
 int      dpumesh_tx_next_send(dpumesh_ctx_t *ctx, uint16_t port, size_t *out_moff, uint32_t *out_len);
 void     dpumesh_tx_sent(dpumesh_ctx_t *ctx, uint16_t port, uint16_t seq, uint32_t len);
-
-/* Borrow/return a per-conn TX region id (max concurrent conns = the region pool).
- * Used internally by the port allocator; borrow returns -1 when the pool is
- * exhausted. */
-int  dpumesh_region_borrow(dpumesh_ctx_t *ctx);
-void dpumesh_region_return(dpumesh_ctx_t *ctx, int rid);
 
 /* Enqueue a descriptor to TX SQ. Returns 0 on success, -1 on failure. */
 int dpumesh_enqueue(dpumesh_ctx_t *ctx, const sw_descriptor_t *desc);

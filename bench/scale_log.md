@@ -4189,3 +4189,69 @@ globally stops). Three-part fix (no new poll/wait/timer, zero hot-path cost):
 **Overall:** multi-backend L7 LB substrate is HW-validated AND resilient to a backend dying mid-traffic. Two
 data-path bugs found + fixed this session (orphan-reply-conn wedge; egress-on-death flood/wedge). Only open
 item: the DPU card's recurring thermal/cooling issue.
+
+---
+
+# 2026-07-13 — ELASTIC per-conn TX buffer (dynamic block allocator) — BUILT + HW-VALIDATED (wedge bug found + fixed)
+
+Replaces the host TX side's **fixed 128 KB/conn region** (`conn_pool`×`conn_bytes`, static — every conn
+always uses the same amount) with an **ELASTIC per-conn block chain** over a shared pool, so a conn's
+footprint tracks its in-flight demand (grows/shrinks) instead of a fixed slab. **HOST-ONLY** change
+(`src/dmesh_core.c` + `src/dmesh.c` + the two host headers); DPA/DPU/wire/bench untouched (the descriptor
+still carries a byte offset into the one TX mmap, which the DPA mirrors offset-for-offset).
+
+## Design (as agreed in the design discussion)
+- Shared TX mmap (32 MB) carved into `n_blocks` fixed **blocks** of `block_size` (default **64 KB** = the
+  max contiguous message = the allocation unit). Pool = **lock-free Treiber** free-list (ported from the old
+  `3159d47ae` slot pool: `tag<<32|head`, `block_next[]`) — grab is now a WRITE-hot-path op, so no mutex.
+- Per-conn **block chain**: `pblk[k%maxb]` maps logical block k → physical block; `recyc[]` holds drained
+  blocks for reuse (depth ≤ **cushion_h**, default 1); `nblk_owned ≤ maxb` (default **4** ⇒ ≤256 KB in-flight).
+  A message never straddles a block (≤ block_size; padded to the next block), so each is contiguous.
+- **grow/shrink = recycle + cushion H** (the balance we settled on): a drained tail block is recycled locally
+  (steady sliding reuses it → 0 pool ops); GROW grabs from the pool only when recyc is empty; SHRINK returns
+  a block only when recyc exceeds H; a fully-drained conn compacts back to logical 0. Idle conn holds ~H
+  blocks; RPC conn cycles 1 block; deep-pipeline conn grows to maxb. Config: `DPUMESH_TX_BLOCK` / `_TX_MAXB`
+  / `_TX_H`. First block is LAZY (connect/accept grab nothing; grabbed on first write).
+- Concurrency unchanged in shape: block chain is OWNER-thread-local while live; the PE only advances `tx_f`
+  (atomic); close hands off via `try_return_blocks` (block_lock + nblk_owned recheck, mirrors the old
+  `try_return_region`). su-FIFO moved from ctx arrays (region-indexed) to per-slot lazy malloc.
+
+## ★ WEDGE BUG found by HW test, then fixed (the load-bearing correctness fix)
+First deploy: validators (loopback/stream/preload) + low-concurrency RPC passed 0-fail, but the closed-loop
+RPC bench **WEDGED (rcnt≈2-4, frozen) at concurrency where the window's in-flight TX exceeds maxb×block_size**
+(conc≥32 at 8 KB; conc=8 fine, conc=64 at 1 KB fine). Bumping maxb did NOT help → a real logic bug, not the
+cap. **Root cause:** `dpumesh_tx_reserve` reused `pblk[k%maxb]` whenever it was `>=0`, but at a full window
+slot `k%maxb` still holds the **un-drained earlier block k−maxb** (a live block); the code overwrote it
+instead of back-pressuring (the window/cap check only fired on the `pblk[s]<0` branch, which a stale slot
+skips). **Fix:** track `head_blk_next` (assign each logical block exactly ONCE) + an explicit **block-window
+backpressure** — before backing block b, wait until `b − tail_blk < maxb` (⇒ block b−maxb has drained and
+recycled slot b%maxb). Now an under-buffered conn THROTTLES (progresses at maxb-deep) instead of wedging.
+Also fixed `try_return_blocks` to free `[tail_blk, head_blk_next)` (not `tx_w/bs`, which `discard_unsent` can
+rewind below the assigned head → block leak at close).
+
+## HW validation (clean deploy, `ARM_EGRESS_THREADS=2 FRAME_SVC=16`, default block=64KB/maxb=4/H=1) — ALL 0-fail
+| test | result |
+|---|---|
+| RPC conc=8 / 32 / 64 / 128, req=reply=8 KB | 3.73 / **7.87 / 7.87 / 7.94 GB/s**, p50 120/260/448/926 µs, 0-fail (pre-fix: conc≥32 **WEDGED**) |
+| RPC conc=32, req=reply=32 KB (1 MB window = 4× cap) | 7.44 GB/s, 0-fail (throttles at the cap, still progresses) |
+| back-to-back conc=64 ×2 + recovery conc=8 | 7.93 / 7.98 / 3.70 GB/s, 0-fail — **no leak / no degradation** |
+| loopback 50000×8 KB (block ring + full-drain compaction) | 50,000/0 · served 50,000 |
+| stream FRAME 500×1 KB / **>8 KB** 200×20000 (seam) / 300×1 KB ×3fpw | 500/0 · 200/0 · 300/0 — **byte-exact** (served Δ 514,500 / +4,001,000 / +926,100, exact) |
+| preload vanilla-TCP 2000×1 KB×32c | 2000/0 · p50 170 µs |
+
+DPU log clean through the run (only deploy-time register "stale upstream" flakes). Local: `make lib` +
+DPU-side `gcc -fsyntax-only -DDOCA_ARCH_DPU` both EXIT 0; symbols export; no stale `tx_region`/`conn_bytes` refs.
+
+## Known limitation (documented, not a regression)
+`dpumesh_tx_reserve` busy-spins on backpressure with **no deadline/stop-check** (same as the old code). With
+the elastic maxb cap, a single conn whose in-flight working set exceeds `maxb×block_size` by a LARGE factor
+(≳8×, e.g. a 2 MB window on the 256 KB default — `req=128 KB conc=16`) can stick the writer past a bench RUN's
+deadline (the RUN never returns → the pod holds that conn). Up to ~4× the cap (1 MB) throttles-but-completes.
+Mitigation: raise `DPUMESH_TX_MAXB` / `DPUMESH_TX_BLOCK` for very-high-BDP single-conn workloads, or add a
+reserve deadline (future). NB the old fixed-128 KB ring had the same busy-spin at HALF the threshold, so the
+elastic design is strictly more headroom (2× the old per-conn in-flight at the default) — not a regression.
+
+## Test-methodology note (mine, not the code)
+Restarting pods to swap the host lib WITHOUT restarting the DPU corrupts the DPU pod table
+(`pods_register: connection not found` flood → routing dead). The mounted-lib fast path is unusable for
+host-lib changes; a full `bench/bench.sh deploy` (which restarts the DPU) is required each time.
