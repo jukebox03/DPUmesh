@@ -249,6 +249,12 @@ struct px_engine {
     struct doca_pe            *pe;     /* own PE (threaded) / objs->pe (inline) */
     struct doca_buf_inventory *inv;
     int      dma_tasks_inflight;
+    /* Safety net: set if the doca_dma ctx faults (alloc_init → BAD_STATE, e.g. a DMA
+     * to a torn-down mmap). Stops further submits so we don't spin retrying + flood
+     * DOCA's internal "state IDLE" log forever. ① (deferred host_rx_mmap destroy)
+     * should prevent the fault; this only fires if something else stops the ctx. */
+    int      dma_stalled;
+    int      dma_fault_warned;
     struct px_batch *batch_mem, *batch_free;
     struct px_unit  *done_head, *done_tail;   /* worker→ingest, under done_lock */
     pthread_mutex_t  done_lock;
@@ -766,8 +772,19 @@ static void px_ship_seg(struct objects *objs, struct px_conn *c,
 
     if (!c->pub.is_reply) {
         uint16_t uP = dpu_upstream_find(ct, c->pub.src_pod, c->pub.src_port, dst_pod);
-        if (uP == 0)
+        if (uP == 0) {
             uP = dpu_upstream_create(ct, c->pub.src_pod, c->pub.src_port, dst_pod);
+            /* A freshly-reused uP may still carry a STALE dead reply-conn (dst_pod, uP)
+             * from a previous client whose late reply arrived AFTER its FIN: px_conn_get
+             * created that reply conn, upstream[uP] was already freed → it got
+             * dead-marked (the stale-upstream WARN-flood guard) but was never cleaned.
+             * Left in place, this backend's replies on the reused uP would hit the dead
+             * orphan (px_ingest_forward c->dead fast-path) and be blackholed for the whole
+             * session — orphans accumulate under conn churn → progressive global wedge.
+             * Evict it so this session's replies build a FRESH conn and get delivered. */
+            if (uP != 0)
+                px_conn_del_key(objs, dst_pod, uP);
+        }
         if (uP == 0) {
             DOCA_LOG_ERR("proxy: upstream space full (%d:%u -> pod %d) — seg dropped",
                          c->pub.src_pod, c->pub.src_port, dst_pod);
@@ -870,7 +887,15 @@ static void px_parse(struct objects *objs, struct px_conn *c) {
             struct dpu_upstream *u = (c->pub.src_port >= DMESH_UPORT_BASE)
                 ? &objs->conntrack->upstream[c->pub.src_port] : NULL;
             if (!u || !u->in_use) {
+                /* Client already closed: this reply is undeliverable forever.
+                 * Drop the window once and mark the conn dead so subsequent
+                 * arrivals hit the silent drop+ack fast-path in
+                 * px_ingest_forward (c->dead) instead of re-parsing and
+                 * re-logging every 8KB window — that flood filled
+                 * dpumesh_dpu_bench.log with millions of identical WARN lines.
+                 * Now bounded to one WARN per conn. */
                 px_drop_window(objs, c, "stale upstream (client closed)");
+                c->dead = 1;
                 return;
             }
             c->pub.peer_pod = u->client_pod;
@@ -1394,6 +1419,24 @@ static int px_engine_emit(struct objects *objs, struct px_engine *eng) {
     return did;
 }
 
+/* A lane whose pod went not-ready (disconnected mid-flight) can never deliver its
+ * queued-but-unsubmitted units. Route them to the done-queue with err=1 so the ingest
+ * thread releases their custody (TX_ACK the senders) + frees them WITHOUT a REV_DONE
+ * (no delivery to a dead pod). Runs on the worker that OWNS this lane (no race on
+ * qhead); the only shared step is the existing done_lock. No poll/wait/timer. */
+static void px_lane_drop_dead(struct px_engine *eng, struct px_lane *ln) {
+    if (!ln->qhead)
+        return;
+    struct px_unit *head = ln->qhead, *tail = ln->qtail;
+    ln->qhead = ln->qtail = NULL;
+    for (struct px_unit *u = head; u; u = u->next)
+        u->err = 1;                            /* skip REV_DONE; custody still released */
+    pthread_mutex_lock(&eng->done_lock);
+    if (eng->done_tail) eng->done_tail->next = head; else eng->done_head = head;
+    eng->done_tail = tail;
+    pthread_mutex_unlock(&eng->done_lock);
+}
+
 /* worker: one pass over this engine's owned lanes (splice inbox→qhead, submit,
  * retire). Owns lanes where pod_idx % n_eng == eng->id. */
 static int px_engine_pump(struct objects *objs, struct px_engine *eng) {
@@ -1418,6 +1461,13 @@ static int px_engine_pump(struct objects *objs, struct px_engine *eng) {
                 }
             }
             if (ln->fhead) px_lane_retire(eng, ln);
+            if (!pod_data_ready(pod)) {
+                /* pod disconnected (or not yet ready): never submit to it. Drain any
+                 * leftover queued units so they don't leak custody or mis-deliver to a
+                 * pod that later REUSES this slot. */
+                px_lane_drop_dead(eng, ln);
+                continue;
+            }
             if (ln->qhead) progressed |= px_lane_submit(objs, eng, i, pod, r, ln);
         }
     }
@@ -1456,6 +1506,8 @@ static int px_lane_submit(struct objects *objs, struct px_engine *eng, int pod_i
     int did = 0;
 
     if (!ln->qhead)
+        return 0;
+    if (eng->dma_stalled)                      /* ctx faulted — don't spin/flood (below) */
         return 0;
     if (!pod_data_ready(pod) || !pod->host_rx_addr || !pod->host_rx_mmap)
         return 0;
@@ -1602,8 +1654,7 @@ static int px_lane_submit(struct objects *objs, struct px_engine *eng, int pod_i
                 }
             }
             if (ret != DOCA_SUCCESS) {
-                /* transient (inventory/task pool): put the units back at the
-                 * lane HEAD in order and retry next drain pass. */
+                /* Put the units back at the lane HEAD (order preserved). */
                 if (src_head) doca_buf_dec_refcount(src_head, NULL);
                 if (dst) doca_buf_dec_refcount(dst, NULL);
                 take_tail->next = ln->qhead;
@@ -1611,6 +1662,19 @@ static int px_lane_submit(struct objects *objs, struct px_engine *eng, int pod_i
                 if (!ln->qtail)
                     ln->qtail = take_tail;
                 px_batch_free_node(eng, b);
+                /* BAD_STATE = the doca_dma ctx stopped (fault) — retrying can never
+                 * succeed and floods DOCA's internal "state IDLE" log forever, so
+                 * STALL this engine's submits instead of spinning. Any other error
+                 * (NO_MEMORY / inventory) is a real transient shortage → retry. */
+                if (ret == DOCA_ERROR_BAD_STATE) {
+                    if (!eng->dma_fault_warned) {
+                        DOCA_LOG_ERR("proxy: egress dma ctx faulted (engine %d): %s — "
+                                     "stopping submit (needs restart)", eng->id,
+                                     doca_error_get_descr(ret));
+                        eng->dma_fault_warned = 1;
+                    }
+                    eng->dma_stalled = 1;
+                }
                 break;
             }
             b->src_head = src_head;

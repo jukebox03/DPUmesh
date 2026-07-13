@@ -5,22 +5,26 @@ A service-mesh **data plane** on NVIDIA DOCA (Comch + DMA). The transport runs o
 in-host sidecar tax).
 
 The DPU is an **L7-style proxy that owns every connection** (think Envoy): your app addresses a
-**`service_id`** — never a pod — and the DPU routes **each message** to a backend pod
-(**per-message load balancing**), owns the connection to that backend, and maps every reply back
-to you. Bodies move by DMA **host → DPU → host**; by default the DPU touches only metadata —
-it reads a body only when the **L7 proxy engine** is enabled (`DPUMESH_PROXY`, §8).
+**`service_id`** — never a pod — and the DPU **load-balances across that service's backend pods** (round
+robin), owns the connection to the chosen backend, and maps every reply back to you. **A connection is
+sticky by default** — it keeps the backend the LB first picked (session affinity: replies stay in send
+order, socket-like); a service can opt into **per-message** load balancing instead (§5). Bodies move by
+DMA **host → DPU → host**; the DPU touches only metadata unless a service selects the **L7 body-parsing
+hook** (`DPUMESH_PROXY_L7_SVC`, §8).
 
 It is a **connection-oriented, full-duplex, byte-stream transport** — close to TCP in shape, but:
 
 - **You address a service, not a peer.** `dmesh_connect(service)` opens a connection *to the DPU*
-  tagged with a service. The DPU picks the backend **per message** and owns the upstream to it.
+  tagged with a service. The DPU load-balances the service's backends and owns the upstream — **by
+  default the whole connection sticks to one backend** (session affinity); per-message LB is opt-in (§5).
 - **Byte stream, like TCP.** `write` **appends** to the connection's send buffer; `flush` ships the
   committed bytes, **coalescing** many small writes into few, large ≤ 8 KB DMAs (the throughput
   win). The receiver `read`s a byte stream and **frames its own length** — a whole write is not
   guaranteed to arrive as one `read`. Bytes are **in send order** on a connection to a given backend.
 - **NOT request/response.** The transport does **no** request↔response matching. If you keep
-  several requests outstanding, **you** correlate replies (a req-id in the body) — under
-  per-message LB, replies on one connection can arrive **out of order**.
+  several requests outstanding, **you** correlate replies (a req-id in the body). On a sticky
+  connection (the default) replies stay in send order; under **per-message** LB (opt-in) they can
+  arrive **out of order**.
 - **Non-blocking**, with **one endpoint fd** + a **ready list** (no per-conn fd, no scan).
 
 Header: `<dpumesh/dmesh.h>` (declares the `dmesh_*` façade; built on the C core `dmesh_core.h`).
@@ -73,12 +77,12 @@ dmesh_close(c);                                  // sends a FIN so the DPU frees
 | | BSD socket | DPUmesh | What it means for you |
 |---|---|---|---|
 | **Address** | IP:port (one peer) | **`service_id`** — the DPU routes it | you name a service, never a pod; no IP/DNS; self-routing OK |
-| **Load balancing** | none (one peer) | **per message** — the DPU picks a backend for *each* message | one conn's messages may spread across backends |
+| **Load balancing** | none (one peer) | **round-robin across the service's backends** — sticky per connection by default (per-message is opt-in) | load spreads across connections; a sticky conn stays on one backend |
 | **Connection** | persistent, full-duplex byte stream | persistent, full-duplex **message** stream **owned by the DPU** | same mental model; the backend you talk to is the DPU's choice |
 | **Setup** | 3-way **handshake** | **none** — `connect` is local; the DPU routes each message | peer liveness is *not* checked at connect; apply your own timeout |
 | **Framing** | byte stream (you frame it) | **byte stream** (you frame it) — writes coalesce, reads are short at arrival boundaries | frame your own length + loop `read` to `EAGAIN`, exactly like TCP; no `EPOLLOUT` dance |
 | **Size** | unbounded | **`write` ANY length** — buffered in the conn's byte-ring, shipped as ≤ 8 KB DMAs (the DPA `dma_copy` limit) | no `EMSGSIZE`; the transport chops the stream into ≤ 8 KB wire DMAs and the reader reassembles by its own framing (§3) |
-| **Ordering** | in-order in a connection | in-order **on a connection to one backend**; **none** across backends | under LB, replies on one conn can arrive out of order |
+| **Ordering** | in-order in a connection | in-order on a sticky connection (default, one backend); **none** under per-message LB | default sticky ⇒ socket-like order; per-message ⇒ correlate by req-id |
 | **RPC matching** | n/a | **none** — the transport delivers, you correlate | pipelining several outstanding? match replies by your own req-id |
 | **EOF** | `read()==0` | **`read()==0`** — the peer sent a FIN (`dmesh_close`) | identical: `read()==0` ⇒ close your side |
 | **Blocking** | blocking *or* non-blocking | **non-blocking only** — RX to a per-conn inbox; TX busy-spins under local saturation | to *sleep* until ready, native-epoll on `dmesh_event_fd` |
@@ -86,12 +90,13 @@ dmesh_close(c);                                  // sends a FIN so the DPU frees
 | **Readiness** | one pollable fd **per** connection | **ONE endpoint fd** + a **ready list** (`dmesh_next_ready`) | no per-conn fd, no scan — the DPU names the ready conns |
 
 **Must-follow rules**
-- **Address a service; the DPU picks the backend per message.** You never choose or learn a pod.
+- **Address a service; the DPU picks the backend (LB) and sticks the connection to it.** You never
+  choose or learn a pod. (A service can be set to per-message LB, §5 — then a conn spreads across backends.)
 - **Pipeline from the first message if you like** (there is no establish-before-pipeline dance —
-  the DPU owns the upstream and the host coalesces). **But** the transport does **no** RPC matching
-  and per-message LB can reorder replies on one conn, so if you keep several requests outstanding,
-  put a **req-id in the body and match on it** (never on arrival order). Single-outstanding
-  (one request, then its reply) needs no correlation — the pairing is structural.
+  the DPU owns the upstream and the host coalesces). The transport does **no** RPC matching: a sticky
+  connection (the default) delivers replies **in send order**, but under **per-message** LB they can
+  reorder, so if you pipeline on a per-message service put a **req-id in the body and match on it**
+  (never on arrival order). Single-outstanding (one request, then its reply) needs no correlation.
 - **`read()==0` is EOF** (the peer sent a FIN → `dmesh_close()`). A *user* zero-length send is a
   no-op (0-length on the wire is the FIN), so `read()` never returns 0 except at EOF.
 - **Exactly one `dmesh_close()` per conn** — sends a FIN so the peer/DPU reclaim, then frees the
@@ -309,9 +314,17 @@ Header + body must fit one ≤ 8 KB message (chunk larger payloads at the app la
 
 ## 5. Addressing & routing model
 
-- **The DPU owns every connection.** A client addresses a **service**; the DPU picks a backend
-  **per message** (per-message load balancing), owns the "upstream" connection to that backend, and
-  maps the reply back. The client never sees or names a pod.
+- **The DPU owns every connection.** A client addresses a **service** (a *cluster* of backend pods); the
+  DPU **round-robin load-balances** across the service's live backends, owns the "upstream" connection to
+  the chosen backend, and maps the reply back. The client never sees or names a pod.
+- **Sticky by default; per-message is opt-in.** A connection keeps the backend the LB first picked for it
+  (session affinity — the src↔backend pairing persists, replies stay in send order). This is Envoy's
+  TCP-proxy behavior. `DPUMESH_LB_PER_REQUEST_SVC=<csv>` (§8) marks services that load-balance **every**
+  message instead (Envoy's HTTP default; a connection's messages then spread across backends). The
+  LD_PRELOAD shim additionally pins each conn (§7) for the socket contract.
+- **Backend set is live (no blackhole).** The service's backend set is derived from the live pods, so a
+  backend that registers or disconnects is added/removed automatically; a pinned backend that dies is
+  re-picked. New traffic never routes to a dead backend.
 - **How it stays a connection.** The DPU assigns each upstream a private id `uP` and rewrites the
   message so the backend sees a connection from *the proxy* `(client_pod, uP)`, demuxes and replies
   by `uP`; the reply returns to the DPU, which maps `uP → (client, client_port)` and delivers it on
@@ -340,11 +353,13 @@ Header + body must fit one ≤ 8 KB message (chunk larger payloads at the app la
   under either hazard it can free a pin mid-message and scatter the chunks; the bounded
   self-healing table is used instead.)
 - **L7 routing (body-aware).** The byte-stream proxy engine that ships every reply is **always on**
-  (§8); its default parser (`passthru`) routes on **metadata only** — the service table +
-  route-affinity above — and never reads a body (**bit-identical** to the legacy per-message LB). To
-  make the DPU an Envoy-like L7 proxy that **parses the byte stream and content-routes**, select the
-  L7 parser for a service (`DPUMESH_PROXY_L7_SVC`, **§8**). The real body-parsing hook is the future
-  step — the mock reframers today validate the L4 substrate.
+  (§8); its default parser (`passthru`) routes on **metadata only** — the LB + route-affinity above —
+  and never reads a body. To make the DPU an Envoy-like L7 proxy that **parses the byte stream and
+  content-routes**, select the L7 parser for a service (`DPUMESH_PROXY_L7_SVC`, **§8**). The L7 author
+  writes one function, `dmesh_l7_route`, that returns a routing **decision** `{ total_len, cluster, host }`
+  per message — pick a cluster (content routing), let the engine load-balance it, or override the host
+  (session persistence). The substrate (cluster registry, LB, connection pool, custody) is done; the
+  default hook is a demo parser.
 - **Response↔request matching is the app's job.** The transport does no matching, and this DPU
   proxy routes at the **connection** level, not the **request** level (it never parses the body). A
   protocol-parsing L7 proxy could correlate by stream-id; a metadata-driven DPU cannot. Carry a
@@ -369,8 +384,8 @@ Scenario: **pod 10** is a client of **service 11**, which has two backends, **po
    HOST pod 10  (client)                    BlueField DPU  (owns every connection)                    HOST pod 11  (service 11)
    ═════════════════════                    ═══════════════════════════════════════                   ══════════════════════════
    dmesh_channel_t  (1/process)             ┌── ARM control plane ──────────────────┐                  dmesh_channel_t
-    • event_fd   (one readiness fd)         │  service_table[11] = { pod11, pod13 }  │                   • ports[uP1] = server conn
-    • ports[] (the conn table)              │  dpu_route(11) → LB → pod11 | pod13     │                   •   peer = (pod10, uP1)
+    • event_fd   (one readiness fd)         │  svc 11 backends: { pod11, pod13 }     │                   • ports[uP1] = server conn
+    • ports[] (the conn table)              │  lb_pick(11) → pod11 | pod13 (round robin)│                 •   peer = (pod10, uP1)
     │   [pC] = client conn → service 11     │                                        │                   • RX buffer  rx_dma_buffer
     • TX buffer  dma_buffer                 │  conntrack (the owned connections):    │                   • PE thread + event_fd
     │   ┌slot0┐┌slot1┐…  (8 KB each)        │    upstream[uP1] = {pod10, pC, pod11}  │
@@ -408,9 +423,10 @@ Scenario: **pod 10** is a client of **service 11**, which has two backends, **po
               TX_ACK to (pod11, uP1)  → frees host11's TX slot
   (9) host10  PE: dst_port=pC → client conn pC inbox → ready list → dmesh_read → the reply
 ```
-pod 10's **next** message may be routed to **pod 13** instead — a second upstream `uP2` is created,
-its replies map back to the same client conn `pC`. That is why replies on `pC` can interleave across
-backends and are matched by your **req-id**, not by order.
+**Under per-message LB** (opt-in, `DPUMESH_LB_PER_REQUEST_SVC`) pod 10's **next** message may be routed to
+**pod 13** instead — a second upstream `uP2` is created, its replies map back to the same client conn `pC`;
+that is why replies on `pC` can interleave across backends and are matched by your **req-id**, not by order.
+By **default** (sticky) `pC` keeps whichever backend its first message picked — one upstream, replies in order.
 
 **Legend**
 - **channel** — your process's single link to the DPU: DOCA device + PE thread + TX/RX buffers +
@@ -480,12 +496,10 @@ connections.
 
 **Cost.** The shim deliberately re-buys the per-conn-fd readiness model the native API
 avoids (one eventfd signal per message). Measured (1 KB round trips, thread-per-conn
-vanilla client, 2-core pod, scale_log 07-03): ~7K RPS per connection (closed-loop
-RTT-bound, p50 ~130 µs), scaling near-linearly to 16 conns, then a **plateau of ~150K
-RPS at 64 conns** (128 conns = same throughput at 2× latency). That is ~76% of the
-native ceiling on the same deploy (~199K) — better than the ~½ originally projected
-from the per-conn-fd experiment (scale_log 06-30). The price of transparency, paid
-only by preloaded apps. Native `dmesh_*` callers are unaffected.
+vanilla client, 2-core pod): ~7K RPS per connection (closed-loop RTT-bound, p50 ~130 µs),
+scaling near-linearly to 16 conns, then a **plateau of ~150K RPS at 64 conns** (128 conns
+= same throughput at 2× latency) — ~76% of the native ceiling on the same deploy (~199K).
+The price of transparency, paid only by preloaded apps. Native `dmesh_*` callers are unaffected.
 
 **Limits (v1).** AF_INET `SOCK_STREAM` only; most `SO_*` options are accepted no-ops;
 `shutdown(SHUT_WR)` sends the FIN (no true half-close — late replies are
@@ -497,11 +511,10 @@ interposable symbols); use direct `read`/`write`/`send`/`recv` on shimmed socket
 **Validation.** `bench/validators/tcp_echo.c` (vanilla epoll echo) + `bench/validators/tcp_client.c`
 (vanilla **thread-per-conn** blocking client; sets `SO_RCVTIMEO=5s` so a lost message
 is a counted failure, never a hang) run the SAME binaries over kernel TCP and over
-DPUmesh (`./test-bench.sh preload <N> <SIZE> <CONNS>`): 0-fail across 1 KB–32 KB
-(32 KB = auto-chunk + pin + stream reassembly) and 1–256 connections — including 23×
+DPUmesh (`bench/bench.sh preload <N> <SIZE> <CONNS>`): 0-fail across 1 KB–32 KB
+(32 KB = auto-chunk + pin + stream reassembly) and 1–256 connections — including
 256-conn simultaneous-connect storms and idle→storm cycles — p50 ~120–150 µs,
-back-to-back stable. One unreproduced 256-conn-storm message-loss incident is tracked
-OPEN with tripwires armed (scale_log 07-03 session 3).
+back-to-back stable.
 
 ---
 
@@ -512,21 +525,26 @@ DMA lands a connection's bytes in DPU staging; an L7 function reframes the strea
 segments**; the engine ships each to its backend by **scatter-gather DMA** (ARM). The backend
 receives a byte stream and frames it **itself** (an ordinary server behind an envoy). `DPUMESH_PROXY`
 does **not** toggle the engine — it selects the deploy-default **request parser**: `passthru`
-(default; one segment per arrived message on the §5 metadata route — **bit-identical** to legacy
-per-message LB) or `frame`. The real body-parsing L7 hook is a MOCK today; replies always pass through.
+(default; one segment per arrived message, routed by the §5 LB + connection stickiness) or `frame`. The
+L7 body-parsing hook (`dmesh_l7_route`, §5.1 / below) has a real contract; its default `dpu_l7.c` is a demo
+parser. Replies always pass through (their dst is the conntrack peer).
 
-**The deliverable — what an L7 function returns:**
+**What an L7 author writes — the routing decision (`dpu_l7.h`):**
 ```c
-struct dmesh_route_seg { uint32_t off; uint32_t len; int32_t dst; };  // one slice → one backend
+struct dmesh_l7_ctx      { int32_t service, client_pod; uint16_t client_port;
+                           const int32_t *hosts; int32_t n_hosts; };  // the cluster's live backend pods
+struct dmesh_l7_decision { uint32_t total_len; int32_t cluster; int32_t host; };
 
-// MOCK now, envoy later. Called with a connection's bytes, IN ORDER, shown contiguously.
-int proxy_route(conn, const uint8_t *buf, uint32_t avail,
-                dmesh_route_seg *segs, int max, uint32_t *consumed);
-//  buf/avail : the window's unconsumed bytes (avail can grow across calls — see seam below)
-//  segs/ret  : up to `max` segments {off,len,dst}; dst = a concrete backend pod, or DEFER to
-//              the §5 L4 route. ret < 0 = protocol error → the L4 drops this stream.
-//  consumed  : bytes fully processed; the cursor advances, the unconsumed tail is kept.
+// You implement this in dpu_l7.c. Shown the message HEAD (bounded window) + the cluster's live hosts.
+int dmesh_l7_route(const uint8_t *head, uint32_t len,
+                   const struct dmesh_l7_ctx *ctx, struct dmesh_l7_decision *out);
+//  return >0 : decided (fill out).  0 : head not fully here (grow).  <0 : malformed (poison).
+//  out.total_len : whole message length (body streams from staging via SG — never linearized)
+//  out.cluster   : service to route to (default = ctx->service; overwrite to content-route)
+//  out.host      : DMESH_LB_DEFER (engine load-balances the cluster) or a ctx->hosts pod (override)
 ```
+Internally the engine turns each decision into routing **segments** `{off, len, dst}` and ships them to
+each backend by SG-DMA (below); the built-in `passthru`/`frame` parsers emit those segments directly.
 
 **The L4 engine (request AND reply run the SAME machinery):**
 ```
@@ -535,7 +553,7 @@ int proxy_route(conn, const uint8_t *buf, uint32_t avail,
    ▼  per-conn INPUT WINDOW ── bytes in arrival order; zero-copy views over staging + a cursor.
    │   A SEAM buffer aligns the unconsumed tail into ONE contiguous run only when a parse stalls
    │   across staging extents (e.g. a >8 KB frame split across arrivals).
-   ▼  proxy_route(MOCK) → segs {off,len,dst}          (consumed = how far the cursor advances)
+   ▼  parser (passthru / frame / L7 hook) → segs {off,len,dst}   (consumed = how far the cursor advances)
    ▼  per-(dst pod, region) LANE ── segments to one backend gathered into ONE chained-buf SG-DMA
    │   (ARM generic doca_dma: staging → the backend's host RX buffer) + one batched notify
    ▼  BYTE-STREAM delivery ── the backend loops dmesh_read (≤8 KB chunks) and frames itself; per
@@ -563,8 +581,8 @@ int proxy_route(conn, const uint8_t *buf, uint32_t avail,
   the app may pack several frames into one write, or let a big write auto-chunk, and the parser
   reframes from the content either way. (The receiver-side atomic-**message** contract of §3 is thus
   dropped for a proxied stream; the backend frames its own bytes, exactly like an envoy upstream.)
-- **`dst` is a concrete pod** (the mock/envoy already did LB), or **`DEFER`** = fall through to the
-  §5 default L4 route (service table + route-affinity).
+- **`dst` is a concrete pod** (the L7 hook / LB already picked), or **`DEFER`** = fall through to the
+  §5 default route (LB + connection stickiness + route-affinity).
 - **Custody at egress**, not at receipt — the batched `TX_ACK` fires only when the SG-DMA has read
   the staging bytes, so the sender never overwrites a body mid-flight.
 - **Ordering.** One receiving conn always lands in ONE lane (FIFO), so a conn's delivery order =
@@ -580,16 +598,19 @@ independently.
 | `DPUMESH_PROXY=frame` | deploy default = **frame** for every request stream (legacy all-frame) | the byte-stream demo |
 | `DPUMESH_PROXY_FRAME_SVC=<csv>` | services whose **request** streams use the frame demo parser `[u32 len][u8 svc][payload]` (routes each whole frame by `svc`; a >8 KB frame ships as ≤8 KB chunks) | mix app kinds: `DPUMESH_PROXY=passthru DPUMESH_PROXY_FRAME_SVC=16` |
 | `DPUMESH_PROXY_L7_SVC=<csv>` | services whose **request** streams run the **real L7 hook** — `dmesh_l7_route` in `dpu_l7.c` (checked before frame) | the production L7 slot |
+| `DPUMESH_LB_PER_REQUEST_SVC=<csv>` | services that load-balance **every** message (Envoy HTTP default) instead of the connection-sticky default (Envoy TCP-proxy) | opt out of session affinity per service |
 
 **Writing an L7 parser.** Implement one function, `dmesh_l7_route`, in `dpu_l7.c` (contract in
-`dpu_l7.h`): you are shown only the **head** of the front message (a bounded ≤`PX_HEAD_MAX`
-window); return the whole message's **total length** (`>0`, may far exceed the head window), `0`
-= "head not fully here", or `<0` = malformed; optionally set `*target` to route by content. The
-engine **streams the body from staging via SG** — it is never linearized, so a large message
-costs **no per-slot memcpy**; the only copy is the ≤`PX_HEAD_MAX` head, and only when a head
-straddles a slot. The hook is **stateless, no malloc, no locks**. Assign its services with
-`DPUMESH_PROXY_L7_SVC`; a head larger than `PX_HEAD_MAX` poisons the conn (cf. Envoy
-`max_request_headers_kb`). Everything else is unaffected.
+`dpu_l7.h`): you are shown only the **head** of the front message (a bounded ≤`PX_HEAD_MAX` window)
+plus the cluster's live backend pods (`ctx->hosts[]`). Fill a **decision** `out = { total_len, cluster,
+host }` and return `>0` (decided), `0` ("head not fully here" → grow), or `<0` (malformed). `total_len` =
+the whole message length (may far exceed the head window); `cluster` = the service to route to
+(default = the addressed service; overwrite to content-route); `host` = `DMESH_LB_DEFER` (the engine
+load-balances the cluster) or one of `ctx->hosts` to pin (session persistence). The engine **streams the
+body from staging via SG** — it is never linearized, so a large message costs **no per-slot memcpy**; the
+only copy is the ≤`PX_HEAD_MAX` head, and only when a head straddles a slot. The hook is **stateless, no
+malloc, no locks**. Assign its services with `DPUMESH_PROXY_L7_SVC`; a head larger than `PX_HEAD_MAX`
+poisons the conn (cf. Envoy `max_request_headers_kb`). Everything else is unaffected.
 
 **Reply streams always pass through** regardless of the above: a reply's `dst` is the single
 conntrack peer, so per-frame vs whole-arrival segmentation delivers a **byte-identical** stream —
@@ -600,10 +621,11 @@ it sends length-prefixed frames and checks **byte-exact** echo + a **served-byte
 Deploy it two ways: legacy `DPUMESH_PROXY=frame`, or decoupled
 `DPUMESH_PROXY=passthru DPUMESH_PROXY_FRAME_SVC=16` — the latter passes `./bench/bench.sh preload`
 (vanilla shim, svc 15) and `./bench/bench.sh stream` (frame, svc 16) against the **same** DPU.
-Validated (scale_log 07-04): byte-exact for self-loopback (1 KB), a >8 KB frame (seam), several
-frames per write (`FPW`), and fan-out across backends (`SVC_LIST`) — 0 drops. **Status:** the L4
-engine is validated and the L7 plug-in slot (`dpu_l7.c`) is wired; writing the real body parser
-(parse + LB + policy) is the author's step and needs **no transport changes**.
+Validated byte-exact for self-loopback (1 KB), a >8 KB frame (seam), several frames per write (`FPW`),
+and fan-out across backends (`SVC_LIST`) — 0 drops. **Status:** the substrate — cluster registry,
+round-robin LB, connection stickiness, connection pool, and the `dmesh_l7_route` decision hook — is
+validated; writing a real body parser (parse + policy) is the author's step and needs **no transport
+changes**.
 
 ---
 

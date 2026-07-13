@@ -4119,3 +4119,73 @@ safe to attempt). On recovery, resume: `bench.sh deploy` → regression (loopbac
 baseline above) → multi-backend LB test (set echo-dpumesh-13/-14 `BENCH_WORKER_ID=11` so svc 11 has 3 backends;
 verify load distributes / conn-pins across pods 11/13/14, byte-exact, 0-fail; kill a backend → remaining serve,
 no blackhole). NO HW numbers recorded — none were produced.
+
+## 2026-07-13 (later) — HW validation of the multi-backend LB + a wedge root-cause fix
+
+DPU hardware recovered (the overheat/read-only episode passed; ASIC held 78–81°C, crit 91°C — still a
+**thermal risk**, recurring overheating, cooling needs attention). Deployed via `bench/bench.sh deploy`
+(`DPUMESH_PROXY=passthru DPUMESH_ARM_EGRESS_THREADS=2`). Post-reboot the host also needed `swapoff -a`
+(kubelet) + `modprobe br_netfilter` (flannel CNI) — env, not code.
+
+**My code is live** (DPU log): `DPU PROXY MODE ON (... lb=round-robin, per-request-services=0 (default
+sticky) ...)`. svc 11 given 3 backends by `kubectl set env echo-dpumesh-13/-14 BENCH_WORKER_ID=11`
+(pods 0, 6, 7 all service=11).
+
+### ⭐ Root-cause bug found + fixed (wedge under repeated load)
+Repeated benches wedged the WHOLE data path after 1–2 runs (rcnt=0, loopback hung, only "stale upstream"
+reply-drops in the DPU log — NO routing drops). Root cause is NOT the LB code (loopback, which uses no
+multi-backend LB, wedged too):
+- `dpu_proxy.c` reply path marks a conn `c->dead=1` on a stale upstream (WARN-flood guard, an uncommitted
+  post-07-10 change). A backend's **late reply** (arriving after the client FIN freed the upstream) creates
+  an orphan reply-conn `(backend, uP)` that is dead-marked and **never cleaned**. `dpu_upstream_create`
+  round-robins `uP`s and does not evict stale conns, so when a `uP` is **reused** for a new client, the
+  backend's replies hit the dead orphan (`px_ingest_forward` `c->dead` fast-path) and are **blackholed for
+  the whole session** → orphans accumulate under conn churn → progressive global wedge.
+- **Fix** (`px_ship_seg`, after `dpu_upstream_create`): `px_conn_del_key(objs, dst_pod, uP)` — evict any
+  stale orphan on a freshly-reused uP so the reply builds a fresh conn and is delivered. Keeps `c->dead`
+  (flood guard) intact.
+- **Verified**: 6 back-to-back benches after the fix, ALL 0-fail (before the fix, run #2 wedged):
+  warmup 1069 · #1 718,264 · #2 493,517 · #3 559,779 · loopback 10000/0 · #4(heavy) 987,383 — all fail=0.
+
+### Multi-backend LB — validated
+| test | result |
+|---|---|
+| Registry (store N pods/service) | svc 11 → pods {0,6,7}, all service=11 (derived from pods[], no table) |
+| **LB distribution** (3 backends, threads=6) | rcnt=951,730 · fail=0 · per-backend CPU **189 / 182 / 161** ticks = balanced round-robin |
+| **No-blackhole** (kill pod7 = last registrant, then bench) | rcnt=614,804 · fail=0 · CPU pod0=177 pod6=173, **dead pod7 gets 0** (old single-entry table would blackhole svc 11) |
+| Regression (passthru) | loopback 50000/0 · 10000/0 byte-exact; conc=1 p50 ~2.3ms (EU-park floor, not a regression) |
+| Sticky default | connection-scoped pin active (`default sticky`); per-message via `DPUMESH_LB_PER_REQUEST_SVC` |
+
+### ⚠️ Separate robustness gap found (NOT fixed — follow-up)
+Killing a backend **while it has in-flight egress** → the ARM egress SG-DMA engine floods
+`DMA: Failed to alloc_init memcpy_task, state IDLE is not running` (millions of lines) and the egress path
+wedges globally. This is the egress engine not tolerating a backend's mmap teardown mid-flight (pre-existing
+infra, newly reachable because multi-backend makes "one backend dies while others serve" a real case). The
+LB **routing** is correct (dead backend excluded); the gap is egress-engine DMA-ctx resilience. Needs a
+follow-up fix (e.g., drop/skip a lane whose pod went not-ready instead of retrying the failed DMA forever).
+
+**Status:** Phase-1 multi-backend registry + round-robin LB + connection-sticky sessions **validated on HW**;
+the orphan-reply-conn wedge is **fixed and verified**. Open: the egress-on-backend-death robustness gap, and
+the card's recurring thermal issue (cooling).
+
+### ⭐ Egress-on-backend-death robustness — FIXED + verified (same day)
+Root cause of the earlier "kill a backend mid-traffic → `DMA state IDLE` flood + global wedge": a backend
+dying with **in-flight egress SG-DMA** to its `host_rx_mmap` → `pods_remove_connection` destroys that mmap
+concurrently with the egress worker → the engine's shared `doca_dma` ctx **faults to IDLE** → every lane's
+`alloc_init` fails, is mis-treated as transient, and **retries forever** (DOCA logs millions of lines, egress
+globally stops). Three-part fix (no new poll/wait/timer, zero hot-path cost):
+- **① Defer `host_rx_mmap` destroy** (`comch_server.c`): keep the handle in the slot on disconnect; destroy it
+  at slot **reuse** (`pods_add_connection`), by which point no egress in-flight references it (same
+  reconnect-latency ≫ in-flight-drain reasoning the slot reuse already relies on). Prevents the ctx fault.
+- **② Drain a not-ready pod's queued lane units** (`dpu_proxy.c px_lane_drop_dead`, in the worker pump): route
+  them to the done-queue with `err=1` so the ingest thread releases custody (TX_ACK senders) + frees them with
+  NO REV_DONE — prevents custody leak + mis-delivery to a reused slot.
+- **③ Safety net** (`px_lane_submit`): on `alloc_init` == `DOCA_ERROR_BAD_STATE`, log once + `eng->dma_stalled`
+  (stop submitting) instead of spinning — caps the flood if any ctx fault ever slips through ①.
+- **Verified** — echo-14 (pod7) **force-killed (grace 0) mid a 15s bench**: mid-kill bench **rcnt=1,337,224
+  fail=0** (traffic sailed through the kill on pod0/pod6), post-kill **loopback 5000/0** + **bench 293,801/0**
+  (no global wedge), DPU log **13→18 lines** (vs 2.1M before), `state IDLE`/`alloc_init` flood count = **0**.
+
+**Overall:** multi-backend L7 LB substrate is HW-validated AND resilient to a backend dying mid-traffic. Two
+data-path bugs found + fixed this session (orphan-reply-conn wedge; egress-on-death flood/wedge). Only open
+item: the DPU card's recurring thermal/cooling issue.

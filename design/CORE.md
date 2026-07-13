@@ -191,12 +191,26 @@ inside a consumer callback** (re-entering the PE would corrupt it). One consumer
 channels into one `comp_queue` keeps the forward ring single-producer and the routing/conntrack tables
 **lock-free by virtue of single-threading**.
 
-### 4.2 Routing — `dpu_route_l4(svc, rg)`
-- `rg != 0` → **route-affinity pin**: `route_group_backend[svc][rg]`; if the pinned backend is live,
-  reuse it, else `lb_pick(svc)` and record the pin (overwrite-on-reuse, self-healing, no delete).
-- `rg == 0` → `service_table[svc]` directly.
-- `lb_pick` is a **single-backend-per-service mock** (the L4 seam a real load balancer / L7 parser
-  replaces). `service_table[svc] = pod_id`, set at registration (last-writer-wins for a shared svc).
+### 4.2 Routing — cluster registry + load balancer
+A **service is a cluster** of backend pods (Envoy model). The healthy backend set is **derived from
+`pods[]` on demand** — `collect_live_hosts(svc)` = the slots with `registered && service_id==svc &&
+dma_ready`. There is **no service→backend table** to keep in sync: a pod register/disconnect changes the
+derived set automatically (a dead backend is simply not returned — no stale-entry blackhole). `pods[]` is
+the single source of truth; the only added state is a per-service round-robin cursor `svc_rr[svc]`.
+
+- **`lb_pick(svc)`** — the load balancer: **round-robin** over `collect_live_hosts(svc)` (Envoy's default
+  policy), `-1` if the cluster has no healthy backend. The one seam a weighted / least-request / hash
+  policy would replace.
+- **`dpu_route_l4(svc, rg)`** — the DEFERred-segment route: `rg != 0` → **route-affinity pin**
+  (`route_group_backend[svc][rg]`; reuse if the pin is live, else `lb_pick` + record — overwrite-on-reuse,
+  self-healing); `rg == 0` → `lb_pick(svc)`.
+- **Connection stickiness (`px_resolve_backend`, dpu_proxy.c).** For a request seg the backend is resolved
+  with Envoy-style precedence: **(1) an L7 host override** (§5.1, validated live) > **(2) the connection's
+  sticky pin** (`px_conn.pinned_backend`, same cluster, still live) > **(3) `dpu_route_l4`** (recorded as
+  the session pin when sticky). **Sticky is the default** — a connection keeps the backend the LB first
+  picked (session affinity, socket-like ordering; the src↔backend pairing persists). `DPUMESH_LB_PER_REQUEST_SVC`
+  lists services that load-balance **every** message instead (Envoy HTTP per-request). Single ARM thread →
+  cursor + pin need no lock.
 
 ### 4.3 Conntrack — Model B (the DPU owns every connection)
 `struct dpu_conntrack` = `upstream[65536]` (by `uP`) + an open-addressed reuse hash table keyed
@@ -208,11 +222,21 @@ leg carries `src_port = uP`, but the client tracks its TX bytes by its real port
 translated `uP → client_port` before sending, or the client's bytes leak. A client **FIN** frees `uP`
 and its reuse HT entry.
 
-### 4.4 Pod registration & batching
+### 4.4 Pod registration, teardown & batching
 `pods[MAX_PODS=8]`; a registering conn is assigned `pod_id =` its slot index (RELEASE-published after
-its fields; `dma_ready` is a separate later gate for the data plane). Per-pod ACK/REV_DONE **batches**
-(`txack_batch[≤14]`, `rev_done_batch[≤16]`) coalesce so the host PE reaps one message per K responses
-(the host per-RTT reap is the 2-pod throughput cap); flushed on full or on the idle drain.
+its fields; `dma_ready` is a separate later gate for the data plane). Slots are stable (never compacted)
+and **reused** on a later connect. Per-pod ACK/REV_DONE **batches** (`txack_batch[≤14]`,
+`rev_done_batch[≤16]`) coalesce so the host PE reaps one message per K responses (the host per-RTT reap
+is the 2-pod throughput cap); flushed on full or on the idle drain.
+
+**Disconnect = graceful for the egress engine.** A backend can die *while it has in-flight egress SG-DMA*
+into its RX buffer. `pods_remove_connection` sets `dma_ready=0` (the egress then skips the pod) but
+**DEFERS destroying `host_rx_mmap`** — an egress worker thread may still hold an in-flight `doca_buf` over
+it, and destroying it concurrently would fault the whole engine's shared `doca_dma` ctx. The handle is
+kept in the slot and destroyed at slot **reuse** (`pods_add_connection`), by which point the old pod is
+long gone and no egress references it (reconnect latency ≫ in-flight drain). The egress side complements
+this: a not-ready pod's queued lane units are dropped to the done-queue (custody released, no delivery),
+and a `doca_dma` `BAD_STATE` fault stalls that engine's submit instead of retry-spinning (§5).
 
 ---
 
@@ -226,11 +250,16 @@ only destination resolution differs.
   staging bytes **physically abut** (the per-conn mirror), stopping at a discontinuity (the host TX
   byte-ring wrap). A **seam** buffer copies the unconsumed tail into one contiguous run **only** when a
   parse stalls across that boundary (e.g. a > 8 KB frame split across arrivals).
-- **Parser.** Per **connection** (selected from the addressed service), `proxy_route` returns route
-  segments `{off, len, dst}`. Parsers: **passthru** (one segment per arrival, `dst = DEFER` → §4.2 L4
-  route — bit-identical to legacy per-message LB; replies always use this), **frame** (a demo
-  `[u32 len][u8 svc][payload]`), or **L7** (the real hook, §5.1). `DPUMESH_PROXY` picks the deploy
+- **Parser.** Per **connection** (selected from the addressed service), the parser returns route
+  segments `{off, len, dst}`. Parsers: **passthru** (one segment per arrival, `dst = DEFER` → the §4.2
+  route: LB + connection stickiness; replies always use this), **frame** (a demo `[u32 len][u8 svc][payload]`,
+  routing each frame by its `svc` byte), or **L7** (the real hook, §5.1). `DPUMESH_PROXY` picks the deploy
   default; `DPUMESH_PROXY_FRAME_SVC` / `_L7_SVC` assign parsers per service.
+- **Backend death mid-flight.** If a destination pod disconnects while units are queued/in-flight, its
+  lane is drained (`px_lane_drop_dead` → done-queue, custody released, no delivery) and its `host_rx_mmap`
+  is kept alive until slot reuse (§4.4) so the in-flight SG-DMA finishes without faulting the engine ctx.
+  A `doca_dma` `BAD_STATE` still sets `eng->dma_stalled` (stop submitting) rather than retry-spinning +
+  flooding. The LB meanwhile routes new traffic only to live backends — a backend death is not a wedge.
 - **Egress.** A receiving conn always lands in **one lane** `[dst_pod][region = dst_port % K]` (FIFO), so
   delivery order = segment order. A lane's units are gathered into **one chained-source `doca_dma`**
   (SG) copy: DPU staging → the destination host's RX buffer, then a batched `REV_DONE` notify. Chunks
@@ -243,14 +272,19 @@ only destination resolution differs.
   thread and **wedges under overload** (event-loop idle-park under egress backpressure); **`n_eng = 2`**
   is required — busy-polling workers keep egress draining so the stall never forms.
 
-### 5.1 The L7 hook (`dpu_l7.c` / `dpu_l7.h`)
-`int dmesh_l7_route(const uint8_t *head, uint32_t len, const struct dmesh_l7_ctx *ctx, int32_t *target)`.
-The engine shows only the message **head** (a bounded ≤ `PX_HEAD_MAX` = 4 KB window); the hook returns
-the message's **total length** (`>0`, may far exceed the head), `0` (head not fully here → grow), or
-`<0` (malformed → poison the conn). It may set `*target` to a **service id** to content-route. The body
-is **streamed from staging via SG, never linearized** (no per-slot memcpy); the backend is resolved once
-per message so all chunks pin to it in order. The hook is stateless, no malloc, no locks. Today it is a
-**mock** re-implementing the frame format; writing a real parser needs no transport change.
+### 5.1 The L7 hook (`dpu_l7.c` / `dpu_l7.h`) — the router filter
+`int dmesh_l7_route(const uint8_t *head, uint32_t len, const struct dmesh_l7_ctx *ctx,
+struct dmesh_l7_decision *out)` — Envoy's router filter. The engine shows only the message **head** (a
+bounded ≤ `PX_HEAD_MAX` = 4 KB window) plus the cluster's live endpoints in `ctx->hosts[]`; the hook
+returns `>0` = decided (fill `out`), `0` (head not fully here → grow), or `<0` (malformed → poison the
+conn). The decision `out = { total_len, cluster, host }`: `total_len` = the whole message length (the body
+is **streamed from staging via SG, never linearized** — no per-slot memcpy); `cluster` = the service to
+route to (default = the addressed service; overwrite to content-route); `host` = `DMESH_LB_DEFER` (the
+engine load-balances the cluster, §4.2) **or** a concrete pod to **override** (session persistence, à la
+Envoy `setUpstreamOverrideHost`). The backend is resolved once per message so all chunks pin to it in order.
+The hook is stateless, no malloc, no locks. The default `dpu_l7.c` is a demo (svc-byte → cluster, then LB);
+a real parser needs no transport change. `hash` (consistent-hash LB) + per-conn `session` state are
+append-only phase-2 fields of the decision struct.
 
 ---
 
@@ -286,6 +320,7 @@ successful read, drain-and-retry-once on `EAGAIN`. `shutdown(SHUT_WR)` sends the
 | publish-role-last (host `ports[]`), publish-registered/`dma_ready`-last (DPU `pods[]`) | a reader must never observe a half-built slot |
 | client ports `[1, 32768)`, upstream `uP` `[32768, 65535]` | loopback host holds both roles in one table |
 | `n_eng = 2` (`DPUMESH_ARM_EGRESS_THREADS`) | `n_eng = 1` wedges under egress backpressure |
+| a disconnected pod's `host_rx_mmap` is destroyed at slot REUSE, never on disconnect | an egress worker may hold an in-flight `doca_buf` over it; concurrent destroy faults the engine's `doca_dma` ctx |
 
 ## 8. Baked sizing (see API.md §9 for the full env/knob table)
 `num_slots = 4096`, `slot_size = 8192` (32 MB TX/RX/staging per pod); `conn_pool = 256` (128 KB
