@@ -346,9 +346,10 @@ struct objects {
      * Kept as pointer arrays (not inline) so host-side translation units that
      * include object.h never pull in doca_dpa.h. */
     struct doca_dpa *dpa;                                   /* shared DPA device */
-    struct dmesh_doca_dpa_thread *dpa_threads[MAX_DPA_RINGS];
-    struct dmesh_doca_dpa_comch  *dpa_comches[MAX_DPA_RINGS];
-    int num_dpa_threads;                                    /* N */
+    struct dmesh_doca_dpa_thread *dpa_threads[MAX_DPA_EU];
+    struct dmesh_doca_dpa_comch  *dpa_comches[MAX_DPA_EU];
+    int num_dpa_threads;                                    /* N (auto-detected unless DPUMESH_DPA_THREADS set) */
+    int dpa_threads_auto;                                   /* 1 = N auto-detected from the device */
     int k_rings;                            /* K = rings per pod, spread across K EUs (1 = legacy) */
     int dpu_ready;   /* 0 until DPA + msgq init done. Gates setup_pod_dma so a fast
                       * host whose mmaps arrive DURING init (before the DPA msgq is

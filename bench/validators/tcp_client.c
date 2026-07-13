@@ -3,7 +3,8 @@
  *
  * No DPUmesh headers: socket/connect/write/read/close + pthreads only. The same
  * binary runs over kernel TCP, and over DPUmesh under
- * LD_PRELOAD=libdmesh_preload.so with DMESH_PRELOAD_MAP=<port>=<svc>.
+ * LD_PRELOAD=libdmesh_preload.so with DMESH_PRELOAD_REGISTRY listing the dialed
+ * ClusterIP:port -> service.
  *
  * THREAD-PER-CONN: every RUN opens <conns> FRESH connections and drives each
  * from its OWN thread with blocking single-outstanding round trips — the classic
@@ -101,6 +102,21 @@ static void *worker_fn(void *arg) {
      * read would wedge the whole RUN. Plain POSIX — stays vanilla. */
     struct timeval tv = { 5, 0 };
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+
+    /* Transparency check (conn 0): getpeername must report the address we dialed —
+     * over kernel TCP trivially, over DPUmesh only if the shim tells the truth (not
+     * 127.0.0.1). Non-fatal; surfaced in the pod log. */
+    if (w->idx == 0) {
+        struct sockaddr_in pa; socklen_t pl = sizeof pa;
+        if (getpeername(fd, (struct sockaddr *)&pa, &pl) == 0) {
+            char ip[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &pa.sin_addr, ip, sizeof ip);
+            fprintf(stderr, "tcp_client: getpeername -> %s:%d (%s dialed addr)\n",
+                    ip, ntohs(pa.sin_port),
+                    (pa.sin_addr.s_addr == w->sin.sin_addr.s_addr &&
+                     pa.sin_port == w->sin.sin_port) ? "MATCHES" : "MISMATCHES");
+        }
+    }
 
     for (long k = 0; k < w->quota; k++) {
         long i = w->base + k;                      /* global msg index → unique pattern */

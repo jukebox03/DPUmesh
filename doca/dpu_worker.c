@@ -425,13 +425,18 @@ run_dpu_worker(struct objects *objs)
      * setup_pod_dma so a fast host's early mmaps don't set up before the msgq. */
     objs->dpu_ready = 0;
 
-    /* N (DPA EU threads) + K (forward rings/pod) — baked to the measured config
-     * (N=4 EUs, K=2 rings, so a 2-pod pair spreads across 4 distinct EUs; K=2 is
-     * the sweet spot, K=4 is flat — the DPA op-rate caps ~810K dma_copy/s). Set
-     * BEFORE the comch server accepts pods so process_mmap_msg sees the right K
-     * (else it rejects a pod's 2nd forward ring and that pod never reaches
-     * dma_ready). init_dpa_objects re-checks `<= 0`, so it reuses these. */
-    objs->num_dpa_threads = 4;
+    /* N (DPA EU threads) + K (forward rings/pod). Defaults are the measured config
+     * (N=4 EUs, K=2 rings, so a 2-pod pair spreads across 4 distinct EUs; K=2 is the
+     * sweet spot, K=4 is flat — the DPA op-rate caps ~810K dma_copy/s), each overridable
+     * by env (DPUMESH_DPA_THREADS / DPUMESH_RINGS_PER_POD). Set BEFORE the comch server
+     * accepts pods so process_mmap_msg sees the right K (else it rejects a pod's 2nd
+     * forward ring and that pod never reaches dma_ready). init_dpa_objects re-checks
+     * `<= 0`, so it reuses these. N is clamped to MAX_DPA_EU (the dpa_threads[] cap). */
+    objs->num_dpa_threads = DPA_THREADS_DEFAULT;   /* tentative (for the K clamp below); AUTO-DETECTED in init_dpa_objects */
+    objs->dpa_threads_auto = 1;
+    { const char *ne = getenv("DPUMESH_DPA_THREADS");
+      if (ne && *ne) { int v = atoi(ne);
+          if (v >= 1) { if (v > MAX_DPA_EU) v = MAX_DPA_EU; objs->num_dpa_threads = v; objs->dpa_threads_auto = 0; } } }
     /* K = forward rings per pod (EU-sharding). Deploy option DPUMESH_RINGS_PER_POD
      * (default 2); clamped to [1, min(N, MAX_EU_PER_POD)]. The HOST reads the SAME
      * env (dmesh_core.c) and MUST land on the same K — forward rings pair 1:1, a

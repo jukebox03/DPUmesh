@@ -552,8 +552,14 @@ pods_add_connection(struct objects *objs, struct doca_comch_connection *conn)
 		}
 	}
 	if (idx < 0) {
-		if (n >= MAX_PODS) {
-			DOCA_LOG_ERR("pods_add_connection: table full (%d)", MAX_PODS);
+		/* LIVE cap = forward-ring capacity for the running config: one EU holds
+		 * MAX_DPA_RINGS rings, so N EUs / K rings-per-pod admit MAX_DPA_RINGS*N/K pods
+		 * (bounded by the pods[] array MAX_PODS). Raising DPUMESH_DPA_THREADS raises it. */
+		int live_cap = MAX_DPA_RINGS * objs->num_dpa_threads / objs->k_rings;
+		if (live_cap > MAX_PODS) live_cap = MAX_PODS;
+		if (n >= live_cap) {
+			DOCA_LOG_ERR("pods_add_connection: table full (live cap %d = %d rings × %d EU / %d K)",
+			             live_cap, MAX_DPA_RINGS, objs->num_dpa_threads, objs->k_rings);
 			return -1;
 		}
 		idx = n;

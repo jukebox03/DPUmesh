@@ -267,7 +267,7 @@ init_dpa_objects(struct objects *objs)
      * K=2) in run_dpu_worker before this runs; these guards only backstop a direct
      * (non-worker) init and keep N off the single-EU (~74K) floor. */
     if (objs->num_dpa_threads <= 0)
-        objs->num_dpa_threads = 4;
+        objs->num_dpa_threads = DPA_THREADS_DEFAULT;
     if (objs->k_rings <= 0) {
         int k = DPUMESH_RINGS_PER_POD_DEFAULT;   /* = 2 */
         if (k > objs->num_dpa_threads) k = objs->num_dpa_threads;
@@ -277,7 +277,9 @@ init_dpa_objects(struct objects *objs)
     DOCA_LOG_INFO("DPA multi-EU: num_dpa_threads=%d k_rings=%d (MAX_DPA_RINGS=%d)",
                   objs->num_dpa_threads, objs->k_rings, MAX_DPA_RINGS);
 
-    for (int k = 0; k < objs->num_dpa_threads; k++) {
+    /* Allocate ALL EU-thread containers up to the array cap (small structs); only
+     * num_dpa_threads (finalized by auto-detect after doca_dpa_start) get created/used. */
+    for (int k = 0; k < MAX_DPA_EU; k++) {
         if (!objs->dpa_threads[k]) {
             objs->dpa_threads[k] = calloc(1, sizeof(struct dmesh_doca_dpa_thread));
             if (!objs->dpa_threads[k]) {
@@ -319,6 +321,23 @@ init_dpa_objects(struct objects *objs)
         DOCA_LOG_ERR("Failed to start DOCA DPA with error = %s", doca_error_get_name(result));
         goto destroy_dpa;
     }
+
+    /* AUTO-DETECT N: query the device's available EUs (unless DPUMESH_DPA_THREADS
+     * pinned it). Use min(available, MAX_DPA_EU); then clamp K <= N. Finalized here,
+     * before the EU threads are created and before setup_pod_dma (main loop) maps a
+     * pod's K rings to EUs — so process_mmap_msg always sees the right N/K. */
+    if (objs->dpa_threads_auto) {
+        unsigned int avail = 0;
+        doca_error_t er = doca_dpa_get_total_num_eus_available(objs->dpa, &avail);
+        int n = (er == DOCA_SUCCESS && avail >= 1) ? (int)avail : objs->num_dpa_threads;
+        if (n > MAX_DPA_EU) n = MAX_DPA_EU;
+        if (n < 1) n = 1;
+        objs->num_dpa_threads = n;
+        DOCA_LOG_WARN("DPA auto-detect: %u EUs available -> N=%d (cap MAX_DPA_EU=%d)",
+                      avail, objs->num_dpa_threads, MAX_DPA_EU);
+    }
+    if (objs->k_rings > objs->num_dpa_threads)
+        objs->k_rings = objs->num_dpa_threads;   /* K <= N */
 
     /* Point every EU thread struct at the shared device. */
     for (int k = 0; k < objs->num_dpa_threads; k++)

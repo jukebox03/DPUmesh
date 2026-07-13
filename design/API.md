@@ -127,9 +127,11 @@ All calls are **non-blocking**. "would-block" = the listed sentinel **with `errn
 
 > **Env:** `DPUMESH_PCI_ADDR` selects the DOCA device; `DPUMESH_SERVICE_ID` overrides the
 > `service_id` arg. (There is no `DPUMESH_POD_ID` — the DPU assigns `pod_id`.)
-> `DPUMESH_CONN_POOL=N` sets the number of per-connection TX byte-rings = **max concurrent
-> connections** (default 256); each ring is `num_slots*slot_size / N` bytes (default 128 KB), the
-> connection's socket send buffer. Fewer, deeper connections (gRPC multiplexing) → smaller `N`.
+> The per-connection TX send buffer is an **elastic block chain**: the `num_slots*slot_size` TX
+> buffer is a shared pool of `block_size` blocks (`DPUMESH_TX_BLOCK`, default 64 KB), and each conn
+> grabs blocks on demand up to `DPUMESH_TX_MAXB` (default 4 → ≤ 256 KB in-flight/conn), returning
+> drained ones — so a conn's footprint tracks its in-flight demand instead of a fixed slab
+> (`DPUMESH_TX_H` = the recycled-block cushion, grow/shrink hysteresis, default 1).
 > (Data-plane tuning — buffer slots, slot size, DPA EU count, EU-sharding, PE-sleep — is
 > baked into the binaries; the DPU L7-proxy engine is the one runtime toggle, `DPUMESH_PROXY`, §8.)
 
@@ -157,7 +159,7 @@ into it — of **any length**, not slot-granular — you fill it in place, `dmes
 bytes, and `dmesh_flush` ships them. Same ring, same wire, no copy.
 | Function | Returns / errno |
 |---|---|
-| `void *dmesh_alloc(dmesh_conn_t *c, size_t len)` | A pointer to **`len` CONTIGUOUS bytes** at this conn's write head — the DMA source; fill it directly. **Busy-spins** under backpressure (waits for the conn's own TX_ACKs to free ring space). `NULL` if `len==0`, `len` exceeds the per-conn ring (`DPUMESH_CONN_POOL` sets its size), or the conn is not established. |
+| `void *dmesh_alloc(dmesh_conn_t *c, size_t len)` | A pointer to **`len` CONTIGUOUS bytes** at this conn's write head — the DMA source; fill it directly. **Busy-spins** under backpressure (waits for the conn's own TX_ACKs to free a block). `NULL` if `len==0`, `len` exceeds `block_size` (`DPUMESH_TX_BLOCK`, the max contiguous message), or the conn is not established. |
 | `int dmesh_commit(dmesh_conn_t *c, size_t len)` | Finalize `len` (**≤ the alloc'd len**) bytes as committed data, ready for `dmesh_flush`. Returns `0`. Commit *less* than you alloc'd to send a short message; the unused tail is reclaimed. |
 
 ```c
@@ -193,7 +195,8 @@ size_t got = 0; while (got < want) { ssize_t n = dmesh_read(c, buf+got, want-got
 > whole connection pins to one backend and the DMAs stay in send order (the LD_PRELOAD shim pins
 > every conn, §7). Unpinned + multi-backend, a large payload's DMAs may land on different backends —
 > use a connection-level pin, or frame at a granularity ≤ 8 KB. (A single `dmesh_write` larger than
-> the per-conn ring, 128 KB by default, needs an intervening `dmesh_flush` to drain the ring.)
+> the per-conn in-flight cap — `DPUMESH_TX_MAXB × block_size`, 256 KB by default — needs an
+> intervening `dmesh_flush` to drain committed bytes.)
 
 **Lifecycles:**
 ```
@@ -453,15 +456,16 @@ recompile, no source change:
 ```sh
 # backend: its listen(<port>) becomes a dmesh service listener
 LD_PRELOAD=libdmesh_preload.so DMESH_PRELOAD_LISTEN=9095 DMESH_PRELOAD_SVC=15  ./my_server 9095
-# client: connect()s to the mapped port are routed over DPUmesh
-LD_PRELOAD=libdmesh_preload.so DMESH_PRELOAD_MAP=9095=15                       ./my_client host 9095
+# client: connect() to a registry ClusterIP:port is routed over DPUmesh
+LD_PRELOAD=libdmesh_preload.so DMESH_PRELOAD_REGISTRY=/etc/dpumesh/registry    ./my_client 10.96.0.15 9095
 ```
 
 | env | meaning |
 |---|---|
 | `DMESH_PRELOAD_LISTEN=<port>` | `listen()` on this TCP port becomes the dmesh service listener |
 | `DMESH_PRELOAD_SVC=<svc>` | the service this process advertises (required with `LISTEN`) |
-| `DMESH_PRELOAD_MAP=<port>=<svc>[,…]` | `connect()`s to these TCP ports go over dmesh |
+| `DMESH_PRELOAD_REGISTRY=<file>` | control-plane registry, lines `ClusterIP:port svc`: `connect()` to a listed **ClusterIP:port** is routed to that service — the Envoy xDS/EDS equivalent (a static file today; controller-fed later). Keyed on IP:port, so same-port services on distinct ClusterIPs resolve apart. `getpeername()` on the conn then returns that ClusterIP:port (not `127.0.0.1`). |
+| `DMESH_PRELOAD_MAP=<port>=<svc>[,…]` | legacy port-only rule (any IP on that port → dmesh); superseded by `REGISTRY`'s ClusterIP key |
 | `DMESH_PRELOAD_DEBUG=1` | per-connection diagnostics on stderr |
 
 **How it works.** When a socket becomes dmesh-backed, the shim `dup2()`s a private
@@ -479,7 +483,7 @@ connections.
 ```
   UNMODIFIED app                     libdmesh_preload.so (interposes libc)          DPUmesh
   ══════════════                     ════════════════════════════════════          ═══════
-  connect(fd, port)  ──intercept──▶  port ∈ MAP?  dmesh_connect(svc) + pin_route
+  connect(fd, ip:port) ─intercept──▶ ip:port ∈ registry?  dmesh_connect(svc) + pin_route
   listen(port)       ──intercept──▶  port == LISTEN?  advertise service SVC
         fd  ◀───────── dup2() a private eventfd OVER the app's fd number ──────────┐
         │            (fd stays a REAL kernel fd → epoll/poll/select/close/dup work  │
@@ -633,23 +637,25 @@ changes**.
 
 Most data-plane tuning is **compiled in** at the values measured as best; the runtime env knobs are
 `DPUMESH_PROXY` + `DPUMESH_PROXY_FRAME_SVC` + `DPUMESH_PROXY_L7_SVC` (§8), `DPUMESH_ARM_EGRESS_THREADS`
-+ `DPUMESH_RINGS_PER_POD` (table below), `DPUMESH_PCI_ADDR`, `DPUMESH_SERVICE_ID`, `DPUMESH_CONN_POOL`
-(§1), and the `DMESH_PRELOAD_*` shim vars (§7). **To change a *baked* value, edit the named
-constant/assignment and rebuild** (no env override).
++ `DPUMESH_DPA_THREADS` + `DPUMESH_RINGS_PER_POD` (table below), `DPUMESH_PCI_ADDR`, `DPUMESH_SERVICE_ID`,
+`DPUMESH_TX_BLOCK` / `DPUMESH_TX_MAXB` / `DPUMESH_TX_H` (§1), and the `DMESH_PRELOAD_*` shim vars (§7).
+**To change a *baked* value, edit the named constant/assignment and rebuild** (no env override).
 
 | Setting | Baked value | Constant / assignment | File |
 |---|---|---|---|
 | TX/RX slots per pod | `4096` | `DPUMESH_NUM_SLOTS_DEFAULT` → `ctx->num_slots` | `dmesh_core.h` / `dmesh_core.c` |
 | Slot size (max wire DMA) | `8192` (8 KB — DPA `dma_copy` cap) | `DPUMESH_SLOT_SIZE_DEFAULT` → `ctx->slot_size` | `dmesh_core.h` / `dmesh_core.c` |
-| Per-conn TX rings (max concurrent conns) | `256` (128 KB byte-ring each) | `DPUMESH_CONN_POOL` env → `ctx->conn_pool` | `dmesh_core.c` |
-| DPA EU threads (N) | `4` | `objs->num_dpa_threads = 4` | `doca/dpu_worker.c` |
+| Per-conn TX elastic block chain | `block_size 64 KB`, `maxb 4` (≤ 256 KB/conn), pool `n_blocks 512`, `cushion_h 1` | `DPUMESH_TX_BLOCK` / `_TX_MAXB` / `_TX_H` env → `ctx->block_size`/`maxb`/`cushion_h` | `dmesh_core.c` |
+| DPA EU threads (N) | **auto-detected** = min(device EUs, `MAX_DPA_EU`=8); BF3 → `8` | `DPUMESH_DPA_THREADS` env → `num_dpa_threads` | `doca/dpa.c` |
+| Concurrent meshed pods / DPU | live cap `MAX_DPA_RINGS × N / K` (BF3 → `32`); `pods[]` array `MAX_DPA_RINGS × MAX_DPA_EU / K` | `dmesh_common.h` + `doca/comch_server.c` |
 | Forward rings per pod / EU-sharding (K) | `2` — env `DPUMESH_RINGS_PER_POD` | `DPUMESH_RINGS_PER_POD_DEFAULT` → `k_rings` | `dmesh_common.h` (DPU + host) |
 | ARM SG-DMA egress workers (n_eng) | `1` — env `DPUMESH_ARM_EGRESS_THREADS` (use `2`) | `getenv` → `px->n_eng` | `doca/dpu_proxy.c` |
 | DPU main loop | event-driven epoll (busy-poll auto-fallback on setup failure) | — (literal path) | `doca/dpu_worker.c` |
 | Host RX (PE) thread | sleep on the notification fd | `want_epoll = 1` | `dmesh_core.c` |
 | Proxy seam cap (max contiguous parser view) | `512 KB` | `PX_SEAM_MAX_DEFAULT` | `doca/dpu_proxy.c` |
 
-Constraints when changing: `K ≤ N ≤ 8` (`MAX_DPA_RINGS`); the **host's K must equal the DPU's K**
-(forward rings pair 1:1); `slot_size ≤ 8192` (the DPA limit). `num_slots × slot_size` is the per-pod
-staging size (4096 × 8 KB = 32 MB). A programmatic `dpumesh_config` still overrides
-`num_slots`/`slot_size` at `dmesh_create_channel` without a rebuild.
+Constraints when changing: `K ≤ N ≤ MAX_DPA_EU` (8); each EU holds `MAX_DPA_RINGS` (8) forward rings, so
+concurrent meshed pods are capped at `MAX_DPA_RINGS × N / K` — going past that needs a bigger `MAX_DPA_EU` +
+`MAX_DPA_RINGS` (a DPA-kernel change). The **host's K must equal the DPU's K** (forward rings pair 1:1);
+`slot_size ≤ 8192` (the DPA limit); `num_slots × slot_size` is the per-pod staging (4096 × 8 KB = 32 MB).
+A programmatic `dpumesh_config` still overrides `num_slots`/`slot_size` at `dmesh_create_channel` without a rebuild.

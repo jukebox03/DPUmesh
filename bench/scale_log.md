@@ -4255,3 +4255,128 @@ elastic design is strictly more headroom (2× the old per-conn in-flight at the 
 Restarting pods to swap the host lib WITHOUT restarting the DPU corrupts the DPU pod table
 (`pods_register: connection not found` flood → routing dead). The mounted-lib fast path is unusable for
 host-lib changes; a full `bench/bench.sh deploy` (which restarts the DPU) is required each time.
+
+# 2026-07-13 — P0 transparency: LD_PRELOAD ClusterIP registry resolve + getpeername truth — IMPLEMENTED + HW-VALIDATED
+
+Shim P0 of the transparency plan (design report's P0): make the LD_PRELOAD shim key `connect()` on
+**ClusterIP:port** (not port alone) via a control-plane-fed **registry**, and make `getpeername` TRUTHFUL —
+the Envoy xDS/EDS equivalent as a static file (controller-fed later = P1). **HOST-ONLY, shim-only**
+(`src/dmesh_preload.c`); `dmesh_core.c` / the elastic block allocator **UNTOUCHED**.
+
+## What changed
+- `src/dmesh_preload.c`: port-only `map_lookup` → unified `(IP,port)->svc` route table, ONE lookup, two
+  sources — new `DMESH_PRELOAD_REGISTRY=<file>` (lines `ClusterIP:port svc`, exact) + legacy
+  `DMESH_PRELOAD_MAP=port=svc` (addr 0 = wildcard). Exact (addr,port) beats wildcard ⇒ same-port services
+  on distinct ClusterIPs resolve apart (fixes the "IP discarded" bug). `connect()` keys on `sin_addr:port`;
+  the dialed IP is stored (`pfd.paddr`) so `getpeername` returns the real ClusterIP:port, not 127.0.0.1.
+  `getsockname` still loopback (real pod IP = P1); server-side real client id = P1 (needs the controller).
+- Test wiring: `preload_runner.c` writes a static registry + dials synthetic ClusterIP 10.96.0.15;
+  `tcp_client.c` got a non-fatal getpeername truth-check. Docs: API.md §7 (+ §1/§3/§9 CONN_POOL→block
+  model), CORE.md §6.
+
+## HW validation (clean deploy, `ARM_EGRESS_THREADS=2`, registry path) — 0-fail
+| test | result |
+|---|---|
+| preload 5000×1KB×8 (ClusterIP→registry→svc15) | 5000/0 · p50 122µs · 18K rps |
+| preload 20000×1KB×32 (conn churn) | 20000/0 · p50 247µs · 80K rps |
+| getpeername (pod log) | `getpeername -> 10.96.0.15:9095 (MATCHES dialed addr)` |
+Passed on BOTH the pre-refactor core (83fbc20+P0) and HEAD (a202796+P0); byte-exact.
+
+## ★ CORRECTION — a false-alarm "regression" I chased (recorded so nobody repeats it)
+During P0 testing, two consecutive a202796 deploys had preload TIME OUT 100% while loopback passed. I
+bisected (83fbc20 preload 5000/0 vs a202796 preload 0/N) and WRONGLY concluded the elastic-block buffer
+refactor broke the shim. **It did NOT.** Three independent disproofs:
+1. a202796 is HOST-ONLY (0 `doca/` lines) ⇒ it CANNOT cause the DPU-side `setup_pod_dma`/`ADD_RING`
+   ring-setup failure that broke deploy #1 (that error is in deploy #1's DPU log).
+2. A later clean a202796 deploy passed preload 5+ consecutive (2000/0, 3000/0×3) + native cross-pod RPC
+   fail=0 + loopback 3000/0.
+3. The buffer refactor's OWN entry above already validated `preload 2000×1KB×32c = 2000/0` on a202796.
+The bisect was 2 samples/side of a PER-DEPLOY flaky phenomenon (the DPU comes up good or bad; see the
+"Test-methodology note" above — register / stale-upstream / ring-setup flakes at bring-up). **Lesson: for a
+per-deploy flake, N=2/side is not a bisect.** The real open issue is DPU **bring-up robustness**
+(`setup_pod_dma` `ADD_RING` flake under the registration burst / `MAX_PODS` pressure) — DPU-side +
+environmental, NOT the host buffer code.
+
+## Not done (P1+)
+dpumesh-controller + injection webhook (feed the registry, self-identity); the review's real blocker
+`MAX_PODS=8` (whole-mesh node cap — hit directly this session as the pod-6 `setup_pod_dma` failure).
+
+# 2026-07-13 — MAX_PODS 8 → 16 (concurrent-meshed-pods-per-node cap raised) — HW-VALIDATED
+
+The review + the "dynamic K8s" discussion surfaced this as the real blocker for K8s use: `MAX_PODS=8`
+caps how many pods can be **concurrently meshed per DPU (node)**. Real K8s nodes run 30–110 pods. The
+pod add/remove/reuse **churn lifecycle is already implemented** (`comch_server.c` `pods_add_connection`
+on Comch connect / `pods_remove_connection` on disconnect / freed-slot reuse) and the data plane already
+self-heals on backend death — so **capacity, not churn, was the gap**. One-line change:
+`include/dpumesh/dmesh_common.h` `MAX_PODS 8 → 16`. **DPU proxy logic (`dpu_proxy.c`/`dpu_l7.c`) untouched.**
+
+## Why 16 is the exact ceiling (no DPA-kernel change)
+- **Forward-ring capacity is the binding constraint.** Each EU holds `rings[MAX_DPA_RINGS=8]`
+  (`dpa_common.h`); ring j of pod p lands on EU `(p*K + j) % N`. With K=2 (default), N=4 EUs, one EU
+  holds `ceil(MAX_PODS/2)` rings → must be ≤ 8 → **MAX_PODS ≤ 16**. (>16 needs a bigger `MAX_DPA_RINGS`
+  = a DPA-kernel change; deferred.)
+- **Wire-safe**: `pod_id` is int8, `_Static_assert(MAX_PODS <= 127)` in `dpa_common.h` passes.
+- **No memory blow-up**: DPU staging is `alloc`'d PER registration (`setup_pod_dma`, 32 MB/live-pod), not
+  preallocated ×MAX_PODS. Proxy pools (`PX_ARRIVAL_POOL = MAX_PODS×4096`, `lanes[MAX_PODS][8]`) are heap
+  (`calloc`) and just ~2× (a few MB on the 16 GB ARM).
+
+## HW validation (clean deploy, `ARM_EGRESS_THREADS=2`, `echo-dpumesh` scaled to 7 replicas → 12 pods)
+| check | result |
+|---|---|
+| pod_id assignment past the old cap | echo replicas got **pod_id 8, 9, 10, 11** (would be `table full (8)` before); +preload client = pod 12/13 |
+| 12 concurrent dmesh pods | all Ready; DPU log **0** `table full` / `setup_pod_dma` / `ADD_RING failed` |
+| native RPC conc=32 (svc 11, 7+ backends) | **fail=0** · 826K reqs · 165K mrps · p50 178µs |
+| loopback (self, pod 4) | **3000/0** |
+| P0 shim (preload) at scale | **3000/0** |
+| churn-at-scale: delete a backend mid-run → RPC | **fail=0** · 361K reqs · no wedge (DPU 0 BAD_STATE/IDLE) |
+
+## Next lever (for real node density > 16)
+Raise `MAX_DPA_RINGS` (per-EU ring array, `dpa_common.h` `rings[]` + `device/dpa_kernel.c`
+`num_rings < MAX_DPA_RINGS`) — a DPA-kernel change; `dpa_ring_info` is ~60 B packed metadata so per-EU
+memory cost is small, but it touches the dpacc-built DPA and needs its own HW validation.
+
+## Follow-up refactor (same day) — single-sourced the tangled DPA/pod constants
+The capacity constants were declared as separate magic numbers; unified them (one source, the rest DERIVE)
+— `dpu_proxy.c`/`dpu_l7.c` (proxy logic) untouched:
+- **`MAX_DPA_EU`** (max EU threads = `dpa_threads[]` array cap) split OUT of **`MAX_DPA_RINGS`** (per-EU
+  ring capacity) — the same `8` was doing double duty (`dpa_threads[MAX_DPA_RINGS]`).
+- **N** (`num_dpa_threads`) was hardcoded `= 4` in TWO places (dpa.c, dpu_worker.c) → one
+  `DPA_THREADS_DEFAULT` + env **`DPUMESH_DPA_THREADS`** (default 4, clamped to `MAX_DPA_EU`), mirroring the
+  existing K env `DPUMESH_RINGS_PER_POD`.
+- **`MAX_PODS`** magic `16` → **derived** `MAX_DPA_RINGS * MAX_DPA_EU / K = 32` (the pods[] array, sized for
+  the max-EU config).
+- The cap is now a **runtime LIVE cap** in `pods_add_connection`:
+  `min(MAX_PODS, MAX_DPA_RINGS * num_dpa_threads / k_rings)` — so raising `DPUMESH_DPA_THREADS` raises
+  capacity with NO recompile. Default N=4 ⇒ live cap 16 (== the 8→16 raise above; no behavior change).
+
+HW-validated (clean deploy, N=4 default): **no regression** — 12 pods (pod_id 6–11) + RPC/loopback all
+0-fail; the runtime cap fires correctly past 16 with the self-documenting log
+`table full (live cap 16 = 8 rings × 4 EU / 2 K)`; gentle 10-pod scale 0-fail after redeploy.
+
+⚠ Observation (NOT the refactor): an AGGRESSIVE test — scale echo `1→14` then abruptly `→1` (13 SIMULTANEOUS
+terminations) — triggered `px_dma_err_cb: SG-DMA batch failed (pod slot 8)` in `dpu_proxy.c` (egress,
+untouched) and wedged routing until redeploy. Single/gentle churn is fine (cf. the backend-death fix
+earlier); **13-at-once is a heavy-churn egress edge worth hardening before high-churn production.**
+
+## Auto-detect N (EU count) — DONE + HW-VALIDATED
+N (DPA EU threads) is now AUTO-DETECTED from the device instead of a hardcoded default:
+`doca_dpa_get_total_num_eus_available()` in `init_dpa_objects` (dpa.c) → N = min(available, MAX_DPA_EU);
+env `DPUMESH_DPA_THREADS` still overrides; K clamped to N; EU-thread containers alloc'd at MAX_DPA_EU so N
+can grow post-detect (`dpa_threads_auto` flag = auto vs env). HW: **BF3 reports 254 EUs → N=8** (capped at
+MAX_DPA_EU=8), so the live pod cap auto-rose to `MAX_DPA_RINGS*N/K = 8*8/2 = `**32**. Validated: pod_ids to
+16 registered (>the old N=4 cap of 16), RPC 0-fail with 17 pods, no ring errors, gradual churn 0-fail.
+`dpu_proxy.c`/`dpu_l7.c` untouched.
+
+## ★ Egress mass-death self-heal — ATTEMPTED, DOES NOT WORK (recorded so nobody retries it the same way)
+The 13-at-once wedge (above) is `px_dma_err_cb: SG-DMA batch failed ... Input/Output Operation Failed` —
+in-flight SG-DMA to a torn-down host RX mmap (the dead pod's process exited → its PCI-mapped memory is gone).
+Tried: on the ctx fault, self-heal the engine's `doca_dma` ctx via `doca_ctx_stop` → progress-to-IDLE →
+`doca_ctx_start` (instead of the permanent `dma_stalled` stall). **It FAILS:** the failed DMA tasks are HUNG
+at the hardware level (a DMA to unmapped memory never completes), so `doca_ctx_stop` can't drain them — DOCA
+logs `can't destroy memcpy tasks pool, will remain in stopping state until all tasks are freed` forever, the
+ctx never reaches IDLE, `doca_ctx_start` never runs, and the recover spins (worse than the quiet stall). The
+original code's `dma_stalled` + "needs [process] restart" was literally correct: **a hung DMA is
+unrecoverable via ctx stop/start.** REVERTED (dpu_proxy.c untouched). The real fix must be **PREVENTION** —
+bound in-flight DMA per pod (fewer hung ops on a mass death) and/or a per-pod `doca_dma` ctx so one dead pod
+can't hang the shared engine — or accept the operational limit (redeploy clears it; single/moderate churn
+≤~6-at-once tested fine; only ~13+ simultaneous terminations wedge).

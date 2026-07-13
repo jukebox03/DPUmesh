@@ -19,7 +19,7 @@ and **DMA** for bodies. The **DPA is forward-only** (host→DPU staging); the **
 ```
  HOST src                         BlueField DPU                              HOST dst
  ════════                         ═════════════                             ════════
- write→byte-ring ─┐   ┌─ DPA EU (N=4, forward-only) ─┐  ┌─ ARM (1 control thread) ──┐
+ write→byte-ring ─┐   ┌─ DPA EU (N≤8, forward-only) ─┐  ┌─ ARM (1 control thread) ──┐
  flush → K fwd    ├──▶│ dma_copy host→DPU staging     │  │ comp_queue → dpu_proxy:   │
  rings (Vyukov    │   │ (≤8KB, 20B completion imm)    │  │  window→parser→conntrack  │
  MPSC, src%K)     ┘   └───────────────────────────────┘  │  →per-(dst,region) lane   │
@@ -167,9 +167,10 @@ One 1-producer/1-consumer Comch channel **per EU**, all draining into the DPU's 
 
 ## 3. DPA data plane — forward-only (`device/dpa_kernel.c` + `dpa.c`)
 
-**N = 4** EU threads share one `doca_dpa` device; each is pinned to a distinct EU. A pod exports **K**
-forward rings, ring `j` landing on EU `(pod_id·K + j) % N` — so a 2-pod pair drives all 4 EUs, and a
-conn's ring (`src_port % K`) selects its EU. `dpa.c` wires each ring's `dpa_ring_info` (buf_arr, host TX
+**N** EU threads (**auto-detected** = min(device EUs, `MAX_DPA_EU`=8) — BF3 reports 254 → **N=8**;
+`DPUMESH_DPA_THREADS` overrides) share one `doca_dpa` device; each is pinned to a distinct EU. A pod exports
+**K** forward rings, ring `j` landing on EU `(pod_id·K + j) % N`, and a conn's ring (`src_port % K`) selects
+its EU. `dpa.c` wires each ring's `dpa_ring_info` (buf_arr, host TX
 mmap+base, DPU staging mmap+base) and hands it to the EU via `RING_ADD` or an h2d memcpy.
 
 **EU kernel loop** (`run_dma_manager`): drain DPU→DPA msgs → poll all forward rings → drain producer
@@ -236,9 +237,11 @@ translated `uP → client_port` before sending, or the client's bytes leak. A cl
 and its reuse HT entry.
 
 ### 4.4 Pod registration, teardown & batching
-`pods[MAX_PODS=8]`; a registering conn is assigned `pod_id =` its slot index (RELEASE-published after
-its fields; `dma_ready` is a separate later gate for the data plane). Slots are stable (never compacted)
-and **reused** on a later connect. Per-pod ACK/REV_DONE **batches** (`txack_batch[≤14]`,
+`pods[MAX_PODS]` (array = `MAX_DPA_RINGS × MAX_DPA_EU / K`, sized for the max EU config); a registering conn
+is assigned `pod_id =` its slot index (RELEASE-published after its fields; `dma_ready` is a separate later
+gate for the data plane). Slots are stable (never compacted) and **reused** on a later connect. The LIVE
+concurrent-pod cap (`pods_add_connection`) is `MAX_DPA_RINGS × N / K` — the forward-ring capacity for the
+running (auto-detected) N — so it grows with N: BF3 N=8 ⇒ 32. Per-pod ACK/REV_DONE **batches** (`txack_batch[≤14]`,
 `rev_done_batch[≤16]`) coalesce so the host PE reaps one message per K responses (the host per-RTT reap
 is the 2-pod throughput cap); flushed on full or on the idle drain.
 
@@ -271,8 +274,13 @@ only destination resolution differs.
 - **Backend death mid-flight.** If a destination pod disconnects while units are queued/in-flight, its
   lane is drained (`px_lane_drop_dead` → done-queue, custody released, no delivery) and its `host_rx_mmap`
   is kept alive until slot reuse (§4.4) so the in-flight SG-DMA finishes without faulting the engine ctx.
-  A `doca_dma` `BAD_STATE` still sets `eng->dma_stalled` (stop submitting) rather than retry-spinning +
-  flooding. The LB meanwhile routes new traffic only to live backends — a backend death is not a wedge.
+  A `doca_dma` `BAD_STATE` sets `eng->dma_stalled` (stop submitting) rather than retry-spinning. The LB
+  meanwhile routes new traffic only to live backends — a single/moderate death is not a wedge.
+  **Limitation (high-churn):** a MASS simultaneous death (≳13 pods at once) can leave enough in-flight
+  SG-DMA to torn-down host RX memory that one DMA **hangs** at the hardware level; the hung task poisons the
+  engine's shared `doca_dma` ctx and `doca_ctx_stop` cannot drain it — so that engine wedges until the DPU
+  process restarts. A ctx restart cannot recover a hung DMA; the real fix is prevention (bound in-flight DMA
+  per pod, or a per-pod ctx). Single/moderate churn (≤ ~6-at-once) is unaffected.
 - **Egress.** A receiving conn always lands in **one lane** `[dst_pod][region = dst_port % K]` (FIFO), so
   delivery order = segment order. A lane's units are gathered into **one chained-source `doca_dma`**
   (SG) copy: DPU staging → the destination host's RX buffer, then a batched `REV_DONE` notify. Chunks
@@ -304,14 +312,16 @@ append-only phase-2 fields of the decision struct.
 ## 6. LD_PRELOAD shim (`src/dmesh_preload.c`)
 
 Runs an unmodified, dynamically-linked POSIX socket app over DPUmesh by interposing libc. The keystone:
-when a socket becomes dmesh-backed (`connect` to a mapped port, or `listen` on the advertised port), the
+when a socket becomes dmesh-backed (`connect` to a registry `ClusterIP:port`, or `listen` on the advertised port), the
 shim **`dup2`s a private eventfd over the app's fd number** — the fd stays a real kernel fd, so
 `epoll`/`poll`/`select`/`close`/`dup` work **natively** (kernel-TCP and dmesh fds share one epoll set,
 zero interposition of the readiness syscalls). `read`/`write`/`send`/`recv` route to `dmesh_read` /
 `dmesh_write`+`dmesh_flush`. A single **dispatcher thread** is the channel's sole `dmesh_accept` /
 `dmesh_next_ready` consumer and sole `dmesh_close` caller (app `close` only queues) — it asserts each
 conn's eventfd on delivery. Every client conn is `dmesh_pin_route`d (one backend, in-order — the socket
-contract). Blocking is emulated (`SO_RCVTIMEO` honored). **Lost-wakeup discipline** bridges the
+contract). `connect` keys on the registry `ClusterIP:port` (not port alone), so same-port services on
+distinct ClusterIPs resolve apart, and `getpeername` returns that dialed address (not `127.0.0.1`).
+Blocking is emulated (`SO_RCVTIMEO` honored). **Lost-wakeup discipline** bridges the
 edge-triggered dmesh ready list to level-triggered POSIX readiness: over-assert the eventfd on every
 successful read, drain-and-retry-once on `EAGAIN`. `shutdown(SHUT_WR)` sends the FIN
 (`dmesh_send_fin`) — an approximate half-close (late replies are undeliverable). Limits: AF_INET
@@ -338,7 +348,9 @@ successful read, drain-and-retry-once on `EAGAIN`. `shutdown(SHUT_WR)` sends the
 
 ## 8. Baked sizing (see API.md §9 for the full env/knob table)
 `num_slots = 4096`, `slot_size = 8192` (32 MB TX/RX/staging per pod); TX blocks `block_size = 64 KB`
-(pool of `n_blocks = 512`), `maxb = 4` (≤ 256 KB in-flight/conn), `cushion_h = 1`; `N = 4` DPA EUs;
-`K = 2` forward rings/pod; `n_eng = 2` ARM egress workers;
-`PX_HEAD_MAX = 4 KB`, `PX_SEAM_MAX = 512 KB`. `DPU_BUFFER_SIZE`, `slot_size`, and `K` are the constrained
-ones (§7). A programmatic `dpumesh_config` overrides `num_slots`/`slot_size` without a rebuild.
+(pool of `n_blocks = 512`), `maxb = 4` (≤ 256 KB in-flight/conn), `cushion_h = 1`; `N` DPA EUs
+**auto-detected** = min(device EUs, `MAX_DPA_EU=8`) (BF3 → 8; `DPUMESH_DPA_THREADS` overrides);
+`K = 2` forward rings/pod; per-EU ring cap `MAX_DPA_RINGS = 8` ⇒ concurrent pods ≤ `MAX_DPA_RINGS × N / K`
+(BF3 → 32); `n_eng = 2` ARM egress workers; `PX_HEAD_MAX = 4 KB`, `PX_SEAM_MAX = 512 KB`. `DPU_BUFFER_SIZE`,
+`slot_size`, and `K` are the constrained ones (§7). A programmatic `dpumesh_config` overrides
+`num_slots`/`slot_size` without a rebuild.

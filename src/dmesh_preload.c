@@ -14,7 +14,14 @@
  *                                        dmesh service listener
  *   DMESH_PRELOAD_SVC=<svc>              service_id this process advertises
  *                                        (required with LISTEN; absent = pure client)
- *   DMESH_PRELOAD_MAP=<port>=<svc>[,..]  connect() to these TCP ports → dmesh
+ *   DMESH_PRELOAD_REGISTRY=<file>        control-plane registry, lines "ClusterIP:port
+ *                                        svc": connect() to a listed ClusterIP:port is
+ *                                        routed to that service — the Envoy xDS/EDS
+ *                                        equivalent (a static file for P0, controller-fed
+ *                                        later). Keyed on IP:port, so same-port services
+ *                                        on distinct ClusterIPs resolve apart.
+ *   DMESH_PRELOAD_MAP=<port>=<svc>[,..]  legacy port-only rule (any IP on that port →
+ *                                        dmesh); superseded by REGISTRY's ClusterIP key
  *   DMESH_PRELOAD_DEBUG=1                stderr diagnostics
  *
  * FD REALIZATION — the design keystone: when a socket becomes dmesh-backed, the
@@ -69,6 +76,7 @@
 #include <sys/uio.h>
 #include <sys/sendfile.h>
 #include <netinet/in.h>
+#include <arpa/inet.h>
 
 #include <dpumesh/dmesh.h>
 
@@ -126,16 +134,55 @@ static void resolve_all(void) {
 
 /* ============================ configuration ============================ */
 
-#define PRELOAD_MAX_MAP 16
+#define PRELOAD_MAX_MAP 64
 
 static int      g_debug;
 static int      g_listen_port = -1;      /* DMESH_PRELOAD_LISTEN */
 static int      g_svc         = -12345;  /* DMESH_PRELOAD_SVC (sentinel = unset) */
-static int      g_map_n;
-static uint16_t g_map_port[PRELOAD_MAX_MAP];
-static int      g_map_svc[PRELOAD_MAX_MAP];
+
+/* connect() routing table: (dst IP:port) -> service_id. ONE lookup, two sources:
+ * DMESH_PRELOAD_REGISTRY (a control-plane-fed file — the Envoy xDS/EDS equivalent)
+ * gives exact ClusterIP:port -> svc; legacy DMESH_PRELOAD_MAP=port=svc gives a
+ * port-only rule (addr 0 = any IP). Exact (addr,port) beats a wildcard, so keying
+ * on the ClusterIP lets same-port services on distinct IPs resolve apart. */
+struct route_ent { uint32_t addr; uint16_t port; int svc; };   /* addr net-order; 0 = any IP */
+static int              g_route_n;
+static struct route_ent g_route[PRELOAD_MAX_MAP];
 
 #define DBG(...) do { if (g_debug) { fprintf(stderr, "[dmesh_preload] " __VA_ARGS__); fputc('\n', stderr); } } while (0)
+
+static void route_add(uint32_t addr, uint16_t port, int svc) {
+    if (g_route_n < PRELOAD_MAX_MAP)
+        g_route[g_route_n++] = (struct route_ent){ addr, port, svc };
+}
+
+/* Resolve a connect() dst. Exact IP:port wins; a wildcard (addr 0, from MAP) matches
+ * any IP on that port; -1 = not meshed (the connect stays kernel TCP). */
+static int route_lookup(uint32_t addr, uint16_t port) {
+    int wild = -1;
+    for (int i = 0; i < g_route_n; i++) {
+        if (g_route[i].port != port) continue;
+        if (g_route[i].addr == addr) return g_route[i].svc;
+        if (g_route[i].addr == 0)    wild = g_route[i].svc;
+    }
+    return wild;
+}
+
+/* Load the registry file: lines "IP:port svc" (blank / non-IP lines — e.g. '#'
+ * comments — fail the parse and skip). P0 stand-in for the dpumesh-controller
+ * feed; P1 swaps the file for a live source behind the SAME table. */
+static void route_load_registry(const char *path) {
+    FILE *f = fopen(path, "r");
+    if (!f) { DBG("registry %s: %s", path, strerror(errno)); return; }
+    char ln[256], ip[64]; int port, svc;
+    while (fgets(ln, sizeof ln, f)) {
+        struct in_addr a;
+        if (sscanf(ln, " %63[^:]:%d %d", ip, &port, &svc) == 3 &&
+            inet_pton(AF_INET, ip, &a) == 1)
+            route_add(a.s_addr, (uint16_t)port, svc);
+    }
+    fclose(f);
+}
 
 __attribute__((constructor))
 static void preload_ctor(void) {
@@ -146,22 +193,13 @@ static void preload_ctor(void) {
     if ((e = getenv("DMESH_PRELOAD_MAP"))) {
         char buf[512]; strncpy(buf, e, sizeof buf - 1); buf[sizeof buf - 1] = 0;
         for (char *save = NULL, *tok = strtok_r(buf, ",", &save);
-             tok && g_map_n < PRELOAD_MAX_MAP; tok = strtok_r(NULL, ",", &save)) {
+             tok; tok = strtok_r(NULL, ",", &save)) {
             char *eq = strchr(tok, '=');
-            if (!eq) continue;
-            *eq = 0;
-            g_map_port[g_map_n] = (uint16_t)atoi(tok);
-            g_map_svc[g_map_n]  = atoi(eq + 1);
-            g_map_n++;
+            if (eq) { *eq = 0; route_add(0, (uint16_t)atoi(tok), atoi(eq + 1)); }
         }
     }
-    DBG("ctor: listen=%d svc=%d map_n=%d", g_listen_port, g_svc, g_map_n);
-}
-
-static int map_lookup(uint16_t port) {
-    for (int i = 0; i < g_map_n; i++)
-        if (g_map_port[i] == port) return g_map_svc[i];
-    return -1;
+    if ((e = getenv("DMESH_PRELOAD_REGISTRY"))) route_load_registry(e);
+    DBG("ctor: listen=%d svc=%d routes=%d", g_listen_port, g_svc, g_route_n);
 }
 
 /* ============================== fd table =============================== */
@@ -179,7 +217,10 @@ typedef struct pfd {
     int  closing;              /* queued for dispatcher dmesh_close */
     long rcv_timeout_ms;       /* SO_RCVTIMEO; 0 = block forever */
     uint16_t lport;            /* synthesized getsockname port */
-    uint16_t pport;            /* synthesized getpeername port */
+    uint16_t pport;            /* getpeername port */
+    uint32_t paddr;            /* getpeername IP (net-order); 0 = synthesize loopback.
+                                * A CLIENT stores the real dialed ClusterIP here; a
+                                * SERVER/accepted conn keeps 0 (real client id is P1). */
     pthread_mutex_t mu;
     struct pfd *q_next;        /* accept- / close-queue linkage */
 } pfd_t;
@@ -563,9 +604,9 @@ static ssize_t shim_send(pfd_t *e, const void *buf, size_t len, int flags) {
 int connect(int fd, const struct sockaddr *addr, socklen_t alen) {
     ENSURE_REAL();
     if (pfd_get(fd)) { errno = EISCONN; return -1; }
-    if (g_map_n > 0 && addr && addr->sa_family == AF_INET && alen >= sizeof(struct sockaddr_in)) {
+    if (g_route_n > 0 && addr && addr->sa_family == AF_INET && alen >= sizeof(struct sockaddr_in)) {
         const struct sockaddr_in *sin = (const struct sockaddr_in *)addr;
-        int svc = map_lookup(ntohs(sin->sin_port));
+        int svc = route_lookup(sin->sin_addr.s_addr, ntohs(sin->sin_port));
         if (svc >= 0) {
             /* AF_INET SOCK_STREAM only (design/API.md §7) — a UDP connect() to a mapped
              * port must stay kernel. */
@@ -583,6 +624,7 @@ int connect(int fd, const struct sockaddr *addr, socklen_t alen) {
             int fl = real_fcntl(fd, F_GETFL);
             e->nonblock = (fl >= 0 && (fl & O_NONBLOCK)) ? 1 : 0;
             e->lport = c->local_port;
+            e->paddr = sin->sin_addr.s_addr;       /* real dst → getpeername tells the truth */
             e->pport = ntohs(sin->sin_port);
             c->user_data = e;                      /* before any send → before any ready */
             if (install_fd(fd, e) < 0) {
@@ -976,15 +1018,17 @@ int getsockopt(int fd, int level, int optname, void *val, socklen_t *len) {
     return 0;                                       /* unknown: report "off/disabled" */
 }
 
-static int synth_name(uint16_t port, struct sockaddr *addr, socklen_t *alen) {
-    if (!addr || !alen) { errno = EFAULT; return -1; }
+/* Build a sockaddr_in view. addr==0 → loopback (a synthesized name); a CLIENT conn
+ * passes its real dialed ClusterIP so getpeername is truthful. */
+static int synth_name(uint32_t addr, uint16_t port, struct sockaddr *out, socklen_t *alen) {
+    if (!out || !alen) { errno = EFAULT; return -1; }
     struct sockaddr_in sin;
     memset(&sin, 0, sizeof sin);
     sin.sin_family = AF_INET;
-    sin.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    sin.sin_addr.s_addr = addr ? addr : htonl(INADDR_LOOPBACK);
     sin.sin_port = htons(port);
     socklen_t n = *alen < (socklen_t)sizeof sin ? *alen : (socklen_t)sizeof sin;
-    memcpy(addr, &sin, n);
+    memcpy(out, &sin, n);
     *alen = sizeof sin;
     return 0;
 }
@@ -993,7 +1037,7 @@ int getsockname(int fd, struct sockaddr *addr, socklen_t *alen) {
     ENSURE_REAL();
     pfd_t *e = pfd_get(fd);
     if (!e) return real_getsockname(fd, addr, alen);
-    return synth_name(e->lport, addr, alen);
+    return synth_name(0, e->lport, addr, alen);   /* loopback — real pod IP is P1 */
 }
 
 int getpeername(int fd, struct sockaddr *addr, socklen_t *alen) {
@@ -1001,7 +1045,7 @@ int getpeername(int fd, struct sockaddr *addr, socklen_t *alen) {
     pfd_t *e = pfd_get(fd);
     if (!e) return real_getpeername(fd, addr, alen);
     if (e->listener) { errno = ENOTCONN; return -1; }
-    return synth_name(e->pport, addr, alen);
+    return synth_name(e->paddr, e->pport, addr, alen);
 }
 
 /* ------------------------------- dup calls ----------------------------- */

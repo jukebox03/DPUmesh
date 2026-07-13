@@ -4,9 +4,10 @@
  * Boots the two VANILLA TCP binaries under LD_PRELOAD=libdmesh_preload.so:
  *   tcp_echo   (persistent server; DMESH_PRELOAD_LISTEN + _SVC → advertises the
  *               service, one DPU pod registration at boot)
- *   tcp_client (persistent client daemon driven over stdin; DMESH_PRELOAD_MAP;
- *               one registration at boot — every RUN opens FRESH connections,
- *               so conn churn is tested without burning MAX_PODS slots)
+ *   tcp_client (persistent client daemon driven over stdin; dials the echo
+ *               service's ClusterIP, resolved via DMESH_PRELOAD_REGISTRY; one
+ *               registration at boot — every RUN opens FRESH connections, so conn
+ *               churn is tested without burning MAX_PODS slots)
  * then serves the bench control protocol on CTRL_PORT (plain kernel TCP —
  * the runner itself is NOT preloaded):
  *
@@ -17,7 +18,8 @@
  * restarts the pod into a clean state.
  *
  * env: PRELOAD_LIB (/usr/local/lib/libdmesh_preload.so), ECHO_PORT (9095),
- *      PRELOAD_SVC (15), CTRL_PORT (9092), ECHO_BIN, CLIENT_BIN
+ *      PRELOAD_SVC (15), SVC_IP (10.96.0.15 — the echo service's ClusterIP the
+ *      client dials), CTRL_PORT (9092), ECHO_BIN, CLIENT_BIN
  */
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -82,9 +84,6 @@ int main(void) {
     const char *echo_bin  = env_or("ECHO_BIN", "/usr/local/bin/tcp_echo");
     const char *client_bin= env_or("CLIENT_BIN", "/usr/local/bin/tcp_client");
 
-    char map[64];
-    snprintf(map, sizeof map, "%s=%s", echo_port, svc);
-
     /* echo server (persistent): advertises the service at listen() time */
     const char *echo_env[][2] = {
         { "LD_PRELOAD", lib },
@@ -97,13 +96,23 @@ int main(void) {
     if (echo_pid < 0) { fprintf(stderr, "runner: echo spawn failed\n"); return 1; }
     sleep(2);                          /* channel registration + listen */
 
+    /* Static registry (P0 stand-in for the dpumesh-controller feed): the echo
+     * service's ClusterIP:port -> its service_id. The client dials the ClusterIP;
+     * the shim keys connect() on IP:port (not port alone) and resolves it here. */
+    const char *svc_ip   = env_or("SVC_IP", "10.96.0.15");
+    const char *reg_path = "/tmp/dpumesh_registry";
+    FILE *rf = fopen(reg_path, "w");
+    if (!rf) { fprintf(stderr, "runner: registry open failed\n"); return 1; }
+    fprintf(rf, "%s:%s %s\n", svc_ip, echo_port, svc);
+    fclose(rf);
+
     /* client daemon (persistent, stdin-driven) */
     const char *cli_env[][2] = {
         { "LD_PRELOAD", lib },
-        { "DMESH_PRELOAD_MAP", map },
+        { "DMESH_PRELOAD_REGISTRY", reg_path },
         { NULL, NULL },
     };
-    char *cli_argv[] = { (char *)client_bin, "127.0.0.1", (char *)echo_port, NULL };
+    char *cli_argv[] = { (char *)client_bin, (char *)svc_ip, (char *)echo_port, NULL };
     int cli_in = -1, cli_out = -1;
     pid_t cli_pid = spawn(client_bin, cli_argv, cli_env, &cli_in, &cli_out);
     if (cli_pid < 0) { fprintf(stderr, "runner: client spawn failed\n"); return 1; }

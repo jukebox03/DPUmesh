@@ -1,17 +1,27 @@
 #ifndef DMESH_COMMON_H
 #define DMESH_COMMON_H
 
-/* ====== DOCA / DPA limits ====== */
-#define MAX_DPA_RINGS       8   /* per-EU forward ring capacity */
-#define MAX_PODS            8
+/* ====== DOCA / DPA capacity — single-sourced; the pod cap DERIVES from these ======
+ * Concurrent-pod capacity is bound by forward-ring capacity: ring j of pod p lands on
+ * EU (p*K + j) % N (dpa.c), so the busiest EU holds ceil(MAX_PODS*K / N) rings, which
+ * must be <= MAX_DPA_RINGS. N (EU threads) is the driving knob — env DPUMESH_DPA_THREADS,
+ * default DPA_THREADS_DEFAULT, clamped to MAX_DPA_EU; K is DPUMESH_RINGS_PER_POD, default
+ * DPUMESH_RINGS_PER_POD_DEFAULT. A pod shards across at most min(K, N) EUs. */
+#define MAX_DPA_EU          8   /* max DPA EU threads: array cap (dpa_threads[]) + the N clamp */
+#define MAX_DPA_RINGS       8   /* per-EU forward-ring capacity (rings[] per EU) */
+#define DPA_THREADS_DEFAULT 4   /* default N (measured config); env DPUMESH_DPA_THREADS overrides */
+#define DPUMESH_RINGS_PER_POD_DEFAULT 2   /* default K; env DPUMESH_RINGS_PER_POD */
+#define MAX_EU_PER_POD      MAX_DPA_RINGS  /* per-pod ring array (a pod spans <= K <= this EUs) */
 
-/* EU-sharding: a pod spreads its forward traffic across K rings, each on
- * a distinct EU, so a 2-pod pair can drive >2 EUs. K = DPUMESH_RINGS_PER_POD.
- * Default 2 = the measured production config (K=2 drives 4 EUs for a 2-pod pair);
- * set to 1 for the legacy single-ring-per-pod path. MAX_EU_PER_POD bounds the
- * per-pod ring arrays; a pod shards across at most min(K, num_dpa_threads) EUs. */
-#define MAX_EU_PER_POD      MAX_DPA_RINGS
-#define DPUMESH_RINGS_PER_POD_DEFAULT 2
+/* MAX_PODS = the pods[] table size, sized for the MAX EU config (N = MAX_DPA_EU): one EU then
+ * holds MAX_PODS*K / MAX_DPA_EU = MAX_DPA_RINGS rings. The LIVE cap is computed at runtime
+ * = MAX_DPA_RINGS * num_dpa_threads / k_rings (comch_server.c pods_add_connection), so raising
+ * N via DPUMESH_DPA_THREADS raises capacity with no recompile (default N=4 => live cap 16).
+ * Beyond MAX_DPA_EU EUs (real node density) needs a bigger MAX_DPA_EU + MAX_DPA_RINGS (a
+ * DPA-kernel change). Wire-safe to 127 (pod_id int8, _Static_assert in dpa_common.h); DPU
+ * staging is allocated PER registration (setup_pod_dma), not preallocated ×MAX_PODS. Churn
+ * (add/remove/reuse) is handled by comch_server.c within the cap. */
+#define MAX_PODS   (MAX_DPA_RINGS * MAX_DPA_EU / DPUMESH_RINGS_PER_POD_DEFAULT)  /* 8*8/2 = 32 */
 
 /* pod_id is int8 on the wire (valid ids [0,127]); this sizes the pod_id->slot
  * map to cover that id space. Always >= MAX_PODS. Widen together with the int8
