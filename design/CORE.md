@@ -19,14 +19,15 @@ and **DMA** for bodies. The **DPA is forward-only** (host→DPU staging); the **
 ```
  HOST src                         BlueField DPU                              HOST dst
  ════════                         ═════════════                             ════════
- write→byte-ring ─┐   ┌─ DPA EU (N≤8, forward-only) ─┐  ┌─ ARM (1 control thread) ──┐
- flush → K fwd    ├──▶│ dma_copy host→DPU staging     │  │ comp_queue → dpu_proxy:   │
- rings (Vyukov    │   │ (≤8KB, 20B completion imm)    │  │  window→parser→conntrack  │
- MPSC, src%K)     ┘   └───────────────────────────────┘  │  →per-(dst,region) lane   │
+ write→byte-ring ─┐   ┌─ DPA EU (N≤8, forward-only) ─┐  ┌─ ARM ingest shards (M) ───┐
+ flush → K fwd    ├──▶│ dma_copy host→DPU staging     │  │ own consumer PE (channel  │
+ rings (Vyukov    │   │ (≤8KB, 20B completion imm)    │  │  k → shard k%M) → window  │
+ MPSC, src%K)     ┘   └───────────────────────────────┘  │  →parser→conntrack→lane   │
                                                           └────────────┬──────────────┘
         reverse = ARM SG-DMA egress (dpu_proxy.c, n_eng workers) ◀──────┘
-        staging→dst host RX buffer ─▶ BATCH_REV_DONE ─▶ host PE thread
-                                    ─▶ conn inbox ─▶ ready list ─▶ event_fd ─▶ read
+        staging→dst host RX buffer; completed batches → ARM emit (main):
+              ─▶ BATCH_REV_DONE / TX_ACK (all Comch sends) ─▶ host PE thread
+              ─▶ conn inbox ─▶ ready list ─▶ event_fd ─▶ read
 ```
 
 ---
@@ -140,13 +141,16 @@ Host = **Comch client**, DPU = **Comch server** (over one PCIe connection). Mess
 |---|---|---|
 | `POD_REGISTER` (1) | H→D | `dmesh_register_msg{service_id, pod_id=−1}` |
 | `MMAP_EXPORT` (2) | H→D | `dmesh_mmap_msg{mmap_type, host_addr, size, export_desc}` |
-| `BATCH_FWD_ACK` (3) | D→H | `dmesh_batch_tx_ack_msg{count, acks[≤14]}` — free the sender's TX bytes |
+| `BATCH_FWD_ACK` (3) | D→H | `dmesh_batch_tx_ack_msg{count, acks[≤16]}` — free the sender's TX bytes |
 | `BATCH_REV_DONE` (4) | D→H | `dmesh_batch_rev_done_msg{count, entries[≤16]}` — deliver reverse DMAs |
 | `POD_ASSIGNED` (5) | D→H | `dmesh_pod_assigned_msg{pod_id}` |
 
 **Dispatch asymmetry (a real trap):** H→D structs lead with a 4-byte `enum` and the server switches on
 it; D→H structs lead with a **`uint8_t` at offset 0** and the host dispatches on `recv_buffer[0]` — so
 every D→H type must keep its value < 256 and be added to the client switch, or it silently drops.
+The batch capacities (`BATCH_TXACK_MAX` / `BATCH_REVDONE_MAX`) are equally **two-sided wire ABI**: both
+binaries compile them and the host silently CLAMPS an oversized `count` — change them only with host
+AND DPU rebuilt together (a full deploy), or the clamped tail acks vanish and the sender's conn wedges.
 
 ### 2.2 Data path — descriptor + completion
 - **`struct dma_desc`** (64 B, one cache line): `{mmap, addr, size, seq, src_port, dst_port,
@@ -159,7 +163,8 @@ every D→H type must keep its value < 256 and be added to the client switch, or
   `src_pod`'s registration (assumes one service per pod).
 
 ### 2.3 DPU ↔ DPA — Comch msgq (`comch_msgq.c`, `enum dpa_msg_type`)
-One 1-producer/1-consumer Comch channel **per EU**, all draining into the DPU's single consumer PE:
+One 1-producer/1-consumer Comch channel **per EU**, channel `k` bound to ingest consumer PE `k % M` —
+its owning shard's PE (§4.1; M = 1 collapses to the single consumer PE):
 `RING_ADD` (D→DPA, add a forward ring), `WAKE` (D→DPA, ~1 kHz keepalive to re-activate a parked EU),
 `FWD_DONE` (DPA→D, a forward dma_copy completed — carries `comch_dma_comp_msg`).
 
@@ -196,14 +201,39 @@ The ARM sends `WAKE` on a ~1 kHz cadence because a silent `valid=1` store genera
 
 ## 4. DPU ARM control plane (`dpu_worker.c` + `object.{c,h}`)
 
-### 4.1 Main loop — single thread
-The ARM runs **one control thread**, event-driven (epoll over the consumer PE fd + the ctrl PE fd) with
-a 1 ms keepalive tick. Each pass: `doca_pe_progress` both PEs (the consumer callbacks push `FWD_DONE`
-completions onto the `comp_queue`) → drain up to 128 completions through `px_ingest_forward` → `px_drain`
-(SG-DMA egress) → flush partial ACK/REV_DONE batches when idle. All Comch sends happen here, **never
-inside a consumer callback** (re-entering the PE would corrupt it). One consumer PE draining all EU
-channels into one `comp_queue` keeps the forward ring single-producer and the routing/conntrack tables
-**lock-free by virtue of single-threading**.
+### 4.1 Thread model — a three-stage pipeline (ingest → emit → egress)
+The ARM control plane is **M ingest shards** (`DPUMESH_INGEST_SHARDS`, default 1), **one emit thread**
+(main), and **`n_eng` egress workers** (§5). Every stage is event-driven — each thread sleeps on its
+own PE notification fd / eventfd (epoll: arm → re-check → block, 1 ms backstop); nothing busy-spins.
+
+- **Ingest (reap + parse/route) — M shard threads.** DPA channel `k` is bound to consumer PE
+  `consumer_pes[k % M]`; shard `m` OWNS PE `m` outright: it reaps it (the consumer callbacks fill the
+  shard's private SPSC queue), drains a bounded batch per pass through `px_ingest_forward`
+  (window → parser → conntrack → lane), and sends the ~1 kHz DPA `WAKE` keepalive for its own channels
+  — only a PE's owner may submit on its channels (the WAKE-race rule). **M = 1 is the original single
+  funnel** (ingest inline on main; `DPUMESH_INGEST_REAP=1` moves reap+process to one dedicated reaper
+  thread instead).
+- **Routing modes (M ≥ 2).** Default **② share-nothing**: conn table, pools, and conntrack are
+  per-shard; an upstream id is allocated OWNER-STRIDED (`(uP − BASE) % M` = the client's shard) so a
+  backend reply names its session's owner — a reply that lands on another shard's EU is handed to the
+  owner via that shard's cross-shard MPSC inbox (a parked shard is woken by eventfd). Optional
+  **① shared** (`DPUMESH_SHARD_SHARED=1`): one conntrack/route table under `routing_lock`, handled
+  where it lands (measured ~7 % below ②). **③** (sharding the emit path) is a scaffold flag only —
+  see the emit bullet for why.
+- **Emit — one thread (main), ALL Comch sends.** The Comch server rides the single ctrl PE; PEs are
+  not thread-safe, and a send must never run inside a consumer callback (re-entering the PE corrupts
+  it). Main progresses the ctrl PE, drains the shards' deferred TX_ACKs (`pending_txack` — an ingest
+  thread never sends), runs `px_drain` (submit + emit for the egress engine, §5), and flushes partial
+  ACK/REV_DONE batches on a lull. This single D→H funnel is why ③ is not yet real: parallel emit
+  needs a coordinated DPU+host multi-channel transport.
+- **Cross-thread state, kept minimal.** Shard queues are acquire/release SPSC; the LB cursor
+  `svc_rr` is a relaxed atomic (a racing double-pick only skews balance); the route-affinity table
+  takes `routing_lock` only when M > 1, and only for `rg ≠ 0` traffic; `px_arrival` custody
+  (`unfreed`) is an atomic counter — ingest (window release, drops) and emit (egressed bytes)
+  decrement it from different threads, and whichever reaches 0 releases exactly once.
+- **Measured** (scale_log 2026-07-14): shards = 2 ⇒ +33–44 %; shards = 2 + `n_eng` = 2 ⇒ ≈ 2× the
+  single-funnel small-RPC ceiling. `DPUMESH_DIAG=1` prints a once/sec pipeline dump (batch fill,
+  flush-size histogram, queue depths) that stays quiet while idle.
 
 ### 4.2 Routing — cluster registry + load balancer
 A **service is a cluster** of backend pods (Envoy model). The healthy backend set is **derived from
@@ -213,22 +243,24 @@ derived set automatically (a dead backend is simply not returned — no stale-en
 the single source of truth; the only added state is a per-service round-robin cursor `svc_rr[svc]`.
 
 - **`lb_pick(svc)`** — the load balancer: **round-robin** over `collect_live_hosts(svc)` (Envoy's default
-  policy), `-1` if the cluster has no healthy backend. The one seam a weighted / least-request / hash
-  policy would replace.
+  policy), `-1` if the cluster has no healthy backend. The cursor is a relaxed atomic (shards may race
+  it, skewing only balance). The one seam a weighted / least-request / hash policy would replace.
 - **`dpu_route_l4(svc, rg)`** — the DEFERred-segment route: `rg != 0` → **route-affinity pin**
   (`route_group_backend[svc][rg]`; reuse if the pin is live, else `lb_pick` + record — overwrite-on-reuse,
-  self-healing); `rg == 0` → `lb_pick(svc)`.
+  self-healing; under `routing_lock` when M > 1, §4.1); `rg == 0` → `lb_pick(svc)`.
 - **Connection stickiness (`px_resolve_backend`, dpu_proxy.c).** For a request seg the backend is resolved
   with Envoy-style precedence: **(1) an L7 host override** (§5.1, validated live) > **(2) the connection's
   sticky pin** (`px_conn.pinned_backend`, same cluster, still live) > **(3) `dpu_route_l4`** (recorded as
   the session pin when sticky). **Sticky is the default** — a connection keeps the backend the LB first
   picked (session affinity, socket-like ordering; the src↔backend pairing persists). `DPUMESH_LB_PER_REQUEST_SVC`
-  lists services that load-balance **every** message instead (Envoy HTTP per-request). Single ARM thread →
-  cursor + pin need no lock.
+  lists services that load-balance **every** message instead (Envoy HTTP per-request). A conn is
+  processed by ONE ingest shard (§4.1), so its sticky pin needs no lock; the only shared routing
+  state is the atomic cursor + the locked `rg` table.
 
 ### 4.3 Conntrack — Model B (the DPU owns every connection)
 `struct dpu_conntrack` = `upstream[65536]` (by `uP`) + an open-addressed reuse hash table keyed
-`(client_pod, client_port, backend_pod) → uP`. **Request** (`dst_pod = BLANK`): route → backend →
+`(client_pod, client_port, backend_pod) → uP`. Under ② sharding (M ≥ 2, §4.1) each ingest shard owns
+a PRIVATE conntrack and allocates `uP` owner-strided, so the table stays single-threaded at any M. **Request** (`dst_pod = BLANK`): route → backend →
 find/create upstream `uP` → rewrite the tuple so the backend sees a connection from the proxy
 (`src = dst_port = uP`). **Reply** (concrete `dst_port = uP`): look up `upstream[uP]` → rewrite
 `dst → (client_pod, client_port)`. **TX_ACK translation** is the key trap: a client request's reverse
@@ -241,9 +273,10 @@ and its reuse HT entry.
 is assigned `pod_id =` its slot index (RELEASE-published after its fields; `dma_ready` is a separate later
 gate for the data plane). Slots are stable (never compacted) and **reused** on a later connect. The LIVE
 concurrent-pod cap (`pods_add_connection`) is `MAX_DPA_RINGS × N / K` — the forward-ring capacity for the
-running (auto-detected) N — so it grows with N: BF3 N=8 ⇒ 32. Per-pod ACK/REV_DONE **batches** (`txack_batch[≤14]`,
+running (auto-detected) N — so it grows with N: BF3 N=8 ⇒ 32. Per-pod ACK/REV_DONE **batches** (`txack_batch[≤16]`,
 `rev_done_batch[≤16]`) coalesce so the host PE reaps one message per K responses (the host per-RTT reap
-is the 2-pod throughput cap); flushed on full or on the idle drain.
+is the 2-pod throughput cap); flushed on full or on the idle lull, and touched ONLY by the emit thread
+(an ingest shard defers its acks via `pending_txack`, §4.1).
 
 **Disconnect = graceful for the egress engine.** A backend can die *while it has in-flight egress SG-DMA*
 into its RX buffer. `pods_remove_connection` sets `dma_ready=0` (the egress then skips the pod) but
@@ -288,10 +321,12 @@ only destination resolution differs.
 - **Custody at egress.** The sender's TX bytes are held until the egress DMA has **read** the staging
   bytes; only then does the batched `TX_ACK` fire (`px_arrival_release`) — releasing earlier would let
   the host overwrite a body mid-DMA.
-- **Workers.** `DPUMESH_ARM_EGRESS_THREADS` (`n_eng`) egress workers, each owning its own
-  `doca_dma`/PE/inventory and a set of lanes (`pod_idx % n_eng`). `n_eng = 1` runs inline on the ARM
-  thread and **wedges under overload** (event-loop idle-park under egress backpressure); **`n_eng = 2`**
-  is required — busy-polling workers keep egress draining so the stall never forms.
+- **Workers.** `DPUMESH_ARM_EGRESS_THREADS` (`n_eng`) egress workers — stage three of the §4.1
+  pipeline — each owning its own `doca_dma`/PE/inventory and a set of lanes (`pod_idx % n_eng`); a
+  worker retires completed batches into a done-queue that the emit thread drains, so REV_DONE +
+  custody TX_ACK sends stay on main. `n_eng = 1` runs inline on the ARM thread and **wedges under
+  overload** (event-loop idle-park under egress backpressure); **`n_eng = 2`** is required —
+  busy-polling workers keep egress draining so the stall never forms.
 
 ### 5.1 The L7 hook (`dpu_l7.c` / `dpu_l7.h`) — the router filter
 `int dmesh_l7_route(const uint8_t *head, uint32_t len, const struct dmesh_l7_ctx *ctx,
@@ -340,7 +375,10 @@ successful read, drain-and-retry-once on `EAGAIN`. `shutdown(SHUT_WR)` sends the
 | `sizeof(dma_desc) == 64` (one cache line) | the DPA's line-granular `valid=0` writeback must not touch a neighbour |
 | D→H message type is a `uint8_t` at offset 0, value < 256, in the client switch | host dispatches on `recv_buffer[0]` |
 | one PE thread writes `tx_f`, inbox tail, ready tail, eventfd | the lock-free SPSC channels assume a single producer |
-| one ARM control thread | conntrack / routing / batch tables are lock-free by single-threading; forward ring stays single-producer |
+| all Comch sends on the emit (main) thread, never inside a PE callback | one ctrl PE, not thread-safe; batch accumulators are main-only (ingest defers via `pending_txack`) |
+| a consumer PE is progressed by exactly ONE thread (its shard), which also sends its channels' `WAKE` | DOCA PEs are single-threaded; a foreign submit races the owner's progress (the WAKE race) |
+| ② conntrack is per-shard; `uP` is owner-strided (`(uP − BASE) % M`) | each conntrack stays single-threaded; a backend reply dispatches to its session's owner shard |
+| `px_arrival.unfreed` is atomic; the decrement that reaches 0 releases exactly once | ingest and emit account the same arrival from two threads |
 | publish-role-last (host `ports[]`), publish-registered/`dma_ready`-last (DPU `pods[]`) | a reader must never observe a half-built slot |
 | client ports `[1, 32768)`, upstream `uP` `[32768, 65535]` | loopback host holds both roles in one table |
 | `n_eng = 2` (`DPUMESH_ARM_EGRESS_THREADS`) | `n_eng = 1` wedges under egress backpressure |
@@ -351,6 +389,7 @@ successful read, drain-and-retry-once on `EAGAIN`. `shutdown(SHUT_WR)` sends the
 (pool of `n_blocks = 512`), `maxb = 4` (≤ 256 KB in-flight/conn), `cushion_h = 1`; `N` DPA EUs
 **auto-detected** = min(device EUs, `MAX_DPA_EU=8`) (BF3 → 8; `DPUMESH_DPA_THREADS` overrides);
 `K = 2` forward rings/pod; per-EU ring cap `MAX_DPA_RINGS = 8` ⇒ concurrent pods ≤ `MAX_DPA_RINGS × N / K`
-(BF3 → 32); `n_eng = 2` ARM egress workers; `PX_HEAD_MAX = 4 KB`, `PX_SEAM_MAX = 512 KB`. `DPU_BUFFER_SIZE`,
+(BF3 → 32); `M = 2` ingest shards (`DPUMESH_INGEST_SHARDS`, ② share-nothing) + `n_eng = 2` ARM egress
+workers — the measured ≈2× config; `PX_HEAD_MAX = 4 KB`, `PX_SEAM_MAX = 512 KB`. `DPU_BUFFER_SIZE`,
 `slot_size`, and `K` are the constrained ones (§7). A programmatic `dpumesh_config` overrides
 `num_slots`/`slot_size` without a rebuild.

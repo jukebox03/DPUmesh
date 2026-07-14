@@ -29,10 +29,16 @@
  *     so the measured latency includes the full request transfer.
  *
  * Control protocol (TCP :9092, one line):
- *   RUN <req_size> <reply_size> <concurrency> <duration_s> <warmup> <threads>
+ *   RUN <req_size> <reply_size> <concurrency> <duration_s> <warmup> <threads> [reconn]
  *        -> OK mrps=.. gbps=.. p50=.. p95=.. p99=.. avg=.. min=.. max=..
  *              rcnt=.. fail=.. conc=.. threads=.. reqsz=.. repsz=.. durs=..
+ *              reconns=.. reconn_us=.. grabs=.. rets=.. recyc=.. waits=.. pads=..
  *      (all latencies in microseconds; key=value fields)
+ *      reconn: CONNECTION-CHURN mode — every `reconn` completions a thread drains
+ *      its window to 0 outstanding, then dmesh_close()+dmesh_connect()s a fresh
+ *      conn (0 = never, default). reconns = total reconnects, reconn_us = mean
+ *      wall cost of one close+connect+pin. grabs/rets/recyc/waits/pads = the
+ *      elastic TX block-pool event deltas over the run (dpumesh_tx_pool_stats_t).
  *   PING -> PONG
  *
  * env: BENCH_DST_POD_ID (dst service id, default 11);
@@ -72,6 +78,7 @@ typedef struct {
     long         warmup;       /* completions excluded from measurement */
     double       duration;     /* run length in seconds */
     double       start_at;     /* shared barrier: all threads begin at this time */
+    long         reconn;       /* completions per conn before close+reconnect (0 = never) */
     atomic_int  *stop;         /* watchdog / abort flag */
 
     /* per-thread transport + pipeline state */
@@ -85,6 +92,9 @@ typedef struct {
 
     /* per-thread results */
     long         rcnt;         /* total completions incl. warmup */
+    long         since_conn;   /* completions on the CURRENT conn (churn trigger) */
+    long         reconns;      /* reconnects performed */
+    double       reconn_sec;   /* wall time inside close+connect+pin (sums) */
     long         fail;         /* seq-mismatch / corrupt completions */
     double       warmup_end;   /* timestamp of the warmup boundary */
     double       dura;         /* measured window length (s) */
@@ -105,6 +115,7 @@ static void on_reply(uint32_t seq, uint32_t plen, uint32_t aux, void *user) {
     if (w->rcnt >= w->warmup)
         bench_hist_record(&w->hist, (now - t0) * 1e6);
     w->rcnt++;
+    w->since_conn++;
     if (w->rcnt == w->warmup) w->warmup_end = now;   /* measurement window opens */
     w->credits++;
 }
@@ -162,7 +173,28 @@ static void *worker_fn(void *arg) {
         }
         if (n == 0) { w->broken = 1; break; }     /* backend FIN — abort this thread */
 
-        while (w->credits > 0) {                  /* keep the window full */
+        /* Connection churn: once `reconn` completions landed on this conn, STOP
+         * issuing (the gate below), drain to 0 outstanding, then swap the conn.
+         * Reconnect wall time is accumulated so the per-reconnect cost is a
+         * direct measurement (not inferred from the rate delta). */
+        if (w->reconn > 0 && w->since_conn >= w->reconn && w->outstanding == 0) {
+            double t0 = bench_now_sec();
+            dmesh_close(w->c);
+            w->c = dmesh_connect(g_s, g_dst_service);
+            if (!w->c) { w->broken = 1; break; }
+            dmesh_pin_route(w->c);
+            w->reconn_sec += bench_now_sec() - t0;
+            bench_reframe_reset(&w->reframer);
+            w->since_conn = 0;
+            w->reconns++;
+            w->credits = 0;                        /* window re-primed fresh below */
+            for (int i = 0; i < w->W; i++)
+                if (!issue(w, payload)) { w->broken = 1; break; }
+            did = 1;
+        }
+
+        while (w->credits > 0 &&                  /* keep the window full … */
+               !(w->reconn > 0 && w->since_conn >= w->reconn)) {  /* … unless draining to churn */
             if (bench_now_sec() - start > w->duration) { w->credits = 0; break; }
             if (!issue(w, payload)) { w->broken = 1; break; }
             w->credits--; did = 1;
@@ -194,17 +226,21 @@ static void *watchdog_fn(void *arg) {
 
 /* ------------------------------------------------------------ one benchmark run */
 static void run_bench(int conn_fd, int req_size, int reply_size, int concurrency,
-                      double duration, long warmup, int threads) {
-    char reply[512];
+                      double duration, long warmup, int threads, long reconn) {
+    char reply[768];
     if (req_size < 0 || reply_size < 1 || concurrency < 1 || duration <= 0 || threads < 1) {
         const char *e = "ERR invalid args\n";
         if (write(conn_fd, e, strlen(e)) < 0) {} return;
     }
     if (threads > MAX_THREADS) threads = MAX_THREADS;
     if (warmup < 0) warmup = 0;
+    if (reconn < 0) reconn = 0;
 
-    fprintf(stderr, "[bench] RUN req=%d reply=%d conc=%d dur=%.1fs warmup=%ld threads=%d dst_svc=%d\n",
-            req_size, reply_size, concurrency, duration, warmup, threads, g_dst_service);
+    fprintf(stderr, "[bench] RUN req=%d reply=%d conc=%d dur=%.1fs warmup=%ld threads=%d reconn=%ld dst_svc=%d\n",
+            req_size, reply_size, concurrency, duration, warmup, threads, reconn, g_dst_service);
+
+    dpumesh_tx_pool_stats_t st0, st1;             /* elastic-pool event deltas over the run */
+    dpumesh_get_tx_pool_stats(g_s->ctx, &st0);
 
     worker_t  *w   = (worker_t *)calloc((size_t)threads, sizeof(worker_t));
     pthread_t *tid = (pthread_t *)calloc((size_t)threads, sizeof(pthread_t));
@@ -222,6 +258,7 @@ static void run_bench(int conn_fd, int req_size, int reply_size, int concurrency
         w[i].warmup     = warmup;
         w[i].duration   = duration;
         w[i].start_at   = start_at;
+        w[i].reconn     = reconn;
         w[i].stop       = &stop;
         if (pthread_create(&tid[i], &attr, worker_fn, &w[i]) != 0) { w[i].broken = 1; tid[i] = 0; }
     }
@@ -236,12 +273,14 @@ static void run_bench(int conn_fd, int req_size, int reply_size, int concurrency
 
     /* aggregate: sum per-thread rates, merge latency histograms */
     bench_hist_t agg; bench_hist_init(&agg);
-    double mrps = 0.0, gbps = 0.0;
-    long total_ok = 0, total_fail = 0;
+    double mrps = 0.0, gbps = 0.0, reconn_sec = 0.0;
+    long total_ok = 0, total_fail = 0, total_reconns = 0;
     for (int i = 0; i < threads; i++) {
         long measured = w[i].rcnt - w[i].warmup;
         if (measured < 0) measured = 0;
         total_fail += w[i].fail;
+        total_reconns += w[i].reconns;
+        reconn_sec    += w[i].reconn_sec;
         if (!w[i].broken && w[i].dura > 1e-9 && measured > 0) {
             mrps += (double)measured / w[i].dura * 1e-6;
             gbps += 8e-9 * (double)measured * (double)req_size / w[i].dura;
@@ -256,11 +295,19 @@ static void run_bench(int conn_fd, int req_size, int reply_size, int concurrency
     double avg = bench_hist_avg(&agg), mn = bench_hist_min(&agg), mx = bench_hist_max(&agg);
     bench_hist_free(&agg);
 
+    dpumesh_get_tx_pool_stats(g_s->ctx, &st1);
+    double reconn_us = (total_reconns > 0) ? reconn_sec * 1e6 / (double)total_reconns : 0.0;
+
     int n = snprintf(reply, sizeof reply,
         "OK mrps=%.6f gbps=%.4f p50=%.2f p95=%.2f p99=%.2f avg=%.2f min=%.2f max=%.2f "
-        "rcnt=%ld fail=%ld conc=%d threads=%d reqsz=%d repsz=%d durs=%.3f\n",
+        "rcnt=%ld fail=%ld conc=%d threads=%d reqsz=%d repsz=%d durs=%.3f "
+        "reconns=%ld reconn_us=%.2f grabs=%llu rets=%llu recyc=%llu waits=%llu pads=%llu\n",
         mrps, gbps, p50, p95, p99, avg, mn, mx,
-        total_ok, total_fail, concurrency, threads, req_size, reply_size, duration);
+        total_ok, total_fail, concurrency, threads, req_size, reply_size, duration,
+        total_reconns, reconn_us,
+        st1.pool_grabs - st0.pool_grabs, st1.pool_returns - st0.pool_returns,
+        st1.recycle_hits - st0.recycle_hits, st1.grow_waits - st0.grow_waits,
+        st1.block_pads - st0.block_pads);
     if (write(conn_fd, reply, (size_t)n) < 0) {}
     fprintf(stderr, "[bench] DONE %s", reply);
     free(w); free(tid);
@@ -279,13 +326,13 @@ static void handle_ctrl(int fd) {
 
     char cmd[16] = {0};
     if (sscanf(buf, "%15s", cmd) == 1 && strcmp(cmd, "RUN") == 0) {
-        int req = 32, rep = 8, conc = 1, threads = 1; double dur = 10.0; long warm = 1000;
-        /* RUN <req_size> <reply_size> <concurrency> <duration> <warmup> <threads> */
-        sscanf(buf, "%*s %d %d %d %lf %ld %d", &req, &rep, &conc, &dur, &warm, &threads);
-        run_bench(fd, req, rep, conc, dur, warm, threads);
+        int req = 32, rep = 8, conc = 1, threads = 1; double dur = 10.0; long warm = 1000, reconn = 0;
+        /* RUN <req_size> <reply_size> <concurrency> <duration> <warmup> <threads> [reconn] */
+        sscanf(buf, "%*s %d %d %d %lf %ld %d %ld", &req, &rep, &conc, &dur, &warm, &threads, &reconn);
+        run_bench(fd, req, rep, conc, dur, warm, threads, reconn);
         close(fd); return;
     }
-    if (write(fd, "ERR use: RUN <req> <reply> <conc> <dur> <warmup> <threads> | PING\n", 65) < 0) {}
+    if (write(fd, "ERR use: RUN <req> <reply> <conc> <dur> <warmup> <threads> [reconn] | PING\n", 76) < 0) {}
     close(fd);
 }
 

@@ -339,8 +339,8 @@ Header + body must fit one ≤ 8 KB message (chunk larger payloads at the app la
   wire messages for you (§3) and route-pins them, so the app just writes any length.
 - **Route-affinity (keeps a large message's chunks together).** Each wire message carries a
   **route-affinity key** (`route_group`, one byte): the DPU pins every message sharing a non-zero
-  key to the **same** backend (a small `(dst_service, key) → backend` table on the single ARM
-  thread — no lock). Key `0` (a single-slot `dmesh_write`) = normal per-message LB. When a
+  key to the **same** backend (a small `(dst_service, key) → backend` table on the DPU; serialized
+  only when ingest is sharded). Key `0` (a single-slot `dmesh_write`) = normal per-message LB. When a
   `dmesh_write` spans slots, it stamps ONE key (a **channel-wide** rolling id, so one channel's
   concurrent large messages get distinct keys) on all of that message's chunks, so — even when a
   service load-balances across several backends — every chunk lands on one backend and
@@ -636,8 +636,9 @@ changes**.
 ## 9. Baked data-plane configuration (reference)
 
 Most data-plane tuning is **compiled in** at the values measured as best; the runtime env knobs are
-`DPUMESH_PROXY` + `DPUMESH_PROXY_FRAME_SVC` + `DPUMESH_PROXY_L7_SVC` (§8), `DPUMESH_ARM_EGRESS_THREADS`
-+ `DPUMESH_DPA_THREADS` + `DPUMESH_RINGS_PER_POD` (table below), `DPUMESH_PCI_ADDR`, `DPUMESH_SERVICE_ID`,
+`DPUMESH_PROXY` + `DPUMESH_PROXY_FRAME_SVC` + `DPUMESH_PROXY_L7_SVC` (§8), `DPUMESH_INGEST_SHARDS` +
+`DPUMESH_ARM_EGRESS_THREADS` + `DPUMESH_DPA_THREADS` + `DPUMESH_RINGS_PER_POD` (table below),
+`DPUMESH_DIAG` (once/sec DPU pipeline diagnostics, quiet at idle), `DPUMESH_PCI_ADDR`, `DPUMESH_SERVICE_ID`,
 `DPUMESH_TX_BLOCK` / `DPUMESH_TX_MAXB` / `DPUMESH_TX_H` (§1), and the `DMESH_PRELOAD_*` shim vars (§7).
 **To change a *baked* value, edit the named constant/assignment and rebuild** (no env override).
 
@@ -649,6 +650,7 @@ Most data-plane tuning is **compiled in** at the values measured as best; the ru
 | DPA EU threads (N) | **auto-detected** = min(device EUs, `MAX_DPA_EU`=8); BF3 → `8` | `DPUMESH_DPA_THREADS` env → `num_dpa_threads` | `doca/dpa.c` |
 | Concurrent meshed pods / DPU | live cap `MAX_DPA_RINGS × N / K` (BF3 → `32`); `pods[]` array `MAX_DPA_RINGS × MAX_DPA_EU / K` | `dmesh_common.h` + `doca/comch_server.c` |
 | Forward rings per pod / EU-sharding (K) | `2` — env `DPUMESH_RINGS_PER_POD` | `DPUMESH_RINGS_PER_POD_DEFAULT` → `k_rings` | `dmesh_common.h` (DPU + host) |
+| ARM ingest shards (M) | `1` — env `DPUMESH_INGEST_SHARDS` (use `2`: parse/route on M threads, per-shard conntrack; with egress `2` ≈ 2× small-RPC rate) | `getenv` → `n_ingest_shards` | `doca/dpu_worker.c` |
 | ARM SG-DMA egress workers (n_eng) | `1` — env `DPUMESH_ARM_EGRESS_THREADS` (use `2`) | `getenv` → `px->n_eng` | `doca/dpu_proxy.c` |
 | DPU main loop | event-driven epoll (busy-poll auto-fallback on setup failure) | — (literal path) | `doca/dpu_worker.c` |
 | Host RX (PE) thread | sleep on the notification fd | `want_epoll = 1` | `dmesh_core.c` |

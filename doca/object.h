@@ -53,35 +53,55 @@ typedef struct {
 /* Force inline so these collapse into the caller. */
 #define CQ_INLINE static inline __attribute__((always_inline))
 
+/* comp_queue is a single-producer / single-consumer ring. Historically both ends
+ * ran on the one DPU worker thread. With the ingest reaper (DPUMESH_INGEST_REAP=1)
+ * the PRODUCER is the reaper thread (recv-cb enqueues) and the CONSUMER is the main
+ * loop (process_completion_queue) — two threads. So head/tail are accessed with
+ * acquire/release: the producer publishes the entry THEN the tail with RELEASE; the
+ * consumer reads the tail with ACQUIRE then the entry (symmetric for head). This is
+ * also correct — and essentially free (ARM ldar/stlr) — when both ends run on one
+ * thread (reaper disabled). Producer owns `tail`, consumer owns `head`. */
 CQ_INLINE int comp_queue_full(const dpu_comp_queue_t *q) {
-    return ((q->tail + 1) % DPU_COMP_QUEUE_SIZE) == q->head;
+    uint32_t tail = __atomic_load_n(&q->tail, __ATOMIC_RELAXED);
+    uint32_t head = __atomic_load_n(&q->head, __ATOMIC_ACQUIRE);
+    return ((tail + 1) % DPU_COMP_QUEUE_SIZE) == head;
 }
 
 CQ_INLINE int comp_queue_empty(const dpu_comp_queue_t *q) {
-    return q->head == q->tail;
+    uint32_t head = __atomic_load_n(&q->head, __ATOMIC_RELAXED);
+    uint32_t tail = __atomic_load_n(&q->tail, __ATOMIC_ACQUIRE);
+    return head == tail;
 }
 
 CQ_INLINE int comp_queue_enqueue(dpu_comp_queue_t *q, const dpu_comp_entry_t *e) {
-    if (comp_queue_full(q)) return -1;
-    q->entries[q->tail] = *e;
-    q->tail = (q->tail + 1) % DPU_COMP_QUEUE_SIZE;
+    uint32_t tail = __atomic_load_n(&q->tail, __ATOMIC_RELAXED);       /* producer owns */
+    uint32_t head = __atomic_load_n(&q->head, __ATOMIC_ACQUIRE);
+    if (((tail + 1) % DPU_COMP_QUEUE_SIZE) == head) return -1;         /* full */
+    q->entries[tail] = *e;
+    __atomic_store_n(&q->tail, (tail + 1) % DPU_COMP_QUEUE_SIZE, __ATOMIC_RELEASE);
     return 0;
 }
 
 CQ_INLINE dpu_comp_entry_t *comp_queue_peek(dpu_comp_queue_t *q) {
-    if (comp_queue_empty(q)) return NULL;
-    return &q->entries[q->head];
+    uint32_t head = __atomic_load_n(&q->head, __ATOMIC_RELAXED);       /* consumer owns */
+    uint32_t tail = __atomic_load_n(&q->tail, __ATOMIC_ACQUIRE);
+    if (head == tail) return NULL;                                     /* empty */
+    return &q->entries[head];
 }
 
 CQ_INLINE void comp_queue_dequeue(dpu_comp_queue_t *q) {
-    if (!comp_queue_empty(q))
-        q->head = (q->head + 1) % DPU_COMP_QUEUE_SIZE;
+    uint32_t head = __atomic_load_n(&q->head, __ATOMIC_RELAXED);       /* consumer owns */
+    uint32_t tail = __atomic_load_n(&q->tail, __ATOMIC_ACQUIRE);
+    if (head == tail) return;                                         /* empty */
+    __atomic_store_n(&q->head, (head + 1) % DPU_COMP_QUEUE_SIZE, __ATOMIC_RELEASE);
 }
 
 CQ_INLINE uint32_t comp_queue_usage(const dpu_comp_queue_t *q) {
-    if (q->tail >= q->head)
-        return q->tail - q->head;
-    return DPU_COMP_QUEUE_SIZE - q->head + q->tail;
+    uint32_t tail = __atomic_load_n(&q->tail, __ATOMIC_ACQUIRE);
+    uint32_t head = __atomic_load_n(&q->head, __ATOMIC_ACQUIRE);
+    if (tail >= head)
+        return tail - head;
+    return DPU_COMP_QUEUE_SIZE - head + tail;
 }
 
 /* Backpressure threshold: defer recv task resubmission when queue exceeds
@@ -257,13 +277,22 @@ static inline uint16_t dpu_upstream_find(struct dpu_conntrack *ct, int32_t cp,
 }
 
 /* Allocate a new up_port for (cp,cport,bpod) and index it. Returns 0 if the
- * upstream id space [BASE,65535) is exhausted. */
+ * upstream id space [BASE,65535) is exhausted.
+ *
+ * OWNER-STRIDED allocation (② share-nothing, diagram): only up_ports p with
+ * (p-BASE)%stride == owner are handed out by this shard, so a backend reply on p
+ * dispatches back (px_uport_owner) to the shard that owns the session — keeping
+ * each shard's conntrack single-threaded. stride==1 (owner==0) = the full range,
+ * i.e. the ①/single-shard behaviour (byte-identical). */
 static inline uint16_t dpu_upstream_create(struct dpu_conntrack *ct, int32_t cp,
-                                           uint16_t cport, int32_t bpod) {
+                                           uint16_t cport, int32_t bpod,
+                                           uint16_t owner, uint16_t stride) {
     uint32_t span = 65536u - DMESH_UPORT_BASE;
     uint16_t uP = 0;
+    if (stride < 1) stride = 1;
     for (uint32_t k = 0; k < span; k++) {
         uint32_t p = DMESH_UPORT_BASE + ((ct->next_uport - DMESH_UPORT_BASE + k) % span);
+        if (stride > 1 && ((p - DMESH_UPORT_BASE) % stride) != owner) continue;
         if (!ct->upstream[p].in_use) { uP = (uint16_t)p; break; }
     }
     if (uP == 0) return 0;
@@ -314,6 +343,46 @@ static inline void dpu_upstream_free(struct dpu_conntrack *ct, uint16_t uP) {
     }
     ct->ht[hole].in_use = 0;
 }
+
+/* ====== Ingest-processor sharding (diagram ①②③) ======
+ * The single ARM funnel is split so the CPU-heavy parse/route runs on M threads.
+ * A single reaper still OWNS consumer_pe (one thread progresses one PE, and the
+ * DPA WAKE keepalive stays with the consumer_pe owner — the WAKE-race fix). After
+ * the reaper reaps DPA completions into comp_queue it DISPATCHES each one to a
+ * shard's private queue (by conn hash for ①, by up_port-encoded OWNER for ②); the
+ * M shard threads run px_ingest_forward (window/parse/route/lane-enqueue). The
+ * reaper→shard SPSC queues ARE the "lock-free cross-shard ring" of the diagram.
+ * All comch sends still happen on main (objs->pe is single-threaded): a shard
+ * DEFERS its TX_ACKs to main via pending_txack and its REV_DONEs ride the egress
+ * lanes' done-queue that main drains. Event-driven end to end — a shard SLEEPS on
+ * its wake_fd and the reaper writes it only while the shard is parked (no per-msg
+ * syscall under load); a missed edge is backstopped by the shard's 1 ms epoll
+ * timeout. M<=1 keeps the proven single-reaper (reap+process) path unchanged. */
+#define MAX_INGEST_SHARDS 8
+
+struct dpu_ingest_shard {
+    struct objects *objs;
+    int id;
+    /* Design A (M>=2): this shard OWNS consumer_pes[id] and SLEEPS on its DOCA
+     * notification fd directly — no reaper, no per-message eventfd. It reaps its
+     * own PE (recv-cb fills `queue`, same thread → SPSC), then processes. */
+    struct doca_pe *pe;          /* = objs->consumer_pes[id]; reaped + WAKE'd by this shard only */
+    dpu_comp_queue_t queue;      /* recv-cb (this shard) -> process (this shard): SPSC same-thread */
+    /* Per-PE recv backpressure (the recv tasks of the channels bound to this PE). */
+    struct doca_task *deferred_recv[MAX_DEFERRED_RECV];
+    int num_deferred_recv;
+    /* ② cross-shard ring: a reply lands on the BACKEND's EU-shard but the session
+     * is owned by the CLIENT's EU-shard (up_port owner). The landing shard hands it
+     * here to the owner (MPSC: many shards push, this shard drains). Unused in ①
+     * (shared conntrack) and M==1. */
+    dpu_comp_queue_t xshard;
+    pthread_mutex_t  xshard_lock;
+    int wake_fd;                 /* eventfd: a cross-shard producer wakes this shard when it parks */
+    atomic_int parked;           /* 1 = shard is about to / is blocked in epoll_wait */
+    pthread_t thread;
+    volatile int stop;
+    int running;                 /* 1 = thread started (teardown guard) */
+};
 
 struct objects {
     struct doca_dev *dev;
@@ -376,7 +445,13 @@ struct objects {
     /* comch data path related */
     struct local_mem_bufs *consumer_mem;
     struct doca_comch_consumer *consumer;
-    struct doca_pe *consumer_pe;
+    struct doca_pe *consumer_pe;   /* == consumer_pes[0] (the data-path consumer + M==1 channels) */
+    /* Design A ingest sharding (M>=2): one consumer PE per shard; DPA channel k is
+     * bound to consumer_pes[k % M] (comch_msgq.c), and shard m OWNS consumer_pes[m]
+     * (reaps it + sends the DPA WAKE to its channels). consumer_pes[0] is the same
+     * object as consumer_pe (created by init_comch_datapath_consumer); [1..M-1] are
+     * created in run_dpu_worker before the DPA msgq is built. */
+    struct doca_pe *consumer_pes[MAX_INGEST_SHARDS];
 
 	doca_error_t consumer_result;  /* Last result from a consumer callback (comch_consumer.c). */
 
@@ -462,6 +537,47 @@ struct objects {
     struct doca_task *consumer_retry[MAX_CONSUMER_RETRY];
     int num_consumer_retry;
     pthread_mutex_t consumer_retry_lock;
+
+    /* ====== Ingest reaper thread (DPUMESH_INGEST_REAP=1) ======
+     * Splits the DPA forward-completion REAP off the single main funnel. When
+     * active, a dedicated thread owns consumer_pe: it runs doca_pe_progress
+     * (recv-cb -> comp_queue), the recv backpressure release (deferred_recv
+     * resubmit), and the consumer_retry drain. The main loop then only DRAINS
+     * comp_queue (parse/route/egress/emit/sends) + ctrl pe. consumer_pe is thus
+     * touched by exactly one thread (the reaper) — DOCA PEs are not thread-safe —
+     * and comp_queue becomes a cross-thread SPSC ring (acquire/release above).
+     * Default 0 = reap inline on the main loop (original single-thread path). */
+    int reaper_active;
+    volatile int reaper_stop;
+    pthread_t reaper_thread;
+    /* Ingest sharding (diagram ①): when the reaper also runs process (px_ingest_forward
+     * = parse/route), main is left with only emit+ctrl+sends. A comch send MUST stay on
+     * the main thread (objs->pe is single-threaded), so the ingest thread never sends —
+     * it ENQUEUES its (rare, FIN/error/drop) TX_ACKs here and main drains + sends. The
+     * frequent custody TX_ACKs already run on main (px_drain emit). Count-based, drained
+     * every main iteration (bounded by messages between drains). */
+    struct { int32_t pod_id; uint16_t port; uint16_t seq; } pending_txack[16384];
+    int pending_txack_n;
+    pthread_mutex_t pending_txack_lock;
+    /* Event-driven hand-off reaper -> main (NO busy-spin): the reaper sleeps on
+     * consumer_pe's epoll fd; after it reaps into comp_queue it wakes the main loop
+     * via reaper_wake_fd — but ONLY when main is parked (main_parked=1), so there is
+     * no write() per message under load. Main sleeps on {ctrl_pe fd, reaper_wake_fd}. */
+    int reaper_wake_fd;          /* eventfd: reaper writes, main reads */
+    atomic_int main_parked;      /* 1 = main is about to / is blocked in epoll_wait */
+
+    /* ====== Ingest-processor sharding (DPUMESH_INGEST_SHARDS=M, diagram ①②③) ======
+     * n_ingest_shards >= 2 activates the sharded pipeline (implies the reaper).
+     * shard_shared_routing selects ① (shared conntrack + route tables under
+     * routing_lock; per-shard conn buckets/pools stay lock-free) vs ② (everything
+     * per-shard, share-nothing; up_port encodes the owner shard so a backend reply
+     * dispatches back to the session's owner). ③ additionally shards the emit/send
+     * path (see run_dpu_worker). Default M=1 (single reaper) — unchanged. */
+    int n_ingest_shards;                       /* M (>=2 = sharded; <=1 = single reaper) */
+    int shard_shared_routing;                  /* 1 = ① (shared+lock), 0 = ② (share-nothing) */
+    int shard_host_emit;                       /* 1 = ③ (shard emits its own REV_DONE/TX_ACK) */
+    struct dpu_ingest_shard ingest_shards[MAX_INGEST_SHARDS];
+    pthread_mutex_t routing_lock;              /* ① : guards shared conntrack + route tables */
 
 };
 

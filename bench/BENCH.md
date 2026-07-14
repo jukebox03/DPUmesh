@@ -143,13 +143,24 @@ does not exercise. See `validators/README.md`.
 The client daemons (`bench-dpumesh`, `bench-tcp`) listen on TCP **:9092**:
 
 ```
-RUN <req_size> <reply_size> <concurrency> <duration_s> <warmup> <threads>
+RUN <req_size> <reply_size> <concurrency> <duration_s> <warmup> <threads> [reconn]
   -> OK mrps=.. gbps=.. p50=.. p95=.. p99=.. avg=.. min=.. max=..
         rcnt=.. fail=.. conc=.. threads=.. reqsz=.. repsz=.. durs=..
+        reconns=.. reconn_us=.. grabs=.. rets=.. recyc=.. waits=.. pads=..
      (latencies in microseconds; key=value fields)
 
 PING -> PONG
 ```
+
+`reconn` (dpumesh only, default 0 = off) is the CONNECTION-CHURN knob: every
+`reconn` completions a worker drains its window to 0 outstanding, then
+`dmesh_close()` + `dmesh_connect()`s a fresh conn. `reconns` = total reconnects,
+`reconn_us` = mean wall cost of one local close+connect+pin. The trailing five
+fields are the elastic TX block-pool event deltas over the run
+(`dpumesh_tx_pool_stats_t`): shared-pool grabs/returns (one CAS each),
+owner-local recycle hits, reserve backoff waits (window full / pool empty), and
+block-tail pads. In a steady small-message run grabs ≈ live conns (the lazy
+first block) and waits = 0 — the per-message path touches no shared state.
 
 Pod bring-up (`bench.sh deploy`) does not parse the RUN reply, so a redeploy is
 what makes the pods speak this protocol.
@@ -175,6 +186,9 @@ Each family prints a table and writes a CSV. Knobs (env): `OUT`, `LAT_DUR`,
 `BW_DUR`, `RATE_DUR`, `WARMUP`, `BW_CONC`, `RATE_CONC`, `RATE_THREADS`,
 `LAT_SIZES`, `BW_SIZES`. `deploy`/`pin` read `.env` at the repo root (DPU ssh
 target, sudo passwords, PCIe addrs); benchmark runs need only `kubectl` + `nc`.
+DPU-side thread knobs pass straight through `deploy` to the DPU process —
+`DPUMESH_INGEST_SHARDS=2 DPUMESH_ARM_EGRESS_THREADS=2 ./bench/bench.sh deploy`
+is the measured config (design/CORE.md §4.1).
 
 ## 6. Layout / build
 
@@ -193,7 +207,10 @@ target, sudo passwords, PCIe addrs); benchmark runs need only `kubectl` + `nc`.
 * **Rate/scalability.** The DPUmesh server delivers through a single-consumer
   ready-list (one PE thread), so only **client** threads scale; the client pod's
   core count is set by the pin profile. For a real core-scaling curve pin more
-  cores first (`./bench/bench.sh pin hw6`) then run the thread sweep.
+  cores first (`./bench/bench.sh pin hw6`) then run the thread sweep. DPU-side
+  transport parallelism is a deploy-time knob: `DPUMESH_INGEST_SHARDS=2` +
+  `DPUMESH_ARM_EGRESS_THREADS=2` ≈ 2× the single-funnel small-RPC ceiling
+  (design/CORE.md §4.1).
 * **Closed loop, not paced.** There is no target-RPS knob — raise `concurrency`
   to push harder.
 * **Validated in-session:** the TCP pair was smoke-tested over loopback

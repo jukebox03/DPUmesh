@@ -29,4 +29,9 @@ void batch_or_send_tx_ack(struct objects *objs, struct pod_state *src_pod,
 /* Flush a pod's accumulated REV_DONE batch as one message (idle/full flush). */
 void flush_rev_done_batch(struct objects *objs, struct pod_state *pod);
 
+/* Wake the (event-driven) main loop if it is parked in epoll. Egress workers call
+ * this after an SG-DMA batch completes so main emits the REV_DONE promptly at low
+ * load. No-op when the reaper is off (reaper_wake_fd < 0). */
+void dpu_wake_main(struct objects *objs);
+
 #endif /* DPU_WORKER_H */

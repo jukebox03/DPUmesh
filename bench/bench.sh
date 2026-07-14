@@ -12,7 +12,7 @@
 #   bench.sh bandwidth [dpumesh|tcp|both]               # Gb/s goodput vs req_size (to 8 MB)
 #   bench.sh rate      [dpumesh|tcp|both]               # Mrps vs client threads {1,2,4,8}
 #   bench.sh all       [dpumesh|tcp|both]               # all three (default both)
-#   bench.sh point <dpumesh|tcp> <req> <reply> <conc> <dur> <warmup> <threads>
+#   bench.sh point <dpumesh|tcp> <req> <reply> <conc> <dur> <warmup> <threads> [reconn]
 #   bench.sh loopback  [<N> <size> <zc>]                # validator: self-routing
 #   bench.sh stream    [<N> <size> <svcs> <fpw>]        # validator: L7 frame proxy (DPUMESH_PROXY=frame)
 #   bench.sh preload   [<N> <size> <conns>]             # validator: LD_PRELOAD shim
@@ -175,12 +175,15 @@ start_dpu() {
     local log_level="${DPUMESH_LOG_LEVEL:-40}"
     local proxy="${DPUMESH_PROXY:-}" frame_svc="${DPUMESH_PROXY_FRAME_SVC:-}" l7_svc="${DPUMESH_PROXY_L7_SVC:-}"
     local arm_threads="${DPUMESH_ARM_EGRESS_THREADS:-}" rings="${DPUMESH_RINGS_PER_POD:-}"
-    step "=== Starting dpumesh_dpu (proxy='$proxy' frame_svc='$frame_svc' l7_svc='$l7_svc' arm_egress_threads='$arm_threads' rings_per_pod='$rings') ==="
+    local reap="${DPUMESH_INGEST_REAP:-}"
+    local shards="${DPUMESH_INGEST_SHARDS:-}" shard_shared="${DPUMESH_SHARD_SHARED:-}" shard_emit="${DPUMESH_SHARD_HOST_EMIT:-}"
+    local diag="${DPUMESH_DIAG:-}"
+    step "=== Starting dpumesh_dpu (proxy='$proxy' frame_svc='$frame_svc' l7_svc='$l7_svc' arm_egress_threads='$arm_threads' rings_per_pod='$rings' ingest_reap='$reap' ingest_shards='$shards' shard_shared='$shard_shared' shard_host_emit='$shard_emit') ==="
     stop_dpu
     local dpu_home; dpu_home=$(ssh "$DPU_HOST" 'echo $HOME')
     ssh "$DPU_HOST" "cat > /tmp/start_dpu_bench.sh << 'LAUNCHER'
 #!/bin/bash
-screen -dmS dpumesh-bench bash -c \"cd $dpu_home/$DPU_BUILD && DPUMESH_PROXY=$proxy DPUMESH_PROXY_FRAME_SVC=$frame_svc DPUMESH_PROXY_L7_SVC=$l7_svc DPUMESH_ARM_EGRESS_THREADS=$arm_threads DPUMESH_RINGS_PER_POD=$rings ./dpumesh_dpu $DPU_PCI -l $log_level > $DPU_LOG 2>&1\"
+screen -dmS dpumesh-bench bash -c \"cd $dpu_home/$DPU_BUILD && DPUMESH_PROXY=$proxy DPUMESH_PROXY_FRAME_SVC=$frame_svc DPUMESH_PROXY_L7_SVC=$l7_svc DPUMESH_ARM_EGRESS_THREADS=$arm_threads DPUMESH_RINGS_PER_POD=$rings DPUMESH_INGEST_REAP=$reap DPUMESH_INGEST_SHARDS=$shards DPUMESH_SHARD_SHARED=$shard_shared DPUMESH_SHARD_HOST_EMIT=$shard_emit DPUMESH_DIAG=$diag ./dpumesh_dpu $DPU_PCI -l $log_level > $DPU_LOG 2>&1\"
 sleep 2
 pgrep -f 'dpumesh_dpu.*03:00' || echo NO_PID
 LAUNCHER
@@ -349,14 +352,15 @@ app_of()     { case "$1" in dpumesh) echo bench-dpumesh;; tcp) echo bench-tcp;; 
 targets_of() { case "${1:-both}" in both|"") echo "dpumesh tcp";; *) echo "$1";; esac; }
 field()      { sed -n "s/.*[[:space:]]$2=\([^ ]*\).*/\1/p" <<<"$1"; }
 
-# run_point <sol> <req> <reply> <conc> <dur> <warmup> <threads> -> echoes the OK line
+# run_point <sol> <req> <reply> <conc> <dur> <warmup> <threads> [reconn] -> echoes the OK line
+# reconn (dpumesh only): close+reconnect each conn every `reconn` completions (churn mode).
 run_point() {
     local app ip to reply
     app="$(app_of "$1")"; [ -z "$app" ] && { echo "ERR bad_target($1)"; return 0; }
     ip=$(kubectl get pod -n "$NS" -l "app=$app" --field-selector=status.phase=Running -o jsonpath='{.items[0].status.podIP}' 2>/dev/null || true)
     [ -z "$ip" ] && { echo "ERR no_pod($app)"; return 0; }
     to=$(( ${5%.*} + 90 ))
-    reply=$(printf 'RUN %s %s %s %s %s %s\n' "$2" "$3" "$4" "$5" "$6" "$7" | timeout "${to}s" nc -N "$ip" "$CTRL_PORT" 2>/dev/null) || reply="ERR nc"
+    reply=$(printf 'RUN %s %s %s %s %s %s %s\n' "$2" "$3" "$4" "$5" "$6" "$7" "${8:-}" | timeout "${to}s" nc -N "$ip" "$CTRL_PORT" 2>/dev/null) || reply="ERR nc"
     echo "$reply"
 }
 
@@ -450,11 +454,13 @@ run_stream() {  # L7-proxy frame validator (needs DPUMESH_PROXY=frame)
 CMD="${1:-help}"; shift || true
 case "$CMD" in
     deploy)    deploy ;;
+    build)     need_env; sync_sources; build_dpu ;;
+    restart)   need_env; sync_sources; build_dpu; start_dpu ;;
     latency)   for s in $(targets_of "${1:-both}"); do bench_latency   "$s"; done ;;
     bandwidth) for s in $(targets_of "${1:-both}"); do bench_bandwidth "$s"; done ;;
     rate)      for s in $(targets_of "${1:-both}"); do bench_rate      "$s"; done ;;
     all)       for s in $(targets_of "${1:-both}"); do bench_latency "$s"; bench_bandwidth "$s"; bench_rate "$s"; done; info "results under $OUT" ;;
-    point)     [ $# -eq 7 ] || { err "point <sol> <req> <reply> <conc> <dur> <warmup> <threads>"; exit 1; }; run_point "$@" ;;
+    point)     [ $# -eq 7 ] || [ $# -eq 8 ] || { err "point <sol> <req> <reply> <conc> <dur> <warmup> <threads> [reconn]"; exit 1; }; run_point "$@" ;;
     loopback)  run_loopback "${1:-50000}" "${2:-8192}" "${3:-0}" ;;
     stream)    run_stream   "${1:-20000}" "${2:-1024}" "${3:-self}" "${4:-1}" ;;
     preload)   run_preload  "${1:-5000}"  "${2:-1024}" "${3:-8}" ;;
@@ -470,7 +476,7 @@ Usage: $0 <command> [args]
 
   deploy                                     build + DPU + images + pods + pin
   latency|bandwidth|rate|all [dpumesh|tcp|both]   benchmark families -> CSVs under $OUT
-  point <sol> <req> <reply> <conc> <dur> <warmup> <threads>   one raw RUN
+  point <sol> <req> <reply> <conc> <dur> <warmup> <threads> [reconn]   one raw RUN (reconn = conn-churn period)
   loopback|stream|preload [args]             feature validators
   pin [fair|hw|hw3|hw6]                       (re)pin pods to cores
   status | logs | cleanup | dpulog [n] | dpucpu

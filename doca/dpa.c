@@ -30,6 +30,12 @@ extern doca_dpa_func_t thread_init_rpc;
 extern struct doca_dpa_app *DPU_mesh_dpa_app;
 #endif
 
+/* Design A ingest sharding (M>=2): each shard thread OWNS one consumer PE and sets
+ * this to its id, so the recv-cb (which runs inside that shard's doca_pe_progress)
+ * routes completions to THAT shard's queue + per-PE backpressure. Main / the single
+ * reaper leave it 0 and use the shared objs->comp_queue (M<2, unchanged). */
+__thread int dpu_reap_shard = 0;
+
 /*
  * Callback invoked once a message is received from DPA successfully
  *
@@ -48,6 +54,16 @@ static void dmesh_doca_dpa_msgq_recv_cb(struct doca_comch_consumer_task_post_rec
 
 	struct objects *objs = ctx_user_data.ptr;
 	struct doca_task *task = doca_comch_consumer_task_post_recv_as_task(recv_task);
+
+    /* Route to the reaping shard's queue + backpressure (Design A, M>=2), else the
+     * shared objs->comp_queue (M<2, byte-identical to the original single path). */
+    dpu_comp_queue_t *q = &objs->comp_queue;
+    struct doca_task **defrecv = objs->deferred_recv;
+    int *ndef = &objs->num_deferred_recv;
+    if (objs->n_ingest_shards >= 2) {
+        struct dpu_ingest_shard *sh = &objs->ingest_shards[dpu_reap_shard];
+        q = &sh->queue; defrecv = sh->deferred_recv; ndef = &sh->num_deferred_recv;
+    }
 
     data_len = doca_comch_consumer_task_post_recv_get_imm_data_len(recv_task);
 
@@ -118,9 +134,15 @@ static void dmesh_doca_dpa_msgq_recv_cb(struct doca_comch_consumer_task_post_rec
              * resolved above (avoids an unguarded re-scan of pods[]). */
             entry.pod_idx = (int)(src_pod - objs->pods);
 
-            if (ingest_push(objs, &entry) != 0) {
-                DOCA_LOG_ERR("Completion queue full, dropping seq=%u (src=%d, dst=%d)",
-                             seq, src_pod_id, dst_pod_id);
+            if (comp_queue_enqueue(q, &entry) != 0) {
+                /* comp_queue-full drops happen at MESSAGE RATE under overload/wedge —
+                 * an unthrottled log here floods the DPU log (fills the disk). Log the
+                 * first and then 1-in-65536 with a running total. Single-threaded
+                 * (consumer_pe owner), so the static counter needs no atomic. */
+                static uint64_t cq_full_drops;
+                if ((cq_full_drops++ & 0xFFFFu) == 0)
+                    DOCA_LOG_ERR("Completion queue full, dropping (total %llu) seq=%u (src=%d, dst=%d)",
+                                 (unsigned long long)cq_full_drops, seq, src_pod_id, dst_pod_id);
                 /* zero-copy: no heap data to free */
             }
             break;
@@ -137,14 +159,14 @@ resubmit_recv_task:
      * so DPA sees consumer_empty and pauses; main loop resubmits when the queue
      * drops below BP_LOW. On submit failure also stash for the main loop to
      * retry rather than losing the task. */
-    if (ingest_usage(objs) >= COMP_QUEUE_BP_HIGH &&
-        objs->num_deferred_recv < MAX_DEFERRED_RECV) {
-        objs->deferred_recv[objs->num_deferred_recv++] = task;
+    if (comp_queue_usage(q) >= COMP_QUEUE_BP_HIGH &&
+        *ndef < MAX_DEFERRED_RECV) {
+        defrecv[(*ndef)++] = task;
     } else {
         result = doca_task_submit(task);
         if (result != DOCA_SUCCESS) {
-            if (objs->num_deferred_recv < MAX_DEFERRED_RECV) {
-                objs->deferred_recv[objs->num_deferred_recv++] = task;
+            if (*ndef < MAX_DEFERRED_RECV) {
+                defrecv[(*ndef)++] = task;
                 DOCA_LOG_WARN("DPA MsgQ recv resubmit failed: %s; deferred",
                               doca_error_get_name(result));
             } else {

@@ -205,6 +205,14 @@ struct dpumesh_ctx {
     atomic_uint_fast64_t block_free;   /* Treiber head: (tag<<32) | head_index */
     uint32_t *block_next;      /* [n_blocks]: free-list links */
     pthread_mutex_t block_lock;    /* close-path block return (exactly-once handoff, cold) */
+    /* Elastic-pool event counters (diagnostics; relaxed atomics — events are the
+     * RARE paths: steady sliding touches none of these except recycle_hits once
+     * per drained block). Read via dpumesh_get_tx_pool_stats. */
+    atomic_ullong st_pool_grabs;    /* shared-pool CAS pops (conn grow / first block) */
+    atomic_ullong st_pool_returns;  /* shared-pool CAS pushes (shrink / close drain) */
+    atomic_ullong st_recycle_hits;  /* grow served from the conn's recyc[] (no pool op) */
+    atomic_ullong st_grow_waits;    /* backoff sleeps in reserve (window full / pool empty) */
+    atomic_ullong st_block_pads;    /* message didn't fit the block tail → pad + next block */
 
     /* RX descriptor queue — lock-free bounded SPMC ring (1 producer = PE
      * thread, N consumers = server workers). dpumesh_dequeue spin-polls it
@@ -916,12 +924,15 @@ static int32_t block_pool_grab(dpumesh_ctx_t *ctx) {
         if (head >= (uint32_t)ctx->n_blocks) return -1;            /* empty */
         uint_fast64_t nv = (((old >> 32) + 1) << 32) | (uint_fast64_t)ctx->block_next[head];
         if (atomic_compare_exchange_weak_explicit(&ctx->block_free, &old, nv,
-                memory_order_acquire, memory_order_acquire))
+                memory_order_acquire, memory_order_acquire)) {
+            atomic_fetch_add_explicit(&ctx->st_pool_grabs, 1, memory_order_relaxed);
             return (int32_t)head;
+        }
     }
 }
 static void block_pool_return(dpumesh_ctx_t *ctx, int32_t id) {
     if (id < 0 || id >= ctx->n_blocks) return;
+    atomic_fetch_add_explicit(&ctx->st_pool_returns, 1, memory_order_relaxed);
     uint_fast64_t old = atomic_load_explicit(&ctx->block_free, memory_order_relaxed);
     for (;;) {
         ctx->block_next[id] = (uint32_t)(old & 0xFFFFFFFFu);
@@ -1027,6 +1038,7 @@ uint8_t *dpumesh_tx_reserve(dpumesh_ctx_t *ctx, uint16_t port, uint32_t len) {
         psl->tx_w = (k + 1) * bs;                          /* pad to the next block boundary */
         k   = psl->tx_w / bs;                              /* = old k + 1 */
         off = 0;
+        atomic_fetch_add_explicit(&ctx->st_block_pads, 1, memory_order_relaxed);
     }
     /* Back every logical block up to k with a physical block, ONCE each (head_blk_next
      * tracks the highest assigned). For each new block b, WAIT until block b-maxb has
@@ -1041,6 +1053,7 @@ uint8_t *dpumesh_tx_reserve(dpumesh_ctx_t *ctx, uint16_t port, uint32_t len) {
             if (b - psl->tail_blk < (uint64_t)maxb) {      /* block b-maxb drained → slot b%maxb free */
                 if (psl->nrec > 0) {                        /* reuse a recycled block (no pool op) */
                     psl->pblk[bslot] = psl->recyc[--psl->nrec];
+                    atomic_fetch_add_explicit(&ctx->st_recycle_hits, 1, memory_order_relaxed);
                     break;
                 }
                 if (psl->nblk_owned < ctx->maxb) {         /* GROW: grab from the shared pool */
@@ -1048,6 +1061,7 @@ uint8_t *dpumesh_tx_reserve(dpumesh_ctx_t *ctx, uint16_t port, uint32_t len) {
                     if (phys >= 0) { psl->pblk[bslot] = phys; psl->nblk_owned++; break; }
                 }
             }
+            atomic_fetch_add_explicit(&ctx->st_grow_waits, 1, memory_order_relaxed);
             nanosleep(&backoff, NULL);                      /* window full OR pool empty → wait */
             if (backoff.tv_nsec < 50000) backoff.tv_nsec *= 2;
             tx_refresh_blocks(ctx, psl);                    /* an ACK may have drained a block */
@@ -1327,6 +1341,15 @@ int dpumesh_get_slot_size(dpumesh_ctx_t *ctx) {
 
 int dpumesh_get_block_size(dpumesh_ctx_t *ctx) {
     return ctx->block_size;
+}
+
+void dpumesh_get_tx_pool_stats(dpumesh_ctx_t *ctx, dpumesh_tx_pool_stats_t *out) {
+    if (!ctx || !out) return;
+    out->pool_grabs   = atomic_load_explicit(&ctx->st_pool_grabs,   memory_order_relaxed);
+    out->pool_returns = atomic_load_explicit(&ctx->st_pool_returns, memory_order_relaxed);
+    out->recycle_hits = atomic_load_explicit(&ctx->st_recycle_hits, memory_order_relaxed);
+    out->grow_waits   = atomic_load_explicit(&ctx->st_grow_waits,   memory_order_relaxed);
+    out->block_pads   = atomic_load_explicit(&ctx->st_block_pads,   memory_order_relaxed);
 }
 
 /* Enable + return the readiness eventfd: a real fd that becomes readable

@@ -53,6 +53,8 @@ validators (see **[bench/BENCH.md](bench/BENCH.md)**).
 
 ```sh
 ./bench/bench.sh deploy                 # build host+DPU, images, (re)start DPU, launch pods
+DPUMESH_INGEST_SHARDS=2 DPUMESH_ARM_EGRESS_THREADS=2 \
+./bench/bench.sh deploy                 # measured DPU thread config (≈2× small-RPC rate; CORE.md §4.1)
 ./bench/bench.sh latency|bandwidth|rate|all [dpumesh|tcp|both]  # RPC benchmark vs TCP+Envoy baseline
 ./bench/bench.sh stream  <N> <SIZE> [<SVC_LIST>] [<FPW>]# byte-stream / L7-proxy frame validator
 ./bench/bench.sh preload <N> <SIZE> <CONNS>             # LD_PRELOAD shim (vanilla TCP apps)

@@ -73,6 +73,23 @@ int dpumesh_get_slot_size(dpumesh_ctx_t *ctx);
 /* Max contiguous message = the per-conn TX block size (the reserve/alloc length cap). */
 int dpumesh_get_block_size(dpumesh_ctx_t *ctx);
 
+/* Elastic TX block-pool event counters (cumulative since init; diagnostics).
+ * Every field counts a RARE path — the steady-state per-message reserve/commit/
+ * send/ACK cycle increments nothing except recycle_hits once per drained block:
+ *   pool_grabs   shared-pool CAS pops (a conn growing / taking its first block)
+ *   pool_returns shared-pool CAS pushes (shrink surplus / close-drain return)
+ *   recycle_hits grow served from the conn's own recycled blocks (no pool op)
+ *   grow_waits   backoff sleeps in tx_reserve (per-conn window full OR pool empty)
+ *   block_pads   message didn't fit the current block tail → pad + fresh block */
+typedef struct {
+    unsigned long long pool_grabs;
+    unsigned long long pool_returns;
+    unsigned long long recycle_hits;
+    unsigned long long grow_waits;
+    unsigned long long block_pads;
+} dpumesh_tx_pool_stats_t;
+void dpumesh_get_tx_pool_stats(dpumesh_ctx_t *ctx, dpumesh_tx_pool_stats_t *out);
+
 /* Enable + return a readiness eventfd: a real fd that becomes readable whenever an
  * inbound request/response is delivered. Wait on it with a VANILLA epoll/poll/select
  * (no busy-poll); on wakeup, drain it with one read() of a uint64_t, then collect

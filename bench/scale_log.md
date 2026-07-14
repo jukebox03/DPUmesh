@@ -4380,3 +4380,42 @@ unrecoverable via ctx stop/start.** REVERTED (dpu_proxy.c untouched). The real f
 bound in-flight DMA per pod (fewer hung ops on a mass death) and/or a per-pod `doca_dma` ctx so one dead pod
 can't hang the shared engine — or accept the operational limit (redeploy clears it; single/moderate churn
 ≤~6-at-once tested fine; only ~13+ simultaneous terminations wedge).
+
+## BATCH_TXACK_MAX 14→16 re-test — "16 = deterministic hang" DID NOT REPRODUCE; verdict = per-deploy flake (2026-07-14)
+Re-ran the 14-vs-16 question end-to-end with matched builds + instrumentation. The earlier same-day
+"MUST stay 14 — PROVEN load-bearing" conclusion is RETRACTED (its own DIAG contradicted its mechanism:
+a batch stalled below threshold would show tx≈15, but the hang showed tx=0 rev=0 = everything flushed,
+HOST stuck — and the idle-flush would have flushed a 15-deep batch within ~1ms anyway).
+
+**Code finding (real, kept as a rule): the batch constants are wire-ABI on BOTH sides.**
+`BATCH_TXACK_MAX`/`BATCH_REVDONE_MAX` (comch_common.h) compile into the DPU binary AND host
+libdpumesh.so. Host rx unpack CLAMPS `n = min(count, its own compiled max)` and its length check uses
+the clamped n → a DPU sending bigger batches than the host was built with loses the TAIL entries
+SILENTLY (no log), and `tx_reclaim_ack` is strict-FIFO front-match-or-noop → one lost ack = that conn
+wedges forever. `bench.sh restart`/`build` rebuild ONLY the DPU ⇒ **changing any comch_common.h wire
+constant requires FULL `deploy`.** (Hardening option, not yet applied: bound host n by received length
+`(len-4)/entry_size` instead of the compile-time max, both BATCH types.)
+
+**HW A/B (all full deploys, ② shards=2 + egress2, greeter 32B/8B):**
+- 16-deploy #1 (uninstrumented): conc=8/1thr PASS (609,820 / 0-fail) → conc=16/2thr **HANG once**
+  (same signature as the retracted A/B: DPU fully idle, all batches flushed, pend=0, q=0, lull=100%,
+  ZERO DPU send errors). Matched builds ⇒ the mismatch trap above was NOT this hang's cause.
+- 16-deploy #2 (+tripwires: DPU flush-size histogram; host rx count histogram + FIFO-mismatch counter):
+  **13/13 PASS** — conc=16/2thr ×7 @ 0.139–0.150 Mrps, conc=32/2thr ×6 @ 0.181–0.209 Mrps (== the
+  known-good 0.206 ②+egress2 baseline), all 0-fail; loopback 20000/0; preload 5000/0. Receipts:
+  DPU sent **1,499,970 full-16** + 95,825 n=15 batches; bench-pod received c16≈756K/c15≈53K;
+  **ACK MISS = 0** across ~2.6M batch msgs ⇒ 64B (n=15) & 68B (n=16) wire sizes, 16-entry unpack, and
+  per-conn ack ordering are ALL fine.
+- Post-cleanup deploy (tripwires removed): conc=16 0.142 / conc=32 0.204 Mrps, 0-fail.
+
+**Verdict:** same constant, different deploys → different behavior ⇒ the hang correlates with DEPLOY
+STATE, not the constant (cousin of the documented bring-up flake, though this flavor passed conc=8
+before wedging at conc=16 — root cause unconfirmed). 16 is NOT proven harmful; the old 14 A/B was a
+1-deploy-per-config sample. Any future batch-const A/B must span MULTIPLE fresh deploys per config.
+Tree+HW currently BOTH at 16 (matched), healthy.
+
+**Log hygiene (same session):** host hot-path tripwires (ACKB rx / ACK MISS in dmesh_core.c) REMOVED
+after the verdict. DPU DIAG dump (DPUMESH_DIAG=1) kept — now with fl=total/15:n/16:n flush histogram +
+sgl count — and made **quiet-at-idle**: the 1 Hz heartbeat only prints while there is queued/batched
+work or the flush counters moved since the last dump (an idle hang still leaves its final counters as
+the last line before silence; was ~86K identical lines/day).

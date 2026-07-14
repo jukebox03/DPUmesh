@@ -32,7 +32,7 @@ enum dmesh_msg_type {
 /* DPU→Host: batched TX_ACK. Coalesces up to BATCH_TXACK_MAX per-request
  * FWD_ACKs into one comch message so the host PE thread processes 1 message
  * instead of K. Flushed when full or on the idle (drain-empty) flush. */
-#define BATCH_TXACK_MAX 14
+#define BATCH_TXACK_MAX 16
 /* DPU->Host TX_ACK frees the SENDER's TX slot. Keyed by the SOURCE endpoint
  * (port,seq) of the acked forward leg. The port's range (client-ephemeral vs
  * server-accepted, both from one host-unique pool) keeps client/server keys

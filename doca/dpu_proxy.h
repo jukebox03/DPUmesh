@@ -125,9 +125,17 @@ typedef int (*dmesh_proxy_route_fn)(struct objects *objs, dmesh_proxy_conn *conn
 int px_init(struct objects *objs);
 
 /* Ingest one COMP_ENTRY_FORWARD (data or FIN, request or reply — symmetric).
- * Returns 1 = consumed, 0 = retry later (transient resource exhaustion; the
- * caller keeps the completion queued), -1 = dropped (sender TX_ACKed). */
-int px_ingest_forward(struct objects *objs, void *entry /* dpu_comp_entry_t* */);
+ * `shard` selects the ingest-processor shard whose private conn table / pools /
+ * conntrack / route tables this completion is processed against (diagram ①②③);
+ * 0 for the single-reaper / inline path. Returns 1 = consumed, 0 = retry later
+ * (transient resource exhaustion; the caller keeps the completion queued),
+ * -1 = dropped (sender TX_ACKed). */
+int px_ingest_forward(struct objects *objs, int shard, void *entry /* dpu_comp_entry_t* */);
+
+/* Owner shard of an up_port under M shards (② share-nothing: a reply on this
+ * up_port dispatches back to the shard that created the upstream). Encoded as
+ * (up_port - BASE) % M; dpu_upstream_create is constrained to this stride. */
+int px_uport_owner(uint16_t up_port, int m);
 
 /* One drain pass: submit per-destination SG-DMA batches, emit completed
  * batches' REV_DONE entries + custody TX_ACKs, kick credit refreshes.

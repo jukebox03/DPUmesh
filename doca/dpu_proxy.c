@@ -123,12 +123,19 @@ struct px_arrival {
     int32_t  pod_idx;             /* staging owner (objs->pods[] slot) */
     uint32_t staging_off;
     uint32_t len;
-    uint32_t unfreed;             /* custody: bytes not yet egressed/dropped */
-    uint32_t claimed_round;       /* scratch: seg-claimed bytes, one parse round */
+    /* Custody is CROSS-THREAD once ingest is sharded/reaped: the ingest processor
+     * that created this arrival accounts DROPPED bytes (px_advance) and removes the
+     * window reference, while MAIN (egress emit) accounts EGRESSED bytes. `unfreed`
+     * = (bytes not yet egressed/dropped) + (1 while linked in the window). Every
+     * decrement is an atomic_fetch_sub (lost-update-free); whichever brings it to 0
+     * releases the arrival EXACTLY once — the byte decrements sum to len and the one
+     * window-ref removal accounts the +1, matching the initial len+1. */
+    atomic_uint unfreed;          /* custody: (bytes not yet egressed/dropped) + in-window ref */
+    uint32_t claimed_round;       /* scratch: seg-claimed bytes, one parse round (ingest-thread-only) */
     int32_t  ack_pod;             /* TX_ACK target (original sender, untranslated) */
     uint16_t ack_port, ack_seq;
     uint8_t  route_group;
-    uint8_t  in_window;           /* 1 while linked in the conn window */
+    uint8_t  in_window;           /* 1 while linked in the conn window (bookkeeping) */
 };
 
 /* One contiguous staging extent of a unit (an SG source piece). */
@@ -263,6 +270,21 @@ struct px_engine {
     volatile int stop;
 };
 
+/* One ingest-processor shard's private routing state (diagram ①②③). The conn
+ * table (buckets) is ALWAYS per-shard: a conn maps deterministically to one shard
+ * (the reaper dispatch), so its window is touched by exactly one thread — lock-free.
+ * The conntrack is PER-SHARD in ② (share-nothing: an up_port encodes its owner
+ * shard so a backend reply dispatches back to the session's owner, keeping each
+ * shard's conntrack single-threaded) and the SHARED objs->conntrack under
+ * routing_lock in ① (px_route_lock/unlock wrap every conntrack access; no-ops in
+ * ② and for a single shard). */
+struct px_shard {
+    struct px_conn **buckets;      /* PX_CONN_HASH buckets, per-shard */
+    struct dpu_conntrack *ct;      /* ② private conntrack / ① == objs->conntrack (shared) */
+    int id;
+    int owner_stride;              /* ② : M (up_port owner residue class); ① / M=1 : 1 */
+};
+
 struct dmesh_proxy {
     /* Per-connection mock selection (NOT one global mock): a REQUEST stream
      * frames iff its addressed service is designated frame; every other request
@@ -278,13 +300,22 @@ struct dmesh_proxy {
     uint32_t seam_max;
     uint32_t sg_pieces_max;
 
-    struct px_conn **buckets;         /* PX_CONN_HASH */
+    /* Ingest-processor shards (diagram ①②③). shards[s].buckets is s's private
+     * conn table; shards[s].ct is s's conntrack (private in ②, shared in ①).
+     * n_shards == objs->n_ingest_shards; share_nothing == !objs->shard_shared_routing. */
+    struct px_shard shards[MAX_INGEST_SHARDS];
+    int n_shards;
+    int share_nothing;                /* 1 = ② (per-shard conntrack) / 0 = ① (shared+lock) */
 
-    /* fixed pools + freelists — INGEST-only (main thread): arrivals/pieces/units.
-     * The batch pool moved per-engine (worker allocs+frees its own). */
+    /* fixed pools + freelists: arrivals/pieces/units. The batch pool moved per-engine
+     * (worker allocs+frees its own). With the ingest reaper (diagram ①) these are
+     * ALLOC'd on the ingest thread and FREE'd on main (emit), so pool_lock guards the
+     * freelist ops (held only for the brief pointer swap, so parse and emit overlap).
+     * When the reaper is off they are single-thread (lock uncontended). */
     struct px_arrival *arr_mem,  *arr_free;
     struct px_piece   *piece_mem, *piece_free;
     struct px_unit    *unit_mem, *unit_free;
+    pthread_mutex_t    pool_lock;
 
     struct px_lane lanes[MAX_PODS][MAX_EU_PER_POD];
     struct px_op   refresh_ops[MAX_PODS][MAX_EU_PER_POD];
@@ -306,36 +337,80 @@ struct dmesh_proxy {
 #define PX_SCRATCH_CELL 64
 #define PX_SCRATCH_OFF(pi, r) (((size_t)(pi) * MAX_EU_PER_POD + (size_t)(r)) * PX_SCRATCH_CELL)
 
+/* ====== ingest-processor shard context (diagram ①②③) ======
+ * Set by px_ingest_forward from its `shard` arg (thread-local, matching the
+ * existing __thread dpu_t_is_ingest pattern) so the parse/route call graph reaches
+ * this shard's private conn table + conntrack without threading `shard` through
+ * ~30 static helpers. The single-reaper / inline path uses shard 0. Emit (main)
+ * never sets this — it only frees to the SHARED pools + sends, touching no
+ * shard-private routing state. */
+static __thread struct px_shard *px_cur_shard;
+
+/* ① : serialize access to the SHARED conntrack + route tables. No-op in ②
+ * (per-shard conntrack) and for a single shard (nothing shared cross-thread). */
+static inline void px_route_lock(struct objects *objs) {
+    if (objs->proxy->n_shards > 1 && !objs->proxy->share_nothing)
+        pthread_mutex_lock(&objs->routing_lock);
+}
+static inline void px_route_unlock(struct objects *objs) {
+    if (objs->proxy->n_shards > 1 && !objs->proxy->share_nothing)
+        pthread_mutex_unlock(&objs->routing_lock);
+}
+
+/* Owner shard of an up_port under m shards (② share-nothing dispatch). */
+int px_uport_owner(uint16_t up_port, int m) {
+    if (m <= 1 || up_port < DMESH_UPORT_BASE)
+        return 0;
+    return (int)(((uint32_t)up_port - DMESH_UPORT_BASE) % (uint32_t)m);
+}
+
 /* ====== pools ====== */
 
+/* Pool freelists are shared (ingest thread allocs, main frees) once the reaper runs;
+ * pool_lock guards the brief pointer swap. Uncontended when the reaper is off. */
 static struct px_arrival *px_arrival_alloc(struct dmesh_proxy *px) {
+    pthread_mutex_lock(&px->pool_lock);
     struct px_arrival *a = px->arr_free;
     if (a) px->arr_free = a->next;
+    pthread_mutex_unlock(&px->pool_lock);
     return a;
 }
 static void px_arrival_free(struct dmesh_proxy *px, struct px_arrival *a) {
+    pthread_mutex_lock(&px->pool_lock);
     a->next = px->arr_free; px->arr_free = a;
+    pthread_mutex_unlock(&px->pool_lock);
 }
 static struct px_piece *px_piece_alloc(struct dmesh_proxy *px) {
+    pthread_mutex_lock(&px->pool_lock);
     struct px_piece *p = px->piece_free;
     if (p) px->piece_free = p->next;
+    pthread_mutex_unlock(&px->pool_lock);
     return p;
 }
 static void px_piece_free(struct dmesh_proxy *px, struct px_piece *p) {
+    pthread_mutex_lock(&px->pool_lock);
     p->next = px->piece_free; px->piece_free = p;
+    pthread_mutex_unlock(&px->pool_lock);
 }
 static struct px_unit *px_unit_alloc(struct dmesh_proxy *px) {
+    pthread_mutex_lock(&px->pool_lock);
     struct px_unit *u = px->unit_free;
-    if (u) { px->unit_free = u->next; memset(u, 0, sizeof(*u)); }
+    if (u) px->unit_free = u->next;
+    pthread_mutex_unlock(&px->pool_lock);
+    if (u) memset(u, 0, sizeof(*u));
     return u;
 }
 static void px_unit_free_node(struct dmesh_proxy *px, struct px_unit *u) {
+    /* Free the unit AND its pieces under one lock (inlined piece-free avoids a
+     * recursive lock). */
+    pthread_mutex_lock(&px->pool_lock);
     while (u->pieces) {
         struct px_piece *p = u->pieces;
         u->pieces = p->next;
-        px_piece_free(px, p);
+        p->next = px->piece_free; px->piece_free = p;
     }
     u->next = px->unit_free; px->unit_free = u;
+    pthread_mutex_unlock(&px->pool_lock);
 }
 static struct px_batch *px_batch_alloc(struct px_engine *eng) {
     struct px_batch *b = eng->batch_free;
@@ -355,6 +430,16 @@ static void px_arrival_release(struct objects *objs, struct px_arrival *a) {
     px_arrival_free(objs->proxy, a);
 }
 
+/* Subtract n from the arrival's cross-thread custody counter; release exactly once
+ * when it reaches 0 (the decrementing thread that observes prev==n owns the release).
+ * n = egressed/dropped bytes, or 1 to remove the window reference. */
+static inline void px_custody_sub(struct objects *objs, struct px_arrival *a, uint32_t n) {
+    if (n == 0)
+        return;
+    if (atomic_fetch_sub_explicit(&a->unfreed, n, memory_order_acq_rel) == n)
+        px_arrival_release(objs, a);
+}
+
 /* ====== conn table ====== */
 
 static inline uint32_t px_conn_hash(int32_t pod, uint16_t port) {
@@ -363,7 +448,8 @@ static inline uint32_t px_conn_hash(int32_t pod, uint16_t port) {
 }
 
 static struct px_conn *px_conn_find(struct dmesh_proxy *px, int32_t pod, uint16_t port) {
-    struct px_conn *c = px->buckets[px_conn_hash(pod, port)];
+    (void)px;   /* conn table is per-shard (px_cur_shard) */
+    struct px_conn *c = px_cur_shard->buckets[px_conn_hash(pod, port)];
     while (c && !(c->pub.src_pod == pod && c->pub.src_port == port))
         c = c->hnext;
     return c;
@@ -385,8 +471,8 @@ static struct px_conn *px_conn_get(struct dmesh_proxy *px, int32_t pod, uint16_t
     c->pinned_backend = -1;                /* unpinned until the first LB pick */
     c->pinned_cluster = DMESH_SVC_NONE;
     uint32_t h = px_conn_hash(pod, port);
-    c->hnext = px->buckets[h];
-    px->buckets[h] = c;
+    c->hnext = px_cur_shard->buckets[h];
+    px_cur_shard->buckets[h] = c;
     return c;
 }
 
@@ -449,12 +535,11 @@ static void px_conn_del(struct objects *objs, struct px_conn *c) {
         c->whead = a->next;
         a->in_window = 0;
         a->next = NULL;
-        if (a->unfreed == 0)
-            px_arrival_release(objs, a);
+        px_custody_sub(objs, a, 1);            /* remove window ref; release iff bytes done */
     }
     c->wtail = NULL;
     free(c->seam);
-    struct px_conn **link = &px->buckets[px_conn_hash(c->pub.src_pod, c->pub.src_port)];
+    struct px_conn **link = &px_cur_shard->buckets[px_conn_hash(c->pub.src_pod, c->pub.src_port)];
     while (*link && *link != c)
         link = &(*link)->hnext;
     if (*link)
@@ -602,7 +687,7 @@ static void px_advance(struct objects *objs, struct px_conn *c, uint32_t consume
             uint32_t covered = (uint32_t)(cend - cbeg);
             uint32_t dropped = covered > a->claimed_round ? covered - a->claimed_round : 0;
             a->claimed_round = 0;
-            a->unfreed = a->unfreed > dropped ? a->unfreed - dropped : 0;
+            px_custody_sub(objs, a, dropped);  /* still in window (+1 ref) → cannot release here */
             objs->proxy->stat_drop_bytes += dropped;
         }
         a = a->next;
@@ -619,8 +704,7 @@ static void px_advance(struct objects *objs, struct px_conn *c, uint32_t consume
             c->wtail = NULL;
         h->in_window = 0;
         h->next = NULL;
-        if (h->unfreed == 0)
-            px_arrival_release(objs, h);
+        px_custody_sub(objs, h, 1);            /* remove window ref; release iff bytes done */
     }
 }
 
@@ -650,8 +734,12 @@ static inline uint32_t px_unit_entries(const struct px_unit *u) {
 static void px_lane_enqueue(struct dmesh_proxy *px, int pod_idx, int region, struct px_unit *u) {
     struct px_lane *ln = &px->lanes[pod_idx][region];
     u->next = NULL;
-    if (px->n_eng > 1) {
-        /* hand to the owning worker's per-lane inbox (spliced onto qhead in pump) */
+    /* Use the locked inbox whenever the PRODUCER (ingest) and CONSUMER (egress) of a
+     * lane can be different threads: n_eng>1 (egress workers own lanes) OR n_shards>1
+     * (multiple ingest processors enqueue to the same lane). The lane owner splices
+     * inq→qhead under the same lock (px_engine_pump / px_drain). Only the single-
+     * reaper + inline-egress default (both ==1) takes the lock-free direct path. */
+    if (px->n_eng > 1 || px->n_shards > 1) {
         pthread_mutex_lock(&ln->inq_lock);
         if (ln->inq_tail) ln->inq_tail->next = u; else ln->inq_head = u;
         ln->inq_tail = u;
@@ -660,7 +748,7 @@ static void px_lane_enqueue(struct dmesh_proxy *px, int pod_idx, int region, str
         if (ln->qtail) ln->qtail->next = u; else ln->qhead = u;
         ln->qtail = u;
     }
-    px->stat_units++;   /* ingest-only writer */
+    __atomic_fetch_add(&px->stat_units, 1, __ATOMIC_RELAXED);   /* multiple ingest writers */
 }
 
 /* route_group of the arrival holding stream offset `off` (for the L4 default
@@ -739,7 +827,7 @@ static int32_t px_resolve_backend(struct objects *objs, struct px_conn *c,
 static void px_ship_seg(struct objects *objs, struct px_conn *c,
                         const struct dmesh_route_seg *s) {
     struct dmesh_proxy *px = objs->proxy;
-    struct dpu_conntrack *ct = objs->conntrack;
+    struct dpu_conntrack *ct = px_cur_shard->ct;   /* ② private / ① shared (under px_route_lock) */
     uint64_t sbeg = c->parse_pos + s->off, send_ = sbeg + s->len;
     int32_t dst_pod;
     uint16_t out_src_port, out_dst_port;
@@ -766,25 +854,41 @@ static void px_ship_seg(struct objects *objs, struct px_conn *c,
 
     struct pod_state *tp = find_pod_by_id(objs, dst_pod);
     if (!tp || !pod_data_ready(tp) || !tp->host_rx_mmap || !tp->host_rx_addr) {
-        DOCA_LOG_ERR("proxy: dst pod %d not ready — %u bytes dropped", dst_pod, s->len);
+        /* Fires per-seg while a pod is mid-(re)start — floods the DPU log during pod
+         * churn. Throttle to first + 1-in-65536 (main thread → static needs no lock). */
+        static uint64_t dst_notready_drops;
+        if ((dst_notready_drops++ & 0xFFFFu) == 0)
+            DOCA_LOG_ERR("proxy: dst pod %d not ready — %u bytes dropped (total %llu)",
+                         dst_pod, s->len, (unsigned long long)dst_notready_drops);
         return;
     }
 
     if (!c->pub.is_reply) {
+        px_route_lock(objs);   /* ① : serialize the shared conntrack; no-op in ② / M=1 */
         uint16_t uP = dpu_upstream_find(ct, c->pub.src_pod, c->pub.src_port, dst_pod);
+        int created = 0;
         if (uP == 0) {
-            uP = dpu_upstream_create(ct, c->pub.src_pod, c->pub.src_port, dst_pod);
-            /* A freshly-reused uP may still carry a STALE dead reply-conn (dst_pod, uP)
-             * from a previous client whose late reply arrived AFTER its FIN: px_conn_get
-             * created that reply conn, upstream[uP] was already freed → it got
-             * dead-marked (the stale-upstream WARN-flood guard) but was never cleaned.
-             * Left in place, this backend's replies on the reused uP would hit the dead
-             * orphan (px_ingest_forward c->dead fast-path) and be blackholed for the whole
-             * session — orphans accumulate under conn churn → progressive global wedge.
-             * Evict it so this session's replies build a FRESH conn and get delivered. */
-            if (uP != 0)
-                px_conn_del_key(objs, dst_pod, uP);
+            /* ② : stamp the up_port with THIS shard's owner-residue so the backend's
+             * reply on it dispatches back here (share-nothing session ownership). */
+            uP = dpu_upstream_create(ct, c->pub.src_pod, c->pub.src_port, dst_pod,
+                                     (uint16_t)px_cur_shard->id,
+                                     (uint16_t)px_cur_shard->owner_stride);
+            created = (uP != 0);
         }
+        px_route_unlock(objs);
+        /* A freshly-reused uP may still carry a STALE dead reply-conn (dst_pod, uP)
+         * from a previous client whose late reply arrived AFTER its FIN: px_conn_get
+         * created that reply conn, upstream[uP] was already freed → it got dead-marked
+         * (the stale-upstream WARN-flood guard) but was never cleaned. Left in place,
+         * this backend's replies on the reused uP would hit the dead orphan
+         * (px_ingest_forward c->dead fast-path) and be blackholed for the whole session
+         * — orphans accumulate under conn churn → progressive global wedge. Evict it so
+         * this session's replies build a FRESH conn and get delivered.
+         * The reply conn (dst_pod, uP) lives on THIS shard only when M==1 or ② (owner
+         * encoding co-locates it here); in ① it may be on another shard — skip (the
+         * shared-conntrack path keeps this rare defensive cleanup single-shard). */
+        if (created && (px->n_shards <= 1 || px->share_nothing))
+            px_conn_del_key(objs, dst_pod, uP);
         if (uP == 0) {
             DOCA_LOG_ERR("proxy: upstream space full (%d:%u -> pod %d) — seg dropped",
                          c->pub.src_pod, c->pub.src_port, dst_pod);
@@ -883,10 +987,17 @@ static void px_parse(struct objects *objs, struct px_conn *c) {
 
     while (c->parse_pos < c->stream_end) {
         if (c->pub.is_reply) {
-            /* the reply's dst is predetermined — L4 conntrack lookup */
-            struct dpu_upstream *u = (c->pub.src_port >= DMESH_UPORT_BASE)
-                ? &objs->conntrack->upstream[c->pub.src_port] : NULL;
-            if (!u || !u->in_use) {
+            /* the reply's dst is predetermined — L4 conntrack lookup. Read the
+             * client identity OUT under px_route_lock (① : the shared conntrack may
+             * be freed by another shard's FIN concurrently; ② : private, no lock). */
+            int have = 0; int32_t cpod = 0; uint16_t cport = 0;
+            if (c->pub.src_port >= DMESH_UPORT_BASE) {
+                px_route_lock(objs);
+                struct dpu_upstream *u = &px_cur_shard->ct->upstream[c->pub.src_port];
+                if (u->in_use) { have = 1; cpod = u->client_pod; cport = u->client_port; }
+                px_route_unlock(objs);
+            }
+            if (!have) {
                 /* Client already closed: this reply is undeliverable forever.
                  * Drop the window once and mark the conn dead so subsequent
                  * arrivals hit the silent drop+ack fast-path in
@@ -898,8 +1009,8 @@ static void px_parse(struct objects *objs, struct px_conn *c) {
                 c->dead = 1;
                 return;
             }
-            c->pub.peer_pod = u->client_pod;
-            c->pub.peer_port = u->client_port;
+            c->pub.peer_pod = cpod;
+            c->pub.peer_port = cport;
         }
         const uint8_t *buf;
         uint32_t avail, consumed = 0;
@@ -1016,7 +1127,8 @@ static void px_parse_l7(struct objects *objs, struct px_conn *c) {
 /* ====== FIN ====== */
 
 static void px_try_fin(struct objects *objs, struct px_conn *c) {
-    struct dpu_conntrack *ct = objs->conntrack;
+    struct dmesh_proxy *px = objs->proxy;
+    struct dpu_conntrack *ct = px_cur_shard->ct;   /* ② private / ① shared (px_route_lock) */
     if (!c->fin_pending)
         return;
     /* FIN = no more input: an unconsumed tail is a truncated unit — drop it
@@ -1026,25 +1138,38 @@ static void px_try_fin(struct objects *objs, struct px_conn *c) {
 
     if (!c->pub.is_reply) {
         /* client FIN: fan-out teardown of every upstream this conn opened —
-         * each 0-len unit rides ITS lane, i.e. BEHIND that upstream's data. */
+         * each 0-len unit rides ITS lane, i.e. BEHIND that upstream's data. The
+         * conntrack find+free is under px_route_lock (① shared); the FIN unit and
+         * reply-conn cleanup are shard-local outside it. */
         for (int i = 0; i < objs->num_pods; i++) {
             int32_t b = objs->pods[i].pod_id;
+            px_route_lock(objs);
             uint16_t uP = dpu_upstream_find(ct, c->pub.src_pod, c->pub.src_port, b);
+            if (uP != 0)
+                dpu_upstream_free(ct, uP);
+            px_route_unlock(objs);
             if (uP == 0)
                 continue;
             struct pod_state *B = find_pod_by_id(objs, b);
             if (B && pod_data_ready(B) && B->host_rx_addr)
                 px_queue_fin_unit(objs, c, B, uP, uP);
-            dpu_upstream_free(ct, uP);
-            px_conn_del_key(objs, b, uP);      /* reply-stream state of this upstream */
+            /* reply-stream state of this upstream lives on THIS shard only when
+             * M==1 or ② (owner encoding); in ① it may be elsewhere — skip. */
+            if (px->n_shards <= 1 || px->share_nothing)
+                px_conn_del_key(objs, b, uP);
         }
     } else {
-        struct dpu_upstream *u = (c->pub.src_port >= DMESH_UPORT_BASE)
-            ? &ct->upstream[c->pub.src_port] : NULL;
-        if (u && u->in_use) {
-            struct pod_state *cp = find_pod_by_id(objs, u->client_pod);
+        int have = 0; int32_t cpod = 0; uint16_t cport = 0;
+        if (c->pub.src_port >= DMESH_UPORT_BASE) {
+            px_route_lock(objs);
+            struct dpu_upstream *u = &ct->upstream[c->pub.src_port];
+            if (u->in_use) { have = 1; cpod = u->client_pod; cport = u->client_port; }
+            px_route_unlock(objs);
+        }
+        if (have) {
+            struct pod_state *cp = find_pod_by_id(objs, cpod);
             if (cp && pod_data_ready(cp) && cp->host_rx_addr)
-                px_queue_fin_unit(objs, c, cp, c->pub.src_port, u->client_port);
+                px_queue_fin_unit(objs, c, cp, c->pub.src_port, cport);
             /* upstream itself is freed by the CLIENT's FIN fan-out (legacy parity) */
         }
     }
@@ -1055,9 +1180,14 @@ static void px_try_fin(struct objects *objs, struct px_conn *c) {
 
 /* ====== ingest (forward completion → per-conn input window) ====== */
 
-int px_ingest_forward(struct objects *objs, void *ventry) {
+int px_ingest_forward(struct objects *objs, int shard, void *ventry) {
     struct dmesh_proxy *px = objs->proxy;
     dpu_comp_entry_t *e = (dpu_comp_entry_t *)ventry;
+
+    /* Bind this thread to its shard's private routing state (conn table +
+     * conntrack) for the whole parse/route call graph. Shard 0 = the
+     * single-reaper / inline path (its structures ARE the shared ones for M<=1). */
+    px_cur_shard = &px->shards[shard];
 
     struct pod_state *fwd = (e->pod_idx >= 0 && e->pod_idx < objs->num_pods)
         ? &objs->pods[e->pod_idx] : NULL;
@@ -1106,7 +1236,10 @@ int px_ingest_forward(struct objects *objs, void *ventry) {
     a->pod_idx = e->pod_idx;
     a->staging_off = e->buf_offset;
     a->len = e->length;
-    a->unfreed = e->length;
+    /* +1 window reference: removed when the arrival leaves the window (px_advance /
+     * px_conn_del). Keeps custody > 0 while bytes are still in flight so egress
+     * emit cannot release the arrival before it is unlinked. */
+    atomic_store_explicit(&a->unfreed, e->length + 1u, memory_order_relaxed);
     a->claimed_round = 0;
     a->ack_pod = e->src_pod_id;
     a->ack_port = e->src_port;
@@ -1297,9 +1430,7 @@ static int px_lane_emit(struct objects *objs, struct px_engine *eng,
             /* custody: the SG op has read (or abandoned) these staging bytes */
             for (struct px_piece *p = u->pieces; p; p = p->next) {
                 struct px_arrival *a = p->arr;
-                a->unfreed = a->unfreed > p->len ? a->unfreed - p->len : 0;
-                if (a->unfreed == 0 && !a->in_window)
-                    px_arrival_release(objs, a);
+                px_custody_sub(objs, a, p->len);   /* egressed bytes; release iff last */
             }
             b->units = u->next;
             px_unit_free_node(px, u);
@@ -1407,9 +1538,7 @@ static int px_engine_emit(struct objects *objs, struct px_engine *eng) {
         /* custody: the SG op has read (or abandoned) these staging bytes */
         for (struct px_piece *p = u->pieces; p; p = p->next) {
             struct px_arrival *a = p->arr;
-            a->unfreed = a->unfreed > p->len ? a->unfreed - p->len : 0;
-            if (a->unfreed == 0 && !a->in_window)
-                px_arrival_release(objs, a);
+            px_custody_sub(objs, a, p->len);   /* egressed bytes; release iff last */
         }
         eng->emit_head = u->next;
         if (!eng->emit_head) eng->emit_tail = NULL;
@@ -1483,7 +1612,12 @@ static void *px_worker_main(void *arg) {
     while (!eng->stop) {
         int p = doca_pe_progress(eng->pe) ? 1 : 0;
         p |= px_engine_pump(objs, eng);
-        if (p) { idle = 0; continue; }
+        if (p) {
+            /* Retired an SG-DMA batch to the done-queue → wake main to emit REV_DONE
+             * promptly (no-op unless main is parked at low load / reaper on). */
+            dpu_wake_main(objs);
+            idle = 0; continue;
+        }
         /* Idle: spin-yield briefly, then back off to a short sleep. An active
          * worker always makes progress and never reaches the sleep; only a
          * worker with no assigned pods (n_eng > active dst pods) or a real lull
@@ -1535,11 +1669,8 @@ static int px_lane_submit(struct objects *objs, struct px_engine *eng, int pod_i
             struct px_unit *u = ln->qhead;
             ln->qhead = u->next;
             if (!ln->qhead) ln->qtail = NULL;
-            for (struct px_piece *p = u->pieces; p; p = p->next) {
-                p->arr->unfreed = p->arr->unfreed > p->len ? p->arr->unfreed - p->len : 0;
-                if (p->arr->unfreed == 0 && !p->arr->in_window)
-                    px_arrival_release(objs, p->arr);
-            }
+            for (struct px_piece *p = u->pieces; p; p = p->next)
+                px_custody_sub(objs, p->arr, p->len);   /* over-region drop: release iff last */
             px_unit_free_node(px, u);
             continue;
         }
@@ -1571,9 +1702,7 @@ static int px_lane_submit(struct objects *objs, struct px_engine *eng, int pod_i
                 ln->qhead = u->next;
                 if (!ln->qhead) ln->qtail = NULL;
                 for (struct px_piece *p = u->pieces; p; p = p->next) {
-                    p->arr->unfreed = p->arr->unfreed > p->len ? p->arr->unfreed - p->len : 0;
-                    if (p->arr->unfreed == 0 && !p->arr->in_window)
-                        px_arrival_release(objs, p->arr);
+                    px_custody_sub(objs, p->arr, p->len);   /* drop path: release iff last */
                 }
                 px_unit_free_node(px, u);
                 continue;
@@ -1717,6 +1846,20 @@ int px_drain(struct objects *objs) {
         int K = pod->k_rings > 0 ? pod->k_rings : 1;
         for (int r = 0; r < K; r++) {
             struct px_lane *ln = &px->lanes[i][r];
+            /* Sharded ingest (M>1) feeds this lane via the locked inbox; splice it
+             * onto the worker-local qhead (main is the lane owner here). For M==1
+             * the enqueue went straight to qhead (no inbox). */
+            if (px->n_shards > 1 && ln->inq_head) {
+                pthread_mutex_lock(&ln->inq_lock);
+                struct px_unit *ih = ln->inq_head, *it = ln->inq_tail;
+                ln->inq_head = ln->inq_tail = NULL;
+                pthread_mutex_unlock(&ln->inq_lock);
+                if (ih) {
+                    if (ln->qtail) ln->qtail->next = ih; else ln->qhead = ih;
+                    ln->qtail = it;
+                    progressed = 1;
+                }
+            }
             if (ln->fhead)
                 progressed |= px_lane_emit(objs, eng, pod, ln);
             if (ln->qhead)
@@ -1833,11 +1976,36 @@ int px_init(struct objects *objs) {
     int n_pr_svc    = px_parse_svc_csv(getenv("DPUMESH_LB_PER_REQUEST_SVC"), px->svc_per_request);
     px->seam_max = PX_SEAM_MAX_DEFAULT;
 
-    px->buckets = (struct px_conn **)calloc(PX_CONN_HASH, sizeof(*px->buckets));
+    /* ==== Ingest-processor shards (diagram ①②③) ====
+     * Each shard gets a PRIVATE conn table (lock-free: a conn maps to one shard).
+     * ② additionally gives each shard a PRIVATE conntrack (share-nothing; the
+     * up_port it hands out encodes owner residue = stride M, so a backend reply
+     * dispatches back). ① / single-shard share the objs->conntrack (routing_lock). */
+    px->n_shards = objs->n_ingest_shards >= 1 ? objs->n_ingest_shards : 1;
+    if (px->n_shards > MAX_INGEST_SHARDS) px->n_shards = MAX_INGEST_SHARDS;
+    px->share_nothing = !objs->shard_shared_routing;
+    for (int s = 0; s < px->n_shards; s++) {
+        struct px_shard *sh = &px->shards[s];
+        sh->id = s;
+        sh->buckets = (struct px_conn **)calloc(PX_CONN_HASH, sizeof(*sh->buckets));
+        if (!sh->buckets)
+            goto oom;
+        if (px->n_shards >= 2 && px->share_nothing) {
+            sh->ct = (struct dpu_conntrack *)calloc(1, sizeof(struct dpu_conntrack));
+            if (!sh->ct)
+                goto oom;
+            sh->ct->next_uport = DMESH_UPORT_BASE;
+            sh->owner_stride = px->n_shards;      /* ② : owner-strided up_ports */
+        } else {
+            sh->ct = objs->conntrack;             /* ① / single : shared conntrack */
+            sh->owner_stride = 1;
+        }
+    }
+
     px->arr_mem = (struct px_arrival *)calloc(PX_ARRIVAL_POOL, sizeof(*px->arr_mem));
     px->piece_mem = (struct px_piece *)calloc(PX_PIECE_POOL, sizeof(*px->piece_mem));
     px->unit_mem = (struct px_unit *)calloc(PX_UNIT_POOL, sizeof(*px->unit_mem));
-    if (!px->buckets || !px->arr_mem || !px->piece_mem || !px->unit_mem)
+    if (!px->arr_mem || !px->piece_mem || !px->unit_mem)
         goto oom;
     for (int i = PX_ARRIVAL_POOL - 1; i >= 0; i--) px_arrival_free(px, &px->arr_mem[i]);
     for (int i = PX_PIECE_POOL - 1; i >= 0; i--)   px_piece_free(px, &px->piece_mem[i]);
@@ -1846,6 +2014,9 @@ int px_init(struct objects *objs) {
     for (int i = 0; i < MAX_PODS; i++)
         for (int r = 0; r < MAX_EU_PER_POD; r++)
             pthread_mutex_init(&px->lanes[i][r].inq_lock, NULL);
+
+    /* pool freelist lock (ingest reaper allocs / main frees); uncontended if reaper off */
+    pthread_mutex_init(&px->pool_lock, NULL);
 
     /* SG piece cap from the device (measured 64; clamp defensively) */
     px->sg_pieces_max = PX_SG_PIECES_MAX;
@@ -1937,7 +2108,13 @@ oom:
     ret = DOCA_ERROR_NO_MEMORY;
 fail:
     DOCA_LOG_ERR("proxy init failed: %s", doca_error_get_descr(ret));
-    free(px->buckets); free(px->arr_mem); free(px->piece_mem);
+    for (int s = 0; s < MAX_INGEST_SHARDS; s++) {
+        free(px->shards[s].buckets);
+        /* free a shard's PRIVATE conntrack (② ); never free the shared objs->conntrack */
+        if (px->shards[s].ct && px->shards[s].ct != objs->conntrack)
+            free(px->shards[s].ct);
+    }
+    free(px->arr_mem); free(px->piece_mem);
     free(px->unit_mem);
     for (int e = 0; e < MAX_ARM_ENG; e++) free(px->engines[e].batch_mem);
     free(px);
