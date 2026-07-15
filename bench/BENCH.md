@@ -38,8 +38,9 @@ request-side bytes. The client is:
   whatever the closed loop sustains.
 * **warmup-aware**: the first `warmup` (1000) completions are excluded; the
   measurement window opens at the warmup boundary.
-* **multi-threaded**: `threads` client threads, each its own connection; the
-  aggregate rate is the **sum of per-thread rates**, latency percentiles come
+* **multi-threaded, share-nothing**: `threads` client threads, each with its own
+  **CQ** and its own connection on it, so no thread touches another's RX path.
+  The aggregate rate is the **sum of per-thread rates**; latency percentiles come
   from the merged histogram.
 
 Reported metrics: **p50/p95/p99/avg/min/max latency (µs)**, **goodput Gb/s** =
@@ -101,12 +102,12 @@ the **client** (`bench-*`). Both listen for the `RUN` control command on :9092
 bench/
   bench.sh         the ONE script: deploy + benchmark + validators + utils
   bench.h          wire frame + stream reframer + latency histogram (shared)
-  bench_dpumesh.c  DPUmesh client   -> bench-dpumesh   (closed-loop, framed, multithread)
+  bench_dpumesh.c  DPUmesh client   -> bench-dpumesh   (closed-loop, framed, CQ-per-thread)
   echo_dpumesh.c   DPUmesh server   -> echo-dpumesh    (Greeter: fixed reply, reassembly)
   bench_tcp.go     TCP client       -> bench-tcp       (same methodology, via sidecar)
   echo_tcp.go      TCP server       -> echo-tcp
   BENCH.md         this doc
-  scale_log.md     (historical experiment log — kept)
+  scale_log.md     the measurement log — every experiment lands here
   k8s/pods.yaml    declarative k8s manifest (applied by bench.sh via envsubst)
   docker/          the 4 benchmark Dockerfiles
   validators/      DPUmesh feature validators (see validators/README.md) + their Dockerfiles
@@ -125,16 +126,21 @@ u32 aux     (request: reply_size the server must return; reply: 0)
 u8  payload[payload_len]
 ```
 
-Framing lets the server reassemble a **>8 KB request** that the transport
-auto-chunks across slots and reply only after the whole request arrives, and lets
-the client correlate replies to requests by `seq` under the concurrency window.
-The DPUmesh client `dmesh_pin_route()`s its connection so it stays on the one
-backend (replies in send order). `dmesh_write` busy-spins on byte-ring
-backpressure, so the closed-loop window is naturally credit-limited.
+Framing lets the server reassemble a **>8 KB request** that arrives as several
+RECV completions and reply only after the whole request is in, and lets the
+client correlate replies to requests by `seq` under the concurrency window.
 
-The DPUmesh feature validators live in `validators/` (self-routing, the L7
-frame-proxy engine, LD_PRELOAD transparency) — separate concerns this benchmark
-does not exercise. See `validators/README.md`.
+Both sides run the **native API**: `dmesh_alloc` hands a pointer straight into the
+TX ring (filled in place — no staging buffer), and every `DMESH_WC_RECV` completion
+points straight into the RX mmap. **Zero copy in both directions.** The client
+`dmesh_pin_route()`s its connection so it stays on one backend (replies in send
+order). Since `dmesh_alloc` **never blocks** (`NULL`+`EAGAIN` on a full SQ), a
+backpressured frame parks and resumes on a later loop pass instead of stalling
+the thread — so the closed-loop window is credit-limited without a spin.
+
+The DPUmesh feature validators live in `validators/` (self-routing, concurrency
+depth, the L7 frame-proxy engine, LD_PRELOAD transparency) — separate concerns
+this benchmark does not exercise. See `validators/README.md`.
 
 ---
 
@@ -154,13 +160,16 @@ PING -> PONG
 
 `reconn` (dpumesh only, default 0 = off) is the CONNECTION-CHURN knob: every
 `reconn` completions a worker drains its window to 0 outstanding, then
-`dmesh_close()` + `dmesh_connect()`s a fresh conn. `reconns` = total reconnects,
-`reconn_us` = mean wall cost of one local close+connect+pin. The trailing five
-fields are the elastic TX block-pool event deltas over the run
-(`dpumesh_tx_pool_stats_t`): shared-pool grabs/returns (one CAS each),
-owner-local recycle hits, reserve backoff waits (window full / pool empty), and
-block-tail pads. In a steady small-message run grabs ≈ live conns (the lazy
-first block) and waits = 0 — the per-message path touches no shared state.
+`dmesh_destroy_qp()` + `dmesh_create_qp()`s a fresh one. `reconns` = total
+reconnects, `reconn_us` = mean wall cost of one local destroy+create+pin.
+
+The trailing five fields are the elastic TX block-pool deltas over the run
+(`dmesh_get_tx_stats`): shared-pool grabs/returns (one CAS each), owner-local
+recycle hits, **`waits`** = `dmesh_alloc` calls that hit the in-flight ceiling and
+returned `EAGAIN`, and block-tail pads. In a steady small-message run grabs ≈ live
+conns (the lazy first block) and **`waits` = 0** — the per-message path touches no
+shared state and backpressure never occurs. `waits` is the number to watch: it is
+the only observable proof of whether a send loop ever actually backpressures.
 
 Pod bring-up (`bench.sh deploy`) does not parse the RUN reply, so a redeploy is
 what makes the pods speak this protocol.
@@ -178,7 +187,7 @@ what makes the pods speak this protocol.
 ./bench/bench.sh rate      both               # Mrps vs client threads {1,2,4,8}
 ./bench/bench.sh all       both               # all three -> CSVs under $OUT (/tmp/dpumesh-bench)
 ./bench/bench.sh point dpumesh 1024 8 32 10 1000 4   # one raw RUN
-./bench/bench.sh loopback|stream|preload …    # feature validators
+./bench/bench.sh loopback|verbs|stream|preload …     # feature validators
 ./bench/bench.sh pin [fair|hw|hw3|hw6] | status | logs | cleanup | dpulog | dpucpu
 ```
 
@@ -193,27 +202,33 @@ is the measured config (design/CORE.md §4.1).
 ## 6. Layout / build
 
 - **`Makefile`** (repo root) builds the host `libdpumesh.so` + all binaries;
-  `bench.sh deploy` calls `make lib bench go`. Validator sources live in
-  `validators/`, benchmark sources at `bench/` top — the Makefile paths point
-  there. `make lib bench go` builds all 9 binaries clean.
+  `bench.sh deploy` calls `make`. Validator sources live in `validators/`,
+  benchmark sources at `bench/` top.
 - **`bench.sh`** is the only shell script: it builds/cross-builds the DPU control
   plane, builds+imports the container images, applies `k8s/pods.yaml` (via
   `envsubst`), starts the DPU process, brings up the pods, pins CPUs, and drives
   the runs.
-- **`k8s/pods.yaml`** holds the pod/service/sidecar definitions declaratively
-  (was 400 lines of inline heredoc); `bench.sh` renders it with `envsubst`.
+- **`k8s/pods.yaml`** holds the pod/service/sidecar definitions declaratively;
+  `bench.sh` renders it with `envsubst`.
 
-### Notes
-* **Rate/scalability.** The DPUmesh server delivers through a single-consumer
-  ready-list (one PE thread), so only **client** threads scale; the client pod's
-  core count is set by the pin profile. For a real core-scaling curve pin more
-  cores first (`./bench/bench.sh pin hw6`) then run the thread sweep. DPU-side
-  transport parallelism is a deploy-time knob: `DPUMESH_INGEST_SHARDS=2` +
-  `DPUMESH_ARM_EGRESS_THREADS=2` ≈ 2× the single-funnel small-RPC ceiling
-  (design/CORE.md §4.1).
+### Notes — read these before quoting a number
+
+* **A `scale_log.md` number is meaningless without its section's config header.**
+  Every measurement block names its deploy env and payload; a default (unsharded)
+  deploy and a `shards=2 + egress2` deploy differ by ~2×, and the greeter payload
+  (32 B/8 B vs 1 KB/1 KB) matters too. Comparing across them fabricates a
+  regression exactly the size of the config delta. Match the config first.
+* **The default deploy pins to ~0.102 Mrps** regardless of concurrency, threads,
+  or payload, with p50 = N/0.102 (pure Little's law). That flat line is the
+  **unsharded DPU funnel ceiling**, not a host bottleneck. With
+  `DPUMESH_INGEST_SHARDS=2 DPUMESH_ARM_EGRESS_THREADS=2` the ceiling is ~0.20.
+* **Thread scaling is only observable below saturation.** At conc=64 one thread
+  already saturates the DPU, so the sweep cannot rise no matter what the host
+  does. At conc=4/thread it scales ~6.8× from 1→4 threads with p50 roughly flat;
+  past the DPU cap, extra threads only add queueing delay.
+* **Client threads share nothing on RX** (one CQ each). The *server* still
+  delivers through one PE thread. DPU-side transport parallelism is a deploy-time
+  knob (`INGEST_SHARDS` + `ARM_EGRESS_THREADS`, design/CORE.md §4.1). For a real
+  core-scaling curve pin more cores first (`./bench/bench.sh pin hw6`).
 * **Closed loop, not paced.** There is no target-RPS knob — raise `concurrency`
   to push harder.
-* **Validated in-session:** the TCP pair was smoke-tested over loopback
-  (64 B … 8 MB, `fail=0`); the DPUmesh pair shares the identical framing +
-  closed-loop code and compiles/links clean, but a live run needs the HW deploy
-  (`bench.sh deploy`).

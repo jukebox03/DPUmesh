@@ -40,7 +40,7 @@
  *
  * THREAD MODEL — design/API.md contract: dmesh_accept/dmesh_next_ready are single-
  * consumer. The shim's dispatcher thread is that consumer; it also EXCLUSIVELY
- * runs dmesh_close (app close() only queues), so a ready-list pop can never
+ * runs dmesh_destroy_qp (app close() only queues), so a ready-list pop can never
  * race a conn free. App threads touch only their own conns (per-entry mutex).
  *
  * LOST-WAKEUP DISCIPLINE — the ready list re-arms only on an inbox empty→
@@ -78,7 +78,11 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
-#include <dpumesh/dmesh.h>
+#include "dmesh_core.h"    /* sibling façade: the shim sits on the CORE, not on the
+                            * native API — it needs conn internals (rx_slot cursor,
+                            * peer_closed) and the internal lifecycle (accept /
+                            * next_ready / send_fin) that <dpumesh/dmesh.h> does not
+                            * expose. Pulls in <dpumesh/dmesh.h> for the handles. */
 
 /* ================= real libc entry points (lazy dlsym) ================= */
 
@@ -207,14 +211,14 @@ static void preload_ctor(void) {
 #define PRELOAD_MAX_FDS 65536
 
 typedef struct pfd {
-    dmesh_conn_t *conn;        /* NULL for the listener entry */
+    dmesh_qp_t *conn;        /* NULL for the listener entry */
     int  efd;                  /* PRIVATE eventfd (CLOEXEC); app fds are kernel dups */
     int  listener;
     int  nonblock;
     int  wr_closed;
     int  rd_closed;
     int  refs;                 /* app fd aliases (dup); private efd NOT counted */
-    int  closing;              /* queued for dispatcher dmesh_close */
+    int  closing;              /* queued for dispatcher dmesh_destroy_qp */
     long rcv_timeout_ms;       /* SO_RCVTIMEO; 0 = block forever */
     uint16_t lport;            /* synthesized getsockname port */
     uint16_t pport;            /* getpeername port */
@@ -233,7 +237,7 @@ static pfd_t *pfd_get(int fd) {
     return g_fds[fd];                    /* torn-read safe: pointer store/load */
 }
 
-static pfd_t *pfd_new(dmesh_conn_t *c) {
+static pfd_t *pfd_new(dmesh_qp_t *c) {
     pfd_t *e = calloc(1, sizeof(*e));
     if (!e) return NULL;
     e->conn = c;
@@ -257,6 +261,9 @@ static void efd_drain(pfd_t *e) {
 /* ===================== channel + dispatcher thread ===================== */
 
 static dmesh_channel_t *g_ch;
+static dmesh_cq_t *g_cq;                 /* the ONE CQ: the dispatcher is the single
+                                          * consumer for every shim conn (see THREAD
+                                          * MODEL), so one is exactly right here. */
 static int  g_wake_fd = -1;              /* wakes the dispatcher for the close queue */
 static pfd_t *g_listener;                /* the (single) dmesh listener entry */
 static int  g_listener_closed;           /* a listener existed and was closed: inbound
@@ -304,7 +311,7 @@ static void close_q_push(pfd_t *e) {
 
 static void *dispatcher_main(void *arg) {
     (void)arg;
-    int ch_fd = dmesh_event_fd(g_ch);    /* enables readiness delivery (design/API.md) */
+    int ch_fd = dmesh_cq_fd(g_cq);
     struct pollfd pfds[2] = {
         { .fd = ch_fd,     .events = POLLIN },
         { .fd = g_wake_fd, .events = POLLIN },
@@ -318,10 +325,10 @@ static void *dispatcher_main(void *arg) {
             while (real_read(ch_fd, &v, sizeof v) > 0) {}
 
             /* New inbound connections → wrap + queue + signal the listener. */
-            dmesh_conn_t *c;
+            dmesh_qp_t *c;
             for (;;) {
                 errno = 0;
-                c = dmesh_accept(g_ch);
+                c = dmesh_accept(g_cq);
                 if (!c) {
                     /* EAGAIN = drained. ENOMEM = dmesh_accept silently DROPPED a
                      * pending first message (alloc failure or a duplicate/reused-uP
@@ -335,11 +342,11 @@ static void *dispatcher_main(void *arg) {
                     break;
                 }
                 if (g_listener == NULL && g_listener_closed) {
-                    dmesh_close(c);              /* listener gone for good → FIN back */
+                    dmesh_destroy_qp(c);              /* listener gone for good → FIN back */
                     continue;
                 }
                 pfd_t *e = pfd_new(c);
-                if (!e) { dmesh_close(c); continue; }
+                if (!e) { dmesh_destroy_qp(c); continue; }
                 e->pport = c->remote_port;
                 e->lport = c->local_port;
                 c->user_data = e;
@@ -357,7 +364,7 @@ static void *dispatcher_main(void *arg) {
             /* Conns with inbound → assert their eventfd. user_data is set by
              * THIS thread (accept above) or before first send (connect), so a
              * ready conn always carries its entry. */
-            while ((c = dmesh_next_ready(g_ch)) != NULL) {
+            while ((c = dmesh_next_ready(g_cq)) != NULL) {
                 pfd_t *e = (pfd_t *)c->user_data;
                 if (e) efd_signal(e);
             }
@@ -381,17 +388,17 @@ static void *dispatcher_main(void *arg) {
                     while ((p = accept_q_pop()) != NULL) close_q_push(p);
                 }
                 pthread_mutex_lock(&e->mu);      /* serialize vs in-flight read/write */
-                dmesh_conn_t *c2 = e->conn;
+                dmesh_qp_t *c2 = e->conn;
                 e->conn = NULL;
                 int fin_sent = e->wr_closed;     /* shutdown(SHUT_WR) already shipped a FIN */
                 pthread_mutex_unlock(&e->mu);
                 if (c2) {
-                    /* Suppress dmesh_close's FIN when shutdown already sent one — a
+                    /* Suppress dmesh_destroy_qp's FIN when shutdown already sent one — a
                      * second FIN is harmless on the DPU (teardown fan-out finds no
                      * upstream) but wastes a TX slot + ACK round trip. peer_closed
                      * only gates the FIN; RX credits/port are still reclaimed. */
                     if (fin_sent) c2->peer_closed = 1;
-                    dmesh_close(c2);              /* single-thread vs next_ready: safe */
+                    dmesh_destroy_qp(c2);              /* single-thread vs next_ready: safe */
                 }
                 real_close(e->efd);               /* immediately unblocks poll()ers */
                 /* GRACE-DELAYED free: a thread blocked in read() on another
@@ -420,17 +427,20 @@ static void channel_init(void) {
     int svc = (g_svc != -12345) ? g_svc : DMESH_SVC_NONE;
     dmesh_channel_t *ch = dmesh_create_channel(svc);
     if (!ch) { DBG("dmesh_create_channel(%d) FAILED (will retry)", svc); return; }
-    if (dmesh_event_fd(ch) < 0) {       /* no readiness fd → dispatcher would be deaf */
+    dmesh_cq_t *cq = dmesh_create_cq(ch);
+    if (!cq || dmesh_cq_fd(cq) < 0) {   /* no readiness fd → dispatcher would be deaf */
+        dmesh_destroy_cq(cq);
         dmesh_destroy_channel(ch);
-        DBG("dmesh_event_fd unavailable (will retry)");
+        DBG("dmesh cq unavailable (will retry)");
         return;
     }
     if (g_wake_fd < 0)                  /* kept across a failed attempt (no re-create leak) */
         g_wake_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     pthread_t t;
-    g_ch = ch;                          /* dispatcher reads g_ch */
+    g_ch = ch; g_cq = cq;               /* dispatcher reads both */
     if (g_wake_fd < 0 || pthread_create(&t, NULL, dispatcher_main, NULL) != 0) {
-        g_ch = NULL;
+        g_ch = NULL; g_cq = NULL;
+        dmesh_destroy_cq(cq);
         dmesh_destroy_channel(ch);
         DBG("dispatcher start FAILED");
         return;
@@ -476,18 +486,23 @@ static int wait_ready(pfd_t *e, long timeout_ms) {
     return -1;
 }
 
-/* ========================= data-path helpers ========================== */
+/* ========================= data-path helpers ==========================
+ * The POSIX byte-stream semantics (stream_read / stream_write) are defined below,
+ * next to the send path that also uses them; forward-declared here for the recv
+ * path. They are the shim's own — the transport does not carry them. */
+static ssize_t stream_read(dmesh_qp_t *c, void *buf, size_t len);
+static ssize_t stream_write(dmesh_qp_t *c, const void *buf, size_t len);
 
 /* One receive attempt honoring the lost-wakeup discipline. Returns >0 bytes,
  * 0 EOF, or -1/EAGAIN (never blocks). Caller holds e->mu. */
 static ssize_t rx_once(pfd_t *e, void *buf, size_t len, int peek) {
-    dmesh_conn_t *c = e->conn;
+    dmesh_qp_t *c = e->conn;
     if (!c || e->rd_closed) return 0;
 
     if (peek) {
         if (c->rx_slot < 0) {                     /* load the next message, consume 0 */
             char dummy;
-            ssize_t l = dmesh_read(c, &dummy, 0);
+            ssize_t l = stream_read(c, &dummy, 0);
             if (l < 0) return -1;                 /* EAGAIN */
             if (c->peer_closed) return 0;         /* the load hit the FIN */
         }
@@ -498,7 +513,7 @@ static ssize_t rx_once(pfd_t *e, void *buf, size_t len, int peek) {
         return (ssize_t)n;
     }
 
-    ssize_t n = dmesh_read(c, buf, len);
+    ssize_t n = stream_read(c, buf, len);
     if (n > 0) {
         efd_signal(e);        /* re-assert: more may be pending; over-assert is safe */
         return n;
@@ -508,7 +523,7 @@ static ssize_t rx_once(pfd_t *e, void *buf, size_t len, int peek) {
     /* EAGAIN: drain the eventfd, then retry ONCE — closes the race where the
      * dispatcher signaled between the failed read and the drain. */
     efd_drain(e);
-    n = dmesh_read(c, buf, len);
+    n = stream_read(c, buf, len);
     if (n > 0) { efd_signal(e); return n; }
     if (n == 0) return 0;
     errno = EAGAIN;
@@ -553,9 +568,88 @@ static ssize_t shim_recv(pfd_t *e, void *buf, size_t len, int flags) {
 
 /* Gather-send: ALL iovs accumulate into ONE message (dmesh_write buffers and
  * auto-chunks any length; a pinned conn keeps chunks on its backend), shipped by
- * a single flush — so writev(header, body) costs one message, not two. Slot
- * exhaustion (EAGAIN) is retried here — TCP send() has no partial-then-remember
- * contract we could map it to. */
+ * a single flush — so writev(header, body) costs one message, not two. */
+
+/* ===== POSIX byte-stream semantics — the shim's, and ONLY the shim's =====
+ *
+ * These two are the price of the socket contract, so they live here rather than in
+ * the transport. read(2) MUST copy into caller memory and MUST support consuming a
+ * message partially; write(2) MUST accept any length. The native API
+ * (<dpumesh/dmesh.h>) owes neither and is zero-copy on both sides because of it.
+ * They were public API (dmesh_read/dmesh_write) until the consolidation, which is
+ * exactly what forced the native path to pay for POSIX. */
+
+/* read(): copy up to `len` bytes of the NEXT inbound message into buf. One message is
+ * atomic (<= slot_size); the conn's rx_pos cursor lets a caller consume it across
+ * several reads. When fully consumed the RX credit is freed and the next read fetches
+ * a new message. >0 bytes, 0 = EOF (peer FIN; sticky), -1 = EAGAIN. */
+static ssize_t stream_read(dmesh_qp_t *c, void *buf, size_t len) {
+    if (c->peer_closed) return 0;             /* EOF is sticky once the FIN arrived */
+    if (c->rx_slot < 0) {                     /* no message loaded → fetch the next */
+        sw_descriptor_t d;
+        if (!dpumesh_conn_recv(c->ep->ctx, c->local_port, &d)) { errno = EAGAIN; return -1; }
+        if (d.body_len == 0) {                /* FIN marker → EOF: reclaim landing, latch */
+            dpumesh_rx_free(c->ep->ctx, d.body_buf_slot);
+            c->peer_closed = 1;
+            return 0;
+        }
+        c->rx_slot = d.body_buf_slot;
+        c->rx_buf  = dpumesh_rx_buf(c->ep->ctx, d.body_buf_slot);
+        c->rx_len  = d.body_len;
+        c->rx_pos  = 0;
+        /* Model B: a CLIENT does NOT learn/pin a peer — it keeps addressing its
+         * service (dst_pod=BLANK) and the DPU owns the upstream. A SERVER conn already
+         * learned its peer (client_pod, uP) at accept. So no learn-on-read here. */
+    }
+    size_t avail = c->rx_len - c->rx_pos;
+    size_t n = (len < avail) ? len : avail;
+    if (n && c->rx_buf) memcpy(buf, c->rx_buf + c->rx_pos, n);
+    c->rx_pos += (uint32_t)n;
+    if (c->rx_pos >= c->rx_len) {             /* consumed → free credit, next read fetches */
+        dpumesh_rx_free(c->ep->ctx, c->rx_slot);
+        c->rx_slot = -1; c->rx_buf = NULL; c->rx_len = 0; c->rx_pos = 0;
+    }
+    return (ssize_t)n;
+}
+
+/* write(): copy `len` bytes into the conn's TX ring (shipped by dmesh_flush). Any
+ * length — carved across as many <= post_max reserves as it takes, which is the one
+ * thing dmesh_alloc cannot do and a POSIX write must.
+ *
+ * BLOCKS under backpressure, which is CORRECT here: every shim conn is a blocking
+ * socket as far as this path is concerned, and a blocking write(2) blocks until done.
+ * The wait used to live inside dpumesh_tx_reserve (a nanosleep ladder in the core hot
+ * path); it now sits here, in the one caller whose contract actually asks for it.
+ *
+ * KNOWN GAP (design/API_REDESIGN.md §6): O_NONBLOCK is not honored on this path — it
+ * blocks instead of returning EAGAIN. Fixing that needs honest EPOLLOUT, which the
+ * eventfd fd-realization cannot express (an eventfd is always writable), so an app
+ * would livelock on epoll→write→EAGAIN. Gated on grow_waits actually being non-zero.
+ * Returns len, or -1 on a permanent conn error (never EAGAIN). */
+static ssize_t stream_write(dmesh_qp_t *c, const void *buf, size_t len) {
+    dpumesh_ctx_t *ctx = c->ep->ctx;
+    const uint8_t *p = (const uint8_t *)buf;
+    uint32_t cap = (uint32_t)c->ep->block_size;   /* one reserve <= block_size (contiguous) */
+    size_t done = 0;
+    struct timespec backoff = {0, 1000};
+    while (done < len) {
+        uint32_t chunk = (len - done > cap) ? cap : (uint32_t)(len - done);
+        uint8_t *dst = dpumesh_tx_reserve(ctx, c->local_port, chunk);
+        if (!dst) {
+            if (errno != EAGAIN)                  /* EINVAL: conn gone → permanent */
+                return done ? (ssize_t)done : -1;
+            nanosleep(&backoff, NULL);            /* SQ full: the conn's TX_ACKs free it */
+            if (backoff.tv_nsec < 50000) backoff.tv_nsec *= 2;
+            continue;
+        }
+        backoff.tv_nsec = 1000;
+        memcpy(dst, p + done, chunk);
+        dpumesh_tx_commit(ctx, c->local_port, chunk);   /* append to the send stream */
+        done += chunk;
+    }
+    return (ssize_t)len;
+}
+
 static ssize_t shim_send_iov(pfd_t *e, const struct iovec *iov, int cnt) {
     if (e->listener) { errno = ENOTCONN; return -1; }
     size_t total = 0;
@@ -563,7 +657,7 @@ static ssize_t shim_send_iov(pfd_t *e, const struct iovec *iov, int cnt) {
     if (total == 0) return 0;
 
     pthread_mutex_lock(&e->mu);
-    dmesh_conn_t *c = e->conn;
+    dmesh_qp_t *c = e->conn;
     if (!c || e->wr_closed) {
         pthread_mutex_unlock(&e->mu);
         errno = EPIPE;
@@ -574,16 +668,13 @@ static ssize_t shim_send_iov(pfd_t *e, const struct iovec *iov, int cnt) {
         const char *p = (const char *)iov[i].iov_base;
         size_t len = iov[i].iov_len, done = 0;
         while (done < len) {
-            ssize_t w = dmesh_write(c, p + done, len - done);
+            ssize_t w = stream_write(c, p + done, len - done);
             if (w > 0) { done += (size_t)w; continue; }
-            if (errno != EAGAIN) {
-                dmesh_flush(c);                    /* best-effort: ship what buffered */
-                pthread_mutex_unlock(&e->mu);
-                errno = ECONNRESET;
-                sent += done;
-                return sent ? (ssize_t)sent : -1;
-            }
-            sched_yield();                         /* TX pool momentarily empty */
+            dmesh_flush(c);                        /* best-effort: ship what buffered */
+            pthread_mutex_unlock(&e->mu);
+            errno = ECONNRESET;
+            sent += done;
+            return sent ? (ssize_t)sent : -1;
         }
         sent += done;
     }
@@ -615,11 +706,11 @@ int connect(int fd, const struct sockaddr *addr, socklen_t alen) {
                 so_type != SOCK_STREAM)
                 return real_connect(fd, addr, alen);
             if (ensure_channel() < 0) { errno = ENETUNREACH; return -1; }
-            dmesh_conn_t *c = dmesh_connect(g_ch, svc);
+            dmesh_qp_t *c = dmesh_create_qp(g_cq, svc);
             if (!c) return -1;                     /* ENOMEM */
             dmesh_pin_route(c);                    /* socket contract: one backend, total order */
             pfd_t *e = pfd_new(c);
-            if (!e) { dmesh_close(c); errno = ENOMEM; return -1; }
+            if (!e) { dmesh_destroy_qp(c); errno = ENOMEM; return -1; }
             /* preserve O_NONBLOCK the app may have set on the TCP socket */
             int fl = real_fcntl(fd, F_GETFL);
             e->nonblock = (fl >= 0 && (fl & O_NONBLOCK)) ? 1 : 0;
@@ -628,7 +719,7 @@ int connect(int fd, const struct sockaddr *addr, socklen_t alen) {
             e->pport = ntohs(sin->sin_port);
             c->user_data = e;                      /* before any send → before any ready */
             if (install_fd(fd, e) < 0) {
-                dmesh_close(c); real_close(e->efd); free(e);
+                dmesh_destroy_qp(c); real_close(e->efd); free(e);
                 errno = ENOMEM;
                 return -1;
             }
@@ -872,12 +963,12 @@ int close(int fd) {
             g_listener = NULL;
             g_listener_closed = 1;
             /* Orphan the pending accept queue: nobody can accept these conns now.
-             * Queue them for dmesh_close (FIN) — the dispatcher's reap of `e`
+             * Queue them for dmesh_destroy_qp (FIN) — the dispatcher's reap of `e`
              * re-drains, closing the race with a concurrent accept-wrap. */
             pfd_t *p;
             while ((p = accept_q_pop()) != NULL) close_q_push(p);
         }
-        close_q_push(e);                          /* dmesh_close runs on the dispatcher */
+        close_q_push(e);                          /* dmesh_destroy_qp runs on the dispatcher */
         DBG("close fd=%d (last ref)", fd);
     }
     return 0;

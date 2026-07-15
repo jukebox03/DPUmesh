@@ -13,7 +13,7 @@
 #include "comch_common.h"
 #include "dpu_worker.h"
 #include "comch_consumer.h"
-#include <dpumesh/dmesh_core.h>
+#include <dpumesh/dmesh_common.h>
 #include "ring.h"
 #include "buffer.h"
 #include <stdlib.h>
@@ -1028,13 +1028,26 @@ setup_pod_dma(struct objects *objs, struct pod_state *pod)
      * staging base is just dma_buffer). +128B tail slack: a final message near the
      * buffer end copies ALIGN_UP_128(size), which could otherwise round up to 127B
      * past DPU_BUFFER_SIZE. */
-    result = alloc_buffer_and_set_mmap(&pod->local_mmap, objs->dev,
-                                       &pod->dma_buffer, DPU_BUFFER_SIZE + 128,
-                                       DOCA_ACCESS_FLAG_LOCAL_READ_WRITE | DOCA_ACCESS_FLAG_PCI_READ_WRITE);
-    if (result != DOCA_SUCCESS) {
-        DOCA_LOG_ERR("setup_pod_dma: alloc buffer failed for pod %d: %s",
-                     pod->pod_id, doca_error_get_descr(result));
-        return result;
+    /* Allocated ONCE PER SLOT and reused across incarnations: it is DPU-local and holds
+     * nothing host-specific, so a reconnecting pod lands in the same staging. Reuse is
+     * what makes never freeing it viable — freeing is not an option, since this is the
+     * egress SG-DMA read source and destroying it faults the engine's shared doca_dma
+     * ctx (see pods_remove_connection). */
+    if (pod->local_mmap == NULL) {
+        result = alloc_buffer_and_set_mmap(&pod->local_mmap, objs->dev,
+                                           &pod->dma_buffer, DPU_BUFFER_SIZE + 128,
+                                           DOCA_ACCESS_FLAG_LOCAL_READ_WRITE | DOCA_ACCESS_FLAG_PCI_READ_WRITE);
+        if (result != DOCA_SUCCESS) {
+            DOCA_LOG_ERR("setup_pod_dma: alloc buffer failed for pod %d: %s",
+                         pod->pod_id, doca_error_get_descr(result));
+            return result;
+        }
+        DOCA_LOG_INFO("setup_pod_dma: pod %d staging allocated (%d MB)",
+                      pod->pod_id, (DPU_BUFFER_SIZE + 128) / (1024 * 1024));
+    } else {
+        /* No memset: stale bytes are unreachable, since the DPA only lands at offsets
+         * the new pod's own descriptors name. */
+        DOCA_LOG_INFO("setup_pod_dma: pod %d staging reused (no realloc)", pod->pod_id);
     }
     /* (The per-pod DPU staging buffer is NOT exported to the host: the host never
      * reads it — the SG-DMA egress lands into the receiver's own rx_dma_buffer.) */
@@ -1122,11 +1135,52 @@ setup_pod_dma(struct objects *objs, struct pod_state *pod)
      * host RX mmap is imported lazily (comch_common.c); the egress uses it once
      * present (pod->host_rx_mmap / host_rx_addr). */
 
+    /* New incarnation of this slot: bump BEFORE publishing dma_ready, so any DMA
+     * error still in flight from the previous tenant carries the old generation and
+     * px_dma_err_cb ignores it instead of marking this fresh pod dead. */
+    __atomic_store_n(&pod->dma_generation, pod->dma_generation + 1, __ATOMIC_RELEASE);
+
     /* RELEASE publication: all data-plane fields (dma_buffer, forward rings, ...)
      * are written above; publish dma_ready last so a reader that ACQUIRE-loads
      * dma_ready==1 (pod_data_ready) is guaranteed to see them. */
     __atomic_store_n(&pod->dma_ready, 1, __ATOMIC_RELEASE);
     return DOCA_SUCCESS;
+}
+
+void
+teardown_pod_dma(struct objects *objs, struct pod_state *pod)
+{
+    /* k_rings is stamped by setup_pod_dma; 0 means this pod never got that far
+     * (registered but disconnected before its mmaps arrived) → no rings to drop. */
+    int K = pod->k_rings;
+    int N = objs->num_dpa_threads;
+    if (K <= 0 || N <= 0 || pod->pod_id < 0)
+        return;
+    if (K > N) K = N;
+
+    /* Mirror setup_pod_dma's mapping exactly: ring j lives on EU k_j. K <= N makes
+     * k_j injective over j, so each EU holds at most one ring for this pod and
+     * pod_id alone identifies it on the DPA side. */
+    for (int j = 0; j < K; j++) {
+        int k_j = (pod->pod_id * K + j) % N;
+        if (!objs->dpa_thread_running[k_j])
+            continue;   /* EU never started → its rings[] is empty */
+
+        struct comch_add_ring_msg del_msg;
+        memset(&del_msg, 0, sizeof(del_msg));
+        del_msg.type = DPA_MSG_RING_DEL;
+        del_msg.ring.pod_id = pod->pod_id;   /* only field the DPA reads for DEL */
+        doca_error_t r = dmesh_doca_dpa_msgq_send(&objs->dpa_comches[k_j]->send,
+                                                  &del_msg, sizeof(del_msg));
+        if (r != DOCA_SUCCESS) {
+            /* The EU keeps a stale entry, but a reconnect still recovers: ADD_RING
+             * replaces a same-pod_id entry in place rather than appending. */
+            DOCA_LOG_ERR("teardown_pod_dma: send RING_DEL to EU %d failed (pod_id=%d): %s",
+                         k_j, pod->pod_id, doca_error_get_descr(r));
+        } else {
+            DOCA_LOG_INFO("Sent RING_DEL to EU %d (pod_id=%d ring=%d)", k_j, pod->pod_id, j);
+        }
+    }
 }
 
 #endif /* DOCA_ARCH_DPU */

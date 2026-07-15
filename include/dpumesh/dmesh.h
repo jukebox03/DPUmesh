@@ -1,46 +1,126 @@
 /*
- * dmesh.h — socket/epoll-style façade over the DPUmesh C API.
+ * dmesh.h — the DPUmesh native API. RDMA-verbs-shaped, zero-copy both ways.
  *
- * DECLARATIONS ONLY; the implementation lives in src/dmesh.c (compiled into
- * libdpumesh.so), matching the header-declares / src-implements split of the
- * core dpumesh_* API (dmesh_core.h → dmesh_core.c). Include this header and link
- * -ldpumesh.
+ * This is ONE of the two surfaces DPUmesh offers, and the only one you program
+ * against directly:
  *
- *   socket()/bind()/listen()  ->  dmesh_create_channel()      (registers a service)
- *   accept()                  ->  dmesh_accept()              (one new conn)
- *   connect()                 ->  dmesh_connect(svc)          (one new conn)
- *   read()/recv()             ->  dmesh_read()                (next inbound message)
- *   write()/send()            ->  dmesh_write() + dmesh_flush()  (buffer, then ship)
- *   close()                   ->  dmesh_close()
- *   epoll on ONE channel fd   ->  native epoll on dmesh_event_fd(s)   (the only fd)
- *   epoll_wait readiness list ->  dmesh_accept() (new conns) + dmesh_next_ready() (data)
+ *   1. THIS header — the native API. Zero-copy send AND receive; no memcpy, no
+ *      syscall and no thread on the data path. Every call is a caller-thread
+ *      re-arrangement of the internal transport.
+ *   2. The LD_PRELOAD shim (libdmesh_preload.so) — the POSIX socket ABI, for
+ *      UNMODIFIED binaries. You never call it; it impersonates libc.
  *
- * CONNECTION-ORIENTED, FULL-DUPLEX (TCP-like), NOT request/response:
- *   - A `dmesh_conn_t` is a persistent connection, alive until close. The transport
- *     delivers ALL inbound messages on a conn to the app — it does NO request↔
- *     response matching (that's the app's job, if it wants RPC semantics).
- *   - MODEL B (the DPU owns every connection): a CLIENT addresses only a SERVICE.
- *     `dmesh_connect(svc)` is local (no round-trip, no pod chosen). Every
- *     `write+flush` ships with dst_pod=BLANK and the DPU load-balances it PER
- *     MESSAGE to a backend, owning the upstream. The client NEVER learns or pins a
- *     pod — it keeps addressing the service. A backend `dmesh_accept()`s a conn the
- *     DPU created to it (learning its DPU-facing peer), replies to it, and the DPU
- *     maps the reply back to the client.
- *   - Ordering: in send order only on a connection to ONE backend. Under per-message
- *     LB a single conn's replies can arrive OUT OF ORDER, so if you keep several
- *     requests outstanding, carry a req-id in the body and match on it (never on
- *     arrival order). Single-outstanding (write→flush→read one at a time) is
- *     structurally paired and needs no correlation.
- *   - Teardown: dmesh_close() sends a FIN (a zero-length message on the same conn),
- *     which rides behind all prior data and makes the peer's read() return 0 (EOF);
- *     the peer then closes, reclaiming its slot. read()==0 ⇒ peer closed ⇒ close.
- *     (A user 0-length send is a no-op; zero length on the wire is the FIN alone.)
- *     Concurrent close is safe: a FIN landing on an already-freed conn is dropped.
- *   - Each message is one whole <= slot_size (8 KB) body, delivered atomically.
- *   - NON-BLOCKING: read/accept/next_ready return EAGAIN/NULL when nothing is ready;
- *     sleep on ONE channel fd (dmesh_event_fd). On wake, drain dmesh_accept() (new
- *     conns) then dmesh_next_ready() (conns with inbound — the PE names them, so no
- *     scan, no per-conn fd). SEND IS EXPLICIT: write buffers, flush ships.
+ * Both sit directly on the internal core (src/dmesh_core.h, NOT installed).
+ * Neither depends on the other. See design/API_REDESIGN.md.
+ *
+ * WHY VERBS-SHAPED AND NOT SOCKET-SHAPED — it is faster, not just more familiar.
+ * DPUmesh's substrate already IS RDMA-shaped: a pre-registered mmap, a DMA
+ * engine, credit admission, completions. read(2) semantics MANDATE a copy into
+ * caller memory, so a socket-shaped API cannot be zero-copy — the copy is the
+ * price of the POSIX contract, and only the shim should pay it.
+ *
+ * OBJECT MAPPING (ibverbs -> DPUmesh):
+ *   context + PD                      ->  dmesh_channel_t (folded)
+ *   ibv_create_cq (+ comp_channel)    ->  dmesh_create_cq  -> dmesh_cq_t
+ *   ibv_create_qp (cq-bound)          ->  dmesh_create_qp    -> dmesh_qp_t
+ *     RC (connected, ordered)         ->  dmesh_create_qp + dmesh_pin_route
+ *     service-addressed (reliable,    ->  dmesh_create_qp alone (per-message LB;
+ *     datagram-ish; closest to IB RD      replies may interleave across backends)
+ *     or Mellanox DC — NOT UD, which
+ *     is unreliable and needs an AH)
+ *   rdma_cm CONNECT_REQUEST           ->  DMESH_WC_CONN_REQ completion
+ *   ibv_post_send (+ WR list)         ->  dmesh_post_send (+ DMESH_SEND_MORE)
+ *   ibv_poll_cq                       ->  dmesh_poll_cq
+ *   SRQ recv-buffer repost            ->  dmesh_wc_release
+ *   ibv_req_notify_cq + comp_channel  ->  dmesh_cq_fd + drain-then-poll (below)
+ *
+ * The split mirrors how a real RDMA program is written: rdma_cm for connection
+ * setup, ibv_* for the data path.
+ *
+ * MEMORY MODEL — registered pool, NOT ibv_reg_mr:
+ *   There is no registration of arbitrary app memory (the DPU DMAs only from the
+ *   mmap exported at init; per-buffer registration would put an address-
+ *   translation lookup on the DPU hot path — the one thing an RDMA NIC does in
+ *   hardware). SEND buffers come from the conn's pre-registered TX byte-ring:
+ *   dmesh_alloc(c, len) IS the "registered buffer" allocator.
+ *
+ * DELIBERATE DEVIATIONS FROM VERBS (stated, not hidden):
+ *   - No one-sided READ/WRITE, no rkey. Arbitrary remote-address translation
+ *     needs a lookup table on the DPU datapath. Out of scope by design.
+ *   - No ibv_reg_mr. See MEMORY MODEL.
+ *   - context + PD folded into dmesh_channel_t: PD is meaningless without
+ *     arbitrary reg_mr, so there are no MRs for it to scope. The CQ is NOT
+ *     folded in — it is the one object carrying a concurrency constraint, and
+ *     folding it made RX single-consumer for the whole process.
+ *   - No send completions, signaled or otherwise. Unsignaled is the verbs
+ *     default and the high-performance idiom; here it is the only mode, so the
+ *     signal that SQ space freed is simply that a later dmesh_alloc succeeds.
+ *
+ * SEND CONTRACT (the price of zero-copy + O(1) reclaim — the TX ring is FIFO):
+ *   - At most ONE outstanding (alloc'd but not yet posted) buffer per conn.
+ *     A second dmesh_alloc before dmesh_post_send returns the SAME bytes.
+ *   - Post order == alloc order == wire order on a conn (like a verbs SQ, where
+ *     wire order is post order; here the buffer IS the queue slot).
+ *   - Ownership transfers to the transport AT POST (no send completion; reclaim
+ *     is internal on the DPU's TX_ACK). Do not touch the buffer after posting.
+ *   - alloc length cap = dmesh_post_max (one contiguous reserve). A post of
+ *     len <= dmesh_msg_max (slot_size) arrives as exactly ONE RECV completion;
+ *     a larger post (<= post_max) is legal but is delivered as MULTIPLE
+ *     <= slot_size RECV completions, in order on a server/pinned conn — the
+ *     receiver reassembles (app framing, as with a byte stream).
+ *   - Different conns are fully independent (per-conn rings).
+ *
+ * BACKPRESSURE — dmesh_alloc NEVER BLOCKS (the ibv_post_send contract):
+ *   It returns NULL + errno=EAGAIN when the conn's send queue is full, exactly
+ *   as ibv_post_send returns ENOMEM on a full SQ. It does NOT sleep, so one
+ *   backpressured conn can never stall the other conns on your thread. On EAGAIN:
+ *   go do other work and retry — a later alloc succeeds once the DPU's TX_ACKs
+ *   free ring space. dmesh_sq_depth() reports the per-conn descriptor cap.
+ *   The TX ring also GROWS on demand (elastic block pool), so EAGAIN means the
+ *   conn hit its in-flight ceiling, not that memory ran out.
+ *
+ * RECV MODEL — SRQ + credit:
+ *   The transport owns the landing buffers; there is no per-QP post_recv. Each
+ *   DMESH_WC_RECV holds one RX credit until you dmesh_wc_release() it — release
+ *   promptly, credits bound RX admission (like reposting to an SRQ). Releasing
+ *   is valid even after the conn is closed.
+ *
+ * SCALING — ONE CQ PER THREAD, exactly as in verbs:
+ *   A CQ is single-consumer: poll it from ONE thread only. That is not a
+ *   limitation, it is why you make several. Each dmesh_cq_t owns its own ready
+ *   list and its own completion fd, and a conn belongs to the CQ that created
+ *   (dmesh_create_qp) or accepted (DMESH_WC_CONN_REQ) it — so N threads with N CQs
+ *   receive genuinely in parallel, sharing nothing on the RX path. One CQ for
+ *   the whole process serializes every thread behind one ready list.
+ *
+ *   Inbound conns are the exception that needs no machinery: the accept queue is
+ *   channel-wide and multi-consumer, so every CQ may poll it and whichever one
+ *   accepts a conn owns it thereafter — SO_REUSEPORT-style distribution for free.
+ *
+ * EVENT LOOP (per CQ; single-consumer):
+ *   dmesh_cq_t *cq = dmesh_create_cq(ch);
+ *   int fd = dmesh_cq_fd(cq);                // register in a vanilla epoll
+ *   on EPOLLIN:
+ *     uint64_t u; read(fd, &u, 8);           // drain the counter
+ *     dmesh_wc_t wc[64]; int n;
+ *     while ((n = dmesh_poll_cq(cq, wc, 64)) > 0)
+ *       for (int i = 0; i < n; i++) switch (wc[i].opcode) {
+ *         case DMESH_WC_CONN_REQ: break;   // new conn = wc[i].qp, already
+ *                                          // usable; refuse by dmesh_destroy_qp
+ *         case DMESH_WC_RECV:     handle(wc[i].buf, wc[i].len);
+ *                                 dmesh_wc_release(ch, &wc[i]); break;
+ *         case DMESH_WC_RECV_FIN: dmesh_destroy_qp(wc[i].qp); break;
+ *       }
+ *   Always poll to 0 before sleeping on the fd again (edge-triggered rule, same
+ *   as ibv_req_notify_cq re-arm). Completions for ONE conn are in order; across
+ *   conns there is no order.
+ *
+ * SEND PATH:
+ *   void *b = dmesh_alloc(c, len);           // NULL+EAGAIN = SQ full, retry later
+ *   ...fill b in place (zero-copy)...
+ *   dmesh_post_send(c, b, len, 0, 0);        // post + doorbell
+ *   // batching (verbs WR-list equivalent): N x post_send(.., DMESH_SEND_MORE)
+ *   // then one dmesh_flush(c) — or a final post_send without the flag.
  */
 #ifndef DMESH_H
 #define DMESH_H
@@ -49,32 +129,42 @@
 #include <stddef.h>
 #include <sys/types.h>
 
-#include "dmesh_core.h"
+#include "dmesh_common.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+/* The internal transport context. Opaque here BY DESIGN: the core
+ * (src/dmesh_core.h) is not a public API and is not installed. */
+struct dpumesh_ctx;
+
 /* ===== Handles ===== */
 
-/* Endpoint — one per process. Wraps one DOCA device context + this node's service. */
+/* Channel — one per process. context + PD, folded. */
 typedef struct dmesh_channel {
-    dpumesh_ctx_t *ctx;
+    struct dpumesh_ctx *ctx;
     int            pod_id;
-    int            slot_size;   /* cached max body size (wire DMA cap) */
-    int            block_size;  /* cached max contiguous message = TX reserve cap */
+    int            slot_size;   /* max body per RECV completion (wire DMA cap) */
+    int            block_size;  /* max contiguous message = alloc/post cap */
     uint32_t       next_group;  /* GLOBAL rolling route-affinity id source (atomic across
-                                 * all conns → 1..255): concurrent large messages get
+                                 * all conns -> 1..255): concurrent large messages get
                                  * DISTINCT groups. A per-conn counter would collide —
                                  * every conn's first large message would pick id 1. */
 } dmesh_channel_t;
 
-/* Connection — a persistent full-duplex link to one peer. */
-typedef struct dmesh_conn {
+/* Completion queue — one per polling THREAD. Opaque: it owns the ready list the
+ * PE thread pushes to, which is single-producer/single-consumer and internal. */
+typedef struct dmesh_cq dmesh_cq_t;
+
+/* Connection — a persistent full-duplex link to one peer. The QP. */
+typedef struct dmesh_qp {
     dmesh_channel_t *ep;
-    void     *user_data;       /* APP-OWNED (like epoll's data.ptr): you set it, and
-                                * dmesh_next_ready hands this conn back so you read it.
-                                * The transport never touches it. */
+    dmesh_cq_t      *cq;       /* the CQ this conn's completions land on (the QP's CQ,
+                                * fixed at connect/accept): its creator, and the only
+                                * thread allowed to poll them. */
+    void     *user_data;       /* APP-OWNED (like a verbs qp_context / epoll data.ptr):
+                                * you set it, the transport never touches it. */
     int       role;            /* DMESH_ROLE_CLIENT (connect) | DMESH_ROLE_SERVER (accept) */
 
     /* addressing */
@@ -83,159 +173,198 @@ typedef struct dmesh_conn {
     int16_t   remote_pod;      /* SERVER: the DPU-facing peer pod (learned at accept).
                                 * CLIENT: always DMESH_POD_BLANK (Model B never pins). */
     uint16_t  remote_port;     /* SERVER: the peer uP (learned at accept); CLIENT: 0. */
-    uint8_t   peer_closed;      /* received the peer's FIN → reads return EOF (sticky) */
+    uint8_t   peer_closed;     /* received the peer's FIN -> EOF (sticky) */
     uint16_t  seq;             /* per-conn OUTBOUND message counter */
 
-    /* inbound (the message currently being read out; rx_slot>=0 ⇒ one is loaded) */
+    /* inbound view (rx_slot>=0 => one message is held on the conn; the compat
+     * layer's partial-read cursor lives here too) */
     int            rx_slot;    /* landing byte-offset in host RX buffer; -1 = none */
     const uint8_t *rx_buf;
     uint32_t       rx_len;
     uint32_t       rx_pos;
 
-    /* Outbound bytes live in the CORE per-conn TX byte-ring (keyed by local_port):
-     * dmesh_write reserves+commits into it; dmesh_flush ships committed bytes as
-     * ≤slot_size descriptors. The conn holds no TX buffer state of its own. */
+    /* Outbound bytes live in the per-conn TX byte-ring (keyed by local_port);
+     * the conn holds no TX buffer state of its own. */
 
-    /* CONNECTION-level route affinity (dmesh_pin_route): 0 = per-message LB (default,
-     * bit-identical to the pre-pin behavior). Non-zero = a route_group stamped on
-     * EVERY outbound message of this conn (and its FIN), so the DPU pins the whole
-     * conn to the ONE backend picked for its first message — restoring socket-like
-     * total order on the conn (per-message LB is forgone by design). Group ids are a
-     * per-channel rolling 255-space, so unrelated conns/channels reuse a byte; the
-     * DPU keys its pin table by (dst_service, id), so a collision can only merge
-     * SAME-SERVICE traffic onto one backend (balance skew, ordering intact) — it can
-     * never redirect a conn to another service's backend. */
+    /* CONNECTION-level route affinity (dmesh_pin_route): 0 = per-message LB (default).
+     * Non-zero = a route_group stamped on EVERY outbound message of this conn (and its
+     * FIN), so the DPU pins the whole conn to the ONE backend picked for its first
+     * message — restoring socket-like total order on the conn (per-message LB is
+     * forgone by design). Group ids are a per-channel rolling 255-space, so unrelated
+     * conns/channels reuse a byte; the DPU keys its pin table by (dst_service, id), so
+     * a collision can only merge SAME-SERVICE traffic onto one backend (balance skew,
+     * ordering intact) — it can never redirect a conn to another service's backend. */
     uint8_t   pin_group;
-} dmesh_conn_t;
+} dmesh_qp_t;
 
-/* ===== Endpoint lifecycle ===== */
+/* ===== Completions ===== */
 
-/* service_id = the service this node advertises (DMESH_SVC_NONE for a pure
- * client). The node's pod_id (its address) is ASSIGNED BY THE DPU at register —
- * the caller never picks it; dmesh_pod_id() returns the assigned value. Returns
- * NULL on init failure. */
+typedef enum {
+    DMESH_WC_RECV     = 1,   /* one whole inbound message; holds an RX credit */
+    DMESH_WC_RECV_FIN = 2,   /* peer closed the conn (EOF); no credit held */
+    DMESH_WC_CONN_REQ = 3,   /* new inbound conn (server side); no credit held */
+} dmesh_wc_opcode_t;
+
+typedef struct dmesh_wc {
+    dmesh_qp_t       *qp;       /* the QP this completion belongs to (== the handle from
+                                 * dmesh_create_qp / CONN_REQ; use qp->user_data for
+                                 * your per-conn context) */
+    dmesh_wc_opcode_t opcode;
+    const uint8_t    *buf;      /* RECV: points INTO the RX mmap (zero-copy); valid
+                                 * until dmesh_wc_release. Else NULL. */
+    uint32_t          len;      /* RECV: message length (<= slot_size). Else 0. */
+    int32_t           rx_slot;  /* internal release token; -1 = nothing held */
+} dmesh_wc_t;
+
+/* ===== Channel lifecycle (ibv_open_device + PD) ===== */
+
+/* service_id = the service this node advertises (DMESH_SVC_NONE for a pure client).
+ * The node's pod_id (its address) is ASSIGNED BY THE DPU at register — the caller
+ * never picks it; dmesh_pod_id() returns the assigned value. NULL on init failure. */
 dmesh_channel_t *dmesh_create_channel(int service_id);
 
 /* Release the channel + all DOCA resources. Safe on NULL. */
 void dmesh_destroy_channel(dmesh_channel_t *s);
 
-int dmesh_pod_id(dmesh_channel_t *s);   /* this node's DPU-assigned pod_id */
-int dmesh_msg_max(dmesh_channel_t *s);  /* max body size (slot_size) */
+int dmesh_pod_id(dmesh_channel_t *s);      /* this node's DPU-assigned pod_id */
+int dmesh_msg_max(dmesh_channel_t *s);     /* max length arriving as ONE RECV (slot_size) */
+int dmesh_post_max(dmesh_channel_t *s);    /* max length of one alloc/post (block size) */
 
-/* The ONE channel fd: readable when a NEW connection is pending (accept) OR any
- * conn has inbound (next_ready). Calling it enables readiness delivery. */
-int dmesh_event_fd(dmesh_channel_t *s);
+/* ===== Completion queue lifecycle (ibv_create_cq + comp_channel) ===== */
 
-/* ===== Connection setup ===== */
+/* Make a CQ on this channel. Create ONE PER POLLING THREAD: each owns its own ready
+ * list and completion fd, so threads on distinct CQs never touch shared RX state (see
+ * SCALING). Readiness is live from this call — never conditional on dmesh_cq_fd.
+ * NULL+ENOMEM on OOM, NULL+EMFILE past the per-channel CQ cap. */
+dmesh_cq_t *dmesh_create_cq(dmesh_channel_t *ch);
 
-/* accept(): NON-BLOCKING. Pops the next NEW connection from the accept queue,
- * allocates a SERVER conn that learns the peer (pod,port), and returns it holding
- * the first message body. NULL+EAGAIN if none pending; NULL+ENOMEM on alloc
- * failure (the message is dropped, its RX credit reclaimed). */
-dmesh_conn_t *dmesh_accept(dmesh_channel_t *s);
+/* Release a CQ. DESTROY ITS CONNS FIRST (ibv_destroy_cq's EBUSY rule): a conn
+ * outliving its CQ has nowhere to report completions. Safe on NULL. */
+void dmesh_destroy_cq(dmesh_cq_t *cq);
 
-/* connect(): bind a CLIENT conn to a logical SERVICE, addressed by its service_id
- * (the same id the backend passed to dmesh_create_channel). Local; no round-trip.
- * The conn is established (peer learned) on its first inbound. NULL+ENOMEM on OOM. */
-dmesh_conn_t *dmesh_connect(dmesh_channel_t *s, int dst_service_id);
+/* This CQ's completion-channel fd (ibv_req_notify_cq + comp_channel): readable when a
+ * new conn or any inbound message is pending ON THIS CQ. Vanilla epoll/poll; drain one
+ * uint64_t on wake, then dmesh_poll_cq to 0.
+ *
+ * PURELY OPTIONAL — it is the idle-sleep path, not a prerequisite. dmesh_poll_cq is
+ * complete on its own, so a spin-polling client never has to call this. */
+int dmesh_cq_fd(dmesh_cq_t *cq);
 
-/* Pin this connection's outbound routing to ONE backend (connection-level LB).
- * Claims a route-affinity group from the channel's global id source and stamps it
- * on every subsequent message (and the FIN): the DPU routes the first message by
- * normal LB, records the pick in its route_group table, and every later message
- * reuses it (dpu_route) — so replies arrive in send order, like a socket. Call it
- * right after dmesh_connect, before any write. Idempotent. Meaningless on a
- * SERVER conn (it already sends to its learned peer). Used by the LD_PRELOAD
- * socket shim, where byte-stream total order is part of the contract. */
-void dmesh_pin_route(dmesh_conn_t *c);
+/* ===== Connection setup (rdma_cm) ===== */
 
-/* Pop the next conn that has inbound, from the channel's ready list (the PE puts
- * ready conns here, so there is NO scan and NO per-conn fd). Returns the SAME conn
- * handle you created at accept/connect, or NULL when drained. After waking on
- * dmesh_event_fd(s), loop dmesh_next_ready() and drain each returned conn to EAGAIN.
- * Single-consumer: call it from your one event-loop thread. */
-dmesh_conn_t *dmesh_next_ready(dmesh_channel_t *s);
+/* ibv_create_qp(): make a CLIENT QP bound to `cq` and addressed to a logical SERVICE
+ * by its service_id (the same id the backend passed to dmesh_create_channel). This is
+ * NOT rdma_connect: it is PURELY LOCAL and does NO round trip — nothing is signalled
+ * to the peer, and the QP is established (peer learned) only on its first inbound.
+ * NULL+ENOMEM on OOM.
+ *
+ * The conn's completions land on `cq` — the thread that polls `cq` is the one that
+ * services this conn. There is NO dmesh_accept: an inbound conn arrives as a
+ * DMESH_WC_CONN_REQ completion (RDMA_CM_EVENT_CONNECT_REQUEST), already usable, on
+ * whichever CQ polled it out of the shared accept queue. */
+dmesh_qp_t *dmesh_create_qp(dmesh_cq_t *cq, int dst_service_id);
 
-/* ===== read / write / send ===== */
+/* Pin this connection's outbound routing to ONE backend — datagram-ish -> RC.
+ * Claims a route-affinity group from the channel's global id source and stamps it on
+ * every subsequent message (and the FIN): the DPU routes the first message by normal
+ * LB, records the pick, and every later message reuses it — so replies arrive in send
+ * order, like a socket. Call it right after dmesh_create_qp, before any post. Idempotent.
+ * Meaningless on a SERVER conn (it already sends to its learned peer). */
+void dmesh_pin_route(dmesh_qp_t *c);
 
-/* read(): return up to `len` bytes of the NEXT inbound message on this conn.
- * One message is atomic (<= slot_size); a single read with a big enough buffer
- * returns the whole message. When a message is fully consumed its RX credit is
- * freed and the next read fetches a new message. Learns the peer on first inbound.
- *   >0 bytes, 0 = EOF (peer closed the conn via FIN; sticky), -1 = EAGAIN.
- * A zero-length inbound message IS the FIN marker (user 0-length sends are no-ops),
- * so read()==0 means the peer closed — close this conn (like a BSD socket EOF). */
-ssize_t dmesh_read(dmesh_conn_t *c, void *buf, size_t len);
+/* GRACEFUL close, then destroy — it is both halves, unlike ibv_destroy_qp. Drops any
+ * posted-but-unflushed bytes, then (if established) SENDS A FIN so the peer sees EOF
+ * (DMESH_WC_RECV_FIN) and the peer + DPU-owned upstream tear down. Shipped-but-un-ACKed
+ * bytes are reclaimed by their own TX_ACKs. Reclaims held RX credit, then FREES the qp.
+ * Safe on NULL. Returns 0.
+ *
+ * The qp is INVALID after this. One poll_cq batch can carry a CONN_REQ plus that qp's
+ * landed messages, so destroying mid-batch dangles the later wc[] entries that name it
+ * — defer closes to a post-batch sweep. */
+int dmesh_destroy_qp(dmesh_qp_t *c);
 
-/* write(): APPEND outbound body bytes to this conn's TX byte-ring (shipped by flush).
- * Any length — the bytes just accumulate in the ring; dmesh_flush later carves the
- * committed run into <=slot_size wire descriptors (coalescing). There is no size
- * limit and no EMSGSIZE. Ordering on a connection to ONE backend is send order;
- * across backends (only when a service has several) use dmesh_pin_route for socket
- * order. The receiver is a plain dmesh_read loop (it frames its own length). */
-ssize_t dmesh_write(dmesh_conn_t *c, const void *buf, size_t len);
+/* ===== Send (ibv_post_send) ===== */
 
-/* sendfile(): append up to count bytes from in_fd into the current message. */
-ssize_t dmesh_sendfile(dmesh_conn_t *c, int in_fd, off_t *offset, size_t count);
+/* Defer the doorbell: the message is committed to the conn's SQ but not shipped; the
+ * next dmesh_post_send WITHOUT this flag (or a dmesh_flush) ships everything committed
+ * so far in order — the verbs WR-list batching pattern. */
+#define DMESH_SEND_MORE      0x1u
 
-/* flush(): SHIP the conn's committed-but-unsent bytes. REQUIRED to send. The core
- * byte-ring carves [send, commit) into ≤slot_size descriptors — coalescing many small
- * writes into fewer, bigger host→DPU DMAs — and this posts each with the conn's tuple
- * + route group, recording it so its DPU TX_ACK reclaims the ring bytes. A CLIENT ships
- * dst_pod=BLANK (per-message LB per descriptor; pin the conn for socket order); a SERVER
- * ships to its learned peer. Nothing committed → NO-OP.
- *   0 = sent (or nothing to send); -1 EBADMSG = descriptor fault (close the conn). */
-int dmesh_flush(dmesh_conn_t *c);
+/* Reserve `len` CONTIGUOUS bytes in this conn's pre-registered TX ring and return a
+ * pointer into transport DMA memory to fill DIRECTLY (no memcpy). Then dmesh_post_send.
+ *
+ * NEVER BLOCKS — the ibv_post_send contract. Returns NULL with errno:
+ *   EAGAIN   the conn's SQ is full (in-flight ceiling reached). Do other work and
+ *            retry; a TX_ACK will free space. This is the ONLY transient error.
+ *   EINVAL   len == 0, len > dmesh_post_max(), or the conn is not established.
+ *
+ * There is no separate "commit": dmesh_post_send finalizes the bytes. */
+void *dmesh_alloc(dmesh_qp_t *c, uint32_t len);
 
-/* ===== Zero-copy TX (dmesh_alloc / dmesh_commit) =====
- * Fill transport DMA memory directly instead of memcpy'ing through dmesh_write. */
+/* Post one message previously filled in the buffer returned by dmesh_alloc(c).
+ * `buf` MUST be the pointer of the conn's most recent (un-posted) dmesh_alloc and
+ * `len` <= that alloc's length (contract, not checked — the ring position is implied).
+ * `wr_id` is reserved for future send-completion support and is ignored. Returns 0,
+ * or -1 with errno:
+ *   EINVAL   NULL conn / len == 0 (a FIN is dmesh_destroy_qp, never a 0-length post)
+ *   EBADMSG  descriptor enqueue fault at the doorbell (close the conn)
+ * Ownership of the bytes transfers to the transport; do not touch buf after. */
+int dmesh_post_send(dmesh_qp_t *c, const void *buf, uint32_t len,
+                    uint64_t wr_id, unsigned flags);
 
-/* dmesh_alloc(c, len): reserve `len` CONTIGUOUS bytes in this conn's TX byte-ring and
- * return a pointer into transport DMA memory to fill DIRECTLY (no memcpy). Then
- * dmesh_commit(c, actual_len) + dmesh_flush(c). Busy-spins under backpressure; NULL if
- * len==0, len exceeds the per-conn ring, or the conn is not established. Zero-copy
- * counterpart of dmesh_write — the same byte-ring, filled in place. */
-void *dmesh_alloc(dmesh_conn_t *c, size_t len);
+/* Ring the doorbell for everything posted with DMESH_SEND_MORE. Nothing pending is a
+ * no-op. 0 = shipped; -1 EBADMSG = descriptor fault (close the conn).
+ *
+ * Cannot run out of PER-CONN queue space — dmesh_alloc reserved the send-unit slot up
+ * front, so a posted message is always carveable. It CAN, however, back off briefly on
+ * the SHARED host->DPU descriptor ring, which is a different (global, all-conns)
+ * resource that saturates only when the DPA falls behind the host; a ring wedged past
+ * a deadline fails with EBADMSG rather than hanging. So: dmesh_alloc never blocks,
+ * dmesh_flush is not quite in that class. Post with DMESH_SEND_MORE and flush from a
+ * point in your loop where a rare microsecond-scale wait is acceptable. */
+int dmesh_flush(dmesh_qp_t *c);
 
-/* dmesh_commit(c, len): finalize `len` (<= the alloc'd len) bytes at the write head as
- * committed message bytes, ready for dmesh_flush. Returns 0. */
-int dmesh_commit(dmesh_conn_t *c, size_t len);
+/* ===== Diagnostics ===== */
 
-/* Low-level: send a FIN — a zero-length message addressed to the established peer.
- * It rides the SAME conn-shard ring as this conn's data (src_port), so it arrives
- * AFTER every prior message (ordering preserved). The peer's PE delivers it to the
- * conn inbox as a 0-length descriptor → the peer's read() returns EOF → the peer
- * closes → its port slot is reclaimed (no cross-run conn accumulation).
- * Best-effort: if no TX slot is free we skip the FIN; the peer/DPU then keep that
- * conn + upstream until the port/uP is reused (there is NO idle reaper — apply your
- * own wall-clock timeout for a service that never answers). A CLIENT FINs to its
- * service (dst_pod=BLANK; the DPU frees the upstream it created); a SERVER FINs to
- * its learned peer. Called by dmesh_close(); also exposed for the LD_PRELOAD shim's
- * shutdown(SHUT_WR) half-close. */
-void dmesh_send_fin(dmesh_conn_t *c);
+/* Elastic TX block-pool counters (cumulative since init). Every field counts a RARE
+ * path — the steady-state alloc/post/ACK cycle increments nothing except recycle_hits
+ * once per drained block:
+ *   pool_grabs   shared-pool CAS pops (a conn growing / taking its first block)
+ *   pool_returns shared-pool CAS pushes (shrink surplus / close-drain return)
+ *   recycle_hits grow served from the conn's own recycled blocks (no pool op)
+ *   grow_waits   dmesh_alloc calls that hit the in-flight ceiling and returned EAGAIN
+ *   block_pads   message didn't fit the current block tail -> pad + fresh block
+ *
+ * grow_waits is the OBSERVABLE COUNTERPART OF EAGAIN: it is how you find out whether
+ * your send loop ever actually hits backpressure. The ring grows on demand, so a
+ * non-zero grow_waits means the conn reached its in-flight cap, not that memory ran
+ * out. Sample it around a workload; if it stays 0, backpressure never happened. */
+typedef struct dmesh_tx_stats {
+    unsigned long long pool_grabs;
+    unsigned long long pool_returns;
+    unsigned long long recycle_hits;
+    unsigned long long grow_waits;
+    unsigned long long block_pads;
+} dmesh_tx_stats_t;
+void dmesh_get_tx_stats(dmesh_channel_t *s, dmesh_tx_stats_t *out);
 
-/* close(): graceful close. Drops any buffered-but-unflushed bytes, then (if established)
- * sends a FIN so the peer + DPU-owned upstream tear down (no leak across runs). Shipped-
- * but-un-ACKed bytes are reclaimed by their own TX_ACKs (the region returns once drained).
- * Reclaims held RX credit. Safe on NULL. Returns 0. */
-int dmesh_close(dmesh_conn_t *c);
+/* ===== Completion queue (ibv_poll_cq) ===== */
 
-/* ===== Large messages (> slot_size) — transparent, NO special API =====
- * There is no write_large/read_large. A payload larger than one slot is handled by
- * plain dmesh_write + dmesh_flush: the bytes buffer in the conn's TX byte-ring and
- * flush ships them as <=slot_size wire descriptors, IN SEND ORDER on a connection to
- * one backend. The receiver is a plain dmesh_read LOOP: read chunks in arrival order
- * and concatenate until you have the length YOUR protocol declares (framing is the
- * app's job, like a byte stream). If a service load-balances across SEVERAL backends,
- * dmesh_pin_route(c) first so the whole conn stays on one backend and the chunks stay
- * in order. bench/bench_dpumesh.c (mode=3) is the worked example. */
+/* Harvest up to nwc completions into wc[]. NON-BLOCKING; returns the count (0 =
+ * drained), or -1 with errno=EINVAL on bad args. Single-consumer: call from the ONE
+ * thread that owns this CQ (make more CQs to poll in parallel — see SCALING). Reports
+ * only conns bound to THIS cq, plus any new conn it takes off the shared accept queue.
+ * Delivers, in this priority: the resumed partially-drained conn from the previous
+ * call, then new conns (one DMESH_WC_CONN_REQ each, immediately followed by that
+ * conn's already-landed messages), then every ready conn's inbox drained to empty.
+ * A conn cut off by wc[] filling up resumes FIRST on the next call, so per-conn
+ * ordering always holds and no message is lost. */
+int dmesh_poll_cq(dmesh_cq_t *cq, dmesh_wc_t *wc, int nwc);
 
-/* ===== Event-loop integration =====
- * ONE fd: dmesh_event_fd(s). Register it in a vanilla epoll set; it becomes readable
- * when a new conn is pending OR any conn has inbound. On EPOLLIN: drain the fd
- * (read() a uint64_t), then loop dmesh_accept() for new conns and dmesh_next_ready()
- * for conns with data (drain each to EAGAIN). No per-conn fds, no dmesh_epoll_*
- * wrappers — the PE-published ready list replaces both the scan and the per-conn fd. */
+/* Return a DMESH_WC_RECV completion's RX credit (≈ reposting the buffer to the SRQ).
+ * Idempotent (wc->rx_slot is cleared); a no-op for FIN/CONN_REQ entries. Valid after
+ * the conn closed — the credit is channel-level, not conn-level. */
+void dmesh_wc_release(dmesh_channel_t *s, dmesh_wc_t *wc);
 
 #ifdef __cplusplus
 }

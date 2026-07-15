@@ -9,6 +9,7 @@
 #include "object.h"
 #include "comch_common.h"
 #include "comch_consumer.h"
+#include "dpa.h"      /* teardown_pod_dma (DOCA_ARCH_DPU only) */
 
 #include <doca_pe.h>
 #include <doca_comch.h>
@@ -565,14 +566,10 @@ pods_add_connection(struct objects *objs, struct doca_comch_connection *conn)
 		idx = n;
 	}
 
-	/* Release the previous pod's host_rx_mmap that pods_remove_connection DEFERRED
-	 * (to avoid faulting the egress DMA ctx on an in-flight batch). The old pod is
-	 * long gone by now (a reconnect took a full control round-trip ≫ egress in-flight
-	 * drain), so no egress references it. A fresh slot has NULL here (no-op). */
-	if (objs->pods[idx].host_rx_mmap) {
-		doca_mmap_destroy(objs->pods[idx].host_rx_mmap);
-		objs->pods[idx].host_rx_mmap = NULL;
-	}
+	/* Nothing to release here: pods_remove_connection already unpublished every
+	 * host-exported handle on this slot, and a never-used slot is memset to 0.
+	 * The DPU-local staging (local_mmap/dma_buffer) is deliberately kept and
+	 * REUSED by setup_pod_dma. */
 
 	objs->pods[idx].connection = conn;
 	objs->pods[idx].pod_id = -1;  /* not yet registered */
@@ -587,10 +584,6 @@ pods_add_connection(struct objects *objs, struct doca_comch_connection *conn)
 int
 pods_remove_connection(struct objects *objs, struct doca_comch_connection *conn)
 {
-	struct doca_mmap *ring_mmaps[MAX_EU_PER_POD] = {0};
-	int ring_mmap_count = 0;
-	struct doca_mmap *remote_mmap = NULL;
-	/* host_rx_mmap is intentionally NOT captured/destroyed here — see below. */
 	int32_t pod_id = -1;
 	int found_idx = -1;
 
@@ -601,22 +594,36 @@ pods_remove_connection(struct objects *objs, struct doca_comch_connection *conn)
 		found_idx = i;
 		pod_id = objs->pods[i].pod_id;
 
-		/* Capture the host-exported mmap views to destroy after tearing
-		 * the slot down. These are DPU-side handles created via
-		 * doca_mmap_create_from_export, so destroying them only releases
-		 * the DPU-side handle. */
-		ring_mmap_count = objs->pods[i].ring_mmap_count;
-		for (int j = 0; j < ring_mmap_count && j < MAX_EU_PER_POD; j++)
-			ring_mmaps[j] = objs->pods[i].ring_mmaps[j];
-		remote_mmap  = objs->pods[i].remote_mmap;
-		/* host_rx_mmap DEFERRED: the ARM egress SG-DMA engine may still have an
-		 * in-flight batch whose destination doca_buf references this mmap. Destroying
-		 * it here (concurrently with an egress worker thread) faults the engine's
-		 * shared doca_dma ctx → the whole engine wedges and floods
-		 * "alloc_init ... state IDLE" forever. So we KEEP the handle in the slot and
-		 * destroy it only at slot REUSE (pods_add_connection), by which point the
-		 * disconnected pod is long gone and no egress in-flight references it — the
-		 * same reconnect-latency ≫ in-flight-drain reasoning the slot reuse relies on. */
+		/* Drop this pod's forward rings from the DPA's poll set FIRST, while
+		 * pod_id/k_rings are still valid (teardown_pod_dma derives the EU set from
+		 * them, and both are cleared below). Until this lands, the EU keeps polling
+		 * rings[] entries that point at this pod's ring_mmaps/remote_mmap. */
+#ifdef DOCA_ARCH_DPU
+		teardown_pod_dma(objs, &objs->pods[i]);
+#endif
+
+		/* UNPUBLISH every host-exported handle, but DESTROY NOTHING — both halves
+		 * are load-bearing:
+		 *   NULL: these pointers are px_lane_refresh_credit's only liveness gate. Left
+		 *     set, the egress keeps credit-refresh DMA-reading the dead pod's unmapped
+		 *     host memory → QP error → the SHARED doca_dma ctx faults → egress wedges
+		 *     for EVERY pod.
+		 *   No destroy: an in-flight DMA may still reference the mapping, and
+		 *     destroying it faults that same ctx. Safe reclaim needs a quiesce protocol
+		 *     that does not exist, so these handles leak per reconnect. The staging
+		 *     buffer, the only large allocation here, is reused per slot instead
+		 *     (setup_pod_dma).
+		 * local_mmap/dma_buffer are kept ON PURPOSE: DPU-local, reused next time. */
+		for (int j = 0; j < MAX_EU_PER_POD; j++) {
+			objs->pods[i].buf_arrs[j]        = NULL;
+			objs->pods[i].ring_mmaps[j]      = NULL;
+			objs->pods[i].ring_host_addrs[j] = NULL;
+		}
+		objs->pods[i].ring_mmap_count = 0;
+		objs->pods[i].remote_mmap     = NULL;
+		objs->pods[i].remote_addr     = NULL;
+		objs->pods[i].host_rx_mmap    = NULL;   /* also gates the egress SG-DMA dest */
+		objs->pods[i].k_rings         = 0;
 
 		/* Mark slot dead in PUBLICATION-INVERSE order: store registered=0
 		 * with RELEASE FIRST so any reader that observes registered=1 is
@@ -632,36 +639,14 @@ pods_remove_connection(struct objects *objs, struct doca_comch_connection *conn)
 		objs->pods[i].dma_ready       = 0;
 		objs->pods[i].connection      = NULL;
 		objs->pods[i].pod_id          = -1;
-		for (int j = 0; j < ring_mmap_count && j < MAX_EU_PER_POD; j++)
-			objs->pods[i].ring_mmaps[j] = NULL;
-		objs->pods[i].ring_mmap_count = 0;
-		objs->pods[i].remote_mmap     = NULL;
-		/* host_rx_mmap kept (deferred destroy). dma_ready=0 (set above) makes the
-		 * egress skip this pod, so the retained handle is never NEWLY referenced;
-		 * already-in-flight batches finish against a still-valid mapping. */
 		break;
 	}
 
 	if (found_idx < 0)
 		return -1;
 
-	for (int j = 0; j < ring_mmap_count && j < MAX_EU_PER_POD; j++) {
-		if (!ring_mmaps[j])
-			continue;
-		doca_error_t r = doca_mmap_destroy(ring_mmaps[j]);
-		if (r != DOCA_SUCCESS)
-			DOCA_LOG_WARN("disconnect: ring_mmap[%d] destroy failed: %s",
-				      j, doca_error_get_name(r));
-	}
-	if (remote_mmap) {
-		doca_error_t r = doca_mmap_destroy(remote_mmap);
-		if (r != DOCA_SUCCESS)
-			DOCA_LOG_WARN("disconnect: remote_mmap destroy failed: %s",
-				      doca_error_get_name(r));
-	}
-	/* host_rx_mmap is NOT destroyed here (deferred to slot reuse — see above). */
-
-	DOCA_LOG_INFO("pods_remove_connection: slot %d (pod_id=%d) invalidated",
+	DOCA_LOG_INFO("pods_remove_connection: slot %d (pod_id=%d) invalidated "
+		      "(DPA rings dropped; host handles unpublished, staging kept)",
 		      found_idx, pod_id);
 	return 0;
 }

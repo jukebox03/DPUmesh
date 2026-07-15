@@ -14,7 +14,9 @@ int setup_dma_ring(struct objects *objs, size_t size, struct dma_ring **out_ring
     doca_error_t result;
     struct dma_ring *ring;
 
-    ring = (struct dma_ring *)malloc(sizeof(struct dma_ring));
+    /* calloc, NOT malloc: the fields below are initialized by hand, so any field added
+     * to struct dma_ring later would otherwise silently inherit heap garbage. */
+    ring = (struct dma_ring *)calloc(1, sizeof(struct dma_ring));
     if (!ring)
         return DOCA_ERROR_NO_MEMORY;
     *out_ring = ring;
@@ -22,6 +24,7 @@ int setup_dma_ring(struct objects *objs, size_t size, struct dma_ring **out_ring
     ring->enq_pos = 0;
     ring->descs = NULL;
     ring->busy_probes = 0;
+    ring->dead = 0;             /* fail-safe latch; see dpumesh_enqueue */
 
     /* Per-slot Vyukov cell sequence (host memory): seq[i]=i so slot i is first
      * writable by ticket i (generation 0). Lock-free MPSC producer state. */

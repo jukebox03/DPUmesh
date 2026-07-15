@@ -178,9 +178,49 @@ spec:
   selector: { app: loopback-dpumesh }
   ports: [{ port: ${CTRL_PORT}, targetPort: ${CTRL_PORT} }]
 ---
-# stream-dpumesh (pod_id=16): byte-stream / L7-proxy frame validator. Needs the
-# DPU launched with DPUMESH_PROXY=frame. replicas:0 + not in start_pods — the
-# 'stream' command scales it up on demand.
+# verbs-dpumesh (pod_id=17): RDMA-verbs-façade counterpart of loopback-dpumesh —
+# same self-routing proof, but the whole data path goes through dmesh_verbs.h
+# (dmesh_post_send / dmesh_poll_cq / dmesh_wc_release / dmesh_cq_fd).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: verbs-dpumesh
+spec:
+  replicas: 0
+  selector: { matchLabels: { app: verbs-dpumesh } }
+  template:
+    metadata: { labels: { app: verbs-dpumesh } }
+    spec:
+      hostname: verbs-dpumesh
+      containers:
+      - name: verbs-dpumesh
+        image: docker.io/${IMG_VERBS_DPU}
+        imagePullPolicy: Never
+        ports: [{ containerPort: ${CTRL_PORT} }]
+        env:
+        - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
+        - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
+        - { name: BENCH_WORKER_ID, value: "17" }
+        - { name: DPUMESH_ARENA_SLOTS, value: "${DPUMESH_ARENA_SLOTS}" }
+        securityContext: { privileged: true }
+        volumeMounts:
+        - { mountPath: /dev/infiniband, name: infiniband }
+        - { mountPath: /usr/local/lib/libdpumesh.so, name: libdpumesh-so, subPath: libdpumesh.so }
+      volumes:
+      - { name: infiniband, hostPath: { path: /dev/infiniband } }
+      - { name: libdpumesh-so, hostPath: { path: ${LIB_OUT}, type: Directory } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: verbs-dpumesh }
+spec:
+  selector: { app: verbs-dpumesh }
+  ports: [{ port: ${CTRL_PORT}, targetPort: ${CTRL_PORT} }]
+---
+# stream-dpumesh (pod_id=16): byte-stream / L7-proxy frame validator. The 'stream'
+# RUN needs the DPU launched with DPUMESH_PROXY=frame, but the pod registers like
+# any other regardless of proxy mode, so start_pods brings it up with everything
+# else (it no longer self-starts on demand — no pod start against a running DPU).
 apiVersion: apps/v1
 kind: Deployment
 metadata:

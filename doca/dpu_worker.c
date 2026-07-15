@@ -13,7 +13,7 @@
 #include "buffer.h"
 #include "ring.h"
 #include "dpu_proxy.h"
-#include <dpumesh/dmesh_core.h>
+#include <dpumesh/dmesh_common.h>
 
 #include <doca_log.h>
 #include <doca_dev.h>

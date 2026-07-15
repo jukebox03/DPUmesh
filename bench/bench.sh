@@ -14,10 +14,15 @@
 #   bench.sh all       [dpumesh|tcp|both]               # all three (default both)
 #   bench.sh point <dpumesh|tcp> <req> <reply> <conc> <dur> <warmup> <threads> [reconn]
 #   bench.sh loopback  [<N> <size> <zc>]                # validator: self-routing
+#   bench.sh verbs     [<N> <size> <zc> <win> <pipe>]   # validator: RDMA-verbs façade
 #   bench.sh stream    [<N> <size> <svcs> <fpw>]        # validator: L7 frame proxy (DPUMESH_PROXY=frame)
 #   bench.sh preload   [<N> <size> <conns>]             # validator: LD_PRELOAD shim
 #   bench.sh pin       [fair|hw|hw3|hw6]                # (re)pin pods to cores
 #   bench.sh status | logs | cleanup | dpulog [n] | dpucpu
+#
+# `deploy` is the ONLY way to bring the environment up: it starts the DPU and every
+# pod together, in order. There is no DPU-only restart and no per-pod start — both
+# desynchronize the host/DPU registration state.
 #
 # Requires .env at the repo root (DPU_HOST, HOST_PASS, DPU_PASS, HOST_PCI, DPU_PCI,
 # …) for deploy/pin. Benchmark/validator runs need only kubectl + nc.
@@ -60,6 +65,7 @@ IMG_ECHO_DPU="bench/echo-dpumesh:latest"
 IMG_LOOPBACK_DPU="bench/loopback-dpumesh:latest"
 IMG_PRELOAD_DPU="bench/preload-dpumesh:latest"
 IMG_STREAM_DPU="bench/stream-dpumesh:latest"
+IMG_VERBS_DPU="bench/verbs-dpumesh:latest"
 IMG_BENCH_TCP="bench/bench-tcp:latest"
 IMG_ECHO_TCP="bench/echo-tcp:latest"
 IMG_ENVOY="envoyproxy/envoy:v1.30-latest"
@@ -143,6 +149,7 @@ build_images() {
     build_image "$BENCH_DIR/docker/echo_dpumesh.Dockerfile"         "$IMG_ECHO_DPU"     "$PROJ_ROOT"
     build_image "$BENCH_DIR/validators/loopback_dpumesh.Dockerfile" "$IMG_LOOPBACK_DPU" "$PROJ_ROOT"
     build_image "$BENCH_DIR/validators/stream_dpumesh.Dockerfile"   "$IMG_STREAM_DPU"   "$PROJ_ROOT"
+    build_image "$BENCH_DIR/validators/verbs_dpumesh.Dockerfile"    "$IMG_VERBS_DPU"    "$PROJ_ROOT"
     build_image "$BENCH_DIR/validators/preload_dpumesh.Dockerfile"  "$IMG_PRELOAD_DPU"  "$PROJ_ROOT"
     build_image "$BENCH_DIR/docker/bench_tcp.Dockerfile"            "$IMG_BENCH_TCP"    "$PROJ_ROOT"
     build_image "$BENCH_DIR/docker/echo_tcp.Dockerfile"             "$IMG_ECHO_TCP"     "$PROJ_ROOT"
@@ -208,7 +215,7 @@ get_pod_cores() {
             case "$app" in
                 bench-dpumesh) echo "0";; echo-dpumesh) echo "1";;
                 bench-tcp) echo "2";; echo-tcp) echo "3";;
-                loopback-dpumesh) echo "4,5";; preload-dpumesh) echo "4,5";; stream-dpumesh) echo "4,5";;
+                loopback-dpumesh) echo "4,5";; preload-dpumesh) echo "4,5";; stream-dpumesh) echo "4,5";; verbs-dpumesh) echo "4,5";;
                 echo-dpumesh-13) echo "6";; echo-dpumesh-14) echo "7";; *) echo "";;
             esac ;;
     esac
@@ -225,7 +232,7 @@ pin_pods() {
     else
         warn "cpupower not found; skipping DVFS lock"
     fi
-    for app in bench-dpumesh echo-dpumesh echo-dpumesh-13 echo-dpumesh-14 loopback-dpumesh stream-dpumesh preload-dpumesh bench-tcp echo-tcp; do
+    for app in bench-dpumesh echo-dpumesh echo-dpumesh-13 echo-dpumesh-14 loopback-dpumesh stream-dpumesh verbs-dpumesh preload-dpumesh bench-tcp echo-tcp; do
         local cores pod_id; cores=$(get_pod_cores "$app" "$profile"); [ -z "$cores" ] && continue
         pod_id=$(echo "$HOST_PASS" | sudo -S crictl pods --label "app=$app" -q 2>/dev/null | head -n 1)
         if [ -z "$pod_id" ]; then warn "$app: pod not found, skipping"; continue; fi
@@ -269,7 +276,7 @@ clean_failed_pods() {
 apply_manifest() {
     step "=== Applying K8s manifest (replicas=0) ==="
     command -v envsubst >/dev/null 2>&1 || { err "envsubst not found (apt install gettext-base)"; exit 1; }
-    export IMG_BENCH_DPU IMG_ECHO_DPU IMG_LOOPBACK_DPU IMG_STREAM_DPU IMG_PRELOAD_DPU IMG_BENCH_TCP IMG_ECHO_TCP IMG_ENVOY
+    export IMG_BENCH_DPU IMG_ECHO_DPU IMG_LOOPBACK_DPU IMG_STREAM_DPU IMG_VERBS_DPU IMG_PRELOAD_DPU IMG_BENCH_TCP IMG_ECHO_TCP IMG_ENVOY
     export CTRL_PORT TCP_PORT HOST_PCI LIB_OUT
     export DPUMESH_RINGS_PER_POD="${DPUMESH_RINGS_PER_POD:-2}" ASYNC_THREADS="${ASYNC_THREADS:-4}" \
            BENCH_PIPELINE="${BENCH_PIPELINE:-8}" BENCH_COALESCE="${BENCH_COALESCE:-0}" \
@@ -300,6 +307,11 @@ scale_up_with_wait() {
     fi
 }
 
+# Every meshed pod is brought up here, as part of the ONE full deploy, against a
+# freshly started DPU. Nothing starts a pod on its own later: the validators used to
+# scale their pod up on demand, which is a pod-restart against an already-running
+# DPU — exactly the pattern being removed. verbs/stream register like any other pod
+# regardless of proxy mode (only the `stream` RUN itself needs DPUMESH_PROXY=frame).
 start_pods() {
     step "=== Starting pods (innermost first) ==="
     scale_up_with_wait "echo-dpumesh"     "pods: 1"
@@ -308,6 +320,8 @@ start_pods() {
     scale_up_with_wait "bench-dpumesh"    "pods: 2"
     scale_up_with_wait "loopback-dpumesh" "pods: 3"
     scale_up_with_wait "preload-dpumesh"  "pods: 4"
+    scale_up_with_wait "verbs-dpumesh"    ""
+    scale_up_with_wait "stream-dpumesh"   ""
     scale_up_with_wait "echo-tcp"  ""
     scale_up_with_wait "bench-tcp" ""
 }
@@ -328,14 +342,14 @@ deploy() {
     pin_pods fair
     info "=== Deploy complete ==="
     echo "  Run:  $0 latency|bandwidth|rate|all [dpumesh|tcp|both]"
-    echo "        $0 loopback|stream|preload ...   (validators)"
-    echo "  Re-pin after a pod restart:  $0 pin [fair|hw|hw3|hw6]"
+    echo "        $0 loopback|verbs|stream|preload ...   (validators)"
+    echo "  Re-pin:  $0 pin [fair|hw|hw3|hw6]"
 }
 
 cleanup() { info "Deleting namespace $NS"; kubectl delete ns "$NS" --ignore-not-found=true 2>/dev/null || true; stop_dpu; }
 
 show_logs() {
-    for app in bench-dpumesh echo-dpumesh echo-dpumesh-13 echo-dpumesh-14 loopback-dpumesh stream-dpumesh preload-dpumesh bench-tcp echo-tcp; do
+    for app in bench-dpumesh echo-dpumesh echo-dpumesh-13 echo-dpumesh-14 loopback-dpumesh stream-dpumesh verbs-dpumesh preload-dpumesh bench-tcp echo-tcp; do
         echo "=== $app ==="
         kubectl logs -n "$NS" -l "app=$app" --all-containers=true --prefix=true --tail=20 2>/dev/null || true
         echo
@@ -424,6 +438,18 @@ run_loopback() {  # self-routing: pod 12 is client + server of its own service
     printf "  OK/Fail: %s/%s  served: %s  p50: %s us\n" "$ok" "$fail" "$served" "$p50"
 }
 
+run_verbs() {  # verbs-façade self-routing: pod 17 is client + server of its own service
+    local N="${1:-50000}" size="${2:-8192}" zc="${3:-0}" window="${4:-1}" pipe="${5:-1}" ip resp
+    ip=$(kubectl get pod -n "$NS" -l app=verbs-dpumesh --field-selector=status.phase=Running -o jsonpath='{.items[0].status.podIP}' 2>/dev/null || true)
+    [ -z "$ip" ] && { err "verbs-dpumesh pod not running — run '$0 deploy' (validators no longer self-start)"; return 1; }
+    step "=== verbs (self-service): N=$N size=${size}B zc=$zc window=$window pipeline=$pipe ==="
+    resp=$(printf 'RUN %s %s %s %s %s\n' "$N" "$size" "$zc" "$window" "$pipe" | timeout 180s nc "$ip" "$CTRL_PORT" || true)
+    [ -z "$resp" ] && { err "no response (timeout or pod down)"; return 1; }
+    [[ "$resp" == ERR* ]] && { err "verbs replied: $resp"; return 1; }
+    read -r _ ok fail served p50 <<<"$resp"
+    printf "  OK/Fail: %s/%s  served: %s  p50: %s us\n" "$ok" "$fail" "$served" "$p50"
+}
+
 run_preload() {  # LD_PRELOAD shim: vanilla TCP apps over DPUmesh
     local N="${1:-5000}" size="${2:-1024}" conns="${3:-8}" ip resp
     ip=$(kubectl get pod -n "$NS" -l app=preload-dpumesh --field-selector=status.phase=Running -o jsonpath='{.items[0].status.podIP}' 2>/dev/null || true)
@@ -437,11 +463,9 @@ run_preload() {  # LD_PRELOAD shim: vanilla TCP apps over DPUmesh
 }
 
 run_stream() {  # L7-proxy frame validator (needs DPUMESH_PROXY=frame)
-    local N="${1:-20000}" size="${2:-1024}" svcs="${3:-self}" fpw="${4:-1}" have ip resp
-    have=$(kubectl get pod -n "$NS" -l app=stream-dpumesh --field-selector=status.phase=Running -o name 2>/dev/null | head -1 || true)
-    [ -z "$have" ] && scale_up_with_wait "stream-dpumesh" "" || info "reusing running stream-dpumesh pod (no restart)"
+    local N="${1:-20000}" size="${2:-1024}" svcs="${3:-self}" fpw="${4:-1}" ip resp
     ip=$(kubectl get pod -n "$NS" -l app=stream-dpumesh --field-selector=status.phase=Running -o jsonpath='{.items[0].status.podIP}' 2>/dev/null || true)
-    [ -z "$ip" ] && { err "stream-dpumesh pod not found"; return 1; }
+    [ -z "$ip" ] && { err "stream-dpumesh pod not running — run '$0 deploy' (validators no longer self-start)"; return 1; }
     step "=== stream (L7-proxy frame): N=$N size=${size}B svcs='$svcs' frames/write=$fpw ==="
     resp=$(printf 'RUN %s %s %s %s\n' "$N" "$size" "$svcs" "$fpw" | timeout 180s nc "$ip" "$CTRL_PORT" || true)
     [ -z "$resp" ] && { err "no response (timeout or pod down)"; return 1; }
@@ -455,13 +479,17 @@ CMD="${1:-help}"; shift || true
 case "$CMD" in
     deploy)    deploy ;;
     build)     need_env; sync_sources; build_dpu ;;
-    restart)   need_env; sync_sources; build_dpu; start_dpu ;;
+    # NOTE: there is deliberately NO `restart` (DPU-only restart) command, and no
+    # per-pod start. Restarting the DPU under live pods — or starting a pod against
+    # an already-running DPU — leaves the two sides' registration state inconsistent.
+    # `deploy` is the only supported path: it brings up the DPU and every pod together.
     latency)   for s in $(targets_of "${1:-both}"); do bench_latency   "$s"; done ;;
     bandwidth) for s in $(targets_of "${1:-both}"); do bench_bandwidth "$s"; done ;;
     rate)      for s in $(targets_of "${1:-both}"); do bench_rate      "$s"; done ;;
     all)       for s in $(targets_of "${1:-both}"); do bench_latency "$s"; bench_bandwidth "$s"; bench_rate "$s"; done; info "results under $OUT" ;;
     point)     [ $# -eq 7 ] || [ $# -eq 8 ] || { err "point <sol> <req> <reply> <conc> <dur> <warmup> <threads> [reconn]"; exit 1; }; run_point "$@" ;;
     loopback)  run_loopback "${1:-50000}" "${2:-8192}" "${3:-0}" ;;
+    verbs)     run_verbs    "${1:-50000}" "${2:-8192}" "${3:-0}" "${4:-1}" "${5:-1}" ;;
     stream)    run_stream   "${1:-20000}" "${2:-1024}" "${3:-self}" "${4:-1}" ;;
     preload)   run_preload  "${1:-5000}"  "${2:-1024}" "${3:-8}" ;;
     pin)       need_env; pin_pods "${1:-fair}" ;;
@@ -474,10 +502,11 @@ case "$CMD" in
         cat <<EOF
 Usage: $0 <command> [args]
 
-  deploy                                     build + DPU + images + pods + pin
+  deploy                                     build + DPU + images + pods + pin (the ONLY bring-up path)
   latency|bandwidth|rate|all [dpumesh|tcp|both]   benchmark families -> CSVs under $OUT
   point <sol> <req> <reply> <conc> <dur> <warmup> <threads> [reconn]   one raw RUN (reconn = conn-churn period)
   loopback|stream|preload [args]             feature validators
+  verbs <N> <size> <zc> <window> <pipeline>  verbs-façade loopback validator (dmesh_verbs.h)
   pin [fair|hw|hw3|hw6]                       (re)pin pods to cores
   status | logs | cleanup | dpulog [n] | dpucpu
 

@@ -26,6 +26,12 @@ struct dma_ring {
     /* "ring busy" WARN rate-limit state (best-effort under lock-free contention;
      * a racy probe count only mis-throttles a diagnostic, never corrupts). */
     uint64_t busy_probes;
+    /* Fail-safe latch (0->1 only): a producer's cell wait blew its deadline ⇒ the DPA
+     * is not draining this ring at all (never registered, or its EU is wedged). The
+     * ring is then permanently unusable — the producer that timed out abandoned its
+     * Vyukov ticket, leaving seq[] unadvanced and a hole the DPA's sequential desc_idx
+     * would stall on forever — so every dpumesh_enqueue fails fast instead. */
+    int dead;
 };
 
 /* Create + export one host→DPU forward descriptor ring (with the +1 credit

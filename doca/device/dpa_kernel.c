@@ -52,15 +52,53 @@ static void handle_dpu_msg(struct dpa_thread_arg *thread_arg, const struct comch
     switch(msg->type) {
         case DPA_MSG_RING_ADD: {
             struct comch_add_ring_msg *add_msg = (struct comch_add_ring_msg *)msg;
-            if (thread_arg->num_rings < MAX_DPA_RINGS) {
-                thread_arg->rings[thread_arg->num_rings] = add_msg->ring;
-                DOCA_DPA_DEV_LOG_INFO("ADD_RING received: pod_id=%d, buf_arr_size=%u\n",
-                                     add_msg->ring.pod_id, add_msg->ring.buf_arr_size);
-                thread_arg->num_rings++;
-                DOCA_DPA_DEV_LOG_INFO("Added ring: pod_id=%d, num_rings=%u\n",
-                                     add_msg->ring.pod_id, thread_arg->num_rings);
+            /* A pod has at most ONE ring per EU, so a same-pod_id entry is a stale
+             * duplicate: overwrite in place rather than accrete. Defensive — RING_DEL
+             * on disconnect should mean this never fires. */
+            uint32_t slot = thread_arg->num_rings;
+            for (uint32_t r = 0; r < thread_arg->num_rings; r++) {
+                if (thread_arg->rings[r].pod_id == add_msg->ring.pod_id) {
+                    slot = r;
+                    DOCA_DPA_DEV_LOG_INFO("ADD_RING: replacing stale entry for pod_id=%d at r=%u\n",
+                                          add_msg->ring.pod_id, r);
+                    break;
+                }
+            }
+            if (slot < MAX_DPA_RINGS) {
+                thread_arg->rings[slot] = add_msg->ring;
+                /* MUST reset: this rings[] slot may be recycled (RING_DEL swap-with-last,
+                 * or the overwrite above), so desc_idx could still hold the previous
+                 * occupant's cursor and we'd read the wrong descriptor forever. */
+                thread_arg->desc_idx[slot] = 0;
+                if (slot == thread_arg->num_rings)
+                    thread_arg->num_rings++;
+                DOCA_DPA_DEV_LOG_INFO("Added ring: pod_id=%d, r=%u, num_rings=%u\n",
+                                     add_msg->ring.pod_id, slot, thread_arg->num_rings);
             } else {
                 DOCA_DPA_DEV_LOG_INFO("Ring add failed: too many rings=%u\n", thread_arg->num_rings);
+            }
+            break;
+        }
+        case DPA_MSG_RING_DEL: {
+            struct comch_add_ring_msg *del_msg = (struct comch_add_ring_msg *)msg;
+            /* Only ring.pod_id is meaningful (struct reused so the wire ABI + its
+             * _Static_asserts stay frozen). Swap-with-last keeps rings[0,num_rings)
+             * dense; desc_idx must travel with the entry it belongs to. */
+            for (uint32_t r = 0; r < thread_arg->num_rings; r++) {
+                if (thread_arg->rings[r].pod_id != del_msg->ring.pod_id)
+                    continue;
+                uint32_t last = thread_arg->num_rings - 1;
+                if (r != last) {
+                    thread_arg->rings[r]    = thread_arg->rings[last];
+                    thread_arg->desc_idx[r] = thread_arg->desc_idx[last];
+                }
+                thread_arg->desc_idx[last] = 0;
+                /* Plain store is enough: this EU is the only mutator (handle_msgs runs
+                 * on it), and num_rings is volatile so the drain loop re-reads it. */
+                thread_arg->num_rings = last;
+                DOCA_DPA_DEV_LOG_INFO("RING_DEL: dropped pod_id=%d at r=%u, num_rings=%u\n",
+                                      del_msg->ring.pod_id, r, thread_arg->num_rings);
+                break;
             }
             break;
         }

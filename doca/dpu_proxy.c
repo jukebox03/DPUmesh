@@ -167,6 +167,7 @@ struct px_op {
     int kind;                     /* 0 = SG batch, 1 = credit refresh */
     struct px_batch *batch;       /* kind 0 */
     int pod_idx, region;          /* kind 1 */
+    uint32_t pod_generation;      /* kind 1: pods[pod_idx].dma_generation at submit */
     struct doca_buf *src_buf, *dst_buf;   /* kind 1 (kind 0 keeps them in the batch) */
 };
 
@@ -204,6 +205,13 @@ struct px_lane {
     uint64_t cached_freed;            /* host freed counter, DMA-read cache */
     int      refresh_inflight;
     int      warned_no_credit_addr;
+    /* Which incarnation of pods[pod_idx] the counters above describe. A restarted pod
+     * exports a FRESH host RX buffer whose freed-counter restarts at 0, so credits
+     * inherited from the previous tenant are wrong in a way that never self-corrects:
+     * inflight = sent_entries - cached_freed stays huge → avail_entries pins at 0 →
+     * the lane never sends again. px_lane_rearm resets them when this stops matching
+     * pods[].dma_generation. */
+    uint32_t pod_generation;
 };
 
 struct px_conn {
@@ -256,10 +264,13 @@ struct px_engine {
     struct doca_pe            *pe;     /* own PE (threaded) / objs->pe (inline) */
     struct doca_buf_inventory *inv;
     int      dma_tasks_inflight;
-    /* Safety net: set if the doca_dma ctx faults (alloc_init → BAD_STATE, e.g. a DMA
-     * to a torn-down mmap). Stops further submits so we don't spin retrying + flood
-     * DOCA's internal "state IDLE" log forever. ① (deferred host_rx_mmap destroy)
-     * should prevent the fault; this only fires if something else stops the ctx. */
+    /* Set when the doca_dma ctx faults. Gates every submit on this engine (no spin,
+     * no DOCA "state IDLE" flood) and tells px_engine_pump/px_drain to run
+     * px_engine_recover, which restarts the ctx and clears this.
+     * RECOVERABLE and EXPECTED, not a should-never-happen: the egress DMAs into pods'
+     * host memory, and a dying pod takes its memory with it before comch can tell us.
+     * Every path that can observe the fault must latch it — px_dma_err_cb, the SG-batch
+     * submit, and px_lane_refresh_credit — or the engine retry-spins instead. */
     int      dma_stalled;
     int      dma_fault_warned;
     struct px_batch *batch_mem, *batch_free;
@@ -1294,9 +1305,34 @@ static void px_dma_err_cb(struct doca_dma_task_memcpy *t, union doca_data tud,
     doca_error_t st = doca_task_get_status(doca_dma_task_memcpy_as_task(t));
     doca_task_free(doca_dma_task_memcpy_as_task(t));
     eng->dma_tasks_inflight--;
+
+    /* Latch from the error itself rather than waiting for a later submit to rediscover
+     * the fault as BAD_STATE: the IO_FAILED handling below marks the pod dead, which
+     * stops the very refreshes that would have hit BAD_STATE, so an otherwise idle
+     * engine would leave the ctx dead indefinitely. Latching on a fault the ctx
+     * survived is harmless — px_engine_recover reads the real state and clears it. */
+    if (st == DOCA_ERROR_IO_FAILED)
+        eng->dma_stalled = 1;
+
     if (op->kind == 1) {
         DOCA_LOG_ERR("proxy: credit refresh DMA failed: %s", doca_error_get_descr(st));
         objs->proxy->lanes[op->pod_idx][op->region].refresh_inflight = 0;
+        /* IO_FAILED on a read of the pod's HOST memory ⇒ that memory is gone ⇒ the pod
+         * died and comch has not reported it yet. This is the earliest reliable death
+         * signal available, so use it: drop dma_ready until the pod re-registers.
+         * Without it the engine recovers straight back into the same wall — restart,
+         * refresh the still-"ready" dead pod, fault, restart — until comch lands.
+         * Two guards, both load-bearing:
+         *   IO_FAILED only — a ctx fault FLUSHES healthy pods' in-flight tasks through
+         *     this same callback; marking those dead would cut off every pod with a
+         *     task in flight.
+         *   generation only — pod_idx is a recycled SLOT index and this lands on PE
+         *     progress, possibly after the slot's next tenant registered. */
+        if (st == DOCA_ERROR_IO_FAILED) {
+            struct pod_state *dead = &objs->pods[op->pod_idx];
+            if (__atomic_load_n(&dead->dma_generation, __ATOMIC_ACQUIRE) == op->pod_generation)
+                __atomic_store_n(&dead->dma_ready, 0, __ATOMIC_RELEASE);
+        }
         if (op->src_buf) { doca_buf_dec_refcount(op->src_buf, NULL); op->src_buf = NULL; }
         if (op->dst_buf) { doca_buf_dec_refcount(op->dst_buf, NULL); op->dst_buf = NULL; }
         return;
@@ -1348,13 +1384,23 @@ static void px_lane_refresh_credit(struct objects *objs, struct px_engine *eng,
     op->kind = 1;
     op->pod_idx = pod_idx;
     op->region = region;
+    /* Stamp WHICH incarnation of this slot we are reading, so a late error cannot be
+     * blamed on whatever pod occupies the slot by the time it lands. */
+    op->pod_generation = __atomic_load_n(&pod->dma_generation, __ATOMIC_ACQUIRE);
     op->src_buf = src;
     op->dst_buf = dst;
     union doca_data ud = { .ptr = op };
     struct doca_dma_task_memcpy *t = NULL;
     ret = doca_dma_task_memcpy_alloc_init(eng->dma, src, dst, ud, &t);
-    if (ret != DOCA_SUCCESS)
+    if (ret != DOCA_SUCCESS) {
+        /* BAD_STATE = the shared ctx faulted; latch so px_engine_recover restarts it.
+         * This path must latch, not just the SG-batch submit: after a fault the refresh
+         * never lands, so credits never arrive and px_lane_submit breaks out before it
+         * ever reaches that submit — leaving nothing to latch and an unbounded spin. */
+        if (ret == DOCA_ERROR_BAD_STATE)
+            eng->dma_stalled = 1;
         goto fail;
+    }
     if (doca_task_try_submit(doca_dma_task_memcpy_as_task(t)) != DOCA_SUCCESS) {
         doca_task_free(doca_dma_task_memcpy_as_task(t));
         goto fail;
@@ -1568,10 +1614,78 @@ static void px_lane_drop_dead(struct px_engine *eng, struct px_lane *ln) {
 
 /* worker: one pass over this engine's owned lanes (splice inbox→qhead, submit,
  * retire). Owns lanes where pod_idx % n_eng == eng->id. */
+/* Bring this engine's SHARED doca_dma ctx back up after a fault.
+ *
+ * A DMA into a dying pod's host memory takes a QP LOCAL_QP_OPERATION_ERROR (its process
+ * is gone, its memory unmapped), and DOCA stops the ctx — so every pod's egress dies
+ * with it. Gating cannot prevent this: pod_data_ready() only drops once comch reports
+ * the disconnect, strictly AFTER the memory is gone. A peer dying is a NORMAL event
+ * this engine must survive.
+ *
+ * Recovery = let the ctx reach IDLE (DOCA flushes in-flight tasks through
+ * px_dma_err_cb), then start it again. One step per pump, never blocking. */
+/* Reset the per-incarnation state of one lane. Queues are NOT touched: they hold
+ * units, whose lifetime is custody-managed (px_lane_drop_dead retires them when the
+ * pod goes not-ready). Only the credit/landing accounting is incarnation-scoped. */
+static void px_lane_rearm(struct px_lane *ln, uint32_t gen) {
+    ln->cursor = 0;
+    ln->sent_entries = 0;
+    ln->cached_freed = 0;
+    ln->refresh_inflight = 0;
+    ln->warned_no_credit_addr = 0;
+    ln->pod_generation = gen;
+}
+
+static int px_engine_recover(struct px_engine *eng) {
+    enum doca_ctx_states st;
+
+    if (doca_ctx_get_state(eng->dma_ctx, &st) != DOCA_SUCCESS)
+        return 0;
+
+    if (st == DOCA_CTX_STATE_RUNNING) {
+        /* Never actually went down (or already healed) — resume submitting. */
+        eng->dma_stalled = 0;
+        eng->dma_fault_warned = 0;
+        return 0;
+    }
+    if (st == DOCA_CTX_STATE_IDLE) {
+        if (doca_ctx_start(eng->dma_ctx) != DOCA_SUCCESS)
+            return 1;                     /* still down; keep the caller awake to retry */
+        eng->dma_tasks_inflight = 0;
+        /* Clear every lane's in-flight marker: a refresh in flight when the ctx died
+         * may never deliver its callback, and a stuck refresh_inflight=1 stops that
+         * lane refreshing credit ever again — it would starve permanently, including
+         * lanes of pods that never died. Fault path only, so rearm all rather than
+         * reason about which callbacks fired. */
+        struct dmesh_proxy *px = eng->objs->proxy;
+        for (int p = 0; p < MAX_PODS; p++)
+            for (int r = 0; r < MAX_EU_PER_POD; r++)
+                px->lanes[p][r].refresh_inflight = 0;
+        eng->dma_stalled = 0;
+        eng->dma_fault_warned = 0;
+        DOCA_LOG_WARN("proxy: egress dma ctx restarted after fault (engine %d) — "
+                      "a peer pod's host memory went away mid-DMA", eng->id);
+        return 0;
+    }
+    /* STOPPING/STARTING: drive the PE ourselves to finish the flush, and return 1 so
+     * the caller reports progress and stays awake. Nobody else will do it: with the ctx
+     * down there is no other traffic, so the main loop reads the lull and parks —
+     * leaving the ctx stopping with nothing progressing it. */
+    doca_pe_progress(eng->pe);
+    return 1;
+}
+
 static int px_engine_pump(struct objects *objs, struct px_engine *eng) {
     struct dmesh_proxy *px = objs->proxy;
     int progressed = 0;
     int npods = __atomic_load_n(&objs->num_pods, __ATOMIC_ACQUIRE);
+
+    if (eng->dma_stalled) {
+        int recovering = px_engine_recover(eng);
+        if (eng->dma_stalled)
+            return recovering;            /* still down: submit nothing, but stay awake
+                                           * so the caller keeps driving the recovery */
+    }
     for (int i = eng->id; i < npods; i += px->n_eng) {
         struct pod_state *pod = &objs->pods[i];
         int K = pod->k_rings > 0 ? pod->k_rings : 1;
@@ -1597,6 +1711,11 @@ static int px_engine_pump(struct objects *objs, struct px_engine *eng) {
                 px_lane_drop_dead(eng, ln);
                 continue;
             }
+            /* Slot re-tenanted since we last touched this lane → its credit/landing
+             * state belongs to the previous pod and must not be applied to this one. */
+            uint32_t gen = __atomic_load_n(&pod->dma_generation, __ATOMIC_ACQUIRE);
+            if (ln->pod_generation != gen)
+                px_lane_rearm(ln, gen);
             if (ln->qhead) progressed |= px_lane_submit(objs, eng, i, pod, r, ln);
         }
     }
@@ -1841,6 +1960,13 @@ int px_drain(struct objects *objs) {
     /* single-thread default: engine 0 runs inline on the main thread. */
     struct px_engine *eng = &px->engines[0];
     int npods = __atomic_load_n(&objs->num_pods, __ATOMIC_ACQUIRE);
+
+    if (eng->dma_stalled) {
+        int recovering = px_engine_recover(eng);
+        if (eng->dma_stalled)
+            return recovering;            /* still down: submit nothing, but stay awake
+                                           * so the caller keeps driving the recovery */
+    }
     for (int i = 0; i < npods; i++) {
         struct pod_state *pod = &objs->pods[i];
         int K = pod->k_rings > 0 ? pod->k_rings : 1;
@@ -1862,6 +1988,14 @@ int px_drain(struct objects *objs) {
             }
             if (ln->fhead)
                 progressed |= px_lane_emit(objs, eng, pod, ln);
+            /* Slot re-tenanted since we last touched this lane → its credit/landing
+             * state belongs to the previous pod. Rearm before any submit, or the new
+             * pod inherits the old one's consumed credits and never sends. */
+            if (pod_data_ready(pod)) {
+                uint32_t gen = __atomic_load_n(&pod->dma_generation, __ATOMIC_ACQUIRE);
+                if (ln->pod_generation != gen)
+                    px_lane_rearm(ln, gen);
+            }
             if (ln->qhead)
                 progressed |= px_lane_submit(objs, eng, i, pod, r, ln);
         }

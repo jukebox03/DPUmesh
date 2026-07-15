@@ -153,6 +153,11 @@ struct pod_state {
                              * set is derived from pods[] by service_id); SVC_NONE if none */
     int registered;         /* 1 = DMESH_MSG_POD_REGISTER received */
     int dma_ready;          /* 1 = both mmaps arrived, DPA ring added */
+    /* Bumped by setup_pod_dma per incarnation of this SLOT. A DMA error names its pod
+     * by slot index, which is RECYCLED, and lands asynchronously — possibly after the
+     * slot's next tenant registered. Stamped into the submitted op so px_dma_err_cb
+     * can tell whose DMA failed and not kill a live pod. Also drives px_lane_rearm. */
+    uint32_t dma_generation;
 
     /* EU-sharding: K forward descriptor rings spread across K EUs (K=k_rings).
      * The host exports K DMA_RING mmaps in order; ring_mmap_count counts arrivals

@@ -8,16 +8,17 @@
  * data path.
  */
 
-#include <dpumesh/dmesh_core.h>
+#include "dmesh_core.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>      /* tx_reserve / lifecycle report EAGAIN|EINVAL|EBADMSG */
 #include <pthread.h>
 #include <stdatomic.h>
 #include <unistd.h>        /* close() for the host epoll RX path */
 #include <sys/epoll.h>     /* event-driven host PE progress (DPUMESH_HOST_EPOLL) */
-#include <sys/eventfd.h>   /* readiness eventfd for native-epoll integration (dpumesh_get_event_fd) */
+#include <sys/eventfd.h>   /* per-CQ readiness eventfd for native-epoll integration */
 
 #include <doca_log.h>
 #include <doca_mmap.h>
@@ -77,8 +78,8 @@ static void cleanup_ctx(struct dpumesh_ctx *ctx);
  * eventfd. The PE thread routes every inbound by dst_port → that conn's inbox and
  * wakes that conn's fd. There is NO request↔response matching: a conn just delivers
  * whatever arrives, in send order per conn, until close. Allocated from one
- * host-unique pool so client and server ports never collide (loopback-safe). */
-#define DMESH_PORT_SPACE  65536
+ * host-unique pool so client and server ports never collide (loopback-safe).
+ * DMESH_PORT_SPACE lives in dmesh_core.h — struct dmesh_cq's ready ring is sized by it. */
 /* Per-conn inbound queue depth (descriptors only — bodies stay in the shared RX
  * mmap, referenced by pos). Lazily malloc'd per LIVE conn (not 65536× pre-alloc).
  * Power of two. On overflow (app drains too slowly) the landing is reclaimed
@@ -91,11 +92,25 @@ struct dmesh_port_slot {
     void            *user;            /* app's conn handle (returned by dmesh_next_ready);
                                        * set BEFORE role is published so the PE never enqueues
                                        * a port whose handle isn't visible yet. */
+    struct dmesh_cq *cq;              /* the CQ owning this conn: the ONE ready list its
+                                       * edges are pushed to, and the ONE fd they wake.
+                                       * Published with `user`, before role; cleared at
+                                       * free_port, so the PE never arms a dead conn. */
     /* Inbound SPSC ring: PE thread = sole producer (in_tail), the conn's owning
      * app thread = sole consumer (in_head). Lock-free. inbox==NULL until alloc. */
     sw_descriptor_t *inbox;           /* malloc'd ring[DMESH_INBOX_RING] */
     atomic_uint_fast32_t in_head;     /* consumer (app) */
     atomic_uint_fast32_t in_tail;     /* producer (PE) */
+    /* Ready-list ARM flag (0=not on ready list & not being serviced; 1=on the list
+     * OR a consumer is draining it). The PE arms it 0->1 (and ready_pushes) after a
+     * push; the consumer disarms it 1->0 when conn_recv drains the inbox empty, then
+     * re-checks under a seq_cst fence. This replaces the racy "arm on the inbox
+     * empty->non-empty edge" test: that read a head the consumer concurrently
+     * advanced, so a push landing exactly as the consumer stopped draining could be
+     * enqueued but never put on the ready list — stranding the conn forever (a
+     * lost-edge / Dekker race). The flag + paired fences close it and also bound the
+     * conn to at most ONE ready-list entry per drain cycle (no duplicate churn). */
+    atomic_uint_fast32_t on_ready;    /* PE arms; consumer (conn_recv) disarms */
     /* Per-conn TX BYTE-RING over an ELASTIC CHAIN of blocks from the shared pool.
      * FOUR monotonic LOGICAL byte cursors span the chain (byte offset in the chain =
      * cursor; logical block index k = cursor / block_size; offset-in-block = cursor %
@@ -129,12 +144,12 @@ struct dmesh_port_slot {
     atomic_uint_fast16_t su_head;           /* send-unit FIFO head (owner writes/release, PE reads) */
     atomic_uint_fast16_t su_tail;           /* send-unit FIFO tail (PE writes/release, owner reads) */
 };
-/* Ready-list SPSC ops (monotonic counters; PE producer, app consumer). The list
- * carries conn PORTS; dmesh_next_ready maps each to its slot->user. Provably never
- * full (≤ live conns < DMESH_PORT_SPACE; the inbox 0->1 edge admits each at most
+/* Ready-list SPSC ops (monotonic counters; PE producer, CQ thread consumer). Each
+ * list carries conn PORTS; dmesh_next_ready maps each to its slot->user. Provably
+ * never full (≤ live conns < DMESH_PORT_SPACE; the on_ready flag admits each at most
  * once between drains), but the guard keeps a stray push from corrupting indices. */
-static inline void ready_push(dpumesh_ctx_t *ctx, uint16_t port);
-static inline int  ready_pop(dpumesh_ctx_t *ctx, uint16_t *port);
+static inline void ready_push(struct dmesh_cq *cq, uint16_t port);
+static inline int  ready_pop(struct dmesh_cq *cq, uint16_t *port);
 /* Inbound SPSC ring ops (monotonic counters; count = tail-head). */
 static inline int inbox_push(struct dmesh_port_slot *psl, const sw_descriptor_t *d) {
     uint_fast32_t t = atomic_load_explicit(&psl->in_tail, memory_order_relaxed);
@@ -207,7 +222,7 @@ struct dpumesh_ctx {
     pthread_mutex_t block_lock;    /* close-path block return (exactly-once handoff, cold) */
     /* Elastic-pool event counters (diagnostics; relaxed atomics — events are the
      * RARE paths: steady sliding touches none of these except recycle_hits once
-     * per drained block). Read via dpumesh_get_tx_pool_stats. */
+     * per drained block). Read via dmesh_get_tx_stats (public). */
     atomic_ullong st_pool_grabs;    /* shared-pool CAS pops (conn grow / first block) */
     atomic_ullong st_pool_returns;  /* shared-pool CAS pushes (shrink / close drain) */
     atomic_ullong st_recycle_hits;  /* grow served from the conn's recyc[] (no pool op) */
@@ -233,33 +248,21 @@ struct dpumesh_ctx {
     pthread_t pe_tid;
     volatile int pe_running;
 
-    /* Readiness eventfd for native-epoll integration. Lazily enabled by
-     * dpumesh_get_event_fd(): once enabled, rx_deliver_desc writes the eventfd on
-     * each user-visible delivery (new conn -> accept RX ring, or established conn -> its inbox) so a
-     * caller blocked in a vanilla epoll_wait() on this fd wakes up. The PE thread
-     * itself already sleeps on the DOCA PE notification fd (DPUMESH_HOST_EPOLL), so
-     * the whole chain is notification-driven, not busy-poll. -1 = not created. */
-    int notify_efd;
-    volatile int notify_enabled;
+    /* CQ registry. Each CQ owns its readiness eventfd + ready list; an ESTABLISHED
+     * conn's delivery wakes only its own CQ (psl->cq), which is what lets N threads
+     * receive in parallel. This registry exists for the ONE delivery that has no conn
+     * yet: a NEW conn goes on the shared accept queue, so EVERY CQ is notified and
+     * whichever one accepts it owns it. Cold path (once per conn), hence the mutex —
+     * it also makes dmesh_destroy_cq's unregister race-free against the PE. */
+    struct dmesh_cq *cqs[DMESH_MAX_CQ];
+    int              n_cqs;            /* high-water mark of cqs[]; slots may be NULL */
+    pthread_mutex_t  cq_lock;
 
     /* Endpoint port table + allocator (oriented-tuple demux). */
     struct dmesh_port_slot *ports;     /* [DMESH_PORT_SPACE] */
     pthread_mutex_t port_lock;
     uint32_t next_port;                /* bump cursor, wraps within [1, DMESH_UPORT_BASE) */
     int32_t service_id;                /* this node's service id (SVC_NONE if client-only) */
-
-    /* PE-published READY LIST (single channel-eventfd model). The PE pushes a
-     * conn's port the moment its inbox goes empty->non-empty; the app drains this
-     * list via dmesh_next_ready() instead of scanning every conn or holding a
-     * per-conn fd. SPSC: PE = sole producer (ready_tail), the app event-loop =
-     * sole consumer (ready_head). Sized to the port space so it never overflows
-     * (each live conn appears at most once — the 0->1 edge dedups). */
-    char _rl_pad0[64];
-    atomic_uint_fast32_t ready_head;   /* consumer (app) */
-    char _rl_pad1[64];
-    atomic_uint_fast32_t ready_tail;   /* producer (PE) */
-    char _rl_pad2[64];
-    uint16_t ready_ring[DMESH_PORT_SPACE];
 };
 
 /* ====================================================================
@@ -382,35 +385,45 @@ static inline int rxq_try_pop(dpumesh_ctx_t *ctx, sw_descriptor_t *out)
     }
 }
 
-/* Wake a caller blocked in a vanilla epoll_wait() on the readiness eventfd.
- * No-op until dpumesh_get_event_fd() enables it. Per-delivery write (no
- * coalescing) → cannot lose a wakeup; the eventfd is a plain counter, drained by
- * one read() per epoll wakeup. Safe to call from the PE thread. */
-static inline void dpumesh_notify(dpumesh_ctx_t *ctx)
+/* Wake the thread blocked in a vanilla epoll_wait() on ONE CQ's readiness fd.
+ * Per-delivery write (no coalescing) → cannot lose a wakeup; the eventfd is a plain
+ * counter, drained by one read() per epoll wakeup. Safe to call from the PE thread. */
+static inline void cq_notify(struct dmesh_cq *cq)
 {
-    if (ctx->notify_enabled && ctx->notify_efd >= 0) {
+    if (cq->notify_efd >= 0) {
         uint64_t one = 1;
-        ssize_t w = write(ctx->notify_efd, &one, sizeof(one));
+        ssize_t w = write(cq->notify_efd, &one, sizeof(one));
         (void)w;
     }
 }
 
-/* Ready-list SPSC: PE pushes a ready conn's port; the app event-loop pops it via
+/* Wake EVERY CQ — only for the shared accept queue, whose conns have no CQ yet, so
+ * any consumer may claim them. Cold (once per new conn); the lock also keeps a
+ * concurrent dmesh_destroy_cq from freeing a CQ under us. */
+static void notify_all_cqs(dpumesh_ctx_t *ctx)
+{
+    pthread_mutex_lock(&ctx->cq_lock);
+    for (int i = 0; i < ctx->n_cqs; i++)
+        if (ctx->cqs[i]) cq_notify(ctx->cqs[i]);
+    pthread_mutex_unlock(&ctx->cq_lock);
+}
+
+/* Ready-list SPSC: PE pushes a ready conn's port; that conn's CQ thread pops it via
  * dmesh_next_ready. Monotonic counters (count = tail-head); ring index masks the
  * power-of-two DMESH_PORT_SPACE. */
-static inline void ready_push(dpumesh_ctx_t *ctx, uint16_t port) {
-    uint_fast32_t t = atomic_load_explicit(&ctx->ready_tail, memory_order_relaxed);
-    uint_fast32_t h = atomic_load_explicit(&ctx->ready_head, memory_order_acquire);
+static inline void ready_push(struct dmesh_cq *cq, uint16_t port) {
+    uint_fast32_t t = atomic_load_explicit(&cq->ready_tail, memory_order_relaxed);
+    uint_fast32_t h = atomic_load_explicit(&cq->ready_head, memory_order_acquire);
     if (t - h >= DMESH_PORT_SPACE) return;   /* provably never full; guard anyway */
-    ctx->ready_ring[t & (DMESH_PORT_SPACE - 1)] = port;
-    atomic_store_explicit(&ctx->ready_tail, t + 1, memory_order_release);
+    cq->ready_ring[t & (DMESH_PORT_SPACE - 1)] = port;
+    atomic_store_explicit(&cq->ready_tail, t + 1, memory_order_release);
 }
-static inline int ready_pop(dpumesh_ctx_t *ctx, uint16_t *port) {
-    uint_fast32_t h = atomic_load_explicit(&ctx->ready_head, memory_order_relaxed);
-    uint_fast32_t t = atomic_load_explicit(&ctx->ready_tail, memory_order_acquire);
+static inline int ready_pop(struct dmesh_cq *cq, uint16_t *port) {
+    uint_fast32_t h = atomic_load_explicit(&cq->ready_head, memory_order_relaxed);
+    uint_fast32_t t = atomic_load_explicit(&cq->ready_tail, memory_order_acquire);
     if (h == t) return 0;                                    /* empty */
-    *port = ctx->ready_ring[h & (DMESH_PORT_SPACE - 1)];
-    atomic_store_explicit(&ctx->ready_head, h + 1, memory_order_release);
+    *port = cq->ready_ring[h & (DMESH_PORT_SPACE - 1)];
+    atomic_store_explicit(&cq->ready_head, h + 1, memory_order_release);
     return 1;
 }
 
@@ -430,6 +443,26 @@ static inline int ready_pop(dpumesh_ctx_t *ctx, uint16_t *port) {
 static void port_reset_tx(struct dmesh_port_slot *psl);
 static inline void tx_reclaim_ack(dpumesh_ctx_t *ctx, uint16_t port, uint16_t seq);
 
+/* Ready-list arming (producer side, PE thread). Call AFTER a successful inbox_push
+ * on a NON-pending conn: if the conn wasn't already armed/being-serviced, put it on
+ * ITS CQ's ready list and wake THAT CQ. The seq_cst fence orders the inbox tail-store
+ * (in inbox_push) before the on_ready load, pairing with the fence in
+ * dpumesh_conn_recv so a push can never be lost off the ready list (Dekker). Skips
+ * SERVER_PENDING (re-read here since a concurrent dmesh_accept may have promoted the
+ * slot after the caller's role load) — a pending conn is drained by dmesh_accept —
+ * and a conn whose CQ binding is gone (freed slot). Arming is unconditional
+ * otherwise: readiness is live from dmesh_create_cq, never gated on dmesh_cq_fd. */
+static inline void arm_ready_after_push(struct dmesh_port_slot *psl, uint16_t dport) {
+    if (__atomic_load_n(&psl->role, __ATOMIC_ACQUIRE) == DMESH_ROLE_SERVER_PENDING) return;
+    struct dmesh_cq *cq = __atomic_load_n(&psl->cq, __ATOMIC_ACQUIRE);
+    if (!cq) return;
+    atomic_thread_fence(memory_order_seq_cst);
+    if (atomic_exchange_explicit(&psl->on_ready, 1u, memory_order_acq_rel) == 0) {
+        ready_push(cq, dport);
+        cq_notify(cq);
+    }
+}
+
 static void rx_deliver_desc(dpumesh_ctx_t *ctx, const sw_descriptor_t *desc, int slot)
 {
     uint16_t dport = desc->dst_port;
@@ -447,18 +480,12 @@ static void rx_deliver_desc(dpumesh_ctx_t *ctx, const sw_descriptor_t *desc, int
             /* inbox full (app draining too slowly) → drop + reclaim the landing. */
             DOCA_LOG_ERR("RX deliver: conn %u inbox full, dropping seq=%u", dport, desc->seq);
             rx_credit_return(ctx, slot);
-        } else if (r == 2 && ctx->notify_enabled) {
-            /* Re-read role: a concurrent dmesh_accept may have promoted this slot
-             * SERVER_PENDING→SERVER AFTER our initial load (line above), in which
-             * case this empty→non-empty edge MUST wake the app — using the stale
-             * PENDING snapshot would strand the conn until its inbox overflows. If
-             * still PENDING, skip (the accept path drains it). Still on the PE
-             * thread, so ready_push stays single-producer. */
-            uint8_t rnow = __atomic_load_n(&psl->role, __ATOMIC_ACQUIRE);
-            if (rnow != DMESH_ROLE_SERVER_PENDING) {
-                ready_push(ctx, dport);
-                dpumesh_notify(ctx);
-            }
+        } else {
+            /* Arm the owning CQ's ready list (flag-based, race-free — see
+             * arm_ready_after_push). A SERVER_PENDING slot promoted concurrently is
+             * handled inside the helper via its own role re-read; a still-pending slot
+             * is skipped (drained by dmesh_accept). Single-producer (PE thread). */
+            arm_ready_after_push(psl, dport);
         }
         return;
     }
@@ -474,7 +501,7 @@ static void rx_deliver_desc(dpumesh_ctx_t *ctx, const sw_descriptor_t *desc, int
             pthread_mutex_unlock(&ctx->port_lock);
             int r = inbox_push(psl, desc);
             if (r == 0) rx_credit_return(ctx, slot);
-            else if (r == 2 && ctx->notify_enabled) { ready_push(ctx, dport); dpumesh_notify(ctx); }
+            else arm_ready_after_push(psl, dport);
             return;
         }
         if (psl->nblk_owned > 0) {
@@ -499,6 +526,7 @@ static void rx_deliver_desc(dpumesh_ctx_t *ctx, const sw_descriptor_t *desc, int
         psl->peer_pod  = desc->src_pod;
         psl->peer_port = desc->src_port;
         psl->user      = NULL;
+        psl->cq        = NULL;   /* no owner until a CQ accepts it (dmesh_accept binds) */
         port_reset_tx(psl);   /* fresh block-chain cursors; TX blocks grabbed LAZILY on first reply */
         __atomic_store_n(&psl->role, DMESH_ROLE_SERVER_PENDING, __ATOMIC_RELEASE);
         pthread_mutex_unlock(&ctx->port_lock);
@@ -515,7 +543,7 @@ static void rx_deliver_desc(dpumesh_ctx_t *ctx, const sw_descriptor_t *desc, int
         c->desc = *desc;
         atomic_store_explicit(&c->seq, pos + 1, memory_order_release);
         atomic_store_explicit(&ctx->rx_enq, pos + 1, memory_order_relaxed);
-        dpumesh_notify(ctx);                       /* endpoint/accept fd */
+        notify_all_cqs(ctx);       /* no owner yet → every CQ may accept it */
         return;
     }
 
@@ -653,6 +681,10 @@ static void init_config(dpumesh_ctx_t *ctx, const dpumesh_config_t *config, int 
     if (bsz < ctx->slot_size) bsz = ctx->slot_size;    /* a block must hold >= 1 wire slot */
     size_t txbytes = (size_t)ctx->num_slots * (size_t)ctx->slot_size;
     if ((size_t)bsz > txbytes) bsz = (int)txbytes;
+    /* ...and at most TX_SU_DEPTH wire slots, so ONE message can never by itself
+     * outrun the send-unit FIFO (see the maxb clamp below). */
+    if ((size_t)bsz > (size_t)TX_SU_DEPTH * (size_t)ctx->slot_size)
+        bsz = (int)((size_t)TX_SU_DEPTH * (size_t)ctx->slot_size);
     ctx->block_size = bsz;
     ctx->n_blocks   = (int)(txbytes / (size_t)bsz);
     if (ctx->n_blocks < 1) ctx->n_blocks = 1;
@@ -663,6 +695,17 @@ static void init_config(dpumesh_ctx_t *ctx, const dpumesh_config_t *config, int 
     if (mb < 1) mb = 1;
     if (mb > DMESH_TX_MAXB_CAP) mb = DMESH_TX_MAXB_CAP;
     if (mb > ctx->n_blocks) mb = ctx->n_blocks;        /* can't own more than the whole pool */
+    /* THE INVARIANT that makes the send path infallible: a conn's live bytes span at
+     * most maxb blocks, and one block carves into at most ceil(block_size/slot_size)
+     * wire descriptors, so its worst-case send-unit occupancy is maxb*dpb. Clamp that
+     * to TX_SU_DEPTH and the BLOCK WINDOW is always the binding constraint — the
+     * send-unit FIFO can then never fill, which is precisely what lets
+     * dpumesh_tx_next_send carve without a capacity check (and without the backoff
+     * loop it used to spin in). dpumesh_tx_reserve therefore gates on blocks alone. */
+    int dpb = (bsz + ctx->slot_size - 1) / ctx->slot_size;
+    if (dpb < 1) dpb = 1;
+    if (mb > (int)(TX_SU_DEPTH / (unsigned)dpb)) mb = (int)(TX_SU_DEPTH / (unsigned)dpb);
+    if (mb < 1) mb = 1;
     ctx->maxb = mb;
 
     int hh = DPUMESH_TX_H_DEFAULT;
@@ -795,7 +838,7 @@ int dpumesh_init(dpumesh_ctx_t **out, int service_id,
                  const dpumesh_config_t *config) {
     dpumesh_ctx_t *ctx = (dpumesh_ctx_t *)calloc(1, sizeof(dpumesh_ctx_t));
     if (!ctx) return -1;
-    ctx->notify_efd = -1;   /* before any goto fail: cleanup must not close fd 0 */
+    pthread_mutex_init(&ctx->cq_lock, NULL);
 
     init_config(ctx, config, service_id);
 
@@ -822,11 +865,6 @@ int dpumesh_init(dpumesh_ctx_t **out, int service_id,
         atomic_init(&ctx->rx_ring[i].seq, (uint_fast32_t)i);
     atomic_init(&ctx->rx_enq, (uint_fast32_t)0);
     atomic_init(&ctx->rx_deq, (uint_fast32_t)0);
-
-    /* Readiness eventfd (non-blocking, close-on-exec). Non-fatal if it fails —
-     * dpumesh_get_event_fd() then returns -1 and the caller falls back to polling. */
-    ctx->notify_efd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-    ctx->notify_enabled = 0;
 
     /* Endpoint port table + allocator (oriented-tuple demux). calloc → every slot
      * role=FREE, nblk_owned=0 (holds no TX blocks), su NULL, cursors 0. pblk[] must
@@ -866,8 +904,16 @@ static void cleanup_ctx(dpumesh_ctx_t *ctx) {
         ctx->pe_running = 0;
         pthread_join(ctx->pe_tid, NULL);
     }
-    /* PE thread joined → no more dpumesh_notify() writers; safe to close. */
-    if (ctx->notify_efd >= 0) { close(ctx->notify_efd); ctx->notify_efd = -1; }
+    /* PE thread joined → no more cq_notify() writers. Surviving CQs (an app that
+     * dropped the channel without destroying them) are reaped here. */
+    for (int i = 0; i < ctx->n_cqs; i++) {
+        struct dmesh_cq *cq = ctx->cqs[i];
+        if (!cq) continue;
+        if (cq->notify_efd >= 0) close(cq->notify_efd);
+        ctx->cqs[i] = NULL;
+        free(cq);
+    }
+    pthread_mutex_destroy(&ctx->cq_lock);
 
     /* Free resources BEFORE destroying locks they depend on. */
 
@@ -1014,57 +1060,74 @@ static void try_return_blocks(dpumesh_ctx_t *ctx, struct dmesh_port_slot *psl) {
 
 /* ---- Per-conn TX BYTE-RING over the block chain: reserve → commit → send → (ACK) free ---- */
 
-/* Reserve `len` CONTIGUOUS bytes (ONE message, ≤ block_size) at this conn's write head,
+/* Reserve `len` CONTIGUOUS bytes (ONE message, <= block_size) at this conn's write head,
  * returning a pointer into the shared TX mmap to fill (then dpumesh_tx_commit). A message
  * that would straddle the current block's end pads the tail and starts a fresh block, so
  * each message is contiguous in one physical block. Grabs a block on demand (GROW, up to
- * maxb) — reusing a recycled block first — else busy-spins (own ACKs free a block). NULL
- * if len==0 or len>block_size. Owner thread only. */
+ * maxb) — reusing a recycled block first, else the shared pool.
+ *
+ * NEVER BLOCKS — the ibv_post_send contract. NULL + errno=EAGAIN when the conn's block
+ * window is full (its own TX_ACKs will free one; retry later), NULL + errno=EINVAL for a
+ * permanent argument/state error. Owner thread only. */
 uint8_t *dpumesh_tx_reserve(dpumesh_ctx_t *ctx, uint16_t port, uint32_t len) {
-    if (port == 0 || port >= DMESH_PORT_SPACE) return NULL;
+    if (port == 0 || port >= DMESH_PORT_SPACE) { errno = EINVAL; return NULL; }
     struct dmesh_port_slot *psl = &ctx->ports[port];
     uint64_t bs = (uint64_t)ctx->block_size, maxb = (uint64_t)ctx->maxb;
-    if (len == 0 || (uint64_t)len > bs) return NULL;      /* one message must fit a block */
+    if (len == 0 || (uint64_t)len > bs) { errno = EINVAL; return NULL; }  /* must fit a block */
     if (!psl->su_seq) {                                    /* lazy per-slot send-unit FIFO */
         psl->su_seq = (uint16_t *)malloc(TX_SU_DEPTH * sizeof(uint16_t));
         psl->su_end = (uint64_t *)malloc(TX_SU_DEPTH * sizeof(uint64_t));
-        if (!psl->su_seq || !psl->su_end) return NULL;
+        if (!psl->su_seq || !psl->su_end) { errno = ENOMEM; return NULL; }
     }
     tx_refresh_blocks(ctx, psl);                           /* recycle / compact / shrink first */
+
+    /* Probe the block window BEFORE mutating tx_w: on EAGAIN the conn's write head must
+     * be exactly where it was, so the caller's retry is a clean no-op. (Padding first and
+     * failing after would strand the padded tail.) */
     uint64_t k   = psl->tx_w / bs;
     uint32_t off = (uint32_t)(psl->tx_w % bs);
-    if ((uint64_t)off + len > bs) {                        /* won't fit → pad + move to next block */
+    int      pad = ((uint64_t)off + len > bs);             /* won't fit → needs a fresh block */
+    uint64_t need_k = pad ? k + 1 : k;
+    if (psl->head_blk_next <= need_k) {                    /* a new block must be backed */
+        uint64_t b = psl->head_blk_next;
+        /* Block b is admissible only once b-maxb has drained: that both caps in-flight
+         * bytes per conn and keeps slot b%maxb from aliasing a still-live block. */
+        int have = (b - psl->tail_blk < maxb) &&
+                   (psl->nrec > 0 || psl->nblk_owned < ctx->maxb);
+        if (!have) {
+            atomic_fetch_add_explicit(&ctx->st_grow_waits, 1, memory_order_relaxed);
+            errno = EAGAIN;
+            return NULL;
+        }
+    }
+
+    if (pad) {                                             /* commit to the pad: we WILL succeed */
         psl->blk_used[k % maxb] = off;                     /* seal block k content end */
         psl->tx_w = (k + 1) * bs;                          /* pad to the next block boundary */
-        k   = psl->tx_w / bs;                              /* = old k + 1 */
+        k   = need_k;
         off = 0;
         atomic_fetch_add_explicit(&ctx->st_block_pads, 1, memory_order_relaxed);
     }
     /* Back every logical block up to k with a physical block, ONCE each (head_blk_next
-     * tracks the highest assigned). For each new block b, WAIT until block b-maxb has
-     * drained (the live window stays ≤ maxb blocks) so slot b%maxb is free — this is the
-     * per-conn in-flight cap AND it prevents reusing a still-live earlier block. Reuse a
-     * recycled block first (no pool op), else grab from the shared pool. */
-    struct timespec backoff = {0, 1000};
+     * tracks the highest assigned). The probe above cleared block head_blk_next; any
+     * further ones are the same admission test, and a message spans at most one new
+     * block, so this loop runs at most once past the probe. */
     while (psl->head_blk_next <= k) {
         uint64_t b = psl->head_blk_next;
         int bslot = (int)(b % maxb);
-        for (;;) {
-            if (b - psl->tail_blk < (uint64_t)maxb) {      /* block b-maxb drained → slot b%maxb free */
-                if (psl->nrec > 0) {                        /* reuse a recycled block (no pool op) */
-                    psl->pblk[bslot] = psl->recyc[--psl->nrec];
-                    atomic_fetch_add_explicit(&ctx->st_recycle_hits, 1, memory_order_relaxed);
-                    break;
-                }
-                if (psl->nblk_owned < ctx->maxb) {         /* GROW: grab from the shared pool */
-                    int32_t phys = block_pool_grab(ctx);
-                    if (phys >= 0) { psl->pblk[bslot] = phys; psl->nblk_owned++; break; }
-                }
+        if (b - psl->tail_blk >= maxb) { errno = EAGAIN; return NULL; }
+        if (psl->nrec > 0) {                               /* reuse a recycled block (no pool op) */
+            psl->pblk[bslot] = psl->recyc[--psl->nrec];
+            atomic_fetch_add_explicit(&ctx->st_recycle_hits, 1, memory_order_relaxed);
+        } else {
+            int32_t phys = (psl->nblk_owned < ctx->maxb) ? block_pool_grab(ctx) : -1;
+            if (phys < 0) {                                /* pool momentarily empty */
+                atomic_fetch_add_explicit(&ctx->st_grow_waits, 1, memory_order_relaxed);
+                errno = EAGAIN;
+                return NULL;
             }
-            atomic_fetch_add_explicit(&ctx->st_grow_waits, 1, memory_order_relaxed);
-            nanosleep(&backoff, NULL);                      /* window full OR pool empty → wait */
-            if (backoff.tv_nsec < 50000) backoff.tv_nsec *= 2;
-            tx_refresh_blocks(ctx, psl);                    /* an ACK may have drained a block */
+            psl->pblk[bslot] = phys;
+            psl->nblk_owned++;
         }
         psl->blk_used[bslot] = 0;
         psl->head_blk_next = b + 1;
@@ -1100,8 +1163,13 @@ void dpumesh_tx_discard_unsent(dpumesh_ctx_t *ctx, uint16_t port) {
 
 /* Get the next descriptor to ship from [tx_s, tx_c): its byte offset in the shared mmap
  * (*out_moff) and length (*out_len, <= slot_size, never crossing a block boundary or a
- * pad). Skips a padded block tail transparently. BLOCKS if the send-unit FIFO is full.
- * 1 if one, 0 if nothing. Does NOT advance tx_s (call dpumesh_tx_sent). Owner thread. */
+ * pad). Skips a padded block tail transparently. 1 if one, 0 if nothing. Does NOT advance
+ * tx_s (call dpumesh_tx_sent). Owner thread.
+ *
+ * INFALLIBLE on capacity: the init clamp (maxb * ceil(block_size/slot_size) <=
+ * TX_SU_DEPTH) makes the block window bind strictly before the send-unit FIFO, so
+ * anything dpumesh_tx_reserve admitted is guaranteed a FIFO slot here. This used to
+ * back off on a full FIFO — a branch that the clamp makes unreachable. */
 int dpumesh_tx_next_send(dpumesh_ctx_t *ctx, uint16_t port, size_t *out_moff, uint32_t *out_len) {
     struct dmesh_port_slot *psl = &ctx->ports[port];
     if (psl->nblk_owned <= 0) return 0;
@@ -1114,13 +1182,6 @@ int dpumesh_tx_next_send(dpumesh_ctx_t *ctx, uint16_t port, size_t *out_moff, ui
         if (off >= used) {                                 /* block k content exhausted → skip pad */
             psl->tx_s = (k + 1) * bs;                       /* jump to the next block start */
             continue;
-        }
-        /* Back-pressure on the send-unit FIFO (bounds in-flight descriptors per conn). */
-        struct timespec backoff = {0, 1000};
-        while ((uint16_t)(atomic_load_explicit(&psl->su_head, memory_order_relaxed) -
-                          atomic_load_explicit(&psl->su_tail, memory_order_acquire)) >= (uint16_t)TX_SU_DEPTH) {
-            nanosleep(&backoff, NULL);
-            if (backoff.tv_nsec < 50000) backoff.tv_nsec *= 2;
         }
         uint64_t content_end = k * bs + (uint64_t)used;    /* content end within block k */
         uint64_t limit = (psl->tx_c < content_end) ? psl->tx_c : content_end;
@@ -1165,6 +1226,11 @@ static inline void tx_reclaim_ack(dpumesh_ctx_t *ctx, uint16_t port, uint16_t se
         try_return_blocks(ctx, psl);                       /* return blocks if this drained a CLOSED conn */
     }
 }
+
+/* Fail-safe, NOT a flow-control knob: a cell frees in microseconds while any consumer
+ * exists, so only a ring with NO consumer can reach this. Turns an unbounded hang
+ * into a loud error. */
+#define RING_STALL_DEADLINE_SEC 5
 
 int dpumesh_enqueue(dpumesh_ctx_t *ctx, const sw_descriptor_t *desc) {
     struct dma_desc *dma;
@@ -1218,11 +1284,18 @@ int dpumesh_enqueue(dpumesh_ctx_t *ctx, const sw_descriptor_t *desc) {
      * producer leaves seq unadvanced, so a lapping producer WAITS here instead of
      * overwriting the slot — generation-safe with just the `valid` flag, no lock,
      * DPA untouched. A cell not yet free is real backpressure (capped backoff). */
+    /* Fail fast on a ring already declared dead — do NOT burn a ticket on it. */
+    if (__atomic_load_n(&ring->dead, __ATOMIC_ACQUIRE)) {
+        DOCA_LOG_ERR("ENQUEUE rejected: DMA ring %d is dead (no DPA consumer)", ridx);
+        return -1;
+    }
+
     uint64_t t = __atomic_fetch_add(&ring->enq_pos, 1, __ATOMIC_RELAXED);
     ring_slot = (uint32_t)(t % ring->size);
     dma = &ring->descs[ring_slot];
     {
         struct timespec backoff = {0, 1000}; /* 1µs initial */
+        struct timespec deadline; int have_dl = 0;
         for (;;) {
             uint64_t s = __atomic_load_n(&ring->seq[ring_slot], __ATOMIC_ACQUIRE);
             if (s == t) break;                                   /* free for me */
@@ -1237,6 +1310,22 @@ int dpumesh_enqueue(dpumesh_ctx_t *ctx, const sw_descriptor_t *desc) {
             if ((pr & 4095u) == 0)
                 DOCA_LOG_WARN("DMA ring %d busy at slot=%u (size=%u) [stuck x%llu]",
                               ridx, ring_slot, ring->size, (unsigned long long)(pr + 1));
+            /* Armed lazily, so the uncontended path never pays a clock_gettime. */
+            if (!have_dl) {
+                clock_gettime(CLOCK_MONOTONIC, &deadline);
+                deadline.tv_sec += RING_STALL_DEADLINE_SEC;
+                have_dl = 1;
+            } else {
+                struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
+                if (now.tv_sec > deadline.tv_sec ||
+                    (now.tv_sec == deadline.tv_sec && now.tv_nsec >= deadline.tv_nsec)) {
+                    __atomic_store_n(&ring->dead, 1, __ATOMIC_RELEASE);
+                    DOCA_LOG_ERR("DMA ring %d STALLED >%ds at slot=%u (size=%u): no DPA "
+                                 "consumer is draining it — ring marked dead, failing enqueue",
+                                 ridx, RING_STALL_DEADLINE_SEC, ring_slot, ring->size);
+                    return -1;
+                }
+            }
             nanosleep(&backoff, NULL);
             if (backoff.tv_nsec < 50000) backoff.tv_nsec *= 2;
         }
@@ -1280,42 +1369,12 @@ int dpumesh_enqueue(dpumesh_ctx_t *ctx, const sw_descriptor_t *desc) {
  * RX functions
  * ==================================================================== */
 
-/* Poll-mode dequeue tuning: spin this many empty racy-checks before yielding
- * the core; at load the queue is rarely empty so the backoff is never reached
- * (no wakeup, no context switch). Mirrors the PE adaptive-poll pattern. */
-#define RX_POLL_SPIN       1024
-#define RX_POLL_BACKOFF_NS 20000   /* 20 us */
-
-int dpumesh_dequeue(dpumesh_ctx_t *ctx, sw_descriptor_t *desc, int timeout_ms) {
-    {
-        /* Lock-free spin-poll on the Vyukov RX ring; back off after sustained
-         * idle. timeout_ms: 0 = non-blocking try, >0 = poll to deadline, <0 =
-         * poll forever. There is NO cond-blocking path — the façade always polls. */
-        struct timespec deadline; int have_dl = 0;
-        if (timeout_ms > 0) {
-            clock_gettime(CLOCK_MONOTONIC, &deadline);
-            deadline.tv_sec  += timeout_ms / 1000;
-            deadline.tv_nsec += (long)(timeout_ms % 1000) * 1000000L;
-            if (deadline.tv_nsec >= 1000000000L) { deadline.tv_sec++; deadline.tv_nsec -= 1000000000L; }
-            have_dl = 1;
-        }
-        uint32_t idle = 0;
-        for (;;) {
-            if (rxq_try_pop(ctx, desc))
-                return 0;
-            if (timeout_ms == 0) return -1;            /* non-blocking try */
-            if (++idle >= RX_POLL_SPIN) {
-                if (have_dl) {
-                    struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
-                    if (now.tv_sec > deadline.tv_sec ||
-                        (now.tv_sec == deadline.tv_sec && now.tv_nsec >= deadline.tv_nsec))
-                        return -1;
-                }
-                struct timespec t = {0, RX_POLL_BACKOFF_NS};
-                nanosleep(&t, NULL);
-            }
-        }
-    }
+/* Pop one NEW-connection descriptor off the Vyukov accept ring. Non-blocking: 0 +
+ * *desc, or -1 when empty. Readiness comes from any CQ's fd (every CQ is notified —
+ * the ring is SPMC), so there is no timeout/blocking form — the old one polled with a
+ * nanosleep backoff and no caller ever passed a non-zero timeout. */
+int dpumesh_dequeue(dpumesh_ctx_t *ctx, sw_descriptor_t *desc) {
+    return rxq_try_pop(ctx, desc) ? 0 : -1;
 }
 
 uint8_t *dpumesh_rx_buf(dpumesh_ctx_t *ctx, int slot) {
@@ -1343,26 +1402,14 @@ int dpumesh_get_block_size(dpumesh_ctx_t *ctx) {
     return ctx->block_size;
 }
 
-void dpumesh_get_tx_pool_stats(dpumesh_ctx_t *ctx, dpumesh_tx_pool_stats_t *out) {
-    if (!ctx || !out) return;
+void dmesh_get_tx_stats(dmesh_channel_t *s, dmesh_tx_stats_t *out) {
+    if (!s || !s->ctx || !out) return;
+    dpumesh_ctx_t *ctx = s->ctx;
     out->pool_grabs   = atomic_load_explicit(&ctx->st_pool_grabs,   memory_order_relaxed);
     out->pool_returns = atomic_load_explicit(&ctx->st_pool_returns, memory_order_relaxed);
     out->recycle_hits = atomic_load_explicit(&ctx->st_recycle_hits, memory_order_relaxed);
     out->grow_waits   = atomic_load_explicit(&ctx->st_grow_waits,   memory_order_relaxed);
     out->block_pads   = atomic_load_explicit(&ctx->st_block_pads,   memory_order_relaxed);
-}
-
-/* Enable + return the readiness eventfd: a real fd that becomes readable
- * whenever an inbound request/response is delivered, so a caller can wait on it
- * with a VANILLA epoll/poll/select instead of busy-polling dequeue/conn_recv.
- * The PE thread (notification-driven under DPUMESH_HOST_EPOLL=1) writes it on each
- * delivery. Drain it with a single read() of a uint64_t per wakeup, then collect
- * ready work via dpumesh_dequeue(0)/dpumesh_conn_recv(). Returns -1 if the
- * eventfd could not be created. Idempotent; level-triggered-friendly. */
-int dpumesh_get_event_fd(dpumesh_ctx_t *ctx) {
-    if (!ctx || ctx->notify_efd < 0) return -1;
-    ctx->notify_enabled = 1;
-    return ctx->notify_efd;
 }
 
 int dpumesh_get_pod_id(dpumesh_ctx_t *ctx) {
@@ -1378,12 +1425,12 @@ const char *dpumesh_get_worker_id(dpumesh_ctx_t *ctx) {
  * ==================================================================== */
 
 /* Allocate a host-unique port (>=1) and register it as a CLIENT or SERVER socket.
- * `user` is the app's conn handle (returned later by dmesh_next_ready); it is
- * stored BEFORE role is published so the PE, which may deliver + enqueue this port
- * the instant it sees role!=FREE, never hands back a NULL handle. The role is
- * published with RELEASE so the PE's ACQUIRE-load sees a fully-initialized slot.
- * Returns 0 on exhaustion. */
-uint16_t dpumesh_alloc_port(dpumesh_ctx_t *ctx, int role, void *user) {
+ * `user` is the app's conn handle (returned later by dmesh_next_ready) and `cq` the
+ * completion queue that owns it; both are stored BEFORE role is published so the PE,
+ * which may deliver + enqueue this port the instant it sees role!=FREE, never hands
+ * back a NULL handle or arms an unbound conn. The role is published with RELEASE so
+ * the PE's ACQUIRE-load sees a fully-initialized slot. Returns 0 on exhaustion. */
+uint16_t dpumesh_alloc_port(dpumesh_ctx_t *ctx, int role, void *user, struct dmesh_cq *cq) {
     pthread_mutex_lock(&ctx->port_lock);
     /* Model B: host CLIENT conns use [1, DMESH_UPORT_BASE); accepted SERVER conns
      * get their port from the DPU-assigned upstream id via
@@ -1403,7 +1450,7 @@ uint16_t dpumesh_alloc_port(dpumesh_ctx_t *ctx, int role, void *user) {
                 if (!psl->inbox) { pthread_mutex_unlock(&ctx->port_lock); return 0; }
             } else {
                 /* A straggler reply may have landed in this slot's inbox AFTER the
-                 * previous owner's dmesh_close drained it (close/deliver race).
+                 * previous owner's dmesh_destroy_qp drained it (close/deliver race).
                  * Return those RX credits now, before the head/tail reset discards
                  * them (else the DPA reverse-admission credit slowly leaks). */
                 sw_descriptor_t d;
@@ -1414,9 +1461,10 @@ uint16_t dpumesh_alloc_port(dpumesh_ctx_t *ctx, int role, void *user) {
             psl->peer_pod   = DMESH_POD_BLANK;
             psl->peer_port  = 0;
             psl->user       = user;     /* visible before role (publish ordering below) */
+            psl->cq         = cq;       /* ditto: the PE arms this CQ's list, not the ctx's */
             port_reset_tx(psl);         /* fresh block-chain cursors; first block grabbed LAZILY on first write */
             /* Publish role LAST (RELEASE) so the PE's ACQUIRE-load sees the fully
-             * initialized inbox/head/tail/user/chain before it can deliver here. */
+             * initialized inbox/head/tail/user/cq/chain before it can deliver here. */
             __atomic_store_n(&psl->role, (uint8_t)role, __ATOMIC_RELEASE);
             pthread_mutex_unlock(&ctx->port_lock);
             return (uint16_t)p;
@@ -1427,46 +1475,15 @@ uint16_t dpumesh_alloc_port(dpumesh_ctx_t *ctx, int role, void *user) {
     return 0;
 }
 
-/* Allocate a SPECIFIC port slot (model B accept): the DPU already assigned this
- * connection's id (`p`, a uP in [DMESH_UPORT_BASE, 65535)), and the backend must
- * bind exactly that port so the DPU can address it. Returns `p` on success, or 0
- * if the slot is already live (a duplicate pre-accept message — caller drops it;
- * coalescing of pre-accept bursts is a later stage). Mirrors dpumesh_alloc_port's
- * publication ordering (init inbox/head/tail/user BEFORE RELEASE-storing role). */
-uint16_t dpumesh_alloc_port_specific(dpumesh_ctx_t *ctx, uint16_t p, int role, void *user) {
-    if (p == 0 || p >= DMESH_PORT_SPACE) return 0;
-    pthread_mutex_lock(&ctx->port_lock);
-    struct dmesh_port_slot *psl = &ctx->ports[p];
-    if (psl->role != DMESH_ROLE_FREE || psl->nblk_owned > 0) {
-        pthread_mutex_unlock(&ctx->port_lock);
-        return 0;   /* already live, or FREE-but-draining (blocks not yet returned) */
-    }
-    if (!psl->inbox) {
-        psl->inbox = (sw_descriptor_t *)malloc(DMESH_INBOX_RING * sizeof(sw_descriptor_t));
-        if (!psl->inbox) { pthread_mutex_unlock(&ctx->port_lock); return 0; }
-    } else {
-        /* Drain a straggler delivery from a prior owner (close/deliver race) so its
-         * RX credit is returned, not discarded by the head/tail reset below. */
-        sw_descriptor_t d;
-        while (inbox_pop(psl, &d)) rx_credit_return(ctx, d.body_buf_slot);
-    }
-    atomic_store_explicit(&psl->in_head, 0, memory_order_relaxed);
-    atomic_store_explicit(&psl->in_tail, 0, memory_order_relaxed);
-    psl->peer_pod  = DMESH_POD_BLANK;
-    psl->peer_port = 0;
-    psl->user      = user;
-    port_reset_tx(psl);   /* fresh block-chain cursors; first block grabbed LAZILY on first reply */
-    __atomic_store_n(&psl->role, (uint8_t)role, __ATOMIC_RELEASE);
-    pthread_mutex_unlock(&ctx->port_lock);
-    return p;
-}
-
 /* Promote a PE-created SERVER_PENDING slot to a live SERVER conn (model B accept):
- * attach the app's conn handle so dmesh_next_ready starts returning it. The PE
- * already allocated the inbox + set the peer + published SERVER_PENDING (message 1
- * rode the accept queue; any messages 2..P are already coalesced in the inbox).
+ * attach the app's conn handle so dmesh_next_ready starts returning it, and bind the
+ * conn to the CQ that accepted it — from here its ready-edges go to that CQ alone.
+ * The PE already allocated the inbox + set the peer + published SERVER_PENDING
+ * (message 1 rode the accept queue; any messages 2..P are already coalesced in the
+ * inbox). The port_lock makes the pending->SERVER promote exactly-once, so when
+ * several CQs accept concurrently only one binds the conn.
  * Returns `port` on success, 0 if the slot is not pending. */
-uint16_t dpumesh_accept_port(dpumesh_ctx_t *ctx, uint16_t port, void *user) {
+uint16_t dpumesh_accept_port(dpumesh_ctx_t *ctx, uint16_t port, void *user, struct dmesh_cq *cq) {
     if (port == 0 || port >= DMESH_PORT_SPACE) return 0;
     struct dmesh_port_slot *psl = &ctx->ports[port];
     pthread_mutex_lock(&ctx->port_lock);
@@ -1475,6 +1492,7 @@ uint16_t dpumesh_accept_port(dpumesh_ctx_t *ctx, uint16_t port, void *user) {
         return 0;   /* not pending (already accepted / freed / race) */
     }
     psl->user = user;
+    psl->cq   = cq;             /* both visible before the role publish below */
     __atomic_store_n(&psl->role, DMESH_ROLE_SERVER, __ATOMIC_RELEASE);
     pthread_mutex_unlock(&ctx->port_lock);
     return port;
@@ -1494,11 +1512,17 @@ void dpumesh_free_port(dpumesh_ctx_t *ctx, uint16_t port) {
      * mid-DMA. Close never blocks the app thread. */
     __atomic_store_n(&psl->role, DMESH_ROLE_FREE, __ATOMIC_RELEASE);
     psl->user = NULL;
+    /* Unbind the CQ (RELEASE) too: arm_ready_after_push skips a NULL cq, so the PE
+     * stops touching a ready list whose owner may be destroyed next. */
+    __atomic_store_n(&psl->cq, NULL, __ATOMIC_RELEASE);
     try_return_blocks(ctx, psl);
     if (psl->inbox) {
         sw_descriptor_t d;
         while (inbox_pop(psl, &d)) rx_credit_return(ctx, d.body_buf_slot);
     }
+    /* Disarm so a recycled slot starts clean (a stale ready-list entry for this port
+     * is skipped by dmesh_next_ready on role==FREE). */
+    atomic_store_explicit(&psl->on_ready, 0u, memory_order_release);
 }
 
 /* Pop the next inbound message descriptor for a conn (CLIENT or SERVER — one
@@ -1508,19 +1532,37 @@ int dpumesh_conn_recv(dpumesh_ctx_t *ctx, uint16_t port, sw_descriptor_t *out) {
     if (port == 0 || port >= DMESH_PORT_SPACE) return 0;
     struct dmesh_port_slot *psl = &ctx->ports[port];
     if (!psl->inbox) return 0;
-    return inbox_pop(psl, out);
+    if (inbox_pop(psl, out)) return 1;
+    /* Inbox observed empty → we are about to report "done draining" to the caller,
+     * which will stop revisiting this conn until the ready list names it again.
+     * Disarm, then RE-CHECK under a seq_cst fence: this pairs with the fence in
+     * arm_ready_after_push so a message the PE enqueued exactly as we drained cannot
+     * be stranded off the ready list. Either this re-check sees it, or the PE's
+     * arm sees on_ready==0 and (re-)pushes the conn — never neither. */
+    atomic_store_explicit(&psl->on_ready, 0u, memory_order_release);
+    atomic_thread_fence(memory_order_seq_cst);
+    if (inbox_pop(psl, out)) {
+        /* A push raced in. We are servicing again, so re-arm: a LATER push will then
+         * see on_ready==1 and rely on us to drain it (and we disarm+recheck again on
+         * the next empty). Harmless if the PE also already re-armed + pushed us (the
+         * duplicate ready-list visit just drains empty once). */
+        atomic_store_explicit(&psl->on_ready, 1u, memory_order_release);
+        return 1;
+    }
+    return 0;
 }
 
-/* Pop the next conn that has inbound, from the PE-published ready list, and return
- * its app handle (the `user` registered at alloc). NULL when the list is drained.
- * No scan: the PE put exactly the ready conns here. A list entry whose conn has
- * since closed (role==FREE) is skipped — its port may even have been recycled, but
- * round-robin allocation makes that astronomically distant; either way a stale
- * entry only ever costs one extra empty drain. Single-consumer (the event loop);
- * call it after waking on dmesh_get_event_fd, drain each returned conn to EAGAIN. */
-void *dpumesh_next_ready(dpumesh_ctx_t *ctx) {
+/* Pop the next conn that has inbound, from THIS CQ's PE-published ready list, and
+ * return its app handle (the `user` registered at alloc). NULL when the list is
+ * drained. No scan: the PE put exactly the ready conns here. A list entry whose conn
+ * has since closed (role==FREE) is skipped — its port may even have been recycled,
+ * but round-robin allocation makes that astronomically distant; either way a stale
+ * entry only ever costs one extra empty drain. Single-consumer (this CQ's thread);
+ * call it after waking on dmesh_cq_fd, drain each returned conn to EAGAIN. */
+void *dpumesh_next_ready(struct dmesh_cq *cq) {
+    dpumesh_ctx_t *ctx = cq->ch->ctx;
     uint16_t port;
-    while (ready_pop(ctx, &port)) {
+    while (ready_pop(cq, &port)) {
         struct dmesh_port_slot *psl = &ctx->ports[port];
         uint8_t role = __atomic_load_n(&psl->role, __ATOMIC_ACQUIRE);
         /* Return only ACCEPTED conns. Skip FREE (closed since enqueued → stale) and
@@ -1532,3 +1574,224 @@ void *dpumesh_next_ready(dpumesh_ctx_t *ctx) {
     return NULL;
 }
 
+
+/* ====================================================================
+ * Connection lifecycle
+ *
+ * This section used to live in src/dmesh.c behind the name "socket façade".
+ * It never was one: nothing below is socket- or verbs-specific — it is the
+ * transport's own notion of a connection (create, address, learn a peer, emit a
+ * descriptor, tear down). Both public surfaces (<dpumesh/dmesh.h> and the
+ * LD_PRELOAD shim) call straight in here, and neither is built on the other.
+ * ==================================================================== */
+
+/* Return the held RX-landing credit and clear the inbound view. */
+static void conn_free_rx(dmesh_qp_t *c) {
+    if (c->rx_slot >= 0) dpumesh_rx_free(c->ep->ctx, c->rx_slot);
+    c->rx_slot = -1; c->rx_buf = NULL; c->rx_len = 0; c->rx_pos = 0;
+}
+
+/* Build the oriented tuple for one outbound descriptor of this conn (client →
+ * service with per-message LB, or server → its learned peer), stamped with the
+ * conn's route-affinity group. `moff` = byte offset in the shared TX mmap, `len`
+ * = descriptor length. seq++. Returns 0, or -1 (EBADMSG) on enqueue fault. */
+static int emit_desc(dmesh_qp_t *c, size_t moff, uint32_t len) {
+    dpumesh_ctx_t *ctx = c->ep->ctx;
+    c->seq++;
+    sw_descriptor_t d;
+    memset(&d, 0, sizeof(d));
+    d.body_buf_slot = (int32_t)moff;                 /* BYTE offset into the TX mmap */
+    d.body_len      = len;
+    d.src_port      = c->local_port;
+    d.seq           = c->seq;
+    d.dst_service   = c->dst_service;
+    if (c->role == DMESH_ROLE_CLIENT) { d.dst_pod = DMESH_POD_BLANK; d.dst_port = DMESH_PORT_BLANK; }
+    else                              { d.dst_pod = c->remote_pod;   d.dst_port = c->remote_port; }
+    d.route_group = c->pin_group;                    /* 0 = per-message LB per descriptor */
+    d.valid = 1;
+    if (dpumesh_enqueue(ctx, &d) < 0) { errno = EBADMSG; return -1; }
+    return 0;
+}
+
+/* ===== Channel ===== */
+
+dmesh_channel_t *dmesh_create_channel(int service_id) {
+    dmesh_channel_t *s = (dmesh_channel_t *)calloc(1, sizeof(*s));
+    if (!s) return NULL;
+    dpumesh_config_t cfg = DPUMESH_CONFIG_DEFAULT;
+    if (dpumesh_init(&s->ctx, service_id, &cfg) != 0 || !s->ctx) {
+        free(s);
+        return NULL;
+    }
+    s->pod_id     = dpumesh_get_pod_id(s->ctx);   /* DPU-assigned (valid after init) */
+    s->slot_size  = dpumesh_get_slot_size(s->ctx);
+    s->block_size = dpumesh_get_block_size(s->ctx);
+    return s;
+}
+
+void dmesh_destroy_channel(dmesh_channel_t *s) {
+    if (!s) return;
+    if (s->ctx) dpumesh_destroy(s->ctx);
+    free(s);
+}
+
+int dmesh_pod_id(dmesh_channel_t *s)   { return s->pod_id; }
+int dmesh_msg_max(dmesh_channel_t *s)  { return s->slot_size; }
+int dmesh_post_max(dmesh_channel_t *s) { return s->block_size; }
+
+/* ===== Completion queue ===== */
+
+/* Readiness is armed HERE, at creation — never lazily on the first dmesh_cq_fd. The
+ * ready list is not an optional extra: it is how dmesh_poll_cq finds an ESTABLISHED
+ * conn's inbound (a NEW conn's first message rides the separate accept queue, which is
+ * why the failure mode was so asymmetric — connects worked, replies vanished). Arming
+ * on first cq_fd meant a caller that only ever POLLS, and never sleeps on the fd,
+ * silently received nothing on established conns. That is a footgun, not an
+ * optimization: every client of this API polls. The eventfd is the idle-sleep path
+ * only, so its creation failing is NOT fatal (notify_efd = -1 → poll still delivers). */
+dmesh_cq_t *dmesh_create_cq(dmesh_channel_t *ch) {
+    if (!ch) { errno = EINVAL; return NULL; }
+    dmesh_cq_t *cq = (dmesh_cq_t *)calloc(1, sizeof(*cq));
+    if (!cq) { errno = ENOMEM; return NULL; }
+    cq->ch         = ch;
+    cq->notify_efd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    atomic_init(&cq->ready_head, (uint_fast32_t)0);
+    atomic_init(&cq->ready_tail, (uint_fast32_t)0);
+
+    dpumesh_ctx_t *ctx = ch->ctx;
+    pthread_mutex_lock(&ctx->cq_lock);
+    int idx = -1;
+    for (int i = 0; i < ctx->n_cqs; i++) if (!ctx->cqs[i]) { idx = i; break; }
+    if (idx < 0 && ctx->n_cqs < DMESH_MAX_CQ) idx = ctx->n_cqs++;
+    if (idx >= 0) ctx->cqs[idx] = cq;
+    pthread_mutex_unlock(&ctx->cq_lock);
+    if (idx < 0) {   /* cap reached: an unregistered CQ would miss every accept */
+        if (cq->notify_efd >= 0) close(cq->notify_efd);
+        free(cq);
+        errno = EMFILE;
+        return NULL;
+    }
+    cq->reg_idx = idx;
+    return cq;
+}
+
+/* Unregister FIRST (under cq_lock, so a concurrent accept-path notify_all_cqs either
+ * saw us before or never sees us again), then free. Conns still bound here would have
+ * nowhere to report — destroy them first, as ibv_destroy_cq's EBUSY demands. */
+void dmesh_destroy_cq(dmesh_cq_t *cq) {
+    if (!cq) return;
+    dpumesh_ctx_t *ctx = cq->ch->ctx;
+    pthread_mutex_lock(&ctx->cq_lock);
+    if (ctx->cqs[cq->reg_idx] == cq) ctx->cqs[cq->reg_idx] = NULL;
+    pthread_mutex_unlock(&ctx->cq_lock);
+    if (cq->notify_efd >= 0) close(cq->notify_efd);
+    free(cq);
+}
+
+int dmesh_cq_fd(dmesh_cq_t *cq) { return cq ? cq->notify_efd : -1; }
+
+/* ===== Connection setup ===== */
+
+dmesh_qp_t *dmesh_accept(dmesh_cq_t *cq) {
+    dmesh_channel_t *s = cq->ch;
+    sw_descriptor_t req;
+    if (dpumesh_dequeue(s->ctx, &req) < 0 || !req.valid) {
+        errno = EAGAIN;
+        return NULL;
+    }
+    dmesh_qp_t *c = (dmesh_qp_t *)calloc(1, sizeof(*c));
+    if (!c) { errno = ENOMEM; dpumesh_rx_free(s->ctx, req.body_buf_slot); return NULL; }
+    /* Model B: the PE created a SERVER_PENDING slot at message-1 delivery (port =
+     * req.dst_port = uP, with any pipelined messages 2..P already coalesced in its
+     * inbox). Promote it to a live SERVER conn, attach THIS handle, and bind it to the
+     * CQ that won it — dmesh_next_ready then returns it on this CQ only. */
+    uint16_t ps = dpumesh_accept_port(s->ctx, req.dst_port, c, cq);
+    if (ps == 0) { dpumesh_rx_free(s->ctx, req.body_buf_slot); free(c); errno = ENOMEM; return NULL; }
+
+    c->ep          = s;
+    c->cq          = cq;
+    c->role        = DMESH_ROLE_SERVER;
+    c->local_port  = ps;                 /* == req.dst_port == uP */
+    c->remote_pod  = req.src_pod;        /* learned peer (for replies + further sends) */
+    c->remote_port = req.src_port;
+    c->dst_service = req.src_service;
+    c->seq         = 0;
+    c->rx_slot     = req.body_buf_slot;  /* the first message (held) */
+    c->rx_buf      = dpumesh_rx_buf(s->ctx, req.body_buf_slot);
+    c->rx_len      = req.body_len;
+    c->rx_pos      = 0;
+    return c;
+}
+
+dmesh_qp_t *dmesh_create_qp(dmesh_cq_t *cq, int dst_service_id) {
+    dmesh_channel_t *s = cq->ch;
+    dmesh_qp_t *c = (dmesh_qp_t *)calloc(1, sizeof(*c));
+    if (!c) { errno = ENOMEM; return NULL; }
+    /* c = the port's handle, cq = the ready list its inbound edges arm */
+    uint16_t pc = dpumesh_alloc_port(s->ctx, DMESH_ROLE_CLIENT, c, cq);
+    if (pc == 0) { free(c); errno = ENOMEM; return NULL; }
+    c->ep          = s;
+    c->cq          = cq;
+    c->role        = DMESH_ROLE_CLIENT;
+    c->local_port  = pc;
+    c->dst_service = (int16_t)dst_service_id;
+    c->remote_pod  = DMESH_POD_BLANK;
+    c->remote_port = DMESH_PORT_BLANK;
+    c->seq         = 0;
+    c->rx_slot     = -1;
+    return c;
+}
+
+void dmesh_pin_route(dmesh_qp_t *c) {
+    if (c->pin_group != 0) return;
+    uint32_t g = __atomic_fetch_add(&c->ep->next_group, 1u, __ATOMIC_RELAXED);
+    c->pin_group = (uint8_t)((g % 255u) + 1u);           /* 1..255, never 0 */
+}
+
+dmesh_qp_t *dmesh_next_ready(dmesh_cq_t *cq) {
+    return (dmesh_qp_t *)dpumesh_next_ready(cq);
+}
+
+/* ===== Doorbell + teardown ===== */
+
+int dmesh_flush(dmesh_qp_t *c) {
+    dpumesh_ctx_t *ctx = c->ep->ctx;
+    size_t moff; uint32_t len;
+    while (dpumesh_tx_next_send(ctx, c->local_port, &moff, &len)) {
+        if (emit_desc(c, moff, len) < 0) return -1;          /* EBADMSG; bytes stay committed */
+        dpumesh_tx_sent(ctx, c->local_port, c->seq, len);    /* c->seq = the seq emit_desc used */
+    }
+    return 0;
+}
+
+void dmesh_send_fin(dmesh_qp_t *c) {
+    dpumesh_ctx_t *ctx = c->ep->ctx;
+    c->seq++;
+    sw_descriptor_t d;
+    memset(&d, 0, sizeof(d));
+    d.body_buf_slot = 0;                                   /* 0-length FIN: offset unused */
+    d.body_len      = 0;                                   /* FIN marker (0-length) */
+    d.src_port      = c->local_port;
+    d.seq           = c->seq;
+    d.dst_service   = c->dst_service;
+    d.dst_pod       = c->remote_pod;                       /* the learned peer conn */
+    d.dst_port      = c->remote_port;
+    d.route_group   = c->pin_group;
+    d.valid         = 1;
+    /* Best-effort: rides after all prior data (seq order). Holds NO ring bytes, so it
+     * needs no send-unit / reclaim — its TX_ACK is a harmless FIFO no-op. */
+    dpumesh_enqueue(ctx, &d);
+}
+
+int dmesh_destroy_qp(dmesh_qp_t *c) {
+    if (!c) return 0;
+    dpumesh_ctx_t *ctx = c->ep->ctx;
+    if (c->cq && c->cq->vq_cur == c) c->cq->vq_cur = NULL; /* poll_cq resume cursor */
+    dpumesh_tx_discard_unsent(ctx, c->local_port);         /* buffered, never flushed → drop */
+    if (!c->peer_closed && (c->role == DMESH_ROLE_SERVER || c->seq > 0))
+        dmesh_send_fin(c);
+    conn_free_rx(c);                                       /* return the held RX credit */
+    if (c->local_port) dpumesh_free_port(ctx, c->local_port);
+    free(c);
+    return 0;
+}

@@ -12,28 +12,34 @@
  * and routes EACH whole frame to service_table[svc] as a byte stream (a >8 KB
  * frame is delivered as consecutive <=8 KB chunks — that is the byte-stream
  * contract; the receiver reframes itself). The frame boundary is decided by the
- * DPU parser, NOT by dmesh_write boundaries: this app may pack several frames
- * into one write, or let dmesh_write auto-chunk a large frame across slots — the
- * parser reframes from the length prefix either way (window + seam).
+ * DPU parser, NOT by post boundaries: this app may pack several frames into one
+ * post, or spill one burst across several posts (one dmesh_alloc reserves at most
+ * one block) — the parser reframes from the length prefix either way (window +
+ * seam), which is exactly the property under test.
  *
- * Like loopback_dpumesh.c this pod is BOTH the client and (via its echo thread) a
+ * Like loopback_dpumesh.c this pod is BOTH the client and (via its echo side) a
  * server of its OWN service, so the default run is self-contained and its
  * served-BYTE counter gives an exact-count proof with no cross-pod scraping:
  *
- *   client: build frames -> dmesh_write+flush -> read the echoed frames back,
+ *   client: build frames -> alloc/post_send -> land the echoed frames back,
  *           verify BYTE-EXACT (header + payload pattern) + reassembled length.
- *   echo:   accept -> read byte-stream -> echo verbatim -> count bytes served.
+ *   echo:   CONN_REQ -> RECV byte-stream -> echo verbatim -> count bytes served.
+ *
+ * ONE THREAD, ONE CQ: a CQ is single-consumer and both roles share this one, so the
+ * echo side cannot sit on a thread of its own. Both directions are
+ * dispatched by conn role out of one pump(), which the client's send and reply
+ * waits drive — the client stays sequential (one burst outstanding) as before.
  *
  * `RUN <N> <SIZE> [<SVC_LIST>] [<FRAMES_PER_WRITE>]`:
  *   N     round-trips, SIZE  payload bytes per frame (frame = 5 + SIZE),
  *   SVC_LIST comma list of destination service bytes to round-robin the frames
  *            across (default = our own service = pure loopback; e.g. "11,13,14"
  *            fans out to the echo-dpumesh backends — high fan-out load),
- *   FRAMES_PER_WRITE  how many frames to pack into one dmesh_write byte-stream
+ *   FRAMES_PER_WRITE  how many frames to pack into one burst byte-stream
  *            (default 1; >1 exercises multi-frame-per-window parsing).
  * Reply: `OK <ok> <fail> <served_bytes> <p50us>`.
  *
- * Uses ONLY the façade (dmesh.h). No changes to the transport.
+ * Uses ONLY the native API (dmesh.h). No changes to the transport.
  */
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -41,12 +47,9 @@
 #include <stdint.h>
 #include <string.h>
 #include <unistd.h>
-#include <pthread.h>
 #include <time.h>
 #include <errno.h>
-#include <sched.h>
 #include <signal.h>
-#include <stdatomic.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 
@@ -56,12 +59,16 @@
 #define FRAME_HDR   5u                 /* [u32 total_len][u8 svc] — matches the DPU mock */
 #define FRAME_MAX   (256u * 1024u)     /* == PX_FRAME_MAX in dpu_proxy.c (mock poison cap) */
 #define MAX_SVCS    16
-#define MAX_FPW     64                 /* frames packed per write cap */
+#define MAX_FPW     64                 /* frames packed per burst cap */
+#define CQ_BATCH    16
+#define MAX_SERVERS 4096
 
 static dmesh_channel_t *g_s      = NULL;
+static dmesh_cq_t      *g_cq     = NULL;   /* the one CQ both roles are polled from */
 static int              g_service = 16;    /* own service id (self-routing default) */
-static atomic_int       g_stop   = 0;
-static atomic_long      g_served = 0;      /* BYTES the echo side wrote back */
+static int              g_msgmax  = 0;     /* max bytes per RECV == max bytes per echo post */
+static int              g_postmax = 0;     /* max bytes per dmesh_alloc (one block) */
+static long             g_served  = 0;     /* BYTES the echo side sent back */
 
 static double now_sec(void) {
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -71,6 +78,10 @@ static int cmp_d(const void *a, const void *b) {
     double x = *(const double *)a, y = *(const double *)b;
     return (x > y) - (x < y);
 }
+/* 2us idle backoff, taken only when a pump found NO work: the CQ is the one wake
+ * source, and SQ space frees silently (there are no send completions), so both
+ * kinds of wait re-poll rather than sleep on the fd. */
+static void idle_wait(void) { struct timespec t = {0, 2000}; nanosleep(&t, NULL); }
 
 /* Deterministic, position-dependent payload byte so a misrouted / truncated /
  * mis-ordered reply is caught byte-exactly. Keyed by (iteration, dest svc). */
@@ -88,29 +99,168 @@ static uint32_t build_frame(uint8_t *buf, long iter, uint8_t svc, uint32_t size)
     return total;
 }
 
-/* ---- server side: drain this pod's accept queue, echo every byte ---- */
-static void *echo_fn(void *arg) {
-    (void)arg;
-    static dmesh_conn_t *cl[4096];
-    int ncl = 0;
-    static char b[65536];
-    while (!atomic_load(&g_stop)) {
-        int did = 0;
-        dmesh_conn_t *c;
-        while (ncl < 4096 && (c = dmesh_accept(g_s)) != NULL) { cl[ncl++] = c; did = 1; }
-        for (int i = 0; i < ncl; ) {
-            ssize_t n;
-            while ((n = dmesh_read(cl[i], b, sizeof b)) > 0) {   /* drain to EAGAIN, echo each chunk */
-                dmesh_write(cl[i], b, (size_t)n); dmesh_flush(cl[i]);
-                atomic_fetch_add(&g_served, (long)n); did = 1;
-            }
-            if (n == 0) { dmesh_close(cl[i]); cl[i] = cl[--ncl]; }  /* EOF (client FIN) → drop */
-            else i++;
-        }
-        if (!did) { struct timespec t = {0, 2000}; nanosleep(&t, NULL); }  /* 2us idle */
+/* Per-server-conn echo backlog (dmesh_qp_t::user_data). Empty in steady state —
+ * a chunk is echoed straight out of the RX mmap into the TX ring. It only fills
+ * if dmesh_alloc reports EAGAIN (the conn's SQ is at its in-flight ceiling): the
+ * RX buffer is transport memory that must be released promptly, so the bytes are
+ * parked here in arrival order and a later pump ships them. Echoing is verbatim
+ * bytes, never frames — the parser owns framing, so re-chunking is legal here. */
+typedef struct { uint8_t *q; size_t cap, len; int dead; } sstate_t;
+
+/* Everything pump() touches: the echo side's conns plus the client's reassembly
+ * of the one burst in flight (`cur` = the conn it was sent on). */
+typedef struct {
+    dmesh_qp_t *cur;                   /* client conn of the iteration in flight */
+    uint8_t      *rb;                    /* reply reassembly buffer (`size` bytes) */
+    size_t        size, got;             /* expected / landed reply bytes */
+    int           bad, eof;              /* stray or over-long reply / peer FIN */
+    dmesh_qp_t *servers[MAX_SERVERS];
+    int           nserv;
+} rstate_t;
+
+/* ---- server side: echo every inbound byte ---- */
+
+static int sq_push(sstate_t *ss, const uint8_t *b, uint32_t n) {
+    if (ss->len + n > ss->cap) {
+        size_t cap = ss->cap ? ss->cap : 65536;
+        while (cap < ss->len + n) cap *= 2;
+        uint8_t *q = realloc(ss->q, cap);
+        if (!q) return -1;
+        ss->q = q; ss->cap = cap;
     }
-    for (int i = 0; i < ncl; i++) dmesh_close(cl[i]);
-    return NULL;
+    memcpy(ss->q + ss->len, b, n);
+    ss->len += n;
+    return 0;
+}
+
+/* Ship as much of the backlog as the SQ will take. Returns messages posted; a
+ * permanent fault (non-EAGAIN alloc / descriptor enqueue fault) flags the conn. */
+static int sq_drain(dmesh_qp_t *c) {
+    sstate_t *ss = (sstate_t *)c->user_data;
+    int posted = 0;
+    while (ss && !ss->dead && ss->len) {
+        uint32_t n = ss->len > (size_t)g_msgmax ? (uint32_t)g_msgmax : (uint32_t)ss->len;
+        uint8_t *b = (uint8_t *)dmesh_alloc(c, n);
+        if (!b) { if (errno != EAGAIN) ss->dead = 1; break; }
+        memcpy(b, ss->q, n);
+        if (dmesh_post_send(c, b, n, 0, 0) != 0) { ss->dead = 1; break; }
+        ss->len -= n; memmove(ss->q, ss->q + n, ss->len);
+        g_served += n; posted++;
+    }
+    return posted;
+}
+
+/* Echo one inbound chunk. A fault only FLAGS the conn: it must stay alive until
+ * the whole wc[] batch is dispatched, since later entries may still name it. */
+static void srv_recv(dmesh_qp_t *c, const dmesh_wc_t *w) {
+    sstate_t *ss = (sstate_t *)c->user_data;
+    if (!ss || ss->dead) return;                    /* untracked / already faulted */
+    if (ss->len == 0) {                             /* fast path: RX mmap -> TX ring */
+        uint8_t *b = (uint8_t *)dmesh_alloc(c, w->len);
+        if (b) {
+            memcpy(b, w->buf, w->len);
+            if (dmesh_post_send(c, b, w->len, 0, 0) != 0) ss->dead = 1;
+            else g_served += w->len;
+            return;
+        }
+        if (errno != EAGAIN) { ss->dead = 1; return; }   /* EINVAL: conn not established */
+    }
+    if (sq_push(ss, w->buf, w->len) != 0) ss->dead = 1;  /* SQ full → owe the bytes */
+}
+
+/* Drop a server conn: its backlog dies with it (the peer is gone). */
+static void srv_retire(rstate_t *st, dmesh_qp_t *c) {
+    sstate_t *ss = (sstate_t *)c->user_data;
+    if (ss) { free(ss->q); free(ss); c->user_data = NULL; }
+    dmesh_destroy_qp(c);
+    for (int i = 0; i < st->nserv; i++)
+        if (st->servers[i] == c) { st->servers[i] = st->servers[--st->nserv]; break; }
+}
+
+/* ---- client side: land the echoed burst ---- */
+
+static void cli_recv(rstate_t *st, dmesh_qp_t *c, const dmesh_wc_t *w) {
+    /* bytes on an idle conn, or more than we sent → a reply we cannot account for */
+    if (c != st->cur || w->len > st->size - st->got) { st->bad = 1; return; }
+    memcpy(st->rb + st->got, w->buf, w->len);
+    st->got += w->len;
+}
+
+static void cli_reconnect(rstate_t *st, dmesh_qp_t **slot, int svc, size_t burst) {
+    dmesh_destroy_qp(*slot);                             /* safe on NULL (first open) */
+    if (st->cur == *slot) st->cur = NULL;
+    *slot = dmesh_create_qp(g_cq, svc);
+    /* A burst wider than one slot is carved into several descriptors, each LB'd on
+     * its own unless the conn is pinned — pin so the stream reaches ONE backend in
+     * send order (what the parser's window + seam assumes). A burst inside one slot
+     * is a single descriptor: leave it unpinned, per-message LB is the fan-out
+     * this validator loads the mock with. */
+    if (*slot && burst > (size_t)g_msgmax) dmesh_pin_route(*slot);
+}
+
+/* ---- the one CQ pump: dispatch by conn role, then retry stalled echoes ---- */
+static int pump(rstate_t *st) {
+    dmesh_wc_t wc[CQ_BATCH];
+    int work = dmesh_poll_cq(g_cq, wc, CQ_BATCH);
+    if (work < 0) work = 0;
+    for (int i = 0; i < work; i++) {
+        dmesh_qp_t *c = wc[i].qp;
+        switch (wc[i].opcode) {
+
+        /* NB: nothing here may close a conn — dmesh_destroy_qp frees it, and poll_cq
+         * emits CONN_REQ together with that conn's already-landed messages, so a
+         * later entry in THIS batch can still name it. Deaths are flagged and
+         * collected by the sweep below. */
+        case DMESH_WC_CONN_REQ:                     /* the DPU routed a stream to us */
+            c->user_data = st->nserv < MAX_SERVERS ? calloc(1, sizeof(sstate_t)) : NULL;
+            if (c->user_data) st->servers[st->nserv++] = c;
+            break;                                  /* untracked → never echoes → client times out */
+
+        case DMESH_WC_RECV:
+            if (c->role == DMESH_ROLE_SERVER) srv_recv(c, &wc[i]);
+            else                              cli_recv(st, c, &wc[i]);
+            dmesh_wc_release(g_s, &wc[i]);
+            break;
+
+        case DMESH_WC_RECV_FIN:                     /* our client's FIN → drop the echo conn */
+            if (c->role != DMESH_ROLE_SERVER) { if (c == st->cur) st->eof = 1; }
+            else if (c->user_data) ((sstate_t *)c->user_data)->dead = 1;
+            break;
+        }
+    }
+    for (int i = 0; i < st->nserv; ) {              /* ship echoes the SQ refused, retire the dead */
+        dmesh_qp_t *c = st->servers[i];
+        work += sq_drain(c);
+        if (((sstate_t *)c->user_data)->dead) { srv_retire(st, c); continue; }
+        i++;
+    }
+    return work;
+}
+
+/* Ship `burst` bytes as one byte stream. One dmesh_alloc reserves at most one
+ * block, so a wider burst goes out as several posts — the mock reframes from the
+ * length prefix regardless. dmesh_alloc NEVER blocks: on EAGAIN the conn's SQ is
+ * at its in-flight ceiling, so keep the loop alive (the echo side shares this
+ * thread and its TX_ACKs are what free the ring) and retry the same chunk.
+ * Returns 0, -1 on a fault. */
+static int send_burst(rstate_t *st, dmesh_qp_t *c, const uint8_t *sbuf, size_t burst) {
+    size_t off = 0;
+    double tw = now_sec();
+    while (off < burst) {
+        size_t left = burst - off;
+        uint32_t n = left > (size_t)g_postmax ? (uint32_t)g_postmax : (uint32_t)left;
+        uint8_t *b = (uint8_t *)dmesh_alloc(c, n);
+        if (!b) {
+            if (errno != EAGAIN) return -1;         /* EINVAL is permanent */
+            if (!pump(st)) idle_wait();
+            if (now_sec() - tw > 5.0) return -1;
+            continue;
+        }
+        memcpy(b, sbuf + off, n);
+        if (dmesh_post_send(c, b, n, 0, 0) != 0) return -1;
+        off += n;
+    }
+    return 0;
 }
 
 /* ---- client side: N round-trips of framed byte-stream to svc_list ---- */
@@ -125,16 +275,20 @@ static void run_stream(int conn_fd, long N, uint32_t size,
     }
 
     uint32_t frame_bytes = FRAME_HDR + size;
-    size_t   burst = (size_t)frame_bytes * (size_t)fpw;   /* bytes per dmesh_write */
+    size_t   burst = (size_t)frame_bytes * (size_t)fpw;   /* bytes per round-trip */
     uint8_t *sbuf = malloc(burst), *rbuf = malloc(burst);
     double  *lat  = malloc((size_t)N * sizeof(double));
     if (!sbuf || !rbuf || !lat) { free(sbuf); free(rbuf); free(lat);
         write(conn_fd, "ERR oom\n", 8); return; }
 
+    static rstate_t st;
+    memset(&st, 0, sizeof st);
+    st.rb = rbuf; st.size = burst;
+
     /* One reusable conn per destination service (a real gateway fans out from one
      * downstream conn; here one conn per dst keeps request/reply demux trivial). */
-    dmesh_conn_t *conns[MAX_SVCS] = {0};
-    for (int k = 0; k < nsvc; k++) conns[k] = dmesh_connect(g_s, svcs[k]);
+    dmesh_qp_t *conns[MAX_SVCS] = {0};
+    for (int k = 0; k < nsvc; k++) cli_reconnect(&st, &conns[k], svcs[k], burst);
 
     /* Early-abort: a misconfigured run (e.g. an unroutable dst svc) fails every
      * round-trip on the 5 s reply timeout — 20000×5 s would wedge for hours. Bail
@@ -143,7 +297,7 @@ static void run_stream(int conn_fd, long N, uint32_t size,
     long consec_fail = 0;
 
     long ok = 0, fail = 0; size_t ns = 0;
-    for (long i = 0; i < N && !atomic_load(&g_stop); i++) {
+    for (long i = 0; i < N; i++) {
         if (consec_fail >= MAX_CONSEC_FAIL) {
             fprintf(stderr, "[stream] ABORT after %ld consecutive failures "
                     "(unroutable dst? check svc list vs registered services / DPUMESH_PROXY=frame)\n",
@@ -152,39 +306,43 @@ static void run_stream(int conn_fd, long N, uint32_t size,
         }
         int k = (int)(i % nsvc);
         uint8_t svc = (uint8_t)svcs[k];
-        dmesh_conn_t *c = conns[k];
+        dmesh_qp_t *c = conns[k];
         if (!c) { fail++; consec_fail++; continue; }
 
-        /* pack `fpw` frames of this iteration into one byte-stream write */
+        /* pack `fpw` frames of this iteration into one byte-stream burst */
         for (int f = 0; f < fpw; f++)
             build_frame(sbuf + (size_t)f * frame_bytes, i, svc, size);
 
         double t0 = now_sec();
-        int sent = (dmesh_write(c, sbuf, burst) >= 0 && dmesh_flush(c) >= 0);
-        if (!sent) { fail++; consec_fail++; dmesh_close(c); conns[k] = dmesh_connect(g_s, svcs[k]); continue; }
+        st.cur = c; st.got = 0; st.bad = 0; st.eof = 0;
+        if (send_burst(&st, c, sbuf, burst) != 0) {
+            fail++; consec_fail++; cli_reconnect(&st, &conns[k], svcs[k], burst); continue;
+        }
 
         /* reply is the echoed byte-stream — reassemble exactly `burst` bytes */
-        double tw = now_sec(); size_t got = 0; int timedout = 0;
-        while (got < burst) {
-            ssize_t n = dmesh_read(c, rbuf + got, burst - got);
-            if (n > 0) { got += (size_t)n; continue; }
-            if (n == 0) break;                              /* peer closed */
+        double tw = now_sec(); int timedout = 0;
+        while (st.got < burst && !st.bad && !st.eof) {
+            if (!pump(&st)) idle_wait();
             if (now_sec() - tw > 5.0) { timedout = 1; break; }
-            sched_yield();                                  /* EAGAIN */
         }
-        int bad = timedout || got != burst || memcmp(sbuf, rbuf, burst) != 0;
-        if (bad) { fail++; consec_fail++; dmesh_close(c); conns[k] = dmesh_connect(g_s, svcs[k]); }
+        int bad = timedout || st.bad || st.got != burst || memcmp(sbuf, rbuf, burst) != 0;
+        st.cur = NULL;
+        if (bad) { fail++; consec_fail++; cli_reconnect(&st, &conns[k], svcs[k], burst); }
         else     { ok++; consec_fail = 0; lat[ns++] = (now_sec() - t0) * 1e6; }
     }
-    for (int k = 0; k < nsvc; k++) if (conns[k]) dmesh_close(conns[k]);
+    for (int k = 0; k < nsvc; k++) if (conns[k]) { dmesh_destroy_qp(conns[k]); conns[k] = NULL; }
+    /* let the echo side observe our FIN and retire its conns; drop the stragglers */
+    double tw = now_sec();
+    while (st.nserv > 0 && now_sec() - tw < 1.0)
+        if (!pump(&st)) idle_wait();
+    while (st.nserv > 0) srv_retire(&st, st.servers[0]);
 
     qsort(lat, ns, sizeof(double), cmp_d);
     double p50 = ns ? lat[ns / 2] : 0.0;
-    int rn = snprintf(reply, sizeof reply, "OK %ld %ld %ld %.1f\n",
-                      ok, fail, atomic_load(&g_served), p50);
+    int rn = snprintf(reply, sizeof reply, "OK %ld %ld %ld %.1f\n", ok, fail, g_served, p50);
     write(conn_fd, reply, (size_t)rn);
     fprintf(stderr, "[stream] DONE N=%ld size=%u fpw=%d nsvc=%d ok=%ld fail=%ld served_bytes=%ld p50=%.1fus\n",
-            N, size, fpw, nsvc, ok, fail, atomic_load(&g_served), p50);
+            N, size, fpw, nsvc, ok, fail, g_served, p50);
     free(sbuf); free(rbuf); free(lat);
 }
 
@@ -223,10 +381,12 @@ int main(void) {
 
     g_s = dmesh_create_channel(g_service);
     if (!g_s) { fprintf(stderr, "[stream] create_channel failed\n"); return 1; }
+    g_msgmax  = dmesh_msg_max(g_s);
+    g_postmax = dmesh_post_max(g_s);
+    g_cq = dmesh_create_cq(g_s);
+    if (!g_cq) { fprintf(stderr, "[stream] create_cq failed\n"); return 1; }
     fprintf(stderr, "[stream] ready: pod_id=%d own_service=%d msg_max=%d\n",
-            dmesh_pod_id(g_s), g_service, dmesh_msg_max(g_s));
-
-    pthread_t et; pthread_create(&et, NULL, echo_fn, NULL);
+            dmesh_pod_id(g_s), g_service, g_msgmax);
 
     int srv = socket(AF_INET, SOCK_STREAM, 0);
     int opt = 1; setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof opt);

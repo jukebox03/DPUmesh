@@ -69,9 +69,17 @@ enum dpa_msg_type {
 	DPA_MSG_RING_ADD = 1, /* DPU→DPA: add forward (CPU→DPU) ring */
 	DPA_MSG_WAKE     = 2, /* DPU→DPA: wake up the EU thread (no payload) */
 	DPA_MSG_FWD_DONE = 3, /* DPA→DPU: forward DMA completed (CPU→DPU) */
+	DPA_MSG_RING_DEL = 4, /* DPU→DPA: drop this pod's forward ring from rings[] */
 	/* Reverse (DPU→host) egress is the ARM SG-DMA engine (dpu_proxy.c), not a DPA
 	 * ring: there is no REV_RING_ADD / REV_DONE on this channel anymore. */
 };
+
+/* RING_DEL drops a pod's ring from an EU's rings[] on disconnect, so num_rings is
+ * bounded by the number of LIVE pods on that EU rather than by cumulative connects
+ * (pod_id is a recycled slot index and k_j = (pod_id*K + j) % N, so a reconnecting
+ * pod returns to the same EUs). dpa.c clamps K <= N, making k_j injective over j: an
+ * EU holds at most one ring per pod, so pod_id alone identifies the entry to drop.
+ * Fire-and-forget, like every message on this channel. */
 
 /* DPA->DPU completion immediate — packed to 20 bytes (route_group added; 2nd WQE BB) to
  * minimize PCIe immediate-data cost on dma_copy. `type` MUST stay at offset 0 (the

@@ -61,4 +61,18 @@
  * host (dmesh.h / dmesh_core.c) and the DPU (object.h / dpu_worker.c). */
 #define DMESH_UPORT_BASE    32768
 
+/* ====== Connection roles ======
+ * A conn's orientation, which decides how its outbound tuple is stamped: a CLIENT
+ * always ships dst_pod=BLANK (the DPU resolves dst_service per message); a SERVER
+ * ships to the peer it learned at accept. CLIENT/SERVER are app-visible (dmesh.h
+ * exposes conn->role); FREE/SERVER_PENDING are host-internal port-slot states. */
+#define DMESH_ROLE_FREE          0
+#define DMESH_ROLE_CLIENT        1
+#define DMESH_ROLE_SERVER        2
+/* Model B: a new server conn the PE created at message-1 delivery but the app has
+ * not accepted yet. Inbound coalesces to its inbox (so pipelined messages 2..P
+ * don't re-hit the accept queue); next_ready skips it; the accept path promotes it
+ * to DMESH_ROLE_SERVER. */
+#define DMESH_ROLE_SERVER_PENDING 3
+
 #endif /* DMESH_COMMON_H */

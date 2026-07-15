@@ -7,7 +7,7 @@ The system spans **three planes**, all driving **one** host→DPU→host data pa
 
 | Plane | Runs on | Sources |
 |---|---|---|
-| **Host transport** | application host (x86) | `src/dmesh_core.c` (core) + `include/dpumesh/dmesh.h` → `src/dmesh.c` (façade) + `src/dmesh_preload.c` (shim) |
+| **Host transport** | application host (x86) | `src/dmesh_core.{h,c}` (core + connection lifecycle; **internal, not installed**) carrying **two sibling surfaces**: `include/dpumesh/dmesh.h` → `src/dmesh_api.c` (the native verbs-shaped API) and `src/dmesh_preload.c` (the POSIX socket shim). Neither surface is built on the other. |
 | **DPU control plane** | BlueField ARM | `doca/dpu_worker.c`, `object.{c,h}`, `dpu_proxy.c` (reverse egress), `dpu_l7.c` (L7 hook), `comch_*.c` |
 | **DPA data plane** | BlueField DPA EUs | `doca/device/dpa_kernel.c` (EU kernel, dpacc-built) + `doca/dpa.c` (ARM-side setup) |
 
@@ -83,9 +83,15 @@ footprint tracks its in-flight demand instead of a fixed slab. The pool is a **l
   the pool only when the free-list is empty; SHRINK returns a block only when it exceeds the cushion; a
   fully-drained conn compacts back to logical 0. So a conn grows toward `maxb` under load, shrinks toward one
   block as it quiets, and holds nothing when idle — the grow/shrink hysteresis is exactly the cushion `H`.
-  First block is LAZY (grabbed on the first write). `dmesh_alloc`/`dmesh_commit` fills the same chain in place.
+  First block is LAZY (grabbed on the first `dmesh_alloc`), which fills the chain in place.
 
-`dmesh_write` = reserve + memcpy + commit; the descriptor's `body_buf_slot` carries the **byte offset**
+`dmesh_alloc` = `tx_reserve` — it hands the ring pointer out and the caller fills in place, so the
+native path never copies (the shim's `stream_write` is the one caller that adds a memcpy, because
+`write(2)` demands one). **`tx_reserve` never blocks**: `NULL`+`EAGAIN` when the block window is full,
+the `ibv_post_send` contract. It also cannot fail *later* — the init clamp
+`maxb × ceil(block_size/slot_size) ≤ TX_SU_DEPTH` makes the block window bind strictly before the
+send-unit FIFO, so anything reserve admitted is guaranteed carveable and `tx_next_send` needs no
+capacity check. The descriptor's `body_buf_slot` carries the **byte offset**
 `pblk[k%maxb] × block_size + off` into the mmap, and `enqueue` sets `dma->addr = dma_buffer + offset` — the
 DPA mirrors that offset into staging, so the whole allocator is **host-side only**. A CLOSED conn's blocks
 return once its chain drains — by close if already drained, else by the PE on the last ACK
@@ -115,19 +121,39 @@ dispatches on the message type:
 `rx_deliver_desc` demuxes by `dst_port`: a **live** conn → `inbox_push` (on the empty→non-empty edge,
 publish the conn to the **ready list** + write the eventfd); a **new** server conn (`dst_port ≥
 UPORT_BASE`, no live slot) → create a `SERVER_PENDING` slot, push message-1 onto the **accept ring**
-(a lock-free SPMC Vyukov queue) so `dmesh_accept` promotes it (`SERVER_PENDING` coalesces pipelined
-messages 2..P into the inbox so they don't re-hit the accept queue). The app reads via `dmesh_next_ready`
-(pop the ready list) → `dmesh_read` (`inbox_pop` → read `rx_dma_buffer[pos]` in place → `rx_free`
+(a lock-free SPMC Vyukov queue) so the accept path promotes it (`SERVER_PENDING` coalesces pipelined
+messages 2..P into the inbox so they don't re-hit the accept queue). The app reads via `dmesh_poll_cq`
+(pop **that CQ's** ready list → `inbox_pop` → hand out a pointer into `rx_dma_buffer[pos]`, released by
+`dmesh_wc_release` → `rx_free`
 returns the RX credit).
 
 ### 1.6 Concurrency model
 Exactly **one internal thread** (the PE). Everything else runs on app threads. Channels are lock-free:
-conn **inbox** (SPSC: PE producer, owning app thread consumer), **ready list** (SPSC: PE producer, the
-one event-loop consumer), **TX byte-ring** (SPSC: app owns `tx_w/c/s`, PE owns `tx_f`), **accept ring**
-(SPMC: PE producer, N worker consumers via CAS), **forward rings** (MPSC). The shared TX block pool is
-lock-free (Treiber); the only two mutexes (`port_lock` at connect/accept/close, `block_lock` at the
-close-drain block handoff) are never on the data path. The eventfd is written **once per delivery** (no
-coalescing → a wakeup is never lost).
+conn **inbox** (SPSC: PE producer, owning app thread consumer), **per-CQ ready list** (SPSC: PE
+producer, that CQ's one polling thread), **TX byte-ring** (SPSC: app owns `tx_w/c/s`, PE owns `tx_f`),
+**accept ring** (SPMC: PE producer, N consumers via CAS), **forward rings** (MPSC). The shared TX block
+pool is lock-free (Treiber); the only mutexes (`port_lock` at create/accept/destroy, `block_lock` at the
+close-drain block handoff, `cq_lock` at CQ register/unregister) are never on the data path.
+
+**The CQ is the unit of RX parallelism** (`struct dmesh_cq`): each owns its ready list and its eventfd,
+and `psl->cq` binds a conn to the CQ that created or accepted it, so `arm_ready_after_push` pushes to
+*that* CQ's ring. N threads with N CQs share nothing on RX. A conn arrives with no CQ yet, so a new
+inbound conn wakes every registered CQ (`cqs[]` under the cold `cq_lock`, once per conn); whichever CQ
+accepts it owns it thereafter. Measured: the CQ was never the bottleneck (one shared CQ under a mutex
+scales 4.6× too — multi-CQ is worth ~5% Mrps / ~17% p50 at 8 threads); it exists so the API does not
+bake "one RX consumer per process" into a ceiling the host will hit once the DPU stops binding.
+
+**Readiness is armed from `dmesh_create_cq`, never lazily.** A `notify_enabled` flag used to gate
+`arm_ready_after_push` and was only set by the fd getter — so a client that only ever *polled* silently
+received nothing on established conns (a new conn's first message rides the accept queue, which is not
+gated, so connects worked and replies vanished). The flag is gone; `dmesh_cq_fd` is purely the optional
+idle-sleep path. The eventfd is written **once per delivery** (no coalescing → a wakeup is never lost).
+
+**The lost-edge (Dekker) invariant is per-conn and unchanged by multi-CQ:** `psl->on_ready` is armed by
+the PE with a `seq_cst` fence + `acq_rel` exchange after a push, and disarmed by the consumer when
+`dpumesh_conn_recv` drains the inbox empty, then re-checked. Only *which ring* the push lands in
+changed. `psl->cq` is published with `user` **before** the `role` release-store, so the acquire-load of
+`role` synchronizes-with it upstream of the Dekker pair.
 
 ---
 
@@ -165,8 +191,12 @@ AND DPU rebuilt together (a full deploy), or the clamped tail acks vanish and th
 ### 2.3 DPU ↔ DPA — Comch msgq (`comch_msgq.c`, `enum dpa_msg_type`)
 One 1-producer/1-consumer Comch channel **per EU**, channel `k` bound to ingest consumer PE `k % M` —
 its owning shard's PE (§4.1; M = 1 collapses to the single consumer PE):
-`RING_ADD` (D→DPA, add a forward ring), `WAKE` (D→DPA, ~1 kHz keepalive to re-activate a parked EU),
-`FWD_DONE` (DPA→D, a forward dma_copy completed — carries `comch_dma_comp_msg`).
+`RING_ADD` (D→DPA, add a forward ring), `RING_DEL` (D→DPA, drop a pod's ring on disconnect — keyed by
+`pod_id`, which is unique per EU because K ≤ N makes `k_j` injective), `WAKE` (D→DPA, ~1 kHz keepalive to
+re-activate a parked EU), `FWD_DONE` (DPA→D, a forward dma_copy completed — carries `comch_dma_comp_msg`).
+Without `RING_DEL` the DPA's `rings[]` was append-only, so a restarting pod (same recycled `pod_id` ⇒ same
+EUs) accreted entries until `MAX_DPA_RINGS`, after which the add was dropped **silently** (the msgq is
+fire-and-forget).
 
 ---
 
@@ -278,14 +308,24 @@ running (auto-detected) N — so it grows with N: BF3 N=8 ⇒ 32. Per-pod ACK/RE
 is the 2-pod throughput cap); flushed on full or on the idle lull, and touched ONLY by the emit thread
 (an ingest shard defers its acks via `pending_txack`, §4.1).
 
-**Disconnect = graceful for the egress engine.** A backend can die *while it has in-flight egress SG-DMA*
-into its RX buffer. `pods_remove_connection` sets `dma_ready=0` (the egress then skips the pod) but
-**DEFERS destroying `host_rx_mmap`** — an egress worker thread may still hold an in-flight `doca_buf` over
-it, and destroying it concurrently would fault the whole engine's shared `doca_dma` ctx. The handle is
-kept in the slot and destroyed at slot **reuse** (`pods_add_connection`), by which point the old pod is
-long gone and no egress references it (reconnect latency ≫ in-flight drain). The egress side complements
-this: a not-ready pod's queued lane units are dropped to the done-queue (custody released, no delivery),
-and a `doca_dma` `BAD_STATE` fault stalls that engine's submit instead of retry-spinning (§5).
+**Disconnect: unpublish everything, destroy nothing.** A pod can die *while it has in-flight DMA* against
+its memory. `pods_remove_connection` therefore:
+- sends **`RING_DEL`** to each EU holding one of its forward rings (while `pod_id`/`k_rings` are still valid),
+- sets `dma_ready=0` and **NULLs every host-exported handle** (`ring_mmaps`, `ring_host_addrs`,
+  `remote_mmap`, `host_rx_mmap`, `buf_arrs`). These pointers ARE the egress's liveness gate —
+  `px_lane_refresh_credit` only checks `ring_mmaps[r] && ring_host_addrs[r]`, so leaving them set lets it
+  keep credit-refresh DMA-reading the dead pod's **unmapped** host memory (§5),
+- **destroys nothing.** An in-flight DMA may still reference a mapping, and destroying it faults the
+  engine's shared `doca_dma` ctx. Safe reclaim needs a quiesce protocol (RING_DEL ack + per-pod egress
+  in-flight refcount) that does not exist, so these handles **leak per reconnect** — deliberately, and
+  cheaply: the 32 MB staging that dominated the leak is now **allocated once per slot and reused**
+  (`setup_pod_dma`), since it is DPU-local and holds nothing host-specific.
+
+**Re-tenanting a slot.** `dma_generation` is bumped per incarnation (before `dma_ready` is published) and
+stamped into async DMA ops. Slot indices are recycled, so it is what distinguishes "this pod's DMA failed"
+from "the previous tenant's did", and what tells the egress its per-lane credit state is stale (§5).
+The egress side complements all this: a not-ready pod's queued lane units are dropped to the done-queue
+(custody released, no delivery).
 
 ---
 
@@ -304,16 +344,38 @@ only destination resolution differs.
   route: LB + connection stickiness; replies always use this), **frame** (a demo `[u32 len][u8 svc][payload]`,
   routing each frame by its `svc` byte), or **L7** (the real hook, §5.1). `DPUMESH_PROXY` picks the deploy
   default; `DPUMESH_PROXY_FRAME_SVC` / `_L7_SVC` assign parsers per service.
-- **Backend death mid-flight.** If a destination pod disconnects while units are queued/in-flight, its
-  lane is drained (`px_lane_drop_dead` → done-queue, custody released, no delivery) and its `host_rx_mmap`
-  is kept alive until slot reuse (§4.4) so the in-flight SG-DMA finishes without faulting the engine ctx.
-  A `doca_dma` `BAD_STATE` sets `eng->dma_stalled` (stop submitting) rather than retry-spinning. The LB
-  meanwhile routes new traffic only to live backends — a single/moderate death is not a wedge.
-  **Limitation (high-churn):** a MASS simultaneous death (≳13 pods at once) can leave enough in-flight
-  SG-DMA to torn-down host RX memory that one DMA **hangs** at the hardware level; the hung task poisons the
-  engine's shared `doca_dma` ctx and `doca_ctx_stop` cannot drain it — so that engine wedges until the DPU
-  process restarts. A ctx restart cannot recover a hung DMA; the real fix is prevention (bound in-flight DMA
-  per pod, or a per-pod ctx). Single/moderate churn (≤ ~6-at-once) is unaffected.
+- **Backend death mid-flight.** If a destination pod disconnects while units are queued/in-flight, its lane
+  is drained (`px_lane_drop_dead` → done-queue, custody released, no delivery) and none of its mappings are
+  destroyed (§4.4), so in-flight SG-DMA finishes without faulting the engine ctx. The LB meanwhile routes
+  new traffic only to live backends.
+- **A failed DMA is a NORMAL event, not a bug.** The egress DMAs into *peers'* host memory, and a dying pod
+  takes that memory with it **before** comch reports the disconnect — so `dma_ready` can never gate the
+  window shut, and some DMA will land in unmapped memory. The QP then takes `LOCAL_QP_OPERATION_ERROR` and
+  DOCA stops the engine's **shared** ctx, killing every pod's egress. So the engine must SURVIVE it:
+  - **Latch:** any path that can observe the fault sets `eng->dma_stalled` — `px_dma_err_cb` (on
+    `IO_FAILED`, from the error itself), the SG-batch submit, and `px_lane_refresh_credit` (on
+    `BAD_STATE`). Latching only in the batch submit is not enough: after a fault the refresh never lands,
+    so credits never arrive and the lane breaks out *before* reaching that submit — the unlatched retry
+    spin is what once flooded DOCA's `alloc_init ... state IDLE` forever.
+  - **Recover:** `px_engine_recover` waits for the ctx to reach IDLE (DOCA flushes in-flight tasks through
+    `px_dma_err_cb`), then `doca_ctx_start`s it, rearming every lane's `refresh_inflight` — a refresh whose
+    callback never ran would otherwise leave that lane unable to ever refresh credit again, starving a
+    *healthy* pod forever. It drives the PE itself and reports progress so the main loop cannot park
+    mid-recovery.
+  - **Learn:** an `IO_FAILED` credit refresh is the *earliest* reliable death signal (earlier than comch),
+    so it drops that pod's `dma_ready` — guarded by `dma_generation` (the callback may land after the
+    slot's next tenant registered) and by `IO_FAILED` specifically (a ctx fault flushes *healthy* pods'
+    tasks through the same callback).
+- **Per-lane state is per-incarnation.** `px_lane_rearm` resets `cursor`/`sent_entries`/`cached_freed` when
+  `pods[].dma_generation` moves. A restarted pod exports a fresh RX buffer whose freed-counter restarts at
+  0, so credits inherited from the previous tenant are wrong in a way that never self-corrects
+  (`inflight = sent_entries - cached_freed` stays huge ⇒ `avail_entries` pins at 0 ⇒ the lane never sends).
+  That starvation was the ROOT of the pod-restart wedge: the starved lane retried credit-refresh every
+  pump, which is what made hitting the death window a certainty rather than a rare race.
+  **Limitation (high-churn, unchanged):** a MASS simultaneous death (≳13 pods at once) can leave a DMA
+  **hung** at the hardware level; a hung task cannot be drained, so the ctx never reaches IDLE and
+  `px_engine_recover` cannot complete. Recovery is validated for single-pod death (14 sequential restarts,
+  0-fail); mass death still needs prevention (bound in-flight DMA per pod, or a per-pod ctx).
 - **Egress.** A receiving conn always lands in **one lane** `[dst_pod][region = dst_port % K]` (FIFO), so
   delivery order = segment order. A lane's units are gathered into **one chained-source `doca_dma`**
   (SG) copy: DPU staging → the destination host's RX buffer, then a batched `REV_DONE` notify. Chunks
@@ -346,21 +408,42 @@ append-only phase-2 fields of the decision struct.
 
 ## 6. LD_PRELOAD shim (`src/dmesh_preload.c`)
 
-Runs an unmodified, dynamically-linked POSIX socket app over DPUmesh by interposing libc. The keystone:
-when a socket becomes dmesh-backed (`connect` to a registry `ClusterIP:port`, or `listen` on the advertised port), the
-shim **`dup2`s a private eventfd over the app's fd number** — the fd stays a real kernel fd, so
-`epoll`/`poll`/`select`/`close`/`dup` work **natively** (kernel-TCP and dmesh fds share one epoll set,
-zero interposition of the readiness syscalls). `read`/`write`/`send`/`recv` route to `dmesh_read` /
-`dmesh_write`+`dmesh_flush`. A single **dispatcher thread** is the channel's sole `dmesh_accept` /
-`dmesh_next_ready` consumer and sole `dmesh_close` caller (app `close` only queues) — it asserts each
-conn's eventfd on delivery. Every client conn is `dmesh_pin_route`d (one backend, in-order — the socket
-contract). `connect` keys on the registry `ClusterIP:port` (not port alone), so same-port services on
-distinct ClusterIPs resolve apart, and `getpeername` returns that dialed address (not `127.0.0.1`).
-Blocking is emulated (`SO_RCVTIMEO` honored). **Lost-wakeup discipline** bridges the
-edge-triggered dmesh ready list to level-triggered POSIX readiness: over-assert the eventfd on every
-successful read, drain-and-retry-once on `EAGAIN`. `shutdown(SHUT_WR)` sends the FIN
-(`dmesh_send_fin`) — an approximate half-close (late replies are undeliverable). Limits: AF_INET
-`SOCK_STREAM` only; no fork-shared sockets; Go/static/stdio binaries bypass `LD_PRELOAD`.
+Runs an unmodified, dynamically-linked POSIX socket app over DPUmesh by interposing libc. It is the
+**second surface on the core, a sibling of the native API — not a client of it**: it includes
+`src/dmesh_core.h` (`-Isrc`) for the QP internals (`rx_slot` cursor, `peer_closed`) and the internal
+lifecycle (`dmesh_accept` / `dmesh_next_ready` / `dmesh_send_fin`) that `<dpumesh/dmesh.h>` does not
+expose.
+
+**It also owns the POSIX byte-stream semantics**, as two file-local statics: `stream_read` (copy out of
+the RX mmap + the `rx_pos` partial-consumption cursor) and `stream_write` (copy into the TX ring +
+carve any length across ≤`block_size` reserves). Both are the price of the socket contract — `read(2)`
+mandates a copy into caller memory, `write(2)` mandates any length — and neither belongs in the
+transport. That seam is exactly why the native path is zero-copy: the cost lives only where the
+contract demands it.
+
+The keystone: when a socket becomes dmesh-backed (`connect` to a registry `ClusterIP:port`, or `listen`
+on the advertised port), the shim **`dup2`s a private eventfd over the app's fd number** — the fd stays
+a real kernel fd, so `epoll`/`poll`/`select`/`close`/`dup` work **natively** (kernel-TCP and dmesh fds
+share one epoll set, zero interposition of the readiness syscalls). A single **dispatcher thread** owns
+the shim's one CQ and is its sole consumer and sole `dmesh_destroy_qp` caller (app `close` only queues)
+— it asserts each conn's eventfd on delivery. Every client conn is `dmesh_pin_route`d (one backend,
+in-order — the socket contract). `connect` keys on the registry `ClusterIP:port` (not port alone), so
+same-port services on distinct ClusterIPs resolve apart, and `getpeername` returns that dialed address.
+Blocking is emulated (`SO_RCVTIMEO` honored). **Lost-wakeup discipline** bridges the edge-triggered
+dmesh ready list to level-triggered POSIX readiness: over-assert the eventfd on every successful read,
+drain-and-retry-once on `EAGAIN`. `shutdown(SHUT_WR)` sends the FIN — an approximate half-close.
+
+**Known gap — `O_NONBLOCK` is not honored on the write path.** `stream_write` blocks under
+backpressure (correct for a blocking socket) but the shim tracks `e->nonblock` and honors it only at
+`recv`/`accept`. Returning `EAGAIN` instead would need honest `EPOLLOUT`, which the eventfd keystone
+**cannot express** — an eventfd is always writable, so an app would livelock on epoll→write→EAGAIN. The
+fix is a socketpair fd-realization (two independent readiness directions; you de-assert writability by
+filling the peer's buffer, mirroring the ring's occupancy so the kernel derives writability for you) —
+which upgrades the **per-message** readiness signal from an eventfd counter bump to an AF_UNIX skb
+alloc. Gated on `grow_waits` ever being non-zero; measured at **0**, so the path never executes.
+
+Limits: AF_INET `SOCK_STREAM` only; no fork-shared sockets; Go/static/stdio binaries bypass
+`LD_PRELOAD`.
 
 ---
 
@@ -370,11 +453,16 @@ successful read, drain-and-retry-once on `EAGAIN`. `shutdown(SHUT_WR)` sends the
 |---|---|
 | `num_slots × slot_size == DPU_BUFFER_SIZE` (32 MB) | staging mirrors the host TX offset-for-offset → bounds occupancy |
 | a conn's live window ≤ `maxb` blocks (`b − tail_blk < maxb` before backing block `b`) | slot `b%maxb` can never alias a still-live block `b−maxb` → no write-side overwrite/wedge |
+| `maxb × ceil(block_size/slot_size) ≤ TX_SU_DEPTH` (clamped at init) | makes the block window bind **strictly before** the send-unit FIFO, so the FIFO can never fill: what `tx_reserve` admitted is always carveable, and `tx_next_send` needs no capacity check (it used to back off on a branch this clamp makes unreachable) |
+| `tx_reserve` probes the block window **before** mutating `tx_w` | on `EAGAIN` the write head must be exactly where it was, or a retry strands the padded tail |
+| `psl->cq` is published with `user` **before** the `role` release-store | `arm_ready_after_push` loads `cq` after an acquire-load of `role`; publishing later would let the PE push to a NULL/stale ready list |
+| readiness is armed at `dmesh_create_cq`, never on first fd request | gating the arm on a fd getter made `poll_cq` silently under-deliver for a pure-polling client (established conns only — a new conn's first message rides the ungated accept queue, hence connects-work/replies-vanish) |
 | host `K` == DPU `K` (`DPUMESH_RINGS_PER_POD`) | forward rings pair 1:1; a mismatch stalls `dma_ready` |
 | `slot_size ≤ 8192` | the DPA `dma_copy` cap (one wire descriptor) |
 | `sizeof(dma_desc) == 64` (one cache line) | the DPA's line-granular `valid=0` writeback must not touch a neighbour |
 | D→H message type is a `uint8_t` at offset 0, value < 256, in the client switch | host dispatches on `recv_buffer[0]` |
-| one PE thread writes `tx_f`, inbox tail, ready tail, eventfd | the lock-free SPSC channels assume a single producer |
+| one PE thread writes `tx_f`, inbox tail, every CQ's ready tail + eventfd | the lock-free SPSC channels assume a single producer |
+| a CQ's ready list is popped by exactly ONE thread | SPSC on the consumer side too — that is *why* you make several CQs, not a limitation of one |
 | all Comch sends on the emit (main) thread, never inside a PE callback | one ctrl PE, not thread-safe; batch accumulators are main-only (ingest defers via `pending_txack`) |
 | a consumer PE is progressed by exactly ONE thread (its shard), which also sends its channels' `WAKE` | DOCA PEs are single-threaded; a foreign submit races the owner's progress (the WAKE race) |
 | ② conntrack is per-shard; `uP` is owner-strided (`(uP − BASE) % M`) | each conntrack stays single-threaded; a backend reply dispatches to its session's owner shard |
@@ -382,11 +470,14 @@ successful read, drain-and-retry-once on `EAGAIN`. `shutdown(SHUT_WR)` sends the
 | publish-role-last (host `ports[]`), publish-registered/`dma_ready`-last (DPU `pods[]`) | a reader must never observe a half-built slot |
 | client ports `[1, 32768)`, upstream `uP` `[32768, 65535]` | loopback host holds both roles in one table |
 | `n_eng = 2` (`DPUMESH_ARM_EGRESS_THREADS`) | `n_eng = 1` wedges under egress backpressure |
-| a disconnected pod's `host_rx_mmap` is destroyed at slot REUSE, never on disconnect | an egress worker may hold an in-flight `doca_buf` over it; concurrent destroy faults the engine's `doca_dma` ctx |
+| a disconnected pod's host-exported mappings are UNPUBLISHED (NULLed) on disconnect and **never destroyed** | the NULL is the egress's only liveness gate (else it DMA-reads unmapped host memory); a destroy faults the shared `doca_dma` ctx, killing EVERY pod's egress. They leak until a quiesce protocol exists; the 32 MB staging is reused per slot instead |
+| per-lane credit state is reset whenever `pods[].dma_generation` moves | a re-tenanted slot's new pod exports a fresh RX freed-counter (restarts at 0); inherited credits pin `avail_entries` at 0 and the lane never sends again |
+| a DMA error is EXPECTED (peers' memory can vanish), so every path that observes a ctx fault must latch `dma_stalled` and let `px_engine_recover` restart the ctx | gating cannot close the window (comch reports the death too late); an unlatched retry spin floods `alloc_init ... state IDLE` forever |
 
 ## 8. Baked sizing (see API.md §9 for the full env/knob table)
 `num_slots = 4096`, `slot_size = 8192` (32 MB TX/RX/staging per pod); TX blocks `block_size = 64 KB`
-(pool of `n_blocks = 512`), `maxb = 4` (≤ 256 KB in-flight/conn), `cushion_h = 1`; `N` DPA EUs
+(pool of `n_blocks = 512`), `maxb = 4` (≤ 256 KB in-flight/conn), `cushion_h = 1`,
+`TX_SU_DEPTH = 64` (and it **clamps** `maxb` — §7); `N` DPA EUs
 **auto-detected** = min(device EUs, `MAX_DPA_EU=8`) (BF3 → 8; `DPUMESH_DPA_THREADS` overrides);
 `K = 2` forward rings/pod; per-EU ring cap `MAX_DPA_RINGS = 8` ⇒ concurrent pods ≤ `MAX_DPA_RINGS × N / K`
 (BF3 → 32); `M = 2` ingest shards (`DPUMESH_INGEST_SHARDS`, ② share-nothing) + `n_eng = 2` ARM egress

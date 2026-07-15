@@ -82,6 +82,13 @@ setup_dpa_buf_array_pod(struct objects *objs, size_t num_elem,
 
 doca_error_t
 setup_pod_dma(struct objects *objs, struct pod_state *pod);
+
+/* Send RING_DEL to every EU holding one of this pod's forward rings, so rings[]
+ * stops referencing them and num_rings falls back. Best-effort, idempotent, and
+ * fire-and-forget (the EU may still be mid-drain when this returns — which is why
+ * the caller destroys nothing; see pods_remove_connection). */
+void
+teardown_pod_dma(struct objects *objs, struct pod_state *pod);
 #endif /* DOCA_ARCH_DPU */
 
 #endif

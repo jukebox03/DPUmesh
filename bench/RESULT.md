@@ -4393,7 +4393,9 @@ libdpumesh.so. Host rx unpack CLAMPS `n = min(count, its own compiled max)` and 
 the clamped n → a DPU sending bigger batches than the host was built with loses the TAIL entries
 SILENTLY (no log), and `tx_reclaim_ack` is strict-FIFO front-match-or-noop → one lost ack = that conn
 wedges forever. `bench.sh restart`/`build` rebuild ONLY the DPU ⇒ **changing any comch_common.h wire
-constant requires FULL `deploy`.** (Hardening option, not yet applied: bound host n by received length
+constant requires FULL `deploy`.** [2026-07-15: `restart` has since been DELETED for this reason among
+others — `build` still rebuilds only the DPU, and `deploy` is now the sole bring-up path.]
+(Hardening option, not yet applied: bound host n by received length
 `(len-4)/entry_size` instead of the compile-time max, both BATCH types.)
 
 **HW A/B (all full deploys, ② shards=2 + egress2, greeter 32B/8B):**
@@ -4419,3 +4421,331 @@ after the verdict. DPU DIAG dump (DPUMESH_DIAG=1) kept — now with fl=total/15:
 sgl count — and made **quiet-at-idle**: the 1 Hz heartbeat only prints while there is queued/batched
 work or the flush counters moved since the last dump (an idle hang still leaves its final counters as
 the last line before silence; was ~86K identical lines/day).
+
+# 2026-07-15 — Pod restart vs a RUNNING DPU: root-caused (stale px_lane credits) + FIXED + HW-VALIDATED (14/14 restarts, ×2 deploys)
+
+**The "a single pod cannot reconnect to a running DPU" rule is DEAD.** It was never a
+property of the system — it was a bug, now fixed and HW-validated. Two independent
+fresh-deploy runs of the full suite, ALL CHECKS PASSED both times.
+
+Note the exact claim: **RE-CONNECT**, not death. Pod death was already fine (2026-07-13,
+verified). See the SCOPE section immediately below before reading the root cause.
+
+## ⚠️ SCOPE — this is about pod RE-TENANTING, not pod death (pod death was already fine)
+
+Read this before the root cause, or you will mis-attribute it. **Pod DEATH was already
+handled and verified** — see "⭐ Egress-on-backend-death robustness — FIXED + verified"
+(2026-07-13, above): a backend force-killed (grace 0) mid a 15s bench gave
+`rcnt=1,337,224 fail=0`, no global wedge, flood count **0**. That fix (① defer
+`host_rx_mmap` destroy, ② `px_lane_drop_dead`, ③ `dma_stalled` safety net) is still in the
+tree, still correct, and this session extends rather than replaces it.
+
+What NO prior test ever did is **bring the pod BACK into the same slot and drive traffic
+through it**:
+
+```
+2026-07-13 backend-death :  kill pod → done.            (never returns)
+13-at-once mass death    :  kill 13 pods → done.        (never return)
+"gradual churn 0-fail"   :  add/remove replicas         (mostly fresh slots)
+elastic TX `[reconn]`    :  CONNECTION churn            (not pod churn at all)
+THIS session             :  kill → REBORN in same slot → traffic → ×14
+```
+
+The bug below requires slot RE-TENANTING. Die-and-stay-dead never triggers it.
+
+**And the 07-13 pass is EVIDENCE FOR the root cause below, not against it.** Without
+re-tenanting there is no starved lane, so credit-refresh fires only occasionally and the
+death window (host memory unmapped → comch disconnect lands) is rarely hit. With
+re-tenanting, the starved lane spams refresh on EVERY pump, so hitting that window becomes
+a near-certainty. The starvation is what turns a rare race into a deterministic wedge.
+(The original disconnect-NULLing of `ring_mmaps[]` — `px_lane_refresh_credit`'s only guard
+— also suppressed refreshes to a dead pod, which is why die-and-stay-dead stayed quiet.)
+
+## ★ Root cause (it was NOT the DPA ring leak, NOT the unbounded wait, NOT stale upstream)
+
+```
+px_lane credit state not reset when a pods[] slot is RE-TENANTED          <- ROOT
+  → reconnected pod inherits the previous tenant's sent_entries/cached_freed,
+    but its FRESH host RX freed-counter restarts at 0
+    → inflight = sent_entries - cached_freed stays huge → avail_entries pins at 0
+      → units queue forever and the lane retries credit-refresh DMA forever
+        → those refreshes read the DEAD pod's UNMAPPED host memory
+          → QP LOCAL_QP_OPERATION_ERROR → the engine's SHARED doca_dma ctx → STOPPING/IDLE
+            → no recovery + the fault never latched → "alloc_init ... state IDLE" flood
+              → egress dead FOR EVERY POD on the node
+```
+
+Every link below the root is a SYMPTOM. Fixing the root makes the DMA fault stop
+occurring at all (final runs: **0 faults, 0 ctx restarts** across 14 restart cycles).
+
+**Load-bearing reframe (user's):** the egress DMAs into peers' host memory, so a DMA
+failure is a NORMAL event, not a bug to prevent. Gating cannot fix it — `dma_ready` only
+drops when comch reports the disconnect, which is strictly AFTER the pod's memory is gone.
+Confirmed empirically: NULLing the pod's handles at disconnect did not close the window.
+
+## ★ Why `dma_stalled` (which already existed) never saved us
+
+`px_engine`'s `dma_stalled` safety net was set in exactly ONE place — the SG-batch submit.
+But after a fault the code never REACHES that submit: the credit refresh can't land, so
+credits never arrive and `px_lane_submit` breaks on `avail_entries < first_needed` first.
+`px_lane_refresh_credit`'s `alloc_init` → `BAD_STATE` just did `goto fail` without
+latching → the pump retried it forever, and each retry made DOCA emit its own
+`alloc_init ... state IDLE` ERR line. **That unlatched spin WAS the flood.**
+
+## Fixes (all HW-validated together)
+
+**dpu_proxy.c** (the real fix)
+- `px_lane_rearm()` + `px_lane.pod_generation`: reset `cursor`/`sent_entries`/`cached_freed`/
+  `refresh_inflight` when the slot's `dma_generation` changes. **This is the root fix.**
+- `px_engine_recover()`: on ctx fault → wait for IDLE → `doca_ctx_start()`. Drives the PE
+  itself and returns "still working" so the main loop does not park mid-recovery (it did:
+  2.55s → 93ms). Also rearms EVERY lane's `refresh_inflight` — a refresh in flight when the
+  ctx died may never deliver its callback, and a stuck `refresh_inflight=1` starves that
+  lane FOREVER (measured on a pod that was not even the one that died: 1245 msgs, then dead).
+- Latch the fault in `px_dma_err_cb` on `DOCA_ERROR_IO_FAILED`, not by waiting for a later
+  submit to rediscover it as `BAD_STATE`.
+- `IO_FAILED` on a credit refresh = that pod's host memory is gone ⇒ drop its `dma_ready`
+  (earlier + more reliable than comch). Guarded by `dma_generation` because the callback
+  can land AFTER the slot's next tenant registered, and by `IO_FAILED` specifically because
+  the ctx fault FLUSHES healthy pods' in-flight tasks through the same callback.
+
+**DPA ring lifecycle (issue A)** — `dpa_common.h` / `dpa_kernel.c` / `dpa.c` / `comch_server.c`
+- `DPA_MSG_RING_DEL` opcode + `teardown_pod_dma()` on disconnect. `rings[]` had NO removal
+  path at all (enum was ADD/WAKE/FWD_DONE only) and `dpa_thread_running[k]` never resets, so
+  `num_rings` grew monotonically for the whole process lifetime. `pod_id` is the recycled
+  slot index and `k_j = (pod_id*K+j)%N`, so a restarting pod returns to the SAME EUs ⇒ budget
+  was **MAX_DPA_RINGS = 8 cumulative connects per EU**, then the add was **silently dropped**
+  (msgq is fire-and-forget — the host still believed it succeeded). Never `DOCA_ERROR_AGAIN`.
+- DPA side: swap-with-last carrying `desc_idx` with the moved entry; `RING_ADD` resets
+  `desc_idx` and replaces a stale same-`pod_id` entry in place.
+
+**Forward-ring wait (issue B)** — `ring.h` / `ring.c` / `dmesh_core.c`
+- 5s deadline + `ring->dead` latch. The `for(;;)` was unbounded: a ring the DPA never
+  registered accepted exactly `size` descriptors then blocked the caller FOREVER. Cannot be
+  recovered in place (an abandoned Vyukov ticket leaves `seq[]` unadvanced and the DPA's
+  sequential `desc_idx` stalls on the hole), so it fails loudly instead.
+
+**Resource lifetime** — `dpa.c` / `comch_server.c`
+- DPU staging (`local_mmap`/`dma_buffer`, 32MB) is now allocated ONCE PER SLOT and REUSED.
+  It was re-allocated per incarnation and never freed ⇒ **32MB leaked per reconnect**.
+- Host-exported handles (`ring_mmaps`, `remote_mmap`, `buf_arrs`, `host_rx_mmap`) are
+  UNPUBLISHED (NULLed) at disconnect but deliberately **never destroyed** — see limitation.
+
+**bench.sh**
+- `restart` (DPU-only restart) command DELETED; validators no longer self-start their pod.
+  `verbs`/`stream` moved into `start_pods`. `deploy` is the only bring-up path.
+
+## HW validation — 2 independent fresh deploys, ALL CHECKS PASSED both
+
+| phase | result (run 1 / run 2) |
+|---|---|
+| validators (clean) | loopback 50000/0; verbs 50k×8KB, 20k×64B, 20k×8KB zc, 20k×4KB w4p4, 20k×8KB w8p2 all 0-fail; preload 5000/0 |
+| benchmarks | latency p50 **114 / 114** µs · thruput p50 **1262 / 1265** µs · churn p50 **1192 / 1195** µs — all fail=0 |
+| **14× pod restart vs RUNNING DPU** | **14/14 both runs**, rcnt **162k–177k** flat, fail=0 |
+| validators AFTER 14 restarts | loopback 50000/0 · verbs 50000/0 · preload 5000/0 |
+| DPU log audit | 0 `too many rings` · 0 `Ring add failed` · 0 `STALLED` · 0 `is dead` · **0 DMA faults · 0 ctx restarts** · log 8K |
+
+**Before → after on the restart path:** `169930 → 3524 → 0` (node dead by cycle 2–3, log
+flooded to multi-MB) ⇒ **flat 162k–177k for 14 cycles, log 8K**.
+
+Convergence receipts (each = one deploy+validate): flood `150,483 lines / never recovers`
+→ latch on the refresh path → `28` → `IO_FAILED` as death signal → `1` (but recovery 2.55s)
+→ latch in the err cb itself → `93ms` → reset lane credits on re-tenant → **0 faults**.
+
+## ⚠️ Reconciliation with "Egress mass-death self-heal — DOES NOT WORK" (2026-07-14, above)
+
+That entry says ctx `stop`→IDLE→`start` self-heal CANNOT work because a DMA to unmapped
+memory HANGS at the hardware level, so the ctx never reaches IDLE. **This session's
+recovery DID work — but that does NOT overturn it, and the two are not in conflict:**
+
+- That entry's scenario is **13 SIMULTANEOUS terminations** (mass death, many hung DMAs).
+  This session tested **single-pod restart** (×14, sequentially). Different load.
+- This recovery never calls `doca_ctx_stop()` — DOCA auto-transitions to STOPPING on the
+  fatal error; we only progress the PE and `doca_ctx_start()` once it reports IDLE.
+- **In the final config the fault does not occur at all** (0 restarts), because the root
+  cause was the lane-credit starvation that kept firing refreshes at dead memory. So
+  `px_engine_recover` is now a SAFETY NET, not a load-bearing path. It was separately
+  observed working (93ms restart) in the intermediate builds, single-pod only.
+
+**NOT tested this session: the 13-at-once mass-death case.** The 2026-07-14 finding
+(hung DMAs ⇒ ctx never reaches IDLE ⇒ recover spins) may well still hold there. If mass
+death is re-tested and `px_engine_recover` spins, that entry's prescription stands
+(bound in-flight DMA per pod, and/or a per-pod `doca_dma` ctx so one dead pod can't hang
+the shared engine).
+
+## Known limitation (documented, deliberate)
+
+**Host-exported handles LEAK once per reconnect.** Destroying them at ANY point faults the
+same shared `doca_dma` ctx (measured: throughput 48× drop on restart 2, node dead on
+restart 3 — with the destroy at slot reuse, already far later than the original code's
+destroy-at-disconnect). Freeing them safely needs a real quiesce protocol (RING_DEL ack +
+per-pod egress in-flight refcount + proxy custody drop, reclaimed async off the control PE).
+The 32MB staging that DOMINATED that leak is now reused per slot, so what remains is small.
+
+**Not done:** a graceful BYE+ACK before host unmap. There is no host shutdown path at all
+today (no `dpumesh_fini`, no UNREGISTER msg), it cannot cover crash/OOM/SIGKILL, and its
+timeout fallback needs the recovery path anyway. Worth adding later as an optimization so
+the graceful path never faults — not as a substitute.
+
+## ★ Corrections / retractions (recorded so nobody repeats them)
+
+1. **"The documented pod-restart rule is the DPA ring leak (issue A)" — WRONG.** Issue A
+   bites at ~8 restarts; the real wall was at 2. A was real but INVISIBLE behind it: nothing
+   ever reached the 8-ring budget, which is why A had never been HW-validated until now.
+2. **"The wedge is caused by destroying mmaps" — WRONG.** It reproduced identically with
+   ZERO destroys. The `credit refresh DMA failed` line, not the destroys, was the signal.
+   (I did make it worse first: removing the original disconnect-NULLing of `ring_mmaps[]`
+   deleted `px_lane_refresh_credit`'s only guard, so refreshes kept firing at dead memory
+   for 75+ seconds. Restoring the NULLing was necessary but not sufficient.)
+2b. **"Pod death wedges the egress — pre-existing bug" — OVERCLAIMED, and I only caught it
+   because the reviewer asked "didn't we already test pod restart/delete?".** We had:
+   2026-07-13 force-killed a backend mid-traffic → `rcnt=1,337,224 fail=0`, flood 0. Pod
+   death was ALREADY fixed and verified. The untested case was pod RE-TENANTING of a slot.
+   Always check what the prior test actually DID before declaring its subject broken — and
+   state the scenario, not just the subject, in the claim.
+3. **`dpu_proxy.c:716` dismissed as "just a log statement" — WRONG.** `px_drop_window:
+   stale upstream` at 716 is exactly the line that precedes the wedge. The original claim
+   pointing there was right.
+4. **`ring.c` `setup_dma_ring` uses `malloc` + hand-initialized fields.** Adding `dead`
+   without adding it to that list gave it heap garbage → ring 1 came up pre-"dead" and
+   fast-failed every enqueue on it (ring 0 happened to get a zero byte). **Now `calloc`;
+   keep it that way** — this class of bug will recur on the next field added.
+5. **Two fixes can fight.** Marking a pod dead on `IO_FAILED` removed the very retries that
+   were latching `dma_stalled` and triggering recovery ⇒ recovery went from prompt to 2.55s.
+   Recovery must be triggered by the error itself, not by rediscovering it later.
+6. **Method:** every wrong turn above came from fixing before confirming the cause. The
+   numbers only started moving once the log pinned it (`QP IO_FAILED → ctx STOPPING`).
+
+**Log-level trap:** `bench.sh` starts the DPU at `-l 40` (WARNING), so every `DOCA_LOG_INFO`
+is invisible — including `"New connection established (total pods: %d)"`. That is why
+`bench.sh`'s "DPU register timeout — continuing" warnings during deploy are **COSMETIC**,
+not failures. Use `DPUMESH_LOG_LEVEL=50` to see registration/RING_ADD/RING_DEL.
+
+---
+
+# 2026-07-15 — API consolidation (4 surfaces → 2) + multi-CQ; HW validation
+
+Collapsed the host surface to **exactly two public APIs**: the native API
+(`include/dpumesh/dmesh.h`, RDMA-verbs-shaped, zero-copy both ways) and the POSIX socket
+ABI (`libdmesh_preload.so`). The socket façade (`src/dmesh.c`) is **gone as a layer** — 87%
+of it was transport (`accept`/`connect`/`close`/`next_ready`/`emit_desc`/`flush`/`send_fin`)
+and moved to `dmesh_core.c`; the other 13% was POSIX byte-stream semantics (`read`'s copy +
+`rx_pos` partial cursor, `write`'s copy + >block carve) and moved **into the shim**, where
+the socket contract actually mandates it. `dmesh_core.h` left `include/` (it was public only
+by accident of `dmesh.h` #including it). Header count 4 → **1 public + 1 internal**; public
+symbols = **16**.
+
+Renames (the old names lied): `dmesh_connect` → **`dmesh_create_qp`** (it does no round
+trip — it is `ibv_create_qp`, not `rdma_connect`), `dmesh_conn_t` → `dmesh_qp_t`,
+`dmesh_close` → `dmesh_destroy_qp`. Deleted with zero callers: `dmesh_sendfile` (the shim's
+`sendfile()` uses a stack buffer + `shim_send`), `dpumesh_alloc_port_specific`,
+`dpumesh_dequeue`'s blocking path, `dmesh_commit`/`dmesh_event_fd`/`dmesh_wc_msg_max`
+(duplicates of `post_send`/`cq_fd`/`msg_max`).
+
+## Correctness — full validator matrix, ALL 0-fail
+
+| validator | result |
+|---|---|
+| `loopback 2000 1024 1` | **2000/0** · served 2000 · p50 115.7 µs |
+| `loopback 2000 8192 0` | **2000/0** · p50 116.8 µs |
+| `verbs 2000 1024 1 8 4` | **2000/0** · p50 154.9 µs |
+| `verbs 2000 8192 0 1 1` | **2000/0** · p50 92.3 µs |
+| `stream 20000 1024 self 1` | **20000/0** · served_bytes 20,580,000 (byte-exact) |
+| `preload 5000 1024 8` | **5000/0** · p50 121 µs · p99 357 µs · 25,091 rps |
+
+`preload` is the regression control: the shim's *behavior* was deliberately not changed
+(only its includes + absorbing the two byte-stream statics), and it passes untouched.
+
+## Backpressure — `grow_waits = 0` everywhere
+
+`dpumesh_tx_reserve` is now **non-blocking**: `NULL`+`EAGAIN` on a full SQ instead of the
+nanosleep ladder it used to spin in (the `ibv_post_send` contract). **`waits=0` on every run
+measured today**, at every concurrency/thread count/payload — the elastic ring never hit its
+in-flight ceiling, so backpressure has never actually occurred in this workload. That
+retires the question of whether the shim needs honest `EPOLLOUT` (a socketpair fd-realization
+instead of the eventfd): it would cost a **per-message** syscall upgrade (eventfd counter →
+AF_UNIX skb alloc) to fix a path that never executes. Not doing it. Revisit only if
+`waits` ever moves.
+
+Two spins provably removed rather than tuned:
+- `tx_next_send`'s send-unit-FIFO wait: an init clamp (`maxb * ceil(block_size/slot_size) <=
+  TX_SU_DEPTH`) makes the block window bind strictly first, so the FIFO can never fill and
+  the branch is unreachable by construction.
+- `sched_yield()` in the shim's `shim_send_iov`: was **dead code** — `dmesh_write` never
+  returned EAGAIN (`tx_reserve` slept instead) and the errno it tested was stale. It would
+  have gone *live* the moment `tx_reserve` started returning EAGAIN, so the blocking retry
+  moved into the shim's own `stream_write` in the same change. `sched_yield` count in
+  `src/` is now **0**.
+
+## Multi-CQ — shipped on fidelity, NOT on performance
+
+`ibv_create_cq`/`dmesh_create_cq` now exists; each CQ owns its own ready list + completion
+fd, and a QP belongs to the CQ that created or accepted it. The accept queue stays
+channel-wide and multi-consumer (it already was), so every CQ may poll it and whichever
+accepts a conn owns it — SO_REUSEPORT-style distribution for free.
+
+**A/B (one build, temporary knob, since removed), shards=2+egress2, conc=4/thread:**
+
+| threads | one CQ + mutex | CQ per thread | Δ |
+|---|---|---|---|
+| 1 | 0.0301 | 0.0312 | +3.7% |
+| 2 | 0.0627 | 0.0653 | +4.2% |
+| 4 | 0.0798 | 0.0837 | +4.9% |
+| 8 | 0.1391 (p50 225 µs) | 0.1464 (p50 186 µs) | +5.2% (p50 −17%) |
+
+**The shared CQ scales 4.6x too.** Multi-CQ is worth ~5% Mrps / ~17% p50 at 8 threads —
+real, but it was never the bottleneck. It ships because folding the CQ into the channel
+bakes "one RX consumer per process" into the API — a ceiling the host hits the moment the
+DPU stops being the binding constraint (③ host-emit). One CQ per thread is what verbs does
+and costs ~nothing.
+
+## RETRACTED: the "~2x regression" was a measurement artifact
+
+Mid-session this log's methodology bit me. I reported a ~2x throughput regression by
+comparing a **default, unsharded** deploy at **1024B/1024B** against the reference at
+`:4406` — whose section header two lines up (`:4404`) reads *"HW A/B (all full deploys,
+**② shards=2 + egress2**, greeter **32B/8B**)"*. Unsharded vs sharded. The "2x" I found was
+exactly the documented ②+egress2 gain (2.02–2.15x) — **a phantom regression whose size
+matches a known config delta is the tell.**
+
+Re-measured with the reference's own config (`DPUMESH_INGEST_SHARDS=2
+DPUMESH_ARM_EGRESS_THREADS=2`, 32B/8B) — **both points reproduce at or above reference:**
+
+| config | reference (`:4406`) | consolidated API |
+|---|---|---|
+| conc=16, 2thr | 0.139–0.150 Mrps | **0.153** (p50 178 µs) |
+| conc=32, 2thr | 0.181–0.209 Mrps | **0.211** (p50 292 µs) |
+
+Also wrong in that retracted claim: the flat thread sweep I called "a textbook serialized
+consumer". A **default (unsharded) deploy pins to ~0.102 Mrps regardless of
+concurrency/threads/payload**, with p50 = N/0.102 (pure Little's law) — that flat line is the
+**unsharded DPU funnel ceiling**, not a host bottleneck. Thread scaling is only observable
+below saturation; at conc=4/thread (shards=2+egress2):
+
+| threads | 1 | 2 | 4 | 8 |
+|---|---|---|---|---|
+| Mrps | 0.029 | 0.088 | **0.200** | 0.176 |
+| p50 (µs) | 115 | 173 | 297 | 1474 |
+
+**6.8x from 1→4 threads**, then the DPU cap (~0.20) binds and 8 threads just queues.
+
+## Core bug found and fixed: `poll_cq` silently under-delivered
+
+`loopback` failed 100% after the port — request routed back and echoed (`nserv=1
+served=1`), reply never landed (`got=0/1024`). Root cause: `ctx->notify_enabled` gated
+`arm_ready_after_push`, and the flag was only set by `dmesh_cq_fd()`. **A pure-polling
+client that never asks for the fd received nothing on ESTABLISHED conns** — a new conn's
+first message rides the separate accept queue, which is *not* gated, hence the
+request-works/reply-vanishes asymmetry. `verbs_dpumesh.c` passed only because it happens to
+call `cq_fd`. Fixed in the core, not the validator: `notify_enabled` **deleted**; readiness
+is live from `dmesh_create_cq`. `cq_fd` is now purely the optional idle-sleep path.
+
+## Method notes
+
+- **`bench.sh loopback` is single-threaded** (`accept` → `handle_ctrl` serially). A wedged
+  `RUN 2000` at 5 s/round-trip runs for ~3 h and every later `nc` silently queues behind it
+  in the listen backlog — which reads exactly like "pod down". Probe with small `N` via
+  `nc <podIP> 9092`; `kubectl delete pod` to abort.
+- Bench binaries are **not** rebuilt by `make all` when only the library changes (the lib is
+  an order-only prerequisite), so a stale binary links against a deleted symbol and the
+  build looks green. `rm build/bin/<x>` to force.

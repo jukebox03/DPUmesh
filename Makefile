@@ -34,7 +34,7 @@ RPATHS  := -Wl,-rpath,/usr/local/lib \
 # ---- host transport library --------------------------------------------------
 LIB_SRCS := \
 	src/dmesh_core.c \
-	src/dmesh.c \
+	src/dmesh_api.c \
 	doca/common.c \
 	doca/object.c \
 	doca/buffer.c \
@@ -50,11 +50,12 @@ LIB := $(LIBDIR)/libdpumesh.so
 
 # ---- consumers of the library ------------------------------------------------
 # dmesh_* API clients (socket/epoll façade over dmesh.h)
-DMESH_BINS := bench_dpumesh echo_dpumesh loopback_dpumesh stream_dpumesh
+DMESH_BINS := bench_dpumesh echo_dpumesh loopback_dpumesh stream_dpumesh verbs_dpumesh
 bench_dpumesh_SRC    := bench/bench_dpumesh.c
 echo_dpumesh_SRC     := bench/echo_dpumesh.c
 loopback_dpumesh_SRC := bench/validators/loopback_dpumesh.c
 stream_dpumesh_SRC   := bench/validators/stream_dpumesh.c
+verbs_dpumesh_SRC    := bench/validators/verbs_dpumesh.c
 
 # LD_PRELOAD shim (interposes libc sockets → dmesh) + its vanilla-TCP validators
 PRELOAD := $(LIBDIR)/libdmesh_preload.so
@@ -86,9 +87,11 @@ $(BINDIR)/$(1): $($(1)_SRC) | dirs lib
 endef
 $(foreach b,$(DMESH_BINS),$(eval $(call DMESH_BIN_RULE,$(b))))
 
-# the shim itself needs the dmesh_* symbols → links the library too
+# The shim is the SECOND façade on the core, not a client of the native API: it needs
+# conn internals + the internal lifecycle, so it compiles against src/dmesh_core.h
+# (-Isrc) and links the library for the shared symbols.
 $(PRELOAD): src/dmesh_preload.c | dirs lib
-	$(CC) -O2 -g -fPIC -shared -Iinclude -o $@ src/dmesh_preload.c \
+	$(CC) -O2 -g -fPIC -shared -Iinclude -Isrc -o $@ src/dmesh_preload.c \
 		-L$(LIBDIR) -ldpumesh -lpthread -ldl $(RPATHS)
 	@echo "  -> $@"
 
