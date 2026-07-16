@@ -4749,3 +4749,222 @@ is live from `dmesh_create_cq`. `cq_fd` is now purely the optional idle-sleep pa
 - Bench binaries are **not** rebuilt by `make all` when only the library changes (the lib is
   an order-only prerequisite), so a stale binary links against a deleted symbol and the
   build looks green. `rm build/bin/<x>` to force.
+
+# 2026-07-16 — echo greeter pegged ONE CORE at IDLE: app bug, not the API — FIXED + HW-VALIDATED. `grow_waits = 0` **RETRACTED**
+
+Reported from `htop`: "echo dpumesh is using 100% of one core". It was real and had been running
+for hours — with **no traffic**. Root cause is entirely in `bench/echo_dpumesh.c`; the transport
+was asleep the whole time.
+
+## Diagnosis — per-thread `/proc`, not a profiler
+
+| pid 2407245 (stuck) | state | utime | stime | total |
+|---|---|---|---|---|
+| tid 2407245 — **greeter main loop** | **R** | 439,632 | **652,931** | **10,925 s** |
+| tid 2407386 — PE (transport) thread | S | 288 | 956 | 12 s |
+
+| control: pid 2410359 (same image, same deploy) | state | 5 s sample |
+|---|---|---|
+| main loop | **S** | **0 / 500 ticks = 0%** |
+
+A 10 s sample of the stuck main thread: **1000/1000 ticks = exactly 100% of one core**. Meanwhile
+`bench_dpumesh` (its client) was `Ssl` with 0:14 total — **idle, but alive**. Two facts fell out
+immediately: (1) the **PE thread was sleeping**, so this was above the API, not in the transport;
+(2) **`stime` > `utime`** ⇒ a syscall-bound spin (`epoll_wait`+`read`), not computation.
+
+## Root cause — two predicates that disagree
+
+The loop decides whether to sleep by reading `qn` alone:
+```c
+for (i...) if (((greeter_conn_t *)g_live[i]->user_data)->qn > 0) { pend = 1; break; }
+epoll_wait(epfd, events, MAX_EVENTS, pend ? 0 : -1);      /* pend -> timeout 0 = poll */
+```
+but `reply_pump` refuses to touch a conn it has given up on, **without clearing the FIFO**:
+```c
+while (gc->qn > 0 && !gc->dead) { ... }                   /* dead -> return, qn untouched */
+```
+So `dead=1` + non-empty FIFO reads as "work pending" **forever**: timeout pinned at 0, `poll_cq`
+returns 0, `reply_pump` does nothing → tight `epoll_wait`+`read` spin. `dead` is latched at three
+sites (`dmesh_alloc` non-EAGAIN fault, `post_send` fault, `qn >= REPLY_Q` overflow).
+
+**This is not an API gap.** A correct greeter sets `pend` only under real backpressure. The API's
+non-blocking `dmesh_alloc` merely *amplified* a missing line into a pegged core.
+
+## The actual missing line — `dead` is a DEFERRED-DESTROY MARKER with no sweep
+
+The predicate mismatch is a symptom. `dead` exists because the API forbids destroying mid-batch:
+
+> `dmesh.h` / `API.md`: *poll_cq can emit CONN_REQ plus that QP's landed messages in **one batch**,
+> so destroying mid-batch dangles later `wc[]` entries.* **Defer destroys to a sweep after the batch.**
+> And `dmesh_post_send` → `EBADMSG` is documented as **"descriptor fault → destroy the QP"**.
+
+`reply_pump` runs inside the batch (via `on_request` ← `bench_reframe_feed` ← the `poll_cq` loop),
+so it *cannot* destroy — it can only mark. `dead` IS that mark. **The greeter never wrote the
+sweep**, so the destroy was deferred forever and dead conns became zombies: still in `g_live`, still
+holding a `MAX_CONNS` slot, reclaimed only at `RECV_FIN` — which an **idle-but-alive** peer never
+sends. Hence "forever". The intent was visible in the code: the post-batch loop already iterated
+**backwards**, which is exactly the safe-removal pattern for `reclaim`'s swap-with-last compaction.
+
+## Fix — write the sweep
+
+```c
+for (int i = g_nlive - 1; i >= 0; i--) {
+    reply_pump(g_live[i]);                   /* may itself latch dead */
+    if (((greeter_conn_t *)g_live[i]->user_data)->dead) reclaim(g_live[i]);
+}
+```
+Safe here and only here: past the `wc[]` batch, and `dmesh_destroy_qp` clears the CQ resume cursor
+itself (`if (c->cq && c->cq->vq_cur == c) c->cq->vq_cur = NULL`) and discards unsent TX bytes.
+It fixes three things at once, where the predicate patch fixed one:
+- the peer gets a **FIN** and *learns*, instead of waiting forever for a reply that never comes;
+- the `g_live` / `MAX_CONNS` slot is freed instead of leaking to a zombie;
+- the conn leaves `g_live`, so `pend` **structurally cannot see it** — no invariant to maintain.
+
+**Rejected: my first patch (`conn_kill()`)** — it cleared the FIFO so the two predicates agreed.
+That silences the spin and leaves all three problems above. Reverted; the helper is gone and the
+three sites are plain `gc->dead = 1` again. Net: one helper deleted, two lines added.
+
+## HW validation — same pod, before vs after
+
+| phase | echo main thread | state |
+|---|---|---|
+| **BEFORE (stuck pod 2407245)** | **100% of one core** | **R** |
+| idle, pre-traffic | 0 / 1500 ticks = **0%** | S |
+| idle, after validator matrix | 0 / 1500 ticks = **0%** | S |
+| idle, after benchmark load | 0 / 2000 ticks = **0%** | S |
+| **under load** (1 KB × conc 32) | 177 / 800 ticks = **22%** | S |
+| idle, final | 0 / 2000 ticks = **0%** | S |
+
+**Cumulative since pod start: 1,046 ticks (10.5 s)** vs the stuck pod's **10,925 s**. It sleeps at
+idle, works under load, and goes back to sleep — which is the whole claim.
+
+### Validator matrix — ALL 0-fail, on **both** deploys (config: **default**, shards=1, egress=1)
+
+Deploy A = the rejected `conn_kill` patch; deploy B = the shipped sweep. Both runs, same matrix:
+
+| validator | B (sweep, shipped) | A (conn_kill) | prior (2026-07-15) |
+|---|---|---|---|
+| `loopback 2000 1024 1` | **2000/0** · p50 115.9 µs | 2000/0 · 115.9 | 115.7 µs |
+| `loopback 2000 8192 0` | **2000/0** · p50 116.7 µs | 2000/0 · 116.7 | 116.8 µs |
+| `verbs 2000 1024 1 8 4` | **2000/0** · p50 155.2 µs | 2000/0 · 153.4 | 154.9 µs |
+| `verbs 2000 8192 0 1 1` | **2000/0** · p50 93.3 µs | 2000/0 · **105.4** | 92.3 µs |
+| `preload 5000 1024 8` | **5000/0** · p50 121 · p99 445 µs · 23,884 rps | 5000/0 · 119 / 203 · 24,415 | 121 / 357 µs · 25,091 rps |
+
+Running the matrix **twice across two deploys** paid for itself: deploy A's `verbs 8192` p50 of
+105.4 µs (+14% vs the 92.3 baseline) looked like a regression on a pod this change does not touch.
+Deploy B put it at 93.3 µs. It was **deploy-to-deploy variance**, now demonstrated rather than
+asserted. `preload` p99 is likewise unstable across deploys (203 / 445 / 357 µs) at a stable p50 —
+do not read a single p99 sample as signal. Everything else is flat.
+
+### Benchmark through the fixed greeter — 0 fail (deploy B / deploy A)
+
+| point | result |
+|---|---|
+| `dpumesh 1024 8 32 10 1000 1` | mrps 0.0978/0.0975 · 0.801 Gb/s · p50 340 µs · **fail=0** · waits=**0** |
+| `dpumesh 8192 8 32 10 1000 1` | mrps 0.0645/0.0642 · 4.227 Gb/s · p50 485/499 µs · **fail=0** · waits=**662/554** |
+| `dpumesh 64 8 32 10 1000 4` | mrps 0.1028/0.1029 · 0.053 Gb/s · p50 1253 µs · **fail=0** · waits=**0** |
+
+## RETRACTION — `grow_waits = 0` is FALSE
+
+The 2026-07-15 entry above claims *"`waits=0` on every run measured today, **at every
+concurrency/thread count/payload** — backpressure has never actually occurred"*, and used it to
+retire the shim's `EPOLLOUT` question ("a path that never executes").
+
+**`waits` = 554 and 662** at 8 KB × conc 32, on two independent default deploys — 0 at 64 B and
+1 KB, reproducibly non-zero at 8 KB. Backpressure **does** occur; it is payload- and
+DPU-config-dependent (today: shards=1/egress=1 — the prior entry does not state its config, cf.
+the baseline-config trap). Consequences:
+
+- **The `EAGAIN` path is live code, not a theoretical branch.** Every claim resting on
+  "it never executes" is now unsupported — including *"Revisit only if `waits` ever moves"*: it moved.
+- The greeter stays at 0% only because **its replies are 8 B**, so its ring never fills. The
+  **client** (8 KB requests) is what hit 554. A server with large replies WOULD poll here for real.
+- `design/API.md` §"Backpressure" said `EAGAIN` means the ceiling was hit, "**not that memory ran
+  out**". Also false: `dmesh_core.c:1127` returns `EAGAIN` when `block_pool_grab()` fails — the
+  process-wide 512-block pool is empty because **other** conns hold it. Three EAGAIN sites, two
+  causes (`:1100`/`:1119` = this conn's ceiling; `:1127` = shared-pool exhaustion). The second is
+  not the caller's doing and **no per-conn accounting prevents it** — so `EAGAIN` is a normal
+  resource condition, never a caller error. This is exactly where the `ibv_post_send`/`ENOMEM`
+  analogy breaks: verbs sends from *your* memory (only the descriptor count is finite, so
+  overrunning it IS your bug); here the buffer itself is a finite shared resource.
+
+## Doc fixes shipped with this
+
+- **`dmesh.h:79` — `dmesh_sq_depth()` was a PHANTOM**: documented as "reports the per-conn
+  descriptor cap", never declared, never defined, zero callers. Removed. (The API exposes no
+  in-flight budget at all — `DPUMESH_TX_MAXB`×`_TX_BLOCK` live in env vars, so unlike verbs'
+  `max_send_wr = 4` a caller cannot compute when `alloc` will fail. Left as-is: the shared pool
+  makes it unpreventable anyway, so the number would not buy prevention.)
+- **`API.md` §2 "No send completions"**: the stated reason — *"unsignaled is the verbs default"* —
+  is wrong. Verbs chooses **per-WR** (`IBV_SEND_SIGNALED`), and hello-world `rdma_cm` sets
+  `sq_sig_all = 1` and calls `rdma_get_send_comp()`. Replaced with the honest reason: nothing needs
+  one (you do not own the send buffer; TX_ACKs reclaim the ring on the PE thread) — and flagged
+  that this is weaker now that `grow_waits` ≠ 0.
+- **`API.md` §4a/§4b**: §4b's retry-in-place `while (!(b = dmesh_alloc(...))) poll_cq(...)` is
+  correct **only** for a single-conn program (it IS the whole loop; nothing to starve). Marked as
+  such, and §4a now warns a reactor must park instead + keep the parked set exact.
+- **`EAGAIN` is documented as non-fatal** in both `API.md` and `dmesh.h`.
+
+## Mine, not the code's
+
+I spent several turns trying to force `dmesh_alloc` onto the `ibv_post_send` contract and proposed,
+then withdrew, three designs (`DMESH_WC_SEND`, blocking-alloc, create-time budget). All were
+category errors: **verbs has no allocator**, so "what would verbs do?" has no answer for `alloc` —
+the finite *shared* buffer decides the semantics, not the label. The user's framing was right:
+alloc failure is a resource condition, not an error, and a reactor API has exactly ONE wait point
+(the CQ), so a second one inside `alloc` is incoherent. Net API change: **none**.
+
+## Which site latched `dead`? — NOT reproduced; narrowed to one by elimination
+
+**The trigger was not reproduced** — the original pod died in the redeploy. The three sites were
+temporarily instrumented (`DEAD @alloc|@post_send|@fifo` + errno, plus a line per sweep); **that
+instrumentation has since been REMOVED** — two of the four `fprintf`s sat inside `reply_pump`, which
+runs per reply, and a `fprintf`+`strerror` in a hot function is not worth carrying for a branch that
+never fired. So a future occurrence is again anonymous; re-add them if it recurs.
+Attempted repro of `@fifo`: `point dpumesh 64 65536 1200 10 10 1` (64 KB replies to fill the 256 KB
+ring so `reply_pump` stalls, conc 1200 > `REPLY_Q` 1024). **`@fifo` did not fire.** It hit the
+already-documented limit above (`2026-07-14`, "Known limitation") instead: 1200 × 64 KB = **76 MB**
+of demanded in-flight against a 256 KB ring = **300×** the cap, so the writer throttles past the
+RUN deadline — `fail=125523`, greeter `served=63`, DPU log clean (no wedge). The pipeline throttles
+upstream long before `qn` can accumulate to 1024.
+
+Elimination over the three sites (CORRECTED — read `dpumesh_enqueue`/`dpumesh_tx_reserve`, do not
+reason from doc strings):
+- **`@alloc` (non-EAGAIN)** — reachable via `EINVAL` (bad port / `len==0` / `len>block_size`, none of
+  which the greeter produces: `want = min(total-done, block_size)`, port is the conn's own) **but
+  also via `ENOMEM`**: `dpumesh_tx_reserve` mallocs the per-conn `su_seq`/`su_end` lazily on first
+  send (`dmesh_core.c:1078-1081`) and returns `NULL`+`ENOMEM` if that fails. Not "unreachable" — I
+  said that earlier and it was wrong.
+- **`@fifo` (`qn >= 1024`)** — needs > 1024 outstanding on ONE conn. Every recorded bench run uses
+  `conc` ≤ 32; forcing conc=1200 throttles upstream instead of overflowing (above). Unreachable in
+  practice.
+- **`@post_send` → `EBADMSG`** — `dpumesh_enqueue` returns −1 **only** after a forward ring stays
+  full for `RING_STALL_DEADLINE_SEC = 5` seconds, at which point it sets `ring->dead` and logs
+  `DOCA_LOG_ERR("...STALLED >5s...no DPA consumer is draining it")`. That is a **DPU-down / DPA-not-
+  draining catastrophe**, not a normal-traffic path — momentary congestion just backs off (1→50 µs)
+  and retries. So it is **loud, not silent**, and it is not the everyday failure I implied.
+
+**Correction of my own earlier claim.** I wrote that a "temporary wedge permanently kills a conn"
+via `@post_send`/`EBADMSG` and called it "the only reachable" site — three errors: (1) `@alloc` is
+also reachable (`ENOMEM`); (2) `ring->dead` is the **consequence of a 5 s stall**, not of momentary
+congestion — the causality was backwards; (3) it is logged, not silent — today's pods show **0**
+`STALLED`/`busy`/`dead` lines, consistent with every test passing. The likeliest explanation for the
+original 2407245 is that it was latched during the **stale-`px_lane` ring-wedge era** documented on
+2026-07-15 (since fixed), i.e. an environment fault of that time, not a standing bug in current code.
+**Trigger: still unidentified. No standing wedge bug demonstrated.**
+
+**Validation status, stated honestly:** "the greeter no longer pegs a core" is **measured** (idle 0%,
+`state=S`, including after the 76 MB abuse run above — the old code would have spun). "the `dead`
+path is now correct" rests on **construction** (the sweep destroys the conn however `dead` is
+reached), not on a repro.
+
+## Also fixed — a log-spam bug that buried the diagnostics
+
+`if (g_served && (g_served % 200000) < 64)` printed `served=N` ~64 times per milestone, filling the
+log during the repro attempt above. **My first patch for it was wrong** and shipped: I read it as
+"matches served 0..63" and gated on `g_served >= 200000` — which fixed only the first milestone.
+The deploy proved it (`served=3800056 … 3800063`, 8 lines and counting). A modulo test **cannot**
+express "every 200k" here: `g_served` advances a few per loop pass, so the widened `< 64` window
+(there to survive a batch stepping over the exact multiple) stays true for ~64 consecutive passes at
+*every* multiple. Replaced with a milestone cursor (`g_served - g_reported >= 200000`), which fires
+once regardless of step size.

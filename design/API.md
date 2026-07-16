@@ -109,9 +109,12 @@ dmesh_destroy_qp(qp);                    // sends a FIN so the DPU frees the ups
 - **context + PD folded into the channel.** PD's job is to scope MRs; with no arbitrary
   `reg_mr` there are no MRs to scope. **The CQ is *not* folded in** — it is the one object
   carrying a concurrency constraint.
-- **No send completions.** Unsignaled is the verbs default and the high-performance idiom; here
-  it is the only mode, so the signal that SQ space freed is simply that a later `dmesh_alloc`
-  succeeds.
+- **No send completions.** Not because "unsignaled is the verbs default" (it isn't — verbs chooses
+  per-WR, and hello-world `rdma_cm` sets `sq_sig_all = 1`), but because nothing needs one: you do
+  not own the send buffer — `dmesh_alloc` does — so there is no "reuse it now" to report, and
+  TX_ACKs reclaim the ring on the PE thread without you. The only gain would be a wakeup when a
+  full ring drains, and no caller needs it: the §4b retry loop keeps the CQ moving while it waits.
+  Weaker than it looks, though — `grow_waits` is **not** 0 (Backpressure), so that path is live.
 
 ### From BSD sockets
 
@@ -171,7 +174,7 @@ dmesh_destroy_qp(qp);                    // sends a FIN so the DPU frees the ups
 ### Send — `ibv_post_send`
 | Function | Returns / errno |
 |---|---|
-| `void *dmesh_alloc(dmesh_qp_t *qp, uint32_t len)` | A pointer to **`len` contiguous bytes** in the QP's pre-registered TX ring — the DMA source; fill it directly. **NEVER BLOCKS.** `NULL`+`EAGAIN` = SQ full (retry later; a TX_ACK will free space). `NULL`+`EINVAL` = `len==0`, `len > dmesh_post_max()`, or the QP is not established. There is no separate commit — `post_send` finalizes. |
+| `void *dmesh_alloc(dmesh_qp_t *qp, uint32_t len)` | A pointer to **`len` contiguous bytes** in the QP's pre-registered TX ring — the DMA source; fill it directly. **NEVER BLOCKS.** `NULL`+`EAGAIN` = no ring space now — this QP's ceiling **or** the shared pool (see Backpressure); normal, **not** fatal, retry. `NULL`+`EINVAL` = `len==0`, `len > dmesh_post_max()`, or the QP is not established. There is no separate commit — `post_send` finalizes. |
 | `int dmesh_post_send(dmesh_qp_t *qp, const void *buf, uint32_t len, uint64_t wr_id, unsigned flags)` | Post the buffer from the QP's most recent `dmesh_alloc`; `len` ≤ that alloc's length. `wr_id` reserved, ignored. `flags`: `DMESH_SEND_MORE` defers the doorbell (the WR-list idiom) — the next post without it, or a `dmesh_flush`, ships everything in order. `0`, or `-1` `EINVAL` / `EBADMSG` (descriptor fault → destroy the QP). **Ownership transfers at post; do not touch `buf` after.** |
 | `int dmesh_flush(dmesh_qp_t *qp)` | Ring the doorbell for everything posted with `DMESH_SEND_MORE`. Cannot run out of *per-QP* queue space (alloc reserved the slot), but **may back off briefly on the shared host→DPU descriptor ring** — a global resource that saturates only if the DPA falls behind. A ring wedged past its deadline fails `EBADMSG` rather than hanging. |
 
@@ -203,12 +206,16 @@ typedef struct dmesh_wc {
   hands the QP back so you read your context off it. The transport never touches it.
 
 ### Backpressure, in one paragraph
-`dmesh_alloc` never sleeps, so **one backpressured QP can never stall the others on your
-thread**. On `EAGAIN`: go do other work and retry — a later alloc succeeds once the DPU's
-TX_ACKs free ring space. The TX ring is an **elastic block chain** that grows on demand
-(`DPUMESH_TX_BLOCK` 64 KB blocks, up to `DPUMESH_TX_MAXB` = 4 → ≤ 256 KB in flight per QP), so
-`EAGAIN` means the QP hit its in-flight ceiling, not that memory ran out. Measured on this
-deploy, `grow_waits` is **0** — backpressure has not occurred in practice.
+`dmesh_alloc` never sleeps: you already have exactly ONE wait point (the CQ), and a second inside
+alloc would contradict that **and** stall every other QP on your thread. On `EAGAIN`, go do other
+work and retry. **`EAGAIN` is a normal resource condition, never a caller error** — either this QP
+hit its in-flight ceiling (elastic block chain: `DPUMESH_TX_BLOCK` 64 KB × `DPUMESH_TX_MAXB` 4 →
+≤ 256 KB/QP) **or** the shared pool (`n_blocks` = 512) is momentarily empty because *other* QPs
+hold it, which no per-QP accounting can prevent. That second cause is exactly where the
+`ibv_post_send`/`ENOMEM` analogy stops: verbs sends from *your* memory, so only the descriptor
+count is finite and overrunning it is your bug; here the buffer itself is shared and finite.
+Measured 2026-07-16 (default deploy, two runs): `grow_waits` = 0 at 64 B and 1 KB but **554–662** at
+8 KB × conc 32 — it **does** occur, payload- and DPU-config-dependent. `EAGAIN` is live code.
 
 ### Large payloads (> `msg_max`) — no special API
 A post up to `dmesh_post_max` (64 KB) is legal and arrives as **several** ≤ `msg_max`
@@ -261,12 +268,16 @@ int main(void) {
     }
 }
 ```
-> `dmesh_alloc` can return `NULL`+`EAGAIN`. A real server parks the body and retries from the
-> loop rather than dropping it — see `bench/validators/loopback_dpumesh.c`.
+> `dmesh_alloc` can return `NULL`+`EAGAIN`. A real server parks the body and retries from the loop
+> rather than dropping it — see `loopback_dpumesh.c`. **Not §4b's retry-in-place loop:** in a
+> reactor that starves every other conn. And a conn you gave up on must leave the parked set, or
+> the loop never sleeps — destroy it in the post-batch sweep (`echo_dpumesh.c`), which is where the
+> "defer destroys" rule above wants it anyway.
 
 ### 4b. Client — request/response, single-outstanding
-With **one** request outstanding, the reply that arrives IS this request's reply — no
-correlation needed.
+With **one** request outstanding, the reply that arrives IS this request's reply — no correlation
+needed. Retrying `dmesh_alloc` in place is correct **only here**: this loop is the whole program,
+so there is nothing to starve and it keeps draining the CQ. A reactor must park instead (§4a).
 ```c
 dmesh_channel_t *ch = dmesh_create_channel(DMESH_SVC_NONE);   // pure client
 dmesh_cq_t      *cq = dmesh_create_cq(ch);
@@ -274,7 +285,7 @@ dmesh_qp_t      *qp = dmesh_create_qp(cq, /*service*/11);
 
 for (int i = 0; i < N; i++) {
     void *b;
-    while (!(b = dmesh_alloc(qp, len)))                       // EAGAIN: SQ full, keep the loop alive
+    while (!(b = dmesh_alloc(qp, len)))                       // EAGAIN: no ring space — normal, not fatal
         { if (errno != EAGAIN) goto dead; dmesh_poll_cq(cq, wc, 64); }
     fill(b, len);
     dmesh_post_send(qp, b, len, 0, 0);

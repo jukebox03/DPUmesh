@@ -71,14 +71,26 @@
  *     receiver reassembles (app framing, as with a byte stream).
  *   - Different conns are fully independent (per-conn rings).
  *
- * BACKPRESSURE — dmesh_alloc NEVER BLOCKS (the ibv_post_send contract):
- *   It returns NULL + errno=EAGAIN when the conn's send queue is full, exactly
- *   as ibv_post_send returns ENOMEM on a full SQ. It does NOT sleep, so one
- *   backpressured conn can never stall the other conns on your thread. On EAGAIN:
- *   go do other work and retry — a later alloc succeeds once the DPU's TX_ACKs
- *   free ring space. dmesh_sq_depth() reports the per-conn descriptor cap.
- *   The TX ring also GROWS on demand (elastic block pool), so EAGAIN means the
- *   conn hit its in-flight ceiling, not that memory ran out.
+ * BACKPRESSURE — dmesh_alloc NEVER BLOCKS:
+ *   It returns NULL + errno=EAGAIN when there is no ring space right now. It does
+ *   NOT sleep — you already have exactly ONE wait point (the CQ, via dmesh_cq_fd),
+ *   and a second one inside alloc would both contradict that shape and stall every
+ *   other conn on your thread. On EAGAIN: do other work and retry — a later alloc
+ *   succeeds once the DPU's TX_ACKs free space.
+ *
+ *   EAGAIN has TWO causes, and you can neither tell them apart nor need to:
+ *     - this conn hit its own in-flight ceiling (DPUMESH_TX_MAXB blocks), OR
+ *     - the process-wide block pool is momentarily empty because OTHER conns hold it.
+ *   The second is not your conn's doing and NO amount of per-conn accounting prevents
+ *   it. EAGAIN is therefore a normal resource condition, NOT a caller error — never
+ *   treat it as fatal. (This is exactly where the analogy to ibv_post_send's ENOMEM
+ *   stops: verbs sends from YOUR memory, so only the descriptor count is finite and
+ *   overrunning it IS your bug. Here the buffer itself is a finite shared resource.)
+ *
+ *   It DOES occur (dmesh_get_tx_stats): measured 2026-07-16 on the default deploy,
+ *   grow_waits = 0 at 64 B / 1 KB but 554-662 at 8 KB x conc 32. Payload- and DPU-
+ *   config-dependent — treat EAGAIN as live code, not a theoretical branch. See
+ *   "Handling EAGAIN" on dmesh_alloc below.
  *
  * RECV MODEL — SRQ + credit:
  *   The transport owns the landing buffers; there is no per-QP post_recv. Each
@@ -297,10 +309,25 @@ int dmesh_destroy_qp(dmesh_qp_t *c);
 /* Reserve `len` CONTIGUOUS bytes in this conn's pre-registered TX ring and return a
  * pointer into transport DMA memory to fill DIRECTLY (no memcpy). Then dmesh_post_send.
  *
- * NEVER BLOCKS — the ibv_post_send contract. Returns NULL with errno:
- *   EAGAIN   the conn's SQ is full (in-flight ceiling reached). Do other work and
- *            retry; a TX_ACK will free space. This is the ONLY transient error.
+ * NEVER BLOCKS. Returns NULL with errno:
+ *   EAGAIN   no ring space right now — EITHER this conn hit its in-flight ceiling
+ *            OR the shared block pool is momentarily empty (other conns hold it).
+ *            A normal resource condition, NOT a caller error. This is the ONLY
+ *            transient error.
  *   EINVAL   len == 0, len > dmesh_post_max(), or the conn is not established.
+ *
+ * Handling EAGAIN — pick by your program's shape, and do NOT die on it:
+ *   - Single-conn / request-response: retry in place, draining the CQ each pass:
+ *       while (!(b = dmesh_alloc(qp, len))) {
+ *           if (errno != EAGAIN) goto dead;
+ *           dmesh_poll_cq(cq, wc, N);          // keep the CQ moving while you wait
+ *       }
+ *   - Reactor (one thread, many conns): do NOT spin like that — it starves the other
+ *     conns. Park the body on that conn and re-post it from your loop; see
+ *     bench/echo_dpumesh.c. Note the loop must then poll rather than sleep while a
+ *     reply is parked (nothing wakes cq_fd when the SQ drains), so keep the parked
+ *     set exact: a conn you have given up on MUST NOT read as still-pending, or your
+ *     loop spins at 100% forever.
  *
  * There is no separate "commit": dmesh_post_send finalizes the bytes. */
 void *dmesh_alloc(dmesh_qp_t *c, uint32_t len);

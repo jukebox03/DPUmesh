@@ -46,6 +46,7 @@ static dmesh_channel_t *g_s        = NULL;
 static dmesh_cq_t      *g_cq       = NULL;   /* the one event loop's CQ */
 static uint32_t         g_post_max = 0;   /* max bytes one dmesh_alloc/post can carry */
 static long             g_served   = 0;   /* requests answered (all conns; single-loop) */
+static long             g_reported = 0;   /* g_served at the last progress print */
 
 typedef struct { uint32_t seq, size; } reply_t;
 
@@ -58,7 +59,8 @@ typedef struct {
     int      qh, qn;         /* FIFO head, depth */
     uint32_t done;           /* bytes of q[qh]'s frame already posted */
     int      idx;            /* this conn's slot in g_live */
-    int      dead;           /* send fault / FIFO overflow -> stop replying */
+    int      dead;           /* give up: stop replying, and get destroyed by the sweep in
+                              * the loop below (dmesh.h forbids destroying mid-batch). */
 } greeter_conn_t;
 
 static dmesh_qp_t *g_live[MAX_CONNS];
@@ -77,7 +79,7 @@ static void reply_pump(dmesh_qp_t *c) {
             uint32_t want = total - gc->done;
             if (want > g_post_max) want = g_post_max;
             uint8_t *b = (uint8_t *)dmesh_alloc(c, want);
-            if (!b) { if (errno != EAGAIN) gc->dead = 1; return; }
+            if (!b) { if (errno != EAGAIN) gc->dead = 1; return; }    /* EAGAIN: keep our place */
             uint32_t off = 0;
             if (gc->done == 0) {
                 bench_put_hdr(b, BENCH_REP_MAGIC, seq, size, 0);
@@ -101,6 +103,7 @@ static void on_request(uint32_t seq, uint32_t req_len, uint32_t reply_size, void
     (void)req_len;
     dmesh_qp_t *c = (dmesh_qp_t *)user;
     greeter_conn_t *gc = (greeter_conn_t *)c->user_data;
+    if (gc->dead) return;                              /* reframer emits several per feed */
     if (gc->qn >= REPLY_Q) { gc->dead = 1; return; }   /* client outran its own window */
     gc->q[(gc->qh + gc->qn) % REPLY_Q] = (reply_t){ .seq = seq, .size = reply_size };
     gc->qn++;
@@ -154,7 +157,15 @@ int main(void) {
     struct epoll_event events[MAX_EVENTS];
     dmesh_wc_t wc[CQ_BATCH];
     for (;;) {
-        int pend = 0;                                /* a reply is waiting on SQ space */
+        /* A reply is parked on SQ space -> poll instead of sleeping: nothing wakes this fd
+         * when the SQ drains (dmesh_alloc's EAGAIN carries no completion), so sleeping
+         * here would strand the reply.
+         * Only LIVE conns reach here: the sweep below destroys the ones we gave up on, so
+         * a conn that will never drain its FIFO can no longer pin this timeout at 0 —
+         * the 100%-core bug this greeter shipped. A greeter's replies are TINY (repsz
+         * default 8 B) so its ring rarely fills; a server with large replies would poll
+         * here for real. */
+        int pend = 0;
         for (int i = 0; i < g_nlive; i++)
             if (((greeter_conn_t *)g_live[i]->user_data)->qn > 0) { pend = 1; break; }
 
@@ -183,11 +194,27 @@ int main(void) {
                 }
             }
         }
-        for (int i = g_nlive - 1; i >= 0; i--)       /* re-post replies the SQ refused */
-            reply_pump(g_live[i]);
+        /* Post-batch: re-post replies the SQ refused, then DESTROY whatever we gave up on.
+         * This is the deferred-destroy sweep dmesh.h asks for (never destroy mid-batch —
+         * poll_cq can hand the same QP back later in wc[]); past the batch it is safe, and
+         * destroy_qp clears the CQ's resume cursor itself. Backwards, so reclaim's
+         * swap-with-last compaction cannot skip an entry. The FIN reclaim sends is the
+         * point: the peer LEARNS instead of waiting forever for a reply that will never
+         * come, and the conn leaves g_live so `pend` above can never see it again. */
+        for (int i = g_nlive - 1; i >= 0; i--) {
+            reply_pump(g_live[i]);                   /* may itself latch dead */
+            if (((greeter_conn_t *)g_live[i]->user_data)->dead) reclaim(g_live[i]);
+        }
 
-        if (g_served && (g_served % 200000) < 64)
+        /* Report every 200k. A modulo test cannot do this: g_served advances a FEW per
+         * loop pass, so `(g_served % 200000) < 64` (the old test, widened to survive a
+         * batch stepping over the exact multiple) stays true for ~64 consecutive passes
+         * and prints ~64 times per milestone — spam that buried the DEAD lines above.
+         * A milestone cursor fires exactly once, whatever the step size. */
+        if (g_served - g_reported >= 200000) {
+            g_reported = g_served;
             fprintf(stderr, "[greeter] served=%ld\n", g_served);
+        }
     }
 
     dmesh_destroy_cq(g_cq);
