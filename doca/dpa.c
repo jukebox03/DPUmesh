@@ -510,7 +510,7 @@ dmesh_doca_dpa_msgq_create(const struct dmesh_doca_dpa_msgq_create_attr *attr,
     msgq->target_consumer_id = consumer_id;
 
     consumer_ctx = doca_comch_consumer_as_ctx(msgq->consumer);
-    /* DPU→DPA direction: must fit the largest message (ADD_RING, ADD_REV_RING, etc.) */
+    /* DPU→DPA direction: must fit the largest message (DPA_MSG_RING_ADD, _RING_DEL, etc.) */
     result = doca_comch_consumer_set_imm_data_len(msgq->consumer, sizeof(struct comch_msg));
     if (result != DOCA_SUCCESS) {
         DOCA_LOG_ERR("Failed to set imm data len to %zu - %s",

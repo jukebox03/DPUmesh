@@ -9,7 +9,7 @@
  *
  *     [u32 total_len (incl. this 5B header)][u8 svc][payload ...]
  *
- * and routes EACH whole frame to service_table[svc] as a byte stream (a >8 KB
+ * and routes EACH whole frame to the service named by its svc byte as a byte stream (a >8 KB
  * frame is delivered as consecutive <=8 KB chunks — that is the byte-stream
  * contract; the receiver reframes itself). The frame boundary is decided by the
  * DPU parser, NOT by post boundaries: this app may pack several frames into one

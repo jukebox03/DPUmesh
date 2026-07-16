@@ -2003,11 +2003,12 @@ int px_drain(struct objects *objs) {
     return progressed;
 }
 
-/* ====== mocks (design/CORE.md §5.1 — the L7 is NOT built here) ====== */
+/* ====== built-in parsers — the REAL L7 hook is dpu_l7.c::dmesh_l7_route (design/CORE.md
+ * §5.1), selected per service by DPUMESH_PROXY_L7_SVC. These two are the deploy defaults. */
 
 /* pass-through: one seg per contiguous arrived run, destination deferred to the
- * L4 default route (service table + route-affinity pins). The parity/regression
- * mock — works with any byte stream, no app framing. */
+ * L4 default route (stickiness, else RR over the live backend set + route-affinity
+ * pins). The parity/regression parser — works with any byte stream, no app framing. */
 static int px_mock_passthru(struct objects *objs, dmesh_proxy_conn *conn,
                             const uint8_t *buf, uint32_t avail,
                             struct dmesh_route_seg *segs, int max, uint32_t *consumed) {
@@ -2019,12 +2020,12 @@ static int px_mock_passthru(struct objects *objs, dmesh_proxy_conn *conn,
     return 1;
 }
 
-/* frame: deterministic byte-stream framing the mock understands (design/CORE.md §5.1):
+/* frame: the deterministic byte-stream framing demo (design/CORE.md §5):
  *   [u32 LE total_len (incl. 5B header)][u8 svc][payload]
  * Consumes only WHOLE frames (an incomplete tail is kept → exercises the
- * window/seam), routes each frame gateway-style by its svc byte via the
- * service table (svc 0xFF or unknown → defer to the client's addressed
- * service). Replies pass through frame-whole to the conntrack peer. */
+ * window/seam), routes each frame gateway-style by its svc byte through the normal
+ * L4 route (svc 0xFF or unknown → defer to the client's addressed service).
+ * Replies pass through frame-whole to the conntrack peer. */
 static int px_mock_frame(struct objects *objs, dmesh_proxy_conn *conn,
                          const uint8_t *buf, uint32_t avail,
                          struct dmesh_route_seg *segs, int max, uint32_t *consumed) {

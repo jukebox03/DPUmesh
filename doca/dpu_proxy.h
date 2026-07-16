@@ -31,7 +31,8 @@
  *
  *   DPUMESH_PROXY=passthru|1  deploy default = passthru: one seg per arrived
  *                             message, dst deferred to the L4 default route
- *                             (service table + route-affinity pins) — wire-
+ *                             (RR over the live backend set + stickiness +
+ *                             route-affinity pins) — wire-
  *                             identical boundaries/routing. Works with ANY
  *                             byte stream (no app framing needed).
  *   DPUMESH_PROXY=frame       deploy default = frame for EVERY request stream
@@ -69,10 +70,11 @@ struct dmesh_route_seg {
     uint32_t len;    /* segment length (> 0; a 0-length wire msg is the FIN) */
     int32_t  dst;    /* destination backend pod (LB already done by L7), or
                       * DMESH_SEG_DST_DEFER = let the L4 default route decide
-                      * (service table + route-affinity pin of these bytes). */
+                      * (conn stickiness, else RR over the live backend set +
+                      * the route-affinity pin of these bytes). */
 };
 
-/* Defer sentinel — let the L4 default route (service table + route-affinity) pick. */
+/* Defer sentinel — let the L4 default route (stickiness / RR / route-affinity) pick. */
 #define DMESH_SEG_DST_DEFER (-2)
 
 /* The proxy's view of one connection (one direction of one stream). The L4
@@ -119,9 +121,11 @@ typedef int (*dmesh_proxy_route_fn)(struct objects *objs, dmesh_proxy_conn *conn
 
 /* ---- engine lifecycle / hooks (called from dpu_worker.c) ---- */
 
-/* Create the engine if env DPUMESH_PROXY selects a mock (NULL env = engine
- * off, objs->proxy stays NULL and everything is bit-identical). Requires
- * objs->dev + objs->pe live. Returns DOCA_SUCCESS also when off. */
+/* Create the engine — ALWAYS, whatever DPUMESH_PROXY says: it is the sole DPU→host
+ * reverse path, not an option. The env only picks the deploy-default REQUEST parser
+ * (unset/passthru/1 → passthru, frame → frame-all). objs->proxy is non-NULL after a
+ * DOCA_SUCCESS return; the caller aborts the worker on failure. Requires objs->dev +
+ * objs->pe live. */
 int px_init(struct objects *objs);
 
 /* Ingest one COMP_ENTRY_FORWARD (data or FIN, request or reply — symmetric).

@@ -24,10 +24,11 @@
  *   ibv_create_cq (+ comp_channel)    ->  dmesh_create_cq  -> dmesh_cq_t
  *   ibv_create_qp (cq-bound)          ->  dmesh_create_qp    -> dmesh_qp_t
  *     RC (connected, ordered)         ->  dmesh_create_qp + dmesh_pin_route
- *     service-addressed (reliable,    ->  dmesh_create_qp alone (per-message LB;
- *     datagram-ish; closest to IB RD      replies may interleave across backends)
- *     or Mellanox DC — NOT UD, which
- *     is unreliable and needs an AH)
+ *     service-addressed (reliable,    ->  dmesh_create_qp alone (the DPU LBs it to a
+ *     datagram-ish; closest to IB RD      backend; STICKY per conn by DEFAULT, so
+ *     or Mellanox DC — NOT UD, which      replies keep send order. Per-message LB is
+ *     is unreliable and needs an AH)      opt-in per service, and only then may
+ *                                         replies interleave across backends.)
  *   rdma_cm CONNECT_REQUEST           ->  DMESH_WC_CONN_REQ completion
  *   ibv_post_send (+ WR list)         ->  dmesh_post_send (+ DMESH_SEND_MORE)
  *   ibv_poll_cq                       ->  dmesh_poll_cq
@@ -186,11 +187,14 @@ typedef struct dmesh_qp {
     /* Outbound bytes live in the per-conn TX byte-ring (keyed by local_port);
      * the conn holds no TX buffer state of its own. */
 
-    /* CONNECTION-level route affinity (dmesh_pin_route): 0 = per-message LB (default).
-     * Non-zero = a route_group stamped on EVERY outbound message of this conn (and its
-     * FIN), so the DPU pins the whole conn to the ONE backend picked for its first
-     * message — restoring socket-like total order on the conn (per-message LB is
-     * forgone by design). Group ids are a per-channel rolling 255-space, so unrelated
+    /* CONNECTION-level route affinity (dmesh_pin_route): 0 = no affinity group (default).
+     * NOT the same as "per-message LB": the DPU is conn-STICKY by default, so a group-less
+     * conn already keeps its first backend. The group MATTERS when the service opted into
+     * per-message LB (DPUMESH_LB_PER_REQUEST_SVC) — then it is the only thing pinning the
+     * conn. Non-zero = a route_group stamped on EVERY outbound message of this conn (and
+     * its FIN), so the DPU pins the whole conn to the ONE backend picked for its first
+     * message — socket-like total order on the conn, whatever the service's LB policy.
+     * Group ids are a per-channel rolling 255-space, so unrelated
      * conns/channels reuse a byte; the DPU keys its pin table by (dst_service, id), so
      * a collision can only merge SAME-SERVICE traffic onto one backend (balance skew,
      * ordering intact) — it can never redirect a conn to another service's backend. */

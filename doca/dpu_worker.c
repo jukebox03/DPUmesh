@@ -222,7 +222,8 @@ lb_pick(struct objects *objs, int16_t svc)
     return hosts[i % (uint32_t)n];
 }
 
-/* L4 default route: service table + route-affinity pin. The single point that
+/* L4 default route: lb_pick (RR over the derived live backend set) + route-affinity
+ * pin. There is no service->backend table — see collect_live_hosts. The single point that
  * resolves a DEFERred request seg's backend for the SG-DMA egress engine
  * (dpu_proxy.c → dpu_route_l4). Single ARM thread → the pin table needs no lock. */
 int32_t
@@ -232,7 +233,7 @@ dpu_route_l4(struct objects *objs, int16_t svc, uint8_t rg)
      * non-zero route_group (a per-channel rolling id, so one channel's concurrent
      * messages differ); a dmesh_pin_route'd conn stamps its one id on every message.
      * All messages sharing a key pin to ONE backend. Whichever message reaches this
-     * single ARM thread FIRST LB-picks (lb_pick → the service table) + records the
+     * single ARM thread FIRST LB-picks (lb_pick → RR over the live set) + records the
      * pin; the rest reuse it.
      * The table is keyed (dst_service, rg), NOT rg alone: id counters are per-channel
      * and only 255 wide, so unrelated channels/conns routinely reuse a byte — service

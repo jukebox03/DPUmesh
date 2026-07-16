@@ -715,8 +715,9 @@ static void init_config(dpumesh_ctx_t *ctx, const dpumesh_config_t *config, int 
     if (hh > mb) hh = mb;                              /* cushion can't exceed the per-conn cap */
     ctx->cushion_h = hh;
 
-    /* This node's service id (what it advertises; DPU sets service_table[service_id]
-     * = the assigned pod_id). SVC_NONE = client-only. Comes from the caller;
+    /* This node's service id (what it advertises: the DPU stores it on our pod_state
+     * and DERIVES the service's backend set by scanning pods[] for it — there is no
+     * service->backend table). SVC_NONE = client-only. Comes from the caller;
      * DPUMESH_SERVICE_ID env overrides. The pod_id (this node's address) is NO
      * LONGER host-chosen — the DPU assigns it at registration (see
      * init_control_path). It stays -1 until DMESH_MSG_POD_ASSIGNED arrives. */
@@ -751,7 +752,7 @@ static doca_error_t init_control_path(dpumesh_ctx_t *ctx) {
     __atomic_store_n(&ctx->doca_objs.assigned_pod_id, -1, __ATOMIC_RELEASE);
     ctx->reg_msg.type = DMESH_MSG_POD_REGISTER;
     ctx->reg_msg.pod_id = -1;                    /* DPU assigns this node's address */
-    ctx->reg_msg.service_id = ctx->service_id;   /* DPU: service_table[service_id]=assigned pod_id */
+    ctx->reg_msg.service_id = ctx->service_id;   /* DPU: pods[our slot].service_id = this (the LB set is derived from it) */
 
     result = client_send_msg(&ctx->doca_objs, (const char *)&ctx->reg_msg, sizeof(ctx->reg_msg));
     if (result != DOCA_SUCCESS) return result;

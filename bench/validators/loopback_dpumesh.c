@@ -2,7 +2,8 @@
  * loopback_dpumesh.c — self-routing / loopback validator for the oriented-tuple
  * model. ONE pod is BOTH the server and the client of its OWN service:
  *
- *   create_channel(pod_id)  ->  registers service_id = pod_id (DPU default)
+ *   create_channel(service_id) ->  advertises that service (12, or BENCH_WORKER_ID).
+ *                                  The pod_id is a SEPARATE id the DPU assigns at register.
  *   echo side               ->  CONN_REQ -> RECV -> post_send  (server)
  *   RUN handler             ->  connect(own service) -> post_send -> RECV (client)
  *

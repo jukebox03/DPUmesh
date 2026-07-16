@@ -103,7 +103,7 @@ struct comch_dma_comp_msg {
 	uint16_t length;      /* payload length (<= DPUMESH_SLOT_SIZE) */
 	uint32_t pos;         /* buffer offset (forward: DPU dpu_buf; reverse: Host RX) */
 	uint8_t  route_group; /* forward route-affinity key (0 = normal LB); reverse: unused. The ARM
-	                       * dpu_route reads this to pin a large message's chunks to one backend. */
+	                       * dpu_route_l4 reads this to pin a large message's chunks to one backend. */
 };
 /* Sent as immediate via doca_dpa_dev_comch_producer_dma_copy() — HW max 32 bytes.
  * route_group grew this 16B->20B (2nd WQE BB); scale_log measured 20B perf-neutral. */

@@ -11,11 +11,11 @@
 /* Max DMA size for doca_dpa_dev_comch_producer_dma_copy.
  * HW supports up to 8KB per single call with 128B-aligned addresses. */
 #define DPA_DMA_COPY_MAX  8192
-/* The host RX staging slot is DPUMESH_SLOT_SIZE bytes; each reverse DMA is
- * capped at DPA_DMA_COPY_MAX. If the cap exceeded the canonical slot size a
- * reverse DMA could overflow the host RX slot, so couple them at compile time.
- * (A host configured with a SMALLER slot_size is caught at runtime in
- * process_rx_dma_entry.) */
+/* The DPU staging slot is DPUMESH_SLOT_SIZE bytes; each FORWARD dma_copy (host →
+ * DPU staging) is capped at DPA_DMA_COPY_MAX. If the cap exceeded the canonical slot
+ * size a copy could overflow the staging slot, so couple them at compile time.
+ * (The DPA is forward-only — DPU→host egress is the ARM SG-DMA engine, dpu_proxy.c —
+ * so no reverse DMA is involved here.) */
 _Static_assert(DPA_DMA_COPY_MAX <= DPUMESH_SLOT_SIZE,
                "DPA_DMA_COPY_MAX must not exceed DPUMESH_SLOT_SIZE");
 
@@ -111,7 +111,7 @@ static void handle_dpu_msg(struct dpa_thread_arg *thread_arg, const struct comch
 }
 
 /* Returns the number of consumer-completion messages drained this call (WAKE,
- * RING_ADD, REV_RING_ADD). The pre-park re-scan in run_dma_manager uses this:
+ * RING_ADD, RING_DEL). The pre-park re-scan in run_dma_manager uses this:
  * a nonzero return after arming means a signal landed in the arm→reschedule
  * race window, so the EU must NOT park (it would do so with a consumed
  * one-shot notification → lost wakeup). */
@@ -243,7 +243,7 @@ static int process_fwd_ring(struct dpa_thread_arg *thread_arg, uint32_t r)
         comp.dst_service = desc->dst_service;
         comp.src_pod_id = ring->pod_id;          /* forward: sender = this ring's pod */
         comp.dst_pod_id = desc->dst_pod_id;      /* may be DMESH_POD_BLANK → DPU resolves */
-        comp.route_group = desc->route_group;    /* opaque passthrough → ARM dpu_route pins the group */
+        comp.route_group = desc->route_group;    /* opaque passthrough → ARM dpu_route_l4 pins the group */
 
         doca_dpa_dev_comch_producer_dma_copy(producer,
                                     dpu_consumer_id,

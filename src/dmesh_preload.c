@@ -31,12 +31,13 @@
  * interposed. The dispatcher asserts readability by writing the private eventfd;
  * the read path drains it at EAGAIN edges.
  *
- * ORDERING — a socket promises byte-stream total order on a connection, but
- * DPUmesh load-balances PER MESSAGE (replies can interleave across backends).
- * Every shim client conn is therefore dmesh_pin_route()'d: all its messages
- * (and its FIN) carry one route-affinity group, so the DPU pins the whole conn
- * to the backend picked for its first message — connection-level LB, exactly
- * what a TCP proxy gives you.
+ * ORDERING — a socket promises byte-stream total order on a connection. The DPU
+ * is conn-STICKY by default, but a service can opt into per-message LB
+ * (DPUMESH_LB_PER_REQUEST_SVC), and its replies would then interleave across
+ * backends. Every shim client conn is therefore dmesh_pin_route()'d unconditionally:
+ * all its messages (and its FIN) carry one route-affinity group, pinning the conn to
+ * the backend picked for its first message WHATEVER the service's LB policy —
+ * connection-level LB, exactly what a TCP proxy gives you.
  *
  * THREAD MODEL — design/API.md contract: dmesh_accept/dmesh_next_ready are single-
  * consumer. The shim's dispatcher thread is that consumer; it also EXCLUSIVELY

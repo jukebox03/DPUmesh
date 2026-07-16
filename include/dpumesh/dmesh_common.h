@@ -44,8 +44,11 @@
 /* ====== Endpoint addressing — oriented-tuple model ======
  * A message carries src=(pod,port[,service]) and dst=(service,pod,port). MODEL B
  * (the DPU owns every connection): a CLIENT always sends dst_pod=BLANK and the DPU
- * resolves dst_service -> a backend pod PER MESSAGE (dpu_route mock, future L7;
- * per-message load balancing), owning the upstream. A backend REPLY carries a
+ * resolves dst_service -> a backend pod (dpu_route_l4 -> lb_pick: ROUND-ROBIN over the
+ * service's live backend set, which is DERIVED on demand by scanning pods[] — there is
+ * no service->backend table; a conn STICKS to its first pick unless the service opts
+ * into per-message LB via DPUMESH_LB_PER_REQUEST_SVC), owning the upstream. The L7 hook
+ * (dpu_l7.c::dmesh_l7_route) may override the pick. A backend REPLY carries a
  * concrete dst_pod (its DPU-facing peer) -> delivered direct, no re-routing.
  *   service_id : own int8 space [0,127]   (declared by the host at register)
  *   pod_id     : own int8 space [0,127]   (ASSIGNED BY THE DPU at register)

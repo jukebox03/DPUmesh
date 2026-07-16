@@ -417,7 +417,7 @@ DPU load-balances pod 10's messages across them and owns every connection.
   (1) host10  dmesh_alloc → fill in place;  post_send emits a dma_desc:
               src=(10, pC)   dst=(svc 11, BLANK, BLANK)   seq=s      ← dst_pod BLANK = "DPU, route me"
   (2) DPA EU  dma_copy  host10 dma_buffer  →  DPU staging[pod10]
-  (3) ARM     dpu_route(11) → pod 11 ;  reuse or create upstream → uP1 ;  upstream[uP1]={10,pC,pod11}
+  (3) ARM     dpu_route_l4(11) → pod 11 ;  reuse or create upstream → uP1 ;  upstream[uP1]={10,pC,pod11}
               rewrite tuple → src=(10, uP1)  dst=(pod11, uP1)        ← backend will see the DPU id uP1
   (4) ARM     SG-DMA   DPU staging[pod10]  →  host11 rx_dma_buffer   (egress; in-place, no DPU CPU copy)
   (5) host11  PE: dst_port=uP1 not live → accept queue → DMESH_WC_CONN_REQ → server QP uP1
