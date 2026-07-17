@@ -59,7 +59,9 @@
  *
  * SEND CONTRACT (the price of zero-copy + O(1) reclaim — the TX ring is FIFO):
  *   - At most ONE outstanding (alloc'd but not yet posted) buffer per conn.
- *     A second dmesh_alloc before dmesh_post_send returns the SAME bytes.
+ *     A second dmesh_alloc of the SAME len before dmesh_post_send returns the same
+ *     buffer; re-allocing with a DIFFERENT len is undefined (it may reposition the
+ *     reserve) — this is the "one outstanding alloc" contract, not a resize primitive.
  *   - Post order == alloc order == wire order on a conn (like a verbs SQ, where
  *     wire order is post order; here the buffer IS the queue slot).
  *   - Ownership transfers to the transport AT POST (no send completion; reclaim
@@ -234,10 +236,13 @@ typedef struct dmesh_wc {
 
 /* ===== Channel lifecycle (ibv_open_device + PD) ===== */
 
-/* service_id = the service this node advertises (DMESH_SVC_NONE for a pure client).
- * The node's pod_id (its address) is ASSIGNED BY THE DPU at register — the caller
+/* Identity is INJECTED, not declared: the node's own service is the k8s Service
+ * name in $DPUMESH_SERVICE (a webhook writes it from the pod's labels; unset = a
+ * pure client). The transport interns it to a service_id through the same table
+ * it resolves peers with — no integer crosses this surface (NAMING.md). The
+ * node's pod_id (its address) is ASSIGNED BY THE DPU at register — the caller
  * never picks it; dmesh_pod_id() returns the assigned value. NULL on init failure. */
-dmesh_channel_t *dmesh_create_channel(int service_id);
+dmesh_channel_t *dmesh_create_channel(void);
 
 /* Release the channel + all DOCA resources. Safe on NULL. */
 void dmesh_destroy_channel(dmesh_channel_t *s);
@@ -269,16 +274,18 @@ int dmesh_cq_fd(dmesh_cq_t *cq);
 /* ===== Connection setup (rdma_cm) ===== */
 
 /* ibv_create_qp(): make a CLIENT QP bound to `cq` and addressed to a logical SERVICE
- * by its service_id (the same id the backend passed to dmesh_create_channel). This is
- * NOT rdma_connect: it is PURELY LOCAL and does NO round trip — nothing is signalled
- * to the peer, and the QP is established (peer learned) only on its first inbound.
- * NULL+ENOMEM on OOM.
+ * by its k8s Service NAME — the same string the preloaded app hands getaddrinfo()
+ * (NAMING.md §1b). The transport resolves it to a service_id at point of use; no
+ * integer wire address is ever cached in app code. NULL+ENOENT if the name is not in
+ * the registry. This is NOT rdma_connect: it is PURELY LOCAL and does NO round trip —
+ * nothing is signalled to the peer, and the QP is established (peer learned) only on
+ * its first inbound. NULL+ENOMEM on OOM.
  *
  * The conn's completions land on `cq` — the thread that polls `cq` is the one that
  * services this conn. There is NO dmesh_accept: an inbound conn arrives as a
  * DMESH_WC_CONN_REQ completion (RDMA_CM_EVENT_CONNECT_REQUEST), already usable, on
  * whichever CQ polled it out of the shared accept queue. */
-dmesh_qp_t *dmesh_create_qp(dmesh_cq_t *cq, int dst_service_id);
+dmesh_qp_t *dmesh_create_qp(dmesh_cq_t *cq, const char *service_name);
 
 /* Pin this connection's outbound routing to ONE backend — datagram-ish -> RC.
  * Claims a route-affinity group from the channel's global id source and stamps it on

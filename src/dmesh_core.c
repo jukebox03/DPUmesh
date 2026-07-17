@@ -81,10 +81,16 @@ static void cleanup_ctx(struct dpumesh_ctx *ctx);
  * host-unique pool so client and server ports never collide (loopback-safe).
  * DMESH_PORT_SPACE lives in dmesh_core.h — struct dmesh_cq's ready ring is sized by it. */
 /* Per-conn inbound queue depth (descriptors only — bodies stay in the shared RX
- * mmap, referenced by pos). Lazily malloc'd per LIVE conn (not 65536× pre-alloc).
- * Power of two. On overflow (app drains too slowly) the landing is reclaimed
- * (message dropped) + the shared RX credit still bounds total in-flight bytes. */
-#define DMESH_INBOX_RING  256u
+ * mmap, referenced by pos). Lazily malloc'd per LIVE conn (not 65536× pre-alloc),
+ * power of two. The DEPTH is sized at init (ctx->inbox_ring, copied into each slot's
+ * psl->inbox_ring at malloc) to the DPU's per-region reverse-credit budget
+ * rq = rq_depth/K = num_slots*slot_size/DPUMESH_SLOT_SIZE / K (comch_common.c). At
+ * that depth the inbox CANNOT overflow before the DPU's own credit runs out — which
+ * back-pressures cleanly — so the silent inbox-full drop in rx_deliver_desc is
+ * unreachable in steady use. Below is the FLOOR (also the depth for tiny configs
+ * where rq < 256). Prior builds hard-coded 256, which is 8× below the default
+ * rq (=2048), so a hot conn could overflow it and lose messages silently. */
+#define DMESH_INBOX_RING_MIN  256u
 struct dmesh_port_slot {
     uint8_t          role;            /* FREE / CLIENT / SERVER */
     int16_t          peer_pod;        /* established peer pod, DMESH_POD_BLANK = not yet learned */
@@ -98,7 +104,9 @@ struct dmesh_port_slot {
                                        * free_port, so the PE never arms a dead conn. */
     /* Inbound SPSC ring: PE thread = sole producer (in_tail), the conn's owning
      * app thread = sole consumer (in_head). Lock-free. inbox==NULL until alloc. */
-    sw_descriptor_t *inbox;           /* malloc'd ring[DMESH_INBOX_RING] */
+    sw_descriptor_t *inbox;           /* malloc'd ring[inbox_ring]; NULL until alloc */
+    uint32_t         inbox_ring;      /* this inbox's depth (power of two = ctx->inbox_ring),
+                                       * stamped at malloc so inbox_push/pop stay self-contained */
     atomic_uint_fast32_t in_head;     /* consumer (app) */
     atomic_uint_fast32_t in_tail;     /* producer (PE) */
     /* Ready-list ARM flag (0=not on ready list & not being serviced; 1=on the list
@@ -130,6 +138,8 @@ struct dmesh_port_slot {
      * The whole block chain is OWNER-thread-local while live; the PE only advances tx_f
      * (atomic). On close (role=FREE) the PE returns the remaining blocks (try_return_blocks). */
     uint64_t         tx_w, tx_c, tx_s;      /* owner-thread logical cursors */
+    uint32_t         resv_len;              /* last dpumesh_tx_reserve len (owner); tx_commit clamps
+                                             * to it so a bad post_send len can't overrun the ring */
     atomic_uint_fast64_t tx_f;              /* PE-thread logical cursor (ACK reclaim) */
     uint64_t         tail_blk;              /* oldest live logical block index (owner) */
     uint64_t         head_blk_next;         /* next logical block index needing a physical block
@@ -154,8 +164,8 @@ static inline int  ready_pop(struct dmesh_cq *cq, uint16_t *port);
 static inline int inbox_push(struct dmesh_port_slot *psl, const sw_descriptor_t *d) {
     uint_fast32_t t = atomic_load_explicit(&psl->in_tail, memory_order_relaxed);
     uint_fast32_t h = atomic_load_explicit(&psl->in_head, memory_order_acquire);
-    if (t - h >= DMESH_INBOX_RING) return 0;                 /* full */
-    psl->inbox[t & (DMESH_INBOX_RING - 1)] = *d;
+    if (t - h >= psl->inbox_ring) return 0;                  /* full */
+    psl->inbox[t & (psl->inbox_ring - 1)] = *d;
     atomic_store_explicit(&psl->in_tail, t + 1, memory_order_release);
     return (t == h) ? 2 : 1;   /* 2 = empty→non-empty transition (edge-trigger the fd) */
 }
@@ -163,7 +173,7 @@ static inline int inbox_pop(struct dmesh_port_slot *psl, sw_descriptor_t *out) {
     uint_fast32_t h = atomic_load_explicit(&psl->in_head, memory_order_relaxed);
     uint_fast32_t t = atomic_load_explicit(&psl->in_tail, memory_order_acquire);
     if (h == t) return 0;                                    /* empty */
-    *out = psl->inbox[h & (DMESH_INBOX_RING - 1)];
+    *out = psl->inbox[h & (psl->inbox_ring - 1)];
     atomic_store_explicit(&psl->in_head, h + 1, memory_order_release);
     return 1;
 }
@@ -182,6 +192,9 @@ struct dpumesh_ctx {
     int  num_slots;
     int  slot_size;
     int  k_rings;              /* K = forward rings per pod (EU-sharding); 1 = legacy */
+    int  inbox_ring;           /* per-conn inbound descriptor ring depth (pow2), sized to the
+                                * DPU per-region reverse-credit budget so the inbox-full drop
+                                * (rx_deliver_desc) is unreachable in steady use. */
     /* DOCA objects */
     struct objects doca_objs;
     void *dma_buffer;          /* Host TX buffer (PCI mmap, CPU→DPU source) */
@@ -228,6 +241,11 @@ struct dpumesh_ctx {
     atomic_ullong st_recycle_hits;  /* grow served from the conn's recyc[] (no pool op) */
     atomic_ullong st_grow_waits;    /* backoff sleeps in reserve (window full / pool empty) */
     atomic_ullong st_block_pads;    /* message didn't fit the block tail → pad + next block */
+    /* RX-side drop counters (observability). Logged at teardown. inbox_drops should stay 0
+     * now the inbox is sized to the reverse-credit budget (see DMESH_INBOX_RING_MIN);
+     * a non-zero value means a conn overflowed anyway (slow drain past the credit budget). */
+    atomic_ullong st_rx_inbox_drops;   /* established/pending conn inbox full → message dropped */
+    atomic_ullong st_rx_accept_drops;  /* accept queue full → NEW conn dropped */
 
     /* RX descriptor queue — lock-free bounded SPMC ring (1 producer = PE
      * thread, N consumers = server workers). dpumesh_dequeue spin-polls it
@@ -478,6 +496,7 @@ static void rx_deliver_desc(dpumesh_ctx_t *ctx, const sw_descriptor_t *desc, int
         int r = inbox_push(psl, desc);
         if (r == 0) {
             /* inbox full (app draining too slowly) → drop + reclaim the landing. */
+            atomic_fetch_add_explicit(&ctx->st_rx_inbox_drops, 1, memory_order_relaxed);
             DOCA_LOG_ERR("RX deliver: conn %u inbox full, dropping seq=%u", dport, desc->seq);
             rx_credit_return(ctx, slot);
         } else {
@@ -500,7 +519,8 @@ static void rx_deliver_desc(dpumesh_ctx_t *ctx, const sw_descriptor_t *desc, int
             /* raced live between the initial load and the lock → coalesce to inbox */
             pthread_mutex_unlock(&ctx->port_lock);
             int r = inbox_push(psl, desc);
-            if (r == 0) rx_credit_return(ctx, slot);
+            if (r == 0) { atomic_fetch_add_explicit(&ctx->st_rx_inbox_drops, 1, memory_order_relaxed);
+                          rx_credit_return(ctx, slot); }
             else arm_ready_after_push(psl, dport);
             return;
         }
@@ -513,8 +533,9 @@ static void rx_deliver_desc(dpumesh_ctx_t *ctx, const sw_descriptor_t *desc, int
             return;
         }
         if (!psl->inbox) {
-            psl->inbox = (sw_descriptor_t *)malloc(DMESH_INBOX_RING * sizeof(sw_descriptor_t));
+            psl->inbox = (sw_descriptor_t *)malloc((size_t)ctx->inbox_ring * sizeof(sw_descriptor_t));
             if (!psl->inbox) { pthread_mutex_unlock(&ctx->port_lock); rx_credit_return(ctx, slot); return; }
+            psl->inbox_ring = (uint32_t)ctx->inbox_ring;
         } else {
             /* Return a prior owner's straggler deliveries (close/deliver race)
              * before the head/tail reset discards them — mirrors alloc_port. */
@@ -536,6 +557,7 @@ static void rx_deliver_desc(dpumesh_ctx_t *ctx, const sw_descriptor_t *desc, int
         uint_fast32_t cseq = atomic_load_explicit(&c->seq, memory_order_acquire);
         if ((int_fast32_t)(cseq - pos) != 0) {
             __atomic_store_n(&psl->role, DMESH_ROLE_FREE, __ATOMIC_RELEASE);   /* roll back (no block borrowed) */
+            atomic_fetch_add_explicit(&ctx->st_rx_accept_drops, 1, memory_order_relaxed);
             DOCA_LOG_ERR("RX deliver: accept queue full, dropping new conn uP=%u", dport);
             rx_credit_return(ctx, slot);
             return;
@@ -670,6 +692,26 @@ static void init_config(dpumesh_ctx_t *ctx, const dpumesh_config_t *config, int 
       if (ke && *ke) { int v = atoi(ke);
                        if (v >= 1 && v <= MAX_EU_PER_POD) ctx->k_rings = v; } }
 
+    /* Per-conn inbox depth = the DPU's per-region reverse-credit budget, so a hot conn
+     * cannot overflow its inbox before the DPU's credit runs out (which back-pressures
+     * cleanly instead of the SILENT drop in rx_deliver_desc). The DPU caps in-flight
+     * landings per region at rq = rq_depth/K, rq_depth = host_rx_bytes/DPUMESH_SLOT_SIZE
+     * = num_slots*slot_size/DPUMESH_SLOT_SIZE (comch_common.c). Round up to a power of two
+     * (the ring is masked), floor at DMESH_INBOX_RING_MIN, cap so one conn's inbox stays
+     * bounded. DPUMESH_INBOX_RING overrides the computed depth (still pow2 + floored). */
+    {
+        uint64_t rq_depth = (uint64_t)ctx->num_slots * (uint64_t)ctx->slot_size
+                            / (uint64_t)DPUMESH_SLOT_SIZE;
+        uint32_t k = ctx->k_rings > 0 ? (uint32_t)ctx->k_rings : 1u;
+        uint64_t want = rq_depth / k;
+        if ((env_val = getenv("DPUMESH_INBOX_RING")) != NULL && atoi(env_val) > 0)
+            want = (uint64_t)atoi(env_val);
+        if (want > 65536u) want = 65536u;                  /* cap ≈ 65536 × 24B = 1.5MB/conn */
+        uint32_t r = DMESH_INBOX_RING_MIN;
+        while ((uint64_t)r < want) r <<= 1;                /* round up to pow2, >= floor */
+        ctx->inbox_ring = (int)r;
+    }
+
     /* ELASTIC TX blocks. block_size (default 64 KB, >= slot_size) = the max contiguous
      * message = the allocation unit; the num_slots*slot_size TX buffer holds n_blocks =
      * (num_slots*slot_size)/block_size of them in a shared pool. maxb = per-conn block
@@ -717,14 +759,13 @@ static void init_config(dpumesh_ctx_t *ctx, const dpumesh_config_t *config, int 
 
     /* This node's service id (what it advertises: the DPU stores it on our pod_state
      * and DERIVES the service's backend set by scanning pods[] for it — there is no
-     * service->backend table). SVC_NONE = client-only. Comes from the caller;
-     * DPUMESH_SERVICE_ID env overrides. The pod_id (this node's address) is NO
-     * LONGER host-chosen — the DPU assigns it at registration (see
-     * init_control_path). It stays -1 until DMESH_MSG_POD_ASSIGNED arrives. */
-    if ((env_val = getenv("DPUMESH_SERVICE_ID")) != NULL)
-        ctx->service_id = atoi(env_val);
-    else
-        ctx->service_id = service_id;
+     * service->backend table). SVC_NONE = client-only. Comes SOLELY from the caller,
+     * which resolved it from $DPUMESH_SERVICE via the registry (dmesh_create_channel).
+     * The DPUMESH_SERVICE_ID int override was DELETED (NAMING.md §2): an int identity
+     * surviving next to a name is the two-sources-of-identity defect this removes.
+     * The pod_id (this node's address) is NO LONGER host-chosen — the DPU assigns it
+     * at registration (see init_control_path). It stays -1 until POD_ASSIGNED arrives. */
+    ctx->service_id = service_id;
 
     ctx->pod_id = -1;   /* unassigned until the DPU replies */
     snprintf(ctx->worker_id, sizeof(ctx->worker_id), "svc%d", ctx->service_id);
@@ -888,7 +929,8 @@ int dpumesh_init(dpumesh_ctx_t **out, int service_id,
         goto fail;
     }
 
-    DOCA_LOG_INFO("DPUmesh DOCA initialized: worker=%s pod_id=%d", ctx->worker_id, ctx->pod_id);
+    DOCA_LOG_INFO("DPUmesh DOCA initialized: worker=%s pod_id=%d inbox_ring=%d (rq/K, was 256)",
+                  ctx->worker_id, ctx->pod_id, ctx->inbox_ring);
 
     *out = ctx;
     return 0;
@@ -954,6 +996,14 @@ static void cleanup_ctx(dpumesh_ctx_t *ctx) {
 void dpumesh_destroy(dpumesh_ctx_t *ctx) {
     if (!ctx) return;
     DOCA_LOG_INFO("Destroying DPUmesh context: worker=%s", ctx->worker_id);
+    {   /* RX-drop summary (should be 0/0 — inbox sized to the reverse-credit budget) */
+        unsigned long long idr = atomic_load_explicit(&ctx->st_rx_inbox_drops, memory_order_relaxed);
+        unsigned long long adr = atomic_load_explicit(&ctx->st_rx_accept_drops, memory_order_relaxed);
+        if (idr || adr)
+            DOCA_LOG_WARN("RX drops at teardown: inbox_full=%llu accept_full=%llu (MESSAGES LOST)", idr, adr);
+        else
+            DOCA_LOG_INFO("RX drops at teardown: inbox_full=0 accept_full=0");
+    }
     cleanup_ctx(ctx);
 }
 
@@ -1133,6 +1183,7 @@ uint8_t *dpumesh_tx_reserve(dpumesh_ctx_t *ctx, uint16_t port, uint32_t len) {
         psl->blk_used[bslot] = 0;
         psl->head_blk_next = b + 1;
     }
+    psl->resv_len = len;                                   /* commit clamps to this (ring-overrun guard) */
     int s = (int)(k % maxb);
     return (uint8_t *)ctx->dma_buffer + (size_t)psl->pblk[s] * (size_t)bs + off;
 }
@@ -1142,6 +1193,14 @@ uint8_t *dpumesh_tx_reserve(dpumesh_ctx_t *ctx, uint16_t port, uint32_t len) {
 void dpumesh_tx_commit(dpumesh_ctx_t *ctx, uint16_t port, uint32_t len) {
     struct dmesh_port_slot *psl = &ctx->ports[port];
     if (psl->nblk_owned <= 0) return;
+    if (len > psl->resv_len) {                             /* contract: len <= reserved. Enforce it
+                                                            * (was unchecked) — an over-long commit
+                                                            * would advance tx_w past the backed
+                                                            * region and corrupt the ring. */
+        DOCA_LOG_WARN("tx_commit port=%u len=%u > reserved=%u — clamped (caller bug)",
+                      port, len, psl->resv_len);
+        len = psl->resv_len;
+    }
     uint64_t bs = (uint64_t)ctx->block_size;
     uint64_t k = psl->tx_w / bs;                           /* block the reserve placed the body in */
     psl->tx_w += len;
@@ -1208,10 +1267,17 @@ void dpumesh_tx_sent(dpumesh_ctx_t *ctx, uint16_t port, uint16_t seq, uint32_t l
     atomic_store_explicit(&psl->su_head, (uint_fast16_t)(h + 1), memory_order_release);
 }
 
-/* Reclaim on BATCH_FWD_ACK(port,seq): pop the send-unit FIFO front when its seq matches
- * (FIFO — a conn ships + ACKs in seq order) and advance the free cursor tx_f to that
- * unit's end. The PE advances tx_f/su_tail ONLY; the block chain is owner-managed while
- * live, so this returns blocks only for a CLOSED conn (try_return_blocks). */
+/* Reclaim on BATCH_FWD_ACK(port,seq): advance the free cursor tx_f past every send-unit
+ * the ACK implies is done. The PE advances tx_f/su_tail ONLY; the block chain is
+ * owner-managed while live, so this returns blocks only for a CLOSED conn.
+ *
+ * CUMULATIVE, not exact-front: forward completion is in-order per conn (its messages all
+ * ride ONE forward ring, drained by one EU), so an ACK for `seq` means every earlier
+ * still-outstanding unit also completed. We therefore pop every FIFO entry whose seq is
+ * at-or-before `seq` within the ≤TX_SU_DEPTH outstanding window, not just an exact-front
+ * match. This TOLERATES A DROPPED intermediate ACK (the DPU drops one on pending_txack
+ * overflow) — the old exact-front match would then never advance and wedge the conn's TX
+ * forever. A stale/duplicate ACK falls outside the window and pops nothing (no-op). */
 static inline void tx_reclaim_ack(dpumesh_ctx_t *ctx, uint16_t port, uint16_t seq) {
     if (port == 0 || port >= DMESH_PORT_SPACE) return;
     struct dmesh_port_slot *psl = &ctx->ports[port];
@@ -1219,11 +1285,22 @@ static inline void tx_reclaim_ack(dpumesh_ctx_t *ctx, uint16_t port, uint16_t se
     uint16_t head = atomic_load_explicit(&psl->su_head, memory_order_acquire);
     if (tail == head) return;                              /* nothing outstanding (su may be NULL) */
     /* head != tail ⇒ the owner shipped ⇒ su_seq/su_end are allocated + visible (the
-     * su_head acquire orders the owner's lazy malloc before this). */
-    size_t idx = (size_t)(tail & (TX_SU_DEPTH - 1));
-    if (psl->su_seq[idx] == seq) {
-        atomic_store_explicit(&psl->tx_f, psl->su_end[idx], memory_order_release);
-        atomic_store_explicit(&psl->su_tail, (uint_fast16_t)(tail + 1), memory_order_release);
+     * su_head acquire orders the owner's lazy malloc before this). FIFO seqs ascend, so
+     * the popped set is a contiguous prefix ending at-or-before `seq`. */
+    uint64_t newf = 0;
+    int popped = 0;
+    while (tail != head) {
+        size_t idx = (size_t)(tail & (TX_SU_DEPTH - 1));
+        /* su_seq[idx] within (seq-TX_SU_DEPTH, seq]? distance wraps large if it is a
+         * FUTURE seq (> seq) or a stale ACK (< tail's seq) → stop. */
+        if ((uint16_t)(seq - psl->su_seq[idx]) >= TX_SU_DEPTH) break;
+        newf = psl->su_end[idx];
+        tail = (uint16_t)(tail + 1);
+        popped++;
+    }
+    if (popped) {
+        atomic_store_explicit(&psl->tx_f, newf, memory_order_release);
+        atomic_store_explicit(&psl->su_tail, (uint_fast16_t)tail, memory_order_release);
         try_return_blocks(ctx, psl);                       /* return blocks if this drained a CLOSED conn */
     }
 }
@@ -1447,8 +1524,9 @@ uint16_t dpumesh_alloc_port(dpumesh_ctx_t *ctx, int role, void *user, struct dme
              * the process (reused when this port number is reallocated) — never
              * freed mid-run, so a stale PE delivery can't use-after-free it. */
             if (!psl->inbox) {
-                psl->inbox = (sw_descriptor_t *)malloc(DMESH_INBOX_RING * sizeof(sw_descriptor_t));
+                psl->inbox = (sw_descriptor_t *)malloc((size_t)ctx->inbox_ring * sizeof(sw_descriptor_t));
                 if (!psl->inbox) { pthread_mutex_unlock(&ctx->port_lock); return 0; }
+                psl->inbox_ring = (uint32_t)ctx->inbox_ring;
             } else {
                 /* A straggler reply may have landed in this slot's inbox AFTER the
                  * previous owner's dmesh_destroy_qp drained it (close/deliver race).
@@ -1616,9 +1694,13 @@ static int emit_desc(dmesh_qp_t *c, size_t moff, uint32_t len) {
 
 /* ===== Channel ===== */
 
-dmesh_channel_t *dmesh_create_channel(int service_id) {
+dmesh_channel_t *dmesh_create_channel(void) {
     dmesh_channel_t *s = (dmesh_channel_t *)calloc(1, sizeof(*s));
     if (!s) return NULL;
+    /* Identity is injected, not declared: resolve $DPUMESH_SERVICE (a k8s Service
+     * name) to a service_id through the same table peers resolve through. Unset =
+     * pure client (SVC_NONE). One table serves both directions (NAMING.md §2). */
+    int service_id = dmesh_config_identity();
     dpumesh_config_t cfg = DPUMESH_CONFIG_DEFAULT;
     if (dpumesh_init(&s->ctx, service_id, &cfg) != 0 || !s->ctx) {
         free(s);
@@ -1724,7 +1806,9 @@ dmesh_qp_t *dmesh_accept(dmesh_cq_t *cq) {
     return c;
 }
 
-dmesh_qp_t *dmesh_create_qp(dmesh_cq_t *cq, int dst_service_id) {
+/* Integer entry point (internal, dmesh_core.h): the shim and the name-taking public
+ * wrapper below both land here. Purely local — no round trip. */
+dmesh_qp_t *dmesh_qp_open(dmesh_cq_t *cq, int dst_service_id) {
     dmesh_channel_t *s = cq->ch;
     dmesh_qp_t *c = (dmesh_qp_t *)calloc(1, sizeof(*c));
     if (!c) { errno = ENOMEM; return NULL; }
@@ -1741,6 +1825,17 @@ dmesh_qp_t *dmesh_create_qp(dmesh_cq_t *cq, int dst_service_id) {
     c->seq         = 0;
     c->rx_slot     = -1;
     return c;
+}
+
+/* Public constructor (NAMING.md §4): resolve the k8s Service NAME to a service_id
+ * at point of use, then open. Two lines, and the integer is never exposed. This
+ * lives here (not dmesh_api.c, which is the verbs data path only) because the
+ * public lifecycle already lives in this file, shared with the shim. */
+dmesh_qp_t *dmesh_create_qp(dmesh_cq_t *cq, const char *service_name) {
+    if (!cq || !service_name) { errno = EINVAL; return NULL; }
+    int svc = dmesh_resolve_name(service_name);
+    if (svc < 0) return NULL;                 /* errno = ENOENT from resolve_name */
+    return dmesh_qp_open(cq, svc);
 }
 
 void dmesh_pin_route(dmesh_qp_t *c) {

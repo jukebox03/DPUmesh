@@ -2,10 +2,10 @@
  * preload_runner.c — entrypoint of the preload-dpumesh validation pod.
  *
  * Boots the two VANILLA TCP binaries under LD_PRELOAD=libdmesh_preload.so:
- *   tcp_echo   (persistent server; DMESH_PRELOAD_LISTEN + _SVC → advertises the
+ *   tcp_echo   (persistent server; DPUMESH_SERVICE + DPUMESH_PORT → advertises the
  *               service, one DPU pod registration at boot)
  *   tcp_client (persistent client daemon driven over stdin; dials the echo
- *               service's ClusterIP, resolved via DMESH_PRELOAD_REGISTRY; one
+ *               service's ClusterIP, resolved via DPUMESH_CONFIG registry; one
  *               registration at boot — every RUN opens FRESH connections, so conn
  *               churn is tested without burning MAX_PODS slots)
  * then serves the bench control protocol on CTRL_PORT (plain kernel TCP —
@@ -18,8 +18,10 @@
  * restarts the pod into a clean state.
  *
  * env: PRELOAD_LIB (/usr/local/lib/libdmesh_preload.so), ECHO_PORT (9095),
- *      PRELOAD_SVC (15), SVC_IP (10.96.0.15 — the echo service's ClusterIP the
- *      client dials), CTRL_PORT (9092), ECHO_BIN, CLIENT_BIN
+ *      PRELOAD_SVC (15, the interned id written into the registry),
+ *      PRELOAD_SERVICE (preload-dpumesh, the service NAME), SVC_IP (10.96.0.15 —
+ *      the echo service's ClusterIP the client dials), CTRL_PORT (9092),
+ *      ECHO_BIN, CLIENT_BIN
  */
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -84,11 +86,26 @@ int main(void) {
     const char *echo_bin  = env_or("ECHO_BIN", "/usr/local/bin/tcp_echo");
     const char *client_bin= env_or("CLIENT_BIN", "/usr/local/bin/tcp_client");
 
-    /* echo server (persistent): advertises the service at listen() time */
+    /* Registry FIRST — before ANY preloaded child starts (NAMING.md §5: the harness
+     * plays the dpumesh-controller). ONE row serves both directions: the echo
+     * server's identity (name → svc) and the client's connect() (ClusterIP:port →
+     * svc). It MUST exist before the echo child's shim ctor runs, or that child could
+     * not resolve its own $DPUMESH_SERVICE. Format: "IP:port name svc". */
+    const char *svc_name = env_or("PRELOAD_SERVICE", "preload-dpumesh");
+    const char *svc_ip   = env_or("SVC_IP", "10.96.0.15");
+    const char *reg_path = "/tmp/dpumesh_registry";
+    FILE *rf = fopen(reg_path, "w");
+    if (!rf) { fprintf(stderr, "runner: registry open failed\n"); return 1; }
+    fprintf(rf, "%s:%s %s %s\n", svc_ip, echo_port, svc_name, svc);
+    fclose(rf);
+
+    /* echo server (persistent): identity + listen port injected via env, resolved
+     * through the registry above (no integer typed). */
     const char *echo_env[][2] = {
         { "LD_PRELOAD", lib },
-        { "DMESH_PRELOAD_LISTEN", echo_port },
-        { "DMESH_PRELOAD_SVC", svc },
+        { "DPUMESH_CONFIG", reg_path },
+        { "DPUMESH_SERVICE", svc_name },
+        { "DPUMESH_PORT", echo_port },
         { NULL, NULL },
     };
     char *echo_argv[] = { (char *)echo_bin, (char *)echo_port, NULL };
@@ -96,20 +113,11 @@ int main(void) {
     if (echo_pid < 0) { fprintf(stderr, "runner: echo spawn failed\n"); return 1; }
     sleep(2);                          /* channel registration + listen */
 
-    /* Static registry (P0 stand-in for the dpumesh-controller feed): the echo
-     * service's ClusterIP:port -> its service_id. The client dials the ClusterIP;
-     * the shim keys connect() on IP:port (not port alone) and resolves it here. */
-    const char *svc_ip   = env_or("SVC_IP", "10.96.0.15");
-    const char *reg_path = "/tmp/dpumesh_registry";
-    FILE *rf = fopen(reg_path, "w");
-    if (!rf) { fprintf(stderr, "runner: registry open failed\n"); return 1; }
-    fprintf(rf, "%s:%s %s\n", svc_ip, echo_port, svc);
-    fclose(rf);
-
-    /* client daemon (persistent, stdin-driven) */
+    /* client daemon (persistent, stdin-driven): pure client — no identity, just the
+     * registry for connect() resolution. */
     const char *cli_env[][2] = {
         { "LD_PRELOAD", lib },
-        { "DMESH_PRELOAD_REGISTRY", reg_path },
+        { "DPUMESH_CONFIG", reg_path },
         { NULL, NULL },
     };
     char *cli_argv[] = { (char *)client_bin, (char *)svc_ip, (char *)echo_port, NULL };

@@ -61,7 +61,7 @@
 
 static dmesh_channel_t *g_s       = NULL;
 static dmesh_cq_t      *g_cq      = NULL;  /* the one CQ both roles are polled from */
-static int              g_service = 17;    /* own service id (self-routing default) */
+static const char      *g_service = "verbs-dpumesh";  /* own service NAME (self-routing) */
 
 /* diagnostics (single-threaded, so plain counters). The allocfail pair counts only
  * PERMANENT alloc faults (EINVAL); an SQ-full EAGAIN is backpressure, not a failure,
@@ -416,13 +416,13 @@ static void handle_ctrl(int fd) {
 
 int main(void) {
     signal(SIGPIPE, SIG_IGN);
-    if (getenv("BENCH_WORKER_ID")) g_service = atoi(getenv("BENCH_WORKER_ID"));
+    if (getenv("DPUMESH_SERVICE")) g_service = getenv("DPUMESH_SERVICE");
 
-    g_s = dmesh_create_channel(g_service);
+    g_s = dmesh_create_channel();
     if (!g_s) { fprintf(stderr, "[verbs] create_channel failed\n"); return 1; }
     g_cq = dmesh_create_cq(g_s);
     if (!g_cq) { fprintf(stderr, "[verbs] create_cq failed\n"); return 1; }
-    fprintf(stderr, "[verbs] ready: pod_id=%d own_service=%d msg_max=%d (verbs façade)\n",
+    fprintf(stderr, "[verbs] ready: pod_id=%d own_service=%s msg_max=%d (verbs façade)\n",
             dmesh_pod_id(g_s), g_service, dmesh_msg_max(g_s));
 
     int srv = socket(AF_INET, SOCK_STREAM, 0);

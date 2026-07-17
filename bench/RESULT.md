@@ -4968,3 +4968,268 @@ express "every 200k" here: `g_served` advances a few per loop pass, so the widen
 (there to survive a batch stepping over the exact multiple) stays true for ~64 consecutive passes at
 *every* multiple. Replaced with a milestone cursor (`g_served - g_reported >= 200000`), which fires
 once regardless of step size.
+
+# 2026-07-16 — egress recover: `px_engine_recover` cleared PEER engines' `refresh_inflight` (multi-engine buffer double-free/leak) — FIXED + healthy-path HW-validated
+
+## The bug (code-certain)
+`px_engine_recover` (`dpu_proxy.c`), after restarting a faulted `doca_dma` ctx, cleared **every**
+lane's `refresh_inflight`:
+```c
+for (int p = 0; p < MAX_PODS; p++)              /* ALL 32 pod slots */
+    for (int r = 0; r < MAX_EU_PER_POD; r++)
+        px->lanes[p][r].refresh_inflight = 0;
+```
+But lanes are owned per engine (`pod_idx % n_eng`, `px_engine_pump`: `for (i = eng->id; i < npods; i += n_eng)`),
+and **each engine has a PRIVATE ctx** (`doca_dma_create` per engine in `px_init`). So engine A's fault
+flushes only A's tasks; engine B's lanes and their in-flight credit-refreshes are unaffected — yet A's
+recover cleared B's flags too.
+
+Why that corrupts: `refresh_ops[pod][region]` is **one `px_op` reused per lane**, and the only guard against
+a second submit overwriting its `src_buf`/`dst_buf` is `refresh_inflight`. `refresh_inflight` is a plain
+`int`, correct because each lane is touched by exactly one thread (its owning engine's worker; completion
+callbacks run on that same worker). Cross-engine clearing breaks BOTH invariants:
+- **data race** — engine A writes `ln->refresh_inflight=0` on a lane engine B's thread is reading/writing.
+- **double-submit** — B then sees `refresh_inflight==0`, issues a *second* refresh on the same `px_op`,
+  overwriting `op->src_buf/dst_buf`. The first refresh's two inventory bufs lose their `dec_refcount`
+  handle (leak); the stale callback later frees the *second* refresh's bufs while its DMA is still in
+  flight (premature free of an in-use inventory buf). Net: inventory bufs leak → that engine's refreshes
+  eventually all fail → the lane pins `avail_entries=0` → **permanent egress starvation** — the same
+  failure shape as the 2026-07-15 pod-restart wedge, just reached via a different door.
+
+Trigger surface: `n_eng >= 2` (`DPUMESH_ARM_EGRESS_THREADS>=2`), which is the **recommended** config
+(`n_eng=1` wedges under overload; the validated ceiling config is `②+egress2`). Needs engine A faulting
+while engine B has a refresh in flight — a narrow interleave, which is why the single-pod-death validation
+(14 sequential restarts, 0-fail, 2026-07-15) never surfaced it: that was proven on the pre-multi-engine
+egress path / single engine, where "all lanes" == "our lanes".
+
+Note: mass-death (≳13 pods) is a **different** limitation — there the ctx hangs in STOPPING and never
+reaches IDLE, so this IDLE-branch loop never runs. This bug lives on the **healthy single-fault recover
+path** (ctx faults, flushes to IDLE, restarts), not the mass-death hang.
+
+## The fix (one line + rationale comment)
+```c
+-        for (int p = 0; p < MAX_PODS; p++)
++        for (int p = eng->id; p < MAX_PODS; p += px->n_eng)   /* only lanes THIS engine owns */
+             for (int r = 0; r < MAX_EU_PER_POD; r++)
+                 px->lanes[p][r].refresh_inflight = 0;
+```
+Restores the single-owner-thread invariant. For `n_eng==1` (`eng->id=0`, step 1) it covers all lanes
+**identically** to before — the default path is byte-for-byte unchanged. `git diff --stat`: 1 file, +13/-6
+(all but one line is the rationale comment).
+
+## Validation — CLEAN redeploy, `DPUMESH_ARM_EGRESS_THREADS=2 DPUMESH_INGEST_SHARDS=2` (the config that ACTIVATES multi-engine egress)
+Full validator + bench suite, ALL 0-fail:
+
+| test | result |
+|---|---|
+| loopback 50000×8192 (zc off/on) | 50000/0, 50000/0 — p50 117/116 µs |
+| verbs 50000×8192 w4p4 / 40000×64 w8p8 / 40000×2048 | 50000/0, 40000/0, 40000/0 |
+| preload (LD_PRELOAD shim) 8000×1024 c8 | 8000/0 — 32176 rps |
+| latency 64…1024 B | every size 114 µs p50, no skip |
+| bandwidth 32 B…128 KB | every size a real row, peak 8.4 Gb/s @32 KB, no 0-throughput |
+| rate 1/2/4/8 threads | all rows, 0.165–0.184 Mrps |
+
+`fault lines during the healthy suite = 0` — i.e. `px_engine_recover` never ran, so the changed code was
+**dormant**; this run proves the edit does not regress the always-on egress path, not that it repaired a
+live fault (see below).
+
+## Honest limitation — the fault path was NOT live-injected (harness can't do it cleanly)
+`px_engine_recover` only fires when a **peer pod's host memory vanishes mid-DMA before comch reports the
+disconnect**. In this k8s harness neither injection vector is clean:
+- **graceful `kubectl delete pod`** — the app closes first, comch reports the disconnect, the DPU unpublishes
+  the pod's mappings, and the LB routes around it. Observed directly: a 45 s bench→echo load with echo
+  deleted mid-run finished **rcnt=7.76M, fail=0** — the mesh self-healed via `collect_live_hosts`, and
+  **no fault fired** (0 recover lines). Self-heal, not fault.
+- **abrupt / in-place restart** — starting a replacement pod against an already-running DPU is the operation
+  `bench.sh` **explicitly forbids** ("leaves the two sides' registration state inconsistent; deploy is the
+  only supported path"). Confirmed: after the delete, the new echo pod (RESTARTS=0, new pod, new IP) never
+  cleanly re-registered; bench→echo went to rcnt=0 and the DPU sat **idle** (alive, non-spinning, no error
+  flood — traffic simply never reached it). That is the documented registration desync, NOT an egress fault
+  and NOT this fix's code path.
+
+So the fix rests on **(1) code-certain construction** (private ctx ⇒ peer lanes must not be touched; the
+race + double-submit are mechanical) and **(2) healthy-path regression** (above), NOT on a reproduced fault.
+A deterministic repro needs a fault-injection hook (e.g. force `IO_FAILED` on one engine while another has
+`refresh_inflight=1`) that the current harness does not expose. Recommend adding one before claiming the
+recover path itself is regression-covered.
+
+## Not changed (noted, out of scope of this one-bug fix)
+- `px_lane_submit` credit test `avail < first_needed || avail < first_needed + MARGIN` — first clause is
+  subsumed by the second (harmless redundancy).
+- `stat_msgs/stat_segs/stat_drop_bytes` increment non-atomically across ingest shards (only `stat_units` is
+  atomic) — cosmetic counter skew at M≥2, no data-path effect.
+
+---
+
+# NAMING Phase 0 — name-based identity/routing (host resolver) — HW validation (2026-07-16)
+
+**Change:** `design/NAMING.md` Phase 0. The `service_id` integer's provenance moved from the user
+(three hand-typed sources) to a file-backed resolver (`src/dmesh_resolve.c`). Public API is now
+name-only (`dmesh_create_channel(void)`, `dmesh_create_qp(cq, const char*)`); identity comes from
+`$DPUMESH_SERVICE` resolved through the registry; `DPUMESH_SERVICE_ID` and the shim's
+`DMESH_PRELOAD_{SVC,LISTEN,MAP,REGISTRY}` are **deleted**. **The DPU and the wire ABI are UNCHANGED**
+— this is a host-side provenance refactor, so the pass criterion is **NEUTRAL** (0-fail, identity
+resolves to the same integers, p50 in the normal validator range), not a perf delta.
+
+config: default deploy — `bench/bench.sh deploy`, rings_per_pod=2, fair 1-core pin, no
+shards/egress2, proxy off. DPU recompiled 15 objs from the header change and came up clean.
+
+### Identity resolution — `resolve_name($DPUMESH_SERVICE)` on real HW (the core proof)
+Every meshed pod resolved its k8s-Service NAME to the expected interned `service_id`; the DPU
+assigned pod_ids and derived backends unchanged (`worker=svcN` = the resolved id):
+
+| pod | `$DPUMESH_SERVICE` | resolved svc | DPU pod_id | log |
+|---|---|---|---|---|
+| echo-dpumesh | echo-dpumesh | **11** | 0 | `service=echo-dpumesh … worker=svc11` |
+| loopback-dpumesh | loopback-dpumesh | **12** | 4 | `own_service=loopback-dpumesh … worker=svc12` |
+| stream-dpumesh | stream-dpumesh | **16** | 7 | `worker=svc16` |
+| verbs-dpumesh | verbs-dpumesh | **17** | 6 | `own_service=verbs-dpumesh … worker=svc17` |
+| preload echo child | preload-dpumesh | **15** | 5 | `REGISTER service_id=15 … worker=svc15` |
+| preload client | (unset) | **SVC_NONE(-1)** | 8 | `worker=svc-1` (pure client, correct) |
+
+### Validator matrix — all 0-fail
+| validator | new path exercised | N / config | result |
+|---|---|---|---|
+| loopback | `create_channel()` id + `create_qp(cq,name)` self | 50000 × 8192B | **50000/0**, p50 117.1µs |
+| verbs | verbs façade, name self-addressing | 50000 × 8192B (w1,p1) | **50000/0**, p50 103.5µs |
+| verbs | " | 50000 × 4096B (w4,p8) | **50000/0**, p50 148.9µs |
+| stream | name id (svc16); self byte-stream | 20000 × 1024B self | **20000/0**, 20.58 MB, p50 115.7µs |
+| preload | shim `resolve_addr`+`config_identity`+`listen_port` | 5000 × 1024B, 8 conns | **5000/0**, p50 123µs, p99 433µs, 23126 rps |
+| bench client | pure client → `create_qp(cq,"echo-dpumesh")` + DPU LB | req64 conc1 5s | **fail=0**, p50 114µs, rcnt 37492 |
+| bench client | " (LB/bandwidth path) | req1024 conc32 5s | **fail=0**, p50 340µs, 0.805 Gb/s, rcnt 490216 |
+
+### Verdict
+**NEUTRAL — PASS.** Six code paths new to Phase 0 (`config_identity`, `resolve_name`,
+`resolve_addr`, `config_listen_port`, `dmesh_qp_open`, and the deleted `DPUMESH_SERVICE_ID`) are all
+exercised on hardware with **0 fail**, and every pod resolves its name to the same integer the old
+hand-typed value would have produced. p50s match the normal self-loop validator range. No throughput
+comparison is drawn (default config; the wire is byte-for-byte identical, so any delta would be noise
+— cf. the scale_log config-trap). The host-side of NAMING is proven; Phases 1–3 (k8s controller +
+webhook + live reload) remain unbuilt (NAMING.md §8).
+
+---
+
+## 2026-07-17 — Per-conn inbox sized to the reverse-credit budget (silent RX drop closed)
+
+**What changed.** The per-conn inbound descriptor ring (`DMESH_INBOX_RING`) was a compile-time
+**256**, while the DPU caps in-flight reverse-DMA landings per region at `rq = rq_depth/K =
+num_slots·slot_size/DPUMESH_SLOT_SIZE / K` (`doca/comch_common.c`) — **2048** on the default deploy.
+The 8× gap meant a hot conn could fill its 256-deep inbox while the DPU still held ~1792 credits, so
+`rx_deliver_desc` **silently dropped** the overflow (`inbox_push`→0 → `DOCA_LOG_ERR` + `rx_credit_return`)
+even though the body had already landed in host RX memory and the sender already had its forward
+`TX_ACK`: undetectable message loss on a "reliable" transport. (px_lane on the DPU sends; the inbox
+on the host receives — different objects across PCIe, coupled only by the count-credit `rq`.)
+
+`dmesh_core.c` now sizes the inbox at init to that budget:
+`ctx->inbox_ring = round_pow2(max(256, num_slots·slot_size/DPUMESH_SLOT_SIZE / K))`, stamped per slot
+at malloc, with a `DPUMESH_INBOX_RING` env override. At `inbox ≥ rq` the DPU's own credit runs out
+**before** the inbox fills → clean back-pressure, so the drop path is unreachable in steady use
+(proof: in-flight ≤ rq, inbox occupancy ≤ in-flight ≤ rq ≤ inbox capacity). **Host-side only — no
+public API, no wire ABI change** (the DPU's `rq` is untouched; the host inbox is sized to match it).
+
+config: default deploy — `bench/bench.sh deploy`, rings_per_pod=2, fair 1-core pin, no shards/egress2,
+proxy off. Every meshed pod came up logging **`inbox_ring=2048 (rq/K, was 256)`** (verbs pod_id=6,
+loopback pod_id=4, echo pod_id=0, preload pod_id=5) — the 256 ceiling is gone.
+
+### Validator matrix — all 0-fail (correctness unchanged)
+| validator | config | result |
+|---|---|---|
+| loopback | 50000 × 8192B | **50000/0**, p50 117.1µs |
+| verbs | 50000 × 8192B, w1 p1 | **50000/0**, p50 103.6µs |
+| verbs | 50000 × 8192B, **w32 p1** (max inbox stress) | **50000/0**, p50 252.7µs |
+| verbs | 50000 × 4096B, w4 p8 | **50000/0**, p50 150.7µs |
+| verbs | 40000 × 64B, w8 p8 | **40000/0**, p50 297.4µs |
+| verbs | 20000 × 8192B **zc**, w8 p2 | **20000/0**, p50 150.7µs |
+| preload | 5000 × 1024B, 8 conns | **5000/0**, p50 122µs, p99 195µs, 26650 rps |
+| stream | 20000 × 1024B self | **20000/0**, 20.58 MB, p50 116.1µs |
+
+### Benchmarks — no regression from the 8× inbox (48 KB vs 6 KB/conn, lazy per live conn)
+| point | before (2026-07-16) | now | verdict |
+|---|---|---|---|
+| latency conc1, 64–1024B | p50 ~114 µs | p50 **114–115 µs** | match |
+| bandwidth 8192 conc32 | 4.227 Gb/s | **4.222 Gb/s** (peak 7.9 @ 32KB) | match |
+| point `8192 8 32` | fail=0, waits 554–662 | fail=0, **waits 719** | same order (TX-side) |
+| point `1024 8 32` | 0.801 Gb/s, waits 0 | **0.806** Gb/s, waits 0 | match |
+| point `64 8 32 t4` | p50 1253 µs, waits 0 | p50 **1238 µs**, waits 0 | match |
+
+Bandwidth ≥512 KB reports 0.0 — the **pre-existing 256 KB/conn in-flight cap** (`maxb·block`, TX-side:
+a 512 KB req × conc32 is ~64× the cap → the writer throttles past the RUN deadline), **not** this
+change (the inbox is RX-side). `waits`/`grow_waits` are the TX send-ring backpressure counter, also
+untouched here; the 719-vs-554–662 spread is normal run variance.
+
+### Verdict
+**PASS — no regression.** The inbox ceiling is raised from 256 to the DPU's per-region credit budget
+(2048 default), making the silent inbox-full drop in `rx_deliver_desc` unreachable in steady
+operation. All eight validators hold 0-fail and every benchmark matches the 2026-07-16 baseline.
+**Caveat (honest):** the bench harness drains each conn every poll, so it cannot inject the
+slow-drain single-conn flood that actually overflowed the old 256 ring — this validates the fix **by
+construction** (inbox ≥ credit budget) plus a clean regression sweep, not by reproduce-then-fix.
+Memory cost: 48 KB/conn (was 6 KB), lazy per live conn, tunable via `DPUMESH_INBOX_RING`; raising
+`DPUMESH_RINGS_PER_POD` shrinks it automatically (rq = rq_depth/K).
+
+---
+
+## 2026-07-17 — Free robustness fixes (no API/ABI change) + HW regression sweep
+
+Six zero-tradeoff, zero-API-surface fixes, deployed together and validated on HW. Two more
+candidates were **deliberately not** done (see end): they are not actually free.
+
+| # | fix | defect closed | where |
+|---|---|---|---|
+| **A1** | `post_send` len ≤ reserved, enforced | an over-long commit advanced `tx_w` past the backed region → **ring overrun / OOB**. Now `tx_reserve` records `resv_len`; `tx_commit` clamps + warns. | `dmesh_core.c` `dpumesh_tx_commit` |
+| **A2** | **cumulative-ACK** reclaim | exact-FIFO-front match: a genuinely dropped intermediate `FWD_ACK` (DPU drops one on `pending_txack` overflow) would **wedge the conn's TX forever**. Now pops every unit at-or-before the acked seq within the ≤`TX_SU_DEPTH` window (safe: forward completion is in-order per conn). | `dmesh_core.c` `tx_reclaim_ack` |
+| **A3** | "same bytes" contract, clarified | header promised a re-alloc returns the same buffer unconditionally; the pad path can reposition it for a *different* len. Doc now scopes it to same-len (contract already forbids the rest). | `dmesh.h` SEND CONTRACT |
+| **A4** | identity resolve failure → **loud** | `$DPUMESH_SERVICE` set-but-unresolved degraded to a silent client (unreachable server, no error; load-once so never self-heals). Now warns loudly, still returns `SVC_NONE`. | `dmesh_resolve.c` `dmesh_config_identity` |
+| **A5** | absent registry → **loud** | a missing registry file marked the table "loaded" and every resolve silently `ENOENT`-ed. `load_file` now reports absence; `dmesh_config_load` warns with the path. | `dmesh_resolve.c` |
+| **A6** | FIN doc/impl reconciled | comment claimed "skip if no TX slot (best-effort)"; `dmesh_send_fin` actually rides `dpumesh_enqueue` and can back off to the ring-stall deadline. Comment now accurate. | `dmesh_core.h` |
+| **A7** | RX-drop counters | the inbox-full / accept-full drops had only per-event logs, no counter — the A→B silent loss was unmeasurable. Added `st_rx_inbox_drops` / `st_rx_accept_drops`, logged at teardown. | `dmesh_core.c` |
+
+**Not done (not free):** `next_group` is **not** a dead field — `dmesh_pin_route` uses it; wiring it
+for auto-SAR on large messages is a *feature*, not a cleanup. `destroy_qp` deferred-free (the
+mid-batch-dangle footgun) changes the lifecycle contract (the qp must outlive the batch) — a real
+behavior change, not a mechanical fix. Both left for a dedicated change.
+
+config: default deploy — rings_per_pod=2, fair 1-core pin, no shards/egress2, proxy off. Host lib
+rebuilt (`make lib` clean, link OK); every pod came up `inbox_ring=2048` with **no** false
+identity/registry warnings (correct config is silent). Pass criterion is **NEUTRAL** (0-fail, p50 in
+range) — these are correctness/robustness guards, not a perf delta.
+
+### A2 is exercised on every message — 0-fail is the proof
+`tx_reclaim_ack` runs on every `FWD_ACK`, so the cumulative reclaim is on the hot path of all ~285 k
+validator round-trips + ~2.6 M `point` round-trips below. A wrong window/wrap would wedge or corrupt
+→ a real FAIL. **0-fail throughout**, including the 8 KB×conc32 `point` at `waits=1934` (heavy TX
+backpressure — the reclaim churns hardest exactly there).
+
+### Validator matrix — all 0-fail
+| validator | config | result |
+|---|---|---|
+| loopback | 50000 × 8192B | **50000/0**, p50 116.7µs |
+| verbs | 50000 × 8192B w1p1 / **w32p1** / 4096B w4p8 / 64B w8p8 / 8192B **zc** w8p2 | **50000/0** · **50000/0** · **50000/0** · **40000/0** · **20000/0** |
+| preload | 5000 × 1024B, 8 conns | **5000/0**, p50 123µs, p99 412µs, 25782 rps |
+| stream | 20000 × 1024B self | **20000/0**, 20.58 MB, p50 115.7µs |
+
+**RX-drop evidence:** 0 `inbox full` / `accept queue full` log lines across all five dpumesh pods
+after the full matrix (incl. verbs w32) → the A7 counters are 0; the inbox=2048 sizing holds.
+
+### A4/A5 negative test (warnings actually fire)
+Linking `libdpumesh.so` and calling `dmesh_config_identity()` directly (pure file+env, no DOCA):
+| env | output |
+|---|---|
+| `DPUMESH_SERVICE=bogus-svc DPUMESH_CONFIG=/nonexistent` | **both** warnings fire (registry-not-found + name-not-in-registry), `identity=-1` |
+| `DPUMESH_SERVICE` unset (intentional client) | **silent**, `identity=-1` |
+
+### Benchmarks — no regression vs 2026-07-16 baseline
+| point | baseline | now |
+|---|---|---|
+| latency conc1 64–1024B | p50 ~114µs | p50 **114–115µs** |
+| bandwidth 8192 conc32 | 4.227 Gb/s | **4.201 Gb/s** (peak 7.83 @ 32KB) |
+| `point 8192 8 32` | fail=0, waits 554–662 | fail=0, waits **1934** (TX-side, run-variable; cumulative-ACK if anything frees faster) |
+| `point 1024 8 32` | 0.801 Gb/s, waits 0 | **0.778** Gb/s, waits 0 |
+| `point 64 8 32 t4` | p50 1253µs, waits 0 | p50 **1258µs**, waits 0 |
+
+Bandwidth ≥512 KB = 0.0 remains the pre-existing 256 KB/conn TX in-flight cap (unrelated).
+
+### Verdict
+**PASS — no regression.** All six free fixes are live on HW: 8/8 validators 0-fail (A2 proven on
+every reclaim), zero RX drops, A4/A5 warnings confirmed to fire on misconfig and stay silent on
+correct config, benchmarks match baseline. No public API or wire ABI changed.

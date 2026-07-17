@@ -76,7 +76,7 @@
 #define REQ_FILL           42
 
 static dmesh_channel_t *g_s           = NULL;   /* shared, thread-safe channel */
-static int              g_dst_service = 11;     /* backend service to address (Model B) */
+static const char      *g_dst_service = "echo-dpumesh";  /* backend service NAME to address */
 static uint32_t         g_post_max    = 0;      /* max bytes one dmesh_alloc/post can carry */
 
 /* ------------------------------------------------------------ per-thread run */
@@ -292,7 +292,7 @@ static void run_bench(int conn_fd, int req_size, int reply_size, int concurrency
     if (warmup < 0) warmup = 0;
     if (reconn < 0) reconn = 0;
 
-    fprintf(stderr, "[bench] RUN req=%d reply=%d conc=%d dur=%.1fs warmup=%ld threads=%d reconn=%ld dst_svc=%d\n",
+    fprintf(stderr, "[bench] RUN req=%d reply=%d conc=%d dur=%.1fs warmup=%ld threads=%d reconn=%ld dst_svc=%s\n",
             req_size, reply_size, concurrency, duration, warmup, threads, reconn, g_dst_service);
 
     dmesh_tx_stats_t st0, st1;                    /* elastic-pool event deltas over the run */
@@ -407,12 +407,12 @@ static int ctrl_listen(int port) {
 
 int main(void) {
     signal(SIGPIPE, SIG_IGN);
-    if (getenv("BENCH_DST_POD_ID")) g_dst_service = atoi(getenv("BENCH_DST_POD_ID"));
+    if (getenv("BENCH_DST_SERVICE")) g_dst_service = getenv("BENCH_DST_SERVICE");
 
-    g_s = dmesh_create_channel(DMESH_SVC_NONE);       /* pure client */
+    g_s = dmesh_create_channel();                     /* pure client ($DPUMESH_SERVICE unset) */
     if (!g_s) { fprintf(stderr, "[bench] dmesh_create_channel failed\n"); return 1; }
     g_post_max = (uint32_t)dmesh_post_max(g_s);
-    fprintf(stderr, "[bench] ready: pod_id=%d dst_service=%d slot=%d\n",
+    fprintf(stderr, "[bench] ready: pod_id=%d dst_service=%s slot=%d\n",
             dmesh_pod_id(g_s), g_dst_service, dmesh_msg_max(g_s));
 
     int srv = ctrl_listen(CTRL_PORT);

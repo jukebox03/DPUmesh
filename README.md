@@ -2,9 +2,10 @@
 
 A service-mesh **data plane** on NVIDIA DOCA (Comch + DMA). The transport runs on the
 **BlueField DPU/DPA**, not the host CPU — your application keeps its full host core (no
-in-host sidecar tax). See **[design/API.md](design/API.md)** for the user-facing whitepaper,
-**[design/CORE.md](design/CORE.md)** for the internal-implementation whitepaper, and
-**[bench/scale_log.md](bench/scale_log.md)** for the measurement log.
+in-host sidecar tax). See **[design/API.md](design/API.md)** (user-facing) and
+**[design/CORE.md](design/CORE.md)** (internals) for the transport whitepapers,
+**[design/NAMING.md](design/NAMING.md)** for the name/identity control plane, and
+**[bench/RESULT.md](bench/RESULT.md)** for the measurement log.
 
 This repository is the standalone extraction of the DPUmesh transport: the sources have
 **no Thrift dependency** (they were previously compiled into `libthrift`; here they build
@@ -28,6 +29,7 @@ include/dpumesh/    public headers — #include <dpumesh/dmesh.h>
     dmesh_common.h      wire ABI + config shared by host and DPU
 src/                host transport library sources
     dmesh_core.{h,c}    INTERNAL core: transport + connection lifecycle (not installed)
+    dmesh_resolve.c     name/identity resolver — the file-backed registry both surfaces resolve through
     dmesh_api.c         the native API impl — the verbs-shaped data path (→ libdpumesh.so)
     dmesh_preload.c     LD_PRELOAD socket shim (→ libdmesh_preload.so)
 doca/               DPU-side control plane (ARM) + DPA kernel — built with meson
@@ -35,7 +37,7 @@ doca/               DPU-side control plane (ARM) + DPA kernel — built with mes
     device/dpa_kernel.c the DPA (EU) data-plane kernel — built by dpacc
     meson.build         DPU build; build_dpacc.sh drives the DPA compile
 bench/              benchmark + validators + bench.sh (deploy+run) + k8s/ manifest + Dockerfiles
-design/             API.md (user-facing whitepaper) + CORE.md (internals whitepaper)
+design/             API.md (user-facing) + CORE.md (internals) + NAMING.md (name/identity control plane)
 Makefile            host build (libdpumesh.so + bench binaries)
 ```
 

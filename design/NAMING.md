@@ -1,10 +1,12 @@
 # DPUmesh Naming & Identity — Whitepaper (design)
 
-> **Status: PROPOSED — none of this is implemented.** The as-built state is
-> `dmesh_create_channel(int service_id)` / `dmesh_create_qp(cq, int)` ([API.md](API.md) §3), the
-> `DMESH_PRELOAD_SVC/_LISTEN/_MAP/_REGISTRY` env tables ([API.md](API.md) §7), and the
-> `DPUMESH_SERVICE_ID` override ([API.md](API.md) §9). This document is the design that replaces
-> all three. Implementing it obsoletes those three sections.
+> **Status: Phase 0 IMPLEMENTED (host C-side) and HW-validated via `bench.sh`; Phases 1–3
+> (the k8s control plane) remain PROPOSED.** See [§8](#8-implementation-phasing-this-document--code).
+> Phase 0 replaced the as-built `dmesh_create_channel(int service_id)` / `dmesh_create_qp(cq, int)`
+> ([API.md](API.md) §3), the `DMESH_PRELOAD_SVC/_LISTEN/_MAP/_REGISTRY` env tables ([API.md](API.md) §7),
+> and the `DPUMESH_SERVICE_ID` override ([API.md](API.md) §9) with the name-only public API and
+> `src/dmesh_resolve.c` — obsoleting those three sections. The `dpumesh-controller` and admission
+> webhook that feed the registry from k8s in production are Phases 1–2.
 
 **DPUmesh invents no names.** The **k8s Service** is the namespace; its DNS name is the only
 identifier a user ever types. The wire's `service_id` (int8, `[0,127]`) is an **intern handle**
@@ -290,3 +292,75 @@ config comes from.
 - **Multi-DPU.** A backend set is derived from one DPU's `pods[]`; a future DPU→DPU hop must
   translate ids at the boundary or move to a cluster-global space — the point at which the §5
   scoping decision gets revisited.
+
+---
+
+## 8. Implementation phasing (this document → code)
+
+**The whole of the public API change is Phase 0; Phases 1–3 add none.** This is the design's
+central property, not an accident of scheduling: `dmesh_create_channel(void)` has no argument to
+carry identity, so its only source is the resolver — which means the signature change, the
+resolver, and the deleted `DPUMESH_SERVICE_ID` override are one indivisible commit. Everything
+after Phase 0 only changes **who writes the registry file and the env**; the code that *consumes*
+them (`src/dmesh_resolve.c`, the shim, the wrapper) is frozen once Phase 0 lands. *Provenance
+moves; the transport does not.* So the riskiest change — a public-header break across every
+caller — is completed and `bench.sh`-proven **before** a line of k8s scaffolding exists.
+
+| Phase | Runtime | Adds to the API? | State |
+|---|---|---|---|
+| **0 — host resolver** | this repo (C) | **the entire change** | **DONE, HW-validated** |
+| **1 — controller** | k8s (Go), new | no — writes the ConfigMap | proposed |
+| **2 — webhook** | k8s (Go), new | no — injects env + volumes | proposed |
+| **3 — live reload** | this repo (C) | no — swaps the table under readers | proposed |
+
+### Phase 0 — the host-side resolver *(implemented)*
+
+- **`src/dmesh_resolve.c`** — one file-backed table, both façades, load-once (so post-load reads
+  need no lock — live reload is deliberately deferred to Phase 3). It answers `identity()` /
+  `listen_port()` / `resolve_name()` / `resolve_addr()`; the integer `service_id` is born here and
+  appears in no public header. Registry format grew a column: `IP:port name svc`.
+- **Public API is name-only.** `dmesh_create_channel(void)` (identity from `$DPUMESH_SERVICE` via
+  the table), `dmesh_create_qp(cq, const char *name)`. The integer entry `dmesh_qp_open(cq, int)`
+  is internal (`src/dmesh_core.h`), shared by the shim and the two-line public wrapper. The
+  `DPUMESH_SERVICE_ID` override is **deleted** — an int identity beside a name is the
+  two-sources defect this removes.
+- **Shim rewired** to the resolver: `DMESH_PRELOAD_{SVC,LISTEN,MAP,REGISTRY}` deleted (`_DEBUG`
+  kept), `connect()`→`resolve_addr`, `listen()`→`config_listen_port` (`$DPUMESH_PORT`),
+  identity→`$DPUMESH_SERVICE`.
+- **Bench dogfoods the names.** Every validator addresses by k8s-Service name and takes its
+  identity from `$DPUMESH_SERVICE`, resolved through a hand-authored registry baked at the
+  resolver's default `/etc/dpumesh/registry` (`bench/k8s/registry`) — the bench harness *is* the
+  controller (§5). This exercises `resolve_name` + `config_identity` on real hardware, not just
+  the transport. Receipts: [bench/RESULT.md](../bench/RESULT.md).
+
+### Phase 1 — `dpumesh-controller` *(proposed)*
+
+Watch Services → intern each name to an int8 → publish the `IP:port name svc` registry as a
+ConfigMap. **The binding correctness constraint is restart-stable id allocation:** the name→int8
+map must survive a controller restart (persist it in the ConfigMap itself or a Service
+annotation), or a recycled id silently re-addresses whatever now owns it — precisely the stale-
+address hazard §4 rejects the pre-resolved handle to avoid. Refuse the 129th service loudly
+rather than wrap.
+
+### Phase 2 — admission webhook *(proposed)*
+
+Gated on the namespace label, per pod: inject `LD_PRELOAD` + `libdpumesh.so` + `/dev/infiniband`
++ the registry volume, and derive `$DPUMESH_SERVICE` / `$DPUMESH_PORT` from the pod's labels vs
+the namespace's Service selectors; **fail admission loudly on >1 selector match** (§7). **The gap
+to close is the self-identity bootstrap order:** a pod resolves its *own* name through the same
+table, so it must not start before the controller has interned that name into the mounted
+ConfigMap — the webhook and controller must coordinate (block admission until interned, or the
+pod retries `resolve_name` until its own row appears). ConfigMap propagation (~60 s) bounds this.
+
+### Phase 3 — live reload *(proposed)*
+
+Replace Phase 0's load-once with an `inotify` snapshot swap so a controller-pushed ConfigMap
+update takes effect without a pod restart. This is the point — and the *only* point — at which
+the table becomes mutable under concurrent readers, so it needs an atomic pointer swap of an
+immutable snapshot (double-buffer / RCU), not an in-place edit. Phase 0 is load-once expressly to
+keep this concurrency out of the correctness-critical provenance change.
+
+> **Not in this document: readiness gating (a would-be Phase 4).** Per §7, the LB set is derived
+> on transport liveness (`registered + dma_ready`), not k8s **Ready**; wiring a Ready signal from
+> the control plane into the DPU's `pods[]` is a separate design and the real remaining blocker to
+> "deploy on k8s and it just works." Naming is necessary for that, not sufficient.

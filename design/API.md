@@ -5,7 +5,7 @@ A service-mesh **data plane** on NVIDIA DOCA (Comch + DMA). The transport runs o
 in-host sidecar tax).
 
 The DPU is an **L7-style proxy that owns every connection** (think Envoy): your app addresses a
-**`service_id`** — never a pod — and the DPU **load-balances across that service's backend pods**
+**service by its k8s name** — never a pod — and the DPU **load-balances across that service's backend pods**
 (round robin), owns the connection to the chosen backend, and maps every reply back to you. **A
 connection is sticky by default** — it keeps the backend the LB first picked (session affinity);
 a service can opt into **per-message** load balancing instead (§5). Bodies move by DMA **host →
@@ -27,6 +27,27 @@ substrate already *is* RDMA-shaped: a pre-registered mmap, a DMA engine, credit 
 completions. `read(2)` semantics **mandate** a copy into caller memory, so a socket-shaped API
 cannot be zero-copy. That copy is the price of the POSIX contract — and only the shim should pay
 it.
+
+---
+
+## Getting started
+
+Two facts must be set before `dmesh_create_channel()` returns a usable channel; the rest is the API below.
+
+- **Build & link.** `#include <dpumesh/dmesh.h>`; compile `-Iinclude`, link `-ldpumesh` (the library is
+  `make`'s output). The transport also needs the DPU up and this process registered — `bench/bench.sh deploy`
+  brings up a dev environment (see the README).
+- **Identity — who you are.** A server exports its own service via `$DPUMESH_SERVICE=<its k8s Service name>`;
+  a pure client leaves it unset. `dmesh_create_channel()` resolves that name to a `service_id` — you never
+  type an integer.
+- **Registry — how peer names resolve.** `dmesh_create_qp(cq, "peer")` looks the name up in a file:
+  `$DPUMESH_CONFIG=<path>` or the default `/etc/dpumesh/registry`, one line per service
+  `ClusterIP:port  name  svc`. Under k8s a webhook + controller write it from your Services automatically
+  (zero config — [NAMING.md](NAMING.md)); for a local or bench run, hand-write it. An unknown name makes
+  `create_qp` return `NULL`+`ENOENT`.
+- **Run.** k8s: `kubectl label namespace <ns> dpumesh-injection=enabled`, then deploy ordinary manifests
+  ([NAMING.md](NAMING.md)). Standalone: run your binary with `$DPUMESH_SERVICE` + `$DPUMESH_CONFIG` set,
+  against a `bench/bench.sh deploy`'d transport.
 
 ---
 
@@ -67,9 +88,9 @@ distribution for free.
   upstream.
 
 ```c
-dmesh_channel_t *ch = dmesh_create_channel(DMESH_SVC_NONE);  // pure client
-dmesh_cq_t      *cq = dmesh_create_cq(ch);                   // one per thread
-dmesh_qp_t      *qp = dmesh_create_qp(cq, /*service*/11);    // address a service, not a pod
+dmesh_channel_t *ch = dmesh_create_channel();               // identity from $DPUMESH_SERVICE (unset = pure client)
+dmesh_cq_t      *cq = dmesh_create_cq(ch);                  // one per thread
+dmesh_qp_t      *qp = dmesh_create_qp(cq, "checkoutservice"); // address a service by NAME, not a pod
 
 void *b = dmesh_alloc(qp, len);          // a pointer INTO the TX ring — fill in place
 if (b) { fill(b, len); dmesh_post_send(qp, b, len, 0, 0); }
@@ -91,7 +112,7 @@ dmesh_destroy_qp(qp);                    // sends a FIN so the DPU frees the ups
 |---|---|
 | `ibv_open_device` + `ibv_alloc_pd` | `dmesh_create_channel` (folded — see below) |
 | `ibv_create_cq` (+ comp_channel) | `dmesh_create_cq` (+ `dmesh_cq_fd`) |
-| `ibv_create_qp(pd, {send_cq, recv_cq})` | `dmesh_create_qp(cq, service)` |
+| `ibv_create_qp(pd, {send_cq, recv_cq})` | `dmesh_create_qp(cq, name)` |
 | RC (connected, ordered) | `dmesh_create_qp` + `dmesh_pin_route` |
 | service-addressed, reliable, datagram-ish | `dmesh_create_qp` alone — closest to IB **RD** or Mellanox **DC**. *Not* UD (unreliable, needs an AH). |
 | `rdma_cm` CONNECT_REQUEST | `DMESH_WC_CONN_REQ` completion |
@@ -120,7 +141,7 @@ dmesh_destroy_qp(qp);                    // sends a FIN so the DPU frees the ups
 
 | | BSD socket | DPUmesh |
 |---|---|---|
-| **Address** | IP:port (one peer) | **`service_id`** — the DPU routes it; no IP/DNS; self-routing OK |
+| **Address** | IP:port (one peer) | **service name** — the DPU routes it; no IP/DNS; self-routing OK |
 | **Load balancing** | none | round-robin across the service's backends; **sticky per connection** by default |
 | **Setup** | 3-way handshake | **none** — local; peer liveness is *not* checked (apply your own timeout) |
 | **Send** | `write()` copies into a kernel buffer | `dmesh_alloc` → fill **in place** → `dmesh_post_send`. **Zero copy.** |
@@ -140,7 +161,8 @@ dmesh_destroy_qp(qp);                    // sends a FIN so the DPU frees the ups
 - **Exactly one `dmesh_destroy_qp` per QP.** It **frees** the QP — and `poll_cq` can emit
   CONN_REQ plus that QP's landed messages in **one batch**, so destroying mid-batch dangles
   later `wc[]` entries. Defer destroys to a sweep after the batch is dispatched.
-- **`service_id` must be live** — a dead/unregistered service is *not* detected; the message is
+- **The addressed service must resolve and be live** — an unknown **name** fails `create_qp`
+  (`NULL`+`ENOENT`); a resolved-but-dead/unregistered service is *not* detected — the message is
   dropped at the DPU and nothing comes back. Apply your own wall-clock timeout.
 - **`slot_size` ≤ 8192** — the DPA `dma_copy` limit; leave `DPUMESH_SLOT_SIZE` at its default.
 
@@ -151,7 +173,7 @@ dmesh_destroy_qp(qp);                    // sends a FIN so the DPU frees the ups
 ### Channel — `ibv_open_device` + `ibv_alloc_pd`
 | Function | Returns / errno |
 |---|---|
-| `dmesh_channel_t *dmesh_create_channel(int service_id)` | Channel, or `NULL` on init failure. `service_id` = the service this node advertises (`DMESH_SVC_NONE` for a pure client). **The node's `pod_id` is assigned by the DPU** — read it back with `dmesh_pod_id()`. Blocks briefly on the register round-trip. |
+| `dmesh_channel_t *dmesh_create_channel(void)` | Channel, or `NULL` on init failure. **Identity is injected, not declared**: the node advertises the service named in `$DPUMESH_SERVICE` (a k8s Service name, resolved to a `service_id` through the registry; unset = pure client). **The node's `pod_id` is assigned by the DPU** — read it back with `dmesh_pod_id()`. Blocks briefly on the register round-trip. |
 | `void dmesh_destroy_channel(dmesh_channel_t *s)` | Releases all DOCA resources. Safe on `NULL`. |
 | `int dmesh_pod_id(dmesh_channel_t *s)` | This node's DPU-assigned `pod_id`. |
 | `int dmesh_msg_max(dmesh_channel_t *s)` | Max length arriving as **ONE** RECV completion (`slot_size`, 8 KB). |
@@ -167,7 +189,7 @@ dmesh_destroy_qp(qp);                    // sends a FIN so the DPU frees the ups
 ### QP — `ibv_create_qp` / `rdma_disconnect`
 | Function | Returns / errno |
 |---|---|
-| `dmesh_qp_t *dmesh_create_qp(dmesh_cq_t *cq, int dst_service_id)` | New **client** QP bound to a service (the id the backend passed to `dmesh_create_channel`) and to `cq`. Local, no round-trip; no pod chosen or learned. `NULL`+`ENOMEM`. |
+| `dmesh_qp_t *dmesh_create_qp(dmesh_cq_t *cq, const char *service_name)` | New **client** QP addressed to a service by its **k8s Service name** — the same string a preloaded app hands `getaddrinfo` — resolved to a `service_id` at point of use, and bound to `cq`. Local, no round-trip; no pod chosen or learned. `NULL`+`ENOENT` (unknown name) / `NULL`+`ENOMEM`. |
 | `void dmesh_pin_route(dmesh_qp_t *qp)` | **Pin to ONE backend** (RC-like). Every later message (and the FIN) carries one route-affinity key, so the DPU routes them all to the backend picked for the **first** — replies then arrive **in send order**. Call right after create, before any post; idempotent; no-op on a server QP. Keys are a per-channel rolling 255-id space scoped **by destination service**: two pinned QPs to the *same* service may share a backend (balance skew, never a correctness issue); cross-service redirection is impossible. |
 | `int dmesh_destroy_qp(dmesh_qp_t *qp)` | **Graceful.** Sends a **FIN** (zero-length, behind all prior data) so the peer gets `DMESH_WC_RECV_FIN` and the DPU frees the upstream; then frees local state. Posted-but-unflushed bytes are discarded (flush first). Returns `0`; safe on `NULL`. |
 
@@ -237,7 +259,7 @@ One fd per CQ; on wake, drain the CQ to 0.
 #include <sys/epoll.h>
 
 int main(void) {
-    dmesh_channel_t *ch = dmesh_create_channel(/*service_id*/11);   // this backend serves svc 11
+    dmesh_channel_t *ch = dmesh_create_channel();                   // serves $DPUMESH_SERVICE
     dmesh_cq_t      *cq = dmesh_create_cq(ch);
     int fd = dmesh_cq_fd(cq);
 
@@ -279,9 +301,9 @@ With **one** request outstanding, the reply that arrives IS this request's reply
 needed. Retrying `dmesh_alloc` in place is correct **only here**: this loop is the whole program,
 so there is nothing to starve and it keeps draining the CQ. A reactor must park instead (§4a).
 ```c
-dmesh_channel_t *ch = dmesh_create_channel(DMESH_SVC_NONE);   // pure client
+dmesh_channel_t *ch = dmesh_create_channel();                // pure client ($DPUMESH_SERVICE unset)
 dmesh_cq_t      *cq = dmesh_create_cq(ch);
-dmesh_qp_t      *qp = dmesh_create_qp(cq, /*service*/11);
+dmesh_qp_t      *qp = dmesh_create_qp(cq, "checkoutservice");
 
 for (int i = 0; i < N; i++) {
     void *b;
@@ -336,7 +358,7 @@ channel-wide accept queue, and whichever accepts a QP owns it.
 ```c
 void *worker(void *arg) {
     dmesh_cq_t *cq = dmesh_create_cq(g_ch);      // ── this thread's own CQ ──
-    dmesh_qp_t *qp = dmesh_create_qp(cq, 11);    // its QPs live on it
+    dmesh_qp_t *qp = dmesh_create_qp(cq, "checkoutservice"); // its QPs live on it
     for (;;) { /* post / poll_cq(cq, …) — no locks, no sharing */ }
 }
 ```
@@ -345,8 +367,9 @@ void *worker(void *arg) {
 
 ## 5. Addressing & routing model
 
-- **The DPU owns every connection.** A client addresses a **service** (a cluster of backend
-  pods); the DPU **round-robin load-balances** across the live backends, owns the "upstream"
+- **The DPU owns every connection.** A client addresses a **service by name** (a cluster of
+  backend pods; the transport interns the k8s name to a `service_id` — [NAMING.md](NAMING.md)); the
+  DPU **round-robin load-balances** across the live backends, owns the "upstream"
   connection to the chosen one, and maps the reply back. The client never sees or names a pod.
 - **Sticky by default; per-message is opt-in.** A connection keeps the backend the LB first
   picked (session affinity — replies stay in send order). This is Envoy's TCP-proxy behavior.
@@ -467,18 +490,21 @@ Run an **unmodified, dynamically-linked POSIX socket application** over DPUmesh 
 no source change:
 
 ```sh
-# backend: its listen(<port>) becomes a dmesh service listener
-LD_PRELOAD=libdmesh_preload.so DMESH_PRELOAD_LISTEN=9095 DMESH_PRELOAD_SVC=15  ./my_server 9095
+# backend: its listen($DPUMESH_PORT) becomes a dmesh service listener
+LD_PRELOAD=libdmesh_preload.so DPUMESH_SERVICE=paymentservice DPUMESH_PORT=9095  ./my_server 9095
 # client: connect() to a registry ClusterIP:port is routed over DPUmesh
-LD_PRELOAD=libdmesh_preload.so DMESH_PRELOAD_REGISTRY=/etc/dpumesh/registry    ./my_client 10.96.0.15 9095
+LD_PRELOAD=libdmesh_preload.so DPUMESH_CONFIG=/etc/dpumesh/registry              ./my_client 10.96.0.15 9095
 ```
+
+The shim types **no integer** — identity and routing both come from the registry
+(`src/dmesh_resolve.c`, the same table the native API resolves through), and a webhook writes these
+envs from k8s labels in production ([NAMING.md](NAMING.md)).
 
 | env | meaning |
 |---|---|
-| `DMESH_PRELOAD_LISTEN=<port>` | `listen()` on this TCP port becomes the dmesh service listener |
-| `DMESH_PRELOAD_SVC=<svc>` | the service this process advertises (required with `LISTEN`) |
-| `DMESH_PRELOAD_REGISTRY=<file>` | control-plane registry, lines `ClusterIP:port svc`: `connect()` to a listed **ClusterIP:port** is routed to that service — the Envoy xDS/EDS equivalent (a static file today; controller-fed later). Keyed on IP:port, so same-port services on distinct ClusterIPs resolve apart. `getpeername()` then returns that ClusterIP:port. |
-| `DMESH_PRELOAD_MAP=<port>=<svc>[,…]` | legacy port-only rule; superseded by `REGISTRY`'s ClusterIP key |
+| `DPUMESH_SERVICE=<name>` | the k8s Service name this process advertises — resolved to a `service_id` via the registry; unset = pure client |
+| `DPUMESH_PORT=<port>` | `listen()` on this TCP port becomes the dmesh service listener (the Service's `targetPort`) |
+| `DPUMESH_CONFIG=<file>` | registry path (default `/etc/dpumesh/registry`), lines `ClusterIP:port name svc`: `connect()` to a listed **ClusterIP:port** is routed to that service — the Envoy xDS/EDS equivalent (a ConfigMap in prod, a static file for the bench harness). Keyed on IP:port, so same-port services on distinct ClusterIPs resolve apart; `getpeername()` then returns that ClusterIP:port. |
 | `DMESH_PRELOAD_DEBUG=1` | per-connection diagnostics on stderr |
 
 **The shim is a sibling of the native API, not a client of it.** It sits directly on the core
@@ -500,8 +526,8 @@ length auto-chunks. Blocking sockets are emulated (`SO_RCVTIMEO` honored). Every
 ```
   UNMODIFIED app                     libdmesh_preload.so (interposes libc)          DPUmesh
   ══════════════                     ════════════════════════════════════          ═══════
-  connect(fd, ip:port) ─intercept──▶ ip:port ∈ registry?  dmesh_create_qp(svc) + pin_route
-  listen(port)       ──intercept──▶  port == LISTEN?  advertise service SVC
+  connect(fd, ip:port) ─intercept──▶ ip:port ∈ registry?  dmesh_qp_open(svc) + pin_route
+  listen(port)       ──intercept──▶  port == $DPUMESH_PORT?  advertise $DPUMESH_SERVICE
         fd  ◀───────── dup2() a private eventfd OVER the app's fd number ──────────┐
         │            (fd stays a REAL kernel fd → epoll/poll/select/close/dup work  │
         │             natively; kernel-TCP fds and dmesh fds share one epoll set)   │
@@ -623,9 +649,9 @@ author's step and needs **no transport changes**.
 Most data-plane tuning is **compiled in** at the values measured as best. The runtime env knobs
 are `DPUMESH_PROXY` + `_PROXY_FRAME_SVC` + `_PROXY_L7_SVC` + `_LB_PER_REQUEST_SVC` (§8),
 `DPUMESH_INGEST_SHARDS` + `_ARM_EGRESS_THREADS` + `_DPA_THREADS` + `_RINGS_PER_POD` (below),
-`DPUMESH_DIAG`, `DPUMESH_PCI_ADDR`, `DPUMESH_SERVICE_ID`, `DPUMESH_TX_BLOCK` / `_TX_MAXB` /
-`_TX_H`, and the `DMESH_PRELOAD_*` shim vars (§7). **To change a *baked* value, edit the named
-constant and rebuild.**
+`DPUMESH_DIAG`, `DPUMESH_PCI_ADDR`, `DPUMESH_TX_BLOCK` / `_TX_MAXB` / `_TX_H`, and the
+identity/registry vars `DPUMESH_SERVICE` / `DPUMESH_PORT` / `DPUMESH_CONFIG` (§7, [NAMING.md](NAMING.md)).
+**To change a *baked* value, edit the named constant and rebuild.**
 
 | Setting | Baked value | Constant / assignment | File |
 |---|---|---|---|

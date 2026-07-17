@@ -128,6 +128,25 @@ int  dpumesh_init(dpumesh_ctx_t **ctx, int service_id,
                   const dpumesh_config_t *config);
 void dpumesh_destroy(dpumesh_ctx_t *ctx);
 
+/* ====== Name / identity resolution (src/dmesh_resolve.c) ======
+ * ONE file-backed table serving BOTH façades. The integer service_id is born
+ * here and appears in no public header (NAMING.md §4). The public name-taking
+ * constructors in <dpumesh/dmesh.h> are thin wrappers over dmesh_qp_open below:
+ *   dmesh_create_channel(void)      = dpumesh_init(dmesh_config_identity())
+ *   dmesh_create_qp(cq, name)       = dmesh_qp_open(cq, dmesh_resolve_name(name))
+ * The shim is NOT a client of the public API — it resolves by ClusterIP:port and
+ * calls dmesh_qp_open with the integer directly. */
+int dmesh_config_load(const char *path);          /* NULL → $DPUMESH_CONFIG or /etc/dpumesh/registry; idempotent, load-once */
+int dmesh_config_listen_port(void);               /* $DPUMESH_PORT, -1 = not a server */
+int dmesh_config_identity(void);                  /* resolve $DPUMESH_SERVICE, SVC_NONE if unset/unknown */
+int dmesh_resolve_name(const char *name);         /* name → svc, -1 + ENOENT */
+int dmesh_resolve_addr(uint32_t ip_net, uint16_t port_host);  /* ClusterIP:port → svc, -1 = not meshed */
+
+/* Integer entry point for the CLIENT QP, shared by the shim and the public
+ * name-taking wrapper. The public dmesh_create_qp(cq, name) lives in
+ * dmesh_core.c and calls this after resolve_name. */
+dmesh_qp_t *dmesh_qp_open(dmesh_cq_t *cq, int dst_service_id);
+
 /* ====== Query configured values ====== */
 int dpumesh_get_slot_size(dpumesh_ctx_t *ctx);
 /* Max contiguous message = the per-conn TX block size (the reserve/alloc length cap). */
@@ -248,10 +267,14 @@ dmesh_qp_t *dmesh_next_ready(dmesh_cq_t *cq);
 /* Send a FIN — a zero-length message to the established peer. It rides the SAME
  * conn-shard ring as this conn's data (src_port), so it arrives AFTER every prior
  * message. The peer's PE delivers it as a 0-length descriptor -> the peer sees EOF ->
- * the peer closes -> its port slot is reclaimed. Best-effort: if no TX slot is free
- * we skip it; the peer/DPU then keep that conn until the port/uP is reused (there is
- * NO idle reaper — apply your own wall-clock timeout for a service that never
- * answers). Called by dmesh_destroy_qp; also used by the shim's shutdown(SHUT_WR). */
+ * the peer closes -> its port slot is reclaimed. It holds NO ring bytes (no send-unit /
+ * reclaim), but it still rides the shared host->DPU forward ring via dpumesh_enqueue, so
+ * — like any enqueue — it is normally instant yet CAN back off briefly under ring
+ * contention (up to RING_STALL_DEADLINE_SEC before the doorbell): close is therefore not
+ * strictly non-blocking. A ring wedged past that deadline drops the FIN (enqueue returns
+ * -1, ignored); the peer/DPU then keep that conn until the port/uP is reused (there is NO
+ * idle reaper — apply your own wall-clock timeout). Called by dmesh_destroy_qp; also used
+ * by the shim's shutdown(SHUT_WR). */
 void dmesh_send_fin(dmesh_qp_t *c);
 
 #ifdef __cplusplus

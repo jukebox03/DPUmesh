@@ -54,6 +54,8 @@
 #include <netinet/in.h>
 
 #include <dpumesh/dmesh.h>
+#include "dmesh_core.h"   /* dmesh_qp_open + dmesh_resolve_name: this validator's numeric
+                           * multi-svc knob addresses by int, below the name surface */
 
 #define CTRL_PORT   9092
 #define FRAME_HDR   5u                 /* [u32 total_len][u8 svc] — matches the DPU mock */
@@ -189,7 +191,7 @@ static void cli_recv(rstate_t *st, dmesh_qp_t *c, const dmesh_wc_t *w) {
 static void cli_reconnect(rstate_t *st, dmesh_qp_t **slot, int svc, size_t burst) {
     dmesh_destroy_qp(*slot);                             /* safe on NULL (first open) */
     if (st->cur == *slot) st->cur = NULL;
-    *slot = dmesh_create_qp(g_cq, svc);
+    *slot = dmesh_qp_open(g_cq, svc);   /* numeric svc → integer entry point */
     /* A burst wider than one slot is carved into several descriptors, each LB'd on
      * its own unless the conn is pinned — pin so the stream reaches ONE backend in
      * send order (what the parser's window + seam assumes). A burst inside one slot
@@ -377,10 +379,11 @@ static void handle_ctrl(int fd) {
 
 int main(void) {
     signal(SIGPIPE, SIG_IGN);
-    if (getenv("BENCH_WORKER_ID")) g_service = atoi(getenv("BENCH_WORKER_ID"));
-
-    g_s = dmesh_create_channel(g_service);
+    g_s = dmesh_create_channel();   /* identity from $DPUMESH_SERVICE via the registry */
     if (!g_s) { fprintf(stderr, "[stream] create_channel failed\n"); return 1; }
+    /* Own service_id, for the self-default svc list (numeric addressing below). */
+    const char *self = getenv("DPUMESH_SERVICE");
+    if (self) { int id = dmesh_resolve_name(self); if (id >= 0) g_service = id; }
     g_msgmax  = dmesh_msg_max(g_s);
     g_postmax = dmesh_post_max(g_s);
     g_cq = dmesh_create_cq(g_s);

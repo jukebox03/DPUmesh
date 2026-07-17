@@ -1,0 +1,18 @@
+# DPUmesh bench registry — the hand-authored stand-in for the dpumesh-controller
+# feed (NAMING.md §5). Baked into native bench images at /etc/dpumesh/registry
+# (the resolver's default path); the preload validator writes its own at runtime
+# because it needs the real ClusterIP for connect() resolution.
+#
+# Format: "ClusterIP:port  name  svc". Native bench peers are addressed by NAME
+# only (resolve_name), so their IP:port is the placeholder 0.0.0.0:0 — no pod
+# dials them by ClusterIP. svc = the interned service_id ([0,127]).
+#
+# ip:port          name              svc
+0.0.0.0:0          bench-dpumesh     10
+0.0.0.0:0          echo-dpumesh      11
+0.0.0.0:0          loopback-dpumesh  12
+0.0.0.0:0          echo-dpumesh-13   13
+0.0.0.0:0          echo-dpumesh-14   14
+0.0.0.0:0          preload-dpumesh   15
+0.0.0.0:0          stream-dpumesh    16
+0.0.0.0:0          verbs-dpumesh     17

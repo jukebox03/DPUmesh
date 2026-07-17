@@ -9,20 +9,21 @@
  * readiness model (measured ~half the native ceiling) in exchange for POSIX
  * transparency. Nothing here is on the native hot path.
  *
- * ACTIVATION (env; everything else is untouched kernel TCP):
- *   DMESH_PRELOAD_LISTEN=<port>          listen() on this TCP port becomes the
- *                                        dmesh service listener
- *   DMESH_PRELOAD_SVC=<svc>              service_id this process advertises
- *                                        (required with LISTEN; absent = pure client)
- *   DMESH_PRELOAD_REGISTRY=<file>        control-plane registry, lines "ClusterIP:port
- *                                        svc": connect() to a listed ClusterIP:port is
- *                                        routed to that service — the Envoy xDS/EDS
- *                                        equivalent (a static file for P0, controller-fed
- *                                        later). Keyed on IP:port, so same-port services
- *                                        on distinct ClusterIPs resolve apart.
- *   DMESH_PRELOAD_MAP=<port>=<svc>[,..]  legacy port-only rule (any IP on that port →
- *                                        dmesh); superseded by REGISTRY's ClusterIP key
- *   DMESH_PRELOAD_DEBUG=1                stderr diagnostics
+ * ACTIVATION — provenance is the control plane, not a human (NAMING.md). The shim
+ * types NO integer: identity and routing come from the SAME file-backed registry the
+ * native API uses (src/dmesh_resolve.c), and every value below is webhook-injected in
+ * production. Everything not listed stays untouched kernel TCP.
+ *   DPUMESH_SERVICE=<name>   this process's own service (a k8s Service name); unset =
+ *                            pure client. Resolved to a service_id via the registry.
+ *   DPUMESH_PORT=<port>      listen() on this TCP port becomes the dmesh service
+ *                            listener (the Service's targetPort). Unset = not a server.
+ *   DPUMESH_CONFIG=<file>    registry path (else /etc/dpumesh/registry), lines
+ *                            "ClusterIP:port name svc": connect() to a listed
+ *                            ClusterIP:port is routed to that service — the Envoy
+ *                            xDS/EDS equivalent (a ConfigMap in prod, a hand-written
+ *                            file for the bench harness). Keyed on IP:port, so
+ *                            same-port services on distinct ClusterIPs resolve apart.
+ *   DMESH_PRELOAD_DEBUG=1    stderr diagnostics
  *
  * FD REALIZATION — the design keystone: when a socket becomes dmesh-backed, the
  * shim creates a PRIVATE eventfd and dup2()s it over the app's fd number. The
@@ -139,72 +140,21 @@ static void resolve_all(void) {
 
 /* ============================ configuration ============================ */
 
-#define PRELOAD_MAX_MAP 64
-
-static int      g_debug;
-static int      g_listen_port = -1;      /* DMESH_PRELOAD_LISTEN */
-static int      g_svc         = -12345;  /* DMESH_PRELOAD_SVC (sentinel = unset) */
-
-/* connect() routing table: (dst IP:port) -> service_id. ONE lookup, two sources:
- * DMESH_PRELOAD_REGISTRY (a control-plane-fed file — the Envoy xDS/EDS equivalent)
- * gives exact ClusterIP:port -> svc; legacy DMESH_PRELOAD_MAP=port=svc gives a
- * port-only rule (addr 0 = any IP). Exact (addr,port) beats a wildcard, so keying
- * on the ClusterIP lets same-port services on distinct IPs resolve apart. */
-struct route_ent { uint32_t addr; uint16_t port; int svc; };   /* addr net-order; 0 = any IP */
-static int              g_route_n;
-static struct route_ent g_route[PRELOAD_MAX_MAP];
+static int g_debug;
 
 #define DBG(...) do { if (g_debug) { fprintf(stderr, "[dmesh_preload] " __VA_ARGS__); fputc('\n', stderr); } } while (0)
 
-static void route_add(uint32_t addr, uint16_t port, int svc) {
-    if (g_route_n < PRELOAD_MAX_MAP)
-        g_route[g_route_n++] = (struct route_ent){ addr, port, svc };
-}
-
-/* Resolve a connect() dst. Exact IP:port wins; a wildcard (addr 0, from MAP) matches
- * any IP on that port; -1 = not meshed (the connect stays kernel TCP). */
-static int route_lookup(uint32_t addr, uint16_t port) {
-    int wild = -1;
-    for (int i = 0; i < g_route_n; i++) {
-        if (g_route[i].port != port) continue;
-        if (g_route[i].addr == addr) return g_route[i].svc;
-        if (g_route[i].addr == 0)    wild = g_route[i].svc;
-    }
-    return wild;
-}
-
-/* Load the registry file: lines "IP:port svc" (blank / non-IP lines — e.g. '#'
- * comments — fail the parse and skip). P0 stand-in for the dpumesh-controller
- * feed; P1 swaps the file for a live source behind the SAME table. */
-static void route_load_registry(const char *path) {
-    FILE *f = fopen(path, "r");
-    if (!f) { DBG("registry %s: %s", path, strerror(errno)); return; }
-    char ln[256], ip[64]; int port, svc;
-    while (fgets(ln, sizeof ln, f)) {
-        struct in_addr a;
-        if (sscanf(ln, " %63[^:]:%d %d", ip, &port, &svc) == 3 &&
-            inet_pton(AF_INET, ip, &a) == 1)
-            route_add(a.s_addr, (uint16_t)port, svc);
-    }
-    fclose(f);
-}
-
+/* Identity ($DPUMESH_SERVICE) and routing (ClusterIP:port → svc) both come from the
+ * shared registry (src/dmesh_resolve.c) — the shim types no integer. connect() keys
+ * on IP:port (dmesh_resolve_addr); listen() converts the port named by $DPUMESH_PORT
+ * (dmesh_config_listen_port). The registry is loaded once here at ctor. */
 __attribute__((constructor))
 static void preload_ctor(void) {
     const char *e;
     g_debug = (e = getenv("DMESH_PRELOAD_DEBUG")) && atoi(e);
-    if ((e = getenv("DMESH_PRELOAD_LISTEN"))) g_listen_port = atoi(e);
-    if ((e = getenv("DMESH_PRELOAD_SVC")))    g_svc = atoi(e);
-    if ((e = getenv("DMESH_PRELOAD_MAP"))) {
-        char buf[512]; strncpy(buf, e, sizeof buf - 1); buf[sizeof buf - 1] = 0;
-        for (char *save = NULL, *tok = strtok_r(buf, ",", &save);
-             tok; tok = strtok_r(NULL, ",", &save)) {
-            char *eq = strchr(tok, '=');
-            if (eq) { *eq = 0; route_add(0, (uint16_t)atoi(tok), atoi(eq + 1)); }
-        }
-    }
-    if ((e = getenv("DMESH_PRELOAD_REGISTRY"))) route_load_registry(e);
-    DBG("ctor: listen=%d svc=%d routes=%d", g_listen_port, g_svc, g_route_n);
+    int n = dmesh_config_load(NULL);   /* $DPUMESH_CONFIG or /etc/dpumesh/registry */
+    DBG("ctor: listen_port=%d service='%s' registry_entries=%d",
+        dmesh_config_listen_port(), getenv("DPUMESH_SERVICE") ? getenv("DPUMESH_SERVICE") : "(none)", n);
 }
 
 /* ============================== fd table =============================== */
@@ -423,11 +373,11 @@ static pthread_mutex_t g_ch_mu = PTHREAD_MUTEX_INITIALIZER;
  * up after us, or its pod table was momentarily full — must not latch a
  * long-lived process into permanent failure). */
 static void channel_init(void) {
-    /* Advertise DMESH_PRELOAD_SVC if set (server or mixed process); else a pure
-     * client. One channel per process, created on first mapped socket op. */
-    int svc = (g_svc != -12345) ? g_svc : DMESH_SVC_NONE;
-    dmesh_channel_t *ch = dmesh_create_channel(svc);
-    if (!ch) { DBG("dmesh_create_channel(%d) FAILED (will retry)", svc); return; }
+    /* Identity is injected: dmesh_create_channel() resolves $DPUMESH_SERVICE via the
+     * registry (a server/mixed process) or opens a pure client if unset. One channel
+     * per process, created on first mapped socket op. */
+    dmesh_channel_t *ch = dmesh_create_channel();
+    if (!ch) { DBG("dmesh_create_channel() FAILED (will retry)"); return; }
     dmesh_cq_t *cq = dmesh_create_cq(ch);
     if (!cq || dmesh_cq_fd(cq) < 0) {   /* no readiness fd → dispatcher would be deaf */
         dmesh_destroy_cq(cq);
@@ -447,7 +397,9 @@ static void channel_init(void) {
         return;
     }
     pthread_detach(t);
-    DBG("channel up: svc=%d pod=%d msg_max=%d", svc, dmesh_pod_id(ch), dmesh_msg_max(ch));
+    DBG("channel up: service='%s' pod=%d msg_max=%d",
+        getenv("DPUMESH_SERVICE") ? getenv("DPUMESH_SERVICE") : "(none)",
+        dmesh_pod_id(ch), dmesh_msg_max(ch));
 }
 
 static int ensure_channel(void) {
@@ -696,9 +648,9 @@ static ssize_t shim_send(pfd_t *e, const void *buf, size_t len, int flags) {
 int connect(int fd, const struct sockaddr *addr, socklen_t alen) {
     ENSURE_REAL();
     if (pfd_get(fd)) { errno = EISCONN; return -1; }
-    if (g_route_n > 0 && addr && addr->sa_family == AF_INET && alen >= sizeof(struct sockaddr_in)) {
+    if (addr && addr->sa_family == AF_INET && alen >= sizeof(struct sockaddr_in)) {
         const struct sockaddr_in *sin = (const struct sockaddr_in *)addr;
-        int svc = route_lookup(sin->sin_addr.s_addr, ntohs(sin->sin_port));
+        int svc = dmesh_resolve_addr(sin->sin_addr.s_addr, ntohs(sin->sin_port));
         if (svc >= 0) {
             /* AF_INET SOCK_STREAM only (design/API.md §7) — a UDP connect() to a mapped
              * port must stay kernel. */
@@ -707,7 +659,7 @@ int connect(int fd, const struct sockaddr *addr, socklen_t alen) {
                 so_type != SOCK_STREAM)
                 return real_connect(fd, addr, alen);
             if (ensure_channel() < 0) { errno = ENETUNREACH; return -1; }
-            dmesh_qp_t *c = dmesh_create_qp(g_cq, svc);
+            dmesh_qp_t *c = dmesh_qp_open(g_cq, svc);
             if (!c) return -1;                     /* ENOMEM */
             dmesh_pin_route(c);                    /* socket contract: one backend, total order */
             pfd_t *e = pfd_new(c);
@@ -741,17 +693,18 @@ int bind(int fd, const struct sockaddr *addr, socklen_t alen) {
 
 int listen(int fd, int backlog) {
     ENSURE_REAL();
-    if (g_listen_port >= 0 && g_svc != -12345 && !pfd_get(fd)) {
+    int listen_port = dmesh_config_listen_port();   /* $DPUMESH_PORT, -1 = not a server */
+    if (listen_port >= 0 && !pfd_get(fd)) {
         struct sockaddr_in sin; socklen_t sl = sizeof sin;
         if (real_getsockname(fd, (struct sockaddr *)&sin, &sl) == 0 &&
-            sin.sin_family == AF_INET && ntohs(sin.sin_port) == (uint16_t)g_listen_port) {
+            sin.sin_family == AF_INET && ntohs(sin.sin_port) == (uint16_t)listen_port) {
             if (ensure_channel() < 0) { errno = EADDRNOTAVAIL; return -1; }
             pfd_t *e = pfd_new(NULL);
             if (!e) { errno = ENOMEM; return -1; }
             e->listener = 1;
             int fl = real_fcntl(fd, F_GETFL);
             e->nonblock = (fl >= 0 && (fl & O_NONBLOCK)) ? 1 : 0;
-            e->lport = (uint16_t)g_listen_port;
+            e->lport = (uint16_t)listen_port;
             if (install_fd(fd, e) < 0) {
                 real_close(e->efd); free(e);
                 errno = ENOMEM;
@@ -763,7 +716,8 @@ int listen(int fd, int backlog) {
             int pending = g_accept_head != NULL;
             pthread_mutex_unlock(&g_q_mu);
             if (pending) efd_signal(e);
-            DBG("listen fd=%d port=%d → dmesh svc=%d", fd, g_listen_port, g_svc);
+            DBG("listen fd=%d port=%d → dmesh service='%s'", fd, listen_port,
+                getenv("DPUMESH_SERVICE") ? getenv("DPUMESH_SERVICE") : "(none)");
             return 0;
         }
     }

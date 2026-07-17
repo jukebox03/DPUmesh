@@ -135,10 +135,10 @@ static void reclaim(dmesh_qp_t *c) {
 }
 
 int main(void) {
-    int service_id = 11;                             /* advertised service (DPU assigns pod_id) */
-    if (getenv("BENCH_WORKER_ID")) service_id = atoi(getenv("BENCH_WORKER_ID"));
+    const char *service = getenv("DPUMESH_SERVICE");  /* identity injected via env → registry */
+    if (!service) service = "(none)";
 
-    g_s = dmesh_create_channel(service_id);
+    g_s = dmesh_create_channel();                     /* advertises $DPUMESH_SERVICE (DPU assigns pod_id) */
     if (!g_s) { fprintf(stderr, "[greeter] dmesh_create_channel failed\n"); return 1; }
     g_post_max = (uint32_t)dmesh_post_max(g_s);
 
@@ -151,8 +151,8 @@ int main(void) {
     struct epoll_event ev = { .events = EPOLLIN, .data = { .fd = dfd } };
     if (epoll_ctl(epfd, EPOLL_CTL_ADD, dfd, &ev) < 0) { perror("epoll_ctl"); return 1; }
 
-    fprintf(stderr, "[greeter] ready (SayHello, single-loop): pod_id=%d service=%d channel_fd=%d\n",
-            dmesh_pod_id(g_s), service_id, dfd);
+    fprintf(stderr, "[greeter] ready (SayHello, single-loop): pod_id=%d service=%s channel_fd=%d\n",
+            dmesh_pod_id(g_s), service, dfd);
 
     struct epoll_event events[MAX_EVENTS];
     dmesh_wc_t wc[CQ_BATCH];

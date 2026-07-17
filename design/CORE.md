@@ -7,7 +7,7 @@ The system spans **three planes**, all driving **one** host→DPU→host data pa
 
 | Plane | Runs on | Sources |
 |---|---|---|
-| **Host transport** | application host (x86) | `src/dmesh_core.{h,c}` (core + connection lifecycle; **internal, not installed**) carrying **two sibling surfaces**: `include/dpumesh/dmesh.h` → `src/dmesh_api.c` (the native verbs-shaped API) and `src/dmesh_preload.c` (the POSIX socket shim). Neither surface is built on the other. |
+| **Host transport** | application host (x86) | `src/dmesh_core.{h,c}` (core + connection lifecycle; **internal, not installed**) carrying **two sibling surfaces** over one file-backed **name/identity resolver** (`src/dmesh_resolve.c`, §1.7): `include/dpumesh/dmesh.h` → `src/dmesh_api.c` (the native verbs-shaped API) and `src/dmesh_preload.c` (the POSIX socket shim). Neither surface is built on the other; both resolve names through the same table. |
 | **DPU control plane** | BlueField ARM | `doca/dpu_worker.c`, `object.{c,h}`, `dpu_proxy.c` (reverse egress), `dpu_l7.c` (L7 hook), `comch_*.c` |
 | **DPA data plane** | BlueField DPA EUs | `doca/device/dpa_kernel.c` (EU kernel, dpacc-built) + `doca/dpa.c` (ARM-side setup) |
 
@@ -41,7 +41,8 @@ path to the DPU) and **Comch consumer** (fast-path RX completions), the **TX mma
 the **K forward descriptor rings**, the **port (connection) table**, one **PE progress thread**, and
 one **readiness eventfd**.
 
-**Registration.** `dmesh_create_channel(service_id)` opens the device, connects Comch, and sends
+**Registration.** `dmesh_create_channel()` resolves `$DPUMESH_SERVICE` (a k8s Service name) to a
+`service_id` through `src/dmesh_resolve.c` (§1.7), opens the device, connects Comch, and sends
 `POD_REGISTER{service_id, pod_id=-1}`; the DPU assigns a `pod_id` (its `pods[]` slot index) and replies
 `POD_ASSIGNED`. The host then exports its TX buffer, RX buffer, and each forward ring to the DPU via
 `MMAP_EXPORT` (DOCA PCI mmap export descriptors). `pod_id` stays −1 until assigned.
@@ -155,6 +156,18 @@ the PE with a `seq_cst` fence + `acq_rel` exchange after a push, and disarmed by
 changed. `psl->cq` is published with `user` **before** the `role` release-store, so the acquire-load of
 `role` synchronizes-with it upstream of the Dekker pair.
 
+### 1.7 Name/identity resolution (`src/dmesh_resolve.c`)
+One file-backed table both surfaces resolve through — the whole of the "`service_id` provenance moves
+from the user to a control plane" change on the host side ([NAMING.md](NAMING.md)). Four questions:
+`config_identity` (this node's own service, from `$DPUMESH_SERVICE`), `config_listen_port`
+(`$DPUMESH_PORT`, shim only), `resolve_name` (a peer's `service_id` by k8s name — the native API),
+`resolve_addr` (a peer's `service_id` by ClusterIP:port — the shim). Registry lines are
+`IP:port name svc`, **loaded once** (default `/etc/dpumesh/registry`; `$DPUMESH_CONFIG` overrides;
+live `inotify` reload is deferred, so post-load reads need no lock). The public
+`dmesh_create_qp(cq, name)` is a two-line wrapper over the internal integer entry
+`dmesh_qp_open(cq, int)` that the shim calls directly — the integer `service_id` is born here and
+appears in **no public header**.
+
 ---
 
 ## 2. Wire protocol (host ↔ DPU ↔ DPA)
@@ -261,7 +274,7 @@ own PE notification fd / eventfd (epoll: arm → re-check → block, 1 ms backst
   takes `routing_lock` only when M > 1, and only for `rg ≠ 0` traffic; `px_arrival` custody
   (`unfreed`) is an atomic counter — ingest (window release, drops) and emit (egressed bytes)
   decrement it from different threads, and whichever reaches 0 releases exactly once.
-- **Measured** (scale_log 2026-07-14): shards = 2 ⇒ +33–44 %; shards = 2 + `n_eng` = 2 ⇒ ≈ 2× the
+- **Measured** (RESULT.md 2026-07-14): shards = 2 ⇒ +33–44 %; shards = 2 + `n_eng` = 2 ⇒ ≈ 2× the
   single-funnel small-RPC ceiling. `DPUMESH_DIAG=1` prints a once/sec pipeline dump (batch fill,
   flush-size histogram, queue depths) that stays quiet while idle.
 
@@ -422,13 +435,15 @@ transport. That seam is exactly why the native path is zero-copy: the cost lives
 contract demands it.
 
 The keystone: when a socket becomes dmesh-backed (`connect` to a registry `ClusterIP:port`, or `listen`
-on the advertised port), the shim **`dup2`s a private eventfd over the app's fd number** — the fd stays
+on `$DPUMESH_PORT`), the shim **`dup2`s a private eventfd over the app's fd number** — the fd stays
 a real kernel fd, so `epoll`/`poll`/`select`/`close`/`dup` work **natively** (kernel-TCP and dmesh fds
 share one epoll set, zero interposition of the readiness syscalls). A single **dispatcher thread** owns
 the shim's one CQ and is its sole consumer and sole `dmesh_destroy_qp` caller (app `close` only queues)
 — it asserts each conn's eventfd on delivery. Every client conn is `dmesh_pin_route`d (one backend,
-in-order — the socket contract). `connect` keys on the registry `ClusterIP:port` (not port alone), so
-same-port services on distinct ClusterIPs resolve apart, and `getpeername` returns that dialed address.
+in-order — the socket contract). `connect` keys on the registry `ClusterIP:port` (not port alone) —
+resolved, like the node's own `$DPUMESH_SERVICE` identity, through `src/dmesh_resolve.c` (§1.7, shared
+with the native API; the shim types no integer) — so same-port services on distinct ClusterIPs resolve
+apart, and `getpeername` returns that dialed address.
 Blocking is emulated (`SO_RCVTIMEO` honored). **Lost-wakeup discipline** bridges the edge-triggered
 dmesh ready list to level-triggered POSIX readiness: over-assert the eventfd on every successful read,
 drain-and-retry-once on `EAGAIN`. `shutdown(SHUT_WR)` sends the FIN — an approximate half-close.

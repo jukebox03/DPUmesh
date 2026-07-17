@@ -1652,13 +1652,20 @@ static int px_engine_recover(struct px_engine *eng) {
         if (doca_ctx_start(eng->dma_ctx) != DOCA_SUCCESS)
             return 1;                     /* still down; keep the caller awake to retry */
         eng->dma_tasks_inflight = 0;
-        /* Clear every lane's in-flight marker: a refresh in flight when the ctx died
-         * may never deliver its callback, and a stuck refresh_inflight=1 stops that
-         * lane refreshing credit ever again — it would starve permanently, including
-         * lanes of pods that never died. Fault path only, so rearm all rather than
-         * reason about which callbacks fired. */
+        /* Clear the in-flight marker of every lane THIS engine owns: a refresh in flight
+         * when the ctx died may never deliver its callback, and a stuck refresh_inflight=1
+         * stops that lane refreshing credit ever again — it would starve permanently. Fault
+         * path only, so rearm all of ours rather than reason about which callbacks fired.
+         *
+         * ONLY our own lanes (pod_idx % n_eng == id): each engine has a PRIVATE doca_dma ctx,
+         * so this fault flushed only OUR tasks; another engine's lanes are untouched and may
+         * have a legitimate refresh in flight. refresh_inflight is a plain int guarded by the
+         * single-owner-thread invariant + the shared refresh_ops[pod][region] px_op — clearing
+         * a peer's flag races that thread AND lets it re-submit on the same px_op, overwriting
+         * op->src_buf/dst_buf and double-freeing/leaking those inventory bufs. For n_eng==1
+         * (eng->id=0, step 1) this covers all lanes exactly as before. */
         struct dmesh_proxy *px = eng->objs->proxy;
-        for (int p = 0; p < MAX_PODS; p++)
+        for (int p = eng->id; p < MAX_PODS; p += px->n_eng)
             for (int r = 0; r < MAX_EU_PER_POD; r++)
                 px->lanes[p][r].refresh_inflight = 0;
         eng->dma_stalled = 0;

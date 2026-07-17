@@ -4,7 +4,7 @@
  * No DPUmesh headers, no transport knowledge: socket/bind/listen/accept4/
  * epoll/read/write/close only. It runs unmodified over kernel TCP, and the
  * SAME binary runs over DPUmesh under LD_PRELOAD=libdmesh_preload.so with
- * DMESH_PRELOAD_LISTEN=<port> DMESH_PRELOAD_SVC=<svc> — that transparency is
+ * DPUMESH_PORT=<port> DPUMESH_SERVICE=<name> — that transparency is
  * the point of the test.
  *
  * Usage: tcp_echo [port]        (default 9095)

@@ -42,7 +42,7 @@
 
 static dmesh_channel_t *g_s      = NULL;
 static dmesh_cq_t      *g_cq     = NULL;  /* the one CQ both roles are polled from */
-static int              g_service = 0;    /* own service id (declared at create_channel) */
+static const char      *g_service = NULL; /* own service NAME (self-routing: connect to ourselves) */
 static int              g_msgmax  = 0;    /* max bytes per RECV == max bytes per echo post */
 static long             g_served  = 0;    /* requests the echo side replied to */
 
@@ -284,16 +284,17 @@ static void handle_ctrl(int fd) {
 
 int main(void) {
     signal(SIGPIPE, SIG_IGN);
-    int service_id = 12;   /* this node advertises AND connects to its own service */
-    if (getenv("BENCH_WORKER_ID")) service_id = atoi(getenv("BENCH_WORKER_ID"));
+    /* This node advertises AND connects to its OWN service: identity from
+     * $DPUMESH_SERVICE, and we address that same name so the DPU routes back to us. */
+    g_service = getenv("DPUMESH_SERVICE");
+    if (!g_service) g_service = "loopback-dpumesh";
 
-    g_s = dmesh_create_channel(service_id);
+    g_s = dmesh_create_channel();
     if (!g_s) { fprintf(stderr, "[loopback] create_channel failed\n"); return 1; }
-    g_service = service_id;   /* connect to OUR OWN service; DPU routes it back to us */
     g_msgmax  = dmesh_msg_max(g_s);
     g_cq = dmesh_create_cq(g_s);
     if (!g_cq) { fprintf(stderr, "[loopback] create_cq failed\n"); return 1; }
-    fprintf(stderr, "[loopback] ready: pod_id=%d own_service=%d\n", dmesh_pod_id(g_s), g_service);
+    fprintf(stderr, "[loopback] ready: pod_id=%d own_service=%s\n", dmesh_pod_id(g_s), g_service);
 
     int srv = socket(AF_INET, SOCK_STREAM, 0);
     int opt = 1; setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof opt);

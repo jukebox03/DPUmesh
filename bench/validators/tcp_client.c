@@ -3,8 +3,8 @@
  *
  * No DPUmesh headers: socket/connect/write/read/close + pthreads only. The same
  * binary runs over kernel TCP, and over DPUmesh under
- * LD_PRELOAD=libdmesh_preload.so with DMESH_PRELOAD_REGISTRY listing the dialed
- * ClusterIP:port -> service.
+ * LD_PRELOAD=libdmesh_preload.so with DPUMESH_CONFIG listing the dialed
+ * ClusterIP:port -> name -> service.
  *
  * THREAD-PER-CONN: every RUN opens <conns> FRESH connections and drives each
  * from its OWN thread with blocking single-outstanding round trips — the classic

@@ -35,6 +35,7 @@ RPATHS  := -Wl,-rpath,/usr/local/lib \
 LIB_SRCS := \
 	src/dmesh_core.c \
 	src/dmesh_api.c \
+	src/dmesh_resolve.c \
 	doca/common.c \
 	doca/object.c \
 	doca/buffer.c \
@@ -82,7 +83,7 @@ bench: lib $(addprefix $(BINDIR)/,$(DMESH_BINS)) $(PRELOAD) $(addprefix $(BINDIR
 # source is a tracked prerequisite (rebuilds on edit).
 define DMESH_BIN_RULE
 $(BINDIR)/$(1): $($(1)_SRC) | dirs lib
-	$$(CC) -O2 -g -Iinclude -o $$@ $$< -L$$(LIBDIR) -ldpumesh -lpthread $$(RPATHS)
+	$$(CC) -O2 -g -Iinclude -Isrc -o $$@ $$< -L$$(LIBDIR) -ldpumesh -lpthread $$(RPATHS)
 	@echo "  -> $$@"
 endef
 $(foreach b,$(DMESH_BINS),$(eval $(call DMESH_BIN_RULE,$(b))))

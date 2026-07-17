@@ -34,8 +34,7 @@ spec:
         env:
         - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
         - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
-        - { name: BENCH_WORKER_ID, value: "10" }
-        - { name: BENCH_DST_POD_ID, value: "11" }
+        - { name: BENCH_DST_SERVICE, value: "echo-dpumesh" }   # peer by k8s Service NAME (pure client)
         - { name: ASYNC_THREADS, value: "${ASYNC_THREADS}" }
         - { name: BENCH_PIPELINE, value: "${BENCH_PIPELINE}" }
         - { name: BENCH_COALESCE, value: "${BENCH_COALESCE}" }
@@ -72,7 +71,7 @@ spec:
         env:
         - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
         - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
-        - { name: BENCH_WORKER_ID, value: "11" }
+        - { name: DPUMESH_SERVICE, value: "echo-dpumesh" }     # identity: k8s Service name → registry
         - { name: ECHO_THREADS, value: "${ECHO_THREADS}" }
         securityContext: { privileged: true }
         volumeMounts:
@@ -102,7 +101,7 @@ spec:
         env:
         - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
         - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
-        - { name: BENCH_WORKER_ID, value: "13" }
+        - { name: DPUMESH_SERVICE, value: "echo-dpumesh-13" }
         - { name: ECHO_THREADS, value: "${ECHO_THREADS}" }
         securityContext: { privileged: true }
         volumeMounts:
@@ -130,7 +129,7 @@ spec:
         env:
         - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
         - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
-        - { name: BENCH_WORKER_ID, value: "14" }
+        - { name: DPUMESH_SERVICE, value: "echo-dpumesh-14" }
         - { name: ECHO_THREADS, value: "${ECHO_THREADS}" }
         securityContext: { privileged: true }
         volumeMounts:
@@ -161,7 +160,7 @@ spec:
         env:
         - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
         - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
-        - { name: BENCH_WORKER_ID, value: "12" }
+        - { name: DPUMESH_SERVICE, value: "loopback-dpumesh" }
         - { name: DPUMESH_ARENA_SLOTS, value: "${DPUMESH_ARENA_SLOTS}" }
         securityContext: { privileged: true }
         volumeMounts:
@@ -200,7 +199,7 @@ spec:
         env:
         - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
         - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
-        - { name: BENCH_WORKER_ID, value: "17" }
+        - { name: DPUMESH_SERVICE, value: "verbs-dpumesh" }
         - { name: DPUMESH_ARENA_SLOTS, value: "${DPUMESH_ARENA_SLOTS}" }
         securityContext: { privileged: true }
         volumeMounts:
@@ -240,7 +239,7 @@ spec:
         env:
         - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
         - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
-        - { name: BENCH_WORKER_ID, value: "16" }
+        - { name: DPUMESH_SERVICE, value: "stream-dpumesh" }
         securityContext: { privileged: true }
         volumeMounts:
         - { mountPath: /dev/infiniband, name: infiniband }

@@ -107,7 +107,7 @@ bench/
   bench_tcp.go     TCP client       -> bench-tcp       (same methodology, via sidecar)
   echo_tcp.go      TCP server       -> echo-tcp
   BENCH.md         this doc
-  scale_log.md     the measurement log — every experiment lands here
+  RESULT.md        the measurement log — every experiment lands here
   k8s/pods.yaml    declarative k8s manifest (applied by bench.sh via envsubst)
   docker/          the 4 benchmark Dockerfiles
   validators/      DPUmesh feature validators (see validators/README.md) + their Dockerfiles
@@ -213,7 +213,7 @@ is the measured config (design/CORE.md §4.1).
 
 ### Notes — read these before quoting a number
 
-* **A `scale_log.md` number is meaningless without its section's config header.**
+* **A `RESULT.md` number is meaningless without its section's config header.**
   Every measurement block names its deploy env and payload; a default (unsharded)
   deploy and a `shards=2 + egress2` deploy differ by ~2×, and the greeter payload
   (32 B/8 B vs 1 KB/1 KB) matters too. Comparing across them fabricates a
