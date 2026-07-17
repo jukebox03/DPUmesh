@@ -244,8 +244,8 @@ is the measured config (design/CORE.md §4.1).
   deploy and a `shards=2 + egress2` deploy differ by ~2×, and the greeter payload
   (32 B/8 B vs 1 KB/1 KB) matters too. Comparing across them fabricates a
   regression exactly the size of the config delta. Match the config first.
-* **The default deploy pins to ~0.102 Mrps** regardless of concurrency, threads,
-  or payload, with p50 = N/0.102 (pure Little's law). That flat line is the
+* **The default deploy pins to ~0.097 Mrps** regardless of concurrency, threads,
+  or payload, with p50 = N/0.097 (pure Little's law). That flat line is the
   **unsharded DPU funnel ceiling**, not a host bottleneck. With
   `DPUMESH_INGEST_SHARDS=2 DPUMESH_ARM_EGRESS_THREADS=2` the ceiling is ~0.20.
 * **Thread scaling is only observable below saturation.** At conc=64 one thread

@@ -76,8 +76,9 @@ make clean
 
 Needs DOCA on the host (`pkg-config` finds `doca-common`/`doca-comch`/`doca-dpa`) and `go` for
 the TCP baseline binaries. Header dependencies are tracked (`-MMD`), so editing a public header
-relinks everything that includes it — mixing a fresh `libdpumesh.so` with a stale binary is an
-ABI skew that only shows up as a run-time SIGSEGV.
+relinks everything in-tree that includes it. The library carries a **versioned SONAME**
+(`libdpumesh.so.1`), so an out-of-tree binary built against an older header fails at the loader
+rather than running against a moved struct layout and SIGSEGV'ing.
 
 The **DPU** side (ARM control plane + DPA kernel) builds with meson/ninja on the DPU;
 `bench/bench.sh deploy` does it over ssh, and `build_dpacc.sh` cross-compiles

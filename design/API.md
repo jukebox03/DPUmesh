@@ -180,7 +180,7 @@ dmesh_destroy_qp(qp);                    // sends a FIN so the DPU frees the ups
 | Function | Returns / errno |
 |---|---|
 | `dmesh_channel_t *dmesh_create_channel(void)` | Channel, or `NULL` on init failure. **Identity is injected, not declared**: the node advertises the service named in `$DPUMESH_SERVICE` (a k8s Service name, resolved to a `service_id` through the registry; unset = pure client). **The node's `pod_id` is assigned by the DPU** — read it back with `dmesh_pod_id()`. Blocks briefly on the register round-trip. |
-| `void dmesh_destroy_channel(dmesh_channel_t *s)` | Releases all DOCA resources. Safe on `NULL`. |
+| `int dmesh_destroy_channel(dmesh_channel_t *s)` | Releases all DOCA resources. Safe on `NULL`. `0`, or `-1`+`EBUSY` (nothing released) if a CQ still lives on it — destroy the CQs first. |
 | `int dmesh_pod_id(dmesh_channel_t *s)` | This node's DPU-assigned `pod_id`. |
 | `int dmesh_msg_max(dmesh_channel_t *s)` | Max length arriving as **ONE** RECV completion (`slot_size`, 8 KB). |
 | `int dmesh_post_max(dmesh_channel_t *s)` | Max length of one `alloc`/`post` (`block_size`, 64 KB). |
@@ -189,7 +189,7 @@ dmesh_destroy_qp(qp);                    // sends a FIN so the DPU frees the ups
 | Function | Returns / errno |
 |---|---|
 | `dmesh_cq_t *dmesh_create_cq(dmesh_channel_t *ch)` | A completion queue with its own ready list + event fd. **Make one per thread.** Readiness is live immediately. |
-| `void dmesh_destroy_cq(dmesh_cq_t *cq)` | Destroy its QPs **first** (the `ibv_destroy_cq` EBUSY rule). |
+| `int dmesh_destroy_cq(dmesh_cq_t *cq)` | Destroy its QPs **first** (`ibv_destroy_cq`'s EBUSY rule): `0`, or `-1`+`EBUSY` (CQ untouched) if a QP is still bound. |
 | `int dmesh_cq_fd(dmesh_cq_t *cq)` | The completion-channel fd, for vanilla epoll/poll/select. **Purely optional** — the idle-sleep path, never a prerequisite: `dmesh_poll_cq` is complete on its own, so a spin-polling client need not call this. |
 
 ### QP — `ibv_create_qp` / `rdma_disconnect`
@@ -248,9 +248,10 @@ reply comes from the one pinned backend, `stream` never changes, and you can ign
 `dmesh_alloc` never sleeps: you already have exactly ONE wait point (the CQ), and a second inside
 alloc would contradict that **and** stall every other QP on your thread. On `EAGAIN`, go do other
 work and retry. **`EAGAIN` is a normal resource condition, never a caller error** — either this QP
-hit its in-flight ceiling (elastic block chain: `DPUMESH_TX_BLOCK` 64 KB × `DPUMESH_TX_MAXB` 4 →
-≤ 256 KB/QP) **or** the shared pool (`n_blocks` = 512) is momentarily empty because *other* QPs
-hold it, which no per-QP accounting can prevent. That second cause is exactly where the
+hit its in-flight ceiling — the elastic block chain (`DPUMESH_TX_BLOCK` 64 KB × `DPUMESH_TX_MAXB`
+4 → ≤ 256 KB/QP) or its `TX_SU_DEPTH` = 64 shipped-descriptor FIFO, whichever binds first (small
+messages hit the FIFO) — **or** the shared pool (`n_blocks` = 512) is momentarily empty because
+*other* QPs hold it, which no per-QP accounting can prevent. That second cause is exactly where the
 `ibv_post_send`/`ENOMEM` analogy stops: verbs sends from *your* memory, so only the descriptor
 count is finite and overrunning it is your bug; here the buffer itself is shared and finite.
 Measured 2026-07-16 (default deploy, two runs): `grow_waits` = 0 at 64 B and 1 KB but **554–662** at
@@ -693,7 +694,7 @@ identity/registry vars `DPUMESH_SERVICE` / `DPUMESH_PORT` / `DPUMESH_CONFIG` (§
 | TX/RX slots per pod | `4096` | `DPUMESH_NUM_SLOTS_DEFAULT` → `ctx->num_slots` | `src/dmesh_core.{h,c}` |
 | Slot size (max wire DMA) | `8192` (DPA `dma_copy` cap) | `DPUMESH_SLOT_SIZE_DEFAULT` → `ctx->slot_size` | `src/dmesh_core.{h,c}` |
 | Per-QP TX elastic block chain | `block_size 64 KB`, `maxb 4` (≤ 256 KB/QP), pool `n_blocks 512`, `cushion_h 1` | `DPUMESH_TX_BLOCK` / `_TX_MAXB` / `_TX_H` env | `src/dmesh_core.c` |
-| Send-unit FIFO depth | `64` — **clamps `maxb`** so `maxb × ceil(block/slot) ≤ 64`; makes the block window bind first, so the FIFO can never fill and `tx_next_send` needs no capacity check | `TX_SU_DEPTH` | `src/dmesh_core.c` |
+| Send-unit FIFO depth | `64` — the per-QP shipped-but-un-ACKed descriptor cap. `dmesh_alloc` reserves a message's whole carve (`ceil(len/slot_size)` entries) up front and returns `EAGAIN` if it will not fit, so `tx_next_send` is always carveable. `block_size` is clamped `≤ 64 × slot_size` so one max-size message fits an empty FIFO | `TX_SU_DEPTH` | `src/dmesh_core.c` |
 | DPA EU threads (N) | **auto-detected** = min(device EUs, `MAX_DPA_EU`=8); BF3 → `8` | `DPUMESH_DPA_THREADS` env | `doca/dpa.c` |
 | Concurrent meshed pods / DPU | live cap `MAX_DPA_RINGS × N / K` (BF3 → `32`) | — | `dmesh_common.h` + `doca/comch_server.c` |
 | Forward rings per pod / EU-sharding (K) | `2` — env `DPUMESH_RINGS_PER_POD` | `DPUMESH_RINGS_PER_POD_DEFAULT` | `dmesh_common.h` (DPU + host) |

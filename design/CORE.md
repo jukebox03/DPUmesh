@@ -88,11 +88,13 @@ footprint tracks its in-flight demand instead of a fixed slab. The pool is a **l
 
 `dmesh_alloc` = `tx_reserve` — it hands the ring pointer out and the caller fills in place, so the
 native path never copies (the shim's `stream_write` is the one caller that adds a memcpy, because
-`write(2)` demands one). **`tx_reserve` never blocks**: `NULL`+`EAGAIN` when the block window is full,
-the `ibv_post_send` contract. It also cannot fail *later* — the init clamp
-`maxb × ceil(block_size/slot_size) ≤ TX_SU_DEPTH` makes the block window bind strictly before the
-send-unit FIFO, so anything reserve admitted is guaranteed carveable and `tx_next_send` needs no
-capacity check. The descriptor's `body_buf_slot` carries the **byte offset**
+`write(2)` demands one). **`tx_reserve` never blocks**: `NULL`+`EAGAIN` when the block window is full
+**or** the send-unit FIFO would overflow — it reserves the message's whole carve
+(`ceil(len/slot_size)` FIFO entries) up front, so what it admits is guaranteed carveable and
+`tx_next_send` needs no capacity check. A small message costs a slice of a block but a whole FIFO
+slot, so the FIFO is the binding limit for small traffic and the block window cannot bound it;
+`block_size` is clamped `≤ TX_SU_DEPTH × slot_size` so one max-size message always fits an empty
+FIFO and a full-size post never deadlocks. The descriptor's `body_buf_slot` carries the **byte offset**
 `pblk[k%maxb] × block_size + off` into the mmap, and `enqueue` sets `dma->addr = dma_buffer + offset` — the
 DPA mirrors that offset into staging, so the whole allocator is **host-side only**. A CLOSED conn's blocks
 return once its chain drains — by close if already drained, else by the PE on the last ACK
@@ -333,14 +335,14 @@ its memory. `pods_remove_connection` therefore:
 - **destroys nothing.** An in-flight DMA may still reference a mapping, and destroying it faults the
   engine's shared `doca_dma` ctx. Safe reclaim needs a quiesce protocol (RING_DEL ack + per-pod egress
   in-flight refcount) that does not exist, so these handles **leak per reconnect** — deliberately, and
-  cheaply: the 32 MB staging that dominated the leak is now **allocated once per slot and reused**
+  cheaply: the 32 MB staging that would dominate the leak is **allocated once per slot and reused**
   (`setup_pod_dma`), since it is DPU-local and holds nothing host-specific.
 
 **Re-tenanting a slot.** `dma_generation` is bumped per incarnation (before `dma_ready` is published) and
 stamped into async DMA ops. Slot indices are recycled, so it is what distinguishes "this pod's DMA failed"
 from "the previous tenant's did", and what tells the egress its per-lane credit state is stale (§5).
 The egress side complements all this: a not-ready pod's queued lane units are dropped to the done-queue
-(custody released, no delivery).
+(custody released, no delivery to the dead pod, an EOF back to each unit's origin).
 
 ---
 
@@ -360,9 +362,11 @@ only destination resolution differs.
   routing each frame by its `svc` byte), or **L7** (the real hook, §5.1). `DPUMESH_PROXY` picks the deploy
   default; `DPUMESH_PROXY_FRAME_SVC` / `_L7_SVC` assign parsers per service.
 - **Backend death mid-flight.** If a destination pod disconnects while units are queued/in-flight, its lane
-  is drained (`px_lane_drop_dead` → done-queue, custody released, no delivery) and none of its mappings are
-  destroyed (§4.4), so in-flight SG-DMA finishes without faulting the engine ctx. The LB meanwhile routes
-  new traffic only to live backends.
+  is drained (`px_lane_drop_dead` → done-queue): custody is released and nothing is delivered to the dead
+  backend, but each dropped unit's origin gets a 0-length **EOF** (`px_eof_to_origin`) so its sender closes
+  rather than hangs — an undelivered unit must not read to the sender as delivered. None of the pod's
+  mappings are destroyed (§4.4), so in-flight SG-DMA finishes without faulting the engine ctx, and the LB
+  routes new traffic only to live backends.
 - **Pressure backpressures; failure closes. Neither truncates.** `px_ship_seg` returns three states, and
   they are the whole delivery contract. `0` = a pool was momentarily empty: it mutates NOTHING (no custody
   claim, no `egress_seq` bump), the parse loop stops **without advancing `parse_pos`**, and `px_stall` parks
@@ -478,7 +482,7 @@ Limits: AF_INET `SOCK_STREAM` only; no fork-shared sockets; Go/static/stdio bina
 |---|---|
 | `num_slots × slot_size == DPU_BUFFER_SIZE` (32 MB) | staging mirrors the host TX offset-for-offset → bounds occupancy |
 | a conn's live window ≤ `maxb` blocks (`b − tail_blk < maxb` before backing block `b`) | slot `b%maxb` can never alias a still-live block `b−maxb` → no write-side overwrite/wedge |
-| `maxb × ceil(block_size/slot_size) ≤ TX_SU_DEPTH` (clamped at init) | makes the block window bind **strictly before** the send-unit FIFO, so the FIFO can never fill: what `tx_reserve` admitted is always carveable, and `tx_next_send` needs no capacity check (it used to back off on a branch this clamp makes unreachable) |
+| `tx_reserve` reserves a message's whole carve (`ceil(len/slot_size)` entries) in the send-unit FIFO before admitting it, and `block_size ≤ TX_SU_DEPTH × slot_size` (clamped at init) | the FIFO is bounded by reserve's admission, not by the block window (a small message costs a slice of a block but a whole FIFO slot). The clamp lets one max-size message fit an empty FIFO, so a full-size post never deadlocks; `tx_next_send` is then always carveable and needs no capacity check |
 | `tx_reserve` probes the block window **before** mutating `tx_w` | on `EAGAIN` the write head must be exactly where it was, or a retry strands the padded tail |
 | `psl->cq` is published with `user` **before** the `role` release-store | `arm_ready_after_push` loads `cq` after an acquire-load of `role`; publishing later would let the PE push to a NULL/stale ready list |
 | readiness is armed at `dmesh_create_cq`, never on first fd request | gating the arm on a fd getter made `poll_cq` silently under-deliver for a pure-polling client (established conns only — a new conn's first message rides the ungated accept queue, hence connects-work/replies-vanish) |
@@ -502,7 +506,7 @@ Limits: AF_INET `SOCK_STREAM` only; no fork-shared sockets; Go/static/stdio bina
 ## 8. Baked sizing (see API.md §9 for the full env/knob table)
 `num_slots = 4096`, `slot_size = 8192` (32 MB TX/RX/staging per pod); TX blocks `block_size = 64 KB`
 (pool of `n_blocks = 512`), `maxb = 4` (≤ 256 KB in-flight/conn), `cushion_h = 1`,
-`TX_SU_DEPTH = 64` (and it **clamps** `maxb` — §7); `N` DPA EUs
+`TX_SU_DEPTH = 64` (the per-QP in-flight descriptor cap; `tx_reserve` admits against it — §7); `N` DPA EUs
 **auto-detected** = min(device EUs, `MAX_DPA_EU=8`) (BF3 → 8; `DPUMESH_DPA_THREADS` overrides);
 `K = 2` forward rings/pod; per-EU ring cap `MAX_DPA_RINGS = 8` ⇒ concurrent pods ≤ `MAX_DPA_RINGS × N / K`
 (BF3 → 32); `M = 2` ingest shards (`DPUMESH_INGEST_SHARDS`, ② share-nothing) + `n_eng = 2` ARM egress
