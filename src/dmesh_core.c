@@ -55,9 +55,13 @@ static void cleanup_ctx(struct dpumesh_ctx *ctx);
 
 /* Per-conn TX send-unit FIFO depth: the max number of shipped-but-un-ACKed
  * descriptors a single connection may keep outstanding. Each shipped descriptor
- * records (seq -> end cursor) in su_seq/su_end[region*TX_SU_DEPTH + i]; a
- * BATCH_FWD_ACK(port,seq) pops the FIFO front and advances the conn's free cursor.
- * Power of two (masked). Bounds in-flight descriptors per conn (backpressure). */
+ * records (seq -> end cursor) in su_seq/su_end[i]; a BATCH_FWD_ACK(port,seq) pops
+ * the FIFO front and advances the conn's free cursor. Power of two (masked).
+ *
+ * ENFORCED by dpumesh_tx_reserve's send-unit admission, which is the ONLY thing
+ * bounding it — the block window cannot, since one small message costs a whole FIFO
+ * slot but a sliver of a block. Overrunning it would overwrite a live entry and let
+ * tx_reclaim_ack free bytes the DPU is still DMA-reading. */
 #define TX_SU_DEPTH 64u
 
 /* ELASTIC per-conn TX buffer (block chain). The shared TX mmap is carved into
@@ -91,6 +95,11 @@ static void cleanup_ctx(struct dpumesh_ctx *ctx);
  * where rq < 256). Prior builds hard-coded 256, which is 8× below the default
  * rq (=2048), so a hot conn could overflow it and lose messages silently. */
 #define DMESH_INBOX_RING_MIN  256u
+
+/* Starting width of the client-port window (dpumesh_alloc_port). Sets both the floor on
+ * port-number reuse distance and the floor on how many per-port inboxes a process can
+ * accumulate; it doubles on demand, so this only has to cover the common case. */
+#define DMESH_PORT_SPAN_MIN   256u
 struct dmesh_port_slot {
     uint8_t          role;            /* FREE / CLIENT / SERVER */
     int16_t          peer_pod;        /* established peer pod, DMESH_POD_BLANK = not yet learned */
@@ -138,8 +147,9 @@ struct dmesh_port_slot {
      * The whole block chain is OWNER-thread-local while live; the PE only advances tx_f
      * (atomic). On close (role=FREE) the PE returns the remaining blocks (try_return_blocks). */
     uint64_t         tx_w, tx_c, tx_s;      /* owner-thread logical cursors */
-    uint32_t         resv_len;              /* last dpumesh_tx_reserve len (owner); tx_commit clamps
-                                             * to it so a bad post_send len can't overrun the ring */
+    uint32_t         resv_len;              /* live dpumesh_tx_reserve len (owner); 0 = no reserve
+                                             * outstanding. tx_commit rejects a len past it (ring
+                                             * overrun) and clears it (one post per alloc). */
     atomic_uint_fast64_t tx_f;              /* PE-thread logical cursor (ACK reclaim) */
     uint64_t         tail_blk;              /* oldest live logical block index (owner) */
     uint64_t         head_blk_next;         /* next logical block index needing a physical block
@@ -279,7 +289,11 @@ struct dpumesh_ctx {
     /* Endpoint port table + allocator (oriented-tuple demux). */
     struct dmesh_port_slot *ports;     /* [DMESH_PORT_SPACE] */
     pthread_mutex_t port_lock;
-    uint32_t next_port;                /* bump cursor, wraps within [1, DMESH_UPORT_BASE) */
+    uint32_t next_port;                /* bump cursor, wraps within [1, port_span) */
+    uint32_t port_span;                /* live client-port window: the cursor's wrap point,
+                                        * and so the cap on how many per-port inboxes this
+                                        * process ever allocates. Doubles (to
+                                        * DMESH_UPORT_BASE) only when the window is full. */
     int32_t service_id;                /* this node's service id (SVC_NONE if client-only) */
 };
 
@@ -723,8 +737,10 @@ static void init_config(dpumesh_ctx_t *ctx, const dpumesh_config_t *config, int 
     if (bsz < ctx->slot_size) bsz = ctx->slot_size;    /* a block must hold >= 1 wire slot */
     size_t txbytes = (size_t)ctx->num_slots * (size_t)ctx->slot_size;
     if ((size_t)bsz > txbytes) bsz = (int)txbytes;
-    /* ...and at most TX_SU_DEPTH wire slots, so ONE message can never by itself
-     * outrun the send-unit FIFO (see the maxb clamp below). */
+    /* ...and at most TX_SU_DEPTH wire slots. This one is load-bearing: a message may be
+     * block_size long and carves into ceil(block_size/slot_size) descriptors, so without
+     * this clamp a single max-size message could need more FIFO than exists and
+     * dpumesh_tx_reserve's send-unit admission would refuse it forever. */
     if ((size_t)bsz > (size_t)TX_SU_DEPTH * (size_t)ctx->slot_size)
         bsz = (int)((size_t)TX_SU_DEPTH * (size_t)ctx->slot_size);
     ctx->block_size = bsz;
@@ -737,17 +753,6 @@ static void init_config(dpumesh_ctx_t *ctx, const dpumesh_config_t *config, int 
     if (mb < 1) mb = 1;
     if (mb > DMESH_TX_MAXB_CAP) mb = DMESH_TX_MAXB_CAP;
     if (mb > ctx->n_blocks) mb = ctx->n_blocks;        /* can't own more than the whole pool */
-    /* THE INVARIANT that makes the send path infallible: a conn's live bytes span at
-     * most maxb blocks, and one block carves into at most ceil(block_size/slot_size)
-     * wire descriptors, so its worst-case send-unit occupancy is maxb*dpb. Clamp that
-     * to TX_SU_DEPTH and the BLOCK WINDOW is always the binding constraint — the
-     * send-unit FIFO can then never fill, which is precisely what lets
-     * dpumesh_tx_next_send carve without a capacity check (and without the backoff
-     * loop it used to spin in). dpumesh_tx_reserve therefore gates on blocks alone. */
-    int dpb = (bsz + ctx->slot_size - 1) / ctx->slot_size;
-    if (dpb < 1) dpb = 1;
-    if (mb > (int)(TX_SU_DEPTH / (unsigned)dpb)) mb = (int)(TX_SU_DEPTH / (unsigned)dpb);
-    if (mb < 1) mb = 1;
     ctx->maxb = mb;
 
     int hh = DPUMESH_TX_H_DEFAULT;
@@ -919,6 +924,7 @@ int dpumesh_init(dpumesh_ctx_t **out, int service_id,
             ctx->ports[p].pblk[b] = -1;
     pthread_mutex_init(&ctx->port_lock, NULL);
     ctx->next_port = 1;
+    ctx->port_span = DMESH_PORT_SPAN_MIN;
 
     ctx->doca_objs.rx_data_hook = rx_data_hook;
     ctx->doca_objs.rx_hook_ctx = ctx;
@@ -1130,6 +1136,25 @@ uint8_t *dpumesh_tx_reserve(dpumesh_ctx_t *ctx, uint16_t port, uint32_t len) {
         psl->su_end = (uint64_t *)malloc(TX_SU_DEPTH * sizeof(uint64_t));
         if (!psl->su_seq || !psl->su_end) { errno = ENOMEM; return NULL; }
     }
+
+    /* SEND-UNIT ADMISSION. The block window does NOT bound the FIFO: dpumesh_tx_next_send
+     * carves [tx_s, tx_c), which a post-per-flush leaves exactly one message long, so a
+     * 64 B message costs 1/1024 of a block but a WHOLE FIFO slot. Gate on the FIFO itself.
+     *
+     * Reserve this message's whole carve — ceil(len/slot_size) descriptors — not one: the
+     * flush that follows emits all of them with no further admission point. Over-counts
+     * for a DMESH_SEND_MORE batch (whose carve coalesces across messages), which is the
+     * safe direction. The block_size <= TX_SU_DEPTH * slot_size clamp at init makes the
+     * worst-case single message always fit an empty FIFO, so this cannot deadlock. */
+    uint32_t need_su = (len + (uint32_t)ctx->slot_size - 1) / (uint32_t)ctx->slot_size;
+    uint16_t suh = atomic_load_explicit(&psl->su_head, memory_order_relaxed);
+    uint16_t sut = atomic_load_explicit(&psl->su_tail, memory_order_acquire);
+    if ((uint32_t)(uint16_t)(suh - sut) + need_su > TX_SU_DEPTH) {
+        atomic_fetch_add_explicit(&ctx->st_grow_waits, 1, memory_order_relaxed);
+        errno = EAGAIN;
+        return NULL;
+    }
+
     tx_refresh_blocks(ctx, psl);                           /* recycle / compact / shrink first */
 
     /* Probe the block window BEFORE mutating tx_w: on EAGAIN the conn's write head must
@@ -1189,23 +1214,25 @@ uint8_t *dpumesh_tx_reserve(dpumesh_ctx_t *ctx, uint16_t port, uint32_t len) {
 }
 
 /* Finalize `len` bytes (<= the reserved len) as committed message bytes, ready to ship.
- * Advances tx_w + tx_c and records the block's content end. Owner thread. */
-void dpumesh_tx_commit(dpumesh_ctx_t *ctx, uint16_t port, uint32_t len) {
+ * Advances tx_w + tx_c and records the block's content end. Consumes the reserve — one
+ * commit per dpumesh_tx_reserve. 0 = committed, -1 = no live reserve or len > it (a
+ * caller-contract break; nothing is mutated). Owner thread. */
+int dpumesh_tx_commit(dpumesh_ctx_t *ctx, uint16_t port, uint32_t len) {
     struct dmesh_port_slot *psl = &ctx->ports[port];
-    if (psl->nblk_owned <= 0) return;
-    if (len > psl->resv_len) {                             /* contract: len <= reserved. Enforce it
-                                                            * (was unchecked) — an over-long commit
-                                                            * would advance tx_w past the backed
-                                                            * region and corrupt the ring. */
-        DOCA_LOG_WARN("tx_commit port=%u len=%u > reserved=%u — clamped (caller bug)",
-                      port, len, psl->resv_len);
-        len = psl->resv_len;
-    }
+    if (psl->nblk_owned <= 0) return -1;
+    /* REJECT, never clamp. Clamping to resv_len looks defensive but is worse than the
+     * bug it hides: resv_len is the LAST reserve's length, so a commit with no live
+     * reserve (post without alloc, or a second post of one alloc) silently passed and
+     * shipped whatever bytes happened to sit at the write head — uninitialised ring
+     * memory, on the wire, with no error anywhere. */
+    if (psl->resv_len == 0 || len > psl->resv_len) return -1;
     uint64_t bs = (uint64_t)ctx->block_size;
     uint64_t k = psl->tx_w / bs;                           /* block the reserve placed the body in */
     psl->tx_w += len;
     psl->tx_c  = psl->tx_w;
     psl->blk_used[k % (uint64_t)ctx->maxb] = (uint32_t)(psl->tx_w - k * bs);  /* content end in block k */
+    psl->resv_len = 0;                                     /* reserve consumed: one post per alloc */
+    return 0;
 }
 
 /* Discard committed-but-UNSENT bytes (close-before-flush): rewind commit + write heads to
@@ -1226,10 +1253,9 @@ void dpumesh_tx_discard_unsent(dpumesh_ctx_t *ctx, uint16_t port) {
  * pad). Skips a padded block tail transparently. 1 if one, 0 if nothing. Does NOT advance
  * tx_s (call dpumesh_tx_sent). Owner thread.
  *
- * INFALLIBLE on capacity: the init clamp (maxb * ceil(block_size/slot_size) <=
- * TX_SU_DEPTH) makes the block window bind strictly before the send-unit FIFO, so
- * anything dpumesh_tx_reserve admitted is guaranteed a FIFO slot here. This used to
- * back off on a full FIFO — a branch that the clamp makes unreachable. */
+ * INFALLIBLE on capacity: dpumesh_tx_reserve admitted this message only after reserving
+ * its whole carve in the send-unit FIFO, so every descriptor it yields is guaranteed a
+ * slot. Hence no capacity check (and no backoff loop) here. */
 int dpumesh_tx_next_send(dpumesh_ctx_t *ctx, uint16_t port, size_t *out_moff, uint32_t *out_len) {
     struct dmesh_port_slot *psl = &ctx->ports[port];
     if (psl->nblk_owned <= 0) return 0;
@@ -1427,7 +1453,6 @@ int dpumesh_enqueue(dpumesh_ctx_t *ctx, const sw_descriptor_t *desc) {
     dma->dst_service = (int8_t)desc->dst_service;
     dma->dst_pod_id  = desc->dst_pod;
     dma->src_pod_id  = ctx->pod_id;
-    dma->route_group = desc->route_group;   /* route-affinity key (0 = normal per-message LB) */
 
     __sync_synchronize();
     dma->valid = 1;                                     /* publish to DPA */
@@ -1510,19 +1535,30 @@ const char *dpumesh_get_worker_id(dpumesh_ctx_t *ctx) {
  * the PE's ACQUIRE-load sees a fully-initialized slot. Returns 0 on exhaustion. */
 uint16_t dpumesh_alloc_port(dpumesh_ctx_t *ctx, int role, void *user, struct dmesh_cq *cq) {
     pthread_mutex_lock(&ctx->port_lock);
-    /* Model B: host CLIENT conns use [1, DMESH_UPORT_BASE); accepted SERVER conns
-     * get their port from the DPU-assigned upstream id via
-     * dpumesh_alloc_port_specific. Capping the round-robin here keeps the two
-     * ranges disjoint so a loopback host never collides in its ports[] table. */
-    if (ctx->next_port == 0 || ctx->next_port >= DMESH_UPORT_BASE) ctx->next_port = 1;
-    for (uint32_t scanned = 0; scanned < DMESH_UPORT_BASE - 1; scanned++) {
-        uint32_t p = ctx->next_port;
-        ctx->next_port = (p + 1 >= DMESH_UPORT_BASE) ? 1 : p + 1;  /* wrap in [1, UPORT_BASE) */
-        struct dmesh_port_slot *psl = &ctx->ports[p];
-        if (psl->role == DMESH_ROLE_FREE && psl->nblk_owned <= 0) { /* skip FREE-but-draining */
-            /* Per-port inbound ring is allocated once and KEPT for the lifetime of
-             * the process (reused when this port number is reallocated) — never
-             * freed mid-run, so a stale PE delivery can't use-after-free it. */
+    /* Model B: host CLIENT conns use [1, DMESH_UPORT_BASE); accepted SERVER conns get
+     * their port from the DPU-assigned upstream id via dpumesh_alloc_port_specific.
+     * Capping the sweep here keeps the two ranges disjoint so a loopback host never
+     * collides in its own ports[] table.
+     *
+     * The cursor sweeps a WINDOW of that range, widened only when concurrency needs it.
+     * A port's inbox is allocated on first use and then kept for the process's life — it
+     * cannot be freed, since the PE pushes into it WITHOUT port_lock (rx_deliver_desc),
+     * so freeing one would race a live delivery. A cursor sweeping all 32767 client ports
+     * therefore ends up allocating 32767 inboxes (~1.5 GB at the default depth) for a
+     * client that merely churns a few connections. The window caps that at port_span.
+     *
+     * Sweeping (rather than reusing the lowest free port) still matters: reusing a
+     * just-closed port invites a reply already in flight at FIN time to land on the NEW
+     * conn, so port numbers are aged out across the whole window. */
+    for (;;) {
+        uint32_t span = ctx->port_span;
+        if (ctx->next_port == 0 || ctx->next_port >= span) ctx->next_port = 1;
+        for (uint32_t scanned = 0; scanned + 1 < span; scanned++) {
+            uint32_t p = ctx->next_port;
+            ctx->next_port = (p + 1 >= span) ? 1 : p + 1;           /* wrap in [1, span) */
+            struct dmesh_port_slot *psl = &ctx->ports[p];
+            if (psl->role != DMESH_ROLE_FREE || psl->nblk_owned > 0)
+                continue;                                          /* live, or still draining */
             if (!psl->inbox) {
                 psl->inbox = (sw_descriptor_t *)malloc((size_t)ctx->inbox_ring * sizeof(sw_descriptor_t));
                 if (!psl->inbox) { pthread_mutex_unlock(&ctx->port_lock); return 0; }
@@ -1548,6 +1584,12 @@ uint16_t dpumesh_alloc_port(dpumesh_ctx_t *ctx, int role, void *user, struct dme
             pthread_mutex_unlock(&ctx->port_lock);
             return (uint16_t)p;
         }
+        if (span >= DMESH_UPORT_BASE)
+            break;                      /* swept the whole range: genuinely out of ports */
+        /* Window full → widen it (the only thing that allocates fresh inboxes) and sweep
+         * the new region first. */
+        ctx->port_span = (span * 2 > DMESH_UPORT_BASE) ? DMESH_UPORT_BASE : span * 2;
+        ctx->next_port = span;
     }
     pthread_mutex_unlock(&ctx->port_lock);
     DOCA_LOG_ERR("dpumesh_alloc_port: no free ports");
@@ -1671,9 +1713,9 @@ static void conn_free_rx(dmesh_qp_t *c) {
 }
 
 /* Build the oriented tuple for one outbound descriptor of this conn (client →
- * service with per-message LB, or server → its learned peer), stamped with the
- * conn's route-affinity group. `moff` = byte offset in the shared TX mmap, `len`
- * = descriptor length. seq++. Returns 0, or -1 (EBADMSG) on enqueue fault. */
+ * service, which the DPU LBs to a backend and then STICKS the conn to; or server →
+ * its learned peer). `moff` = byte offset in the shared TX mmap, `len` = descriptor
+ * length. seq++. Returns 0, or -1 (EBADMSG) on enqueue fault. */
 static int emit_desc(dmesh_qp_t *c, size_t moff, uint32_t len) {
     dpumesh_ctx_t *ctx = c->ep->ctx;
     c->seq++;
@@ -1686,7 +1728,6 @@ static int emit_desc(dmesh_qp_t *c, size_t moff, uint32_t len) {
     d.dst_service   = c->dst_service;
     if (c->role == DMESH_ROLE_CLIENT) { d.dst_pod = DMESH_POD_BLANK; d.dst_port = DMESH_PORT_BLANK; }
     else                              { d.dst_pod = c->remote_pod;   d.dst_port = c->remote_port; }
-    d.route_group = c->pin_group;                    /* 0 = per-message LB per descriptor */
     d.valid = 1;
     if (dpumesh_enqueue(ctx, &d) < 0) { errno = EBADMSG; return -1; }
     return 0;
@@ -1712,10 +1753,23 @@ dmesh_channel_t *dmesh_create_channel(void) {
     return s;
 }
 
-void dmesh_destroy_channel(dmesh_channel_t *s) {
-    if (!s) return;
-    if (s->ctx) dpumesh_destroy(s->ctx);
+/* Same EBUSY rule one level up: a CQ outliving its channel points at a freed ctx, and
+ * tearing the transport down under a live CQ is the same use-after-free as tearing a CQ
+ * down under a live QP. Destroy the CQs first (which their own EBUSY makes you destroy
+ * the QPs first). Returns 0, or -1 + EBUSY with nothing released. */
+int dmesh_destroy_channel(dmesh_channel_t *s) {
+    if (!s) return 0;
+    if (s->ctx) {
+        dpumesh_ctx_t *ctx = s->ctx;
+        int live = 0;
+        pthread_mutex_lock(&ctx->cq_lock);
+        for (int i = 0; i < ctx->n_cqs; i++) if (ctx->cqs[i]) { live = 1; break; }
+        pthread_mutex_unlock(&ctx->cq_lock);
+        if (live) { errno = EBUSY; return -1; }
+        dpumesh_destroy(ctx);
+    }
     free(s);
+    return 0;
 }
 
 int dmesh_pod_id(dmesh_channel_t *s)   { return s->pod_id; }
@@ -1740,6 +1794,7 @@ dmesh_cq_t *dmesh_create_cq(dmesh_channel_t *ch) {
     cq->notify_efd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     atomic_init(&cq->ready_head, (uint_fast32_t)0);
     atomic_init(&cq->ready_tail, (uint_fast32_t)0);
+    atomic_init(&cq->nqp, 0);
 
     dpumesh_ctx_t *ctx = ch->ctx;
     pthread_mutex_lock(&ctx->cq_lock);
@@ -1760,15 +1815,21 @@ dmesh_cq_t *dmesh_create_cq(dmesh_channel_t *ch) {
 
 /* Unregister FIRST (under cq_lock, so a concurrent accept-path notify_all_cqs either
  * saw us before or never sees us again), then free. Conns still bound here would have
- * nowhere to report — destroy them first, as ibv_destroy_cq's EBUSY demands. */
-void dmesh_destroy_cq(dmesh_cq_t *cq) {
-    if (!cq) return;
+ * nowhere to report, so ibv_destroy_cq's EBUSY rule is CHECKED, not just documented:
+ * freeing under a live QP leaves the PE arming a ready list in freed memory. */
+int dmesh_destroy_cq(dmesh_cq_t *cq) {
+    if (!cq) return 0;
+    if (atomic_load_explicit(&cq->nqp, memory_order_acquire) > 0) {
+        errno = EBUSY;
+        return -1;
+    }
     dpumesh_ctx_t *ctx = cq->ch->ctx;
     pthread_mutex_lock(&ctx->cq_lock);
     if (ctx->cqs[cq->reg_idx] == cq) ctx->cqs[cq->reg_idx] = NULL;
     pthread_mutex_unlock(&ctx->cq_lock);
     if (cq->notify_efd >= 0) close(cq->notify_efd);
     free(cq);
+    return 0;
 }
 
 int dmesh_cq_fd(dmesh_cq_t *cq) { return cq ? cq->notify_efd : -1; }
@@ -1803,6 +1864,7 @@ dmesh_qp_t *dmesh_accept(dmesh_cq_t *cq) {
     c->rx_buf      = dpumesh_rx_buf(s->ctx, req.body_buf_slot);
     c->rx_len      = req.body_len;
     c->rx_pos      = 0;
+    atomic_fetch_add_explicit(&cq->nqp, 1, memory_order_relaxed);
     return c;
 }
 
@@ -1824,6 +1886,7 @@ dmesh_qp_t *dmesh_qp_open(dmesh_cq_t *cq, int dst_service_id) {
     c->remote_port = DMESH_PORT_BLANK;
     c->seq         = 0;
     c->rx_slot     = -1;
+    atomic_fetch_add_explicit(&cq->nqp, 1, memory_order_relaxed);
     return c;
 }
 
@@ -1836,12 +1899,6 @@ dmesh_qp_t *dmesh_create_qp(dmesh_cq_t *cq, const char *service_name) {
     int svc = dmesh_resolve_name(service_name);
     if (svc < 0) return NULL;                 /* errno = ENOENT from resolve_name */
     return dmesh_qp_open(cq, svc);
-}
-
-void dmesh_pin_route(dmesh_qp_t *c) {
-    if (c->pin_group != 0) return;
-    uint32_t g = __atomic_fetch_add(&c->ep->next_group, 1u, __ATOMIC_RELAXED);
-    c->pin_group = (uint8_t)((g % 255u) + 1u);           /* 1..255, never 0 */
 }
 
 dmesh_qp_t *dmesh_next_ready(dmesh_cq_t *cq) {
@@ -1860,7 +1917,13 @@ int dmesh_flush(dmesh_qp_t *c) {
     return 0;
 }
 
+/* Ship this conn's FIN. IDEMPOTENT: fin_sent latches, so every caller can just ask
+ * for a FIN without first proving nobody else sent one. Independent of peer_closed —
+ * receiving the peer's FIN does not close OUR half (TCP does not conflate them, and
+ * the DPU's upstream teardown fans out from this FIN alone). */
 void dmesh_send_fin(dmesh_qp_t *c) {
+    if (c->fin_sent) return;
+    c->fin_sent = 1;
     dpumesh_ctx_t *ctx = c->ep->ctx;
     c->seq++;
     sw_descriptor_t d;
@@ -1872,7 +1935,6 @@ void dmesh_send_fin(dmesh_qp_t *c) {
     d.dst_service   = c->dst_service;
     d.dst_pod       = c->remote_pod;                       /* the learned peer conn */
     d.dst_port      = c->remote_port;
-    d.route_group   = c->pin_group;
     d.valid         = 1;
     /* Best-effort: rides after all prior data (seq order). Holds NO ring bytes, so it
      * needs no send-unit / reclaim — its TX_ACK is a harmless FIFO no-op. */
@@ -1884,10 +1946,14 @@ int dmesh_destroy_qp(dmesh_qp_t *c) {
     dpumesh_ctx_t *ctx = c->ep->ctx;
     if (c->cq && c->cq->vq_cur == c) c->cq->vq_cur = NULL; /* poll_cq resume cursor */
     dpumesh_tx_discard_unsent(ctx, c->local_port);         /* buffered, never flushed → drop */
-    if (!c->peer_closed && (c->role == DMESH_ROLE_SERVER || c->seq > 0))
+    /* Established conns ALWAYS close their half (dmesh_send_fin self-guards against a
+     * second one). A CLIENT that never sent has no peer and no DPU-side conn — nothing
+     * to tear down, so seq==0 skips. */
+    if (c->role == DMESH_ROLE_SERVER || c->seq > 0)
         dmesh_send_fin(c);
     conn_free_rx(c);                                       /* return the held RX credit */
     if (c->local_port) dpumesh_free_port(ctx, c->local_port);
+    if (c->cq) atomic_fetch_sub_explicit(&c->cq->nqp, 1, memory_order_release);
     free(c);
     return 0;
 }

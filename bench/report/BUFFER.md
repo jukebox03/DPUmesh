@@ -122,7 +122,7 @@ governor `performance`, frequency fixed at 2.5 GHz (set by deploy).
 | loopback / preload | 4,5 | idle validators |
 
 Client env: `BENCH_WORKER_ID=10`, `BENCH_DST_POD_ID=11` (service 11 = pods
-{11,13,14}; every conn is `dmesh_pin_route()`d so it stays on one backend),
+{11,13,14}; every conn is sticky to its first backend so it stays on one backend),
 `BENCH_RX_SCRATCH` default 64 KiB.
 
 **DPU process (`dpumesh_dpu`, BlueField-3, log level 40) — all data-path knobs

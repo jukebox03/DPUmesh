@@ -46,10 +46,11 @@
  * (the DPU owns every connection): a CLIENT always sends dst_pod=BLANK and the DPU
  * resolves dst_service -> a backend pod (dpu_route_l4 -> lb_pick: ROUND-ROBIN over the
  * service's live backend set, which is DERIVED on demand by scanning pods[] — there is
- * no service->backend table; a conn STICKS to its first pick unless the service opts
- * into per-message LB via DPUMESH_LB_PER_REQUEST_SVC), owning the upstream. The L7 hook
- * (dpu_l7.c::dmesh_l7_route) may override the pick. A backend REPLY carries a
- * concrete dst_pod (its DPU-facing peer) -> delivered direct, no re-routing.
+ * no service->backend table), owning the upstream. HOW OFTEN it picks follows the
+ * service's codec: a codec'd service (_FRAME_SVC/_L7_SVC) knows message boundaries and
+ * picks PER MESSAGE; a passthru service is an opaque byte stream, so it cannot split and
+ * pins the conn to its first pick. The L7 hook (dpu_l7.c::dmesh_l7_route) may override
+ * the pick. A backend REPLY carries a concrete dst_pod -> delivered direct, no re-routing.
  *   service_id : own int8 space [0,127]   (declared by the host at register)
  *   pod_id     : own int8 space [0,127]   (ASSIGNED BY THE DPU at register)
  * service_id and pod_id are SEPARATE fields (not a shared/partitioned namespace). */

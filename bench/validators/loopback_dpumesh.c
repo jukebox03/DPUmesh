@@ -36,6 +36,12 @@
 
 #include <dpumesh/dmesh.h>
 
+/* Best-effort control-socket reply. Every caller is already returning, and a failed
+ * write only means the driver hung up first — there is nothing to recover. Wrapping it
+ * states that, instead of leaving 4 unchecked write()s for -Wunused-result to flag. */
+static void ctl_reply(int fd, const char *s, size_t n) { (void)!write(fd, s, n); }
+
+
 #define CTRL_PORT   9092
 #define CQ_BATCH    16
 #define MAX_SERVERS 4096
@@ -144,13 +150,12 @@ static void cli_recv(rstate_t *st, const dmesh_wc_t *w) {
     st->got += w->len;
 }
 
-static void cli_reconnect(rstate_t *st, int size) {
+/* A message wider than one slot is carved into several descriptors, but the conn is
+ * STICKY to its first backend for life, so they all land on it in send order and
+ * reassemble. Nothing to configure per size. */
+static void cli_reconnect(rstate_t *st) {
     dmesh_destroy_qp(st->cl);                            /* safe on NULL (first open) */
     st->cl = dmesh_create_qp(g_cq, g_service);
-    /* A message wider than one slot is carved into several descriptors, each LB'd
-     * on its own unless the conn is pinned — pin so it arrives (and is echoed
-     * back) in send order. A single-slot message needs no pin: one descriptor. */
-    if (st->cl && size > g_msgmax) dmesh_pin_route(st->cl);
 }
 
 /* ---- the one CQ pump: dispatch by conn role, then retry stalled echoes ---- */
@@ -220,17 +225,17 @@ static void run_loopback(int conn_fd, long N, int size, int zc) {
     if (N < 1 || size < 1 || size > postmax || (!zc && size > msgmax)) {
         int n = snprintf(reply, sizeof reply,
                          "ERR bad args (size<=%d for non-zc, <=%d for zc)\n", msgmax, postmax);
-        write(conn_fd, reply, (size_t)n); return;
+        ctl_reply(conn_fd, reply, (size_t)n); return;
     }
     uint8_t *body = malloc((size_t)size), *rb = malloc((size_t)size);
     double  *lat  = malloc((size_t)N * sizeof(double));
     if (!body || !rb || !lat) { free(body); free(rb); free(lat);
-        write(conn_fd, "ERR oom\n", 8); return; }
+        ctl_reply(conn_fd, "ERR oom\n", 8); return; }
 
     static rstate_t st;
     memset(&st, 0, sizeof st);
     st.rb = rb; st.size = (uint32_t)size;
-    cli_reconnect(&st, size);
+    cli_reconnect(&st);
 
     long ok = 0, fail = 0; size_t ns = 0;
     for (long i = 0; i < N && st.cl; i++) {
@@ -239,7 +244,7 @@ static void run_loopback(int conn_fd, long N, int size, int zc) {
         st.got = 0; st.bad = 0; st.eof = 0;
         if (!zc) { body[0] = p; body[size / 2] = p; body[size - 1] = p; }
         if (send_req(&st, body, p, (uint32_t)size, zc) != 0) {
-            fail++; cli_reconnect(&st, size); continue;
+            fail++; cli_reconnect(&st); continue;
         }
         /* await the reply — reassembled up to `size` bytes (large = several RECVs) */
         double tw = now_sec(); int timedout = 0;
@@ -249,7 +254,7 @@ static void run_loopback(int conn_fd, long N, int size, int zc) {
         }
         int bad = timedout || st.bad || st.got != (uint32_t)size ||
                   rb[0] != p || rb[size / 2] != p || rb[size - 1] != p;
-        if (bad) { fail++; cli_reconnect(&st, size); }
+        if (bad) { fail++; cli_reconnect(&st); }
         else     { ok++; lat[ns++] = (now_sec() - t0) * 1e6; }
     }
     if (st.cl) { dmesh_destroy_qp(st.cl); st.cl = NULL; }
@@ -262,7 +267,7 @@ static void run_loopback(int conn_fd, long N, int size, int zc) {
     qsort(lat, ns, sizeof(double), cmp_d);
     double p50 = ns ? lat[ns / 2] : 0.0;
     int rn = snprintf(reply, sizeof reply, "OK %ld %ld %ld %.1f\n", ok, fail, g_served, p50);
-    write(conn_fd, reply, (size_t)rn);
+    ctl_reply(conn_fd, reply, (size_t)rn);
     fprintf(stderr, "[loopback] DONE N=%ld ok=%ld fail=%ld served=%ld p50=%.1fus\n",
             N, ok, fail, g_served, p50);
     free(body); free(rb); free(lat);
@@ -278,7 +283,7 @@ static void handle_ctrl(int fd) {
     if (sscanf(buf, "%15s %ld %d %d", cmd, &N, &size, &zc) >= 1 && strcmp(cmd, "RUN") == 0)
         run_loopback(fd, N, size, zc);   /* 4th arg (optional) = zero-copy flag */
     else
-        write(fd, "ERR use: RUN <N> <SIZE> [ZC]\n", 29);
+        ctl_reply(fd, "ERR use: RUN <N> <SIZE> [ZC]\n", 29);
     close(fd);
 }
 

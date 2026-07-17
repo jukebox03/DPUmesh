@@ -17,7 +17,7 @@
  * Being reachable was an accident of <dpumesh/dmesh.h> #including it, which put
  * every dpumesh_* symbol in every client's namespace.
  *
- * Connection lifecycle (dmesh_create_qp/close/pin_route/accept/next_ready) is
+ * Connection lifecycle (dmesh_create_qp/close/accept/next_ready) is
  * implemented in dmesh_core.c and shared by both surfaces: it is transport, not
  * a façade — nothing about it is socket- or verbs-specific.
  */
@@ -71,9 +71,6 @@ typedef struct {
     uint16_t dst_port;              /* dest port; DMESH_PORT_BLANK(0) -> accept queue */
     uint16_t seq;                   /* per-conn sequence (match key with port) */
     int8_t   valid;
-    uint8_t  route_group;           /* route-affinity key (0 = normal per-message LB); the façade
-                                     * SAR stamps all chunks of one large message with the same
-                                     * value so the DPU routes them to ONE backend (reassembly). */
 } sw_descriptor_t;
 
 /* ====== Opaque context ====== */
@@ -106,6 +103,12 @@ struct dmesh_cq {
     int                notify_efd;  /* this CQ's readiness fd; ALWAYS armed (created live —
                                      * dmesh_cq_fd only hands it out, it never enables it). */
     int                reg_idx;     /* slot in ctx->cqs[], for destroy */
+    atomic_int         nqp;         /* live QPs bound here. Enforces ibv_destroy_cq's EBUSY
+                                     * rule instead of only documenting it: a conn outliving
+                                     * its CQ reports completions into freed memory. Atomic
+                                     * because dmesh_create_qp may run off the CQ's thread;
+                                     * touched only at conn create/destroy, never on the
+                                     * data path. */
     /* PE-published READY LIST for this CQ's conns. The PE pushes a conn's port the
      * moment its inbox goes empty->non-empty; the CQ thread drains it via
      * dmesh_next_ready instead of scanning conns or holding a per-conn fd. SPSC: PE =
@@ -202,7 +205,7 @@ void dpumesh_rx_free(dpumesh_ctx_t *ctx, int slot);
  *   the send head, so a BATCH_FWD_ACK(port,seq) reclaims it.
  * dpumesh_tx_sq_depth(): the per-conn in-flight descriptor cap (TX_SU_DEPTH). */
 uint8_t *dpumesh_tx_reserve(dpumesh_ctx_t *ctx, uint16_t port, uint32_t len);
-void     dpumesh_tx_commit(dpumesh_ctx_t *ctx, uint16_t port, uint32_t len);
+int      dpumesh_tx_commit(dpumesh_ctx_t *ctx, uint16_t port, uint32_t len);
 void     dpumesh_tx_discard_unsent(dpumesh_ctx_t *ctx, uint16_t port);
 int      dpumesh_tx_next_send(dpumesh_ctx_t *ctx, uint16_t port, size_t *out_moff, uint32_t *out_len);
 void     dpumesh_tx_sent(dpumesh_ctx_t *ctx, uint16_t port, uint16_t seq, uint32_t len);
@@ -247,8 +250,8 @@ void *dpumesh_next_ready(struct dmesh_cq *cq);
  * These are transport, not façade: nothing here is socket- or verbs-specific, so
  * they live in dmesh_core.c and both src/dmesh_api.c and src/dmesh_preload.c call
  * them. The public half of the lifecycle (dmesh_create_channel / dmesh_create_qp /
- * dmesh_pin_route / dmesh_destroy_qp) is declared in <dpumesh/dmesh.h> and implemented
- * in the same file; only the three below stay internal. */
+ * dmesh_destroy_qp) is declared in <dpumesh/dmesh.h> and implemented in the same
+ * file; only the three below stay internal. */
 
 /* Pop the next NEW inbound connection off the channel-wide accept queue and BIND it
  * to `cq`: allocate a SERVER conn that learns its peer (pod,port) and holds the first

@@ -193,21 +193,24 @@ static int process_fwd_ring(struct dpa_thread_arg *thread_arg, uint32_t r)
             continue;
         }
 
-        /* Wait for DPU consumer recv availability. On timeout the consumer is
-         * stalled — clear this desc and stop the batch (no point continuing). */
-        int aborted = 0;
+        /* Wait for DPU consumer recv availability. On timeout the consumer is stalled —
+         * LEAVE the descriptor in place and stop the batch. It is retried next pass.
+         *
+         * Dropping it (as this used to) is silent data loss with no way to report it: the
+         * DPU never sees these bytes, so it never TX_ACKs them, so the sender neither
+         * receives an error nor reclaims the slot — and if it was the conn's last message,
+         * its port strands forever. Backpressure instead: the ring backs up, the host's
+         * forward ring fills, and dmesh_flush fails loudly with EBADMSG past its deadline. */
+        int stalled = 0;
         {
             uint32_t wait = 0;
             while (doca_dpa_dev_comch_producer_is_consumer_empty(producer, dpu_consumer_id) == 1) {
-                if (++wait >= DMA_CONSUMER_EMPTY_WAIT_LOOPS) { aborted = 1; break; }
+                if (++wait >= DMA_CONSUMER_EMPTY_WAIT_LOOPS) { stalled = 1; break; }
             }
         }
-        if (aborted) {
-            DOCA_DPA_DEV_LOG_INFO("FWD: consumer timeout (ring=%u slot=%u). Dropping.\n",
+        if (stalled) {
+            DOCA_DPA_DEV_LOG_INFO("FWD: consumer timeout (ring=%u slot=%u). Retrying.\n",
                                   r, thread_arg->desc_idx[r]);
-            desc->valid = 0;
-            thread_arg->desc_idx[r] = (thread_arg->desc_idx[r] + 1) % ring->buf_arr_size;
-            total_chunks += 1;
             break;
         }
 
@@ -235,15 +238,13 @@ static int process_fwd_ring(struct dpa_thread_arg *thread_arg, uint32_t r)
         comp.pos = moff;                         /* staging offset == host TX offset */
         comp.length = (uint16_t)desc->size;
         /* Endpoint tuple — opaque passthrough from the host-posted desc. src_service
-         * is NOT carried (the 20B budget carries route_group, not src_service); the
-         * DPU derives it from src_pod. */
+         * is NOT carried; the DPU derives it from src_pod. */
         comp.seq = desc->seq;
         comp.src_port = desc->src_port;
         comp.dst_port = desc->dst_port;
         comp.dst_service = desc->dst_service;
         comp.src_pod_id = ring->pod_id;          /* forward: sender = this ring's pod */
         comp.dst_pod_id = desc->dst_pod_id;      /* may be DMESH_POD_BLANK → DPU resolves */
-        comp.route_group = desc->route_group;    /* opaque passthrough → ARM dpu_route_l4 pins the group */
 
         doca_dpa_dev_comch_producer_dma_copy(producer,
                                     dpu_consumer_id,

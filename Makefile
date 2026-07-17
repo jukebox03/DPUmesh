@@ -47,7 +47,14 @@ LIB_SRCS := \
 	doca/comch_msgq.c \
 	doca/dpa.c
 
-LIB := $(LIBDIR)/libdpumesh.so
+# ABI major. BUMP IT whenever the public ABI changes incompatibly — a field added to
+# dmesh_wc_t / dmesh_qp_t / dmesh_channel_t, a reorder, a signature change. The SONAME
+# carries it, so a binary built against the old header asks the loader for the old
+# libdpumesh.so.N and gets a clean "cannot open shared object file" instead of silently
+# running against a struct whose layout moved (which reads as a SIGSEGV in the app).
+ABI_MAJOR := 1
+LIB      := $(LIBDIR)/libdpumesh.so.$(ABI_MAJOR)
+LIB_LINK := $(LIBDIR)/libdpumesh.so
 
 # ---- consumers of the library ------------------------------------------------
 # dmesh_* API clients (socket/epoll façade over dmesh.h)
@@ -68,14 +75,25 @@ preload_runner_SRC := bench/validators/preload_runner.c
 .PHONY: all lib bench go clean dirs
 all: lib bench go
 
-dirs:
-	@mkdir -p $(LIBDIR) $(BINDIR)
+# Header dependencies. Without these a change to a public header (dmesh.h) leaves
+# every binary stale while the library rebuilds — the two then disagree on struct
+# layout and the mismatch shows up as a SIGSEGV at run time, not a build error.
+DEPDIR  := $(BUILD)/dep
+DEPFLAGS = -MMD -MP -MF $(DEPDIR)/$(@F).d
 
-lib: dirs $(LIB)
-$(LIB): $(LIB_SRCS)
-	$(CC) $(CFLAGS) -shared -Wl,-soname,libdpumesh.so -o $@ $(LIB_SRCS) \
+dirs:
+	@mkdir -p $(LIBDIR) $(BINDIR) $(DEPDIR)
+
+lib: dirs $(LIB) $(LIB_LINK)
+$(LIB): $(LIB_SRCS) | dirs
+	$(CC) $(CFLAGS) $(DEPFLAGS) -shared -Wl,-soname,libdpumesh.so.$(ABI_MAJOR) -o $@ $(LIB_SRCS) \
 		$(DOCA_LIBS) -lpthread $(RPATHS)
 	@echo "  -> $@"
+
+# The unversioned name is the LINKER's entry point only (-ldpumesh). What a binary
+# records as DT_NEEDED is the SONAME above, so runtime resolution never goes through it.
+$(LIB_LINK): $(LIB)
+	@ln -sf $(notdir $(LIB)) $@
 
 bench: lib $(addprefix $(BINDIR)/,$(DMESH_BINS)) $(PRELOAD) $(addprefix $(BINDIR)/,$(PLAIN_BINS))
 
@@ -83,7 +101,7 @@ bench: lib $(addprefix $(BINDIR)/,$(DMESH_BINS)) $(PRELOAD) $(addprefix $(BINDIR
 # source is a tracked prerequisite (rebuilds on edit).
 define DMESH_BIN_RULE
 $(BINDIR)/$(1): $($(1)_SRC) | dirs lib
-	$$(CC) -O2 -g -Iinclude -Isrc -o $$@ $$< -L$$(LIBDIR) -ldpumesh -lpthread $$(RPATHS)
+	$$(CC) -O2 -g $$(DEPFLAGS) -Iinclude -Isrc -o $$@ $$< -L$$(LIBDIR) -ldpumesh -lpthread $$(RPATHS)
 	@echo "  -> $$@"
 endef
 $(foreach b,$(DMESH_BINS),$(eval $(call DMESH_BIN_RULE,$(b))))
@@ -92,17 +110,17 @@ $(foreach b,$(DMESH_BINS),$(eval $(call DMESH_BIN_RULE,$(b))))
 # conn internals + the internal lifecycle, so it compiles against src/dmesh_core.h
 # (-Isrc) and links the library for the shared symbols.
 $(PRELOAD): src/dmesh_preload.c | dirs lib
-	$(CC) -O2 -g -fPIC -shared -Iinclude -Isrc -o $@ src/dmesh_preload.c \
+	$(CC) -O2 -g $(DEPFLAGS) -fPIC -shared -Iinclude -Isrc -o $@ src/dmesh_preload.c \
 		-L$(LIBDIR) -ldpumesh -lpthread -ldl $(RPATHS)
 	@echo "  -> $@"
 
 # pure-POSIX validators (no library dependency); tcp_client needs pthread
 $(BINDIR)/tcp_echo: bench/validators/tcp_echo.c | dirs
-	$(CC) -O2 -o $@ $<
+	$(CC) -O2 $(DEPFLAGS) -o $@ $<
 $(BINDIR)/tcp_client: bench/validators/tcp_client.c | dirs
-	$(CC) -O2 -o $@ $< -lpthread
+	$(CC) -O2 $(DEPFLAGS) -o $@ $< -lpthread
 $(BINDIR)/preload_runner: bench/validators/preload_runner.c | dirs
-	$(CC) -O2 -o $@ $<
+	$(CC) -O2 $(DEPFLAGS) -o $@ $<
 
 # Go TCP baseline (skipped with a notice if `go` is absent)
 go: dirs
@@ -112,3 +130,5 @@ go: dirs
 
 clean:
 	rm -rf $(BUILD)
+
+-include $(wildcard $(DEPDIR)/*.d)

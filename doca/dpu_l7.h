@@ -23,8 +23,9 @@
  *   - host    : leave DEFER and the engine's LOAD BALANCER picks a backend of the
  *               cluster (round-robin over its live endpoints — ctx->hosts); OR set
  *               a specific pod to OVERRIDE (Envoy setUpstreamOverrideHost — session
- *               persistence). The engine also does connection-scoped stickiness for
- *               you (see DPUMESH_LB_PER_REQUEST_SVC) so you need not remember pods.
+ *               persistence). Running this hook IS the choice to route PER MESSAGE:
+ *               the engine load-balances every message it hands you. Session affinity
+ *               is yours to implement — keep your own table and return its host.
  *
  * You are called only for REQUEST streams. Replies are forwarded back to the
  * client automatically — you never handle them.
@@ -46,8 +47,8 @@ struct dmesh_l7_ctx {
     int32_t        n_hosts;
 };
 
-/* decision.host sentinel: let the engine's load balancer pick (round-robin over
- * ctx->hosts, with connection stickiness unless the service is per-request). */
+/* decision.host sentinel: let the engine's load balancer pick this message's backend
+ * (round-robin over ctx->hosts). Per message — there is no connection pin here. */
 #define DMESH_LB_DEFER (-1)
 
 /* What YOU fill in per message (the engine zero-inits it before the call, then

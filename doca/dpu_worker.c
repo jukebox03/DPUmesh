@@ -67,6 +67,22 @@ send_or_defer_tx_ack(struct objects *objs, struct pod_state *src_pod,
         return;
 
     if (r == DOCA_ERROR_AGAIN) {
+        /* COALESCE, don't append: the host's reclaim is cumulative (tx_reclaim_ack pops
+         * every unit at-or-before `seq`), so a newer seq for the same (conn,port) fully
+         * subsumes a queued older one. That bounds this queue by the number of live PORTS
+         * instead of the message rate — which is what stops it from ever filling and
+         * dropping an ack. Dropping the LAST ack of a conn is unrecoverable: the host's
+         * tx_f never reaches tx_w, so try_return_blocks never fires and the port stays
+         * FREE-but-draining — its blocks AND its port number leak for the process's life.
+         * The scan is O(live ports), and only on this already-stalled path. */
+        for (int i = 0; i < objs->num_deferred_tx_acks; i++) {
+            deferred_tx_ack_t *d = &objs->deferred_tx_acks[i];
+            if (d->conn != src_pod->connection || d->port != port)
+                continue;
+            if ((uint16_t)(seq - d->seq) < 0x8000u)   /* keep the newer of the two */
+                d->seq = seq;
+            return;
+        }
         if (objs->num_deferred_tx_acks < MAX_DEFERRED_TX_ACK) {
             int n = objs->num_deferred_tx_acks++;
             objs->deferred_tx_acks[n].conn = src_pod->connection;
@@ -174,11 +190,11 @@ flush_rev_done_batch(struct objects *objs, struct pod_state *pod)
 /* ====== L4 routing ======
  *
  * dpu_route_l4() is the single point where the DPU picks the destination pod for a
- * forward segment: LOAD-BALANCE over the service's live backend set, with ROUTE-
- * AFFINITY layered on top — a non-zero route_group pins every chunk of one large
- * (SAR) message to ONE backend so they reassemble. Single ARM thread → the cursor
- * and group tables need no lock. Called by the SG-DMA egress engine (dpu_proxy.c)
- * for DEFERred request segs; the L7 hook rides the same LB via dmesh_l7_ctx.hosts.
+ * forward segment: LOAD-BALANCE over the service's live backend set. It holds NO
+ * affinity state — affinity belongs to the caller (px_resolve_backend: conn-sticky
+ * pin, or an L7 host override), which is where the conn's lifetime is known. Called
+ * by the SG-DMA egress engine (dpu_proxy.c) for DEFERred request segs; the L7 hook
+ * rides the same LB via dmesh_l7_ctx.hosts.
  *
  * The backend SET is DERIVED from pods[] on demand (registered + service_id + dma_ready)
  * — pods[] is the single source of truth, so a disconnected backend leaves the set
@@ -222,52 +238,19 @@ lb_pick(struct objects *objs, int16_t svc)
     return hosts[i % (uint32_t)n];
 }
 
-/* L4 default route: lb_pick (RR over the derived live backend set) + route-affinity
- * pin. There is no service->backend table — see collect_live_hosts. The single point that
- * resolves a DEFERred request seg's backend for the SG-DMA egress engine
- * (dpu_proxy.c → dpu_route_l4). Single ARM thread → the pin table needs no lock. */
+/* L4 default route: lb_pick (RR over the derived live backend set). There is no
+ * service->backend table — see collect_live_hosts. The single point that resolves a
+ * DEFERred request seg's backend for the SG-DMA egress engine (dpu_proxy.c →
+ * dpu_route_l4).
+ *
+ * This is the LB pick ALONE — it carries no affinity of its own. Affinity is the
+ * CALLER's (px_resolve_backend): a conn is sticky to the backend its first message
+ * picked here, and an L7 hook may override the host outright.
+ *
+ * Unknown/empty service → -1 (caller drops + TX_ACKs the sender). */
 int32_t
-dpu_route_l4(struct objects *objs, int16_t svc, uint8_t rg)
+dpu_route_l4(struct objects *objs, int16_t svc)
 {
-    /* Route-affinity: an auto-chunked large message stamps EVERY chunk with the same
-     * non-zero route_group (a per-channel rolling id, so one channel's concurrent
-     * messages differ); a dmesh_pin_route'd conn stamps its one id on every message.
-     * All messages sharing a key pin to ONE backend. Whichever message reaches this
-     * single ARM thread FIRST LB-picks (lb_pick → RR over the live set) + records the
-     * pin; the rest reuse it.
-     * The table is keyed (dst_service, rg), NOT rg alone: id counters are per-channel
-     * and only 255 wide, so unrelated channels/conns routinely reuse a byte — service
-     * scoping confines a collision to same-service traffic (both pin to one backend:
-     * balance skew, ordering/reassembly intact) and makes cross-service redirection
-     * structurally impossible (an rg reused by another service gets its own entry).
-     * OVERWRITE-ON-REUSE, no delete: ORDER-INDEPENDENT (chunks that round-robin across
-     * EU-sharding rings can reach here out of order, yet all resolve to the one
-     * recorded backend); a pin to a since-dead backend is re-picked. Single ARM
-     * thread → no lock. (is_last-DELETE was rejected: it would free a pin mid-message
-     * under either hazard → scatter. See scale_log 2026-07-02.) */
-    if (rg != 0) {
-        if (svc < 0 || svc >= POD_ID_SPACE)
-            return -1;                       /* unroutable either way (caller drops) */
-        /* route_group_backend stays SHARED across shards (a large SAR message's chunks
-         * can traverse different conns → shards, yet must pin to one backend). Serialize
-         * its read-modify-write when ingest is sharded (M>1); reuses routing_lock (in ②
-         * that lock is otherwise idle — the conntrack is per-shard). Off the hot path:
-         * only rg!=0 (SAR / pinned routes) ever reaches here, never plain small msgs. */
-        int locked = (objs->n_ingest_shards > 1);
-        if (locked) pthread_mutex_lock(&objs->routing_lock);
-        int32_t pinned = objs->route_group_backend[svc][rg];
-        if (pinned >= 0 && find_pod_by_id(objs, pinned)) {
-            if (locked) pthread_mutex_unlock(&objs->routing_lock);
-            return pinned;
-        }
-        int32_t b = lb_pick(objs, svc);
-        if (b >= 0) objs->route_group_backend[svc][rg] = b;
-        if (locked) pthread_mutex_unlock(&objs->routing_lock);
-        return b;
-    }
-
-    /* No affinity (route_group==0) → per-message round-robin over the live backends.
-     * Unknown/empty service → -1 (caller drops + TX_ACKs the sender). */
     return lb_pick(objs, svc);
 }
 
@@ -368,6 +351,12 @@ process_completion_queue(struct objects *objs, int max_batch)
         comp_queue_dequeue(&objs->comp_queue);
         processed++;
     }
+
+    /* Resume conns the egress backpressured (px_ship_seg found a pool empty and left
+     * their bytes in the window). Runs even when no completion arrived — a stalled conn
+     * is waiting on an egress unit, not on new input. Counts as processed only if it
+     * really advanced, so an unrelieved pool still lets the loop park. */
+    processed += px_drain_stalled(objs, 0);
 
     return processed;
 }
@@ -605,7 +594,7 @@ dpu_drain_iteration(struct objects *objs)
 static void
 dpu_diag_dump(struct objects *objs)
 {
-    static uint64_t prev_fl, prev_sgl;
+    static uint64_t prev_fl, prev_sgl, prev_stalls;
     static int prev_pend = -1;   /* -1 → always print the first dump */
     int busy = (objs->pending_txack_n != 0);
     for (int s = 0; s < objs->n_ingest_shards && !busy; s++)
@@ -616,14 +605,18 @@ dpu_diag_dump(struct objects *objs)
             busy |= (objs->pods[i].txack_batch_n != 0 ||
                      objs->pods[i].rev_done_batch_n != 0);
     }
+    /* A conn backpressured by px_ship_seg is parked on a pool and moves nothing, so it
+     * looks idle to every counter above. A climbing stall count keeps the dump alive. */
+    uint64_t stalls = px_stall_total(objs);
     if (!busy && g_fl_total == prev_fl && g_single_acks == prev_sgl &&
-        prev_pend == 0) {
+        stalls == prev_stalls && prev_pend == 0) {
         g_lull_hits = 0;
         g_drain_iters = 0;
         return;                      /* idle + unchanged → stay silent */
     }
     prev_fl = g_fl_total;
     prev_sgl = g_single_acks;
+    prev_stalls = stalls;
     prev_pend = busy ? 1 : 0;
 
     char buf[700];
@@ -646,6 +639,10 @@ dpu_diag_dump(struct objects *objs)
         n += snprintf(buf + n, sizeof(buf) - n, " p%d[tx=%d rev=%d]",
                       p->pod_id, p->txack_batch_n, p->rev_done_batch_n);
     }
+    /* Proxy delivery counters: drop= bytes lost (the sender was ACKed for them anyway),
+     * stall= backpressure parks. drop>0 is a bug; a climbing stall= is a dry pool. */
+    if (n < (int)sizeof(buf) - 80)
+        n += px_diag_str(objs, buf + n, (int)sizeof(buf) - n);
     DOCA_LOG_WARN("%s", buf);
     g_lull_hits = 0;
     g_drain_iters = 0;
@@ -750,6 +747,10 @@ dpu_shard_run(struct objects *objs, struct dpu_ingest_shard *sh)
         did++;
     }
 
+    /* Resume this shard's egress-backpressured conns (see process_completion_queue).
+     * Shard-local list, shard-local conn table → no lock. */
+    did += px_drain_stalled(objs, sh->id);
+
     for (int s = 0; s < objs->n_ingest_shards; s++)
         if (woke[s])
             dpu_wake_shard(&objs->ingest_shards[s]);
@@ -850,10 +851,6 @@ run_dpu_worker(struct objects *objs)
         objs->pod_id_to_slot[i] = -1;
         objs->svc_rr[i]         = 0;
     }
-
-    /* Route-affinity table ((service, route_group) -> pinned backend) starts empty.
-     * 0xFF bytes == -1 for two's-complement int32. */
-    memset(objs->route_group_backend, 0xFF, sizeof(objs->route_group_backend));
 
     /* Init DPU connection tracking (model B). Heap-allocated — too large to embed
      * on the stack. calloc zeroes every in_use flag; next_uport starts at BASE. */
@@ -1227,6 +1224,7 @@ run_dpu_worker(struct objects *objs)
                   (int)cfd, (int)pfd);
 
     clock_gettime(CLOCK_MONOTONIC, &last_kick);
+    struct timespec last_dbg = last_kick;
     while (true) {
         int progressed = dpu_drain_iteration(objs);   /* ONE pass */
 
@@ -1235,6 +1233,11 @@ run_dpu_worker(struct objects *objs)
          * parked reverse EU). At idle the 1 ms epoll timeout below brings us back
          * here to re-send it. */
         clock_gettime(CLOCK_MONOTONIC, &now);
+        if (g_dpu_diag &&
+            (now.tv_sec - last_dbg.tv_sec) + (now.tv_nsec - last_dbg.tv_nsec) / 1e9 >= 1.0) {
+            dpu_diag_dump(objs);
+            last_dbg = now;
+        }
         kick_elapsed = (now.tv_sec - last_kick.tv_sec) +
                        (now.tv_nsec - last_kick.tv_nsec) / 1e9;
         if (kick_elapsed >= keepalive_sec) {

@@ -32,13 +32,15 @@
  * interposed. The dispatcher asserts readability by writing the private eventfd;
  * the read path drains it at EAGAIN edges.
  *
- * ORDERING — a socket promises byte-stream total order on a connection. The DPU
- * is conn-STICKY by default, but a service can opt into per-message LB
- * (DPUMESH_LB_PER_REQUEST_SVC), and its replies would then interleave across
- * backends. Every shim client conn is therefore dmesh_pin_route()'d unconditionally:
- * all its messages (and its FIN) carry one route-affinity group, pinning the conn to
- * the backend picked for its first message WHATEVER the service's LB policy —
- * connection-level LB, exactly what a TCP proxy gives you.
+ * ORDERING — a socket promises byte-stream total order on a connection, and the DPU
+ * delivers exactly that for free: a conn is STICKY to the backend its first message
+ * LB-picked and keeps it for life (px_conn.pinned_backend), so replies arrive in send
+ * order. Connection-level LB, exactly what a TCP proxy gives you. Nothing to opt into.
+ *
+ * That comes from the service running NO codec (passthru): with no message boundaries
+ * the DPU cannot split the stream, so it pins the conn. Never give a shim-facing service
+ * a codec (_FRAME_SVC/_L7_SVC) — it would route per message, interleave replies across
+ * backends, and the byte stream would stop being one.
  *
  * THREAD MODEL — design/API.md contract: dmesh_accept/dmesh_next_ready are single-
  * consumer. The shim's dispatcher thread is that consumer; it also EXCLUSIVELY
@@ -341,16 +343,12 @@ static void *dispatcher_main(void *arg) {
                 pthread_mutex_lock(&e->mu);      /* serialize vs in-flight read/write */
                 dmesh_qp_t *c2 = e->conn;
                 e->conn = NULL;
-                int fin_sent = e->wr_closed;     /* shutdown(SHUT_WR) already shipped a FIN */
                 pthread_mutex_unlock(&e->mu);
-                if (c2) {
-                    /* Suppress dmesh_destroy_qp's FIN when shutdown already sent one — a
-                     * second FIN is harmless on the DPU (teardown fan-out finds no
-                     * upstream) but wastes a TX slot + ACK round trip. peer_closed
-                     * only gates the FIN; RX credits/port are still reclaimed. */
-                    if (fin_sent) c2->peer_closed = 1;
-                    dmesh_destroy_qp(c2);              /* single-thread vs next_ready: safe */
-                }
+                if (c2)
+                    dmesh_destroy_qp(c2);              /* single-thread vs next_ready: safe.
+                                                        * A shutdown(SHUT_WR) FIN already sent
+                                                        * latched fin_sent, so this sends no
+                                                        * second one. */
                 real_close(e->efd);               /* immediately unblocks poll()ers */
                 /* GRACE-DELAYED free: a thread blocked in read() on another
                  * thread's close() wakes from the efd close (POLLNVAL) and may
@@ -597,7 +595,11 @@ static ssize_t stream_write(dmesh_qp_t *c, const void *buf, size_t len) {
         }
         backoff.tv_nsec = 1000;
         memcpy(dst, p + done, chunk);
-        dpumesh_tx_commit(ctx, c->local_port, chunk);   /* append to the send stream */
+        if (dpumesh_tx_commit(ctx, c->local_port, chunk) != 0) {  /* cannot fail: chunk == the
+                                                                   * reserve we just took */
+            errno = EIO;
+            return done ? (ssize_t)done : -1;
+        }
         done += chunk;
     }
     return (ssize_t)len;
@@ -661,7 +663,6 @@ int connect(int fd, const struct sockaddr *addr, socklen_t alen) {
             if (ensure_channel() < 0) { errno = ENETUNREACH; return -1; }
             dmesh_qp_t *c = dmesh_qp_open(g_cq, svc);
             if (!c) return -1;                     /* ENOMEM */
-            dmesh_pin_route(c);                    /* socket contract: one backend, total order */
             pfd_t *e = pfd_new(c);
             if (!e) { dmesh_destroy_qp(c); errno = ENOMEM; return -1; }
             /* preserve O_NONBLOCK the app may have set on the TCP socket */
@@ -942,7 +943,7 @@ int shutdown(int fd, int how) {
          * (the transport has no true half-close; documented limit). */
         if (e->conn) {
             dmesh_flush(e->conn);
-            if (!e->conn->peer_closed) dmesh_send_fin(e->conn);
+            dmesh_send_fin(e->conn);   /* self-guards; a peer FIN does not close our half */
         }
     }
     if (how == SHUT_RD || how == SHUT_RDWR) e->rd_closed = 1;

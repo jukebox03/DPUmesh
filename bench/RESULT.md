@@ -5233,3 +5233,691 @@ Bandwidth ≥512 KB = 0.0 remains the pre-existing 256 KB/conn TX in-flight cap 
 **PASS — no regression.** All six free fixes are live on HW: 8/8 validators 0-fail (A2 proven on
 every reclaim), zero RX drops, A4/A5 warnings confirmed to fire on misconfig and stay silent on
 correct config, benchmarks match baseline. No public API or wire ABI changed.
+
+---
+
+# 2026-07-17 — `dmesh_pin_route` + the `route_group` wire key REMOVED — BUILT, wire-verified, HW-VALIDATED (see session 2/3 below)
+
+**Trigger.** "Why does `pin_route` exist, is it needed?" It is not. It was correct when built
+(07-03): the DPU's L4 route was then per-message RR with **no** connection stickiness, so stamping
+one route-affinity key on every message of a conn was the only way to give a socket app total
+order. Commit `66c31f7` then added `px_conn.pinned_backend` (Envoy TCP-proxy session affinity,
+default STICKY) and superseded it. `pin_route` was never removed.
+
+## Why it was dead
+
+`px_resolve_backend` precedence is **(1) L7 host override > (2) conn sticky > (3) `dpu_route_l4`**.
+For a default (sticky) service, (2) returns from the 2nd message on, so the key was consulted only
+on a conn's FIRST message — where it cannot add ordering (nothing is pinned yet). Exhaustively:
+- **L4 passthru**: conn stickiness already pins. Key unused.
+- **frame parser**: routes each frame by its own `svc` byte and hardcoded `rg=0`. Key never read.
+- **L7 path**: `px_parse_l7` latches `c->msg_dst` at each message head and ships every chunk of
+  that message to it — per-message affinity **already built in, no wire key needed**.
+- **per-request services** (`DPUMESH_LB_PER_REQUEST_SVC`): the one place the key was load-bearing.
+  Never set anywhere in the repo, and incoherent at L4 anyway — per-message LB splits a byte
+  stream across backends, which is an L7 concern (Envoy terminates HTTP2 and re-originates; it
+  never splits an L4 byte stream per message).
+
+## Why it was harmful — frozen pin map starves scale-out
+
+`route_group_backend[svc][rg]` had **no invalidation on topology change**: written at init
+(`memset -1`) and on pin; re-picked ONLY if the pinned pod is dead. `next_group` is a per-channel
+monotonic 1..255 counter, so it **wraps every 255 conns** — and the shim pinned EVERY conn
+unconditionally (`dmesh_preload.c:664`). After the wrap, a new conn inherits the pick made by a
+long-dead conn, bypassing `lb_pick`: the rg→backend map **freezes**. Add a backend and pinned
+conns never route to it until an old backend dies. Worst case is cold start: if only one backend
+is ready while 255 conns churn, the whole table pins to it **permanently**. Unpinned conns would
+have picked up the new backends immediately via RR. Envoy-parity violation (a new endpoint must
+take traffic).
+
+## What changed
+
+| | before | after |
+|---|---|---|
+| `comch_dma_comp_msg` | 20 B — **2 WQE basic blocks** | **16 B — 1 BB** (exact pre-feature revert) |
+| `comch_msg` (union) | 60 B | **60 B** — dominated by 56 B `add_ring_msg`, so **no msgq / `imm_data_len` change** |
+| `dma_desc` | 64 B, `route_group@28` + `pad0[3]` | **64 B**, `pad0[4]` — cache-line invariant held |
+| `struct objects` | `route_group_backend[128][256]` | gone (**−128 KB** ARM) |
+| `dpu_route_l4(svc, rg)` | pin table + `lb_pick` | **`lb_pick(svc)`** — a stateless pick; affinity lives only in `px_resolve_backend` |
+
+Deleted: `dmesh_pin_route`, `dmesh_qp_t.pin_group`, `dmesh_channel_t.next_group`,
+`sw_descriptor_t.route_group`, `dpu_comp_entry_t.route_group`, `px_arrival.route_group`,
+`px_rg_at`, and the DPA passthrough (`dpa_kernel.c`, `dpa.c`). 6 call sites removed
+(`dmesh_preload.c` + `bench_dpumesh.c` ×2 + loopback/stream/verbs validators).
+**KEPT (independent, verified):** `DPUMESH_LB_PER_REQUEST_SVC` / `svc_per_request` /
+`px_service_sticky`, and `svc_rr` / `lb_pick`.
+
+## Accepted semantic loss (documented in API.md §4)
+
+A **per-request service** can no longer carry a post `> msg_max`: its SAR chunks re-LB per
+message and scatter. Empty in practice — the L7 path latches `msg_dst` per message, the frame
+path consumes whole frames, and the only remaining case is shim + per-request, which is
+self-contradictory (a raw socket app needs total order; marking its service per-message and then
+pinning it back merely cancels the policy).
+
+## Verification
+
+`make lib bench` exit 0, no new warnings. Wire layout verified by compiling the real headers and
+printing `sizeof`/`offsetof`:
+```
+comch_dma_comp_msg = 16 B   type@0  pos@12
+comch_msg          = 60 B   (unchanged -> no msgq reconfig)
+dma_desc           = 64 B   dst_pod_id@24  src_pod_id@32  valid@63
+```
+The three SAR/pipeline-conditional validator pins (loopback `size > msgmax`, stream
+`burst > msgmax`, verbs `pipeline > 1`) are no-ops against sticky services, so their 0-fail
+matrices should be unchanged.
+
+**HW-UNVALIDATED. This is a WIRE ABI change — host + DPU + DPA must deploy TOGETHER**
+(a mismatched pair reads `route_group`'s old offset as garbage; `comch_msg` staying 60 B means
+the msgq will NOT reject the mismatch for you). Run `bench/bench.sh deploy` clean, then the full
+validator matrix. The scale-out-starvation claim is a code-reading result, not a measured one —
+observing it needs a discriminator backend (reply carries server identity); every validator
+backend is an echo, so all prior 0-fail results were blind to it (same blind spot noted 07-03).
+
+---
+
+# 2026-07-17 (session 2) — the proxy's delivery contract: transient pressure now BACKPRESSURES, terminal failure now CLOSES. Neither truncates. — HW-VALIDATED (addendum below)
+
+**Trigger.** Auditing whether the L4 layer supports message send/recv + routing well. Routing
+is fine. Delivery was not: **`px_ship_seg` had 4 early-return drop paths and its callers advanced
+`parse_pos` regardless**, so a byte stream silently lost a chunk mid-flight. Worse than silent —
+`px_advance` charges unclaimed bytes as drops, which releases custody, which **TX_ACKs the
+sender**. A blackhole with a success signal attached: the sender's writes all "succeed", no reply
+ever comes, and with no timeouts anywhere its `read()` blocks forever.
+
+The two halves had opposite semantics for the *same* condition: `px_arrival_alloc` failure at
+ingest returns `0` = *"pool full — retry (backpressure)"*, while `px_unit_alloc` failure 300 lines
+later **dropped**. Structural, not sloppy: the retry boundary (a whole completion entry) was
+coarser than the failure boundary (one seg), and `px_ship_seg` returned `void` — it had nowhere to
+report.
+
+## The contract now
+
+`px_ship_seg` returns three states, and the parse loops honor all three:
+
+| | meaning | caller |
+|---|---|---|
+| `1` | shipped | advance past it |
+| `0` | **EAGAIN** — a pool was momentarily empty | **do not advance**; `px_stall(c)` parks the conn |
+| `-1` | **TERMINAL** — undeliverable (no live backend / dst gone / parser contract violation) | advance through what shipped, then `px_poison` |
+
+- **EAGAIN mutates nothing.** `u->seq = ++c->egress_seq` **moved below every allocation** — the
+  subtle one: a retry would otherwise burn a seq twice and put a gap in the peer's per-conn
+  sequence. The conntrack `uP` find-or-create above it is idempotent under retry, so an EAGAIN
+  after it is still clean.
+- **TERMINAL closes the stream.** New `px_fin_to_sender` queues a 0-length unit back to
+  `(src_pod, src_port)` → the sender gets `DMESH_WC_RECV_FIN`. `length==0` is the only error code
+  point the wire has, and closing is exactly what Envoy's tcp_proxy does when its upstream fails.
+  Symmetric: the sender is the client on a request stream, the backend on a reply stream (its
+  server QP's `local_port == uP`, so `dst_port = uP` demuxes correctly).
+  Verified safe to synthesize: the host demuxes by `dst_port` alone; `desc->seq` is informational
+  on the RX path (only logged — the `seq` in `rx_deliver_desc` is the RX queue's own turn-stamp);
+  and `cq_emit` on a 0-length body only latches `peer_closed`, never learning a peer.
+- `px_poison` is now idempotent and FINs the sender. The one `c->dead = 1` outside it — *"stale
+  upstream (client closed)"* — correctly stays silent: there is nobody left to tell.
+
+## Resuming a stalled conn — deliberately NO new wake plumbing
+
+`px_stall` parks the conn on a **shard-local list**; `px_drain_stalled` re-parses it. Units are
+freed by the egress (`px_lane_emit` ← `px_drain`, main thread), and every ingest driver already
+re-reaches the drain without being told:
+- **inline (the default, reaper off):** main IS the ingest thread — it frees units in `px_drain`
+  and re-parses on its very next pass. Immediate.
+- **reaper (M=1) / shard threads (M≥2):** main does not wake them, so the retry rides their **1 ms
+  epoll backstop** (all four park sites use a 1 ms timeout). Bounded, and only in an
+  already-degraded state. *(An earlier draft of this comment claimed the egress completion wakes
+  them — false for these two modes; corrected.)*
+
+**No busy-spin** (the LOCKED rule): `px_drain_stalled` reports progress **only if `parse_pos`
+actually moved**, so an unrelieved pool returns 0 and the loop parks instead of spinning on a
+retry that cannot yet succeed. No deadlock: the egress is independent of ingest, so the units
+always come back. Cascading backpressure is intact — a stalled conn holds its arrivals, so the
+arrival pool drains and `px_ingest_forward` starts returning 0 at the ingest boundary.
+
+`px_conn_del` unlinks from the stall list before the `free` (else the drain walks freed memory).
+
+## Behavior change worth expecting on HW
+
+During pod churn, a conn whose backend dies mid-message is now **closed** (sender sees EOF)
+instead of silently losing the rest of that message. That is the point — but it means churn tests
+may now show connection closures where they previously showed (echo-blind) success. `dst pod not
+ready` is classified TERMINAL, not EAGAIN, deliberately: waiting would stall the conn on a pod
+that may never return, and on the L7 path `msg_dst` is already latched to it, so the message is
+broken either way.
+
+## Verification
+
+`make lib bench` exit 0. DPU sources syntax-checked against the real DOCA headers
+(`-I/opt/mellanox/doca/include`): **zero new warnings or errors** — the 2 `unused variable 'px'`
+(`px_conn_del`, `px_parse`) and the 4 `implicit declaration` in `dpu_worker.c` are pre-existing,
+confirmed by re-checking a `git stash`'d tree (identical counts). Both `px_ship_seg` call sites
+consume the status; there are no others. (`dpa_kernel.c` is DPA device code — host gcc cannot
+check it; it needs `dpacc`.)
+
+**HW-UNVALIDATED, and the new paths are NOT reachable under normal load** — they need pool
+exhaustion (a slow/credit-starved backend, or a deliberately shrunk pool) or a backend death
+mid-message. `bench.sh` has no local mode; every subcommand needs the remote deploy. Suggested
+proof: a build with a tiny `PX_UNIT_POOL` under the stream validator should show
+`stat_drop_bytes == 0` and 0-fail (before: byte loss), and a backend killed mid-message should
+give the client a clean EOF rather than a hang.
+
+## Known gap (unfixed, same class)
+
+`px_queue_fin_unit`'s unit-pool exhaustion still **drops** (*"FIN to pod %d port %u lost"*) — a
+lost FIN means the peer never sees EOF and its conn leaks. Backpressuring it needs `px_try_fin` to
+defer `px_conn_del` and retry, but its fan-out already frees each `uP` as it goes, so a partial
+retry would lose the remaining FINs; it needs restructuring, not a return code. Left out to keep
+this change small. `px_fin_to_sender` has the same exposure and logs it loudly.
+
+## 2026-07-17 (session 2, addendum) — backpressure path EXERCISED on HW: 51,948 stalls, 0 bytes lost
+
+The EAGAIN path is unreachable under normal load (`PX_UNIT_POOL` = `MAX_PODS × 4096` = 131,072
+units, and the stream validator is sequential — at most `fpw` units in flight). Forced it by
+temporarily shrinking the pool. **The shrink is an experiment only and is reverted**; the shipped
+value is `PX_UNIT_POOL = PX_ARRIVAL_POOL`.
+
+| `PX_UNIT_POOL` | run | OK/Fail | counters | p50 |
+|---|---|---|---|---|
+| 131072 (shipped) | `stream 10000 1024 4` | **10000/0** | `drop=0B stall=u0/p0/P0` | 117.0 µs |
+| 32 | `stream 5000 1024 16` | **5000/0** | `drop=0B stall=u0/p0/P0` | 179.1 µs |
+| **4** | `stream 3000 1024 16` | **3000/0** | `drop=0B` **`stall=u51948`** | **179.9 µs** |
+
+With 4 units and 16 frames per parse round, `px_exec_segs` cannot finish a round: it ships ~4
+segs, hits EAGAIN, returns the shipped-through offset, and `px_parse` advances only that far and
+parks the conn. **51,948 stalls, zero bytes lost, every round-trip byte-exact, p50 within 1 µs of
+the full-pool run.** Each of those stalls is a byte-drop-plus-false-TX_ACK in the previous code.
+
+Proven by this: the three-state `px_ship_seg` contract, the partial-advance arithmetic in
+`px_exec_segs`, the stall/resume loop (no deadlock, no livelock — `px_drain_stalled` reports
+progress only when `parse_pos` moves, and the inline driver re-parses on its next pass), and the
+`u->seq`-below-the-allocations placement (a seq gap would have desynced the peer and failed the
+byte-exact check).
+
+`DPUMESH_DIAG=1` gained the `px[...]` line and a hook in the inline driver loop — the dump was
+previously only wired into the reaper/shard branch, so the default config printed nothing.
+
+Validator matrix on the shipped pool: loopback SAR 8K/16K/32K/64K, verbs pipeline 1/2/4/8,
+preload 5000×1KB + 3000×8KB, churn 23,209 reconnects, stream self fpw 1/4/16, bench
+latency/bandwidth/rate — all 0-fail.
+
+**Bench change:** `stream`'s `SVC_LIST` (multi-service fan-out) is REMOVED. No pod in the bench
+topology can serve it: `echo-dpumesh*` are Greeters (bench.h framing, not a verbatim echo), and
+`loopback`/`verbs` echo verbatim but block in `accept()` when idle and never poll their CQ, so
+any non-self target simply burns the 5 s reply timeout. `RUN <N> <SIZE> [<FPW>]` now.
+
+---
+
+# 2026-07-17 (session 3) — the codec decides the LB granularity: per-service LB axis DELETED, L7 sticky bug FIXED, fan-out PROVEN on HW
+
+**The model this settles on.** L4 is a byte stream, host↔DPU, with nothing L7 on the wire — the
+app's pipe is a submission queue addressed to a SERVICE and it ENDS AT THE DPU, which owns and
+re-originates the upstreams (conntrack is keyed `(client_pod, client_port, backend_pod) → uP`, so
+one pipe already has N upstreams). The DPU is the sidecar. **How often the LB picks follows the
+CODEC, and nothing else:**
+
+| service | Envoy analogue | knows message boundaries? | LB granularity |
+|---|---|---|---|
+| passthru (no codec) | `tcp_proxy` | no — bytes only | conn pinned for life (**forced**) |
+| `_FRAME_SVC` / `_L7_SVC` | `http_connection_manager` | yes | **per message** |
+
+Pinning is the consequence of having no codec, not a setting. Routing policy lives in the DPU's
+proxy config, never in a client API call.
+
+## Removed / fixed
+
+- **`DPUMESH_LB_PER_REQUEST_SVC` + `svc_per_request` + `px_service_sticky` — DELETED.** A second,
+  per-service axis for something the codec already decides: redundant, and able to contradict it
+  (per-request on a service with no codec is meaningless). The docs calling it "Envoy's HTTP
+  default" was a layering error — Envoy terminates HTTP2 and re-originates on per-backend upstream
+  connections; it never splits an L4 byte stream per message.
+- **BUG: the L7 path was connection-sticky.** `px_parse_l7` resolved through `px_resolve_backend`,
+  so a service that ran a codec — and therefore *knew* where each message ended — still pinned its
+  first backend for life. That is the gRPC-over-L4-LB failure, sitting in the L7 slot. Split into
+  two honest functions: `px_route_message()` (codec: per message, or the hook's `decision.host`)
+  and `px_resolve_backend()` (passthru: conn pin, cluster-scoped, re-picked if the backend dies).
+- Ghost text: `bench.sh`'s `verbs ... (dmesh_verbs.h)` — that header does not exist; verbs and
+  bench both use `<dpumesh/dmesh.h>` since the 4-surfaces→2 consolidation.
+
+## Fan-out, measured
+
+3 backends of ONE service (`echo-dpumesh` = pods 0/1/2 — `echo-dpumesh-13/14` now carry the same
+`DPUMESH_SERVICE`, so they are backends instead of dead single-pod services). The Greeter stamps
+its `dmesh_pod_id()` into every reply's `aux` (the field was 0/unused) — without that discriminator
+the LB is unobservable, since all three backends answer identically. `bench_dpumesh` correlates
+**by seq** (never by arrival order), counts `reorder`, and tallies `dist=pod:count`.
+
+`point dpumesh 1024 8 8 5 200 <threads>`:
+
+| service | threads | dist (replies per backend) | reorder | fail |
+|---|---|---|---|---|
+| **passthru** | 1 | `0:342541` — **one conn, one backend; 2 pods idle** | **0** | 0 |
+| **passthru** | 4 | `0:115630, 1:236403, 2:115296` — conns spread, each pinned | **0** | 0 |
+| **codec** (`_L7_SVC=11`) | 1 | `0:103984, 1:103983, 2:103983` — **one conn, all 3, even** | 135122 | 0 |
+| **codec** | 4 | `0:152831, 1:152831, 2:152830` | 156038 | 0 |
+
+The passthru/threads=1 row **is** the gRPC problem in one line: a long-lived connection pinned to
+one backend forever. The codec/threads=1 row is the same connection load-balancing every message.
+`reorder>0` is the multiplexing that necessarily comes with it — replies interleave, which is why
+correlation must be by id. p50 114 µs on both, so the granularity is not costing latency.
+
+## Bench client bugs this test exposed (mine, both in the new code)
+
+1. `exp_seq = seq + 1` as the window base — with out-of-order replies a late low seq falls outside
+   `[exp_seq, exp_seq+W)` and was scored as a failure. `fail=7`.
+2. Indexing in-flight requests by `seq % W`. **Out-of-order completion means the span from the
+   oldest outstanding seq to the newest issued one is NOT bounded by W** — a lagging request holds
+   its slot while newer ones cycle through it, so seq 8 overwrote seq 0's slot at W=8. `fail=5`,
+   plus silently mis-timed latencies. Fixed with a 1024-slot direct map that stores each slot's
+   seq, so a collision is detected rather than silent. **`fail=0`** after.
+
+The apparent 14x throughput drop under the codec was (1) leaking `outstanding` on its early
+return, not a transport cost: 0.0611 → 0.0625 Mrps after the fix, against 0.0686 passthru.
+
+## Verification
+
+Full deploy + HW, all 0-fail: loopback 8K + 64K(zc), verbs pipeline=4, preload, and the fan-out
+matrix above. `make lib bench` clean; DPU sources syntax-checked against the real DOCA headers with
+no new warnings.
+
+**Not covered:** backend-death re-pick under a codec, and the `px_fin_to_sender` terminal path —
+both need fault injection. `stat_drop_bytes`/`stall` stayed 0 throughout (`DPUMESH_DIAG=1`).
+
+---
+
+# 2026-07-17 (session 4) — one QP carries N inbound streams: `dmesh_wc_t.stream` — the reply-side half of per-message LB
+
+**What this closes.** Per-message LB gives one QP several upstreams at once, and their replies
+all land on that QP. The transport merged them into ONE byte stream and threw away the sender —
+which L4 cannot represent. TCP has no such problem: N peers means N sockets. Here N peers share a
+QP, so the transport must say WHICH. It already knows: a reply carries `src_port = uP`, the DPU's
+upstream id, and it reaches the host in the descriptor. `cq_emit` was dropping it.
+
+`dmesh_wc_t` gains `uint16_t stream`. No wire change (the id already arrives), no new function —
+the API is still 16 calls. `stream` is opaque (an upstream number, not a pod), so "the client never
+names a pod" holds. On a no-codec service every reply comes from the one pinned backend and
+`stream` never varies: existing apps ignore it.
+
+## The failure it fixes, measured
+
+A reply ≤ `msg_max` (8 KB) is one completion — atomic, so it cannot interleave. A larger one
+arrives as several, and another backend's reply lands between them. Reassembling all of it through
+one reframer splices the streams together and desyncs. It does not error — **it stops**:
+
+| reply size | before | after (per-stream reframers) |
+|---|---|---|
+| 8 B | ok | ok |
+| 4 KB | ok | ok |
+| **16 KB** | **4 replies, then wedged** | **176,771 · fail=0** |
+| **64 KB** | (not reached) | **66,006 · fail=0** |
+
+## The matrix (codec on svc 11, 3 backends, one QP unless noted)
+
+`point dpumesh <req> <reply> <conc> 4 100 <threads>` — `dist=pod:count`, all `fail=0`:
+
+| sweep | | Mrps | Gb/s | dist |
+|---|---|---|---|---|
+| **request** | 32 B | 0.0634 | 0.02 | `0:84489, 1:84489, 2:84490` |
+| | 1 KB | 0.0638 | 0.52 | `0:84987, 1:84986, 2:84987` |
+| | 8 KB | 0.0514 | 3.37 | `0:68485, 1:68485, 2:68484` |
+| | 32 KB | 0.0292 | 7.65 | `0:38891, 1:38893, 2:38892` |
+| | 64 KB | 0.0149 | 7.79 | `0:19810, 1:19811, 2:19811` |
+| **reply** | 4 KB | — | 0.51 | `0:82344, 1:82343, 2:82342` |
+| | 16 KB | — | 0.36 | `0:58924, 1:58923, 2:58924` |
+| | 64 KB | — | 0.14 | `0:22002, 1:22002, 2:22002` |
+| **conc** | 1 / 4 / 32 / 64 | 0.0044 / 0.0333 / 0.0902 / 0.0901 | | p50 227 / 115 / 343 / 687 µs |
+| **threads=4** | | 0.0947 | | `0:126245, 1:126248, 2:126244` |
+| **churn=50** | | | | 5735 reconnects @ 2.54 µs, `0:106878, 1:106879, 2:106879` |
+
+Distribution is even to within 2 replies in every row. `reorder` tracks it: **0 at conc=1**
+(nothing outstanding to reorder), 18.7 K at conc=4, 210 K at conc=64.
+
+## Control — no codec, same build
+
+| | Mrps | reorder | dist |
+|---|---|---|---|
+| threads=1 | 0.0682 | **0** | `0:272509` — **one conn, one backend; 2 pods idle** |
+| threads=4 | 0.0942 | **0** | `0:94360, 1:189905, 2:92491` — conns spread, each pinned |
+| reply 64 KB | — | **0** | `2:71158` — no interleaving, so no wedge before this fix either |
+
+`reorder=0` everywhere confirms `stream` did not disturb the pinned path. The threads=1 row is
+still the gRPC problem in one line; the codec rows above are the same connection load-balanced.
+
+Validators unchanged: loopback 8 K + 64 K(zc), verbs pipeline=8, preload — all 0-fail.
+
+## A build bug this exposed — silent ABI skew
+
+The first `(c)` deploy SIGSEGV'd all three greeters (exit 139) and delivered zero replies. Cause:
+**the Makefile tracked only `.c` prerequisites, never headers.** Growing `dmesh_wc_t` rebuilt
+`libdpumesh.so` but left `echo_dpumesh` stale (19:50 vs 20:59), and the pods bind-mount the `.so`
+from the host while baking the binary into the image — so a new library wrote `w->stream` past the
+end of an old 24-byte struct, off the end of the caller's `wc[]` array.
+
+Fixed with `-MMD -MP -MF $(DEPDIR)/$(@F).d` on every compile plus `-include $(wildcard
+$(DEPDIR)/*.d)`. Verified: `touch include/dpumesh/dmesh.h` now rebuilds every dependent binary; a
+no-op `make` rebuilds nothing. **Any public-header change before this commit could silently ship a
+mismatched pair** — the earlier `route_group` removal escaped only because it never touched a
+struct the apps compile against.
+
+## 2026-07-17 (session 4, addendum) — the reframer now DETECTS desync instead of stalling
+
+`bench_reframe_feed` read `seq`/`payload_len`/`aux` out of the 16-byte header and **skipped the
+`magic` word**. The field was written by both ends and read by nobody — so a desynced reply
+stream had no way to announce itself: the reframer just kept reading lengths out of whatever
+sat where a header should be, never completed a frame, and the connection **stopped**. That is
+exactly how the pre-`stream` 16 KB failure presented — 4 replies, then silence, no error.
+
+`bench_reframe_feed` now takes `want_magic` and returns `-1` on mismatch (`BENCH_REQ_MAGIC` on
+the server, `BENCH_REP_MAGIC` on the client). Desync is unrecoverable — the boundary is gone, so
+every later length is garbage — so the callers kill the conn rather than scan for a new one.
+Bench-only: no transport, API or wire change.
+
+**Proof it fires.** Re-created the failure by forcing every stream onto one reframer
+(`stream_rf(w, 0)`, reverted after):
+
+| | before this check | with it |
+|---|---|---|
+| 3 backends merged onto 1 reframer, 16 KB reply | 4 replies, then silent stall | **`fail=22`**, `[bench] reply stream 32768 desync` |
+
+The log names the `uP`, so a real desync now points at the stream that broke.
+
+**No false positives.** Clean build, codec on svc 11, 3 backends — replies 8 B / 16 KB / 64 KB all
+`fail=0` with even `dist` (`0:83783,1:83783,2:83783` · `0:57921,1:57921,2:57921` ·
+`0:21547,1:21540,2:21547`); loopback 5000/0, verbs pipeline=8 5000/0, preload 3000/0.
+
+---
+
+# 2026-07-17 (session 5) — fixing the audit findings: FIN semantics, TX-FIFO overrun, error delivery, ABI
+
+Fourteen fixes from a code audit, plus one deadlock the audit missed and the testing found.
+Full deploy + HW on every claim below. `DPUMESH_PROXY=passthru`, `l7-services=0`,
+egress-threads=1, shards=1, K=2, pin=fair, 3 backends.
+
+## The headline: a request > 256 KB could never complete
+
+Not on the audit's list — `bench.sh bandwidth` simply returned `0.0000 Gb/s` for every size at or
+above 262144, and had been doing so silently. `rcnt=0` with `grow_waits` climbing into the
+hundreds of thousands, and **zero** DPU-side errors: the client never got its request out.
+
+The cliff sits exactly at `maxb × block_size` = 4 × 64 KB = 256 KB, the per-conn in-flight cap.
+A caller that builds one message out of `DMESH_SEND_MORE` chunks (which `bench_dpumesh.c` does,
+and which `dmesh.h` documents as the WR-list idiom) holds those bytes COMMITTED BUT UNSHIPPED.
+The DPU has never been told they exist, so no TX_ACK for them can ever arrive — and `tail_blk`
+never advances. `dmesh_alloc` then returns EAGAIN forever, while the header promises the exact
+opposite:
+
+> *"On EAGAIN: do other work and retry — a later alloc succeeds once the DPU's TX_ACKs free space."*
+
+The promise was false whenever the space is held by the caller's own un-flushed batch. Fixed in
+`dmesh_alloc`: on EAGAIN, ring the doorbell and retry once. The bytes go in flight, ACKs start
+coming, and EAGAIN is transient again — as documented.
+
+| req size | before (Gb/s) | after (Gb/s) |
+|---|---|---|
+| 131072 | 6.41 | **10.54** |
+| 524288 | **0** (deadlock) | 11.64 |
+| 1000000 | **0** (deadlock) | 12.07 |
+| 2097152 | **0** (deadlock) | 12.20 |
+| 8000000 | **0** (deadlock) | 12.25 |
+
+## P0 — `peer_closed` meant two different things, and leaked an upstream per close
+
+`cq_emit` sets it to mean "the peer's FIN landed"; `dmesh_destroy_qp` read it as "I already sent
+my FIN" and skipped sending one. `dmesh_preload.c` had latched it for the second meaning outright.
+TCP never conflates the two, and here it mattered more than style: `dpu_upstream_free` has exactly
+ONE call site in the whole tree — the client-FIN fan-out (`dpu_proxy.c`) — and the backend-FIN path
+deliberately frees nothing (*"upstream itself is freed by the CLIENT's FIN fan-out"*).
+
+So **every server-initiated close leaked** an upstream slot, its conntrack entry and a `px_conn`
+node — permanently, on the plain no-codec path and through the shim, with no codec or
+multi-backend needed. The audit had scoped this to multi-stream FIN semantics; it was much wider.
+
+Split into `peer_closed` (inbound) and `fin_sent` (outbound), and made `dmesh_send_fin`
+idempotent — which let three call sites collapse into one unconditional call. `shutdown(SHUT_WR)`
+carried the same bug (it withheld our FIN if the peer had closed first) and is fixed by the same
+change.
+
+## P0 — the TX send-unit FIFO could be overrun
+
+`dmesh_core.c` claimed *"THE INVARIANT that makes the send path infallible"*: one block carves into
+at most `ceil(block_size/slot_size)` descriptors, so clamping `maxb × dpb ≤ TX_SU_DEPTH` makes the
+block window bind first. **The premise is false.** `dpumesh_tx_next_send` carves `[tx_s, tx_c)`,
+which a post-per-flush leaves exactly one message long — so a post emits ONE descriptor whatever
+its size. At defaults a 64 B message costs 1/1024 of a block but a whole FIFO slot: 4096
+descriptors fit the block window against a `TX_SU_DEPTH` of 64.
+
+Past 64 un-ACKed posts, `dpumesh_tx_sent` (no capacity check) overwrites a live entry and
+`tx_reclaim_ack` then advances `tx_f` past bytes the DPU is still DMA-reading. Gated in
+`dpumesh_tx_reserve` on the FIFO itself, reserving the message's WHOLE carve
+(`ceil(len/slot_size)`) — a single check would have let one 64 KB post emit 8 descriptors through
+a gate that admitted one. The now-redundant `maxb` clamp and its false comment are gone.
+
+**Cost: none, measured.** Gate on vs. gate compiled out, same deploy otherwise:
+
+| threads | gate ON (Mrps) | gate OFF (Mrps) |
+|---|---|---|
+| 1 | 0.0993 / 0.0991 / 0.0995 | 0.0983 / 0.0984 |
+| 2 | 0.0960 / 0.0963 / 0.0947 | 0.0956 / 0.0957 |
+| 4 | 0.0960 / 0.0991 / 0.0976 | 0.0964 / 0.0967 |
+
+## P1 — failures returned a success-shaped ACK
+
+`px_lane_emit` skips REV_DONE on `b->error` but released custody anyway, which TX_ACKs the sender:
+undelivered bytes reading as delivered, with neither data nor EOF. `px_lane_drop_dead` did the
+same for a pod that died mid-flight. Added `px_eof_to_origin` — a 0-length unit (the only error
+the wire can carry) addressed back to the conn the bytes came from. It takes the unit, not a
+`px_conn`, because the emit paths run where the conn table may belong to another shard;
+`px_unit.org_port` carries the un-rewritten origin port for exactly this.
+
+The DPA's consumer-timeout path (`dpa_kernel.c`) dropped the descriptor outright — silent loss the
+sender could never learn about, and a stranded port if it was the conn's last message. It now
+leaves the descriptor for the next pass: the ring backs up and `dmesh_flush` fails loudly with
+EBADMSG instead. (`DMA_CONSUMER_EMPTY_WAIT_LOOPS` is 0x800000, so this never fires under load.)
+
+## P1 — a dropped last TX_ACK leaked a port and its blocks, forever
+
+`try_return_blocks` requires `tx_w == tx_f`, and `dpumesh_alloc_port` skips FREE-but-draining
+slots. A dropped final ACK therefore strands both, for the process's life. The loss was in the
+NOTIFICATION, not the data — the DPU had already egressed. Since host reclaim is cumulative, a
+newer seq for the same `(conn,port)` fully subsumes a queued older one, so the deferred queue now
+COALESCES instead of appending: bounded by live ports rather than message rate, and it can no
+longer fill and drop.
+
+## P1 — FIN loss on a dry unit pool (the known gap, now closed)
+
+`RESULT.md` recorded this as unfixable-without-restructuring because *"its fan-out already frees
+each uP as it goes, so a partial retry would lose the remaining FINs"*. That is the fix: **free
+the upstream only AFTER its FIN unit is queued.** `dpu_upstream_find` is the fan-out's only
+enumeration, so with the free ordered last a retry re-scans, skips what is done (find returns 0)
+and resumes exactly where it stopped. `px_try_fin` returns 0 and parks the conn; `px_drain_stalled`
+re-enters it. `px_poison`'s EOF is a latched debt (`eof_pending`) for the same reason.
+
+## P1 — L7 decisions were executed unvalidated
+
+`ctx.hosts` is built from the ADDRESSED service before the hook runs; a hook that re-clusters
+still sees the old cluster's endpoints, and `px_route_message` ignored `cluster` entirely when
+`host >= 0`, checking only liveness — a content-routing hook would deliver into a different
+service. Now the host must be a live backend OF `dec.cluster`, and `cluster` is range-checked
+BEFORE the int32→int16 narrowing (truncating first silently aliases onto a real service). Added
+`PX_L7_MSG_MAX` (Envoy's `max_request_bytes`). Latent today — `dpu_l7.c` ignores `ctx` — so this
+is an API fix, not a live bug.
+
+## P1 — ABI versioning
+
+Unversioned SONAME; a stale binary loaded a moved struct layout and SIGSEGV'd (session 4). Now
+`libdpumesh.so.1` (SONAME + DT_NEEDED + pod mounts + Dockerfiles). Verified the gate is real:
+
+```
+$ readelf -d build/bin/echo_dpumesh | grep NEEDED
+    Shared library: [libdpumesh.so.1]
+$ mv build/lib/libdpumesh.so.1 /tmp && ./build/bin/echo_dpumesh
+  error while loading shared libraries: libdpumesh.so.1: cannot open shared object file
+```
+
+A loader error at startup instead of memory corruption mid-run.
+
+## P2 — the send contract stopped trusting the caller
+
+`dpumesh_tx_commit` CLAMPED an over-long len to `resv_len`, which is the LAST reserve's length —
+so a post with no live reserve silently shipped whatever sat at the write head: **uninitialised
+ring memory, on the wire, no error anywhere**. It now rejects (EINVAL) and consumes the reserve,
+making "one post per alloc" enforced rather than documented. `dmesh_post_send` also rejects unknown
+flags. `dmesh_destroy_cq` / `dmesh_destroy_channel` now return `-1 + EBUSY` instead of freeing
+under a live QP/CQ (ibverbs' rule, checked).
+
+## P2 — per-port inbox memory was bounded only by total churn
+
+A port's inbox is allocated on first use and never freed — correctly, since the PE pushes into it
+without `port_lock`. But the allocator swept all 32767 client ports, so a long-lived churning
+client ends up holding 32767 × 48 KB ≈ **1.5 GB**. The cursor now sweeps a WINDOW (`port_span`,
+from 256, doubling on demand), which caps the inboxes while keeping the age-out that stops a
+just-closed port from catching an in-flight reply.
+
+## Cleanup
+
+Dead `route-affinity` comments (3, in `dpu_proxy.h`; nothing in code); the stale
+`su_seq[region*TX_SU_DEPTH+i]` comment (indexing is flat); the redundant first half of the
+credit-refresh condition; `wc.stream` left uninitialised on CONN_REQ (caller stack garbage); the
+4 DPA msgQ callbacks compiled into the HOST library where they are unreachable (moved inside
+`DOCA_ARCH_DPU`); 12 unchecked control-socket `write()`s in the validators. **Host build: 0
+warnings** (was 16).
+
+Two audit findings were REJECTED after checking: `fcntl`'s unconditional `va_arg` is what glibc
+itself does, and destroy-mid-poll-batch is a documented caller contract (`dmesh.h`), not a defect.
+
+## Verification
+
+| case | result |
+|---|---|
+| loopback 8 K / 64 K(zc) | 50000/0 · 20000/0 |
+| verbs w4 p8 / w1 p1 | 50000/0 · 20000/0 |
+| preload (8 conns) | 5000/0, p50 119 µs, 27111 rps |
+| stream fpw=1 / fpw=4 | 20000/0 · 20000/0 |
+| bandwidth, all 11 sizes | fail=0, 0.026 → 12.25 Gb/s |
+| conn churn reconn=1/10/100 | fail=0, 27754 reconnects, ~0.35 µs |
+| DPU log | 0 errors; 18 `stale upstream` in 27754 reconnects (0.06%) — the narrow close/deliver race, not a leak |
+
+Latency (conc=1) p50 = 114 µs at 64–1024 B, unchanged from the HEAD build.
+
+## An honest gap in this report
+
+`rate` at threads=2/4 measures **~6-8% lower than the HEAD commit** (t=2: 0.1025–0.1049 → 0.0947–0.0963;
+t=4: 0.1025–0.1053 → 0.0960–0.0991; both bands tight across 3 repeats and 3 separate deploys, so it
+is real, not noise). p50 tracks it (+54 µs at t=2). t=1 is unchanged.
+
+**I could not attribute it.** The comparison I ran is HEAD-commit vs working-tree, and the working
+tree carried **4448 uncommitted lines across 33 files** from prior sessions before this session
+began — I never snapshotted it, so `git stash` reverted everything, not just my changes. That is a
+process error on my part.
+
+What the evidence does say: the su gate is the only per-alloc code this session added, and
+switching it off changes nothing (table above). Everything else added to a per-request path is a
+branch or a single store (`u->org_port`, `b->error &&`, `resv_len` checks). +54 µs/req ≈ 2000 ARM
+cycles is not a plausible cost for that. The backend pair is not the cause either — `dist` varies
+run to run (1&2, 0&1, 0&2) while Mrps stays pinned at 0.0956–0.0962. So the regression most likely
+predates this session's work and has simply never been benchmarked in the passthru config at
+threads=2/4. **Not proven.** Isolating it needs a per-commit bisect of the uncommitted work.
+
+---
+
+# 2026-07-18 (session 6) — bisecting the t=2/4 rate regression: it's the route-affinity removal
+
+Session 5 left an unattributed 6-8% drop at `rate` threads=2/4 (t=1 unchanged). Bisected it to
+the end. **Cause: the `dmesh_pin_route` / route-affinity (`route_group`) removal from the prior
+layering refactor — NOT this session's audit fixes.** Proven, with the DPU pegged at 99%.
+
+## Method
+
+Committed the full working tree to a branch (`wip-audit-fixes`) as a safety snapshot first — the
+tree carried 4448 uncommitted lines I never wanted to lose to a stray `git stash` again. Then
+reverted by domain against `9b153b9` (HEAD), redeploying and measuring t=1/2/4 × 4 repeats each
+under a fixed harness.
+
+## The bracket
+
+| config | DPU binary | host+bench | t=2 Mrps | t=4 Mrps | DPU main-thread CPU |
+|---|---|---|---|---|---|
+| HEAD `9b153b9` (deploy #2) | 9b153b9 | 9b153b9 | 0.1025 | 0.1023 | **99%** |
+| HEAD `9b153b9` (deploy #3) | 9b153b9 | 9b153b9 | — | 0.1025 | **99%** |
+| **Test A** | **9b153b9** | **worktree** | 0.0956 | 0.0960 | **99%** |
+| final worktree | worktree | worktree | 0.0958 | 0.0974 | **98%** |
+
+First, **HEAD reproduces 0.1024 across three deploys** (variance <0.2%) — the regression is real,
+not deploy noise. Then:
+
+- **Test A reverts ONLY the DPU to 9b153b9, keeps the worktree host+bench → still 0.096.** The DPU
+  diff is exonerated: the same DPU binary that gives HEAD 0.1025 gives 0.096 when fed worktree-host
+  traffic. The cause is host-side.
+- **The client core is not the bottleneck.** Pinning `bench-dpumesh` to 4 cores (server left on 1)
+  moved nothing (0.096). The heavier worktree client (INFLIGHT_RING 32→1024) is not it.
+- **The DPU ingest thread is the bottleneck: 99% in every config.** `echo-dpumesh` sat at 21.8%,
+  the client core ruled out. So throughput is `DPU-messages-per-second at 99% CPU`, and HEAD gets
+  6.8% more of them than worktree from the *same* saturated thread — i.e. HEAD's DPU does **less
+  work per message.**
+
+## The mechanism (code-level)
+
+The only per-message difference in what the host hands the DPU is `route_group`, and `emit_desc`
+is the one line that changed:
+
+```
+-    d.route_group = c->pin_group;   /* 0 = per-message LB per descriptor */   (9b153b9)
+     (worktree: pin_route removed → route_group is always 0)
+```
+
+On the 9b153b9 DPU, `dpu_route_l4` branches on it:
+
+```c
+if (rg != 0) {                                   /* HEAD: dmesh_pin_route stamped it */
+    int32_t pinned = objs->route_group_backend[svc][rg];   /* ONE 2D-array read */
+    if (pinned >= 0 && find_pod_by_id(objs, pinned)) return pinned;
+    ...
+}
+return lb_pick(objs, svc);                        /* worktree (rg==0): EVERY message */
+```
+
+and `lb_pick` is not free per message:
+
+```c
+static int32_t lb_pick(struct objects *objs, int16_t svc) {
+    int32_t hosts[MAX_PODS];
+    int n = collect_live_hosts(objs, svc, hosts);  /* scans pods[]: ACQUIRE-loads
+                                                      registered + service_id + dma_ready
+                                                      for every pod, fills a 128-int array */
+    ...
+}
+```
+
+So HEAD resolves a pinned conn's backend with **one array read**; worktree re-scans the whole live
+backend set **on every message**. With the single DPU ingest thread at 99%, that per-message delta
+is the 6.8%. **t=1 is identical because one connection's message rate never saturates the ingest
+thread — the extra scan is absorbed. It only bites once a second connection pushes the thread to
+99% (t≥2).** That is exactly the t=1-clean / t≥2-regressed shape observed.
+
+The final worktree DPU removed the `route_group_backend` fast-path entirely (the layering fix
+dropped route-affinity on both sides) and resolves per message through the conntrack / pinned-conn
+path instead; it lands at the same ~0.097 ceiling. Test A isolates the host half cleanly on the old
+DPU; the two halves are one refactor.
+
+## Attribution and verdict
+
+This is the **prior layering refactor** (route-affinity was an L4 layering violation — a client
+stamping a per-RPC affinity key; see the design notes that mandate "new code must not call
+pin_route"), present in the working tree before this session began. **It is not the audit fixes:**
+Test A runs with *none* of this session's DPU changes and still regresses, and the su-gate-off
+control (session 5) already showed this session's only per-alloc addition is free. My host changes
+to the send path only *removed* a field write (`route_group`), which is cheaper, not slower.
+
+**Verdict: it is the intended, correct cost of the layering fix, not a bug** — route-affinity was
+removed on purpose. But it is a real, now-quantified regression (~6-8% at DPU saturation), and it
+is recoverable *without* reintroducing the violation: the DPU already knows each conn's backend
+(the conntrack `dpu_upstream_find` tuple, and `px_conn.pinned_backend`), so the per-message
+`lb_pick`/`collect_live_hosts` scan can be replaced by reading that cache — a DPU-side change that
+keeps routing entirely at L4. Filed as a follow-up; not done here (it is an optimization, not a
+correctness fix, and this session's mandate was the audit findings).
+
+## Correction to session 5's "honest gap"
+
+Session 5 reported this gap as unattributed and blamed a process error (I stashed the pre-session
+tree). The process error was real, but the regression is now fully explained above and is **not**
+in this session's fixes.

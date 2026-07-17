@@ -40,7 +40,6 @@ typedef struct {
     uint16_t seq;          /* per-conn sequence (opaque passthrough) */
     uint32_t length;
     uint32_t buf_offset;   /* offset of the body in the pod's DPU staging buffer */
-    uint8_t  route_group;  /* route-affinity key (0 = normal LB) */
     int32_t  pod_idx;      /* index into pods[] (staging owner) */
 } dpu_comp_entry_t;
 
@@ -429,15 +428,6 @@ struct objects {
                       * host whose mmaps arrive DURING init (before the DPA msgq is
                       * up) doesn't setup too early; those pods run in a deferred
                       * pass in run_dpu_worker once this is published. */
-    /* Route affinity (large-message SAR + dmesh_pin_route): (dst_service, route_group
-     * byte) -> pinned backend pod, so every message sharing a non-zero key routes to ONE
-     * backend. Keyed BY SERVICE: group ids are claimed from per-channel rolling counters,
-     * so two processes (or one process after 255 claims) reuse the same byte — scoping the
-     * pin to the message's dst_service confines a collision to same-service traffic (a
-     * balance skew) and makes cross-service redirection impossible. Overwrite-on-reuse —
-     * self-healing (a stale pin only risks a suboptimal same-service backend). 128×256×4B
-     * = 128 KB. Single ARM thread → no lock. -1 = unset. */
-    int32_t  route_group_backend[POD_ID_SPACE][256];
     /* SG-DMA egress engine (dpu_proxy.c) — the unified, always-on DPU→host reverse
      * path (px_init aborts the worker on failure, so this is never NULL at run
      * time). Every forward completion (request AND reply) runs the per-conn input

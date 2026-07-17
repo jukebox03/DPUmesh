@@ -62,7 +62,11 @@ static inline void bench_put_hdr(uint8_t *h, uint32_t magic, uint32_t seq,
  * Feed arbitrary byte-stream chunks; the callback fires once per COMPLETE frame
  * with (seq, payload_len, aux). Payload is discarded as it streams in (only the
  * count matters), so a >8 KB frame spread across many transport messages is
- * reframed with a fixed 16-byte buffer. */
+ * reframed with a fixed 16-byte buffer.
+ *
+ * ONE REFRAMER PER STREAM. It is a state machine over ONE sender's bytes: give it two
+ * senders' and it reads the second's header as the first's payload, losing the frame
+ * boundary for good. Key it by dmesh_wc_t.stream. */
 typedef void (*bench_frame_cb)(uint32_t seq, uint32_t payload_len, uint32_t aux, void *user);
 
 typedef struct {
@@ -77,8 +81,14 @@ static inline void bench_reframe_reset(bench_reframer_t *rf) {
     memset(rf, 0, sizeof(*rf));
 }
 
-static inline void bench_reframe_feed(bench_reframer_t *rf, const uint8_t *buf, size_t len,
-                                      bench_frame_cb cb, void *user) {
+/* Returns 0, or -1 on DESYNC: the bytes where a frame must begin do not carry
+ * `want_magic` (BENCH_REQ_MAGIC on a server, BENCH_REP_MAGIC on a client). Desync is
+ * unrecoverable — the boundary is lost, so every later length is read out of whatever
+ * happens to sit there and the stream never resyncs. Kill the conn; do not scan for a
+ * new boundary. Without this check that failure is SILENT: the reframer keeps counting
+ * garbage lengths, no frame ever completes, and the conn simply stops. */
+static inline int bench_reframe_feed(bench_reframer_t *rf, const uint8_t *buf, size_t len,
+                                     uint32_t want_magic, bench_frame_cb cb, void *user) {
     while (len > 0) {
         if (!rf->in_payload) {
             uint32_t need = BENCH_HDR_LEN - rf->hdr_got;
@@ -86,6 +96,9 @@ static inline void bench_reframe_feed(bench_reframer_t *rf, const uint8_t *buf, 
             memcpy(rf->hdr + rf->hdr_got, buf, take);
             rf->hdr_got += take; buf += take; len -= take;
             if (rf->hdr_got == BENCH_HDR_LEN) {
+                uint32_t magic;
+                memcpy(&magic, rf->hdr, 4);
+                if (magic != want_magic) return -1;
                 memcpy(&rf->seq,  rf->hdr + 4, 4);
                 memcpy(&rf->plen, rf->hdr + 8, 4);
                 memcpy(&rf->aux,  rf->hdr + 12, 4);
@@ -106,6 +119,7 @@ static inline void bench_reframe_feed(bench_reframer_t *rf, const uint8_t *buf, 
             }
         }
     }
+    return 0;
 }
 
 /* ------------------------------------------------------------ latency histogram

@@ -45,6 +45,9 @@
 static dmesh_channel_t *g_s        = NULL;
 static dmesh_cq_t      *g_cq       = NULL;   /* the one event loop's CQ */
 static uint32_t         g_post_max = 0;   /* max bytes one dmesh_alloc/post can carry */
+static uint32_t         g_pod_id   = 0;   /* our DPU-assigned pod_id, stamped into every
+                                           * reply's aux so the client can see WHICH backend
+                                           * served it — the only way to observe the LB. */
 static long             g_served   = 0;   /* requests answered (all conns; single-loop) */
 static long             g_reported = 0;   /* g_served at the last progress print */
 
@@ -82,7 +85,7 @@ static void reply_pump(dmesh_qp_t *c) {
             if (!b) { if (errno != EAGAIN) gc->dead = 1; return; }    /* EAGAIN: keep our place */
             uint32_t off = 0;
             if (gc->done == 0) {
-                bench_put_hdr(b, BENCH_REP_MAGIC, seq, size, 0);
+                bench_put_hdr(b, BENCH_REP_MAGIC, seq, size, g_pod_id);
                 off = BENCH_HDR_LEN;
             }
             memset(b + off, REPLY_FILL, want - off);
@@ -151,6 +154,7 @@ int main(void) {
     struct epoll_event ev = { .events = EPOLLIN, .data = { .fd = dfd } };
     if (epoll_ctl(epfd, EPOLL_CTL_ADD, dfd, &ev) < 0) { perror("epoll_ctl"); return 1; }
 
+    g_pod_id = (uint32_t)dmesh_pod_id(g_s);
     fprintf(stderr, "[greeter] ready (SayHello, single-loop): pod_id=%d service=%s channel_fd=%d\n",
             dmesh_pod_id(g_s), service, dfd);
 
@@ -184,8 +188,12 @@ int main(void) {
                     if (!attach(c)) fprintf(stderr, "[greeter] attach failed (conn idle)\n");
                     break;
                 case DMESH_WC_RECV:
-                    if (gc && !gc->dead)
-                        bench_reframe_feed(&gc->rf, wc[i].buf, wc[i].len, on_request, c);
+                    if (gc && !gc->dead &&
+                        bench_reframe_feed(&gc->rf, wc[i].buf, wc[i].len,
+                                           BENCH_REQ_MAGIC, on_request, c) < 0) {
+                        fprintf(stderr, "[greeter] request stream desync — dropping conn\n");
+                        gc->dead = 1;
+                    }
                     dmesh_wc_release(g_s, &wc[i]);
                     break;
                 case DMESH_WC_RECV_FIN:

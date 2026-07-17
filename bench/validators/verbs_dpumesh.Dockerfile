@@ -13,7 +13,7 @@ RUN apt-get update && \
 
 COPY build/bin/verbs_dpumesh /usr/local/bin/verbs_dpumesh
 COPY doca-libs/ /usr/local/lib/
-COPY build/lib/libdpumesh.so /usr/local/lib/
+COPY build/lib/libdpumesh.so.1 /usr/local/lib/
 COPY bench/k8s/registry /etc/dpumesh/registry
 
 RUN ldconfig

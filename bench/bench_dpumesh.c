@@ -21,9 +21,13 @@
  *     from the merged histogram.
  *
  * DPUmesh mapping notes:
- *   * One dmesh connection per client thread, dmesh_pin_route()'d so the whole
- *     conn stays on the ONE backend => replies arrive in send order (positional
- *     FIFO correlation, cross-checked against the echoed seq).
+ *   * One dmesh connection per client thread. Replies are correlated BY SEQ, never by
+ *     arrival order: whether they keep send order depends on the service's codec, which
+ *     is DPU-side config, not something this client knows. `reorder` counts how many
+ *     arrived out of order and `dist` tallies which backend served each — together they
+ *     show the routing granularity:
+ *       no codec (passthru) -> conn pinned to one backend -> reorder=0, dist on one pod
+ *       codec (_L7_SVC/_FRAME_SVC) -> every message load-balanced -> reorder>0, dist spread
  *   * Requests/replies are framed (bench.h) so a >8 KB request that the transport
  *     auto-chunks across slots is reassembled by the server before it replies —
  *     so the measured latency includes the full request transfer.
@@ -51,7 +55,8 @@
  *      elastic TX block-pool event deltas over the run (dmesh_tx_stats_t).
  *   PING -> PONG
  *
- * env: BENCH_DST_POD_ID (dst service id, default 11).
+ * Addresses the backend by k8s Service NAME ("echo-dpumesh"), resolved through the
+ * registry — no service id is typed here.
  */
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -74,6 +79,16 @@
 #define CQ_BATCH           64
 #define STOP_GRACE_SEC     15         /* watchdog kill margin past the run duration */
 #define REQ_FILL           42
+#define BENCH_MAX_BACKENDS 32         /* pod_id space we tally replies over (>= MAX_PODS) */
+#define MAX_STREAMS        32         /* inbound streams per conn == backends of the service */
+#define INFLIGHT_RING      1024       /* direct-map slots for outstanding requests, by seq.
+                                       * MUST exceed the concurrency window by a wide margin:
+                                       * replies complete OUT OF ORDER on a codec'd service, so
+                                       * the span from the oldest outstanding seq to the newest
+                                       * issued one is NOT bounded by the window — a lagging
+                                       * request holds its slot while newer ones cycle. Each
+                                       * slot stores its seq, so a collision is DETECTED (fail)
+                                       * rather than silently mis-timed. */
 
 static dmesh_channel_t *g_s           = NULL;   /* shared, thread-safe channel */
 static const char      *g_dst_service = "echo-dpumesh";  /* backend service NAME to address */
@@ -97,37 +112,73 @@ typedef struct {
      * lock and no atomics below. */
     dmesh_cq_t      *cq;        /* this thread's CQ (single-consumer, polled here only) */
     dmesh_qp_t    *c;
-    double          *start_ts;  /* ring[W]: issue time of each outstanding request */
+    /* Outstanding requests, direct-mapped by seq % INFLIGHT_RING (see above). */
+    double          *start_ts;  /* issue time */
+    uint32_t        *slot_seq;  /* which seq owns the slot (collision check) */
+    uint8_t         *live;      /* 1 = awaiting its reply */
     uint32_t         next_seq;  /* next seq to assign on issue */
-    uint32_t         exp_seq;   /* next seq expected to complete (in-order FIFO) */
+    uint32_t         prev_seq;  /* seq of the previous completion — only to count reordering */
     uint32_t         tx_done;   /* bytes of the in-flight request frame already posted */
     int              tx_active; /* a frame is mid-carve (must finish before the next) */
     long             outstanding;
     long             credits;   /* completions observed -> requests to reissue */
-    bench_reframer_t reframer;  /* reply-stream reframer */
+    /* One reframer PER INBOUND STREAM (wc.stream). A reply longer than msg_max arrives
+     * as several completions, and on a per-message-routed service the backends reply
+     * concurrently, so another peer's bytes can land between two of them. Reassembling
+     * them all through one reframer would splice the streams together and desync. */
+    struct { uint16_t id; int used; bench_reframer_t rf; } rs[MAX_STREAMS];
 
     /* per-thread results */
     long         rcnt;         /* total completions incl. warmup */
     long         since_conn;   /* completions on the CURRENT conn (churn trigger) */
     long         reconns;      /* reconnects performed */
     double       reconn_sec;   /* wall time inside close+connect+pin (sums) */
-    long         fail;         /* seq-mismatch / corrupt completions */
+    long         fail;         /* completions that named a seq we never had outstanding */
+    long         reorder;      /* replies that arrived out of send order. 0 on a pinned
+                                * (no-codec) service; >0 is the visible proof that a
+                                * codec'd service load-balances per message. */
+    long         dist[BENCH_MAX_BACKENDS];  /* replies per backend pod_id — which pod served */
     double       warmup_end;   /* timestamp of the warmup boundary */
     double       dura;         /* measured window length (s) */
     bench_hist_t hist;         /* post-warmup latencies (us) */
     atomic_int   broken;       /* conn/alloc failure -> excluded from aggregate */
 } worker_t;
 
-/* Fire once per fully-received reply frame: correlate to the oldest outstanding
- * request (FIFO — single pinned backend => send order), record its latency. Runs on
- * w's own thread: the completion came off w's own CQ. */
+/* Find (or start) this stream's reframer. Linear over MAX_STREAMS: a conn has at most
+ * one stream per backend of the service, so the scan is a handful of compares and needs
+ * no hashing. NULL = more distinct peers than MAX_STREAMS. */
+static bench_reframer_t *stream_rf(worker_t *w, uint16_t id) {
+    int free_i = -1;
+    for (int i = 0; i < MAX_STREAMS; i++) {
+        if (w->rs[i].used && w->rs[i].id == id) return &w->rs[i].rf;
+        if (!w->rs[i].used && free_i < 0) free_i = i;
+    }
+    if (free_i < 0) return NULL;
+    w->rs[free_i].used = 1;
+    w->rs[free_i].id   = id;
+    bench_reframe_reset(&w->rs[free_i].rf);
+    return &w->rs[free_i].rf;
+}
+
+static void streams_reset(worker_t *w) {
+    for (int i = 0; i < MAX_STREAMS; i++) w->rs[i].used = 0;
+}
+
+/* Fire once per fully-received reply frame. Correlate BY SEQ, not by arrival order: a
+ * codec'd service load-balances every message, so replies from different backends
+ * interleave and out-of-order is normal, not an error. `aux` carries the backend's
+ * pod_id. Runs on w's own thread: the completion came off w's own CQ. */
 static void on_reply(uint32_t seq, uint32_t plen, uint32_t aux, void *user) {
-    (void)plen; (void)aux;
+    (void)plen;
     worker_t *w = (worker_t *)user;
     double now = bench_now_sec();
-    double t0  = w->start_ts[w->exp_seq % (uint32_t)w->W];
-    if (seq != w->exp_seq) w->fail++;            /* reorder/corruption guard */
-    w->exp_seq++;
+    uint32_t idx = seq % INFLIGHT_RING;
+    if (!w->live[idx] || w->slot_seq[idx] != seq) { w->fail++; return; }  /* not in flight */
+    w->live[idx] = 0;
+    double t0 = w->start_ts[idx];
+    if (seq != w->prev_seq + 1) w->reorder++;   /* arrival order != send order */
+    w->prev_seq = seq;
+    if (aux < BENCH_MAX_BACKENDS) w->dist[aux]++;
     w->outstanding--;
     if (w->rcnt >= w->warmup)
         bench_hist_record(&w->hist, (now - t0) * 1e6);
@@ -145,7 +196,16 @@ static int cq_pump(worker_t *w) {
     while ((n = dmesh_poll_cq(w->cq, wc, CQ_BATCH)) > 0) {  /* drain to 0 (edge-triggered rule) */
         for (int i = 0; i < n; i++) {
             if (wc[i].opcode == DMESH_WC_RECV) {
-                bench_reframe_feed(&w->reframer, wc[i].buf, wc[i].len, on_reply, w);
+                bench_reframer_t *rf = stream_rf(w, wc[i].stream);
+                if (!rf) w->fail++;           /* more peers than MAX_STREAMS */
+                else if (bench_reframe_feed(rf, wc[i].buf, wc[i].len,
+                                            BENCH_REP_MAGIC, on_reply, w) < 0) {
+                    /* Unrecoverable: this stream's boundary is lost. Fail loudly instead
+                     * of stalling forever on a reframer that will never complete a frame. */
+                    fprintf(stderr, "[bench] reply stream %u desync\n", wc[i].stream);
+                    w->fail++;
+                    atomic_store(&w->broken, 1);
+                }
                 dmesh_wc_release(g_s, &wc[i]);
             } else if (wc[i].opcode == DMESH_WC_RECV_FIN) {
                 atomic_store(&w->broken, 1);              /* backend FIN — abort this thread */
@@ -165,7 +225,7 @@ static int cq_pump(worker_t *w) {
 static int issue(worker_t *w) {
     uint32_t total = BENCH_HDR_LEN + (uint32_t)w->req_size;
     if (!w->tx_active) {
-        w->start_ts[w->next_seq % (uint32_t)w->W] = bench_now_sec();
+        w->start_ts[w->next_seq % INFLIGHT_RING] = bench_now_sec();
         w->tx_active = 1;
         w->tx_done   = 0;
     }
@@ -186,6 +246,9 @@ static int issue(worker_t *w) {
         w->tx_done += want;
     }
     w->tx_active = 0;
+    uint32_t si = w->next_seq % INFLIGHT_RING;
+    w->slot_seq[si] = w->next_seq;
+    w->live[si] = 1;                            /* in flight until its reply lands */
     w->next_seq++;
     w->outstanding++;
     return 1;
@@ -194,11 +257,14 @@ static int issue(worker_t *w) {
 static void *worker_fn(void *arg) {
     worker_t *w = (worker_t *)arg;
     double end = 0.0;
-    bench_reframe_reset(&w->reframer);
+    streams_reset(w);
 
     if (bench_hist_init(&w->hist) < 0) { atomic_store(&w->broken, 1); return NULL; }
-    w->start_ts = (double *)calloc((size_t)w->W, sizeof(double));
-    if (!w->start_ts) { atomic_store(&w->broken, 1); goto done; }
+    w->start_ts = (double *)calloc(INFLIGHT_RING, sizeof(double));
+    w->slot_seq = (uint32_t *)calloc(INFLIGHT_RING, sizeof(uint32_t));
+    w->live     = (uint8_t *)calloc(INFLIGHT_RING, 1);
+    if (!w->start_ts || !w->slot_seq || !w->live) { atomic_store(&w->broken, 1); goto done; }
+    w->prev_seq = UINT32_MAX;                   /* so seq 0 counts as in-order */
 
     /* This thread's OWN CQ, and its conn on it: nothing on this CQ belongs to anyone
      * else, so poll_cq below is contention-free. This is the scaling knob. */
@@ -206,7 +272,6 @@ static void *worker_fn(void *arg) {
     if (!w->cq) { atomic_store(&w->broken, 1); goto done; }
     w->c = dmesh_create_qp(w->cq, g_dst_service);
     if (!w->c) { atomic_store(&w->broken, 1); goto done; }
-    dmesh_pin_route(w->c);                       /* socket-order on the one backend */
 
     /* barrier: all threads start together */
     while (bench_now_sec() < w->start_at) {
@@ -232,8 +297,7 @@ static void *worker_fn(void *arg) {
             dmesh_destroy_qp(w->c);                    /* vq_cur is this CQ's, i.e. ours */
             w->c = dmesh_create_qp(w->cq, g_dst_service);
             if (!w->c) { atomic_store(&w->broken, 1); break; }
-            dmesh_pin_route(w->c);
-            bench_reframe_reset(&w->reframer);
+            streams_reset(w);                  /* fresh conn → fresh upstreams */
             w->since_conn = 0;
             w->reconn_sec += bench_now_sec() - t0;
             w->reconns++;
@@ -264,6 +328,8 @@ done:
     if (w->cq) { dmesh_destroy_cq(w->cq); w->cq = NULL; }
     w->dura = (end > 0.0 && w->rcnt > w->warmup) ? (end - w->warmup_end) : 0.0;
     free(w->start_ts);
+    free(w->slot_seq);
+    free(w->live);
     return NULL;
 }
 
@@ -332,11 +398,14 @@ static void run_bench(int conn_fd, int req_size, int reply_size, int concurrency
     /* aggregate: sum per-thread rates, merge latency histograms */
     bench_hist_t agg; bench_hist_init(&agg);
     double mrps = 0.0, gbps = 0.0, reconn_sec = 0.0;
-    long total_ok = 0, total_fail = 0, total_reconns = 0;
+    long total_ok = 0, total_fail = 0, total_reconns = 0, total_reorder = 0;
+    long dist[BENCH_MAX_BACKENDS] = { 0 };
     for (int i = 0; i < threads; i++) {
         long measured = w[i].rcnt - w[i].warmup;
         if (measured < 0) measured = 0;
         total_fail += w[i].fail;
+        total_reorder += w[i].reorder;
+        for (int b = 0; b < BENCH_MAX_BACKENDS; b++) dist[b] += w[i].dist[b];
         total_reconns += w[i].reconns;
         reconn_sec    += w[i].reconn_sec;
         if (!atomic_load(&w[i].broken) && w[i].dura > 1e-9 && measured > 0) {
@@ -359,13 +428,26 @@ static void run_bench(int conn_fd, int req_size, int reply_size, int concurrency
     int n = snprintf(reply, sizeof reply,
         "OK mrps=%.6f gbps=%.4f p50=%.2f p95=%.2f p99=%.2f avg=%.2f min=%.2f max=%.2f "
         "rcnt=%ld fail=%ld conc=%d threads=%d reqsz=%d repsz=%d durs=%.3f "
-        "reconns=%ld reconn_us=%.2f grabs=%llu rets=%llu recyc=%llu waits=%llu pads=%llu\n",
+        "reconns=%ld reconn_us=%.2f grabs=%llu rets=%llu recyc=%llu waits=%llu pads=%llu "
+        "reorder=%ld",
         mrps, gbps, p50, p95, p99, avg, mn, mx,
         total_ok, total_fail, concurrency, threads, req_size, reply_size, duration,
         total_reconns, reconn_us,
         st1.pool_grabs - st0.pool_grabs, st1.pool_returns - st0.pool_returns,
         st1.recycle_hits - st0.recycle_hits, st1.grow_waits - st0.grow_waits,
-        st1.block_pads - st0.block_pads);
+        st1.block_pads - st0.block_pads, total_reorder);
+    /* dist=pod:count,... — which backend served each reply. One entry => the conn is
+     * pinned (no codec); several => the service load-balances per message. */
+    n += snprintf(reply + n, sizeof reply - (size_t)n, " dist=");
+    int first = 1;
+    for (int b = 0; b < BENCH_MAX_BACKENDS && n < (int)sizeof reply - 24; b++) {
+        if (!dist[b]) continue;
+        n += snprintf(reply + n, sizeof reply - (size_t)n, "%s%d:%ld",
+                      first ? "" : ",", b, dist[b]);
+        first = 0;
+    }
+    if (first) n += snprintf(reply + n, sizeof reply - (size_t)n, "-");
+    n += snprintf(reply + n, sizeof reply - (size_t)n, "\n");
     if (write(conn_fd, reply, (size_t)n) < 0) {}
     fprintf(stderr, "[bench] DONE %s", reply);
     free(w); free(tid);

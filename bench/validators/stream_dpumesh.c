@@ -9,7 +9,7 @@
  *
  *     [u32 total_len (incl. this 5B header)][u8 svc][payload ...]
  *
- * and routes EACH whole frame to the service named by its svc byte as a byte stream (a >8 KB
+ * and routes EACH whole frame by its svc byte as a byte stream (a >8 KB
  * frame is delivered as consecutive <=8 KB chunks — that is the byte-stream
  * contract; the receiver reframes itself). The frame boundary is decided by the
  * DPU parser, NOT by post boundaries: this app may pack several frames into one
@@ -30,11 +30,13 @@
  * dispatched by conn role out of one pump(), which the client's send and reply
  * waits drive — the client stays sequential (one burst outstanding) as before.
  *
- * `RUN <N> <SIZE> [<SVC_LIST>] [<FRAMES_PER_WRITE>]`:
+ * Frames always carry our OWN svc byte, so the run is self-contained: no other pod in
+ * the bench topology can serve as a target. The echo-dpumesh* pods are Greeters (bench.h
+ * request/reply framing), and the other validators only poll their completion queue while
+ * running their own test — idle, they block in accept() and never answer.
+ *
+ * `RUN <N> <SIZE> [<FRAMES_PER_WRITE>]`:
  *   N     round-trips, SIZE  payload bytes per frame (frame = 5 + SIZE),
- *   SVC_LIST comma list of destination service bytes to round-robin the frames
- *            across (default = our own service = pure loopback; e.g. "11,13,14"
- *            fans out to the echo-dpumesh backends — high fan-out load),
  *   FRAMES_PER_WRITE  how many frames to pack into one burst byte-stream
  *            (default 1; >1 exercises multi-frame-per-window parsing).
  * Reply: `OK <ok> <fail> <served_bytes> <p50us>`.
@@ -57,10 +59,14 @@
 #include "dmesh_core.h"   /* dmesh_qp_open + dmesh_resolve_name: this validator's numeric
                            * multi-svc knob addresses by int, below the name surface */
 
+/* Best-effort control-socket reply. Every caller is already returning, and a failed
+ * write only means the driver hung up first — there is nothing to recover. Wrapping it
+ * states that, instead of leaving 4 unchecked write()s for -Wunused-result to flag. */
+static void ctl_reply(int fd, const char *s, size_t n) { (void)!write(fd, s, n); }
+
 #define CTRL_PORT   9092
 #define FRAME_HDR   5u                 /* [u32 total_len][u8 svc] — matches the DPU mock */
 #define FRAME_MAX   (256u * 1024u)     /* == PX_FRAME_MAX in dpu_proxy.c (mock poison cap) */
-#define MAX_SVCS    16
 #define MAX_FPW     64                 /* frames packed per burst cap */
 #define CQ_BATCH    16
 #define MAX_SERVERS 4096
@@ -188,16 +194,10 @@ static void cli_recv(rstate_t *st, dmesh_qp_t *c, const dmesh_wc_t *w) {
     st->got += w->len;
 }
 
-static void cli_reconnect(rstate_t *st, dmesh_qp_t **slot, int svc, size_t burst) {
+static void cli_reconnect(rstate_t *st, dmesh_qp_t **slot, int svc) {
     dmesh_destroy_qp(*slot);                             /* safe on NULL (first open) */
     if (st->cur == *slot) st->cur = NULL;
     *slot = dmesh_qp_open(g_cq, svc);   /* numeric svc → integer entry point */
-    /* A burst wider than one slot is carved into several descriptors, each LB'd on
-     * its own unless the conn is pinned — pin so the stream reaches ONE backend in
-     * send order (what the parser's window + seam assumes). A burst inside one slot
-     * is a single descriptor: leave it unpinned, per-message LB is the fan-out
-     * this validator loads the mock with. */
-    if (*slot && burst > (size_t)g_msgmax) dmesh_pin_route(*slot);
 }
 
 /* ---- the one CQ pump: dispatch by conn role, then retry stalled echoes ---- */
@@ -265,15 +265,14 @@ static int send_burst(rstate_t *st, dmesh_qp_t *c, const uint8_t *sbuf, size_t b
     return 0;
 }
 
-/* ---- client side: N round-trips of framed byte-stream to svc_list ---- */
-static void run_stream(int conn_fd, long N, uint32_t size,
-                       const int *svcs, int nsvc, int fpw) {
+/* ---- client side: N round-trips of framed byte-stream to our own service ---- */
+static void run_stream(int conn_fd, long N, uint32_t size, int fpw) {
     char reply[192];
-    if (N < 1 || nsvc < 1 || fpw < 1 || fpw > MAX_FPW ||
+    if (N < 1 || fpw < 1 || fpw > MAX_FPW ||
         FRAME_HDR + size > FRAME_MAX) {
         int n = snprintf(reply, sizeof reply,
                          "ERR bad args (size<=%u, fpw<=%d)\n", FRAME_MAX - FRAME_HDR, MAX_FPW);
-        write(conn_fd, reply, (size_t)n); return;
+        ctl_reply(conn_fd, reply, (size_t)n); return;
     }
 
     uint32_t frame_bytes = FRAME_HDR + size;
@@ -281,20 +280,18 @@ static void run_stream(int conn_fd, long N, uint32_t size,
     uint8_t *sbuf = malloc(burst), *rbuf = malloc(burst);
     double  *lat  = malloc((size_t)N * sizeof(double));
     if (!sbuf || !rbuf || !lat) { free(sbuf); free(rbuf); free(lat);
-        write(conn_fd, "ERR oom\n", 8); return; }
+        ctl_reply(conn_fd, "ERR oom\n", 8); return; }
 
     static rstate_t st;
     memset(&st, 0, sizeof st);
     st.rb = rbuf; st.size = burst;
 
-    /* One reusable conn per destination service (a real gateway fans out from one
-     * downstream conn; here one conn per dst keeps request/reply demux trivial). */
-    dmesh_qp_t *conns[MAX_SVCS] = {0};
-    for (int k = 0; k < nsvc; k++) cli_reconnect(&st, &conns[k], svcs[k], burst);
+    dmesh_qp_t *c = NULL;
+    cli_reconnect(&st, &c, g_service);
 
-    /* Early-abort: a misconfigured run (e.g. an unroutable dst svc) fails every
-     * round-trip on the 5 s reply timeout — 20000×5 s would wedge for hours. Bail
-     * after a burst of consecutive failures so the operator gets fast feedback. */
+    /* Early-abort: a run that cannot round-trip (wrong DPUMESH_PROXY, DPU down) burns
+     * the 5 s reply timeout every iteration — N×5 s would wedge for hours. Bail after a
+     * burst of consecutive failures so the operator gets fast feedback. */
     const long MAX_CONSEC_FAIL = 40;
     long consec_fail = 0;
 
@@ -302,13 +299,10 @@ static void run_stream(int conn_fd, long N, uint32_t size,
     for (long i = 0; i < N; i++) {
         if (consec_fail >= MAX_CONSEC_FAIL) {
             fprintf(stderr, "[stream] ABORT after %ld consecutive failures "
-                    "(unroutable dst? check svc list vs registered services / DPUMESH_PROXY=frame)\n",
-                    consec_fail);
+                    "(is the DPU up with DPUMESH_PROXY=frame?)\n", consec_fail);
             break;
         }
-        int k = (int)(i % nsvc);
-        uint8_t svc = (uint8_t)svcs[k];
-        dmesh_qp_t *c = conns[k];
+        uint8_t svc = (uint8_t)g_service;
         if (!c) { fail++; consec_fail++; continue; }
 
         /* pack `fpw` frames of this iteration into one byte-stream burst */
@@ -318,7 +312,7 @@ static void run_stream(int conn_fd, long N, uint32_t size,
         double t0 = now_sec();
         st.cur = c; st.got = 0; st.bad = 0; st.eof = 0;
         if (send_burst(&st, c, sbuf, burst) != 0) {
-            fail++; consec_fail++; cli_reconnect(&st, &conns[k], svcs[k], burst); continue;
+            fail++; consec_fail++; cli_reconnect(&st, &c, g_service); continue;
         }
 
         /* reply is the echoed byte-stream — reassemble exactly `burst` bytes */
@@ -329,10 +323,10 @@ static void run_stream(int conn_fd, long N, uint32_t size,
         }
         int bad = timedout || st.bad || st.got != burst || memcmp(sbuf, rbuf, burst) != 0;
         st.cur = NULL;
-        if (bad) { fail++; consec_fail++; cli_reconnect(&st, &conns[k], svcs[k], burst); }
+        if (bad) { fail++; consec_fail++; cli_reconnect(&st, &c, g_service); }
         else     { ok++; consec_fail = 0; lat[ns++] = (now_sec() - t0) * 1e6; }
     }
-    for (int k = 0; k < nsvc; k++) if (conns[k]) { dmesh_destroy_qp(conns[k]); conns[k] = NULL; }
+    if (c) { dmesh_destroy_qp(c); c = NULL; }
     /* let the echo side observe our FIN and retire its conns; drop the stragglers */
     double tw = now_sec();
     while (st.nserv > 0 && now_sec() - tw < 1.0)
@@ -342,9 +336,9 @@ static void run_stream(int conn_fd, long N, uint32_t size,
     qsort(lat, ns, sizeof(double), cmp_d);
     double p50 = ns ? lat[ns / 2] : 0.0;
     int rn = snprintf(reply, sizeof reply, "OK %ld %ld %ld %.1f\n", ok, fail, g_served, p50);
-    write(conn_fd, reply, (size_t)rn);
-    fprintf(stderr, "[stream] DONE N=%ld size=%u fpw=%d nsvc=%d ok=%ld fail=%ld served_bytes=%ld p50=%.1fus\n",
-            N, size, fpw, nsvc, ok, fail, g_served, p50);
+    ctl_reply(conn_fd, reply, (size_t)rn);
+    fprintf(stderr, "[stream] DONE N=%ld size=%u fpw=%d ok=%ld fail=%ld served_bytes=%ld p50=%.1fus\n",
+            N, size, fpw, ok, fail, g_served, p50);
     free(sbuf); free(rbuf); free(lat);
 }
 
@@ -355,25 +349,15 @@ static void handle_ctrl(int fd) {
     buf[n] = '\0';
     char *nl = strchr(buf, '\n'); if (nl) *nl = '\0';
 
-    char cmd[16] = {0}, svclist[128] = {0};
+    char cmd[16] = {0};
     long N = 0; uint32_t size = 0; int fpw = 1;
-    int m = sscanf(buf, "%15s %ld %u %127s %d", cmd, &N, &size, svclist, &fpw);
+    int m = sscanf(buf, "%15s %ld %u %d", cmd, &N, &size, &fpw);
     if (m < 3 || strcmp(cmd, "RUN") != 0) {
-        write(fd, "ERR use: RUN <N> <SIZE> [<SVC_LIST>] [<FPW>]\n", 45);
+        ctl_reply(fd, "ERR use: RUN <N> <SIZE> [<FPW>]\n", 32);
         close(fd); return;
     }
-    /* default svc list = our own service (pure loopback, self-contained proof).
-     * "self"/"-"/empty (and any non-numeric token) → own service, so an omitted
-     * SVC_LIST arg is unambiguous even though `RUN N SIZE <fpw>` would otherwise
-     * let sscanf slide fpw into the svclist slot. */
-    int svcs[MAX_SVCS], nsvc = 0;
-    if (m >= 4 && svclist[0] && strcmp(svclist, "self") != 0 && strcmp(svclist, "-") != 0) {
-        char *save = NULL, *tok = strtok_r(svclist, ",", &save);
-        while (tok && nsvc < MAX_SVCS) { svcs[nsvc++] = atoi(tok); tok = strtok_r(NULL, ",", &save); }
-    }
-    if (nsvc == 0) { svcs[0] = g_service; nsvc = 1; }
-    if (m < 5) fpw = 1;
-    run_stream(fd, N, size, svcs, nsvc, fpw);
+    if (m < 4) fpw = 1;
+    run_stream(fd, N, size, fpw);
     close(fd);
 }
 

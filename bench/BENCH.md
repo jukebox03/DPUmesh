@@ -69,17 +69,23 @@ service-mesh "tax"). The default `fair` pin gives **1 host core per pod** on bot
 sides, so the comparison is apples-to-apples.
 
 ```
-DPUmesh  — transport offloaded to the DPU; the app owns its whole core
+DPUmesh  — transport offloaded to the DPU; the app owns its whole core.
+           Service `echo-dpumesh` has THREE backends (cores 1, 6, 7).
 
-     host core 0                            host core 1
-   ┌────────────────┐  request(req_size)   ┌────────────────┐
-   │  bench-dpumesh │ ───────────────────► │  echo-dpumesh  │
-   │     client     │                      │    Greeter     │
-   │  (full core)   │ ◄─────────────────── │  (full core)   │
-   └───────┬────────┘  reply(8 B)          └───────▲────────┘
-           │              dmesh.h                  │
-           └──────►  DPU / DPA transport  ─────────┘
-                     (off host CPU: DOCA Comch + DMA)
+     host core 0                                      core 1  ┌────────────┐
+   ┌────────────────┐  request(req_size)                    ┌─┤  Greeter   │
+   │  bench-dpumesh │ ──────────┐                           │ └────────────┘
+   │     client     │           │                   core 6  │ ┌────────────┐
+   │  (full core)   │ ◄───────┐ │                           ├─┤  Greeter   │
+   └────────────────┘ reply   │ │                           │ └────────────┘
+        dmesh.h               │ ▼                   core 7  │ ┌────────────┐
+                        ┌─────┴──────────┐                  ├─┤  Greeter   │
+                        │ DPU / DPA      │──────────────────┘ └────────────┘
+                        │ the sidecar    │   one upstream per backend (uP)
+                        └────────────────┘   (off host CPU: DOCA Comch + DMA)
+
+   no codec  → the client's ONE conn pins to ONE Greeter; the other two idle
+   codec     → every message is load-balanced; all three serve the same conn
 
 
 TCP + Envoy sidecar  — the service-mesh baseline; app shares its core with a proxy
@@ -95,6 +101,22 @@ TCP + Envoy sidecar  — the service-mesh baseline; app shares its core with a p
 The pod that answers is the **Greeter** (`echo-*`); the pod that drives load is
 the **client** (`bench-*`). Both listen for the `RUN` control command on :9092
 (§4); the client also opens the data connection(s) to the Greeter.
+
+### Seeing the routing granularity
+
+Every Greeter stamps its own `pod_id` into each reply, and the client tallies it. Without that
+discriminator the load balancer is **unobservable** — all three backends answer identically. Two
+fields in the `OK` line say which regime you measured:
+
+| | `reorder` | `dist` |
+|---|---|---|
+| **no codec** (default) | `0` | one pod per conn — `dist=0:342541` at threads=1 |
+| **codec** (`DPUMESH_PROXY_L7_SVC=11`) | `>0` | even across all three — `dist=0:103984,1:103983,2:103983` |
+
+`reorder>0` is not a fault: load-balancing every message means replies come back from several
+backends at once, so arrival order stops matching send order. That is why the client correlates
+by `seq`. The threads=1 / no-codec row is the gRPC problem in one line — one long-lived
+connection, one backend, two pods idle.
 
 ## 3. Pieces
 
@@ -132,9 +154,10 @@ client correlate replies to requests by `seq` under the concurrency window.
 
 Both sides run the **native API**: `dmesh_alloc` hands a pointer straight into the
 TX ring (filled in place — no staging buffer), and every `DMESH_WC_RECV` completion
-points straight into the RX mmap. **Zero copy in both directions.** The client
-`dmesh_pin_route()`s its connection so it stays on one backend (replies in send
-order). Since `dmesh_alloc` **never blocks** (`NULL`+`EAGAIN` on a full SQ), a
+points straight into the RX mmap. **Zero copy in both directions.** Replies are correlated
+**by seq**, never by arrival order — whether they keep send order is the service's codec's
+business, not the client's, and the run reports `reorder` and `dist` so you can see which
+regime you measured. Since `dmesh_alloc` **never blocks** (`NULL`+`EAGAIN` on a full SQ), a
 backpressured frame parks and resumes on a later loop pass instead of stalling
 the thread — so the closed-loop window is credit-limited without a spin.
 
@@ -186,9 +209,12 @@ what makes the pods speak this protocol.
 ./bench/bench.sh bandwidth both               # Gb/s vs req_size (to 8 MB)
 ./bench/bench.sh rate      both               # Mrps vs client threads {1,2,4,8}
 ./bench/bench.sh all       both               # all three -> CSVs under $OUT (/tmp/dpumesh-bench)
-./bench/bench.sh point dpumesh 1024 8 32 10 1000 4   # one raw RUN
+./bench/bench.sh point dpumesh 1024 8 32 10 1000 4   # one raw RUN (reports reorder + dist)
 ./bench/bench.sh loopback|verbs|stream|preload …     # feature validators
 ./bench/bench.sh pin [fair|hw|hw3|hw6] | status | logs | cleanup | dpulog | dpucpu
+
+DPUMESH_PROXY_L7_SVC=11 ./bench/bench.sh deploy      # codec on echo-dpumesh -> per-message LB
+DPUMESH_PROXY=frame     ./bench/bench.sh deploy      # the frame codec (what `stream` needs)
 ```
 
 Each family prints a table and writes a CSV. Knobs (env): `OUT`, `LAT_DUR`,

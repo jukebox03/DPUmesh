@@ -19,5 +19,12 @@ Container defs for these live beside the sources here
 All validator pods are brought up by `bench.sh deploy` (`start_pods`); none self-starts
 on demand — starting a pod against an already-running DPU is not a supported flow.
 
+**Why every validator is self-contained.** Each one is BOTH the client and the server of its own
+service, and that is not just convenience — a validator only polls its completion queue while its
+own `RUN` is in flight. Idle, it blocks in `accept()` and answers nothing, so it cannot serve as
+another pod's backend. The `echo-*` pods do poll continuously, but they are Greeters speaking the
+benchmark's framing, not verbatim echoes. Cross-pod fan-out is therefore the **benchmark's** job
+(three `echo-dpumesh` backends, `../BENCH.md` §2), not a validator's.
+
 **Build wiring:** these sources live in `bench/validators/`; the root `Makefile`
 paths point here (see `../BENCH.md` §5).

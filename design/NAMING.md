@@ -1,7 +1,8 @@
 # DPUmesh Naming & Identity — Whitepaper (design)
 
-> **Status: Phase 0 IMPLEMENTED (host C-side) and HW-validated via `bench.sh`; Phases 1–3
-> (the k8s control plane) remain PROPOSED.** See [§8](#8-implementation-phasing-this-document--code).
+> **Status: Phase 0 IMPLEMENTED (host C-side) and HW-validated via `bench.sh`; Phases 1–4
+> remain PROPOSED.** Phases 1–3 build the naming control plane; Phase 4 carries Kubernetes
+> endpoint readiness into DPU routing. See [§8](#8-implementation-phasing-this-document--code).
 > Phase 0 replaced the as-built `dmesh_create_channel(int service_id)` / `dmesh_create_qp(cq, int)`
 > ([API.md](API.md) §3), the `DMESH_PRELOAD_SVC/_LISTEN/_MAP/_REGISTRY` env tables ([API.md](API.md) §7),
 > and the `DPUMESH_SERVICE_ID` override ([API.md](API.md) §9) with the name-only public API and
@@ -19,8 +20,8 @@ silently **overrides the caller's argument** inside the core (`src/dmesh_core.c`
 arbitrates any of them, and the failure is not a loud one: the DPU derives a service's backends by
 scanning `pods[]` for `service_id == svc` (`collect_live_hosts`, `doca/dpu_worker.c`), so two
 *different* services that both pick `7` are not a collision that one of them wins — **both become
-backends of service 7**, and the LB round-robins across the union. Because a connection is sticky
-by default (`px_resolve_backend`, `doca/dpu_proxy.c`), a conn that lands on the wrong application
+backends of service 7**, and the LB round-robins across the union. Because a connection with no
+codec is pinned to its first backend (`px_resolve_backend`, `doca/dpu_proxy.c`), a conn that lands on the wrong application
 **stays on it for its whole life.**
 The integer is a **wire address wearing a config's clothes**, and this design's whole content is
 moving its provenance from the user to a control plane, changing **nothing else**.
@@ -138,7 +139,8 @@ init signature is unchanged; one table serves both directions.
                            ▼
               wire:  dst = (svc 7, BLANK, BLANK)   ← unchanged (API.md §6)
                            ▼
-              DPU:   pods[] where service_id==7 && live  →  sticky pin, else RR pick
+              DPU:   pods[] where service_id==7 && live  →  RR pick (per message if the
+                     service runs a codec; else once, then the conn is pinned)
 ```
 
 Two keys, one table: the shim resolves by `ClusterIP:port` (it must decide "is this meshed?"
@@ -235,52 +237,17 @@ mechanism, exercised by tests and production alike; no programmatic identity ove
 
 ---
 
-## 6. Before / after
+## 6. Remaining gaps and scope boundaries
 
-| | Before (as-built) | After |
-|---|---|---|
-| native identity | `dmesh_create_channel(7)` | `dmesh_create_channel()` |
-| core identity override | `DPUMESH_SERVICE_ID=7` — an int, silently beats the caller | `DPUMESH_SERVICE=checkoutservice` — a name, webhook-written |
-| native peer | `dmesh_create_qp(cq, 3)` | `dmesh_create_qp(cq, "checkoutservice")` |
-| shim identity | `DMESH_PRELOAD_SVC=15` — typed | webhook, derived from k8s labels |
-| shim listen port | `DMESH_PRELOAD_LISTEN=9095` — typed | the Service's `targetPort` |
-| shim route table | `DMESH_PRELOAD_MAP` + `_REGISTRY` — typed | ConfigMap, controller-fed, live |
-| `service_id` | app code, YAML, public header | **core only** |
-| user's deploy | 3 env vars + hand-mounted volumes | one namespace label |
-| DPU / wire ABI | — | **unchanged** |
-
-```yaml
-# BEFORE — bench/k8s/pods.yaml:280. A human chose "15".
-env:
-- { name: PRELOAD_SVC, value: "15" }
-- { name: ECHO_PORT,   value: "9095" }
-# + preload_runner.c writes /tmp/dpumesh_registry at runtime and re-exports both as DMESH_PRELOAD_*
-
-# AFTER
-metadata: { labels: { app: checkoutservice } }     # ...that is the whole diff.
-```
-
-**Deleted from `dmesh_preload.c`:** `struct route_ent`, `g_route[]`, `g_route_n`, `g_svc`,
-`g_listen_port`, `route_add`, `route_lookup`, `route_load_registry`, `PRELOAD_MAX_MAP`, the four
-`DMESH_PRELOAD_*` vars (`_DEBUG` survives), and the ACTIVATION block of its header comment.
-**From `dmesh_core.c`:** the `DPUMESH_SERVICE_ID` int override. Net ≈ −50 lines in the shim,
-**zero added.** Untouched: fd realization, the dispatcher, `pin_route`, the
-`getpeername` truth (`e->paddr`), the lost-wakeup discipline. The change is confined to where
-config comes from.
-
----
-
-## 7. Out of scope, and the gaps this leaves
-
-- **Readiness is not wired, and this is the largest remaining gap — it is live, not future.**
+- **Readiness is not wired, and this is the largest remaining gap until Phase 4 (§8).**
   Round-robin LB over a service's backends already ships (`lb_pick`, `doca/dpu_worker.c`), and the
   backend set is derived on demand from `pods[]` gated on **`registered + dma_ready`**
   (`doca/object.h`) — that is *transport* liveness, not k8s **Ready**. A pod whose channel is up
-  but whose `readinessProbe` has not passed is therefore **already in the rotation**, and since a
-  conn is sticky by default (`px_resolve_backend`), one that lands there **stays** — stickiness
-  turns a transient warm-up into a permanent misroute for that connection. Envoy would not route
-  to it at all. Naming does not fix this; it is a separate design, and it is the real remaining
-  blocker to "deploy it on k8s and it just works."
+  but whose `readinessProbe` has not passed is therefore **already in the rotation**, and on a
+  service with no codec a conn that lands there **stays pinned to it** — turning a transient
+  warm-up into a permanent misroute for that connection. Envoy would not route
+  to it at all. Naming alone does not fix this; Phase 4 supplies the separate endpoint-readiness
+  signal and keeps unready endpoints out of new backend selections.
 - **A pod backing several Services is refused.** Legal in k8s, but a channel advertises one
   `service_id` and the shim already permits one listener per process ([API.md](API.md) §7). The
   webhook must **fail admission loudly** when >1 selector matches — never silently pick one.
@@ -295,16 +262,18 @@ config comes from.
 
 ---
 
-## 8. Implementation phasing (this document → code)
+## 7. Implementation phasing (this document → code)
 
-**The whole of the public API change is Phase 0; Phases 1–3 add none.** This is the design's
+**The whole of the public API change is Phase 0; Phases 1–4 add none.** This is the design's
 central property, not an accident of scheduling: `dmesh_create_channel(void)` has no argument to
 carry identity, so its only source is the resolver — which means the signature change, the
-resolver, and the deleted `DPUMESH_SERVICE_ID` override are one indivisible commit. Everything
-after Phase 0 only changes **who writes the registry file and the env**; the code that *consumes*
-them (`src/dmesh_resolve.c`, the shim, the wrapper) is frozen once Phase 0 lands. *Provenance
-moves; the transport does not.* So the riskiest change — a public-header break across every
-caller — is completed and `bench.sh`-proven **before** a line of k8s scaffolding exists.
+resolver, and the deleted `DPUMESH_SERVICE_ID` override are one indivisible commit. Phases 1–3
+only change **who writes the registry file and the env**; the code that consumes them
+(`src/dmesh_resolve.c`, the shim, the wrapper) is frozen once Phase 0 lands. *Provenance moves;
+the transport does not.* Phase 4 is separate: it adds internal registration/control messages and
+DPU routing state, but still adds nothing to the application API. Thus the riskiest change — a
+public-header break across every caller — is completed and `bench.sh`-proven before any k8s
+scaffolding or readiness wiring exists.
 
 | Phase | Runtime | Adds to the API? | State |
 |---|---|---|---|
@@ -312,6 +281,7 @@ caller — is completed and `bench.sh`-proven **before** a line of k8s scaffoldi
 | **1 — controller** | k8s (Go), new | no — writes the ConfigMap | proposed |
 | **2 — webhook** | k8s (Go), new | no — injects env + volumes | proposed |
 | **3 — live reload** | this repo (C) | no — swaps the table under readers | proposed |
+| **4 — endpoint readiness** | k8s node agent + host/DPU control path | no — internal control ABI only | proposed |
 
 ### Phase 0 — the host-side resolver *(implemented)*
 
@@ -360,7 +330,81 @@ the table becomes mutable under concurrent readers, so it needs an atomic pointe
 immutable snapshot (double-buffer / RCU), not an in-place edit. Phase 0 is load-once expressly to
 keep this concurrency out of the correctness-critical provenance change.
 
-> **Not in this document: readiness gating (a would-be Phase 4).** Per §7, the LB set is derived
-> on transport liveness (`registered + dma_ready`), not k8s **Ready**; wiring a Ready signal from
-> the control plane into the DPU's `pods[]` is a separate design and the real remaining blocker to
-> "deploy on k8s and it just works." Naming is necessary for that, not sufficient.
+### Phase 4 — Kubernetes endpoint readiness gating *(proposed)*
+
+Phase 4 makes the DPU's backend-selection set match Kubernetes Service endpoint readiness. The
+source of truth is the Service's
+[**EndpointSlice conditions**](https://kubernetes.io/docs/concepts/services-networking/endpoint-slices/#conditions),
+not whether the DPU transport happens to be connected: `ready=true` admits new traffic;
+`ready=false` or `terminating=true` removes the endpoint from new selections. The agent honors the
+published `ready` value (including a Service's `publishNotReadyAddresses` policy) rather than
+reconstructing Pod Ready independently. This is a control-path update only — no readiness lookup,
+file read, or Kubernetes call enters the data hot path.
+
+#### Identity and control path
+
+Readiness must attach to a **pod incarnation**, not the DPU-assigned `pod_id`: a `pods[]` slot and
+its small integer id are reused after disconnect. The webhook therefore injects a stable
+`DPUMESH_ENDPOINT_UID` from the Kubernetes Pod UID (via the downward API), and the host includes
+that UID in its internal REGISTER message. It remains absent from the public C API and application
+configuration.
+
+A node-local `dpumesh-agent` watches EndpointSlices for pods scheduled on its node and sends a
+full snapshot followed by deltas to the node's DPU management path. Each update is keyed by Pod
+UID and carries `{ready, serving, terminating, agent_session, revision}`. The agent aggregates all
+EndpointSlices of a Service and de-duplicates repeated endpoints before publishing its snapshot.
+The DPU caches an update that arrives before REGISTER and applies it when the matching UID
+registers; an old UID can never make a reused `pods[]` slot ready. A fresh random `agent_session`
+on agent start, monotonically increasing `revision` within that session, and a full snapshot after
+reconnect prevent delayed updates from reviving stale state.
+
+Only the node agent may write this state. Application pods report their UID at registration but do
+not report their own readiness, because a process cannot be the authority for the result of its
+Kubernetes readiness probe.
+
+#### Two predicates, not one
+
+Do **not** add Kubernetes Ready to the existing `pod_data_ready()` predicate everywhere. The data
+path needs two distinct questions:
+
+- `pod_transport_live(p)`: registration, DMA mappings, and communication channel are usable. This
+  gates memory access and delivery on an already-established connection.
+- `pod_route_ready(p)`: `pod_transport_live(p)` plus the latest EndpointSlice state has
+  `ready=true` and `terminating!=true`. (`ready` already represents serving-and-not-terminating in
+  the normal Kubernetes case; `serving` is retained separately for drain policy and diagnostics.)
+  This gates `lb_pick`, `collect_live_hosts`, L7 host overrides, and every other **new** backend
+  selection.
+
+This distinction preserves L4 connection semantics. A Ready→NotReady transition immediately stops
+new QPs and new codec-routed messages from selecting the endpoint, but an existing pinned
+connection continues on its original backend while the transport remains live. It is drained, not
+silently rebound mid-stream. A transport disconnect remains terminal and follows the transport's
+normal close/error path. A Terminating endpoint follows the same no-new-selection rule; Kubernetes
+grace and application shutdown drain existing pins before the channel disappears.
+
+#### State and failure policy
+
+A newly registered endpoint starts **NotReady** and becomes selectable only after a matching
+EndpointSlice snapshot/update arrives (fail closed). On node-agent or DPU reconnect, the agent sends
+a complete snapshot before deltas. If the watch is lost, the agent reconnects and reconciles from a
+fresh list; the DPU never guesses readiness from `dma_ready`. A bounded stale-state TTL may keep
+existing pins draining, but expiry must remove the endpoint from new selection.
+
+The DPU state needed per pod is small and control-plane-owned: Pod UID (or a collision-resistant
+fixed-width digest), readiness flags, agent session/revision, and last-update time. Service
+membership still comes from the Phase 1 registry plus REGISTER's `service_id`; readiness never
+allocates or changes a service id.
+
+#### Required validation
+
+Phase 4 is complete only when the hardware validators demonstrate all of the following:
+
+1. A transport-live but NotReady backend receives no new connections.
+2. A NotReady→Ready transition admits traffic without restarting the pod or DPU.
+3. Ready→NotReady/Terminating stops new selections while an existing pinned stream drains on
+   the same backend.
+4. A transport disconnect closes/fails the existing stream rather than rebinding it mid-stream.
+5. Pod deletion plus slot/id reuse ignores delayed readiness updates for the old Pod UID.
+6. Agent and DPU restart/reconnect converge from a full snapshot before admitting traffic.
+7. L4 `lb_pick`, L7 `collect_live_hosts`, and explicit L7 host override all use the same
+   `pod_route_ready` eligibility rule.

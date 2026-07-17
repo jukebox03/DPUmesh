@@ -193,13 +193,13 @@ AND DPU rebuilt together (a full deploy), or the clamped tail acks vanish and th
 
 ### 2.2 Data path — descriptor + completion
 - **`struct dma_desc`** (64 B, one cache line): `{mmap, addr, size, seq, src_port, dst_port,
-  src_service, dst_service, dst_pod_id, src_pod_id, route_group, valid}` — the **oriented endpoint
+  src_service, dst_service, dst_pod_id, src_pod_id, valid}` — the **oriented endpoint
   tuple**. The body is NOT in it (only a pointer + tuple). A CLIENT sends `dst_pod = BLANK` (DPU routes
   by `dst_service`); a backend reply sends a concrete `dst_pod` (direct).
-- **`struct comch_dma_comp_msg`** (20 B immediate): the DPA→DPU completion — `{type, src_pod, dst_pod,
-  dst_service, src_port, dst_port, seq, length, pos, route_group}`. `type` at offset 0 (peeked).
-  `src_service` is **not** on the wire (the 20 B budget carries `route_group`); the DPU derives it from
-  `src_pod`'s registration (assumes one service per pod).
+- **`struct comch_dma_comp_msg`** (16 B immediate = one WQE basic block): the DPA→DPU completion —
+  `{type, src_pod, dst_pod, dst_service, src_port, dst_port, seq, length, pos}`. `type` at offset 0
+  (peeked). `src_service` is **not** on the wire; the DPU derives it from `src_pod`'s registration
+  (assumes one service per pod).
 
 ### 2.3 DPU ↔ DPA — Comch msgq (`comch_msgq.c`, `enum dpa_msg_type`)
 One 1-producer/1-consumer Comch channel **per EU**, channel `k` bound to ingest consumer PE `k % M` —
@@ -270,8 +270,7 @@ own PE notification fd / eventfd (epoll: arm → re-check → block, 1 ms backst
   ACK/REV_DONE batches on a lull. This single D→H funnel is why ③ is not yet real: parallel emit
   needs a coordinated DPU+host multi-channel transport.
 - **Cross-thread state, kept minimal.** Shard queues are acquire/release SPSC; the LB cursor
-  `svc_rr` is a relaxed atomic (a racing double-pick only skews balance); the route-affinity table
-  takes `routing_lock` only when M > 1, and only for `rg ≠ 0` traffic; `px_arrival` custody
+  `svc_rr` is a relaxed atomic (a racing double-pick only skews balance); `px_arrival` custody
   (`unfreed`) is an atomic counter — ingest (window release, drops) and emit (egressed bytes)
   decrement it from different threads, and whichever reaches 0 releases exactly once.
 - **Measured** (RESULT.md 2026-07-14): shards = 2 ⇒ +33–44 %; shards = 2 + `n_eng` = 2 ⇒ ≈ 2× the
@@ -288,17 +287,20 @@ the single source of truth; the only added state is a per-service round-robin cu
 - **`lb_pick(svc)`** — the load balancer: **round-robin** over `collect_live_hosts(svc)` (Envoy's default
   policy), `-1` if the cluster has no healthy backend. The cursor is a relaxed atomic (shards may race
   it, skewing only balance). The one seam a weighted / least-request / hash policy would replace.
-- **`dpu_route_l4(svc, rg)`** — the DEFERred-segment route: `rg != 0` → **route-affinity pin**
-  (`route_group_backend[svc][rg]`; reuse if the pin is live, else `lb_pick` + record — overwrite-on-reuse,
-  self-healing; under `routing_lock` when M > 1, §4.1); `rg == 0` → `lb_pick(svc)`.
+- **`dpu_route_l4(svc)`** — the DEFERred-segment route: `lb_pick(svc)`, nothing more. It is a
+  **stateless pick**; all affinity lives in the caller (`px_resolve_backend`), which knows the
+  conn's lifetime.
 - **Connection stickiness (`px_resolve_backend`, dpu_proxy.c).** For a request seg the backend is resolved
-  with Envoy-style precedence: **(1) an L7 host override** (§5.1, validated live) > **(2) the connection's
-  sticky pin** (`px_conn.pinned_backend`, same cluster, still live) > **(3) `dpu_route_l4`** (recorded as
-  the session pin when sticky). **Sticky is the default** — a connection keeps the backend the LB first
-  picked (session affinity, socket-like ordering; the src↔backend pairing persists). `DPUMESH_LB_PER_REQUEST_SVC`
-  lists services that load-balance **every** message instead (Envoy HTTP per-request). A conn is
-  processed by ONE ingest shard (§4.1), so its sticky pin needs no lock; the only shared routing
-  state is the atomic cursor + the locked `rg` table.
+  by the CODEC, and the two paths are separate functions:
+  - **codec'd service** (`_FRAME_SVC` / `_L7_SVC`) → `px_route_message()`: the codec gives the message
+    boundary, so the engine picks **per message** (`dpu_route_l4`), or honors the hook's `decision.host`.
+    The pick is latched for that message's length only (`px_conn.msg_dst`). Envoy `http_connection_manager`.
+  - **passthru service** (no codec) → `px_resolve_backend()`: bytes only, no boundaries, so the stream
+    **cannot** be split — the conn pins to its first pick (`px_conn.pinned_backend`, cluster-scoped,
+    re-picked if that backend dies). Envoy `tcp_proxy`. Forced by the absence of a codec, not chosen.
+
+  A conn is processed by ONE ingest shard (§4.1), so the pin needs no lock; the only shared routing
+  state is the atomic `svc_rr` cursor.
 
 ### 4.3 Conntrack — Model B (the DPU owns every connection)
 `struct dpu_conntrack` = `upstream[65536]` (by `uP`) + an open-addressed reuse hash table keyed
@@ -361,6 +363,14 @@ only destination resolution differs.
   is drained (`px_lane_drop_dead` → done-queue, custody released, no delivery) and none of its mappings are
   destroyed (§4.4), so in-flight SG-DMA finishes without faulting the engine ctx. The LB meanwhile routes
   new traffic only to live backends.
+- **Pressure backpressures; failure closes. Neither truncates.** `px_ship_seg` returns three states, and
+  they are the whole delivery contract. `0` = a pool was momentarily empty: it mutates NOTHING (no custody
+  claim, no `egress_seq` bump), the parse loop stops **without advancing `parse_pos`**, and `px_stall` parks
+  the conn for `px_drain_stalled` to resume once the egress frees a unit — the same answer `px_arrival_alloc`
+  already gives at ingest. `-1` = these bytes can never be delivered (no live backend / dst gone / parser
+  contract violation): the conn is **poisoned**, and `px_fin_to_sender` sends a 0-length unit back to
+  `(src_pod, src_port)` so the sender sees EOF. A byte stream that loses a chunk mid-flight is broken, so
+  the only correct move is to close it — Envoy's tcp_proxy does the same on upstream failure.
 - **A failed DMA is a NORMAL event, not a bug.** The egress DMAs into *peers'* host memory, and a dying pod
   takes that memory with it **before** comch reports the disconnect — so `dma_ready` can never gate the
   window shut, and some DMA will land in unmapped memory. The QP then takes `LOCAL_QP_OPERATION_ERROR` and
@@ -439,8 +449,8 @@ on `$DPUMESH_PORT`), the shim **`dup2`s a private eventfd over the app's fd numb
 a real kernel fd, so `epoll`/`poll`/`select`/`close`/`dup` work **natively** (kernel-TCP and dmesh fds
 share one epoll set, zero interposition of the readiness syscalls). A single **dispatcher thread** owns
 the shim's one CQ and is its sole consumer and sole `dmesh_destroy_qp` caller (app `close` only queues)
-— it asserts each conn's eventfd on delivery. Every client conn is `dmesh_pin_route`d (one backend,
-in-order — the socket contract). `connect` keys on the registry `ClusterIP:port` (not port alone) —
+— it asserts each conn's eventfd on delivery. A conn is sticky to its first backend for life (one
+backend, in-order — the socket contract, for free). `connect` keys on the registry `ClusterIP:port` (not port alone) —
 resolved, like the node's own `$DPUMESH_SERVICE` identity, through `src/dmesh_resolve.c` (§1.7, shared
 with the native API; the shim types no integer) — so same-port services on distinct ClusterIPs resolve
 apart, and `getpeername` returns that dialed address.

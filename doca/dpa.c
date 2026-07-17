@@ -36,6 +36,12 @@ extern struct doca_dpa_app *DPU_mesh_dpa_app;
  * reaper leave it 0 and use the shared objs->comp_queue (M<2, unchanged). */
 __thread int dpu_reap_shard = 0;
 
+/* The DPA msgQ task callbacks are wired up only by init_dpa_objects, which is itself
+ * DPU-only — so on the host they are dead weight the compiler warns about. Same guard,
+ * one block. (dmesh_doca_dpa_comch_msgq_ctx_state_changed_cb below stays OUT: comch_msgq.c
+ * is in the host library and references it.) */
+#ifdef DOCA_ARCH_DPU
+
 /*
  * Callback invoked once a message is received from DPA successfully
  *
@@ -67,7 +73,7 @@ static void dmesh_doca_dpa_msgq_recv_cb(struct doca_comch_consumer_task_post_rec
 
     data_len = doca_comch_consumer_task_post_recv_get_imm_data_len(recv_task);
 
-    /* DPA sends comch_dma_comp_msg directly (20 bytes; HW imm-data max 32) rather
+    /* DPA sends comch_dma_comp_msg directly (16 bytes; HW imm-data max 32) rather
      * than the full comch_msg union, so read raw bytes and dispatch by the leading
      * type field. */
     uint8_t *raw = (uint8_t *)doca_comch_consumer_task_post_recv_get_imm_data(recv_task);
@@ -124,7 +130,6 @@ static void dmesh_doca_dpa_msgq_recv_cb(struct doca_comch_consumer_task_post_rec
             entry.dst_port = comp_msg->dst_port;
             entry.seq = seq;
             entry.length = payload_len;
-            entry.route_group = comp_msg->route_group;  /* forward route-affinity key (0 = normal LB) */
 
             /* Zero-copy: record buffer offset instead of heap-copying.
              * End-node slot-based admission keeps in-flight bytes ≤ buf_size
@@ -245,6 +250,8 @@ static void dmesh_doca_dpa_msgq_send_error_cb(struct doca_comch_producer_task_se
     }
     doca_task_free(task);
 }
+
+#endif /* DOCA_ARCH_DPU — DPA msgQ task callbacks */
 
 /*
  * Callback invoked once consumer/producer state changes

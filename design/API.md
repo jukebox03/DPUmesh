@@ -4,13 +4,19 @@ A service-mesh **data plane** on NVIDIA DOCA (Comch + DMA). The transport runs o
 **BlueField DPU/DPA**, not the host CPU, so your application keeps its full host core (no
 in-host sidecar tax).
 
-The DPU is an **L7-style proxy that owns every connection** (think Envoy): your app addresses a
-**service by its k8s name** — never a pod — and the DPU **load-balances across that service's backend pods**
-(round robin), owns the connection to the chosen backend, and maps every reply back to you. **A
-connection is sticky by default** — it keeps the backend the LB first picked (session affinity);
-a service can opt into **per-message** load balancing instead (§5). Bodies move by DMA **host →
-DPU → host**; the DPU touches only metadata unless a service selects the **L7 body-parsing hook**
-(§8).
+**The DPU is the sidecar.** Your app addresses a **service by its k8s name** — never a pod. Its
+QP is a submission queue that **ends at the DPU**: the DPU load-balances across the service's
+backend pods, **owns and re-originates** the connections to them, and maps every reply back. That
+is Envoy's shape, off the host CPU.
+
+**How often the LB picks is decided by the service's codec, not by your app** (§5). A service with
+a codec (§8) hands the DPU message boundaries, so it picks **per message** — one long-lived QP
+spreads across every backend. A service without one is an opaque byte stream: nothing can see
+where a message ends, so it **cannot** be split and the QP stays pinned to its first backend.
+Envoy calls these `http_connection_manager` and `tcp_proxy`.
+
+Bodies move by DMA **host → DPU → host**; the DPU touches only metadata unless a service selects
+the L7 hook.
 
 ## Two surfaces, and only two
 
@@ -113,7 +119,7 @@ dmesh_destroy_qp(qp);                    // sends a FIN so the DPU frees the ups
 | `ibv_open_device` + `ibv_alloc_pd` | `dmesh_create_channel` (folded — see below) |
 | `ibv_create_cq` (+ comp_channel) | `dmesh_create_cq` (+ `dmesh_cq_fd`) |
 | `ibv_create_qp(pd, {send_cq, recv_cq})` | `dmesh_create_qp(cq, name)` |
-| RC (connected, ordered) | `dmesh_create_qp` + `dmesh_pin_route` |
+| RC (connected, ordered) | `dmesh_create_qp` alone — a QP is **sticky** to its first backend for life, so it already *is* the connected/ordered case |
 | service-addressed, reliable, datagram-ish | `dmesh_create_qp` alone — closest to IB **RD** or Mellanox **DC**. *Not* UD (unreliable, needs an AH). |
 | `rdma_cm` CONNECT_REQUEST | `DMESH_WC_CONN_REQ` completion |
 | `ibv_post_send` (+ WR list) | `dmesh_post_send` (+ `DMESH_SEND_MORE`) |
@@ -147,9 +153,9 @@ dmesh_destroy_qp(qp);                    // sends a FIN so the DPU frees the ups
 | **Send** | `write()` copies into a kernel buffer | `dmesh_alloc` → fill **in place** → `dmesh_post_send`. **Zero copy.** |
 | **Receive** | `read()` copies into your buffer | completion carries a pointer **into the RX mmap**. **Zero copy** + `dmesh_wc_release`. |
 | **Framing** | byte stream | a post ≤ `dmesh_msg_max` arrives as **exactly one** RECV; larger arrives as several in order — frame your own length |
-| **Ordering** | in-order | in-order on a sticky/pinned QP; **none** under per-message LB → correlate by req-id |
+| **Ordering** | in-order | in-order on a sticky QP (the default); **none** under per-message LB → correlate by req-id |
 | **RPC matching** | n/a | **none** — the transport delivers, you correlate |
-| **EOF** | `read()==0` | `DMESH_WC_RECV_FIN` completion |
+| **EOF** | `read()==0` | `DMESH_WC_RECV_FIN` completion — the peer closed, **or** the DPU could not deliver the stream intact (see Failure below) |
 | **Backpressure** | blocks, or `EAGAIN` + `EPOLLOUT` | `dmesh_alloc` returns `NULL`+`EAGAIN`; **never blocks** |
 | **Readiness** | one fd per connection | **one fd per CQ** + a ready list — no per-conn fd, no scan |
 
@@ -190,7 +196,6 @@ dmesh_destroy_qp(qp);                    // sends a FIN so the DPU frees the ups
 | Function | Returns / errno |
 |---|---|
 | `dmesh_qp_t *dmesh_create_qp(dmesh_cq_t *cq, const char *service_name)` | New **client** QP addressed to a service by its **k8s Service name** — the same string a preloaded app hands `getaddrinfo` — resolved to a `service_id` at point of use, and bound to `cq`. Local, no round-trip; no pod chosen or learned. `NULL`+`ENOENT` (unknown name) / `NULL`+`ENOMEM`. |
-| `void dmesh_pin_route(dmesh_qp_t *qp)` | **Pin to ONE backend** (RC-like). Every later message (and the FIN) carries one route-affinity key, so the DPU routes them all to the backend picked for the **first** — replies then arrive **in send order**. Call right after create, before any post; idempotent; no-op on a server QP. Keys are a per-channel rolling 255-id space scoped **by destination service**: two pinned QPs to the *same* service may share a backend (balance skew, never a correctness issue); cross-service redirection is impossible. |
 | `int dmesh_destroy_qp(dmesh_qp_t *qp)` | **Graceful.** Sends a **FIN** (zero-length, behind all prior data) so the peer gets `DMESH_WC_RECV_FIN` and the DPU frees the upstream; then frees local state. Posted-but-unflushed bytes are discarded (flush first). Returns `0`; safe on `NULL`. |
 
 ### Send — `ibv_post_send`
@@ -214,9 +219,21 @@ typedef struct dmesh_wc {
     dmesh_wc_opcode_t opcode;
     const uint8_t    *buf;     /* RECV: points INTO the RX mmap (zero-copy) until wc_release */
     uint32_t          len;     /* RECV: message length (<= msg_max) */
+    uint16_t          stream;  /* RECV: WHICH PEER sent it — see below */
     int32_t           rx_slot; /* internal release token */
 } dmesh_wc_t;
 ```
+
+**`stream` — one QP, several peers.** A QP addresses a *service*, and under a codec (§5) the DPU
+may hold an upstream to several of its backends at once, so **one QP carries several independent
+inbound byte streams**. TCP hands you one socket per peer; here they share the QP and `stream`
+is what tells them apart. It is opaque (the DPU's upstream number, **not** a pod — you still
+cannot name or address a backend).
+
+Bytes of **one** stream arrive in order. Bytes of **different** streams may interleave — so a
+message longer than `msg_max`, which arrives as several completions, **must be reassembled per
+`stream`**, or another peer's bytes land in the middle of it. On a service with no codec every
+reply comes from the one pinned backend, `stream` never changes, and you can ignore it.
 
 ### Diagnostics
 | Function | Returns |
@@ -241,10 +258,18 @@ Measured 2026-07-16 (default deploy, two runs): `grow_waits` = 0 at 64 B and 1 K
 
 ### Large payloads (> `msg_max`) — no special API
 A post up to `dmesh_post_max` (64 KB) is legal and arrives as **several** ≤ `msg_max`
-completions, in order on a server/pinned QP; the receiver reassembles (app framing, as with a
-byte stream). Beyond `post_max`, loop: alloc + post per chunk. To a service that
-load-balances across **several** backends, `dmesh_pin_route(qp)` first so the chunks stay on one
-backend and in order.
+completions; beyond `post_max`, loop alloc + post per chunk. Either way the receiver
+reassembles — the transport carries no message boundary, exactly as TCP carries none. Framing
+is yours (or your service's codec's).
+
+**Reassemble per `stream`.** Completions of one stream arrive in order, so on a service with no
+codec — one peer, one stream — concatenating them is correct and `stream` may be ignored. Under a
+codec the QP has several peers, their bytes interleave, and reassembling them through one buffer
+splices two senders together: the result is not a torn message you can detect, it is a stream that
+never resyncs. Key your reassembly by `wc.stream` and it cannot happen.
+
+**Sending** is never affected: the DPU makes one routing decision per message and a message
+always reaches exactly one backend, whole and in order (§5).
 
 ---
 
@@ -328,7 +353,7 @@ dmesh_destroy_qp(qp);
 ### 4c. Pipelined — correlate by req-id
 Fire many without waiting. Under **per-message** LB (opt-in, §5) replies on one QP can arrive
 **out of order** — put a **req-id in the body** and match on it, never on arrival order. On a
-sticky (default) or `dmesh_pin_route`'d QP replies stay in send order.
+sticky QP (the default) replies stay in send order.
 ```c
 for (uint32_t id = 0; id < N; id++) {                         // fire N, no waiting
     msg_t *m = dmesh_alloc(qp, sizeof *m);
@@ -371,11 +396,14 @@ void *worker(void *arg) {
   backend pods; the transport interns the k8s name to a `service_id` — [NAMING.md](NAMING.md)); the
   DPU **round-robin load-balances** across the live backends, owns the "upstream"
   connection to the chosen one, and maps the reply back. The client never sees or names a pod.
-- **Sticky by default; per-message is opt-in.** A connection keeps the backend the LB first
-  picked (session affinity — replies stay in send order). This is Envoy's TCP-proxy behavior.
-  `DPUMESH_LB_PER_REQUEST_SVC=<csv>` (§8) marks services that load-balance **every** message
-  instead (Envoy's HTTP default). The shim additionally pins each conn (§7) for the socket
-  contract.
+- **The codec decides how often the LB picks — there is no separate policy.** A service with a
+  **codec** (`_FRAME_SVC` / `_L7_SVC`, §8) hands the DPU message boundaries, so it load-balances
+  **every message**: one long-lived connection's messages spread across the backends. This is
+  Envoy's `http_connection_manager`. A **passthru** service (no codec) is an opaque byte stream —
+  the DPU cannot see where messages end, so it *cannot* split it and pins the connection to its
+  first pick. This is Envoy's `tcp_proxy`. Pinning is the consequence of having no codec, not a
+  setting; to load-balance a long-lived connection, give the service a codec. Session affinity on
+  a codec'd service is the L7 hook's job (`decision.host`).
 - **Backend set is live (no blackhole).** Derived from the live pods: a backend that registers
   or disconnects is added/removed automatically; a pinned backend that dies is re-picked. New
   traffic never routes to a dead backend.
@@ -387,17 +415,12 @@ void *worker(void *arg) {
   message and delivers it to **exactly one** backend — a message cannot be split across
   destinations. A wire message is atomic at **≤ 8 KB**; there is no transport concept of a
   message spanning slots.
-- **Route-affinity keeps a multi-slot post's chunks together.** Each wire message carries a
-  one-byte **route-affinity key**: the DPU pins every message sharing a non-zero key to the
-  **same** backend (a small `(dst_service, key) → backend` table). Key `0` = normal per-message
-  LB. `dmesh_pin_route` stamps one key on a QP's whole life. Chunks reach the ARM **in send
-  order** (a QP's messages are conn-sharded onto ONE forward ring, `src_port % K`, so they stay
-  FIFO — the head chunk arrives first, a property a future L7 parser relies on); the table is
-  nevertheless **overwrite-on-reuse**, so correctness never depends on that ordering. It is
-  **collision-safe**: pins are scoped by destination service, so a shared key can only merge
-  same-service traffic onto one backend (skew, still reassembling) — never a cross-service
-  redirect. (An `is_last`-DELETE freeing the pin per message was considered and **rejected**:
-  under either hazard it can free a pin mid-message and scatter the chunks.)
+- **Connection stickiness keeps a multi-slot post's chunks together.** No wire key is involved:
+  the conn is pinned to its first backend for life (`px_conn.pinned_backend`), so every chunk
+  follows. Chunks also reach the ARM **in send order** — a QP's messages are conn-sharded onto
+  ONE forward ring (`src_port % K`), so they stay FIFO and the head chunk arrives first, a
+  property the L7 parser relies on. On the **L7** path a second latch applies: the backend is
+  resolved once at each message head and every chunk of that message ships to it.
 - **L7 routing (body-aware).** The byte-stream proxy engine that ships every reply is **always
   on** (§8); its default parser (`passthru`) routes on **metadata only** and never reads a body.
   To make the DPU an Envoy-like L7 proxy that parses the stream and content-routes, select the
@@ -414,6 +437,14 @@ void *worker(void *arg) {
   gets `DMESH_WC_RECV_FIN` and the DPU frees the upstream. A peer that crashes without a FIN
   leaves its conn + upstream allocated until that port/`uP` is reused (there is **no idle
   reaper**); apply your own wall-clock timeout.
+- **Failure = EOF.** If the DPU cannot deliver a QP's stream intact — no live backend, the chosen
+  backend died mid-message, a parser contract violation — it **closes the QP**: you get
+  `DMESH_WC_RECV_FIN`, exactly as if the peer had closed. There is no error code point on the
+  wire (a completion carries a length, and `0` means EOF), and closing is what a TCP proxy does
+  when its upstream fails. **`RECV_FIN` therefore means "no more data, ever" — not "the peer said
+  goodbye".** Treat a FIN arriving mid-request as a failed request and retry on a fresh QP; do not
+  assume the bytes you posted were delivered. Transient DPU-side pressure is NOT this case: it
+  backpressures (your bytes wait) and never truncates.
 
 ---
 
@@ -442,7 +473,7 @@ DPU load-balances pod 10's messages across them and owns every connection.
    descriptor posted per message (dma_desc, 64 B — the body is NOT in it, only a pointer + the tuple):
         { mmap, addr = &dma_buffer[off], size,
           src = (pod, port),  dst = (service, pod, port),  seq,  valid }     ← the "oriented tuple"
-   completion returned per DMA (20 B on the control path): { type, src/dst pod, ports, seq, len, pos, route_group }
+   completion returned per DMA (16 B on the control path): { type, src/dst pod, ports, seq, len, pos }
 ```
 
 **One message — `pod10:pC → service 11`, LB'd to `pod 11`, then its reply:**
@@ -519,14 +550,15 @@ the app's fd number — the fd stays a **real kernel fd**, so `epoll`/`poll`/`se
 work natively (kernel-TCP fds and dmesh fds mix freely in one epoll set). A dispatcher thread
 (the single consumer of its one CQ) asserts per-fd readability. Reads are byte-stream (short
 reads at message boundaries, exactly like TCP); each `send()`/`write()` ships one message; any
-length auto-chunks. Blocking sockets are emulated (`SO_RCVTIMEO` honored). Every client conn is
-`dmesh_pin_route()`d, so one connection's traffic stays on **one backend** and replies arrive
-**in order** — the socket contract; load is still balanced **across** connections.
+length auto-chunks. Blocking sockets are emulated (`SO_RCVTIMEO` honored). A conn is sticky to
+its first backend for life, so one connection's traffic stays on **one backend** and replies
+arrive **in order** — the socket contract, for free; load is still balanced **across**
+connections.
 
 ```
   UNMODIFIED app                     libdmesh_preload.so (interposes libc)          DPUmesh
   ══════════════                     ════════════════════════════════════          ═══════
-  connect(fd, ip:port) ─intercept──▶ ip:port ∈ registry?  dmesh_qp_open(svc) + pin_route
+  connect(fd, ip:port) ─intercept──▶ ip:port ∈ registry?  dmesh_qp_open(svc)
   listen(port)       ──intercept──▶  port == $DPUMESH_PORT?  advertise $DPUMESH_SERVICE
         fd  ◀───────── dup2() a private eventfd OVER the app's fd number ──────────┐
         │            (fd stays a REAL kernel fd → epoll/poll/select/close/dup work  │
@@ -563,14 +595,19 @@ simultaneous-connect storms and idle→storm cycles — p50 ~120–150 µs.
 
 ---
 
-## 8. L7 proxy — byte-stream reframing (`DPUMESH_PROXY` = parser selector)
+## 8. The codec — `DPUMESH_PROXY` selects it per service
 
-DPU→host egress is **always** this per-conn byte-stream engine — the sole reverse path. The
-forward DMA lands a connection's bytes in DPU staging; an L7 function reframes the stream into
+**Choosing a codec IS choosing the LB granularity.** A codec tells the DPU where each message
+ends, and that is the only thing that makes per-message routing possible — so a codec'd service
+load-balances every message (Envoy `http_connection_manager`), and a service without one is an
+opaque byte stream pinned to one backend (Envoy `tcp_proxy`). There is no second knob: the
+question "per connection or per message?" is answered by "does this service run a codec?".
+
+DPU→host egress is **always** the per-conn byte-stream engine — the sole reverse path. The
+forward DMA lands a connection's bytes in DPU staging; the codec reframes the stream into
 **routing segments**; the engine ships each to its backend by **scatter-gather DMA** (ARM). The
 backend receives a byte stream and frames it **itself** (an ordinary server behind an envoy).
-`DPUMESH_PROXY` does **not** toggle the engine — it selects the deploy-default **request
-parser**. Replies always pass through (their dst is the conntrack peer).
+Replies always pass through — their destination is the conntrack peer, already decided.
 
 **What an L7 author writes — the routing decision (`dpu_l7.h`):**
 ```c
@@ -609,7 +646,7 @@ int dmesh_l7_route(const uint8_t *head, uint32_t len,
   content either way. (The receiver-side one-post-one-RECV contract of §3 is thus dropped for a
   proxied stream; the backend frames its own bytes, exactly like an envoy upstream.)
 - **`dst` is a concrete pod** (the L7 hook / LB already picked), or **`DEFER`** = fall through to
-  the §5 default route (LB + stickiness + route-affinity).
+  the §5 default route (LB + connection stickiness).
 - **Custody at egress**, not at receipt — the batched `TX_ACK` fires only when the SG-DMA has
   read the staging bytes, so the sender never overwrites a body mid-flight.
 - **Ordering.** One receiving conn always lands in ONE lane (FIFO), so a conn's delivery order =
@@ -620,12 +657,10 @@ choice. So a vanilla (shim) app, the frame demo, and a real L7 service **coexist
 
 | env | behavior | purpose |
 |---|---|---|
-| `DPUMESH_PROXY` *(unset)* | same as `passthru` — the engine is **always on** | production default, **bit-identical** to legacy per-message LB |
-| `DPUMESH_PROXY=passthru` \| `1` | deploy default = **passthru**: one segment per arrived message; `dst` = the §5 L4 route. Works with **any** byte stream. | parity / regression + the vanilla (shim) path |
-| `DPUMESH_PROXY=frame` | deploy default = **frame** for every request stream | the byte-stream demo |
-| `DPUMESH_PROXY_FRAME_SVC=<csv>` | services whose **request** streams use the frame demo parser `[u32 len][u8 svc][payload]` | mix app kinds: `DPUMESH_PROXY=passthru DPUMESH_PROXY_FRAME_SVC=16` |
-| `DPUMESH_PROXY_L7_SVC=<csv>` | services whose **request** streams run the **real L7 hook** (checked before frame) | the production L7 slot |
-| `DPUMESH_LB_PER_REQUEST_SVC=<csv>` | services that load-balance **every** message (Envoy HTTP default) instead of the connection-sticky default (Envoy TCP-proxy) | opt out of session affinity per service |
+| `DPUMESH_PROXY` *(unset)* \| `passthru` \| `1` | **no codec** — one segment per arrived run of bytes, `dst` = the §5 route. Works with **any** byte stream, sees none of it. **Conn pinned.** | production default + the vanilla (shim) path |
+| `DPUMESH_PROXY=frame` | deploy default = the **frame** codec for every request stream. **Per-message LB.** | the byte-stream demo |
+| `DPUMESH_PROXY_FRAME_SVC=<csv>` | these services use the frame demo codec `[u32 len][u8 svc][payload]` | mix app kinds: `DPUMESH_PROXY=passthru DPUMESH_PROXY_FRAME_SVC=16` |
+| `DPUMESH_PROXY_L7_SVC=<csv>` | these services run the **real L7 hook** (checked before frame). **Per-message LB.** | the production L7 slot |
 
 **Writing an L7 parser.** Implement `dmesh_l7_route` in `dpu_l7.c`: you are shown only the
 **head** of the front message (a bounded ≤`PX_HEAD_MAX` window) plus the cluster's live backend
@@ -647,7 +682,7 @@ author's step and needs **no transport changes**.
 ## 9. Baked data-plane configuration (reference)
 
 Most data-plane tuning is **compiled in** at the values measured as best. The runtime env knobs
-are `DPUMESH_PROXY` + `_PROXY_FRAME_SVC` + `_PROXY_L7_SVC` + `_LB_PER_REQUEST_SVC` (§8),
+are `DPUMESH_PROXY` + `_PROXY_FRAME_SVC` + `_PROXY_L7_SVC` (§8),
 `DPUMESH_INGEST_SHARDS` + `_ARM_EGRESS_THREADS` + `_DPA_THREADS` + `_RINGS_PER_POD` (below),
 `DPUMESH_DIAG`, `DPUMESH_PCI_ADDR`, `DPUMESH_TX_BLOCK` / `_TX_MAXB` / `_TX_H`, and the
 identity/registry vars `DPUMESH_SERVICE` / `DPUMESH_PORT` / `DPUMESH_CONFIG` (§7, [NAMING.md](NAMING.md)).

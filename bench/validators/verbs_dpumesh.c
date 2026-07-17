@@ -10,9 +10,9 @@
  *
  * Byte-exact like loopback: each request carries a per-(conn,req) marker at 3
  * sentinel offsets; the echo is verbatim so the reply must reproduce them (a
- * misroute / truncation / reorder is caught). Replies on one conn are FIFO (client
- * conns are dmesh_pin_route'd -> RC-like ordered), so outstanding requests are
- * validated oldest-first.
+ * misroute / truncation / reorder is caught). Replies on one conn are FIFO (a conn is
+ * STICKY to its first backend for life -> RC-like ordered), so outstanding requests
+ * are validated oldest-first.
  *
  * ONE THREAD, ONE CQ: a CQ is single-consumer, and this validator puts both roles on
  * one of them (several CQs would need several threads — not what this proves). So the
@@ -53,6 +53,12 @@
 #include <netinet/in.h>
 
 #include <dpumesh/dmesh.h>
+
+/* Best-effort control-socket reply. Every caller is already returning, and a failed
+ * write only means the driver hung up first — there is nothing to recover. Wrapping it
+ * states that, instead of leaving 4 unchecked write()s for -Wunused-result to flag. */
+static void ctl_reply(int fd, const char *s, size_t n) { (void)!write(fd, s, n); }
+
 
 #define CTRL_PORT     9092
 #define MAX_CLIENTS   256
@@ -222,7 +228,7 @@ static void run_verbs(int conn_fd, long N, uint32_t size, int zc,
         int n = snprintf(reply, sizeof reply,
                          "ERR bad args (1<=size<=%d, 1<=window<=%d, 1<=pipe<=%d, batch>=1)\n",
                          msgmax, MAX_CLIENTS, MAX_PIPELINE);
-        write(conn_fd, reply, (size_t)n); return;
+        ctl_reply(conn_fd, reply, (size_t)n); return;
     }
     D_cl_sent = D_cl_recv = D_sv_recv = D_sv_sent = 0;
     D_cl_allocfail = D_cl_postfail = D_sv_allocfail = D_sv_postfail = 0;
@@ -240,7 +246,7 @@ static void run_verbs(int conn_fd, long N, uint32_t size, int zc,
     /* SERVER conns the DPU loops back to us — tracked so teardown closes them all. */
     static dmesh_qp_t *servers[MAX_SERVERS]; int nserv = 0;
     if (!lat || !wc || !clients || !cst) {
-        write(conn_fd, "ERR oom\n", 8);
+        ctl_reply(conn_fd, "ERR oom\n", 8);
         free(lat); free(wc); free(clients); free(cst); close(epfd); return;
     }
 
@@ -256,9 +262,6 @@ static void run_verbs(int conn_fd, long N, uint32_t size, int zc,
             for (int j = 0; j < window; j++) if (clients[j]) dmesh_destroy_qp(clients[j]);
             fail += N; goto report;
         }
-        if (pipeline > 1) dmesh_pin_route(c);      /* RC-like order for >1 outstanding
-                                                    * (pipe==1 == loopback: single backend
-                                                    * already orders, no pin, bit-identical) */
         cstate_t *cs = &cst[i];
         cs->target = N / window + (i < (N % window) ? 1 : 0);
         cs->size = size; cs->zc = zc; cs->cap = pipeline;
@@ -388,7 +391,7 @@ report:
     qsort(lat, (size_t)nlat, sizeof(double), cmp_d);
     double p50 = nlat ? lat[nlat / 2] : 0.0;
     int rn = snprintf(reply, sizeof reply, "OK %ld %ld %ld %.1f\n", ok, fail, served, p50);
-    write(conn_fd, reply, (size_t)rn);
+    ctl_reply(conn_fd, reply, (size_t)rn);
     fprintf(stderr, "[verbs] DONE N=%ld size=%u zc=%d window=%d pipe=%d batch=%d "
             "ok=%ld fail=%ld served=%ld p50=%.1fus\n",
             N, size, zc, window, pipeline, batch, ok, fail, served, p50);
@@ -407,7 +410,7 @@ static void handle_ctrl(int fd) {
     int zc = 0, window = 1, pipeline = 1, batch = 16;
     int m = sscanf(buf, "%15s %ld %u %d %d %d %d", cmd, &N, &size, &zc, &window, &pipeline, &batch);
     if (m < 3 || strcmp(cmd, "RUN") != 0) {
-        write(fd, "ERR use: RUN <N> <SIZE> [ZC] [WINDOW] [PIPELINE] [BATCH]\n", 56);
+        ctl_reply(fd, "ERR use: RUN <N> <SIZE> [ZC] [WINDOW] [PIPELINE] [BATCH]\n", 56);
         close(fd); return;
     }
     run_verbs(fd, N, size, zc, window, pipeline, batch);

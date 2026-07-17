@@ -15,7 +15,7 @@
 #   bench.sh point <dpumesh|tcp> <req> <reply> <conc> <dur> <warmup> <threads> [reconn]
 #   bench.sh loopback  [<N> <size> <zc>]                # validator: self-routing
 #   bench.sh verbs     [<N> <size> <zc> <win> <pipe>]   # validator: RDMA-verbs façade
-#   bench.sh stream    [<N> <size> <svcs> <fpw>]        # validator: L7 frame proxy (DPUMESH_PROXY=frame)
+#   bench.sh stream    [<N> <size> <fpw>]               # validator: L7 frame proxy (DPUMESH_PROXY=frame)
 #   bench.sh preload   [<N> <size> <conns>]             # validator: LD_PRELOAD shim
 #   bench.sh pin       [fair|hw|hw3|hw6]                # (re)pin pods to cores
 #   bench.sh status | logs | cleanup | dpulog [n] | dpucpu
@@ -463,11 +463,11 @@ run_preload() {  # LD_PRELOAD shim: vanilla TCP apps over DPUmesh
 }
 
 run_stream() {  # L7-proxy frame validator (needs DPUMESH_PROXY=frame)
-    local N="${1:-20000}" size="${2:-1024}" svcs="${3:-self}" fpw="${4:-1}" ip resp
+    local N="${1:-20000}" size="${2:-1024}" fpw="${3:-1}" ip resp
     ip=$(kubectl get pod -n "$NS" -l app=stream-dpumesh --field-selector=status.phase=Running -o jsonpath='{.items[0].status.podIP}' 2>/dev/null || true)
     [ -z "$ip" ] && { err "stream-dpumesh pod not running — run '$0 deploy' (validators no longer self-start)"; return 1; }
-    step "=== stream (L7-proxy frame): N=$N size=${size}B svcs='$svcs' frames/write=$fpw ==="
-    resp=$(printf 'RUN %s %s %s %s\n' "$N" "$size" "$svcs" "$fpw" | timeout 180s nc "$ip" "$CTRL_PORT" || true)
+    step "=== stream (L7-proxy frame): N=$N size=${size}B frames/write=$fpw ==="
+    resp=$(printf 'RUN %s %s %s\n' "$N" "$size" "$fpw" | timeout 180s nc "$ip" "$CTRL_PORT" || true)
     [ -z "$resp" ] && { err "no response (timeout or pod down)"; return 1; }
     [[ "$resp" == ERR* ]] && { err "stream replied: $resp"; return 1; }
     read -r _ ok fail served p50 <<<"$resp"
@@ -490,7 +490,7 @@ case "$CMD" in
     point)     [ $# -eq 7 ] || [ $# -eq 8 ] || { err "point <sol> <req> <reply> <conc> <dur> <warmup> <threads> [reconn]"; exit 1; }; run_point "$@" ;;
     loopback)  run_loopback "${1:-50000}" "${2:-8192}" "${3:-0}" ;;
     verbs)     run_verbs    "${1:-50000}" "${2:-8192}" "${3:-0}" "${4:-1}" "${5:-1}" ;;
-    stream)    run_stream   "${1:-20000}" "${2:-1024}" "${3:-self}" "${4:-1}" ;;
+    stream)    run_stream   "${1:-20000}" "${2:-1024}" "${3:-1}" ;;
     preload)   run_preload  "${1:-5000}"  "${2:-1024}" "${3:-8}" ;;
     pin)       need_env; pin_pods "${1:-fair}" ;;
     status)    show_status ;;
@@ -506,7 +506,7 @@ Usage: $0 <command> [args]
   latency|bandwidth|rate|all [dpumesh|tcp|both]   benchmark families -> CSVs under $OUT
   point <sol> <req> <reply> <conc> <dur> <warmup> <threads> [reconn]   one raw RUN (reconn = conn-churn period)
   loopback|stream|preload [args]             feature validators
-  verbs <N> <size> <zc> <window> <pipeline>  verbs-façade loopback validator (dmesh_verbs.h)
+  verbs <N> <size> <zc> <window> <pipeline>  native-API loopback validator: window conns x pipeline outstanding
   pin [fair|hw|hw3|hw6]                       (re)pin pods to cores
   status | logs | cleanup | dpulog [n] | dpucpu
 

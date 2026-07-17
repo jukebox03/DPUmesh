@@ -12,9 +12,10 @@ void run_dpu_worker(struct objects *objs);
  * egress reuses the SAME batched TX_ACK / REV_DONE accumulators and the SAME
  * L4 default route. */
 
-/* L4 default route (load-balance over the service's live backends + route-affinity
- * pin). Used for a DEFERred request seg. Returns a live pod_id or -1 (unroutable). */
-int32_t dpu_route_l4(struct objects *objs, int16_t svc, uint8_t route_group);
+/* L4 default route: load-balance over the service's live backends. Holds no affinity
+ * of its own — the caller (px_resolve_backend) owns stickiness. Used for a DEFERred
+ * request seg. Returns a live pod_id or -1 (unroutable). */
+int32_t dpu_route_l4(struct objects *objs, int16_t svc);
 
 /* Collect the live backend pod_ids advertising service `svc` (derived from pods[]:
  * registered + service_id==svc + dma_ready). Fills out[0..n) (caller sizes >= MAX_PODS)
