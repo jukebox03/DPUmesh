@@ -104,6 +104,9 @@ typedef struct {
     double       duration;     /* run length in seconds */
     double       start_at;     /* shared barrier: all threads begin at this time */
     long         reconn;       /* completions per conn before close+reconnect (0 = never) */
+    int          batch;        /* 1 = coalesce the whole burst issued in one loop pass into
+                                * ONE doorbell (matched-batching ablation vs the TCP client,
+                                * which coalesces its window into one write); 0 = flush per RPC */
     atomic_int  *stop;         /* watchdog / abort flag */
 
     /* per-thread transport + pipeline state. ALL of it — issue side and reply side
@@ -241,7 +244,9 @@ static int issue(worker_t *w) {
             off = BENCH_HDR_LEN;
         }
         memset(b + off, REQ_FILL, want - off);
-        unsigned fl = (w->tx_done + want < total) ? DMESH_SEND_MORE : 0;
+        /* Non-final chunk of a carved frame ALWAYS defers. In batch mode the final
+         * chunk defers too, so the whole burst rings one doorbell at end-of-pass. */
+        unsigned fl = (w->tx_done + want < total || w->batch) ? DMESH_SEND_MORE : 0;
         if (dmesh_post_send(w->c, b, want, 0, fl) != 0) return -1;
         w->tx_done += want;
     }
@@ -286,6 +291,7 @@ static void *worker_fn(void *arg) {
         if (bench_now_sec() - start > w->duration) break;
 
         int did = cq_pump(w) > 0;
+        int issued = 0;
 
         /* Connection churn: once `reconn` completions landed on this conn, STOP
          * issuing (the gate below), drain to 0 outstanding, then swap the conn.
@@ -317,7 +323,12 @@ static void *worker_fn(void *arg) {
             if (r == 0) break;                    /* SQ full: resume on the next pass */
             w->credits--;
             did = 1;
+            issued = 1;
         }
+        /* Batch mode: one doorbell for the whole burst issued this pass (SEND_MORE
+         * deferred each frame above). No-op when nothing was posted. */
+        if (issued && w->batch && !atomic_load(&w->broken))
+            if (dmesh_flush(w->c) != 0) atomic_store(&w->broken, 1);
         if (!did) { struct timespec ts = {0, 2000}; nanosleep(&ts, NULL); }  /* 2us */
     }
     end = bench_now_sec();
@@ -348,7 +359,7 @@ static void *watchdog_fn(void *arg) {
 
 /* ------------------------------------------------------------ one benchmark run */
 static void run_bench(int conn_fd, int req_size, int reply_size, int concurrency,
-                      double duration, long warmup, int threads, long reconn) {
+                      double duration, long warmup, int threads, long reconn, int batch) {
     char reply[768];
     if (req_size < 0 || reply_size < 1 || concurrency < 1 || duration <= 0 || threads < 1) {
         const char *e = "ERR invalid args\n";
@@ -358,8 +369,8 @@ static void run_bench(int conn_fd, int req_size, int reply_size, int concurrency
     if (warmup < 0) warmup = 0;
     if (reconn < 0) reconn = 0;
 
-    fprintf(stderr, "[bench] RUN req=%d reply=%d conc=%d dur=%.1fs warmup=%ld threads=%d reconn=%ld dst_svc=%s\n",
-            req_size, reply_size, concurrency, duration, warmup, threads, reconn, g_dst_service);
+    fprintf(stderr, "[bench] RUN req=%d reply=%d conc=%d dur=%.1fs warmup=%ld threads=%d reconn=%ld batch=%d dst_svc=%s\n",
+            req_size, reply_size, concurrency, duration, warmup, threads, reconn, batch, g_dst_service);
 
     dmesh_tx_stats_t st0, st1;                    /* elastic-pool event deltas over the run */
     dmesh_get_tx_stats(g_s, &st0);
@@ -381,6 +392,7 @@ static void run_bench(int conn_fd, int req_size, int reply_size, int concurrency
         w[i].duration   = duration;
         w[i].start_at   = start_at;
         w[i].reconn     = reconn;
+        w[i].batch      = batch;
         w[i].stop       = &stop;
         if (pthread_create(&tid[i], &attr, worker_fn, &w[i]) != 0) {
             atomic_store(&w[i].broken, 1); tid[i] = 0;
@@ -427,11 +439,11 @@ static void run_bench(int conn_fd, int req_size, int reply_size, int concurrency
 
     int n = snprintf(reply, sizeof reply,
         "OK mrps=%.6f gbps=%.4f p50=%.2f p95=%.2f p99=%.2f avg=%.2f min=%.2f max=%.2f "
-        "rcnt=%ld fail=%ld conc=%d threads=%d reqsz=%d repsz=%d durs=%.3f "
+        "rcnt=%ld fail=%ld conc=%d threads=%d reqsz=%d repsz=%d durs=%.3f batch=%d "
         "reconns=%ld reconn_us=%.2f grabs=%llu rets=%llu recyc=%llu waits=%llu pads=%llu "
         "reorder=%ld",
         mrps, gbps, p50, p95, p99, avg, mn, mx,
-        total_ok, total_fail, concurrency, threads, req_size, reply_size, duration,
+        total_ok, total_fail, concurrency, threads, req_size, reply_size, duration, batch,
         total_reconns, reconn_us,
         st1.pool_grabs - st0.pool_grabs, st1.pool_returns - st0.pool_returns,
         st1.recycle_hits - st0.recycle_hits, st1.grow_waits - st0.grow_waits,
@@ -466,13 +478,13 @@ static void handle_ctrl(int fd) {
 
     char cmd[16] = {0};
     if (sscanf(buf, "%15s", cmd) == 1 && strcmp(cmd, "RUN") == 0) {
-        int req = 32, rep = 8, conc = 1, threads = 1; double dur = 10.0; long warm = 1000, reconn = 0;
-        /* RUN <req_size> <reply_size> <concurrency> <duration> <warmup> <threads> [reconn] */
-        sscanf(buf, "%*s %d %d %d %lf %ld %d %ld", &req, &rep, &conc, &dur, &warm, &threads, &reconn);
-        run_bench(fd, req, rep, conc, dur, warm, threads, reconn);
+        int req = 32, rep = 8, conc = 1, threads = 1, batch = 0; double dur = 10.0; long warm = 1000, reconn = 0;
+        /* RUN <req_size> <reply_size> <concurrency> <duration> <warmup> <threads> [reconn] [batch] */
+        sscanf(buf, "%*s %d %d %d %lf %ld %d %ld %d", &req, &rep, &conc, &dur, &warm, &threads, &reconn, &batch);
+        run_bench(fd, req, rep, conc, dur, warm, threads, reconn, batch);
         close(fd); return;
     }
-    if (write(fd, "ERR use: RUN <req> <reply> <conc> <dur> <warmup> <threads> [reconn] | PING\n", 76) < 0) {}
+    if (write(fd, "ERR use: RUN <req> <reply> <conc> <dur> <warmup> <threads> [reconn] [batch] | PING\n", 83) < 0) {}
     close(fd);
 }
 

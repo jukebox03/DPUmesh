@@ -122,16 +122,21 @@ only compare to Envoy HCM once an HTTP/gRPC codec exists.
 ## What has actually been run
 Live BlueField-DPU, matched-C, intra-node, fair 1-core. **A-phase** (4,4): 3-transport ablation
 (dpumesh-native / tcp-envoy / tcp-direct) `conc`(8 reps)/`rtt`(6)/`bw`(4) + host+DPU CPU (3 reps)
-+ idle baseline. **B-phase**: busy-app sweep (`APP_WORK_US`) + N-pod amortization (`npod.sh`,
-N=1..3) across the **(4,4)/(2,2)/(1,1)** DPU-config frontier. Results (`../report/REPORT.md`,
-reproducible):
++ idle baseline. **Batching phase** (4,4): matched-batching ablation (`batch_ablation.sh`, 6 reps)
++ DPU-ARM cost (`batch_cpu.sh`). **B-phase**: busy-app sweep (`APP_WORK_US`) + N-pod amortization
+(`npod.sh`, N=1..3) across the **(4,4)/(2,2)/(1,1)** DPU-config frontier. Results
+(`../report/REPORT.md`, reproducible):
 
-- **throughput/latency** — direct kernel TCP ≫ TCP+Envoy > DPUmesh (conc32: 0.93 / 0.41 / 0.20
+- **throughput/latency** — direct kernel TCP ≫ TCP+Envoy > DPUmesh (conc32: 0.93 / 0.42 / 0.19
   Mrps). The Envoy sidecar tax is ~2.3×, but DPUmesh sits *below* even the taxed path.
-- **CPU** — DPUmesh's host CPU/req beats tcp-envoy but is relocated onto 3.3–4.6 DPU cores;
-  host+DPU total is ~7× TCP at every config.
+- **batching-fairness** — the throughput columns are TCP-batched vs DPUmesh-per-RPC. Matched
+  coalescing (`batch_ablation.sh`) lifts DPUmesh +32%/+77% (conc 32/64) and restores its latency,
+  but it stays below Envoy (0.61×/0.83×). The win is super-additive: only coalescing *both* legs helps.
+- **CPU** — DPUmesh returns *client* cycles, but total host CPU/req is *worse* than Envoy (host-eff
+  0.44 vs 0.25); the transport is relocated onto 3.3–4.6 DPU cores; host+DPU total is **7.5–10.9×**
+  TCP. ARM cost is per-RPC, not core-bound — batching halves ARM µs/RPC (`batch_cpu.sh`).
 - **amortization FAILS** — DPU cost scales with traffic (not a fixed overhead), so sharing it
-  across pods doesn't divide it; (2,2) amortizes best but stays ~7× TCP; (1,1) is
+  across pods doesn't divide it; (2,2) amortizes best but stays ~10× TCP; (1,1) is
   throughput-capped and does not scale.
 - **busy-app** — the one DPUmesh win: under app-work ≥5 µs it edges tcp-envoy by ~15–23%.
 

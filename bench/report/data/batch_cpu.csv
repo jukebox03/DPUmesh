@@ -1,0 +1,5 @@
+cell,conc,batch,reply_batch,mrps,p50_us,dpu_arm_pct,arm_us_per_rpc,arm_pct_per_mrps
+unbatched,32,0,0,0.192108,175,429.35,22.35,2235
+both,32,1,1,0.257265,118,312.40,12.14,1214
+unbatched,64,0,0,0.277750,240,462.85,16.66,1666
+both,64,1,1,0.493157,122,358.80,7.27,728

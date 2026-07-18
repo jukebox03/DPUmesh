@@ -56,12 +56,21 @@ static long             g_app_work_us = 0;/* per-request busy-spin (µs) — mod
                                            * offload leaves it). Set at start from APP_WORK_US,
                                            * then live-tunable: write /tmp/app_work_us + SIGHUP,
                                            * so a busy-app sweep needs no pod restart. */
+static int              g_reply_batch = 0;/* 1 = coalesce a whole CQ batch's replies into ONE
+                                           * doorbell per conn (matched-batching ablation vs the
+                                           * TCP echo_sock, which flushes one write() per read
+                                           * batch); 0 = flush per reply. Live-tunable via
+                                           * /tmp/reply_batch, polled like app-work — a batching
+                                           * ablation needs no pod restart. */
 static volatile sig_atomic_t g_reload = 0;
 static void on_hup(int s) { (void)s; g_reload = 1; }
 static void load_work(void) {
     FILE *f = fopen("/tmp/app_work_us", "r");
     if (f) { long v; if (fscanf(f, "%ld", &v) == 1) g_app_work_us = v; fclose(f); }
     else { const char *e = getenv("APP_WORK_US"); if (e) g_app_work_us = atol(e); }
+    FILE *g = fopen("/tmp/reply_batch", "r");
+    if (g) { int v; if (fscanf(g, "%d", &v) == 1) g_reply_batch = v; fclose(g); }
+    else { const char *e = getenv("REPLY_BATCH"); if (e) g_reply_batch = atoi(e); }
 }
 
 typedef struct { uint32_t seq, size; } reply_t;
@@ -102,7 +111,10 @@ static void reply_pump(dmesh_qp_t *c) {
                 off = BENCH_HDR_LEN;
             }
             memset(b + off, REPLY_FILL, want - off);
-            unsigned fl = (gc->done + want < total) ? DMESH_SEND_MORE : 0;
+            /* Non-final chunk of a carved reply ALWAYS defers. In batch mode the final
+             * chunk defers too, so a whole CQ batch's replies ring one doorbell (flushed
+             * post-batch in the main loop). */
+            unsigned fl = (gc->done + want < total || g_reply_batch) ? DMESH_SEND_MORE : 0;
             if (dmesh_post_send(c, b, want, 0, fl) != 0) { gc->dead = 1; return; }
             gc->done += want;
         }
@@ -235,6 +247,10 @@ int main(void) {
             reply_pump(g_live[i]);                   /* may itself latch dead */
             if (((greeter_conn_t *)g_live[i]->user_data)->dead) reclaim(g_live[i]);
         }
+        /* Batch mode: reply_pump deferred every doorbell above, so ring one per surviving
+         * conn now — before the next epoll_wait, so nothing is stranded on the SQ. */
+        if (g_reply_batch)
+            for (int i = 0; i < g_nlive; i++) dmesh_flush(g_live[i]);
 
         /* Report every 200k. A modulo test cannot do this: g_served advances a FEW per
          * loop pass, so `(g_served % 200000) < 64` (the old test, widened to survive a

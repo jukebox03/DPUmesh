@@ -937,7 +937,12 @@ static void px_lane_enqueue(struct dmesh_proxy *px, int pod_idx, int region, str
      * reaper + inline-egress default (both ==1) takes the lock-free direct path. */
     if (px->n_eng > 1 || px->n_shards > 1) {
         pthread_mutex_lock(&ln->inq_lock);
-        if (ln->inq_tail) ln->inq_tail->next = u; else ln->inq_head = u;
+        /* inq_head is peeked LOCK-FREE by the lane owner (px_engine_pump / px_drain) to
+         * decide whether to take this lock at all; publish it with a release store so that
+         * peek's acquire load is a well-defined atomic, not a data race. inq_tail is only
+         * ever touched under the lock, so it stays plain. */
+        if (ln->inq_tail) ln->inq_tail->next = u;
+        else __atomic_store_n(&ln->inq_head, u, __ATOMIC_RELEASE);
         ln->inq_tail = u;
         pthread_mutex_unlock(&ln->inq_lock);
     } else {
@@ -2111,8 +2116,10 @@ static int px_engine_pump(struct objects *objs, struct px_engine *eng) {
         int K = pod->k_rings > 0 ? pod->k_rings : 1;
         for (int r = 0; r < K; r++) {
             struct px_lane *ln = &px->lanes[i][r];
-            /* splice the ingest inbox onto the worker-local qhead (O(1)) */
-            if (ln->inq_head) {
+            /* splice the ingest inbox onto the worker-local qhead (O(1)). Peek the head
+             * lock-free (acquire, paired with px_lane_enqueue's release store) so the empty
+             * case never touches the mutex; re-read under the lock before splicing. */
+            if (__atomic_load_n(&ln->inq_head, __ATOMIC_ACQUIRE)) {
                 pthread_mutex_lock(&ln->inq_lock);
                 struct px_unit *ih = ln->inq_head, *it = ln->inq_tail;
                 ln->inq_head = ln->inq_tail = NULL;
@@ -2398,7 +2405,7 @@ int px_drain(struct objects *objs) {
             /* Sharded ingest (M>1) feeds this lane via the locked inbox; splice it
              * onto the worker-local qhead (main is the lane owner here). For M==1
              * the enqueue went straight to qhead (no inbox). */
-            if (px->n_shards > 1 && ln->inq_head) {
+            if (px->n_shards > 1 && __atomic_load_n(&ln->inq_head, __ATOMIC_ACQUIRE)) {
                 pthread_mutex_lock(&ln->inq_lock);
                 struct px_unit *ih = ln->inq_head, *it = ln->inq_tail;
                 ln->inq_head = ln->inq_tail = NULL;

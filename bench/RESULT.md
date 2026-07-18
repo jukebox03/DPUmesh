@@ -6050,3 +6050,35 @@ downstream of the pool-lock contention that A+B removed.
 ## Diff (internal only; public `<dpumesh/dmesh.h>` untouched; no bench/DPA-kernel changes)
 `doca/dpu_proxy.c` (free-batch + alloc magazine), `src/dmesh_core.c` + `src/dmesh_core.h`
 (notification gating + false-sharing).
+
+---
+
+## Matched-batching ablation + lane-inbox data-race fix (2026-07-18)
+
+Tests the `plan/bench.md` hypothesis that the E1 throughput gap is partly a benchmark artifact
+(TCP batches its window into one syscall; DPUmesh flushed per RPC). Added a matched-batching mode
+to the bench apps — client coalesces the burst issued per loop pass into one doorbell (`RUN` 8th arg
+`batch`; `bench_dpumesh.c` sets `DMESH_SEND_MORE` on the final chunk, one `dmesh_flush` per pass);
+server coalesces a CQ batch's replies into one doorbell/conn (`/tmp/reply_batch` file-poll;
+`echo_dpumesh.c`). Live (4,4), 1 KB/8 B, one conn, 6 reps/cell, **0 fail / 0 reorder** everywhere.
+Raw: `report/data/batch_ablation.csv`, `report/data/batch_cpu.csv`.
+
+DPUmesh Mrps (median): conc32  U 0.193 · req 0.213 · reply 0.208 · **both 0.255** (envoy 0.417).
+                       conc64  U 0.278 · req 0.277 · reply 0.285 · **both 0.491** (envoy 0.591).
+- Symmetric (both-side) batching = +32% (conc32) / +77% (conc64); one-sided ≤10% / ≈0% — super-additive.
+- Loaded p50 collapses 175/240µs → 117/122µs (≈ conc1 floor 114): the loaded-latency penalty was
+  per-RPC serialization, not the transport.
+- Even fully batched, DPUmesh < Envoy (0.61× / 0.83×) and ≪ direct TCP. The old 4.5× (P2A) does NOT
+  reproduce on the current ARM-SG-DMA reverse path; current max is +77%.
+- ARM cost is per-RPC-bound: batching drops DPU-ARM µs/RPC 22.4→12.1 (conc32, −46%) and 16.7→7.3
+  (conc64, −56%) — halving it while raising throughput.
+
+Also fixed the lane inbox data race `plan/bench.md` §4.3 flagged: `px_lane_enqueue` writes
+`ln->inq_head` under `inq_lock` while `px_engine_pump`/`px_drain` peeked it lock-free (UB at
+n_eng>1 || n_shards>1, i.e. the (4,4) headline). Now an atomic release store + acquire peek
+(`doca/dpu_proxy.c`). Redeployed (4,4); loopback 50000/0, preload 5000/0, throughput unchanged →
+neutral. (The live DPU had drifted to `egress-threads=1`; re-fixed to (4,4) before measuring.)
+
+## Diff (this session; public `<dpumesh/dmesh.h>` untouched)
+`bench/apps/bench_dpumesh.c` + `bench/apps/echo_dpumesh.c` (matched-batching mode, default off),
+`doca/dpu_proxy.c` (atomic `inq_head` peek).
