@@ -31,6 +31,7 @@
 #include <string.h>
 #include <errno.h>
 #include <unistd.h>
+#include <signal.h>
 #include <sys/epoll.h>
 
 #include <dpumesh/dmesh.h>
@@ -50,6 +51,18 @@ static uint32_t         g_pod_id   = 0;   /* our DPU-assigned pod_id, stamped in
                                            * served it — the only way to observe the LB. */
 static long             g_served   = 0;   /* requests answered (all conns; single-loop) */
 static long             g_reported = 0;   /* g_served at the last progress print */
+static long             g_app_work_us = 0;/* per-request busy-spin (µs) — models the greeter
+                                           * doing real work on ITS host core (which the DPU
+                                           * offload leaves it). Set at start from APP_WORK_US,
+                                           * then live-tunable: write /tmp/app_work_us + SIGHUP,
+                                           * so a busy-app sweep needs no pod restart. */
+static volatile sig_atomic_t g_reload = 0;
+static void on_hup(int s) { (void)s; g_reload = 1; }
+static void load_work(void) {
+    FILE *f = fopen("/tmp/app_work_us", "r");
+    if (f) { long v; if (fscanf(f, "%ld", &v) == 1) g_app_work_us = v; fclose(f); }
+    else { const char *e = getenv("APP_WORK_US"); if (e) g_app_work_us = atol(e); }
+}
 
 typedef struct { uint32_t seq, size; } reply_t;
 
@@ -107,6 +120,10 @@ static void on_request(uint32_t seq, uint32_t req_len, uint32_t reply_size, void
     dmesh_qp_t *c = (dmesh_qp_t *)user;
     greeter_conn_t *gc = (greeter_conn_t *)c->user_data;
     if (gc->dead) return;                              /* reframer emits several per feed */
+    if (g_app_work_us > 0) {                           /* simulate app-work on the host core */
+        double t0 = bench_now_sec();
+        while ((bench_now_sec() - t0) * 1e6 < (double)g_app_work_us) { }
+    }
     if (gc->qn >= REPLY_Q) { gc->dead = 1; return; }   /* client outran its own window */
     gc->q[(gc->qh + gc->qn) % REPLY_Q] = (reply_t){ .seq = seq, .size = reply_size };
     gc->qn++;
@@ -140,6 +157,7 @@ static void reclaim(dmesh_qp_t *c) {
 int main(void) {
     const char *service = getenv("DPUMESH_SERVICE");  /* identity injected via env → registry */
     if (!service) service = "(none)";
+    signal(SIGHUP, on_hup); load_work();              /* app-work: env default, live via SIGHUP */
 
     g_s = dmesh_create_channel();                     /* advertises $DPUMESH_SERVICE (DPU assigns pod_id) */
     if (!g_s) { fprintf(stderr, "[greeter] dmesh_create_channel failed\n"); return 1; }
@@ -161,6 +179,9 @@ int main(void) {
     struct epoll_event events[MAX_EVENTS];
     dmesh_wc_t wc[CQ_BATCH];
     for (;;) {
+        { static double lr = 0; double now = bench_now_sec();   /* live app-work: poll the file
+             * every 0.5s (robust vs SIGHUP, which a libdpumesh thread can absorb). */
+          if (now - lr > 0.5) { lr = now; load_work(); } }
         /* A reply is parked on SQ space -> poll instead of sleeping: nothing wakes this fd
          * when the SQ drains (dmesh_alloc's EAGAIN carries no completion), so sleeping
          * here would strand the reply.
@@ -174,7 +195,8 @@ int main(void) {
             if (((greeter_conn_t *)g_live[i]->user_data)->qn > 0) { pend = 1; break; }
 
         int nfds = epoll_wait(epfd, events, MAX_EVENTS, pend ? 0 : -1);
-        if (nfds < 0) { if (errno == EINTR) continue; perror("epoll_wait"); break; }
+        if (nfds < 0) { if (errno == EINTR) { if (g_reload) { g_reload = 0; load_work(); } continue; } perror("epoll_wait"); break; }
+        if (g_reload) { g_reload = 0; load_work(); }
 
         uint64_t cnt; while (read(dfd, &cnt, sizeof cnt) > 0) { }   /* drain level counter */
 

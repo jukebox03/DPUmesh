@@ -1,0 +1,1 @@
+idle_dpu_arm_pct=18.80 (window=20.0s)

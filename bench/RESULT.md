@@ -1,5 +1,11 @@
 # DPUmesh scalability — direct-experiment log (2026-06-08)
 
+> **This is a historical engineering log, not the evaluation.** Rates here are
+> config-specific single-shot DPU-internal measurements (many superseded), and
+> "BEST"/"FINAL" refer to a step in that log — **not** a cross-transport result. The
+> authoritative, reproducible comparison against TCP + Envoy lives in
+> **[report/REPORT.md](report/REPORT.md)**. Where the two disagree, REPORT.md wins.
+
 Goal: (1) raise 2-pod chain RPS, (2) make DPA/DPU multithread actually scale.
 Constraint: all traffic stays host→DPU→host (L7 routing computed on DPU; no host→host).
 Method: DIRECT experiments via `test-bench.sh` only. No elimination logic.

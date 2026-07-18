@@ -700,7 +700,7 @@ identity/registry vars `DPUMESH_SERVICE` / `DPUMESH_PORT` / `DPUMESH_CONFIG` (§
 | Forward rings per pod / EU-sharding (K) | `2` — env `DPUMESH_RINGS_PER_POD` | `DPUMESH_RINGS_PER_POD_DEFAULT` | `dmesh_common.h` (DPU + host) |
 | ARM ingest shards (M) | `1` — env `DPUMESH_INGEST_SHARDS` (parse/route on M threads, per-shard conntrack) | `getenv` → `n_ingest_shards` | `doca/dpu_worker.c` |
 | ARM SG-DMA egress workers (n_eng) | `1` — env `DPUMESH_ARM_EGRESS_THREADS` (`1` runs inline + wedges under overload, so use ≥ 2) | `getenv` → `px->n_eng` | `doca/dpu_proxy.c` |
-| **Recommended DPU transport config** | `DPUMESH_INGEST_SHARDS=4 DPUMESH_ARM_EGRESS_THREADS=4 DPUMESH_SHARD_SHARED=0` — ~5× the single-funnel small-RPC rate (~0.5 Mrps, > 2× TCP+Envoy); `2/2` is within ~10 %. The default `1/1` is the slow, unsharded path. | (env, no rebuild) | — |
+| **Recommended DPU transport config** | `DPUMESH_INGEST_SHARDS=4 DPUMESH_ARM_EGRESS_THREADS=4 DPUMESH_SHARD_SHARED=0` — ~5× the single-funnel small-RPC rate (~0.5 Mrps, the transport's own ceiling; for the end-to-end comparison vs TCP+Envoy see `bench/report/REPORT.md`); `2/2` is within ~10 %. The default `1/1` is the slow, unsharded path. | (env, no rebuild) | — |
 | DPU main loop | event-driven epoll (busy-poll auto-fallback) | — | `doca/dpu_worker.c` |
 | Host RX (PE) thread | sleep on the notification fd | `want_epoll = 1` | `src/dmesh_core.c` |
 | Proxy seam cap | `512 KB` | `PX_SEAM_MAX_DEFAULT` | `doca/dpu_proxy.c` |

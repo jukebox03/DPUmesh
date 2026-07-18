@@ -127,9 +127,8 @@ collect_doca_libs() {
 }
 
 build_bench_binaries() {
-    step "=== Building bench/validator binaries (make bench go) ==="
-    if ! make -C "$PROJ_ROOT" bench go 2>&1 | tail -30; then err "Bench build failed"; exit 1; fi
-    command -v go >/dev/null 2>&1 || { err "go not found (needed for bench_tcp/echo_tcp)"; exit 1; }
+    step "=== Building bench/validator binaries (make bench) ==="
+    if ! make -C "$PROJ_ROOT" bench 2>&1 | tail -30; then err "Bench build failed"; exit 1; fi
     info "Bench binaries built ($BIN_OUT + $LIB_OUT/libdmesh_preload.so)"
 }
 
@@ -151,8 +150,8 @@ build_images() {
     build_image "$BENCH_DIR/validators/stream_dpumesh.Dockerfile"   "$IMG_STREAM_DPU"   "$PROJ_ROOT"
     build_image "$BENCH_DIR/validators/verbs_dpumesh.Dockerfile"    "$IMG_VERBS_DPU"    "$PROJ_ROOT"
     build_image "$BENCH_DIR/validators/preload_dpumesh.Dockerfile"  "$IMG_PRELOAD_DPU"  "$PROJ_ROOT"
-    build_image "$BENCH_DIR/docker/bench_tcp.Dockerfile"            "$IMG_BENCH_TCP"    "$PROJ_ROOT"
-    build_image "$BENCH_DIR/docker/echo_tcp.Dockerfile"             "$IMG_ECHO_TCP"     "$PROJ_ROOT"
+    build_image "$BENCH_DIR/docker/bench_sock.Dockerfile"          "$IMG_BENCH_TCP"    "$PROJ_ROOT"
+    build_image "$BENCH_DIR/docker/echo_sock.Dockerfile"           "$IMG_ECHO_TCP"     "$PROJ_ROOT"
     docker builder prune -f >/dev/null 2>&1 || true
     info "All images built and imported to containerd"
 }
@@ -216,7 +215,8 @@ get_pod_cores() {
                 bench-dpumesh) echo "0";; echo-dpumesh) echo "1";;
                 bench-tcp) echo "2";; echo-tcp) echo "3";;
                 loopback-dpumesh) echo "4,5";; preload-dpumesh) echo "4,5";; stream-dpumesh) echo "4,5";; verbs-dpumesh) echo "4,5";;
-                echo-dpumesh-13) echo "6";; echo-dpumesh-14) echo "7";; *) echo "";;
+                echo-dpumesh-13) echo "6";; echo-dpumesh-14) echo "7";; bench-direct) echo "8";;
+                bench-dpumesh-2) echo "9";; bench-dpumesh-3) echo "10";; *) echo "";;
             esac ;;
     esac
 }
@@ -232,7 +232,7 @@ pin_pods() {
     else
         warn "cpupower not found; skipping DVFS lock"
     fi
-    for app in bench-dpumesh echo-dpumesh echo-dpumesh-13 echo-dpumesh-14 loopback-dpumesh stream-dpumesh verbs-dpumesh preload-dpumesh bench-tcp echo-tcp; do
+    for app in bench-dpumesh bench-dpumesh-2 bench-dpumesh-3 echo-dpumesh echo-dpumesh-13 echo-dpumesh-14 loopback-dpumesh stream-dpumesh verbs-dpumesh preload-dpumesh bench-tcp echo-tcp bench-direct; do
         local cores pod_id; cores=$(get_pod_cores "$app" "$profile"); [ -z "$cores" ] && continue
         pod_id=$(echo "$HOST_PASS" | sudo -S crictl pods --label "app=$app" -q 2>/dev/null | head -n 1)
         if [ -z "$pod_id" ]; then warn "$app: pod not found, skipping"; continue; fi
@@ -318,12 +318,15 @@ start_pods() {
     scale_up_with_wait "echo-dpumesh-13"  ""
     scale_up_with_wait "echo-dpumesh-14"  ""
     scale_up_with_wait "bench-dpumesh"    "pods: 2"
+    scale_up_with_wait "bench-dpumesh-2"  ""     # extra meshed clients for N-pod amortization
+    scale_up_with_wait "bench-dpumesh-3"  ""
     scale_up_with_wait "loopback-dpumesh" "pods: 3"
     scale_up_with_wait "preload-dpumesh"  "pods: 4"
     scale_up_with_wait "verbs-dpumesh"    ""
     scale_up_with_wait "stream-dpumesh"   ""
     scale_up_with_wait "echo-tcp"  ""
     scale_up_with_wait "bench-tcp" ""
+    scale_up_with_wait "bench-direct" ""     # direct-TCP client (targets echo_sock, no sidecar)
 }
 
 deploy() {
@@ -349,7 +352,7 @@ deploy() {
 cleanup() { info "Deleting namespace $NS"; kubectl delete ns "$NS" --ignore-not-found=true 2>/dev/null || true; stop_dpu; }
 
 show_logs() {
-    for app in bench-dpumesh echo-dpumesh echo-dpumesh-13 echo-dpumesh-14 loopback-dpumesh stream-dpumesh verbs-dpumesh preload-dpumesh bench-tcp echo-tcp; do
+    for app in bench-dpumesh echo-dpumesh echo-dpumesh-13 echo-dpumesh-14 loopback-dpumesh stream-dpumesh verbs-dpumesh preload-dpumesh bench-tcp echo-tcp bench-direct; do
         echo "=== $app ==="
         kubectl logs -n "$NS" -l "app=$app" --all-containers=true --prefix=true --tail=20 2>/dev/null || true
         echo

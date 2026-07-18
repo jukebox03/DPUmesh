@@ -294,9 +294,10 @@ own PE notification fd / eventfd (epoll: arm → re-check → block, 1 ms backst
   Custody's exactly-once atomic is unchanged, so batched vs direct free is only *where* the node lands.
 - **Measured** (RESULT.md): the single funnel is ~0.10 Mrps; shards = 2 + `n_eng` = 2 ≈ 2×; and once the
   object pools stopped serializing the emit thread (the magazine + free-batch above), `4 / 4` reaches
-  **~0.5 Mrps** — ~5× the single funnel and ~2× a TCP+Envoy baseline, now scaling with client threads
-  rather than flat. `DPUMESH_DIAG=1` prints a once/sec pipeline dump (batch fill, flush-size histogram,
-  queue depths) that stays quiet while idle.
+  **~0.5 Mrps** — ~5× the single funnel, now scaling with client threads rather than flat. That ~0.5 Mrps
+  is the transport's own ceiling, not an end-to-end win: at single-pod L4 it currently sits **below** a
+  TCP + Envoy sidecar (see `bench/report/REPORT.md`). `DPUMESH_DIAG=1` prints a once/sec pipeline dump
+  (batch fill, flush-size histogram, queue depths) that stays quiet while idle.
 
 ### 4.2 Routing — cluster registry + load balancer
 A **service is a cluster** of backend pods (Envoy model). The healthy backend set is **derived from

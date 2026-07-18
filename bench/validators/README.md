@@ -24,7 +24,7 @@ service, and that is not just convenience — a validator only polls its complet
 own `RUN` is in flight. Idle, it blocks in `accept()` and answers nothing, so it cannot serve as
 another pod's backend. The `echo-*` pods do poll continuously, but they are Greeters speaking the
 benchmark's framing, not verbatim echoes. Cross-pod fan-out is therefore the **benchmark's** job
-(three `echo-dpumesh` backends, `../BENCH.md` §2), not a validator's.
+(three `echo-dpumesh` backends, `../README.md`), not a validator's.
 
 **Build wiring:** these sources live in `bench/validators/`; the root `Makefile`
-paths point here (see `../BENCH.md` §5).
+paths point here (see `../README.md`).

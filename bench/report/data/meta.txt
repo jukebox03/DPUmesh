@@ -1,0 +1,35 @@
+date_utc   2026-07-18T10:30:11Z
+commit     4beb0bef4872f70bf288533338022aaf49d4e19b
+dirty      24 files (uncommitted eval-harness edits)
+node       rapids4  kernel 5.15.0-185-generic
+cpu        INTEL(R) XEON(R) GOLD 6554S
+doca       3.1.0-091000
+NA
+governor   performance @ 2.48GHz
+kubectl    {  "clientVersion": {    "major": "1",    "minor": "31",    "gitVersion": "v1.31.14",    "gitCommit": "5e00b99bac504844579ec74886b6cc5c9611ca19",    "gitTreeState": "clean",    "buildDate": "2025-11-11T20:24:51Z",    "goVersion": "go1.24.9",    "compiler": "gc",    "platform": "linux/amd64"  },  "kustomizeVersion": "v5.4.2"}
+namespace  test-bench
+params     DUR=15 WARMUP=1000 REPS=8
+dpu        live /proc/<dpumesh_dpu>/environ + binary sha256:
+    pid=120601 etimes=567s
+    DPUMESH_SHARD_SHARED=
+    DPUMESH_DIAG=
+    DPUMESH_RINGS_PER_POD=2
+    DPUMESH_PROXY=
+    DPUMESH_INGEST_SHARDS=4
+    DPUMESH_SHARD_HOST_EMIT=
+    DPUMESH_PROXY_FRAME_SVC=
+    DPUMESH_ARM_EGRESS_THREADS=4
+    DPUMESH_PROXY_L7_SVC=
+    DPUMESH_INGEST_REAP=
+    _=./dpumesh_dpu
+images     containerd k8s.io digests:
+    docker.io/bench/bench-dpumesh:latest  sha256:c924fc049554c406298fbe2b6dc130ed156b9eaa4531a33e834486e20a9ac806
+    docker.io/bench/bench-tcp:latest  sha256:5fd25c70c283051c6b35ef6d1147902a96ed8210dd4d28aaa0ad6c099122f254
+    docker.io/bench/echo-dpumesh:latest  sha256:383f92a32cfb6585d56ff7c07a4ab328ea37b6c2e16a5ad0064b34a53ca22f38
+    docker.io/bench/echo-tcp:latest  sha256:70a7849470f22875bc9782cc83e0d9397b72b2b5e8d4a1b05787876153cbb2c9
+    docker.io/bench/loopback-dpumesh:latest  sha256:62c42c9c2aea97b1c191bb1094b0a7dbfcb871872ea8ceeab0b0eb0fe89fd11c
+    docker.io/bench/preload-dpumesh:latest  sha256:30fbde7bbe62ce9b701dd21fde4a170b15503f5a5460cdac54bc3294e89bc5f6
+    docker.io/bench/stream-dpumesh:latest  sha256:7ea7c6102d1b92725697b89e52e06b24afa75d2cf7ae513fa4fa79b7ebf2886b
+    docker.io/bench/verbs-dpumesh:latest  sha256:e6d0de1697276ea8ab2441790d79cddb8cb84516055873675fb95a3906c91187
+    docker.io/envoyproxy/envoy:v1.30-latest  sha256:b5cc70f5fe5503858817e897ae1da5d873dc32cbc493790b4e330b8a42c4af9d
+    docker.io/envoyproxy/envoy@sha256:b5cc70f5fe5503858817e897ae1da5d873dc32cbc493790b4e330b8a42c4af9d  sha256:b5cc70f5fe5503858817e897ae1da5d873dc32cbc493790b4e330b8a42c4af9d

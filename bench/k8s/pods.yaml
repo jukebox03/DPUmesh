@@ -53,6 +53,71 @@ spec:
   selector: { app: bench-dpumesh }
   ports: [{ port: ${CTRL_PORT}, targetPort: ${CTRL_PORT} }]
 ---
+# bench-dpumesh-2 / -3: extra meshed CLIENT pods for the N-pod amortization sweep. Each is an
+# independent app that names service echo-dpumesh and rides the ONE shared DPU (passthrough
+# assigns each to a backend). Driven concurrently by suite/npod.sh; idle otherwise.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bench-dpumesh-2
+spec:
+  replicas: 0
+  selector: { matchLabels: { app: bench-dpumesh-2 } }
+  template:
+    metadata: { labels: { app: bench-dpumesh-2 } }
+    spec:
+      hostname: bench-dpumesh-2
+      containers:
+      - name: bench-dpumesh-2
+        image: docker.io/${IMG_BENCH_DPU}
+        imagePullPolicy: Never
+        ports: [{ containerPort: ${CTRL_PORT} }]
+        env:
+        - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
+        - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
+        - { name: BENCH_DST_SERVICE, value: "echo-dpumesh" }
+        - { name: ASYNC_THREADS, value: "${ASYNC_THREADS}" }
+        - { name: BENCH_PIPELINE, value: "${BENCH_PIPELINE}" }
+        - { name: BENCH_COALESCE, value: "${BENCH_COALESCE}" }
+        securityContext: { privileged: true }
+        volumeMounts:
+        - { mountPath: /dev/infiniband, name: infiniband }
+        - { mountPath: /usr/local/lib/libdpumesh.so.1, name: libdpumesh-so, subPath: libdpumesh.so.1 }
+      volumes:
+      - { name: infiniband, hostPath: { path: /dev/infiniband } }
+      - { name: libdpumesh-so, hostPath: { path: ${LIB_OUT}, type: Directory } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bench-dpumesh-3
+spec:
+  replicas: 0
+  selector: { matchLabels: { app: bench-dpumesh-3 } }
+  template:
+    metadata: { labels: { app: bench-dpumesh-3 } }
+    spec:
+      hostname: bench-dpumesh-3
+      containers:
+      - name: bench-dpumesh-3
+        image: docker.io/${IMG_BENCH_DPU}
+        imagePullPolicy: Never
+        ports: [{ containerPort: ${CTRL_PORT} }]
+        env:
+        - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
+        - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
+        - { name: BENCH_DST_SERVICE, value: "echo-dpumesh" }
+        - { name: ASYNC_THREADS, value: "${ASYNC_THREADS}" }
+        - { name: BENCH_PIPELINE, value: "${BENCH_PIPELINE}" }
+        - { name: BENCH_COALESCE, value: "${BENCH_COALESCE}" }
+        securityContext: { privileged: true }
+        volumeMounts:
+        - { mountPath: /dev/infiniband, name: infiniband }
+        - { mountPath: /usr/local/lib/libdpumesh.so.1, name: libdpumesh-so, subPath: libdpumesh.so.1 }
+      volumes:
+      - { name: infiniband, hostPath: { path: /dev/infiniband } }
+      - { name: libdpumesh-so, hostPath: { path: ${LIB_OUT}, type: Directory } }
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -341,13 +406,15 @@ spec:
   template:
     metadata: { labels: { app: echo-tcp } }
     spec:
-      # echo app + sidecar2 in same pod sharing 1 host core. echo listens on 9092;
-      # sidecar2 listens on ${TCP_PORT} and forwards to 127.0.0.1:9092.
+      # echo app (matched C echo_sock) + sidecar2 in same pod sharing 1 host core.
+      # echo_sock listens on ECHO_PORT=9092; sidecar2 listens on ${TCP_PORT} and
+      # forwards to 127.0.0.1:9092.
       containers:
       - name: echo-tcp
         image: docker.io/${IMG_ECHO_TCP}
         imagePullPolicy: Never
-        args: ["-port", "9092"]
+        env:
+        - { name: ECHO_PORT, value: "9092" }
         ports: [{ containerPort: 9092 }]
       - name: sidecar2
         image: docker.io/${IMG_ENVOY}
@@ -365,6 +432,43 @@ metadata: { name: echo-tcp }
 spec:
   selector: { app: echo-tcp }
   ports: [{ port: ${TCP_PORT}, targetPort: ${TCP_PORT} }]
+---
+# echo-direct Service: routes straight to echo-tcp's echo_sock (port 9092), bypassing BOTH
+# Envoy sidecars — the direct-kernel-TCP ablation. It reuses the echo-tcp pod's server, so the
+# server core (echo_sock, core 3) is identical to the tcp-envoy path; only the client path (no
+# sidecars) differs, isolating exactly the sidecar tax.
+apiVersion: v1
+kind: Service
+metadata: { name: echo-direct }
+spec:
+  selector: { app: echo-tcp }
+  ports: [{ port: 9092, targetPort: 9092 }]
+---
+# bench-direct: matched-C client (bench_sock) pointed straight at echo_sock (no sidecar).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bench-direct
+spec:
+  replicas: 0
+  selector: { matchLabels: { app: bench-direct } }
+  template:
+    metadata: { labels: { app: bench-direct } }
+    spec:
+      containers:
+      - name: bench-direct
+        image: docker.io/${IMG_BENCH_TCP}
+        imagePullPolicy: Never
+        ports: [{ containerPort: ${CTRL_PORT} }]
+        env:
+        - { name: BENCH_TARGET, value: "echo-direct:9092" }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: bench-direct }
+spec:
+  selector: { app: bench-direct }
+  ports: [{ port: ${CTRL_PORT}, targetPort: ${CTRL_PORT} }]
 ---
 # sidecar1 ConfigMap (bench-tcp pod): tcp_proxy filter only — minimum viable Envoy
 # doing pure TCP forwarding, forwarding to the echo-tcp Service (-> sidecar2).

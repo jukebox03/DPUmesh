@@ -59,21 +59,25 @@ LIB_LINK := $(LIBDIR)/libdpumesh.so
 # ---- consumers of the library ------------------------------------------------
 # dmesh_* API clients (socket/epoll façade over dmesh.h)
 DMESH_BINS := bench_dpumesh echo_dpumesh loopback_dpumesh stream_dpumesh verbs_dpumesh
-bench_dpumesh_SRC    := bench/bench_dpumesh.c
-echo_dpumesh_SRC     := bench/echo_dpumesh.c
+bench_dpumesh_SRC    := bench/apps/bench_dpumesh.c
+echo_dpumesh_SRC     := bench/apps/echo_dpumesh.c
 loopback_dpumesh_SRC := bench/validators/loopback_dpumesh.c
 stream_dpumesh_SRC   := bench/validators/stream_dpumesh.c
 verbs_dpumesh_SRC    := bench/validators/verbs_dpumesh.c
 
 # LD_PRELOAD shim (interposes libc sockets → dmesh) + its vanilla-TCP validators
 PRELOAD := $(LIBDIR)/libdmesh_preload.so
-PLAIN_BINS := tcp_echo tcp_client preload_runner        # pure POSIX, no dmesh link
+PLAIN_BINS := tcp_echo tcp_client preload_runner bench_sock echo_sock  # pure POSIX, no dmesh link
 tcp_echo_SRC       := bench/validators/tcp_echo.c
 tcp_client_SRC     := bench/validators/tcp_client.c
 preload_runner_SRC := bench/validators/preload_runner.c
+# bench_sock/echo_sock: the MATCHED C-language TCP baseline (bench.h wire frame). Same
+# binary runs over direct TCP, TCP+Envoy, and DPUmesh-preload — isolating the transport.
+bench_sock_SRC     := bench/apps/bench_sock.c
+echo_sock_SRC      := bench/apps/echo_sock.c
 
-.PHONY: all lib bench go clean dirs
-all: lib bench go
+.PHONY: all lib bench clean dirs
+all: lib bench
 
 # Header dependencies. Without these a change to a public header (dmesh.h) leaves
 # every binary stale while the library rebuilds — the two then disagree on struct
@@ -121,12 +125,11 @@ $(BINDIR)/tcp_client: bench/validators/tcp_client.c | dirs
 	$(CC) -O2 $(DEPFLAGS) -o $@ $< -lpthread
 $(BINDIR)/preload_runner: bench/validators/preload_runner.c | dirs
 	$(CC) -O2 $(DEPFLAGS) -o $@ $<
-
-# Go TCP baseline (skipped with a notice if `go` is absent)
-go: dirs
-	@command -v go >/dev/null 2>&1 || { echo "  (go not found — skipping bench_tcp/echo_tcp)"; exit 0; }
-	cd bench && go build -o ../$(BINDIR)/bench_tcp bench_tcp.go && go build -o ../$(BINDIR)/echo_tcp echo_tcp.go
-	@echo "  -> $(BINDIR)/bench_tcp $(BINDIR)/echo_tcp"
+# matched C TCP baseline: -Ibench/apps for bench.h; bench_sock uses libm (Poisson arrivals)
+$(BINDIR)/echo_sock: bench/apps/echo_sock.c | dirs
+	$(CC) -O2 -g $(DEPFLAGS) -Ibench/apps -o $@ $< -lpthread
+$(BINDIR)/bench_sock: bench/apps/bench_sock.c | dirs
+	$(CC) -O2 -g $(DEPFLAGS) -Ibench/apps -o $@ $< -lpthread -lm
 
 clean:
 	rm -rf $(BUILD)
