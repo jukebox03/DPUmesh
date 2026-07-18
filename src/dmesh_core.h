@@ -102,6 +102,16 @@ struct dmesh_cq {
                                   * CQ's thread; dmesh_destroy_qp clears it on a matching conn. */
     int                notify_efd;  /* this CQ's readiness fd; ALWAYS armed (created live —
                                      * dmesh_cq_fd only hands it out, it never enables it). */
+    /* eventfd-write gate. The PE writes notify_efd on every inbox empty->non-empty edge
+     * so a thread blocked in epoll_wait on the fd wakes — one write() syscall per edge on
+     * the PE thread. A caller that only ever POLLS (never sleeps on the fd, e.g. the RPC
+     * bench and the verbs client) has nobody to wake, so that syscall is pure waste — and
+     * under fair pinning the PE thread shares the app's core, so it also steals the app's
+     * cycles. wants_notify latches 1 the first time dmesh_cq_fd hands the fd out (the
+     * caller has DECLARED it may sleep); until then cq_notify skips the write. The ready
+     * list is armed unconditionally either way, so a poller never misses a conn — only the
+     * redundant wakeup is elided. Set-with-self-kick in dmesh_cq_fd closes the arm race. */
+    atomic_int         wants_notify;
     int                reg_idx;     /* slot in ctx->cqs[], for destroy */
     atomic_int         nqp;         /* live QPs bound here. Enforces ibv_destroy_cq's EBUSY
                                      * rule instead of only documenting it: a conn outliving

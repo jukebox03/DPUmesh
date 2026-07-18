@@ -100,6 +100,14 @@ static void cleanup_ctx(struct dpumesh_ctx *ctx);
  * port-number reuse distance and the floor on how many per-port inboxes a process can
  * accumulate; it doubles on demand, so this only has to cover the common case. */
 #define DMESH_PORT_SPAN_MIN   256u
+/* Field grouping is by MUTATOR THREAD, not by role, to kill false sharing between the
+ * PE (producer) and the conn's owning app thread (consumer). The two run on different
+ * cores under hw pinning / real deployments, and a producer store that lands on the same
+ * 64B line as a consumer store ping-pongs the line on every message. So: owner-local +
+ * read-mostly setup fields first; then a producer-write line; then the shared arm flag on
+ * its own line (both sides write it, so it must not sit with either side's private line);
+ * then a consumer-write line. Each _cl_* pad opens a fresh cache line. All fields are
+ * preserved; only their placement changed (the struct is calloc'd and accessed by name). */
 struct dmesh_port_slot {
     uint8_t          role;            /* FREE / CLIENT / SERVER */
     int16_t          peer_pod;        /* established peer pod, DMESH_POD_BLANK = not yet learned */
@@ -116,18 +124,6 @@ struct dmesh_port_slot {
     sw_descriptor_t *inbox;           /* malloc'd ring[inbox_ring]; NULL until alloc */
     uint32_t         inbox_ring;      /* this inbox's depth (power of two = ctx->inbox_ring),
                                        * stamped at malloc so inbox_push/pop stay self-contained */
-    atomic_uint_fast32_t in_head;     /* consumer (app) */
-    atomic_uint_fast32_t in_tail;     /* producer (PE) */
-    /* Ready-list ARM flag (0=not on ready list & not being serviced; 1=on the list
-     * OR a consumer is draining it). The PE arms it 0->1 (and ready_pushes) after a
-     * push; the consumer disarms it 1->0 when conn_recv drains the inbox empty, then
-     * re-checks under a seq_cst fence. This replaces the racy "arm on the inbox
-     * empty->non-empty edge" test: that read a head the consumer concurrently
-     * advanced, so a push landing exactly as the consumer stopped draining could be
-     * enqueued but never put on the ready list — stranding the conn forever (a
-     * lost-edge / Dekker race). The flag + paired fences close it and also bound the
-     * conn to at most ONE ready-list entry per drain cycle (no duplicate churn). */
-    atomic_uint_fast32_t on_ready;    /* PE arms; consumer (conn_recv) disarms */
     /* Per-conn TX BYTE-RING over an ELASTIC CHAIN of blocks from the shared pool.
      * FOUR monotonic LOGICAL byte cursors span the chain (byte offset in the chain =
      * cursor; logical block index k = cursor / block_size; offset-in-block = cursor %
@@ -150,7 +146,6 @@ struct dmesh_port_slot {
     uint32_t         resv_len;              /* live dpumesh_tx_reserve len (owner); 0 = no reserve
                                              * outstanding. tx_commit rejects a len past it (ring
                                              * overrun) and clears it (one post per alloc). */
-    atomic_uint_fast64_t tx_f;              /* PE-thread logical cursor (ACK reclaim) */
     uint64_t         tail_blk;              /* oldest live logical block index (owner) */
     uint64_t         head_blk_next;         /* next logical block index needing a physical block
                                              * (blocks [tail_blk, head_blk_next) are backed) */
@@ -161,8 +156,32 @@ struct dmesh_port_slot {
     int              nrec;                  /* recyc depth (owner) */
     uint16_t        *su_seq;                /* [TX_SU_DEPTH] shipped seq (lazy malloc, per slot) */
     uint64_t        *su_end;                /* [TX_SU_DEPTH] shipped end cursor (lazy malloc, per slot) */
-    atomic_uint_fast16_t su_head;           /* send-unit FIFO head (owner writes/release, PE reads) */
+
+    /* ---- PRODUCER (PE thread) cache line: fields the PE mutates every message ---- */
+    char _cl_prod[64];
+    atomic_uint_fast32_t in_tail;           /* inbound SPSC producer (PE) */
+    atomic_uint_fast64_t tx_f;              /* PE-thread logical cursor (ACK reclaim) */
     atomic_uint_fast16_t su_tail;           /* send-unit FIFO tail (PE writes/release, owner reads) */
+
+    /* ---- shared ARM flag on its own line (both threads write it) ---- */
+    /* Ready-list ARM flag (0=not on ready list & not being serviced; 1=on the list
+     * OR a consumer is draining it). The PE arms it 0->1 (and ready_pushes) after a
+     * push; the consumer disarms it 1->0 when conn_recv drains the inbox empty, then
+     * re-checks under a seq_cst fence. This replaces the racy "arm on the inbox
+     * empty->non-empty edge" test: that read a head the consumer concurrently
+     * advanced, so a push landing exactly as the consumer stopped draining could be
+     * enqueued but never put on the ready list — stranding the conn forever (a
+     * lost-edge / Dekker race). The flag + paired fences close it and also bound the
+     * conn to at most ONE ready-list entry per drain cycle (no duplicate churn). Its
+     * own line so an arm/disarm never dirties either side's private cursor line. */
+    char _cl_arm[64];
+    atomic_uint_fast32_t on_ready;    /* PE arms; consumer (conn_recv) disarms */
+
+    /* ---- CONSUMER (owner app thread) cache line: fields the owner mutates ---- */
+    char _cl_cons[64];
+    atomic_uint_fast32_t in_head;     /* inbound SPSC consumer (app) */
+    atomic_uint_fast16_t su_head;     /* send-unit FIFO head (owner writes/release, PE reads) */
+    char _cl_end[64];                 /* isolate this slot's consumer line from the next slot */
 };
 /* Ready-list SPSC ops (monotonic counters; PE producer, CQ thread consumer). Each
  * list carries conn PORTS; dmesh_next_ready maps each to its slot->user. Provably
@@ -419,10 +438,19 @@ static inline int rxq_try_pop(dpumesh_ctx_t *ctx, sw_descriptor_t *out)
 
 /* Wake the thread blocked in a vanilla epoll_wait() on ONE CQ's readiness fd.
  * Per-delivery write (no coalescing) → cannot lose a wakeup; the eventfd is a plain
- * counter, drained by one read() per epoll wakeup. Safe to call from the PE thread. */
+ * counter, drained by one read() per epoll wakeup. Safe to call from the PE thread.
+ *
+ * Gated on wants_notify: a CQ whose fd was never handed out (dmesh_cq_fd) has no thread
+ * asleep on it, so the write() would only burn a syscall (and, under fair pinning, the
+ * app's own core — the PE thread is a sibling of the app thread). The ready list is
+ * armed regardless (arm_ready_after_push), so gating drops ONLY the redundant wakeup:
+ * a poller still sees the conn. The acquire load pairs with the release store +
+ * self-kick in dmesh_cq_fd so a caller that starts polling and only later sleeps on the
+ * fd cannot miss an already-armed conn. */
 static inline void cq_notify(struct dmesh_cq *cq)
 {
-    if (cq->notify_efd >= 0) {
+    if (cq->notify_efd >= 0 &&
+        atomic_load_explicit(&cq->wants_notify, memory_order_acquire)) {
         uint64_t one = 1;
         ssize_t w = write(cq->notify_efd, &one, sizeof(one));
         (void)w;
@@ -1795,6 +1823,7 @@ dmesh_cq_t *dmesh_create_cq(dmesh_channel_t *ch) {
     atomic_init(&cq->ready_head, (uint_fast32_t)0);
     atomic_init(&cq->ready_tail, (uint_fast32_t)0);
     atomic_init(&cq->nqp, 0);
+    atomic_init(&cq->wants_notify, 0);   /* poll-only until dmesh_cq_fd is called */
 
     dpumesh_ctx_t *ctx = ch->ctx;
     pthread_mutex_lock(&ctx->cq_lock);
@@ -1832,7 +1861,22 @@ int dmesh_destroy_cq(dmesh_cq_t *cq) {
     return 0;
 }
 
-int dmesh_cq_fd(dmesh_cq_t *cq) { return cq ? cq->notify_efd : -1; }
+/* Handing out the fd is the caller DECLARING it may sleep on it, so latch wants_notify
+ * (the PE starts writing the fd on ready edges) and self-kick once: any conn armed while
+ * the CQ was still poll-only (wants_notify==0, no wakeup written) is already on the ready
+ * list but left no edge on the fd, so without this the caller's first epoll_wait could
+ * block despite pending work. The release store publishes the flag to the PE thread
+ * before the kick. Idempotent: repeated calls just re-kick (one spurious wakeup). */
+int dmesh_cq_fd(dmesh_cq_t *cq) {
+    if (!cq) return -1;
+    atomic_store_explicit(&cq->wants_notify, 1, memory_order_release);
+    if (cq->notify_efd >= 0) {
+        uint64_t one = 1;
+        ssize_t w = write(cq->notify_efd, &one, sizeof(one));
+        (void)w;
+    }
+    return cq->notify_efd;
+}
 
 /* ===== Connection setup ===== */
 

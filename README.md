@@ -93,8 +93,8 @@ starts the DPU and every pod together, in order. See **[bench/BENCH.md](bench/BE
 ```sh
 ./bench/bench.sh deploy                 # build host+DPU, images, (re)start DPU, launch pods
 DPUMESH_PROXY_L7_SVC=11 ./bench/bench.sh deploy    # run the L7 codec on echo-dpumesh → per-message LB
-DPUMESH_INGEST_SHARDS=2 DPUMESH_ARM_EGRESS_THREADS=2 \
-./bench/bench.sh deploy                 # measured DPU thread config (≈2× small-RPC rate; CORE.md §4.1)
+DPUMESH_INGEST_SHARDS=4 DPUMESH_ARM_EGRESS_THREADS=4 DPUMESH_SHARD_SHARED=0 \
+./bench/bench.sh deploy                 # recommended DPU thread config (~5× small-RPC rate; CORE.md §4.1)
 
 ./bench/bench.sh latency|bandwidth|rate|all [dpumesh|tcp|both]   # RPC benchmark vs TCP+Envoy
 ./bench/bench.sh point <sol> <req> <reply> <conc> <dur> <warmup> <threads> [reconn]

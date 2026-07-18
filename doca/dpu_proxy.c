@@ -393,13 +393,33 @@ int px_uport_owner(uint16_t up_port, int m) {
 
 /* ====== pools ====== */
 
-/* Pool freelists are shared (ingest thread allocs, main frees) once the reaper runs;
- * pool_lock guards the brief pointer swap. Uncontended when the reaper is off. */
+/* Per-thread ALLOC magazines. The ingest/shard thread pulls a run of nodes off the shared
+ * free-list under ONE lock, then hands them out lock-free until the magazine empties — the
+ * mirror of main's px_free_batch on the alloc side. Before this, each shard alloc grabbed
+ * pool_lock per message and contended with main's emit-free flush (measured: main ~33% of
+ * its mutex time waiting on that flush). Bounded hoarding: at most PX_MAG_N per type per
+ * thread (<< the ~65536-node pools), and magazines are per-thread so there is no lock on
+ * the hand-out. Nodes stuck in an idle thread's magazine are reclaimed en masse at teardown
+ * (the whole arena is freed). Frees below stay direct (locked) — only the rare cleanup/drop
+ * paths use them; the hot free path is main's batch. */
+#define PX_MAG_N 64
+static __thread struct px_arrival *tls_arr_mag;
+static __thread struct px_piece   *tls_piece_mag;
+static __thread struct px_unit    *tls_unit_mag;
+
 static struct px_arrival *px_arrival_alloc(struct dmesh_proxy *px) {
+    struct px_arrival *a = tls_arr_mag;
+    if (a) { tls_arr_mag = a->next; return a; }
     pthread_mutex_lock(&px->pool_lock);
-    struct px_arrival *a = px->arr_free;
-    if (a) px->arr_free = a->next;
+    a = px->arr_free;
+    if (a) {
+        struct px_arrival *t = a; int got = 1;
+        while (got < PX_MAG_N && t->next) { t = t->next; got++; }
+        px->arr_free = t->next; t->next = NULL;      /* detach the run [a..t] */
+    }
     pthread_mutex_unlock(&px->pool_lock);
+    if (!a) return NULL;
+    tls_arr_mag = a->next;                           /* rest of the run → magazine */
     return a;
 }
 static void px_arrival_free(struct dmesh_proxy *px, struct px_arrival *a) {
@@ -408,10 +428,18 @@ static void px_arrival_free(struct dmesh_proxy *px, struct px_arrival *a) {
     pthread_mutex_unlock(&px->pool_lock);
 }
 static struct px_piece *px_piece_alloc(struct dmesh_proxy *px) {
+    struct px_piece *p = tls_piece_mag;
+    if (p) { tls_piece_mag = p->next; return p; }
     pthread_mutex_lock(&px->pool_lock);
-    struct px_piece *p = px->piece_free;
-    if (p) px->piece_free = p->next;
+    p = px->piece_free;
+    if (p) {
+        struct px_piece *t = p; int got = 1;
+        while (got < PX_MAG_N && t->next) { t = t->next; got++; }
+        px->piece_free = t->next; t->next = NULL;
+    }
     pthread_mutex_unlock(&px->pool_lock);
+    if (!p) return NULL;
+    tls_piece_mag = p->next;
     return p;
 }
 static void px_piece_free(struct dmesh_proxy *px, struct px_piece *p) {
@@ -420,11 +448,19 @@ static void px_piece_free(struct dmesh_proxy *px, struct px_piece *p) {
     pthread_mutex_unlock(&px->pool_lock);
 }
 static struct px_unit *px_unit_alloc(struct dmesh_proxy *px) {
+    struct px_unit *u = tls_unit_mag;
+    if (u) { tls_unit_mag = u->next; memset(u, 0, sizeof(*u)); return u; }
     pthread_mutex_lock(&px->pool_lock);
-    struct px_unit *u = px->unit_free;
-    if (u) px->unit_free = u->next;
+    u = px->unit_free;
+    if (u) {
+        struct px_unit *t = u; int got = 1;
+        while (got < PX_MAG_N && t->next) { t = t->next; got++; }
+        px->unit_free = t->next; t->next = NULL;
+    }
     pthread_mutex_unlock(&px->pool_lock);
-    if (u) memset(u, 0, sizeof(*u));
+    if (!u) return NULL;
+    tls_unit_mag = u->next;
+    memset(u, 0, sizeof(*u));
     return u;
 }
 static void px_unit_free_node(struct dmesh_proxy *px, struct px_unit *u) {
@@ -448,6 +484,58 @@ static void px_batch_free_node(struct px_engine *eng, struct px_batch *b) {
     b->next = eng->batch_free; eng->batch_free = b;
 }
 
+/* ====== batched pool free (main-thread emit hot path) ======
+ *
+ * The emit drain (px_engine_emit, main thread) frees a unit + its pieces + a released
+ * arrival for EVERY completed message, and each px_*_free grabs pool_lock — under load
+ * the ingest shards alloc from the same lock, so main serializes on it (measured ~87% of
+ * main's CPU). This collects the freed nodes into a thread-local chain and returns them
+ * to the shared pool in ONE locked splice per drain span, cutting main's lock traffic by
+ * the batch factor. Pool semantics are unchanged (a freelist is order-agnostic); the only
+ * new invariant is a periodic flush so main never holds so many freed nodes that a
+ * concurrent shard alloc starves. Same mutex, same nodes — just far fewer acquisitions. */
+/* Flush the deferred-free batch after this many units (<< the ~65536-node pools, so a
+ * shard alloc can never starve while main holds a span back). Also cuts main's pool_lock
+ * acquisitions by up to this factor. */
+#define PX_FREE_BATCH_FLUSH  256
+struct px_free_batch {
+    struct px_unit    *u_head, *u_tail;
+    struct px_piece   *p_head, *p_tail;
+    struct px_arrival *a_head, *a_tail;
+    int                n;                 /* units held since the last flush */
+};
+/* Move a unit and its whole piece chain into the batch — no lock. */
+static inline void px_fb_unit(struct px_free_batch *fb, struct px_unit *u) {
+    struct px_piece *ph = u->pieces;
+    if (ph) {
+        struct px_piece *pt = ph;
+        while (pt->next) pt = pt->next;          /* chain tail (usually length 1) */
+        u->pieces = NULL;
+        if (fb->p_head) pt->next = fb->p_head; else fb->p_tail = pt;
+        fb->p_head = ph;
+    }
+    u->next = fb->u_head; fb->u_head = u;
+    if (!fb->u_tail) fb->u_tail = u;
+    fb->n++;
+}
+static inline void px_fb_arr(struct px_free_batch *fb, struct px_arrival *a) {
+    a->next = fb->a_head; fb->a_head = a;
+    if (!fb->a_tail) fb->a_tail = a;
+}
+/* Splice everything collected onto the shared freelists under ONE pool_lock. */
+static void px_free_batch_flush(struct dmesh_proxy *px, struct px_free_batch *fb) {
+    if (!fb->u_head && !fb->p_head && !fb->a_head) return;
+    pthread_mutex_lock(&px->pool_lock);
+    if (fb->u_head) { fb->u_tail->next = px->unit_free;  px->unit_free  = fb->u_head; }
+    if (fb->p_head) { fb->p_tail->next = px->piece_free; px->piece_free = fb->p_head; }
+    if (fb->a_head) { fb->a_tail->next = px->arr_free;   px->arr_free   = fb->a_head; }
+    pthread_mutex_unlock(&px->pool_lock);
+    fb->u_head = fb->u_tail = NULL;
+    fb->p_head = fb->p_tail = NULL;
+    fb->a_head = fb->a_tail = NULL;
+    fb->n = 0;
+}
+
 /* ====== custody ====== */
 
 /* All of this arrival's bytes are accounted (egressed or dropped): return the
@@ -465,6 +553,21 @@ static inline void px_custody_sub(struct objects *objs, struct px_arrival *a, ui
         return;
     if (atomic_fetch_sub_explicit(&a->unfreed, n, memory_order_acq_rel) == n)
         px_arrival_release(objs, a);
+}
+
+/* Batched twin of px_custody_sub for the main emit path: on release, still TX_ACK the
+ * sender immediately (batch_or_send_tx_ack is already coalesced), but defer the arrival's
+ * pool free into fb instead of locking. Identical release semantics — exactly one thread
+ * observes prev==n and owns the arrival, so no double-free even though workers may also
+ * be decrementing the same arrival via the plain px_custody_sub. */
+static inline void px_custody_sub_fb(struct objects *objs, struct px_arrival *a,
+                                     uint32_t n, struct px_free_batch *fb) {
+    if (n == 0)
+        return;
+    if (atomic_fetch_sub_explicit(&a->unfreed, n, memory_order_acq_rel) == n) {
+        batch_or_send_tx_ack(objs, find_pod_by_id(objs, a->ack_pod), a->ack_port, a->ack_seq);
+        px_fb_arr(fb, a);
+    }
 }
 
 /* ====== conn table ====== */
@@ -1832,7 +1935,8 @@ static void px_lane_retire(struct px_engine *eng, struct px_lane *ln) {
 /* ingest: drain one engine's done-queue → REV_DONE + custody + free. Resumable
  * on comch send-pool backpressure (units stay on the engine's ingest-local
  * emit list). Single-consumer (main thread). */
-static int px_engine_emit(struct objects *objs, struct px_engine *eng) {
+static int px_engine_emit(struct objects *objs, struct px_engine *eng,
+                          struct px_free_batch *fb) {
     struct dmesh_proxy *px = objs->proxy;
     /* pull the worker's completed units into the ingest-local drain list */
     pthread_mutex_lock(&eng->done_lock);
@@ -1868,7 +1972,7 @@ static int px_engine_emit(struct objects *objs, struct px_engine *eng) {
                     e.length = 0;
                     e.pos = u->landing_pos;
                     if (!px_emit_rev_entry(objs, pod, &e))
-                        return did;             /* backpressure — resume later */
+                        return did;             /* backpressure — resume later (caller flushes fb) */
                     u->emit_fin_done = 1;
                     did = 1;
                 }
@@ -1880,7 +1984,7 @@ static int px_engine_emit(struct objects *objs, struct px_engine *eng) {
                     e.length = (uint16_t)elen;
                     e.pos = u->landing_pos + u->emit_off;
                     if (!px_emit_rev_entry(objs, pod, &e))
-                        return did;
+                        return did;                     /* backpressure (caller flushes fb) */
                     u->emit_off += elen;
                     did = 1;
                 }
@@ -1889,12 +1993,16 @@ static int px_engine_emit(struct objects *objs, struct px_engine *eng) {
         /* custody: the SG op has read (or abandoned) these staging bytes */
         for (struct px_piece *p = u->pieces; p; p = p->next) {
             struct px_arrival *a = p->arr;
-            px_custody_sub(objs, a, p->len);   /* egressed bytes; release iff last */
+            px_custody_sub_fb(objs, a, p->len, fb);   /* egressed bytes; release (batched) iff last */
         }
         eng->emit_head = u->next;
         if (!eng->emit_head) eng->emit_tail = NULL;
-        px_unit_free_node(px, u);
+        px_fb_unit(fb, u);                     /* batched free (caller splices) */
         did = 1;
+        /* Cap how many freed nodes main holds back, so a concurrent shard alloc can
+         * never starve the pool while the drain span is long. */
+        if (fb->n >= PX_FREE_BATCH_FLUSH)
+            px_free_batch_flush(px, fb);
     }
     return did;
 }
@@ -2263,9 +2371,13 @@ int px_drain(struct objects *objs) {
     if (px->n_eng > 1) {
         /* n_eng>=2: the egress workers do submit+SG-DMA+retire on their own
          * threads; the ingest (main) thread only drains each engine's done-queue
-         * for REV_DONE + custody + pool free. */
+         * for REV_DONE + custody + pool free. One deferred-free batch spans ALL
+         * engines and is spliced back to the pool in a SINGLE locked op per drain,
+         * so main's pool_lock traffic is O(1)/drain instead of O(units). */
+        struct px_free_batch fb = { 0 };
         for (int e = 0; e < px->n_eng; e++)
-            progressed |= px_engine_emit(objs, &px->engines[e]);
+            progressed |= px_engine_emit(objs, &px->engines[e], &fb);
+        px_free_batch_flush(px, &fb);
         return progressed;
     }
     /* single-thread default: engine 0 runs inline on the main thread. */

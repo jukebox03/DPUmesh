@@ -134,9 +134,12 @@ returns the RX credit).
 Exactly **one internal thread** (the PE). Everything else runs on app threads. Channels are lock-free:
 conn **inbox** (SPSC: PE producer, owning app thread consumer), **per-CQ ready list** (SPSC: PE
 producer, that CQ's one polling thread), **TX byte-ring** (SPSC: app owns `tx_w/c/s`, PE owns `tx_f`),
-**accept ring** (SPMC: PE producer, N consumers via CAS), **forward rings** (MPSC). The shared TX block
-pool is lock-free (Treiber); the only mutexes (`port_lock` at create/accept/destroy, `block_lock` at the
-close-drain block handoff, `cq_lock` at CQ register/unregister) are never on the data path.
+**accept ring** (SPMC: PE producer, N consumers via CAS), **forward rings** (MPSC). Within each conn slot
+the PE-written cursors (`in_tail`, `tx_f`, `su_tail`) and the app-written ones (`in_head`, `su_head`) sit on
+**separate cache lines** (the shared `on_ready` flag on its own), so a producer store never invalidates the
+consumer's line. The shared TX block pool is lock-free (Treiber); the only mutexes (`port_lock` at
+create/accept/destroy, `block_lock` at the close-drain block handoff, `cq_lock` at CQ register/unregister)
+are never on the data path.
 
 **The CQ is the unit of RX parallelism** (`struct dmesh_cq`): each owns its ready list and its eventfd,
 and `psl->cq` binds a conn to the CQ that created or accepted it, so `arm_ready_after_push` pushes to
@@ -146,11 +149,16 @@ accepts it owns it thereafter. Measured: the CQ was never the bottleneck (one sh
 scales 4.6× too — multi-CQ is worth ~5% Mrps / ~17% p50 at 8 threads); it exists so the API does not
 bake "one RX consumer per process" into a ceiling the host will hit once the DPU stops binding.
 
-**Readiness is armed from `dmesh_create_cq`, never lazily.** A `notify_enabled` flag used to gate
-`arm_ready_after_push` and was only set by the fd getter — so a client that only ever *polled* silently
-received nothing on established conns (a new conn's first message rides the accept queue, which is not
-gated, so connects worked and replies vanished). The flag is gone; `dmesh_cq_fd` is purely the optional
-idle-sleep path. The eventfd is written **once per delivery** (no coalescing → a wakeup is never lost).
+**The ready list is armed unconditionally; only the wakeup is gated.** `arm_ready_after_push` ALWAYS
+publishes a conn to its CQ's ready list, so a pure poller never misses one. What is gated is the eventfd
+*write*: a per-CQ `wants_notify` flag. A CQ whose fd was never handed out has nobody asleep on it, so the
+PE skips that `write()` — pure waste otherwise, and under fair pinning it would steal the app thread's own
+core (the PE is its sibling). `dmesh_cq_fd` latches `wants_notify` (RELEASE) and self-kicks the fd once, so
+a caller that polled first and only later sleeps cannot miss an already-armed conn. An earlier design gated
+the *arm itself* on the fd getter — so a pure-polling client silently received nothing on established
+conns (a new conn's first message rides the ungated accept queue → connects-work/replies-vanish); gating
+only the write keeps that bug closed while dropping the syscall. For a fd-using consumer the write still
+fires on every empty→non-empty edge (no coalescing → a wakeup is never lost).
 
 **The lost-edge (Dekker) invariant is per-conn and unchanged by multi-CQ:** `psl->on_ready` is armed by
 the PE with a `seq_cst` fence + `acq_rel` exchange after a push, and disarmed by the consumer when
@@ -275,9 +283,20 @@ own PE notification fd / eventfd (epoll: arm → re-check → block, 1 ms backst
   `svc_rr` is a relaxed atomic (a racing double-pick only skews balance); `px_arrival` custody
   (`unfreed`) is an atomic counter — ingest (window release, drops) and emit (egressed bytes)
   decrement it from different threads, and whichever reaches 0 releases exactly once.
-- **Measured** (RESULT.md 2026-07-14): shards = 2 ⇒ +33–44 %; shards = 2 + `n_eng` = 2 ⇒ ≈ 2× the
-  single-funnel small-RPC ceiling. `DPUMESH_DIAG=1` prints a once/sec pipeline dump (batch fill,
-  flush-size histogram, queue depths) that stays quiet while idle.
+- **The proxy object pools are shared but off the per-message lock path.** The three fixed pools
+  (`px_arrival`/`px_piece`/`px_unit`, `pool_lock`) are allocated by the ingest shards and freed by the
+  emit thread. Neither hits the lock per message: each shard allocs from a **per-thread magazine**
+  (`PX_MAG_N` = 64 nodes detached per lock, then handed out lock-free), and the emit thread returns freed
+  nodes through a **batch** spliced back in one locked op per `px_drain` (`PX_FREE_BATCH_FLUSH` = 256 cap,
+  both ≪ the ~65 K-node pools so a shard can never starve). This is what took the emit thread off the lock:
+  profiled at ~87 % of its time in `pool_lock`, it was the single serial funnel that pinned the small-RPC
+  ceiling regardless of shard/engine count — batching both sides is a ~2.5× on top of multithreading.
+  Custody's exactly-once atomic is unchanged, so batched vs direct free is only *where* the node lands.
+- **Measured** (RESULT.md): the single funnel is ~0.10 Mrps; shards = 2 + `n_eng` = 2 ≈ 2×; and once the
+  object pools stopped serializing the emit thread (the magazine + free-batch above), `4 / 4` reaches
+  **~0.5 Mrps** — ~5× the single funnel and ~2× a TCP+Envoy baseline, now scaling with client threads
+  rather than flat. `DPUMESH_DIAG=1` prints a once/sec pipeline dump (batch fill, flush-size histogram,
+  queue depths) that stays quiet while idle.
 
 ### 4.2 Routing — cluster registry + load balancer
 A **service is a cluster** of backend pods (Envoy model). The healthy backend set is **derived from
@@ -485,7 +504,7 @@ Limits: AF_INET `SOCK_STREAM` only; no fork-shared sockets; Go/static/stdio bina
 | `tx_reserve` reserves a message's whole carve (`ceil(len/slot_size)` entries) in the send-unit FIFO before admitting it, and `block_size ≤ TX_SU_DEPTH × slot_size` (clamped at init) | the FIFO is bounded by reserve's admission, not by the block window (a small message costs a slice of a block but a whole FIFO slot). The clamp lets one max-size message fit an empty FIFO, so a full-size post never deadlocks; `tx_next_send` is then always carveable and needs no capacity check |
 | `tx_reserve` probes the block window **before** mutating `tx_w` | on `EAGAIN` the write head must be exactly where it was, or a retry strands the padded tail |
 | `psl->cq` is published with `user` **before** the `role` release-store | `arm_ready_after_push` loads `cq` after an acquire-load of `role`; publishing later would let the PE push to a NULL/stale ready list |
-| readiness is armed at `dmesh_create_cq`, never on first fd request | gating the arm on a fd getter made `poll_cq` silently under-deliver for a pure-polling client (established conns only — a new conn's first message rides the ungated accept queue, hence connects-work/replies-vanish) |
+| the ready-list ARM is unconditional; only the eventfd WRITE is gated (per-CQ `wants_notify`, latched + self-kicked by `dmesh_cq_fd`) | gating the *arm* on a fd getter made `poll_cq` silently under-deliver for a pure-polling client (established conns only — a new conn's first message rides the ungated accept queue, hence connects-work/replies-vanish); gating only the *write* drops the wasted PE syscall for pollers without reopening that hole |
 | host `K` == DPU `K` (`DPUMESH_RINGS_PER_POD`) | forward rings pair 1:1; a mismatch stalls `dma_ready` |
 | `slot_size ≤ 8192` | the DPA `dma_copy` cap (one wire descriptor) |
 | `sizeof(dma_desc) == 64` (one cache line) | the DPA's line-granular `valid=0` writeback must not touch a neighbour |
@@ -495,7 +514,7 @@ Limits: AF_INET `SOCK_STREAM` only; no fork-shared sockets; Go/static/stdio bina
 | all Comch sends on the emit (main) thread, never inside a PE callback | one ctrl PE, not thread-safe; batch accumulators are main-only (ingest defers via `pending_txack`) |
 | a consumer PE is progressed by exactly ONE thread (its shard), which also sends its channels' `WAKE` | DOCA PEs are single-threaded; a foreign submit races the owner's progress (the WAKE race) |
 | ② conntrack is per-shard; `uP` is owner-strided (`(uP − BASE) % M`) | each conntrack stays single-threaded; a backend reply dispatches to its session's owner shard |
-| `px_arrival.unfreed` is atomic; the decrement that reaches 0 releases exactly once | ingest and emit account the same arrival from two threads |
+| `px_arrival.unfreed` is atomic; the decrement that reaches 0 releases exactly once (whether the releaser frees direct or via the emit batch — only *where* the node lands differs) | ingest and emit account the same arrival from two threads; a message fanned to several dst engines is still released once, by main, serially |
 | publish-role-last (host `ports[]`), publish-registered/`dma_ready`-last (DPU `pods[]`) | a reader must never observe a half-built slot |
 | client ports `[1, 32768)`, upstream `uP` `[32768, 65535]` | loopback host holds both roles in one table |
 | `n_eng = 2` (`DPUMESH_ARM_EGRESS_THREADS`) | `n_eng = 1` wedges under egress backpressure |
@@ -509,7 +528,10 @@ Limits: AF_INET `SOCK_STREAM` only; no fork-shared sockets; Go/static/stdio bina
 `TX_SU_DEPTH = 64` (the per-QP in-flight descriptor cap; `tx_reserve` admits against it — §7); `N` DPA EUs
 **auto-detected** = min(device EUs, `MAX_DPA_EU=8`) (BF3 → 8; `DPUMESH_DPA_THREADS` overrides);
 `K = 2` forward rings/pod; per-EU ring cap `MAX_DPA_RINGS = 8` ⇒ concurrent pods ≤ `MAX_DPA_RINGS × N / K`
-(BF3 → 32); `M = 2` ingest shards (`DPUMESH_INGEST_SHARDS`, ② share-nothing) + `n_eng = 2` ARM egress
-workers — the measured ≈2× config; `PX_HEAD_MAX = 4 KB`, `PX_SEAM_MAX = 512 KB`. `DPU_BUFFER_SIZE`,
+(BF3 → 32); `M` ingest shards (`DPUMESH_INGEST_SHARDS`, default 1, ② share-nothing) + `n_eng` ARM egress
+workers (`DPUMESH_ARM_EGRESS_THREADS`, default 1) — the **measured best is `4 / 4`** (~0.5 Mrps; `2 / 2`
+within ~10 %), both far past the single funnel now the object pools no longer serialize the emit thread
+(§4.1); `n_eng = 1` runs inline and wedges under overload, so any parallel config needs ≥ 2;
+`PX_HEAD_MAX = 4 KB`, `PX_SEAM_MAX = 512 KB`. `DPU_BUFFER_SIZE`,
 `slot_size`, and `K` are the constrained ones (§7). A programmatic `dpumesh_config` overrides
 `num_slots`/`slot_size` without a rebuild.

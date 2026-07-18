@@ -5921,3 +5921,126 @@ correctness fix, and this session's mandate was the audit findings).
 Session 5 reported this gap as unattributed and blamed a process error (I stashed the pre-session
 tree). The process error was real, but the regression is now fully explained above and is **not**
 in this session's fixes.
+
+---
+
+# Session 6 — ARM emit-path lock contention: 100K → ~500K RPS (2026-07-18)
+
+Goal: raise latency + throughput, both "far below target". Constraints: keep the public API
+shell identical (internal optimization only), delete/specialize no functionality, keep env
+knobs tunable (don't hardcode EU/thread counts), event-driven (no new busy-spin). Method:
+DIRECT before/after via `bench/bench.sh`, fresh full deploys, gdb-profile the DPU to find
+the real bottleneck. Fair pin unless noted. 32B req / 8B reply.
+
+## Baseline (HEAD d9f5f41, config n_shards=1 n_eng=1 — the bare-`deploy` default)
+
+| test | metric | value |
+|---|---|---|
+| conc=1 | p50 / p99 | 114 µs / ~413 µs |
+| 1-thr conc64 | throughput / p50 | 0.101 Mrps / 629 µs |
+| 4-thr conc32 | throughput / p50 | 0.099 Mrps / 1276 µs |
+| verbs 8K w1p1 | p50 | 94.5 µs |
+| verbs 64 w4p8 | p50 | 145.5 µs |
+| preload (shim) 1K×8 | p50 / rps | 122 µs / 25.8K |
+| **TCP ref** conc1 / t4c32 | p50 / Mrps | 86 µs / 0.258 |
+
+Throughput is FLAT vs client threads (1thr 0.101, 4thr 0.099) → DPU-side single-thread wall,
+not the client.
+
+## Host-side internal opts (src/dmesh_core.{c,h}; public API untouched)
+- **notification gating**: `struct dmesh_cq.wants_notify`; `cq_notify` skips the per-message
+  `eventfd` write for poll-only CQs (RPC bench + verbs client never call `dmesh_cq_fd`).
+  `dmesh_cq_fd` latches it + self-kicks (closes the arm race). Same signature/contract.
+- **false-sharing split**: `dmesh_port_slot` PE-written atomics (in_tail/tx_f/su_tail) vs
+  owner-written (in_head/su_head) on separate cache lines; `on_ready` its own line.
+- Effect isolated at (1,1): conc=1 p50 114 (unchanged floor), p99 ~413→~370. Throughput
+  unchanged (DPU-bound). No regression; helps host CPU at scale + real multi-core pinning.
+
+## DPU multithreading sweep (env knobs, NOT hardcoded; host code constant)
+
+| n_shards, n_eng | extra | t1c64 Mrps | t4c32 Mrps | note |
+|---|---|---|---|---|
+| 1, 1 | — | 0.101 | 0.099 | default (slow) |
+| 2, 2 | share-nothing | 0.178 | 0.182 | +82% |
+| 4, 4 | share-nothing | 0.186 | 0.182 | +85%, plateau |
+| 4, 4 | + SHARD_HOST_EMIT=1 | 0.180 | — | no help (③ scaffold) |
+| 4, 4 | + RINGS_PER_POD(K)=4 | 0.172 | — | WORSE (more forward EUs ≠ help) |
+
+Plateau ~185K invariant across eng/shards 2/4/8, host_emit, K, and concurrency 64→512.
+DPA auto-detects N=8 EUs (cap MAX_DPA_EU=8, device has 254), 6/8 used → DPA has headroom,
+NOT the wall.
+
+## Root-cause: gdb profile of the DPU under load (the decisive step)
+`gdb -p <dpumesh_dpu> -batch -ex 'thread 1' -ex 'bt 3'` ×15, histogram top frame:
+- **main (thread 1) = 87% in `lll_mutex_lock/unlock` = the proxy `pool_lock`** — every emitted
+  message frees unit+pieces+arrival under it in `px_engine_emit`, contending with the ingest
+  shards' allocs.
+- the "4 egress workers at 100% CPU" were in `sched_yield` (idle-spin, STARVED by main) — a
+  red herring.
+So the wall was ONE serialized ARM thread on a lock, not thread count and not the DPA.
+
+## Fix A — batch main's pool frees (dpu_proxy.c)
+`px_free_batch`: main collects freed unit/piece/arrival into a thread-local chain and splices
+them onto the pool in ONE locked op per drain iteration (hoisted to `px_drain` across all
+engines); `px_custody_sub_fb` defers the arrival free (still TX_ACKs inline). Cap
+`PX_FREE_BATCH_FLUSH=256` << the ~65536-node pools (no shard-alloc starvation). Same mutex,
+same nodes, far fewer acquisitions.
+
+| config | before A | after A |
+|---|---|---|
+| t1c64 | 0.186 | 0.259 (+39%) |
+| t4c32 | 0.182 | 0.243 (+34%) |
+
+Re-profile: main mutex 87% → ~75%, now split pool_lock-flush + `libdoca_comch` send.
+
+## Fix B — per-thread ALLOC magazine (dpu_proxy.c)
+Deep profile showed main's residual mutex was ~33% `px_free_batch_flush` (pool_lock, still
+contending with the SHARD allocs which lock per message) + ~42% inside `libdoca_comch`
+(`doca_task_submit`, closed lib). Mirror of Fix A on the alloc side: each ingest/shard thread
+pulls a run of `PX_MAG_N=64` nodes off the shared free-list under one lock, then hands them
+out lock-free (`tls_*_mag`). This removed the alloc-side contention that had been throttling
+multi-conn.
+
+| config | before B (Fix A only) | after B (A+B) |
+|---|---|---|
+| t1c64 | 0.259 | 0.283 |
+| **t4c32** | 0.243 | **0.432–0.490** (+79%) |
+| **t8c32** | ~0.25 | **0.523–0.536** |
+| t4c64 | ~0.25 | 0.483–0.502 |
+
+Re-profile: main now MOSTLY real work (`doca_pe_progress`, `px_custody_sub_fb`), only ~33%
+mutex. hw6 pin ≈ fair (~0.45–0.48) → client cores not the hard limit.
+
+## Fix C attempt — comch REV_DONE batch 16→32 (comch_common.h): REVERTED
+Hypothesis: fewer/larger comch sends cut the `libdoca_comch` lock. Result: t4c64 0.502,
+t8c32 0.478 — NO improvement over =16, and it is a wire-ABI change + adds reply-delivery
+latency at load + the historical REVDONE hang risk. **Reverted to 16.** Finding: after A+B,
+the comch send is NOT the throughput wall — main is balanced; the "comch bottleneck" was
+downstream of the pool-lock contention that A+B removed.
+
+## FINAL — config (4,4) share-nothing, all fixes (host + A + B), REV_DONE=16
+
+| test | baseline | FINAL | Δ |
+|---|---|---|---|
+| **throughput t8c32** | 0.099 | **0.536 Mrps** | **+441%** |
+| throughput t4c64 | — | 0.483 | |
+| throughput t4c32 | 0.099 | 0.432 | +336% |
+| throughput t1c64 | 0.101 | 0.283 | +180% |
+| loaded lat t4c32 p50 | 1276 µs | 293 µs | −77% |
+| conc=1 p50 / p99 | 114 / ~413 | 114 / ~227 | p99 −45% |
+| verbs 8K / 64 p50 | 94.5 / 145.5 | 103 / 128 | 64B −12% |
+| preload p50 / rps | 122 / 25.8K | 130 / 24K | ~flat |
+| validators (loopback/verbs/preload/stream) | 0-fail | **0-fail + byte-exact** | no regression |
+
+**~536K now vs TCP's 258K (2.1×).** conc=1 latency floor 114µs is the DPU-pipeline traversal
+(verbs self-loop 94µs) — unchanged; not safely reducible without a pipeline-stage rewrite.
+
+## Operating config (env, keep TUNABLE — never hardcode)
+- max throughput / loaded latency: `DPUMESH_INGEST_SHARDS=4 DPUMESH_ARM_EGRESS_THREADS=4
+  DPUMESH_SHARD_SHARED=0` (deployed).
+- resource-efficient: `2 2 0` (~within 10-15%).
+- min low-load latency: `1 1` (fewest handoffs; verbs 8K ~94µs).
+
+## Diff (internal only; public `<dpumesh/dmesh.h>` untouched; no bench/DPA-kernel changes)
+`doca/dpu_proxy.c` (free-batch + alloc magazine), `src/dmesh_core.c` + `src/dmesh_core.h`
+(notification gating + false-sharing).

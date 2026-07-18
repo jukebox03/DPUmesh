@@ -222,8 +222,8 @@ Each family prints a table and writes a CSV. Knobs (env): `OUT`, `LAT_DUR`,
 `LAT_SIZES`, `BW_SIZES`. `deploy`/`pin` read `.env` at the repo root (DPU ssh
 target, sudo passwords, PCIe addrs); benchmark runs need only `kubectl` + `nc`.
 DPU-side thread knobs pass straight through `deploy` to the DPU process —
-`DPUMESH_INGEST_SHARDS=2 DPUMESH_ARM_EGRESS_THREADS=2 ./bench/bench.sh deploy`
-is the measured config (design/CORE.md §4.1).
+`DPUMESH_INGEST_SHARDS=4 DPUMESH_ARM_EGRESS_THREADS=4 DPUMESH_SHARD_SHARED=0 ./bench/bench.sh deploy`
+is the recommended config (design/CORE.md §4.1).
 
 ## 6. Layout / build
 
@@ -244,14 +244,17 @@ is the measured config (design/CORE.md §4.1).
   deploy and a `shards=2 + egress2` deploy differ by ~2×, and the greeter payload
   (32 B/8 B vs 1 KB/1 KB) matters too. Comparing across them fabricates a
   regression exactly the size of the config delta. Match the config first.
-* **The default deploy pins to ~0.097 Mrps** regardless of concurrency, threads,
-  or payload, with p50 = N/0.097 (pure Little's law). That flat line is the
-  **unsharded DPU funnel ceiling**, not a host bottleneck. With
-  `DPUMESH_INGEST_SHARDS=2 DPUMESH_ARM_EGRESS_THREADS=2` the ceiling is ~0.20.
-* **Thread scaling is only observable below saturation.** At conc=64 one thread
-  already saturates the DPU, so the sweep cannot rise no matter what the host
-  does. At conc=4/thread it scales ~6.8× from 1→4 threads with p50 roughly flat;
-  past the DPU cap, extra threads only add queueing delay.
+* **The default deploy pins to ~0.10 Mrps** regardless of concurrency, threads,
+  or payload, with p50 = N/0.10 (pure Little's law). That flat line is the
+  **unsharded, single-emit-thread ceiling** — the proxy `pool_lock` serialized the
+  emit thread — not a host bottleneck. `DPUMESH_INGEST_SHARDS=2
+  DPUMESH_ARM_EGRESS_THREADS=2` lifts it to ~0.2, and `4 / 4` (with the batched
+  object pools, design/CORE.md §4.1) to **~0.5**.
+* **Thread scaling depends on the DPU config.** On the default/single-funnel
+  deploy one thread already saturates the DPU and the sweep stays flat. With the
+  recommended `4 / 4` config the emit thread is no longer the wall, so aggregate
+  rate rises with client threads (t1×conc64 ~0.28 → t8×conc32 ~0.54 Mrps); past the
+  DPU cap, extra threads only add queueing delay.
 * **Client threads share nothing on RX** (one CQ each). The *server* still
   delivers through one PE thread. DPU-side transport parallelism is a deploy-time
   knob (`INGEST_SHARDS` + `ARM_EGRESS_THREADS`, design/CORE.md §4.1). For a real
