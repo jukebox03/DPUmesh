@@ -8,6 +8,7 @@
 #include "comch_client.h"
 #include "comch_server.h"
 #include "dpa.h"
+#include "dpa_common.h"
 #include <dpumesh/dmesh_common.h>
 DOCA_LOG_REGISTER(COMCH_COMMON);
 
@@ -52,13 +53,28 @@ export_mmap_to_remote(struct objects *objs, struct doca_mmap *mmap, void *buffer
 
 doca_error_t
 process_mmap_msg(struct objects *objs, struct doca_comch_connection *conn,
-                 struct dmesh_mmap_msg *mmap_msg)
+                 struct dmesh_mmap_msg *mmap_msg, size_t msg_len)
 {
 	doca_error_t result;
-	struct doca_mmap **mmap;
+	struct doca_mmap *imported_mmap = NULL;
+	if (msg_len < sizeof(struct dmesh_mmap_msg)) {
+		DOCA_LOG_ERR("MMAP message shorter than its fixed header: %zu", msg_len);
+		return DOCA_ERROR_INVALID_VALUE;
+	}
 	void *remote_addr = (void *)ntohq((uint64_t)mmap_msg->host_addr);
 	size_t buf_size = ntohq(mmap_msg->buf_size);
 	size_t export_desc_len = ntohq(mmap_msg->export_desc_len);
+	if (export_desc_len == 0 ||
+	    export_desc_len != msg_len - sizeof(struct dmesh_mmap_msg)) {
+		DOCA_LOG_ERR("Invalid MMAP descriptor length: desc=%zu message=%zu header=%zu",
+		             export_desc_len, msg_len, sizeof(struct dmesh_mmap_msg));
+		return DOCA_ERROR_INVALID_VALUE;
+	}
+	if (remote_addr == NULL || buf_size == 0) {
+		DOCA_LOG_ERR("Invalid remote mmap metadata: remote_addr=%p buf_size=%zu",
+		             remote_addr, buf_size);
+		return DOCA_ERROR_INVALID_VALUE;
+	}
 
 	DOCA_LOG_INFO("remote_addr: %p, buf_size: %zu, export_desc_len: %zu",
 		      remote_addr, buf_size, export_desc_len);
@@ -70,42 +86,88 @@ process_mmap_msg(struct objects *objs, struct doca_comch_connection *conn,
 		DOCA_LOG_ERR("process_mmap_msg: no pod found for connection");
 		return DOCA_ERROR_NOT_FOUND;
 	}
+	if (!__atomic_load_n(&pod->registered, __ATOMIC_ACQUIRE)) {
+		DOCA_LOG_ERR("process_mmap_msg: connection has not registered a pod");
+		return DOCA_ERROR_BAD_STATE;
+	}
+	if (pod->init_result != DMESH_POD_INIT_PENDING) {
+		DOCA_LOG_ERR("Pod %d: MMAP arrived after terminal init result=%d",
+		             pod->pod_id, pod->init_result);
+		return DOCA_ERROR_BAD_STATE;
+	}
 
 	int kmax = objs->k_rings > 0 ? objs->k_rings : 1;
 	if (mmap_msg->mmap_type == DMA_RING) {
-		/* K forward rings arrive in order; store into ring_mmaps[0..K-1]. */
-		if (pod->ring_mmap_count >= kmax) {
-			DOCA_LOG_ERR("Pod %d: extra DMA_RING export (count=%d k=%d) ignored",
+		/* The protocol is deliberately ordered: exactly K rings, then TX, then
+		 * RX. This turns a host/DPU K mismatch into an explicit failure instead
+		 * of an indefinitely pending pod. */
+		if (pod->ring_mmap_count >= kmax || pod->remote_mmap != NULL ||
+		    pod->host_rx_mmap != NULL) {
+			DOCA_LOG_ERR("Pod %d: out-of-order/extra DMA_RING (count=%d k=%d)",
 				     pod->pod_id, pod->ring_mmap_count, kmax);
 			return DOCA_ERROR_INVALID_VALUE;
 		}
-		mmap = &pod->ring_mmaps[pod->ring_mmap_count];
 	} else if (mmap_msg->mmap_type == DMA_BUFFER) {
-		mmap = &pod->remote_mmap;
+		if (pod->ring_mmap_count != kmax || pod->remote_mmap != NULL ||
+		    pod->host_rx_mmap != NULL) {
+			DOCA_LOG_ERR("Pod %d: out-of-order/duplicate TX mmap (rings=%d/%d)",
+			             pod->pod_id, pod->ring_mmap_count, kmax);
+			return DOCA_ERROR_INVALID_VALUE;
+		}
 	} else if (mmap_msg->mmap_type == DMA_HOST_RX_BUFFER) {
-		mmap = &pod->host_rx_mmap;
+		if (pod->ring_mmap_count != kmax || pod->remote_mmap == NULL ||
+		    pod->host_rx_mmap != NULL) {
+			DOCA_LOG_ERR("Pod %d: out-of-order/duplicate RX mmap (rings=%d/%d tx=%p)",
+			             pod->pod_id, pod->ring_mmap_count, kmax,
+			             (void *)pod->remote_mmap);
+			return DOCA_ERROR_INVALID_VALUE;
+		}
 	} else {
 		DOCA_LOG_ERR("Invalid mmap type received: %d", mmap_msg->mmap_type);
+		return DOCA_ERROR_INVALID_VALUE;
+	}
+
+	/* Validate the imported range before giving it to DOCA/DPA. The ring shape is
+	 * wire ABI; TX offsets mirror into a fixed DPU staging buffer; RX is split
+	 * into K regions at 8 KiB credit granularity. */
+	if (((uintptr_t)remote_addr & 127u) != 0) {
+		DOCA_LOG_ERR("Pod %d: mmap base is not 128-byte aligned: %p",
+		             pod->pod_id, remote_addr);
+		return DOCA_ERROR_INVALID_VALUE;
+	}
+	if (mmap_msg->mmap_type == DMA_RING &&
+	    buf_size != (DMA_RING_SIZE + 1u) * sizeof(struct dma_desc)) {
+		DOCA_LOG_ERR("Pod %d: invalid ring bytes=%zu expected=%zu", pod->pod_id,
+		             buf_size, (DMA_RING_SIZE + 1u) * sizeof(struct dma_desc));
+		return DOCA_ERROR_INVALID_VALUE;
+	}
+	if (mmap_msg->mmap_type == DMA_BUFFER && buf_size > DPU_BUFFER_SIZE) {
+		DOCA_LOG_ERR("Pod %d: TX mmap bytes=%zu exceed DPU staging=%u",
+		             pod->pod_id, buf_size, (unsigned)DPU_BUFFER_SIZE);
+		return DOCA_ERROR_INVALID_VALUE;
+	}
+	if (mmap_msg->mmap_type == DMA_HOST_RX_BUFFER &&
+	    (buf_size != pod->remote_buf_size ||
+	     buf_size < (size_t)kmax * DPUMESH_SLOT_SIZE ||
+	     buf_size % ((size_t)kmax * DPUMESH_SLOT_SIZE) != 0)) {
+		DOCA_LOG_ERR("Pod %d: invalid RX bytes=%zu (TX=%zu K=%d slot=%d)",
+		             pod->pod_id, buf_size, pod->remote_buf_size, kmax,
+		             DPUMESH_SLOT_SIZE);
 		return DOCA_ERROR_INVALID_VALUE;
 	}
 
 	result = doca_mmap_create_from_export(NULL, mmap_msg->export_desc,
 					      export_desc_len,
 					      objs->dev,
-					      mmap);
+					      &imported_mmap);
 	if (result != DOCA_SUCCESS) {
 		DOCA_LOG_ERR("Failed to create remote mmap from export desc: %s",
 			     doca_error_get_name(result));
 		return result;
 	}
 
-	if (remote_addr == NULL || buf_size == 0) {
-		DOCA_LOG_ERR("Invalid remote mmap metadata: remote_addr=%p buf_size=%zu",
-			     remote_addr, buf_size);
-		return DOCA_ERROR_INVALID_VALUE;
-	}
-
 	if (mmap_msg->mmap_type == DMA_HOST_RX_BUFFER) {
+		pod->host_rx_mmap = imported_mmap;
 		pod->host_rx_addr = remote_addr;
 		pod->host_rx_buf_size = buf_size;
 		/* rq_depth derived from host_rx buffer size: num_slots × slot_size. */
@@ -113,9 +175,11 @@ process_mmap_msg(struct objects *objs, struct doca_comch_connection *conn,
 		DOCA_LOG_INFO("Pod %d: Host RX buffer stored (addr=%p, size=%zu, rq_depth=%u)",
 			      pod->pod_id, remote_addr, buf_size, pod->rq_depth);
 	} else if (mmap_msg->mmap_type == DMA_BUFFER) {
+		pod->remote_mmap = imported_mmap;
 		pod->remote_addr = remote_addr;
 		pod->remote_buf_size = buf_size;
 	} else { /* DMA_RING */
+		pod->ring_mmaps[pod->ring_mmap_count] = imported_mmap;
 		/* Save this forward ring's host base VA (same index the ring mmap was
 		 * stored at above). The proxy egress admission (dpu_proxy.c) DMA-reads
 		 * the host freed counter at base + DMA_RING_SIZE*sizeof(dma_desc) — the
@@ -129,7 +193,9 @@ process_mmap_msg(struct objects *objs, struct doca_comch_connection *conn,
 		      pod->ring_mmap_count, kmax,
 		      (void *)pod->remote_mmap, (void *)pod->host_rx_mmap);
 
-	/* Trigger per-pod DMA setup when both forward-direction mmaps have arrived.
+	/* Trigger per-pod DMA setup only after every host-exported mapping has
+	 * arrived. In particular, dma_ready must never become visible before the RX
+	 * landing mmap exists: READY is a full-duplex channel contract.
 	 * setup_pod_dma sends ADD_RING to the DPA (forward rings only; the DPU→host
 	 * reverse path is the ARM SG-DMA egress engine, not a DPA ring).
 	 * Rare (pod registration), off the steady path; runs on the single
@@ -140,7 +206,8 @@ process_mmap_msg(struct objects *objs, struct doca_comch_connection *conn,
 	 * would run before the msgq exists and the pod would never reach dma_ready.
 	 * Until dpu_ready, the mmaps are just stored; run_dpu_worker runs a deferred
 	 * setup pass for such pods right after init. */
-	if (objs->dpu_ready && pod->ring_mmap_count >= kmax && pod->remote_mmap && !pod->dma_ready) {
+	if (objs->dpu_ready && pod->ring_mmap_count == kmax && pod->remote_mmap &&
+	    pod->host_rx_mmap && !pod->dma_ready) {
 		result = setup_pod_dma(objs, pod);
 		if (result != DOCA_SUCCESS) {
 			DOCA_LOG_ERR("setup_pod_dma failed for pod %d: %s",
@@ -154,7 +221,7 @@ process_mmap_msg(struct objects *objs, struct doca_comch_connection *conn,
 	 * path lands into its OWN ctx->rx_dma_buffer and never reads an imported DPU
 	 * mmap, so there is nothing to store. (The DPU no longer sends this either;
 	 * see setup_pod_dma in dpa.c.) */
-	(void)objs; (void)conn; (void)result; (void)mmap;
+	(void)objs; (void)conn; (void)result; (void)imported_mmap;
 	(void)remote_addr; (void)buf_size; (void)export_desc_len;
 #endif
 

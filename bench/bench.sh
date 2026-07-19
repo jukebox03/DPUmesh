@@ -296,14 +296,24 @@ scale_up_with_wait() {
     fi
     info "$app pod Ready"
     if [ -n "$expected_log" ]; then
-        info "Waiting for DPU register: $expected_log"
+        # Kubernetes Ready only says the container process exists; it does not
+        # prove that DPUmesh finished its two-phase register + mmap/DPA setup.
+        # Wait on the host's authoritative POD_INIT_READY log instead of the old
+        # DPU diagnostic "pods: N" text (which was neither stable nor a full
+        # data-readiness signal).
+        info "Waiting for DPUmesh init: $app ($expected_log)"
         local attempts=0
-        while [ $attempts -lt 15 ]; do
-            local line; line=$(ssh "$DPU_HOST" "echo '$DPU_PASS' | sudo -S tail -3 $DPU_LOG" 2>&1 | sed 's/^\[sudo\][^:]*: *//' || true)
-            if echo "$line" | grep -q "$expected_log"; then info "DPU registered ($expected_log)"; return 0; fi
+        while [ $attempts -lt 35 ]; do
+            local line; line=$(kubectl logs -n "$NS" -l "app=$app" --tail=80 2>/dev/null || true)
+            if echo "$line" | grep -q "$expected_log"; then
+                info "$app DPUmesh data-ready"
+                return 0
+            fi
             sleep 1; attempts=$((attempts+1))
         done
-        warn "DPU register timeout — continuing"
+        err "$app did not reach DPUmesh data-ready state"
+        kubectl logs -n "$NS" -l "app=$app" --tail=80 2>/dev/null || true
+        exit 1
     fi
 }
 
@@ -314,16 +324,17 @@ scale_up_with_wait() {
 # regardless of proxy mode (only the `stream` RUN itself needs DPUMESH_PROXY=frame).
 start_pods() {
     step "=== Starting pods (innermost first) ==="
-    scale_up_with_wait "echo-dpumesh"     "pods: 1"
-    scale_up_with_wait "echo-dpumesh-13"  ""
-    scale_up_with_wait "echo-dpumesh-14"  ""
-    scale_up_with_wait "bench-dpumesh"    "pods: 2"
-    scale_up_with_wait "bench-dpumesh-2"  ""     # extra meshed clients for N-pod amortization
-    scale_up_with_wait "bench-dpumesh-3"  ""
-    scale_up_with_wait "loopback-dpumesh" "pods: 3"
-    scale_up_with_wait "preload-dpumesh"  "pods: 4"
-    scale_up_with_wait "verbs-dpumesh"    ""
-    scale_up_with_wait "stream-dpumesh"   ""
+    local ready="DPU pod is data-ready"
+    scale_up_with_wait "echo-dpumesh"     "$ready"
+    scale_up_with_wait "echo-dpumesh-13"  "$ready"
+    scale_up_with_wait "echo-dpumesh-14"  "$ready"
+    scale_up_with_wait "bench-dpumesh"    "$ready"
+    scale_up_with_wait "bench-dpumesh-2"  "$ready"  # extra meshed clients for N-pod amortization
+    scale_up_with_wait "bench-dpumesh-3"  "$ready"
+    scale_up_with_wait "loopback-dpumesh" "$ready"
+    scale_up_with_wait "preload-dpumesh"  "$ready"
+    scale_up_with_wait "verbs-dpumesh"    "$ready"
+    scale_up_with_wait "stream-dpumesh"   "$ready"
     scale_up_with_wait "echo-tcp"  ""
     scale_up_with_wait "bench-tcp" ""
     scale_up_with_wait "bench-direct" ""     # direct-TCP client (targets echo_sock, no sidecar)

@@ -19,6 +19,20 @@ DOCA_LOG_REGISTER(COMCH_CLIENT);
 #define SLEEP_IN_NANOS (10 * 1000)	       /* Sample tasks every 10 microseconds */
 #endif
 
+#define COMCH_CLIENT_CONNECT_TIMEOUT_MS 10000
+
+static int
+elapsed_ms(const struct timespec *start, const struct timespec *now)
+{
+	time_t sec = now->tv_sec - start->tv_sec;
+	long nsec = now->tv_nsec - start->tv_nsec;
+	if (nsec < 0) {
+		sec--;
+		nsec += 1000000000L;
+	}
+	return (int)(sec * 1000 + nsec / 1000000L);
+}
+
 /**
  * Callback for client send task successful completion
  *
@@ -92,6 +106,10 @@ static void client_message_recv_callback(struct doca_comch_event_msg_recv *event
 	}
 
 	objs = (struct objects *)user_data.ptr;
+	if (msg_len == 0) {
+		DOCA_LOG_ERR("Received empty message from server");
+		return;
+	}
 
 	/* Dispatch on the 1-byte type at offset 0. */
 	switch (recv_buffer[0])
@@ -115,12 +133,55 @@ static void client_message_recv_callback(struct doca_comch_event_msg_recv *event
 		if (msg_len >= sizeof(struct dmesh_pod_assigned_msg)) {
 			const struct dmesh_pod_assigned_msg *am =
 				(const struct dmesh_pod_assigned_msg *)recv_buffer;
-			__atomic_store_n(&objs->assigned_pod_id, am->pod_id, __ATOMIC_RELEASE);
+			if (am->pod_id >= 0 && am->pod_id < POD_ID_SPACE)
+				__atomic_store_n(&objs->assigned_pod_id, am->pod_id, __ATOMIC_RELEASE);
+			else
+				DOCA_LOG_ERR("DPU returned invalid assigned pod_id=%d", am->pod_id);
+		}
+		break;
+
+	case DMESH_MSG_POD_INIT_RESULT:
+		if (msg_len >= sizeof(struct dmesh_pod_init_result_msg)) {
+			const struct dmesh_pod_init_result_msg *im =
+				(const struct dmesh_pod_init_result_msg *)recv_buffer;
+			if (im->result >= DMESH_POD_INIT_READY &&
+			    im->result <= DMESH_POD_INIT_DPA_FAILED) {
+				int32_t assigned = __atomic_load_n(&objs->assigned_pod_id,
+				                                           __ATOMIC_ACQUIRE);
+				if (im->result == DMESH_POD_INIT_REGISTER_FAILED ||
+				    (assigned >= 0 && im->pod_id == assigned)) {
+					__atomic_store_n(&objs->pod_init_result, im->result,
+					                 __ATOMIC_RELEASE);
+				} else {
+					DOCA_LOG_ERR("Ignoring pod init result for unexpected pod_id=%d (assigned=%d)",
+					             im->pod_id, assigned);
+				}
+			} else {
+				DOCA_LOG_ERR("Ignoring invalid pod init result=%d", im->result);
+			}
+		} else {
+			DOCA_LOG_ERR("Short POD_INIT_RESULT message: %u", msg_len);
+		}
+		break;
+
+	case DMESH_MSG_POD_QUIESCED:
+		if (msg_len == sizeof(struct dmesh_pod_quiesced_msg)) {
+			const struct dmesh_pod_quiesced_msg *qm =
+				(const struct dmesh_pod_quiesced_msg *)recv_buffer;
+			int32_t assigned = __atomic_load_n(&objs->assigned_pod_id,
+			                                           __ATOMIC_ACQUIRE);
+			if (qm->pod_id == assigned)
+				__atomic_store_n(&objs->pod_quiesced, 1, __ATOMIC_RELEASE);
+			else
+				DOCA_LOG_WARN("Ignoring POD_QUIESCED for pod_id=%d (assigned=%d)",
+				              qm->pod_id, assigned);
+		} else {
+			DOCA_LOG_ERR("Invalid POD_QUIESCED message size: %u", msg_len);
 		}
 		break;
 
 	default:
-		DOCA_LOG_INFO("Received unknown message type from server: %u", recv_buffer[0]);
+        DOCA_LOG_WARN("Received unknown message type from server: %u", recv_buffer[0]);
 		break;
 	}
 }
@@ -298,24 +359,53 @@ doca_error_t init_comch_ctrl_path_client(const char *server_name,
 		goto destroy_client;
 	}
 
-	(void)doca_ctx_get_state(ctx, &state);
+	result = doca_ctx_get_state(ctx, &state);
+	if (result != DOCA_SUCCESS)
+		goto destroy_client;
+	struct timespec connect_start, now;
+	clock_gettime(CLOCK_MONOTONIC, &connect_start);
 	while (state != DOCA_CTX_STATE_RUNNING) {
 		(void)doca_pe_progress(objs->pe);
-		nanosleep(&ts, &ts);
-		(void)doca_ctx_get_state(ctx, &state);
+		nanosleep(&ts, NULL);
+		result = doca_ctx_get_state(ctx, &state);
+		if (result != DOCA_SUCCESS)
+			goto destroy_client;
+		if (state == DOCA_CTX_STATE_IDLE) {
+			DOCA_LOG_ERR("CC client returned to IDLE before connecting");
+			result = DOCA_ERROR_NOT_CONNECTED;
+			goto destroy_client;
+		}
+		clock_gettime(CLOCK_MONOTONIC, &now);
+		if (elapsed_ms(&connect_start, &now) >= COMCH_CLIENT_CONNECT_TIMEOUT_MS) {
+			DOCA_LOG_ERR("Timed out after %d ms connecting CC client",
+			             COMCH_CLIENT_CONNECT_TIMEOUT_MS);
+			result = DOCA_ERROR_TIME_OUT;
+			goto destroy_client;
+		}
 	}
 
-	(void)doca_comch_client_get_connection(objs->cc_client, &objs->connection);
-	doca_comch_connection_set_user_data(objs->connection, user_data);
+	result = doca_comch_client_get_connection(objs->cc_client, &objs->connection);
+	if (result != DOCA_SUCCESS || objs->connection == NULL) {
+		DOCA_LOG_ERR("Failed to get CC client connection: %s",
+		             doca_error_get_name(result));
+		if (result == DOCA_SUCCESS)
+			result = DOCA_ERROR_NOT_CONNECTED;
+		goto destroy_client;
+	}
+	result = doca_comch_connection_set_user_data(objs->connection, user_data);
+	if (result != DOCA_SUCCESS) {
+		DOCA_LOG_ERR("Failed to set CC connection user data: %s",
+		             doca_error_get_name(result));
+		goto destroy_client;
+	}
 	DOCA_LOG_INFO("CC client connection established successfully");
 
     return DOCA_SUCCESS;
 
 destroy_client:
-    doca_comch_client_destroy(objs->cc_client);
-    objs->cc_client = NULL;    
 destroy_pe:
-    doca_pe_destroy(objs->pe);
-    objs->pe = NULL;
+    /* The caller owns `objs` and always runs cleanup_objects on failure. Leave
+     * partially started contexts intact so the shared stop→IDLE→destroy path is
+     * used instead of destroying a RUNNING/STARTING object in-place. */
     return result;
 }

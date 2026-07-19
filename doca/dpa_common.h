@@ -36,6 +36,13 @@ struct dpa_thread_arg {
 	uint64_t dpa_consumer;
 	uint32_t dpu_consumer_id; /* DPU-side comch consumer ID for DPA->DPU sends */
 	uint32_t eu_index; /* which EU this thread is (0..N-1) */
+	/* Generation of rings[0]. The first ring is installed by h2d_memcpy before
+	 * the EU starts rather than by RING_ADD; run_dma_manager echoes this in an
+	 * ADD_ACK as its first action so ARM readiness proves the EU actually ran. */
+	uint32_t initial_generation;
+	/* doca_dpa_dev_thread_reschedule restarts the global entry function, so this
+	 * persistent device-memory guard is required to emit the initial ACK once. */
+	uint32_t initial_ack_sent;
 
 	/* Forward rings (CPU→DPU, per-pod). Reverse (DPU→host) egress is the ARM
 	 * SG-DMA engine (dpu_proxy.c), not a DPA ring — no reverse ring state here.
@@ -45,6 +52,10 @@ struct dpa_thread_arg {
 	uint32_t _pad2;
 	struct dpa_ring_info rings[MAX_DPA_RINGS];
 	uint32_t desc_idx[MAX_DPA_RINGS];
+	/* Incarnation paired with rings[]. Kept parallel rather than changing
+	 * dpa_ring_info's exported-handle ABI. Every FWD_DONE echoes this value so
+	 * ARM can reject a completion left in its queue across pod-slot reuse. */
+	uint32_t ring_generation[MAX_DPA_RINGS];
 } __attribute__((__packed__, aligned(8)));
 
 /* ====== Per-message payload layout ======
@@ -70,6 +81,8 @@ enum dpa_msg_type {
 	DPA_MSG_WAKE     = 2, /* DPU→DPA: wake up the EU thread (no payload) */
 	DPA_MSG_FWD_DONE = 3, /* DPA→DPU: forward DMA completed (CPU→DPU) */
 	DPA_MSG_RING_DEL = 4, /* DPU→DPA: drop this pod's forward ring from rings[] */
+	DPA_MSG_RING_ADD_ACK = 5, /* DPA→DPU: ring installed (or rejected) */
+	DPA_MSG_RING_DEL_ACK = 6, /* DPA→DPU: ring removed; prior DMA ops are fenced */
 	/* Reverse (DPU→host) egress is the ARM SG-DMA engine (dpu_proxy.c), not a DPA
 	 * ring: there is no REV_RING_ADD / REV_DONE on this channel anymore. */
 };
@@ -79,18 +92,41 @@ enum dpa_msg_type {
  * (pod_id is a recycled slot index and k_j = (pod_id*K + j) % N, so a reconnecting
  * pod returns to the same EUs). dpa.c clamps K <= N, making k_j injective over j: an
  * EU holds at most one ring per pod, so pod_id alone identifies the entry to drop.
- * Fire-and-forget, like every message on this channel. */
+ * RING_DEL and RING_ADD both have explicit ACKs. DEL_ACK is posted with FLUSH on
+ * the same ordered DPA producer after the ring is removed, so observing it on
+ * ARM also fences every older DMA operation that could reference that ring's
+ * imported mmap/buf_arr. */
 
-/* DPA->DPU completion immediate — packed to 16 bytes to minimize PCIe immediate-data
- * cost on dma_copy. `type` MUST stay at offset 0 (the recv callback peeks raw[0] to
- * dispatch). Carries the endpoint tuple so the DPU can route (dst_pod==BLANK ->
- * resolve dst_service) and the host can demux by dst_port; port/seq are OPAQUE
- * passthrough.
+enum dpa_ring_ack_status {
+	DPA_RING_ACK_OK = 0,
+	DPA_RING_ACK_FULL = 1,
+};
+
+/* DPA→DPU immediate sent only after an EU has installed/rejected or removed a
+ * ring. The generation prevents a delayed ACK from a disconnected incarnation
+ * from affecting a reused pod_id. One pod has at most one ring on an EU. */
+struct dpa_ring_ack_msg {
+	uint8_t  type;       /* DPA_MSG_RING_ADD_ACK or DPA_MSG_RING_DEL_ACK */
+	int8_t   pod_id;
+	uint8_t  status;     /* enum dpa_ring_ack_status */
+	uint8_t  eu_index;
+	uint32_t generation;
+} __attribute__((__packed__, aligned(4)));
+_Static_assert(sizeof(struct dpa_ring_ack_msg) == 8,
+               "dpa_ring_ack_msg must be exactly 8 bytes");
+
+/* DPA->DPU completion immediate — packed to 20 bytes (below the HW 32-byte
+ * immediate-data limit). `type` MUST stay at offset 0 (the recv callback peeks
+ * raw[0] to dispatch). Carries the endpoint tuple so the DPU can route
+ * (dst_pod==BLANK -> resolve dst_service) and the host can demux by dst_port;
+ * port/seq are OPAQUE passthrough. `generation` prevents a completion already
+ * delivered into an ARM software queue from being applied after the same pod_id
+ * slot has been reused.
  *   src_service is NOT on the wire: the DPU derives the caller's service from
  *   src_pod's registration (assumes ONE service per pod — widen the wire if a pod
  *   ever hosts multiple services).
- * Layout is naturally aligned (uint16 on even offsets, pos@12), no tail pad:
- *   type0 src_pod1 dst_pod2 dst_svc3 src_port4 dst_port6 seq8 length10 pos12 = 16B. */
+ * Layout is naturally aligned (uint16 on even offsets, pos@12, generation@16),
+ * no tail pad. */
 struct comch_dma_comp_msg {
 	uint8_t  type;        /* DPA_MSG_FWD_DONE (offset 0 — peeked) */
 	int8_t   src_pod_id;  /* originating pod (always concrete) */
@@ -101,12 +137,13 @@ struct comch_dma_comp_msg {
 	uint16_t seq;         /* per-conn sequence (match key with port) */
 	uint16_t length;      /* payload length (<= DPUMESH_SLOT_SIZE) */
 	uint32_t pos;         /* buffer offset (forward: DPU dpu_buf; reverse: Host RX) */
+	uint32_t generation;  /* source pod's dma_generation */
 };
 /* Sent as immediate via doca_dpa_dev_comch_producer_dma_copy() — HW max 32 bytes.
- * 16B fits ONE WQE basic block; keep it there. Routing carries nothing on this wire:
- * the ARM pins a conn to its backend. */
-_Static_assert(sizeof(struct comch_dma_comp_msg) == 16,
-               "comch_dma_comp_msg must be exactly 16 bytes (one WQE basic block)");
+ * 20B remains below that limit. Routing carries nothing else on this wire: the
+ * ARM pins a conn to its backend. */
+_Static_assert(sizeof(struct comch_dma_comp_msg) == 20,
+               "comch_dma_comp_msg must be exactly 20 bytes");
 _Static_assert(offsetof(struct comch_dma_comp_msg, type) == 0,
                "comch_dma_comp_msg.type must be at offset 0 (recv-cb peeks raw[0])");
 /* src/dst_pod_id travel as int8 on the wire (dst==-1 = DMESH_POD_BLANK, the
@@ -120,7 +157,7 @@ typedef uint64_t doca_dpa_dev_comch_producer_t;
 
 struct comch_add_ring_msg {
 	enum dpa_msg_type type;
-	uint32_t _pad;
+	uint32_t generation;
 	struct dpa_ring_info ring;
 } __attribute__((__packed__, aligned(8)));
 

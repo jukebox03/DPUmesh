@@ -539,6 +539,46 @@ dpu_reaper_main(void *arg)
     return NULL;
 }
 
+/* Convert the asynchronous EU ADD_ACK barrier into the only data-plane ready
+ * publication. Runs on main because Comch result sends are main-PE-owned. */
+static int
+dpu_finalize_pending_pod_inits(struct objects *objs)
+{
+    int finalized = 0;
+    int n = __atomic_load_n(&objs->num_pods, __ATOMIC_ACQUIRE);
+    for (int i = 0; i < n; i++) {
+        struct pod_state *pod = &objs->pods[i];
+        if (!__atomic_load_n(&pod->registered, __ATOMIC_ACQUIRE) ||
+            pod->init_result != DMESH_POD_INIT_PENDING || pod_data_ready(pod) ||
+            !__atomic_load_n(&pod->dpa_setup_complete, __ATOMIC_ACQUIRE))
+            continue;
+        uint32_t expected = __atomic_load_n(&pod->dpa_add_expected_mask,
+                                             __ATOMIC_ACQUIRE);
+        uint32_t received = __atomic_load_n(&pod->dpa_add_ack_mask,
+                                             __ATOMIC_ACQUIRE);
+        if ((received & expected) != expected)
+            continue;
+        if (__atomic_load_n(&pod->dpa_add_ack_failed, __ATOMIC_ACQUIRE)) {
+            DOCA_LOG_ERR("DPA rejected ring setup for pod %d (ack mask 0x%x)",
+                         pod->pod_id, received);
+            (void)server_publish_pod_init_result(objs, pod,
+                                                 DMESH_POD_INIT_DPA_FAILED);
+        } else {
+            /* RELEASE publication: setup_complete ACQUIRE above observed all
+             * data-plane fields, and dma_ready is the reader-side gate. */
+            __atomic_store_n(&pod->dma_ready, 1, __ATOMIC_RELEASE);
+            DOCA_LOG_INFO("DPU pod is data-ready: pod_id=%d generation=%u EU mask=0x%x",
+                          pod->pod_id,
+                          __atomic_load_n(&pod->dma_generation, __ATOMIC_RELAXED),
+                          expected);
+            (void)server_publish_pod_init_result(objs, pod,
+                                                 DMESH_POD_INIT_READY);
+        }
+        finalized++;
+    }
+    return finalized;
+}
+
 /* One pass of the DPU worker's drain work: reap the consumer PE (unless the reaper
  * thread owns it), progress the ctrl PE, retry deferred TX_ACKs, drain the
  * completion queue, run egress. Returns non-zero if any progress was made. The
@@ -554,6 +594,8 @@ dpu_drain_iteration(struct objects *objs)
      * ctrl + emit + all comch sends. */
     uint8_t did_consumer = objs->reaper_active ? 0 : (uint8_t)dpu_reap_iteration(objs);
     uint8_t did_ctrl     = doca_pe_progress(objs->pe);  /* new conns, REGISTER, TX_DATA */
+    int finalized_init   = dpu_finalize_pending_pod_inits(objs);
+    int sent_init_result = server_flush_pod_init_results(objs);
 
     /* Retry deferred TX_ACKs right after pe_progress so just-released send-pool
      * slots are available. */
@@ -570,6 +612,11 @@ dpu_drain_iteration(struct objects *objs)
      * REV_DONE entries and custody TX_ACKs (the unified DPU→host reverse path). */
     int px_progressed = px_drain(objs);
 
+    /* POD_UNREGISTER cleanup is deliberately after px_drain: this pass first
+     * retires/drops dead destination lanes, then the cleanup state machine may
+     * combine ARM quiescence with DPA DEL_ACKs and destroy imported mappings. */
+    int cleaned_pods = server_progress_pod_cleanup(objs);
+
     /* Lull → flush partial TX_ACK + REV_DONE batches so low-load latency is not held
      * by coalescing. reaper-OFF: unchanged (proc==0). reaper-ON: main never processes,
      * so a lull = egress + deferred-txack idle. */
@@ -581,7 +628,9 @@ dpu_drain_iteration(struct objects *objs)
         }
 
     if (g_dpu_diag) { g_drain_iters++; if (lull) g_lull_hits++; }
-    return (did_consumer || did_ctrl || proc > 0 || px_progressed || sent_pend > 0);
+    return (did_consumer || did_ctrl || proc > 0 || px_progressed ||
+            cleaned_pods > 0 || sent_pend > 0 || finalized_init > 0 ||
+            sent_init_result > 0);
 }
 
 /* DIAG dump (once/sec): per-pod TX_ACK/REV_DONE batch fill + pending_txack + how often
@@ -782,8 +831,11 @@ dpu_shard_main(void *arg)
     }
     if (ep < 0) {
         DOCA_LOG_ERR("ingest shard %d: consumer_pe epoll setup failed — shard disabled", sh->id);
+        atomic_store_explicit(&sh->init_state, -1, memory_order_release);
         return NULL;
     }
+
+    atomic_store_explicit(&sh->init_state, 1, memory_order_release);
 
     struct timespec last, now;
     clock_gettime(CLOCK_MONOTONIC, &last);
@@ -818,6 +870,61 @@ dpu_shard_main(void *arg)
     }
     close(ep);
     return NULL;
+}
+
+static void
+stop_ingest_shards(struct objects *objs)
+{
+    for (int s = 0; s < objs->n_ingest_shards; s++) {
+        struct dpu_ingest_shard *sh = &objs->ingest_shards[s];
+        if (!sh->running)
+            continue;
+        sh->stop = 1;
+        dpu_wake_shard(sh);
+    }
+    for (int s = 0; s < objs->n_ingest_shards; s++) {
+        struct dpu_ingest_shard *sh = &objs->ingest_shards[s];
+        if (!sh->running)
+            continue;
+        pthread_join(sh->thread, NULL);
+        sh->running = 0;
+        if (sh->wake_fd >= 0) {
+            close(sh->wake_fd);
+            sh->wake_fd = -1;
+        }
+    }
+}
+
+/* Final readiness barrier. Call only after the selected main-loop driver (and
+ * any ingest-owner threads) is fully constructed. This is the only place that
+ * raises dpu_ready, so POD_INIT_READY cannot precede a component whose setup may
+ * still fail. */
+static void
+dpu_publish_ready_and_setup_pods(struct objects *objs)
+{
+    objs->dpu_ready = 1;
+    int kmax = objs->k_rings > 0 ? objs->k_rings : 1;
+    int n = __atomic_load_n(&objs->num_pods, __ATOMIC_ACQUIRE);
+    for (int i = 0; i < n; i++) {
+        struct pod_state *pod = &objs->pods[i];
+        if (!__atomic_load_n(&pod->registered, __ATOMIC_ACQUIRE) ||
+            pod->init_result != DMESH_POD_INIT_PENDING)
+            continue;
+        if (pod->ring_mmap_count != kmax || pod->remote_mmap == NULL ||
+            pod->host_rx_mmap == NULL || pod->dma_ready)
+            continue;
+
+        doca_error_t result = setup_pod_dma(objs, pod);
+        if (result != DOCA_SUCCESS) {
+            DOCA_LOG_ERR("deferred setup_pod_dma failed for pod %d: %s",
+                         pod->pod_id, doca_error_get_descr(result));
+            (void)server_publish_pod_init_result(objs, pod,
+                                                 DMESH_POD_INIT_DPA_FAILED);
+            continue;
+        }
+        /* setup_pod_dma only arms the ACK barrier. READY is published by
+         * dpu_finalize_pending_pod_inits after every target EU responds. */
+    }
 }
 
 void
@@ -938,6 +1045,7 @@ run_dpu_worker(struct objects *objs)
         sh->num_deferred_recv = 0;
         sh->wake_fd = -1;
         atomic_store_explicit(&sh->parked, 0, memory_order_relaxed);
+        atomic_store_explicit(&sh->init_state, 0, memory_order_relaxed);
         sh->stop = 0;
         sh->running = 0;
     }
@@ -1033,32 +1141,12 @@ run_dpu_worker(struct objects *objs)
         return;
     }
 
-    /* 6. Publish the DPU as ready, then run per-pod DMA setup for any pod whose
-     *    mmaps ALREADY arrived during init (a fast host can connect + export before
-     *    the msgq is up; process_mmap_msg stored them but deferred setup_pod_dma via
-     *    the dpu_ready gate). Later pods set up inline via process_mmap_msg. */
-    objs->dpu_ready = 1;
-    {
-        int kmax = objs->k_rings > 0 ? objs->k_rings : 1;
-        for (int i = 0; i < objs->num_pods; i++) {
-            struct pod_state *pod = &objs->pods[i];
-            if (!__atomic_load_n(&pod->registered, __ATOMIC_ACQUIRE))
-                continue;
-            if (pod->ring_mmap_count >= kmax && pod->remote_mmap && !pod->dma_ready) {
-                result = setup_pod_dma(objs, pod);
-                if (result != DOCA_SUCCESS) {
-                    DOCA_LOG_ERR("deferred setup_pod_dma failed for pod %d: %s",
-                                 pod->pod_id, doca_error_get_descr(result));
-                    continue;
-                }
-            }
-        }
-    }
-
-    /* 7. SG-DMA egress engine (dpu_proxy.c) — the UNIFIED DPU→host reverse path,
+    /* 6. SG-DMA egress engine (dpu_proxy.c) — the UNIFIED DPU→host reverse path,
      *    ALWAYS on. Requires objs->dev (opened in dpu_main before run_dpu_worker)
      *    + objs->pe (step 1) live. DPUMESH_PROXY only selects the request parser
-     *    (passthru default = metadata L4 route; frame; L7). */
+     *    (passthru default = metadata L4 route; frame; L7). This MUST precede
+     *    dpu_ready: otherwise the host can observe READY and send a request while
+     *    the reverse/route engine is still NULL. */
     result = px_init(objs);
     if (result != DOCA_SUCCESS) {
         DOCA_LOG_ERR("Failed to init L7-proxy L4 engine: %s",
@@ -1067,7 +1155,7 @@ run_dpu_worker(struct objects *objs)
         return;
     }
 
-    DOCA_LOG_INFO("DPU worker initialized (event-based), entering main loop");
+    /* dpu_ready remains false until the selected driver below is fully built. */
 
     /* ===== Ingest shard threads (Design A, M>=2) =====
      * Each shard OWNS consumer_pes[id] (DPA channels bound in step 5) and sleeps on
@@ -1080,13 +1168,32 @@ run_dpu_worker(struct objects *objs)
             struct dpu_ingest_shard *sh = &objs->ingest_shards[s];
             sh->pe = objs->consumer_pes[s];
             sh->wake_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-            if (sh->wake_fd < 0 ||
-                pthread_create(&sh->thread, NULL, dpu_shard_main, sh) != 0) {
+            if (sh->wake_fd < 0) {
                 DOCA_LOG_ERR("Ingest shard %d spawn failed (eventfd/thread) — aborting", s);
+                stop_ingest_shards(objs);
+                cleanup_objects(objs);
+                return;
+            }
+            if (pthread_create(&sh->thread, NULL, dpu_shard_main, sh) != 0) {
+                DOCA_LOG_ERR("Ingest shard %d spawn failed (eventfd/thread) — aborting", s);
+                close(sh->wake_fd);
+                sh->wake_fd = -1;
+                stop_ingest_shards(objs);
                 cleanup_objects(objs);
                 return;
             }
             sh->running = 1;
+            const struct timespec init_pause = { .tv_sec = 0, .tv_nsec = 100000 };
+            int attempts = 0;
+            while (atomic_load_explicit(&sh->init_state, memory_order_acquire) == 0 &&
+                   attempts++ < 20000)
+                nanosleep(&init_pause, NULL);
+            if (atomic_load_explicit(&sh->init_state, memory_order_acquire) != 1) {
+                DOCA_LOG_ERR("Ingest shard %d did not initialize its event loop", s);
+                stop_ingest_shards(objs);
+                cleanup_objects(objs);
+                return;
+            }
         }
         DOCA_LOG_WARN("INGEST SHARD THREADS spawned: %d (event-driven, each owns its consumer PE)",
                       objs->n_ingest_shards);
@@ -1133,6 +1240,7 @@ run_dpu_worker(struct objects *objs)
                 DOCA_LOG_ERR("main emit-loop epoll setup failed with %d ingest shards — aborting",
                              objs->n_ingest_shards);
                 if (rep >= 0) close(rep);
+                stop_ingest_shards(objs);
                 cleanup_objects(objs);
                 return;
             }
@@ -1142,6 +1250,7 @@ run_dpu_worker(struct objects *objs)
             objs->reaper_active = 0;
             /* fall through to the normal event-driven driver below */
         } else {
+            dpu_publish_ready_and_setup_pods(objs);
             DOCA_LOG_WARN("MAIN EMIT LOOP (event-driven): %s; main sleeps on "
                           "{ctrl_pe, wake_fd} — no busy-spin",
                           objs->n_ingest_shards >= 2
@@ -1207,6 +1316,8 @@ run_dpu_worker(struct objects *objs)
                       doca_error_get_name(hc), doca_error_get_name(hp), ep);
         if (ep >= 0) close(ep);
         clock_gettime(CLOCK_MONOTONIC, &last_kick);
+        dpu_publish_ready_and_setup_pods(objs);
+        DOCA_LOG_INFO("DPU worker initialized (busy-poll fallback), entering main loop");
         while (true) {
             dpu_drain_iteration(objs);
             clock_gettime(CLOCK_MONOTONIC, &now);
@@ -1220,6 +1331,7 @@ run_dpu_worker(struct objects *objs)
         return;  /* not reached */
     }
 
+    dpu_publish_ready_and_setup_pods(objs);
     DOCA_LOG_INFO("DPU worker: EVENT-DRIVEN main loop armed (consumer_pe fd=%d, ctrl_pe fd=%d)",
                   (int)cfd, (int)pfd);
 

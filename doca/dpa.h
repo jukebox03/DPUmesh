@@ -24,7 +24,11 @@ struct dmesh_doca_dpa_msgq {
 	struct doca_comch_producer *producer; /**< The DOCA Comch Producer */
 	struct doca_comch_consumer *consumer; /**< The DOCA Comch Consumer */
 	uint32_t target_consumer_id;          /**< Remote consumer target used by producer send tasks */
-	
+	/* At most one fire-and-forget WAKE may occupy the DPU→DPA queue. The
+	 * completion callback clears this after the EU consumes it. Without
+	 * coalescing, a parked EU can accumulate 1 kHz WAKEs until control messages
+	 * such as RING_DEL/ADD_RING fail with DOCA_ERROR_AGAIN. */
+	int wake_inflight;
 };
 
 struct dmesh_doca_dpa_comch {
@@ -83,12 +87,17 @@ setup_dpa_buf_array_pod(struct objects *objs, size_t num_elem,
 doca_error_t
 setup_pod_dma(struct objects *objs, struct pod_state *pod);
 
-/* Send RING_DEL to every EU holding one of this pod's forward rings, so rings[]
- * stops referencing them and num_rings falls back. Best-effort, idempotent, and
- * fire-and-forget (the EU may still be mid-drain when this returns — which is why
- * the caller destroys nothing; see pods_remove_connection). */
+/* Initialize an ACK-based RING_DEL barrier for every EU holding one of this
+ * pod's forward rings. progress_teardown_pod_dma() retransmits idempotent DELs
+ * until every generation-matched DEL_ACK has arrived. */
 void
 teardown_pod_dma(struct objects *objs, struct pod_state *pod);
+
+/* Returns 1 only after every target EU has removed the ring and fenced all
+ * older producer DMA operations, otherwise 0. Nonblocking; call from the main
+ * progress loop. */
+int
+progress_teardown_pod_dma(struct objects *objs, struct pod_state *pod);
 #endif /* DOCA_ARCH_DPU */
 
 #endif

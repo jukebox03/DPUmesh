@@ -8,6 +8,7 @@
 #include "comch_common.h"  /* dmesh_rev_done_entry for server_send_batch_rev_done_to */
 
 struct objects; /* Forward declaration */
+struct pod_state;
 
 #define CC_SERVER_RECV_QUEUE_SIZE 1024 /* Size of CC receive queue (server side) */
 
@@ -25,6 +26,20 @@ server_send_msg(struct objects *objs, const char *msg, size_t len);
 doca_error_t
 server_send_msg_to_conn(struct objects *objs, struct doca_comch_connection *conn,
                         const char *msg, size_t len);
+
+/* Publish the terminal second-phase initialization result for one pod. If the
+ * send pool is temporarily full, the result remains latched for a later flush. */
+doca_error_t
+server_publish_pod_init_result(struct objects *objs, struct pod_state *pod,
+                               enum dmesh_pod_init_result result);
+
+int
+server_flush_pod_init_results(struct objects *objs);
+
+/* Drive asynchronous DPA DEL_ACK + ARM egress quiescence and reclaim imported
+ * pod resources. Called once per DPU main-loop pass; never blocks. */
+int
+server_progress_pod_cleanup(struct objects *objs);
 
 
 /* Batched TX_ACK: coalesce n (port,seq) entries into one message. */
@@ -51,14 +66,18 @@ find_pod_by_connection(struct objects *objs, struct doca_comch_connection *conn)
 int
 pods_add_connection(struct objects *objs, struct doca_comch_connection *conn);
 
-/* Invalidate the pod slot for the given connection on disconnect. Marks the
- * slot as not-registered, clears the connection pointer so future lookups
- * skip it, and destroys the host-exported mmap views held on the DPU side.
- * Local DPU buffers (dma_buffer, tx_ring) and the DPA-side ring registration
- * are not torn down here. Returns 0 if a slot was found and invalidated,
- * -1 if no slot matched. */
+/* Start cleanup for an unexpected disconnect and release the connection. The
+ * slot remains non-reusable until server_progress_pod_cleanup observes DPA and
+ * ARM quiescence and destroys all imported views. */
 int
 pods_remove_connection(struct objects *objs, struct doca_comch_connection *conn);
+
+/* Start graceful cleanup while retaining the control connection so the DPU can
+ * send POD_QUIESCED. */
+int
+pods_unregister_connection(struct objects *objs,
+                           struct doca_comch_connection *conn,
+                           int32_t pod_id);
 
 /* Register an existing connection. pod_id < 0 → the DPU assigns a free pod_id
  * (the pods[] slot index). Returns the assigned pod_id (>= 0), or -1 on error. */

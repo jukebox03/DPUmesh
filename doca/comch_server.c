@@ -10,9 +10,12 @@
 #include "comch_common.h"
 #include "comch_consumer.h"
 #include "dpa.h"      /* teardown_pod_dma (DOCA_ARCH_DPU only) */
+#include "dpu_proxy.h"
 
 #include <doca_pe.h>
 #include <doca_comch.h>
+#include <doca_buf_array.h>
+#include <doca_mmap.h>
 #include <doca_log.h>
 
 DOCA_LOG_REGISTER(COMCH_SERVER);
@@ -138,6 +141,10 @@ static void server_message_recv_callback(struct doca_comch_event_msg_recv *event
 	}
 
 	objs = (struct objects *)user_data.ptr;
+	if (msg_len < sizeof(enum dmesh_msg_type)) {
+		DOCA_LOG_ERR("Received short control message from client: %u", msg_len);
+		return;
+	}
 
 	/* Track the primary (first) client's connection */
 	if (objs->connection == NULL)
@@ -147,17 +154,36 @@ static void server_message_recv_callback(struct doca_comch_event_msg_recv *event
 
 	switch (comch_msg->type) {
 	case DMESH_MSG_MMAP_EXPORT:
-
 		if (msg_len <= sizeof(struct dmesh_mmap_msg)) {
 			DOCA_LOG_ERR("Received invalid MMAP message from client");
+			struct pod_state *pod = find_pod_by_connection(objs, comch_connection);
+			if (pod != NULL)
+				(void)server_publish_pod_init_result(objs, pod, DMESH_POD_INIT_MMAP_FAILED);
 			return;
 		}
-		result = process_mmap_msg(objs, comch_connection, (struct dmesh_mmap_msg *)recv_buffer);
+		result = process_mmap_msg(objs, comch_connection,
+		                          (struct dmesh_mmap_msg *)recv_buffer, msg_len);
+		{
+			struct pod_state *pod = find_pod_by_connection(objs, comch_connection);
+			if (result != DOCA_SUCCESS) {
+				if (pod != NULL) {
+					int kmax = objs->k_rings > 0 ? objs->k_rings : 1;
+					enum dmesh_pod_init_result init_result =
+						(pod->ring_mmap_count == kmax && pod->remote_mmap != NULL &&
+						 pod->host_rx_mmap != NULL)
+							? DMESH_POD_INIT_DPA_FAILED
+							: DMESH_POD_INIT_MMAP_FAILED;
+					(void)server_publish_pod_init_result(objs, pod, init_result);
+				}
+			} else if (pod != NULL && pod_data_ready(pod)) {
+				(void)server_publish_pod_init_result(objs, pod, DMESH_POD_INIT_READY);
+			}
+		}
 		break;
 
 	case DMESH_MSG_POD_REGISTER: {
 		struct dmesh_register_msg *reg = (struct dmesh_register_msg *)recv_buffer;
-		if (msg_len < sizeof(struct dmesh_register_msg)) {
+		if (msg_len != sizeof(struct dmesh_register_msg)) {
 			DOCA_LOG_ERR("Received invalid REGISTER message");
 			return;
 		}
@@ -172,8 +198,34 @@ static void server_message_recv_callback(struct doca_comch_event_msg_recv *event
 			if (sr != DOCA_SUCCESS)
 				DOCA_LOG_ERR("POD_ASSIGNED send failed (pod_id=%d): %s",
 				             assigned, doca_error_get_name(sr));
+		} else {
+			struct dmesh_pod_init_result_msg im = {
+				.type = DMESH_MSG_POD_INIT_RESULT,
+				.pod_id = -1,
+				.result = DMESH_POD_INIT_REGISTER_FAILED,
+			};
+			doca_error_t sr = server_send_msg_to_conn(objs, comch_connection,
+			                                          (const char *)&im, sizeof(im));
+			if (sr != DOCA_SUCCESS)
+				DOCA_LOG_ERR("REGISTER failure result send failed: %s",
+				             doca_error_get_name(sr));
 		}
 		DOCA_LOG_INFO("Pod registered: pod_id=%d service_id=%d", assigned, reg->service_id);
+		break;
+	}
+
+	case DMESH_MSG_POD_UNREGISTER: {
+		if (msg_len != sizeof(struct dmesh_pod_unregister_msg)) {
+			DOCA_LOG_ERR("Received invalid POD_UNREGISTER message");
+			return;
+		}
+		const struct dmesh_pod_unregister_msg *unreg =
+			(const struct dmesh_pod_unregister_msg *)recv_buffer;
+		if (pods_unregister_connection(objs, comch_connection,
+		                               unreg->pod_id) != 0) {
+			DOCA_LOG_ERR("POD_UNREGISTER rejected for pod_id=%d",
+			             unreg->pod_id);
+		}
 		break;
 	}
 
@@ -420,11 +472,9 @@ init_comch_ctrl_path_server(const char *server_name, struct objects *objs, bool 
     return DOCA_SUCCESS;
 
 destroy_server:
-    doca_comch_server_destroy(objs->cc_server);
-    objs->cc_server = NULL;
 destroy_pe:
-    doca_pe_destroy(objs->pe);
-    objs->pe = NULL;
+    /* run_dpu_worker owns `objs` and calls cleanup_objects on every failure.
+     * Preserve partially started state for the common stop→IDLE→destroy path. */
     return result;
 }
 
@@ -482,6 +532,67 @@ server_send_msg_to_conn(struct objects *objs, struct doca_comch_connection *conn
 	}
 
 	return DOCA_SUCCESS;
+}
+
+static doca_error_t
+send_pod_init_result(struct objects *objs, struct pod_state *pod)
+{
+	if (pod == NULL || pod->connection == NULL ||
+	    pod->init_result == DMESH_POD_INIT_PENDING)
+		return DOCA_ERROR_INVALID_VALUE;
+	if (pod->init_result_sent)
+		return DOCA_SUCCESS;
+
+	struct dmesh_pod_init_result_msg msg = {
+		.type = DMESH_MSG_POD_INIT_RESULT,
+		.pod_id = pod->pod_id,
+		.result = pod->init_result,
+	};
+	doca_error_t result = server_send_msg_to_conn(objs, pod->connection,
+	                                               (const char *)&msg, sizeof(msg));
+	if (result == DOCA_SUCCESS) {
+		pod->init_result_sent = 1;
+		DOCA_LOG_INFO("Pod init result submitted: pod_id=%d result=%d",
+		              pod->pod_id, pod->init_result);
+	}
+	return result;
+}
+
+doca_error_t
+server_publish_pod_init_result(struct objects *objs, struct pod_state *pod,
+                               enum dmesh_pod_init_result result)
+{
+	if (pod == NULL || result <= DMESH_POD_INIT_PENDING ||
+	    result > DMESH_POD_INIT_DPA_FAILED)
+		return DOCA_ERROR_INVALID_VALUE;
+
+	/* A failure is terminal and can never be overwritten by a later setup retry.
+	 * READY is likewise immutable once published. */
+	if (pod->init_result == DMESH_POD_INIT_PENDING)
+		pod->init_result = result;
+	else if (pod->init_result != result)
+		return DOCA_ERROR_BAD_STATE;
+
+	return send_pod_init_result(objs, pod);
+}
+
+int
+server_flush_pod_init_results(struct objects *objs)
+{
+	int submitted = 0;
+	int n = __atomic_load_n(&objs->num_pods, __ATOMIC_ACQUIRE);
+	for (int i = 0; i < n; i++) {
+		struct pod_state *pod = &objs->pods[i];
+		if (pod->connection == NULL ||
+		    !__atomic_load_n(&pod->registered, __ATOMIC_ACQUIRE) ||
+		    __atomic_load_n(&pod->cleanup_pending, __ATOMIC_ACQUIRE) ||
+		    pod->init_result == DMESH_POD_INIT_PENDING ||
+		    pod->init_result_sent)
+			continue;
+		if (send_pod_init_result(objs, pod) == DOCA_SUCCESS)
+			submitted++;
+	}
+	return submitted;
 }
 
 
@@ -547,7 +658,9 @@ pods_add_connection(struct objects *objs, struct doca_comch_connection *conn)
 	int idx = -1;
 	for (int i = 0; i < n; i++) {
 		if (objs->pods[i].connection == NULL &&
-		    __atomic_load_n(&objs->pods[i].registered, __ATOMIC_ACQUIRE) == 0) {
+		    __atomic_load_n(&objs->pods[i].registered, __ATOMIC_ACQUIRE) == 0 &&
+		    !__atomic_load_n(&objs->pods[i].cleanup_pending,
+		                     __ATOMIC_ACQUIRE)) {
 			idx = i;   /* recycle a freed slot */
 			break;
 		}
@@ -573,6 +686,21 @@ pods_add_connection(struct objects *objs, struct doca_comch_connection *conn)
 
 	objs->pods[idx].connection = conn;
 	objs->pods[idx].pod_id = -1;  /* not yet registered */
+	objs->pods[idx].service_id = DMESH_SVC_NONE;
+	objs->pods[idx].init_result = DMESH_POD_INIT_PENDING;
+	objs->pods[idx].init_result_sent = 0;
+	objs->pods[idx].dpa_add_expected_mask = 0;
+	objs->pods[idx].dpa_add_ack_mask = 0;
+	objs->pods[idx].dpa_add_ack_failed = 0;
+	objs->pods[idx].dpa_setup_complete = 0;
+	objs->pods[idx].cleanup_pending = 0;
+	objs->pods[idx].cleanup_reply_sent = 0;
+	objs->pods[idx].dpa_del_expected_mask = 0;
+	objs->pods[idx].dpa_del_ack_mask = 0;
+	objs->pods[idx].dpa_del_last_send_ns = 0;
+	objs->pods[idx].egress_quiesced = 0;
+	objs->pods[idx].egress_inflight = 0;
+	objs->pods[idx].proxy_source_refs = 0;
 	__atomic_store_n(&objs->pods[idx].registered, 0, __ATOMIC_RELEASE);
 	if (idx == n)
 		__atomic_store_n(&objs->num_pods, idx + 1, __ATOMIC_RELEASE);
@@ -581,90 +709,222 @@ pods_add_connection(struct objects *objs, struct doca_comch_connection *conn)
 	return 0;
 }
 
+static int
+pod_has_imported_resources(const struct pod_state *pod)
+{
+	if (pod->remote_mmap || pod->host_rx_mmap)
+		return 1;
+	for (int j = 0; j < MAX_EU_PER_POD; j++)
+		if (pod->buf_arrs[j] || pod->ring_mmaps[j])
+			return 1;
+	return 0;
+}
+
+static void
+pod_begin_cleanup(struct objects *objs, struct pod_state *pod)
+{
+	if (__atomic_load_n(&pod->cleanup_pending, __ATOMIC_ACQUIRE))
+		return;
+
+	/* Stop every producer before asking either DMA engine to quiesce. Keep all
+	 * imported handles published in the private slot until both barriers pass. */
+	__atomic_store_n(&pod->dma_ready, 0, __ATOMIC_RELEASE);
+	__atomic_store_n(&pod->registered, 0, __ATOMIC_RELEASE);
+	if (pod->pod_id >= 0 && pod->pod_id < POD_ID_SPACE)
+		__atomic_store_n(&objs->pod_id_to_slot[pod->pod_id], -1,
+		                 __ATOMIC_RELEASE);
+	__atomic_store_n(&pod->egress_quiesced, 0, __ATOMIC_RELEASE);
+	pod->txack_batch_n = 0;
+	pod->rev_done_batch_n = 0;
+	pod->cleanup_reply_sent = 0;
+	__atomic_store_n(&pod->cleanup_pending, 1, __ATOMIC_RELEASE);
+#ifdef DOCA_ARCH_DPU
+	teardown_pod_dma(objs, pod);
+#endif
+}
+
+int
+pods_unregister_connection(struct objects *objs,
+                           struct doca_comch_connection *conn,
+                           int32_t pod_id)
+{
+	struct pod_state *pod = find_pod_by_connection(objs, conn);
+	if (pod == NULL || pod->pod_id != pod_id)
+		return -1;
+	pod_begin_cleanup(objs, pod);
+	DOCA_LOG_INFO("POD_UNREGISTER accepted: pod_id=%d", pod_id);
+	return 0;
+}
+
 int
 pods_remove_connection(struct objects *objs, struct doca_comch_connection *conn)
 {
-	int32_t pod_id = -1;
-	int found_idx = -1;
-
 	int n = __atomic_load_n(&objs->num_pods, __ATOMIC_ACQUIRE);
 	for (int i = 0; i < n; i++) {
-		if (objs->pods[i].connection != conn)
+		struct pod_state *pod = &objs->pods[i];
+		if (pod->connection != conn)
 			continue;
-		found_idx = i;
-		pod_id = objs->pods[i].pod_id;
+		int32_t pod_id = pod->pod_id;
+		if (pod_id >= 0 &&
+		    (pod_has_imported_resources(pod) || pod->k_rings > 0) &&
+		    !__atomic_load_n(&pod->cleanup_pending, __ATOMIC_ACQUIRE))
+			pod_begin_cleanup(objs, pod);
+		else {
+			__atomic_store_n(&pod->dma_ready, 0, __ATOMIC_RELEASE);
+			__atomic_store_n(&pod->registered, 0, __ATOMIC_RELEASE);
+			if (pod_id >= 0 && pod_id < POD_ID_SPACE)
+				__atomic_store_n(&objs->pod_id_to_slot[pod_id], -1,
+				                 __ATOMIC_RELEASE);
+		}
+		pod->connection = NULL;
+		if (!__atomic_load_n(&pod->cleanup_pending, __ATOMIC_ACQUIRE))
+			pod->pod_id = -1;
+		DOCA_LOG_INFO("pods_remove_connection: slot %d pod_id=%d cleanup_pending=%d",
+		              i, pod_id,
+		              __atomic_load_n(&pod->cleanup_pending,
+		                              __ATOMIC_ACQUIRE));
+		return 0;
+	}
+	return -1;
+}
 
-		/* Drop this pod's forward rings from the DPA's poll set FIRST, while
-		 * pod_id/k_rings are still valid (teardown_pod_dma derives the EU set from
-		 * them, and both are cleared below). Until this lands, the EU keeps polling
-		 * rings[] entries that point at this pod's ring_mmaps/remote_mmap. */
 #ifdef DOCA_ARCH_DPU
-		teardown_pod_dma(objs, &objs->pods[i]);
+static int
+pod_destroy_imported_resources(struct pod_state *pod)
+{
+	/* DEL_ACK fenced the DPA handles; ARM quiescence fenced host-RX and credit
+	 * reads. Destroy buf_arrs before the mmaps they were created over. */
+	for (int j = 0; j < MAX_EU_PER_POD; j++) {
+		if (pod->buf_arrs[j] != NULL) {
+			doca_error_t result = doca_buf_arr_destroy(pod->buf_arrs[j]);
+			if (result != DOCA_SUCCESS) {
+				DOCA_LOG_ERR("pod %d: buf_arr[%d] reclaim failed: %s",
+				             pod->pod_id, j, doca_error_get_name(result));
+				return 0;
+			}
+			pod->buf_arrs[j] = NULL;
+		}
+	}
+	for (int j = 0; j < MAX_EU_PER_POD; j++) {
+		if (pod->ring_mmaps[j] != NULL) {
+			doca_error_t result = doca_mmap_destroy(pod->ring_mmaps[j]);
+			if (result != DOCA_SUCCESS) {
+				DOCA_LOG_ERR("pod %d: ring mmap[%d] reclaim failed: %s",
+				             pod->pod_id, j, doca_error_get_name(result));
+				return 0;
+			}
+			pod->ring_mmaps[j] = NULL;
+			pod->ring_host_addrs[j] = NULL;
+		}
+	}
+	if (pod->remote_mmap != NULL) {
+		doca_error_t result = doca_mmap_destroy(pod->remote_mmap);
+		if (result != DOCA_SUCCESS) {
+			DOCA_LOG_ERR("pod %d: TX mmap reclaim failed: %s",
+			             pod->pod_id, doca_error_get_name(result));
+			return 0;
+		}
+		pod->remote_mmap = NULL;
+	}
+	if (pod->host_rx_mmap != NULL) {
+		doca_error_t result = doca_mmap_destroy(pod->host_rx_mmap);
+		if (result != DOCA_SUCCESS) {
+			DOCA_LOG_ERR("pod %d: RX mmap reclaim failed: %s",
+			             pod->pod_id, doca_error_get_name(result));
+			return 0;
+		}
+		pod->host_rx_mmap = NULL;
+	}
+	return 1;
+}
 #endif
 
-		/* UNPUBLISH every host-exported handle, but DESTROY NOTHING — both halves
-		 * are load-bearing:
-		 *   NULL: these pointers are px_lane_refresh_credit's only liveness gate. Left
-		 *     set, the egress keeps credit-refresh DMA-reading the dead pod's unmapped
-		 *     host memory → QP error → the SHARED doca_dma ctx faults → egress wedges
-		 *     for EVERY pod.
-		 *   No destroy: an in-flight DMA may still reference the mapping, and
-		 *     destroying it faults that same ctx. Safe reclaim needs a quiesce protocol
-		 *     that does not exist, so these handles leak per reconnect. The staging
-		 *     buffer, the only large allocation here, is reused per slot instead
-		 *     (setup_pod_dma).
-		 * local_mmap/dma_buffer are kept ON PURPOSE: DPU-local, reused next time. */
-		for (int j = 0; j < MAX_EU_PER_POD; j++) {
-			objs->pods[i].buf_arrs[j]        = NULL;
-			objs->pods[i].ring_mmaps[j]      = NULL;
-			objs->pods[i].ring_host_addrs[j] = NULL;
-		}
-		objs->pods[i].ring_mmap_count = 0;
-		objs->pods[i].remote_mmap     = NULL;
-		objs->pods[i].remote_addr     = NULL;
-		objs->pods[i].host_rx_mmap    = NULL;   /* also gates the egress SG-DMA dest */
-		objs->pods[i].k_rings         = 0;
-
-		/* Mark slot dead in PUBLICATION-INVERSE order: store registered=0
-		 * with RELEASE FIRST so any reader that observes registered=1 is
-		 * guaranteed to also see a still-valid slot. The slot index is kept
-		 * stable (not compacted) so any in-flight comp_queue entry with
-		 * pod_idx == i hits the (connection == NULL) branch and ACKs the
-		 * originator instead of dereferencing freed memory. */
-		__atomic_store_n(&objs->pods[i].registered, 0, __ATOMIC_RELEASE);
-		/* Clear the O(1) map so the freed pod_id no longer resolves to this
-		 * dead slot and can be re-registered into a new slot. */
-		if (pod_id >= 0 && pod_id < POD_ID_SPACE)
-			__atomic_store_n(&objs->pod_id_to_slot[pod_id], -1, __ATOMIC_RELEASE);
-		objs->pods[i].dma_ready       = 0;
-		objs->pods[i].connection      = NULL;
-		objs->pods[i].pod_id          = -1;
-		break;
-	}
-
-	if (found_idx < 0)
-		return -1;
-
-	DOCA_LOG_INFO("pods_remove_connection: slot %d (pod_id=%d) invalidated "
-		      "(DPA rings dropped; host handles unpublished, staging kept)",
-		      found_idx, pod_id);
+int
+server_progress_pod_cleanup(struct objects *objs)
+{
+#ifndef DOCA_ARCH_DPU
+	(void)objs;
 	return 0;
+#else
+	int progressed = 0;
+	int n = __atomic_load_n(&objs->num_pods, __ATOMIC_ACQUIRE);
+	for (int i = 0; i < n; i++) {
+		struct pod_state *pod = &objs->pods[i];
+		if (!__atomic_load_n(&pod->cleanup_pending, __ATOMIC_ACQUIRE))
+			continue;
+		if (!progress_teardown_pod_dma(objs, pod))
+			continue;
+		if (!px_pod_reclaim_ready(objs, i))
+			continue;
+		if (!pod_destroy_imported_resources(pod))
+			continue;
+
+		pod->ring_mmap_count = 0;
+		pod->remote_addr = NULL;
+		pod->remote_buf_size = 0;
+		pod->host_rx_addr = NULL;
+		pod->host_rx_buf_size = 0;
+		pod->rq_depth = 0;
+		pod->k_rings = 0;
+		pod->init_result = DMESH_POD_INIT_PENDING;
+		pod->init_result_sent = 0;
+		pod->dpa_add_expected_mask = 0;
+		pod->dpa_add_ack_mask = 0;
+		pod->dpa_add_ack_failed = 0;
+		pod->dpa_setup_complete = 0;
+
+		if (pod->connection != NULL && !pod->cleanup_reply_sent) {
+			struct dmesh_pod_quiesced_msg msg = {
+				.type = DMESH_MSG_POD_QUIESCED,
+				.pod_id = pod->pod_id,
+			};
+			doca_error_t result = server_send_msg_to_conn(
+				objs, pod->connection, (const char *)&msg, sizeof(msg));
+			if (result != DOCA_SUCCESS)
+				continue; /* send-pool backpressure: retain and retry */
+			pod->cleanup_reply_sent = 1;
+			DOCA_LOG_INFO("POD_QUIESCED submitted: pod_id=%d", pod->pod_id);
+		}
+
+		__atomic_store_n(&pod->cleanup_pending, 0, __ATOMIC_RELEASE);
+		if (pod->connection == NULL)
+			pod->pod_id = -1;
+		progressed++;
+	}
+	return progressed;
+#endif
 }
 
 int
 pods_register(struct objects *objs, struct doca_comch_connection *conn,
               int32_t pod_id, int32_t service_id)
 {
+	if ((service_id != DMESH_SVC_NONE &&
+	     (service_id < 0 || service_id >= POD_ID_SPACE)) ||
+	    pod_id < -1 || pod_id >= POD_ID_SPACE) {
+		DOCA_LOG_ERR("pods_register: invalid pod_id=%d service_id=%d",
+		             pod_id, service_id);
+		return -1;
+	}
+
 	int n = __atomic_load_n(&objs->num_pods, __ATOMIC_ACQUIRE);
 	for (int i = 0; i < n; i++) {
 		if (objs->pods[i].connection != conn)
 			continue;
+		if (__atomic_load_n(&objs->pods[i].registered, __ATOMIC_ACQUIRE)) {
+			DOCA_LOG_ERR("pods_register: duplicate register on slot %d", i);
+			return -1;
+		}
 
 		/* DPU-assigned pod_id: the host no longer picks its own address. A
 		 * register with pod_id < 0 gets the pods[] slot index — unique among
 		 * live pods and always in [0, MAX_PODS) ⊂ [0, POD_ID_SPACE). */
 		if (pod_id < 0)
 			pod_id = i;
+		if (__atomic_load_n(&objs->pod_id_to_slot[pod_id], __ATOMIC_ACQUIRE) >= 0) {
+			DOCA_LOG_ERR("pods_register: pod_id=%d is already live", pod_id);
+			return -1;
+		}
 
 		/* Publication order: write all fields first, then the gate.
 		 * Readers that observe registered=1 (ACQUIRE load) are guaranteed

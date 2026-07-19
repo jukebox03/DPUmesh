@@ -1,129 +1,156 @@
-# Deployment — environment, config knobs, and topology
+# Benchmark Deployment
 
-Everything needed to reproduce the measured environment. `bench/bench.sh deploy` is the
-ONE bring-up path: it builds the host library, the DPU firmware, the container images,
-applies the k8s manifest, starts the DPU process, brings up every pod in order, and pins
-them to cores. There is deliberately no per-pod start / DPU-only restart (either
-desynchronizes host↔DPU registration).
+This document defines the environment represented by the repository's benchmark
+results. `bench/bench.sh deploy` is the only supported bring-up path. It builds
+both sides, synchronizes DPU sources, creates/imports images, starts a fresh DPU
+process, starts every pod in registration order, waits for DPUmesh data readiness,
+and pins processes to CPUs.
 
-## Reproduce this evaluation
+## Required local configuration
 
-```bash
-# from repo root, with .env present (see below)
-DPUMESH_INGEST_SHARDS=4 DPUMESH_ARM_EGRESS_THREADS=4 DPUMESH_RINGS_PER_POD=2 bash bench/bench.sh deploy
+Create an uncommitted `.env` at the repository root with these site-specific
+keys:
 
-# then, against the live deploy:
-OUT=/tmp/out bash bench/suite/run_suite.sh conc rtt bw    # ablation + headline (3 transports)
-bash bench/suite/cpu_probe.sh dpumesh|tcp|direct 1024 8 32 30 1 data/cpu.csv   # host+DPU CPU
-bash bench/suite/npod.sh 4-4 32 20 3 data/npod.csv        # N-pod amortization
+```text
+DPU_HOST     SSH destination for the BlueField ARM
+HOST_PASS    sudo password on the Kubernetes host
+DPU_PASS     sudo password on the BlueField ARM
+HOST_PCI     host-side DOCA PCI address
+DPU_PCI      DPU-side DOCA PCI address
 ```
 
-That reproduces the **(4,4) operating point**. The DPU-config frontier repeats the deploy +
-`npod.sh` at `2 2` and `1 1`. The **busy-app** sweep sets `/tmp/app_work_us` on the echo pods at
-runtime (`kubectl exec … -- sh -c 'echo <µs> >/tmp/app_work_us'`; the echo re-reads it every
-0.5 s), so it needs no redeploy. The three knobs above are the only ones set explicitly.
+Deploy and CPU pinning require these values. Read-only benchmark execution needs
+only working `kubectl` access and the live deployment. Never commit `.env`.
 
-## Provenance is captured live, not asserted
+## Bring-up
 
-`run_suite.sh` freezes `data/meta.txt` at the start of every run by reading the **actual
-running system**, not this shell's environment:
-
-- the DPU operating point from the live `/proc/<dpumesh_dpu>/environ` (proves (4,4)),
-  plus the process uptime and binary path;
-- the **container-image digests** loaded in containerd (the exact host binaries running);
-- node, kernel, kubectl version, namespace, and the run params (`DUR/WARMUP/REPS`).
-
-This is the fix for a prior report that *claimed* (4,4) but recorded only the invoking
-shell's (unset) env. If `.env` is absent the DPU config is explicitly marked *not
-captured* rather than silently omitted.
-
-## DPU config knobs (data-plane operating point)
-
-Read live from the running process at `/proc/<dpumesh_dpu-pid>/environ`.
-
-| knob | value here | meaning |
-|---|---|---|
-| `DPUMESH_INGEST_SHARDS` | **4** | parallel ingest (parse/route) shards on the ARM |
-| `DPUMESH_ARM_EGRESS_THREADS` | **4** | parallel egress (send) threads on the ARM |
-| `DPUMESH_RINGS_PER_POD` | **2** | DPA forward rings per meshed pod |
-| `DPUMESH_SHARD_SHARED` | *(unset → 0)* | share-nothing shards (each shard owns its state) |
-| `DPUMESH_PROXY` | *(unset)* | passthrough — L4 byte stream, conn pinned to one backend (no per-message codec) |
-| `DPUMESH_INGEST_REAP` | *(unset)* | DPA-reap not split off the main funnel |
-| `DPUMESH_LOG_LEVEL` | 40 | DOCA log level (warn) |
-
-DPU launch (observed in `meta.txt`): `./dpumesh_dpu <dpu_pci> -l 40`.
-
-## Host / manifest values (set by `bench.sh apply_manifest`)
-
-| var | value | applies to | note |
-|---|---|---|---|
-| `ASYNC_THREADS` | 4 | DPUmesh client async poll threads | |
-| `BENCH_PIPELINE` | 8 | DPUmesh client pipeline depth | |
-| `BENCH_COALESCE` | 0 | client TX coalescing off | |
-| `DPUMESH_ARENA_SLOTS` | 512 | RX arena slots per pod | |
-| `ECHO_THREADS` | 3 | *(legacy)* | **not consumed by the current C servers** — see below |
-
-**Server concurrency model (important for fairness).** `ECHO_THREADS` is a leftover
-manifest var; neither greeter server reads it. `echo_dpumesh` is a **single CQ / epoll
-event loop** (transport offloaded to the DPU). `echo_sock` is **thread-per-connection**
-(one thread per accepted socket). The load generators hold one long-lived connection per
-client thread, so at the headline **threads=1** each server serves exactly one connection
-on one host core — a like-for-like 1-backend-vs-1-backend comparison.
-
-## `.env` (repo root, required for deploy/pin — NOT committed)
-
-Keys only (values are secrets / site-specific):
-`DPU_HOST`, `HOST_PASS`, `DPU_PASS`, `HOST_PCI`, `DPU_PCI`.
-Benchmark/validator RUNs need only `kubectl` + `nc`; deploy/pin and the provenance freeze
-need `.env`.
-
-## Pod topology (`bench/k8s/pods.yaml`, namespace `test-bench`)
-
-```
-DPUmesh path (transport on the DPU, app owns its whole core):
-  bench-dpumesh ─ dmesh.h ─►  DPU (DOCA Comch + DMA)  ─►  echo-dpumesh
-     (+ bench-dpumesh-2/-3 clients & echo-dpumesh-13/-14 backends: the N-pod amortization sweep)
-
-TCP+Envoy path (matched-C client; app shares its core with an Envoy sidecar):
-  bench-tcp ─► sidecar1(Envoy) ─ k8s svc ─► sidecar2(Envoy) ─► echo-tcp[echo_sock]
-
-TCP-direct path (ablation — isolates the sidecar tax; reuses echo-tcp's echo_sock):
-  bench-direct ─ k8s svc echo-direct:9092 ─► echo-tcp[echo_sock]   (no Envoy)
+```sh
+DPUMESH_INGEST_SHARDS=4 \
+DPUMESH_ARM_EGRESS_THREADS=4 \
+DPUMESH_RINGS_PER_POD=2 \
+DPUMESH_LOG_LEVEL=40 \
+./bench/bench.sh deploy
 ```
 
-Both clients and both servers are **pure C** (`bench_sock`/`echo_sock`,
-`bench_dpumesh`/`echo_dpumesh`) sharing the same 16-byte wire frame (`bench.h`) — the
-transport is the only difference. The former Go baseline was removed (it was the source of
-the retracted "2× DPUmesh" result). `echo-dpumesh-13/-14` are extra backends of the same
-service; a single-connection (threads=1) run pins to exactly one of them, so they engage
-only in the multi-thread and fair-core sweeps.
+The command stops the prior DPU process and recreates the complete registration
+state. DPU-only or pod-only restarts are unsupported because they can leave one
+side referring to a different pod-slot generation. Kubernetes `Ready` is not
+sufficient: the harness also waits for the host log that follows
+`POD_INIT_RESULT(READY)`.
 
-Validator pods (feature correctness, not perf): `loopback-dpumesh`, `verbs-dpumesh`,
-`stream-dpumesh`, `preload-dpumesh`.
+## DPU operating point
 
-## CPU pinning (`bench.sh pin fair` — the apples-to-apples 1-core comparison)
+The DPU launch environment is authoritative. Capture it from the live
+`/proc/<dpumesh_dpu-pid>/environ`, not from the invoking shell.
 
-`performance` governor, fixed 2.5 GHz on cores 0–7. One host core per app:
+| Variable | Reported L4 headline value | Meaning |
+|---|---:|---|
+| `DPUMESH_INGEST_SHARDS` | 4 | ARM ingest/routing shards |
+| `DPUMESH_ARM_EGRESS_THREADS` | 4 | ARM SG-DMA egress workers |
+| `DPUMESH_RINGS_PER_POD` | 2 | Forward rings per pod |
+| `DPUMESH_SHARD_SHARED` | unset/0 | Share-nothing shard routing |
+| `DPUMESH_PROXY` | unset | L4 passthrough |
+| `DPUMESH_INGEST_REAP` | unset | Inline default unless shards require reapers |
+| `DPUMESH_LOG_LEVEL` | 40 | Warning-level DOCA logging |
 
-| pod | core(s) |
+N DPA EUs are auto-detected after DPA startup and clamped to eight unless
+`DPUMESH_DPA_THREADS` is explicitly set. Host and DPU must use the same K. The
+2026-07 hardware reported more EUs than the cap, so the effective automatic N was
+eight in the gRPC lifecycle runs.
+
+The 4/4 ARM configuration is the historical L4 headline operating point, not a
+universal recommendation. The report keeps 1/1, 2/2, and 4/4 results separate.
+
+## Manifest values
+
+`bench.sh` renders `bench/k8s/pods.yaml` with these defaults:
+
+| Variable | Default | Consumer |
+|---|---:|---|
+| `ASYNC_THREADS` | 4 | Native DPUmesh benchmark client |
+| `BENCH_PIPELINE` | 8 | Native client pipeline depth |
+| `BENCH_COALESCE` | 0 | Native client TX coalescing disabled |
+| `DPUMESH_ARENA_SLOTS` | 512 | Validator arena sizing |
+| `ECHO_THREADS` | 3 | Legacy manifest value; current C echo servers do not read it |
+| `DMESH_PRELOAD_DEBUG` | 0 | Preload diagnostic output disabled |
+
+`echo_dpumesh` is a single-CQ event loop. `echo_sock` uses a thread per accepted
+socket. At the headline one-client-thread point, each server handles one
+long-lived connection on one assigned application core.
+
+## Kubernetes topology
+
+All resources run in namespace `test-bench`.
+
+```text
+DPUmesh:
+  bench-dpumesh ─ native API ─ BlueField ─ backend TCP ─ echo-dpumesh
+       ├─ bench-dpumesh-2/-3                  ├─ echo-dpumesh-13/-14
+
+TCP + Envoy:
+  bench-tcp/bench_sock ─ Envoy tcp_proxy ─ Service ─ Envoy ─ echo-tcp/echo_sock
+
+Direct TCP:
+  bench-direct/bench_sock ─ echo-direct Service ─ echo-tcp/echo_sock
+
+Validators:
+  loopback-dpumesh, verbs-dpumesh, stream-dpumesh, preload-dpumesh
+```
+
+The TCP paths use the same pure-C `bench_sock`/`echo_sock` wire workload. The
+native path uses the equivalent DPUmesh benchmark semantics. Extra DPUmesh
+clients and backends are idle in the basic single-pair measurement and are used
+only by explicit multi-pod or multi-connection runs.
+
+The gRPC benchmark reuses a DPUmesh client pod and an independently named DPUmesh
+server registration so it does not conflict with the resident L4 echo service.
+For its TCP comparator, the same gRPC binary listens on an unoccupied pod TCP port
+and the client targets that server pod IP.
+
+## CPU pinning
+
+`./bench/bench.sh pin fair` assigns one application core per primary pod:
+
+| Pod | Core(s) |
 |---|---|
-| bench-dpumesh (client) | 0 |
-| echo-dpumesh (greeter) | 1 |
-| bench-tcp (client + sidecar1) | 2 |
-| echo-tcp (greeter + sidecar2) | 3 |
-| echo-dpumesh-13 / -14 (extra backends) | 6 / 7 |
-| bench-direct (tcp-direct client, no sidecar) | 8 |
-| bench-dpumesh-2 / -3 (N-pod clients) | 9 / 10 |
+| `bench-dpumesh` | 0 |
+| `echo-dpumesh` | 1 |
+| `bench-tcp` including sidecar | 2 |
+| `echo-tcp` including sidecar | 3 |
 | validators | 4,5 |
+| `echo-dpumesh-13`, `echo-dpumesh-14` | 6, 7 |
+| `bench-direct` | 8 |
+| `bench-dpumesh-2`, `bench-dpumesh-3` | 9, 10 |
 
-The DPUmesh app gets a full core because its transport runs on the DPU; the TCP app shares
-its single core with its Envoy sidecar — that contention is the sidecar tax the CPU
-accounting measures. The `fair_cores.sh` sweep re-pins both clients to a symmetric B-core
-budget (cores 8–15) and restores `fair` when done.
+When available, the harness selects the performance governor and fixes cores 0–7
+at 2.5 GHz. Failure to apply the frequency setting is nonfatal and must be noted
+in provenance. `hw`, `hw3`, and `hw6` grant additional cores only to the DPUmesh
+side and therefore are ceiling probes, not fair TCP comparisons.
 
-## Images (containerd `k8s.io` namespace)
+## Image and run provenance
 
-`bench/{bench-dpumesh,echo-dpumesh,bench-tcp,echo-tcp,loopback-dpumesh,stream-dpumesh,verbs-dpumesh,preload-dpumesh}:latest`
-+ `envoyproxy/envoy:v1.30-latest`. The `bench-tcp`/`echo-tcp` images build from
-`docker/bench_sock.Dockerfile` / `docker/echo_sock.Dockerfile` (pure C). Exact digests for
-each run are frozen in `data/meta.txt`.
+The deploy imports repository images into the containerd `k8s.io` namespace and
+uses `envoyproxy/envoy:v1.30-latest`. A retained performance run must record:
+
+- git commit and dirty-tree state;
+- built binary hash and container image digests;
+- node, kernel, Kubernetes context, and pod placement;
+- DPU binary path, PID/uptime, launch environment, N/K, and log level;
+- benchmark payload, concurrency, warmup, duration, repetitions, and pin profile.
+
+`bench/suite/run_suite.sh` captures live metadata in its output directory. If it
+cannot read DPU state, the result is marked uncaptured rather than inferring it
+from shell variables.
+
+## Inspection and cleanup
+
+```sh
+./bench/bench.sh status
+./bench/bench.sh logs
+./bench/bench.sh dpulog 500
+./bench/bench.sh dpucpu
+./bench/bench.sh cleanup
+```
+
+Performance runs use log level 40. Higher-volume diagnostics change CPU and I/O
+behavior and are not comparable to warning-level results.

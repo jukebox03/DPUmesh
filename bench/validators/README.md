@@ -1,30 +1,35 @@
-# DPUmesh transport validators
+# DPUmesh Transport Validators
 
-Correctness validators for DPUmesh transport **features** that the RPC benchmark
-(`../bench_dpumesh.c` / `../echo_dpumesh.c`) does not exercise. They are separate from
-the benchmark and are driven by `../bench.sh` (`loopback` / `verbs` / `stream` / `preload`).
+These programs validate transport semantics independently of the performance
+report. Build and deploy through `bench/bench.sh`; direct invocation is useful
+only when the DPU process and pod registration state are already synchronized.
 
-| file                 | binary             | validates                                              |
-|----------------------|--------------------|--------------------------------------------------------|
-| `loopback_dpumesh.c` | `loopback_dpumesh` | self-routing (one pod is client+server of its own svc) + oriented-tuple demux, one request at a time |
-| `verbs_dpumesh.c`    | `verbs_dpumesh`    | the same self-routing proof **at depth** — `WINDOW` concurrent QPs × `PIPELINE` outstanding each, so it drives the completion path where loopback drives it one-at-a-time. It is what caught the ready-list lost-edge race |
-| `stream_dpumesh.c`   | `stream_dpumesh`   | the DPU L7 frame-proxy engine (`DPUMESH_PROXY=frame`: length-prefix parser, per-dst SG-DMA egress) |
-| `preload_runner.c`   | `preload_runner`   | LD_PRELOAD transparency: vanilla TCP apps over DPUmesh via `libdmesh_preload.so` (pod/image: `preload-dpumesh`) |
-| `tcp_client.c`, `tcp_echo.c` | (POSIX)    | the vanilla TCP apps the preload validator runs unmodified under the shim |
+| Validator | Programs | Contract exercised |
+|---|---|---|
+| Loopback | `loopback_dpumesh.c` | One process registers, connects to its own Service, exchanges data, and closes |
+| Verbs-shaped | `verbs_dpumesh.c` | Channel/CQ/QP lifecycle, windowed sends, polling, and RX credit release |
+| Stream/L7 | `stream_dpumesh.c` | Fragmented framed messages through the optional frame codec |
+| POSIX preload | `preload_runner.c`, `tcp_echo.c`, `tcp_client.c` | Unmodified socket connect/listen/accept/read/write behavior and TCP fallback |
 
-Container defs for these live beside the sources here
-(`loopback_dpumesh.Dockerfile`, `verbs_dpumesh.Dockerfile`,
-`stream_dpumesh.Dockerfile`, `preload_dpumesh.Dockerfile`).
+Run them through the common entry point:
 
-All validator pods are brought up by `bench.sh deploy` (`start_pods`); none self-starts
-on demand — starting a pod against an already-running DPU is not a supported flow.
+```sh
+./bench/bench.sh loopback 1000 1024 0
+./bench/bench.sh verbs    1000 1024 0 32 4
+./bench/bench.sh stream   1000 1024 1
+./bench/bench.sh preload  1000 1024 8
+```
 
-**Why every validator is self-contained.** Each one is BOTH the client and the server of its own
-service, and that is not just convenience — a validator only polls its completion queue while its
-own `RUN` is in flight. Idle, it blocks in `accept()` and answers nothing, so it cannot serve as
-another pod's backend. The `echo-*` pods do poll continuously, but they are Greeters speaking the
-benchmark's framing, not verbatim echoes. Cross-pod fan-out is therefore the **benchmark's** job
-(three `echo-dpumesh` backends, `../README.md`), not a validator's.
+A passing data test requires exact byte and request-id agreement, zero failed
+operations, correct EOF delivery, and successful reverse-order destruction. A
+process exit without a crash is not sufficient: inspect the DPU log for DMA,
+generation, ring-ACK, egress, or cleanup warnings.
 
-**Build wiring:** these sources live in `bench/validators/`; the root `Makefile`
-paths point here (see `../README.md`).
+The L7 stream validator is not a gRPC validator. Its simple frame codec has a
+repository-specific message format and must not be enabled for HTTP/2. gRPC uses
+L4 passthrough and is tested by the C++ tests and
+`grpc_dpumesh_qps_benchmark` under `integrations/grpc`.
+
+Sanitizer validation and performance validation are separate. Use ASAN/UBSAN
+builds for memory correctness, and use optimized non-sanitized binaries for QPS
+or latency results.

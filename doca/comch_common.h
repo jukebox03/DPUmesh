@@ -27,6 +27,22 @@ enum dmesh_msg_type {
     DMESH_MSG_BATCH_FWD_ACK= 3, /* DPU→Host: batch of (port,seq) keys whose forward DMA is done — free all */
     DMESH_MSG_BATCH_REV_DONE=4, /* DPU→Host: batch of reverse-DMA completions — deliver all */
     DMESH_MSG_POD_ASSIGNED = 5, /* DPU→Host: the pod_id the DPU allocated for this registration */
+    DMESH_MSG_POD_INIT_RESULT=6,/* DPU→Host: all pod DMA resources are READY, or init failed */
+    DMESH_MSG_POD_UNREGISTER=7, /* Host→DPU: stop routing and quiesce every remote DMA reference */
+    DMESH_MSG_POD_QUIESCED=8,  /* DPU→Host: remote mappings reclaimed; host may destroy exports */
+};
+
+/* POD_ASSIGNED only reserves an address. A channel is usable only after the DPU
+ * reports DMESH_POD_INIT_READY, which means all K forward rings, the host TX
+ * mmap, the host RX mmap, an installation ACK from every target DPA EU, and the
+ * ARM egress engine are ready. Values other than PENDING/READY are terminal
+ * failures. */
+enum dmesh_pod_init_result {
+    DMESH_POD_INIT_PENDING         = 0,
+    DMESH_POD_INIT_READY           = 1,
+    DMESH_POD_INIT_REGISTER_FAILED = 2,
+    DMESH_POD_INIT_MMAP_FAILED     = 3,
+    DMESH_POD_INIT_DPA_FAILED      = 4,
 };
 
 /* DPU→Host: batched TX_ACK. Coalesces up to BATCH_TXACK_MAX per-request
@@ -114,6 +130,36 @@ struct dmesh_pod_assigned_msg {
     int32_t  pod_id;            /* the assigned pod id (>= 0) */
 };
 
+/* DPU→Host terminal result for the second phase of channel initialization.
+ * Keep the type byte at offset 0 because the host dispatches on recv_buffer[0]. */
+struct dmesh_pod_init_result_msg {
+    uint8_t  type;              /* = DMESH_MSG_POD_INIT_RESULT */
+    uint8_t  _pad[3];
+    int32_t  pod_id;            /* assigned pod, or -1 when registration itself failed */
+    int32_t  result;            /* enum dmesh_pod_init_result; never PENDING on the wire */
+};
+_Static_assert(sizeof(struct dmesh_pod_init_result_msg) == 12,
+               "dmesh_pod_init_result_msg ABI drift");
+
+/* Graceful teardown is a protocol barrier, not merely a Comch disconnect. The
+ * host keeps its exported mmaps alive after UNREGISTER until QUIESCED arrives.
+ * The DPU sends QUIESCED only after DPA DEL_ACK fences and ARM SG-DMA quiescence,
+ * and after destroying its imported buf_arr/mmap handles. */
+struct dmesh_pod_unregister_msg {
+    uint8_t type;               /* = DMESH_MSG_POD_UNREGISTER */
+    uint8_t _pad[3];
+    int32_t pod_id;
+};
+struct dmesh_pod_quiesced_msg {
+    uint8_t type;               /* = DMESH_MSG_POD_QUIESCED */
+    uint8_t _pad[3];
+    int32_t pod_id;
+};
+_Static_assert(sizeof(struct dmesh_pod_unregister_msg) == 8,
+               "dmesh_pod_unregister_msg ABI drift");
+_Static_assert(sizeof(struct dmesh_pod_quiesced_msg) == 8,
+               "dmesh_pod_quiesced_msg ABI drift");
+
 
 
 /* Type-peek wrapper: control-path recv buffers are cast to this to read the
@@ -126,5 +172,5 @@ export_mmap_to_remote(struct objects *objs, struct doca_mmap *mmap, void *buffer
 struct doca_comch_connection;
 doca_error_t
 process_mmap_msg(struct objects *objs, struct doca_comch_connection *conn,
-                 struct dmesh_mmap_msg *mmap_msg);
+                 struct dmesh_mmap_msg *mmap_msg, size_t msg_len);
 #endif // COMCH_COMMON_H

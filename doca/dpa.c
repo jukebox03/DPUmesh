@@ -19,10 +19,18 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stddef.h>
+#include <time.h>
 
 DOCA_LOG_REGISTER(DPA);
 
 #ifdef DOCA_ARCH_DPU
+
+struct dpa_send_payload {
+    struct dmesh_doca_dpa_msgq *msgq;
+    uint8_t is_wake;
+    uint8_t _pad[7];
+    uint8_t bytes[];
+};
 /* Kernel function declaration (resolved from dpa_program.a stubs, DPU only) */
 extern doca_dpa_func_t run_dma_manager;
 extern doca_dpa_func_t thread_init_rpc;
@@ -73,7 +81,7 @@ static void dmesh_doca_dpa_msgq_recv_cb(struct doca_comch_consumer_task_post_rec
 
     data_len = doca_comch_consumer_task_post_recv_get_imm_data_len(recv_task);
 
-    /* DPA sends comch_dma_comp_msg directly (16 bytes; HW imm-data max 32) rather
+    /* DPA sends comch_dma_comp_msg directly (20 bytes; HW imm-data max 32) rather
      * than the full comch_msg union, so read raw bytes and dispatch by the leading
      * type field. */
     uint8_t *raw = (uint8_t *)doca_comch_consumer_task_post_recv_get_imm_data(recv_task);
@@ -108,8 +116,14 @@ static void dmesh_doca_dpa_msgq_recv_cb(struct doca_comch_consumer_task_post_rec
              * dma_ready so the dma_buffer/handle reads below see the
              * RELEASE-published setup fields. */
             struct pod_state *src_pod = find_pod_by_id(objs, src_pod_id);
-            if (!src_pod || !pod_data_ready(src_pod) || !src_pod->dma_buffer) {
-                DOCA_LOG_ERR("DMA completed but src_pod %d not found or not ready", src_pod_id);
+            if (!src_pod || !pod_data_ready(src_pod) || !src_pod->dma_buffer ||
+                __atomic_load_n(&src_pod->dma_generation, __ATOMIC_ACQUIRE) !=
+                    comp_msg->generation) {
+                /* Normal during teardown: DEL_ACK fences the DMA itself, but an
+                 * older FWD_DONE can already be queued on ARM. Generation makes
+                 * this safe even if the pod_id slot has since been reused. */
+                DOCA_LOG_INFO("Ignoring stale FWD_DONE src_pod=%d gen=%u seq=%u",
+                              src_pod_id, comp_msg->generation, seq);
                 break;
             }
 
@@ -135,6 +149,7 @@ static void dmesh_doca_dpa_msgq_recv_cb(struct doca_comch_consumer_task_post_rec
              * End-node slot-based admission keeps in-flight bytes ≤ buf_size
              * so DPA cannot lap unconsumed data. */
             entry.buf_offset = body_offset;
+            entry.generation = comp_msg->generation;
             /* Derive src_pod index directly from the ACQUIRE-gated pointer
              * resolved above (avoids an unguarded re-scan of pods[]). */
             entry.pod_idx = (int)(src_pod - objs->pods);
@@ -150,6 +165,81 @@ static void dmesh_doca_dpa_msgq_recv_cb(struct doca_comch_consumer_task_post_rec
                                  (unsigned long long)cq_full_drops, seq, src_pod_id, dst_pod_id);
                 /* zero-copy: no heap data to free */
             }
+            break;
+        }
+        case DPA_MSG_RING_ADD_ACK: {
+            if (data_len != sizeof(struct dpa_ring_ack_msg)) {
+                DOCA_LOG_ERR("DPA MsgQ recv: RING_ADD_ACK bad size (len=%u, need=%zu)",
+                             data_len, sizeof(struct dpa_ring_ack_msg));
+                break;
+            }
+            const struct dpa_ring_ack_msg *ack =
+                (const struct dpa_ring_ack_msg *)raw;
+            struct pod_state *pod = find_pod_by_id(objs, ack->pod_id);
+            if (pod == NULL || !__atomic_load_n(&pod->registered, __ATOMIC_ACQUIRE)) {
+                DOCA_LOG_WARN("Ignoring ADD_ACK for dead pod=%d eu=%u gen=%u",
+                              ack->pod_id, ack->eu_index, ack->generation);
+                break;
+            }
+            uint32_t generation = __atomic_load_n(&pod->dma_generation,
+                                                   __ATOMIC_ACQUIRE);
+            uint32_t expected = __atomic_load_n(&pod->dpa_add_expected_mask,
+                                                 __ATOMIC_ACQUIRE);
+            uint32_t bit = ack->eu_index < 32 ? (1u << ack->eu_index) : 0;
+            if (ack->generation != generation || bit == 0 || (expected & bit) == 0) {
+                DOCA_LOG_WARN("Ignoring stale/unexpected ADD_ACK pod=%d eu=%u gen=%u current=%u mask=0x%x",
+                              ack->pod_id, ack->eu_index, ack->generation,
+                              generation, expected);
+                break;
+            }
+            if (ack->status != DPA_RING_ACK_OK)
+                __atomic_store_n(&pod->dpa_add_ack_failed, 1, __ATOMIC_RELEASE);
+            __atomic_fetch_or(&pod->dpa_add_ack_mask, bit, __ATOMIC_ACQ_REL);
+            DOCA_LOG_INFO("DPA ADD_ACK: pod=%d eu=%u gen=%u status=%u",
+                          ack->pod_id, ack->eu_index, ack->generation, ack->status);
+            dpu_wake_main(objs);
+            break;
+        }
+        case DPA_MSG_RING_DEL_ACK: {
+            if (data_len != sizeof(struct dpa_ring_ack_msg)) {
+                DOCA_LOG_ERR("DPA MsgQ recv: RING_DEL_ACK bad size (len=%u, need=%zu)",
+                             data_len, sizeof(struct dpa_ring_ack_msg));
+                break;
+            }
+            const struct dpa_ring_ack_msg *ack =
+                (const struct dpa_ring_ack_msg *)raw;
+            struct pod_state *pod = NULL;
+            int n = __atomic_load_n(&objs->num_pods, __ATOMIC_ACQUIRE);
+            for (int i = 0; i < n; i++) {
+                struct pod_state *candidate = &objs->pods[i];
+                if (__atomic_load_n(&candidate->cleanup_pending,
+                                    __ATOMIC_ACQUIRE) &&
+                    candidate->pod_id == ack->pod_id &&
+                    __atomic_load_n(&candidate->dma_generation,
+                                    __ATOMIC_ACQUIRE) == ack->generation) {
+                    pod = candidate;
+                    break;
+                }
+            }
+            if (pod == NULL) {
+                DOCA_LOG_WARN("Ignoring stale DEL_ACK pod=%d eu=%u gen=%u",
+                              ack->pod_id, ack->eu_index, ack->generation);
+                break;
+            }
+            uint32_t expected = __atomic_load_n(&pod->dpa_del_expected_mask,
+                                                 __ATOMIC_ACQUIRE);
+            uint32_t bit = ack->eu_index < 32 ? (1u << ack->eu_index) : 0;
+            if (bit == 0 || (expected & bit) == 0 ||
+                ack->status != DPA_RING_ACK_OK) {
+                DOCA_LOG_WARN("Ignoring invalid DEL_ACK pod=%d eu=%u gen=%u status=%u mask=0x%x",
+                              ack->pod_id, ack->eu_index, ack->generation,
+                              ack->status, expected);
+                break;
+            }
+            __atomic_fetch_or(&pod->dpa_del_ack_mask, bit, __ATOMIC_ACQ_REL);
+            DOCA_LOG_INFO("DPA DEL_ACK: pod=%d eu=%u gen=%u",
+                          ack->pod_id, ack->eu_index, ack->generation);
+            dpu_wake_main(objs);
             break;
         }
         case DPA_MSG_WAKE:
@@ -219,11 +309,14 @@ static void dmesh_doca_dpa_msgq_send_cb(struct doca_comch_producer_task_send *se
 				       union doca_data task_user_data,
 				       union doca_data ctx_user_data)
 {
-	void *payload_copy = task_user_data.ptr;
+	struct dpa_send_payload *payload = task_user_data.ptr;
 	(void)ctx_user_data;
 
-	if (payload_copy != NULL)
-		free(payload_copy);
+	if (payload != NULL) {
+		if (payload->is_wake && payload->msgq != NULL)
+			payload->msgq->wake_inflight = 0;
+		free(payload);
+	}
 
 	struct doca_task *task = doca_comch_producer_task_send_as_task(send_task);
 	doca_task_free(task);
@@ -240,13 +333,15 @@ static void dmesh_doca_dpa_msgq_send_error_cb(struct doca_comch_producer_task_se
 					     union doca_data task_user_data,
 					     union doca_data ctx_user_data)
 {
-    void *payload_copy = task_user_data.ptr;
+	struct dpa_send_payload *payload = task_user_data.ptr;
     (void)ctx_user_data;
 
     struct doca_task *task = doca_comch_producer_task_send_as_task(send_task);
     DOCA_LOG_ERR("Failed to send msg");
-    if (payload_copy != NULL) {
-        free(payload_copy);
+	if (payload != NULL) {
+		if (payload->is_wake && payload->msgq != NULL)
+			payload->msgq->wake_inflight = 0;
+		free(payload);
     }
     doca_task_free(task);
 }
@@ -830,33 +925,37 @@ dmesh_doca_dpa_msgq_send(struct dmesh_doca_dpa_msgq *msgq, void *msg, uint32_t m
 {
 	doca_error_t result;
     union doca_data user_data;
-    void *msg_copy;
+    struct dpa_send_payload *payload;
 
 	struct doca_comch_producer_task_send *send_task;
     struct doca_task *task;
 
-    msg_copy = malloc(msg_size);
-    if (msg_copy == NULL) {
+    payload = malloc(sizeof(*payload) + msg_size);
+    if (payload == NULL) {
         DOCA_LOG_ERR("DPA MsgQ send failed: payload copy allocation failed");
         return DOCA_ERROR_NO_MEMORY;
     }
-    memcpy(msg_copy, msg, msg_size);
+	payload->msgq = msgq;
+	payload->is_wake =
+		(msg_size >= sizeof(enum dpa_msg_type) &&
+		 *(const enum dpa_msg_type *)msg == DPA_MSG_WAKE);
+    memcpy(payload->bytes, msg, msg_size);
 	result = doca_comch_producer_task_send_alloc_init(msgq->producer,
 							  NULL,
-                                msg_copy,
+							  payload->bytes,
 							  msg_size,
                               msgq->target_consumer_id,
 							  &send_task);
 	if (result != DOCA_SUCCESS) {
 		DOCA_LOG_ERR("DPA MsgQ send failed: failed to allocate send task - %s",
 			     doca_error_get_name(result));
-        free(msg_copy);
+        free(payload);
 		return result;
 	}
 
     task = doca_comch_producer_task_send_as_task(send_task);
 
-    user_data.ptr = msg_copy;
+    user_data.ptr = payload;
     doca_task_set_user_data(task, user_data);
 
     int retry = 0;
@@ -872,10 +971,12 @@ dmesh_doca_dpa_msgq_send(struct dmesh_doca_dpa_msgq *msgq, void *msg, uint32_t m
 	if (result != DOCA_SUCCESS) {
 		DOCA_LOG_ERR("DPA MsgQ send failed: %s (retries=%d, msg_size=%u)",
 			     doca_error_get_name(result), retry, msg_size);
-        free(msg_copy);
+		free(payload);
 		doca_task_free(task);
 		return result;
 	}
+	if (payload->is_wake)
+		msgq->wake_inflight = 1;
 
 	return DOCA_SUCCESS;
 }
@@ -888,34 +989,44 @@ dmesh_doca_dpa_msgq_send_try(struct dmesh_doca_dpa_msgq *msgq, void *msg, uint32
 {
     doca_error_t result;
     union doca_data user_data;
-    void *msg_copy;
+    struct dpa_send_payload *payload;
     struct doca_comch_producer_task_send *send_task;
     struct doca_task *task;
 
-    msg_copy = malloc(msg_size);
-    if (msg_copy == NULL)
+    int is_wake =
+        msg_size >= sizeof(enum dpa_msg_type) &&
+        *(const enum dpa_msg_type *)msg == DPA_MSG_WAKE;
+    if (is_wake && msgq->wake_inflight)
+        return DOCA_SUCCESS;
+
+    payload = malloc(sizeof(*payload) + msg_size);
+    if (payload == NULL)
         return DOCA_ERROR_NO_MEMORY;
-    memcpy(msg_copy, msg, msg_size);
+    payload->msgq = msgq;
+    payload->is_wake = (uint8_t)is_wake;
+    memcpy(payload->bytes, msg, msg_size);
 
     result = doca_comch_producer_task_send_alloc_init(msgq->producer, NULL,
-                                                       msg_copy, msg_size,
+                                                       payload->bytes, msg_size,
                                                        msgq->target_consumer_id,
                                                        &send_task);
     if (result != DOCA_SUCCESS) {
-        free(msg_copy);
+        free(payload);
         return result;
     }
 
     task = doca_comch_producer_task_send_as_task(send_task);
-    user_data.ptr = msg_copy;
+    user_data.ptr = payload;
     doca_task_set_user_data(task, user_data);
 
     result = doca_task_submit(task);
     if (result != DOCA_SUCCESS) {
-        free(msg_copy);
+        free(payload);
         doca_task_free(task);
         return result;
     }
+    if (is_wake)
+        msgq->wake_inflight = 1;
     return DOCA_SUCCESS;
 }
 
@@ -1027,6 +1138,21 @@ setup_pod_dma(struct objects *objs, struct pod_state *pod)
     int K = objs->k_rings > 0 ? objs->k_rings : 1;
     if (K > N) K = N;
     pod->k_rings = K;
+    __atomic_store_n(&pod->egress_quiesced, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&pod->egress_inflight, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&pod->proxy_source_refs, 0, __ATOMIC_RELEASE);
+
+    /* Every target EU must ACK this exact incarnation. Publish the expected
+     * bitmap before any EU can answer; K<=N makes the mapping injective. */
+    uint32_t generation = __atomic_add_fetch(&pod->dma_generation, 1,
+                                              __ATOMIC_ACQ_REL);
+    uint32_t expected_mask = 0;
+    for (int j = 0; j < K; j++)
+        expected_mask |= 1u << ((pod->pod_id * K + j) % N);
+    __atomic_store_n(&pod->dpa_add_ack_mask, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&pod->dpa_add_ack_failed, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&pod->dpa_setup_complete, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&pod->dpa_add_expected_mask, expected_mask, __ATOMIC_RELEASE);
 
     /* 1. One DPU staging buffer per pod. Under PER-CONN CONTIGUOUS STAGING the
      * forward DMA lands each chunk at the sender's host TX byte offset (mirror),
@@ -1087,7 +1213,9 @@ setup_pod_dma(struct objects *objs, struct pod_state *pod)
             if (result != DOCA_SUCCESS)
                 return result;
             arg.rings[0] = ring_info;
+            arg.ring_generation[0] = generation;
             arg.num_rings = 1;
+            arg.initial_generation = generation;
             result = doca_dpa_h2d_memcpy(objs->dpa, dpa_thread->arg,
                                           &arg, sizeof(struct dpa_thread_arg));
             if (result != DOCA_SUCCESS) {
@@ -1124,6 +1252,7 @@ setup_pod_dma(struct objects *objs, struct pod_state *pod)
             struct comch_add_ring_msg add_msg;
             memset(&add_msg, 0, sizeof(add_msg));
             add_msg.type = DPA_MSG_RING_ADD;
+            add_msg.generation = generation;
             add_msg.ring = ring_info;
             result = dmesh_doca_dpa_msgq_send(&objs->dpa_comches[k_j]->send,
                                                &add_msg, sizeof(add_msg));
@@ -1142,15 +1271,11 @@ setup_pod_dma(struct objects *objs, struct pod_state *pod)
      * host RX mmap is imported lazily (comch_common.c); the egress uses it once
      * present (pod->host_rx_mmap / host_rx_addr). */
 
-    /* New incarnation of this slot: bump BEFORE publishing dma_ready, so any DMA
-     * error still in flight from the previous tenant carries the old generation and
-     * px_dma_err_cb ignores it instead of marking this fresh pod dead. */
-    __atomic_store_n(&pod->dma_generation, pod->dma_generation + 1, __ATOMIC_RELEASE);
-
-    /* RELEASE publication: all data-plane fields (dma_buffer, forward rings, ...)
-     * are written above; publish dma_ready last so a reader that ACQUIRE-loads
-     * dma_ready==1 (pod_data_ready) is guaranteed to see them. */
-    __atomic_store_n(&pod->dma_ready, 1, __ATOMIC_RELEASE);
+    /* Do NOT publish dma_ready here. ADD_RING send completion only means the ARM
+     * submitted the task. dpu_finalize_pending_pod_inits publishes readiness after
+     * every target EU returns an ADD_ACK for `generation`. RELEASE makes all setup
+     * fields above visible to that main-thread ACQUIRE. */
+    __atomic_store_n(&pod->dpa_setup_complete, 1, __ATOMIC_RELEASE);
     return DOCA_SUCCESS;
 }
 
@@ -1161,33 +1286,69 @@ teardown_pod_dma(struct objects *objs, struct pod_state *pod)
      * (registered but disconnected before its mmaps arrived) → no rings to drop. */
     int K = pod->k_rings;
     int N = objs->num_dpa_threads;
+    __atomic_store_n(&pod->dpa_del_expected_mask, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&pod->dpa_del_ack_mask, 0, __ATOMIC_RELEASE);
+    pod->dpa_del_last_send_ns = 0;
     if (K <= 0 || N <= 0 || pod->pod_id < 0)
         return;
     if (K > N) K = N;
 
-    /* Mirror setup_pod_dma's mapping exactly: ring j lives on EU k_j. K <= N makes
-     * k_j injective over j, so each EU holds at most one ring for this pod and
-     * pod_id alone identifies it on the DPA side. */
+    uint32_t expected = 0;
     for (int j = 0; j < K; j++) {
         int k_j = (pod->pod_id * K + j) % N;
-        if (!objs->dpa_thread_running[k_j])
-            continue;   /* EU never started → its rings[] is empty */
+        if (objs->dpa_thread_running[k_j])
+            expected |= 1u << k_j;
+    }
+    __atomic_store_n(&pod->dpa_del_expected_mask, expected, __ATOMIC_RELEASE);
+    (void)progress_teardown_pod_dma(objs, pod);
+}
 
+int
+progress_teardown_pod_dma(struct objects *objs, struct pod_state *pod)
+{
+    uint32_t expected = __atomic_load_n(&pod->dpa_del_expected_mask,
+                                         __ATOMIC_ACQUIRE);
+    uint32_t acked = __atomic_load_n(&pod->dpa_del_ack_mask,
+                                      __ATOMIC_ACQUIRE);
+    if ((acked & expected) == expected)
+        return 1;
+
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    uint64_t now_ns = (uint64_t)now.tv_sec * 1000000000ull +
+                      (uint64_t)now.tv_nsec;
+    /* An ACK can be lost if the ARM receive pool was temporarily empty. DEL is
+     * idempotent, so retry unacked EUs at 10 ms without filling their MsgQs. */
+    if (pod->dpa_del_last_send_ns != 0 &&
+        now_ns - pod->dpa_del_last_send_ns < 10000000ull)
+        return 0;
+    pod->dpa_del_last_send_ns = now_ns;
+
+    int K = pod->k_rings;
+    int N = objs->num_dpa_threads;
+    if (K > N) K = N;
+    uint32_t generation = __atomic_load_n(&pod->dma_generation,
+                                           __ATOMIC_ACQUIRE);
+    for (int j = 0; j < K; j++) {
+        int eu = (pod->pod_id * K + j) % N;
+        uint32_t bit = 1u << eu;
+        if ((expected & bit) == 0 || (acked & bit) != 0)
+            continue;
         struct comch_add_ring_msg del_msg;
         memset(&del_msg, 0, sizeof(del_msg));
         del_msg.type = DPA_MSG_RING_DEL;
-        del_msg.ring.pod_id = pod->pod_id;   /* only field the DPA reads for DEL */
-        doca_error_t r = dmesh_doca_dpa_msgq_send(&objs->dpa_comches[k_j]->send,
-                                                  &del_msg, sizeof(del_msg));
-        if (r != DOCA_SUCCESS) {
-            /* The EU keeps a stale entry, but a reconnect still recovers: ADD_RING
-             * replaces a same-pod_id entry in place rather than appending. */
-            DOCA_LOG_ERR("teardown_pod_dma: send RING_DEL to EU %d failed (pod_id=%d): %s",
-                         k_j, pod->pod_id, doca_error_get_descr(r));
-        } else {
-            DOCA_LOG_INFO("Sent RING_DEL to EU %d (pod_id=%d ring=%d)", k_j, pod->pod_id, j);
-        }
+        del_msg.generation = generation;
+        del_msg.ring.pod_id = pod->pod_id;
+        doca_error_t result = dmesh_doca_dpa_msgq_send_try(
+            &objs->dpa_comches[eu]->send, &del_msg, sizeof(del_msg));
+        if (result == DOCA_SUCCESS)
+            DOCA_LOG_INFO("Sent RING_DEL to EU %d (pod_id=%d gen=%u)",
+                          eu, pod->pod_id, generation);
+        else if (result != DOCA_ERROR_AGAIN)
+            DOCA_LOG_WARN("RING_DEL retry to EU %d failed (pod_id=%d): %s",
+                          eu, pod->pod_id, doca_error_get_descr(result));
     }
+    return 0;
 }
 
 #endif /* DOCA_ARCH_DPU */

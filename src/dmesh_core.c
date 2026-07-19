@@ -16,6 +16,7 @@
 #include <errno.h>      /* tx_reserve / lifecycle report EAGAIN|EINVAL|EBADMSG */
 #include <pthread.h>
 #include <stdatomic.h>
+#include <time.h>
 #include <unistd.h>        /* close() for the host epoll RX path */
 #include <sys/epoll.h>     /* event-driven host PE progress (DPUMESH_HOST_EPOLL) */
 #include <sys/eventfd.h>   /* per-CQ readiness eventfd for native-epoll integration */
@@ -262,6 +263,7 @@ struct dpumesh_ctx {
     atomic_uint_fast64_t block_free;   /* Treiber head: (tag<<32) | head_index */
     uint32_t *block_next;      /* [n_blocks]: free-list links */
     pthread_mutex_t block_lock;    /* close-path block return (exactly-once handoff, cold) */
+    int block_lock_initialized;
     /* Elastic-pool event counters (diagnostics; relaxed atomics — events are the
      * RARE paths: steady sliding touches none of these except recycle_hits once
      * per drained block). Read via dmesh_get_tx_stats (public). */
@@ -304,10 +306,12 @@ struct dpumesh_ctx {
     struct dmesh_cq *cqs[DMESH_MAX_CQ];
     int              n_cqs;            /* high-water mark of cqs[]; slots may be NULL */
     pthread_mutex_t  cq_lock;
+    int              cq_lock_initialized;
 
     /* Endpoint port table + allocator (oriented-tuple demux). */
     struct dmesh_port_slot *ports;     /* [DMESH_PORT_SPACE] */
     pthread_mutex_t port_lock;
+    int port_lock_initialized;
     uint32_t next_port;                /* bump cursor, wraps within [1, port_span) */
     uint32_t port_span;                /* live client-port window: the cursor's wrap point,
                                         * and so the cap on how many per-port inboxes this
@@ -813,6 +817,64 @@ static doca_error_t init_doca_device(dpumesh_ctx_t *ctx) {
     return open_doca_device_with_pci(pci_addr, NULL, &ctx->doca_objs.dev);
 }
 
+#define DPUMESH_POD_INIT_TIMEOUT_MS 30000
+
+static int init_elapsed_ms(const struct timespec *start, const struct timespec *now) {
+    time_t sec = now->tv_sec - start->tv_sec;
+    long nsec = now->tv_nsec - start->tv_nsec;
+    if (nsec < 0) { sec--; nsec += 1000000000L; }
+    return (int)(sec * 1000 + nsec / 1000000L);
+}
+
+static doca_error_t require_running_control_path(dpumesh_ctx_t *ctx) {
+    if (ctx->doca_objs.cc_client == NULL)
+        return DOCA_ERROR_NOT_CONNECTED;
+    enum doca_ctx_states state;
+    doca_error_t result = doca_ctx_get_state(
+        doca_comch_client_as_ctx(ctx->doca_objs.cc_client), &state);
+    if (result != DOCA_SUCCESS)
+        return result;
+    return state == DOCA_CTX_STATE_RUNNING ? DOCA_SUCCESS
+                                           : DOCA_ERROR_CONNECTION_ABORTED;
+}
+
+static doca_error_t wait_for_pod_init_result(dpumesh_ctx_t *ctx) {
+    const struct timespec pause = { .tv_sec = 0, .tv_nsec = 10000 };
+    struct timespec start, now;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+
+    for (;;) {
+        int32_t init_result = __atomic_load_n(&ctx->doca_objs.pod_init_result,
+                                              __ATOMIC_ACQUIRE);
+        if (init_result == DMESH_POD_INIT_READY) {
+            DOCA_LOG_INFO("DPU pod is data-ready: pod_id=%d", ctx->pod_id);
+            return DOCA_SUCCESS;
+        }
+        if (init_result > DMESH_POD_INIT_READY) {
+            DOCA_LOG_ERR("DPU rejected pod initialization: pod_id=%d result=%d",
+                         ctx->pod_id, init_result);
+            return DOCA_ERROR_INITIALIZATION;
+        }
+
+        if (ctx->doca_objs.pe != NULL)
+            (void)doca_pe_progress(ctx->doca_objs.pe);
+        doca_error_t control_result = require_running_control_path(ctx);
+        if (control_result != DOCA_SUCCESS) {
+            DOCA_LOG_ERR("Control path stopped while awaiting pod readiness: %s",
+                         doca_error_get_name(control_result));
+            return control_result;
+        }
+        nanosleep(&pause, NULL);
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        if (init_elapsed_ms(&start, &now) >= DPUMESH_POD_INIT_TIMEOUT_MS) {
+            DOCA_LOG_ERR("Timed out after %d ms waiting for DPU pod readiness "
+                         "(pod_id=%d, rings=%d)",
+                         DPUMESH_POD_INIT_TIMEOUT_MS, ctx->pod_id, ctx->k_rings);
+            return DOCA_ERROR_TIME_OUT;
+        }
+    }
+}
+
 static doca_error_t init_control_path(dpumesh_ctx_t *ctx) {
     doca_error_t result;
 
@@ -824,6 +886,9 @@ static doca_error_t init_control_path(dpumesh_ctx_t *ctx) {
      * DMESH_MSG_POD_ASSIGNED. Block until it arrives, progressing the PE by hand
      * (the PE thread isn't started until the end of dpumesh_init). */
     __atomic_store_n(&ctx->doca_objs.assigned_pod_id, -1, __ATOMIC_RELEASE);
+    __atomic_store_n(&ctx->doca_objs.pod_init_result, DMESH_POD_INIT_PENDING,
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&ctx->doca_objs.pod_quiesced, 0, __ATOMIC_RELEASE);
     ctx->reg_msg.type = DMESH_MSG_POD_REGISTER;
     ctx->reg_msg.pod_id = -1;                    /* DPU assigns this node's address */
     ctx->reg_msg.service_id = ctx->service_id;   /* DPU: pods[our slot].service_id = this (the LB set is derived from it) */
@@ -832,18 +897,36 @@ static doca_error_t init_control_path(dpumesh_ctx_t *ctx) {
     if (result != DOCA_SUCCESS) return result;
     DOCA_LOG_INFO("Sent REGISTER to DPU: service_id=%d (awaiting pod_id)", ctx->service_id);
 
-    /* Wait for the assignment. Bounded (~2 s) so a lost reply fails init instead
-     * of wedging forever. The reply normally lands in microseconds. */
+    /* Wait for phase 1 (address assignment). A registration failure may arrive
+     * as POD_INIT_RESULT before POD_ASSIGNED, so check both atomics. */
     struct timespec ts = { .tv_sec = 0, .tv_nsec = 10000 };   /* 10 us */
+    struct timespec start, now;
+    clock_gettime(CLOCK_MONOTONIC, &start);
     int32_t assigned = -1;
-    for (int i = 0; i < 200000; i++) {
+    for (;;) {
         assigned = __atomic_load_n(&ctx->doca_objs.assigned_pod_id, __ATOMIC_ACQUIRE);
         if (assigned >= 0) break;
-        if (ctx->doca_objs.pe) doca_pe_progress(ctx->doca_objs.pe);
+        int32_t init_result = __atomic_load_n(&ctx->doca_objs.pod_init_result,
+                                              __ATOMIC_ACQUIRE);
+        if (init_result == DMESH_POD_INIT_REGISTER_FAILED) {
+            DOCA_LOG_ERR("DPU rejected pod registration (service_id=%d)", ctx->service_id);
+            return DOCA_ERROR_INITIALIZATION;
+        }
+        if (ctx->doca_objs.pe) (void)doca_pe_progress(ctx->doca_objs.pe);
+        doca_error_t control_result = require_running_control_path(ctx);
+        if (control_result != DOCA_SUCCESS) {
+            DOCA_LOG_ERR("Control path stopped while awaiting pod assignment: %s",
+                         doca_error_get_name(control_result));
+            return control_result;
+        }
         nanosleep(&ts, NULL);
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        if (init_elapsed_ms(&start, &now) >= DPUMESH_POD_INIT_TIMEOUT_MS)
+            break;
     }
     if (assigned < 0) {
-        DOCA_LOG_ERR("Timed out waiting for DPU pod_id assignment (service_id=%d)", ctx->service_id);
+        DOCA_LOG_ERR("Timed out after %d ms waiting for DPU pod_id assignment "
+                     "(service_id=%d)", DPUMESH_POD_INIT_TIMEOUT_MS, ctx->service_id);
         return DOCA_ERROR_TIME_OUT;
     }
     ctx->pod_id = assigned;
@@ -903,39 +986,76 @@ static doca_error_t init_datapath(dpumesh_ctx_t *ctx) {
                                    ctx->rx_dma_buffer, ctx->rx_dma_buf_size,
                                    DMA_HOST_RX_BUFFER);
     if (result != DOCA_SUCCESS) {
-        DOCA_LOG_WARN("Failed to export Host RX buffer to DPU: %s", doca_err_str(result));
+        DOCA_LOG_ERR("Failed to export Host RX buffer to DPU: %s", doca_err_str(result));
+        return result;
     }
 
-    return DOCA_SUCCESS;
+    /* A successful send submission is not remote acceptance. The DPU returns
+     * READY only after it has imported all three mapping classes and installed
+     * every DPA ring (or a terminal failure explaining that this channel cannot
+     * be used). */
+    return wait_for_pod_init_result(ctx);
 }
 
 int dpumesh_init(dpumesh_ctx_t **out, int service_id,
                  const dpumesh_config_t *config) {
+    if (out == NULL) { errno = EINVAL; return -1; }
+    *out = NULL;
     dpumesh_ctx_t *ctx = (dpumesh_ctx_t *)calloc(1, sizeof(dpumesh_ctx_t));
-    if (!ctx) return -1;
-    pthread_mutex_init(&ctx->cq_lock, NULL);
+    if (!ctx) { errno = ENOMEM; return -1; }
+    int prc = pthread_mutex_init(&ctx->cq_lock, NULL);
+    if (prc != 0) { errno = prc; goto fail; }
+    ctx->cq_lock_initialized = 1;
 
     init_config(ctx, config, service_id);
 
-    if (init_doca_device(ctx) != DOCA_SUCCESS) goto fail;
-    if (init_control_path(ctx) != DOCA_SUCCESS) goto fail;
-    if (init_datapath(ctx) != DOCA_SUCCESS) goto fail;
+    /* These limits are data-plane ABI, not tuning preferences. The DPA copies at
+     * most 8 KiB per descriptor, TX byte offsets mirror into a fixed 32 MiB DPU
+     * staging buffer, and reverse credits partition the RX buffer evenly over K. */
+    size_t configured_bytes = (size_t)ctx->num_slots * (size_t)ctx->slot_size;
+    size_t rx_quantum = (size_t)ctx->k_rings * DPUMESH_SLOT_SIZE;
+    if (ctx->slot_size <= 0 || ctx->slot_size > DPUMESH_SLOT_SIZE ||
+        configured_bytes == 0 || configured_bytes > DPU_BUFFER_SIZE ||
+        rx_quantum == 0 || configured_bytes < rx_quantum ||
+        configured_bytes % rx_quantum != 0) {
+        DOCA_LOG_ERR("Invalid DPUmesh config: slots=%d slot_size=%d K=%d bytes=%zu "
+                     "(slot<=%d bytes<=%d and bytes%%(K*%d)==0 required)",
+                     ctx->num_slots, ctx->slot_size, ctx->k_rings, configured_bytes,
+                     DPUMESH_SLOT_SIZE, DPU_BUFFER_SIZE, DPUMESH_SLOT_SIZE);
+        errno = EINVAL;
+        goto fail;
+    }
+
+    doca_error_t init_result = init_doca_device(ctx);
+    if (init_result != DOCA_SUCCESS) { errno = EIO; goto fail; }
+    init_result = init_control_path(ctx);
+    if (init_result != DOCA_SUCCESS) {
+        errno = (init_result == DOCA_ERROR_TIME_OUT) ? ETIMEDOUT : EIO;
+        goto fail;
+    }
+    init_result = init_datapath(ctx);
+    if (init_result != DOCA_SUCCESS) {
+        errno = (init_result == DOCA_ERROR_TIME_OUT) ? ETIMEDOUT : EIO;
+        goto fail;
+    }
 
     /* Shared lock-free Treiber block pool. block_next[i] = i+1 threads the free-list;
      * block_free head starts at index 0 (all n_blocks free, tag 0); the last block links
      * to n_blocks (the empty sentinel). Per-conn send-unit FIFOs (su_seq/su_end) are
      * lazily malloc'd per port slot (kept for the slot's life). */
     ctx->block_next = (uint32_t *)malloc((size_t)ctx->n_blocks * sizeof(uint32_t));
-    if (!ctx->block_next) goto fail;
+    if (!ctx->block_next) { errno = ENOMEM; goto fail; }
     for (int i = 0; i < ctx->n_blocks; i++)
         ctx->block_next[i] = (uint32_t)(i + 1);          /* last -> n_blocks (empty sentinel) */
     atomic_init(&ctx->block_free, (uint_fast64_t)0);     /* tag 0, head index 0 */
-    pthread_mutex_init(&ctx->block_lock, NULL);
+    prc = pthread_mutex_init(&ctx->block_lock, NULL);
+    if (prc != 0) { errno = prc; goto fail; }
+    ctx->block_lock_initialized = 1;
 
     /* Lock-free SPMC RX ring: seq[i] = i (cell i first writable at enq
      * position i), enq = deq = 0. */
     ctx->rx_ring = (struct rxq_cell *)malloc((size_t)RX_QUEUE_SIZE * sizeof(struct rxq_cell));
-    if (!ctx->rx_ring) goto fail;
+    if (!ctx->rx_ring) { errno = ENOMEM; goto fail; }
     for (uint32_t i = 0; i < RX_QUEUE_SIZE; i++)
         atomic_init(&ctx->rx_ring[i].seq, (uint_fast32_t)i);
     atomic_init(&ctx->rx_enq, (uint_fast32_t)0);
@@ -946,11 +1066,13 @@ int dpumesh_init(dpumesh_ctx_t **out, int service_id,
      * start -1 (0 is a valid block id); a conn grabs its first block LAZILY on the
      * first write (no eager borrow at connect/accept). */
     ctx->ports = (struct dmesh_port_slot *)calloc(DMESH_PORT_SPACE, sizeof(struct dmesh_port_slot));
-    if (!ctx->ports) goto fail;
+    if (!ctx->ports) { errno = ENOMEM; goto fail; }
     for (uint32_t p = 0; p < DMESH_PORT_SPACE; p++)
         for (int b = 0; b < DMESH_TX_MAXB_CAP; b++)
             ctx->ports[p].pblk[b] = -1;
-    pthread_mutex_init(&ctx->port_lock, NULL);
+    prc = pthread_mutex_init(&ctx->port_lock, NULL);
+    if (prc != 0) { errno = prc; goto fail; }
+    ctx->port_lock_initialized = 1;
     ctx->next_port = 1;
     ctx->port_span = DMESH_PORT_SPAN_MIN;
 
@@ -958,8 +1080,10 @@ int dpumesh_init(dpumesh_ctx_t **out, int service_id,
     ctx->doca_objs.rx_hook_ctx = ctx;
 
     ctx->pe_running = 1;
-    if (pthread_create(&ctx->pe_tid, NULL, pe_progress_fn, ctx) != 0) {
+    prc = pthread_create(&ctx->pe_tid, NULL, pe_progress_fn, ctx);
+    if (prc != 0) {
         ctx->pe_running = 0;   /* cleanup must not join a never-created thread */
+        errno = prc;
         goto fail;
     }
 
@@ -970,17 +1094,81 @@ int dpumesh_init(dpumesh_ctx_t **out, int service_id,
     return 0;
 
 fail:
-    cleanup_ctx(ctx);
+    {
+        int saved_errno = errno != 0 ? errno : EIO;
+        cleanup_ctx(ctx);
+        errno = saved_errno;
+    }
     return -1;
+}
+
+#define DPUMESH_POD_CLEANUP_TIMEOUT_MS 5000
+
+/* Graceful remote-resource barrier. Keep the normal PE progress thread alive
+ * while waiting: Comch notification delivery is owned by that thread for the
+ * lifetime of a running channel, and switching the already-armed PE to ad-hoc
+ * progress on the destroying thread can strand POD_QUIESCED. If initialization
+ * failed before the PE thread was started, this function instead progresses the
+ * PE synchronously. Keep every exported mmap alive until the DPU confirms that
+ * DPA rings, DPA producer DMAs, ARM SG-DMAs and imported handles are gone. */
+static int request_remote_pod_quiesce(dpumesh_ctx_t *ctx) {
+    struct objects *objs = &ctx->doca_objs;
+    int32_t pod_id = __atomic_load_n(&objs->assigned_pod_id, __ATOMIC_ACQUIRE);
+    if (objs->cc_client == NULL || objs->connection == NULL || pod_id < 0)
+        return 0;
+
+    __atomic_store_n(&objs->pod_quiesced, 0, __ATOMIC_RELEASE);
+    struct dmesh_pod_unregister_msg msg = {
+        .type = DMESH_MSG_POD_UNREGISTER,
+        .pod_id = pod_id,
+    };
+    doca_error_t result = client_send_msg(objs, (const char *)&msg, sizeof(msg));
+    if (result != DOCA_SUCCESS) {
+        DOCA_LOG_WARN("POD_UNREGISTER send failed for pod_id=%d: %s",
+                      pod_id, doca_error_get_name(result));
+        return -1;
+    }
+
+    const struct timespec pause = { .tv_sec = 0, .tv_nsec = 100000 };
+    struct timespec start, now;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    for (;;) {
+        if (!ctx->pe_running && objs->pe != NULL)
+            (void)doca_pe_progress(objs->pe);
+        if (__atomic_load_n(&objs->pod_quiesced, __ATOMIC_ACQUIRE)) {
+            DOCA_LOG_INFO("DPU remote resources quiesced: pod_id=%d", pod_id);
+            return 0;
+        }
+        result = require_running_control_path(ctx);
+        if (result != DOCA_SUCCESS) {
+            DOCA_LOG_WARN("Control path stopped while awaiting POD_QUIESCED: %s",
+                          doca_error_get_name(result));
+            return -1;
+        }
+        nanosleep(&pause, NULL);
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        if (init_elapsed_ms(&start, &now) >= DPUMESH_POD_CLEANUP_TIMEOUT_MS) {
+            DOCA_LOG_WARN("Timed out after %d ms waiting for POD_QUIESCED "
+                          "(pod_id=%d); falling back to disconnect cleanup",
+                          DPUMESH_POD_CLEANUP_TIMEOUT_MS, pod_id);
+            return -1;
+        }
+    }
 }
 
 static void cleanup_ctx(dpumesh_ctx_t *ctx) {
     if (!ctx) return;
 
+    /* QPs/channels are already gone, so no new application traffic can appear.
+     * Receive the remote teardown ACK on the same notification/progress thread
+     * that has owned the Comch PE throughout the channel lifetime. */
+    (void)request_remote_pod_quiesce(ctx);
+
     if (ctx->pe_running) {
         ctx->pe_running = 0;
         pthread_join(ctx->pe_tid, NULL);
     }
+
     /* PE thread joined → no more cq_notify() writers. Surviving CQs (an app that
      * dropped the channel without destroying them) are reaped here. */
     for (int i = 0; i < ctx->n_cqs; i++) {
@@ -990,15 +1178,23 @@ static void cleanup_ctx(dpumesh_ctx_t *ctx) {
         ctx->cqs[i] = NULL;
         free(cq);
     }
-    pthread_mutex_destroy(&ctx->cq_lock);
+    if (ctx->cq_lock_initialized) {
+        pthread_mutex_destroy(&ctx->cq_lock);
+        ctx->cq_lock_initialized = 0;
+    }
 
-    /* Free resources BEFORE destroying locks they depend on. */
+    /* Disconnect first. Reaching Comch IDLE causes the DPU to unpublish this pod
+     * before any host-exported address is released. cleanup_objects is delayed
+     * until after mmap teardown so PE/device remain valid for doca_mmap_destroy. */
+    cleanup_comch_object(&ctx->doca_objs);
 
-    /* Per-conn TX block chains need no drain at teardown — in-flight bytes die with the
-     * ctx. (PE thread joined above → no concurrent reserve/reclaim.) Free the shared
-     * block pool + per-port send-unit FIFOs. */
+    /* Per-conn TX block chains need no drain at teardown — in-flight bytes die with
+     * the ctx. The PE thread is joined, so no reserve/reclaim can race this. */
     if (ctx->block_next) { free(ctx->block_next); ctx->block_next = NULL; }
-    pthread_mutex_destroy(&ctx->block_lock);
+    if (ctx->block_lock_initialized) {
+        pthread_mutex_destroy(&ctx->block_lock);
+        ctx->block_lock_initialized = 0;
+    }
     if (ctx->ports) {
         for (uint32_t p = 0; p < DMESH_PORT_SPACE; p++) {
             if (ctx->ports[p].su_seq) { free(ctx->ports[p].su_seq); ctx->ports[p].su_seq = NULL; }
@@ -1006,23 +1202,48 @@ static void cleanup_ctx(dpumesh_ctx_t *ctx) {
         }
     }
 
-    /* Destroy DMA landing-zone mmap + buffer (Host RX DMA buffer).
-     * Must happen before cleanup_objects destroys the device. */
-    if (ctx->rx_dma_mmap) {
-        doca_mmap_destroy(ctx->rx_dma_mmap);
-        ctx->rx_dma_mmap = NULL;
+    /* Destroy EVERY host mmap while the DOCA device is still open. The old path
+     * freed only RX and leaked K ring mmaps plus the TX mmap, leaving dev_close
+     * permanently IN_USE. destroy_mmap_and_free_buffer deliberately keeps memory
+     * allocated if DOCA refuses the mmap destroy, avoiding DMA into freed memory. */
+    if (ctx->rx_dma_mmap && ctx->rx_dma_buffer) {
+        if (destroy_mmap_and_free_buffer(ctx->rx_dma_mmap,
+                                         ctx->rx_dma_buffer) == DOCA_SUCCESS) {
+            ctx->rx_dma_mmap = NULL;
+            ctx->rx_dma_buffer = NULL;
+        }
     }
-    if (ctx->rx_dma_buffer) {
-        free(ctx->rx_dma_buffer);
-        ctx->rx_dma_buffer = NULL;
+
+    for (int j = 0; j < MAX_EU_PER_POD; j++) {
+        struct dma_ring *ring = ctx->dma_rings[j];
+        if (!ring) continue;
+        if (ring->mmap && ring->descs &&
+            destroy_mmap_and_free_buffer(ring->mmap, ring->descs) == DOCA_SUCCESS) {
+            ring->mmap = NULL;
+            ring->descs = NULL;
+        }
+        free(ring->seq);
+        ring->seq = NULL;
+        free(ring);
+        ctx->dma_rings[j] = NULL;
+    }
+
+    if (ctx->doca_objs.local_mmap && ctx->doca_objs.dma_buffer &&
+        destroy_mmap_and_free_buffer(ctx->doca_objs.local_mmap,
+                                     ctx->doca_objs.dma_buffer) == DOCA_SUCCESS) {
+        ctx->doca_objs.local_mmap = NULL;
+        ctx->doca_objs.dma_buffer = NULL;
+        ctx->dma_buffer = NULL;
     }
 
     cleanup_objects(&ctx->doca_objs);
 
-    for (int j = 0; j < MAX_EU_PER_POD; j++)
-        if (ctx->dma_rings[j]) { free(ctx->dma_rings[j]->seq); ctx->dma_rings[j]->seq = NULL; }
-    if (ctx->rx_ring) free(ctx->rx_ring);
-    if (ctx->ports) { free(ctx->ports); ctx->ports = NULL; pthread_mutex_destroy(&ctx->port_lock); }
+    if (ctx->rx_ring) { free(ctx->rx_ring); ctx->rx_ring = NULL; }
+    if (ctx->ports) { free(ctx->ports); ctx->ports = NULL; }
+    if (ctx->port_lock_initialized) {
+        pthread_mutex_destroy(&ctx->port_lock);
+        ctx->port_lock_initialized = 0;
+    }
 
     free(ctx);
 }
@@ -1772,7 +1993,9 @@ dmesh_channel_t *dmesh_create_channel(void) {
     int service_id = dmesh_config_identity();
     dpumesh_config_t cfg = DPUMESH_CONFIG_DEFAULT;
     if (dpumesh_init(&s->ctx, service_id, &cfg) != 0 || !s->ctx) {
+        int saved_errno = errno != 0 ? errno : EIO;
         free(s);
+        errno = saved_errno;
         return NULL;
     }
     s->pod_id     = dpumesh_get_pod_id(s->ctx);   /* DPU-assigned (valid after init) */

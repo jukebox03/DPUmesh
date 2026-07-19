@@ -40,6 +40,7 @@ typedef struct {
     uint16_t seq;          /* per-conn sequence (opaque passthrough) */
     uint32_t length;
     uint32_t buf_offset;   /* offset of the body in the pod's DPU staging buffer */
+    uint32_t generation;   /* source staging incarnation; rejects queued stale work */
     int32_t  pod_idx;      /* index into pods[] (staging owner) */
 } dpu_comp_entry_t;
 
@@ -151,12 +152,40 @@ struct pod_state {
     int32_t service_id;     /* this pod's service id (an LB backend of that service; the live
                              * set is derived from pods[] by service_id); SVC_NONE if none */
     int registered;         /* 1 = DMESH_MSG_POD_REGISTER received */
-    int dma_ready;          /* 1 = both mmaps arrived, DPA ring added */
+    int dma_ready;          /* 1 = all mmaps + worker barrier + DPA ADD ACKs complete */
+    int init_result;        /* enum dmesh_pod_init_result; terminal once non-PENDING */
+    int init_result_sent;   /* result message was submitted to this connection */
     /* Bumped by setup_pod_dma per incarnation of this SLOT. A DMA error names its pod
      * by slot index, which is RECYCLED, and lands asynchronously — possibly after the
      * slot's next tenant registered. Stamped into the submitted op so px_dma_err_cb
      * can tell whose DMA failed and not kill a live pod. Also drives px_lane_rearm. */
     uint32_t dma_generation;
+    /* Init handshake with the DPA. setup_pod_dma publishes setup_complete only
+     * after all ARM-side fields and sends are prepared. Each EU then contributes
+     * one bit to add_ack_mask. All accesses are atomic because DPA receive
+     * callbacks can run on ingest-owner threads while main publishes READY. */
+    uint32_t dpa_add_expected_mask;
+    uint32_t dpa_add_ack_mask;
+    int dpa_add_ack_failed;
+    int dpa_setup_complete;
+
+    /* Asynchronous unregister/reclaim state. registered/dma_ready are cleared
+     * immediately so routing stops, but the slot and every imported handle stay
+     * owned until all target EUs return generation-matched DEL_ACK and the ARM
+     * egress engine reports no DMA operation or queued lane for this incarnation.
+     * Only then may the control thread destroy buf_arrs/imported mmaps and reply
+     * POD_QUIESCED. */
+    int cleanup_pending;
+    int cleanup_reply_sent;
+    uint32_t dpa_del_expected_mask;
+    uint32_t dpa_del_ack_mask;
+    uint64_t dpa_del_last_send_ns;
+    int egress_quiesced;
+    uint32_t egress_inflight;
+    /* Number of proxy arrivals whose bytes still reference this slot's reusable
+     * DPU staging buffer (window ref or queued/in-flight egress piece). Slot
+     * reuse is forbidden until it reaches zero. */
+    uint32_t proxy_source_refs;
 
     /* EU-sharding: K forward descriptor rings spread across K EUs (K=k_rings).
      * The host exports K DMA_RING mmaps in order; ring_mmap_count counts arrivals
@@ -383,6 +412,7 @@ struct dpu_ingest_shard {
     pthread_mutex_t  xshard_lock;
     int wake_fd;                 /* eventfd: a cross-shard producer wakes this shard when it parks */
     atomic_int parked;           /* 1 = shard is about to / is blocked in epoll_wait */
+    atomic_int init_state;       /* 0=pending, 1=epoll ready, -1=thread init failed */
     pthread_t thread;
     volatile int stop;
     int running;                 /* 1 = thread started (teardown guard) */
@@ -405,6 +435,13 @@ struct objects {
      * init; the register wait loop polls it. -1 = not yet assigned. Single init
      * thread drives doca_pe_progress, so the callback runs synchronously. */
     int32_t assigned_pod_id;
+    /* POD_ASSIGNED is only phase 1. Phase 2 finishes when the DPU reports
+     * READY after importing all mmaps and installing the DPA rings. */
+    int32_t pod_init_result;
+    /* Set by the client recv callback after the DPU has removed all DPA/ARM
+     * references and destroyed its imported mmap views. Host teardown waits on
+     * this before destroying the exported mmaps. */
+    int32_t pod_quiesced;
 
     /* DPA (shared device, N EU threads for multi-EU data plane).
      *
@@ -532,6 +569,7 @@ struct objects {
     struct doca_task *consumer_retry[MAX_CONSUMER_RETRY];
     int num_consumer_retry;
     pthread_mutex_t consumer_retry_lock;
+    int consumer_retry_lock_initialized;
 
     /* ====== Ingest reaper thread (DPUMESH_INGEST_REAP=1) ======
      * Splits the DPA forward-completion REAP off the single main funnel. When
@@ -630,6 +668,11 @@ static inline void progress_all_pes(struct objects *objs) {
 
 void
 cleanup_objects(struct objects *objs);
+
+/* Stop and destroy only the Comch context. Host teardown calls this before
+ * releasing memory exported to the DPU, then cleanup_objects closes PE/device. */
+void
+cleanup_comch_object(struct objects *objs);
 
 /* Prime task-pool counters (call once from control-path init). */
 void

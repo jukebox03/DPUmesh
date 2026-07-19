@@ -164,6 +164,12 @@ int px_uport_owner(uint16_t up_port, int m);
  * Returns non-zero if any progress was made. */
 int px_drain(struct objects *objs);
 
+/* True only after the egress owner has stopped submitting for this dead pod,
+ * every destination DMA/credit read has completed, all lane queues are empty,
+ * and no worker→main completion still names the slot. The control path uses
+ * this as the ARM half of POD_QUIESCED before destroying imported host mmaps. */
+int px_pod_reclaim_ready(struct objects *objs, int pod_idx);
+
 /* Idle flush (proc==0 in the main loop): nothing px-specific today — REV_DONE
  * and TX_ACK ride the per-pod batches flushed by dpu_worker's idle flush. */
 
