@@ -197,10 +197,21 @@ void PumpWrite(const std::shared_ptr<DmeshEndpointState>& state) {
         if (!write_completion.has_value() &&
             state->pending_write.has_value() &&
             write.slice_index == write.data->Count()) {
-          write.data->Clear();
-          write_completion = Completion{std::move(write.callback),
-                                        absl::OkStatus()};
-          state->pending_write.reset();
+          absl::Status flush_status = state->transport->Flush();
+          if (flush_status.ok()) {
+            write.data->Clear();
+            write_completion = Completion{std::move(write.callback),
+                                          absl::OkStatus()};
+            state->pending_write.reset();
+          } else {
+            state->life = DmeshEndpointState::Life::kFailed;
+            state->failure = std::move(flush_status);
+            write_completion =
+                TakeWriteFailureLocked(state.get(), state->failure);
+            read_completion =
+                TakeReadFailureLocked(state.get(), state->failure);
+            close_transport = true;
+          }
         }
       }
     }

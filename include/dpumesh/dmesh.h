@@ -1,8 +1,8 @@
 /*
  * dmesh.h — the DPUmesh native API. RDMA-verbs-shaped, zero-copy both ways.
  *
- * This is ONE of the two surfaces DPUmesh offers, and the only one you program
- * against directly:
+ * This is the native surface DPUmesh offers, and the one C/C++ applications can
+ * program against directly:
  *
  *   1. THIS header — the native API. Zero-copy send AND receive; no memcpy, no
  *      syscall and no thread on the data path. Every call is a caller-thread
@@ -11,7 +11,7 @@
  *      UNMODIFIED binaries. You never call it; it impersonates libc.
  *
  * Both sit directly on the internal core (src/dmesh_core.h, NOT installed).
- * Neither depends on the other. See design/API_REDESIGN.md.
+ * Neither depends on the other. See design/API.md.
  *
  * WHY VERBS-SHAPED AND NOT SOCKET-SHAPED — it is faster, not just more familiar.
  * DPUmesh's substrate already IS RDMA-shaped: a pre-registered mmap, a DMA
@@ -32,7 +32,7 @@
  *     is unreliable and needs an AH)      SERVICE, and only then may replies interleave
  *                                         across backends.
  *   rdma_cm CONNECT_REQUEST           ->  DMESH_WC_CONN_REQ completion
- *   ibv_post_send (+ WR list)         ->  dmesh_post_send (+ DMESH_SEND_MORE)
+ *   ibv_post_send (+ WR list)         ->  dmesh_post_send (flush = force partial)
  *   ibv_poll_cq                       ->  dmesh_poll_cq
  *   SRQ recv-buffer repost            ->  dmesh_wc_release
  *   ibv_req_notify_cq + comp_channel  ->  dmesh_cq_fd + drain-then-poll (below)
@@ -61,26 +61,29 @@
  *
  * SEND CONTRACT (the price of zero-copy + O(1) reclaim — the TX ring is FIFO):
  *   - At most ONE outstanding (alloc'd but not yet posted) buffer per conn.
- *     A second dmesh_alloc of the SAME len before dmesh_post_send returns the same
- *     buffer; re-allocing with a DIFFERENT len is undefined (it may reposition the
- *     reserve) — this is the "one outstanding alloc" contract, not a resize primitive.
+ *     A second dmesh_alloc before dmesh_post_send fails with EINVAL.
  *   - Post order == alloc order == wire order on a conn (like a verbs SQ, where
  *     wire order is post order; here the buffer IS the queue slot).
  *   - Ownership transfers to the transport AT POST (no send completion; reclaim
  *     is internal on the DPU's TX_ACK). Do not touch the buffer after posting.
- *   - alloc length cap = dmesh_post_max (one contiguous reserve). A post of
- *     len <= dmesh_msg_max (slot_size) arrives as exactly ONE RECV completion;
- *     a larger post (<= post_max) is legal but is delivered as MULTIPLE
- *     <= slot_size RECV completions, in order on a server/pinned conn — the
- *     receiver reassembles (app framing, as with a byte stream).
+ *   - alloc length cap = dmesh_post_max (one contiguous reserve). Posts form an
+ *     ordered byte stream: transport batching may combine adjacent posts or split a
+ *     large post into several RECV completions. Applications frame/reassemble the
+ *     stream and must not infer post boundaries from completion boundaries.
  *   - Different conns are fully independent (per-conn rings).
  *
  * BACKPRESSURE — dmesh_alloc NEVER BLOCKS:
  *   It returns NULL + errno=EAGAIN when there is no ring space right now. It does
- *   NOT sleep — you already have exactly ONE wait point (the CQ, via dmesh_cq_fd),
- *   and a second one inside alloc would both contradict that shape and stall every
- *   other conn on your thread. On EAGAIN: do other work and retry — a later alloc
- *   succeeds once the DPU's TX_ACKs free space.
+ *   NOT sleep. On EAGAIN: do other work and retry — a later alloc succeeds once the
+ *   DPU's TX_ACKs free space. Complete internal batches are submitted by post_send;
+ *   if a buffered partial remains while space is tight, dmesh_flush forces it out so
+ *   it can earn a TX_ACK.
+ *
+ *   ABI 2 does NOT yet report that transition through dmesh_cq_fd: the CQ fd wakes
+ *   for inbound/accept work, not TX reclaim. An event-driven caller therefore needs
+ *   an external retry source (the gRPC adapter currently uses a short timer). A
+ *   race-free one-shot TX-ready completion is the remaining writable-notification
+ *   gap; do not assume EPOLLIN means a blocked alloc became writable.
  *
  *   EAGAIN has TWO causes, and you can neither tell them apart nor need to:
  *     - this conn hit its own in-flight ceiling (DPUMESH_TX_MAXB blocks), OR
@@ -135,9 +138,9 @@
  * SEND PATH:
  *   void *b = dmesh_alloc(c, len);           // NULL+EAGAIN = SQ full, retry later
  *   ...fill b in place (zero-copy)...
- *   dmesh_post_send(c, b, len, 0, 0);        // post + doorbell
- *   // batching (verbs WR-list equivalent): N x post_send(.., DMESH_SEND_MORE)
- *   // then one dmesh_flush(c) — or a final post_send without the flag.
+ *   dmesh_post_send(c, b, len, 0, 0);        // commit; full batches auto-submit
+ *   // repeat alloc/post as needed; physical batching is transport-private
+ *   dmesh_flush(c);                           // force the newest partial now
  */
 #ifndef DMESH_H
 #define DMESH_H
@@ -294,23 +297,25 @@ int dmesh_cq_fd(dmesh_cq_t *cq);
  * whichever CQ polled it out of the shared accept queue. */
 dmesh_qp_t *dmesh_create_qp(dmesh_cq_t *cq, const char *service_name);
 
-/* GRACEFUL close, then destroy — it is both halves, unlike ibv_destroy_qp. Drops any
- * posted-but-unflushed bytes, then (if established) SENDS A FIN so the peer sees EOF
+/* GRACEFUL close, then destroy — it is both halves, unlike ibv_destroy_qp. Submits all
+ * committed bytes, then (if established) SENDS A FIN so the peer sees EOF
  * (DMESH_WC_RECV_FIN) and the peer + DPU-owned upstream tear down. Shipped-but-un-ACKed
  * bytes are reclaimed by their own TX_ACKs. Reclaims held RX credit, then FREES the qp.
- * Safe on NULL. Returns 0.
+ * Safe on NULL. Returns 0, or -1 with errno=EBADMSG if data/FIN enqueue failed. The
+ * local QP is destroyed in either case, so the pointer is always invalid afterward.
  *
  * The qp is INVALID after this. One poll_cq batch can carry a CONN_REQ plus that qp's
  * landed messages, so destroying mid-batch dangles the later wc[] entries that name it
  * — defer closes to a post-batch sweep. */
 int dmesh_destroy_qp(dmesh_qp_t *c);
 
-/* ===== Send (ibv_post_send) ===== */
+/* ABORT, then destroy. Discards committed bytes that have not yet been submitted,
+ * sends FIN when a peer exists so remote/DPU state can be reclaimed, and frees the
+ * local QP. Already-submitted bytes cannot be recalled. The pointer is invalid on
+ * every return, with the same FIN-error contract as dmesh_destroy_qp. */
+int dmesh_abort_qp(dmesh_qp_t *c);
 
-/* Defer the doorbell: the message is committed to the conn's SQ but not shipped; the
- * next dmesh_post_send WITHOUT this flag (or a dmesh_flush) ships everything committed
- * so far in order — the verbs WR-list batching pattern. */
-#define DMESH_SEND_MORE      0x1u
+/* ===== Send (ibv_post_send) ===== */
 
 /* Reserve `len` CONTIGUOUS bytes in this conn's pre-registered TX ring and return a
  * pointer into transport DMA memory to fill DIRECTLY (no memcpy). Then dmesh_post_send.
@@ -340,27 +345,33 @@ void *dmesh_alloc(dmesh_qp_t *c, uint32_t len);
 
 /* Post one message previously filled in the buffer returned by dmesh_alloc(c).
  * `buf` MUST be the pointer of the conn's most recent (un-posted) dmesh_alloc and
- * `len` <= that alloc's length — the ring position is implied by the alloc, so `buf`
- * itself is not read. `wr_id` is reserved for future send-completion support and is
- * ignored. Returns 0, or -1 with errno:
+ * `buf` MUST exactly equal the pointer returned by that alloc and `len` must not exceed
+ * the reserved length. `wr_id` is reserved and ignored; `flags` must be zero.
+ * The call COMMITs bytes, coalesces adjacent committed bytes internally, and submits
+ * every newly complete transport batch. It leaves only the newest fillable partial
+ * buffered for a later post, flush, close, or future batching timer. Physical batch
+ * size is not an application contract. Returns 0, or -1 with errno:
  *   EINVAL   NULL conn / len == 0 (a FIN is dmesh_destroy_qp, never a 0-length post) /
- *            an unknown flag / NO LIVE ALLOC — len exceeds the outstanding dmesh_alloc,
- *            or the alloc was already posted (one post per alloc). Nothing is sent.
- *   EBADMSG  descriptor enqueue fault at the doorbell (close the conn)
+ *            flags != 0 / wrong buf / NO LIVE ALLOC / len exceeds the reserve /
+ *            the alloc was already posted. Nothing is committed or sent.
+ *   EBADMSG  a complete batch could not be submitted. The post is already committed;
+ *            some older complete batches may already be submitted. Close or abort.
  * Ownership of the bytes transfers to the transport; do not touch buf after. */
 int dmesh_post_send(dmesh_qp_t *c, const void *buf, uint32_t len,
                     uint64_t wr_id, unsigned flags);
 
-/* Ring the doorbell for everything posted with DMESH_SEND_MORE. Nothing pending is a
- * no-op. 0 = shipped; -1 EBADMSG = descriptor fault (close the conn).
+/* Force every committed byte to be submitted now, including the newest incomplete
+ * transport batch. Consecutive posts are coalesced while preserving byte order;
+ * physical chunk size is private to the transport. Usually this submits only one
+ * trailing partial because post_send already submitted every complete batch. Nothing
+ * pending is a no-op. 0 = submitted; -1 EBADMSG = descriptor fault.
  *
- * Cannot run out of PER-CONN queue space — dmesh_alloc reserved the send-unit slot up
- * front, so a posted message is always carveable. It CAN, however, back off briefly on
+ * Cannot run out of PER-CONN queue space — the admitted block window is clamped so
+ * its worst-case slot carve fits the reclaim FIFO. It CAN back off briefly on
  * the SHARED host->DPU descriptor ring, which is a different (global, all-conns)
  * resource that saturates only when the DPA falls behind the host; a ring wedged past
- * a deadline fails with EBADMSG rather than hanging. So: dmesh_alloc never blocks,
- * dmesh_flush is not quite in that class. Post with DMESH_SEND_MORE and flush from a
- * point in your loop where a rare microsecond-scale wait is acceptable. */
+ * a deadline fails with EBADMSG rather than hanging. Both post_send (when it completes
+ * a batch) and flush may therefore back off briefly at the shared descriptor ring. */
 int dmesh_flush(dmesh_qp_t *c);
 
 /* ===== Diagnostics ===== */

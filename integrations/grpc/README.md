@@ -1,140 +1,119 @@
-# gRPC over DPUmesh
+# gRPC C++ over DPUmesh
 
-This directory implements the gRPC C++ EventEngine transport described in
-[`plan/gRPC.md`](../../plan/gRPC.md). It deliberately remains in the DPUmesh
-repository because the production transport requires coordinated changes to
-both this adapter and the native DPUmesh API.
-
-The directory is an independent CMake project. It does not include DPUmesh
-internal headers and it does not make the main `Makefile` depend on gRPC.
+This directory adapts the DPUmesh native byte stream to gRPC C++ EventEngine.
+It is an independent CMake project and depends only on public
+`<dpumesh/dmesh.h>` plus `libdpumesh.so.2`; no DPUmesh internal header crosses
+the integration boundary.
 
 ## Version contract
 
-- gRPC: exactly `v1.80.0`
-- C++: C++17 or newer
-- DPUmesh: public `<dpumesh/dmesh.h>` and `libdpumesh.so.1`
+- gRPC source: exactly v1.80.0
+- language: C++17
+- transport ABI: `libdpumesh.so.2`
 
-EventEngine is experimental. A gRPC upgrade is therefore a deliberate source
-and test migration, not an unbounded compatible dependency update.
+The used EventEngine endpoint-injection APIs are experimental. A gRPC upgrade is
+therefore an explicit source migration with a full test rebuild.
 
-## Local build
+## Mapping
 
-Prepare the DPUmesh library first:
+```text
+gRPC chttp2
+    │ EventEngine Read / Write
+    ▼
+DmeshEndpoint
+    │
+DmeshReactor: one owner thread + one native CQ
+    │
+dmesh_qp_t ── registered byte stream ── BlueField
+```
+
+One `DmeshRuntime` owns the native channel and a configurable set of reactor
+shards. Each reactor owns one single-consumer CQ. A client endpoint owns one QP;
+an inbound `DMESH_WC_CONN_REQ` becomes a server Endpoint delivered through
+gRPC's `PassiveListener`.
+
+RX bytes are copied into allocator-owned gRPC slices before the native RX credit
+is returned. TX slices are copied into registered native reservations. This copy
+boundary is intentional: arbitrary gRPC heap memory is not DPA-registered, and a
+native RX slot cannot be released while gRPC still references it.
+
+Writes use native default batching. Every slice fragment is committed with
+`dmesh_post_send`, then the adapter calls `dmesh_flush` once when the complete
+EventEngine Write has been accepted. If a write is larger than the bounded
+native batch window, the committed prefix is flushed explicitly before the QP
+is parked. Complete physical units may already have been submitted by post; the
+final flush is a logical latency boundary that forces only the remaining tail.
+
+## Reactor and backpressure
+
+Each reactor polls:
+
+| fd | Purpose |
+|---|---|
+| command eventfd | cross-thread connect, bind, close, shutdown |
+| native CQ eventfd | inbound connection, data, FIN |
+| timerfd | retry a QP whose `dmesh_alloc` returned `EAGAIN` |
+
+All QP calls run on the CQ owner. QP destruction is deferred until the complete
+native completion batch has been dispatched. Data arriving before Endpoint bind
+is copied and replayed in order, followed by any retained FIN/error.
+
+The retry timer defaults to 50 µs because ABI 2 still lacks native writable
+notification. It is a correctness fallback, not the desired final readiness
+model. A future native TX-ready completion can remove the timer without changing
+the Endpoint write state machine.
+
+## Build and tests
+
+Build the native library first, then configure against the pinned gRPC source:
 
 ```sh
 make lib
-```
-
-Use an exact gRPC v1.80.0 source checkout with its required submodules:
-
-```sh
 cmake -S integrations/grpc -B build/grpc \
   -DDPUMESH_GRPC_SOURCE_DIR=/path/to/grpc-v1.80.0 \
   -DBUILD_TESTING=ON
-cmake --build build/grpc -j
-ctest --test-dir build/grpc --output-on-failure
+cmake --build build/grpc -j2
+ASAN_OPTIONS=detect_leaks=0 ctest --test-dir build/grpc --output-on-failure
 ```
 
-Adapter tests can be rebuilt with ASAN and UBSAN without rebuilding gRPC:
+The test suite covers Endpoint read/write state, one-flush-per-logical-write
+batching, EAGAIN retry, exact callback completion, CQ ownership, deferred close,
+inbound QPs, native symbol linkage, and paired real gRPC HTTP/2 over fake native
+transport. The BlueField smoke executable exercises the same runtime against the
+real native API.
+
+Sanitizers can be selected independently:
 
 ```sh
 cmake -S integrations/grpc -B build/grpc \
   -DDPUMESH_GRPC_SOURCE_DIR=/path/to/grpc-v1.80.0 \
   -DDPUMESH_GRPC_ENABLE_SANITIZERS=ON
-cmake --build build/grpc -j
-ctest --test-dir build/grpc --output-on-failure
-```
 
-When tests run under `ptrace`, LeakSanitizer may be unavailable. In that
-environment use `ASAN_OPTIONS=detect_leaks=0`; AddressSanitizer and UBSan
-checks remain active.
-
-ThreadSanitizer uses a separate configuration because it cannot be combined
-with ASan:
-
-```sh
-cmake -S integrations/grpc -B build/grpc \
+# separate build: TSan cannot be combined with ASan
+cmake -S integrations/grpc -B build/grpc-tsan \
   -DDPUMESH_GRPC_SOURCE_DIR=/path/to/grpc-v1.80.0 \
-  -DDPUMESH_GRPC_ENABLE_SANITIZERS=OFF \
   -DDPUMESH_GRPC_ENABLE_TSAN=ON
-cmake --build build/grpc -j
-TSAN_OPTIONS=halt_on_error=1 \
-  ctest --test-dir build/grpc --output-on-failure
 ```
 
-If gRPC v1.80.0 is installed as a CMake package,
-`DPUMESH_GRPC_SOURCE_DIR` may be omitted.
+LeakSanitizer may fail under ptrace-restricted test runners; disabling leak
+detection does not disable ASan's memory-access checks.
 
-## Current implementation boundary
+## Application bridge
 
-Implemented through the BlueField unary/reclaim phase:
+`ConnectDmeshGrpcChannel` creates a client chttp2 channel from a DPUmesh Endpoint.
+`AttachDmeshGrpcServer` attaches inbound DPUmesh Endpoints to an ordinary gRPC
+server. Generated protobuf types, service implementations, HTTP/2 framing,
+metadata, and TLS bytes remain unchanged.
 
-- exact gRPC version and public-header build gate
-- testable wrapper for the public DPUmesh C API
-- `EventEngine::Endpoint` Read, Write, FIN, failure and destruction state
-- asynchronous work/callback separation
-- deterministic fake transport tests, including TX backpressure
-- one process channel with configurable round-robin CQ reactor shards
-- single-consumer `poll`/eventfd owner thread per CQ
-- mutex-protected MPSC command queue and command eventfd
-- client QP creation with asynchronous status delivery
-- registered TX allocation, copy, post-size splitting and immediate doorbell
-- exact pending-TX set with timerfd retry after `EAGAIN`
-- RX copy before `dmesh_wc_release`, FIN and CQ-failure delivery
-- passthru stream-ID latch and fail-close on a stream change
-- post-CQ-drain deferred QP destruction and CQ-before-channel shutdown
-- pre-endpoint-bind receive/FIN buffering and ordered replay
-- real BlueField runtime smoke using the actual native channel/CQ/QP API
-- two-phase native channel initialization (`POD_ASSIGNED` then `POD_INIT_READY`)
-- generation-safe per-EU `RING_ADD_ACK` barrier before native channel readiness
-- native init-failure propagation and ordered Comch/mmap/PE/device cleanup
-- client endpoint injection with gRPC v1.80
-  `grpc::experimental::CreateChannelFromEndpoint`
-- server endpoint injection with gRPC v1.80 `PassiveListener`
-- native inbound `DMESH_WC_CONN_REQ` conversion to an accepted endpoint
-- production client/server bridge helpers (`ConnectDmeshGrpcChannel` and the
-  RAII `DmeshGrpcServerAttachment` returned by `AttachDmeshGrpcServer`)
-- real chttp2 unary echo over paired `DmeshEndpoint` instances, including a
-  4 KiB payload and forced 137-byte native post fragmentation
-- real gRPC chttp2 unary echo over native DPUmesh on BlueField hardware
-- host `POD_UNREGISTER` / DPU `POD_QUIESCED` graceful teardown barrier
-- generation-checked, flushed per-EU `RING_DEL_ACK` before imported-handle
-  destruction
-- ARM SG-DMA lane/inflight/source-reference quiescence before remote reclaim
-- generation on queued `FWD_DONE` work so a recycled pod slot cannot consume a
-  previous tenant's completion
-- idempotent delete retry and coalesced DPA WAKE messages
-- DPU pod slot reuse after graceful teardown and unexpected disconnect
+The adapter must use L4 passthrough. The repository's optional simple frame
+codec is not an HTTP/2 parser and must not be enabled for a gRPC service.
 
-Not implemented yet:
+## Current boundary
 
-- TX-writable notification and nonblocking flush API additions
-- streaming, deadline/cancellation and TLS/mTLS tests on BlueField hardware
-- a production resource-quota-backed allocator factory; the bridge currently
-  requires the embedding application to supply an EventEngine allocator
-- long-duration 100k+ lifecycle churn and resource-plateau measurement
-- a defined isolation/recovery guarantee for process death with host-memory DMA
-  already in flight
+Implemented: client and server endpoint injection, unary chttp2, multi-reactor
+CQ ownership, native lifecycle barriers, default TX batching, focused QPS
+benchmark, fake and hardware smoke paths.
 
-The reactor has been executed against a real-eventfd fake `DmeshApiOps`, under
-ASan/UBSan and ThreadSanitizer. It has also run on BlueField through the real
-`libdpumesh.so.1`: 2 reactor shards, 16 QPs, 1,120 byte-exact messages, and
-29,220,480 wire bytes passed. A deliberately mismatched rings-per-pod setting
-failed during native initialization and the same DPU pod slot was then reused by
-a successful run. Both first-EU startup and existing-EU `ADD_RING` paths were
-observed on hardware; readiness followed exactly one successful ACK per target
-EU. `plan/gRPC.md` section 31 preserves that earlier bench-framing phase and its
-then-open delete/quiesce limitation; section 33 documents the final ACK-based
-reclaim implementation and supersedes that limitation.
-
-The final hardware run used the real gRPC GenericStub/AsyncGenericService path,
-not repository bench framing. Thirty consecutive server/client lifecycle rounds
-passed without a DPU restart: 60 unary RPCs, the same slots 10/11 reused every
-round, and `POD_QUIESCED` observed on both sides every round. A subsequent
-3 x 1 MiB byte-exact run also passed. The final warning-level DPU log contained
-no runtime errors. An unexpected-disconnect injection was followed by successful
-reuse of the reclaimed slot. See `plan/gRPC.md` section 33 for the protocol
-diagram, exact safety invariants, commands, evidence, and limitations.
-
-Those items are intentionally layered on the tested endpoint state machine
-rather than mixed into its first implementation.
+Not yet established: native writable events, streaming/cancellation/TLS hardware
+matrices, production resource-quota allocator policy, long-duration resource
+plateau evidence, and forced-death isolation for already-issued host-memory DMA.

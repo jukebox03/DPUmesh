@@ -379,13 +379,16 @@ show_status() {
 app_of()     { case "$1" in dpumesh) echo bench-dpumesh;; tcp) echo bench-tcp;; *) echo "";; esac; }
 targets_of() { case "${1:-both}" in both|"") echo "dpumesh tcp";; *) echo "$1";; esac; }
 field()      { sed -n "s/.*[[:space:]]$2=\([^ ]*\).*/\1/p" <<<"$1"; }
+running_pod_ip() {
+    kubectl get pod -n "$NS" -l "app=$1" -o go-template='{{range .items}}{{if not .metadata.deletionTimestamp}}{{if eq .status.phase "Running"}}{{.status.podIP}}{{"\n"}}{{end}}{{end}}{{end}}' 2>/dev/null | head -n 1
+}
 
 # run_point <sol> <req> <reply> <conc> <dur> <warmup> <threads> [reconn] -> echoes the OK line
 # reconn (dpumesh only): close+reconnect each conn every `reconn` completions (churn mode).
 run_point() {
     local app ip to reply
     app="$(app_of "$1")"; [ -z "$app" ] && { echo "ERR bad_target($1)"; return 0; }
-    ip=$(kubectl get pod -n "$NS" -l "app=$app" --field-selector=status.phase=Running -o jsonpath='{.items[0].status.podIP}' 2>/dev/null || true)
+    ip=$(running_pod_ip "$app" || true)
     [ -z "$ip" ] && { echo "ERR no_pod($app)"; return 0; }
     to=$(( ${5%.*} + 90 ))
     reply=$(printf 'RUN %s %s %s %s %s %s %s\n' "$2" "$3" "$4" "$5" "$6" "$7" "${8:-}" | timeout "${to}s" nc -N "$ip" "$CTRL_PORT" 2>/dev/null) || reply="ERR nc"
@@ -442,7 +445,7 @@ bench_rate() {
 ### ------------------------------------------------------------ validators
 run_loopback() {  # self-routing: pod 12 is client + server of its own service
     local N="${1:-50000}" size="${2:-8192}" zc="${3:-0}" ip resp
-    ip=$(kubectl get pod -n "$NS" -l app=loopback-dpumesh --field-selector=status.phase=Running -o jsonpath='{.items[0].status.podIP}' 2>/dev/null || true)
+    ip=$(running_pod_ip loopback-dpumesh || true)
     [ -z "$ip" ] && { err "loopback-dpumesh pod not found — run '$0 deploy'"; return 1; }
     step "=== loopback (self-service): N=$N size=${size}B zerocopy=$zc ==="
     resp=$(printf 'RUN %s %s %s\n' "$N" "$size" "$zc" | timeout 120s nc "$ip" "$CTRL_PORT" || true)
@@ -454,7 +457,7 @@ run_loopback() {  # self-routing: pod 12 is client + server of its own service
 
 run_verbs() {  # verbs-façade self-routing: pod 17 is client + server of its own service
     local N="${1:-50000}" size="${2:-8192}" zc="${3:-0}" window="${4:-1}" pipe="${5:-1}" ip resp
-    ip=$(kubectl get pod -n "$NS" -l app=verbs-dpumesh --field-selector=status.phase=Running -o jsonpath='{.items[0].status.podIP}' 2>/dev/null || true)
+    ip=$(running_pod_ip verbs-dpumesh || true)
     [ -z "$ip" ] && { err "verbs-dpumesh pod not running — run '$0 deploy' (validators no longer self-start)"; return 1; }
     step "=== verbs (self-service): N=$N size=${size}B zc=$zc window=$window pipeline=$pipe ==="
     resp=$(printf 'RUN %s %s %s %s %s\n' "$N" "$size" "$zc" "$window" "$pipe" | timeout 180s nc "$ip" "$CTRL_PORT" || true)
@@ -466,7 +469,7 @@ run_verbs() {  # verbs-façade self-routing: pod 17 is client + server of its ow
 
 run_preload() {  # LD_PRELOAD shim: vanilla TCP apps over DPUmesh
     local N="${1:-5000}" size="${2:-1024}" conns="${3:-8}" ip resp
-    ip=$(kubectl get pod -n "$NS" -l app=preload-dpumesh --field-selector=status.phase=Running -o jsonpath='{.items[0].status.podIP}' 2>/dev/null || true)
+    ip=$(running_pod_ip preload-dpumesh || true)
     [ -z "$ip" ] && { err "preload-dpumesh pod not found — run '$0 deploy'"; return 1; }
     step "=== preload (LD_PRELOAD shim): N=$N size=${size}B conns=$conns ==="
     resp=$(printf 'RUN %s %s %s\n' "$N" "$size" "$conns" | timeout 620s nc "$ip" "$CTRL_PORT" || true)
@@ -478,7 +481,7 @@ run_preload() {  # LD_PRELOAD shim: vanilla TCP apps over DPUmesh
 
 run_stream() {  # L7-proxy frame validator (needs DPUMESH_PROXY=frame)
     local N="${1:-20000}" size="${2:-1024}" fpw="${3:-1}" ip resp
-    ip=$(kubectl get pod -n "$NS" -l app=stream-dpumesh --field-selector=status.phase=Running -o jsonpath='{.items[0].status.podIP}' 2>/dev/null || true)
+    ip=$(running_pod_ip stream-dpumesh || true)
     [ -z "$ip" ] && { err "stream-dpumesh pod not running — run '$0 deploy' (validators no longer self-start)"; return 1; }
     step "=== stream (L7-proxy frame): N=$N size=${size}B frames/write=$fpw ==="
     resp=$(printf 'RUN %s %s %s\n' "$N" "$size" "$fpw" | timeout 180s nc "$ip" "$CTRL_PORT" || true)

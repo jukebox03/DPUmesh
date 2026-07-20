@@ -232,6 +232,7 @@ void TestWriteSplitsSlicesAndCompletesAsynchronously() {
   CHECK_EQ(std::string(fixture.transport_state->posts[2].begin(),
                        fixture.transport_state->posts[2].end()),
            std::string("g"));
+  CHECK_EQ(fixture.transport_state->flush_count, 1);
 }
 
 void TestWriteWouldBlockAndResumesExactlyOnce() {
@@ -263,6 +264,7 @@ void TestWriteWouldBlockAndResumesExactlyOnce() {
   CHECK_EQ(callback_count, 1);
   CHECK_TRUE(status->ok());
   CHECK_EQ(fixture.transport_state->posts.size(), size_t{1});
+  CHECK_EQ(fixture.transport_state->flush_count, 1);
 }
 
 void TestTransportErrorFailsReadAndWrite() {

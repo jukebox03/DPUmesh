@@ -20,6 +20,7 @@ FLEXIO_LIBDIR := /opt/mellanox/flexio/lib
 BUILD   := build
 LIBDIR  := $(BUILD)/lib
 BINDIR  := $(BUILD)/bin
+TESTDIR := $(BUILD)/test
 
 # -Iinclude → <dpumesh/...> ; -I. → the "doca/..." includes from src/dmesh_core.c
 CFLAGS  := -O2 -g -Wall -fPIC -DDOCA_ALLOW_EXPERIMENTAL_API -Iinclude -I. $(DOCA_CFLAGS)
@@ -46,13 +47,14 @@ LIB_SRCS := \
 	doca/comch_consumer.c \
 	doca/comch_msgq.c \
 	doca/dpa.c
+LIB_HDRS := $(shell rg --files include src doca -g '*.h')
 
 # ABI major. BUMP IT whenever the public ABI changes incompatibly — a field added to
 # dmesh_wc_t / dmesh_qp_t / dmesh_channel_t, a reorder, a signature change. The SONAME
 # carries it, so a binary built against the old header asks the loader for the old
 # libdpumesh.so.N and gets a clean "cannot open shared object file" instead of silently
 # running against a struct whose layout moved (which reads as a SIGSEGV in the app).
-ABI_MAJOR := 1
+ABI_MAJOR := 2
 LIB      := $(LIBDIR)/libdpumesh.so.$(ABI_MAJOR)
 LIB_LINK := $(LIBDIR)/libdpumesh.so
 
@@ -76,7 +78,7 @@ preload_runner_SRC := bench/validators/preload_runner.c
 bench_sock_SRC     := bench/apps/bench_sock.c
 echo_sock_SRC      := bench/apps/echo_sock.c
 
-.PHONY: all lib bench clean dirs
+.PHONY: all lib bench test clean dirs
 all: lib bench
 
 # Header dependencies. Without these a change to a public header (dmesh.h) leaves
@@ -86,10 +88,10 @@ DEPDIR  := $(BUILD)/dep
 DEPFLAGS = -MMD -MP -MF $(DEPDIR)/$(@F).d
 
 dirs:
-	@mkdir -p $(LIBDIR) $(BINDIR) $(DEPDIR)
+	@mkdir -p $(LIBDIR) $(BINDIR) $(DEPDIR) $(TESTDIR)
 
 lib: dirs $(LIB) $(LIB_LINK)
-$(LIB): $(LIB_SRCS) | dirs
+$(LIB): $(LIB_SRCS) $(LIB_HDRS) | dirs
 	$(CC) $(CFLAGS) $(DEPFLAGS) -shared -Wl,-soname,libdpumesh.so.$(ABI_MAJOR) -o $@ $(LIB_SRCS) \
 		$(DOCA_LIBS) -lpthread $(RPATHS)
 	@echo "  -> $@"
@@ -100,6 +102,26 @@ $(LIB_LINK): $(LIB)
 	@ln -sf $(notdir $(LIB)) $@
 
 bench: lib $(addprefix $(BINDIR)/,$(DMESH_BINS)) $(PRELOAD) $(addprefix $(BINDIR)/,$(PLAIN_BINS))
+
+# Focused host-only contract tests. Function-section GC lets each test link the
+# production source that owns the state machine without constructing DOCA hardware.
+$(TESTDIR)/native_api_contract_test: tests/native_api_contract_test.c src/dmesh_api.c $(LIB_HDRS) | dirs
+	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -Wl,--gc-sections \
+		-o $@ tests/native_api_contract_test.c src/dmesh_api.c
+
+$(TESTDIR)/native_control_state_test: tests/native_control_state_test.c doca/comch_server.c $(LIB_HDRS) | dirs
+	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -Wl,--gc-sections \
+		-o $@ tests/native_control_state_test.c doca/comch_server.c $(DOCA_LIBS) -lpthread $(RPATHS)
+
+$(TESTDIR)/native_tx_batch_policy_test: tests/native_tx_batch_policy_test.c src/dmesh_core.c $(LIB_HDRS) | dirs
+	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -Wl,--gc-sections \
+		-o $@ tests/native_tx_batch_policy_test.c $(DOCA_LIBS) -lpthread $(RPATHS)
+
+test: $(TESTDIR)/native_api_contract_test $(TESTDIR)/native_control_state_test \
+	$(TESTDIR)/native_tx_batch_policy_test
+	$(TESTDIR)/native_api_contract_test
+	$(TESTDIR)/native_control_state_test
+	$(TESTDIR)/native_tx_batch_policy_test
 
 # dmesh API binaries link the transport library. One explicit rule each so the
 # source is a tracked prerequisite (rebuilds on edit).

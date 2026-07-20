@@ -1,118 +1,126 @@
 # DPUmesh
 
-DPUmesh is a service-mesh data plane built on NVIDIA BlueField DOCA Comch, DMA,
-and DPA. Applications connect to a Kubernetes Service name rather than a pod
-address. DPUmesh owns host-to-DPU transport, connection tracking, backend
-selection, and reverse forwarding. Its default mode is L4 byte-stream
-passthrough; it does not interpret the application protocol.
+DPUmesh is a BlueField service-mesh transport built with DOCA Comch, DPA, and
+DMA. Applications address a Kubernetes Service; the DPU owns backend selection,
+connection tracking, host-to-DPU forwarding, and reverse DMA. The default mode
+is an ordered L4 byte stream. DPUmesh does not terminate TLS or interpret HTTP/2.
 
-This document describes the 2026-07-19 working tree. The implementation is a
-research prototype. In the existing single-pod L4 measurements, DPUmesh is not
-faster than direct TCP or TCP+Envoy. At 1 KiB and concurrency 32, the observed
-rates were 0.93 Mrps for direct TCP, 0.41 Mrps for TCP+Envoy, and 0.20 Mrps for
-DPUmesh. DPUmesh reduces part of the host cost by consuming DPU ARM CPU. The
-methodology and complete results are in the [performance report](bench/report/REPORT.md).
+This repository is a research prototype, not a claim that offload is already
+faster than direct TCP. The measured baselines and limitations are kept in the
+[performance report](bench/report/REPORT.md).
 
-## Transport model
+## Architecture
 
 ```text
-application / gRPC HTTP/2
-            │ byte stream
-            ▼
-libdpumesh.so ── Comch + registered DMA ── BlueField ARM/DPA
-                                               │
-                                      backend TCP connections
+C/C++ application or gRPC
+          │
+          ▼
+libdpumesh.so.2 ─ registered TX/RX memory ─ BlueField DPA + ARM ─ backend TCP
+          ▲
+          └─ CQ completions and optional epoll fd
 ```
 
-- L4 passthrough is the default. A connection remains pinned to one backend.
-- A service configured with the `_FRAME_SVC`/`_L7_SVC` codec may load-balance at
-  message boundaries. The DPU configuration selects the codec; the application
-  does not.
-- gRPC retains its own HTTP/2 framing. The current integration disables the
-  DPUmesh L7 codec and uses DPUmesh only as a reliable byte stream.
+The host exposes three integration surfaces:
 
-## Public surfaces
+| Surface | Purpose |
+|---|---|
+| `<dpumesh/dmesh.h>` | Native channel/CQ/QP API with registered TX and zero-copy RX |
+| `libdmesh_preload.so` | POSIX socket compatibility for libc-based C/C++ binaries |
+| `integrations/grpc` | gRPC C++ v1.80 Endpoint and PassiveListener integration |
 
-| Surface | Intended user | Current status |
-|---|---|---|
-| `<dpumesh/dmesh.h>` | New C/C++ code | Native channel/CQ/QP API, zero-copy RX, registered TX |
-| `libdmesh_preload.so` | Unmodified POSIX C/C++ binaries | Interposes sockets and performs the copies required by read/write |
-| `integrations/grpc` | gRPC C++ v1.80 | Client Endpoint and server PassiveListener paths implemented |
+The native send path batches by default. `dmesh_alloc()` reserves registered
+bytes and `dmesh_post_send()` commits them into one ordered stream. A post
+automatically submits every newly complete transport batch; `dmesh_flush()`
+forces only the newest partial batch. The physical unit is an internal data-plane
+choice, not an application tuning parameter. A future one-shot batching timer may
+bound partial-batch latency; ABI 2 currently relies on flush or graceful close for
+that tail, while abort discards it. Native publication writes a shared descriptor
+ring that the DPA already polls; it is not a socket syscall or a per-flush control
+message.
 
-The native API models one process transport as a channel, one single-consumer
-polling thread as a CQ, and one full-duplex stream as a QP. `dmesh_alloc()` never
-blocks and returns `EAGAIN` when TX capacity is unavailable. Every RX completion
-must be returned with `dmesh_wc_release()`. See the [API whitepaper](design/API.md)
-for the complete contract.
+## Lifecycle
 
-## Initialization and teardown
-
-Pod assignment alone does not make a channel usable. Channel creation returns
-only after every DPU ring import, mmap, DPA registration, and ARM egress resource
-has completed and the host receives `POD_INIT_RESULT(READY)`. Graceful teardown
-uses the following barrier:
+Channel creation returns only after a replayable two-phase barrier:
 
 ```text
-host destroys QPs/CQs
-       │ POD_UNREGISTER
-       ▼
-DPU blocks routing → all-EU RING_DEL_ACK → ARM egress/inflight drain
-       │ POD_QUIESCED
-       ▼
-host stops Comch → destroys exported mmap/device resources
+POD_REGISTER → POD_ASSIGNED → mmap/ring import → all DPA RING_ADD_ACKs
+             → POD_INIT_RESULT(READY)
 ```
 
-Slot generations prevent delayed acknowledgements or forwarding completions from
-touching a reused pod slot. Unexpected process loss triggers asynchronous DPU
-cleanup, but production-grade containment of arbitrary in-flight host-memory DMA
-during forced process death remains open work. See the [core whitepaper](design/CORE.md).
+The host retries registration while either assignment or readiness is pending;
+the DPU treats identical registration as idempotent. Missing DPA add ACKs are
+also retried. Graceful destruction similarly retries `POD_UNREGISTER` until the
+DPU has removed every ring, drained ARM DMA custody, destroyed imported handles,
+and replied `POD_QUIESCED`.
 
-## Repository layout
+Those retries are phase-local. A ready channel does not periodically send
+registration heartbeats, and unregister traffic starts only when channel
+destruction begins. The steady-state data plane uses the imported rings and
+completion path.
+
+Per-slot DMA generations reject delayed work from a prior registration. Forced
+process death during an already-issued DMA remains outside the graceful reclaim
+guarantee.
+
+## Repository
 
 ```text
-include/dpumesh/       public C headers
-src/                   host core, native API, name resolver, preload facade
-doca/                  BlueField ARM control/data plane and DPA kernel
-integrations/grpc/     gRPC C++ endpoint, runtime, tests, and QPS benchmark
-bench/                 deployment, matched workloads, validators, and reports
-design/                API, core, and naming whitepapers
+include/dpumesh/       public C API
+src/                   host core, native facade, resolver, preload facade
+doca/                  BlueField ARM process and DPA kernel
+integrations/grpc/     gRPC C++ runtime, reactor, tests, benchmark
+bench/                 deployment, workloads, validators, measurement records
+design/                current API, core, and naming whitepapers
 ```
 
-## Build and validation
+## Build and test
 
-Build the host library and benchmark programs in a DOCA development environment:
+In a DOCA development environment:
 
 ```sh
-make
-./bench/bench.sh deploy
-./bench/bench.sh latency both
-./bench/bench.sh point dpumesh 1024 1024 32 10 1000 1
+make -j2
 ```
 
-The DPU code uses `doca/meson.build`. `bench/bench.sh deploy` performs source
-synchronization, DPU build, host image creation, DPU startup, and pod startup in
-the required order. Restarting only one side can desynchronize registration state,
-so `deploy` is the single supported bring-up path. Keep machine-specific SSH, PCI,
-and password values in the uncommitted `.env` file.
+The build produces `build/lib/libdpumesh.so.2`, the preload library, and native
+bench/validator binaries. The library target tracks all source and header inputs;
+public-header changes therefore rebuild both ABI and consumers.
 
-The gRPC C++ integration has an independent CMake build:
+The BlueField program is built from `doca/meson.build`. The supported benchmark
+bring-up path rebuilds and deploys both sides together:
+
+```sh
+DPUMESH_INGEST_SHARDS=4 \
+DPUMESH_ARM_EGRESS_THREADS=4 \
+DPUMESH_RINGS_PER_POD=2 \
+./bench/bench.sh deploy
+./bench/bench.sh latency both
+```
+
+A bare deploy selects the resource-minimal `(1,1)` ARM default and is not
+comparable to the report's `(4,4)` measurements. Retained results must capture
+the environment of the live `dpumesh_dpu` process.
+
+The gRPC adapter has an independent CMake build:
 
 ```sh
 cmake -S integrations/grpc -B build/grpc \
   -DDPUMESH_GRPC_SOURCE_DIR=/path/to/grpc-v1.80.0
 cmake --build build/grpc -j2
-ctest --test-dir build/grpc --output-on-failure
+ASAN_OPTIONS=detect_leaks=0 ctest --test-dir build/grpc --output-on-failure
 ```
 
-`grpc_dpumesh_qps_benchmark` runs the same generated
-`grpc.testing.BenchmarkService` over either TCP or DPUmesh. Build and execution
-details are in the [gRPC integration guide](integrations/grpc/README.md).
+LeakSanitizer is disabled only because ptrace/sandboxed test execution makes its
+process probe fail; AddressSanitizer and the functional test suite still run.
 
-## Documentation map
+## Documentation
 
-- [API.md](design/API.md): public API and exact call contracts
-- [CORE.md](design/CORE.md): host/DPU/DPA design and lifecycle invariants
-- [NAMING.md](design/NAMING.md): service names, identity, registry, and control-plane gaps
-- [bench/README.md](bench/README.md): reproducible experiment procedure
-- [REPORT.md](bench/report/REPORT.md): measurements and limitations
-- [STAGES.md](bench/suite/STAGES.md): evaluation coverage and interpretation rules
+- [Native API](design/API.md): exact lifecycle, batching, CQ, and error contracts
+- [Core architecture](design/CORE.md): host/DPA/ARM custody and replay barriers
+- [Naming](design/NAMING.md): registry, service identity, and routing meaning
+- [gRPC integration](integrations/grpc/README.md): build and application bootstrap
+- [Benchmark guide](bench/README.md): deployment and experiment commands
+- [Performance report](bench/report/REPORT.md): frozen ABI-1 campaign and interpretation
+- [Engineering results](bench/RESULT.md): chronological experiments, including the ABI-2 A/B audit
+
+`bench/RESULT.md` is a chronological engineering log. It intentionally preserves
+historical implementation states and is not a current specification.

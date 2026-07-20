@@ -556,6 +556,16 @@ dpu_finalize_pending_pod_inits(struct objects *objs)
                                              __ATOMIC_ACQUIRE);
         uint32_t received = __atomic_load_n(&pod->dpa_add_ack_mask,
                                              __ATOMIC_ACQUIRE);
+        int setup_progress = progress_setup_pod_dma(objs, pod);
+        if (setup_progress < 0) {
+            DOCA_LOG_ERR("DPA ring setup retry failed for pod %d", pod->pod_id);
+            (void)server_publish_pod_init_result(objs, pod,
+                                                 DMESH_POD_INIT_DPA_FAILED);
+            finalized++;
+            continue;
+        }
+        received = __atomic_load_n(&pod->dpa_add_ack_mask,
+                                    __ATOMIC_ACQUIRE);
         if ((received & expected) != expected)
             continue;
         if (__atomic_load_n(&pod->dpa_add_ack_failed, __ATOMIC_ACQUIRE)) {

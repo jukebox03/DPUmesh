@@ -1,10 +1,10 @@
 # Benchmark Deployment
 
-This document defines the environment represented by the repository's benchmark
-results. `bench/bench.sh deploy` is the only supported bring-up path. It builds
-both sides, synchronizes DPU sources, creates/imports images, starts a fresh DPU
-process, starts every pod in registration order, waits for DPUmesh data readiness,
-and pins processes to CPUs.
+This document defines the environment represented by retained benchmark results.
+`bench/bench.sh deploy` is the reproducible fresh bring-up path: it builds both
+sides, synchronizes DPU sources, creates and imports images, starts a fresh DPU
+process, starts pods in registration order, waits for DPUmesh data readiness, and
+pins processes to CPUs.
 
 ## Required local configuration
 
@@ -33,17 +33,22 @@ DPUMESH_LOG_LEVEL=40 \
 ```
 
 The command stops the prior DPU process and recreates the complete registration
-state. DPU-only or pod-only restarts are unsupported because they can leave one
-side referring to a different pod-slot generation. Kubernetes `Ready` is not
-sufficient: the harness also waits for the host log that follows
-`POD_INIT_RESULT(READY)`.
+state. A DPU-only restart invalidates all host channels and requires a complete
+pod restart. A controlled host-image A/B may retain the DPU process only when the
+old pod exits through `POD_QUIESCED` and the replacement reaches a fresh
+`POD_INIT_RESULT(READY)`; record that exception explicitly. Kubernetes `Ready`
+alone is never sufficient.
 
 ## DPU operating point
 
-The DPU launch environment is authoritative. Capture it from the live
-`/proc/<dpumesh_dpu-pid>/environ`, not from the invoking shell.
+The live DPU process is authoritative. Capture both
+`/proc/<dpumesh_dpu-pid>/environ` and its command line, not the invoking shell.
+The environment holds the shard/ring settings, while warning log level appears
+as `-l 40` in the command line. A bare `deploy` uses the implementation defaults
+of one ingest shard and one egress worker, so omitting the explicit `(4,4)`
+variables changes the measured system.
 
-| Variable | Reported L4 headline value | Meaning |
+| Setting | Reported L4 headline value | Meaning |
 |---|---:|---|
 | `DPUMESH_INGEST_SHARDS` | 4 | ARM ingest/routing shards |
 | `DPUMESH_ARM_EGRESS_THREADS` | 4 | ARM SG-DMA egress workers |
@@ -51,7 +56,7 @@ The DPU launch environment is authoritative. Capture it from the live
 | `DPUMESH_SHARD_SHARED` | unset/0 | Share-nothing shard routing |
 | `DPUMESH_PROXY` | unset | L4 passthrough |
 | `DPUMESH_INGEST_REAP` | unset | Inline default unless shards require reapers |
-| `DPUMESH_LOG_LEVEL` | 40 | Warning-level DOCA logging |
+| process argument `-l` | 40 | Warning-level DOCA logging |
 
 N DPA EUs are auto-detected after DPA startup and clamped to eight unless
 `DPUMESH_DPA_THREADS` is explicitly set. Host and DPU must use the same K. The
@@ -61,18 +66,21 @@ eight in the gRPC lifecycle runs.
 The 4/4 ARM configuration is the historical L4 headline operating point, not a
 universal recommendation. The report keeps 1/1, 2/2, and 4/4 results separate.
 
-## Manifest values
+## Host manifest values
 
-`bench.sh` renders `bench/k8s/pods.yaml` with these defaults:
+The current host programs consume these rendered transport values:
 
 | Variable | Default | Consumer |
 |---|---:|---|
-| `ASYNC_THREADS` | 4 | Native DPUmesh benchmark client |
-| `BENCH_PIPELINE` | 8 | Native client pipeline depth |
-| `BENCH_COALESCE` | 0 | Native client TX coalescing disabled |
-| `DPUMESH_ARENA_SLOTS` | 512 | Validator arena sizing |
-| `ECHO_THREADS` | 3 | Legacy manifest value; current C echo servers do not read it |
-| `DMESH_PRELOAD_DEBUG` | 0 | Preload diagnostic output disabled |
+| `DPUMESH_RINGS_PER_POD` | 2 | Host native core; must match DPU K |
+| `DMESH_PRELOAD_DEBUG` | 0 | POSIX preload diagnostics |
+
+The manifest still renders `ASYNC_THREADS`, `BENCH_PIPELINE`,
+`BENCH_COALESCE`, `ECHO_THREADS`, and `DPUMESH_ARENA_SLOTS` for compatibility
+with older images. The current C benchmark, echo, and validator programs do not
+read them. Workload concurrency, threads, reconnect cadence, validator window,
+and pipeline are command arguments. ABI 2 batching is mandatory and has no
+environment toggle.
 
 `echo_dpumesh` is a single-CQ event loop. `echo_sock` uses a thread per accepted
 socket. At the headline one-client-thread point, each server handles one
@@ -141,6 +149,10 @@ uses `envoyproxy/envoy:v1.30-latest`. A retained performance run must record:
 `bench/suite/run_suite.sh` captures live metadata in its output directory. If it
 cannot read DPU state, the result is marked uncaptured rather than inferring it
 from shell variables.
+
+After an image rollout, point commands select a Running pod with no deletion
+timestamp. This prevents a terminating old replica from being chosen merely
+because it appears first in the Kubernetes item list.
 
 ## Inspection and cleanup
 

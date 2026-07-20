@@ -95,6 +95,7 @@ class DmeshReactor::Impl final
     std::atomic<bool> close_enqueued{false};
     bool closing = false;
     bool remote_eof = false;
+    bool unflushed = false;
   };
 
   class Transport final : public EndpointTransport {
@@ -121,6 +122,13 @@ class DmeshReactor::Impl final
       }
       return PostResult::Closed(
           absl::UnavailableError("DPUmesh reactor no longer exists"));
+    }
+
+    absl::Status Flush() override {
+      if (auto impl = impl_.lock()) {
+        return impl->Flush(connection_);
+      }
+      return absl::UnavailableError("DPUmesh reactor no longer exists");
     }
 
     void Close() override {
@@ -292,6 +300,12 @@ class DmeshReactor::Impl final
     if (destination == nullptr) {
       const int error_number = errno;
       if (error_number == EAGAIN) {
+        /* A logical write may be larger than the bounded native batch window.
+         * Publish its committed prefix so TX ACKs can make room for the rest. */
+        if (connection->unflushed) {
+          const absl::Status status = Flush(connection);
+          if (!status.ok()) return PostResult::Error(status);
+        }
         pending_tx_.insert(connection.get());
         return PostResult::WouldBlock();
       }
@@ -303,8 +317,24 @@ class DmeshReactor::Impl final
                        static_cast<uint32_t>(bytes.size()), 0, 0) != 0) {
       return PostResult::Error(ErrnoStatus("dmesh_post_send", errno));
     }
+    connection->unflushed = true;
     pending_tx_.erase(connection.get());
     return PostResult::Accepted();
+  }
+
+  absl::Status Flush(const std::shared_ptr<Connection>& connection) {
+    if (std::this_thread::get_id() != owner_id_) {
+      return absl::InternalError(
+          "DPUmesh Flush executed outside the CQ owner thread");
+    }
+    if (connection->closing || connection->qp == nullptr) {
+      return absl::UnavailableError("DPUmesh connection is closed");
+    }
+    if (!connection->unflushed) return absl::OkStatus();
+    if (ops_->Flush(connection->qp) != 0)
+      return ErrnoStatus("dmesh_flush", errno);
+    connection->unflushed = false;
+    return absl::OkStatus();
   }
 
   void RequestClose(const std::shared_ptr<Connection>& connection) {

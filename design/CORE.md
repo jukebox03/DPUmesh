@@ -1,219 +1,207 @@
 # DPUmesh Core Architecture
 
-This whitepaper describes the 2026-07-19 implementation across
-`src/dmesh_core.c`, `doca/`, and `doca/device/dpa_kernel.c`. It separates the
-host API, the BlueField ARM control/data path, and the DPA forwarding kernel, and
-states the lifecycle barriers that make imported host memory safe to reclaim.
+This whitepaper describes the implementation shared by the native API, preload
+facade, BlueField ARM process, and DPA kernel as of 2026-07-20. Its organizing
+principle is custody: every byte, descriptor, credit, and imported mapping has a
+single owner until an explicit acknowledgement transfers or releases it.
 
-## 1. End-to-end structure
-
-```text
-Host process                         BlueField                     backend
-┌──────────────────┐       ┌────────────────────────────┐      ┌─────────┐
-│ native/preload   │       │ ARM control + proxy        │      │ TCP app │
-│ channel/CQ/QP    │Comch  │ registration, conntrack,   │ TCP  └─────────┘
-│ registered TX/RX ├──────►│ routing, SG-DMA egress     ├──────────►
-└────────▲─────────┘       └──────────▲─────────────────┘
-         │ host RX DMA               │ forward completion
-         └───────────────────────────┤
-                                     │
-                               ┌─────┴─────┐
-                               │ DPA EUs   │
-                               │ TX DMA +  │
-                               │ ring ACKs │
-                               └───────────┘
-```
-
-Host-to-DPU request bodies are read by DPA EUs from registered host TX memory.
-The DPU ARM proxy owns backend TCP connections. Replies are copied by ARM SG-DMA
-into the destination host RX mmap. The DPA is forward-only; it does not implement
-the reverse path.
-
-## 2. Host transport
-
-### Channel and progress
-
-`struct dpumesh_ctx` owns the DOCA device, Comch client, K exported forward
-rings, TX block pool, RX memory, CQ registry, accept queue, and one PE progress
-thread. Public `dmesh_channel_t` wraps this context and the DPU-assigned pod id.
-
-The progress thread is the only Comch PE owner. It receives control messages and
-data completions, publishes QPs onto their CQ ready-lists, and signals the CQ
-eventfd only on empty-to-nonempty transitions. Each CQ ready-list is
-single-producer/single-consumer: the progress thread produces and the CQ's one
-application thread consumes.
-
-### TX storage and forwarding rings
-
-Each QP reserves bytes from an elastic chain of 64 KiB registered blocks. The
-default per-QP ceiling is four blocks (256 KiB in flight), with one recycled
-block retained as hysteresis. `dmesh_alloc()` reserves a block region and one
-send unit together, so post cannot later fail for per-QP capacity. A shared
-descriptor ring can still apply bounded backoff at doorbell time.
-
-K forward rings shard QPs by connection. All bytes for one QP use one ring, while
-different QPs can occupy different DPA EUs. The ring uses ticket generations in
-the cell sequence, so a producer cannot overwrite a cell until the DPA has
-consumed the prior generation. The default K is two.
-
-### RX and completions
-
-The RX mmap is divided into 4,096 slots of 8 KiB by default. A `RECV` completion
-holds a slot credit until `dmesh_wc_release()`. Per-QP inboxes preserve ordering;
-the CQ ready-list avoids a global scan. `CONN_REQ` QPs are assigned to whichever
-CQ drains the shared accept queue, then remain bound to that CQ.
-
-### Concurrency invariants
-
-- Exactly one thread progresses the host Comch PE.
-- Exactly one application thread polls a given CQ.
-- QP completions never migrate between CQs.
-- A poll batch is processed fully before freeing any QP referenced by that batch.
-- The application does not access TX bytes after post or RX bytes after release.
-
-## 3. Control protocol
-
-DOCA Comch carries lifecycle control. The current host/DPU message sequence is:
+## 1. Data-plane shape
 
 ```text
-Host                                      DPU ARM
- |---- registration + exported handles ---->|
- |<--------------- POD_ASSIGNED -------------|  slot reserved
- |                                            |  import K rings and TX/RX mmap
- |                                            |  register rings on target EUs
- |                                            |  wait RING_ADD_ACK generation G
- |                                            |  initialize ARM egress lanes
- |<------ POD_INIT_RESULT(READY, G) -----------|
- |=============== data path ==================|
- |---------------- POD_UNREGISTER ------------>|
- |                                            |  registered=0, dma_ready=0
- |                                            |  RING_DEL to all target EUs
- |                                            |  wait matching RING_DEL_ACK
- |                                            |  drain egress queues/inflight/refs
- |<--------------- POD_QUIESCED --------------|
+host process                         BlueField
+┌────────────────────┐     ┌──────────────────────────────┐
+│ channel / CQ / QP  │     │ ARM control + stream proxy   │
+│ registered TX mmap ├─DPA►│ backend sockets / conntrack  ├── TCP backend
+│ registered RX mmap │◄─DMA┤ SG-DMA reverse egress        │
+└────────────────────┘     └──────────────▲───────────────┘
+                                          │
+                                   DPA execution units
+                              forward-ring drain + TX DMA
 ```
 
-`POD_ASSIGNED` is phase one only. `POD_INIT_RESULT` carries `READY` or an explicit
-registration, mmap, or DPA failure. The host waits up to 30 seconds for both
-phases. It never exposes a partially initialized channel.
+Host-to-DPU bodies are DMA-read from host TX memory by DPA execution units.
+BlueField ARM owns service selection, upstream sockets, and response routing.
+Responses return through ARM SG-DMA into the destination host RX mapping. The
+DPA path is forward-only.
 
-Every slot incarnation has a monotonically increasing `dma_generation`.
-`RING_ADD_ACK`, `RING_DEL_ACK`, DPA forwarding completions, and ARM egress
-operations carry that generation. A completion with a stale generation is
-dropped instead of being applied to a reused slot.
+## 2. Host ownership and concurrency
 
-## 4. DPA forwarding
+One `dpumesh_ctx` owns the DOCA device, Comch client, K forward rings, TX block
+pool, RX mapping, accept queue, CQ registry, and PE progress thread. The PE
+thread is the sole Comch progress owner. Each CQ has an SPSC ready-list: the PE
+publishes a port once, and the CQ's one application thread drains it.
 
-At startup the ARM side selects N available DPA execution units, clamped to
-`MAX_DPA_EU=8`. If `DPUMESH_DPA_THREADS` is unset, `dpa.c` uses the available-EU
-query and the configured default/clamp behavior; a deployment may set N
-explicitly. Each EU can hold up to eight registered forward rings.
+Per-QP inboxes preserve arrival order without scanning the global port table.
+An atomic arm/disarm handshake closes the empty-inbox/ready-edge race. A QP
+never migrates between CQs, and an application must finish dispatching a returned
+CQ batch before freeing any QP named by it.
 
-An EU loop performs three operations:
+The accept path creates a `SERVER_PENDING` port before publishing the first
+request. The public QP allocation now occurs before consuming the shared accept
+descriptor, so host OOM cannot consume the request and strand that pending port.
 
-1. Process ring add/delete control and return a generation-tagged ACK.
-2. Drain valid host descriptors from its registered rings.
-3. DMA request bytes into DPU memory and publish a forwarding completion to ARM.
+## 3. TX byte ring and automatic physical batching
 
-The kernel validates ring slot, pod id, and generation. Parking/re-arm logic keeps
-idle use bounded while a grace polling interval avoids a large hot-path wakeup
-penalty.
-
-## 5. BlueField ARM proxy
-
-The ARM process owns service configuration, pod objects, backend endpoints,
-load-balancing state, connection tracking, and the reverse SG-DMA engine.
+Each QP owns a logical byte ring backed by an elastic chain of registered physical
+blocks. Four monotonic cursors describe custody:
 
 ```text
-DPA completion
-      │
-      ▼
-ingest/reap shard → parse or passthrough → backend socket
-      ▲                                      │ reply
-      │                                      ▼
-REV_DONE/credit ← SG-DMA completion ← egress lane/worker
+free (ACKed) ≤ sent (described) ≤ committed (posted) ≤ write (reserved)
 ```
 
-`DPUMESH_INGEST_SHARDS` selects up to eight ingest shards. QPs are mapped
-deterministically so their conn state remains shard-local. With share-nothing
-routing, each shard owns its conntrack and upstream-port residue; shared routing
-uses a lock around the common table.
+The default block is 64 KiB and the default QP ceiling is four blocks. Messages
+never straddle physical blocks; unused block tails are padding. The shared block
+pool lets idle QPs retain no eager TX allocation.
 
-`DPUMESH_ARM_EGRESS_THREADS` selects one inline egress path or multiple workers,
-up to eight. Each worker owns its DOCA DMA context, PE, inventory, batch pool, and
-a partition of destination lanes. Lane records carry the destination pod
-generation. DMA completion returns byte custody and emits reverse-done credit to
-the source side.
+The public send state machine is:
 
-The default proxy mode is raw passthrough. Per-service frame/L7 codecs may expose
-message boundaries, but they are not used for gRPC. Feeding HTTP/2 through the
-current simple frame codec would corrupt the stream because it is not an HTTP/2
-parser.
+1. `alloc` reserves a contiguous range and records its exact mmap offset.
+2. `post_send` validates that exact pointer, commits it, and emits every newly
+   complete transport unit.
+3. `flush` emits the newest partial unit as well.
+4. `BATCH_FWD_ACK(port, seq)` advances the free cursor and recycles blocks.
 
-## 6. Graceful remote reclaim
+Adjacent small posts naturally share a physical descriptor. The current wire
+unit is 8 KiB, but the public send policy does not depend on callers knowing it.
+A short physical-block tail that can no longer grow is emitted before later-block
+bytes to preserve order. Configuration clamps
+`max_blocks_per_qp × ceil(block/slot)` to the
+64-entry send-unit FIFO, so the complete committed window has reclaim metadata
+before it is admitted. A shared forward ring still uses bounded backoff as a
+fail-safe against a dead DPA consumer.
 
-Channel shutdown first requires all host QPs and CQs to be gone. The host then
-sends `POD_UNREGISTER` while its PE remains live. The DPU performs these ordered
-steps:
+Emission writes a descriptor and advances the producer state of a shared ring.
+The DPA execution unit already drains that ring, so neither a complete-unit post
+nor an explicit tail flush performs a send syscall or emits a separate control
+doorbell. Automatic batching is byte coalescing inside descriptors.
 
-1. Clear `registered` and `dma_ready`, preventing new routing and DMA submissions.
-2. Flush stale generation-tagged forwarding completions.
-3. Send ring delete to every EU used by the pod and collect matching ACKs.
-4. Drain or discard every ARM egress lane item, DMA batch, inflight counter, and
-   source-window custody reference for that generation.
-5. Destroy DOCA buffer arrays before their imported mmaps.
-6. Send `POD_QUIESCED` and release the pod slot.
+No partial-batch timer exists yet. Until one is added, `flush` and graceful close
+are the bounded-latency boundaries for the newest partial.
 
-Only after receiving the barrier does the host stop Comch and destroy exported
-memory and device objects. If the five-second wait expires, the host logs a
-warning and continues bounded teardown; the DPU continues asynchronous cleanup.
-Unexpected disconnect also enters asynchronous cleanup and has been shown to
-recover liveness and slot reuse. Forced death while DMA is already in flight is
-not equivalent to the graceful barrier and is not claimed to provide complete
-memory-isolation safety.
+Descriptor sequence numbers and FIN state are published only after enqueue
+succeeds. FIN failure is returned to the caller instead of being silently
+latched as sent. Local close still releases the QP so channel teardown can
+continue and DPU disconnect cleanup remains available.
 
-## 7. Name resolution and facades
+## 4. RX custody
 
-`src/dmesh_resolve.c` loads one immutable table on first use. A row is:
+The host RX mmap is divided into 8 KiB landing units. ARM emits batched reverse
+completion records; the PE routes each record to a QP inbox or the shared accept
+queue. A `RECV` completion transfers temporary read access to the application.
+`wc_release` returns the landing credit exactly once, allowing that offset to be
+reused.
+
+RX queue capacity and reverse admission are coupled. The transport never treats
+dropping an RX completion as ordinary flow control: loss of a credit or body is a
+correctness fault, not a throughput policy.
+
+## 5. Registration and readiness
+
+Initialization has two externally visible phases but one success result:
 
 ```text
-ClusterIP:port service-name service-id
+Host                                      BlueField ARM / DPA
+ |-- POD_REGISTER(service, requested=-1) -->|
+ |<-------------- POD_ASSIGNED --------------|
+ |-- K ring exports, TX mmap, RX mmap ------->|
+ |                                      RING_ADD generation G
+ |                                     <----- ACK from every EU
+ |<---------- POD_INIT_RESULT(READY) ----------|
 ```
 
-The native facade resolves a peer name. The preload facade resolves a socket
-destination and falls back to kernel TCP when the row is absent. Both facades
-call the same internal core; preload is not layered on the public native API.
+The control state machine is designed for replay:
 
-The C++ gRPC integration is a native API consumer. Its runtime owns one channel,
-reactors own CQs, and each gRPC EventEngine Endpoint owns a DPUmesh QP. Endpoint
-reads copy RX bytes into gRPC slices before returning credits; writes copy gRPC
-slices into registered TX reservations.
+- One Comch connection owns at most one registration.
+- Repeating the same `POD_REGISTER` is idempotent and returns the same pod id.
+- The host retries registration every 100 ms until assignment and again until a
+  terminal initialization result.
+- A replay after terminal state resends both assignment and result.
+- Missing DPA `RING_ADD_ACK`s trigger generation-matched, idempotent `RING_ADD`
+  replay every 10 ms.
+- Received assignment and result messages require exact wire sizes and matching
+  pod identity.
+- Comch receive-queue requests are capped to the device-reported maximum.
 
-## 8. Configuration and hard bounds
+The channel becomes public only after every import and every target-EU ACK is
+complete. Registration, mmap, and DPA failures are terminal. The host deadline
+is 30 seconds, preventing an indefinitely half-initialized channel.
 
-| Item | Default or bound | Meaning |
-|---|---:|---|
-| RX slot size | 8 KiB | One DPA DMA unit and one `RECV` fragment |
-| RX slots | 4,096 | Channel landing capacity |
-| TX block | 64 KiB | Largest default contiguous alloc/post |
-| TX blocks/QP | 4 | 256 KiB default in-flight cap |
-| K rings/pod | 2 | QP sharding across EUs |
-| N DPA EUs | auto-detected, fallback 4, max 8 | Forward executors; deployment can override |
-| Ingest shards | max 8 | ARM completion/routing workers |
-| Egress engines | max 8 | ARM SG-DMA workers |
-| Pod slots | 32 at default K | Derived from EU/ring capacity |
+Replay is confined to initialization. Once READY is delivered there is no
+registration heartbeat or periodic control-plane poll; ordinary progress comes
+from the data and completion rings.
 
-Host and DPU must agree on K and structure layout. ABI-incompatible public header
-changes require incrementing `ABI_MAJOR` so the SONAME prevents silent layout
-mismatch.
+## 6. DPA forwarding
 
-## 9. System invariants
+K forward rings per pod shard QPs by source port. Every QP remains on one ring,
+preserving its send order; different QPs spread across execution units. Ring
+cells carry producer generations so a host producer cannot overwrite a cell
+until its previous occupant has been consumed.
 
-- L4 mode never assumes application message boundaries.
-- One QP's bytes remain ordered, and a connection is not silently repicked after
-  backend failure.
-- All remote references to a host export quiesce before graceful host unmap.
-- Every cross-pod DMA operation is validated against the current slot generation.
-- Every `RECV` credit is returned exactly once; the release API is idempotent.
-- Backpressure is reported as `EAGAIN`, not converted into an unbounded wait.
-- Routine logging is warning-level; high-volume diagnostic logging is explicit.
+Each DPA EU processes ring add/delete control, drains valid descriptors, copies
+request bytes into DPU staging, and publishes completion metadata to ARM. Ring
+control ACKs include pod id, EU id, status, and DMA generation. Duplicate
+`RING_ADD` overwrites the same logical registration rather than accumulating
+another ring, which makes ACK recovery safe.
+
+## 7. ARM proxy and reverse egress
+
+ARM owns the backend byte streams. In L4 mode a connection is pinned to one
+backend. Optional service codecs can expose message boundaries, but the gRPC path
+uses raw HTTP/2 passthrough.
+
+Ingest shards own completion parsing and connection state. Egress workers own
+destination lanes, DOCA DMA engines, and reverse batches. Every queued lane item
+and DMA operation carries the destination pod generation. A stale completion can
+therefore be discarded instead of touching a reused pod slot.
+
+## 8. Remote reclaim
+
+Graceful shutdown is another replayable barrier:
+
+```text
+Host                                      BlueField
+ |-- POD_UNREGISTER (retry every 100 ms) ---->|
+ |                                  stop new routing
+ |                                  RING_DEL to every EU
+ |                                  wait generation ACKs
+ |                                  drain ARM lanes/inflight/refs
+ |                                  destroy imported handles
+ |<---------------- POD_QUIESCED --------------|
+```
+
+`POD_UNREGISTER` is idempotent. Missing delete ACKs are retried every 10 ms, and
+a repeated unregister after cleanup causes a fresh quiesced reply. The host keeps
+Comch and all exports alive while waiting. Only a received barrier authorizes the
+normal unmap order: DPA buffer arrays, imported mappings, then host exports and
+device objects.
+
+The local five-second timeout is a bounded failure policy, not proof that remote
+DMA stopped. Disconnect cleanup continues on the DPU. Complete containment after
+SIGKILL or hardware failure requires a stronger platform isolation mechanism and
+is not claimed here.
+
+## 9. Fixed bounds and invariants
+
+| Item | Default / bound |
+|---|---:|
+| Wire slot and RX landing unit | 8 KiB |
+| Host TX/RX capacity | 4,096 slots each |
+| TX block | 64 KiB default |
+| QP TX window | 4 blocks default, FIFO-clamped |
+| Send-unit reclaim FIFO | 64 descriptors/QP |
+| Forward rings per pod | 2 default |
+| DPA execution units | deployment-selected, max 8 |
+| ARM ingest shards | deployment-selected, 1 default |
+| ARM egress workers | deployment-selected, 1 default |
+| Initialization deadline | 30 s |
+| Graceful local cleanup deadline | 5 s |
+
+The implementation relies on these invariants:
+
+- one PE owner and one consumer per CQ;
+- per-QP wire order equals committed byte order;
+- `post_send` emits complete units and `flush` emits the trailing partial;
+- every RX landing and TX block remains owned until its matching credit or ACK;
+- every asynchronous DPA/ARM result is validated against its slot generation;
+- graceful unmap follows remote quiescence, never mere send submission;
+- backpressure is surfaced as `EAGAIN`; batching size remains transport-private.

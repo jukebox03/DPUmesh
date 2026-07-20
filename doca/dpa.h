@@ -87,6 +87,12 @@ setup_dpa_buf_array_pod(struct objects *objs, size_t num_elem,
 doca_error_t
 setup_pod_dma(struct objects *objs, struct pod_state *pod);
 
+/* Retransmit idempotent RING_ADD messages for EUs whose generation-matched ACK
+ * has not arrived. Returns 1 when complete, 0 while pending, -1 on a terminal
+ * local reconstruction/send error. Nonblocking; call from the main progress pass. */
+int
+progress_setup_pod_dma(struct objects *objs, struct pod_state *pod);
+
 /* Initialize an ACK-based RING_DEL barrier for every EU holding one of this
  * pod's forward rings. progress_teardown_pod_dma() retransmits idempotent DELs
  * until every generation-matched DEL_ACK has arrived. */

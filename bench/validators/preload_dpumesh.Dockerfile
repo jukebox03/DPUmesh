@@ -16,7 +16,7 @@ COPY build/bin/tcp_echo /usr/local/bin/tcp_echo
 COPY build/bin/tcp_client /usr/local/bin/tcp_client
 COPY build/lib/libdmesh_preload.so /usr/local/lib/libdmesh_preload.so
 COPY doca-libs/ /usr/local/lib/
-COPY build/lib/libdpumesh.so.1 /usr/local/lib/
+COPY build/lib/libdpumesh.so.2 /usr/local/lib/
 
 RUN ldconfig
 

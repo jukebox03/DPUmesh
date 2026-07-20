@@ -1,5 +1,10 @@
 # DPUmesh vs TCP + Envoy — L4 performance evaluation
 
+This is a frozen ABI-1 campaign, retained because its raw data and interpretation
+remain useful. It is not the current ABI-2 performance record. The controlled
+automatic-batching A/B and its live DPU configuration are recorded in
+[`bench/RESULT.md`](../RESULT.md#session-7--abi-2-automatic-batching-performance-audit-2026-07-20).
+
 Real BlueField-3 hardware, **intra-node** (pod → local DPU → pod). One workload — a greeter
 RPC (N-byte request → 8-byte reply, 16-byte `bench.h` frame) — driven over every transport by
 the **same pure-C** client and server, so the language runtime (GC, scheduler) is never the
@@ -15,7 +20,7 @@ dpumesh      bench-dpumesh ─dmesh.h─► DPU(DOCA Comch+DMA) ─► echo-dpum
 ## Abstract
 
 At L4 / 1 KB / one connection, ranked by throughput: **direct kernel TCP ≫ TCP+Envoy > DPUmesh.**
-This holds *after* correcting a benchmark-fairness gap the first report missed — the TCP baseline
+This ABI-1 campaign holds *after* correcting a benchmark-fairness gap the first report missed — the TCP baseline
 coalesces its window into one `write()` while DPUmesh flushed **per RPC**. Giving DPUmesh matched
 coalescing lifts it **+32 % (conc 32) / +77 % (conc 64)** and collapses its loaded latency to the
 single-RPC floor, but it still lands **below Envoy** (0.61× / 0.83×) and far below direct TCP. The
@@ -49,35 +54,35 @@ tax, counted honestly.
 `RUN <req> <reply> <conc> <dur> <warmup> <threads>`.
 - `tcp-direct` — `bench-direct` (`bench_sock`) → `echo_sock`, **no sidecar** (isolates the Envoy tax).
 - `tcp-envoy` — `bench-tcp` (`bench_sock`+Envoy `tcp_proxy`) → svc → (`echo_sock`+Envoy).
-- `dpumesh` — `bench_dpumesh` (`dmesh.h`) → DPU → `echo_dpumesh`. Control arg 8 is `batch` (below).
+- `dpumesh` — `bench_dpumesh` (`dmesh.h`) → DPU → `echo_dpumesh`.
 
 **Workload.** 1 KB request, 8 B reply, 16 B frame, **one connection** (`threads=1`) — one backend
 per side, a like-for-like pod pair. Closed loop, warmup excluded, median + 95 % bootstrap CI
 (`suite/analyze.py`). A point is trusted only at **fail = 0, reorder = 0**, and Little's-law ratio
 (throughput × avg-RTT / conc) in 0.98–1.02.
 
-**The matched-batching knobs (the fairness fix, §2–§4).** The TCP client/server each coalesce a
-whole batch into one syscall (`bench_sock.c`, `echo_sock.c`); DPUmesh, by default, rings one
-doorbell per RPC. Two off-by-default knobs give it the same coalescing:
-- **client** — the 8th `RUN` arg `batch=1`: `bench_dpumesh.c` marks every frame in the burst it
-  issues per loop pass `DMESH_SEND_MORE` and flushes once.
-- **server** — `/tmp/reply_batch=1` on the echo pods (polled every 0.5 s): `echo_dpumesh.c`
-  coalesces a CQ batch's replies into one doorbell/conn.
+**Historical batching variable (§2–§4).** These measurements were collected on ABI 1, where
+`SEND_MORE` and `/tmp/reply_batch` selected per-RPC versus loop-pass coalescing. ABI 2 removed both
+switches: every `post_send` commits and automatically submits complete transport units, while
+`flush` forces the trailing partial. The current benchmark always flushes once per loop-pass burst
+on both native legs. Consequently the four-way ablation and
+its CPU companion are retained as historical evidence, but their scripts intentionally refuse to
+emit ABI-2 rows whose labels would execute identical code.
 
 **Reproduce each figure.**
 
 | figure | command | data |
 |---|---|---|
 | RTT vs size, throughput/CPU sweeps | `REPS=8 DUR=15 bench/suite/run_suite.sh rtt conc bw` | `data/summary.csv` |
-| batching ablation (§2, §3) | `bench/suite/batch_ablation.sh` | `data/batch_ablation.csv` |
-| DPU-ARM cost (§4) | `bench/suite/batch_cpu.sh` | `data/batch_cpu.csv` |
+| batching ablation (§2, §3; ABI 1 archive) | checkout `af19365` | `data/batch_ablation.csv` |
+| DPU-ARM cost (§4; ABI 1 archive) | checkout `af19365` | `data/batch_cpu.csv` |
 | host+DPU CPU (§4) | `for c in 8 32 64; do bench/suite/cpu_probe.sh <tr> 1024 8 $c 30; done` | `data/cpu.csv` |
 | config / N-pod (§5, §6) | `bench/suite/npod.sh <cfg> 32 20 3` per deployed config | `data/{cpu_configs,npod}.csv` |
 | plots | `python3 bench/suite/plot_batch.py data figures` ; `python3 bench/suite/plot.py …` | `figures/` |
 
-**Provenance note.** §1–§4 (latency, throughput, batching, ARM CPU) were **re-measured 2026-07-18**
-on the current build (which adds the off-by-default batching knobs and an atomic fix to a lane-inbox
-data race in `doca/dpu_proxy.c`); the unbatched/TCP anchors reproduced the frozen numbers within CI.
+**Provenance note.** §1–§4 (latency, throughput, batching, ARM CPU) were **measured 2026-07-18**
+at commit `af19365`, which contained the ABI-1 opt-in batching knobs and a lane-inbox atomic fix;
+the unbatched/TCP anchors reproduced the frozen numbers within CI.
 §5–§6 (config frontier, N-pod, busy-app, goodput) are from the frozen `commit 4beb0be` (4,4) campaign
 — same workload and pinning — and are marked where they are single-rep.
 
@@ -100,9 +105,9 @@ backend, and the mirror on the reply); it is real and batching-independent.
 
 ## 2. Throughput vs concurrency — and the batching-fairness correction
 
-The first report's throughput columns compared TCP **batched** against DPUmesh **per-RPC-flush** and
+The first ABI-1 report's throughput columns compared TCP **batched** against DPUmesh **per-RPC-flush** and
 called it "transport only." It is not: above conc=1 the *issue/flush granularity* differs. §2 gives
-DPUmesh the matched coalescing (`batch=1` + `reply_batch=1`). Median of 6, `data/batch_ablation.csv`,
+DPUmesh the then-optional matched coalescing. Median of 6, `data/batch_ablation.csv`,
 `figures/fig_tput_vs_conc.png` + `figures/fig_p50_vs_conc.png`:
 
 | conc | tcp-direct | tcp-envoy | dpumesh (per-RPC) | dpumesh (batched) |
@@ -162,7 +167,7 @@ raises throughput *while lowering* ARM occupancy, so ARM µs/RPC drops sharply:
 | 64 | 16.7 (463 %) | 7.3 (359 %) | **−56 %** |
 
 Coalescing amortizes roughly half the ARM cost away — direct evidence that the bottleneck is per-RPC
-fixed overhead (doorbell, per-message DMA, REV_DONE/TX_ACK), not raw ARM core speed.
+fixed overhead (descriptor publication, per-message DMA, REV_DONE/TX_ACK), not raw ARM core speed.
 
 ## 5. DPU config frontier — (1,1) / (2,2) / (4,4)
 
@@ -215,6 +220,6 @@ architecture rests on the untested regimes (L7 sidecar tax, busy apps), not on t
 ---
 
 commit `af19365` · node rapids4 (Xeon Gold 6554S) · BlueField-3 · DOCA 3.1.0 · kernel 5.15 ·
-DPU (4,4) live-verified · §1–§4 re-measured 2026-07-18 on the build with the batching knobs +
+DPU (4,4) live-verified · §1–§4 measured 2026-07-18 on the ABI-1 build with batching knobs +
 lane-inbox data-race fix (0-fail on loopback/preload + the ablation) · §5–§6 frozen from commit
 `4beb0be`.

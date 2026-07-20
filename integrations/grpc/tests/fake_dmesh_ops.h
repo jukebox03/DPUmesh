@@ -54,6 +54,7 @@ class FakeDmeshState final {
 
   std::vector<std::vector<uint8_t>> Posts(dmesh_qp_t* qp) const;
   size_t alloc_calls(dmesh_qp_t* qp) const;
+  size_t flush_calls(dmesh_qp_t* qp) const;
   size_t release_count() const;
   size_t destroy_count() const;
   size_t mid_batch_destroy_count() const;

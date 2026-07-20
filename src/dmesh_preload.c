@@ -517,9 +517,8 @@ static ssize_t shim_recv(pfd_t *e, void *buf, size_t len, int flags) {
     }
 }
 
-/* Gather-send: ALL iovs accumulate into ONE message (dmesh_write buffers and
- * auto-chunks any length; a pinned conn keeps chunks on its backend), shipped by
- * a single flush — so writev(header, body) costs one message, not two. */
+/* Gather-send: ALL iovs accumulate into one byte stream and one final flush submits
+ * it. The caller never needs to know the physical batching size. */
 
 /* ===== POSIX byte-stream semantics — the shim's, and ONLY the shim's =====
  *
@@ -563,16 +562,17 @@ static ssize_t stream_read(dmesh_qp_t *c, void *buf, size_t len) {
     return (ssize_t)n;
 }
 
-/* write(): copy `len` bytes into the conn's TX ring (shipped by dmesh_flush). Any
- * length — carved across as many <= post_max reserves as it takes, which is the one
- * thing dmesh_alloc cannot do and a POSIX write must.
+/* write(): copy `len` bytes into the conn's TX ring. shim_send_iov submits the
+ * accumulated byte stream at the POSIX write boundary. Any length is carved across as
+ * many <= post_max reserves as it takes, which is the one thing dmesh_alloc cannot do
+ * and a POSIX write must.
  *
  * BLOCKS under backpressure, which is CORRECT here: every shim conn is a blocking
  * socket as far as this path is concerned, and a blocking write(2) blocks until done.
  * The wait used to live inside dpumesh_tx_reserve (a nanosleep ladder in the core hot
  * path); it now sits here, in the one caller whose contract actually asks for it.
  *
- * KNOWN GAP (design/API_REDESIGN.md §6): O_NONBLOCK is not honored on this path — it
+ * KNOWN GAP (design/API.md §7): O_NONBLOCK is not honored on this path — it
  * blocks instead of returning EAGAIN. Fixing that needs honest EPOLLOUT, which the
  * eventfd fd-realization cannot express (an eventfd is always writable), so an app
  * would livelock on epoll→write→EAGAIN. Gated on grow_waits actually being non-zero.
@@ -589,14 +589,18 @@ static ssize_t stream_write(dmesh_qp_t *c, const void *buf, size_t len) {
         if (!dst) {
             if (errno != EAGAIN)                  /* EINVAL: conn gone → permanent */
                 return done ? (ssize_t)done : -1;
+            /* A single POSIX write may exceed the bounded batching window. Ship the
+             * committed prefix explicitly so its ACKs can make room for the rest. */
+            if (done > 0 && dmesh_flush(c) != 0)
+                return done ? (ssize_t)done : -1;
             nanosleep(&backoff, NULL);            /* SQ full: the conn's TX_ACKs free it */
             if (backoff.tv_nsec < 50000) backoff.tv_nsec *= 2;
             continue;
         }
         backoff.tv_nsec = 1000;
         memcpy(dst, p + done, chunk);
-        if (dpumesh_tx_commit(ctx, c->local_port, chunk) != 0) {  /* cannot fail: chunk == the
-                                                                   * reserve we just took */
+        if (dpumesh_tx_commit(ctx, c->local_port, dst, chunk) != 0) {  /* cannot fail: dst/chunk ==
+                                                                        * the reserve we just took */
             errno = EIO;
             return done ? (ssize_t)done : -1;
         }
@@ -942,8 +946,11 @@ int shutdown(int fd, int how) {
          * FIN frees the DPU upstream — replies sent after it are undeliverable
          * (the transport has no true half-close; documented limit). */
         if (e->conn) {
-            dmesh_flush(e->conn);
-            dmesh_send_fin(e->conn);   /* self-guards; a peer FIN does not close our half */
+            if (dmesh_flush(e->conn) != 0 || dmesh_send_fin(e->conn) != 0) {
+                pthread_mutex_unlock(&e->mu);
+                errno = ECONNRESET;
+                return -1;
+            }
         }
     }
     if (how == SHUT_RD || how == SHUT_RDWR) e->rd_closed = 1;

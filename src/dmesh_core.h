@@ -11,7 +11,7 @@
  *                                            byte-stream semantics it needs)
  *
  * The two surfaces are SIBLINGS: neither is built on the other, both call in
- * here. See design/API_REDESIGN.md.
+ * here. See design/API.md.
  *
  * It was public (include/dpumesh/dmesh_core.h) until the API consolidation.
  * Being reachable was an accident of <dpumesh/dmesh.h> #including it, which put
@@ -95,6 +95,8 @@ typedef struct dpumesh_ctx dpumesh_ctx_t;
  * per conn. */
 struct dmesh_cq {
     dmesh_channel_t   *ch;
+    struct dmesh_qp *accept_spare; /* preallocated before consuming an accept descriptor;
+                                    * prevents OOM from stranding SERVER_PENDING */
     struct dmesh_qp *vq_cur;   /* poll_cq resume cursor: the conn whose inbox was only
                                   * partially drained because the caller's wc[] filled (its
                                   * inbox never went empty, so the ready list holds no fresh
@@ -192,32 +194,34 @@ void dpumesh_rx_free(dpumesh_ctx_t *ctx, int slot);
  *   block size) at the write head and return a pointer into TX DMA memory to fill
  *   (zero-copy). Grabs a block on demand (grow, elastic pool).
  *
- *   NEVER BLOCKS. Reserves BOTH resources a message needs, together:
- *     (a) the ring bytes  — a physical block for every logical block it spans, and
- *     (b) the send-unit FIFO slots it will occupy — ceil(len/slot_size) of them.
- *   Reserving both up front is what lets dpumesh_tx_next_send be infallible: once a
- *   message is in, it can always be carved and shipped. There is no half-posted state.
+ *   NEVER BLOCKS. The configured block window is bounded so its complete worst-case
+ *   slot carve fits the send-unit FIFO; reserve therefore admits ring bytes only.
  *
  *   NULL + errno:
  *     EAGAIN  the SQ is full: the per-conn block window (maxb) is exhausted and no
- *             block is recyclable/available, OR the send-unit FIFO lacks room. The
+ *             block is recyclable/available. The
  *             caller retries later (a TX_ACK frees space); st_grow_waits counts these.
  *     EINVAL  len == 0, len > block_size, or the port is not a live conn.
  *
- * dpumesh_tx_commit(port, len): finalize len (<= reserved) bytes as a committed
- *   message, ready to ship.
+ * dpumesh_tx_commit(port, buf, len): validate the exact reserved pointer and finalize
+ *   len (<= reserved) bytes as committed batching input.
  * dpumesh_tx_discard_unsent(port): drop committed-but-unsent bytes (close-before-flush).
- * dpumesh_tx_next_send(port, &moff, &len): pop the next descriptor to ship from the
- *   committed range as (mmap byte offset, len<=slot_size); 1 if one, 0 if none. Cannot
- *   fail on capacity (reserve took the FIFO slot). Does NOT advance the send head —
- *   enqueue it, then call dpumesh_tx_sent.
+ * dpumesh_tx_next_send(port, flush_partial, &moff, &len): select the next descriptor
+ *   from the committed range as (mmap byte offset, len<=slot_size). With
+ *   flush_partial=0, only a full slot is returned, except that a short tail sealed by
+ *   a physical TX-block boundary must be emitted before later blocks can preserve
+ *   byte order. With flush_partial=1, the current trailing partial is returned too.
+ *   1 if one, 0 if none. Cannot fail on capacity (the whole block window fits the
+ *   FIFO). Does NOT advance the send head — enqueue it, then call dpumesh_tx_sent.
  * dpumesh_tx_sent(port, seq, len): record the shipped descriptor (seq->end) + advance
  *   the send head, so a BATCH_FWD_ACK(port,seq) reclaims it.
  * dpumesh_tx_sq_depth(): the per-conn in-flight descriptor cap (TX_SU_DEPTH). */
 uint8_t *dpumesh_tx_reserve(dpumesh_ctx_t *ctx, uint16_t port, uint32_t len);
-int      dpumesh_tx_commit(dpumesh_ctx_t *ctx, uint16_t port, uint32_t len);
+int      dpumesh_tx_commit(dpumesh_ctx_t *ctx, uint16_t port,
+                           const void *buf, uint32_t len);
 void     dpumesh_tx_discard_unsent(dpumesh_ctx_t *ctx, uint16_t port);
-int      dpumesh_tx_next_send(dpumesh_ctx_t *ctx, uint16_t port, size_t *out_moff, uint32_t *out_len);
+int      dpumesh_tx_next_send(dpumesh_ctx_t *ctx, uint16_t port, int flush_partial,
+                              size_t *out_moff, uint32_t *out_len);
 void     dpumesh_tx_sent(dpumesh_ctx_t *ctx, uint16_t port, uint16_t seq, uint32_t len);
 
 /* Enqueue a descriptor to TX SQ. Returns 0 on success, -1 on failure. */
@@ -277,18 +281,22 @@ dmesh_qp_t *dmesh_accept(dmesh_cq_t *cq);
  * created at accept/connect, or NULL when drained. Single-consumer. */
 dmesh_qp_t *dmesh_next_ready(dmesh_cq_t *cq);
 
+/* Submit every complete wire slot currently committed on this QP, leaving only the
+ * newest fillable partial slot buffered. This is the post_send fast path; unlike the
+ * public dmesh_flush it does not force that trailing partial. */
+int dmesh_flush_full(dmesh_qp_t *c);
+
 /* Send a FIN — a zero-length message to the established peer. It rides the SAME
  * conn-shard ring as this conn's data (src_port), so it arrives AFTER every prior
  * message. The peer's PE delivers it as a 0-length descriptor -> the peer sees EOF ->
  * the peer closes -> its port slot is reclaimed. It holds NO ring bytes (no send-unit /
  * reclaim), but it still rides the shared host->DPU forward ring via dpumesh_enqueue, so
  * — like any enqueue — it is normally instant yet CAN back off briefly under ring
- * contention (up to RING_STALL_DEADLINE_SEC before the doorbell): close is therefore not
- * strictly non-blocking. A ring wedged past that deadline drops the FIN (enqueue returns
- * -1, ignored); the peer/DPU then keep that conn until the port/uP is reused (there is NO
- * idle reaper — apply your own wall-clock timeout). Called by dmesh_destroy_qp; also used
- * by the shim's shutdown(SHUT_WR). */
-void dmesh_send_fin(dmesh_qp_t *c);
+ * contention (up to RING_STALL_DEADLINE_SEC before publication): close is therefore not
+ * strictly non-blocking. A ring wedged past that deadline returns -1/EBADMSG and does
+ * not latch fin_sent, so the failure is observable. Called by graceful close and
+ * abort teardown; also used by the shim's shutdown(SHUT_WR). */
+int dmesh_send_fin(dmesh_qp_t *c);
 
 #ifdef __cplusplus
 }

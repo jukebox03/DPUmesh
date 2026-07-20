@@ -130,18 +130,20 @@ static void client_message_recv_callback(struct doca_comch_event_msg_recv *event
 		/* DPU assigned this node's pod_id at registration. Stash it for the
 		 * init-time register wait loop to pick up. NOT via rx_data_hook (the
 		 * PE thread / hook aren't wired until the end of dpumesh_init). */
-		if (msg_len >= sizeof(struct dmesh_pod_assigned_msg)) {
+		if (msg_len == sizeof(struct dmesh_pod_assigned_msg)) {
 			const struct dmesh_pod_assigned_msg *am =
 				(const struct dmesh_pod_assigned_msg *)recv_buffer;
 			if (am->pod_id >= 0 && am->pod_id < POD_ID_SPACE)
 				__atomic_store_n(&objs->assigned_pod_id, am->pod_id, __ATOMIC_RELEASE);
 			else
 				DOCA_LOG_ERR("DPU returned invalid assigned pod_id=%d", am->pod_id);
+		} else {
+			DOCA_LOG_ERR("Invalid POD_ASSIGNED message size: %u", msg_len);
 		}
 		break;
 
 	case DMESH_MSG_POD_INIT_RESULT:
-		if (msg_len >= sizeof(struct dmesh_pod_init_result_msg)) {
+		if (msg_len == sizeof(struct dmesh_pod_init_result_msg)) {
 			const struct dmesh_pod_init_result_msg *im =
 				(const struct dmesh_pod_init_result_msg *)recv_buffer;
 			if (im->result >= DMESH_POD_INIT_READY &&
@@ -333,8 +335,8 @@ doca_error_t init_comch_ctrl_path_client(const char *server_name,
 	}
 
 	{
-		uint32_t desired_rq = max_rq_size;
-		if (desired_rq < CC_CLIENT_RECV_QUEUE_SIZE) desired_rq = CC_CLIENT_RECV_QUEUE_SIZE;
+		uint32_t desired_rq = CC_CLIENT_RECV_QUEUE_SIZE;
+		if (desired_rq > max_rq_size) desired_rq = max_rq_size;
 		result = doca_comch_client_set_recv_queue_size(objs->cc_client, desired_rq);
 		if (result == DOCA_SUCCESS) {
 			DOCA_LOG_INFO("CC client recv queue size set to %u (cap=%u)", desired_rq, max_rq_size);

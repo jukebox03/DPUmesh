@@ -56,6 +56,7 @@ class FakeDmeshState::Impl final {
     Cq* cq = nullptr;
     bool alive = true;
     size_t alloc_calls = 0;
+    size_t flush_calls = 0;
     std::deque<int> alloc_failures;
     int sticky_alloc_error = 0;
     std::deque<int> post_failures;
@@ -279,7 +280,16 @@ class FakeDmeshApiOps final : public DmeshApiOps {
     return 0;
   }
 
-  int Flush(dmesh_qp_t* /*qp*/) override { return 0; }
+  int Flush(dmesh_qp_t* qp) override {
+    std::lock_guard<std::mutex> lock(impl_->mu);
+    auto* fake = impl_->FindQp(qp);
+    if (fake == nullptr || !fake->alive) {
+      errno = EINVAL;
+      return -1;
+    }
+    ++fake->flush_calls;
+    return 0;
+  }
 
   int PollCq(dmesh_cq_t* cq, dmesh_wc_t* completions,
              int max_completions) override {
@@ -490,6 +500,12 @@ size_t FakeDmeshState::alloc_calls(dmesh_qp_t* qp) const {
   std::lock_guard<std::mutex> lock(impl_->mu);
   auto* fake = impl_->FindQp(qp);
   return fake == nullptr ? 0 : fake->alloc_calls;
+}
+
+size_t FakeDmeshState::flush_calls(dmesh_qp_t* qp) const {
+  std::lock_guard<std::mutex> lock(impl_->mu);
+  auto* fake = impl_->FindQp(qp);
+  return fake == nullptr ? 0 : fake->flush_calls;
 }
 
 size_t FakeDmeshState::release_count() const {

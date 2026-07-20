@@ -198,6 +198,22 @@ static void server_message_recv_callback(struct doca_comch_event_msg_recv *event
 			if (sr != DOCA_SUCCESS)
 				DOCA_LOG_ERR("POD_ASSIGNED send failed (pod_id=%d): %s",
 				             assigned, doca_error_get_name(sr));
+			/* REGISTER is also the retry request for registration state. If an
+			 * earlier terminal result was lost after submission, send a fresh copy
+			 * regardless of init_result_sent; the host retries until READY. */
+			struct pod_state *pod = find_pod_by_connection(objs, comch_connection);
+			if (pod != NULL && pod->init_result != DMESH_POD_INIT_PENDING) {
+				struct dmesh_pod_init_result_msg im = {
+					.type = DMESH_MSG_POD_INIT_RESULT,
+					.pod_id = pod->pod_id,
+					.result = pod->init_result,
+				};
+				sr = server_send_msg_to_conn(objs, comch_connection,
+				                             (const char *)&im, sizeof(im));
+				if (sr != DOCA_SUCCESS)
+					DOCA_LOG_WARN("POD_INIT_RESULT resend failed (pod_id=%d): %s",
+					              pod->pod_id, doca_error_get_name(sr));
+			}
 		} else {
 			struct dmesh_pod_init_result_msg im = {
 				.type = DMESH_MSG_POD_INIT_RESULT,
@@ -273,8 +289,10 @@ static void server_connection_event_callback(struct doca_comch_event_connection_
 	if (objs->connection == NULL)
 		objs->connection = comch_connection;
 
-	/* Add to pods table */
-	pods_add_connection(objs, comch_connection);
+	/* Add to pods table. A connection without a slot is kept only long enough
+	 * for REGISTER to receive an explicit REGISTER_FAILED response. */
+	if (pods_add_connection(objs, comch_connection) != 0)
+		DOCA_LOG_ERR("New connection has no available pod slot");
 
 	DOCA_LOG_INFO("New connection established (total pods: %d)", objs->num_pods);
 }
@@ -438,8 +456,8 @@ init_comch_ctrl_path_server(const char *server_name, struct objects *objs, bool 
     }
 
     {
-        uint32_t desired_rq = max_rq_size;
-        if (desired_rq < CC_SERVER_RECV_QUEUE_SIZE) desired_rq = CC_SERVER_RECV_QUEUE_SIZE;
+		uint32_t desired_rq = CC_SERVER_RECV_QUEUE_SIZE;
+		if (desired_rq > max_rq_size) desired_rq = max_rq_size;
         result = doca_comch_server_set_recv_queue_size(objs->cc_server, desired_rq);
         if (result != DOCA_SUCCESS) {
             DOCA_LOG_ERR("Failed to set recv queue size (%u) with error = %s",
@@ -693,6 +711,7 @@ pods_add_connection(struct objects *objs, struct doca_comch_connection *conn)
 	objs->pods[idx].dpa_add_ack_mask = 0;
 	objs->pods[idx].dpa_add_ack_failed = 0;
 	objs->pods[idx].dpa_setup_complete = 0;
+	objs->pods[idx].dpa_add_last_send_ns = 0;
 	objs->pods[idx].cleanup_pending = 0;
 	objs->pods[idx].cleanup_reply_sent = 0;
 	objs->pods[idx].dpa_del_expected_mask = 0;
@@ -872,6 +891,7 @@ server_progress_pod_cleanup(struct objects *objs)
 		pod->dpa_add_ack_mask = 0;
 		pod->dpa_add_ack_failed = 0;
 		pod->dpa_setup_complete = 0;
+		pod->dpa_add_last_send_ns = 0;
 
 		if (pod->connection != NULL && !pod->cleanup_reply_sent) {
 			struct dmesh_pod_quiesced_msg msg = {
@@ -911,8 +931,18 @@ pods_register(struct objects *objs, struct doca_comch_connection *conn,
 	for (int i = 0; i < n; i++) {
 		if (objs->pods[i].connection != conn)
 			continue;
+		if (__atomic_load_n(&objs->pods[i].cleanup_pending, __ATOMIC_ACQUIRE)) {
+			DOCA_LOG_WARN("pods_register: slot %d is still quiescing", i);
+			return -1;
+		}
 		if (__atomic_load_n(&objs->pods[i].registered, __ATOMIC_ACQUIRE)) {
-			DOCA_LOG_ERR("pods_register: duplicate register on slot %d", i);
+			/* Idempotent replay: one Comch connection owns one registration.
+			 * The host uses this to recover a lost ASSIGNED/INIT_RESULT reply. */
+			int32_t current_id = objs->pods[i].pod_id;
+			if ((pod_id < 0 || pod_id == current_id) &&
+			    service_id == objs->pods[i].service_id)
+				return current_id;
+			DOCA_LOG_ERR("pods_register: conflicting replay on slot %d", i);
 			return -1;
 		}
 

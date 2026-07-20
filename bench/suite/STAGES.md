@@ -1,7 +1,7 @@
 # DPUmesh Evaluation Coverage
 
 This document is an index of what the repository's evaluation has and has not
-measured as of 2026-07-19. It does not convert an unmeasured configuration into a
+measured as of 2026-07-20. It does not convert an unmeasured configuration into a
 performance claim.
 
 ## Transport matrix
@@ -69,11 +69,13 @@ A performance point is retained only if:
 - DPA EUs are hardware execution resources and are not interchangeable with ARM
   process CPU percentages.
 - A single repetition is directional evidence, not a stable median.
-- Native batching compared with unbatched TCP changes application behavior.
+- ABI-2 native batching is mandatory; historical ABI-1 batching ablations must
+  not be regenerated or compared as if the removed switches still changed code.
 - L4 Envoy `tcp_proxy` is a valid transport baseline but not a measurement of
   HTTP/2 routing, retries, telemetry, or policy cost.
 - The focused gRPC harness is compatible with the official service schema but is
   not the upstream distributed `qps_worker` scenario controller.
 
-The actual numerical results and provenance are maintained in
-`bench/report/REPORT.md`; deployment details are in `bench/report/DEPLOY.md`.
+The frozen ABI-1 campaign is in `bench/report/REPORT.md`; the chronological log,
+including the controlled ABI-2 automatic-batching A/B, is in `bench/RESULT.md`.
+Deployment details are in `bench/report/DEPLOY.md`.

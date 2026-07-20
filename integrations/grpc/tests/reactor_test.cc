@@ -153,6 +153,7 @@ void TestTxCopiesSplitsAndPostsOnOwnerThread() {
   CHECK_EQ(std::string(posts[0].begin(), posts[0].end()), std::string("abc"));
   CHECK_EQ(std::string(posts[1].begin(), posts[1].end()), std::string("def"));
   CHECK_EQ(std::string(posts[2].begin(), posts[2].end()), std::string("g"));
+  CHECK_EQ(fixture.state->flush_calls(fixture.qp), size_t{1});
   CHECK_EQ(fixture.state->poll_thread_violation_count(), size_t{0});
 }
 
@@ -177,6 +178,7 @@ void TestTxEagainRetriesFromTimer() {
   CHECK_EQ(callback_count, 1);
   CHECK_TRUE(status->ok());
   CHECK_TRUE(fixture.state->alloc_calls(fixture.qp) >= size_t{2});
+  CHECK_EQ(fixture.state->flush_calls(fixture.qp), size_t{1});
 }
 
 void TestRxCopiesBeforeReleasingCredit() {

@@ -155,6 +155,7 @@ static int sq_drain(dmesh_qp_t *c) {
         ss->len -= n; memmove(ss->q, ss->q + n, ss->len);
         g_served += n; posted++;
     }
+    if (posted && dmesh_flush(c) != 0) ss->dead = 1;
     return posted;
 }
 
@@ -167,7 +168,8 @@ static void srv_recv(dmesh_qp_t *c, const dmesh_wc_t *w) {
         uint8_t *b = (uint8_t *)dmesh_alloc(c, w->len);
         if (b) {
             memcpy(b, w->buf, w->len);
-            if (dmesh_post_send(c, b, w->len, 0, 0) != 0) ss->dead = 1;
+            if (dmesh_post_send(c, b, w->len, 0, 0) != 0 ||
+                dmesh_flush(c) != 0) ss->dead = 1;
             else g_served += w->len;
             return;
         }
@@ -254,6 +256,7 @@ static int send_burst(rstate_t *st, dmesh_qp_t *c, const uint8_t *sbuf, size_t b
         uint8_t *b = (uint8_t *)dmesh_alloc(c, n);
         if (!b) {
             if (errno != EAGAIN) return -1;         /* EINVAL is permanent */
+            if (off > 0 && dmesh_flush(c) != 0) return -1;
             if (!pump(st)) idle_wait();
             if (now_sec() - tw > 5.0) return -1;
             continue;
@@ -262,7 +265,7 @@ static int send_burst(rstate_t *st, dmesh_qp_t *c, const uint8_t *sbuf, size_t b
         if (dmesh_post_send(c, b, n, 0, 0) != 0) return -1;
         off += n;
     }
-    return 0;
+    return dmesh_flush(c);
 }
 
 /* ---- client side: N round-trips of framed byte-stream to our own service ---- */

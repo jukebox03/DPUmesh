@@ -140,6 +140,8 @@ class LinkedEndpointTransport final : public EndpointTransport {
     return PostResult::Accepted();
   }
 
+  absl::Status Flush() override { return absl::OkStatus(); }
+
   void Close() override {
     std::shared_ptr<DmeshEndpointDriver> peer;
     {

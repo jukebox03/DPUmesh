@@ -59,10 +59,9 @@ static void cleanup_ctx(struct dpumesh_ctx *ctx);
  * records (seq -> end cursor) in su_seq/su_end[i]; a BATCH_FWD_ACK(port,seq) pops
  * the FIFO front and advances the conn's free cursor. Power of two (masked).
  *
- * ENFORCED by dpumesh_tx_reserve's send-unit admission, which is the ONLY thing
- * bounding it — the block window cannot, since one small message costs a whole FIFO
- * slot but a sliver of a block. Overrunning it would overwrite a live entry and let
- * tx_reclaim_ack free bytes the DPU is still DMA-reading. */
+ * ENFORCED by the configuration-time block-window clamp. flush coalesces adjacent
+ * committed bytes into slot-sized units, and maxb*ceil(block/slot) never exceeds
+ * this FIFO. Overrunning it would overwrite a live entry and reclaim bytes early. */
 #define TX_SU_DEPTH 64u
 
 /* ELASTIC per-conn TX buffer (block chain). The shared TX mmap is carved into
@@ -144,9 +143,8 @@ struct dmesh_port_slot {
      * The whole block chain is OWNER-thread-local while live; the PE only advances tx_f
      * (atomic). On close (role=FREE) the PE returns the remaining blocks (try_return_blocks). */
     uint64_t         tx_w, tx_c, tx_s;      /* owner-thread logical cursors */
-    uint32_t         resv_len;              /* live dpumesh_tx_reserve len (owner); 0 = no reserve
-                                             * outstanding. tx_commit rejects a len past it (ring
-                                             * overrun) and clears it (one post per alloc). */
+    uint32_t         resv_len;              /* live reserve length (owner); 0 = none */
+    uint64_t         resv_moff;             /* exact TX-mmap offset returned to the caller */
     uint64_t         tail_blk;              /* oldest live logical block index (owner) */
     uint64_t         head_blk_next;         /* next logical block index needing a physical block
                                              * (blocks [tail_blk, head_blk_next) are backed) */
@@ -769,10 +767,8 @@ static void init_config(dpumesh_ctx_t *ctx, const dpumesh_config_t *config, int 
     if (bsz < ctx->slot_size) bsz = ctx->slot_size;    /* a block must hold >= 1 wire slot */
     size_t txbytes = (size_t)ctx->num_slots * (size_t)ctx->slot_size;
     if ((size_t)bsz > txbytes) bsz = (int)txbytes;
-    /* ...and at most TX_SU_DEPTH wire slots. This one is load-bearing: a message may be
-     * block_size long and carves into ceil(block_size/slot_size) descriptors, so without
-     * this clamp a single max-size message could need more FIFO than exists and
-     * dpumesh_tx_reserve's send-unit admission would refuse it forever. */
+    /* ...and at most TX_SU_DEPTH wire slots. This is the single-block half of the
+     * invariant completed by the maxb clamp below. */
     if ((size_t)bsz > (size_t)TX_SU_DEPTH * (size_t)ctx->slot_size)
         bsz = (int)((size_t)TX_SU_DEPTH * (size_t)ctx->slot_size);
     ctx->block_size = bsz;
@@ -785,6 +781,15 @@ static void init_config(dpumesh_ctx_t *ctx, const dpumesh_config_t *config, int 
     if (mb < 1) mb = 1;
     if (mb > DMESH_TX_MAXB_CAP) mb = DMESH_TX_MAXB_CAP;
     if (mb > ctx->n_blocks) mb = ctx->n_blocks;        /* can't own more than the whole pool */
+    /* flush coalesces the whole committed window into <=8 KiB send units. Bound that
+     * window by the reclaim FIFO so every successful alloc remains flushable without
+     * a second admission point or a partial, permanently stuck batch. */
+    {
+        int su_per_block = (ctx->block_size + ctx->slot_size - 1) / ctx->slot_size;
+        int maxb_by_su = TX_SU_DEPTH / su_per_block;
+        if (maxb_by_su < 1) maxb_by_su = 1;
+        if (mb > maxb_by_su) mb = maxb_by_su;
+    }
     ctx->maxb = mb;
 
     int hh = DPUMESH_TX_H_DEFAULT;
@@ -818,6 +823,7 @@ static doca_error_t init_doca_device(dpumesh_ctx_t *ctx) {
 }
 
 #define DPUMESH_POD_INIT_TIMEOUT_MS 30000
+#define DPUMESH_CONTROL_RETRY_MS 100
 
 static int init_elapsed_ms(const struct timespec *start, const struct timespec *now) {
     time_t sec = now->tv_sec - start->tv_sec;
@@ -842,6 +848,7 @@ static doca_error_t wait_for_pod_init_result(dpumesh_ctx_t *ctx) {
     const struct timespec pause = { .tv_sec = 0, .tv_nsec = 10000 };
     struct timespec start, now;
     clock_gettime(CLOCK_MONOTONIC, &start);
+    struct timespec last_register = start;
 
     for (;;) {
         int32_t init_result = __atomic_load_n(&ctx->doca_objs.pod_init_result,
@@ -864,14 +871,25 @@ static doca_error_t wait_for_pod_init_result(dpumesh_ctx_t *ctx) {
                          doca_error_get_name(control_result));
             return control_result;
         }
-        nanosleep(&pause, NULL);
         clock_gettime(CLOCK_MONOTONIC, &now);
+        if (init_elapsed_ms(&last_register, &now) >= DPUMESH_CONTROL_RETRY_MS) {
+            doca_error_t retry = client_send_msg(&ctx->doca_objs,
+                                                  (const char *)&ctx->reg_msg,
+                                                  sizeof(ctx->reg_msg));
+            last_register = now;
+            if (retry != DOCA_SUCCESS && retry != DOCA_ERROR_AGAIN) {
+                DOCA_LOG_ERR("REGISTER retry failed while awaiting pod readiness: %s",
+                             doca_error_get_name(retry));
+                return retry;
+            }
+        }
         if (init_elapsed_ms(&start, &now) >= DPUMESH_POD_INIT_TIMEOUT_MS) {
             DOCA_LOG_ERR("Timed out after %d ms waiting for DPU pod readiness "
                          "(pod_id=%d, rings=%d)",
                          DPUMESH_POD_INIT_TIMEOUT_MS, ctx->pod_id, ctx->k_rings);
             return DOCA_ERROR_TIME_OUT;
         }
+        nanosleep(&pause, NULL);
     }
 }
 
@@ -902,6 +920,7 @@ static doca_error_t init_control_path(dpumesh_ctx_t *ctx) {
     struct timespec ts = { .tv_sec = 0, .tv_nsec = 10000 };   /* 10 us */
     struct timespec start, now;
     clock_gettime(CLOCK_MONOTONIC, &start);
+    struct timespec last_register = start;
     int32_t assigned = -1;
     for (;;) {
         assigned = __atomic_load_n(&ctx->doca_objs.assigned_pod_id, __ATOMIC_ACQUIRE);
@@ -919,10 +938,21 @@ static doca_error_t init_control_path(dpumesh_ctx_t *ctx) {
                          doca_error_get_name(control_result));
             return control_result;
         }
-        nanosleep(&ts, NULL);
         clock_gettime(CLOCK_MONOTONIC, &now);
+        if (init_elapsed_ms(&last_register, &now) >= DPUMESH_CONTROL_RETRY_MS) {
+            doca_error_t retry = client_send_msg(&ctx->doca_objs,
+                                                  (const char *)&ctx->reg_msg,
+                                                  sizeof(ctx->reg_msg));
+            last_register = now;
+            if (retry != DOCA_SUCCESS && retry != DOCA_ERROR_AGAIN) {
+                DOCA_LOG_ERR("REGISTER retry failed while awaiting pod assignment: %s",
+                             doca_error_get_name(retry));
+                return retry;
+            }
+        }
         if (init_elapsed_ms(&start, &now) >= DPUMESH_POD_INIT_TIMEOUT_MS)
             break;
+        nanosleep(&ts, NULL);
     }
     if (assigned < 0) {
         DOCA_LOG_ERR("Timed out after %d ms waiting for DPU pod_id assignment "
@@ -1122,30 +1152,33 @@ static int request_remote_pod_quiesce(dpumesh_ctx_t *ctx) {
         .type = DMESH_MSG_POD_UNREGISTER,
         .pod_id = pod_id,
     };
-    doca_error_t result = client_send_msg(objs, (const char *)&msg, sizeof(msg));
-    if (result != DOCA_SUCCESS) {
-        DOCA_LOG_WARN("POD_UNREGISTER send failed for pod_id=%d: %s",
-                      pod_id, doca_error_get_name(result));
-        return -1;
-    }
-
     const struct timespec pause = { .tv_sec = 0, .tv_nsec = 100000 };
     struct timespec start, now;
     clock_gettime(CLOCK_MONOTONIC, &start);
+    struct timespec last_send = {0};
     for (;;) {
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        if (last_send.tv_sec == 0 ||
+            init_elapsed_ms(&last_send, &now) >= DPUMESH_CONTROL_RETRY_MS) {
+            doca_error_t send_result = client_send_msg(
+                objs, (const char *)&msg, sizeof(msg));
+            last_send = now;
+            if (send_result != DOCA_SUCCESS && send_result != DOCA_ERROR_AGAIN)
+                DOCA_LOG_WARN("POD_UNREGISTER retry failed for pod_id=%d: %s",
+                              pod_id, doca_error_get_name(send_result));
+        }
         if (!ctx->pe_running && objs->pe != NULL)
             (void)doca_pe_progress(objs->pe);
         if (__atomic_load_n(&objs->pod_quiesced, __ATOMIC_ACQUIRE)) {
             DOCA_LOG_INFO("DPU remote resources quiesced: pod_id=%d", pod_id);
             return 0;
         }
-        result = require_running_control_path(ctx);
+        doca_error_t result = require_running_control_path(ctx);
         if (result != DOCA_SUCCESS) {
             DOCA_LOG_WARN("Control path stopped while awaiting POD_QUIESCED: %s",
                           doca_error_get_name(result));
             return -1;
         }
-        nanosleep(&pause, NULL);
         clock_gettime(CLOCK_MONOTONIC, &now);
         if (init_elapsed_ms(&start, &now) >= DPUMESH_POD_CLEANUP_TIMEOUT_MS) {
             DOCA_LOG_WARN("Timed out after %d ms waiting for POD_QUIESCED "
@@ -1153,6 +1186,7 @@ static int request_remote_pod_quiesce(dpumesh_ctx_t *ctx) {
                           DPUMESH_POD_CLEANUP_TIMEOUT_MS, pod_id);
             return -1;
         }
+        nanosleep(&pause, NULL);
     }
 }
 
@@ -1176,6 +1210,7 @@ static void cleanup_ctx(dpumesh_ctx_t *ctx) {
         if (!cq) continue;
         if (cq->notify_efd >= 0) close(cq->notify_efd);
         ctx->cqs[i] = NULL;
+        free(cq->accept_spare);
         free(cq);
     }
     if (ctx->cq_lock_initialized) {
@@ -1300,6 +1335,8 @@ static void block_pool_return(dpumesh_ctx_t *ctx, int32_t id) {
  * su_seq/su_end (if already malloc'd for this slot) are kept and reused. */
 static void port_reset_tx(struct dmesh_port_slot *psl) {
     psl->tx_w = psl->tx_c = psl->tx_s = 0;
+    psl->resv_len = 0;
+    psl->resv_moff = 0;
     atomic_store_explicit(&psl->tx_f, 0, memory_order_relaxed);
     psl->tail_blk      = 0;
     psl->head_blk_next = 0;
@@ -1380,28 +1417,23 @@ uint8_t *dpumesh_tx_reserve(dpumesh_ctx_t *ctx, uint16_t port, uint32_t len) {
     struct dmesh_port_slot *psl = &ctx->ports[port];
     uint64_t bs = (uint64_t)ctx->block_size, maxb = (uint64_t)ctx->maxb;
     if (len == 0 || (uint64_t)len > bs) { errno = EINVAL; return NULL; }  /* must fit a block */
-    if (!psl->su_seq) {                                    /* lazy per-slot send-unit FIFO */
-        psl->su_seq = (uint16_t *)malloc(TX_SU_DEPTH * sizeof(uint16_t));
-        psl->su_end = (uint64_t *)malloc(TX_SU_DEPTH * sizeof(uint64_t));
-        if (!psl->su_seq || !psl->su_end) { errno = ENOMEM; return NULL; }
-    }
-
-    /* SEND-UNIT ADMISSION. The block window does NOT bound the FIFO: dpumesh_tx_next_send
-     * carves [tx_s, tx_c), which a post-per-flush leaves exactly one message long, so a
-     * 64 B message costs 1/1024 of a block but a WHOLE FIFO slot. Gate on the FIFO itself.
-     *
-     * Reserve this message's whole carve — ceil(len/slot_size) descriptors — not one: the
-     * flush that follows emits all of them with no further admission point. Over-counts
-     * for a DMESH_SEND_MORE batch (whose carve coalesces across messages), which is the
-     * safe direction. The block_size <= TX_SU_DEPTH * slot_size clamp at init makes the
-     * worst-case single message always fit an empty FIFO, so this cannot deadlock. */
-    uint32_t need_su = (len + (uint32_t)ctx->slot_size - 1) / (uint32_t)ctx->slot_size;
-    uint16_t suh = atomic_load_explicit(&psl->su_head, memory_order_relaxed);
-    uint16_t sut = atomic_load_explicit(&psl->su_tail, memory_order_acquire);
-    if ((uint32_t)(uint16_t)(suh - sut) + need_su > TX_SU_DEPTH) {
-        atomic_fetch_add_explicit(&ctx->st_grow_waits, 1, memory_order_relaxed);
-        errno = EAGAIN;
+    uint8_t role = __atomic_load_n(&psl->role, __ATOMIC_ACQUIRE);
+    if (role != DMESH_ROLE_CLIENT && role != DMESH_ROLE_SERVER) {
+        errno = EINVAL;
         return NULL;
+    }
+    if (psl->resv_len != 0) { errno = EINVAL; return NULL; } /* one outstanding alloc/QP */
+    if (!psl->su_seq) {                                    /* lazy per-slot send-unit FIFO */
+        uint16_t *seq = (uint16_t *)malloc(TX_SU_DEPTH * sizeof(uint16_t));
+        uint64_t *end = (uint64_t *)malloc(TX_SU_DEPTH * sizeof(uint64_t));
+        if (!seq || !end) {
+            free(seq);
+            free(end);
+            errno = ENOMEM;
+            return NULL;
+        }
+        psl->su_seq = seq;
+        psl->su_end = end;
     }
 
     tx_refresh_blocks(ctx, psl);                           /* recycle / compact / shrink first */
@@ -1457,16 +1489,19 @@ uint8_t *dpumesh_tx_reserve(dpumesh_ctx_t *ctx, uint16_t port, uint32_t len) {
         psl->blk_used[bslot] = 0;
         psl->head_blk_next = b + 1;
     }
-    psl->resv_len = len;                                   /* commit clamps to this (ring-overrun guard) */
     int s = (int)(k % maxb);
-    return (uint8_t *)ctx->dma_buffer + (size_t)psl->pblk[s] * (size_t)bs + off;
+    psl->resv_len = len;
+    psl->resv_moff = (uint64_t)((size_t)psl->pblk[s] * (size_t)bs + off);
+    return (uint8_t *)ctx->dma_buffer + psl->resv_moff;
 }
 
 /* Finalize `len` bytes (<= the reserved len) as committed message bytes, ready to ship.
  * Advances tx_w + tx_c and records the block's content end. Consumes the reserve — one
  * commit per dpumesh_tx_reserve. 0 = committed, -1 = no live reserve or len > it (a
  * caller-contract break; nothing is mutated). Owner thread. */
-int dpumesh_tx_commit(dpumesh_ctx_t *ctx, uint16_t port, uint32_t len) {
+int dpumesh_tx_commit(dpumesh_ctx_t *ctx, uint16_t port,
+                      const void *buf, uint32_t len) {
+    if (port == 0 || port >= DMESH_PORT_SPACE || buf == NULL) return -1;
     struct dmesh_port_slot *psl = &ctx->ports[port];
     if (psl->nblk_owned <= 0) return -1;
     /* REJECT, never clamp. Clamping to resv_len looks defensive but is worse than the
@@ -1474,13 +1509,16 @@ int dpumesh_tx_commit(dpumesh_ctx_t *ctx, uint16_t port, uint32_t len) {
      * reserve (post without alloc, or a second post of one alloc) silently passed and
      * shipped whatever bytes happened to sit at the write head — uninitialised ring
      * memory, on the wire, with no error anywhere. */
-    if (psl->resv_len == 0 || len > psl->resv_len) return -1;
+    if (psl->resv_len == 0 || len == 0 || len > psl->resv_len ||
+        buf != (const uint8_t *)ctx->dma_buffer + psl->resv_moff)
+        return -1;
     uint64_t bs = (uint64_t)ctx->block_size;
     uint64_t k = psl->tx_w / bs;                           /* block the reserve placed the body in */
     psl->tx_w += len;
     psl->tx_c  = psl->tx_w;
     psl->blk_used[k % (uint64_t)ctx->maxb] = (uint32_t)(psl->tx_w - k * bs);  /* content end in block k */
     psl->resv_len = 0;                                     /* reserve consumed: one post per alloc */
+    psl->resv_moff = 0;
     return 0;
 }
 
@@ -1492,6 +1530,8 @@ void dpumesh_tx_discard_unsent(dpumesh_ctx_t *ctx, uint16_t port) {
     if (psl->nblk_owned <= 0) return;
     psl->tx_c = psl->tx_s;
     psl->tx_w = psl->tx_s;
+    psl->resv_len = 0;
+    psl->resv_moff = 0;
     uint64_t bs = (uint64_t)ctx->block_size;
     uint64_t k = psl->tx_s / bs;
     psl->blk_used[k % (uint64_t)ctx->maxb] = (uint32_t)(psl->tx_s - k * bs);
@@ -1502,10 +1542,11 @@ void dpumesh_tx_discard_unsent(dpumesh_ctx_t *ctx, uint16_t port) {
  * pad). Skips a padded block tail transparently. 1 if one, 0 if nothing. Does NOT advance
  * tx_s (call dpumesh_tx_sent). Owner thread.
  *
- * INFALLIBLE on capacity: dpumesh_tx_reserve admitted this message only after reserving
- * its whole carve in the send-unit FIFO, so every descriptor it yields is guaranteed a
- * slot. Hence no capacity check (and no backoff loop) here. */
-int dpumesh_tx_next_send(dpumesh_ctx_t *ctx, uint16_t port, size_t *out_moff, uint32_t *out_len) {
+ * INFALLIBLE on per-QP capacity: configuration bounds the complete admitted block
+ * window by the send-unit FIFO, so every descriptor yielded here has metadata space.
+ * Hence no second admission check or retry loop is needed. */
+int dpumesh_tx_next_send(dpumesh_ctx_t *ctx, uint16_t port, int flush_partial,
+                         size_t *out_moff, uint32_t *out_len) {
     struct dmesh_port_slot *psl = &ctx->ports[port];
     if (psl->nblk_owned <= 0) return 0;
     uint64_t bs = (uint64_t)ctx->block_size, maxb = (uint64_t)ctx->maxb;
@@ -1521,6 +1562,15 @@ int dpumesh_tx_next_send(dpumesh_ctx_t *ctx, uint16_t port, size_t *out_moff, ui
         uint64_t content_end = k * bs + (uint64_t)used;    /* content end within block k */
         uint64_t limit = (psl->tx_c < content_end) ? psl->tx_c : content_end;
         uint64_t avail = limit - psl->tx_s;
+        /* Normal post_send drains only complete wire slots. A short tail at the end
+         * of a sealed physical block is the one exception: reserve padded past it and
+         * committed bytes in a later block, so this tail can never grow and must go
+         * first to preserve the byte stream's order. In the common case only the one
+         * newest, still-fillable partial remains for an explicit flush (or future
+         * timer policy). */
+        if (!flush_partial && avail < (uint64_t)ctx->slot_size &&
+            psl->tx_c <= content_end)
+            return 0;
         uint32_t chunk = (avail < (uint64_t)ctx->slot_size) ? (uint32_t)avail : (uint32_t)ctx->slot_size;
         *out_moff = (size_t)psl->pblk[k % maxb] * (size_t)bs + off;
         *out_len  = chunk;
@@ -1967,18 +2017,19 @@ static void conn_free_rx(dmesh_qp_t *c) {
  * length. seq++. Returns 0, or -1 (EBADMSG) on enqueue fault. */
 static int emit_desc(dmesh_qp_t *c, size_t moff, uint32_t len) {
     dpumesh_ctx_t *ctx = c->ep->ctx;
-    c->seq++;
+    uint16_t next_seq = (uint16_t)(c->seq + 1);
     sw_descriptor_t d;
     memset(&d, 0, sizeof(d));
     d.body_buf_slot = (int32_t)moff;                 /* BYTE offset into the TX mmap */
     d.body_len      = len;
     d.src_port      = c->local_port;
-    d.seq           = c->seq;
+    d.seq           = next_seq;
     d.dst_service   = c->dst_service;
     if (c->role == DMESH_ROLE_CLIENT) { d.dst_pod = DMESH_POD_BLANK; d.dst_port = DMESH_PORT_BLANK; }
     else                              { d.dst_pod = c->remote_pod;   d.dst_port = c->remote_port; }
     d.valid = 1;
     if (dpumesh_enqueue(ctx, &d) < 0) { errno = EBADMSG; return -1; }
+    c->seq = next_seq;
     return 0;
 }
 
@@ -2041,6 +2092,8 @@ dmesh_cq_t *dmesh_create_cq(dmesh_channel_t *ch) {
     if (!ch) { errno = EINVAL; return NULL; }
     dmesh_cq_t *cq = (dmesh_cq_t *)calloc(1, sizeof(*cq));
     if (!cq) { errno = ENOMEM; return NULL; }
+    cq->accept_spare = (dmesh_qp_t *)calloc(1, sizeof(*cq->accept_spare));
+    if (!cq->accept_spare) { free(cq); errno = ENOMEM; return NULL; }
     cq->ch         = ch;
     cq->notify_efd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     atomic_init(&cq->ready_head, (uint_fast32_t)0);
@@ -2057,6 +2110,7 @@ dmesh_cq_t *dmesh_create_cq(dmesh_channel_t *ch) {
     pthread_mutex_unlock(&ctx->cq_lock);
     if (idx < 0) {   /* cap reached: an unregistered CQ would miss every accept */
         if (cq->notify_efd >= 0) close(cq->notify_efd);
+        free(cq->accept_spare);
         free(cq);
         errno = EMFILE;
         return NULL;
@@ -2080,6 +2134,7 @@ int dmesh_destroy_cq(dmesh_cq_t *cq) {
     if (ctx->cqs[cq->reg_idx] == cq) ctx->cqs[cq->reg_idx] = NULL;
     pthread_mutex_unlock(&ctx->cq_lock);
     if (cq->notify_efd >= 0) close(cq->notify_efd);
+    free(cq->accept_spare);
     free(cq);
     return 0;
 }
@@ -2105,13 +2160,20 @@ int dmesh_cq_fd(dmesh_cq_t *cq) {
 
 dmesh_qp_t *dmesh_accept(dmesh_cq_t *cq) {
     dmesh_channel_t *s = cq->ch;
+    /* Hold one spare before consuming the shared accept queue. An OOM after dequeue
+     * used to strand the already-created SERVER_PENDING port forever; retaining the
+     * spare also avoids an allocation/free pair on every empty poll. */
+    if (!cq->accept_spare) {
+        cq->accept_spare = (dmesh_qp_t *)calloc(1, sizeof(*cq->accept_spare));
+        if (!cq->accept_spare) { errno = ENOMEM; return NULL; }
+    }
     sw_descriptor_t req;
     if (dpumesh_dequeue(s->ctx, &req) < 0 || !req.valid) {
         errno = EAGAIN;
         return NULL;
     }
-    dmesh_qp_t *c = (dmesh_qp_t *)calloc(1, sizeof(*c));
-    if (!c) { errno = ENOMEM; dpumesh_rx_free(s->ctx, req.body_buf_slot); return NULL; }
+    dmesh_qp_t *c = cq->accept_spare;
+    cq->accept_spare = NULL;
     /* Model B: the PE created a SERVER_PENDING slot at message-1 delivery (port =
      * req.dst_port = uP, with any pipelined messages 2..P already coalesced in its
      * inbox). Promote it to a live SERVER conn, attach THIS handle, and bind it to the
@@ -2172,55 +2234,88 @@ dmesh_qp_t *dmesh_next_ready(dmesh_cq_t *cq) {
     return (dmesh_qp_t *)dpumesh_next_ready(cq);
 }
 
-/* ===== Doorbell + teardown ===== */
+/* ===== TX publication + teardown ===== */
 
-int dmesh_flush(dmesh_qp_t *c) {
+static int dmesh_drain_tx(dmesh_qp_t *c, int flush_partial) {
+    if (!c) { errno = EINVAL; return -1; }
     dpumesh_ctx_t *ctx = c->ep->ctx;
     size_t moff; uint32_t len;
-    while (dpumesh_tx_next_send(ctx, c->local_port, &moff, &len)) {
+    while (dpumesh_tx_next_send(ctx, c->local_port, flush_partial, &moff, &len)) {
         if (emit_desc(c, moff, len) < 0) return -1;          /* EBADMSG; bytes stay committed */
         dpumesh_tx_sent(ctx, c->local_port, c->seq, len);    /* c->seq = the seq emit_desc used */
     }
     return 0;
 }
 
+int dmesh_flush_full(dmesh_qp_t *c) {
+    return dmesh_drain_tx(c, 0);
+}
+
+int dmesh_flush(dmesh_qp_t *c) {
+    return dmesh_drain_tx(c, 1);
+}
+
 /* Ship this conn's FIN. IDEMPOTENT: fin_sent latches, so every caller can just ask
  * for a FIN without first proving nobody else sent one. Independent of peer_closed —
  * receiving the peer's FIN does not close OUR half (TCP does not conflate them, and
  * the DPU's upstream teardown fans out from this FIN alone). */
-void dmesh_send_fin(dmesh_qp_t *c) {
-    if (c->fin_sent) return;
-    c->fin_sent = 1;
+int dmesh_send_fin(dmesh_qp_t *c) {
+    if (!c) { errno = EINVAL; return -1; }
+    if (c->fin_sent) return 0;
     dpumesh_ctx_t *ctx = c->ep->ctx;
-    c->seq++;
+    uint16_t next_seq = (uint16_t)(c->seq + 1);
     sw_descriptor_t d;
     memset(&d, 0, sizeof(d));
     d.body_buf_slot = 0;                                   /* 0-length FIN: offset unused */
     d.body_len      = 0;                                   /* FIN marker (0-length) */
     d.src_port      = c->local_port;
-    d.seq           = c->seq;
+    d.seq           = next_seq;
     d.dst_service   = c->dst_service;
     d.dst_pod       = c->remote_pod;                       /* the learned peer conn */
     d.dst_port      = c->remote_port;
     d.valid         = 1;
-    /* Best-effort: rides after all prior data (seq order). Holds NO ring bytes, so it
-     * needs no send-unit / reclaim — its TX_ACK is a harmless FIFO no-op. */
-    dpumesh_enqueue(ctx, &d);
+    /* Latch only after enqueue succeeds. A failed attempt must be observable and
+     * must not suppress a later close path from trying again. */
+    if (dpumesh_enqueue(ctx, &d) < 0) { errno = EBADMSG; return -1; }
+    c->seq = next_seq;
+    c->fin_sent = 1;
+    return 0;
 }
 
-int dmesh_destroy_qp(dmesh_qp_t *c) {
+static int dmesh_release_qp(dmesh_qp_t *c, int graceful) {
     if (!c) return 0;
+    int close_result = 0, close_errno = 0;
     dpumesh_ctx_t *ctx = c->ep->ctx;
     if (c->cq && c->cq->vq_cur == c) c->cq->vq_cur = NULL; /* poll_cq resume cursor */
-    dpumesh_tx_discard_unsent(ctx, c->local_port);         /* buffered, never flushed → drop */
+    if (graceful && dmesh_flush(c) != 0) {
+        close_result = -1;
+        close_errno = errno;
+    }
+    /* Abort always discards the buffered tail. Graceful close reaches this with no
+     * unsent committed bytes unless its flush failed; a live, un-posted reservation
+     * is never application data owned by the transport and is discarded either way. */
+    dpumesh_tx_discard_unsent(ctx, c->local_port);
     /* Established conns ALWAYS close their half (dmesh_send_fin self-guards against a
      * second one). A CLIENT that never sent has no peer and no DPU-side conn — nothing
      * to tear down, so seq==0 skips. */
-    if (c->role == DMESH_ROLE_SERVER || c->seq > 0)
-        dmesh_send_fin(c);
+    if (c->role == DMESH_ROLE_SERVER || c->seq > 0) {
+        if (dmesh_send_fin(c) != 0 && close_result == 0) {
+            close_result = -1;
+            close_errno = errno;
+        }
+    }
     conn_free_rx(c);                                       /* return the held RX credit */
     if (c->local_port) dpumesh_free_port(ctx, c->local_port);
     if (c->cq) atomic_fetch_sub_explicit(&c->cq->nqp, 1, memory_order_release);
     free(c);
-    return 0;
+    if (close_result != 0) errno = close_errno;
+    return close_result;
+}
+
+int dmesh_destroy_qp(dmesh_qp_t *c) {
+    return dmesh_release_qp(c, 1);
+}
+
+int dmesh_abort_qp(dmesh_qp_t *c) {
+    return dmesh_release_qp(c, 0);
 }

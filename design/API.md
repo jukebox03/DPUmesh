@@ -1,216 +1,195 @@
 # DPUmesh Native API
 
-This document specifies the public contract of `<dpumesh/dmesh.h>` in the
-2026-07-19 working tree. The API resembles RDMA verbs in object lifecycle and
-nonblocking completion semantics, but it is not a remote-memory API. It exposes
-reliable, full-duplex byte streams addressed by service name.
+This document defines the public contract of `<dpumesh/dmesh.h>` as implemented
+on 2026-07-20. The ABI is `libdpumesh.so.2`. The interface borrows the useful
+shape of RDMA verbs—channel, completion queue, QP, registered buffers—but it is
+a reliable full-duplex byte transport, not a remote-memory API.
 
-## 1. Objects and ownership
+## 1. Object and thread model
 
 ```text
 process
-└─ dmesh_channel_t                 normally one
-   ├─ dmesh_cq_t                  one per polling thread
-   │  └─ dmesh_qp_t               streams connected or accepted by this CQ
-   └─ registered TX/RX memory     owned by the channel
+└─ channel                         one transport and one registered-memory domain
+   ├─ CQ                           one per polling thread
+   │  └─ QP                        full-duplex connections owned by that CQ
+   └─ TX/RX mappings               shared by the channel
 ```
 
-- `dmesh_channel_t` owns the DOCA device, Comch control path, exported memory,
-  and transport progress thread.
-- `dmesh_cq_t` owns a completion ready-list and eventfd. It is single-consumer;
-  two threads must not poll the same CQ concurrently.
-- `dmesh_qp_t` is one persistent full-duplex connection. The application may use
-  `qp->user_data`; the transport does not read or modify it.
-- `dmesh_wc_t` reports `RECV`, `RECV_FIN`, or `CONN_REQ`. A `RECV` buffer points
-  into the channel RX mmap and remains valid only until its credit is released.
+Create objects in channel → CQ → QP order and destroy them in reverse order.
+Destroying a CQ with live QPs, or a channel with live CQs, returns `EBUSY`
+without partially tearing the object down.
 
-Create in channel → CQ → QP order and destroy in QP → CQ → channel order. The
-library enforces reverse destruction with `EBUSY`. Public declarations use
-`extern "C"`, so C++ can link the C implementation directly.
+A CQ has exactly one consumer. QP operations and CQ polling should run on that
+CQ's owner thread; create more CQs to scale across threads. The transport PE is a
+separate single producer of CQ-ready edges. `qp->user_data` belongs entirely to
+the application.
 
-## 2. Connection and routing semantics
+The public surface consists of seventeen calls:
 
-`dmesh_create_qp(cq, service_name)` resolves a Kubernetes Service name to an
-internal service id. It creates a local object and performs no peer round trip.
-There is no separate server `accept()` call: an inbound connection arrives as a
-`DMESH_WC_CONN_REQ`, whose `qp` is immediately usable.
+| Group | Calls |
+|---|---|
+| Channel | `create_channel`, `destroy_channel`, `pod_id`, `msg_max`, `post_max` |
+| CQ | `create_cq`, `destroy_cq`, `cq_fd` |
+| QP | `create_qp`, `destroy_qp`, `abort_qp` |
+| TX | `alloc`, `post_send`, `flush` |
+| RX | `poll_cq`, `wc_release` |
+| Diagnostics | `get_tx_stats` |
 
-The default L4 passthrough mode pins a QP to one backend and preserves byte order.
-With a service codec, replies on one QP may originate from distinct upstreams;
-the application must reassemble fragments independently by `wc.stream`. The
-gRPC/HTTP/2 integration uses L4 passthrough and therefore one upstream stream.
+## 2. Channel lifecycle
 
-Identity is injected rather than chosen as an integer by the caller:
-
-- `$DPUMESH_SERVICE` is this process's Service name; unset means client-only.
-- `$DPUMESH_PORT` is the listen port used by the preload facade.
-- `$DPUMESH_CONFIG` selects the registry; the default is `/etc/dpumesh/registry`.
-- The DPU assigns the pod id during registration; `dmesh_pod_id()` only reads it.
-
-## 3. API reference
-
-### Channel
-
-```c
-dmesh_channel_t *dmesh_create_channel(void);
-int dmesh_destroy_channel(dmesh_channel_t *ch);
-int dmesh_pod_id(dmesh_channel_t *ch);
-int dmesh_msg_max(dmesh_channel_t *ch);
-int dmesh_post_max(dmesh_channel_t *ch);
-```
-
-`dmesh_create_channel()` returns only after this complete sequence succeeds:
+`dmesh_create_channel()` resolves local identity, connects Comch, registers with
+the DPU, exports the data-path mappings, and waits for an end-to-end readiness
+barrier:
 
 ```text
-Comch connect → POD_ASSIGNED → K ring/mmap imports → DPA RING_ADD_ACK from every EU
-              → ARM egress ready → POD_INIT_RESULT(READY)
+Comch RUNNING
+  → POD_REGISTER / POD_ASSIGNED
+  → K rings + TX mmap + RX mmap imported
+  → generation-matched RING_ADD_ACK from every target EU
+  → POD_INIT_RESULT(READY)
 ```
 
-It returns `NULL` if assignment or readiness exceeds 30 seconds or if any import,
-DPA, or egress step fails. Partial resources are unwound. `dmesh_destroy_channel()`
-returns `-1/EBUSY` without destroying anything while CQs remain. During graceful
-shutdown it progresses the PE while waiting up to five seconds for
-`POD_QUIESCED`, then destroys host exports.
+Registration is idempotent. While assignment or readiness is pending, the host
+replays `POD_REGISTER` every 100 ms; the DPU returns the same pod id and replays
+any terminal result. Missing DPA ring acknowledgements cause idempotent
+`RING_ADD` replay every 10 ms. A channel is never returned in a half-ready state.
+The overall initialization deadline is 30 seconds.
 
-`dmesh_msg_max()` is the largest body delivered in one RX completion, currently
-8 KiB by default. Longer byte sequences arrive in multiple completions.
-`dmesh_post_max()` is the largest contiguous alloc/post, normally 64 KiB.
+Graceful channel destruction sends `POD_UNREGISTER` every 100 ms until
+`POD_QUIESCED` or the five-second local deadline. The host retains exported
+memory until that barrier. Unexpected disconnect still invokes DPU-side cleanup,
+but forced process death during an already-issued DMA is outside the graceful
+safety claim.
 
-### Completion queue
+The replay timers exist only inside these transitions. After READY, the channel
+does not poll registration state or emit periodic control messages. Unregister is
+not required for data transfer; it is the graceful remote-reclaim barrier when
+the channel is destroyed.
+
+## 3. Connections and naming
+
+`dmesh_create_qp(cq, service_name)` resolves a Kubernetes Service name through
+the immutable process registry. QP creation is local; the first outbound data is
+what causes DPU routing and backend connection creation. Inbound connections
+arrive as `DMESH_WC_CONN_REQ`; their `wc.qp` is already usable and permanently
+bound to the CQ that accepted it.
+
+Default L4 passthrough pins a connection to one backend and preserves byte order.
+A service codec may route messages to several upstreams; in that mode the
+application reassembles independently by `wc.stream`. DPUmesh does not expose a
+numeric service id in this API.
+
+`dmesh_destroy_qp()` is graceful close: it submits the buffered tail before FIN,
+returns any held RX credit, and always frees the local QP. `dmesh_abort_qp()`
+instead discards bytes that have not yet been submitted, then sends FIN when a
+peer exists so remote state can be reclaimed. Already-submitted bytes cannot be
+recalled. Either call may return `-1/EBADMSG`, and the pointer is invalid on every
+return. Because one CQ poll can return several entries that name the same QP,
+defer destruction until the whole returned batch has been processed.
+
+## 4. TX: batching is the default
+
+The send protocol is deliberately three-stage:
 
 ```c
-dmesh_cq_t *dmesh_create_cq(dmesh_channel_t *ch);
-int dmesh_destroy_cq(dmesh_cq_t *cq);
-int dmesh_cq_fd(dmesh_cq_t *cq);
+void *p = dmesh_alloc(qp, len);              /* reserve registered bytes */
+memcpy(p, source, len);                       /* or produce in place */
+dmesh_post_send(qp, p, len, 0, 0);           /* commit; full units auto-submit */
+
+/* repeat alloc/post as useful */
+dmesh_flush(qp);                              /* force the newest partial now */
 ```
 
-Destroying a CQ with bound QPs returns `EBUSY`. The eventfd returned by
-`dmesh_cq_fd()` is an optional idle-sleep path. After wakeup, drain one `uint64_t`
-and call `dmesh_poll_cq()` until it returns zero. A spin-polling application need
-not use the fd.
+`dmesh_alloc()` reserves one contiguous region of at most `dmesh_post_max()`.
+Only one unposted allocation may exist per QP. `dmesh_post_send()` requires the
+exact pointer returned by that allocation, rejects an oversized or repeated post,
+and requires `flags == 0`. `wr_id` is reserved. A successful post transfers byte
+ownership to the transport and automatically submits every newly complete
+transport batch. Usually one newest fillable partial remains buffered.
 
-### QP
+`dmesh_flush()` forces every remaining committed byte, which normally means just
+that trailing partial. Small adjacent posts are batched automatically, but callers
+choose flush boundaries by latency or protocol semantics rather than by transport
+size. The current data plane uses 8 KiB physical units internally; that value is
+not a send-side application contract. There is no `SEND_MORE` mode.
 
-```c
-dmesh_qp_t *dmesh_create_qp(dmesh_cq_t *cq, const char *service_name);
-int dmesh_destroy_qp(dmesh_qp_t *qp);
-```
+Submission is descriptor publication to a memory ring continuously consumed by
+the DPA. `post_send()` and `flush()` do not make a send syscall, wake a transport
+thread, or send a separate doorbell message. Batching changes how many adjacent
+bytes one descriptor covers, not whether a syscall is issued.
 
-An unknown service returns `NULL/ENOENT`. All completions for a QP remain on the
-CQ to which it was created or accepted. `dmesh_destroy_qp()` drops unflushed
-bytes, sends FIN for an established connection, returns held RX credit, and frees
-the object. A single poll batch may contain `CONN_REQ` followed by `RECV` entries
-for the same QP. Defer QP destruction until the entire batch has been processed.
+The per-QP block window is clamped so its worst-case physical-unit carve fits the
+64-entry reclaim FIFO. Consequently a successfully committed window is always
+flushable without another per-QP admission step. The shared host-to-DPU ring may
+still apply bounded backoff; a ring stalled for its deadline returns
+`-1/EBADMSG`.
 
-### TX
+### Backpressure
 
-```c
-void *dmesh_alloc(dmesh_qp_t *qp, uint32_t len);
-int dmesh_post_send(dmesh_qp_t *qp, const void *buf, uint32_t len,
-                    uint64_t wr_id, unsigned flags);
-int dmesh_flush(dmesh_qp_t *qp);
-#define DMESH_SEND_MORE 0x1u
-```
+`dmesh_alloc()` never sleeps or flushes. It returns:
 
-`dmesh_alloc()` reserves a contiguous region in the registered TX ring. Fill that
-region directly, then call `dmesh_post_send()` exactly once. Ownership transfers
-to the transport at post time. `wr_id` is reserved for future send completions and
-is currently ignored.
+| Result | Meaning |
+|---|---|
+| pointer | Reservation succeeded |
+| `NULL/EAGAIN` | Per-QP window or process block pool has no space now |
+| `NULL/EINVAL` | Invalid length, QP, or outstanding-allocation state |
+| `NULL/ENOMEM` | Lazy per-QP bookkeeping allocation failed |
 
-`dmesh_alloc()` never blocks:
+Complete batches already generate ACKs. If allocation still reaches backpressure
+with a trailing partial buffered, flush that tail before waiting for more space.
+For multi-QP reactors, park the write and continue servicing other QPs rather
+than spinning on one connection.
 
-| Result | Meaning | Required action |
+The current API has no race-free writable completion. The gRPC adapter therefore
+arms a short timer only after a write parks on `EAGAIN`. This retry timer is not a
+batching timer and does not periodically transmit messages while the QP is
+writable. Replacing it with a one-shot reclaim notification is the remaining
+event-model gap.
+
+There is no internal partial-batch timer. Code that needs bounded latency calls
+`dmesh_flush()` at its logical write boundary; graceful close also flushes, while
+`dmesh_abort_qp()` discards the unsent partial.
+
+## 5. RX and CQ notification
+
+`dmesh_poll_cq()` is nonblocking and returns three completion types:
+
+| Opcode | Meaning | Credit |
 |---|---|---|
-| pointer | Reservation succeeded | Fill and post |
-| `NULL/EAGAIN` | Per-QP inflight or shared-pool pressure | Progress other QPs/CQs, then retry |
-| `NULL/EINVAL` | Zero/oversized length or unusable QP | Treat as a call or connection error |
+| `DMESH_WC_CONN_REQ` | New inbound QP | none |
+| `DMESH_WC_RECV` | One RX fragment | held until `dmesh_wc_release()` |
+| `DMESH_WC_RECV_FIN` | Peer EOF | none |
 
-The API has no notification that TX capacity became writable. A reactor must keep
-one pending write per QP, continue CQ progress, and retry on a short timer. The
-C++ gRPC adapter defaults to 50 microseconds. This is correct but remains a
-performance and idle-CPU limitation.
+`wc.buf` points directly into the channel RX mmap. Copy it before release if the
+data must outlive the completion. `dmesh_wc_release()` is idempotent and remains
+valid after QP destruction because the credit belongs to the channel.
 
-`DMESH_SEND_MORE` commits a message while deferring the shared descriptor
-doorbell. A final post without the flag, or `dmesh_flush()`, ships committed
-messages in order. `flush()` cannot exhaust the already reserved per-QP units, but
-it may briefly back off on a saturated host-to-DPU descriptor ring and returns
-`EBADMSG` if its bounded deadline expires.
+`dmesh_cq_fd()` exposes an optional eventfd for `poll`/`epoll`. Drain its counter,
+poll the CQ to zero, then sleep again. Spin-polling clients do not need the fd.
+The fd reports inbound completions only; it does not currently report TX
+writability.
 
-### Completion and RX credit
+## 6. POSIX and gRPC facades
 
-```c
-int dmesh_poll_cq(dmesh_cq_t *cq, dmesh_wc_t *wc, int nwc);
-void dmesh_wc_release(dmesh_channel_t *ch, dmesh_wc_t *wc);
-```
+`libdmesh_preload.so` and the native API are sibling facades over the same core.
+The preload path copies because POSIX `read`/`write` require application buffers;
+it flushes once at each POSIX write boundary. If one write exceeds the bounded
+native TX window, it may flush an accepted prefix to make forward progress. The
+POSIX application never selects or observes the physical batch size.
 
-`dmesh_poll_cq()` is nonblocking and returns at most `nwc` entries. It preserves
-per-QP order. If the batch ends in the middle of a QP's ready list, the next call
-resumes that QP first.
+The gRPC C++ adapter maps one runtime to a channel, reactor shards to CQs, and
+EventEngine endpoints to QPs. It commits all slices of one EventEngine Write and
+flushes once at the logical write boundary. RX is copied into gRPC slices before
+the native credit is returned. TLS and HTTP/2 framing remain end-to-end and are
+not interpreted by DPUmesh.
 
-| Opcode | Meaning | Buffer and credit |
-|---|---|---|
-| `DMESH_WC_CONN_REQ` | New inbound QP | None |
-| `DMESH_WC_RECV` | One RX fragment | `wc.buf`, `wc.len`; release is mandatory |
-| `DMESH_WC_RECV_FIN` | Peer EOF | None |
+## 7. Explicit limits
 
-`dmesh_wc_release()` is idempotent and remains valid after the QP closes. Copy RX
-bytes into application-owned memory before release if they must outlive the call.
-The gRPC adapter follows this baseline: it copies into gRPC slices and immediately
-returns the DPUmesh credit.
-
-### Diagnostics
-
-```c
-void dmesh_get_tx_stats(dmesh_channel_t *ch, dmesh_tx_stats_t *out);
-```
-
-The cumulative fields are `pool_grabs`, `pool_returns`, `recycle_hits`,
-`grow_waits`, and `block_pads`. `grow_waits` is the observable count of actual
-`dmesh_alloc()` backpressure. Record the before/after delta in performance tests.
-
-## 4. Minimal reactor pattern
-
-```c
-dmesh_channel_t *ch = dmesh_create_channel();
-dmesh_cq_t *cq = dmesh_create_cq(ch);
-dmesh_qp_t *qp = dmesh_create_qp(cq, "echo-dpumesh");
-
-void *p;
-while ((p = dmesh_alloc(qp, len)) == NULL && errno == EAGAIN) {
-    dmesh_wc_t wc[64];
-    int n = dmesh_poll_cq(cq, wc, 64);
-    for (int i = 0; i < n; ++i) {
-        if (wc[i].opcode == DMESH_WC_RECV) dmesh_wc_release(ch, &wc[i]);
-    }
-}
-memcpy(p, body, len);
-if (dmesh_post_send(qp, p, len, 0, 0) != 0) /* close qp */;
-
-dmesh_destroy_qp(qp);
-dmesh_destroy_cq(cq);
-dmesh_destroy_channel(ch);
-```
-
-A real reactor must also handle connection requests, FIN, fragmented messages,
-per-QP pending writes, and post-batch close. Reference implementations are
-`integrations/grpc/src/dmesh_reactor.*` and `bench/apps/echo_dpumesh.c`.
-
-## 5. POSIX facade
-
-`libdmesh_preload.so` is a separate public facade. To preserve
-`socket/connect/listen/accept/read/write` behavior, it hides native zero-copy and
-performs the copies and partial-read bookkeeping required by POSIX. Destinations
-absent from the registry remain on kernel TCP. Native and preload are sibling
-facades over `src/dmesh_core.c`; neither is implemented on top of the other.
-Because the Go runtime does not consistently route network operations through
-libc, LD_PRELOAD is not the Go integration strategy.
-
-## 6. Support boundary
-
-- The transport is a reliable ordered byte stream, not a complete implementation
-  of every POSIX socket option.
-- There are no send completions; protocol acknowledgements reclaim TX capacity.
-- DPUmesh does not terminate TLS. gRPC TLS ciphertext is transported unchanged.
-- Graceful shutdown is protected by the remote-reclaim barrier. Full containment
-  of in-flight DMA across SIGKILL or host failure remains production work.
-- The registry loads once at first use. Live reload is not implemented.
+- No arbitrary memory registration, rkey, one-sided READ, or one-sided WRITE.
+- No application-visible send completion; protocol ACKs reclaim internal TX
+  capacity.
+- No native writable event yet.
+- No automatic deadline for an unflushed partial batch yet.
+- The registry is loaded once and is not live-reloaded.
+- L4 passthrough is the supported gRPC mode; the simple message codec is not an
+  HTTP/2 parser.

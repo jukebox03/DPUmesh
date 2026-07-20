@@ -7,7 +7,7 @@ only when the DPU process and pod registration state are already synchronized.
 | Validator | Programs | Contract exercised |
 |---|---|---|
 | Loopback | `loopback_dpumesh.c` | One process registers, connects to its own Service, exchanges data, and closes |
-| Verbs-shaped | `verbs_dpumesh.c` | Channel/CQ/QP lifecycle, windowed sends, polling, and RX credit release |
+| Verbs-shaped | `verbs_dpumesh.c` | Channel/CQ/QP lifecycle, windowed commit/flush sends, polling, and RX credit release |
 | Stream/L7 | `stream_dpumesh.c` | Fragmented framed messages through the optional frame codec |
 | POSIX preload | `preload_runner.c`, `tcp_echo.c`, `tcp_client.c` | Unmodified socket connect/listen/accept/read/write behavior and TCP fallback |
 
@@ -24,6 +24,11 @@ A passing data test requires exact byte and request-id agreement, zero failed
 operations, correct EOF delivery, and successful reverse-order destruction. A
 process exit without a crash is not sufficient: inspect the DPU log for DMA,
 generation, ring-ACK, egress, or cleanup warnings.
+
+All native validators use ABI-2 semantics: `post_send` commits and automatically
+submits complete transport units, while explicit `flush` forces each logical
+request, response batch, or large-write tail. A pass exercises both automatic
+full-unit submission and byte correctness.
 
 The L7 stream validator is not a gRPC validator. Its simple frame codec has a
 repository-specific message format and must not be enabled for HTTP/2. gRPC uses

@@ -168,6 +168,7 @@ struct pod_state {
     uint32_t dpa_add_ack_mask;
     int dpa_add_ack_failed;
     int dpa_setup_complete;
+    uint64_t dpa_add_last_send_ns;
 
     /* Asynchronous unregister/reclaim state. registered/dma_ready are cleared
      * immediately so routing stops, but the slot and every imported handle stay

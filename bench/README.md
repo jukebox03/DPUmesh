@@ -1,7 +1,7 @@
 # DPUmesh Benchmark and Validation
 
 The benchmark tree contains the deploy harness, matched transport workloads,
-feature validators, and measured reports for the 2026-07-19 working tree.
+feature validators, and measured reports for the 2026-07-20 working tree.
 Results are meaningful only when the compared paths use the same request/reply
 semantics, payloads, concurrency, warmup, duration, and CPU allocation.
 
@@ -49,17 +49,30 @@ it is a focused transport harness rather than the upstream multi-scenario
 ## 3. Reproducible deployment
 
 Create an uncommitted repository-root `.env` containing the machine-specific
-values described in [DEPLOY.md](report/DEPLOY.md), then use the only supported
-bring-up command:
+values described in [DEPLOY.md](report/DEPLOY.md). For a result comparable to the
+reported L4 `(4,4)` operating point, deploy with the DPU knobs explicit:
 
 ```sh
+DPUMESH_INGEST_SHARDS=4 \
+DPUMESH_ARM_EGRESS_THREADS=4 \
+DPUMESH_RINGS_PER_POD=2 \
+DPUMESH_LOG_LEVEL=40 \
 ./bench/bench.sh deploy
 ```
 
 This command builds host and DPU artifacts, synchronizes the DPU sources, imports
 container images, starts the DPU process and pods in order, and applies the fair
-CPU pinning. Do not restart only the DPU process or only the pods; doing so can
-invalidate registration state.
+CPU pinning. A bare `deploy` is valid for functional work but selects the `(1,1)`
+ARM default; it is not the same experiment. The live DPU process environment,
+not the invoking shell, is the measurement authority.
+
+On the BlueField ARM, capture it before every retained run:
+
+```sh
+sudo xargs -0 -n1 -a "/proc/$(pgrep -n dpumesh_dpu)/environ" \
+  | grep '^DPUMESH_' | sort
+ps -ww -p "$(pgrep -n dpumesh_dpu)" -o args=
+```
 
 Useful read-only checks are:
 
@@ -98,9 +111,23 @@ The L4 headline comparison uses `fair`: one application core for each transport;
 for Envoy, the sidecar shares the assigned pod budget. DPU CPU is measured
 separately and must not be hidden when comparing total CPU/request.
 
-For a point that exercises batching, apply the same application-level batching
-to every transport. Report native DPUmesh coalescing separately from the matched
-comparison because asymmetric batching changes the workload.
+Native ABI 2 commits a loop-pass burst, automatically submits complete transport
+units, and flushes the trailing partial once; the old `batch` control argument is
+accepted only for wire compatibility and is ignored. The
+ABI-1 four-way `SEND_MORE`/`reply_batch` ablation remains historical data and its
+scripts now refuse to emit mislabeled ABI-2 results.
+
+Here batching means adjacent posts share descriptor payloads in the polled DPA
+ring. It does not mean that a whole loop pass becomes one syscall or one control
+doorbell. Applications choose protocol/latency flush boundaries and do not choose
+the 8 KiB physical unit.
+
+The controlled ABI-2 audit used one fixed DPU with four ingest shards, four
+egress workers, and two rings per pod, and changed only the host images. Against
+the old matched-batching path, current throughput was -1.91% at
+64 B and +2.79% at 8 KiB; against the old per-RPC default it was +38.16% and
++51.33%. Full tables and the invalid configuration-mismatched first attempt are
+in [RESULT.md](RESULT.md#session-7--abi-2-automatic-batching-performance-audit-2026-07-20).
 
 ## 5. gRPC QPS measurements
 
@@ -159,4 +186,5 @@ an optional BlueField client/server smoke binary.
 7. Compare only matched semantics. The current gRPC comparison is DPUmesh versus
    direct TCP, not DPUmesh versus Envoy HTTP connection management.
 
-Interpreted results and their provenance are in [REPORT.md](report/REPORT.md).
+The frozen ABI-1 campaign is in [REPORT.md](report/REPORT.md). New engineering
+measurements and corrections are appended to [RESULT.md](RESULT.md).

@@ -1,126 +1,73 @@
 # DPUmesh Naming and Identity
 
-This document describes the name-resolution and identity behavior implemented in
-the 2026-07-19 working tree. Applications name Kubernetes Services. Numeric
-service ids and DPU-assigned pod ids remain below the public API.
+DPUmesh separates application names from data-plane addresses. Applications use
+Kubernetes Service names; a process-local registry translates those names and
+socket destinations to compact service ids, while the DPU assigns ephemeral pod
+ids at registration.
 
-## 1. Contract
-
-```text
-application name or socket address
-              │
-              ▼
-      immutable registry row
-ClusterIP:port  service-name  service-id
-              │
-              ▼
-       DPU routing identity
-```
-
-The same registry drives both public facades:
-
-- Native callers pass a Service name to `dmesh_create_qp()`.
-- The preload facade looks up the destination `ClusterIP:port` supplied to
-  `connect()`. A missing row means ordinary kernel TCP rather than DPUmesh.
-
-The integer service id is produced inside `src/dmesh_resolve.c`. It does not
-appear in application code, public API arguments, or Kubernetes workload YAML.
-
-## 2. Registry
-
-The resolver reads `$DPUMESH_CONFIG`, or `/etc/dpumesh/registry` when the variable
-is unset. Each valid row has this form:
+## 1. One registry, two facades
 
 ```text
-10.96.23.17:9091 echo-dpumesh 13
-0.0.0.0:0       name-only-service 27
+ClusterIP:port    service-name    service-id
+10.96.23.17:9091  echo-dpumesh    13
 ```
 
-`0.0.0.0` creates a name-only row that native clients can use but the socket
-facade cannot match. Blank, comment, malformed, and non-IPv4 rows are skipped.
-The fixed table holds at most 256 entries, names are at most 63 characters plus
-the terminator, and service ids are expected to fit the data-plane service range.
+The native API resolves `service-name` in `dmesh_create_qp()`. The preload facade
+resolves the IPv4 `ClusterIP:port` passed to `connect()` and falls back to kernel
+TCP when no row matches. Both paths use `src/dmesh_resolve.c`; neither public
+surface accepts an integer service id.
 
-The file is loaded once, on first resolution, under a mutex. Subsequent reads are
-lock-free and the process never reloads the file. An absent file produces a
-warning and an immutable empty table; adding the file later does not repair that
-process. A deployment must therefore mount the complete registry before process
-startup.
+The registry path is `$DPUMESH_CONFIG`, defaulting to
+`/etc/dpumesh/registry`. Blank lines, comments, and malformed rows are ignored.
+`0.0.0.0:0` is a name-only entry usable by the native facade. The table is
+loaded once under a mutex and then read without locks. It does not reload; the
+complete file must exist before first resolution.
 
-## 3. Local identity
+## 2. Local identity
 
-`$DPUMESH_SERVICE` identifies the Service implemented by the current process.
+`$DPUMESH_SERVICE` names the Service implemented by the current process. Unset
+means client-only. A matching name is translated to the internal id carried in
+`POD_REGISTER`. A nonempty unknown name is logged and leaves the process
+client-only rather than inventing an identity.
 
-- Unset or empty means intentionally client-only.
-- A matching registry name yields the internal service id sent during channel
-  registration.
-- A nonempty name absent from the table emits a warning and starts client-only;
-  the process is unreachable as a server.
+The host never chooses its pod id. The DPU assigns a live slot, returns
+`POD_ASSIGNED`, and associates a monotonically increasing DMA generation with
+that slot. Replayed registration on the same Comch connection returns the same
+assignment. The id is observable through `dmesh_pod_id()` only after the later
+readiness barrier completes.
 
-The application never selects its pod id. The DPU reserves a free slot, returns
-it in `POD_ASSIGNED`, and associates a generation with that slot. The channel is
-usable only after the later `POD_INIT_RESULT(READY)`.
+`$DPUMESH_PORT` is used only by the preload listener facade. Native servers and
+the gRPC PassiveListener receive inbound QPs as `DMESH_WC_CONN_REQ` completions;
+they do not bind a numeric transport port through the native API.
 
-`$DPUMESH_PORT` supplies the meshed listening port used by the preload facade.
-The native API receives inbound QPs through `DMESH_WC_CONN_REQ` and does not need
-a numeric listen call. The C++ gRPC server similarly attaches native inbound QPs
-to a gRPC `PassiveListener`.
+## 3. Routing meaning
 
-## 4. Native path
+A QP names a service, not a backend. In default L4 passthrough, its first data
+causes the DPU to select one ready backend and the resulting byte stream remains
+pinned. Optional per-service codecs may route distinct messages to distinct
+upstreams; in that case `wc.stream` distinguishes reply streams.
 
-```c
-dmesh_channel_t *ch = dmesh_create_channel();
-dmesh_cq_t *cq = dmesh_create_cq(ch);
-dmesh_qp_t *qp = dmesh_create_qp(cq, "echo-dpumesh");
-```
+The DPU derives a service's current backend set from live registered pod slots.
+A pod participates only after `POD_INIT_RESULT(READY)` and is removed from
+routing as soon as unregister or disconnect clears its live state.
 
-The call resolves the name at point of use. A missing name returns
-`NULL/ENOENT`. QP construction itself is local; the first data and DPU routing
-establish the remote stream. In default L4 mode that stream remains pinned to the
-chosen backend for its lifetime.
+## 4. gRPC authority is separate
 
-## 5. POSIX preload path
+The C++ adapter passes an explicit DPUmesh Service name when creating a channel
+or listener. That value chooses the transport destination. HTTP/2 `:authority`,
+TLS SNI, and certificate identity remain application/security-layer values;
+DPUmesh neither rewrites nor terminates them.
 
-An unmodified application may continue to use DNS and a ClusterIP:
+The repository implements endpoint injection, not a global
+`dpumesh:///service` resolver. Generated protobuf code, stubs, handlers, and RPC
+methods are unchanged; only client/server bootstrap chooses the DPUmesh runtime.
 
-```c
-getaddrinfo("echo-dpumesh", "9091", ...);
-connect(fd, cluster_ip, ...);
-```
+## 5. Control-plane boundary
 
-The preload facade compares the resolved IPv4 address and port with the same
-registry. A match creates a DPUmesh QP; no match delegates to the original libc
-socket path. `listen($DPUMESH_PORT)` represents this process's meshed listener,
-and inbound QPs are returned through the interposed `accept()` behavior.
-
-This interception is suitable only where networking flows through the
-interposed libc ABI. It is not a reliable Go integration mechanism because the Go
-runtime may issue network syscalls without libc.
-
-## 6. gRPC names and authority
-
-The C++ adapter currently passes an explicit DPUmesh Service name to
-`ConnectDmeshGrpcChannel()`. That name selects the QP destination. gRPC's HTTP/2
-`:authority`, TLS SNI, and certificate identity are independent L7/security
-values; DPUmesh does not rewrite or terminate them.
-
-The implemented endpoint-injection path does not install a global
-`dpumesh:///service` resolver or a complete hybrid EventEngine. Therefore an
-application changes only its channel/listener bootstrap, while generated protobuf
-types, stubs, handlers, and RPC methods remain unchanged.
-
-## 7. Kubernetes state in this repository
-
-The benchmark harness generates or mounts registry content before starting the
-pods and injects `$DPUMESH_SERVICE` into server pods. There is no controller,
-admission webhook, live registry reload, or Kubernetes Endpoint readiness gate in
-this repository. Consequently:
-
-- registry/service-id consistency is an operator and benchmark-deploy invariant;
-- a process does not observe registry changes after its first lookup;
-- Kubernetes readiness alone does not prove that DPU DMA initialization reached
-  `POD_INIT_RESULT(READY)`;
-- workload identity is the injected Service name, not a cryptographic identity.
-
-These are factual boundaries of the current implementation and must be included
-when interpreting deployment or failure results.
+This repository includes a static registry and benchmark deployment machinery,
+not a Kubernetes controller. It does not implement admission-time identity,
+EndpointSlice watching, live registry reload, or cryptographic workload
+identity. Registry consistency and `$DPUMESH_SERVICE` injection are deployment
+invariants. Kubernetes readiness and DPUmesh data-path readiness are distinct;
+only the DPUmesh initialization barrier proves that the registered DMA path is
+usable.

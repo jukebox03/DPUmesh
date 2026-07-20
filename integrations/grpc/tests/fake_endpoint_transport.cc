@@ -70,6 +70,14 @@ PostResult FakeEndpointTransport::Post(absl::Span<const uint8_t> bytes) {
   return result;
 }
 
+absl::Status FakeEndpointTransport::Flush() {
+  std::lock_guard<std::mutex> lock(state_->mu);
+  if (state_->close_count != 0)
+    return absl::UnavailableError("fake transport is closed");
+  ++state_->flush_count;
+  return absl::OkStatus();
+}
+
 void FakeEndpointTransport::Close() {
   std::lock_guard<std::mutex> lock(state_->mu);
   ++state_->close_count;

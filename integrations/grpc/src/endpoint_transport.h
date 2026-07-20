@@ -48,6 +48,9 @@ class EndpointTransport {
   virtual void BindDriver(std::weak_ptr<DmeshEndpointDriver> driver) = 0;
   virtual size_t MaxPostSize() const = 0;
   virtual PostResult Post(absl::Span<const uint8_t> bytes) = 0;
+  // Publish every span accepted since the previous Flush. The native transport
+  // deliberately batches Post calls; a logical EventEngine Write is the boundary.
+  virtual absl::Status Flush() = 0;
   virtual void Close() = 0;
 };
 

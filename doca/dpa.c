@@ -1153,6 +1153,7 @@ setup_pod_dma(struct objects *objs, struct pod_state *pod)
     __atomic_store_n(&pod->dpa_add_ack_failed, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&pod->dpa_setup_complete, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&pod->dpa_add_expected_mask, expected_mask, __ATOMIC_RELEASE);
+    pod->dpa_add_last_send_ns = 0;
 
     /* 1. One DPU staging buffer per pod. Under PER-CONN CONTIGUOUS STAGING the
      * forward DMA lands each chunk at the sender's host TX byte offset (mirror),
@@ -1275,8 +1276,66 @@ setup_pod_dma(struct objects *objs, struct pod_state *pod)
      * submitted the task. dpu_finalize_pending_pod_inits publishes readiness after
      * every target EU returns an ADD_ACK for `generation`. RELEASE makes all setup
      * fields above visible to that main-thread ACQUIRE. */
+    {
+        struct timespec sent_at;
+        clock_gettime(CLOCK_MONOTONIC, &sent_at);
+        pod->dpa_add_last_send_ns =
+            (uint64_t)sent_at.tv_sec * 1000000000ull + (uint64_t)sent_at.tv_nsec;
+    }
     __atomic_store_n(&pod->dpa_setup_complete, 1, __ATOMIC_RELEASE);
     return DOCA_SUCCESS;
+}
+
+int
+progress_setup_pod_dma(struct objects *objs, struct pod_state *pod)
+{
+    uint32_t expected = __atomic_load_n(&pod->dpa_add_expected_mask,
+                                         __ATOMIC_ACQUIRE);
+    uint32_t acked = __atomic_load_n(&pod->dpa_add_ack_mask,
+                                      __ATOMIC_ACQUIRE);
+    if ((acked & expected) == expected)
+        return 1;
+
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    uint64_t now_ns = (uint64_t)now.tv_sec * 1000000000ull +
+                      (uint64_t)now.tv_nsec;
+    if (pod->dpa_add_last_send_ns != 0 &&
+        now_ns - pod->dpa_add_last_send_ns < 10000000ull)
+        return 0;
+    pod->dpa_add_last_send_ns = now_ns;
+
+    int K = pod->k_rings;
+    int N = objs->num_dpa_threads;
+    if (K > N) K = N;
+    uint32_t generation = __atomic_load_n(&pod->dma_generation,
+                                           __ATOMIC_ACQUIRE);
+    for (int j = 0; j < K; j++) {
+        int eu = (pod->pod_id * K + j) % N;
+        uint32_t bit = 1u << eu;
+        if ((expected & bit) == 0 || (acked & bit) != 0)
+            continue;
+
+        struct comch_add_ring_msg add_msg;
+        memset(&add_msg, 0, sizeof(add_msg));
+        add_msg.type = DPA_MSG_RING_ADD;
+        add_msg.generation = generation;
+        doca_error_t result = dmesh_fill_dpa_ring_info(objs, pod, j,
+                                                       &add_msg.ring);
+        if (result != DOCA_SUCCESS)
+            return -1;
+        result = dmesh_doca_dpa_msgq_send_try(
+            &objs->dpa_comches[eu]->send, &add_msg, sizeof(add_msg));
+        if (result == DOCA_SUCCESS)
+            DOCA_LOG_INFO("Retried RING_ADD to EU %d (pod_id=%d gen=%u)",
+                          eu, pod->pod_id, generation);
+        else if (result != DOCA_ERROR_AGAIN) {
+            DOCA_LOG_ERR("RING_ADD retry to EU %d failed (pod_id=%d): %s",
+                         eu, pod->pod_id, doca_error_get_descr(result));
+            return -1;
+        }
+    }
+    return 0;
 }
 
 void

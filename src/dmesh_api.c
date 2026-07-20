@@ -19,32 +19,21 @@
 
 void *dmesh_alloc(dmesh_qp_t *c, uint32_t len) {
     if (!c) { errno = EINVAL; return NULL; }
-    void *b = dpumesh_tx_reserve(c->ep->ctx, c->local_port, len);   /* NULL+EAGAIN if SQ full */
-    if (b || errno != EAGAIN) return b;
-
-    /* EAGAIN promises "a later alloc succeeds once the DPU's TX_ACKs free space" — and
-     * that promise is FALSE if the space is held by our own committed-but-unshipped
-     * bytes: a DMESH_SEND_MORE batch has not been handed to the DPU, so no TX_ACK for it
-     * can ever arrive and the caller's documented retry loop spins forever. A message
-     * built from more than maxb blocks of SEND_MORE chunks deadlocks exactly there.
-     * Ring the doorbell and retry once: now the bytes are in flight, so ACKs will come
-     * and a genuine EAGAIN is transient again, as documented. */
-    if (dmesh_flush(c) != 0) return NULL;                          /* EBADMSG from the ring */
-    errno = EAGAIN;
     return dpumesh_tx_reserve(c->ep->ctx, c->local_port, len);
 }
 
 int dmesh_post_send(dmesh_qp_t *c, const void *buf, uint32_t len,
                     uint64_t wr_id, unsigned flags) {
-    (void)buf;      /* the ring position is implied by the alloc contract */
     (void)wr_id;    /* reserved for future send-completion support */
     if (!c || len == 0) { errno = EINVAL; return -1; }
-    if (flags & ~(unsigned)DMESH_SEND_MORE) { errno = EINVAL; return -1; }  /* unknown flag */
-    /* Rejects a post with no live alloc, or len past what was alloc'd — both would
-     * otherwise ship uninitialised ring bytes. */
-    if (dpumesh_tx_commit(c->ep->ctx, c->local_port, len) != 0) { errno = EINVAL; return -1; }
-    if (flags & DMESH_SEND_MORE) return 0;               /* doorbell deferred (WR batching) */
-    return dmesh_flush(c);                               /* ship ALL committed, in order */
+    if (flags != 0) { errno = EINVAL; return -1; }
+    /* Commit first, then publish every newly complete transport slot. The newest
+     * partial stays buffered until more posts fill it or dmesh_flush forces it. */
+    if (dpumesh_tx_commit(c->ep->ctx, c->local_port, buf, len) != 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    return dmesh_flush_full(c);
 }
 
 /* ===== Completion queue ===== */

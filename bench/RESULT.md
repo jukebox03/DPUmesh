@@ -1,10 +1,14 @@
-# DPUmesh scalability — direct-experiment log (2026-06-08)
+# DPUmesh engineering result log
 
-> **This is a historical engineering log, not the evaluation.** Rates here are
-> config-specific single-shot DPU-internal measurements (many superseded), and
-> "BEST"/"FINAL" refer to a step in that log — **not** a cross-transport result. The
-> authoritative, reproducible comparison against TCP + Envoy lives in
-> **[report/REPORT.md](report/REPORT.md)**. Where the two disagree, REPORT.md wins.
+This file is chronological. Early entries preserve superseded implementations,
+single-shot diagnostics, and local labels such as “BEST” or “FINAL”; a later
+session that explicitly corrects an earlier one takes precedence for that
+subject. The current transport contract lives in `design/`, while the frozen
+ABI-1 cross-transport campaign lives in [report/REPORT.md](report/REPORT.md).
+Session 7 below is the current ABI-2 batching A/B and records both the valid
+configuration-controlled result and the first comparison that had to be discarded.
+
+# Session 1 — scalability experiments (2026-06-08)
 
 Goal: (1) raise 2-pod chain RPS, (2) make DPA/DPU multithread actually scale.
 Constraint: all traffic stays host→DPU→host (L7 routing computed on DPU; no host→host).
@@ -6082,3 +6086,89 @@ neutral. (The live DPU had drifted to `egress-threads=1`; re-fixed to (4,4) befo
 ## Diff (this session; public `<dpumesh/dmesh.h>` untouched)
 `bench/apps/bench_dpumesh.c` + `bench/apps/echo_dpumesh.c` (matched-batching mode, default off),
 `doca/dpu_proxy.c` (atomic `inq_head` peek).
+
+---
+
+# Session 7 — ABI 2 automatic-batching performance audit (2026-07-20)
+
+Goal: determine whether the ABI 2 lifecycle and TX-policy work changed native L4
+performance. This section supersedes the first before/after numbers collected in
+this session because that comparison did not hold the DPU launch configuration
+constant.
+
+## Invalid first comparison
+
+The first `before` run reused an already-running DPU process without capturing
+`/proc/<pid>/environ`. The first `after` deployment used the bare deploy defaults,
+`DPUMESH_INGEST_SHARDS=1` and `DPUMESH_ARM_EGRESS_THREADS=1`, rather than the
+report's `(4,4)` operating point. At `(1,1)` the main DPU thread was at 99% CPU and
+the 8 KiB point reached only about 5.63 Gb/s. Those numbers measure different DPU
+configurations and are **not a valid code comparison**; do not use them as a
+regression result.
+
+## Controlled method
+
+The valid A/B kept one live DPU process and its data-plane configuration fixed:
+
+```text
+DPUMESH_INGEST_SHARDS=4
+DPUMESH_ARM_EGRESS_THREADS=4
+DPUMESH_RINGS_PER_POD=2
+DPA execution units=8 (automatic, capped)
+DPU log argument=-l 40
+```
+
+Only the host benchmark and echo images were changed. The baseline images were
+built from clean commit `939a6a4`; the current images were built from the
+2026-07-20 working tree at the same commit. Each cell below is the median of three
+runs at concurrency 32. Every retained run reported `fail=0` and `reorder=0`.
+
+Two old-policy baselines are shown because they answer different questions:
+
+- `old per-RPC` flushes every request/reply and represents the old default.
+- `old matched` enables the old loop-pass coalescing controls on both client and
+  server; it isolates implementation overhead from the batching-policy change.
+- `current auto` is ABI 2: each post commits, complete physical units publish
+  automatically, and the benchmark flushes the one trailing partial per loop pass.
+
+## Results
+
+| request / reply | policy | throughput | goodput | p50 | p95 | p99 | average |
+|---|---|---:|---:|---:|---:|---:|---:|
+| 64 B / 8 B | old per-RPC | 0.186394 Mrps | — | 175 µs | 231 µs | — | 169.98 µs |
+| 64 B / 8 B | old matched | 0.262528 Mrps | — | 116 µs | 118 µs | 229 µs | 119.47 µs |
+| 64 B / 8 B | current auto | 0.257524 Mrps | — | 117 µs | 120 µs | — | — |
+| 8192 B / 8 B | old per-RPC | 0.119343 Mrps | 7.8213 Gb/s | 245 µs | 306 µs | 313 µs | 261.09 µs |
+| 8192 B / 8 B | old matched | 0.175700 Mrps | 11.5147 Gb/s | 183 µs | 239 µs | 246 µs | 178.58 µs |
+| 8192 B / 8 B | current auto | 0.180600 Mrps | 11.8358 Gb/s | 184 µs | 197 µs | 246 µs | 171.43 µs |
+
+Relative to the old per-RPC default, current automatic batching raises throughput
+by **38.16% at 64 B** and **51.33% at 8 KiB**. Relative to the old matched policy,
+which is the fair code-overhead comparison, current throughput is **1.91% lower at
+64 B** and **2.79% higher at 8 KiB**. The 8 KiB average latency improves by 4.0%
+and p95 by 17.57% versus old matched batching. The small 64 B throughput difference
+is within the scale of run-to-run variation; there is no evidence here of a
+meaningful ABI 2 fast-path regression.
+
+## Interpretation
+
+ABI 2 does not combine many descriptors behind one system-call doorbell. The DPA
+polls the shared forward ring. Batching here means that adjacent application posts
+share an ordered descriptor payload: `post_send` publishes every newly complete
+8 KiB physical unit, while `flush` publishes the newest incomplete unit. The
+application therefore selects only a logical latency boundary and does not need
+to know the 8 KiB value.
+
+For the 64 B request workload, a loop-pass of 32 requests plus the benchmark's
+16-byte frame headers fits in a small number of coalesced descriptors. For an
+8192 B request, the header makes each record 8208 B; the 64 KiB backing-block
+boundary therefore introduces sealed tails, so descriptor count is reduced but
+not to one descriptor per request window. This explains why the policy provides
+substantial amortization without implying a single publication for the whole
+window.
+
+The decisive reproducibility rule is that a retained result must capture the
+**live** DPU process environment. Shell variables and manifest values do not prove
+what the running process uses. The benchmark harness also now selects a Running,
+non-terminating pod after image rollouts, avoiding accidental measurements against
+a stale pod IP.
