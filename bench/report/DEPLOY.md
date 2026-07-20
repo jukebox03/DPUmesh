@@ -35,7 +35,7 @@ DPUMESH_LOG_LEVEL=40 \
 The command stops the prior DPU process and recreates the complete registration
 state. A DPU-only restart invalidates all host channels and requires a complete
 pod restart. A controlled host-image A/B may retain the DPU process only when the
-old pod exits through `POD_QUIESCED` and the replacement reaches a fresh
+terminating pod exits through `POD_QUIESCED` and the replacement reaches a fresh
 `POD_INIT_RESULT(READY)`; record that exception explicitly. Kubernetes `Ready`
 alone is never sufficient.
 
@@ -60,10 +60,10 @@ variables changes the measured system.
 
 N DPA EUs are auto-detected after DPA startup and clamped to eight unless
 `DPUMESH_DPA_THREADS` is explicitly set. Host and DPU must use the same K. The
-2026-07 hardware reported more EUs than the cap, so the effective automatic N was
+recorded hardware reports more EUs than the cap, so the effective automatic N is
 eight in the gRPC lifecycle runs.
 
-The 4/4 ARM configuration is the historical L4 headline operating point, not a
+The 4/4 ARM configuration is the recorded L4 headline operating point, not a
 universal recommendation. The report keeps 1/1, 2/2, and 4/4 results separate.
 
 ## Host manifest values
@@ -140,7 +140,6 @@ side and therefore are ceiling probes, not fair TCP comparisons.
 The deploy imports repository images into the containerd `k8s.io` namespace and
 uses `envoyproxy/envoy:v1.30-latest`. A retained performance run must record:
 
-- git commit and dirty-tree state;
 - built binary hash and container image digests;
 - node, kernel, Kubernetes context, and pod placement;
 - DPU binary path, PID/uptime, launch environment, N/K, and log level;
@@ -151,7 +150,7 @@ cannot read DPU state, the result is marked uncaptured rather than inferring it
 from shell variables.
 
 After an image rollout, point commands select a Running pod with no deletion
-timestamp. This prevents a terminating old replica from being chosen merely
+timestamp. This prevents a terminating replica from being chosen merely
 because it appears first in the Kubernetes item list.
 
 ## Inspection and cleanup

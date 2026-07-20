@@ -20,11 +20,7 @@ struct dpa_ring_info {
 	doca_dpa_dev_mmap_t dpu_mmap;    /* DPU staging buffer mmap (forward DMA dest) */
 	uint64_t dpu_addr;               /* this ring's DPU staging region base VA */
 	int32_t pod_id;
-	/* Retained in the wire ABI but ALWAYS 0 now: under per-conn contiguous
-	 * staging the DPA lands each chunk at the host TX byte offset, so the pod
-	 * staging base is simply dpu_addr (the old K-way EU-shard region split is
-	 * retired). Kept as a zeroed field so the struct layout + ABI asserts below
-	 * stay frozen; the DPA still computes dpu_addr - region_off (== dpu_addr). */
+		/* Wire-ABI field fixed at zero. The staging base equals dpu_addr. */
 	uint32_t region_off;
 } __attribute__((__packed__, aligned(8)));
 
@@ -52,29 +48,14 @@ struct dpa_thread_arg {
 	uint32_t _pad2;
 	struct dpa_ring_info rings[MAX_DPA_RINGS];
 	uint32_t desc_idx[MAX_DPA_RINGS];
-	/* Incarnation paired with rings[]. Kept parallel rather than changing
-	 * dpa_ring_info's exported-handle ABI. Every FWD_DONE echoes this value so
-	 * ARM can reject a completion left in its queue across pod-slot reuse. */
+	/* Incarnation paired with rings[] and echoed by FWD_DONE. */
 	uint32_t ring_generation[MAX_DPA_RINGS];
 } __attribute__((__packed__, aligned(8)));
 
-/* ====== Per-message payload layout ======
- * The DMA payload is the body itself — no in-band header.
- *   Forward path (Host→DPU): payload = body
- *   Reverse path (DPU→Host): payload = body
- * Per-request metadata (the oriented endpoint tuple: src/dst pod, port, service, seq + length)
- * is carried via comch_dma_comp_msg (and dma_desc on-DPU), keeping
- * reverse per-entry size = forward per-entry size = slot_size. That is
- * what makes num_slots × slot_size ≤ DPU_BUFFER_SIZE actually bound the
- * reverse buffer occupancy.
- *
- * Flow control is handled end-to-end at the application layer via slot-
- * based admission. DPU/DPA do not interpret any byte-position field. */
+/* DMA payloads contain only message bodies. Endpoint metadata travels in
+ * comch_dma_comp_msg and dma_desc. Slot admission bounds buffer occupancy. */
 
-/* ====== Datapath message types (DPU ARM ↔ DPA) ======
- * Exchanged over the doca_comch_msgq between the DPU ARM and the DPA EU kernel.
- * Explicit values, contiguous from 1; 0 is reserved INVALID so a zeroed buffer
- * hits the default-reject arm (fail-safe). */
+/* DPU ARM and DPA EU messages. Zero is reserved for invalid buffers. */
 enum dpa_msg_type {
 	DPA_MSG_INVALID  = 0, /* reserved: zeroed buffer hits default-reject */
 	DPA_MSG_RING_ADD = 1, /* DPU→DPA: add forward (CPU→DPU) ring */
@@ -83,28 +64,18 @@ enum dpa_msg_type {
 	DPA_MSG_RING_DEL = 4, /* DPU→DPA: drop this pod's forward ring from rings[] */
 	DPA_MSG_RING_ADD_ACK = 5, /* DPA→DPU: ring installed (or rejected) */
 	DPA_MSG_RING_DEL_ACK = 6, /* DPA→DPU: ring removed; prior DMA ops are fenced */
-	/* Reverse (DPU→host) egress is the ARM SG-DMA engine (dpu_proxy.c), not a DPA
-	 * ring: there is no REV_RING_ADD / REV_DONE on this channel anymore. */
+	/* Reverse egress uses the ARM SG-DMA engine. */
 };
 
-/* RING_DEL drops a pod's ring from an EU's rings[] on disconnect, so num_rings is
- * bounded by the number of LIVE pods on that EU rather than by cumulative connects
- * (pod_id is a recycled slot index and k_j = (pod_id*K + j) % N, so a reconnecting
- * pod returns to the same EUs). dpa.c clamps K <= N, making k_j injective over j: an
- * EU holds at most one ring per pod, so pod_id alone identifies the entry to drop.
- * RING_DEL and RING_ADD both have explicit ACKs. DEL_ACK is posted with FLUSH on
- * the same ordered DPA producer after the ring is removed, so observing it on
- * ARM also fences every older DMA operation that could reference that ring's
- * imported mmap/buf_arr. */
+/* Each EU holds at most one ring per pod. RING_DEL removes it, and the ordered
+ * DEL_ACK fences preceding DMA operations for that ring. */
 
 enum dpa_ring_ack_status {
 	DPA_RING_ACK_OK = 0,
 	DPA_RING_ACK_FULL = 1,
 };
 
-/* DPA→DPU immediate sent only after an EU has installed/rejected or removed a
- * ring. The generation prevents a delayed ACK from a disconnected incarnation
- * from affecting a reused pod_id. One pod has at most one ring on an EU. */
+/* Ring operation result. The generation rejects stale acknowledgements. */
 struct dpa_ring_ack_msg {
 	uint8_t  type;       /* DPA_MSG_RING_ADD_ACK or DPA_MSG_RING_DEL_ACK */
 	int8_t   pod_id;
@@ -115,18 +86,9 @@ struct dpa_ring_ack_msg {
 _Static_assert(sizeof(struct dpa_ring_ack_msg) == 8,
                "dpa_ring_ack_msg must be exactly 8 bytes");
 
-/* DPA->DPU completion immediate — packed to 20 bytes (below the HW 32-byte
- * immediate-data limit). `type` MUST stay at offset 0 (the recv callback peeks
- * raw[0] to dispatch). Carries the endpoint tuple so the DPU can route
- * (dst_pod==BLANK -> resolve dst_service) and the host can demux by dst_port;
- * port/seq are OPAQUE passthrough. `generation` prevents a completion already
- * delivered into an ARM software queue from being applied after the same pod_id
- * slot has been reused.
- *   src_service is NOT on the wire: the DPU derives the caller's service from
- *   src_pod's registration (assumes ONE service per pod — widen the wire if a pod
- *   ever hosts multiple services).
- * Layout is naturally aligned (uint16 on even offsets, pos@12, generation@16),
- * no tail pad. */
+/* Packed DPA-to-DPU completion. `type` remains at offset zero for dispatch, and
+ * `generation` rejects stale completions. Endpoint fields support routing and
+ * host demultiplexing. */
 struct comch_dma_comp_msg {
 	uint8_t  type;        /* DPA_MSG_FWD_DONE (offset 0 — peeked) */
 	int8_t   src_pod_id;  /* originating pod (always concrete) */
@@ -193,9 +155,8 @@ struct dma_desc {
 	doca_dpa_dev_mmap_t mmap;      /* 4B */
 	uint64_t addr;                 /* 8B */
 	uint32_t size;                 /* 4B (fixed width for Host/DPA ABI stability) */
-	/* 8B of endpoint-tuple metadata (replaces the old 8B `idx`/req_id, offset 16).
-	 * DPA copies these verbatim into the completion (opaque passthrough). */
-	uint16_t seq;                  /* 2B per-conn sequence (was req_id) */
+		/* Endpoint tuple copied verbatim into the completion. */
+		uint16_t seq;                  /* 2B per-conn sequence */
 	uint16_t src_port;             /* 2B sender port */
 	uint16_t dst_port;             /* 2B dest port (PORT_BLANK=0 -> accept queue) */
 	int8_t   src_service;          /* 1B caller service (SVC_NONE if none) */
@@ -203,11 +164,8 @@ struct dma_desc {
 	int32_t dst_pod_id;            /* 4B routing target; DMESH_POD_BLANK(-1) -> DPU resolves dst_service */
 	uint8_t pad0[4];               /* 4B: aligns src_pod_id, and holds the struct at its fixed
 	                                * 64B cache line (see above) — widen it, never shrink. */
-	int32_t src_pod_id;            /* 4B. Set by the host enqueue; the DPA forward
-	                                * handler derives the sender from ring->pod_id and
-	                                * does not read this field. Kept for wire-ABI
-	                                * stability (dma_desc is a fixed 64B cache line). */
-	uint8_t reserved[27];          /* 27B (absorbed the removed REVERSE-only landing_pos) */
+	int32_t src_pod_id;            /* 4B host sender field; DPA uses ring->pod_id */
+	uint8_t reserved[27];          /* fixed descriptor padding */
 	volatile uint8_t valid;        /* 1B */
 } __attribute__((__packed__, aligned(8)));
 

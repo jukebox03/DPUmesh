@@ -36,13 +36,10 @@ DOCA_LOG_REGISTER(DPU_WORKER);
  * send path (objs->pe is single-threaded on main). Main + egress workers leave it 0. */
 __thread int dpu_t_is_ingest = 0;
 
-/* Defined in dpa.c: the recv-cb reads it to route completions to the reaping
- * shard's queue (Design A, M>=2). Each shard thread sets it to its id. */
+/* recv-cb uses this id to select the current shard queue. */
 extern __thread int dpu_reap_shard;
 
-/* Diagnostic (DPUMESH_DIAG=1): once/sec dump of the emit-batch state to root-cause a
- * TX_ACK/REV_DONE starvation hang. g_lull_hits/g_drain_iters count how often main's
- * idle-flush (lull) actually fires vs total drain iterations. */
+/* DPUMESH_DIAG emits batch state and idle-flush counters once per second. */
 static int g_dpu_diag = 0;
 static uint64_t g_lull_hits = 0, g_drain_iters = 0;
 /* batch-16 hang debug: TX_ACK flush-size histogram + single-send fallbacks.
@@ -67,14 +64,8 @@ send_or_defer_tx_ack(struct objects *objs, struct pod_state *src_pod,
         return;
 
     if (r == DOCA_ERROR_AGAIN) {
-        /* COALESCE, don't append: the host's reclaim is cumulative (tx_reclaim_ack pops
-         * every unit at-or-before `seq`), so a newer seq for the same (conn,port) fully
-         * subsumes a queued older one. That bounds this queue by the number of live PORTS
-         * instead of the message rate — which is what stops it from ever filling and
-         * dropping an ack. Dropping the LAST ack of a conn is unrecoverable: the host's
-         * tx_f never reaches tx_w, so try_return_blocks never fires and the port stays
-         * FREE-but-draining — its blocks AND its port number leak for the process's life.
-         * The scan is O(live ports), and only on this already-stalled path. */
+        /* Coalesce cumulative acknowledgements by connection and port, retaining the
+         * newest sequence. */
         for (int i = 0; i < objs->num_deferred_tx_acks; i++) {
             deferred_tx_ack_t *d = &objs->deferred_tx_acks[i];
             if (d->conn != src_pod->connection || d->port != port)
@@ -120,10 +111,8 @@ flush_txack_batch(struct objects *objs, struct pod_state *pod)
     }
 }
 
-/* Accumulate one TX_ACK into the src pod's batch; flush when full. Falls back to
- * the single-send path when the pod is gone or the batch is already full and a
- * prior flush is still pending (AGAIN).
- * Non-static: the proxy engine (dpu_proxy.c) releases custody through this. */
+/* Add a TX_ACK to the source pod's batch. A full pending batch uses the
+ * single-send path. The proxy also calls this function to release custody. */
 void
 batch_or_send_tx_ack(struct objects *objs, struct pod_state *src_pod,
                      uint16_t port, uint16_t seq)
@@ -167,9 +156,7 @@ batch_or_send_tx_ack(struct objects *objs, struct pod_state *src_pod,
         flush_txack_batch(objs, src_pod);
 }
 
-/* ====== Batched REV_DONE (mirror of batched TX_ACK) ======
- * The single host PE thread reaping one REV_DONE comch msg per response is the
- * 2-pod cap; coalescing K responses into one msg cuts the PE reap rate K-fold. */
+/* Batched REV_DONE mirrors batched TX_ACK. */
 
 /* Flush a pod's accumulated REV_DONE batch as one message. On AGAIN the batch is
  * retained (retried by the next flush, including the idle proc==0 flush).
@@ -187,20 +174,8 @@ flush_rev_done_batch(struct objects *objs, struct pod_state *pod)
     pod->rev_done_batch_n = 0;   /* sent (a hard error drops the batch) */
 }
 
-/* ====== L4 routing ======
- *
- * dpu_route_l4() is the single point where the DPU picks the destination pod for a
- * forward segment: LOAD-BALANCE over the service's live backend set. It holds NO
- * affinity state — affinity belongs to the caller (px_resolve_backend: conn-sticky
- * pin, or an L7 host override), which is where the conn's lifetime is known. Called
- * by the SG-DMA egress engine (dpu_proxy.c) for DEFERred request segs; the L7 hook
- * rides the same LB via dmesh_l7_ctx.hosts.
- *
- * The backend SET is DERIVED from pods[] on demand (registered + service_id + dma_ready)
- * — pods[] is the single source of truth, so a disconnected backend leaves the set
- * with no bookkeeping (no stale-entry blackhole). Envoy parity: a service == a
- * cluster; pods[] filtered by service_id == the cluster's healthy endpoints.
- */
+/* L4 routing selects a live, ready backend from pods[]. Connection affinity and
+ * L7 host overrides are applied by the caller. */
 int
 collect_live_hosts(struct objects *objs, int16_t svc, int32_t *out)
 {
@@ -238,16 +213,8 @@ lb_pick(struct objects *objs, int16_t svc)
     return hosts[i % (uint32_t)n];
 }
 
-/* L4 default route: lb_pick (RR over the derived live backend set). There is no
- * service->backend table — see collect_live_hosts. The single point that resolves a
- * DEFERred request seg's backend for the SG-DMA egress engine (dpu_proxy.c →
- * dpu_route_l4).
- *
- * This is the LB pick ALONE — it carries no affinity of its own. Affinity is the
- * CALLER's (px_resolve_backend): a conn is sticky to the backend its first message
- * picked here, and an L7 hook may override the host outright.
- *
- * Unknown/empty service → -1 (caller drops + TX_ACKs the sender). */
+/* Pick a live backend with round-robin balancing. Affinity is caller-owned;
+ * unknown or empty services return -1. */
 int32_t
 dpu_route_l4(struct objects *objs, int16_t svc)
 {
@@ -320,14 +287,8 @@ drain_pending_txack(struct objects *objs)
     return sent;
 }
 
-/*
- * Process up to max_batch entries from the deferred completion queue.
- * Called from the main loop to avoid blocking inside consumer callbacks.
- * Every forward completion (request AND reply) feeds the per-conn input window
- * → proxy_route (mock) → per-dst SG-DMA egress engine (dpu_proxy.c). All comch
- * sends happen here — never inside consumer callbacks, which would risk
- * re-entrant doca_pe_progress. Returns number of entries processed.
- */
+/* Process up to max_batch deferred completions on the main loop. Routing, egress,
+ * and Comch sends run outside consumer callbacks. */
 static int
 process_completion_queue(struct objects *objs, int max_batch)
 {
@@ -361,33 +322,21 @@ process_completion_queue(struct objects *objs, int max_batch)
     return processed;
 }
 
-/* ====== Ingest sharding — Design A (M consumer PEs, one per shard) ======
- *
- * Each shard OWNS one consumer PE (consumer_pes[id]); DPA channel k is bound to
- * consumer_pes[k % M] (comch_msgq.c), so a shard SLEEPS directly on its own PE's
- * DOCA notification fd — no reaper, no per-message eventfd on the forward path. It
- * reaps its PE (recv-cb fills its queue), then processes: a completion is handled
- * by the shard whose EU it landed on, EXCEPT a ② backend reply, whose session is
- * owned by the CLIENT's shard (encoded in the up_port) — that one is handed to the
- * owner via its cross-shard inbox (the diagram's lock-free ring, MPSC). ① (shared
- * conntrack under routing_lock) never crosses. Each shard sends the DPA WAKE to ITS
- * OWN channels only (k%M==id) — the send producer is bound to that shard's PE, so
- * the WAKE-race fix holds per-shard. Comch sends stay on main (TX_ACK →
- * pending_txack, REV_DONE → egress lanes' done-queue main drains). */
+/* Each ingest shard owns one consumer PE and processes its completion queue.
+ * Backend replies move to the shard encoded in the upstream port. The main
+ * thread performs comch sends. */
 
-/* The shard that must PROCESS this completion (own its conn window + conntrack).
- * ② reply (up_port leg) → the up_port's owner shard; else the shard it landed on. */
+/* Select the connection-window and conntrack owner for a completion. */
 static inline int
 owner_shard(struct objects *objs, int here, const dpu_comp_entry_t *e)
 {
     if (!objs->shard_shared_routing &&
         e->dst_pod_id != DMESH_POD_BLANK && e->src_port >= DMESH_UPORT_BASE)
         return px_uport_owner(e->src_port, objs->n_ingest_shards);
-    return here;                         /* ① / forward request → handle where it landed */
+    return here;                         /* use the receiving shard */
 }
 
-/* Wake a parked shard (edge via its eventfd; a missed edge is caught by its 1 ms
- * epoll backstop). Used only for the ② cross-shard hand-off at low load. */
+/* Wake a parked shard after a cross-shard handoff. */
 static void
 dpu_wake_shard(struct dpu_ingest_shard *sh)
 {
@@ -399,9 +348,7 @@ dpu_wake_shard(struct dpu_ingest_shard *sh)
     }
 }
 
-/* Hand a ② reply completion to its owner shard's cross-shard inbox. Producers
- * serialize on xshard_lock (MPSC); the owner shard consumes lock-free (single
- * consumer). Returns 0, or -1 if the inbox is full (caller retries). */
+/* Hand a reply to its owner shard. Returns -1 when the inbox is full. */
 static int
 xshard_handoff(struct objects *objs, int owner, const dpu_comp_entry_t *e)
 {
@@ -472,13 +419,7 @@ dpu_wake_main(struct objects *objs)
 
 static void dpu_send_wake(struct objects *objs);   /* fwd decl: the reaper sends the DPA keepalive */
 
-/* Ingest reaper/shard thread (DPUMESH_INGEST_REAP=1). Owns consumer_pe and runs the
- * ingest half of the pipeline — REAP (consumer_pe → comp_queue) AND PROCESS (comp_queue
- * → px_ingest_forward: parse/route) — off the single main funnel; main is left with
- * emit + ctrl + sends (diagram ①). EVENT-DRIVEN, exactly like the original loop handled
- * consumer_pe: SLEEP on its notification fd (arm → re-check → epoll_wait, 1 ms backstop),
- * wake on a real DPA completion — NO busy-spin. Wakes main (if parked) when it produced
- * egress work / deferred TX_ACKs. */
+/* Ingest reaper owns consumer_pe, parses queued completions, and wakes main for emit. */
 static void *
 dpu_reaper_main(void *arg)
 {
@@ -627,9 +568,7 @@ dpu_drain_iteration(struct objects *objs)
      * combine ARM quiescence with DPA DEL_ACKs and destroy imported mappings. */
     int cleaned_pods = server_progress_pod_cleanup(objs);
 
-    /* Lull → flush partial TX_ACK + REV_DONE batches so low-load latency is not held
-     * by coalescing. reaper-OFF: unchanged (proc==0). reaper-ON: main never processes,
-     * so a lull = egress + deferred-txack idle. */
+    /* Flush partial batches when the active progress path is idle. */
     int lull = objs->reaper_active ? (!px_progressed && sent_pend == 0) : (proc == 0);
     if (lull)
         for (int i = 0; i < objs->num_pods; i++) {
@@ -726,9 +665,8 @@ dpu_send_wake(struct objects *objs)
 
 /* ====== Design-A shard thread body (M consumer PEs) ====== */
 
-/* Send the DPA WAKE keepalive to THIS shard's channels only (k % M == id). The
- * send producer for channel k is bound to consumer_pes[k%M] = this shard's PE, so
- * only this shard's thread may submit on it (PE thread-safety / WAKE-race fix). */
+/* Send DPA WAKE to this shard's channels. Only the owning shard submits on each
+ * channel's producer PE. */
 static void
 dpu_send_wake_shard(struct objects *objs, int id)
 {
@@ -766,11 +704,8 @@ dpu_reap_shard_pe(struct objects *objs, struct dpu_ingest_shard *sh)
     return did;
 }
 
-/* Process this shard's reaped completions (sh->queue) + its cross-shard inbox.
- * A completion handled locally (owner == self) → px_ingest_forward; a ② reply for
- * another shard → xshard_handoff to its owner. Both queues drain FRONT-stable so an
- * engine-backpressure (r==0) just leaves the front entry for the next pass (order
- * preserved). Returns the number of completions made progress on. */
+/* Drain local and cross-shard completions while preserving each queue's front on
+ * backpressure. Returns the number of completions advanced. */
 static int
 dpu_shard_run(struct objects *objs, struct dpu_ingest_shard *sh)
 {
@@ -794,8 +729,7 @@ dpu_shard_run(struct objects *objs, struct dpu_ingest_shard *sh)
         did++;
     }
 
-    /* ② cross-shard inbox: replies other shards handed to us. Single consumer (this
-     * shard) → lock-free peek/dequeue; producers serialize on xshard_lock. */
+    /* Cross-shard reply inbox; producers serialize and this shard consumes. */
     for (int n = 0; n < 512; n++) {
         dpu_comp_entry_t *xe = comp_queue_peek(&sh->xshard);
         if (!xe)
@@ -816,11 +750,7 @@ dpu_shard_run(struct objects *objs, struct dpu_ingest_shard *sh)
     return did;
 }
 
-/* Ingest shard thread (Design A, DPUMESH_INGEST_SHARDS>=2). OWNS consumer_pes[id]
- * and SLEEPS directly on its DOCA notification fd (+ its cross-shard wake eventfd),
- * exactly like the single reaper sleeps on consumer_pe — event-driven, NO busy-spin.
- * Reaps its PE, processes (with ② cross-shard hand-off), sends the DPA WAKE to its
- * own channels, and wakes main to emit. */
+/* Ingest shard owner for its consumer PE, wake fd, queue, and DPA channels. */
 static void *
 dpu_shard_main(void *arg)
 {
@@ -988,13 +918,8 @@ run_dpu_worker(struct objects *objs)
      * setup_pod_dma so a fast host's early mmaps don't set up before the msgq. */
     objs->dpu_ready = 0;
 
-    /* N (DPA EU threads) + K (forward rings/pod). Defaults are the measured config
-     * (N=4 EUs, K=2 rings, so a 2-pod pair spreads across 4 distinct EUs; K=2 is the
-     * sweet spot, K=4 is flat — the DPA op-rate caps ~810K dma_copy/s), each overridable
-     * by env (DPUMESH_DPA_THREADS / DPUMESH_RINGS_PER_POD). Set BEFORE the comch server
-     * accepts pods so process_mmap_msg sees the right K (else it rejects a pod's 2nd
-     * forward ring and that pod never reaches dma_ready). init_dpa_objects re-checks
-     * `<= 0`, so it reuses these. N is clamped to MAX_DPA_EU (the dpa_threads[] cap). */
+    /* Configure DPA EU threads and forward rings before the server accepts pod
+     * mappings. Environment overrides are clamped to the supported limits. */
     objs->num_dpa_threads = DPA_THREADS_DEFAULT;   /* tentative (for the K clamp below); AUTO-DETECTED in init_dpa_objects */
     objs->dpa_threads_auto = 1;
     { const char *ne = getenv("DPUMESH_DPA_THREADS");
@@ -1018,10 +943,8 @@ run_dpu_worker(struct objects *objs)
     DOCA_LOG_WARN("K forward rings/pod = %d (DPUMESH_RINGS_PER_POD; N=%d)",
                   objs->k_rings, objs->num_dpa_threads);
 
-    /* Ingest reaper (DPUMESH_INGEST_REAP=1): run the DPA forward-completion REAP
-     * on a dedicated thread so it no longer shares the single main funnel with
-     * parse/route/egress/emit/sends. Default off = reap inline on the main loop
-     * (original behaviour). Spawned just before the main loop (below). */
+    /* DPUMESH_INGEST_REAP=1 runs DPA completion reaping on a dedicated thread.
+     * The default processes reaping inline on the main loop. */
     objs->reaper_active = 0;
     objs->reaper_stop = 0;
     objs->reaper_wake_fd = -1;                       /* -1 → dpu_wake_main is a no-op */
@@ -1031,15 +954,8 @@ run_dpu_worker(struct objects *objs)
     { const char *re = getenv("DPUMESH_INGEST_REAP");
       if (re && atoi(re) >= 1) objs->reaper_active = 1; }
 
-    /* Ingest sharding (diagram ①②③, Design A). DPUMESH_INGEST_SHARDS=M (>=2) gives
-     * each shard its OWN consumer PE (DPA channel k → consumer_pes[k%M]); shard m
-     * reaps consumer_pes[m] via its own DOCA fd and runs parse/route in parallel.
-     * Main is left with emit + ctrl (reaper_active drives the emit-only loop; no
-     * separate reaper thread for M>=2). DPUMESH_SHARD_SHARED=1 selects ① (shared
-     * conntrack/route under routing_lock; a reply is handled where it lands) instead
-     * of the default ② (share-nothing: per-shard conntrack, a reply is handed to its
-     * owner shard's cross-shard inbox). DPUMESH_SHARD_HOST_EMIT=1 = ③ scaffold. M=1
-     * = the single reaper (DPUMESH_INGEST_REAP) or inline-on-main (default). */
+    /* Configure ingest shards. Each shard owns a consumer PE; shared routing uses
+     * routing_lock, while private routing transfers replies to their owner shard. */
     objs->n_ingest_shards = 1;
     objs->shard_shared_routing = 0;
     objs->shard_host_emit = 0;
@@ -1100,11 +1016,7 @@ run_dpu_worker(struct objects *objs)
         return;
     }
 
-    /* 2b. Per-shard consumer PEs (Design A, M>=2). consumer_pes[0] IS the data-path
-     *     consumer's PE (created in step 2); create [1..M-1] so DPA channel k binds to
-     *     consumer_pes[k%M] and shard m owns its own DOCA notification fd. On failure,
-     *     fall back to a single PE (n_ingest_shards=1) — all channels then bind to
-     *     consumer_pes[0] and the M==1 reaper/inline path runs (validated). */
+    /* Create one consumer PE per ingest shard; creation failure selects M=1. */
     objs->consumer_pes[0] = objs->consumer_pe;
     if (objs->n_ingest_shards >= 2) {
         for (int s = 1; s < objs->n_ingest_shards; s++) {
@@ -1141,8 +1053,7 @@ run_dpu_worker(struct objects *objs)
         }
     }
 
-    /* 5. comch DPA message queue. Channel k binds to consumer_pes[k % M] (Design A);
-     *    M==1 → all bind to consumer_pes[0] (== consumer_pe, unchanged). */
+    /* Channel k binds to consumer_pes[k % M]. */
     result = init_comch_dpa_msgq(objs, objs->consumer_pe);
     if (result != DOCA_SUCCESS) {
         DOCA_LOG_ERR("Failed to init comch DPA msgq: %s",
@@ -1167,12 +1078,7 @@ run_dpu_worker(struct objects *objs)
 
     /* dpu_ready remains false until the selected driver below is fully built. */
 
-    /* ===== Ingest shard threads (Design A, M>=2) =====
-     * Each shard OWNS consumer_pes[id] (DPA channels bound in step 5) and sleeps on
-     * its own DOCA notification fd + a cross-shard wake eventfd — no reaper, no
-     * per-message eventfd on the forward path. Spawn them before the main emit loop.
-     * A spawn failure here is an init-time resource error (channels are already
-     * bound to M PEs, so there is no clean single-PE fallback) → abort cleanly. */
+    /* Each ingest shard owns one consumer PE and cross-shard wake fd. */
     if (objs->n_ingest_shards >= 2) {
         for (int s = 0; s < objs->n_ingest_shards; s++) {
             struct dpu_ingest_shard *sh = &objs->ingest_shards[s];
@@ -1211,11 +1117,8 @@ run_dpu_worker(struct objects *objs)
 
     /* ===== Ingest-reaper driver =====
      * When the reaper is enabled, spawn the thread that OWNS consumer_pe (reaps
-     * DPA forward completions into comp_queue). The main loop then BUSY-POLLS —
-     * it drains comp_queue + progresses the ctrl PE + runs egress — because it can
-     * no longer sleep on a consumer_pe notification it does not own (comp_queue
-     * fills asynchronously from the reaper). This spreads the ingest reap onto its
-     * own core, off the single main funnel. On spawn failure, fall through to the
+     * DPA forward completions into comp_queue). The main loop drains comp_queue,
+     * progresses the control PE, and runs egress. On spawn failure, fall through to the
      * inline event-driven driver below (reaper_active cleared → reap inline). */
     if (objs->reaper_active) {
         /* Set up the reaper→main wake (eventfd) + main's epoll {ctrl_pe, eventfd}
@@ -1237,11 +1140,7 @@ run_dpu_worker(struct objects *objs)
                 close(rep); rep = -1;
             }
         }
-        /* M>=2 (Design A): the shard threads (already spawned) each reap their OWN
-         * consumer PE — main must NOT also run the inline driver (it would
-         * double-progress consumer_pes[0]). Only spawn the single Design-B reaper for
-         * M==1. A main-epoll failure is fatal for the sharded config (no safe
-         * fall-through), so abort; for M==1 it falls back to the inline driver. */
+        /* Shards reap their own PEs; M==1 uses the single reaper or inline driver. */
         int reaper_ok = (rep >= 0);
         if (reaper_ok && objs->n_ingest_shards < 2)
             reaper_ok = (pthread_create(&objs->reaper_thread, NULL, dpu_reaper_main, objs) == 0);
@@ -1268,7 +1167,7 @@ run_dpu_worker(struct objects *objs)
                               : "reaper owns consumer_pe");
             clock_gettime(CLOCK_MONOTONIC, &last_kick);
             struct timespec last_dbg = last_kick;
-            (void)last_kick; (void)kick_elapsed;   /* keepalive is the reaper's/shards' job now */
+            (void)last_kick; (void)kick_elapsed;   /* reaper/shards own keepalive */
             while (true) {
                 int progressed = dpu_drain_iteration(objs);   /* reap skipped (reaper owns it) */
                 if (g_dpu_diag) {

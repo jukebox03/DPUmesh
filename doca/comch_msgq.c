@@ -17,10 +17,7 @@ init_comch_dpa_msgq(struct objects *objs, struct doca_pe *pe)
 {
 	doca_error_t result;
 
-	/* One 1c/1p comch channel per EU thread. Design A ingest sharding: channel k's
-	 * DPU-side ctx binds to consumer_pes[k % M] so shard m owns (reaps) its own set
-	 * of channels via its own DOCA notification fd. M==1 (or unset) → every channel
-	 * binds to consumer_pes[0] (== the `pe` arg, the single consumer PE) — unchanged. */
+	/* Channel k binds to consumer_pes[k % M]; M==1 uses the supplied PE. */
 	int nb = objs->n_ingest_shards >= 1 ? objs->n_ingest_shards : 1;
 	for (int k = 0; k < objs->num_dpa_threads; k++) {
 		result = dmesh_doca_dpa_comch_create(objs, k);

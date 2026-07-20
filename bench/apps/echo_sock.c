@@ -1,26 +1,6 @@
-/*
- * echo_sock.c — Greeter SERVER over pure POSIX sockets (the MATCHED baseline).
- *
- * The matched-C greeter server, so the TCP and DPUmesh sides can be
- * measured with the SAME server language (C) and thus isolate the transport, not
- * the runtime — a plain-sockets greeter that speaks the bench.h wire frame, so ONE
- * binary serves three transports unchanged —
- *
- *     direct kernel TCP        : client -> echo_sock
- *     TCP + Envoy sidecar      : client -> sidecar -> sidecar -> echo_sock
- *     DPUmesh (LD_PRELOAD)     : the same socket calls ride the DPU transport
- *
- * Greeter SayHello semantics (NOT a raw echo): each framed request carries the
- * reply_size the client wants in `aux`; the server discards the request payload
- * (content is irrelevant) and answers with exactly that many filler bytes. This
- * reproduces the asymmetric big-request / tiny-reply RPC the whole suite measures.
- *
- * Thread-per-connection, blocking I/O: the load generators keep a small, fixed
- * number of long-lived connections (one per client thread), so a thread per conn
- * is the simplest model that never head-of-line-blocks one conn behind another.
- * Each connection is an independent byte stream, so one bench_reframer_t per conn
- * (bench.h) turns the stream back into whole request frames.
- */
+/* Blocking Greeter server for direct TCP, Envoy, and preload transports.
+ * Each connection has its own thread and reframer. Replies contain the byte count
+ * requested in the frame's aux field. */
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -87,8 +67,7 @@ static void out_put(conn_t *c, const uint8_t *b, size_t n) {
     c->out_len += n;
 }
 
-/* Shared read-only reply filler, initialised exactly once across all connection
- * threads via pthread_once — the old `static int ready` guard was a data race. */
+/* Shared read-only reply filler initialized once across connection threads. */
 static uint8_t g_reply_fill[RD_CHUNK];
 static pthread_once_t g_reply_fill_once = PTHREAD_ONCE_INIT;
 static void init_reply_fill(void) { memset(g_reply_fill, REPLY_FILL, sizeof g_reply_fill); }

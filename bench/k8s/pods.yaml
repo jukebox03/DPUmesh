@@ -1,20 +1,6 @@
-# pods.yaml — k8s manifest for the DPUmesh benchmark environment.
-#
-# Applied by bench/bench.sh (`bench.sh deploy`) via:
-#     envsubst < bench/k8s/pods.yaml | kubectl apply -n <ns> -f -
-# All Deployments start at replicas: 0; bench.sh scales them up (innermost first).
-#
-# Substituted variables (bench.sh exports these, with defaults, before envsubst):
-#   IMG_*                 container image tags
-#   CTRL_PORT TCP_PORT    control (9092) / TCP-baseline (9091) ports
-#   HOST_PCI              host PCIe address of the DPU
-#   LIB_OUT               host path holding libdpumesh.so (bind-mounted into pods)
-#   DPUMESH_RINGS_PER_POD ASYNC_THREADS BENCH_PIPELINE BENCH_COALESCE
-#   ECHO_THREADS DPUMESH_ARENA_SLOTS DMESH_PRELOAD_DEBUG
-#
-# bench-dpumesh (client, pod 10) --DPUmesh--> echo-dpumesh (greeter, pod 11).
-# bench-tcp/echo-tcp: the TCP+Envoy sidecar baseline. loopback/stream/preload:
-# feature validators (see ../validators/README.md).
+# Benchmark deployments for DPUmesh, TCP/Envoy, and feature validators.
+# bench.sh substitutes image, port, PCI, library, and runtime variables before
+# applying the manifest. Deployments start with zero replicas.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -281,10 +267,8 @@ spec:
   selector: { app: verbs-dpumesh }
   ports: [{ port: ${CTRL_PORT}, targetPort: ${CTRL_PORT} }]
 ---
-# stream-dpumesh (pod_id=16): byte-stream / L7-proxy frame validator. The 'stream'
-# RUN needs the DPU launched with DPUMESH_PROXY=frame, but the pod registers like
-# any other regardless of proxy mode, so start_pods brings it up with everything
-# else (it no longer self-starts on demand — no pod start against a running DPU).
+# stream-dpumesh (pod_id=16): byte-stream / L7-proxy frame validator.
+# Stream execution requires DPUMESH_PROXY=frame; registration does not.
 apiVersion: apps/v1
 kind: Deployment
 metadata:

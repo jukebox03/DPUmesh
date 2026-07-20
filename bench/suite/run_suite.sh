@@ -1,16 +1,7 @@
 #!/bin/bash
-# run_suite.sh — the STAGED evaluation run against a live `bench.sh deploy` (DPU host).
-#
-# Repetitions + CI, ABBA ordering, output pipeline tidy CSV -> analyze.py -> plot.py.
-# It drives the deployed pods by resolving each transport's control endpoint the way
-# bench.sh does (kubectl pod IP + nc), so the DPU columns fill in from real hardware.
-#
-# It runs whichever transports are actually deployed; a missing pod is warned and
-# skipped, so a partial deploy still yields partial figures. See STAGES.md for the
-# full transport matrix and which pods need to be added to k8s/pods.yaml.
-#
-#   bench/suite/run_suite.sh [stage ...]        # default: rtt conc curve bw
-#   REPS=5 DUR=30 WARMUP=1000 bench/suite/run_suite.sh rtt curve
+# Run staged measurements against a live deployment with repetitions, ABBA order,
+# analysis, and plots. Missing transports are skipped with a warning.
+# Usage: run_suite.sh [stage ...]. Default stages: rtt conc curve bw.
 set -euo pipefail
 
 SUITE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

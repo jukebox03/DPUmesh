@@ -1,7 +1,7 @@
 # DPUmesh Core Architecture
 
-This whitepaper describes the implementation shared by the native API, preload
-facade, BlueField ARM process, and DPA kernel as of 2026-07-20. Its organizing
+This whitepaper describes the current implementation shared by the native API,
+preload facade, BlueField ARM process, and DPA kernel. Its organizing
 principle is custody: every byte, descriptor, credit, and imported mapping has a
 single owner until an explicit acknowledgement transfers or releases it.
 

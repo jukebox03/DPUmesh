@@ -53,14 +53,8 @@ typedef struct {
 /* Force inline so these collapse into the caller. */
 #define CQ_INLINE static inline __attribute__((always_inline))
 
-/* comp_queue is a single-producer / single-consumer ring. Historically both ends
- * ran on the one DPU worker thread. With the ingest reaper (DPUMESH_INGEST_REAP=1)
- * the PRODUCER is the reaper thread (recv-cb enqueues) and the CONSUMER is the main
- * loop (process_completion_queue) — two threads. So head/tail are accessed with
- * acquire/release: the producer publishes the entry THEN the tail with RELEASE; the
- * consumer reads the tail with ACQUIRE then the entry (symmetric for head). This is
- * also correct — and essentially free (ARM ldar/stlr) — when both ends run on one
- * thread (reaper disabled). Producer owns `tail`, consumer owns `head`. */
+/* Single-producer/single-consumer queue. The producer owns tail and publishes it
+ * with release ordering; the consumer owns head and acquires tail. */
 CQ_INLINE int comp_queue_full(const dpu_comp_queue_t *q) {
     uint32_t tail = __atomic_load_n(&q->tail, __ATOMIC_RELAXED);
     uint32_t head = __atomic_load_n(&q->head, __ATOMIC_ACQUIRE);
@@ -128,19 +122,8 @@ typedef struct {
     uint16_t  seq;
 } deferred_tx_ack_t;
 
-/* ====== DOCA task pool capacity tracking (check-first model) ======
- * DOCA does not expose in-flight task counts, so we mirror them at
- * submit/completion boundaries. Submits are gated on our counter rather
- * than relying on DOCA_ERROR_AGAIN + retry loop (which can block PE threads).
- *
- * TASK_POOL_MARGIN: safety headroom below max to absorb counter races.
- * Increment-then-check means we may briefly exceed max by the number of
- * concurrent submitters; margin covers that.
- *
- * MAX_CONSUMER_RETRY: fallback stash size for the rare case a gated submit
- * still fails (e.g. transient state during ctx restart). Drained from the
- * main PE loop.
- */
+/* Mirrored DOCA task counts gate submissions. TASK_POOL_MARGIN covers concurrent
+ * submitters, and MAX_CONSUMER_RETRY bounds tasks awaiting resubmission. */
 #define TASK_POOL_MARGIN 8
 #define MAX_CONSUMER_RETRY 256
 
@@ -192,7 +175,7 @@ struct pod_state {
      * The host exports K DMA_RING mmaps in order; ring_mmap_count counts arrivals
      * so the import handler fills ring_mmaps[0..K-1]. The host TX data buffer
      * (remote_mmap) and host RX buffer are shared/partitioned, not K-plural. */
-    int k_rings;                                   /* = objs->k_rings (1 = legacy) */
+    int k_rings;                                   /* = objs->k_rings */
     struct doca_mmap *ring_mmaps[MAX_EU_PER_POD];  /* Host-exported forward rings */
     /* Host VA of each forward ring's desc array. The RX credit counter lives at
      * ring_host_addrs[j] + DMA_RING_SIZE*sizeof(dma_desc) (the +1 slot); the
@@ -238,32 +221,15 @@ struct pod_state {
     int      rev_done_batch_n;
 };
 
-/* Data-plane publication gate. `dma_ready` is set with RELEASE at the END of
- * setup_pod_dma (after dma_buffer and the forward rings are all written). When
- * setup writes run on thread B while the hot path reads run on thread A, the
- * `registered` gate is not sufficient for the data fields, which are written
- * later. ACQUIRE-loading dma_ready before dereferencing dma_buffer establishes
- * the missing happens-before. */
+/* Acquire the DMA publication gate before reading the pod's data-plane fields. */
 static inline int pod_data_ready(const struct pod_state *pod) {
     return __atomic_load_n(&pod->dma_ready, __ATOMIC_ACQUIRE);
 }
 
-/* ===================================================================
- * DPU connection tracking (model B: the DPU owns every connection)
- * ===================================================================
- * A client addresses a SERVICE (dst_pod=BLANK); the DPU picks a backend per
- * message and owns the "upstream" connection to it. Each upstream gets a
- * DPU-assigned id `up_port` from [DMESH_UPORT_BASE, 65535]; host client conns
- * use [1, DMESH_UPORT_BASE), so a host that is BOTH client and backend
- * (loopback) never collides in its own ports[] table.
- *
- * Toward the backend the DPU rewrites the tuple to src=(client_pod, up_port),
- * dst_port=up_port, so the backend sees the DPU id (not the real client) and
- * replies to it. The reply returns to the DPU (which forwards everything), maps
- * up_port -> (client_pod, client_port) and rewrites dst_port back to the client's
- * real port. The client's TX_ACK is likewise translated up_port -> client_port
- * so the client frees the right slot. (DMESH_UPORT_BASE is defined in the shared
- * dmesh_common.h so the host side sees the same split.) */
+/* The DPU assigns each upstream connection a port in
+ * [DMESH_UPORT_BASE, 65535] and maps it to the client and backend tuple. Host
+ * client ports stay below DMESH_UPORT_BASE. Replies and acknowledgements are
+ * translated through this mapping. */
 
 struct dpu_upstream {
     int      in_use;
@@ -310,14 +276,8 @@ static inline uint16_t dpu_upstream_find(struct dpu_conntrack *ct, int32_t cp,
     return 0;
 }
 
-/* Allocate a new up_port for (cp,cport,bpod) and index it. Returns 0 if the
- * upstream id space [BASE,65535) is exhausted.
- *
- * OWNER-STRIDED allocation (② share-nothing, diagram): only up_ports p with
- * (p-BASE)%stride == owner are handed out by this shard, so a backend reply on p
- * dispatches back (px_uport_owner) to the shard that owns the session — keeping
- * each shard's conntrack single-threaded. stride==1 (owner==0) = the full range,
- * i.e. the ①/single-shard behaviour (byte-identical). */
+/* Allocate and index an upstream port. Owner-strided allocation encodes the
+ * session shard; zero reports exhausted port space. */
 static inline uint16_t dpu_upstream_create(struct dpu_conntrack *ct, int32_t cp,
                                            uint16_t cport, int32_t bpod,
                                            uint16_t owner, uint16_t stride) {
@@ -378,37 +338,21 @@ static inline void dpu_upstream_free(struct dpu_conntrack *ct, uint16_t uP) {
     ct->ht[hole].in_use = 0;
 }
 
-/* ====== Ingest-processor sharding (diagram ①②③) ======
- * The single ARM funnel is split so the CPU-heavy parse/route runs on M threads.
- * A single reaper still OWNS consumer_pe (one thread progresses one PE, and the
- * DPA WAKE keepalive stays with the consumer_pe owner — the WAKE-race fix). After
- * the reaper reaps DPA completions into comp_queue it DISPATCHES each one to a
- * shard's private queue (by conn hash for ①, by up_port-encoded OWNER for ②); the
- * M shard threads run px_ingest_forward (window/parse/route/lane-enqueue). The
- * reaper→shard SPSC queues ARE the "lock-free cross-shard ring" of the diagram.
- * All comch sends still happen on main (objs->pe is single-threaded): a shard
- * DEFERS its TX_ACKs to main via pending_txack and its REV_DONEs ride the egress
- * lanes' done-queue that main drains. Event-driven end to end — a shard SLEEPS on
- * its wake_fd and the reaper writes it only while the shard is parked (no per-msg
- * syscall under load); a missed edge is backstopped by the shard's 1 ms epoll
- * timeout. M<=1 keeps the proven single-reaper (reap+process) path unchanged. */
+/* Ingest completions are assigned to shard queues by connection hash or upstream
+ * port owner. Shards parse and route data, while the main thread performs comch
+ * sends. Each shard sleeps on its wake descriptor when idle. */
 #define MAX_INGEST_SHARDS 8
 
 struct dpu_ingest_shard {
     struct objects *objs;
     int id;
-    /* Design A (M>=2): this shard OWNS consumer_pes[id] and SLEEPS on its DOCA
-     * notification fd directly — no reaper, no per-message eventfd. It reaps its
-     * own PE (recv-cb fills `queue`, same thread → SPSC), then processes. */
+    /* This shard owns consumer_pes[id] and its notification fd. */
     struct doca_pe *pe;          /* = objs->consumer_pes[id]; reaped + WAKE'd by this shard only */
     dpu_comp_queue_t queue;      /* recv-cb (this shard) -> process (this shard): SPSC same-thread */
     /* Per-PE recv backpressure (the recv tasks of the channels bound to this PE). */
     struct doca_task *deferred_recv[MAX_DEFERRED_RECV];
     int num_deferred_recv;
-    /* ② cross-shard ring: a reply lands on the BACKEND's EU-shard but the session
-     * is owned by the CLIENT's EU-shard (up_port owner). The landing shard hands it
-     * here to the owner (MPSC: many shards push, this shard drains). Unused in ①
-     * (shared conntrack) and M==1. */
+    /* MPSC inbox for replies handed to their upstream-port owner shard. */
     dpu_comp_queue_t xshard;
     pthread_mutex_t  xshard_lock;
     int wake_fd;                 /* eventfd: a cross-shard producer wakes this shard when it parks */
@@ -444,24 +388,14 @@ struct objects {
      * this before destroying the exported mmaps. */
     int32_t pod_quiesced;
 
-    /* DPA (shared device, N EU threads for multi-EU data plane).
-     *
-     * num_dpa_threads (= N, clamp [1, MAX_DPA_RINGS]) EU threads share ONE
-     * doca_dpa device (`dpa`). Each EU k owns its own dpa_threads[k]
-     * (doca_dpa_thread + arg) and its own 1c/1p comch channel dpa_comches[k].
-     * A pod's K forward rings map to EUs (pod_id*K + j) % num_dpa_threads (ring j). The DPU side
-     * stays single-threaded: all N recv-msgq consumers connect to the one
-     * consumer_pe, so one pe_progress drains every channel into the single
-     * comp_queue — no lock, tx_ring stays single-producer.
-     *
-     * Kept as pointer arrays (not inline) so host-side translation units that
-     * include object.h never pull in doca_dpa.h. */
+    /* Shared DPA device with N EU threads. Ring j of a pod maps to
+     * (pod_id*K + j) % N, and each EU owns one thread and comch channel. */
     struct doca_dpa *dpa;                                   /* shared DPA device */
     struct dmesh_doca_dpa_thread *dpa_threads[MAX_DPA_EU];
     struct dmesh_doca_dpa_comch  *dpa_comches[MAX_DPA_EU];
     int num_dpa_threads;                                    /* N (auto-detected unless DPUMESH_DPA_THREADS set) */
     int dpa_threads_auto;                                   /* 1 = N auto-detected from the device */
-    int k_rings;                            /* K = rings per pod, spread across K EUs (1 = legacy) */
+    int k_rings;                            /* K rings per pod across K EUs */
     int dpu_ready;   /* 0 until DPA + msgq init done. Gates setup_pod_dma so a fast
                       * host whose mmaps arrive DURING init (before the DPA msgq is
                       * up) doesn't setup too early; those pods run in a deferred
@@ -479,11 +413,7 @@ struct objects {
     struct local_mem_bufs *consumer_mem;
     struct doca_comch_consumer *consumer;
     struct doca_pe *consumer_pe;   /* == consumer_pes[0] (the data-path consumer + M==1 channels) */
-    /* Design A ingest sharding (M>=2): one consumer PE per shard; DPA channel k is
-     * bound to consumer_pes[k % M] (comch_msgq.c), and shard m OWNS consumer_pes[m]
-     * (reaps it + sends the DPA WAKE to its channels). consumer_pes[0] is the same
-     * object as consumer_pe (created by init_comch_datapath_consumer); [1..M-1] are
-     * created in run_dpu_worker before the DPA msgq is built. */
+    /* DPA channel k binds to consumer_pes[k % M]; shard m owns consumer_pes[m]. */
     struct doca_pe *consumer_pes[MAX_INGEST_SHARDS];
 
 	doca_error_t consumer_result;  /* Last result from a consumer callback (comch_consumer.c). */
@@ -492,26 +422,8 @@ struct objects {
     void (*rx_data_hook)(void *hook_ctx, const uint8_t *data, uint32_t len);
     void *rx_hook_ctx;
 
-    /* Multi-pod table (DPU only).
-     *
-     * Concurrency model: lock-free with publication ordering on `registered`.
-     *
-     *   1. Slots are append-only: pods_add_connection writes into
-     *      pods[num_pods] then increments num_pods. Slots are NEVER compacted
-     *      or recycled, so &pods[i] is a stable pointer for the lifetime of
-     *      the process.
-     *   2. `registered` is the publication gate. Writers set every other
-     *      field of pod_state FIRST, then publish via
-     *      __atomic_store_n(&pods[i].registered, 1, __ATOMIC_RELEASE).
-     *      Disconnect tears down in the opposite order: store registered=0
-     *      with RELEASE first, then NULL-ify connection/mmap/etc.
-     *   3. Readers (find_pod_by_id / find_pod_by_connection / hot path)
-     *      observe via __atomic_load_n(&pods[i].registered, __ATOMIC_ACQUIRE).
-     *      Seeing registered=1 guarantees visibility of the prior field
-     *      writes. Seeing registered=0 is treated as "not found".
-     *
-     * Single writer (control PE callbacks dispatched on the one PE thread).
-     */
+    /* Append-only DPU pod table. `registered` is the release/acquire publication
+     * gate; slots remain stable for the process lifetime. */
     struct pod_state pods[MAX_PODS];
     int num_pods;
 
@@ -572,24 +484,12 @@ struct objects {
     pthread_mutex_t consumer_retry_lock;
     int consumer_retry_lock_initialized;
 
-    /* ====== Ingest reaper thread (DPUMESH_INGEST_REAP=1) ======
-     * Splits the DPA forward-completion REAP off the single main funnel. When
-     * active, a dedicated thread owns consumer_pe: it runs doca_pe_progress
-     * (recv-cb -> comp_queue), the recv backpressure release (deferred_recv
-     * resubmit), and the consumer_retry drain. The main loop then only DRAINS
-     * comp_queue (parse/route/egress/emit/sends) + ctrl pe. consumer_pe is thus
-     * touched by exactly one thread (the reaper) — DOCA PEs are not thread-safe —
-     * and comp_queue becomes a cross-thread SPSC ring (acquire/release above).
-     * Default 0 = reap inline on the main loop (original single-thread path). */
+    /* Optional ingest reaper. It owns consumer_pe and publishes completions to the
+     * SPSC queue; otherwise the main loop progresses the PE inline. */
     int reaper_active;
     volatile int reaper_stop;
     pthread_t reaper_thread;
-    /* Ingest sharding (diagram ①): when the reaper also runs process (px_ingest_forward
-     * = parse/route), main is left with only emit+ctrl+sends. A comch send MUST stay on
-     * the main thread (objs->pe is single-threaded), so the ingest thread never sends —
-     * it ENQUEUES its (rare, FIN/error/drop) TX_ACKs here and main drains + sends. The
-     * frequent custody TX_ACKs already run on main (px_drain emit). Count-based, drained
-     * every main iteration (bounded by messages between drains). */
+    /* Ingest threads enqueue control TX_ACKs here for the main-thread comch owner. */
     struct { int32_t pod_id; uint16_t port; uint16_t seq; } pending_txack[16384];
     int pending_txack_n;
     pthread_mutex_t pending_txack_lock;
@@ -600,18 +500,12 @@ struct objects {
     int reaper_wake_fd;          /* eventfd: reaper writes, main reads */
     atomic_int main_parked;      /* 1 = main is about to / is blocked in epoll_wait */
 
-    /* ====== Ingest-processor sharding (DPUMESH_INGEST_SHARDS=M, diagram ①②③) ======
-     * n_ingest_shards >= 2 activates the sharded pipeline (implies the reaper).
-     * shard_shared_routing selects ① (shared conntrack + route tables under
-     * routing_lock; per-shard conn buckets/pools stay lock-free) vs ② (everything
-     * per-shard, share-nothing; up_port encodes the owner shard so a backend reply
-     * dispatches back to the session's owner). ③ additionally shards the emit/send
-     * path (see run_dpu_worker). Default M=1 (single reaper) — unchanged. */
+    /* Ingest sharding; M>=2 assigns one consumer PE and queue per shard. */
     int n_ingest_shards;                       /* M (>=2 = sharded; <=1 = single reaper) */
-    int shard_shared_routing;                  /* 1 = ① (shared+lock), 0 = ② (share-nothing) */
-    int shard_host_emit;                       /* 1 = ③ (shard emits its own REV_DONE/TX_ACK) */
+    int shard_shared_routing;                  /* 1 = shared+lock, 0 = share-nothing */
+    int shard_host_emit;                       /* 1 = shard emits REV_DONE/TX_ACK */
     struct dpu_ingest_shard ingest_shards[MAX_INGEST_SHARDS];
-    pthread_mutex_t routing_lock;              /* ① : guards shared conntrack + route tables */
+    pthread_mutex_t routing_lock;              /* shared conntrack and route tables */
 
 };
 
@@ -653,14 +547,7 @@ static inline void doca_pool_release(atomic_int *cnt) {
     atomic_fetch_sub(cnt, 1);
 }
 
-/* Progress both PEs: control-path PE + consumer PE.
- * consumer_pe must be progressed here to resubmit DPA recv tasks during
- * server_send_msg_to_conn retry loops. Without this, DPA exhausts consumer
- * credits and permanently stalls under load.
- * Safe because server_send_msg_to_conn is only called from:
- *   - process_completion_queue (main loop, not inside any callback)
- *   - server_message_recv_callback (pe callback, not consumer_pe callback)
- * So consumer_pe is never re-entered. */
+/* Progress the control and consumer PEs during send retry loops. */
 static inline void progress_all_pes(struct objects *objs) {
     doca_pe_progress(objs->pe);
     if (objs->consumer_pe)

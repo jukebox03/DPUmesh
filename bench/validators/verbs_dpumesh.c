@@ -1,42 +1,9 @@
-/*
- * verbs_dpumesh.c — CONCURRENCY-DEPTH validator.
+/* Self-routing concurrency-depth validator.
  *
- * Same PROOF as loopback_dpumesh.c (self-routing / oriented-tuple demux on ONE pod
- * that is both client and server of its own service), but parameterized on the two
- * knobs loopback holds at 1: WINDOW (concurrent conns) and PIPELINE (outstanding
- * requests per conn). That is its whole reason to exist beside loopback — it drives
- * the completion path at depth, where loopback drives it one-at-a-time. It is what
- * caught the ready-list lost-edge race.
- *
- * Byte-exact like loopback: each request carries a per-(conn,req) marker at 3
- * sentinel offsets; the echo is verbatim so the reply must reproduce them (a
- * misroute / truncation / reorder is caught). Replies on one conn are FIFO (a conn is
- * STICKY to its first backend for life -> RC-like ordered), so outstanding requests
- * are validated oldest-first.
- *
- * ONE THREAD, ONE CQ: a CQ is single-consumer, and this validator puts both roles on
- * one of them (several CQs would need several threads — not what this proves). So the
- * loop's poll_cq delivers BOTH:
- *   - the loop's OWN client replies  (DMESH_WC_RECV on a CLIENT conn), and
- *   - the loopback requests the DPU routed back to us (CONN_REQ + RECV on a SERVER
- *     conn) which we echo verbatim.
- * role is read off the completion's conn (dmesh_qp_t::role): CLIENT reply vs
- * SERVER request. Entirely event-driven.
- *
- * Control-TCP daemon exactly like loopback_dpumesh.c:
- *   `RUN <N> <SIZE> [ZC] [WINDOW] [PIPELINE]`  -> `OK <ok> <fail> <served> <p50us>`
- *     N        total client round-trips to complete
- *     SIZE     request == reply bytes (1..msg_max; one whole RECV per message)
- *     ZC       1 = fill the dmesh_alloc buffer in place; 0 = memcpy a staging
- *              buffer into it (default 0). (send is alloc-based either way.)
- *     WINDOW   concurrent CLIENT conns (default 1 = pure loopback)
- *     PIPELINE outstanding requests per conn before reading replies (default 1);
- *              >1 stresses SERVER_PENDING coalescing + the poll_cq partial-drain
- *              cursor (esp. with a small DMESH_CQ_BATCH).
- *
- * env: BENCH_WORKER_ID (own service id, default 17), DMESH_CQ_BATCH (poll_cq batch
- *      size, default 16 — set 1 to hammer the partial-drain cursor).
- */
+ * One thread and CQ drive client and echo roles. Byte markers detect truncation,
+ * misrouting, and reordering across configurable connection and pipeline depth.
+ * Command: RUN <count> <size> [zero-copy] [window] [pipeline].
+ * DMESH_CQ_BATCH controls completion batch size. */
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -54,9 +21,7 @@
 
 #include <dpumesh/dmesh.h>
 
-/* Best-effort control-socket reply. Every caller is already returning, and a failed
- * write only means the driver hung up first — there is nothing to recover. Wrapping it
- * states that, instead of leaving 4 unchecked write()s for -Wunused-result to flag. */
+/* Send a best-effort control reply; failures are ignored. */
 static void ctl_reply(int fd, const char *s, size_t n) { (void)!write(fd, s, n); }
 
 
@@ -142,14 +107,8 @@ static int post_request(dmesh_qp_t *c) {
 
 /* ---- server side: echo every looped-back request verbatim ---- */
 
-/* Per-server-conn echo backlog (dmesh_qp_t::user_data). Empty in steady state — a
- * request goes straight from the RX mmap into the TX ring. It only fills when
- * dmesh_alloc reports EAGAIN (the conn's SQ is at its in-flight ceiling). DROPPING an
- * echo is not an option: it costs the client a reply, which its byte-exact check
- * reports as a real FAIL — so the body is parked here, in arrival order (replies on a
- * pinned conn are validated FIFO), and a later sweep ships it. The bytes are COPIED
- * out because the RX credit must be released promptly: holding RX credits while
- * waiting for TX credits deadlocks the two against each other. */
+/* Per-server-connection FIFO for echoes waiting on TX capacity. Bodies are copied
+ * so RX credits can be released while the queue waits. */
 typedef struct { uint8_t *b; uint32_t len; } smsg_t;
 typedef struct { smsg_t *q; int cap, head, cnt, dead; } sstate_t;
 

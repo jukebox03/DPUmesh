@@ -1,29 +1,8 @@
-/*
- * echo_dpumesh.c — Greeter SERVER for the DPUmesh RPC benchmark (echo-dpumesh pod).
+/* Event-driven native DPUmesh Greeter server.
  *
- * A Greeter that answers SayHello(request) with a fixed-size reply. It is NOT a
- * symmetric echo — the reply size is chosen by the client (default 8 B),
- * independent of the request size. This asymmetry (big request, tiny reply) is
- * what makes the bandwidth benchmark measure request-side goodput.
- *
- * Over the DPUmesh native API (dmesh.h) each request is a framed message
- * (bench.h): [u32 magic|u32 seq|u32 req_len|u32 reply_size] + req_len bytes.
- * A per-connection reframer reassembles a whole request — even a >8 KB request
- * the transport delivered as several <=8 KB RECV completions — and only THEN
- * emits the reply frame [u32 magic|u32 seq|u32 reply_size|u32 0] + reply_size
- * bytes, with the request's seq echoed so the client can correlate it.
- *
- * Event model: a one-fd epoll server over ONE CQ (dmesh_cq_fd), so the server runs
- * ONE event loop; the transport itself is offloaded to the DPU. Several CQs would
- * spread the accept queue across server threads, but that is not what this measures —
- * client-thread scaling (bench_dpumesh.c) is the axis under test.
- *
- * Backpressure: dmesh_alloc never blocks. EAGAIN leaves the reply at its exact FIFO
- * offset and automatically arms a one-shot TX_READY completion for that QP; the
- * event loop sleeps normally and retries only the named connection.
- *
- * env: BENCH_WORKER_ID (advertised service id, default 11).
- */
+ * One CQ and epoll loop reframe bench.h requests and return the requested reply
+ * size with the same sequence id. EAGAIN parks the reply until TX_READY names the
+ * connection. BENCH_WORKER_ID selects the advertised service. */
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -227,11 +206,7 @@ int main(void) {
             if (dmesh_flush(g_live[i]) != 0)
                 ((greeter_conn_t *)g_live[i]->user_data)->dead = 1;
 
-        /* Report every 200k. A modulo test cannot do this: g_served advances a FEW per
-         * loop pass, so `(g_served % 200000) < 64` (the old test, widened to survive a
-         * batch stepping over the exact multiple) stays true for ~64 consecutive passes
-         * and prints ~64 times per milestone — spam that buried the DEAD lines above.
-         * A milestone cursor fires exactly once, whatever the step size. */
+        /* Report each 200k milestone once. */
         if (g_served - g_reported >= 200000) {
             g_reported = g_served;
             fprintf(stderr, "[greeter] served=%ld\n", g_served);

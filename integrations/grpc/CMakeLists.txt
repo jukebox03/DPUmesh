@@ -23,6 +23,16 @@ if(DPUMESH_GRPC_ENABLE_SANITIZERS AND DPUMESH_GRPC_ENABLE_TSAN)
   message(FATAL_ERROR
     "ASan/UBSan and ThreadSanitizer must use separate build configurations")
 endif()
+if(DPUMESH_GRPC_ENABLE_TSAN AND NOT DPUMESH_GRPC_SOURCE_DIR)
+  message(FATAL_ERROR
+    "ThreadSanitizer requires DPUMESH_GRPC_SOURCE_DIR so gRPC is instrumented")
+endif()
+
+# Instrument the full source build with ThreadSanitizer.
+if(DPUMESH_GRPC_ENABLE_TSAN)
+  add_compile_options(-fsanitize=thread -fno-omit-frame-pointer)
+  add_link_options(-fsanitize=thread)
+endif()
 
 if(DPUMESH_GRPC_SOURCE_DIR)
   if(NOT EXISTS "${DPUMESH_GRPC_SOURCE_DIR}/include/grpc/event_engine/event_engine.h")

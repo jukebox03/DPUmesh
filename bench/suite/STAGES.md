@@ -1,7 +1,7 @@
 # DPUmesh Evaluation Coverage
 
-This document is an index of what the repository's evaluation has and has not
-measured as of 2026-07-20. It does not convert an unmeasured configuration into a
+This document indexes what the repository's evaluation has and has not measured.
+It does not convert an unmeasured configuration into a
 performance claim.
 
 ## Transport matrix
@@ -12,8 +12,8 @@ performance claim.
 | TCP through Envoy `tcp_proxy` | Yes | Yes | Same POSIX frame workload |
 | Native DPUmesh | Yes | Yes | Matched request/reply workload |
 | DPUmesh preload | Yes | Matched-C diagnostic/performance path; no headline claim yet | Same POSIX binary |
-| gRPC C++ over direct TCP | Yes | Current QPS campaign | `grpc.testing.BenchmarkService` unary |
-| gRPC C++ over DPUmesh | Yes | Current QPS campaign | Identical generated service and calls |
+| gRPC C++ over direct TCP | Yes | Harness available; no retained comparison result | `grpc.testing.BenchmarkService` unary |
+| gRPC C++ over DPUmesh | Yes | Harness available; no retained comparison result | Identical generated service and calls |
 | Envoy HTTP/2 gRPC proxy | No result | No result | Not represented in existing measurements |
 | gRPC Go over DPUmesh | No implementation | No result | Not represented in the working tree |
 
@@ -69,8 +69,8 @@ A performance point is retained only if:
 - DPA EUs are hardware execution resources and are not interchangeable with ARM
   process CPU percentages.
 - A single repetition is directional evidence, not a stable median.
-- ABI-2 native batching is mandatory; historical ABI-1 batching ablations must
-  not be regenerated or compared as if the removed switches still changed code.
+- ABI-2 native batching is mandatory; incompatible batching ablations are not
+  regenerated.
 - L4 Envoy `tcp_proxy` is a valid transport baseline but not a measurement of
   HTTP/2 routing, retries, telemetry, or policy cost.
 - The focused gRPC harness is compatible with the official service schema but is

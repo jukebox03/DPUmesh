@@ -1,7 +1,7 @@
 # DPUmesh Benchmark and Validation
 
 The benchmark tree contains the deploy harness, matched transport workloads,
-feature validators, and measured reports for the 2026-07-20 working tree.
+feature validators, and measured reports for the current working tree.
 Results are meaningful only when the compared paths use the same request/reply
 semantics, payloads, concurrency, warmup, duration, and CPU allocation.
 
@@ -48,7 +48,7 @@ it is a focused transport harness rather than the upstream multi-scenario
 
 ## 3. Reproducible deployment
 
-Create an uncommitted repository-root `.env` containing the machine-specific
+Create a repository-root `.env` excluded from version control with the machine-specific
 values described in [DEPLOY.md](report/DEPLOY.md). For a result comparable to the
 reported L4 `(4,4)` operating point, deploy with the DPU knobs explicit:
 
@@ -112,10 +112,9 @@ for Envoy, the sidecar shares the assigned pod budget. DPU CPU is measured
 separately and must not be hidden when comparing total CPU/request.
 
 Native ABI 2 commits a loop-pass burst, automatically submits complete transport
-units, and flushes the trailing partial once; the old `batch` control argument is
-accepted only for wire compatibility and is ignored. The
-ABI-1 four-way `SEND_MORE`/`reply_batch` ablation remains historical data and its
-scripts now refuse to emit mislabeled ABI-2 results.
+units, and flushes the trailing partial once. The `batch` control argument is
+accepted only for wire compatibility and is ignored. Unsupported batching
+ablation scripts exit without producing results.
 
 Here batching means adjacent posts share descriptor payloads in the polled DPA
 ring. It does not mean that a whole loop pass becomes one syscall or one control
@@ -128,16 +127,12 @@ CQ on wake. If a reply parks on `dmesh_alloc(EAGAIN)`, the core automatically ar
 that QP; `DMESH_WC_TX_READY` retries only the named reply. The server does not
 busy-poll, run a retry timer, or scan every pending QP.
 
-The controlled ABI-2 audit used one fixed DPU with four ingest shards, four
-egress workers, and two rings per pod, and changed only the host images. Against
-the old matched-batching path, current throughput was -1.91% at
-64 B and +2.79% at 8 KiB; against the old per-RPC default it was +38.16% and
-+51.33%. Full tables and the invalid configuration-mismatched first attempt are
-in [RESULT.md](RESULT.md#session-7--abi-2-automatic-batching-performance-audit-2026-07-20).
+The controlled ABI-2 audit and its complete tables are recorded in
+[RESULT.md](RESULT.md#session-7--abi-2-automatic-batching-performance-audit).
 
 ## 5. gRPC QPS measurements
 
-Build a Release binary against the pinned gRPC checkout:
+Build a Release binary against the pinned gRPC source tree:
 
 ```sh
 cmake -S integrations/grpc -B build/grpc-release \
@@ -189,16 +184,15 @@ test, native symbol linkage, and an optional BlueField client/server smoke binar
 
 ## 7. Measurement rules
 
-1. Record the exact git commit plus whether the working tree is dirty.
-2. Use a Release build for performance and sanitizer builds for correctness.
-3. Verify zero RPC/request failures before accepting throughput or latency.
-4. Separate warmup from measurement and use at least three repetitions for a
+1. Use a Release build for performance and sanitizer builds for correctness.
+2. Verify zero RPC/request failures before accepting throughput or latency.
+3. Separate warmup from measurement and use at least three repetitions for a
    reported median when the environment permits.
-5. Report p50 and tail latency with QPS; a saturated point can improve QPS while
+4. Report p50 and tail latency with QPS; a saturated point can improve QPS while
    invalidating latency comparison.
-6. Capture host application CPU, Envoy CPU when present, DPU ARM CPU, and active
+5. Capture host application CPU, Envoy CPU when present, DPU ARM CPU, and active
    DPA configuration. Host-only CPU is not total system cost.
-7. Compare only matched semantics. The current gRPC comparison is DPUmesh versus
+6. Compare only matched semantics. The current gRPC comparison is DPUmesh versus
    direct TCP, not DPUmesh versus Envoy HTTP connection management.
 
 The frozen ABI-1 campaign is in [REPORT.md](report/REPORT.md). New engineering

@@ -1,82 +1,39 @@
 #ifndef DMESH_COMMON_H
 #define DMESH_COMMON_H
 
-/* ====== DOCA / DPA capacity — single-sourced; the pod cap DERIVES from these ======
- * Concurrent-pod capacity is bound by forward-ring capacity: ring j of pod p lands on
- * EU (p*K + j) % N (dpa.c), so the busiest EU holds ceil(MAX_PODS*K / N) rings, which
- * must be <= MAX_DPA_RINGS. N (EU threads) is the driving knob — env DPUMESH_DPA_THREADS,
- * default DPA_THREADS_DEFAULT, clamped to MAX_DPA_EU; K is DPUMESH_RINGS_PER_POD, default
- * DPUMESH_RINGS_PER_POD_DEFAULT. A pod shards across at most min(K, N) EUs. */
+/* DPA capacity. Ring j of pod p maps to EU (p*K + j) % N. */
 #define MAX_DPA_EU          8   /* max DPA EU threads: array cap (dpa_threads[]) + the N clamp */
 #define MAX_DPA_RINGS       8   /* per-EU forward-ring capacity (rings[] per EU) */
-#define DPA_THREADS_DEFAULT 4   /* default N (measured config); env DPUMESH_DPA_THREADS overrides */
+#define DPA_THREADS_DEFAULT 4   /* default N; env DPUMESH_DPA_THREADS overrides */
 #define DPUMESH_RINGS_PER_POD_DEFAULT 2   /* default K; env DPUMESH_RINGS_PER_POD */
 #define MAX_EU_PER_POD      MAX_DPA_RINGS  /* per-pod ring array (a pod spans <= K <= this EUs) */
 
-/* MAX_PODS = the pods[] table size, sized for the MAX EU config (N = MAX_DPA_EU): one EU then
- * holds MAX_PODS*K / MAX_DPA_EU = MAX_DPA_RINGS rings. The LIVE cap is computed at runtime
- * = MAX_DPA_RINGS * num_dpa_threads / k_rings (comch_server.c pods_add_connection), so raising
- * N via DPUMESH_DPA_THREADS raises capacity with no recompile (default N=4 => live cap 16).
- * Beyond MAX_DPA_EU EUs (real node density) needs a bigger MAX_DPA_EU + MAX_DPA_RINGS (a
- * DPA-kernel change). Wire-safe to 127 (pod_id int8, _Static_assert in dpa_common.h); DPU
- * staging is allocated PER registration (setup_pod_dma), not preallocated ×MAX_PODS. Churn
- * (add/remove/reuse) is handled by comch_server.c within the cap. */
+/* pods[] capacity; the runtime cap is MAX_DPA_RINGS * N / K. */
 #define MAX_PODS   (MAX_DPA_RINGS * MAX_DPA_EU / DPUMESH_RINGS_PER_POD_DEFAULT)  /* 8*8/2 = 32 */
 
-/* pod_id is int8 on the wire (valid ids [0,127]); this sizes the pod_id->slot
- * map to cover that id space. Always >= MAX_PODS. Widen together with the int8
- * wire fields if pod_id ever needs to exceed 127. */
+/* Complete nonnegative int8 pod-id space. */
 #define POD_ID_SPACE        128
 
-/* DPU-side DMA staging buffer per pod: the forward host→DPU hop, from which the
- * ARM SG-DMA egress reads bodies in place. MUST equal DPUMESH_NUM_SLOTS_DEFAULT ×
- * DPUMESH_SLOT_SIZE_DEFAULT — each conn's staging MIRRORS its host TX byte-ring
- * offset-for-offset (moff = desc->addr - host_addr), so staging occupancy is
- * bounded by the source's own host TX buffer and never overflows. */
+/* Per-pod DPU staging mirrors host TX byte offsets. */
 #define DPU_BUFFER_SIZE     (32 * 1024 * 1024)  /* 32MB = 4096 × 8KB */
 #define DPUMESH_SLOT_SIZE   8192               /* matches DPUMESH_SLOT_SIZE_DEFAULT */
-/* DMA descriptor ring depth (host→DPU forward). Mirrored from ring.h so
- * the DPA kernel — which can't include ring.h — knows the ring length.
- * Host's setup_dma_ring allocates this many slots PLUS 1 extra for the
- * credit counter at index DMA_RING_SIZE. */
+/* Forward descriptor count; the credit counter occupies the next slot. */
 #define DMA_RING_SIZE       4096
 
-/* ====== Endpoint addressing — oriented-tuple model ======
- * A message carries src=(pod,port[,service]) and dst=(service,pod,port). MODEL B
- * (the DPU owns every connection): a CLIENT always sends dst_pod=BLANK and the DPU
- * resolves dst_service -> a backend pod (dpu_route_l4 -> lb_pick: ROUND-ROBIN over the
- * service's live backend set, which is DERIVED on demand by scanning pods[] — there is
- * no service->backend table), owning the upstream. HOW OFTEN it picks follows the
- * service's codec: a codec'd service (_FRAME_SVC/_L7_SVC) knows message boundaries and
- * picks PER MESSAGE; a passthru service is an opaque byte stream, so it cannot split and
- * pins the conn to its first pick. The L7 hook (dpu_l7.c::dmesh_l7_route) may override
- * the pick. A backend REPLY carries a concrete dst_pod -> delivered direct, no re-routing.
- *   service_id : own int8 space [0,127]   (declared by the host at register)
- *   pod_id     : own int8 space [0,127]   (ASSIGNED BY THE DPU at register)
- * service_id and pod_id are SEPARATE fields (not a shared/partitioned namespace). */
+/* Endpoint tuples carry separate service-id and pod-id fields. Clients use a
+ * blank destination pod for DPU resolution; replies name a concrete pod. */
 #define DMESH_POD_BLANK     (-1)   /* dst_pod == -1 -> DPU must resolve dst_service */
 #define DMESH_PORT_BLANK     0     /* dst_port == 0 -> service listener / accept queue */
 #define DMESH_SVC_NONE      (-1)   /* no service id */
 
-/* Model B (the DPU owns every connection): DPU-assigned upstream connection ids
- * live in [DMESH_UPORT_BASE, 65535]; host client conns use [1, DMESH_UPORT_BASE).
- * The split lets a host that is BOTH client and backend (loopback) keep both
- * kinds of conn in its one ports[] table with no number collision. Shared by the
- * host (dmesh.h / dmesh_core.c) and the DPU (object.h / dpu_worker.c). */
+/* DPU upstream ids occupy the upper half of the port space. */
 #define DMESH_UPORT_BASE    32768
 
-/* ====== Connection roles ======
- * A conn's orientation, which decides how its outbound tuple is stamped: a CLIENT
- * always ships dst_pod=BLANK (the DPU resolves dst_service per message); a SERVER
- * ships to the peer it learned at accept. CLIENT/SERVER are app-visible (dmesh.h
- * exposes conn->role); FREE/SERVER_PENDING are host-internal port-slot states. */
+/* Connection roles. FREE and SERVER_PENDING are internal slot states. */
 #define DMESH_ROLE_FREE          0
 #define DMESH_ROLE_CLIENT        1
 #define DMESH_ROLE_SERVER        2
-/* Model B: a new server conn the PE created at message-1 delivery but the app has
- * not accepted yet. Inbound coalesces to its inbox (so pipelined messages 2..P
- * don't re-hit the accept queue); next_ready skips it; the accept path promotes it
- * to DMESH_ROLE_SERVER. */
+/* Unaccepted server connection with an active inbox. */
 #define DMESH_ROLE_SERVER_PENDING 3
 
 #endif /* DMESH_COMMON_H */

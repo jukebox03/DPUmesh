@@ -1,12 +1,4 @@
-/*
- * dmesh_core.c - DPUmesh DOCA transport layer implementation (raw core engine)
- *
- * NVIDIA DOCA (Comch + DMA) host-side backend for the DPUmesh transport.
- * Provides the host-side raw buffer API declared in dmesh_core.h: TX/RX
- * slot pools, descriptor SQ enqueue/dequeue, and a connection-oriented
- * port table (no request/response matching) over the DPU control + DMA
- * data path.
- */
+/* Host DOCA transport engine for control, DMA data, connections, and buffers. */
 
 #include "dmesh_core.h"
 
@@ -54,22 +46,10 @@ static void cleanup_ctx(struct dpumesh_ctx *ctx);
  * concurrent new-conn bursts so the PE thread never has to drop on enqueue. */
 #define RX_QUEUE_SIZE 65536
 
-/* Per-conn TX send-unit FIFO depth: the max number of shipped-but-un-ACKed
- * descriptors a single connection may keep outstanding. Each shipped descriptor
- * records (seq -> end cursor) in su_seq/su_end[i]; a BATCH_FWD_ACK(port,seq) pops
- * the FIFO front and advances the conn's free cursor. Power of two (masked).
- *
- * ENFORCED by the configuration-time block-window clamp. flush coalesces adjacent
- * committed bytes into slot-sized units, and maxb*ceil(block/slot) never exceeds
- * this FIFO. Overrunning it would overwrite a live entry and reclaim bytes early. */
+/* Per-connection power-of-two FIFO for sent, unacknowledged transport units. */
 #define TX_SU_DEPTH 64u
 
-/* ELASTIC per-conn TX buffer (block chain). The shared TX mmap is carved into
- * fixed BLOCKS of DPUMESH_TX_BLOCK bytes (= the max contiguous message = the
- * allocation unit). A conn grabs blocks on demand (grow, up to DPUMESH_TX_MAXB)
- * and returns drained ones — keeping a cushion of DPUMESH_TX_H recycled blocks
- * for reuse (grow/shrink hysteresis) — so its footprint tracks in-flight demand
- * instead of a fixed region. DMESH_TX_MAXB_CAP bounds the per-conn block arrays. */
+/* Per-connection TX block-chain defaults over the shared TX mapping. */
 #define DPUMESH_TX_BLOCK_DEFAULT  65536   /* 64 KB */
 #define DPUMESH_TX_MAXB_DEFAULT   4        /* max blocks/conn (4 × 64 KB = 256 KB in-flight cap) */
 #define DPUMESH_TX_H_DEFAULT      1        /* recycled-block cushion (hysteresis) */
@@ -87,25 +67,9 @@ enum dmesh_tx_wait_reason {
     DMESH_TX_WAIT_SHARED_POOL,
 };
 
-/* Connection table (connection-oriented, full-duplex — NOT request/response).
- * Index = local port [1,65535]; port 0 = BLANK (a fresh-connection message → the
- * accept queue). Each allocated port IS a connection (like a socket fd): it owns a
- * peer (pod,port), an inbound message queue, and an optional per-conn readiness
- * eventfd. The PE thread routes every inbound by dst_port → that conn's inbox and
- * wakes that conn's fd. There is NO request↔response matching: a conn just delivers
- * whatever arrives, in send order per conn, until close. Allocated from one
- * host-unique pool so client and server ports never collide (loopback-safe).
- * DMESH_PORT_SPACE lives in dmesh_core.h — struct dmesh_cq's ready ring is sized by it. */
-/* Per-conn inbound queue depth (descriptors only — bodies stay in the shared RX
- * mmap, referenced by pos). Lazily malloc'd per LIVE conn (not 65536× pre-alloc),
- * power of two. The DEPTH is sized at init (ctx->inbox_ring, copied into each slot's
- * psl->inbox_ring at malloc) to the DPU's per-region reverse-credit budget
- * rq = rq_depth/K = num_slots*slot_size/DPUMESH_SLOT_SIZE / K (comch_common.c). At
- * that depth the inbox CANNOT overflow before the DPU's own credit runs out — which
- * back-pressures cleanly — so the silent inbox-full drop in rx_deliver_desc is
- * unreachable in steady use. Below is the FLOOR (also the depth for tiny configs
- * where rq < 256). Prior builds hard-coded 256, which is 8× below the default
- * rq (=2048), so a hot conn could overflow it and lose messages silently. */
+/* Full-duplex connections are indexed by local port; port zero denotes an accept.
+ * Inbound descriptor queues are allocated per live connection and sized from the
+ * DPU reverse-credit budget. Bodies remain in the shared RX mapping. */
 #define DMESH_INBOX_RING_MIN  256u
 
 /* Starting width of the client-port window (dpumesh_alloc_port). Sets both the floor on
@@ -117,9 +81,7 @@ enum dmesh_tx_wait_reason {
  * cores under hw pinning / real deployments, and a producer store that lands on the same
  * 64B line as a consumer store ping-pongs the line on every message. So: owner-local +
  * read-mostly setup fields first; then a producer-write line; then the shared arm flag on
- * its own line (both sides write it, so it must not sit with either side's private line);
- * then a consumer-write line. Each _cl_* pad opens a fresh cache line. All fields are
- * preserved; only their placement changed (the struct is calloc'd and accessed by name). */
+ * its own line; then a consumer-write line. Each _cl_* pad opens a cache line. */
 struct dmesh_port_slot {
     uint8_t          role;            /* FREE / CLIENT / SERVER */
     int16_t          peer_pod;        /* established peer pod, DMESH_POD_BLANK = not yet learned */
@@ -136,24 +98,13 @@ struct dmesh_port_slot {
     sw_descriptor_t *inbox;           /* malloc'd ring[inbox_ring]; NULL until alloc */
     uint32_t         inbox_ring;      /* this inbox's depth (power of two = ctx->inbox_ring),
                                        * stamped at malloc so inbox_push/pop stay self-contained */
-    /* Per-conn TX BYTE-RING over an ELASTIC CHAIN of blocks from the shared pool.
-     * FOUR monotonic LOGICAL byte cursors span the chain (byte offset in the chain =
-     * cursor; logical block index k = cursor / block_size; offset-in-block = cursor %
-     * block_size; physical block = pblk[k % maxb]):
+    /* Per-connection TX byte-ring over shared-pool blocks:
      *   tx_w  alloc/write head — where the next message body is written / alloc'd (owner)
      *   tx_c  commit           — bytes finalized as whole messages, ready to ship (owner)
      *   tx_s  send             — bytes a descriptor was posted for (owner, at flush)
      *   tx_f  free             — bytes ACKed by the DPU, reclaimable (PE thread, atomic)
-     * Invariant tx_f <= tx_s <= tx_c <= tx_w. A message never straddles a block (≤
-     * block_size; padded to the next block if it won't fit) so each is CONTIGUOUS in
-     * one physical block. blk_used[k%maxb] = committed content end offset in block k
-     * (send skips the pad). Blocks are grabbed on demand (grow, up to maxb) and drained
-     * blocks recycled via recyc[] (depth ≤ cushion_h) then returned to the pool (shrink);
-     * nblk_owned = pblk-live + recyc count (≤ maxb, >0 == holds buffer / draining).
-     * tail_blk = oldest live logical block index. su_seq/su_end = per-conn send-unit FIFO
-     * (lazily malloc'd, kept per slot) mapping shipped seq -> end cursor for ACK reclaim.
-     * The whole block chain is OWNER-thread-local while live; the PE only advances tx_f
-     * (atomic). On close (role=FREE) the PE returns the remaining blocks (try_return_blocks). */
+     * Invariant: tx_f <= tx_s <= tx_c <= tx_w. Messages remain within one block.
+     * The owner manages live blocks; the PE advances atomic tx_f on ACK. */
     uint64_t         tx_w, tx_c, tx_s;      /* owner-thread logical cursors */
     uint32_t         resv_len;              /* live reserve length (owner); 0 = none */
     uint64_t         resv_moff;             /* exact TX-mmap offset returned to the caller */
@@ -186,16 +137,8 @@ struct dmesh_port_slot {
     atomic_uint_fast16_t su_tail;           /* send-unit FIFO tail (PE writes/release, owner reads) */
 
     /* ---- shared ARM flag on its own line (both threads write it) ---- */
-    /* Ready-list ARM flag (0=not on ready list & not being serviced; 1=on the list
-     * OR a consumer is draining it). The PE arms it 0->1 (and ready_pushes) after a
-     * push; the consumer disarms it 1->0 when conn_recv drains the inbox empty, then
-     * re-checks under a seq_cst fence. This replaces the racy "arm on the inbox
-     * empty->non-empty edge" test: that read a head the consumer concurrently
-     * advanced, so a push landing exactly as the consumer stopped draining could be
-     * enqueued but never put on the ready list — stranding the conn forever (a
-     * lost-edge / Dekker race). The flag + paired fences close it and also bound the
-     * conn to at most ONE ready-list entry per drain cycle (no duplicate churn). Its
-     * own line so an arm/disarm never dirties either side's private cursor line. */
+    /* Ready-list ownership flag. The PE arms after a push; the consumer disarms
+     * after draining and rechecks with paired sequentially consistent fences. */
     char _cl_arm[64];
     atomic_uint_fast32_t on_ready;    /* PE arms; consumer (conn_recv) disarms */
 
@@ -242,7 +185,7 @@ struct dpumesh_ctx {
     int  pod_id;             /* this node's address; -1 until the DPU assigns it at register */
     int  num_slots;
     int  slot_size;
-    int  k_rings;              /* K = forward rings per pod (EU-sharding); 1 = legacy */
+    int  k_rings;              /* K = forward rings per pod; 1 selects one ring */
     int  inbox_ring;           /* per-conn inbound descriptor ring depth (pow2), sized to the
                                 * DPU per-region reverse-credit budget so the inbox-full drop
                                 * (rx_deliver_desc) is unreachable in steady use. */
@@ -252,7 +195,7 @@ struct dpumesh_ctx {
     /* K forward descriptor rings (EU-sharding). dpumesh_enqueue conn-shards
      * across them (ring = src_port % K). Posting is LOCK-FREE MPSC — a Vyukov
      * bounded queue lives in each ring (enq_pos ticket + per-slot seq[]); no
-     * per-ring mutex. K=1 = legacy. */
+     * per-ring mutex. K=1 uses one ring. */
     struct dma_ring *dma_rings[MAX_EU_PER_POD];
     /* Reverse credit region size = rx_dma_buf_size / k_rings. The DPA reports an
      * absolute landing pos; ring_idx = pos / rx_region_size selects which ring's
@@ -268,15 +211,8 @@ struct dpumesh_ctx {
     /* Persistent buffer for initial registration to avoid stack UAF */
     struct dmesh_register_msg reg_msg;
 
-    /* TX buffer management — ELASTIC per-conn block chains over a SHARED lock-free
-     * block pool. The shared TX mmap (num_slots * slot_size = DPU_BUFFER_SIZE bytes) is
-     * carved into n_blocks blocks of block_size bytes. A conn grabs blocks on demand
-     * (grow, up to maxb) and returns drained ones (keeping a cushion of cushion_h for
-     * reuse — grow/shrink hysteresis), so per-conn footprint tracks in-flight demand
-     * instead of a fixed region. block_size = the max contiguous message. The pool is a
-     * lock-free Treiber free-list of block ids (block_free = tag<<32 | head; head ==
-     * n_blocks == empty; block_next[] links). The per-conn block chain + send-unit FIFO
-     * live in each dmesh_port_slot and are OWNER-thread-local while the conn is live. */
+    /* Per-connection TX block chains draw from a shared Treiber free list. Live
+     * chains and send-unit FIFOs are owner-thread-local. */
     int   block_size;          /* bytes per block (= max contiguous message = alloc unit) */
     int   n_blocks;            /* number of blocks = num_slots*slot_size / block_size */
     int   maxb;                /* max blocks a conn may own (per-conn in-flight cap) */
@@ -300,9 +236,8 @@ struct dpumesh_ctx {
     atomic_ullong st_recycle_hits;  /* grow served from the conn's recyc[] (no pool op) */
     atomic_ullong st_grow_waits;    /* backoff sleeps in reserve (window full / pool empty) */
     atomic_ullong st_block_pads;    /* message didn't fit the block tail → pad + next block */
-    /* RX-side drop counters (observability). Logged at teardown. inbox_drops should stay 0
-     * now the inbox is sized to the reverse-credit budget (see DMESH_INBOX_RING_MIN);
-     * a non-zero value means a conn overflowed anyway (slow drain past the credit budget). */
+    /* RX drop counters. inbox_drops should remain zero with the configured
+     * reverse-credit budget. */
     atomic_ullong st_rx_inbox_drops;   /* established/pending conn inbox full → message dropped */
     atomic_ullong st_rx_accept_drops;  /* accept queue full → NEW conn dropped */
 
@@ -363,12 +298,7 @@ static void *pe_progress_fn(void *arg) {
     dpumesh_ctx_t *ctx = (dpumesh_ctx_t *)arg;
     struct doca_pe *pe = ctx->doca_objs.pe;
 
-    /* Sleep on the PE notification fd instead of spinning (baked ON). The host
-     * comch PE receives ONLY real completions (REV_DONE / TX_ACK from the DPU),
-     * each of which raises the notification fd — there is NO silent-wakeup path
-     * here (unlike the DPU forward ring), so epoll is safe and cuts this thread's
-     * idle CPU to ~0 (p99 tail win). If the epoll setup below fails it falls back
-     * to the adaptive-spin loop. */
+    /* Use PE notifications when available; otherwise use adaptive polling. */
     int want_epoll = 1;
 
     doca_notification_handle_t pfd = 0;
@@ -404,7 +334,7 @@ static void *pe_progress_fn(void *arg) {
         return NULL;
     }
 
-    /* ===== Fallback: adaptive spin + nanosleep (baked default) ===== */
+    /* Adaptive polling fallback. */
     uint32_t idle = 0;
     while (ctx->pe_running) {
         uint8_t did = 0;
@@ -468,17 +398,8 @@ static inline int rxq_try_pop(dpumesh_ctx_t *ctx, sw_descriptor_t *out)
     }
 }
 
-/* Wake the thread blocked in a vanilla epoll_wait() on ONE CQ's readiness fd.
- * Per-delivery write (no coalescing) → cannot lose a wakeup; the eventfd is a plain
- * counter, drained by one read() per epoll wakeup. Safe to call from the PE thread.
- *
- * Gated on wants_notify: a CQ whose fd was never handed out (dmesh_cq_fd) has no thread
- * asleep on it, so the write() would only burn a syscall (and, under fair pinning, the
- * app's own core — the PE thread is a sibling of the app thread). The ready list is
- * armed regardless (arm_ready_after_push), so gating drops ONLY the redundant wakeup:
- * a poller still sees the conn. The acquire load pairs with the release store +
- * self-kick in dmesh_cq_fd so a caller that starts polling and only later sleeps on the
- * fd cannot miss an already-armed conn. */
+/* Wake the CQ eventfd consumer when notifications are enabled. Poll-only CQs use
+ * the ready list without eventfd writes. */
 static inline void cq_notify(struct dmesh_cq *cq)
 {
     if (cq->notify_efd >= 0 &&
@@ -689,31 +610,16 @@ static void tx_wait_arm(dpumesh_ctx_t *ctx, struct dmesh_port_slot *psl,
     }
 }
 
-/* Deliver one inbound descriptor (model B — the DPU owns every connection).
- * Demux purely by the local dst_port (like a TCP demux resolving to a socket):
- *   - a LIVE conn      → its inbound SPSC ring + the READY LIST + channel fd. This
- *                        covers a client's reply on its own port (dst_port < BASE)
- *                        AND an established server conn on its DPU-assigned uP.
- *   - FREE + uP (>=BASE)→ a NEW server conn (the DPU created an upstream to me) →
- *                        accept queue; dmesh_accept binds port = dst_port = uP.
- *   - FREE + low port  → stale (conn closed) → reclaim the landing credit.
- * dst_port==BLANK never reaches a host: a client addresses a service and the DPU
- * always resolves to a concrete port before delivering. Bodies stay in the shared
- * RX mmap (pos); only the descriptor is queued. */
+/* Demultiplex an inbound descriptor by local destination port. Live connections
+ * receive it, free upstream ports enter the accept queue, and stale low ports
+ * return the landing credit. Bodies remain in the shared RX mapping. */
 /* Per-conn TX region lifecycle + FIFO reclaim (defined with the TX functions below).
  * port_reset_tx is used by the PE (SERVER_PENDING) above its definition. */
 static void port_reset_tx(struct dmesh_port_slot *psl);
 static inline void tx_reclaim_ack(dpumesh_ctx_t *ctx, uint16_t port, uint16_t seq);
 
-/* Ready-list arming (producer side, PE thread). Call AFTER a successful inbox_push
- * on a NON-pending conn: if the conn wasn't already armed/being-serviced, put it on
- * ITS CQ's ready list and wake THAT CQ. The seq_cst fence orders the inbox tail-store
- * (in inbox_push) before the on_ready load, pairing with the fence in
- * dpumesh_conn_recv so a push can never be lost off the ready list (Dekker). Skips
- * SERVER_PENDING (re-read here since a concurrent dmesh_accept may have promoted the
- * slot after the caller's role load) — a pending conn is drained by dmesh_accept —
- * and a conn whose CQ binding is gone (freed slot). Arming is unconditional
- * otherwise: readiness is live from dmesh_create_cq, never gated on dmesh_cq_fd. */
+/* Arm a connection on its CQ ready list after inbox publication. The fence pairs
+ * with the receive-side fence to preserve an empty-to-ready transition. */
 static inline void arm_ready_after_push(struct dmesh_port_slot *psl, uint16_t dport) {
     if (__atomic_load_n(&psl->role, __ATOMIC_ACQUIRE) == DMESH_ROLE_SERVER_PENDING) return;
     struct dmesh_cq *cq = __atomic_load_n(&psl->cq, __ATOMIC_ACQUIRE);
@@ -754,7 +660,7 @@ static void rx_deliver_desc(dpumesh_ctx_t *ctx, const sw_descriptor_t *desc, int
     }
 
     /* (2) FREE + dst_port is a DPU-assigned upstream id → a NEW server conn. Create
-     * a PENDING port slot NOW (so further messages for this uP coalesce into its
+     * a PENDING port slot immediately so further messages for this uP coalesce into its
      * inbox), then push message 1 to the accept queue so dmesh_accept returns it
      * first. dst_port==BLANK never reaches a host (the DPU always resolves). */
     if (dport >= DMESH_UPORT_BASE) {
@@ -862,10 +768,7 @@ static int process_rx_dma_entry(dpumesh_ctx_t *ctx, const struct dmesh_rev_done_
 
 static void rx_data_hook(void *hook_ctx, const uint8_t *data, uint32_t len) {
     dpumesh_ctx_t *ctx = (dpumesh_ctx_t *)hook_ctx;
-    /* Dispatch on the 1-byte type at offset 0. The only DPU->Host messages this
-     * hook receives are BATCH_FWD_ACK and BATCH_REV_DONE (the non-batched FWD_ACK/
-     * REV_DONE types no longer exist); both carry a uint8_t type as their first
-     * field and values stay < 256, so a single byte read is sufficient. */
+    /* Dispatch BATCH_FWD_ACK and BATCH_REV_DONE by their first-byte type. */
     uint8_t mtype = data[0];
 
 
@@ -893,8 +796,7 @@ static void rx_data_hook(void *hook_ctx, const uint8_t *data, uint32_t len) {
 
 
     if (mtype == DMESH_MSG_BATCH_REV_DONE) {
-        /* Batched reverse-DMA notification: deliver each entry. One reaped comch
-         * msg → K deliveries, so the single PE thread reaps 1/K — the 2-pod lever. */
+        /* Deliver every entry in the reverse-DMA completion batch. */
         if (len < 4) {
             DOCA_LOG_ERR("BATCH_REV_DONE: too short (len=%u)", len);
             return;
@@ -920,8 +822,7 @@ static void rx_data_hook(void *hook_ctx, const uint8_t *data, uint32_t len) {
 static void init_config(dpumesh_ctx_t *ctx, const dpumesh_config_t *config, int service_id) {
     const char *env_val;
 
-    /* num_slots (32 MB / 8 KB = 4096) and slot_size (8 KB, the DPA dma_copy limit)
-     * are baked; a programmatic config override still wins. */
+    /* Programmatic values override the fixed slot-count and slot-size defaults. */
     ctx->num_slots = (config && config->num_slots > 0) ? config->num_slots
                                                        : DPUMESH_NUM_SLOTS_DEFAULT;
     ctx->slot_size = (config && config->slot_size > 0) ? config->slot_size
@@ -999,14 +900,8 @@ static void init_config(dpumesh_ctx_t *ctx, const dpumesh_config_t *config, int 
     if (hh > mb) hh = mb;                              /* cushion can't exceed the per-conn cap */
     ctx->cushion_h = hh;
 
-    /* This node's service id (what it advertises: the DPU stores it on our pod_state
-     * and DERIVES the service's backend set by scanning pods[] for it — there is no
-     * service->backend table). SVC_NONE = client-only. Comes SOLELY from the caller,
-     * which resolved it from $DPUMESH_SERVICE via the registry (dmesh_create_channel).
-     * The DPUMESH_SERVICE_ID int override was DELETED (NAMING.md §2): an int identity
-     * surviving next to a name is the two-sources-of-identity defect this removes.
-     * The pod_id (this node's address) is NO LONGER host-chosen — the DPU assigns it
-     * at registration (see init_control_path). It stays -1 until POD_ASSIGNED arrives. */
+    /* The registry resolves $DPUMESH_SERVICE to the advertised service id.
+     * SVC_NONE is client-only. The DPU assigns pod_id during registration. */
     ctx->service_id = service_id;
 
     ctx->pod_id = -1;   /* unassigned until the DPU replies */
@@ -1330,7 +1225,7 @@ int dpumesh_init(dpumesh_ctx_t **out, int service_id,
         goto fail;
     }
 
-    DOCA_LOG_INFO("DPUmesh DOCA initialized: worker=%s pod_id=%d inbox_ring=%d (rq/K, was 256)",
+    DOCA_LOG_INFO("DPUmesh DOCA initialized: worker=%s pod_id=%d inbox_ring=%d (rq/K)",
                   ctx->worker_id, ctx->pod_id, ctx->inbox_ring);
 
     *out = ctx;
@@ -1454,10 +1349,8 @@ static void cleanup_ctx(dpumesh_ctx_t *ctx) {
         }
     }
 
-    /* Destroy EVERY host mmap while the DOCA device is still open. The old path
-     * freed only RX and leaked K ring mmaps plus the TX mmap, leaving dev_close
-     * permanently IN_USE. destroy_mmap_and_free_buffer deliberately keeps memory
-     * allocated if DOCA refuses the mmap destroy, avoiding DMA into freed memory. */
+    /* Destroy host mmaps while the DOCA device remains open. Failed mmap
+     * destruction retains the backing memory. */
     if (ctx->rx_dma_mmap && ctx->rx_dma_buffer) {
         if (destroy_mmap_and_free_buffer(ctx->rx_dma_mmap,
                                          ctx->rx_dma_buffer) == DOCA_SUCCESS) {
@@ -1630,15 +1523,8 @@ static void try_return_blocks(dpumesh_ctx_t *ctx, struct dmesh_port_slot *psl) {
 
 /* ---- Per-conn TX BYTE-RING over the block chain: reserve → commit → send → (ACK) free ---- */
 
-/* Reserve `len` CONTIGUOUS bytes (ONE message, <= block_size) at this conn's write head,
- * returning a pointer into the shared TX mmap to fill (then dpumesh_tx_commit). A message
- * that would straddle the current block's end pads the tail and starts a fresh block, so
- * each message is contiguous in one physical block. Grabs a block on demand (GROW, up to
- * maxb) — reusing a recycled block first, else the shared pool.
- *
- * NEVER BLOCKS — the ibv_post_send contract. NULL + errno=EAGAIN when the conn's block
- * window is full (its own TX_ACKs will free one; retry later), NULL + errno=EINVAL for a
- * permanent argument/state error. Owner thread only. */
+/* Reserve one contiguous message in the connection's TX block chain. The owner
+ * thread receives EAGAIN for capacity pressure or EINVAL for invalid state. */
 uint8_t *dpumesh_tx_reserve(dpumesh_ctx_t *ctx, uint16_t port, uint32_t len) {
     if (port == 0 || port >= DMESH_PORT_SPACE) { errno = EINVAL; return NULL; }
     struct dmesh_port_slot *psl = &ctx->ports[port];
@@ -1746,11 +1632,7 @@ int dpumesh_tx_commit(dpumesh_ctx_t *ctx, uint16_t port,
     if (port == 0 || port >= DMESH_PORT_SPACE || buf == NULL) return -1;
     struct dmesh_port_slot *psl = &ctx->ports[port];
     if (psl->nblk_owned <= 0) return -1;
-    /* REJECT, never clamp. Clamping to resv_len looks defensive but is worse than the
-     * bug it hides: resv_len is the LAST reserve's length, so a commit with no live
-     * reserve (post without alloc, or a second post of one alloc) silently passed and
-     * shipped whatever bytes happened to sit at the write head — uninitialised ring
-     * memory, on the wire, with no error anywhere. */
+    /* Reject commits without an exact live reservation. */
     if (psl->resv_len == 0 || len == 0 || len > psl->resv_len ||
         buf != (const uint8_t *)ctx->dma_buffer + psl->resv_moff)
         return -1;
@@ -1779,14 +1661,8 @@ void dpumesh_tx_discard_unsent(dpumesh_ctx_t *ctx, uint16_t port) {
     psl->blk_used[k % (uint64_t)ctx->maxb] = (uint32_t)(psl->tx_s - k * bs);
 }
 
-/* Get the next descriptor to ship from [tx_s, tx_c): its byte offset in the shared mmap
- * (*out_moff) and length (*out_len, <= slot_size, never crossing a block boundary or a
- * pad). Skips a padded block tail transparently. 1 if one, 0 if nothing. Does NOT advance
- * tx_s (call dpumesh_tx_sent). Owner thread.
- *
- * INFALLIBLE on per-QP capacity: configuration bounds the complete admitted block
- * window by the send-unit FIFO, so every descriptor yielded here has metadata space.
- * Hence no second admission check or retry loop is needed. */
+/* Return the next committed descriptor without advancing tx_s. Padded block tails
+ * are skipped; dpumesh_tx_sent records successful submission. */
 int dpumesh_tx_next_send(dpumesh_ctx_t *ctx, uint16_t port, int flush_partial,
                          size_t *out_moff, uint32_t *out_len) {
     struct dmesh_port_slot *psl = &ctx->ports[port];
@@ -1808,8 +1684,7 @@ int dpumesh_tx_next_send(dpumesh_ctx_t *ctx, uint16_t port, int flush_partial,
          * of a sealed physical block is the one exception: reserve padded past it and
          * committed bytes in a later block, so this tail can never grow and must go
          * first to preserve the byte stream's order. In the common case only the one
-         * newest, still-fillable partial remains for an explicit flush (or future
-         * timer policy). */
+         * newest, still-fillable partial remains for an explicit flush. */
         if (!flush_partial && avail < (uint64_t)ctx->slot_size &&
             psl->tx_c <= content_end)
             return 0;
@@ -1834,17 +1709,8 @@ void dpumesh_tx_sent(dpumesh_ctx_t *ctx, uint16_t port, uint16_t seq, uint32_t l
     atomic_store_explicit(&psl->su_head, (uint_fast16_t)(h + 1), memory_order_release);
 }
 
-/* Reclaim on BATCH_FWD_ACK(port,seq): advance the free cursor tx_f past every send-unit
- * the ACK implies is done. The PE advances tx_f/su_tail ONLY; the block chain is
- * owner-managed while live, so this returns blocks only for a CLOSED conn.
- *
- * CUMULATIVE, not exact-front: forward completion is in-order per conn (its messages all
- * ride ONE forward ring, drained by one EU), so an ACK for `seq` means every earlier
- * still-outstanding unit also completed. We therefore pop every FIFO entry whose seq is
- * at-or-before `seq` within the ≤TX_SU_DEPTH outstanding window, not just an exact-front
- * match. This TOLERATES A DROPPED intermediate ACK (the DPU drops one on pending_txack
- * overflow) — the old exact-front match would then never advance and wedge the conn's TX
- * forever. A stale/duplicate ACK falls outside the window and pops nothing (no-op). */
+/* Apply a cumulative forward ACK by advancing tx_f through matching FIFO entries.
+ * Stale and duplicate acknowledgements reclaim nothing. */
 static inline void tx_reclaim_ack(dpumesh_ctx_t *ctx, uint16_t port, uint16_t seq) {
     if (port == 0 || port >= DMESH_PORT_SPACE) return;
     struct dmesh_port_slot *psl = &ctx->ports[port];
@@ -1892,13 +1758,9 @@ int dpumesh_enqueue(dpumesh_ctx_t *ctx, const sw_descriptor_t *desc) {
         return -1;
     }
 
-    /* Loopback (dst == self) is NOW supported: demux is by dst_port (client vs
-     * server socket), not by req_id origin, so a self-routed request and its reply
-     * are distinguished even on the same host. The DPU may also route a service to
-     * the sender's own pod. No reject here. */
+    /* Loopback is valid and is demultiplexed by dst_port. */
 
-    /* body_buf_slot now carries a BYTE OFFSET into the shared TX mmap (per-conn
-     * byte-ring), not a slot index. Bounds-check the offset + length. */
+    /* body_buf_slot is a byte offset in the shared TX mmap. */
     if (desc->body_buf_slot < 0 ||
         (size_t)desc->body_buf_slot + desc->body_len > (size_t)ctx->num_slots * ctx->slot_size) {
         DOCA_LOG_ERR("ENQUEUE rejected: byte offset=%d + len=%u out of TX buffer (%zu)",
@@ -1913,28 +1775,13 @@ int dpumesh_enqueue(dpumesh_ctx_t *ctx, const sw_descriptor_t *desc) {
         return -1;
     }
 
-    /* EU-sharding: round-robin this request across the K forward rings, so the
-     * pod's traffic spreads over K EUs. Each ring has its own lock (single-
-     * producer per ring). K=1 → always ring 0 (legacy single-ring path).
-     *
-     * Flow control: end-to-end via byte-ring admission only. dpumesh_tx_reserve
-     * has already back-pressured the writer on the conn's own un-ACKed bytes, and
-     * num_slots × slot_size = DPU_BUFFER_SIZE, so total in-flight bytes inside DPU's
-     * buffer can never exceed buffer size. DPU/DPA do no FC of their own. */
-    /* conn-sharding: a connection's messages ALL use one ring (hashed by the
-     * sender's local port), so they stay FIFO on one EU → per-conn send order is
-     * preserved; different conns spread across the K rings/EUs (throughput kept). */
+    /* Hash each connection to one forward ring, preserving its order while
+     * spreading connections across K EUs. TX byte-ring admission provides flow control. */
     int ridx = (int)((unsigned)desc->src_port % (unsigned)ctx->k_rings);
     struct dma_ring *ring = ctx->dma_rings[ridx];
 
-    /* Lock-free MPSC claim (Vyukov bounded queue) — replaces the per-ring mutex.
-     * enq_pos hands out a monotonic ticket t; the producer owns slot t%size for
-     * generation t. It may write when the cell is free for t: seq==t (first use /
-     * already reclaimed) OR the previous occupant (ticket t-size) has PUBLISHED
-     * (seq==t-size+1) AND the DPA has CONSUMED it (valid==0) → reclaim. A stalled
-     * producer leaves seq unadvanced, so a lapping producer WAITS here instead of
-     * overwriting the slot — generation-safe with just the `valid` flag, no lock,
-     * DPA untouched. A cell not yet free is real backpressure (capped backoff). */
+    /* Claim the connection ring with a bounded MPSC ticket. The slot sequence and
+     * valid flag prevent reuse before DPA consumption. */
     /* Fail fast on a ring already declared dead — do NOT burn a ticket on it. */
     if (__atomic_load_n(&ring->dead, __ATOMIC_ACQUIRE)) {
         DOCA_LOG_ERR("ENQUEUE rejected: DMA ring %d is dead (no DPA consumer)", ridx);
@@ -2019,10 +1866,7 @@ int dpumesh_enqueue(dpumesh_ctx_t *ctx, const sw_descriptor_t *desc) {
  * RX functions
  * ==================================================================== */
 
-/* Pop one NEW-connection descriptor off the Vyukov accept ring. Non-blocking: 0 +
- * *desc, or -1 when empty. Readiness comes from any CQ's fd (every CQ is notified —
- * the ring is SPMC), so there is no timeout/blocking form — the old one polled with a
- * nanosleep backoff and no caller ever passed a non-zero timeout. */
+/* Pop one connection descriptor from the SPMC accept ring. Returns -1 when empty. */
 int dpumesh_dequeue(dpumesh_ctx_t *ctx, sw_descriptor_t *desc) {
     return rxq_try_pop(ctx, desc) ? 0 : -1;
 }
@@ -2082,21 +1926,8 @@ const char *dpumesh_get_worker_id(dpumesh_ctx_t *ctx) {
  * the PE's ACQUIRE-load sees a fully-initialized slot. Returns 0 on exhaustion. */
 uint16_t dpumesh_alloc_port(dpumesh_ctx_t *ctx, int role, void *user, struct dmesh_cq *cq) {
     pthread_mutex_lock(&ctx->port_lock);
-    /* Model B: host CLIENT conns use [1, DMESH_UPORT_BASE); accepted SERVER conns get
-     * their port from the DPU-assigned upstream id via dpumesh_alloc_port_specific.
-     * Capping the sweep here keeps the two ranges disjoint so a loopback host never
-     * collides in its own ports[] table.
-     *
-     * The cursor sweeps a WINDOW of that range, widened only when concurrency needs it.
-     * A port's inbox is allocated on first use and then kept for the process's life — it
-     * cannot be freed, since the PE pushes into it WITHOUT port_lock (rx_deliver_desc),
-     * so freeing one would race a live delivery. A cursor sweeping all 32767 client ports
-     * therefore ends up allocating 32767 inboxes (~1.5 GB at the default depth) for a
-     * client that merely churns a few connections. The window caps that at port_span.
-     *
-     * Sweeping (rather than reusing the lowest free port) still matters: reusing a
-     * just-closed port invites a reply already in flight at FIN time to land on the NEW
-     * conn, so port numbers are aged out across the whole window. */
+    /* Client ports use a widening window below DMESH_UPORT_BASE. Inbox storage is
+     * retained per visited port, and cursor rotation delays port-number reuse. */
     for (;;) {
         uint32_t span = ctx->port_span;
         if (ctx->next_port == 0 || ctx->next_port >= span) ctx->next_port = 1;
@@ -2143,14 +1974,8 @@ uint16_t dpumesh_alloc_port(dpumesh_ctx_t *ctx, int role, void *user, struct dme
     return 0;
 }
 
-/* Promote a PE-created SERVER_PENDING slot to a live SERVER conn (model B accept):
- * attach the app's conn handle so dmesh_next_ready starts returning it, and bind the
- * conn to the CQ that accepted it — from here its ready-edges go to that CQ alone.
- * The PE already allocated the inbox + set the peer + published SERVER_PENDING
- * (message 1 rode the accept queue; any messages 2..P are already coalesced in the
- * inbox). The port_lock makes the pending->SERVER promote exactly-once, so when
- * several CQs accept concurrently only one binds the conn.
- * Returns `port` on success, 0 if the slot is not pending. */
+/* Promote a pending server port to the accepting CQ exactly once. Returns the port
+ * on success or zero when it is no longer pending. */
 uint16_t dpumesh_accept_port(dpumesh_ctx_t *ctx, uint16_t port, void *user, struct dmesh_cq *cq) {
     if (port == 0 || port >= DMESH_PORT_SPACE) return 0;
     struct dmesh_port_slot *psl = &ctx->ports[port];
@@ -2267,13 +2092,7 @@ void *dpumesh_next_tx_ready(struct dmesh_cq *cq) {
 
 
 /* ====================================================================
- * Connection lifecycle
- *
- * This section used to live in src/dmesh.c behind the name "socket façade".
- * It never was one: nothing below is socket- or verbs-specific — it is the
- * transport's own notion of a connection (create, address, learn a peer, emit a
- * descriptor, tear down). Both public surfaces (<dpumesh/dmesh.h> and the
- * LD_PRELOAD shim) call straight in here, and neither is built on the other.
+ * Connection lifecycle shared by the native and preload facades.
  * ==================================================================== */
 
 /* Return the held RX-landing credit and clear the inbound view. */
@@ -2351,14 +2170,8 @@ int dmesh_post_max(dmesh_channel_t *s) { return s->block_size; }
 
 /* ===== Completion queue ===== */
 
-/* Readiness is armed HERE, at creation — never lazily on the first dmesh_cq_fd. The
- * ready list is not an optional extra: it is how dmesh_poll_cq finds an ESTABLISHED
- * conn's inbound (a NEW conn's first message rides the separate accept queue, which is
- * why the failure mode was so asymmetric — connects worked, replies vanished). Arming
- * on first cq_fd meant a caller that only ever POLLS, and never sleeps on the fd,
- * silently received nothing on established conns. That is a footgun, not an
- * optimization: every client of this API polls. The eventfd is the idle-sleep path
- * only, so its creation failing is NOT fatal (notify_efd = -1 → poll still delivers). */
+/* Readiness is active at CQ creation. The eventfd is optional; polling remains
+ * available when eventfd creation fails. */
 dmesh_cq_t *dmesh_create_cq(dmesh_channel_t *ch) {
     if (!ch) { errno = EINVAL; return NULL; }
     dmesh_cq_t *cq = (dmesh_cq_t *)calloc(1, sizeof(*cq));
@@ -2435,9 +2248,7 @@ int dmesh_cq_fd(dmesh_cq_t *cq) {
 
 dmesh_qp_t *dmesh_accept(dmesh_cq_t *cq) {
     dmesh_channel_t *s = cq->ch;
-    /* Hold one spare before consuming the shared accept queue. An OOM after dequeue
-     * used to strand the already-created SERVER_PENDING port forever; retaining the
-     * spare also avoids an allocation/free pair on every empty poll. */
+    /* Reserve the QP object before consuming the shared accept queue. */
     if (!cq->accept_spare) {
         cq->accept_spare = (dmesh_qp_t *)calloc(1, sizeof(*cq->accept_spare));
         if (!cq->accept_spare) { errno = ENOMEM; return NULL; }
@@ -2494,10 +2305,7 @@ dmesh_qp_t *dmesh_qp_open(dmesh_cq_t *cq, int dst_service_id) {
     return c;
 }
 
-/* Public constructor (NAMING.md §4): resolve the k8s Service NAME to a service_id
- * at point of use, then open. Two lines, and the integer is never exposed. This
- * lives here (not dmesh_api.c, which is the verbs data path only) because the
- * public lifecycle already lives in this file, shared with the shim. */
+/* Resolve the Kubernetes Service name and open the public QP. */
 dmesh_qp_t *dmesh_create_qp(dmesh_cq_t *cq, const char *service_name) {
     if (!cq || !service_name) { errno = EINVAL; return NULL; }
     int svc = dmesh_resolve_name(service_name);

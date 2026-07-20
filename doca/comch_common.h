@@ -66,10 +66,7 @@ struct dmesh_batch_tx_ack_msg {
 _Static_assert(sizeof(struct dmesh_batch_tx_ack_msg) == 4 + 4 * BATCH_TXACK_MAX,
                "dmesh_batch_tx_ack_msg must pack tightly");
 
-/* DPU→Host: batched REV_DONE. Coalesces up to BATCH_REVDONE_MAX per-response
- * reverse-DMA completions into one comch message so the host PE thread reaps 1
- * message per K responses instead of K — the per-RTT PE reap is the 2-pod cap.
- * Each entry mirrors the comch_dma_comp_msg payload minus the type byte. */
+/* DPU→Host REV_DONE batch. Each entry omits the message type byte. */
 #define BATCH_REVDONE_MAX 16
 struct dmesh_rev_done_entry {
     int8_t   src_pod_id;   /* sender pod (the peer, for the receiving conn) */
@@ -116,7 +113,7 @@ typedef uint64_t doca_dpa_dev_comch_consumer_t;
  * free pod_id and return it in a DMESH_MSG_POD_ASSIGNED reply. */
 struct dmesh_register_msg {
     enum dmesh_msg_type type;   /* = DMESH_MSG_POD_REGISTER */
-    int32_t pod_id;             /* -1 → DPU assigns (the host no longer picks its address) */
+    int32_t pod_id;             /* -1 requests DPU assignment */
     int32_t service_id;         /* this node's service id; the DPU adds this pod to the
                                  * service's live backend set (an LB candidate for that
                                  * service). SVC_NONE = client-only, no service to advertise. */

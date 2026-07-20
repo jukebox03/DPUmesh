@@ -1,63 +1,5 @@
-/*
- * bench_dpumesh.c — RPC benchmark CLIENT for DPUmesh (bench-dpumesh pod).
- *
- * A closed-loop request/response load generator over the DPUmesh native API
- * (dmesh.h). It measures the standard RPC microbenchmark quantities:
- *
- *   - latency  : p50 / p95 / p99 / avg / min / max  (concurrency = 1 ping-pong)
- *   - bandwidth: goodput in Gb/s over the request bytes (large messages)
- *   - rate     : small-RPC rate in Mrps and its scaling with client threads
- *
- * Methodology:
- *   * CLOSED-LOOP, fixed concurrency window: each client thread keeps
- *     `concurrency` requests outstanding on ONE connection. There is NO target
- *     rate and NO pacing — offered load is whatever the closed loop sustains.
- *   * Greeter SayHello semantics: a `req_size`-byte request, a fixed small
- *     `reply_size`-byte reply (default 8). Bandwidth counts REQUEST bytes.
- *   * Warmup: the first `warmup` completions (default 1000) are excluded; the
- *     measurement window starts at the warmup boundary (`warmup_end`).
- *   * Multi-thread: `threads` client threads, each its own connection; the
- *     aggregate rate is the sum of per-thread rates, latency percentiles come
- *     from the merged histogram.
- *
- * DPUmesh mapping notes:
- *   * One dmesh connection per client thread. Replies are correlated BY SEQ, never by
- *     arrival order: whether they keep send order depends on the service's codec, which
- *     is DPU-side config, not something this client knows. `reorder` counts how many
- *     arrived out of order and `dist` tallies which backend served each — together they
- *     show the routing granularity:
- *       no codec (passthru) -> conn pinned to one backend -> reorder=0, dist on one pod
- *       codec (_L7_SVC/_FRAME_SVC) -> every message load-balanced -> reorder>0, dist spread
- *   * Requests/replies are framed (bench.h) so a >8 KB request that the transport
- *     auto-chunks across slots is reassembled by the server before it replies —
- *     so the measured latency includes the full request transfer.
- *   * ONE CQ PER THREAD (dmesh_create_cq), each with that thread's own conn on it.
- *     A CQ is single-consumer, so a thread polls only its own CQ, every completion
- *     it sees is its own, and threads share no RX state, no lock and no dispatch.
- *     Measured worth vs all threads on one CQ under a mutex: ~+5% Mrps and ~-17%
- *     p50 at 8 threads (32B/8B, conc=4/thread). NOT more: the DPU pipeline is the
- *     ceiling here, and one thread at conc=64 already saturates it — so the THREAD
- *     sweep only scales while per-thread concurrency stays well under that.
- *   * dmesh_alloc never blocks and caps at post_max, so a request frame is carved
- *     into <= post_max posts and an SQ-full frame parks and resumes on the next
- *     loop pass; the payload is constant filler written straight into the TX ring.
- *
- * Control protocol (TCP :9092, one line):
- *   RUN <req_size> <reply_size> <concurrency> <duration_s> <warmup> <threads> [reconn]
- *        -> OK mrps=.. gbps=.. p50=.. p95=.. p99=.. avg=.. min=.. max=..
- *              rcnt=.. fail=.. conc=.. threads=.. reqsz=.. repsz=.. durs=..
- *              reconns=.. reconn_us=.. grabs=.. rets=.. recyc=.. waits=.. pads=..
- *      (all latencies in microseconds; key=value fields)
- *      reconn: CONNECTION-CHURN mode — every `reconn` completions a thread drains
- *      its window to 0 outstanding, then dmesh_destroy_qp()+dmesh_create_qp()s a fresh
- *      conn (0 = never, default). reconns = total reconnects, reconn_us = mean
- *      wall cost of one close+connect+pin. grabs/rets/recyc/waits/pads = the
- *      elastic TX block-pool event deltas over the run (dmesh_tx_stats_t).
- *   PING -> PONG
- *
- * Addresses the backend by k8s Service NAME ("echo-dpumesh"), resolved through the
- * registry — no service id is typed here.
- */
+/* Closed-loop native RPC benchmark. Each thread owns one CQ and connection and
+ * reports throughput, latency, failures, ordering, routing, and TX-pool metrics. */
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -81,14 +23,8 @@
 #define REQ_FILL           42
 #define BENCH_MAX_BACKENDS 32         /* pod_id space we tally replies over (>= MAX_PODS) */
 #define MAX_STREAMS        32         /* inbound streams per conn == backends of the service */
-#define INFLIGHT_RING      1024       /* direct-map slots for outstanding requests, by seq.
-                                       * MUST exceed the concurrency window by a wide margin:
-                                       * replies complete OUT OF ORDER on a codec'd service, so
-                                       * the span from the oldest outstanding seq to the newest
-                                       * issued one is NOT bounded by the window — a lagging
-                                       * request holds its slot while newer ones cycle. Each
-                                       * slot stores its seq, so a collision is DETECTED (fail)
-                                       * rather than silently mis-timed. */
+#define INFLIGHT_RING      1024       /* seq-indexed outstanding requests; sized for
+                                       * out-of-order completion spans */
 
 static dmesh_channel_t *g_s           = NULL;   /* shared, thread-safe channel */
 static const char      *g_dst_service = "echo-dpumesh";  /* backend service NAME to address */
@@ -104,7 +40,7 @@ typedef struct {
     double       duration;     /* run length in seconds */
     double       start_at;     /* shared barrier: all threads begin at this time */
     long         reconn;       /* completions per conn before close+reconnect (0 = never) */
-    int          batch;        /* retained in the control/result layout for compatibility */
+    int          batch;        /* control/result layout field */
     atomic_int  *stop;         /* watchdog / abort flag */
 
     /* per-thread transport + pipeline state. ALL of it — issue side and reply side
@@ -364,7 +300,7 @@ static void run_bench(int conn_fd, int req_size, int reply_size, int concurrency
     if (warmup < 0) warmup = 0;
     if (reconn < 0) reconn = 0;
 
-    (void)batch; /* legacy control-field: batching is now the transport default */
+    (void)batch; /* wire-compatibility field; transport batching is automatic */
     fprintf(stderr, "[bench] RUN req=%d reply=%d conc=%d dur=%.1fs warmup=%ld threads=%d reconn=%ld batch=auto dst_svc=%s\n",
             req_size, reply_size, concurrency, duration, warmup, threads, reconn, g_dst_service);
 

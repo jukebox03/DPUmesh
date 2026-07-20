@@ -138,5 +138,4 @@ process probe fail; AddressSanitizer and the functional test suite still run.
 - [Performance report](bench/report/REPORT.md): frozen ABI-1 campaign and interpretation
 - [Engineering results](bench/RESULT.md): chronological experiments, including the ABI-2 A/B audit
 
-`bench/RESULT.md` is a chronological engineering log. It intentionally preserves
-historical implementation states and is not a current specification.
+`bench/RESULT.md` is an engineering experiment log, not a current specification.

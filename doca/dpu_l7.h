@@ -1,36 +1,11 @@
 #ifndef DPU_L7_H
 #define DPU_L7_H
 
-/* ===================================================================
- * dpu_l7.h — the L7 proxy hook (write your parser in dpu_l7.c)
- * ===================================================================
+/* L7 request-routing hook implemented in dpu_l7.c.
  *
- * This is the ONLY interface an L7 author needs. You implement ONE function,
- * `dmesh_l7_route`, in dpu_l7.c. Everything else (byte-stream reassembly,
- * scatter-gather DMA, custody, credits, load balancing, connection pooling, the
- * DPU/DOCA machinery) is handled for you by the L4 engine — you never see it.
- *
- * Mental model (Envoy's router filter): a connection is a byte stream. You are
- * shown only the HEAD of the message at the FRONT (up to a small bounded window)
- * and asked: "how long is this whole message, and where does it go?" You read the
- * head (length prefix / routing key) and fill in a DECISION. The engine then
- * forwards the whole message (head + body, even the parts you never saw) from
- * staging via scatter-gather DMA — the BODY is never copied — and calls you again
- * for the next message. This is why a large message costs no per-slot memcpy.
- *
- * Envoy parity — you decide, the engine executes:
- *   - cluster : which SERVICE the message routes to (default = the addressed one).
- *   - host    : leave DEFER and the engine's LOAD BALANCER picks a backend of the
- *               cluster (round-robin over its live endpoints — ctx->hosts); OR set
- *               a specific pod to OVERRIDE (Envoy setUpstreamOverrideHost — session
- *               persistence). Running this hook IS the choice to route PER MESSAGE:
- *               the engine load-balances every message it hands you. Session affinity
- *               is yours to implement — keep your own table and return its host.
- *
- * You are called only for REQUEST streams. Replies are forwarded back to the
- * client automatically — you never handle them.
- * ===================================================================
- */
+ * The hook reads a bounded message head and returns total message length,
+ * destination service, and an optional backend override. The L4 engine streams
+ * the complete body through SG-DMA and handles replies. */
 
 #include <stdint.h>
 
@@ -63,41 +38,11 @@ struct dmesh_l7_decision {
     int32_t  host;        /* DMESH_LB_DEFER = the engine load-balances the cluster;
                            * >=0 = OVERRIDE — route to this exact pod (must be a live
                            * backend, else the message is dropped). */
-    /* phase 2 (append-only, non-breaking): uint64_t hash;  void *session; */
 };
 
-/*
- * dmesh_l7_route — YOU IMPLEMENT THIS (in dpu_l7.c).
- *
- * buf[0 .. len) is the HEAD of the front message — NOT the whole message. `len`
- * is a small bounded window (the body usually is NOT here). Read the head only.
- *
- *   return  > 0 : DECIDED. Fill `out` (at least out->total_len). The engine ships
- *                 out->total_len bytes from staging (even the body you never saw)
- *                 to the resolved backend, then calls you again at the next message.
- *
- *   return  == 0: the HEAD is not fully in buf yet. The engine gives you a few more
- *                 contiguous head bytes and calls again. (Used when a head straddles
- *                 a slot boundary.) Do not rely on `out`.
- *
- *   return  <  0: malformed / protocol violation → the engine drops (poisons) this
- *                 connection.
- *
- * CONTRACT (keep these and you cannot corrupt the engine):
- *   1. Determine total_len from the HEAD (e.g. a length prefix). Do NOT wait for the
- *      body — you will not see it. Return 0 ONLY when the head itself is incomplete;
- *      return >0 as soon as you know the total length.
- *   2. Read only within buf[0 .. len). Never read past `len`.
- *   3. Be STATELESS. On a 0-return you are re-invoked from the same buf[0] with more
- *      head bytes. Re-parse.
- *   4. The HEAD must fit the head window (<= 4 KB, PX_HEAD_MAX). A head that needs
- *      more than that poisons the conn (cf. Envoy max_request_headers_kb). The BODY
- *      has no such limit — it streams.
- *   5. out->cluster must be a SERVICE id (0..127). out->host is either DMESH_LB_DEFER
- *      or one of ctx->hosts (a pod). An unknown service / dead host drops the message.
- *   6. Never block, never malloc/free, never log — this is the hot path.
- *   7. Runs on a single thread — no locking needed.
- */
+/* Inspect buf[0,len) without blocking or allocation. Return >0 with a complete
+ * decision, 0 for an incomplete head, or <0 for a protocol error. The hook is
+ * stateless across retries; total_len may exceed the head window. */
 int dmesh_l7_route(const uint8_t *buf, uint32_t len,
                    const struct dmesh_l7_ctx *ctx, struct dmesh_l7_decision *out);
 

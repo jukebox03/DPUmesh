@@ -1,27 +1,8 @@
-/*
- * loopback_dpumesh.c — self-routing / loopback validator for the oriented-tuple
- * model. ONE pod is BOTH the server and the client of its OWN service:
+/* Native self-routing validator.
  *
- *   create_channel(service_id) ->  advertises that service (12, or BENCH_WORKER_ID).
- *                                  The pod_id is a SEPARATE id the DPU assigns at register.
- *   echo side               ->  CONN_REQ -> RECV -> post_send  (server)
- *   RUN handler             ->  connect(own service) -> post_send -> RECV (client)
- *
- * The client's request is dst=(own service, pod=BLANK, port=BLANK): the DPU
- * resolves the service to THIS pod and loops it back. On this single host the
- * request lands with dst_port=uP (>= DMESH_UPORT_BASE -> server conn) while the
- * reply lands with dst_port=pc (< BASE -> client conn). The port-range split keeps
- * both kinds of conn in the one ports[] table — that is exactly what this proves.
- *
- * ONE THREAD, ONE CQ: a CQ is single-consumer and both roles share this one, so the
- * echo side cannot sit on a thread of its own. Both directions are
- * dispatched by conn role out of one pump(), which the client's send and reply
- * waits drive — the client stays sequential (one request outstanding) as before.
- *
- * Uses ONLY the native API (dmesh.h). No changes to the transport. Control-TCP
- * daemon like bench_dpumesh.c: `RUN <N> <SIZE> [ZC]` runs N loopback round-trips
- * and replies `OK <ok> <fail> <served> <p50us>`.
- */
+ * One thread and CQ drive client and echo roles for the same registered service.
+ * The test verifies DPU service resolution and client/upstream port demultiplexing.
+ * Command: RUN <count> <size> [zero-copy]. */
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -36,9 +17,7 @@
 
 #include <dpumesh/dmesh.h>
 
-/* Best-effort control-socket reply. Every caller is already returning, and a failed
- * write only means the driver hung up first — there is nothing to recover. Wrapping it
- * states that, instead of leaving 4 unchecked write()s for -Wunused-result to flag. */
+/* Send a best-effort control reply; failures are ignored. */
 static void ctl_reply(int fd, const char *s, size_t n) { (void)!write(fd, s, n); }
 
 

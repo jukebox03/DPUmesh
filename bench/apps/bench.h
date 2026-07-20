@@ -1,34 +1,5 @@
-/*
- * bench.h — shared definitions for the DPUmesh RPC benchmark (client + server).
- *
- * The benchmark is a Greeter-style request/response service:
- *     SayHello(request[req_size])  ->  reply[reply_size]
- * with reply_size FIXED and SMALL (default 8 B) — an ASYMMETRIC big-request /
- * tiny-reply RPC, NOT a symmetric echo. Throughput (Gb/s) counts REQUEST bytes.
- *
- * DPUmesh delivers a connection-oriented BYTE STREAM (dmesh.h), not typed RPC, so
- * we frame each request/reply on the wire. The framing lets the server (a) know
- * when a whole request has arrived (a large request spans many <=8 KB transport
- * messages) and (b) produce a reply of the requested size, and lets the client
- * correlate replies to requests by seq under a concurrency window.
- *
- * WIRE FRAME (both directions), 16-byte little-endian header + payload:
- *     u32 magic        BENCH_REQ_MAGIC (request)  |  BENCH_REP_MAGIC (reply)
- *     u32 seq          request id (client-assigned; echoed verbatim in the reply)
- *     u32 payload_len  bytes following this header
- *     u32 aux          request: reply_size the server must return; reply: 0
- *     u8  payload[payload_len]
- *
- * The reframer below fires its callback exactly once per WHOLE frame (header +
- * all payload consumed), so the server replies only after the full request has
- * been received — the request latency the client measures then includes the
- * complete request transfer. Payload bytes are skipped, not buffered (content is
- * irrelevant to the benchmark), so the reframer is O(1) memory at any size.
- *
- * This header is #included by BOTH bench_dpumesh.c (client) and echo_dpumesh.c
- * (server); everything is `static`/`static inline`, so there is no ODR/link
- * clash across the two independently-compiled binaries.
- */
+/* Shared Greeter frame helpers. A 16-byte little-endian header contains magic,
+ * sequence, payload length, and auxiliary reply length, followed by payload. */
 #ifndef BENCH_H
 #define BENCH_H
 
@@ -58,15 +29,8 @@ static inline void bench_put_hdr(uint8_t *h, uint32_t magic, uint32_t seq,
     memcpy(h + 12, &aux,         4);
 }
 
-/* ------------------------------------------------------------ stream reframer
- * Feed arbitrary byte-stream chunks; the callback fires once per COMPLETE frame
- * with (seq, payload_len, aux). Payload is discarded as it streams in (only the
- * count matters), so a >8 KB frame spread across many transport messages is
- * reframed with a fixed 16-byte buffer.
- *
- * ONE REFRAMER PER STREAM. It is a state machine over ONE sender's bytes: give it two
- * senders' and it reads the second's header as the first's payload, losing the frame
- * boundary for good. Key it by dmesh_wc_t.stream. */
+/* Stream reframer. Feed arbitrary chunks from one stream; the callback receives
+ * each complete frame's sequence, payload length, and auxiliary value. */
 typedef void (*bench_frame_cb)(uint32_t seq, uint32_t payload_len, uint32_t aux, void *user);
 
 typedef struct {

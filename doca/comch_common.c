@@ -193,19 +193,8 @@ process_mmap_msg(struct objects *objs, struct doca_comch_connection *conn,
 		      pod->ring_mmap_count, kmax,
 		      (void *)pod->remote_mmap, (void *)pod->host_rx_mmap);
 
-	/* Trigger per-pod DMA setup only after every host-exported mapping has
-	 * arrived. In particular, dma_ready must never become visible before the RX
-	 * landing mmap exists: READY is a full-duplex channel contract.
-	 * setup_pod_dma sends ADD_RING to the DPA (forward rings only; the DPU→host
-	 * reverse path is the ARM SG-DMA egress engine, not a DPA ring).
-	 * Rare (pod registration), off the steady path; runs on the single
-	 * worker thread that also drains consumer_pe, so no lock is needed.
-	 * GATED on objs->dpu_ready: a fast host can export its mmaps DURING DPU init
-	 * (before init_comch_dpa_msgq builds the DPA msgq), and this callback runs on
-	 * the control PE that init already progresses — so without the gate setup_pod_dma
-	 * would run before the msgq exists and the pod would never reach dma_ready.
-	 * Until dpu_ready, the mmaps are just stored; run_dpu_worker runs a deferred
-	 * setup pass for such pods right after init. */
+	/* Start per-pod DMA setup when DPU initialization and every required host
+	 * mapping are ready. Pending mappings are handled by the worker setup pass. */
 	if (objs->dpu_ready && pod->ring_mmap_count == kmax && pod->remote_mmap &&
 	    pod->host_rx_mmap && !pod->dma_ready) {
 		result = setup_pod_dma(objs, pod);
@@ -217,10 +206,7 @@ process_mmap_msg(struct objects *objs, struct doca_comch_connection *conn,
 	}
 
 #else
-	/* Host side: the DPU→host MMAP_EXPORT import path is DEAD — the host reverse
-	 * path lands into its OWN ctx->rx_dma_buffer and never reads an imported DPU
-	 * mmap, so there is nothing to store. (The DPU no longer sends this either;
-	 * see setup_pod_dma in dpa.c.) */
+		/* The host reverse path lands in ctx->rx_dma_buffer. */
 	(void)objs; (void)conn; (void)result; (void)imported_mmap;
 	(void)remote_addr; (void)buf_size; (void)export_desc_len;
 #endif

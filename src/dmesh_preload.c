@@ -1,64 +1,6 @@
-/*
- * dmesh_preload.c — LD_PRELOAD socket-compatibility shim over the DPUmesh
- * native API (dmesh.h). Lets an UNMODIFIED, dynamically-linked POSIX socket
- * application run over DPUmesh: selected TCP connects/listens are transparently
- * backed by dmesh connections; every other fd passes through to the kernel.
- *
- * LAYERING (see design/CORE.md §6): the native dmesh_* API stays the optimized product;
- * this shim is a compatibility layer that deliberately re-buys the per-conn-fd
- * readiness model (measured ~half the native ceiling) in exchange for POSIX
- * transparency. Nothing here is on the native hot path.
- *
- * ACTIVATION — provenance is the control plane, not a human (NAMING.md). The shim
- * types NO integer: identity and routing come from the SAME file-backed registry the
- * native API uses (src/dmesh_resolve.c), and every value below is webhook-injected in
- * production. Everything not listed stays untouched kernel TCP.
- *   DPUMESH_SERVICE=<name>   this process's own service (a k8s Service name); unset =
- *                            pure client. Resolved to a service_id via the registry.
- *   DPUMESH_PORT=<port>      listen() on this TCP port becomes the dmesh service
- *                            listener (the Service's targetPort). Unset = not a server.
- *   DPUMESH_CONFIG=<file>    registry path (else /etc/dpumesh/registry), lines
- *                            "ClusterIP:port name svc": connect() to a listed
- *                            ClusterIP:port is routed to that service — the Envoy
- *                            xDS/EDS equivalent (a ConfigMap in prod, a hand-written
- *                            file for the bench harness). Keyed on IP:port, so
- *                            same-port services on distinct ClusterIPs resolve apart.
- *   DMESH_PRELOAD_DEBUG=1    stderr diagnostics
- *
- * FD REALIZATION — the design keystone: when a socket becomes dmesh-backed, the
- * shim creates a PRIVATE nonblocking socketpair and dup2()s its app end over the
- * app's fd number. The fd is therefore a real kernel fd, so epoll/poll/select/
- * close/dup work natively. Dispatcher→app bytes represent RX/EOF readiness. The
- * otherwise-unused app→dispatcher direction is filled after native TX EAGAIN and
- * drained on DMESH_WC_TX_READY, so kernel EPOLLOUT mirrors native writability.
- *
- * ORDERING — a socket promises byte-stream total order on a connection, and the DPU
- * delivers exactly that for free: a conn is STICKY to the backend its first message
- * LB-picked and keeps it for life (px_conn.pinned_backend), so replies arrive in send
- * order. Connection-level LB, exactly what a TCP proxy gives you. Nothing to opt into.
- *
- * That comes from the service running NO codec (passthru): with no message boundaries
- * the DPU cannot split the stream, so it pins the conn. Never give a shim-facing service
- * a codec (_FRAME_SVC/_L7_SVC) — it would route per message, interleave replies across
- * backends, and the byte stream would stop being one.
- *
- * THREAD MODEL — design/API.md contract: a CQ is single-consumer. The shim's
- * dispatcher thread exclusively calls dmesh_poll_cq for its CQ and also runs
- * dmesh_destroy_qp (app close() only queues), so a completion can never race a
- * conn free. App threads touch their own conns under per-entry mutexes.
- *
- * LOST-WAKEUP DISCIPLINE — the dispatcher first queues a copied native completion,
- * then writes an RX token. The app drains tokens only while holding the same pfd
- * mutex after observing an empty queue; a dispatcher blocked on that mutex queues
- * and signals afterward. Partial reads reassert a token while data remains.
- *
- * KNOWN LIMITS (v1, documented): no fork-shared sockets (DOCA is not fork-
- * safe), half-close is approximate (a FIN tears the upstream down — replies
- * after shutdown(SHUT_WR) are undeliverable), most SO_* options are accepted
- * no-ops, AF_INET SOCK_STREAM only, one dmesh listener per process. BYPASSES:
- * Go binaries (raw syscalls) and stdio FILE* wrappers over a socket (glibc
- * stdio calls its internal __read/__write, not the PLT) never enter the shim.
- */
+/* LD_PRELOAD POSIX-socket facade. Registry-matched TCP endpoints use DPUmesh; all
+ * other descriptors remain kernel-backed. A dispatcher translates native
+ * completions into socket readiness. */
 #define _GNU_SOURCE
 #include <dlfcn.h>
 #include <stdio.h>
@@ -624,7 +566,12 @@ static int ensure_channel(void) {
 /* Occupy the app's fd number with a kernel dup of the private socketpair end. */
 static int install_fd(int fd, pfd_t *e) {
     if (fd < 0 || fd >= PRELOAD_MAX_FDS) { errno = EMFILE; return -1; }  /* g_fds bound */
-    if (real_dup2(e->efd, fd) < 0) return -1;    /* closes the old TCP socket */
+    int fd_flags = real_fcntl(fd, F_GETFD);
+    if (fd_flags < 0) return -1;
+    int rc = (fd_flags & FD_CLOEXEC)
+           ? real_dup3(e->efd, fd, O_CLOEXEC)
+           : real_dup2(e->efd, fd);
+    if (rc < 0) return -1;                       /* replaces the TCP socket */
     pthread_mutex_lock(&g_tbl_mu);
     g_fds[fd] = e;
     e->refs++;

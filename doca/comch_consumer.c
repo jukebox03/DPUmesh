@@ -268,14 +268,7 @@ static void consumer_recv_task_comp_err_cb(struct doca_comch_consumer_task_post_
 	/* Do NOT stop consumer context — allow other pods to continue working */
 }
 
-/**
- * Post the initial pool of recv tasks on the consumer.
- *
- * @objs [in]: transport objects
- * @consumer [in]: comch consumer to post recv tasks on
- * @cmem [in]: consumer-side buf pool
- * @return: DOCA_SUCCESS on success and DOCA_ERROR otherwise
- */
+/* Post the consumer's initial receive-task pool. */
 static doca_error_t prepare_consumer_tasks(struct objects *objs, struct doca_comch_consumer *consumer, struct local_mem_bufs *cmem)
 {
 	struct doca_comch_consumer_task_post_recv *consumer_task;
@@ -312,14 +305,7 @@ static doca_error_t prepare_consumer_tasks(struct objects *objs, struct doca_com
 	return DOCA_SUCCESS;
 }
 
-/**
- * Callback triggered whenever CC consumer context state changes
- *
- * @user_data [in]: User data associated with the CC consumer context
- * @ctx [in]: The CC consumer context that had a state change
- * @prev_state [in]: Previous context state
- * @next_state [in]: Next context state (context is already in this state when the callback is called)
- */
+/* Handle a Comch consumer context state transition. */
 static void consumer_state_changed_cb(const union doca_data user_data,
 					    struct doca_ctx *ctx,
 					    enum doca_ctx_states prev_state,

@@ -13,24 +13,14 @@ struct dma_ring {
     struct doca_mmap *mmap;
     uint32_t size;
     struct dma_desc *descs;
-    /* Host forward ring — LOCK-FREE MPSC (Vyukov bounded queue). Producers claim a
-     * monotonic ticket from enq_pos (fetch-add); seq[i] is the per-slot cell
-     * sequence (host memory, NOT in the ring mmap; init seq[i]=i). A producer owns
-     * slot t%size for generation t when seq==t, or when the previous occupant
-     * published (seq==t-size+1) AND the DPA consumed it (desc.valid==0) → reclaim.
-     * A stalled producer leaves seq unadvanced, so a lapping producer waits rather
-     * than overwriting — generation-safe with just the existing `valid` flag, no
-     * lock, DPA untouched. */
+    /* Lock-free MPSC forward ring. enq_pos assigns tickets; per-slot sequences and
+     * desc.valid guard publication, DPA consumption, and reuse. */
     uint64_t  enq_pos;
     uint64_t *seq;
     /* "ring busy" WARN rate-limit state (best-effort under lock-free contention;
      * a racy probe count only mis-throttles a diagnostic, never corrupts). */
     uint64_t busy_probes;
-    /* Fail-safe latch (0->1 only): a producer's cell wait blew its deadline ⇒ the DPA
-     * is not draining this ring at all (never registered, or its EU is wedged). The
-     * ring is then permanently unusable — the producer that timed out abandoned its
-     * Vyukov ticket, leaving seq[] unadvanced and a hole the DPA's sequential desc_idx
-     * would stall on forever — so every dpumesh_enqueue fails fast instead. */
+    /* One-way latch set when a slot wait times out; subsequent enqueues fail fast. */
     int dead;
 };
 

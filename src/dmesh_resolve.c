@@ -1,25 +1,5 @@
-/*
- * dmesh_resolve.c — DPUmesh name/identity resolver (NAMING.md Phase 0).
- *
- * ONE table, both façades. This file is the whole of the "provenance moves from
- * the user to a control plane" change on the host side: it answers the four
- * questions the transport asks about identity, and it takes a *name* where the
- * caller used to type an *integer*.
- *
- *   identity()      — this node's own service, from DPUMESH_SERVICE (a name)
- *   listen_port()   — this node's meshed listen port, from DPUMESH_PORT
- *   resolve_name()  — a PEER's service_id, by k8s Service name (native API)
- *   resolve_addr()  — a PEER's service_id, by ClusterIP:port (the shim)
- *
- * The table is a file — a ConfigMap mounted at /etc/dpumesh/registry in
- * production, or DPUMESH_CONFIG=<path> for the bench harness playing controller
- * (NAMING.md §5). Lines are "IP:port name svc"; blank / non-parsing lines
- * (e.g. '#' comments) are skipped. Loaded ONCE and then immutable — live
- * inotify reload is NAMING.md Phase 3, so post-load reads need no lock.
- *
- * The integer service_id is BORN here (resolve_*), and appears nowhere above
- * this layer: not in <dpumesh/dmesh.h>, not in app code, not in YAML.
- */
+/* Shared service identity and peer resolver. The immutable registry contains
+ * "IP:port name service" entries and is loaded on first use. */
 #define _GNU_SOURCE
 #include "dmesh_core.h"
 

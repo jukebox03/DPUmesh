@@ -1,24 +1,5 @@
-/* ===================================================================
- * dpu_l7.c — WRITE YOUR L7 PROXY HERE
- * ===================================================================
- *
- * This is the only file you edit. Implement dmesh_l7_route(): given the HEAD of
- * the front message, fill in a DECISION — how long the WHOLE message is, and
- * (optionally) which service/pod it goes to. The engine ships the whole message
- * (head + body) from staging via scatter-gather — you never see or copy the body.
- * Read dpu_l7.h for the full contract.
- *
- * Running this hook on a service IS the choice to route it PER MESSAGE: the codec
- * below tells the engine where each message ends, so the engine load-balances every
- * one of them across the service's live backends. A service with no codec is an
- * opaque byte stream and stays pinned to one backend.
- *
- * The default parses the benchmark's framing (bench/bench.h), so
- * `DPUMESH_PROXY_L7_SVC=<echo svc>` puts `./bench.sh` traffic on this path:
- *     [u32 magic][u32 seq][u32 payload_len][u32 aux][payload ...]
- * Replace the body with your own protocol.
- * ===================================================================
- */
+/* L7 request-routing hook. The default parser accepts the bench.h frame header
+ * and leaves backend selection to the engine. */
 
 #include "dpu_l7.h"
 #include <string.h>

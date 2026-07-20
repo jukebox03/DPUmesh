@@ -1,14 +1,5 @@
-# DPUmesh — standalone host build (no Thrift, no CMake).
-#
-# Produces the host transport library + the benchmark/validator binaries.
-# The DPU-side control plane (ARM + DPA kernel) is built separately with meson
-# under doca/ (see doca/meson.build); bench/bench.sh drives that on the DPU.
-#
-#   make            # libdpumesh.so + all bench binaries (+ Go binaries if `go` present)
-#   make lib        # build/lib/libdpumesh.so only
-#   make bench      # C bench/validator binaries + the LD_PRELOAD shim
-#   make go         # Go TCP-baseline binaries (bench_tcp, echo_tcp)
-#   make clean
+# Build the host transport library and benchmark/validator binaries. DPU ARM and
+# DPA components use doca/meson.build. Targets: all, lib, bench, go, clean.
 
 CC      ?= gcc
 DOCA_PKGS := doca-common doca-comch doca-dpa
@@ -51,9 +42,7 @@ LIB_HDRS := $(shell rg --files include src doca -g '*.h')
 
 # ABI major. BUMP IT whenever the public ABI changes incompatibly — a field added to
 # dmesh_wc_t / dmesh_qp_t / dmesh_channel_t, a reorder, a signature change. The SONAME
-# carries it, so a binary built against the old header asks the loader for the old
-# libdpumesh.so.N and gets a clean "cannot open shared object file" instead of silently
-# running against a struct whose layout moved (which reads as a SIGSEGV in the app).
+# identifies incompatible public layouts at load time.
 ABI_MAJOR := 2
 LIB      := $(LIBDIR)/libdpumesh.so.$(ABI_MAJOR)
 LIB_LINK := $(LIBDIR)/libdpumesh.so
@@ -81,9 +70,7 @@ echo_sock_SRC      := bench/apps/echo_sock.c
 .PHONY: all lib bench test clean dirs
 all: lib bench
 
-# Header dependencies. Without these a change to a public header (dmesh.h) leaves
-# every binary stale while the library rebuilds — the two then disagree on struct
-# layout and the mismatch shows up as a SIGSEGV at run time, not a build error.
+# Header dependencies for the library and all consumers.
 DEPDIR  := $(BUILD)/dep
 DEPFLAGS = -MMD -MP -MF $(DEPDIR)/$(@F).d
 
@@ -126,12 +113,13 @@ $(TESTDIR)/preload_api_contract_test: tests/preload_api_contract_test.c src/dmes
 
 test: $(TESTDIR)/native_api_contract_test $(TESTDIR)/native_control_state_test \
 	$(TESTDIR)/native_tx_batch_policy_test $(TESTDIR)/native_writable_test \
-	$(TESTDIR)/preload_api_contract_test
+	$(TESTDIR)/preload_api_contract_test $(PRELOAD)
 	$(TESTDIR)/native_api_contract_test
 	$(TESTDIR)/native_control_state_test
 	$(TESTDIR)/native_tx_batch_policy_test
 	$(TESTDIR)/native_writable_test
 	$(TESTDIR)/preload_api_contract_test
+	sh tests/abi_contract_test.sh $(LIB) $(PRELOAD) $(ABI_MAJOR)
 
 # dmesh API binaries link the transport library. One explicit rule each so the
 # source is a tracked prerequisite (rebuilds on edit).

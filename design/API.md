@@ -1,7 +1,7 @@
 # DPUmesh Native API
 
-This document defines the public contract of `<dpumesh/dmesh.h>` as implemented
-on 2026-07-20. The ABI is `libdpumesh.so.2`. The interface borrows the useful
+This document defines the current public contract of `<dpumesh/dmesh.h>`. The
+ABI is `libdpumesh.so.2`. The interface borrows the useful
 shape of RDMA verbs—channel, completion queue, QP, registered buffers—but it is
 a reliable full-duplex byte transport, not a remote-memory API.
 
@@ -242,7 +242,7 @@ stale hint if that QP no longer has a parked write.
 `libdmesh_preload.so` is a POSIX adapter over the native data/completion contract.
 It uses `dmesh_alloc`/`dmesh_post_send`/`dmesh_flush` for TX and consumes
 `DMESH_WC_RECV`, `DMESH_WC_RECV_FIN`, and `DMESH_WC_TX_READY` from
-`dmesh_poll_cq`; it does not use the legacy raw-ring or ready-list APIs. Narrow
+`dmesh_poll_cq`; it does not use the internal raw-ring or ready-list APIs. Narrow
 in-tree hooks remain for ClusterIP resolution, numeric QP creation, and transport
 FIN because those operations are specific to socket interception rather than the
 public service-name API.

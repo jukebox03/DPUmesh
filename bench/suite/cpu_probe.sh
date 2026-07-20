@@ -1,20 +1,7 @@
 #!/bin/bash
-# cpu_probe.sh — host + DPU-ARM CPU accounting for one transport at one load point.
-#
-# The RQ3 evidence: "DPU offload returns host cores to the app." It samples CPU by
-# reading /proc/<pid>/stat (utime+stime, world-readable — no sudo for the counters)
-# BEFORE and AFTER a fixed load window, where the window is simply a blocking
-# `nc RUN ...` of `dur` seconds. Per-core %CPU = 100 * Δticks / CLK_TCK / dur.
-#
-#   - host side: every container PID of the client pod and the server pod. For the
-#     TCP baseline that INCLUDES the Envoy sidecars (the tax). For DPUmesh it is just
-#     the app pods — the transport is on the DPU.
-#   - DPU side: the dpumesh_dpu process (all ARM threads) via ssh, same Δticks method.
-#
-# crictl (sudo) is used ONLY to map pod -> container PIDs; the CPU counters are read
-# without sudo. Run it while nothing else is driving the pods.
-#
-#   bench/suite/cpu_probe.sh <dpumesh|tcp> <req> <reply> <conc> <dur> [threads] [tidy.csv]
+# Measure host-container and DPU ARM CPU across one fixed load window using process
+# tick deltas. TCP accounting includes Envoy. crictl maps pods to container PIDs.
+# Usage: cpu_probe.sh <dpumesh|tcp> <req> <reply> <conc> <dur> [threads] [tidy.csv]
 set -euo pipefail
 
 SUITE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2023 NVIDIA CORPORATION AND AFFILIATES.  All rights reserved.
+ * Copyright NVIDIA CORPORATION AND AFFILIATES. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without modification, are permitted
  * provided that the following conditions are met:
@@ -65,25 +65,10 @@ static inline uint64_t ntohq(uint64_t value)
 /* Function to check if a given device is capable of executing some task */
 typedef doca_error_t (*tasks_check)(struct doca_devinfo *);
 
-/*
- * Open a DOCA device according to a given PCI address
- *
- * @pci_addr [in]: PCI address
- * @func [in]: pointer to a function that checks if the device have some task capabilities (Ignored if set to NULL)
- * @retval [out]: pointer to doca_dev struct, NULL if not found
- * @return: DOCA_SUCCESS on success and DOCA_ERROR otherwise
- */
+/* Open a PCI-addressed DOCA device accepted by the optional capability check. */
 doca_error_t open_doca_device_with_pci(const char *pci_addr, tasks_check func, struct doca_dev **retval);
 
-/*
- * Open a DOCA device according to a given PCI address
- *
- * @local [in]: queries representors of the given local doca device
- * @filter [in]: bitflags filter to narrow the representors in the search
- * @pci_addr [in]: PCI address
- * @retval [out]: pointer to doca_dev_rep struct, NULL if not found
- * @return: DOCA_SUCCESS on success and DOCA_ERROR otherwise
- */
+/* Open a filtered representor for a local DOCA device and PCI address. */
 doca_error_t open_doca_device_rep_with_pci(struct doca_dev *local,
 					   enum doca_devinfo_rep_filter filter,
 					   const char *pci_addr,

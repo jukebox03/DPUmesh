@@ -1,16 +1,5 @@
-/*
- * dmesh_api.c — implementation of the native API declared in <dpumesh/dmesh.h>.
- *
- * This file is ONLY the verbs-shaped data path: alloc, post_send, poll_cq,
- * wc_release. Everything else the header declares (channel + connection
- * lifecycle, flush, close) is transport and lives in dmesh_core.c. The
- * LD_PRELOAD adapter now consumes these public data/CQ verbs; only its
- * address-based setup and POSIX half-close need narrow internal hooks.
- *
- * Nothing here adds a thread, a lock, a syscall or a copy: every function is a
- * caller-thread re-arrangement of the core. RECV hands out a pointer straight
- * into the RX mmap; SEND hands out a pointer straight into the TX ring.
- */
+/* Native allocation, posting, polling, and completion-release API.
+ * Operations run on the caller thread and expose registered RX/TX memory. */
 #include "dmesh_core.h"
 
 #include <errno.h>
@@ -60,15 +49,8 @@ static void cq_emit(dmesh_channel_t *s, dmesh_qp_t *c, dmesh_wc_t *w,
     w->rx_slot = slot;                       /* credit held until wc_release */
 }
 
-/* Drain one conn into wc[0..nwc). Returns the count emitted; *drained = 1 iff the
- * inbox was emptied (0 = wc[] filled first → the caller parks the conn in cq->vq_cur
- * and the next poll_cq resumes it, preserving per-conn order).
- *
- * The conn-held RX view goes FIRST: dmesh_accept returns the conn HOLDING its first
- * message (delivered before the promote, so the ready list will never re-edge for it
- * — the same trap dmesh_preload.c documents). Emitting it here transfers ownership to
- * the wc, so the view is cleared (a later dmesh_destroy_qp must not double-free the
- * credit). */
+/* Drain one connection into wc[]. `drained` reports whether its inbox emptied.
+ * An accept-held first message is emitted before queued messages. */
 static int cq_drain_conn(dmesh_channel_t *s, dmesh_qp_t *c,
                          dmesh_wc_t *wc, int nwc, int *drained) {
     int n = 0;

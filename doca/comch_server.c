@@ -49,14 +49,7 @@ static void server_send_task_completion_err_callback(struct doca_comch_task_send
 	doca_task_free(doca_comch_task_send_as_task(task));
 }
 
-/**
- * Server sends a message to client
- *
- * @sample_objects [in]: The sample object to use
- * @msg [in]: The msg to send
- * @len [in]: The msg length
- * @return: DOCA_SUCCESS on success and DOCA_ERROR otherwise
- */
+/* Send one control message from the server to its client. */
 doca_error_t
 server_send_msg(struct objects *objs, const char *msg, size_t len)
 {
@@ -112,14 +105,7 @@ server_send_msg(struct objects *objs, const char *msg, size_t len)
 
 	return DOCA_SUCCESS;
 }
-/**
- * Callback for server message recv event
- *
- * @event [in]: Recv event object
- * @recv_buffer [in]: Message buffer
- * @msg_len [in]: Message len
- * @comch_connection [in]: Connection the message was received on
- */
+/* Handle a message received by the Comch server. */
 static void server_message_recv_callback(struct doca_comch_event_msg_recv *event,
 					 uint8_t *recv_buffer,
 					 uint32_t msg_len,
@@ -198,9 +184,7 @@ static void server_message_recv_callback(struct doca_comch_event_msg_recv *event
 			if (sr != DOCA_SUCCESS)
 				DOCA_LOG_ERR("POD_ASSIGNED send failed (pod_id=%d): %s",
 				             assigned, doca_error_get_name(sr));
-			/* REGISTER is also the retry request for registration state. If an
-			 * earlier terminal result was lost after submission, send a fresh copy
-			 * regardless of init_result_sent; the host retries until READY. */
+			/* REGISTER also requests the current terminal registration result. */
 			struct pod_state *pod = find_pod_by_connection(objs, comch_connection);
 			if (pod != NULL && pod->init_result != DMESH_POD_INIT_PENDING) {
 				struct dmesh_pod_init_result_msg im = {
@@ -661,17 +645,8 @@ server_send_batch_rev_done_to(struct objects *objs,
 int
 pods_add_connection(struct objects *objs, struct doca_comch_connection *conn)
 {
-	/* See object.h pods[] concurrency model. Single writer (control PE
-	 * callback); registered=0 so readers skip the slot until pods_register
-	 * publishes it. The num_pods bump is the visibility gate for the slot's
-	 * existence; do it last.
-	 *
-	 * Prefer REUSING a slot freed by pods_remove_connection (connection==NULL,
-	 * registered==0) over always appending — otherwise the table exhausts after
-	 * MAX_PODS cumulative connect/disconnect cycles even though ≤MAX_PODS are ever
-	 * live. Slot indices stay stable; a freed slot is only reused on a later
-	 * connect, by which point the disconnected pod is long gone (reconnect latency
-	 * ≫ comp_queue drain), so no live comp_queue entry still references the index. */
+	/* Reuse an unpublished, disconnected slot when available. The control PE is
+	 * the sole writer, and num_pods publishes newly appended slots. */
 	int n = __atomic_load_n(&objs->num_pods, __ATOMIC_ACQUIRE);
 	int idx = -1;
 	for (int i = 0; i < n; i++) {
@@ -946,9 +921,7 @@ pods_register(struct objects *objs, struct doca_comch_connection *conn,
 			return -1;
 		}
 
-		/* DPU-assigned pod_id: the host no longer picks its own address. A
-		 * register with pod_id < 0 gets the pods[] slot index — unique among
-		 * live pods and always in [0, MAX_PODS) ⊂ [0, POD_ID_SPACE). */
+			/* Negative pod_id requests a live pods[] slot index. */
 		if (pod_id < 0)
 			pod_id = i;
 		if (__atomic_load_n(&objs->pod_id_to_slot[pod_id], __ATOMIC_ACQUIRE) >= 0) {
@@ -969,12 +942,7 @@ pods_register(struct objects *objs, struct doca_comch_connection *conn,
 		if (pod_id >= 0 && pod_id < POD_ID_SPACE)
 			__atomic_store_n(&objs->pod_id_to_slot[pod_id], i, __ATOMIC_RELEASE);
 
-		/* No service->backend table to update: the LB derives a service's live
-		 * backend set from pods[] on demand (registered + service_id + dma_ready),
-		 * so multiple pods on one service_id are ALL load-balance candidates and a
-		 * disconnect drops a backend automatically. `registered` was published with
-		 * RELEASE above, after service_id — so a concurrent lb_pick reader that sees
-		 * registered==1 also sees this pod's service_id. */
+		/* The load balancer derives live backends from published pod fields. */
 
 		DOCA_LOG_INFO("pods_register: slot %d → pod_id=%d service_id=%d",
 		              i, pod_id, service_id);

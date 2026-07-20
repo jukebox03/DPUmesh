@@ -1,31 +1,6 @@
-/*
- * tcp_client.c — a deliberately VANILLA blocking TCP client, driven over stdin.
- *
- * No DPUmesh headers: socket/connect/write/read/close + pthreads only. The same
- * binary runs over kernel TCP, and over DPUmesh under
- * LD_PRELOAD=libdmesh_preload.so with DPUMESH_CONFIG listing the dialed
- * ClusterIP:port -> name -> service.
- *
- * THREAD-PER-CONN: every RUN opens <conns> FRESH connections and drives each
- * from its OWN thread with blocking single-outstanding round trips — the classic
- * thread-per-conn shape, so aggregate throughput scales with <conns> instead of
- * being serialized at 1/RTT (the previous single-thread client measured latency
- * only). Also exercises the shim's multi-threaded blocking paths for real.
- *
- * It stays a single long-lived PROCESS (one dmesh channel = one DPU pod
- * registration) while every RUN opens fresh connections — so conn churn
- * (connect/FIN/close) is exercised per RUN without burning registration slots.
- *
- * Usage:  tcp_client <host> <port>
- * stdin:  RUN <n_msgs> <size> <conns>\n     (repeatable; n_msgs split across conns)
- *         QUIT\n (or EOF)
- * stdout: RESULT <ok> <fail> <p50us> <p99us> <rps>\n   (one per RUN;
- *         rps = ok / wall-time of the whole RUN incl. connect+close)
- *
- * Per message: fill a per-(msg,offset) pattern, write it all, read exactly
- * <size> bytes back (short reads legal — byte stream), verify every byte.
- * A content mismatch or premature EOF counts as fail.
- */
+/* Blocking POSIX TCP validation client driven over stdin.
+ * Each RUN uses one thread per connection for byte-exact round trips and reports
+ * success, failure, latency, and request rate. Usage: tcp_client <host> <port>. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

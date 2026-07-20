@@ -1,39 +1,8 @@
-/*
- * dpu_proxy.c — L4 engine under the L7 proxy seam (design/CORE.md §5).
+/* L4 engine beneath the L7 routing hook.
  *
- * Both directions (client request AND backend reply) run the SAME machinery:
- *
- *   forward completion ──▶ per-conn INPUT WINDOW (bytes in arrival order;
- *   (body landed in DPU     zero-copy views over staging; a seam buffer
- *    staging, in place)     aligns the unconsumed tail ONLY when a parse
- *                           stalls across extent boundaries)
- *                      ──▶ proxy_route (MOCK) → segs {off,len,dst}
- *                      ──▶ per-(dst pod, region) LANE: units gathered into
- *                           ONE chained-src SG-DMA per batch (ARM generic
- *                           doca_dma, staging → host RX, measured 07-03)
- *                      ──▶ batch completion → batched REV_DONE entries to the
- *                           receiver + batched TX_ACK custody release to the
- *                           senders (END-TO-END: a sender's slot is held until
- *                           the egress DMA has READ its staging bytes).
- *
- * Direction asymmetry is confined to dst resolution: a request seg's dst is
- * the proxy's decision (or the L4 default route on DEFER) and owns/creates an
- * upstream; a reply seg's dst comes from the conntrack table (the proxy only
- * confirms). Everything else — window, segs, lanes, custody — is shared.
- *
- * Delivery is a BYTE STREAM: the receiver gets each unit as consecutive
- * <=8 KB chunks (one REV_DONE entry each) and parses/frames itself. Per
- * receiving conn, delivery order == seg order (lane FIFO + in-order batch
- * retirement); a unit's chunks are never interleaved with another unit's.
- *
- * Single-threaded: everything here runs on the one DPU worker thread
- * (ingest from the consumer-PE callbacks, drain from the main loop, DMA
- * completions from the control PE) — no locks.
- *
- * The engine is ALWAYS on — it is the sole DPU→host reverse (egress) path.
- * DPUMESH_PROXY only selects the request parser (passthru default / frame / L7);
- * the data plane is identical either way.
- */
+ * Both directions use ordered input windows, routed segments, per-destination
+ * lanes, SG-DMA egress, batched REV_DONE, and TX_ACK custody release. Replies
+ * resolve through conntrack; requests use the selected parser and route. */
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
@@ -75,8 +44,7 @@ DOCA_LOG_REGISTER(DPU_PROXY);
 /* doca_dma task pool: SG batches + credit-refresh reads share it. */
 #define PX_DMA_TASKS        256
 
-/* Source pieces per SG task. Measured cap (07-03): max_buf_list_len = 64;
- * clamped further by the device capability at init. */
+/* Source pieces per SG task, clamped by the device capability at init. */
 #define PX_SG_PIECES_MAX    64
 
 /* Seam buffer cap: the largest contiguous view the parser can demand (a frame
@@ -215,12 +183,7 @@ struct px_lane {
     uint64_t cached_freed;            /* host freed counter, DMA-read cache */
     int      refresh_inflight;
     int      warned_no_credit_addr;
-    /* Which incarnation of pods[pod_idx] the counters above describe. A restarted pod
-     * exports a FRESH host RX buffer whose freed-counter restarts at 0, so credits
-     * inherited from the previous tenant are wrong in a way that never self-corrects:
-     * inflight = sent_entries - cached_freed stays huge → avail_entries pins at 0 →
-     * the lane never sends again. px_lane_rearm resets them when this stops matching
-     * pods[].dma_generation. */
+    /* Pod generation associated with this lane's credit counters. */
     uint32_t pod_generation;
 };
 
@@ -265,12 +228,8 @@ struct px_conn {
 
 #define MAX_ARM_ENG 8
 
-/* One egress worker. Owns its own DOCA dma/PE/inventory + batch pool + the lanes
- * whose dst pod_idx % n_eng == id. For n_eng==1 the single engine runs INLINE on
- * the main thread (pe == objs->pe, threaded==0) — the proven single-thread path,
- * unchanged. For n_eng>=2 each engine runs on its OWN thread doing the heavy
- * per-message DOCA SG-DMA lifecycle, and hands retired units back to the ingest
- * (main) thread via the done-queue, which does REV_DONE + custody + pool free. */
+/* An egress worker owns its DOCA resources and lanes where pod_idx % n_eng == id.
+ * A single engine runs inline; multiple engines use worker threads. */
 struct px_engine {
     struct objects *objs;
     int      id;
@@ -297,19 +256,13 @@ struct px_engine {
     volatile int stop;
 };
 
-/* One ingest-processor shard's private routing state (diagram ①②③). The conn
- * table (buckets) is ALWAYS per-shard: a conn maps deterministically to one shard
- * (the reaper dispatch), so its window is touched by exactly one thread — lock-free.
- * The conntrack is PER-SHARD in ② (share-nothing: an up_port encodes its owner
- * shard so a backend reply dispatches back to the session's owner, keeping each
- * shard's conntrack single-threaded) and the SHARED objs->conntrack under
- * routing_lock in ① (px_route_lock/unlock wrap every conntrack access; no-ops in
- * ② and for a single shard). */
+/* Per-ingest-shard routing state. Connection windows are shard-local; conntrack is
+ * either shard-local or shared under routing_lock. */
 struct px_shard {
     struct px_conn **buckets;      /* PX_CONN_HASH buckets, per-shard */
-    struct dpu_conntrack *ct;      /* ② private conntrack / ① == objs->conntrack (shared) */
+    struct dpu_conntrack *ct;      /* private or shared conntrack */
     int id;
-    int owner_stride;              /* ② : M (up_port owner residue class); ① / M=1 : 1 */
+    int owner_stride;              /* upstream-port owner stride */
     struct px_conn *stall_head;    /* conns parked by px_stall; drained by px_drain_stalled */
 };
 
@@ -324,18 +277,12 @@ struct dmesh_proxy {
     uint32_t seam_max;
     uint32_t sg_pieces_max;
 
-    /* Ingest-processor shards (diagram ①②③). shards[s].buckets is s's private
-     * conn table; shards[s].ct is s's conntrack (private in ②, shared in ①).
-     * n_shards == objs->n_ingest_shards; share_nothing == !objs->shard_shared_routing. */
+    /* Per-shard connection tables with private or shared conntrack state. */
     struct px_shard shards[MAX_INGEST_SHARDS];
     int n_shards;
-    int share_nothing;                /* 1 = ② (per-shard conntrack) / 0 = ① (shared+lock) */
+    int share_nothing;                /* 1 = private conntrack; 0 = shared under lock */
 
-    /* fixed pools + freelists: arrivals/pieces/units. The batch pool moved per-engine
-     * (worker allocs+frees its own). With the ingest reaper (diagram ①) these are
-     * ALLOC'd on the ingest thread and FREE'd on main (emit), so pool_lock guards the
-     * freelist ops (held only for the brief pointer swap, so parse and emit overlap).
-     * When the reaper is off they are single-thread (lock uncontended). */
+    /* Fixed arrival, piece, and unit pools shared by ingest and emit. */
     struct px_arrival *arr_mem,  *arr_free;
     struct px_piece   *piece_mem, *piece_free;
     struct px_unit    *unit_mem, *unit_free;
@@ -344,9 +291,7 @@ struct dmesh_proxy {
     struct px_lane lanes[MAX_PODS][MAX_EU_PER_POD];
     struct px_op   refresh_ops[MAX_PODS][MAX_EU_PER_POD];
 
-    /* ARM SG-DMA egress workers (DPUMESH_ARM_EGRESS_THREADS). n_eng==1 = inline
-     * on main (proven default); n_eng>=2 = n_eng worker threads. A lane is owned
-     * by engine (pod_idx % n_eng). */
+    /* ARM SG-DMA egress workers; engine pod ownership is pod_idx % n_eng. */
     struct px_engine engines[MAX_ARM_ENG];
     int n_eng;
 
@@ -365,17 +310,10 @@ struct dmesh_proxy {
 #define PX_SCRATCH_CELL 64
 #define PX_SCRATCH_OFF(pi, r) (((size_t)(pi) * MAX_EU_PER_POD + (size_t)(r)) * PX_SCRATCH_CELL)
 
-/* ====== ingest-processor shard context (diagram ①②③) ======
- * Set by px_ingest_forward from its `shard` arg (thread-local, matching the
- * existing __thread dpu_t_is_ingest pattern) so the parse/route call graph reaches
- * this shard's private conn table + conntrack without threading `shard` through
- * ~30 static helpers. The single-reaper / inline path uses shard 0. Emit (main)
- * never sets this — it only frees to the SHARED pools + sends, touching no
- * shard-private routing state. */
+/* Thread-local routing state for the active ingest shard. */
 static __thread struct px_shard *px_cur_shard;
 
-/* ① : serialize access to the SHARED conntrack + route tables. No-op in ②
- * (per-shard conntrack) and for a single shard (nothing shared cross-thread). */
+/* Lock shared routing state; private and single-shard state need no lock. */
 static inline void px_route_lock(struct objects *objs) {
     if (objs->proxy->n_shards > 1 && !objs->proxy->share_nothing)
         pthread_mutex_lock(&objs->routing_lock);
@@ -385,7 +323,7 @@ static inline void px_route_unlock(struct objects *objs) {
         pthread_mutex_unlock(&objs->routing_lock);
 }
 
-/* Owner shard of an up_port under m shards (② share-nothing dispatch). */
+/* Return the shard encoded in an upstream port. */
 int px_uport_owner(uint16_t up_port, int m) {
     if (m <= 1 || up_port < DMESH_UPORT_BASE)
         return 0;
@@ -394,15 +332,8 @@ int px_uport_owner(uint16_t up_port, int m) {
 
 /* ====== pools ====== */
 
-/* Per-thread ALLOC magazines. The ingest/shard thread pulls a run of nodes off the shared
- * free-list under ONE lock, then hands them out lock-free until the magazine empties — the
- * mirror of main's px_free_batch on the alloc side. Before this, each shard alloc grabbed
- * pool_lock per message and contended with main's emit-free flush (measured: main ~33% of
- * its mutex time waiting on that flush). Bounded hoarding: at most PX_MAG_N per type per
- * thread (<< the ~65536-node pools), and magazines are per-thread so there is no lock on
- * the hand-out. Nodes stuck in an idle thread's magazine are reclaimed en masse at teardown
- * (the whole arena is freed). Frees below stay direct (locked) — only the rare cleanup/drop
- * paths use them; the hot free path is main's batch. */
+/* Per-thread allocation magazines hold up to PX_MAG_N nodes per type. Shared-list
+ * refill uses one lock; local allocation is lock-free. */
 #define PX_MAG_N 64
 static __thread struct px_arrival *tls_arr_mag;
 static __thread struct px_piece   *tls_piece_mag;
@@ -485,19 +416,8 @@ static void px_batch_free_node(struct px_engine *eng, struct px_batch *b) {
     b->next = eng->batch_free; eng->batch_free = b;
 }
 
-/* ====== batched pool free (main-thread emit hot path) ======
- *
- * The emit drain (px_engine_emit, main thread) frees a unit + its pieces + a released
- * arrival for EVERY completed message, and each px_*_free grabs pool_lock — under load
- * the ingest shards alloc from the same lock, so main serializes on it (measured ~87% of
- * main's CPU). This collects the freed nodes into a thread-local chain and returns them
- * to the shared pool in ONE locked splice per drain span, cutting main's lock traffic by
- * the batch factor. Pool semantics are unchanged (a freelist is order-agnostic); the only
- * new invariant is a periodic flush so main never holds so many freed nodes that a
- * concurrent shard alloc starves. Same mutex, same nodes — just far fewer acquisitions. */
-/* Flush the deferred-free batch after this many units (<< the ~65536-node pools, so a
- * shard alloc can never starve while main holds a span back). Also cuts main's pool_lock
- * acquisitions by up to this factor. */
+/* Main-thread deferred frees are returned in one locked splice per drain span. */
+/* Maximum units retained before a deferred-free flush. */
 #define PX_FREE_BATCH_FLUSH  256
 struct px_free_batch {
     struct px_unit    *u_head, *u_tail;
@@ -662,7 +582,6 @@ static void px_resolve_route(struct dmesh_proxy *px, struct px_conn *c,
 }
 
 static void px_conn_del(struct objects *objs, struct px_conn *c) {
-    struct dmesh_proxy *px = objs->proxy;
     if (c->parse_pos < c->stream_end)
         px_drop_window(objs, c, "conn teardown");
     /* remaining window arrivals are fully parsed; any with pending egress
@@ -865,17 +784,8 @@ static void px_drop_window(struct objects *objs, struct px_conn *c, const char *
     }
 }
 
-/* Tell this stream's SENDER that its stream is dead: a 0-length unit (= EOF) addressed
- * back to (src_pod, src_port), the conn it sent on. Symmetric for both directions — the
- * sender is the client on a request stream, the backend on a reply stream.
- *
- * EOF is the ONLY error signal the wire has: a rev_done entry encodes length==0 (EOF)
- * or length>0 (data), nothing else. Closing on upstream failure is TCP-proxy behavior —
- * the sender's read() returns 0 and the app errors out.
- *
- * Safe to synthesize: the host demuxes an inbound message by dst_port alone, and on a
- * 0-length body cq_emit only latches peer_closed — it reads neither seq nor src_*, and
- * a client conn never learns a peer. */
+/* Send a zero-length EOF unit to the stream sender. EOF is the wire-level failure
+ * signal for both request and reply directions. */
 /* 1 = the sender has been told (or is gone), 0 = the unit pool is momentarily dry and
  * NOTHING was mutated — the caller must latch the debt and retry, never drop it: a lost
  * EOF is a sender that hangs forever. */
@@ -988,15 +898,8 @@ static int px_queue_fin_unit(struct objects *objs, struct px_conn *c,
     return 1;
 }
 
-/* A unit that will never be delivered (egress DMA faulted, or its destination died
- * mid-flight) must not look like a success to the sender: releasing its custody TX_ACKs
- * the sender, which reads as "delivered". Tell the ORIGIN its stream is dead — a
- * 0-length unit (= EOF) addressed back to the conn it sent on, the same signal
- * px_fin_to_sender uses, since EOF is the only error the wire can carry.
- *
- * Takes the unit, not a px_conn, ON PURPOSE: the emit paths run where the conn table
- * may belong to another shard. pods[], the ingest-owned unit pool and the (locked) lane
- * are all this needs, so it is safe from every one of them. */
+/* Send EOF to the origin of an undeliverable unit. This operates on the unit so
+ * emit paths do not access another shard's connection table. */
 static void px_eof_to_origin(struct objects *objs, const struct px_unit *fu) {
     struct dmesh_proxy *px = objs->proxy;
     struct pod_state *sp = find_pod_by_id(objs, fu->src_pod_id);
@@ -1021,19 +924,8 @@ static void px_eof_to_origin(struct objects *objs, const struct px_unit *fu) {
     px_lane_enqueue(px, (int)(sp - objs->pods), (int)(fu->org_port % (uint16_t)K), u);
 }
 
-/* Route an L7 message: the codec knows where this message starts and ends, so the
- * engine picks a backend PER MESSAGE — Envoy's http_connection_manager granularity.
- *   host >= 0        → the hook named a pod: honor it iff it is a live backend OF
- *                      `cluster` (session affinity is the hook's business — it has
- *                      ctx->hosts and its own state).
- *   DMESH_LB_DEFER   → load-balance this message.
- * No connection pin: pinning a codec'd service to one backend would discard LB for
- * every long-lived client, which is the whole reason to run a codec.
- *
- * VALIDATES the decision rather than trusting it. `cluster` arrives as the hook's int32
- * and is range-checked BEFORE narrowing — truncating first would silently alias an
- * out-of-range cluster onto a real service. -1 = the hook broke its contract; the caller
- * poisons the conn. */
+/* Route one codec-delimited L7 message. A nonnegative host must be a live backend
+ * of the selected cluster; DMESH_LB_DEFER invokes load balancing. */
 static int32_t px_route_message(struct objects *objs, int32_t cluster, int32_t host) {
     if (cluster < 0 || cluster >= POD_ID_SPACE)
         return -1;                             /* not a service id */
@@ -1052,12 +944,7 @@ static int32_t px_route_message(struct objects *objs, int32_t cluster, int32_t h
     return dpu_route_l4(objs, (int16_t)cluster);
 }
 
-/* Resolve a byte-stream conn's backend. NO CODEC runs on this path, so the engine
- * cannot see where messages begin or end — it only has bytes. Splitting them across
- * backends would shred the stream, so the conn is pinned to its first pick for life
- * (Envoy's tcp_proxy granularity). This is forced by the absence of a codec, not
- * chosen: to load-balance per message, give the service a codec (_FRAME_SVC/_L7_SVC).
- * A pinned backend that dies is re-picked. */
+/* Resolve a byte-stream connection to one pinned backend. A dead backend is re-picked. */
 static int32_t px_resolve_backend(struct objects *objs, struct px_conn *c,
                                   int16_t cluster) {
     if (c->pinned_backend >= 0 && c->pinned_cluster == cluster) {
@@ -1073,28 +960,15 @@ static int32_t px_resolve_backend(struct objects *objs, struct px_conn *c,
     return b;
 }
 
-/* Execute one seg: resolve its destination, build the unit's staging pieces,
- * claim custody, queue on the destination lane. */
-/* Execute one seg: resolve its destination, build the unit's staging pieces, claim
- * custody, queue on the destination lane. Returns:
- *
- *   1  SHIPPED  — claimed + queued; the caller advances past these bytes.
- *   0  EAGAIN   — a pool is empty. NOTHING is mutated (no custody claim, no egress_seq
- *                 bump), so the caller must NOT advance: the bytes stay in the window
- *                 and re-ship once the egress frees a unit.
- *  -1  TERMINAL — these bytes can never be delivered (no live backend / dst gone /
- *                 a seg that violates the parser contract). The caller advances past
- *                 them and px_advance charges them to stat_drop_bytes.
- *
- * The conntrack `uP` find-or-create above the allocations is idempotent, so an EAGAIN
- * after it is clean. */
+/* Resolve and queue one segment. Returns 1 when queued, 0 when capacity is
+ * temporarily unavailable, or -1 when the segment is undeliverable. */
 static int px_ship_seg(struct objects *objs, struct px_conn *c,
                        const struct dmesh_route_seg *s) {
     struct dmesh_proxy *px = objs->proxy;
-    struct dpu_conntrack *ct = px_cur_shard->ct;   /* ② private / ① shared (under px_route_lock) */
+    struct dpu_conntrack *ct = px_cur_shard->ct;   /* private or locked shared state */
     uint64_t sbeg = c->parse_pos + s->off, send_ = sbeg + s->len;
     int32_t dst_pod;
-    uint16_t out_src_port, out_dst_port;
+    uint16_t out_src_port = 0, out_dst_port = 0;
 
     if (c->pub.is_reply) {
         /* dst comes from the conntrack table; the proxy only confirms. */
@@ -1132,29 +1006,19 @@ static int px_ship_seg(struct objects *objs, struct px_conn *c,
     }
 
     if (!c->pub.is_reply) {
-        px_route_lock(objs);   /* ① : serialize the shared conntrack; no-op in ② / M=1 */
+        px_route_lock(objs);   /* serialize shared conntrack access */
         uint16_t uP = dpu_upstream_find(ct, c->pub.src_pod, c->pub.src_port, dst_pod);
         int created = 0;
         if (uP == 0) {
-            /* ② : stamp the up_port with THIS shard's owner-residue so the backend's
-             * reply on it dispatches back here (share-nothing session ownership). */
+            /* Encode this shard in the upstream port for reply dispatch. */
             uP = dpu_upstream_create(ct, c->pub.src_pod, c->pub.src_port, dst_pod,
                                      (uint16_t)px_cur_shard->id,
                                      (uint16_t)px_cur_shard->owner_stride);
             created = (uP != 0);
         }
         px_route_unlock(objs);
-        /* A freshly-reused uP may still carry a STALE dead reply-conn (dst_pod, uP)
-         * from a previous client whose late reply arrived AFTER its FIN: px_conn_get
-         * created that reply conn, upstream[uP] was already freed → it got dead-marked
-         * (the stale-upstream WARN-flood guard) but was never cleaned. Left in place,
-         * this backend's replies on the reused uP would hit the dead orphan
-         * (px_ingest_forward c->dead fast-path) and be blackholed for the whole session
-         * — orphans accumulate under conn churn → progressive global wedge. Evict it so
-         * this session's replies build a FRESH conn and get delivered.
-         * The reply conn (dst_pod, uP) lives on THIS shard only when M==1 or ② (owner
-         * encoding co-locates it here); in ① it may be on another shard — skip (the
-         * shared-conntrack path keeps this rare defensive cleanup single-shard). */
+        /* Remove stale reply state when a uP is newly allocated. Owner encoding
+         * locates the state on this shard for M==1 and share-nothing mode. */
         if (created && (px->n_shards <= 1 || px->share_nothing))
             px_conn_del_key(objs, dst_pod, uP);
         if (uP == 0) {
@@ -1270,17 +1134,8 @@ static int px_exec_segs(struct objects *objs, struct px_conn *c,
     return 1;
 }
 
-/* Park a conn that could not ship for want of a pool node. parse_pos did NOT move, so
- * its bytes are still in the window; px_drain_stalled re-parses from exactly there.
- *
- * Deliberately NO wake plumbing. Units are freed by the egress (px_drain, main thread),
- * and every ingest driver already re-reaches px_drain_stalled without being told:
- *   - inline (default, reaper off): main IS the ingest thread — it frees the units in
- *     px_drain and re-parses on its very next loop pass. Immediate.
- *   - reaper (M==1) / shard threads (M>=2): main does not wake them, so the retry rides
- *     their 1 ms epoll backstop. Bounded, and only in an already-degraded state.
- * Either way the thread still SLEEPS while stalled — px_drain_stalled reports progress
- * only when parse_pos actually moves, so an unrelieved pool cannot spin the loop. */
+/* Park a connection whose pool allocation failed. Its parse position remains in
+ * the window, and the ingest loop retries it on the next pass or epoll timeout. */
 static void px_stall(struct px_conn *c) {
     if (c->stalled)
         return;
@@ -1292,7 +1147,6 @@ static void px_stall(struct px_conn *c) {
 /* ====== parse loop ====== */
 
 static void px_parse(struct objects *objs, struct px_conn *c) {
-    struct dmesh_proxy *px = objs->proxy;
     struct dmesh_route_seg segs[DMESH_PROXY_SEG_MAX];
 
     if (c->is_l7) {                            /* head-only path — its own loop */
@@ -1302,9 +1156,7 @@ static void px_parse(struct objects *objs, struct px_conn *c) {
 
     while (c->parse_pos < c->stream_end) {
         if (c->pub.is_reply) {
-            /* the reply's dst is predetermined — L4 conntrack lookup. Read the
-             * client identity OUT under px_route_lock (① : the shared conntrack may
-             * be freed by another shard's FIN concurrently; ② : private, no lock). */
+            /* Resolve the reply destination from conntrack under the routing lock. */
             int have = 0; int32_t cpod = 0; uint16_t cport = 0;
             if (c->pub.src_port >= DMESH_UPORT_BASE) {
                 px_route_lock(objs);
@@ -1313,13 +1165,7 @@ static void px_parse(struct objects *objs, struct px_conn *c) {
                 px_route_unlock(objs);
             }
             if (!have) {
-                /* Client already closed: this reply is undeliverable forever.
-                 * Drop the window once and mark the conn dead so subsequent
-                 * arrivals hit the silent drop+ack fast-path in
-                 * px_ingest_forward (c->dead) instead of re-parsing and
-                 * re-logging every 8KB window — that flood filled
-                 * dpumesh_dpu_bench.log with millions of identical WARN lines.
-                 * Now bounded to one WARN per conn. */
+                /* Mark undeliverable reply traffic dead after dropping its window. */
                 px_drop_window(objs, c, "stale upstream (client closed)");
                 c->dead = 1;
                 return;
@@ -1463,17 +1309,11 @@ static void px_parse_l7(struct objects *objs, struct px_conn *c) {
 
 /* ====== FIN ====== */
 
-/* 1 = the conn is torn down and FREED (never touch it again); 0 = a pool was dry, so
- * fin_pending stays latched, the conn is parked, and px_drain_stalled re-enters here.
- *
- * RESUMABILITY IS WHY THE ORDER IS WHAT IT IS: an upstream is freed only AFTER its FIN
- * unit is queued. Freeing first would make a retry unable to FIND the upstreams whose
- * FIN had not gone out yet — dpu_upstream_find is the fan-out's only enumeration — so a
- * partial pass would silently lose the rest. With the free last, a retry re-scans, skips
- * what is already done (find returns 0) and picks up exactly where it stopped. */
+/* Returns 1 after freeing the connection. On pool pressure, retains fin_pending
+ * and parks the connection. Each upstream is freed after its FIN unit is queued. */
 static int px_try_fin(struct objects *objs, struct px_conn *c) {
     struct dmesh_proxy *px = objs->proxy;
-    struct dpu_conntrack *ct = px_cur_shard->ct;   /* ② private / ① shared (px_route_lock) */
+    struct dpu_conntrack *ct = px_cur_shard->ct;   /* private or locked shared state */
     if (!c->fin_pending)
         return 0;
     /* FIN = no more input: an unconsumed tail is a truncated unit — drop it
@@ -1482,10 +1322,7 @@ static int px_try_fin(struct objects *objs, struct px_conn *c) {
         px_drop_window(objs, c, "FIN with unconsumed tail");
 
     if (!c->pub.is_reply) {
-        /* client FIN: fan-out teardown of every upstream this conn opened —
-         * each 0-len unit rides ITS lane, i.e. BEHIND that upstream's data. The
-         * conntrack find/free are under px_route_lock (① shared); the FIN unit and
-         * reply-conn cleanup are shard-local outside it. */
+        /* Fan out client FIN behind each upstream's queued data. */
         for (int i = 0; i < objs->num_pods; i++) {
             int32_t b = objs->pods[i].pod_id;
             px_route_lock(objs);
@@ -1503,8 +1340,7 @@ static int px_try_fin(struct objects *objs, struct px_conn *c) {
             px_route_lock(objs);
             dpu_upstream_free(ct, uP);         /* only now: this one's FIN is on its lane */
             px_route_unlock(objs);
-            /* reply-stream state of this upstream lives on THIS shard only when
-             * M==1 or ② (owner encoding); in ① it may be elsewhere — skip. */
+            /* Private routing keeps this upstream's reply stream on this shard. */
             if (px->n_shards <= 1 || px->share_nothing)
                 px_conn_del_key(objs, b, uP);
         }
@@ -1524,7 +1360,7 @@ static int px_try_fin(struct objects *objs, struct px_conn *c) {
                     return 0;
                 }
             }
-            /* upstream itself is freed by the CLIENT's FIN fan-out (legacy parity) */
+            /* The client FIN fan-out frees the upstream. */
         }
     }
     batch_or_send_tx_ack(objs, find_pod_by_id(objs, c->fin_ack_pod),
@@ -1723,11 +1559,7 @@ static void px_dma_err_cb(struct doca_dma_task_memcpy *t, union doca_data tud,
     doca_task_free(doca_dma_task_memcpy_as_task(t));
     eng->dma_tasks_inflight--;
 
-    /* Latch from the error itself rather than waiting for a later submit to rediscover
-     * the fault as BAD_STATE: the IO_FAILED handling below marks the pod dead, which
-     * stops the very refreshes that would have hit BAD_STATE, so an otherwise idle
-     * engine would leave the ctx dead indefinitely. Latching on a fault the ctx
-     * survived is harmless — px_engine_recover reads the real state and clears it. */
+    /* Latch I/O faults for context recovery. */
     if (st == DOCA_ERROR_IO_FAILED)
         eng->dma_stalled = 1;
 
@@ -1736,17 +1568,7 @@ static void px_dma_err_cb(struct doca_dma_task_memcpy *t, union doca_data tud,
                            __ATOMIC_ACQ_REL);
         DOCA_LOG_ERR("proxy: credit refresh DMA failed: %s", doca_error_get_descr(st));
         objs->proxy->lanes[op->pod_idx][op->region].refresh_inflight = 0;
-        /* IO_FAILED on a read of the pod's HOST memory ⇒ that memory is gone ⇒ the pod
-         * died and comch has not reported it yet. This is the earliest reliable death
-         * signal available, so use it: drop dma_ready until the pod re-registers.
-         * Without it the engine recovers straight back into the same wall — restart,
-         * refresh the still-"ready" dead pod, fault, restart — until comch lands.
-         * Two guards, both load-bearing:
-         *   IO_FAILED only — a ctx fault FLUSHES healthy pods' in-flight tasks through
-         *     this same callback; marking those dead would cut off every pod with a
-         *     task in flight.
-         *   generation only — pod_idx is a recycled SLOT index and this lands on PE
-         *     progress, possibly after the slot's next tenant registered. */
+        /* An I/O failure for the current pod generation clears data-plane readiness. */
         if (st == DOCA_ERROR_IO_FAILED) {
             struct pod_state *dead = &objs->pods[op->pod_idx];
             if (__atomic_load_n(&dead->dma_generation, __ATOMIC_ACQUIRE) == op->pod_generation)
@@ -2053,16 +1875,7 @@ static void px_lane_drop_dead(struct px_engine *eng, struct px_lane *ln) {
 
 /* worker: one pass over this engine's owned lanes (splice inbox→qhead, submit,
  * retire). Owns lanes where pod_idx % n_eng == eng->id. */
-/* Bring this engine's SHARED doca_dma ctx back up after a fault.
- *
- * A DMA into a dying pod's host memory takes a QP LOCAL_QP_OPERATION_ERROR (its process
- * is gone, its memory unmapped), and DOCA stops the ctx — so every pod's egress dies
- * with it. Gating cannot prevent this: pod_data_ready() only drops once comch reports
- * the disconnect, strictly AFTER the memory is gone. A peer dying is a NORMAL event
- * this engine must survive.
- *
- * Recovery = let the ctx reach IDLE (DOCA flushes in-flight tasks through
- * px_dma_err_cb), then start it again. One step per pump, never blocking. */
+/* Restart this engine's shared DMA context after it reaches IDLE. */
 /* Reset the per-incarnation state of one lane. Queues are NOT touched: they hold
  * units, whose lifetime is custody-managed (px_lane_drop_dead retires them when the
  * pod goes not-ready). Only the credit/landing accounting is incarnation-scoped. */
@@ -2091,18 +1904,7 @@ static int px_engine_recover(struct px_engine *eng) {
         if (doca_ctx_start(eng->dma_ctx) != DOCA_SUCCESS)
             return 1;                     /* still down; keep the caller awake to retry */
         eng->dma_tasks_inflight = 0;
-        /* Clear the in-flight marker of every lane THIS engine owns: a refresh in flight
-         * when the ctx died may never deliver its callback, and a stuck refresh_inflight=1
-         * stops that lane refreshing credit ever again — it would starve permanently. Fault
-         * path only, so rearm all of ours rather than reason about which callbacks fired.
-         *
-         * ONLY our own lanes (pod_idx % n_eng == id): each engine has a PRIVATE doca_dma ctx,
-         * so this fault flushed only OUR tasks; another engine's lanes are untouched and may
-         * have a legitimate refresh in flight. refresh_inflight is a plain int guarded by the
-         * single-owner-thread invariant + the shared refresh_ops[pod][region] px_op — clearing
-         * a peer's flag races that thread AND lets it re-submit on the same px_op, overwriting
-         * op->src_buf/dst_buf and double-freeing/leaking those inventory bufs. For n_eng==1
-         * (eng->id=0, step 1) this covers all lanes exactly as before. */
+        /* Clear refresh state only for lanes owned by this engine. */
         struct dmesh_proxy *px = eng->objs->proxy;
         for (int p = eng->id; p < MAX_PODS; p += px->n_eng)
             for (int r = 0; r < MAX_EU_PER_POD; r++)
@@ -2167,8 +1969,7 @@ static int px_engine_pump(struct objects *objs, struct px_engine *eng) {
                     quiet = 0;
                 continue;
             }
-            /* Slot re-tenanted since we last touched this lane → its credit/landing
-             * state belongs to the previous pod and must not be applied to this one. */
+            /* Reset lane accounting when the pod generation changes. */
             uint32_t gen = __atomic_load_n(&pod->dma_generation, __ATOMIC_ACQUIRE);
             if (ln->pod_generation != gen)
                 px_lane_rearm(ln, gen);
@@ -2464,9 +2265,7 @@ int px_drain(struct objects *objs) {
                     quiet = 0;
                 continue;
             }
-            /* Slot re-tenanted since we last touched this lane → its credit/landing
-             * state belongs to the previous pod. Rearm before any submit, or the new
-             * pod inherits the old one's consumed credits and never sends. */
+            /* Reset lane accounting before submitting to a new pod generation. */
             if (pod_data_ready(pod)) {
                 uint32_t gen = __atomic_load_n(&pod->dma_generation, __ATOMIC_ACQUIRE);
                 if (ln->pod_generation != gen)
@@ -2481,9 +2280,7 @@ int px_drain(struct objects *objs) {
             __atomic_store_n(&pod->egress_quiesced, quiet, __ATOMIC_RELEASE);
         }
     }
-    /* px_lane_drop_dead uses the common worker→main done queue even in the
-     * single-engine configuration. Drain it here so no old unit survives slot
-     * reuse. */
+    /* Drain the worker-to-main done queue before slot reuse. */
     {
         struct px_free_batch fb = { 0 };
         progressed |= px_engine_emit(objs, eng, &fb);
@@ -2519,9 +2316,7 @@ int px_pod_reclaim_ready(struct objects *objs, int pod_idx) {
 /* ====== built-in parsers — the REAL L7 hook is dpu_l7.c::dmesh_l7_route (design/CORE.md
  * §5.1), selected per service by DPUMESH_PROXY_L7_SVC. These two are the deploy defaults. */
 
-/* pass-through: one seg per contiguous arrived run, destination deferred to the
- * L4 default route (connection stickiness, else RR over the live backend set).
- * The parity/regression parser — works with any byte stream, no app framing. */
+/* Pass-through emits one segment per contiguous run and defers destination choice. */
 static int px_mock_passthru(struct objects *objs, dmesh_proxy_conn *conn,
                             const uint8_t *buf, uint32_t avail,
                             struct dmesh_route_seg *segs, int max, uint32_t *consumed) {
@@ -2604,11 +2399,8 @@ int px_init(struct objects *objs) {
     const char *env = getenv("DPUMESH_PROXY");
     objs->proxy = NULL;
 
-    /* UNIFIED DATA PLANE: the SG-DMA egress engine is ALWAYS on — it is the sole
-     * DPU→host reverse path (the legacy DPA reverse machinery is gone). DPUMESH_PROXY
-     * no longer toggles the engine; it only picks the deploy-default REQUEST parser:
-     * unset / "passthru" / "1" → passthru (one seg per arrived message, dst = the §5
-     * L4 route: metadata-only, the old legacy behaviour), "frame" → frame-all. */
+    /* The SG-DMA egress engine is the DPU-to-host reverse path.
+     * DPUMESH_PROXY selects the default request parser. */
     struct dmesh_proxy *px = (struct dmesh_proxy *)calloc(1, sizeof(*px));
     if (!px)
         return DOCA_ERROR_NO_MEMORY;
@@ -2621,11 +2413,8 @@ int px_init(struct objects *objs) {
     int n_frame_svc = px_parse_svc_csv(getenv("DPUMESH_PROXY_FRAME_SVC"), px->svc_frame);
     px->seam_max = PX_SEAM_MAX_DEFAULT;
 
-    /* ==== Ingest-processor shards (diagram ①②③) ====
-     * Each shard gets a PRIVATE conn table (lock-free: a conn maps to one shard).
-     * ② additionally gives each shard a PRIVATE conntrack (share-nothing; the
-     * up_port it hands out encodes owner residue = stride M, so a backend reply
-     * dispatches back). ① / single-shard share the objs->conntrack (routing_lock). */
+    /* Each ingest shard owns a connection table. Conntrack is private in
+     * share-nothing mode and shared under routing_lock otherwise. */
     px->n_shards = objs->n_ingest_shards >= 1 ? objs->n_ingest_shards : 1;
     if (px->n_shards > MAX_INGEST_SHARDS) px->n_shards = MAX_INGEST_SHARDS;
     px->share_nothing = !objs->shard_shared_routing;
@@ -2640,9 +2429,9 @@ int px_init(struct objects *objs) {
             if (!sh->ct)
                 goto oom;
             sh->ct->next_uport = DMESH_UPORT_BASE;
-            sh->owner_stride = px->n_shards;      /* ② : owner-strided up_ports */
+            sh->owner_stride = px->n_shards;      /* owner-strided upstream ports */
         } else {
-            sh->ct = objs->conntrack;             /* ① / single : shared conntrack */
+            sh->ct = objs->conntrack;             /* shared conntrack */
             sh->owner_stride = 1;
         }
     }
@@ -2663,7 +2452,7 @@ int px_init(struct objects *objs) {
     /* pool freelist lock (ingest reaper allocs / main frees); uncontended if reaper off */
     pthread_mutex_init(&px->pool_lock, NULL);
 
-    /* SG piece cap from the device (measured 64; clamp defensively) */
+    /* Clamp the SG piece cap to the device capability. */
     px->sg_pieces_max = PX_SG_PIECES_MAX;
     {
         uint32_t cap = 0;
@@ -2673,10 +2462,7 @@ int px_init(struct objects *objs) {
             px->sg_pieces_max = cap;
     }
 
-    /* Egress worker count. DPUMESH_ARM_EGRESS_THREADS: 1 (default/unset) = the
-     * proven inline path on the main thread; >=2 spawns that many egress worker
-     * threads (each its own DOCA dma/PE/inventory/batch pool), lanes sharded by
-     * dst pod_idx % n_eng. */
+    /* One egress engine runs inline; additional engines run on worker threads. */
     int n_eng = 1;
     { const char *te = getenv("DPUMESH_ARM_EGRESS_THREADS");
       if (te && *te) { int v = atoi(te);
@@ -2755,7 +2541,7 @@ fail:
     DOCA_LOG_ERR("proxy init failed: %s", doca_error_get_descr(ret));
     for (int s = 0; s < MAX_INGEST_SHARDS; s++) {
         free(px->shards[s].buckets);
-        /* free a shard's PRIVATE conntrack (② ); never free the shared objs->conntrack */
+        /* Free only shard-private conntrack state. */
         if (px->shards[s].ct && px->shards[s].ct != objs->conntrack)
             free(px->shards[s].ct);
     }

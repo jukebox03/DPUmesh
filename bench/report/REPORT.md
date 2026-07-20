@@ -3,7 +3,7 @@
 This is a frozen ABI-1 campaign, retained because its raw data and interpretation
 remain useful. It is not the current ABI-2 performance record. The controlled
 automatic-batching A/B and its live DPU configuration are recorded in
-[`bench/RESULT.md`](../RESULT.md#session-7--abi-2-automatic-batching-performance-audit-2026-07-20).
+[`bench/RESULT.md`](../RESULT.md#session-7--abi-2-automatic-batching-performance-audit).
 
 Real BlueField-3 hardware, **intra-node** (pod → local DPU → pod). One workload — a greeter
 RPC (N-byte request → 8-byte reply, 16-byte `bench.h` frame) — driven over every transport by
@@ -80,7 +80,7 @@ emit ABI-2 rows whose labels would execute identical code.
 | config / N-pod (§5, §6) | `bench/suite/npod.sh <cfg> 32 20 3` per deployed config | `data/{cpu_configs,npod}.csv` |
 | plots | `python3 bench/suite/plot_batch.py data figures` ; `python3 bench/suite/plot.py …` | `figures/` |
 
-**Provenance note.** §1–§4 (latency, throughput, batching, ARM CPU) were **measured 2026-07-18**
+**Provenance note.** §1–§4 (latency, throughput, batching, ARM CPU) were measured
 at commit `af19365`, which contained the ABI-1 opt-in batching knobs and a lane-inbox atomic fix;
 the unbatched/TCP anchors reproduced the frozen numbers within CI.
 §5–§6 (config frontier, N-pod, busy-app, goodput) are from the frozen `commit 4beb0be` (4,4) campaign
@@ -220,6 +220,6 @@ architecture rests on the untested regimes (L7 sidecar tax, busy apps), not on t
 ---
 
 commit `af19365` · node rapids4 (Xeon Gold 6554S) · BlueField-3 · DOCA 3.1.0 · kernel 5.15 ·
-DPU (4,4) live-verified · §1–§4 measured 2026-07-18 on the ABI-1 build with batching knobs +
+DPU (4,4) live-verified · §1–§4 measured on the ABI-1 build with batching knobs +
 lane-inbox data-race fix (0-fail on loopback/preload + the ablation) · §5–§6 frozen from commit
 `4beb0be`.

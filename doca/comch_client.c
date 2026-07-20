@@ -77,14 +77,7 @@ static void client_send_task_completion_err_callback(struct doca_comch_task_send
 	(void)doca_ctx_stop(doca_comch_client_as_ctx(objs->cc_client));
 }
 
-/**
- * Callback for client message recv event
- *
- * @event [in]: Recv event object
- * @recv_buffer [in]: Message buffer
- * @msg_len [in]: Message len
- * @comch_connection [in]: Connection the message was received on
- */
+/* Handle a message received by the Comch client. */
 static void client_message_recv_callback(struct doca_comch_event_msg_recv *event,
 					 uint8_t *recv_buffer,
 					 uint32_t msg_len,
@@ -188,14 +181,7 @@ static void client_message_recv_callback(struct doca_comch_event_msg_recv *event
 	}
 }
 
-/**
- * Client sends a message to server
- *
- * @objs [in]: Transport objects context
- * @msg [in]: The msg to send
- * @len [in]: The msg length
- * @return: DOCA_SUCCESS on success and DOCA_ERROR otherwise
- */
+/* Send one control message from the client to the server. */
 doca_error_t client_send_msg(struct objects *objs, const char *msg, size_t len)
 {
 	doca_error_t result;

@@ -1,19 +1,8 @@
 #!/bin/bash
-# fair_cores.sh — the logically-fair comparison: give BOTH client sides the SAME host
-# core budget B (Envoy counted inside the TCP budget), drive each to saturation, and
-# report the peak throughput plus host CPU (client+server) and DPU ARM.
-#
-# "equal host cores": both bench pods are pinned to exactly B cores; the TCP pod's
-# B cores are shared by bench_sock + its Envoy sidecar (the sidecar is IN the budget).
-# The DPU ARM is reported separately — it is the offload silicon, not a host core.
-#
-# The thread/QP count is FIXED (FAIR_THREADS, default 4) across all B, so this sweep
-# varies ONLY the host-core budget and isolates core-scaling from connection-scaling.
-# CAVEAT this sweep cannot remove: DPUmesh's client threads fan out across up to 3
-# echo backends (cores 1/6/7) while TCP has ONE echo backend — the server side is NOT
-# symmetric, and it favours DPUmesh. Read the result with that asymmetry in mind.
-#
-#   bench/suite/fair_cores.sh ["1 2 4"]   # B values; writes $OUT/fair.csv
+# Sweep equal client-side host-core budgets and report peak throughput, host CPU,
+# and DPU ARM CPU. TCP's budget includes Envoy. FAIR_THREADS stays fixed; DPUmesh
+# may use more backend cores than the single TCP backend.
+# Usage: fair_cores.sh ["1 2 4"]. Output: $OUT/fair.csv.
 set -euo pipefail
 SUITE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJ_ROOT="$(cd "$SUITE_DIR/../.." && pwd)"

@@ -11,6 +11,7 @@ are the first validation layer before the hardware validators under `bench/`.
 | `native_tx_batch_policy_test.c` | Complete 8 KiB unit submission, explicit partial flush, and physical-block tail ordering |
 | `native_writable_test.c` | Automatic one-shot arm/recheck, QP and shared-pool readiness, stale-hint cancellation, and reservation rollback |
 | `preload_api_contract_test.c` | Public native TX usage, completion-driven blocking/nonblocking retry, honest `POLLOUT`, send timeout, RX partial/peek credit, FIN/stream validation, and fd-entry lifetime |
+| `abi_contract_test.sh` | Library SONAME, required public symbols, and the preload library's versioned runtime dependency |
 
 Run all tests from the repository root:
 

@@ -8,7 +8,7 @@ ABI-1 cross-transport campaign lives in [report/REPORT.md](report/REPORT.md).
 Session 7 below is the current ABI-2 batching A/B and records both the valid
 configuration-controlled result and the first comparison that had to be discarded.
 
-# Session 1 — scalability experiments (2026-06-08)
+# Session 1 — scalability experiments
 
 Goal: (1) raise 2-pod chain RPS, (2) make DPA/DPU multithread actually scale.
 Constraint: all traffic stays host→DPU→host (L7 routing computed on DPU; no host→host).
@@ -170,7 +170,7 @@ conns=4096 > echo's 2048 TX slots → echo rx_queue filled to 1984, tx_inflight=
 - echo re-send fine (rx_queue=0); host send is the serial cap (single PE thread + worker-wakeup on 1 core; more concurrency hurts; hw flat).
 - FIX direction: split host RX progress (pe vs consumer_pe → 2 threads) so dispatch parallelizes on hw; and/or reduce per-request wakeup cost.
 
-## ★ WIN — TX_ACK elimination unlocks host multi-core scaling (2026-06-08)
+## ★ WIN — TX_ACK elimination unlocks host multi-core scaling
 Lever: `DPUMESH_SKIP_REQ_TXACK=1` — DPU does NOT send TX_ACK for request forwards; the CLIENT frees its TX slot when the response (REV_DONE) arrives (response implies request round-tripped). Response forwards still ACK their src (echo). Host-side free is always-on + no-op-if-already-freed → safe. (User's idea; avoids any new DPA host-memory read — just skips a message.)
 
 ### E9 — SKIP_REQ_TXACK (verified active: bench tx_inflight 750→1500 full-RTT hold; 0-fail; back-to-back leak-safe)
@@ -342,7 +342,7 @@ Two ORTHOGONAL multithreading axes (commonly conflated):
 
 ---
 
-# Phase 1 cleanup (2026-06-09) — fix config (no env selection) + compose SHARD with host wins
+# Phase 1 cleanup — fix config (no env selection) + compose SHARD with host wins
 
 Goal: remove the runtime SELECTION (env toggles) and bake each feature to its
 enabled/fixed state. KEEP all feature code. Assume "neutral" verdicts may have been
@@ -378,7 +378,7 @@ async_client via config, NUM_SLOTS_DEFAULT=4096); dpumesh_common.h (stale commen
 bench_dpumesh.c (async-only, cfg.async_client=1); echo_dpumesh.c (cfg.poll_rx=1);
 test-bench.sh (dropped baked-knob env; DPA_THREADS:-2, NUM_SLOTS:-4096).
 
-## Measured (2026-06-09) — build OK (DPU recompiled 13 objs; host OK), all toolchains compile
+## Measured — build OK (DPU recompiled 13 objs; host OK), all toolchains compile
 
 ### hw3 (3-core) — 0-fail, >= prior best + ~2x lower p50
 | target | achieved | p50 | p99 | ok/fail |
@@ -426,7 +426,7 @@ DPA_THREADS=2.
   limit (pod%N). Higher throughput needs >2 pods (more active EUs), which costs host cores.
   Net Phase-1 gain = latency (async) + correctness composition; throughput ceiling flat.
 
-## Phase 1 cleanup (step 2: comments + dead-path) — verified non-regressing (2026-06-09)
+## Phase 1 cleanup (step 2: comments + dead-path) — verified non-regressing
 - Comment cleanup: 8-agent workflow trimmed history/rationale/dead-env comments across 39 files.
   Verified comment-ONLY (comment-stripped diff vs pre-cleanup snapshot = 0 code changes).
 - Host RX staging path removed (zerocopy baked-on made it dead): rx_buffer / rx_slot_bitmap /
@@ -442,7 +442,7 @@ DPA_THREADS=2.
 - Verify (deploy3, all toolchains compile): hw3 130K->129,291 (p50 2.34ms, 0-fail);
   1-core 105K->104,424 (p50 1.39ms, 0-fail); back-to-back 130K/30K 0-fail (no leak). Non-regressing.
 
-## Phase 2 lightening (2026-06-09) — per-RTT compute, honest verdict
+## Phase 2 lightening — per-RTT compute, honest verdict
 Investigation (workflow): "completion 제거" is NOT a lever —
 - immediate completion comch_dma_comp_msg (16B) = routing-essential EU→ARM channel, can't remove
   (already 1 WQE BB).
@@ -465,7 +465,7 @@ Verify (deploy4, all toolchains compile): hw3 130K->129,292 (0-fail), 137K->136,
 back-to-back 130K/30K 0-fail (no leak). Throughput flat ~130-137K (expected — leanness, not a
 ceiling mover). Confirms per-RTT lightening cannot raise the 2-pod closed-loop ceiling.
 
-## 4-pod (2 echo pairs, 4 active EUs) — DOES scale past the 2-pod ceiling (2026-06-09)
+## 4-pod (2 echo pairs, 4 active EUs) — DOES scale past the 2-pod ceiling
 Config: DPUMESH_DPA_THREADS=4 deploy (10%4=2,11%4=3,12%4=0,13%4=1 → 4 distinct EUs), SHARD baked
 (4 workers + 1 SENDER + DRAIN=1 single drain), SKIP+BATCH+async+zerocopy. fair pin: pair1 cores
 0,1 / pair2 cores 4,5 (each pod 1 host core). Single-pair anchor (fair 1-core) = 104,429.
@@ -491,7 +491,7 @@ the per-RTT closed-loop cap is per-pair-parallelizable, not a shared hard wall (
 scaling (>4 pods / >4 EUs) limited by the shared ARM drain+SENDER+cc_server (next lever if needed:
 shard the SENDER / DRAIN_SHARDS>1 with group-affine routing — currently DRAIN=1 for cross-echo).
 
-## Q2 — WHY does 4-pod throughput rise? (attribution, controlled) (2026-06-09)
+## Q2 — WHY does 4-pod throughput rise? (attribution, controlled)
 Isolated EU count by running 4-pod at DPA_THREADS=2 (4 pods share 2 EUs: 10,12→EU0; 11,13→EU1)
 vs DPA_THREADS=4 (4 distinct EUs). Host cores (4) + pair count (2) held equal.
 
@@ -515,7 +515,7 @@ It is host-core + DPA-EU bound, NOT ARM-bound. To scale: add pods (host cores) u
 then add EUs — both cost host cores (1 core/pod). Shared ARM drain/SENDER/cc_server is the eventual
 ceiling above ~186K.
 
-## Q3/Q4 — completion rethink (workflow + adversarial verify vs DOCA headers) (2026-06-09)
+## Q3/Q4 — completion rethink (workflow + adversarial verify vs DOCA headers)
 Q3 (send reverse completion DPA->host directly, skip ARM relay): **NOT possible** in the current
 binding. DOCA: producer sends to a consumer_id on the SAME comch connection (doca_comch_producer.h
 :20-23); the DPA producer msgq is anchored to the DPU device (max_num_consumers=1=ARM, dpa.c:457);
@@ -532,7 +532,7 @@ an in-band metadata trailer (undo zerocopy) + body-before-flag fence + wrap rede
 Bottom line: completion is needed; the only ARM-relay removal (reverse) is SDK-blocked AND targets
 ~2.8% of RTT (host-transport-bound ceiling) — not a throughput lever. Real lever = more pods (Q2/4-pod).
 
-## Q2.2 — EU-sharding (2 pods, >2 EUs) feasibility (workflow + adversarial verify) (2026-06-09)
+## Q2.2 — EU-sharding (2 pods, >2 EUs) feasibility (workflow + adversarial verify)
 Re-examined as K-rings-per-pod (each EU owns its own ring), NOT the old 1-ring-per-pod.
 VERDICT: mechanism foreclosure OVERTURNED — single-producer (ring.c: 1 ring=1p/1c, not 1 pod=1 ring),
 admission [eu][ring] (already isolated), max_num_consumers=1 (per-MsgQ, already worked around by
@@ -545,7 +545,7 @@ ring_lock + single pe_progress_fn) — K EUs starve; (2) single ARM bridge ~103K
 K-way. Change scope: host dma_ring[K]/ring_lock[K]/enqueue-select + DPA per-pod K rings + reverse-ADD
 re-key + ARM reverse K-ring single-writer routing (the hard part). Coupled multi-layer build.
 
-## Q2.1 — 1-core attribution (TRACE) + SHARD reverted to OFF (measured) (2026-06-09)
+## Q2.1 — 1-core attribution (TRACE) + SHARD reverted to OFF (measured)
 Measured 1-core fair host/DPU split (DPA=2, TRACE=1, -l 50):
 - SHARD (baked): 1-core 105K, DPU hop avg 416µs (max 1343), cq_depth=0, recv 420K/s.
 - OFF (reverted): 1-core **120K** (p50 1.36ms healthy; 125K overloads), DPU hop avg **171µs**.
@@ -564,7 +564,7 @@ Verify (OFF, deploy): 1-core 120K (was 105K, +14%); hop 171µs (was 416µs, -59%
 137K→136,244 (0-fail, unchanged); back-to-back 130K/30K 0-fail (no leak). Net win, simpler, no 2-pod loss.
 Residual 1-core gap (120K → EU ceiling ~137K) = host CPU (library) → next: host-library lightening (Q2.1).
 
-## Q2.2 — EU-sharding decisive experiment: does EU count cap throughput? (2026-06-09)
+## Q2.2 — EU-sharding decisive experiment: does EU count cap throughput?
 Positive-evidence test (per project_bench_elimination_unreliable: demand positive evidence). Resolve the
 memory conflict (4pod_scales "~160K scales" vs shard_bottleneck "pairs halve"). 4-pod, SPLIT_OFF baseline,
 fair 1-core/app (pair1 cores 0,1; pair2 cores 4,5 — HOST cores constant = 4 client procs). Only variable =
@@ -627,7 +627,7 @@ throughput lever (host-micro exhausted per Q2.1). Above ~178K needs attacking th
 => 2-pod / 2-EU ceiling ~130K (120K healthy). EU-sharding target: 1 pair using 4 EUs (K=2 rings/pod)
 toward the measured 4-EU ceiling ~178K. This is the "before" for the EU-sharding gain comparison.
 
-## Q2.3 — EU-sharding BUILT (K-rings/pod). K=1 non-regressive verify (2026-06-09)
+## Q2.3 — EU-sharding BUILT (K-rings/pod). K=1 non-regressive verify
 Implemented K-rings-per-pod EU-sharding (DPUMESH_RINGS_PER_POD, default 1): host K forward rings +
 round-robin post + per-ring credit (ring_idx = pos/region_size); DPU setup_pod_dma loops K rings across
 K EUs k_j=(pod_id*K+j)%N, partitions DPU staging + host RX into K disjoint regions, region_off makes
@@ -642,7 +642,7 @@ K=1 DPA=4 2-pod hw3 (bit-identical check vs pre-sharding DPA=4 baseline ~120K):
 | 130K | 129,279 | 4.29 ms | 10.9 ms | knee |
 => K=1 reproduces the baseline exactly -> refactor is non-regressive. Next: K=2 DPA=4 (pair drives 4 EUs).
 
-## Q2.4 — EU-sharding RESULT: K=2 lifts the 2-pod ceiling (2026-06-09)
+## Q2.4 — EU-sharding RESULT: K=2 lifts the 2-pod ceiling
 K=2 DPA=4: the SAME 2 pods (10,11) now each shard across 2 EUs -> the pair drives 4 EUs
 (10 -> EU 0,1; 11 -> EU 2,3). 2-pod hw3, size=8192, 10s:
 | RPS | K=1 (2 EU) | K=2 (4 EU) | note |
@@ -665,7 +665,7 @@ bit-identical (Q2.3). Build: host (K rings + rr post + per-ring credit), DPU set
 region partition), ARM tx_rings[K] rr, kernel comp.pos += region_off. dpa_ring_info ABI unchanged
 (_pad_credit repurposed). Deployed state: DPA=4 K=2.
 
-## Q2.5 — Where is the 2-pod K=2 cap? HOST CPU measurement (2026-06-09)
+## Q2.5 — Where is the 2-pod K=2 cap? HOST CPU measurement
 K=2 DPA=4, hw3, 150K (149.5K achieved, 0-fail, p50 2.0ms = healthy). mpstat per-core (bench host10 pinned
 0,4,6; echo host11 pinned 1,5,7):
 | side          | %usr | %sys | %idle | busy |
@@ -685,7 +685,7 @@ POSITIVE EVIDENCE (confirms the user's "destination re-transmit overhead" intuit
    server-side analogue of [[project_option_a_async_result]] (async client removed per-req wakeup on the
    CLIENT; the SERVER still pays it). Levers from the perf-levers workflow ranked separately.
 
-## Q2.6 — Perf-lever multi-angle analysis (5 levers, adversarially verified) (2026-06-09)
+## Q2.6 — Perf-lever multi-angle analysis (5 levers, adversarially verified)
 Workflow (5 finders + 5 refuters + synthesis) over the code, cross-checked vs the Q2.5 measurement.
 Ranked:
 1. **Lean server RX (poll_rx on echo) — TOP, KEEP.** Only lever with POSITIVE measured evidence (Q2.5:
@@ -715,7 +715,7 @@ op-rate" vs "sub-EU PCIe BW / comch op-rate" — the ~178K attribution is elimin
 flopped, demand a positive counter first. (3) ONLY if egress proven binding, build a NEW K-way cc_server
 egress (NOT the racy SPLIT_SHARD). Running the poll_rx experiment now (ECHO_POLL_RX=1 ECHO_THREADS=3).
 
-## Q2.7 — poll_rx lean server RESULT: the biggest single win (2026-06-09)
+## Q2.7 — poll_rx lean server RESULT: the biggest single win
 Deployed ECHO_POLL_RX=1 ECHO_THREADS=3 (K=2 DPA=4). The poll path removes the per-request
 cond_signal/cond_wait. 2-pod hw3, size 8192:
 | RPS | achieved | p50 | echo %sys | state |
@@ -739,7 +739,7 @@ prove "single ARM egress op-rate" vs "PCIe body BW" BEFORE building a K-way cc_s
 72% is partly bench load-gen artifact (real clients are leaner).
 Deployed state: DPA=4 K=2 ECHO_POLL_RX=1 ECHO_THREADS=3 (~200K). Knobs: DPUMESH_RINGS_PER_POD, ECHO_POLL_RX.
 
-## Q2.8 — >200K cap attribution: DPU egress counters (positive evidence) (2026-06-09)
+## Q2.8 — >200K cap attribution: DPU egress counters (positive evidence)
 Added g_egress_again (cc_server DMA_COMPLETION send AGAIN/s) to the 1Hz DPU stat; cq_depth already logged.
 K=2 DPA=4 ECHO_POLL_RX=1, -l 50:
 | offered | achieved | recv (DPA->ARM comp/s) | cq_depth | egress_again/s |
@@ -761,7 +761,7 @@ completion)? K=4 DPA=8 makes the 2-pod pair drive 8 EUs (pod10->EU0-3, pod11->EU
 810K and RPS above 200K => EU-bound, EU-sharding K=4 scales further. If recv stays ~810K => hard shared
 op-rate cap, more EUs won't help and the only lever is fewer dma_copy/RTT.
 
-## Q2.9 — K=4 (8 EU) test: the ~810K op-rate is a HARD shared cap, NOT per-EU (2026-06-09)
+## Q2.9 — K=4 (8 EU) test: the ~810K op-rate is a HARD shared cap, NOT per-EU
 K=4 DPA=8 (2-pod pair drives 8 EUs: pod10->EU0-3, pod11->EU4-7), ECHO_POLL_RX=1, -l 50:
 | offered | achieved | recv (DPA->ARM comp/s) | cq_depth | egress_again |
 |---|---|---|---|---|
@@ -786,7 +786,7 @@ either fewer dma_copy (host->host direct = foreclosed for body-L7; refuted 4->2 
 completion-free RX (host polls landed RX buffer instead of a per-resp REV_DONE msg) — an architectural
 redesign. Baking K=2 + poll_rx as the standing 200K config; K=4 reverted.
 
-## Q2.10 — (a) BAKED standing config + (b) DONE + log level reverted (2026-06-09)
+## Q2.10 — (a) BAKED standing config + (b) DONE + log level reverted
 (a) Baked the measured 200K config as test-bench.sh defaults (env still overridable):
 DPUMESH_DPA_THREADS:-4, DPUMESH_RINGS_PER_POD:-2, ECHO_POLL_RX:-1, ECHO_THREADS:-3. A plain
 `test-bench.sh deploy` now yields the K=2 + lean-server 200K config at -l 40.
@@ -801,7 +801,7 @@ FINAL LADDER (2-pod, hw3, 8KB): 130K (K=1) -> 160K (K=2 EU-sharding) -> **200K (
 = +54% over baseline, and above the 4-pod blocking number (178K). 200K is the architecture's 2-pod DPA
 op-rate ceiling; exceeding it needs fewer dma_copy+completion per RTT (architectural), not more EUs/pods.
 
-## Q2.11 — CORRECTION of Q2.8/Q2.9 attribution (per bench.md hierarchy) (2026-06-09)
+## Q2.11 — CORRECTION of Q2.8/Q2.9 attribution (per bench.md hierarchy)
 Q2.8/Q2.9 claimed "~810K = the DPA dma_copy+completion op-rate; the per-op completion is ~half the cost;
 single comch consumer delivery." **That attribution is WRONG** — bench.md §5 already measured the engine
 hierarchy (test_dma micro-bench, recv/s == dma_copy/s, completions INCLUDED in all):
@@ -823,7 +823,7 @@ specific: closed-loop + reverse DMA + admission per-RTT structure), but the spec
 NEXT (bench.md §8.2): DPA-side stall-cycle instrumentation — measure where the chain EU stalls
 (is_consumer_empty / admission-gate / ring-empty) with POSITIVE counters.
 
-## Q2.12 — POSITIVE cap localization via DPA EU-stall instrumentation (2026-06-09)
+## Q2.12 — POSITIVE cap localization via DPA EU-stall instrumentation
 Added device-side EU counters (dpa_thread_arg: stat_dma/consumer_wait/admission_brk/idle_resched),
 incremented in dpa_kernel.c, read back by the ARM via doca_dpa_d2h_memcpy in the 1Hz stat
 (dmesh_log_eu_stats in dpa.c). This is bench.md §8.2's "DPA stall-cycle 계측" — positive, not elimination.
@@ -854,7 +854,7 @@ guess — all refuted by positive counters. Remaining: localize host ring-fill (
 per-thread CPU probe failed (container ns); headline (host closed-loop ring-fill) is positive-evidenced.
 Diagnostics (egress_again, EU-stall) kept in code, silent at -l 40.
 
-## Q2.13 — Host cap POSITIVELY localized: single PE progress thread (2026-06-09)
+## Q2.13 — Host cap POSITIVELY localized: single PE progress thread
 Per-thread CPU (crictl PID + top -H) at K=2/200K, hw3 (3 cores/side):
 - ECHO (server): ONE thread **96.4%** (saturated) + 3 poll workers ~23% each (idle-ish, waiting on PE).
 - CLIENT: ONE thread 77.2% + 4 async workers ~38% each.
@@ -866,7 +866,7 @@ the PE thread can't post/land fast enough to feed >4 EUs.
 LEVER: parallelize/lighten the host RX landing (single pe_progress_fn). Candidates: drop the vestigial
 consumer_pe drain if empty; offload rx_data_hook off the PE callback; or multiple RX PEs.
 
-## Q2.14 — consumer_pe drain removed (lean-up); confirms cap = comch RX reaping (2026-06-09)
+## Q2.14 — consumer_pe drain removed (lean-up); confirms cap = comch RX reaping
 Removed the vestigial doca_pe_progress(consumer_pe) from pe_progress_fn (host datapath consumer ID is never
 advertised → nothing lands on it; RX arrives via the comch client/pe → rx_data_hook). Safe, host-only.
 Result (K=2, hw3): 200K healthy (p50 1.89ms 0-fail); 215K saturates (~204K, p50 296ms). => marginal ~+2%,
@@ -898,7 +898,7 @@ comch type needs a case in BOTH rx_data_hook AND the comch_client.c client_messa
 Added rx_data_hook but missed the client switch → type 6 hit default ("unknown message type") → silent
 drop → no responses → wedge. FIX: added the DMESH_MSG_BATCH_REV_DONE case to comch_client.c:119. Redeploy.
 
-## Q2.16 — BATCH_REV_DONE RESULT: 200K -> ~220-235K, bottleneck redistributed (2026-06-09)
+## Q2.16 — BATCH_REV_DONE RESULT: 200K -> ~220-235K, bottleneck redistributed
 After the gatekeeper fix (Q2.15), K=2 hw3, 8KB, 0-fail throughout:
 | RPS | achieved | p50 | state |
 |---|---|---|---|
@@ -919,7 +919,7 @@ BUT is NOT app-local: the forward DMA reads the host TX data buffer (remote_mmap
 re-sending from RX needs the RX buffer registered as a DMA source (a transport change), not just an
 echo-app edit. Ladder so far: 130K(K=1) -> 160K(EU-shard) -> 200K(poll_rx) -> ~220-235K(BATCH_REV_DONE).
 
-## Q2.17 — Bench restructured to isolate transport (user was RIGHT) (2026-06-09)
+## Q2.17 — Bench restructured to isolate transport (user was RIGHT)
 USER INSIGHT (verified correct): the echo memcpy (echo_dpumesh.c:68, 8KB rx->tx) AND the client memset
 (bench_dpumesh.c:132/234, 8KB pattern fill) are per-request APP operations for the content-validation
 bench, NOT dpumesh transport. The transport DMAs body_len bytes regardless of content. bench.md §1's own
@@ -941,7 +941,7 @@ the same corruption sanity (it always only checked 3 positions). Baked (bench ap
 LADDER (transport-only is the correct metric): 130K(K=1) -> 160K(EU-shard) -> 200K(poll_rx) ->
 ~235K(BATCH_REV_DONE) -> ~250K(bench isolates app overhead). Cap remains the host comch-RX PE thread.
 
-## Q2.18 — "more cores to service" REGRESSES; chain reached the M2 engine ceiling (2026-06-09)
+## Q2.18 — "more cores to service" REGRESSES; chain reached the M2 engine ceiling
 USER asked: give the echo SERVICE more cores (or one-way bench), since they want dpumesh TRANSPORT perf
 not service perf. Tested hw6 (6 cores/side + ECHO_THREADS=6 ASYNC_THREADS=6), transport-only bench:
 | profile | ceiling |
@@ -963,7 +963,7 @@ service re-send) to measure the forward transport rate directly. One-way needs t
 re-enabled (g_skip_req_txack) for client TX-slot lifecycle without a response.
 LADDER: 130K -> 160K(EU) -> 200K(poll_rx) -> ~235K(BATCH_REV_DONE) -> ~250K(bench isolates app) = M2 ceiling.
 
-## Q2.19 — LIGHTER transport: lock-free TX slot pool (user: transport must be light) (2026-06-09)
+## Q2.19 — LIGHTER transport: lock-free TX slot pool (user: transport must be light)
 USER directive: the transport must be LIGHT on host CPU (NOT use more cores). perf (Q-prev) showed the
 reducible host CPU is in MUTEXES + the O(n) TX-slot bitmap scan, not the SDK. Replaced slot_bitmap +
 slot_lock + slot_cond with a lock-free Treiber free-list of slot indices (free_head atomic u64 with ABA
@@ -984,8 +984,8 @@ IRREDUCIBLE FLOOR: the DOCA SDK comch polling (priv_doca_cq_poll_one + doca_pe_p
 RX (completion-free polled, not SDK-supported) would go below it. So the transport's host-CPU floor at
 ~250K is the SDK poll (~12-15%) + the irreducible per-entry deliver. Ladder unchanged (~250K = M2 ceiling).
 
-## Q2.20 — LIGHTER transport: lock-free rx_queue (Vyukov-style SPMC) (2026-06-10)
-(Terminology corrected 2026-06-10: this queue is SPMC — 1 PE producer, N worker consumers —
+## Q2.20 — LIGHTER transport: lock-free rx_queue (Vyukov-style SPMC)
+(Terminology: this queue is SPMC — 1 PE producer, N worker consumers —
 built on Vyukov's bounded-MPMC cell/seq design with the producer side specialized to a
 single producer, plain store on rx_enq, no CAS. Earlier "MPSC" labels were a misnomer.)
 USER: "rx_queue lock-free 이어서 해줘" (continue the lighter-transport work; rx_queue was the biggest
@@ -1042,7 +1042,7 @@ LADDER (unchanged ceiling): 130K -> 160K(EU) -> 200K(poll_rx) -> 235K(BATCH_REV_
 CPU per request: TX pool lock-free (Q2.19) + RX queue lock-free (Q2.20) => mutex 6.5% -> 3.48% cumulatively.
 NEXT lighter lever: pending[req_id] lock-free (the remaining ~3.48% mutex = pending + ring_lock).
 
-### Q2.20 verification (adversarial, 2026-06-10) — mutex attribution CONFIRMED + corrected
+### Q2.20 adversarial verification — mutex attribution CONFIRMED + corrected
 Challenged the "3.48% mutex = pending + ring_lock" attribution (memory: elimination is unreliable; demand
 positive evidence). Perf caller-graph was inconclusive: frame-pointer unwind fails (libthrift -O2 omits
 frame ptr); --call-graph dwarf is Heisenberg-perturbed (16KB/sample stack copy -> the recording is dominated
@@ -1065,7 +1065,7 @@ SIDE FINDING (dwarf): at 240K the echo workers are ~84% IDLE (3 workers, ~16% bu
 biggest cost is the 20us backoff nanosleep sleep/wake churn (poll_rx-bench artifact), NOT the mutexes or the
 lock-free ring. The mutex (3.48%) + rxq_try_pop (10.5%) are secondary to the idle-poll scheduler traffic.
 
-## Q2.21 — Periodic hot-path log audit + bench stat gated off (2026-06-10)
+## Q2.21 — Periodic hot-path log audit + bench stat gated off
 USER noticed periodic logs during deploy/test and asked to audit log level + log statements, and whether
 more host-CPU lightening remains.
 LOG AUDIT (positive, by source):
@@ -1094,7 +1094,7 @@ small, and below it sits the irreducible SDK comch poll (~12-15%). The transport
 achievable host-CPU floor. Deployed: baked K=2 + poll_rx + BATCH_REV_DONE + lock-free TX + lock-free RX +
 stat-gated-off, -l 40, ~240K 0-fail.
 
-## Cleanup — bake the winning config fixed, delete everything else (2026-06-10)
+## Cleanup — bake the winning config fixed, delete everything else
 USER directive: keep ONLY the best-performing option (no env/compile toggles — fixed in code); keep only
 thread/EU counts + sizing + pod-identity configurable; delete all dead code / unused vars / inappropriate
 names / record-keeping comments. This intentionally OVERRIDES the earlier "bake ON but KEEP the SHARD/SPLIT/
@@ -1154,7 +1154,7 @@ only code path (no env/compile toggles), with thread/EU/sizing counts still tuna
 
 ---
 
-# Event-driven PE notification — feasibility (CPU-leanness, NOT throughput) (2026-06-22)
+# Event-driven PE notification — feasibility (CPU-leanness, NOT throughput)
 
 GOAL: cut the idle-CPU waste of busy-polling (`doca_pe_progress` loops burn a full core even when
 idle). DOCA exposes an event-driven path (`doca_pe_get_notification_handle` → `doca_pe_request_notification`
@@ -1194,7 +1194,7 @@ biggest idle-CPU win (the DPU ARM full-core busy-spin → ~0% idle). Host `pe_pr
 
 ---
 
-## 2026-06-22 — Idle wedge: two root causes found + fixed (DPA re-arm + ARM event-loop re-poll)
+## Idle wedge: two root causes found + fixed (DPA re-arm + ARM event-loop re-poll)
 
 **Symptom (user report):** after deploy + idle > threshold, first load `dpumesh 220000 10 8192`
 returned `0.0 RPS, OK/Fail 0/4400` (total wedge). DPU log silent at `-l 40`.
@@ -1229,7 +1229,7 @@ Unfixed event-loop baseline wedged on run #2 (20–30 RPS, 300/600). Deploy requ
 
 ---
 
-## 2026-06-23 — Phase A: host pe_progress spin → epoll (DPUMESH_HOST_EPOLL)
+## Phase A: host pe_progress spin → epoll (DPUMESH_HOST_EPOLL)
 
 Goal: reduce host CPU from the polling/while loops (user directive: "notification 올 때만 pe_progress").
 Change: `pe_progress_fn` (dpumesh_doca.c) spin+nanosleep(20µs) → **epoll on the host comch PE notification
@@ -1257,7 +1257,7 @@ the racy 1ms keepalive + idle wedge).
 
 ---
 
-## 2026-06-23 — DPU ARM event-driven (epoll + 1ms keepalive) + EU park+re-arm+re-scan: idle wedge GONE
+## DPU ARM event-driven (epoll + 1ms keepalive) + EU park+re-arm+re-scan: idle wedge GONE
 
 User decision: keep the 1ms DPU→DPA keepalive but make the DPU ARM epoll-based (not busy-poll).
 Config (default EVENT_LOOP=1): DPU ARM = epoll over {consumer_pe, ctrl_pe} with a 1ms epoll-timeout that
@@ -1277,7 +1277,7 @@ Caveat: 150s passed; prior failure was after "several minutes" — longer-idle (
 
 ---
 
-## 2026-06-23 — DPA EU grace-period polling: p50 → sub-ms (poll continuously, park only on sustained idle)
+## DPA EU grace-period polling: p50 → sub-ms (poll continuously, park only on sustained idle)
 
 User insight: the DPA EU is dedicated FlexIO silicon (zero ARM/host CPU), so it should POLL as continuously as
 possible for latency; parking on every empty drain (prior config) was too eager → parked in inter-request gaps
@@ -1327,7 +1327,7 @@ Recovery: 30K x2 after the 400K overload = 180000/0, p50 0.22ms — full recover
 
 ---
 
-## 2026-06-23 — DEBUG: EVENT_LOOP=1 long-idle wedge (0 RPS / all-fail, needs redeploy)
+## DEBUG: EVENT_LOOP=1 long-idle wedge (0 RPS / all-fail, needs redeploy)
 
 **Symptom.** `DPUMESH_EVENT_LOOP=1` deploy + `dpumesh 240000 10 8192`: works fine initially and under load
 (238K 0-fail validated), but after a LONG idle (multi-minute; 90s was NOT enough — see ramp entry above) the
@@ -1430,7 +1430,7 @@ never silently consumed). 200K/240K p99 swings (0.7–45ms) remain saturation-ed
 
 ---
 
-## 2026-06-24 — Limit + CPU/DPU + latency characterization (FIX 2 prod build, EVENT_LOOP=1, DPA=4/K=2, 8KB)
+## Limit + CPU/DPU + latency characterization (FIX 2 prod build, EVENT_LOOP=1, DPA=4/K=2, 8KB)
 
 ### Latency-vs-load curve (each 10s, fair pin)
 
@@ -1631,7 +1631,7 @@ floor AND the 257K ceiling** — the one validated latency win (~16us, ~7%) that
 RING_BATCH_CAP / HANDLE_MSGS_EVERY / DRAIN_COMPLETIONS_EVERY / CREDIT_REFRESH_MARGIN: no isolated sweep; analysis
 says low-leverage (cycle-efficiency knobs), DRAIN_COMPLETIONS_EVERY is the only throughput-sensitive one (guard ≥257K).
 
-### 2026-06-24 CAMPAIGN SUMMARY (bottleneck map + actionable levers)
+### CAMPAIGN SUMMARY (bottleneck map + actionable levers)
 
 **Bottleneck map (8KB, 2-pod, FIX2 prod build):**
 - THROUGHPUT ceiling ≈ **257K RPS** = the shared **DPA dma_copy op-rate (~1.03M ops/s, 4 DMA/RTT)**. Co-binder:
@@ -1654,7 +1654,7 @@ says low-leverage (cycle-efficiency knobs), DRAIN_COMPLETIONS_EVERY is the only 
 - (cleaner attribution only) pin host data-plane (pe_progress, ~10%) to its own core — no throughput gain.
 - Pushing ceiling >257K needs fewer DMA legs/RTT (4→2 = host→host), which is DESIGN-FORECLOSED → ceiling is structural.
 
-### 2026-06-24 — Experiment: event-driven ARM (epoll-block under load) vs busy-spin (DPUMESH_EVENT_BLOCK)
+### Experiment: event-driven ARM (epoll-block under load) vs busy-spin (DPUMESH_EVENT_BLOCK)
 
 Added diagnostic knob DPUMESH_EVENT_BLOCK (default 0). =1 forces the ARM event loop through epoll EVERY iteration
 (skips the busy-poll spin fast-paths `if(progressed)continue` + the re-poll continue) → fully event-driven ARM,
@@ -1677,7 +1677,7 @@ event-driving adds ~5 syscalls/completion that the ~1µs inter-completion interv
 dedicated, so spinning it is free; event-driving it to "save" that core would cost 4.5× throughput. Knob left in
 off-by-default (production byte-identical); can be removed.
 
-### 2026-06-24 FINAL — performance-lever analysis (what can actually raise perf)
+### FINAL — performance-lever analysis (what can actually raise perf)
 
 **Hard wall (measured, one DPU, 2-pod):** ceiling ~257K RPS = DPA dma_copy op-rate (~1.03M ops/s) ÷ 4 DMA/RTT.
 Decisive evidence that NOTHING within the current arch beats it:
@@ -1706,7 +1706,7 @@ flush. Real throughput gain needs either the host→host re-architecture (≈2×
 
 ---
 
-## 2026-06-24 — Façade validation: native-epoll server (echo_sock.c) over DPUmesh
+## Façade validation: native-epoll server (echo_sock.c) over DPUmesh
 
 Goal: prove a vanilla non-blocking epoll server ports to DPUmesh by swapping ONLY the BSD calls for their
 `_dpumesh` twins, using NATIVE kernel epoll on `dpumesh_event_fd(s)` (no epoll_*_dpumesh wrappers). Server =
@@ -1731,7 +1731,7 @@ native epoll on the event fd; (2) 0-fail 30K→240K; (3) throughput matches the 
 sustainable); (4) lower latency at low-mid load (165–263us, single reactor, no futex/thread contention);
 (5) idle 1.2% proves it's notification-driven. eventfd write is per-delivery (coalescing = future opt).
 
-### 2026-06-24 — FULL façade stack (bench_sock.c client + echo_sock.c server), both on the new API
+### FULL façade stack (bench_sock.c client + echo_sock.c server), both on the new API
 
 Client = bench/bench_sock.c (windowed async load-gen using ONLY connect/write/send/read/close_dpumesh — one
 single-shot dpmconn_t per in-flight request, malloc/free per request). Server = bench/echo_sock.c (native epoll
@@ -1750,7 +1750,7 @@ ceiling as the raw-API stack. The client's per-request malloc/free (single-shot 
 Latency competitive (170–255µs low-mid). Confirms a normal async request/response CLIENT ports with just the
 `_dpumesh` suffix, exactly like the server. The benchmark now runs on the new API by default with these toggles.
 
-### 2026-06-24 — Cleanup: deleted blocking code + raw bench/echo; Thrift excluded from build
+### Cleanup: deleted blocking code + raw bench/echo; Thrift excluded from build
 
 Removed (now that the façade stack is validated): raw bench/echo sources (bench_dpumesh.c, echo_dpumesh.c) +
 the BENCH_SRC/ECHO_SRC toggles (build hardcodes bench_sock.c/echo_sock.c). Blocking I/O code deleted from
@@ -1762,7 +1762,7 @@ libthrift build (cmake) — its .cpp/.h stay on disk untouched for a later port 
 Smoke test after cleanup (slimmed transport, façade stack): 30K=29,838/0 p50 174µs · 100K=99,451/0 p50 202µs ·
 240K=238,708/0 p50 580µs. → **0-fail, unchanged performance** — the deletions broke nothing.
 
-### 2026-06-24 — Stability investigation (façade stack): the "instability" is the saturation knee + cold-jump
+### Stability investigation (façade stack): the "instability" is the saturation knee + cold-jump
 
 WARM (proper ramp 30K→200K first), each rate ×3 back-to-back:
 | rate | achieved | p50 | p99 | fail (×3) |
@@ -1788,7 +1788,7 @@ Always warmup-ramp before high-RPS measurement ([[feedback_bench_warmup_ramp]]).
 
 ---
 
-## 2026-06-24 — Code-cleanup pass (dead code / stale comments / naming), perf-neutral validation
+## Code-cleanup pass (dead code / stale comments / naming), perf-neutral validation
 
 Pass over the LIVE code (façade `dpumesh_sock.h`, core `dpumesh.h` + `dpumesh_doca.c`, bench `bench_sock.c`/`echo_sock.c`,
 and the DPU/DPA `doca/` engine). The dead Thrift transport wrappers (`TDpumesh*.cpp/.h`) and `gateway.c` were left
@@ -1832,7 +1832,7 @@ timing, ordering, or wire-format changed, exactly as intended.
 
 ---
 
-## 2026-06-24 — Stage 1: implicit send (socket-transparent `write`/`read`)
+## Stage 1: implicit send (socket-transparent `write`/`read`)
 
 Goal (user): make the façade behave like the BSD socket API so the caller can't tell socket vs DPUmesh — step 1 =
 remove the explicit `send_dpumesh()` so `write`→`read` (client) / `write`→`close` (server) work like sockets.
@@ -1864,7 +1864,7 @@ correctness is implicit in 0-fail (a wrong/short echo is counted as a failure). 
 true byte-stream over a real `int fd` (socketpair) for literal socket-indistinguishability — trades an extra host copy
 for transparency (see design discussion).
 
-### 2026-06-24 — Façade suffix renamed `_dpumesh` → `_dpm` (cosmetic, for naming uniformity)
+### Façade suffix renamed `_dpumesh` → `_dpm` (cosmetic, for naming uniformity)
 
 The 9 BSD-twin façade funcs + the readiness-fd accessor were renamed for consistency with the `dpm_t`/`dpmconn_t`/`dpm_*`
 family: `socket_dpm`, `destroy_dpm`, `accept_dpm`, `connect_dpm`, `read_dpm`, `write_dpm`, `sendfile_dpm`, `send_dpm`,
@@ -1873,7 +1873,7 @@ the header filename `dpumesh_sock.h`, and the `dpm_*` accessors. Scope = `dpumes
 (the only façade users) + `api.md`. Behavior-preserving rename — smoke ladder (8 KB, warm): 30K 29,838/0 p50 170µs ·
 100K 99,453/0 p50 207µs · 200K 198,924/0 p50 278µs · 235K 233,678/0 p50 530µs → all 0-fail, latencies unchanged.
 
-### 2026-06-24 — Façade naming unified to `*_dpm` suffix + header renamed `dpumesh_sock.h` → `dpm.h`
+### Façade naming unified to `*_dpm` suffix + header renamed `dpumesh_sock.h` → `dpm.h`
 
 Accessor funcs unified from mixed prefix/suffix to all-suffix: `dpm_pod_id`→`pod_id_dpm`, `dpm_msg_max`→`msg_max_dpm`,
 `dpm_event_fd`→`event_fd_dpm`, `dpm_is_server`→`is_server_dpm`, `dpm_peer`→`peer_dpm`, `dpm_set_data/get_data`→
@@ -1882,7 +1882,7 @@ kept (user's choice). Header file `dpumesh_sock.h` → `dpm.h` (guard `DPM_H`, i
 Behavior-preserving rename — smoke ladder (8 KB, warm): 30K 29,837/0 · 100K 99,451/0 · 200K 198,923/0 p50 264µs ·
 235K 233,733/0 p50 365µs → all 0-fail, latencies unchanged.
 
-### 2026-06-24 — Review fixes E + A (+ light F); B/C/D deferred by user
+### Review fixes E + A (+ light F); B/C/D deferred by user
 
 E (close swallowed send failure): `close_dpm` now RETURNS the auto-flush result (`0`/`-1`) instead of always `0`, so a
 server can detect a dropped reply; `send_dpm` re-documented as the explicit confirm/retry path (conn freed on close, so
@@ -1892,7 +1892,7 @@ return now checked; connect dead-pod behavior noted; client multi-conn epoll pat
 Behavior-preserving (bench ignores close's return) — smoke ladder 30K 29,839/0 · 100K 99,452/0 · 200K 198,920/0 p50
 265µs · 235K 233,738/0 → all 0-fail. Deferred per user: one-way path (B), slot_size>8192 reject (C), req_id 2s stall (D).
 
-### 2026-06-25 — Rigorous api.md/dpm.h review + fixes (FC-1/FC-2/EDGE-4 + doc precision)
+### Rigorous api.md/dpm.h review + fixes (FC-1/FC-2/EDGE-4 + doc precision)
 
 5-dimension adversarial cross-verify of api.md vs dpm.h vs core (dpumesh_doca.c) vs scale_log: 9 findings confirmed
 (1 major DEFERRED), 3 refuted. NO memory-safety bugs (all TX/RX-slot/pending/req_id lifecycles correct). Fixed every
@@ -1923,7 +1923,7 @@ seconds latency) = documented knee-overshoot ([[feedback_bench_warmup_ramp]]); r
 confirmed behavior-neutral (they only touch unreachable enqueue-validation/OOM paths + comments) — ladder matches the
 prior baseline byte-for-byte.
 
-### 2026-06-25 — API redesign Stage 1: flush rename + echo_mode removal + C2 (4→2 completion types)
+### API redesign Stage 1: flush rename + echo_mode removal + C2 (4→2 completion types)
 
 Part of the 2-stage clean-transport redesign (Stage 2 = C3 tx_slot/ack decouple, separate). All Stage-1 changes:
 - **`send_dpm` → `flush_dpm`** (dpm.h + api.md; bench/echo never called send — implicit flush via read/close).
@@ -1953,7 +1953,7 @@ Deploy via test-bench.sh: DPU ninja + host make + bench all built; pods Ready.
 leak**. DPU log no ERR/flood across the whole run (proves C2 both-sides type agreement + echo-removal routing intact).
 → Stage 1 is functionally correct, leak-free, throughput/latency unchanged. Next: Stage 2 (C3).
 
-### 2026-06-25 — API redesign Stage 2: C3 — TX-slot decoupled from pending entry, ACK = sole free authority
+### API redesign Stage 2: C3 — TX-slot decoupled from pending entry, ACK = sole free authority
 
 Made the host TX_ACK the single authority that frees a SENT slot, removing the multiple writers that touched
 `p->tx_slot` (the entry-reuse clobber was the latent leak source). All host-side (dpumesh_doca.c); 1 DPU comment.
@@ -1993,7 +1993,7 @@ heavily exercised. NOT bench-exercised (structurally sound, shares machinery, bu
 (cancel→-2 delegation) and unwanted-late-response reclaim — follow-up for a one-way workload.
 → Stage 2 done. Transport is now: 2 completion types, no echo special-case, flush API, single ACK free-authority.
 
-### 2026-06-25 — Façade redesign (dpm.h): reusable conn (①) + one-way first-class (②)
+### Façade redesign (dpm.h): reusable conn (①) + one-way first-class (②)
 
 Now that the transport supports it (Stages 1-2), reshaped the dpm.h façade to the "socket-mimicry, friction-removed"
 model. Host-only (dpm.h + bench_sock.c + 1 host-core log line + api.md); no DPU/wire change.
@@ -2027,7 +2027,7 @@ would compound across back-to-back). DPU log clean. → ① validated end-to-end
 but NOT bench-exercised (bench is RPC: reuse+read); follow-up = a one-way load test. Façade is now: peer-handle conn,
 reusable, one-way first-class, flush API.
 
-### 2026-06-25 — api.md full rewrite + one-way LOAD TEST (closes the ② follow-up)
+### api.md full rewrite + one-way LOAD TEST (closes the ② follow-up)
 
 **api.md rewritten** to the new façade model (peer-handle conn / reusable client / one-way first-class / flush API):
 §3 signatures+errno corrected, examples 4a-4f redone (echo, reusable-RPC client, one-way, epoll window, epoll server,
@@ -2057,7 +2057,7 @@ Results (fair 1-core, 8KB):
 → ② (one-way) now validated end-to-end. Façade redesign complete: peer-handle / reusable / one-way first-class /
 flush API, all measured 0-fail + leak-free + delivery-confirmed.
 
-### 2026-06-25 — Façade naming flipped `*_dpm` suffix → `dpm_*` prefix (reverts the 06-24 "unify to suffix")
+### Façade naming flipped `*_dpm` suffix → `dpm_*` prefix (reverts the suffix unification)
 
 Reverses the earlier "Façade naming unified to `*_dpm` suffix" decision: all façade identifiers now carry the `dpm_`
 PREFIX. Generic mechanical transform `\b(<ident>)_dpm\b → dpm_\1` over the only 4 files that use the suffix:
@@ -2072,13 +2072,13 @@ PREFIX. Generic mechanical transform `\b(<ident>)_dpm\b → dpm_\1` over the onl
 - **Untouched:** types `dpm_t`/`dpmconn_t` (already prefix-style); the low-level C core API (`dpumesh.h`/`dpumesh_doca.c`:
   `dpumesh_init`/`dpumesh_get_event_fd`/…); env vars `DPUMESH_*`; the header filename `dpm.h`. Prose mentions of the
   convention updated by hand (`_dpm` twin/suffix → `dpm_` prefix; `epoll_*_dpm` → `dpm_epoll_*`).
-- **scale_log history left intact** (the 06-24 entries above still record the suffix era — not rewritten).
+- **scale_log history left intact** (the entries above still record the suffix era — not rewritten).
 
 Behavior-preserving, name-only. Verified host-side: `gcc -fsyntax-only -I lib/cpp/src bench/{echo,bench}_sock.c` → 0
 errors; repo-wide grep confirms 0 remaining `_dpm` tokens in code/doc. Deploy smoke-ladder via test-bench.sh pending
 (mechanical rename — no codepath change).
 
-### 2026-06-25 — Drop socket-cosplay in the echo example (atomic msg → single read)
+### Drop socket-cosplay in the echo example (atomic msg → single read)
 
 A message arrives ATOMICALLY (one whole ≤8KB body, contiguous in `rx_buf`), so the byte-stream accumulation loop
 `while ((r = dpm_read(c, buf+off, …)) > 0) off += r;` always did exactly [1 real read + 1 EOF read]. Replaced it with a
@@ -2090,7 +2090,7 @@ claims (echo_sock.c header, 4e note) to "simpler than a socket, not byte-for-byt
 *is* a divergence from socket code. Behavior-preserving; `gcc -fsyntax-only -Wall` clean. Transport API/semantics
 untouched (this is example/usage cleanup only).
 
-### 2026-06-25 — Façade prefix flipped `dmesh_` + handle types renamed (user-directed)
+### Façade prefix flipped `dmesh_` + handle types renamed (user-directed)
 
 Per user decision (keep incremental write → keep the per-exchange handle, just make names honest):
 - **Prefix `dpm_` → `dmesh_`** on all 16 public funcs + 4 internal static helpers (`dmesh_socket`, `dmesh_accept`,
@@ -2108,7 +2108,7 @@ Per user decision (keep incremental write → keep the per-exchange handle, just
 STILL PENDING (user thinking): the semantic name redesign (e.g. `dmesh_conn_t` → exchange/ticket terms, `dmesh_socket`/
 `accept`/`connect`/`read`/`write` → RPC/message verbs). This entry is the prefix+type step only.
 
-### 2026-06-25 — Endpoint lifecycle verbs renamed (user-directed, partial semantic pass)
+### Endpoint lifecycle verbs renamed (user-directed, partial semantic pass)
 
 - `dmesh_socket` → **`dmesh_create_channel`**, `dmesh_destroy` → **`dmesh_destroy_channel`** (match the `dmesh_channel_t`
   type). Core `dpumesh_destroy(ctx)` inside is untouched.
@@ -2119,7 +2119,7 @@ STILL PENDING (user thinking): the semantic name redesign (e.g. `dmesh_conn_t` �
 - Scope: `dpm.h` + `bench/{echo,bench}_sock.c` + `api.md` (+ synced install copy). `gcc -fsyntax-only -Wall` both bench
   files → 0 errors.
 
-### 2026-06-25 — Role-neutrality pass: remove role-assuming API (user principle)
+### Role-neutrality pass: remove role-assuming API (user principle)
 
 User principle: the façade must exist **independently of server/client/topology role**. Audited the façade and removed/
 neutralized every role assumption (the C core `dpumesh_*` was already role-neutral — pod_id/worker_id based).
@@ -2138,7 +2138,7 @@ neutralized every role assumption (the C core `dpumesh_*` was already role-neutr
   `dmesh_accept`/`dmesh_connect` · `dmesh_read`/`dmesh_write`/`dmesh_sendfile`/`dmesh_flush`/`dmesh_close` · `dmesh_peer`
   · types `dmesh_channel_t`/`dmesh_conn_t`.
 
-### 2026-06-25 — req_id originator-scoping + OP_ functionally removed + explicit flush (host-only; NOT YET DEPLOYED)
+### req_id originator-scoping + OP_ functionally removed + explicit flush (host-only; NOT YET DEPLOYED)
 
 Big design (agreed via wf_bf45a2f9 mapping). **Host-only change — DPU/DPA/Thrift/gateway untouched** so the cross-target
 build I can't verify stays green. NOT yet deploy-tested (deploy is the user's per [[feedback_no_background_deploy]]).
@@ -2162,7 +2162,7 @@ build I can't verify stays green. NOT yet deploy-tested (deploy is the user's pe
   validates on real HW. Watch for: loopback-reject false positives (none expected), reply mis-demux (would show as
   client EAGAIN-forever / wrong-body fails).
 
-**VALIDATED ON HW (2026-06-25, fair 1-core, 8KB)** — deployed via `test-bench.sh deploy` (exit 0, fresh pods,
+**VALIDATED ON HW (fair 1-core, 8KB)** — deployed via `test-bench.sh deploy` (exit 0, fresh pods,
 restart=0; DPU log clean, NO ERR/loopback-reject/drop floods — only benign DOCA startup WRNs). Warm ladder:
 
 | target | achieved | p50 | p99 | OK/Fail |
@@ -2180,7 +2180,7 @@ DPU `-l` stayed 40 (nothing to revert). OP_/CASE_ #defines still present (dead) 
 
 ---
 
-# Endpoint-tuple redesign — deploy + test (2026-06-29)
+# Endpoint-tuple redesign — deploy + test
 
 Redesign: `req_id` → oriented endpoint tuple `(src pod/port, dst service/pod/port, seq)`.
 Demux by `dst_port` (not req_id-origin / no direction flag); addressing = **service_id**
@@ -2222,10 +2222,10 @@ The 20B completion immediate (2nd WQE BB) is perf-neutral here (219K = baseline)
 earlier slowness was bug #1/#2, not the immediate size. 16B is reachable only via
 pos byte-offset→slot-index (DPA change), expected ~0 gain — deferred.
 
-## comch_dma_comp_msg → 16B (done 2026-06-29) — measured perf-identical to 20B
+## comch_dma_comp_msg → 16B — measured perf-identical to 20B
 Earlier entry deferred 16B (said it needed pos→slot-index). Done a simpler way:
 **dropped `src_service` from the 16B wire** (the DPU derives the caller's service from
-src_pod's registration in the recv-cb — assumes one service per pod, true today since
+src_pod's registration in the recv-cb — assumes one service per pod, which the current model enforces since
 service_id=pod_id). Reordered: type0 src_pod1 dst_pod2 dst_svc3 src_port4 dst_port6 seq8
 length10 pos12 = exactly 16B (type@0 for the recv peek, pos@12 4-aligned, no padding).
 Files: dpa_common.h (struct+assert==16), dpa_kernel.c (fwd/rev comp fill), dpa.c
@@ -2244,7 +2244,7 @@ range** (DPU/DPA hop is small; the immediate cost only matters near the DPA op-r
 ceiling ~257K, not reached). User's "16B 넘으면 느려졌다" did not reproduce — the
 earlier slowness was the pending-index bug. 16B kept anyway (leaner, one WQE BB).
 
-## Loopback / self-routing validation (2026-06-29) — PASS
+## Loopback / self-routing validation — PASS
 New, isolated test (no transport code changed): `bench/loopback_sock.c` — ONE pod
 (pod_id=12, service_id=12) runs an echo thread AND a client loop over the SAME
 channel. The client connect(svc 12) -> DPU resolves svc 12 -> pod 12 (itself) ->
@@ -2271,7 +2271,7 @@ NB: a COLD-JUMP straight to 220K right after the loopback test gave 168K + 507 f
 
 ---
 
-# 2026-06-30 — FIX: the ~2s p99/p999 spike (deferred item "D" register_pending 2s stall) — DONE
+# FIX: the ~2s p99/p999 spike (deferred item "D" register_pending 2s stall) — DONE
 
 ## Symptom (user-reported, confirmed in this log)
 At/over the knee, p50 stays fine but **p99/p999 occasionally spikes to ~2 s** (still 0-fail).
@@ -2301,7 +2301,7 @@ fall back to the old -2/-3 backstop (correctness preserved). `register_pending`'
 and `cleanup_ctx` also free any parked `drain[]` slots. 7 edits, all in `dpumesh_doca.c`; ABI/DPU/DPA
 unchanged. Pure host-side; syntax-clean (real DOCA headers).
 
-## Measured (2026-06-30, fair 1-core/pod, 8192B, 10s, DPA=4 K=2, baked config) — ALL the 2 s gone
+## Measured (fair 1-core/pod, 8192B, 10s, DPA=4 K=2, baked config) — ALL the 2 s gone
 Warm ramp (single shots):
 | target | achieved | p50 | p99 | p999 | ok/fail |
 |---|---|---|---|---|---|
@@ -2334,7 +2334,7 @@ workload overflows `drain[]` under extreme skew (then it degrades to the old -3 
 
 ---
 
-# 2026-06-30 — "out-of-nowhere / non-monotonic" p99/p999 tail diagnosis (NOT the 2s; NOT a bug)
+# "out-of-nowhere / non-monotonic" p99/p999 tail diagnosis (NOT the 2s; NOT a bug)
 
 ## Question
 Warm-ramp single shots showed a NON-monotonic tail: 100K p99=9.26ms but 150K p99=336µs (lower!),
@@ -2381,12 +2381,12 @@ p50 ~200µs always (contention-immune) + cold-start (short-run p99 spike; 1-time
 with spare cores tails at ~1-2ms (hw-like). Levers (1-core): PE-thread sched priority/isolation (SCHED_FIFO /
 dedicated core), lighter PE per-completion work, sustained/long measurement, higher keepalive freq (≈1ms floor
 only). NB the decouple's per-harvest cond_broadcast (app-thread, no waiter in correct use) is a removable minor
-leanness item — not the cause. NOT re-attributable to the 2026-06-30 pending-decouple fix (the core sweep is
+leanness item — not the cause. NOT re-attributable to the pending-decouple fix (the core sweep is
 mechanism-independent of the pending table).
 
 ---
 
-# 2026-06-30 — Connection FIN (graceful close) — implementation + reliability test
+# Connection FIN (graceful close) — implementation + reliability test
 
 ## What & why
 The connection model had NO teardown signal: `dmesh_close` freed only the LOCAL slot, so a
@@ -2432,7 +2432,7 @@ Flat across runs ⇒ every run's conns are reclaimed by FIN. (Pre-FIN this would
 | 60K  | 59.8K | 166µs | 481µs | 0 / 1.2M | |
 | 100K | 99.9K | **207µs** | 530µs | **0 / 6.0M** (60s) | = baseline p50 (perf-neutral) |
 p50 ~207µs at 100K is identical to the pre-FIN baseline → the FIN is free on the steady-state data path
-(it only fires at close). p999 ~10ms @100K is the documented 1-core PE-contention tail (see 06-30 entry),
+(it only fires at close). p999 ~10ms @100K is the documented 1-core PE-contention tail (see the related entry),
 not FIN.
 
 ## RESULT 3 — host CPU at 100K (1 core = 100%); the per-conn-fd tax, MEASURED
@@ -2473,7 +2473,7 @@ single-eventfd + ready-list review (Result 3 gives the CPU evidence: echo is 75%
 
 ---
 
-# 2026-06-30 — Single channel-eventfd + PE-published READY LIST (replaces per-conn fd)
+# Single channel-eventfd + PE-published READY LIST (replaces per-conn fd)
 
 ## What & why
 The per-conn-fd readiness model (one eventfd per conn) cost ~1 `read(eventfd)` syscall
@@ -2540,7 +2540,7 @@ limit flagged in the FIN entry above.
 
 ---
 
-# 2026-06-30 — Bench scenario coverage (reuse / one-way / loopback / pipeline) + high-load fail analysis
+# Bench scenario coverage (reuse / one-way / loopback / pipeline) + high-load fail analysis
 
 Added per-RUN observability to bench_sock.c (stderr DONE line): `connects` (vs ok → reuse
 factor) and a fail breakdown (`timeout` / `reset-eof` / `bad`). Added a pipelined mode
@@ -2642,7 +2642,7 @@ flat at ~257K across 250–300K offered = the DPA op-rate wall.
 
 ---
 
-# 2026-07-01 — MODEL B: the DPU owns every connection (Envoy-style proxy) — full redesign + all 7 test cases 0-fail
+# MODEL B: the DPU owns every connection (Envoy-style proxy) — full redesign + all 7 test cases 0-fail
 
 Replaces the connection-sticky model (client learns+pins a backend pod) with an Envoy-faithful proxy
 where **the DPU owns every connection**. A client addresses only a SERVICE (`dst_pod=BLANK`, never
@@ -2723,7 +2723,7 @@ rates), so FIFO ordering cannot be assumed — only content/req-id correlation i
 RPC needs no correlation — the 1:1 pairing is structural. The bench's pipeline mode assumes FIFO, which
 holds only while a conn's messages stay on one backend, i.e. NOT under per-message spread.)
 
-# 2026-07-01 (session 2) — Code-review fixes + simplification + HW validation
+# (session 2) — Code-review fixes + simplification + HW validation
 
 Applied the multi-agent code-review findings (custody #1, wakeup #2, credit-race #3, ring #4,
 pod-slot #5, rev-admission #6, MMAP-export #10, 2GiB consumer #9) + façade/struct simplification
@@ -2825,7 +2825,7 @@ The back-to-back RPC (12K/6.6s BEFORE the bench fix) is now clean 1.0M/0 @ 211us
 churn was bench-driven over-concurrency, not a transport bug; fixing the bench conn count removes
 it entirely. (One-way still logs benign "stale upstream" — it closes before the reply by design.)
 
-# 2026-07-01 (session 3) — Transparent >8KB messages: SAR helper + descriptor route-affinity
+# (session 3) — Transparent >8KB messages: SAR helper + descriptor route-affinity
 
 Feature: (1) a façade SAR helper (dmesh_write_large/read_large, dpm.h) that auto-chunks a
 >slot_size payload into ordered <=8KB messages with an in-band header and reassembles them;
@@ -2883,9 +2883,9 @@ DPA=4, K=2, HOST_EPOLL=1; DPUMESH_LB_RR is a TEST-only knob (empty in production
 
 ---
 
-# 2026-07-02 — SAR REDESIGN: auto-chunk write + stream read (no write_large/read_large)
+# SAR REDESIGN: auto-chunk write + stream read (no write_large/read_large)
 
-User feedback on the 07-01 design: the transport shouldn't own message framing/completeness
+User feedback on the SAR design: the transport shouldn't own message framing/completeness
 (read_large decided "done" via an in-band total_len — that's L7's job). Redesigned so the
 **transport owns only affinity + ordered delivery; the app frames** (like a byte stream). No
 new API — plain `dmesh_write`/`dmesh_read` handle >8KB.
@@ -2954,7 +2954,7 @@ Large throughput ~149 MB/s 0-fail sub-ms. is_last-DELETE rejected (collision + r
 scatter); GLOBAL route_group counter + overwrite-on-reuse is safe. Wire unchanged (20B completion,
 route_group full byte). Deploy config unchanged; DPUMESH_LB_RR TEST-only.
 
-# 2026-07-02 (session 2) — Cleanup build validation (rr_counter→conn-shard, dead-code sweep)
+# (session 2) — Cleanup build validation (rr_counter→conn-shard, dead-code sweep)
 
 Working-tree cleanup on top of the SAR redesign: removed the orphaned `atomic_uint rr_counter`
 (forward-ring selection is now `src_port % k_rings` conn-shard, not round-robin — the counter was
@@ -3003,7 +3003,7 @@ per-conn-eventfd, rev_rr round-robin, bench read auto-send). All host .c `gcc -f
 full `deploy` (device dpa_kernel + ARM + host) exit 0. Re-validated: RPC 100K = 99,452 p50 184.9us
 0-fail; loopback 50K 0-fail; large 32KB 100,000/0 621 MB/s. Perf-neutral, no behavior change.
 
-# 2026-07-02 (session 3) — API: service_id-only + DPU-assigned pod_id; zero-copy dmesh_alloc/slot_register
+# (session 3) — API: service_id-only + DPU-assigned pod_id; zero-copy dmesh_alloc/slot_register
 
 Three API changes (user-directed), each deployed + tested via test-bench.sh (all 0-fail):
 
@@ -3030,8 +3030,8 @@ model = SINGLE slot + flush-first (custody list already holds many outstanding s
 
 ## Task 3 — write ship-error hardening (folded in)
 dmesh_write on ship failure no longer over-counts the dropped full slot in the returned `done`
-(returns done-cap) and clears cur_group. Latent/unreachable today (enqueue blocks on ring-full, only
-rejects malformed) but reachable once registered buffers exist.
+(returns done-cap) and clears cur_group. Latent while enqueue blocks on ring-full (it only rejects
+malformed input) but reachable once registered buffers exist.
 
 ## Zero-copy validation (loopback, DPUMESH_ARENA_SLOTS=512, RUN N SIZE ZC) — all 0-fail
 | test | ok/fail | p50 | note |
@@ -3049,7 +3049,7 @@ Service-taking params are consistently `service_id`: dmesh_create_channel(int se
 dmesh_connect(s, int dst_service_id). Wire/struct field `dst_service` kept (cascades to sw_descriptor/
 dma_desc/DPU — out of scope for a param rename).
 
-# 2026-07-02 (session 4) — 2nd cleanup sweep + full reliable re-test
+# (session 4) — 2nd cleanup sweep + full reliable re-test
 
 ## Cleanup sweep #2 (workflow-verified, applied on top of the API changes)
 Full-transport fan-out (12 groups, discover → adversarial verify). 19 findings SAFE+applied,
@@ -3110,7 +3110,7 @@ run pipeline before overload tests, or redeploy between. All session-4 code chan
 
 ---
 
-# 2026-07-03 — LD_PRELOAD socket shim (libdmesh_preload.so) + connection route pin — BUILT + VALIDATED
+# LD_PRELOAD socket shim (libdmesh_preload.so) + connection route pin — BUILT + VALIDATED
 
 ## What & why
 Two-layer design (plan.md): the native dmesh_* API stays the optimized product; a NEW
@@ -3161,9 +3161,9 @@ dmesh_preload.c (new shim) · dpm.h (pin_group + dmesh_pin_route) · bench/tcp_e
 tcp_client.c, preload_runner.c (vanilla validators + pod entrypoint, new) ·
 Dockerfile.preload_dpumesh (new) · test-bench.sh (build/image/manifest/pin/`preload` cmd)
 
-# 2026-07-03 (session 2) — LD_PRELOAD review fixes — BUILT + DEPLOYED + VALIDATED
+# (session 2) — LD_PRELOAD review fixes — BUILT + DEPLOYED + VALIDATED
 
-Code-review findings on the 07-03 shim + pin, fixed. Build checks: shim .so gcc
+Code-review findings on the new shim + pin, fixed. Build checks: shim .so gcc
 clean, dpu_worker/object gcc -fsyntax-only clean, kernel-TCP passthrough smoke
 3000/0 + 2000/0 with the new shim. Deployed + full HW validation below (deploy #1
 aborted on the known stale-pod kubectl-wait flake, deploy #2 clean exit 0).
@@ -3179,7 +3179,7 @@ wrong-service delivery still echoes the right bytes. Table is now
 `[POD_ID_SPACE][256]` (128 KB, ARM-local): a collision can only merge SAME-service
 traffic (balance skew, ordering intact); cross-service redirection is structurally
 impossible. Docs updated (api.md §3/§5, dpm.h pin_group, object.h). Pre-existing
-since the 07-02 route-affinity work; dmesh_pin_route widened exposure (every preload
+since the route-affinity work; dmesh_pin_route widened exposure (every preload
 conn holds an id for its lifetime). FOLLOW-UP for a real test: a non-echo
 discriminator backend (reply carries server identity).
 
@@ -3199,7 +3199,7 @@ discriminator backend (reply carries server identity).
 - channel_init: fail early if dmesh_event_fd()<0 (deaf dispatcher); no wake-fd re-create
   leak on register-retry.
 - Docs: stdio FILE* bypass documented (api.md §7 limits + header comment); api.md §7
-  "~100K measured" reworded (that figure is the 06-30 per-conn-fd experiment, the shim
+  "~100K measured" reworded (that figure is the per-conn-fd experiment, the shim
   itself is not throughput-benchmarked).
 
 ## HW validation (fresh deploy, churn-safe order) — ALL 0-fail
@@ -3213,7 +3213,7 @@ discriminator backend (reply carries server identity).
 | preload 5000×1KB ×8c (b2b)  | 5000/0  | 123µs | 571µs | back-to-back, no leak |
 | RPC 30K / 100K / 200K, 8KB  | 300K/0 · 1M/0 · 2M/0 | 181/218/315µs | 0.5/0.5/28.9ms | 29,837 / 99,449 / 198,907 = baseline |
 | loopback ZC 5000×32KB       | 5000/0  | 163µs | —     | svc 12 pins rg 1..255 |
-| large 32KB @2K/64c (svc 11) | 20000/0 | 484µs | 631µs | 124.3 MB/s, = 07-02 baseline |
+| large 32KB @2K/64c (svc 11) | 20000/0 | 484µs | 631µs | 124.3 MB/s, baseline |
 
 ## Fix 1 POSITIVE discriminator (not maskable by echo)
 Sequence engineered so the OLD global table would misroute: loopback ZC 32KB first
@@ -3228,7 +3228,7 @@ DPU log clean over the whole window (init-time SDK warns only); log level at 40.
 Deferred: none of the fixed paths regressed; remaining follow-ups stay ①②③ in
 plan.md (dead-conn slot reclaim, thread-per-conn depth, real-app porting).
 
-# 2026-07-03 (session 3) — preload throughput ladder + 256-conn wedge (OPEN INVESTIGATION)
+# (session 3) — preload throughput ladder + 256-conn wedge (OPEN INVESTIGATION)
 
 ## Ladder (thread-per-conn tcp_client, 1KB, fresh conns per RUN, cores 4,5) — 0-fail through 128c
 | conns | RPS | p50 | p99 |
@@ -3281,7 +3281,7 @@ sanity ×1 · exact original ladder history then 256c ×1 · back-to-back hammer
 under burst, EVENT_LOOP=1) · soak (60s idle + storm) ×10. Post-campaign health:
 native 100K = 99,452/0, loopback 20000/0 p50 162µs — no state leak from ~6,800
 conn churn. Throughput with DEBUG=1 unchanged (146-156K plateau).
-VERDICT: the 07-03 wedge is a RARE race (<~1/23 storms; single occurrence — prior
+VERDICT: the preload wedge is a RARE race (<~1/23 storms; single occurrence — prior
 deploy also differed: interleaved native/large/loopback history + multi-minute
 idle + DEBUG off). Left OPEN with tripwires armed: any future occurrence produces
 TIMEOUT/DROPPED lines + completed RUN counts instead of a wedged pod. NOTE: this
@@ -3296,7 +3296,7 @@ updated to the measured numbers (~150K plateau, 76% of native, 1–256c coverage
 tripwires); plan.md STATUS/리스크 updated (thread-per-conn client validated, 256c
 incident OPEN w/ tripwires, measured perf replaces the ~100K expectation).
 
-# 2026-07-03 (session 4) — L7-readiness: routing hook seam + exact-count validation — BUILT + VALIDATED
+# (session 4) — L7-readiness: routing hook seam + exact-count validation — BUILT + VALIDATED
 
 Goal (user): NOT building the L7 proxy yet — make the L4 layer able to host a future
 envoy-like L7 proxy on the DPU (body-parsing routing). Design/contracts in plan_l7.md;
@@ -3334,7 +3334,7 @@ read-only (v1).
   DPUMESH_LB_RR. Real L7 next steps live in plan_l7.md (seam→pin-miss pick, per-src
   ROUTER threads per prev/architecture.md, reply observe hook, rewrite contract).
 
-# 2026-07-04 — L7 proxy L4 engine (DPUMESH_PROXY, byte-stream reframing) — BUILT + VALIDATED (frame mock)
+# L7 proxy L4 engine (DPUMESH_PROXY, byte-stream reframing) — BUILT + VALIDATED (frame mock)
 
 Goal (user, plan.md): make the DPU an envoy-like L7 proxy. L7 (parse + route/LB) = future,
 MOCK for now; L4 (this pass) = execute a per-connection routing decision as a BYTE STREAM via
@@ -3396,7 +3396,7 @@ served = echo-side bytes written back, CUMULATIVE on the reused pod → check DE
   suite, L4-ARM-CPU / notify cost. Deploy run by ME in FOREGROUND completed without hang (the
   old hang was background-execution-specific).
 
-# 2026-07-04 (session 2) — Option cleanup: bake tuning knobs + delete route_fn/L7_DEMO/LB_RR — DONE + VALIDATED
+# (session 2) — Option cleanup: bake tuning knobs + delete route_fn/L7_DEMO/LB_RR — DONE + VALIDATED
 
 Goal (user): the config surface grew ~17 env knobs during exploration — reduce to the ones you
 meaningfully adjust, remove legacy. Keep: `DPUMESH_PROXY` (L7 proxy on/off) + LD_PRELOAD
@@ -3421,7 +3421,7 @@ meaningfully adjust, remove legacy. Keep: `DPUMESH_PROXY` (L7 proxy on/off) + LD
   pre-existing bench write-unused-result warnings) — the refactor compiles for real, not just
   syntax-checks.
 
-## Validation (clean redeploy DPUMESH_PROXY=frame; compare to 07-04 session-1 pre-cleanup)
+## Validation (clean redeploy DPUMESH_PROXY=frame; compare to session-1 pre-cleanup)
 Bakes == the exact values the deploy already set, so behavior must be UNCHANGED — confirmed:
 | test | command | result | vs pre-cleanup |
 |---|---|---|---|
@@ -3440,7 +3440,7 @@ values + their constants/files documented in api.md §9 for future adjustment (e
 
 ---
 
-# 2026-07-05 · L7 head-only streaming (bounded head copy, body via SG) — CODE LANDED, HW PENDING
+# L7 head-only streaming (bounded head copy, body via SG) — CODE LANDED, HW PENDING
 
 **Problem (verified in code, not measured):** the L7/frame path linearizes a WHOLE message into
 the seam (`px_copy_stream` memcpy) just to give the parser a contiguous view — but egress ships
@@ -3468,9 +3468,9 @@ custody/advance/FIN/streaming interactions (drop-accounting reuses the existing 
 head-only path directly. Head-only must be BYTE-IDENTICAL to frame mode (same client + byte-exact +
 served-count checks); SIZE>8 KB specifically exercises head-only streaming vs whole-message seam.
 
-## HW results (2026-07-05, cluster recovered)
+## HW results (cluster recovered)
 
-Env recovery first (07-04 reboot dropped 3 non-persistent boot configs): (1) swap re-enabled →
+Env recovery first (a reboot dropped 3 non-persistent boot configs): (1) swap re-enabled →
 kubelet `failSwapOn` crash-loop (NRestarts=10242) → `swapoff -a` + fstab comment; (2) DPU
 unreachable — host `tmfifo_net0` lost `192.168.100.1/24` → re-added; (3) flannel CrashLoopBackOff —
 `br_netfilter` not loaded (`/proc/sys/net/bridge/bridge-nf-call-iptables` missing) → `modprobe
@@ -3478,7 +3478,7 @@ br_netfilter` + `sysctl`. After all three, node Ready + pods up. New binary conf
 line `request-default=..., l7-services=N`.
 
 Frame baseline on the NEW binary (regression): `stream 200 20000` → **200/0, served 4,001,000** —
-IDENTICAL to 07-04. Frame path unchanged. ✓
+IDENTICAL to the frame baseline. Frame path unchanged. ✓
 
 L7 head-only (`DPUMESH_PROXY=passthru DPUMESH_PROXY_L7_SVC=16`; px_init `l7-services=1`). Served is a
 DPU cumulative counter → deltas shown:
@@ -3499,7 +3499,7 @@ VALIDATED.
 
 ---
 
-# 2026-07-08 · P1: lock-free forward ring (host-only Vyukov MPSC) — BUILT + HW-VALIDATED
+# P1: lock-free forward ring (host-only Vyukov MPSC) — BUILT + HW-VALIDATED
 
 Context: moving toward per-CONNECTION mmap buffers (to kill the shared Treiber TX slot
 pool + custody + arena on the host, and align with the socket model). Step 1: make the
@@ -3573,7 +3573,7 @@ give no per-conn MR isolation. Decision surfaced to the user.
 
 ---
 
-# 2026-07-08 · Bottleneck: DMA COUNT vs DATA-VOLUME — POSITIVELY RESOLVED (count-bound)
+# Bottleneck: DMA COUNT vs DATA-VOLUME — POSITIVELY RESOLVED (count-bound)
 
 Question (before committing to a per-conn contiguous-ring + 8KB-coalescing rewrite): is the
 transport ceiling bound by DMA **count** (ops/s, fixed per-op cost) or DMA **data volume**
@@ -3623,7 +3623,7 @@ tool kept: bench/mrbench/run_countbw.sh (+ countbw.csv). dma_mrbench unchanged.
 
 ---
 
-# 2026-07-08 · P2a-1: per-conn TX slot-ring — BUILT, validated <=64c, 128c pool-exhaustion OPEN
+# P2a-1: per-conn TX slot-ring — BUILT, validated <=64c, 128c pool-exhaustion OPEN
 
 Replaced the shared Treiber TX slot pool + per-slot custody linked-list + zero-copy arena
 with PER-CONNECTION contiguous slot-rings (socket send-buffer model), the first brick of the
@@ -3667,7 +3667,7 @@ chosen. Deployed state runs P2a-1 (works <=64c; regresses vs the old 256c preloa
 
 ---
 
-# 2026-07-08 · P2a-1 128c hang — ROOT-CAUSED (2 region-lifecycle bugs) + FIXED, now 0-fail to 256c
+# P2a-1 128c hang — ROOT-CAUSED (2 region-lifecycle bugs) + FIXED, now 0-fail to 256c
 
 The 128c "stale upstream flood + hang" was NOT the core ring — it was two per-conn TX **region
 leaks/holds** that only bite at high conn count. Both fixed; P2a-1 now passes back-to-back.
@@ -3708,7 +3708,7 @@ lifecycle is the load-bearing correctness piece. Next: P2a-2 (byte-pack + 8KB co
 
 ---
 
-# 2026-07-08 · P2a-2: 8KB slot-coalescing VALIDATED — pipeline 262K → 1.19M RPS (~4.5x), 0-fail
+# P2a-2: 8KB slot-coalescing VALIDATED — pipeline 262K → 1.19M RPS (~4.5x), 0-fail
 
 The DMA-COUNT bottleneck thesis (proved earlier: ~1M dma_copy/s wall, 4 dma/RPC → ~262K RPC
 ceiling on one DPU) predicts that COALESCING many small messages into one 8KB DMA lifts the
@@ -3747,7 +3747,7 @@ currently deployed with BENCH_COALESCE=1; redeploy without it to restore the bas
 
 ---
 
-# 2026-07-08 · TX BYTE-RING + zero-copy alloc/commit (4-cursor) — BUILT + fully VALIDATED
+# TX BYTE-RING + zero-copy alloc/commit (4-cursor) — BUILT + fully VALIDATED
 
 Reworked the per-conn TX slot-ring (P2a-1) into a per-conn contiguous BYTE-RING with the
 user's 4-cursor buffer-management model, and added the conn-scoped zero-copy alloc/commit API.
@@ -3789,7 +3789,7 @@ rely on a single backend. A single dmesh_write > conn_bytes (128KB) needs an int
 
 ---
 
-# 2026-07-09 (session 2) — Reverse egress UNIFICATION to ARM SG-DMA (Level 0) — REGRESSION + WEDGE
+# (session 2) — Reverse egress UNIFICATION to ARM SG-DMA (Level 0) — REGRESSION + WEDGE
 
 Design goal (user): unify the data plane — reverse (DPU→host) egress = ARM SG-DMA for BOTH
 engines; DPUMESH_PROXY becomes a PARSER selector only (passthru default / frame / L7), not an
@@ -3824,7 +3824,7 @@ dormant. Change: dpu_proxy.c px_init (drop the `env NULL → proxy off` early-ou
 - STOPPED per hang-discipline (captured logs, no auto-redeploy). System currently wedged — a
   redeploy is needed to clear it. Blocks Level 1 (per-conn RX) until the egress viability is resolved.
 
-## Root-cause: ARM egress is CPU-BOUND on the single worker thread (2026-07-09 s2)
+## Root-cause: ARM egress is CPU-BOUND on the single worker thread
 Redeployed (wedge cleared). Sustained 80K/25s/8KB, sampled DPU ARM per-thread CPU DURING load:
 | | main worker thread | 2 helper threads | bench (80K) |
 |---|---|---|---|
@@ -3838,7 +3838,7 @@ never reads the body); route/conntrack are array/hash lookups — NOT the cost. 
 earlier wedge-idle (2%) was the POST-stall state, not under-load. Lever = parallelize ARM egress
 across cores (mirror DPA EU-sharding). Wedge under deep overload is a SEPARATE liveness bug (TODO).
 
-## FIX: multi-threaded ARM egress (DPUMESH_ARM_EGRESS_THREADS) — recovers baseline + kills wedge (2026-07-09 s2)
+## FIX: multi-threaded ARM egress (DPUMESH_ARM_EGRESS_THREADS) — recovers baseline + kills wedge
 Root cause was the single ARM worker doing ALL SG-DMA egress (94-96% CPU/core). Fix: split the
 proxy egress into 1 INGEST thread (main: consumer_pe + parse/route/conntrack + ship + REV_DONE +
 custody + all comch + all unit/piece/arrival pools) + N EGRESS workers (own doca dma/PE/inventory
@@ -3883,7 +3883,7 @@ passthru RPC / self-route / vanilla-shim / frame paths, wedge gone. Code default
 (proven inline); RECOMMEND baking n_eng=2 (or ≈active-pod-count). Testing note: MUST ramp — a cold
 jump to 200K wedges the host forward ring (my error mid-session, unrelated to DPU code).
 
-## Deploy option: DPUMESH_RINGS_PER_POD (K forward rings/pod) (2026-07-10)
+## Deploy option: DPUMESH_RINGS_PER_POD (K forward rings/pod)
 K was baked (=2). Now a deploy env, read on BOTH host (dpumesh_doca.c init_config) and DPU
 (dpu_worker.c run_dpu_worker) — the host sizes K forward rings at init (before register) so it
 can't learn K from the DPU later; both must land on the same K (fwd rings pair 1:1, mismatch stalls
@@ -3895,9 +3895,9 @@ throughput lever at 2 pods (it's an EU-spread knob for many pods); exposed per r
 
 ---
 
-# 2026-07-10 (session 2) — DELETE the dead legacy DPA-reverse data plane — BUILT + HW-VALIDATED
+# (session 2) — DELETE the dead legacy DPA-reverse data plane — BUILT + HW-VALIDATED
 
-Since the egress unification (07-09 s2), `px_init` allocates the proxy unconditionally and the DPU
+Since the egress unification, `px_init` allocates the proxy unconditionally and the DPU
 worker aborts if it fails (`dpu_worker.c` — `px_init` fatal), so `objs->proxy` is ALWAYS non-NULL and
 the ARM SG-DMA egress is the SOLE DPU→host reverse path. That made the entire legacy DPA-reverse
 machinery **unreachable dead code** (it only ran on the `objs->proxy==NULL` branch). User decision:
@@ -3939,7 +3939,7 @@ delete ALL of it; keep `DPUMESH_ARM_EGRESS_THREADS` (n_eng) as a deploy env knob
 | loopback self-route 50000×8KB | 50,000/0 · served 50,000 | = baseline |
 | preload vanilla-TCP 5000×1KB×8c | 5,000/0 · p50 115µs | = baseline |
 | stream FRAME 20000×1KB (svc16) | 20,000/0 · served 20,580,000 B | byte-exact |
-| stream FRAME **>8KB** 200×20000 (seam) | 200/0 · served Δ **4,001,000 = 200×20005** | **byte-exact = 07-05** |
+| stream FRAME **>8KB** 200×20000 (seam) | 200/0 · served Δ **4,001,000 = 200×20005** | **byte-exact** |
 
 DPU log 100% clean through all of it (0 drops/errors); ARM idle 1-3% between runs, egress workers
 accumulated 2:33/1:30 CPU-time (they did the work). **Conclusion: the legacy-reverse deletion is
@@ -3952,11 +3952,11 @@ cold-start wedge (the bench invocation targets a fixed RPS with no internal warm
 threshold for this fair 1-core pod is between 100K–150K). Evidence it is host-side, not the DPU:
 DPU log stayed clean (no stale-upstream drop flood), ARM idle (the load never reached it), pods 0
 restarts, and loopback/preload/frame (other pods) all passed 0-fail AFTER the 200K wedge. Reaching
-~200K needs a warmed ramp (as the 07-10 K-knob session did with 30/120/200); stopped pushing after
+~200K needs a warmed ramp (as the earlier K-knob session did with 30/120/200); stopped pushing after
 2 wedges per hang-discipline. Deployed state: n_eng=2, passthru default + frame svc16.
 
 
-# 2026-07-10 (session 3) — standalone Thrift-free repo extraction — BUILT + HW-VALIDATED
+# (session 3) — standalone Thrift-free repo extraction — BUILT + HW-VALIDATED
 
 The DPUmesh transport was extracted out of the Thrift tree into a standalone repo
 (`/home/jukebox/DPUmesh`): its own `Makefile` builds `libdpumesh.so` (no `libthrift`, no CMake) from
@@ -4009,10 +4009,10 @@ frame, >8KB seam, multi-frame) 0-fail and byte-exact.**
   Run preload before heavy blasts. Deployed state: n_eng=2, passthru default + frame svc16.
 
 
-# 2026-07-10 (session 4) — Consistency cleanup + façade dpm.h→src/dpm.c refactor — BUILT + HW-VALIDATED (behavior-neutral)
+# (session 4) — Consistency cleanup + façade dpm.h→src/dpm.c refactor — BUILT + HW-VALIDATED (behavior-neutral)
 
 Two coupled housekeeping changes, validated together on one deploy. Both are behavior-neutral by
-construction; this session proves it end-to-end (0-fail, byte-exact, p50 == the 07-10 s3 baseline).
+construction; this session proves it end-to-end (0-fail, byte-exact, p50 == the session-3 baseline).
 
 ## What changed
 **A. Consistency cleanup (readability-only, ABI frozen — the standing "zero functional removal" rule):**
@@ -4055,7 +4055,7 @@ code untouched), `doca/dpa_common.h` (region_off + 16B→20B comments). `include
 DPU up clean: `px_init` = "SG-DMA egress, egress-threads=2; request-default=passthru, l7-services=0,
 frame-services=1". All 8 pods Running, 0 restarts. DPU log 0 err/drop/poison/stale through the whole run.
 
-| test | result | vs 07-10 s3 baseline |
+| test | result | vs session-3 baseline |
 |---|---|---|
 | preload vanilla-TCP 2000×1KB×32c | 2000/0 · p50 192µs · 13.2K RPS | = baseline |
 | loopback self-route 50000×8KB | 50000/0 · served 50000 | = baseline |
@@ -4073,7 +4073,7 @@ cumulative counter across the 3 runs (514,500 → +4,001,000 → +926,100) — t
 ## Conclusion
 Both changes are **behavior- and performance-neutral**: every live path (forward staging-mirror,
 passthru RPC, self-route, vanilla shim + `dmesh_send_fin` half-close, frame, >8KB seam) is 0-fail and
-byte-exact, and the RPC p50 (165µs @30/100K, 250µs @200K) matches the 07-10 s3 baseline. The façade now
+byte-exact, and the RPC p50 (165µs @30/100K, 250µs @200K) matches the session-3 baseline. The façade now
 follows the same header-declares/src-implements split as the other two API layers; the region_off ABI is
 frozen (device untouched); `CC_SEND_TASK_NUM` can no longer drift. NB the low-concurrency loopback/stream
 p50 (~1–2.5ms) is the known EU-park/wake floor at single-outstanding closed-loop, not a regression (the
@@ -4081,7 +4081,7 @@ high-concurrency RPC path shows the correct ~165µs). Deployed state: n_eng=2, p
 
 ---
 
-# 2026-07-13 — L7 multi-backend registry + round-robin LB + connection-sticky sessions (Envoy parity, phase 1)
+# L7 multi-backend registry + round-robin LB + connection-sticky sessions (Envoy parity, phase 1)
 
 **Goal.** Make the DPU a real Envoy-like L7 data plane substrate: a *service = a cluster* with
 MULTIPLE backend pods, load-balanced, with connection-scoped session stickiness — so an external L7
@@ -4120,17 +4120,17 @@ errors** — `touch ~/DPUmesh/.__wtest` → "Read-only file system", `df`/`uptim
 on the same (ro) root, no separate tmpfs. `/proc/mounts` still reads `rw` but every write EROFS and some binary
 reads/execs return EIO → ext4/NVMe hard-error state (classic `errors=remount-ro` after device I/O failure). This
 prevents rsync of sources, the DPU `ninja` build, and restarting `dpumesh_dpu`. The currently-running
-`dpumesh_dpu` is the **Jul-10 build (does NOT contain this change)**. The failed deploy's `apply_manifest` scaled
+`dpumesh_dpu` does **not contain this change**. The failed deploy's `apply_manifest` scaled
 the k8s deployments to replicas=0 (pods down).
 
 **Status: code complete + statically verified; HW validation PENDING DPU filesystem recovery** (reboot/fsck, or
 NVMe replacement if the device is physically failing — requires operator action on the DPU, not remotely fixable/
-safe to attempt). On recovery, resume: `bench.sh deploy` → regression (loopback/stream/preload/RPC vs the 07-10
+safe to attempt). On recovery, resume: `bench.sh deploy` → regression (loopback/stream/preload/RPC vs the
 baseline above) → multi-backend LB test (set echo-dpumesh-13/-14 `BENCH_WORKER_ID=11` so svc 11 has 3 backends;
 verify load distributes / conn-pins across pods 11/13/14, byte-exact, 0-fail; kill a backend → remaining serve,
 no blackhole). NO HW numbers recorded — none were produced.
 
-## 2026-07-13 (later) — HW validation of the multi-backend LB + a wedge root-cause fix
+## (later) — HW validation of the multi-backend LB + a wedge root-cause fix
 
 DPU hardware recovered (the overheat/read-only episode passed; ASIC held 78–81°C, crit 91°C — still a
 **thermal risk**, recurring overheating, cooling needs attention). Deployed via `bench/bench.sh deploy`
@@ -4146,7 +4146,7 @@ Repeated benches wedged the WHOLE data path after 1–2 runs (rcnt=0, loopback h
 reply-drops in the DPU log — NO routing drops). Root cause is NOT the LB code (loopback, which uses no
 multi-backend LB, wedged too):
 - `dpu_proxy.c` reply path marks a conn `c->dead=1` on a stale upstream (WARN-flood guard, an uncommitted
-  post-07-10 change). A backend's **late reply** (arriving after the client FIN freed the upstream) creates
+  post-LB change). A backend's **late reply** (arriving after the client FIN freed the upstream) creates
   an orphan reply-conn `(backend, uP)` that is dead-marked and **never cleaned**. `dpu_upstream_create`
   round-robins `uP`s and does not evict stale conns, so when a `uP` is **reused** for a new client, the
   backend's replies hit the dead orphan (`px_ingest_forward` `c->dead` fast-path) and are **blackholed for
@@ -4202,7 +4202,7 @@ item: the DPU card's recurring thermal/cooling issue.
 
 ---
 
-# 2026-07-13 — ELASTIC per-conn TX buffer (dynamic block allocator) — BUILT + HW-VALIDATED (wedge bug found + fixed)
+# ELASTIC per-conn TX buffer (dynamic block allocator) — BUILT + HW-VALIDATED (wedge bug found + fixed)
 
 Replaces the host TX side's **fixed 128 KB/conn region** (`conn_pool`×`conn_bytes`, static — every conn
 always uses the same amount) with an **ELASTIC per-conn block chain** over a shared pool, so a conn's
@@ -4266,7 +4266,7 @@ Restarting pods to swap the host lib WITHOUT restarting the DPU corrupts the DPU
 (`pods_register: connection not found` flood → routing dead). The mounted-lib fast path is unusable for
 host-lib changes; a full `bench/bench.sh deploy` (which restarts the DPU) is required each time.
 
-# 2026-07-13 — P0 transparency: LD_PRELOAD ClusterIP registry resolve + getpeername truth — IMPLEMENTED + HW-VALIDATED
+# P0 transparency: LD_PRELOAD ClusterIP registry resolve + getpeername truth — IMPLEMENTED + HW-VALIDATED
 
 Shim P0 of the transparency plan (design report's P0): make the LD_PRELOAD shim key `connect()` on
 **ClusterIP:port** (not port alone) via a control-plane-fed **registry**, and make `getpeername` TRUTHFUL —
@@ -4311,7 +4311,7 @@ environmental, NOT the host buffer code.
 dpumesh-controller + injection webhook (feed the registry, self-identity); the review's real blocker
 `MAX_PODS=8` (whole-mesh node cap — hit directly this session as the pod-6 `setup_pod_dma` failure).
 
-# 2026-07-13 — MAX_PODS 8 → 16 (concurrent-meshed-pods-per-node cap raised) — HW-VALIDATED
+# MAX_PODS 8 → 16 (concurrent-meshed-pods-per-node cap raised) — HW-VALIDATED
 
 The review + the "dynamic K8s" discussion surfaced this as the real blocker for K8s use: `MAX_PODS=8`
 caps how many pods can be **concurrently meshed per DPU (node)**. Real K8s nodes run 30–110 pods. The
@@ -4391,8 +4391,8 @@ bound in-flight DMA per pod (fewer hung ops on a mass death) and/or a per-pod `d
 can't hang the shared engine — or accept the operational limit (redeploy clears it; single/moderate churn
 ≤~6-at-once tested fine; only ~13+ simultaneous terminations wedge).
 
-## BATCH_TXACK_MAX 14→16 re-test — "16 = deterministic hang" DID NOT REPRODUCE; verdict = per-deploy flake (2026-07-14)
-Re-ran the 14-vs-16 question end-to-end with matched builds + instrumentation. The earlier same-day
+## BATCH_TXACK_MAX 14→16 re-test — "16 = deterministic hang" DID NOT REPRODUCE; verdict = per-deploy flake
+Re-ran the 14-vs-16 question end-to-end with matched builds + instrumentation. The earlier
 "MUST stay 14 — PROVEN load-bearing" conclusion is RETRACTED (its own DIAG contradicted its mechanism:
 a batch stalled below threshold would show tx≈15, but the hang showed tx=0 rev=0 = everything flushed,
 HOST stuck — and the idle-flush would have flushed a 15-deep batch within ~1ms anyway).
@@ -4403,8 +4403,8 @@ libdpumesh.so. Host rx unpack CLAMPS `n = min(count, its own compiled max)` and 
 the clamped n → a DPU sending bigger batches than the host was built with loses the TAIL entries
 SILENTLY (no log), and `tx_reclaim_ack` is strict-FIFO front-match-or-noop → one lost ack = that conn
 wedges forever. `bench.sh restart`/`build` rebuild ONLY the DPU ⇒ **changing any comch_common.h wire
-constant requires FULL `deploy`.** [2026-07-15: `restart` has since been DELETED for this reason among
-others — `build` still rebuilds only the DPU, and `deploy` is now the sole bring-up path.]
+constant requires FULL `deploy`.** (`restart` has since been deleted for this reason;
+`build` still rebuilds only the DPU, and `deploy` is the sole bring-up path.)
 (Hardening option, not yet applied: bound host n by received length
 `(len-4)/entry_size` instead of the compile-time max, both BATCH types.)
 
@@ -4432,20 +4432,20 @@ sgl count — and made **quiet-at-idle**: the 1 Hz heartbeat only prints while t
 work or the flush counters moved since the last dump (an idle hang still leaves its final counters as
 the last line before silence; was ~86K identical lines/day).
 
-# 2026-07-15 — Pod restart vs a RUNNING DPU: root-caused (stale px_lane credits) + FIXED + HW-VALIDATED (14/14 restarts, ×2 deploys)
+# Pod restart vs a RUNNING DPU: root-caused (stale px_lane credits) + FIXED + HW-VALIDATED (14/14 restarts, ×2 deploys)
 
 **The "a single pod cannot reconnect to a running DPU" rule is DEAD.** It was never a
 property of the system — it was a bug, now fixed and HW-validated. Two independent
 fresh-deploy runs of the full suite, ALL CHECKS PASSED both times.
 
-Note the exact claim: **RE-CONNECT**, not death. Pod death was already fine (2026-07-13,
-verified). See the SCOPE section immediately below before reading the root cause.
+Note the exact claim: **RE-CONNECT**, not death. Pod death was already verified.
+See the SCOPE section immediately below before reading the root cause.
 
 ## ⚠️ SCOPE — this is about pod RE-TENANTING, not pod death (pod death was already fine)
 
 Read this before the root cause, or you will mis-attribute it. **Pod DEATH was already
 handled and verified** — see "⭐ Egress-on-backend-death robustness — FIXED + verified"
-(2026-07-13, above): a backend force-killed (grace 0) mid a 15s bench gave
+(above): a backend force-killed (grace 0) mid a 15s bench gave
 `rcnt=1,337,224 fail=0`, no global wedge, flood count **0**. That fix (① defer
 `host_rx_mmap` destroy, ② `px_lane_drop_dead`, ③ `dma_stalled` safety net) is still in the
 tree, still correct, and this session extends rather than replaces it.
@@ -4454,7 +4454,7 @@ What NO prior test ever did is **bring the pod BACK into the same slot and drive
 through it**:
 
 ```
-2026-07-13 backend-death :  kill pod → done.            (never returns)
+backend-death             :  kill pod → done.            (never returns)
 13-at-once mass death    :  kill 13 pods → done.        (never return)
 "gradual churn 0-fail"   :  add/remove replicas         (mostly fresh slots)
 elastic TX `[reconn]`    :  CONNECTION churn            (not pod churn at all)
@@ -4463,7 +4463,7 @@ THIS session             :  kill → REBORN in same slot → traffic → ×14
 
 The bug below requires slot RE-TENANTING. Die-and-stay-dead never triggers it.
 
-**And the 07-13 pass is EVIDENCE FOR the root cause below, not against it.** Without
+**And the backend-death pass is EVIDENCE FOR the root cause below, not against it.** Without
 re-tenanting there is no starved lane, so credit-refresh fires only occasionally and the
 death window (host memory unmapped → comch disconnect lands) is rarely hit. With
 re-tenanting, the starved lane spams refresh on EVERY pump, so hitting that window becomes
@@ -4562,7 +4562,7 @@ Convergence receipts (each = one deploy+validate): flood `150,483 lines / never 
 → latch on the refresh path → `28` → `IO_FAILED` as death signal → `1` (but recovery 2.55s)
 → latch in the err cb itself → `93ms` → reset lane credits on re-tenant → **0 faults**.
 
-## ⚠️ Reconciliation with "Egress mass-death self-heal — DOES NOT WORK" (2026-07-14, above)
+## ⚠️ Reconciliation with "Egress mass-death self-heal — DOES NOT WORK" (above)
 
 That entry says ctx `stop`→IDLE→`start` self-heal CANNOT work because a DMA to unmapped
 memory HANGS at the hardware level, so the ctx never reaches IDLE. **This session's
@@ -4577,7 +4577,7 @@ recovery DID work — but that does NOT overturn it, and the two are not in conf
   `px_engine_recover` is now a SAFETY NET, not a load-bearing path. It was separately
   observed working (93ms restart) in the intermediate builds, single-pod only.
 
-**NOT tested this session: the 13-at-once mass-death case.** The 2026-07-14 finding
+**NOT tested this session: the 13-at-once mass-death case.** The mass-death finding
 (hung DMAs ⇒ ctx never reaches IDLE ⇒ recover spins) may well still hold there. If mass
 death is re-tested and `px_engine_recover` spins, that entry's prescription stands
 (bound in-flight DMA per pod, and/or a per-pod `doca_dma` ctx so one dead pod can't hang
@@ -4593,7 +4593,7 @@ per-pod egress in-flight refcount + proxy custody drop, reclaimed async off the 
 The 32MB staging that DOMINATED that leak is now reused per slot, so what remains is small.
 
 **Not done:** a graceful BYE+ACK before host unmap. There is no host shutdown path at all
-today (no `dpumesh_fini`, no UNREGISTER msg), it cannot cover crash/OOM/SIGKILL, and its
+in the current implementation (no `dpumesh_fini`, no UNREGISTER msg), it cannot cover crash/OOM/SIGKILL, and its
 timeout fallback needs the recovery path anyway. Worth adding later as an optimization so
 the graceful path never faults — not as a substitute.
 
@@ -4609,7 +4609,7 @@ the graceful path never faults — not as a substitute.
    for 75+ seconds. Restoring the NULLing was necessary but not sufficient.)
 2b. **"Pod death wedges the egress — pre-existing bug" — OVERCLAIMED, and I only caught it
    because the reviewer asked "didn't we already test pod restart/delete?".** We had:
-   2026-07-13 force-killed a backend mid-traffic → `rcnt=1,337,224 fail=0`, flood 0. Pod
+    force-killed a backend mid-traffic → `rcnt=1,337,224 fail=0`, flood 0. Pod
    death was ALREADY fixed and verified. The untested case was pod RE-TENANTING of a slot.
    Always check what the prior test actually DID before declaring its subject broken — and
    state the scenario, not just the subject, in the claim.
@@ -4633,7 +4633,7 @@ not failures. Use `DPUMESH_LOG_LEVEL=50` to see registration/RING_ADD/RING_DEL.
 
 ---
 
-# 2026-07-15 — API consolidation (4 surfaces → 2) + multi-CQ; HW validation
+# API consolidation (4 surfaces → 2) + multi-CQ; HW validation
 
 Collapsed the host surface to **exactly two public APIs**: the native API
 (`include/dpumesh/dmesh.h`, RDMA-verbs-shaped, zero-copy both ways) and the POSIX socket
@@ -4670,7 +4670,7 @@ trip — it is `ibv_create_qp`, not `rdma_connect`), `dmesh_conn_t` → `dmesh_q
 
 `dpumesh_tx_reserve` is now **non-blocking**: `NULL`+`EAGAIN` on a full SQ instead of the
 nanosleep ladder it used to spin in (the `ibv_post_send` contract). **`waits=0` on every run
-measured today**, at every concurrency/thread count/payload — the elastic ring never hit its
+measured**, at every concurrency/thread count/payload — the elastic ring never hit its
 in-flight ceiling, so backpressure has never actually occurred in this workload. That
 retires the question of whether the shim needs honest `EPOLLOUT` (a socketpair fd-realization
 instead of the eventfd): it would cost a **per-message** syscall upgrade (eventfd counter →
@@ -4760,7 +4760,7 @@ is live from `dmesh_create_cq`. `cq_fd` is now purely the optional idle-sleep pa
   an order-only prerequisite), so a stale binary links against a deleted symbol and the
   build looks green. `rm build/bin/<x>` to force.
 
-# 2026-07-16 — echo greeter pegged ONE CORE at IDLE: app bug, not the API — FIXED + HW-VALIDATED. `grow_waits = 0` **RETRACTED**
+# echo greeter pegged ONE CORE at IDLE: app bug, not the API — FIXED + HW-VALIDATED. `grow_waits = 0` **RETRACTED**
 
 Reported from `htop`: "echo dpumesh is using 100% of one core". It was real and had been running
 for hours — with **no traffic**. Root cause is entirely in `bench/echo_dpumesh.c`; the transport
@@ -4852,7 +4852,7 @@ idle, works under load, and goes back to sleep — which is the whole claim.
 
 Deploy A = the rejected `conn_kill` patch; deploy B = the shipped sweep. Both runs, same matrix:
 
-| validator | B (sweep, shipped) | A (conn_kill) | prior (2026-07-15) |
+| validator | B (sweep, shipped) | A (conn_kill) | prior |
 |---|---|---|---|
 | `loopback 2000 1024 1` | **2000/0** · p50 115.9 µs | 2000/0 · 115.9 | 115.7 µs |
 | `loopback 2000 8192 0` | **2000/0** · p50 116.7 µs | 2000/0 · 116.7 | 116.8 µs |
@@ -4876,13 +4876,13 @@ do not read a single p99 sample as signal. Everything else is flat.
 
 ## RETRACTION — `grow_waits = 0` is FALSE
 
-The 2026-07-15 entry above claims *"`waits=0` on every run measured today, **at every
+The entry above claims *"`waits=0` on every run measured, **at every
 concurrency/thread count/payload** — backpressure has never actually occurred"*, and used it to
 retire the shim's `EPOLLOUT` question ("a path that never executes").
 
 **`waits` = 554 and 662** at 8 KB × conc 32, on two independent default deploys — 0 at 64 B and
 1 KB, reproducibly non-zero at 8 KB. Backpressure **does** occur; it is payload- and
-DPU-config-dependent (today: shards=1/egress=1 — the prior entry does not state its config, cf.
+DPU-config-dependent (the measured configuration used shards=1/egress=1; the prior entry does not state its config, cf.
 the baseline-config trap). Consequences:
 
 - **The `EAGAIN` path is live code, not a theoretical branch.** Every claim resting on
@@ -4933,7 +4933,7 @@ runs per reply, and a `fprintf`+`strerror` in a hot function is not worth carryi
 never fired. So a future occurrence is again anonymous; re-add them if it recurs.
 Attempted repro of `@fifo`: `point dpumesh 64 65536 1200 10 10 1` (64 KB replies to fill the 256 KB
 ring so `reply_pump` stalls, conc 1200 > `REPLY_Q` 1024). **`@fifo` did not fire.** It hit the
-already-documented limit above (`2026-07-14`, "Known limitation") instead: 1200 × 64 KB = **76 MB**
+already-documented "Known limitation" instead: 1200 × 64 KB = **76 MB**
 of demanded in-flight against a 256 KB ring = **300×** the cap, so the writer throttles past the
 RUN deadline — `fail=125523`, greeter `served=63`, DPU log clean (no wedge). The pipeline throttles
 upstream long before `qn` can accumulate to 1024.
@@ -4957,10 +4957,10 @@ reason from doc strings):
 **Correction of my own earlier claim.** I wrote that a "temporary wedge permanently kills a conn"
 via `@post_send`/`EBADMSG` and called it "the only reachable" site — three errors: (1) `@alloc` is
 also reachable (`ENOMEM`); (2) `ring->dead` is the **consequence of a 5 s stall**, not of momentary
-congestion — the causality was backwards; (3) it is logged, not silent — today's pods show **0**
+congestion — the causality was backwards; (3) it is logged, not silent — the observed pods show **0**
 `STALLED`/`busy`/`dead` lines, consistent with every test passing. The likeliest explanation for the
-original 2407245 is that it was latched during the **stale-`px_lane` ring-wedge era** documented on
-2026-07-15 (since fixed), i.e. an environment fault of that time, not a standing bug in current code.
+original 2407245 is that it was latched during the **stale-`px_lane` ring-wedge era**,
+which is fixed, rather than by a standing bug in current code.
 **Trigger: still unidentified. No standing wedge bug demonstrated.**
 
 **Validation status, stated honestly:** "the greeter no longer pegs a core" is **measured** (idle 0%,
@@ -4979,7 +4979,7 @@ express "every 200k" here: `g_served` advances a few per loop pass, so the widen
 *every* multiple. Replaced with a milestone cursor (`g_served - g_reported >= 200000`), which fires
 once regardless of step size.
 
-# 2026-07-16 — egress recover: `px_engine_recover` cleared PEER engines' `refresh_inflight` (multi-engine buffer double-free/leak) — FIXED + healthy-path HW-validated
+# egress recover: `px_engine_recover` cleared PEER engines' `refresh_inflight` (multi-engine buffer double-free/leak) — FIXED + healthy-path HW-validated
 
 ## The bug (code-certain)
 `px_engine_recover` (`dpu_proxy.c`), after restarting a faulted `doca_dma` ctx, cleared **every**
@@ -5004,12 +5004,12 @@ callbacks run on that same worker). Cross-engine clearing breaks BOTH invariants
   handle (leak); the stale callback later frees the *second* refresh's bufs while its DMA is still in
   flight (premature free of an in-use inventory buf). Net: inventory bufs leak → that engine's refreshes
   eventually all fail → the lane pins `avail_entries=0` → **permanent egress starvation** — the same
-  failure shape as the 2026-07-15 pod-restart wedge, just reached via a different door.
+  failure shape as the pod-restart wedge, just reached via a different door.
 
 Trigger surface: `n_eng >= 2` (`DPUMESH_ARM_EGRESS_THREADS>=2`), which is the **recommended** config
 (`n_eng=1` wedges under overload; the validated ceiling config is `②+egress2`). Needs engine A faulting
 while engine B has a refresh in flight — a narrow interleave, which is why the single-pod-death validation
-(14 sequential restarts, 0-fail, 2026-07-15) never surfaced it: that was proven on the pre-multi-engine
+(14 sequential restarts, 0-fail) never surfaced it: that was proven on the pre-multi-engine
 egress path / single engine, where "all lanes" == "our lanes".
 
 Note: mass-death (≳13 pods) is a **different** limitation — there the ctx hangs in STOPPING and never
@@ -5071,7 +5071,7 @@ recover path itself is regression-covered.
 
 ---
 
-# NAMING Phase 0 — name-based identity/routing (host resolver) — HW validation (2026-07-16)
+# NAMING Phase 0 — name-based identity/routing (host resolver) — HW validation
 
 **Change:** `design/NAMING.md` Phase 0. The `service_id` integer's provenance moved from the user
 (three hand-typed sources) to a file-backed resolver (`src/dmesh_resolve.c`). Public API is now
@@ -5119,7 +5119,7 @@ webhook + live reload) remain unbuilt (NAMING.md §8).
 
 ---
 
-## 2026-07-17 — Per-conn inbox sized to the reverse-credit budget (silent RX drop closed)
+## Per-conn inbox sized to the reverse-credit budget (silent RX drop closed)
 
 **What changed.** The per-conn inbound descriptor ring (`DMESH_INBOX_RING`) was a compile-time
 **256**, while the DPU caps in-flight reverse-DMA landings per region at `rq = rq_depth/K =
@@ -5154,7 +5154,7 @@ loopback pod_id=4, echo pod_id=0, preload pod_id=5) — the 256 ceiling is gone.
 | stream | 20000 × 1024B self | **20000/0**, 20.58 MB, p50 116.1µs |
 
 ### Benchmarks — no regression from the 8× inbox (48 KB vs 6 KB/conn, lazy per live conn)
-| point | before (2026-07-16) | now | verdict |
+| point | before | now | verdict |
 |---|---|---|---|
 | latency conc1, 64–1024B | p50 ~114 µs | p50 **114–115 µs** | match |
 | bandwidth 8192 conc32 | 4.227 Gb/s | **4.222 Gb/s** (peak 7.9 @ 32KB) | match |
@@ -5170,7 +5170,7 @@ untouched here; the 719-vs-554–662 spread is normal run variance.
 ### Verdict
 **PASS — no regression.** The inbox ceiling is raised from 256 to the DPU's per-region credit budget
 (2048 default), making the silent inbox-full drop in `rx_deliver_desc` unreachable in steady
-operation. All eight validators hold 0-fail and every benchmark matches the 2026-07-16 baseline.
+operation. All eight validators hold 0-fail and every benchmark matches the baseline.
 **Caveat (honest):** the bench harness drains each conn every poll, so it cannot inject the
 slow-drain single-conn flood that actually overflowed the old 256 ring — this validates the fix **by
 construction** (inbox ≥ credit budget) plus a clean regression sweep, not by reproduce-then-fix.
@@ -5179,7 +5179,7 @@ Memory cost: 48 KB/conn (was 6 KB), lazy per live conn, tunable via `DPUMESH_INB
 
 ---
 
-## 2026-07-17 — Free robustness fixes (no API/ABI change) + HW regression sweep
+## Free robustness fixes (no API/ABI change) + HW regression sweep
 
 Six zero-tradeoff, zero-API-surface fixes, deployed together and validated on HW. Two more
 candidates were **deliberately not** done (see end): they are not actually free.
@@ -5228,7 +5228,7 @@ Linking `libdpumesh.so` and calling `dmesh_config_identity()` directly (pure fil
 | `DPUMESH_SERVICE=bogus-svc DPUMESH_CONFIG=/nonexistent` | **both** warnings fire (registry-not-found + name-not-in-registry), `identity=-1` |
 | `DPUMESH_SERVICE` unset (intentional client) | **silent**, `identity=-1` |
 
-### Benchmarks — no regression vs 2026-07-16 baseline
+### Benchmarks — no regression vs baseline
 | point | baseline | now |
 |---|---|---|
 | latency conc1 64–1024B | p50 ~114µs | p50 **114–115µs** |
@@ -5246,10 +5246,10 @@ correct config, benchmarks match baseline. No public API or wire ABI changed.
 
 ---
 
-# 2026-07-17 — `dmesh_pin_route` + the `route_group` wire key REMOVED — BUILT, wire-verified, HW-VALIDATED (see session 2/3 below)
+# `dmesh_pin_route` + the `route_group` wire key REMOVED — BUILT, wire-verified, HW-VALIDATED (see session 2/3 below)
 
-**Trigger.** "Why does `pin_route` exist, is it needed?" It is not. It was correct when built
-(07-03): the DPU's L4 route was then per-message RR with **no** connection stickiness, so stamping
+**Trigger.** "Why does `pin_route` exist, is it needed?" It is not. The DPU's L4
+route was then per-message RR with **no** connection stickiness, so stamping
 one route-affinity key on every message of a conn was the only way to give a socket app total
 order. Commit `66c31f7` then added `px_conn.pinned_backend` (Envoy TCP-proxy session affinity,
 default STICKY) and superseded it. `pin_route` was never removed.
@@ -5323,11 +5323,11 @@ matrices should be unchanged.
 the msgq will NOT reject the mismatch for you). Run `bench/bench.sh deploy` clean, then the full
 validator matrix. The scale-out-starvation claim is a code-reading result, not a measured one —
 observing it needs a discriminator backend (reply carries server identity); every validator
-backend is an echo, so all prior 0-fail results were blind to it (same blind spot noted 07-03).
+backend is an echo, so all prior 0-fail results were blind to the same issue.
 
 ---
 
-# 2026-07-17 (session 2) — the proxy's delivery contract: transient pressure now BACKPRESSURES, terminal failure now CLOSES. Neither truncates. — HW-VALIDATED (addendum below)
+# (session 2) — the proxy's delivery contract: transient pressure now BACKPRESSURES, terminal failure now CLOSES. Neither truncates. — HW-VALIDATED (addendum below)
 
 **Trigger.** Auditing whether the L4 layer supports message send/recv + routing well. Routing
 is fine. Delivery was not: **`px_ship_seg` had 4 early-return drop paths and its callers advanced
@@ -5420,7 +5420,7 @@ defer `px_conn_del` and retry, but its fan-out already frees each `uP` as it goe
 retry would lose the remaining FINs; it needs restructuring, not a return code. Left out to keep
 this change small. `px_fin_to_sender` has the same exposure and logs it loudly.
 
-## 2026-07-17 (session 2, addendum) — backpressure path EXERCISED on HW: 51,948 stalls, 0 bytes lost
+## (session 2, addendum) — backpressure path EXERCISED on HW: 51,948 stalls, 0 bytes lost
 
 The EAGAIN path is unreachable under normal load (`PX_UNIT_POOL` = `MAX_PODS × 4096` = 131,072
 units, and the stream validator is sequential — at most `fpw` units in flight). Forced it by
@@ -5458,7 +5458,7 @@ any non-self target simply burns the 5 s reply timeout. `RUN <N> <SIZE> [<FPW>]`
 
 ---
 
-# 2026-07-17 (session 3) — the codec decides the LB granularity: per-service LB axis DELETED, L7 sticky bug FIXED, fan-out PROVEN on HW
+# (session 3) — the codec decides the LB granularity: per-service LB axis DELETED, L7 sticky bug FIXED, fan-out PROVEN on HW
 
 **The model this settles on.** L4 is a byte stream, host↔DPU, with nothing L7 on the wire — the
 app's pipe is a submission queue addressed to a SERVICE and it ENDS AT THE DPU, which owns and
@@ -5535,7 +5535,7 @@ both need fault injection. `stat_drop_bytes`/`stall` stayed 0 throughout (`DPUME
 
 ---
 
-# 2026-07-17 (session 4) — one QP carries N inbound streams: `dmesh_wc_t.stream` — the reply-side half of per-message LB
+# (session 4) — one QP carries N inbound streams: `dmesh_wc_t.stream` — the reply-side half of per-message LB
 
 **What this closes.** Per-message LB gives one QP several upstreams at once, and their replies
 all land on that QP. The transport merged them into ONE byte stream and threw away the sender —
@@ -5609,7 +5609,7 @@ no-op `make` rebuilds nothing. **Any public-header change before this commit cou
 mismatched pair** — the earlier `route_group` removal escaped only because it never touched a
 struct the apps compile against.
 
-## 2026-07-17 (session 4, addendum) — the reframer now DETECTS desync instead of stalling
+## (session 4, addendum) — the reframer now DETECTS desync instead of stalling
 
 `bench_reframe_feed` read `seq`/`payload_len`/`aux` out of the 16-byte header and **skipped the
 `magic` word**. The field was written by both ends and read by nobody — so a desynced reply
@@ -5637,7 +5637,7 @@ The log names the `uP`, so a real desync now points at the stream that broke.
 
 ---
 
-# 2026-07-17 (session 5) — fixing the audit findings: FIN semantics, TX-FIFO overrun, error delivery, ABI
+# (session 5) — fixing the audit findings: FIN semantics, TX-FIFO overrun, error delivery, ABI
 
 Fourteen fixes from a code audit, plus one deadlock the audit missed and the testing found.
 Full deploy + HW on every claim below. `DPUMESH_PROXY=passthru`, `l7-services=0`,
@@ -5749,7 +5749,7 @@ still sees the old cluster's endpoints, and `px_route_message` ignored `cluster`
 `host >= 0`, checking only liveness — a content-routing hook would deliver into a different
 service. Now the host must be a live backend OF `dec.cluster`, and `cluster` is range-checked
 BEFORE the int32→int16 narrowing (truncating first silently aliases onto a real service). Added
-`PX_L7_MSG_MAX` (Envoy's `max_request_bytes`). Latent today — `dpu_l7.c` ignores `ctx` — so this
+`PX_L7_MSG_MAX` (Envoy's `max_request_bytes`). Latent in the current hook — `dpu_l7.c` ignores `ctx` — so this
 is an API fix, not a live bug.
 
 ## P1 — ABI versioning
@@ -5830,7 +5830,7 @@ threads=2/4. **Not proven.** Isolating it needs a per-commit bisect of the uncom
 
 ---
 
-# 2026-07-18 (session 6) — bisecting the t=2/4 rate regression: it's the route-affinity removal
+# (session 6) — bisecting the t=2/4 rate regression: it's the route-affinity removal
 
 Session 5 left an unattributed 6-8% drop at `rate` threads=2/4 (t=1 unchanged). Bisected it to
 the end. **Cause: the `dmesh_pin_route` / route-affinity (`route_group`) removal from the prior
@@ -5934,7 +5934,7 @@ in this session's fixes.
 
 ---
 
-# Session 6 — ARM emit-path lock contention: 100K → ~500K RPS (2026-07-18)
+# Session 6 — ARM emit-path lock contention: 100K → ~500K RPS
 
 Goal: raise latency + throughput, both "far below target". Constraints: keep the public API
 shell identical (internal optimization only), delete/specialize no functionality, keep env
@@ -6057,7 +6057,7 @@ downstream of the pool-lock contention that A+B removed.
 
 ---
 
-## Matched-batching ablation + lane-inbox data-race fix (2026-07-18)
+## Matched-batching ablation + lane-inbox data-race fix
 
 Tests the `plan/bench.md` hypothesis that the E1 throughput gap is partly a benchmark artifact
 (TCP batches its window into one syscall; DPUmesh flushed per RPC). Added a matched-batching mode
@@ -6089,7 +6089,7 @@ neutral. (The live DPU had drifted to `egress-threads=1`; re-fixed to (4,4) befo
 
 ---
 
-# Session 7 — ABI 2 automatic-batching performance audit (2026-07-20)
+# Session 7 — ABI 2 automatic-batching performance audit
 
 Goal: determine whether the ABI 2 lifecycle and TX-policy work changed native L4
 performance. This section supersedes the first before/after numbers collected in
@@ -6120,7 +6120,7 @@ DPU log argument=-l 40
 
 Only the host benchmark and echo images were changed. The baseline images were
 built from clean commit `939a6a4`; the current images were built from the
-2026-07-20 working tree at the same commit. Each cell below is the median of three
+working tree at the same commit. Each cell below is the median of three
 runs at concurrency 32. Every retained run reported `fail=0` and `reorder=0`.
 
 Two old-policy baselines are shown because they answer different questions:
@@ -6175,7 +6175,7 @@ a stale pod IP.
 
 ---
 
-# Session 8 — completion-driven native TX readiness and gRPC backpressure (2026-07-20)
+# Session 8 — completion-driven native TX readiness and gRPC backpressure
 
 Goal: replace timer, busy-poll, and whole-QP retry scans with a race-free native
 one-shot writable completion, convert the gRPC reactor to that completion model,
@@ -6357,7 +6357,7 @@ checks.
 
 ---
 
-# Session 9 — controlled writable A/B performance audit (2026-07-20)
+# Session 9 — controlled writable A/B performance audit
 
 ## Result
 
@@ -6406,8 +6406,7 @@ selected artifact, and `bench/bench.sh pin fair` was reapplied. The experiment
 ended with all four target deployments and the host-mounted library restored to
 the post-change hashes.
 
-The same DPU process, PID **1329320**, ran from 2026-07-20 07:49:29 through the
-whole experiment; its executable hash was
+The same DPU process, PID **1329320**, ran throughout the experiment; its executable hash was
 `fa6950519a7b5a2084afa0cfe5903f4fa9916bc3ca0e6670fad8a15e822aebe7`.
 The actual process environment and command line were:
 
@@ -6599,7 +6598,7 @@ method before being treated as a separate defect.
 
 ---
 
-# Session 10 — LD_PRELOAD migration to the native CQ contract (2026-07-20)
+# Session 10 — LD_PRELOAD migration to the native CQ contract
 
 The preload data path now uses `dmesh_alloc`/`dmesh_post_send`/`dmesh_flush` and
 consumes `CONN_REQ`, `RECV`, `RECV_FIN`, and `TX_READY` through `dmesh_poll_cq`.
@@ -6633,7 +6632,7 @@ only as run receipts.
 
 ---
 
-# Session 11 — Matched-C LD_PRELOAD suite smoke (2026-07-20)
+# Session 11 — Matched-C LD_PRELOAD suite smoke
 
 The previously disabled `dpumesh-preload` row is now wired to the dedicated
 `preload-bench`/`preload-echo` pair. A reduced suite (`rtt conc curve bw`,

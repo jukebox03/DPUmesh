@@ -1,31 +1,7 @@
 #!/bin/bash
-# bench.sh — the single entry point for the DPUmesh benchmark.
-#
-# One script for everything bench: build + deploy the environment (DPU transport,
-# container images, k8s pods, CPU pinning), then drive the benchmark and the
-# feature validators. The heavy k8s manifest lives declaratively in
-# bench/k8s/pods.yaml (applied via envsubst); the host build lives in the Makefile
-# (this script calls `make`).
-#
-#   bench.sh deploy                                     # build + DPU + images + pods + pin
-#   bench.sh latency   [dpumesh|tcp|both]               # concurrency=1 latency vs req_size
-#   bench.sh bandwidth [dpumesh|tcp|both]               # Gb/s goodput vs req_size (to 8 MB)
-#   bench.sh rate      [dpumesh|tcp|both]               # Mrps vs client threads {1,2,4,8}
-#   bench.sh all       [dpumesh|tcp|both]               # all three (default both)
-#   bench.sh point <dpumesh|tcp> <req> <reply> <conc> <dur> <warmup> <threads> [reconn]
-#   bench.sh loopback  [<N> <size> <zc>]                # validator: self-routing
-#   bench.sh verbs     [<N> <size> <zc> <win> <pipe>]   # validator: RDMA-verbs façade
-#   bench.sh stream    [<N> <size> <fpw>]               # validator: L7 frame proxy (DPUMESH_PROXY=frame)
-#   bench.sh preload   [<N> <size> <conns>]             # validator: LD_PRELOAD shim
-#   bench.sh pin       [fair|hw|hw3|hw6]                # (re)pin pods to cores
-#   bench.sh status | logs | cleanup | dpulog [n] | dpucpu
-#
-# `deploy` is the ONLY way to bring the environment up: it starts the DPU and every
-# pod together, in order. There is no DPU-only restart and no per-pod start — both
-# desynchronize the host/DPU registration state.
-#
-# Requires .env at the repo root (DPU_HOST, HOST_PASS, DPU_PASS, HOST_PCI, DPU_PCI,
-# …) for deploy/pin. Benchmark/validator runs need only kubectl + nc.
+# Benchmark build, deployment, measurement, validation, pinning, and diagnostics.
+# Use `deploy` to start the DPU and pods as one registration lifecycle. Deployment
+# and pinning read repository-root `.env`; live runs require kubectl and nc.
 set -euo pipefail
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
@@ -52,7 +28,7 @@ INCLUDE_SRC="$PROJ_ROOT/include"
 DOCA_SRC="$PROJ_ROOT/doca"
 LIB_OUT="$PROJ_ROOT/build/lib"
 BIN_OUT="$PROJ_ROOT/build/bin"
-DPU_PROJ="${DPU_PROJ:-DPUmesh}"        # repo checkout name on the DPU
+DPU_PROJ="${DPU_PROJ:-DPUmesh}"        # project directory name on the DPU
 DPU_DOCA="$DPU_PROJ/doca"
 DPU_INCLUDE="$DPU_PROJ/include"
 DPU_BUILD="$DPU_DOCA/build"
@@ -101,11 +77,19 @@ sync_sources() {
 build_dpu() {
     step "=== Building on DPU (ninja) ==="
     local bt="${DPU_BUILDTYPE:-debugoptimized}"
-    ssh "$DPU_HOST" "[ -d ~/$DPU_BUILD ] || (cd ~/$DPU_DOCA && meson setup build --buildtype=$bt)" 2>&1 | grep -vE '^\s*$' || true
-    ssh "$DPU_HOST" "rm -f ~/$DPU_BUILD/dpa_kernel.a" 2>/dev/null || true
     local out
-    out=$(ssh "$DPU_HOST" "cd ~/$DPU_BUILD && meson configure -Dbuildtype=$bt 2>&1; ninja 2>&1" 2>&1)
-    if echo "$out" | grep -q "error:"; then err "DPU build failed:"; echo "$out"; exit 1; fi
+    if ! out=$(ssh "$DPU_HOST" "[ -d ~/$DPU_BUILD ] || (cd ~/$DPU_DOCA && meson setup build --buildtype=$bt)" 2>&1); then
+        err "DPU build setup failed:"
+        printf '%s\n' "$out"
+        exit 1
+    fi
+    if [ -n "$out" ]; then printf '%s\n' "$out" | grep -vE '^\s*$' || true; fi
+    ssh "$DPU_HOST" "rm -f ~/$DPU_BUILD/dpa_kernel.a" 2>/dev/null || true
+    if ! out=$(ssh "$DPU_HOST" "cd ~/$DPU_BUILD && meson configure -Dbuildtype=$bt && ninja" 2>&1); then
+        err "DPU build failed:"
+        printf '%s\n' "$out"
+        exit 1
+    fi
     local nobj; nobj=$(echo "$out" | grep -cE "Compiling C object" || true)
     info "DPU build OK (buildtype=$bt, recompiled $nobj C objects)"
 }
@@ -298,11 +282,7 @@ scale_up_with_wait() {
     fi
     info "$app pod Ready"
     if [ -n "$expected_log" ]; then
-        # Kubernetes Ready only says the container process exists; it does not
-        # prove that DPUmesh finished its two-phase register + mmap/DPA setup.
-        # Wait on the host's authoritative POD_INIT_READY log instead of the old
-        # DPU diagnostic "pods: N" text (which was neither stable nor a full
-        # data-readiness signal).
+        # POD_INIT_READY confirms the DPUmesh registration and mmap/DPA setup.
         info "Waiting for DPUmesh init: $app ($expected_log)"
         local attempts=0
         while [ $attempts -lt 35 ]; do
@@ -319,11 +299,8 @@ scale_up_with_wait() {
     fi
 }
 
-# Every meshed pod is brought up here, as part of the ONE full deploy, against a
-# freshly started DPU. Nothing starts a pod on its own later: the validators used to
-# scale their pod up on demand, which is a pod-restart against an already-running
-# DPU — exactly the pattern being removed. verbs/stream register like any other pod
-# regardless of proxy mode (only the `stream` RUN itself needs DPUMESH_PROXY=frame).
+# Start every meshed pod during the full deploy. Only stream execution requires
+# DPUMESH_PROXY=frame; registration does not.
 start_pods() {
     step "=== Starting pods (innermost first) ==="
     local ready="DPU pod is data-ready"

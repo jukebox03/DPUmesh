@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2023 NVIDIA CORPORATION AND AFFILIATES.  All rights reserved.
+ * Copyright NVIDIA CORPORATION AND AFFILIATES. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without modification, are permitted
  * provided that the following conditions are met:
@@ -128,4 +128,3 @@ doca_error_t open_doca_device_rep_with_pci(struct doca_dev *local,
 	doca_devinfo_rep_destroy_list(rep_dev_list);
 	return DOCA_ERROR_NOT_FOUND;
 }
-

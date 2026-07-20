@@ -1,28 +1,7 @@
-/*
- * preload_runner.c — entrypoint of the preload-dpumesh validation pod.
+/* Validation-pod supervisor for preloaded tcp_echo and tcp_client children.
  *
- * Boots the two VANILLA TCP binaries under LD_PRELOAD=libdmesh_preload.so:
- *   tcp_echo   (persistent server; DPUMESH_SERVICE + DPUMESH_PORT → advertises the
- *               service, one DPU pod registration at boot)
- *   tcp_client (persistent client daemon driven over stdin; dials the echo
- *               service's ClusterIP, resolved via DPUMESH_CONFIG registry; one
- *               registration at boot — every RUN opens FRESH connections, so conn
- *               churn is tested without burning MAX_PODS slots)
- * then serves the bench control protocol on CTRL_PORT (plain kernel TCP —
- * the runner itself is NOT preloaded):
- *
- *   "RUN <n> <size> <conns>\n"  →  forwarded to tcp_client stdin
- *   reply "OK <ok> <fail> <p50us> <p99us>\n"  (or "ERR <reason>\n")
- *
- * If either child dies the runner replies ERR and exits non-zero so kubernetes
- * restarts the pod into a clean state.
- *
- * env: PRELOAD_LIB (/usr/local/lib/libdmesh_preload.so), ECHO_PORT (9095),
- *      PRELOAD_SVC (15, the interned id written into the registry),
- *      PRELOAD_SERVICE (preload-dpumesh, the service NAME), SVC_IP (10.96.0.15 —
- *      the echo service's ClusterIP the client dials), CTRL_PORT (9092),
- *      ECHO_BIN, CLIENT_BIN
- */
+ * CTRL_PORT accepts RUN <count> <size> <connections>, forwards it to the client,
+ * and returns its OK or ERR result. Child failure terminates the runner. */
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>

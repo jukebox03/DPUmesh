@@ -63,7 +63,7 @@ class DmeshGrpcServerAttachment final {
   std::shared_ptr<State> state_;
 };
 
-// Routes future native inbound QPs to a started gRPC PassiveListener.
+// Routes subsequent native inbound QPs to a started gRPC PassiveListener.
 absl::StatusOr<std::unique_ptr<DmeshGrpcServerAttachment>>
 AttachDmeshGrpcServer(
     DmeshRuntime* runtime,

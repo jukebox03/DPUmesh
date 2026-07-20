@@ -38,10 +38,7 @@ extern doca_dpa_func_t thread_init_rpc;
 extern struct doca_dpa_app *DPU_mesh_dpa_app;
 #endif
 
-/* Design A ingest sharding (M>=2): each shard thread OWNS one consumer PE and sets
- * this to its id, so the recv-cb (which runs inside that shard's doca_pe_progress)
- * routes completions to THAT shard's queue + per-PE backpressure. Main / the single
- * reaper leave it 0 and use the shared objs->comp_queue (M<2, unchanged). */
+/* Current ingest shard id; zero selects the shared completion queue. */
 __thread int dpu_reap_shard = 0;
 
 /* The DPA msgQ task callbacks are wired up only by init_dpa_objects, which is itself
@@ -54,8 +51,8 @@ __thread int dpu_reap_shard = 0;
  * Callback invoked once a message is received from DPA successfully
  *
  * @recv_task [in]: The receive task
- * @task_user_data [in]: User data that was previously provided with the task
- * @ctx_user_data [in]: User data that was previously set for the consumer context
+ * @task_user_data [in]: Task user data
+ * @ctx_user_data [in]: Consumer context user data
  */
 static void dmesh_doca_dpa_msgq_recv_cb(struct doca_comch_consumer_task_post_recv *recv_task,
 				       union doca_data task_user_data,
@@ -69,8 +66,7 @@ static void dmesh_doca_dpa_msgq_recv_cb(struct doca_comch_consumer_task_post_rec
 	struct objects *objs = ctx_user_data.ptr;
 	struct doca_task *task = doca_comch_consumer_task_post_recv_as_task(recv_task);
 
-    /* Route to the reaping shard's queue + backpressure (Design A, M>=2), else the
-     * shared objs->comp_queue (M<2, byte-identical to the original single path). */
+    /* Route to the reaping shard queue for M>=2, otherwise to comp_queue. */
     dpu_comp_queue_t *q = &objs->comp_queue;
     struct doca_task **defrecv = objs->deferred_recv;
     int *ndef = &objs->num_deferred_recv;
@@ -276,8 +272,8 @@ resubmit_recv_task:
  * Callback invoked once consumer encounters a receive error
  *
  * @recv_task [in]: The receive task
- * @task_user_data [in]: User data that was previously provided with the task
- * @ctx_user_data [in]: User data that was previously set for the consumer context
+ * @task_user_data [in]: Task user data
+ * @ctx_user_data [in]: Consumer context user data
  */
 static void dmesh_doca_dpa_msgq_recv_error_cb(struct doca_comch_consumer_task_post_recv *recv_task,
 					     union doca_data task_user_data,
@@ -302,8 +298,8 @@ static void dmesh_doca_dpa_msgq_recv_error_cb(struct doca_comch_consumer_task_po
  * Callback invoked once a message is sent to DPA successfully
  *
  * @send_task [in]: The send task
- * @task_user_data [in]: User data that was previously provided with the task
- * @ctx_user_data [in]: User data that was previously set for the producer context
+ * @task_user_data [in]: Task user data
+ * @ctx_user_data [in]: Producer context user data
  */
 static void dmesh_doca_dpa_msgq_send_cb(struct doca_comch_producer_task_send *send_task,
 				       union doca_data task_user_data,
@@ -326,8 +322,8 @@ static void dmesh_doca_dpa_msgq_send_cb(struct doca_comch_producer_task_send *se
  * Callback invoked once producer encounters a send error
  *
  * @send_task [in]: The send task
- * @task_user_data [in]: User data that was previously provided with the task
- * @ctx_user_data [in]: User data that was previously set for the producer context
+ * @task_user_data [in]: Task user data
+ * @ctx_user_data [in]: Producer context user data
  */
 static void dmesh_doca_dpa_msgq_send_error_cb(struct doca_comch_producer_task_send *send_task,
 					     union doca_data task_user_data,
@@ -348,14 +344,7 @@ static void dmesh_doca_dpa_msgq_send_error_cb(struct doca_comch_producer_task_se
 
 #endif /* DOCA_ARCH_DPU — DPA msgQ task callbacks */
 
-/*
- * Callback invoked once consumer/producer state changes
- *
- * @user_data [in]: The user data associated with the context
- * @ctx [in]: The consumer/producer context
- * @prev_state [in]: The previous state
- * @next_state [in]: The new state
- */
+/* Handle a DPA Comch message-queue context state transition. */
 void dmesh_doca_dpa_comch_msgq_ctx_state_changed_cb(const union doca_data user_data,
 							  struct doca_ctx *ctx,
 							  enum doca_ctx_states prev_state,
@@ -387,9 +376,7 @@ init_dpa_objects(struct objects *objs)
 {
     doca_error_t result;
 
-    /* N (DPA EU threads) + K (rings/pod) are baked to the measured config (N=4,
-     * K=2) in run_dpu_worker before this runs; these guards only backstop a direct
-     * (non-worker) init and keep N off the single-EU (~74K) floor. */
+    /* Direct initialization uses the default N and K values. */
     if (objs->num_dpa_threads <= 0)
         objs->num_dpa_threads = DPA_THREADS_DEFAULT;
     if (objs->k_rings <= 0) {
@@ -838,14 +825,7 @@ dmesh_doca_dpa_comch_create(struct objects *objs, int idx)
     return DOCA_SUCCESS;
 }
 
-/*
- * Fill shared comch (consumer/producer) DPA handles into the DPA thread arg.
- * No ring info is set here — rings are added dynamically per-pod via
- * setup_pod_dma (arg->num_rings starts at 0).
- *
- * @arg [out]: the thread argument that is filled in
- * @return: DOCA_SUCCESS on success, a DOCA error otherwise
- */
+/* Fill a DPA thread argument with shared Comch handles and no initial rings. */
 static doca_error_t
 dmesh_fill_dpa_thread_arg(struct objects *objs, int idx, struct dpa_thread_arg *arg)
 {
@@ -912,14 +892,7 @@ dmesh_fill_dpa_thread_arg(struct objects *objs, int idx, struct dpa_thread_arg *
     return DOCA_SUCCESS;
 }
 
-/*
- * Send message to DPA over the DOCA Comch MsgQ
- *
- * @msgq [in]: The MsgQ to be used for the send operation
- * @msg [in]: The message to send
- * @msg_size [in]: The message size
- * @return: DOCA_SUCCESS on success and DOCA_ERROR otherwise
- */
+/* Send one message over a DPA Comch queue. */
 doca_error_t 
 dmesh_doca_dpa_msgq_send(struct dmesh_doca_dpa_msgq *msgq, void *msg, uint32_t msg_size)
 {
@@ -1082,12 +1055,8 @@ dmesh_fill_dpa_ring_info(struct objects *objs, struct pod_state *pod, int j,
     doca_dpa_dev_buf_arr_t dpa_buf_arr;
     doca_dpa_dev_mmap_t host_mmap, dpu_mmap;
 
-    /* Forward ring j reads its own descriptor ring (buf_arrs[j]) and shares the
-     * host TX data mmap (descriptors carry absolute addrs). Under per-conn
-     * contiguous staging the DPA lands each chunk at the sender's host TX byte
-     * offset, so every ring's staging base is simply the pod staging buffer:
-     * dpu_addr = dma_buffer, region_off = 0 (the K-way EU-shard split is retired;
-     * region_off is kept 0 for wire-ABI stability). */
+    /* Ring j uses buf_arrs[j], the shared host TX mmap, and the pod staging base.
+     * region_off is fixed at zero by the wire ABI. */
     result = doca_buf_arr_get_dpa_handle(pod->buf_arrs[j], &dpa_buf_arr);
     if (result != DOCA_SUCCESS) {
         DOCA_LOG_ERR("Failed to get buf array DPA handle: %s", doca_error_get_name(result));
@@ -1111,22 +1080,14 @@ dmesh_fill_dpa_ring_info(struct objects *objs, struct pod_state *pod, int j,
     ring_info->host_mmap = host_mmap;
     ring_info->host_addr = (uint64_t)pod->remote_addr;
     ring_info->dpu_mmap = dpu_mmap;
-    ring_info->dpu_addr = (uint64_t)pod->dma_buffer;  /* pod staging base (K-way split retired) */
-    ring_info->region_off = 0;                        /* vestigial; kept 0 for wire-ABI stability */
+    ring_info->dpu_addr = (uint64_t)pod->dma_buffer;  /* pod staging base */
+    ring_info->region_off = 0;                        /* wire-ABI constant */
     ring_info->pod_id = pod->pod_id;
 
     return DOCA_SUCCESS;
 }
 
-/*
- * Per-pod DMA setup. Called when both ring_mmap and remote_mmap arrive.
- * 1. Create buf_arr for pod's ring_mmap
- * 2. Allocate local DMA buffer for pod
- * 3. Export local buffer to Host
- * 4. Fill DPA ring info
- * 5. Update DPA thread arg (h2d_memcpy)
- * 6. If first pod, run DPA thread
- */
+/* Create and publish a pod's DMA buffers, ring metadata, and DPA thread state. */
 doca_error_t
 setup_pod_dma(struct objects *objs, struct pod_state *pod)
 {
@@ -1155,13 +1116,8 @@ setup_pod_dma(struct objects *objs, struct pod_state *pod)
     __atomic_store_n(&pod->dpa_add_expected_mask, expected_mask, __ATOMIC_RELEASE);
     pod->dpa_add_last_send_ns = 0;
 
-    /* 1. One DPU staging buffer per pod. Under PER-CONN CONTIGUOUS STAGING the
-     * forward DMA lands each chunk at the sender's host TX byte offset (mirror),
-     * so a conn's bytes are contiguous in staging regardless of which forward ring
-     * (EU) carried them; the old K-way EU-region split is retired (every ring's
-     * staging base is just dma_buffer). +128B tail slack: a final message near the
-     * buffer end copies ALIGN_UP_128(size), which could otherwise round up to 127B
-     * past DPU_BUFFER_SIZE. */
+    /* One staging buffer per pod mirrors host TX offsets across all forward rings.
+     * The 128-byte tail covers ALIGN_UP_128 at the buffer boundary. */
     /* Allocated ONCE PER SLOT and reused across incarnations: it is DPU-local and holds
      * nothing host-specific, so a reconnecting pod lands in the same staging. Reuse is
      * what makes never freeing it viable — freeing is not an option, since this is the

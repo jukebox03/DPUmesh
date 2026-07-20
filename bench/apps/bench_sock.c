@@ -1,47 +1,9 @@
-/*
- * bench_sock.c — RPC benchmark CLIENT over pure POSIX sockets (the MATCHED baseline).
+/* Matched-C POSIX RPC benchmark client for direct TCP, Envoy, and DPUmesh preload.
  *
- * The matched-C TCP-baseline client. The TCP baseline and the DPUmesh
- * native client are the SAME language (C), driven by the SAME methodology, so a
- * measured gap is the TRANSPORT and not the runtime (goroutine scheduler, GC). It
- * is also the one client that rides ALL THREE socket-level transports UNCHANGED —
- *
- *     direct kernel TCP     : BENCH_TARGET = echo_sock host:port
- *     TCP + Envoy sidecar   : BENCH_TARGET = sidecar host:port
- *     DPUmesh (LD_PRELOAD)  : the same connect()/send()/recv() ride the DPU transport
- *
- * so a four-way comparison {direct-TCP, TCP+Envoy, DPUmesh-preload, DPUmesh-native}
- * isolates each layer's cost with ONE workload.
- *
- * TWO LOAD MODELS, one event loop:
- *   * CLOSED loop (RUN)  — fixed concurrency window W per connection; no pacing.
- *     Identical methodology to bench_dpumesh.c, so bench.sh latency/bandwidth/
- *     rate families drive this binary with no change. Measures SATURATION.
- *   * OPEN loop (OPEN)   — a target offered rate; requests are SCHEDULED at fixed
- *     (constant) or exponential (Poisson) gaps, INDEPENDENT of completions. Latency
- *     is measured from a request's SCHEDULED time, not when it was actually written
- *     — the coordinated-omission correction. This is the only model that exposes
- *     queueing and tail latency under load (p99/p99.9 vs offered RPS), the figure a
- *     closed loop structurally cannot produce (it self-throttles to capacity).
- *
- * Greeter SayHello: a `req_size`-byte request, a fixed small `reply_size`-byte reply
- * (default 8). Requests/replies are framed (bench.h); goodput counts REQUEST bytes.
- *
- * Control protocol (TCP :$CTRL_PORT, one line), OK line is a key=value superset of
- * the other clients' (extra keys are ignored by field parsers):
- *   PING -> PONG
- *   RUN  <req> <reply> <conc> <dur> <warmup> <threads>
- *        closed loop, W=conc outstanding per connection, `threads` connections.
- *   OPEN <req> <reply> <threads> <dur> <warmup> <rate> [arrival]
- *        open loop, total offered `rate` RPS split across `threads` connections;
- *        arrival = const (default) | poisson.
- *   -> OK mrps=.. gbps=.. p50=.. p95=.. p99=.. p999=.. p9999=.. avg=.. min=.. max=..
- *         rcnt=.. fail=.. conc=.. threads=.. reqsz=.. repsz=.. durs=..
- *         offered_mrps=.. drops=.. overflow=.. reorder=.. mode=..
- *      (all latencies µs; drops = scheduled sends skipped at the outstanding cap;
- *       overflow = latency samples past the histogram's 1.05 s ceiling — nonzero
- *       means a reported tail percentile may be pinned to max, i.e. read with care.)
- */
+ * RUN uses a closed fixed-concurrency window. OPEN schedules constant or Poisson
+ * arrivals and measures latency from scheduled send time. bench.h defines the
+ * request/reply framing. Results include rate, goodput, latency percentiles,
+ * failures, drops, histogram overflow, and reordering. */
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -149,8 +111,7 @@ static double prng_exp_gap(worker_t *w, double rate) {   /* ~ Exp(rate): -ln(U)/
     return -log(u) / rate;
 }
 
-/* Fires once per WHOLE reply frame. Correlate BY SEQ. Latency is now - start_ts,
- * where start_ts is the SCHEDULED time in open loop (coordinated-omission fix). */
+/* Correlate complete replies by sequence. Open-loop latency uses scheduled time. */
 static void on_reply(uint32_t seq, uint32_t plen, uint32_t aux, void *user) {
     (void)plen; (void)aux;
     worker_t *w = (worker_t *)user;

@@ -241,14 +241,7 @@ static int process_fwd_ring(struct dpa_thread_arg *thread_arg, uint32_t r)
             continue;
         }
 
-        /* Wait for DPU consumer recv availability. On timeout the consumer is stalled —
-         * LEAVE the descriptor in place and stop the batch. It is retried next pass.
-         *
-         * Dropping it (as this used to) is silent data loss with no way to report it: the
-         * DPU never sees these bytes, so it never TX_ACKs them, so the sender neither
-         * receives an error nor reclaims the slot — and if it was the conn's last message,
-         * its port strands forever. Backpressure instead: the ring backs up, the host's
-         * forward ring fills, and dmesh_flush fails loudly with EBADMSG past its deadline. */
+        /* Leave the descriptor in place when the DPU consumer is unavailable. */
         int stalled = 0;
         {
             uint32_t wait = 0;
@@ -268,17 +261,9 @@ static int process_fwd_ring(struct dpa_thread_arg *thread_arg, uint32_t r)
         uint32_t chunk = ALIGN_UP_128(desc->size);
         if (chunk == 0) chunk = DMA_COPY_SIZE_ALIGN;
 
-        /* PER-CONN CONTIGUOUS STAGING (mirror of the host TX byte-ring). Land each
-         * chunk at the SAME offset it occupies in the host TX buffer, so a conn's
-         * bytes are contiguous in staging (a mirror of its per-conn TX region) and
-         * the L7 parser sees a contiguous per-conn byte stream — no arrival-boundary
-         * seam. moff = desc->addr - host_addr is the host TX byte offset; the pod's
-         * staging base = dpu_addr - region_off, which is now simply dpu_addr
-         * (region_off is retired to 0; see dpa_common.h). Occupancy mirrors the
-         * host TX byte-ring (bounded by
-         * tx_w - tx_f <= conn_bytes) so staging never overflows — no ring wrap. The
-         * pod staging buffer carries a small tail slack (dpa.c) so a final message's
-         * ALIGN_UP_128 rounding cannot write past the buffer end. */
+        /* Mirror each connection's host TX offset into contiguous DPU staging.
+         * The host ring bounds occupancy, and staging tail slack covers DMA size
+         * alignment. */
         uint32_t moff = (uint32_t)(desc->addr - ring->host_addr);
         uint64_t staging_base = ring->dpu_addr - (uint64_t)ring->region_off;
 
@@ -320,21 +305,8 @@ static int process_fwd_ring(struct dpa_thread_arg *thread_arg, uint32_t r)
     return total_chunks;
 }
 
-/*
- * Drain all valid forward descriptors across all rings.
- * Returns total number of dma_copy calls issued. Producer-side backpressure
- * is handled by the SDK; we only need to ack producer completions periodically
- * (drain_producer_completions throttle below) so the completion queue cycles.
- *
- * Throttled actions inside the inner iter:
- *  - handle_msgs: PCIe-touching consumer-completion poll. Steady-state messages
- *    are only wake triggers and deploy-time ADD_RING, so every-iter polling would
- *    waste EU cycles on empty completions.
- *  - drain_producer_completions: acks producer send completions to free queue slots.
- *
- * The outer run_dma_manager loop calls handle_msgs and drain_producer_completions
- * once per wake, so any setup message / pending completion is not delayed beyond
- * a single yield cycle. */
+/* Drain valid forward descriptors from every ring. Message polling and producer
+ * completion acknowledgement are throttled within the scan. */
 #define HANDLE_MSGS_EVERY 32
 #define DRAIN_COMPLETIONS_EVERY 8
 
@@ -383,14 +355,7 @@ static int drain_all_rings(struct dpa_thread_arg *thread_arg, int poll_msgs)
     return total_dma_calls;
 }
 
-/* Consecutive empty drains before the EU parks. The EU runs on a dedicated FlexIO
- * EU (zero ARM/host CPU), so it should POLL as continuously as possible for the
- * lowest latency — it parks only on SUSTAINED idle, purely to satisfy the FlexIO
- * watchdog (a never-yielding thread is descheduled after ~120s; measured). Each
- * empty drain is ~µs (a few PCIe desc->valid reads), so this grace window is
- * ~tens-to-hundreds of ms — far longer than any real inter-request gap (so under
- * load the counter resets every request and the EU NEVER parks → no park/WAKE
- * latency on the hot path) yet far shorter than the ~120s watchdog. */
+/* Consecutive empty drains before the EU parks for the FlexIO watchdog. */
 #define IDLE_SPINS_BEFORE_PARK  262144u
 
 __dpa_global__ void run_dma_manager(uint64_t arg)
@@ -411,22 +376,9 @@ __dpa_global__ void run_dma_manager(uint64_t arg)
             thread_arg->initial_ack_sent = 1;
     }
 
-    /* Poll continuously while there is work OR within the grace window; PARK
-     * (reschedule) only after IDLE_SPINS_BEFORE_PARK consecutive empty drains.
-     * reschedule releases the EU and needs a completion trigger (the ARM's 1 ms
-     * DPA_MSG_WAKE) — it does NOT self-sustain (measured). Before parking we
-     * RE-ARM both attached completion contexts (DOCA contract: without
-     * request_notification a newly-arrived completion is not populated/triggered,
-     * so the WAKE would not re-activate the parked EU), then RE-SCAN once — both
-     * the rings (closes the silent host desc->valid=1 store race) AND the consumer
-     * completion queue. We park ONLY if BOTH come up empty. A WAKE/RING_ADD drained
-     * by the re-scan's handle_msgs means a signal landed in the arm→reschedule
-     * window: parking then would consume the one-shot notification yet still sleep
-     * → lost wakeup → the EU is parked+disarmed and subsequent WAKEs never
-     * re-activate it (they fill the consumer queue until recv credits exhaust →
-     * permanent wedge needing redeploy). Counting drained messages here turns that
-     * into "loop, re-arm next cycle" — the canonical arm→re-poll→don't-sleep-if-
-     * found idiom applied to BOTH wake sources. */
+    /* Poll through the idle grace window. Before parking, arm both completion
+     * contexts and rescan the rings and consumer completions. Detected work
+     * restarts the loop. */
     while (1) {
         handle_msgs(thread_arg);
         int chunks = drain_all_rings(thread_arg, 1);

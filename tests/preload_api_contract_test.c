@@ -309,6 +309,28 @@ static void test_fcntl_getfl_without_third_argument(void) {
     test_pfd_free(e);
 }
 
+static void test_install_fd_preserves_cloexec(void) {
+    for (int cloexec = 0; cloexec <= 1; cloexec++) {
+        fake_reset();
+        pfd_t *e = test_pfd();
+        int target = real_dup(e->sigfd);
+        assert(target >= 0 && target < PRELOAD_MAX_FDS);
+        assert(real_fcntl(target, F_SETFD, cloexec ? FD_CLOEXEC : 0) == 0);
+        assert(!!(real_fcntl(target, F_GETFD) & FD_CLOEXEC) == cloexec);
+
+        assert(install_fd(target, e) == 0);
+        assert(!!(real_fcntl(target, F_GETFD) & FD_CLOEXEC) == cloexec);
+
+        pthread_mutex_lock(&g_tbl_mu);
+        assert(g_fds[target] == e && e->refs == 1);
+        g_fds[target] = NULL;
+        e->refs = 0;
+        pthread_mutex_unlock(&g_tbl_mu);
+        real_close(target);
+        test_pfd_free(e);
+    }
+}
+
 static void test_retire_waits_for_active_wrapper(void) {
     fake_reset();
     pfd_t *e = test_pfd();
@@ -365,6 +387,7 @@ int main(void) {
     test_data_after_fin_fails_closed();
     test_stream_change_fails_closed();
     test_fcntl_getfl_without_third_argument();
+    test_install_fd_preserves_cloexec();
     test_retire_waits_for_active_wrapper();
     puts("preload_api_contract_test: PASS");
     return 0;

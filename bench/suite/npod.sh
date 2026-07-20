@@ -1,16 +1,7 @@
 #!/bin/bash
-# npod.sh — N-pod amortization sweep (the decisive test of the DPUmesh value prop).
-#
-# Drives N DPUmesh client pods CONCURRENTLY through the ONE shared DPU and reports, per N:
-#   * aggregate throughput (sum of the N clients' Mrps),
-#   * total host cores (all N clients + the backends they hit),
-#   * the (fixed, shared) DPU-ARM cores.
-# The DPU cost is paid ONCE regardless of N, so host-cores-per-aggregate-Krps should fall as N
-# grows — until the DPU saturates. TCP has no shared resource (its app+sidecar pairs are
-# independent), so its N-scaling is exactly linear in the measured single-pair cost; we measure
-# that pair once and extrapolate, clearly labelled.
-#
-#   bench/suite/npod.sh <config-label> <conc> <dur> <Nmax> [out.csv]
+# Sweep concurrent client-pod counts through one DPU and report aggregate
+# throughput, host cores, and shared DPU ARM cores. TCP scaling uses a labelled
+# single-pair extrapolation. Usage: npod.sh <label> <conc> <dur> <Nmax> [out.csv].
 set -u
 SUITE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; PROJ="$(cd "$SUITE_DIR/../.." && pwd)"
 [ -f "$PROJ/.env" ] && { set -a; source "$PROJ/.env"; set +a; }

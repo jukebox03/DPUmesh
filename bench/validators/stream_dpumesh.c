@@ -1,48 +1,9 @@
-/*
- * stream_dpumesh.c — byte-stream / L7-proxy validator for the DPU frame mock
- * (design/CORE.md §5). Proves the L4 engine (dpu_proxy.c) end to end: a per-conn input
- * window, the mock length-prefix parser, per-destination SG-DMA egress, custody,
- * and byte-stream delivery.
+/* Self-routing byte-stream/frame validator for DPUMESH_PROXY=frame.
  *
- * The DPU must run with DPUMESH_PROXY=frame. The mock understands the wire
- * framing this app emits:
- *
- *     [u32 total_len (incl. this 5B header)][u8 svc][payload ...]
- *
- * and routes EACH whole frame by its svc byte as a byte stream (a >8 KB
- * frame is delivered as consecutive <=8 KB chunks — that is the byte-stream
- * contract; the receiver reframes itself). The frame boundary is decided by the
- * DPU parser, NOT by post boundaries: this app may pack several frames into one
- * post, or spill one burst across several posts (one dmesh_alloc reserves at most
- * one block) — the parser reframes from the length prefix either way (window +
- * seam), which is exactly the property under test.
- *
- * Like loopback_dpumesh.c this pod is BOTH the client and (via its echo side) a
- * server of its OWN service, so the default run is self-contained and its
- * served-BYTE counter gives an exact-count proof with no cross-pod scraping:
- *
- *   client: build frames -> alloc/post_send -> land the echoed frames back,
- *           verify BYTE-EXACT (header + payload pattern) + reassembled length.
- *   echo:   CONN_REQ -> RECV byte-stream -> echo verbatim -> count bytes served.
- *
- * ONE THREAD, ONE CQ: a CQ is single-consumer and both roles share this one, so the
- * echo side cannot sit on a thread of its own. Both directions are
- * dispatched by conn role out of one pump(), which the client's send and reply
- * waits drive — the client stays sequential (one burst outstanding) as before.
- *
- * Frames always carry our OWN svc byte, so the run is self-contained: no other pod in
- * the bench topology can serve as a target. The echo-dpumesh* pods are Greeters (bench.h
- * request/reply framing), and the other validators only poll their completion queue while
- * running their own test — idle, they block in accept() and never answer.
- *
- * `RUN <N> <SIZE> [<FRAMES_PER_WRITE>]`:
- *   N     round-trips, SIZE  payload bytes per frame (frame = 5 + SIZE),
- *   FRAMES_PER_WRITE  how many frames to pack into one burst byte-stream
- *            (default 1; >1 exercises multi-frame-per-window parsing).
- * Reply: `OK <ok> <fail> <served_bytes> <p50us>`.
- *
- * Uses ONLY the native API (dmesh.h). No changes to the transport.
- */
+ * One thread and CQ drive client and echo roles. Frames use
+ * [u32 total_len][u8 service][payload], may span or share native posts, and are
+ * verified byte-for-byte after DPU reframing and SG-DMA delivery.
+ * Command: RUN <count> <payload-size> [frames-per-write]. */
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -59,9 +20,7 @@
 #include "dmesh_core.h"   /* dmesh_qp_open + dmesh_resolve_name: this validator's numeric
                            * multi-svc knob addresses by int, below the name surface */
 
-/* Best-effort control-socket reply. Every caller is already returning, and a failed
- * write only means the driver hung up first — there is nothing to recover. Wrapping it
- * states that, instead of leaving 4 unchecked write()s for -Wunused-result to flag. */
+/* Send a best-effort control reply; failures are ignored. */
 static void ctl_reply(int fd, const char *s, size_t n) { (void)!write(fd, s, n); }
 
 #define CTRL_PORT   9092

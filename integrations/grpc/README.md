@@ -12,7 +12,7 @@ the integration boundary.
 - transport ABI: `libdpumesh.so.2`
 
 The used EventEngine endpoint-injection APIs are experimental. A gRPC upgrade is
-therefore an explicit source migration with a full test rebuild.
+therefore an explicit source update with a full test rebuild.
 
 ## Mapping
 
