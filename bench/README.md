@@ -160,6 +160,15 @@ and DPU logs with the output.
 
 ## 6. Correctness validators
 
+Run the host-only native contract suite before deployment:
+
+```sh
+make test
+```
+
+Its scope is documented in [tests/README.md](../tests/README.md). Then exercise
+the real registration, DMA, byte-transfer, FIN, and cleanup paths on BlueField:
+
 ```sh
 ./bench/bench.sh loopback 1000 1024 0
 ./bench/bench.sh verbs    1000 1024 0 32 4

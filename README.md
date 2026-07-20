@@ -70,6 +70,7 @@ src/                   host core, native facade, resolver, preload facade
 doca/                  BlueField ARM process and DPA kernel
 integrations/grpc/     gRPC C++ runtime, reactor, tests, benchmark
 bench/                 deployment, workloads, validators, measurement records
+tests/                 fast host-only ABI and state-machine regression tests
 design/                current API, core, and naming whitepapers
 ```
 
@@ -79,11 +80,16 @@ In a DOCA development environment:
 
 ```sh
 make -j2
+make test
 ```
 
 The build produces `build/lib/libdpumesh.so.2`, the preload library, and native
 bench/validator binaries. The library target tracks all source and header inputs;
 public-header changes therefore rebuild both ABI and consumers.
+
+`make test` runs the host-only native contract suite without requiring a DPU.
+Its scope and relationship to hardware validation are documented in
+[`tests/README.md`](tests/README.md).
 
 The BlueField program is built from `doca/meson.build`. The supported benchmark
 bring-up path rebuilds and deploys both sides together:
@@ -119,6 +125,7 @@ process probe fail; AddressSanitizer and the functional test suite still run.
 - [Naming](design/NAMING.md): registry, service identity, and routing meaning
 - [gRPC integration](integrations/grpc/README.md): build and application bootstrap
 - [Benchmark guide](bench/README.md): deployment and experiment commands
+- [Native contract tests](tests/README.md): fast host-only regression coverage
 - [Performance report](bench/report/REPORT.md): frozen ABI-1 campaign and interpretation
 - [Engineering results](bench/RESULT.md): chronological experiments, including the ABI-2 A/B audit
 

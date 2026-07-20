@@ -3,6 +3,9 @@
 These programs validate transport semantics independently of the performance
 report. Build and deploy through `bench/bench.sh`; direct invocation is useful
 only when the DPU process and pod registration state are already synchronized.
+For fast host-only ABI, control-state, and batching-policy checks, run `make test`
+as documented in [`tests/README.md`](../../tests/README.md). Those tests complement
+rather than replace the hardware validators below.
 
 | Validator | Programs | Contract exercised |
 |---|---|---|
