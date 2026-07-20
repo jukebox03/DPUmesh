@@ -121,12 +121,17 @@ $(TESTDIR)/native_writable_test: tests/native_writable_test.c src/dmesh_core.c $
 	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -Wl,--gc-sections \
 		-o $@ tests/native_writable_test.c $(DOCA_LIBS) -lpthread $(RPATHS)
 
+$(TESTDIR)/preload_api_contract_test: tests/preload_api_contract_test.c src/dmesh_preload.c $(LIB_HDRS) | dirs
+	$(CC) $(CFLAGS) -o $@ tests/preload_api_contract_test.c -lpthread -ldl
+
 test: $(TESTDIR)/native_api_contract_test $(TESTDIR)/native_control_state_test \
-	$(TESTDIR)/native_tx_batch_policy_test $(TESTDIR)/native_writable_test
+	$(TESTDIR)/native_tx_batch_policy_test $(TESTDIR)/native_writable_test \
+	$(TESTDIR)/preload_api_contract_test
 	$(TESTDIR)/native_api_contract_test
 	$(TESTDIR)/native_control_state_test
 	$(TESTDIR)/native_tx_batch_policy_test
 	$(TESTDIR)/native_writable_test
+	$(TESTDIR)/preload_api_contract_test
 
 # dmesh API binaries link the transport library. One explicit rule each so the
 # source is a tracked prerequisite (rebuilds on edit).
@@ -137,9 +142,8 @@ $(BINDIR)/$(1): $($(1)_SRC) | dirs lib
 endef
 $(foreach b,$(DMESH_BINS),$(eval $(call DMESH_BIN_RULE,$(b))))
 
-# The shim is the SECOND façade on the core, not a client of the native API: it needs
-# conn internals + the internal lifecycle, so it compiles against src/dmesh_core.h
-# (-Isrc) and links the library for the shared symbols.
+# The shim's data/CQ plane is a client of the public native API. It also compiles
+# against src/dmesh_core.h for narrow in-tree address-resolution and FIN hooks.
 $(PRELOAD): src/dmesh_preload.c | dirs lib
 	$(CC) -O2 -g $(DEPFLAGS) -fPIC -shared -Iinclude -Isrc -o $@ src/dmesh_preload.c \
 		-L$(LIBDIR) -ldpumesh -lpthread -ldl $(RPATHS)

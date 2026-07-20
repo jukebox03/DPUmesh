@@ -359,6 +359,86 @@ spec:
   selector: { app: preload-dpumesh }
   ports: [{ port: ${CTRL_PORT}, targetPort: ${CTRL_PORT} }]
 ---
+# preload-sock: matched bench_sock/echo_sock workload over LD_PRELOAD. The
+# control listener is ordinary kernel TCP; only BENCH_TARGET data connections
+# are intercepted. The static ClusterIP is also the registry key baked into the
+# image, so the client can resolve the DPU service without a sidecar.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: preload-echo
+spec:
+  replicas: 0
+  selector: { matchLabels: { app: preload-echo } }
+  template:
+    metadata: { labels: { app: preload-echo } }
+    spec:
+      hostname: preload-echo
+      containers:
+      - name: preload-echo
+        image: docker.io/${IMG_PRELOAD_SOCK}
+        imagePullPolicy: Never
+        command: ["/usr/local/bin/echo_sock"]
+        env:
+        - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
+        - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
+        - { name: DPUMESH_SERVICE, value: "preload-sock" }
+        - { name: DPUMESH_PORT, value: "9100" }
+        - { name: ECHO_PORT, value: "9100" }
+        - { name: LD_PRELOAD, value: "/usr/local/lib/libdmesh_preload.so" }
+        securityContext: { privileged: true }
+        volumeMounts:
+        - { mountPath: /dev/infiniband, name: infiniband }
+        - { mountPath: /usr/local/lib/libdpumesh.so.2, name: libdpumesh-so, subPath: libdpumesh.so.2 }
+      volumes:
+      - { name: infiniband, hostPath: { path: /dev/infiniband } }
+      - { name: libdpumesh-so, hostPath: { path: ${LIB_OUT}, type: Directory } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: preload-bench
+spec:
+  replicas: 0
+  selector: { matchLabels: { app: preload-bench } }
+  template:
+    metadata: { labels: { app: preload-bench } }
+    spec:
+      hostname: preload-bench
+      containers:
+      - name: preload-bench
+        image: docker.io/${IMG_PRELOAD_SOCK}
+        imagePullPolicy: Never
+        command: ["/usr/local/bin/bench_sock"]
+        env:
+        - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
+        - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
+        - { name: BENCH_TARGET, value: "10.96.0.18:9100" }
+        - { name: CTRL_PORT, value: "${CTRL_PORT}" }
+        - { name: LD_PRELOAD, value: "/usr/local/lib/libdmesh_preload.so" }
+        securityContext: { privileged: true }
+        volumeMounts:
+        - { mountPath: /dev/infiniband, name: infiniband }
+        - { mountPath: /usr/local/lib/libdpumesh.so.2, name: libdpumesh-so, subPath: libdpumesh.so.2 }
+      volumes:
+      - { name: infiniband, hostPath: { path: /dev/infiniband } }
+      - { name: libdpumesh-so, hostPath: { path: ${LIB_OUT}, type: Directory } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: preload-bench }
+spec:
+  selector: { app: preload-bench }
+  ports: [{ port: ${CTRL_PORT}, targetPort: ${CTRL_PORT} }]
+---
+apiVersion: v1
+kind: Service
+metadata: { name: preload-sock }
+spec:
+  clusterIP: 10.96.0.18
+  selector: { app: preload-echo }
+  ports: [{ port: 9100, targetPort: 9100 }]
+---
 # bench-tcp: TCP baseline client + sidecar1 (Envoy) in ONE pod sharing 1 host core
 # (the realistic sidecar tax). bench connects to localhost:$TCP_PORT (sidecar1),
 # which forwards to the echo-tcp Service (-> sidecar2). Pinned post-deploy.

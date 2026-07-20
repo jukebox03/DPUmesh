@@ -239,10 +239,19 @@ stale hint if that QP no longer has a parked write.
 
 ## 6. POSIX and gRPC facades
 
-`libdmesh_preload.so` and the native API are sibling facades over the same core.
+`libdmesh_preload.so` is a POSIX adapter over the native data/completion contract.
+It uses `dmesh_alloc`/`dmesh_post_send`/`dmesh_flush` for TX and consumes
+`DMESH_WC_RECV`, `DMESH_WC_RECV_FIN`, and `DMESH_WC_TX_READY` from
+`dmesh_poll_cq`; it does not use the legacy raw-ring or ready-list APIs. Narrow
+in-tree hooks remain for ClusterIP resolution, numeric QP creation, and transport
+FIN because those operations are specific to socket interception rather than the
+public service-name API.
+
 The preload path copies because POSIX `read`/`write` require application buffers;
 it flushes once at each POSIX write boundary. If one write exceeds the bounded
-native TX window, it may flush an accepted prefix to make forward progress. The
+native TX window, it may flush an accepted prefix to make forward progress. On
+`EAGAIN`, its real kernel fd suppresses `EPOLLOUT` until the CQ delivers
+`DMESH_WC_TX_READY`; blocking writes park on that fd, without a retry timer. The
 POSIX application never selects or observes the physical batch size.
 
 The gRPC C++ adapter maps one runtime to a channel, reactor shards to CQs, and

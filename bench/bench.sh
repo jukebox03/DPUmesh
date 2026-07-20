@@ -64,6 +64,7 @@ IMG_BENCH_DPU="bench/bench-dpumesh:latest"
 IMG_ECHO_DPU="bench/echo-dpumesh:latest"
 IMG_LOOPBACK_DPU="bench/loopback-dpumesh:latest"
 IMG_PRELOAD_DPU="bench/preload-dpumesh:latest"
+IMG_PRELOAD_SOCK="bench/preload-sock:latest"
 IMG_STREAM_DPU="bench/stream-dpumesh:latest"
 IMG_VERBS_DPU="bench/verbs-dpumesh:latest"
 IMG_BENCH_TCP="bench/bench-tcp:latest"
@@ -150,6 +151,7 @@ build_images() {
     build_image "$BENCH_DIR/validators/stream_dpumesh.Dockerfile"   "$IMG_STREAM_DPU"   "$PROJ_ROOT"
     build_image "$BENCH_DIR/validators/verbs_dpumesh.Dockerfile"    "$IMG_VERBS_DPU"    "$PROJ_ROOT"
     build_image "$BENCH_DIR/validators/preload_dpumesh.Dockerfile"  "$IMG_PRELOAD_DPU"  "$PROJ_ROOT"
+    build_image "$BENCH_DIR/validators/preload_sock.Dockerfile"     "$IMG_PRELOAD_SOCK" "$PROJ_ROOT"
     build_image "$BENCH_DIR/docker/bench_sock.Dockerfile"          "$IMG_BENCH_TCP"    "$PROJ_ROOT"
     build_image "$BENCH_DIR/docker/echo_sock.Dockerfile"           "$IMG_ECHO_TCP"     "$PROJ_ROOT"
     docker builder prune -f >/dev/null 2>&1 || true
@@ -214,7 +216,7 @@ get_pod_cores() {
             case "$app" in
                 bench-dpumesh) echo "0";; echo-dpumesh) echo "1";;
                 bench-tcp) echo "2";; echo-tcp) echo "3";;
-                loopback-dpumesh) echo "4,5";; preload-dpumesh) echo "4,5";; stream-dpumesh) echo "4,5";; verbs-dpumesh) echo "4,5";;
+                loopback-dpumesh) echo "4,5";; preload-dpumesh|preload-echo|preload-bench) echo "4,5";; stream-dpumesh) echo "4,5";; verbs-dpumesh) echo "4,5";;
                 echo-dpumesh-13) echo "6";; echo-dpumesh-14) echo "7";; bench-direct) echo "8";;
                 bench-dpumesh-2) echo "9";; bench-dpumesh-3) echo "10";; *) echo "";;
             esac ;;
@@ -232,7 +234,7 @@ pin_pods() {
     else
         warn "cpupower not found; skipping DVFS lock"
     fi
-    for app in bench-dpumesh bench-dpumesh-2 bench-dpumesh-3 echo-dpumesh echo-dpumesh-13 echo-dpumesh-14 loopback-dpumesh stream-dpumesh verbs-dpumesh preload-dpumesh bench-tcp echo-tcp bench-direct; do
+    for app in bench-dpumesh bench-dpumesh-2 bench-dpumesh-3 echo-dpumesh echo-dpumesh-13 echo-dpumesh-14 loopback-dpumesh stream-dpumesh verbs-dpumesh preload-dpumesh preload-echo preload-bench bench-tcp echo-tcp bench-direct; do
         local cores pod_id; cores=$(get_pod_cores "$app" "$profile"); [ -z "$cores" ] && continue
         pod_id=$(echo "$HOST_PASS" | sudo -S crictl pods --label "app=$app" -q 2>/dev/null | head -n 1)
         if [ -z "$pod_id" ]; then warn "$app: pod not found, skipping"; continue; fi
@@ -276,7 +278,7 @@ clean_failed_pods() {
 apply_manifest() {
     step "=== Applying K8s manifest (replicas=0) ==="
     command -v envsubst >/dev/null 2>&1 || { err "envsubst not found (apt install gettext-base)"; exit 1; }
-    export IMG_BENCH_DPU IMG_ECHO_DPU IMG_LOOPBACK_DPU IMG_STREAM_DPU IMG_VERBS_DPU IMG_PRELOAD_DPU IMG_BENCH_TCP IMG_ECHO_TCP IMG_ENVOY
+    export IMG_BENCH_DPU IMG_ECHO_DPU IMG_LOOPBACK_DPU IMG_STREAM_DPU IMG_VERBS_DPU IMG_PRELOAD_DPU IMG_PRELOAD_SOCK IMG_BENCH_TCP IMG_ECHO_TCP IMG_ENVOY
     export CTRL_PORT TCP_PORT HOST_PCI LIB_OUT
     export DPUMESH_RINGS_PER_POD="${DPUMESH_RINGS_PER_POD:-2}" ASYNC_THREADS="${ASYNC_THREADS:-4}" \
            BENCH_PIPELINE="${BENCH_PIPELINE:-8}" BENCH_COALESCE="${BENCH_COALESCE:-0}" \
@@ -333,6 +335,8 @@ start_pods() {
     scale_up_with_wait "bench-dpumesh-3"  "$ready"
     scale_up_with_wait "loopback-dpumesh" "$ready"
     scale_up_with_wait "preload-dpumesh"  "$ready"
+    scale_up_with_wait "preload-echo"     "$ready"
+    scale_up_with_wait "preload-bench"    ""
     scale_up_with_wait "verbs-dpumesh"    "$ready"
     scale_up_with_wait "stream-dpumesh"   "$ready"
     scale_up_with_wait "echo-tcp"  ""
@@ -363,7 +367,7 @@ deploy() {
 cleanup() { info "Deleting namespace $NS"; kubectl delete ns "$NS" --ignore-not-found=true 2>/dev/null || true; stop_dpu; }
 
 show_logs() {
-    for app in bench-dpumesh echo-dpumesh echo-dpumesh-13 echo-dpumesh-14 loopback-dpumesh stream-dpumesh verbs-dpumesh preload-dpumesh bench-tcp echo-tcp bench-direct; do
+    for app in bench-dpumesh echo-dpumesh echo-dpumesh-13 echo-dpumesh-14 loopback-dpumesh stream-dpumesh verbs-dpumesh preload-dpumesh preload-echo preload-bench bench-tcp echo-tcp bench-direct; do
         echo "=== $app ==="
         kubectl logs -n "$NS" -l "app=$app" --all-containers=true --prefix=true --tail=20 2>/dev/null || true
         echo

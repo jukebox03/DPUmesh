@@ -10,6 +10,7 @@ are the first validation layer before the hardware validators under `bench/`.
 | `native_control_state_test.c` | Idempotent register, replay-safe unregister, and no slot reuse while cleanup is pending |
 | `native_tx_batch_policy_test.c` | Complete 8 KiB unit submission, explicit partial flush, and physical-block tail ordering |
 | `native_writable_test.c` | Automatic one-shot arm/recheck, QP and shared-pool readiness, stale-hint cancellation, and reservation rollback |
+| `preload_api_contract_test.c` | Public native TX usage, completion-driven blocking/nonblocking retry, honest `POLLOUT`, send timeout, RX partial/peek credit, FIN/stream validation, and fd-entry lifetime |
 
 Run all tests from the repository root:
 
@@ -36,3 +37,10 @@ between failure and arm, direct-retry cancellation of a queued hint, and the rul
 that a failed cross-block reserve leaves the write cursor and padding counters
 unchanged. `native_api_contract_test.c` separately verifies the public
 `DMESH_WC_TX_READY` shape and one-shot consumption.
+
+`preload_api_contract_test.c` includes the production preload state machine and
+replaces native calls with deterministic fakes. It verifies that `EAGAIN` causes
+no timer retry, that `TX_READY` changes the app-visible fd back to writable, and
+that native RX credits survive partial/peek reads and are released exactly once.
+It also rejects data or a stream change after FIN and checks that dispatcher
+retirement cannot free an entry still held by an interposed operation.

@@ -10,8 +10,10 @@
  *   2. The LD_PRELOAD shim (libdmesh_preload.so) — the POSIX socket ABI, for
  *      UNMODIFIED binaries. You never call it; it impersonates libc.
  *
- * Both sit directly on the internal core (src/dmesh_core.h, NOT installed).
- * Neither depends on the other. See design/API.md.
+ * The shim's data and completion paths are an adapter over this API, so TX
+ * backpressure and RX credit ownership have one contract. It additionally uses
+ * narrow in-tree control hooks for address-based connect and POSIX half-close.
+ * See design/API.md.
  *
  * WHY VERBS-SHAPED AND NOT SOCKET-SHAPED — it is faster, not just more familiar.
  * DPUmesh's substrate already IS RDMA-shaped: a pre-registered mmap, a DMA

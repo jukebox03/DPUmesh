@@ -3,9 +3,9 @@
  *
  * This file is ONLY the verbs-shaped data path: alloc, post_send, poll_cq,
  * wc_release. Everything else the header declares (channel + connection
- * lifecycle, flush, close) is transport and lives in dmesh_core.c, shared with
- * the LD_PRELOAD shim — the two surfaces are siblings on the core, neither
- * built on the other.
+ * lifecycle, flush, close) is transport and lives in dmesh_core.c. The
+ * LD_PRELOAD adapter now consumes these public data/CQ verbs; only its
+ * address-based setup and POSIX half-close need narrow internal hooks.
  *
  * Nothing here adds a thread, a lock, a syscall or a copy: every function is a
  * caller-thread re-arrangement of the core. RECV hands out a pointer straight

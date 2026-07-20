@@ -31,12 +31,13 @@ BW_CONC="${BW_CONC:-32}"
 CURVE_FRACS="${CURVE_FRACS:-0.10 0.25 0.50 0.70 0.85 0.90 0.95 1.00 1.10}"
 
 # transport id | app label | control port | kind (native|tcp|sock) | open-capable
-# Uncomment the last two once k8s/pods.yaml exposes them (see STAGES.md "Deploy TODO").
+# `dpumesh-preload` is the matched-C workload over the socket facade; its
+# control listener remains kernel TCP while BENCH_TARGET uses DPUmesh.
 TRANSPORTS=(
   "dpumesh-native|bench-dpumesh|$CTRL_PORT|native|no"
   "tcp-envoy|bench-tcp|$CTRL_PORT|sock|yes"
   "tcp-direct|bench-direct|$CTRL_PORT|sock|yes"        # bench_sock → echo_sock, NO sidecar (isolates the Envoy tax)
-  # "dpumesh-preload|...|sock|yes"   # needs shim epoll support for bench_sock (see STAGES.md)
+  "dpumesh-preload|preload-bench|$CTRL_PORT|sock|yes"
 )
 
 log()  { echo -e "\033[0;34m[suite]\033[0m $*"; }

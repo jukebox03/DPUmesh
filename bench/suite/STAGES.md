@@ -11,7 +11,7 @@ performance claim.
 | Direct kernel TCP | Yes | Yes | Matched POSIX frame workload |
 | TCP through Envoy `tcp_proxy` | Yes | Yes | Same POSIX frame workload |
 | Native DPUmesh | Yes | Yes | Matched request/reply workload |
-| DPUmesh preload | Yes | Correctness, not headline performance | Same POSIX binary |
+| DPUmesh preload | Yes | Matched-C diagnostic/performance path; no headline claim yet | Same POSIX binary |
 | gRPC C++ over direct TCP | Yes | Current QPS campaign | `grpc.testing.BenchmarkService` unary |
 | gRPC C++ over DPUmesh | Yes | Current QPS campaign | Identical generated service and calls |
 | Envoy HTTP/2 gRPC proxy | No result | No result | Not represented in existing measurements |

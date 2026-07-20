@@ -2,24 +2,20 @@
  * dmesh_core.h — DPUmesh transport core. INTERNAL: NOT a public API.
  *
  * This header lives in src/ and is deliberately NOT installed. It is the
- * substrate both public surfaces sit on, and nothing outside this repo may
+ * substrate behind the public native API, and nothing outside this repo may
  * include it:
  *
  *   <dpumesh/dmesh.h>   the native API   -> src/dmesh_api.c
- *   the POSIX socket ABI (LD_PRELOAD)    -> src/dmesh_preload.c
- *                                           (+ src/dmesh_compat.h, the socket
- *                                            byte-stream semantics it needs)
- *
- * The two surfaces are SIBLINGS: neither is built on the other, both call in
- * here. See design/API.md.
+ *   the POSIX socket ABI (LD_PRELOAD)    -> public data/CQ API plus narrow
+ *                                           in-tree address/FIN hooks here
  *
  * It was public (include/dpumesh/dmesh_core.h) until the API consolidation.
  * Being reachable was an accident of <dpumesh/dmesh.h> #including it, which put
  * every dpumesh_* symbol in every client's namespace.
  *
- * Connection lifecycle (dmesh_create_qp/close/accept/next_ready) is
- * implemented in dmesh_core.c and shared by both surfaces: it is transport, not
- * a façade — nothing about it is socket- or verbs-specific.
+ * Connection lifecycle is implemented in dmesh_core.c. Public callers receive
+ * inbound QPs as DMESH_WC_CONN_REQ completions; legacy accept/ready helpers remain
+ * internal and are not used by the preload adapter.
  */
 
 #ifndef DMESH_CORE_H
@@ -156,8 +152,8 @@ void dpumesh_destroy(dpumesh_ctx_t *ctx);
  * constructors in <dpumesh/dmesh.h> are thin wrappers over dmesh_qp_open below:
  *   dmesh_create_channel(void)      = dpumesh_init(dmesh_config_identity())
  *   dmesh_create_qp(cq, name)       = dmesh_qp_open(cq, dmesh_resolve_name(name))
- * The shim is NOT a client of the public API — it resolves by ClusterIP:port and
- * calls dmesh_qp_open with the integer directly. */
+ * The shim uses the public data/CQ API but resolves intercepted ClusterIP:port
+ * destinations here and calls dmesh_qp_open with the resulting integer. */
 int dmesh_config_load(const char *path);          /* NULL → $DPUMESH_CONFIG or /etc/dpumesh/registry; idempotent, load-once */
 int dmesh_config_listen_port(void);               /* $DPUMESH_PORT, -1 = not a server */
 int dmesh_config_identity(void);                  /* resolve $DPUMESH_SERVICE, SVC_NONE if unset/unknown */

@@ -6596,3 +6596,52 @@ is the primary requirement, but its wake/retry path needs optimization if the
 old saturated large-reply throughput is also a release gate. The rejected 8 KiB
 third-backend anomaly should be reproduced with a quality-gated measurement
 method before being treated as a separate defect.
+
+---
+
+# Session 10 — LD_PRELOAD migration to the native CQ contract (2026-07-20)
+
+The preload data path now uses `dmesh_alloc`/`dmesh_post_send`/`dmesh_flush` and
+consumes `CONN_REQ`, `RECV`, `RECV_FIN`, and `TX_READY` through `dmesh_poll_cq`.
+The old raw-ring and internal ready-list calls are absent from the rebuilt shim.
+Its app-visible socketpair suppresses `POLLOUT` after native `EAGAIN` and restores
+it only on `TX_READY`; blocking writers park on that kernel fd without a timer.
+
+## Validation receipt
+
+- Source base: `b8e5c9b` plus the dirty Session 10 preload/API/test changes.
+- Full `bench.sh deploy` completed: DPU rebuilt/restarted, all meshed pods reached
+  `DPU pod is data-ready`, and fair CPU pinning completed.
+- Local and running-pod shim SHA-256 matched:
+  `c931c4df5dafb4ba967f2c9b838d0216e990f7cb567f114798cdcc09b7b11223`.
+- Live validator workload used the rebuilt shim, not the earlier image.
+
+| preload validator | OK/Fail | p50 | p99 | RPS |
+|---|---:|---:|---:|---:|
+| 1,000 × 1 KiB × 8 conns | 1,000/0 | 141 us | 239 us | 6,327 |
+| 8,000 × 8 KiB × 32 conns | 8,000/0 | 355 us | 1,267 us | 52,967 |
+| 3,000 × 32 KiB × 8 conns | 3,000/0 | 271 us | 794 us | 21,586 |
+| 5,000 × 1 KiB × 64 conns | 5,000/0 | 575 us | 7,716 us | 52,318 |
+| 2,000 × 64 KiB × 64 conns | 2,000/0 | 5,013 us | 7,291 us | 11,735 |
+
+Every run opened fresh connections and exercised vanilla blocking client I/O,
+the nonblocking epoll echo server, partial byte-stream reads/writes, large-write
+chunking, ClusterIP `getpeername`, FIN/close churn, and dispatcher entry lifetime.
+All runs were byte-correct with zero failures. These are correctness/diagnostic
+results, not a controlled performance comparison; latency and RPS are included
+only as run receipts.
+
+---
+
+# Session 11 — Matched-C LD_PRELOAD suite smoke (2026-07-20)
+
+The previously disabled `dpumesh-preload` row is now wired to the dedicated
+`preload-bench`/`preload-echo` pair. A reduced suite (`rtt conc curve bw`,
+1 repetition, 3-second runs) completed with 78 rows and zero reported
+`fail`, `drops`, `overflow`, or `reorder` for the preload rows.
+
+- Direct control smoke: `1,024 B` request / `8 B` reply, 4 connections,
+  5 seconds: `fail=0`, `drops=0`, `overflow=0`, `reorder=0`.
+- Matched-C curve peak receipts: `0.184219 Mrps` at 64 B and
+  `0.153458 Mrps` at 1 KiB (4 connections); these are diagnostic, not a
+  release-grade comparison.
