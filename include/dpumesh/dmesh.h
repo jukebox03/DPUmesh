@@ -55,9 +55,10 @@
  *     arbitrary reg_mr, so there are no MRs for it to scope. The CQ is NOT
  *     folded in — it is the one object carrying a concurrency constraint, and
  *     folding it made RX single-consumer for the whole process.
- *   - No send completions, signaled or otherwise. Unsignaled is the verbs
- *     default and the high-performance idiom; here it is the only mode, so the
- *     signal that SQ space freed is simply that a later dmesh_alloc succeeds.
+*   - No send completions, signaled or otherwise. Unsignaled is the verbs
+*     default and the high-performance idiom; here it is the only mode, so the
+ *     transport does not complete individual sends. DMESH_WC_TX_READY exists only
+ *     after alloc(EAGAIN) and means that the named QP should retry allocation.
  *
  * SEND CONTRACT (the price of zero-copy + O(1) reclaim — the TX ring is FIFO):
  *   - At most ONE outstanding (alloc'd but not yet posted) buffer per conn.
@@ -79,11 +80,12 @@
  *   if a buffered partial remains while space is tight, dmesh_flush forces it out so
  *   it can earn a TX_ACK.
  *
- *   ABI 2 does NOT yet report that transition through dmesh_cq_fd: the CQ fd wakes
- *   for inbound/accept work, not TX reclaim. An event-driven caller therefore needs
- *   an external retry source (the gRPC adapter currently uses a short timer). A
- *   race-free one-shot TX-ready completion is the remaining writable-notification
- *   gap; do not assume EPOLLIN means a blocked alloc became writable.
+ *   EAGAIN automatically arms one one-shot writable notification on this QP. When
+ *   its own ACK reclaim, or a physical block returned to the shared pool, makes a
+ *   retry meaningful, dmesh_poll_cq reports DMESH_WC_TX_READY and dmesh_cq_fd wakes.
+ *   No explicit arm call, retry timer, or busy-poll is required. A completion is a
+ *   retry hint rather than a reservation: another writer may consume shared capacity
+ *   first, so a retry can return EAGAIN and arm the next one-shot notification.
  *
  *   EAGAIN has TWO causes, and you can neither tell them apart nor need to:
  *     - this conn hit its own in-flight ceiling (DPUMESH_TX_MAXB blocks), OR
@@ -127,10 +129,11 @@
  *       for (int i = 0; i < n; i++) switch (wc[i].opcode) {
  *         case DMESH_WC_CONN_REQ: break;   // new conn = wc[i].qp, already
  *                                          // usable; refuse by dmesh_destroy_qp
- *         case DMESH_WC_RECV:     handle(wc[i].buf, wc[i].len);
- *                                 dmesh_wc_release(ch, &wc[i]); break;
- *         case DMESH_WC_RECV_FIN: dmesh_destroy_qp(wc[i].qp); break;
- *       }
+*         case DMESH_WC_RECV:     handle(wc[i].buf, wc[i].len);
+*                                 dmesh_wc_release(ch, &wc[i]); break;
+*         case DMESH_WC_RECV_FIN: dmesh_destroy_qp(wc[i].qp); break;
+ *         case DMESH_WC_TX_READY: retry_parked_write(wc[i].qp); break;
+*       }
  *   Always poll to 0 before sleeping on the fd again (edge-triggered rule, same
  *   as ibv_req_notify_cq re-arm). Completions for ONE conn are in order; across
  *   conns there is no order.
@@ -215,6 +218,7 @@ typedef enum {
     DMESH_WC_RECV     = 1,   /* one whole inbound message; holds an RX credit */
     DMESH_WC_RECV_FIN = 2,   /* peer closed the conn (EOF); no credit held */
     DMESH_WC_CONN_REQ = 3,   /* new inbound conn (server side); no credit held */
+    DMESH_WC_TX_READY = 4,   /* an EAGAIN-blocked QP should retry dmesh_alloc */
 } dmesh_wc_opcode_t;
 
 typedef struct dmesh_wc {
@@ -274,8 +278,8 @@ dmesh_cq_t *dmesh_create_cq(dmesh_channel_t *ch);
 int dmesh_destroy_cq(dmesh_cq_t *cq);
 
 /* This CQ's completion-channel fd (ibv_req_notify_cq + comp_channel): readable when a
- * new conn or any inbound message is pending ON THIS CQ. Vanilla epoll/poll; drain one
- * uint64_t on wake, then dmesh_poll_cq to 0.
+ * new conn, inbound message, or armed TX-ready transition is pending ON THIS CQ.
+ * Vanilla epoll/poll; drain one uint64_t on wake, then dmesh_poll_cq to 0.
  *
  * PURELY OPTIONAL — it is the idle-sleep path, not a prerequisite. dmesh_poll_cq is
  * complete on its own, so a spin-polling client never has to call this. */
@@ -323,22 +327,16 @@ int dmesh_abort_qp(dmesh_qp_t *c);
  * NEVER BLOCKS. Returns NULL with errno:
  *   EAGAIN   no ring space right now — EITHER this conn hit its in-flight ceiling
  *            OR the shared block pool is momentarily empty (other conns hold it).
- *            A normal resource condition, NOT a caller error. This is the ONLY
- *            transient error.
+ *            A normal resource condition, NOT a caller error. This automatically
+ *            arms one DMESH_WC_TX_READY completion; park the write and retry when
+ *            that completion arrives. This is the ONLY transient error.
  *   EINVAL   len == 0, len > dmesh_post_max(), or the conn is not established.
  *
- * Handling EAGAIN — pick by your program's shape, and do NOT die on it:
- *   - Single-conn / request-response: retry in place, draining the CQ each pass:
- *       while (!(b = dmesh_alloc(qp, len))) {
- *           if (errno != EAGAIN) goto dead;
- *           dmesh_poll_cq(cq, wc, N);          // keep the CQ moving while you wait
- *       }
- *   - Reactor (one thread, many conns): do NOT spin like that — it starves the other
- *     conns. Park the body on that conn and re-post it from your loop; see
- *     bench/echo_dpumesh.c. Note the loop must then poll rather than sleep while a
- *     reply is parked (nothing wakes cq_fd when the SQ drains), so keep the parked
- *     set exact: a conn you have given up on MUST NOT read as still-pending, or your
- *     loop spins at 100% forever.
+ * Handling EAGAIN: retain the body and return to the CQ loop. DMESH_WC_TX_READY names
+ * the QP to retry; no QP scan is needed. If the QP had a committed trailing partial,
+ * call dmesh_flush before parking so those bytes can earn the ACK that frees space.
+ * Spin-polling callers may retry directly; a successful retry cancels any obsolete
+ * armed/queued notification before reserving new bytes.
  *
  * There is no separate "commit": dmesh_post_send finalizes the bytes. */
 void *dmesh_alloc(dmesh_qp_t *c, uint32_t len);
@@ -382,13 +380,14 @@ int dmesh_flush(dmesh_qp_t *c);
  *   pool_grabs   shared-pool CAS pops (a conn growing / taking its first block)
  *   pool_returns shared-pool CAS pushes (shrink surplus / close-drain return)
  *   recycle_hits grow served from the conn's own recycled blocks (no pool op)
- *   grow_waits   dmesh_alloc calls that hit the in-flight ceiling and returned EAGAIN
- *   block_pads   message didn't fit the current block tail -> pad + fresh block
- *
- * grow_waits is the OBSERVABLE COUNTERPART OF EAGAIN: it is how you find out whether
- * your send loop ever actually hits backpressure. The ring grows on demand, so a
- * non-zero grow_waits means the conn reached its in-flight cap, not that memory ran
- * out. Sample it around a workload; if it stays 0, backpressure never happened. */
+ *   grow_waits   dmesh_alloc calls blocked by QP window or shared pool (EAGAIN)
+*   block_pads   message didn't fit the current block tail -> pad + fresh block
+*
+* grow_waits is the OBSERVABLE COUNTERPART OF EAGAIN: it is how you find out whether
+ * your send loop ever actually hits backpressure. A non-zero value means either the
+ * QP reached its configured block window or the channel's shared registered-block
+ * pool was temporarily empty. Sample it around a workload; if it stays 0,
+ * backpressure never happened. */
 typedef struct dmesh_tx_stats {
     unsigned long long pool_grabs;
     unsigned long long pool_returns;
@@ -403,17 +402,19 @@ void dmesh_get_tx_stats(dmesh_channel_t *s, dmesh_tx_stats_t *out);
 /* Harvest up to nwc completions into wc[]. NON-BLOCKING; returns the count (0 =
  * drained), or -1 with errno=EINVAL on bad args. Single-consumer: call from the ONE
  * thread that owns this CQ (make more CQs to poll in parallel — see SCALING). Reports
- * only conns bound to THIS cq, plus any new conn it takes off the shared accept queue.
- * Delivers, in this priority: the resumed partially-drained conn from the previous
- * call, then new conns (one DMESH_WC_CONN_REQ each, immediately followed by that
- * conn's already-landed messages), then every ready conn's inbox drained to empty.
+* only conns bound to THIS cq, plus any new conn it takes off the shared accept queue.
+* Delivers, in this priority: the resumed partially-drained conn from the previous
+* call, then new conns (one DMESH_WC_CONN_REQ each, immediately followed by that
+ * conn's already-landed messages), then DMESH_WC_TX_READY hints, then every ready
+ * established conn's inbox drained to empty.
  * A conn cut off by wc[] filling up resumes FIRST on the next call, so per-conn
  * ordering always holds and no message is lost. */
 int dmesh_poll_cq(dmesh_cq_t *cq, dmesh_wc_t *wc, int nwc);
 
 /* Return a DMESH_WC_RECV completion's RX credit (≈ reposting the buffer to the SRQ).
- * Idempotent (wc->rx_slot is cleared); a no-op for FIN/CONN_REQ entries. Valid after
- * the conn closed — the credit is channel-level, not conn-level. */
+ * Idempotent (wc->rx_slot is cleared); a no-op for FIN/CONN_REQ/TX_READY entries.
+ * Valid after
+* the conn closed — the credit is channel-level, not conn-level. */
 void dmesh_wc_release(dmesh_channel_t *s, dmesh_wc_t *wc);
 
 #ifdef __cplusplus

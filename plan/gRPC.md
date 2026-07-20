@@ -57,12 +57,15 @@ slice bytes
 Native ABI 2 batches committed posts into transport-private physical units and
 submits complete units immediately. If the bounded native window fills before the
 logical Write ends, the reactor forces any remaining partial, parks the cursor,
-and retries after capacity is expected to have returned. The final callback is
-scheduled only after the final partial flush succeeds.
+and retries only after native capacity reclamation identifies that QP as ready.
+The final callback is scheduled only after the final partial flush succeeds.
 
-`EAGAIN` currently uses a 50 µs timer because native writable notification is not
-implemented. This preserves correctness but adds timer syscalls and retry work;
-it is the next transport-level design target.
+`dmesh_alloc(EAGAIN)` automatically arms a one-shot `DMESH_WC_TX_READY`
+completion on the QP's CQ. The reactor retains the exact cursor and returns to its
+two-fd event loop: one command eventfd and one native CQ eventfd. It does not own a
+timerfd or scan all pending writes. On TX-ready it resumes only the named QP and
+ignores the hint if that connection no longer has a parked write. The hint does not
+reserve shared capacity; a repeated `EAGAIN` rearms the next transition.
 
 ## Read state machine
 
@@ -88,7 +91,7 @@ The maintained tests require:
 
 - byte-exact split writes and one final flush;
 - no callback before the flush boundary;
-- exact cursor resume after `EAGAIN`;
+- exact cursor resume only after `DMESH_WC_TX_READY`, with no timer retry;
 - one CQ polling thread and no mid-batch QP destruction;
 - RX copy before release;
 - inbound QP conversion and pre-bind event replay;
@@ -99,13 +102,15 @@ Hardware validation additionally checks the native register/readiness barrier,
 real byte exchange, FIN, `POD_QUIESCED`, and slot reuse. Those observations show
 the exercised graceful path; they do not prove forced-death DMA isolation.
 
-## Remaining work
+## Status and remaining work
 
-1. Replace timer retry with a race-free native TX-ready completion.
-2. Exercise streaming, cancellation/deadline, and TLS/mTLS on BlueField.
-3. Integrate allocator/resource-quota policy suitable for production servers.
-4. Run long-duration connection churn and memory/handle plateau tests.
-5. Define platform-backed containment for host death during in-flight DMA.
+Race-free native TX-ready completion and completion-driven retry are implemented.
+The remaining integration work is:
+
+1. Exercise streaming, cancellation/deadline, and TLS/mTLS on BlueField.
+2. Integrate allocator/resource-quota policy suitable for production servers.
+3. Run long-duration connection churn and memory/handle plateau tests.
+4. Define platform-backed containment for host death during in-flight DMA.
 
 Go is not addressed through LD_PRELOAD because its runtime may bypass libc
 network calls. A future Go integration should bind the native API directly and

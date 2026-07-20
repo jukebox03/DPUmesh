@@ -38,6 +38,15 @@ that tail, while abort discards it. Native publication writes a shared descripto
 ring that the DPA already polls; it is not a socket syscall or a per-flush control
 message.
 
+Backpressure remains nonblocking. If `dmesh_alloc()` returns `NULL/EAGAIN`, it
+also arms that QP internally. Capacity returned by a QP ACK or by the channel's
+shared registered-block pool produces one `DMESH_WC_TX_READY` completion on the
+QP's CQ and wakes the same optional CQ fd used for receive events. Applications
+park only the named write and retry it from the completion; they need no explicit
+arm call, per-QP fd, retry timer, busy-poll, or scan of all QPs. Readiness is a
+one-shot retry hint rather than a capacity reservation, so another `EAGAIN`
+simply arms the next transition.
+
 ## Lifecycle
 
 Channel creation returns only after a replayable two-phase barrier:

@@ -31,10 +31,16 @@ pool, RX mapping, accept queue, CQ registry, and PE progress thread. The PE
 thread is the sole Comch progress owner. Each CQ has an SPSC ready-list: the PE
 publishes a port once, and the CQ's one application thread drains it.
 
+The CQ also owns one eventfd shared by accept, RX/FIN, and TX-ready transitions;
+there is no per-QP fd.
+
 Per-QP inboxes preserve arrival order without scanning the global port table.
 An atomic arm/disarm handshake closes the empty-inbox/ready-edge race. A QP
 never migrates between CQs, and an application must finish dispatching a returned
 CQ batch before freeing any QP named by it.
+
+TX readiness uses a separate atomic bitmap because its producers include both the
+PE ACK path and application-owner threads returning blocks to the shared pool.
 
 The accept path creates a `SERVER_PENDING` port before publishing the first
 request. The public QP allocation now occurs before consuming the shared accept
@@ -51,7 +57,10 @@ free (ACKed) ≤ sent (described) ≤ committed (posted) ≤ write (reserved)
 
 The default block is 64 KiB and the default QP ceiling is four blocks. Messages
 never straddle physical blocks; unused block tails are padding. The shared block
-pool lets idle QPs retain no eager TX allocation.
+pool lets idle QPs retain no eager TX allocation. The ceiling is a fixed bound:
+the implementation grows a QP's physical chain on demand up to that bound, but
+does not dynamically tune the configured number of blocks per QP. Blocks are
+storage and reclamation units; 8 KiB descriptors are the wire transport units.
 
 The public send state machine is:
 
@@ -75,6 +84,12 @@ The DPA execution unit already drains that ring, so neither a complete-unit post
 nor an explicit tail flush performs a send syscall or emits a separate control
 doorbell. Automatic batching is byte coalescing inside descriptors.
 
+A reservation that needs another physical block probes both admission sources
+before changing the write cursor or sealing a padded tail. It first verifies that
+the QP block window can advance, then preclaims a recycled or shared physical
+block. Either `EAGAIN` path is therefore a true no-op on the logical byte ring;
+retrying the same body cannot inherit padding from a failed attempt.
+
 No partial-batch timer exists yet. Until one is added, `flush` and graceful close
 are the bounded-latency boundaries for the newest partial.
 
@@ -82,6 +97,36 @@ Descriptor sequence numbers and FIN state are published only after enqueue
 succeeds. FIN failure is returned to the caller instead of being silently
 latched as sent. Local close still releases the QP so channel teardown can
 continue and DPU disconnect cleanup remains available.
+
+### TX writable notification
+
+Every QP carries a one-shot `IDLE → ARMED → READY → IDLE` state and a wait
+reason. `dmesh_alloc(EAGAIN)` installs the arm internally:
+
+1. a QP-window failure snapshots the free-block boundary and write cursor;
+2. a shared-pool failure snapshots the pool epoch and registers the port in a
+   channel-wide waiter bitmap;
+3. the state is release-published as `ARMED`; and
+4. the relevant capacity source is rechecked after publication.
+
+The post-arm recheck is part of the correctness contract. An ACK or block return
+that races with the failed allocation either observes `ARMED` and performs the
+transition, or changes the snapshot inspected by the recheck. Capacity cannot
+return in the gap and leave a sleeping owner without an event.
+
+A QP-window arm becomes ready only when ACK progress crosses a physical-block
+boundary or the QP fully drains. ACKs inside the same block do not cause a false
+wakeup, because they cannot back the next logical block. A returned shared block
+increments a pool epoch and claims at most one live waiter from the round-robin
+bitmap: one returned block advertises one retry opportunity, not writability for
+every blocked QP.
+
+A successful transition sets the QP bit in its CQ's multi-producer bitmap and
+writes the CQ eventfd if notification was requested. `dmesh_poll_cq` consumes that
+bit as `DMESH_WC_TX_READY` before bulk established-RX work, avoiding TX starvation
+on a read-heavy CQ. The completion is a retry hint, not a block reservation.
+`dmesh_alloc` returning `EAGAIN` again rearms the QP. An opportunistic successful
+retry, QP close, or CQ unbind cancels an obsolete state and removes any stale bit.
 
 ## 4. RX custody
 
@@ -180,6 +225,10 @@ DMA stopped. Disconnect cleanup continues on the DPU. Complete containment after
 SIGKILL or hardware failure requires a stronger platform isolation mechanism and
 is not claimed here.
 
+Local teardown joins the PE before freeing CQ state and releases each per-port
+inbox and lazy reclaim array before the port table, so host-only and hardware
+lifecycle checks observe the same ownership closure.
+
 ## 9. Fixed bounds and invariants
 
 | Item | Default / bound |
@@ -201,6 +250,10 @@ The implementation relies on these invariants:
 - one PE owner and one consumer per CQ;
 - per-QP wire order equals committed byte order;
 - `post_send` emits complete units and `flush` emits the trailing partial;
+- a failed reservation does not advance the QP write cursor or add block padding;
+- one automatic TX-ready arm produces at most one queued retry hint;
+- QP-window readiness requires reusable local capacity, while one pool return
+  wakes at most one shared-pool waiter;
 - every RX landing and TX block remains owned until its matching credit or ACK;
 - every asynchronous DPA/ARM result is validated against its slot generation;
 - graceful unmap follows remote quiescence, never mere send submission;

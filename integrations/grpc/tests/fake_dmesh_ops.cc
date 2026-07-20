@@ -472,6 +472,18 @@ void FakeDmeshState::InjectFin(dmesh_qp_t* qp) {
   impl_->Signal(fake->cq);
 }
 
+void FakeDmeshState::InjectTxReady(dmesh_qp_t* qp) {
+  std::lock_guard<std::mutex> lock(impl_->mu);
+  auto* fake = impl_->FindQp(qp);
+  if (fake == nullptr || !fake->alive) return;
+  Impl::Completion completion;
+  completion.value.qp = qp;
+  completion.value.opcode = DMESH_WC_TX_READY;
+  completion.value.rx_slot = -1;
+  fake->cq->completions.push_back(completion);
+  impl_->Signal(fake->cq);
+}
+
 dmesh_qp_t* FakeDmeshState::InjectConnectionRequest(
     const std::string& first_bytes, uint16_t stream) {
   std::lock_guard<std::mutex> lock(impl_->mu);

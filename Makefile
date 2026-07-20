@@ -117,11 +117,16 @@ $(TESTDIR)/native_tx_batch_policy_test: tests/native_tx_batch_policy_test.c src/
 	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -Wl,--gc-sections \
 		-o $@ tests/native_tx_batch_policy_test.c $(DOCA_LIBS) -lpthread $(RPATHS)
 
+$(TESTDIR)/native_writable_test: tests/native_writable_test.c src/dmesh_core.c $(LIB_HDRS) | dirs
+	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -Wl,--gc-sections \
+		-o $@ tests/native_writable_test.c $(DOCA_LIBS) -lpthread $(RPATHS)
+
 test: $(TESTDIR)/native_api_contract_test $(TESTDIR)/native_control_state_test \
-	$(TESTDIR)/native_tx_batch_policy_test
+	$(TESTDIR)/native_tx_batch_policy_test $(TESTDIR)/native_writable_test
 	$(TESTDIR)/native_api_contract_test
 	$(TESTDIR)/native_control_state_test
 	$(TESTDIR)/native_tx_batch_policy_test
+	$(TESTDIR)/native_writable_test
 
 # dmesh API binaries link the transport library. One explicit rule each so the
 # source is a tracked prerequisite (rebuilds on edit).

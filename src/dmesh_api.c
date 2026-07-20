@@ -128,7 +128,22 @@ int dmesh_poll_cq(dmesh_cq_t *cq, dmesh_wc_t *wc, int nwc) {
         if (!drained) { cq->vq_cur = c; return n; }
     }
 
-    /* 3. This CQ's established conns with inbound (edge-armed by the PE). A spurious
+    /* 3. QPs whose automatically armed alloc(EAGAIN) became retryable. TX readiness
+     * is deliberately emitted before bulk RX so a read-heavy CQ cannot starve writes.
+     * It is a hint, not a reservation; the application retries only the named QP. */
+    while (n < nwc) {
+        dmesh_qp_t *c = (dmesh_qp_t *)dpumesh_next_tx_ready(cq);
+        if (!c) break;
+        wc[n].qp      = c;
+        wc[n].opcode  = DMESH_WC_TX_READY;
+        wc[n].buf     = NULL;
+        wc[n].len     = 0;
+        wc[n].stream  = 0;
+        wc[n].rx_slot = -1;
+        n++;
+    }
+
+    /* 4. This CQ's established conns with inbound (edge-armed by the PE). A spurious
      * entry (inbox already drained via 1/2) emits nothing — harmless. */
     while (n < nwc) {
         dmesh_qp_t *c = dmesh_next_ready(cq);

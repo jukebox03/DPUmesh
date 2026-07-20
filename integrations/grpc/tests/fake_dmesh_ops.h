@@ -49,6 +49,7 @@ class FakeDmeshState final {
       dmesh_qp_t* qp,
       const std::vector<std::pair<uint16_t, std::string>>& receives);
   void InjectFin(dmesh_qp_t* qp);
+  void InjectTxReady(dmesh_qp_t* qp);
   dmesh_qp_t* InjectConnectionRequest(const std::string& first_bytes,
                                       uint16_t stream);
 

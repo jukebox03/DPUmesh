@@ -18,9 +18,9 @@
  * spread the accept queue across server threads, but that is not what this measures —
  * client-thread scaling (bench_dpumesh.c) is the axis under test.
  *
- * Backpressure: dmesh_alloc never blocks, so a reply the conn's SQ cannot take
- * stays on that conn's reply FIFO and is re-posted from the loop, instead of
- * stalling every other conn on the thread the way a blocking write did.
+ * Backpressure: dmesh_alloc never blocks. EAGAIN leaves the reply at its exact FIFO
+ * offset and automatically arms a one-shot TX_READY completion for that QP; the
+ * event loop sleeps normally and retries only the named connection.
  *
  * env: BENCH_WORKER_ID (advertised service id, default 11).
  */
@@ -181,19 +181,9 @@ int main(void) {
         { static double lr = 0; double now = bench_now_sec();   /* live app-work: poll the file
              * every 0.5s (robust vs SIGHUP, which a libdpumesh thread can absorb). */
           if (now - lr > 0.5) { lr = now; load_work(); } }
-        /* A reply is parked on SQ space -> poll instead of sleeping: nothing wakes this fd
-         * when the SQ drains (dmesh_alloc's EAGAIN carries no completion), so sleeping
-         * here would strand the reply.
-         * Only LIVE conns reach here: the sweep below destroys the ones we gave up on, so
-         * a conn that will never drain its FIFO can no longer pin this timeout at 0 —
-         * the 100%-core bug this greeter shipped. A greeter's replies are TINY (repsz
-         * default 8 B) so its ring rarely fills; a server with large replies would poll
-         * here for real. */
-        int pend = 0;
-        for (int i = 0; i < g_nlive; i++)
-            if (((greeter_conn_t *)g_live[i]->user_data)->qn > 0) { pend = 1; break; }
-
-        int nfds = epoll_wait(epfd, events, MAX_EVENTS, pend ? 0 : -1);
+        /* CQ fd covers RX, accepts, and armed TX-ready transitions, so parked replies
+         * need neither a timer nor a zero-timeout sweep. */
+        int nfds = epoll_wait(epfd, events, MAX_EVENTS, -1);
         if (nfds < 0) { if (errno == EINTR) { if (g_reload) { g_reload = 0; load_work(); } continue; } perror("epoll_wait"); break; }
         if (g_reload) { g_reload = 0; load_work(); }
 
@@ -220,18 +210,15 @@ int main(void) {
                 case DMESH_WC_RECV_FIN:
                     reclaim(c);                      /* FIN is the conn's last completion */
                     break;
+                case DMESH_WC_TX_READY:
+                    if (gc && !gc->dead) reply_pump(c); /* targeted one-shot retry */
+                    break;
                 }
             }
         }
-        /* Post-batch: re-post replies the SQ refused, then DESTROY whatever we gave up on.
-         * This is the deferred-destroy sweep dmesh.h asks for (never destroy mid-batch —
-         * poll_cq can hand the same QP back later in wc[]); past the batch it is safe, and
-         * destroy_qp clears the CQ's resume cursor itself. Backwards, so reclaim's
-         * swap-with-last compaction cannot skip an entry. The FIN reclaim sends is the
-         * point: the peer LEARNS instead of waiting forever for a reply that will never
-         * come, and the conn leaves g_live so `pend` above can never see it again. */
+        /* Post-batch: destroy whatever we gave up on. Backwards, so reclaim's
+         * swap-with-last compaction cannot skip an entry. */
         for (int i = g_nlive - 1; i >= 0; i--) {
-            reply_pump(g_live[i]);                   /* may itself latch dead */
             if (((greeter_conn_t *)g_live[i]->user_data)->dead) reclaim(g_live[i]);
         }
         /* post_send commits and submits every newly complete transport unit. One

@@ -122,6 +122,12 @@ ring. It does not mean that a whole loop pass becomes one syscall or one control
 doorbell. Applications choose protocol/latency flush boundaries and do not choose
 the 8 KiB physical unit.
 
+The native echo server is also the reference event-driven backpressure pattern.
+It registers one native CQ fd with epoll, blocks without a timeout, and drains the
+CQ on wake. If a reply parks on `dmesh_alloc(EAGAIN)`, the core automatically arms
+that QP; `DMESH_WC_TX_READY` retries only the named reply. The server does not
+busy-poll, run a retry timer, or scan every pending QP.
+
 The controlled ABI-2 audit used one fixed DPU with four ingest shards, four
 egress workers, and two rings per pod, and changed only the host images. Against
 the old matched-batching path, current throughput was -1.91% at
@@ -178,8 +184,8 @@ the real registration, DMA, byte-transfer, FIN, and cleanup paths on BlueField:
 
 The validator-specific contracts are in [validators/README.md](validators/README.md).
 The C++ gRPC tests are executed separately with CTest and include fake-native
-reactor tests, a paired real gRPC HTTP/2 channel test, native symbol linkage, and
-an optional BlueField client/server smoke binary.
+reactor tests, completion-gated writable retry, a paired real gRPC HTTP/2 channel
+test, native symbol linkage, and an optional BlueField client/server smoke binary.
 
 ## 7. Measurement rules
 

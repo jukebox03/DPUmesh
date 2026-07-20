@@ -87,10 +87,7 @@ struct Fixture {
       : state(std::make_shared<FakeDmeshState>()),
         allocator_impl(std::make_shared<TestMemoryAllocator>()) {
     state->SetPostMax(post_max);
-    DmeshRuntime::Options options;
-    options.reactor.tx_retry_delay = 100us;
-    auto created = DmeshRuntime::Create(MakeFakeDmeshApiOps(state), &callbacks,
-                                        options);
+    auto created = DmeshRuntime::Create(MakeFakeDmeshApiOps(state), &callbacks);
     CHECK_TRUE(created.ok());
     runtime = std::move(*created);
 
@@ -157,7 +154,7 @@ void TestTxCopiesSplitsAndPostsOnOwnerThread() {
   CHECK_EQ(fixture.state->poll_thread_violation_count(), size_t{0});
 }
 
-void TestTxEagainRetriesFromTimer() {
+void TestTxEagainRetriesFromCompletion() {
   Fixture fixture;
   fixture.state->FailNextAlloc(fixture.qp, EAGAIN);
 
@@ -172,6 +169,12 @@ void TestTxEagainRetriesFromTimer() {
       },
       &data, EventEngine::Endpoint::WriteArgs()));
 
+  CHECK_TRUE(fixture.state->WaitForAllocCallCount(fixture.qp, 1, 2s));
+  std::this_thread::sleep_for(5ms);
+  CHECK_EQ(fixture.state->alloc_calls(fixture.qp), size_t{1});
+  CHECK_EQ(fixture.state->Posts(fixture.qp).size(), size_t{0});
+
+  fixture.state->InjectTxReady(fixture.qp);
   CHECK_TRUE(fixture.state->WaitForPostCount(fixture.qp, 1, 2s));
   CHECK_TRUE(fixture.callbacks.WaitForSize(1, 2s));
   fixture.callbacks.RunAll();
@@ -202,10 +205,7 @@ void TestPrebindDataAndFinAreReplayedInOrder() {
   ManualExecutor callbacks;
   auto state = std::make_shared<FakeDmeshState>();
   auto allocator_impl = std::make_shared<TestMemoryAllocator>();
-  DmeshRuntime::Options options;
-  options.reactor.tx_retry_delay = 100us;
-  auto created = DmeshRuntime::Create(MakeFakeDmeshApiOps(state), &callbacks,
-                                      options);
+  auto created = DmeshRuntime::Create(MakeFakeDmeshApiOps(state), &callbacks);
   CHECK_TRUE(created.ok());
   auto runtime = std::move(*created);
 
@@ -671,7 +671,8 @@ int main() {
   const TestCase tests[] = {
       {"TX copies and splits on owner thread",
        TestTxCopiesSplitsAndPostsOnOwnerThread},
-      {"TX EAGAIN retries from timer", TestTxEagainRetriesFromTimer},
+      {"TX EAGAIN retries from completion",
+       TestTxEagainRetriesFromCompletion},
       {"RX copies before releasing credit", TestRxCopiesBeforeReleasingCredit},
       {"pre-bind data and FIN replay in order",
        TestPrebindDataAndFinAreReplayedInOrder},

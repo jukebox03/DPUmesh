@@ -118,6 +118,13 @@ the DPA. `post_send()` and `flush()` do not make a send syscall, wake a transpor
 thread, or send a separate doorbell message. Batching changes how many adjacent
 bytes one descriptor covers, not whether a syscall is issued.
 
+The registered TX mapping is divided into physical blocks. A QP borrows blocks
+from a channel-wide pool as its logical byte ring grows and reuses or returns them
+after ACK reclamation. A block is allocation and reclamation storage, not an
+application message and not necessarily one DPA descriptor: several posts and
+several 8 KiB transport units can occupy one block. The block count per QP is a
+fixed configured ceiling, not a dynamically tuned target.
+
 The per-QP block window is clamped so its worst-case physical-unit carve fits the
 64-entry reclaim FIFO. Consequently a successfully committed window is always
 flushable without another per-QP admission step. The shared host-to-DPU ring may
@@ -140,11 +147,27 @@ with a trailing partial buffered, flush that tail before waiting for more space.
 For multi-QP reactors, park the write and continue servicing other QPs rather
 than spinning on one connection.
 
-The current API has no race-free writable completion. The gRPC adapter therefore
-arms a short timer only after a write parks on `EAGAIN`. This retry timer is not a
-batching timer and does not periodically transmit messages while the QP is
-writable. Replacing it with a one-shot reclaim notification is the remaining
-event-model gap.
+`EAGAIN` has two resource causes. The QP may have reached its configured block
+window, in which case its own forward ACK must make a whole block reusable or
+fully drain the window. Alternatively, every registered block in the channel's
+shared pool may currently be held by other QPs, even though this QP remains below
+its own ceiling. These causes are deliberately not exposed as separate errors;
+the correct application action is identical.
+
+Every `dmesh_alloc()` that returns `EAGAIN` automatically arms one notification
+for that QP. There is no public `dmesh_arm_writable()` call. The core snapshots
+the failed allocation state, publishes the arm, and rechecks the relevant ACK or
+pool generation, closing the reclaim-before-arm race. A qualifying QP reclaim
+queues `DMESH_WC_TX_READY`; a returned shared block wakes at most one valid pool
+waiter because it represents one new unit of capacity. Close and a successful
+direct retry cancel a stale arm or queued hint.
+
+TX readiness is one-shot and edge-driven, not a permanent statement that a QP is
+writable. The completion names the QP whose parked write should retry, but does
+not reserve a block for it. Shared capacity can be consumed before the retry; if
+the retry returns `EAGAIN`, the same call has already armed the next notification.
+Polling applications may retry opportunistically without waiting, while sleeping
+event loops need neither a timer nor a scan of all QPs.
 
 There is no internal partial-batch timer. Code that needs bounded latency calls
 `dmesh_flush()` at its logical write boundary; graceful close also flushes, while
@@ -152,13 +175,14 @@ There is no internal partial-batch timer. Code that needs bounded latency calls
 
 ## 5. RX and CQ notification
 
-`dmesh_poll_cq()` is nonblocking and returns three completion types:
+`dmesh_poll_cq()` is nonblocking and returns four completion types:
 
 | Opcode | Meaning | Credit |
 |---|---|---|
 | `DMESH_WC_CONN_REQ` | New inbound QP | none |
 | `DMESH_WC_RECV` | One RX fragment | held until `dmesh_wc_release()` |
 | `DMESH_WC_RECV_FIN` | Peer EOF | none |
+| `DMESH_WC_TX_READY` | An `EAGAIN`-blocked QP should retry allocation | none |
 
 `wc.buf` points directly into the channel RX mmap. Copy it before release if the
 data must outlive the completion. `dmesh_wc_release()` is idempotent and remains
@@ -166,8 +190,52 @@ valid after QP destruction because the credit belongs to the channel.
 
 `dmesh_cq_fd()` exposes an optional eventfd for `poll`/`epoll`. Drain its counter,
 poll the CQ to zero, then sleep again. Spin-polling clients do not need the fd.
-The fd reports inbound completions only; it does not currently report TX
-writability.
+The fd reports new connections, RX/FIN, and armed TX-ready transitions for every
+QP owned by that CQ. It is one fd per CQ, not one fd per QP. Calling
+`dmesh_cq_fd()` also self-kicks once so work queued while the CQ was poll-only
+cannot be stranded when the application first goes to sleep.
+
+A minimal event-driven owner loop has the following shape. Application-specific
+connection state is normally stored in `qp->user_data`; closing a QP is deferred
+until the entire returned batch has been dispatched.
+
+```c
+int cqfd = dmesh_cq_fd(cq);
+add_to_epoll_once(cqfd, EPOLLIN);
+
+/* When epoll reports EPOLLIN for cqfd: */
+uint64_t counter;
+if (read(cqfd, &counter, sizeof(counter)) < 0 && errno != EAGAIN)
+    handle_fd_error();
+
+dmesh_wc_t wc[64];
+int n;
+while ((n = dmesh_poll_cq(cq, wc, 64)) > 0) {
+    for (int i = 0; i < n; ++i) {
+        switch (wc[i].opcode) {
+        case DMESH_WC_CONN_REQ:
+            bind_connection(wc[i].qp);
+            break;
+        case DMESH_WC_RECV:
+            consume(wc[i].qp, wc[i].buf, wc[i].len, wc[i].stream);
+            dmesh_wc_release(channel, &wc[i]);
+            break;
+        case DMESH_WC_RECV_FIN:
+            mark_peer_eof(wc[i].qp);
+            break;
+        case DMESH_WC_TX_READY:
+            retry_parked_write(wc[i].qp);
+            break;
+        }
+    }
+    destroy_qps_marked_during_this_batch();
+}
+```
+
+For `DMESH_WC_TX_READY`, `wc.qp` is the retry target and `buf == NULL`,
+`len == 0`, `stream == 0`, and `rx_slot == -1`. Calling
+`dmesh_wc_release()` on it is a harmless no-op. The application should ignore a
+stale hint if that QP no longer has a parked write.
 
 ## 6. POSIX and gRPC facades
 
@@ -181,14 +249,15 @@ The gRPC C++ adapter maps one runtime to a channel, reactor shards to CQs, and
 EventEngine endpoints to QPs. It commits all slices of one EventEngine Write and
 flushes once at the logical write boundary. RX is copied into gRPC slices before
 the native credit is returned. TLS and HTTP/2 framing remain end-to-end and are
-not interpreted by DPUmesh.
+not interpreted by DPUmesh. A reactor parks its exact slice cursor on `EAGAIN`
+and resumes only that connection when its CQ produces `DMESH_WC_TX_READY`; the
+adapter has no retry timer.
 
 ## 7. Explicit limits
 
 - No arbitrary memory registration, rkey, one-sided READ, or one-sided WRITE.
 - No application-visible send completion; protocol ACKs reclaim internal TX
   capacity.
-- No native writable event yet.
 - No automatic deadline for an unflushed partial batch yet.
 - The registry is loaded once and is not live-reloaded.
 - L4 passthrough is the supported gRPC mode; the simple message codec is not an

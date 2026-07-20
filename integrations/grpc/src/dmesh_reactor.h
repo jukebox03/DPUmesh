@@ -1,7 +1,6 @@
 #ifndef DPUMESH_GRPC_DMESH_REACTOR_H
 #define DPUMESH_GRPC_DMESH_REACTOR_H
 
-#include <chrono>
 #include <cstddef>
 #include <functional>
 #include <memory>
@@ -23,8 +22,6 @@ class DmeshReactor final : public Executor {
  public:
   struct Options {
     size_t cq_batch_size = 64;
-    std::chrono::microseconds tx_retry_delay =
-        std::chrono::microseconds(50);
   };
 
   struct ConnectedTransport {

@@ -6172,3 +6172,427 @@ The decisive reproducibility rule is that a retained result must capture the
 what the running process uses. The benchmark harness also now selects a Running,
 non-terminating pod after image rollouts, avoiding accidental measurements against
 a stale pod IP.
+
+---
+
+# Session 8 — completion-driven native TX readiness and gRPC backpressure (2026-07-20)
+
+Goal: replace timer, busy-poll, and whole-QP retry scans with a race-free native
+one-shot writable completion, convert the gRPC reactor to that completion model,
+and exercise representative host-only and BlueField paths. These are correctness
+and diagnostic runs, not a controlled transport-performance comparison. The
+`LD_PRELOAD` source was intentionally not changed or validated in this session.
+
+## Implemented contract
+
+`dmesh_alloc(NULL/EAGAIN)` now arms its own QP internally. QP-window reclaim and
+shared-block-pool return converge on one `DMESH_WC_TX_READY` opcode delivered by
+the QP's existing CQ and optional CQ eventfd. A snapshot/recheck closes the
+failure-to-arm race; each arm queues at most one retry hint; successful direct
+retry and close cancel obsolete hints. A shared block return wakes at most one
+valid pool waiter. The native echo loop and gRPC reactor park only the affected
+write and no longer use a timeout, busy-poll, or whole-connection scan.
+
+## Configuration audit
+
+| Layer | Live or compiled setting |
+|---|---|
+| host registered TX / RX | 4,096 × 8,192 B = 32 MiB each |
+| TX storage | 64 KiB block; four-block QP ceiling = 256 KiB; recycle cushion 1 |
+| TX descriptor reclaim | 64 entries per QP |
+| rings per pod | K=2 on both host pods and DPU |
+| DPA | 254 EUs reported; auto-selected N=8 (cap 8) |
+| ARM ingest | one shard (bare-deploy default), reaper off / inline on main |
+| ARM proxy | SG-DMA, one egress worker |
+| routing | request/reply passthrough, connection-pinned, no L7/frame services |
+| proxy bounds | seam_max=524,288; SG pieces=64 |
+| DPU diagnostics | log level 40; diagnostic/shard-shared/host-emit overrides off |
+| client manifest | ASYNC_THREADS=4, BENCH_PIPELINE=8, BENCH_COALESCE=0 |
+| echo manifest | ECHO_THREADS=3 |
+| unused preload manifest | arena slots=512, preload debug=0; not exercised |
+| Kubernetes | namespace `test-bench`; all benchmark deployments ready |
+| CPU placement | `fair` profile |
+
+The full deployment was repeated after detecting that a Kubernetes `subPath`
+mount still referenced the previous inode. Before the repeat, the host hash was
+`4b85b75c04e51be3109db22c8bc1c0e2ddfb2b8bf8bb386eb844f64474c9806a`
+and the pod hash began `8cc3`; after it, host and pod both reported the complete
+`4b85b75c04e51be3109db22c8bc1c0e2ddfb2b8bf8bb386eb844f64474c9806a`.
+
+A later comment-only public-header rebuild produced host full-ELF hash
+`f69a40c8dd5e8d8277771c0e7936a6fe5168b75302ef808af0d5c8aee5f53251`
+while the live pod retained `4b85b75c…9806a`. Runtime comparison proved that
+this was metadata-only: after removing debug/symbol/build-id data, both images
+hashed to `3741d2724db3f002f335fbe90f9e9cb0aaa3508d62a4c7e8316a527c86717014`.
+The `.text`, `.rodata`, `.data`, and `.eh_frame` section hashes also matched:
+`ef36a41c4e45c8d95b3be7170323ae1394c115a7b71c80685f43fa8b6c998b3e`,
+`978f7a093b3e58f4547015aa7d4673c33ef2761ac0f47ff8acd0ecfdf14ff714`,
+`6b5c5bb6cdbbd629cf4d805f536457046f1c4a893d0ad78c83fdda70c10e3731`,
+and `9c955027fee0c3d924e8656ed5169b12073738b719eca9c77d505fcdb23c834d`
+respectively.
+
+## Host-only verification
+
+- `make -j2 all`: passed. It rebuilt the native library, benchmark/validator
+  binaries, and the preload artifact; `src/dmesh_preload.c` itself is unchanged.
+- `make test`: four of four passed: API contract, control state, TX batch policy,
+  and the new writable state-machine test.
+- gRPC sanitizer CTest with LeakSanitizer enabled produced all functional PASS
+  output but was reported as 0/4 because LSan cannot run under the ptrace-restricted
+  runner. This is a runner failure, not four functional failures.
+- `ASAN_OPTIONS=detect_leaks=0 ctest --test-dir build/grpc`: 4/4 passed. One run
+  took 0.19 s (endpoint 0.01, channel 0.05, reactor 0.10, native link 0.03); the
+  final rebuild took 0.12 s (0.01, 0.04, 0.06, 0.01 respectively). ASan memory
+  access checking remained enabled.
+
+The writable white-box test covers exact block-boundary wakeup, no same-block
+false wakeup, reclaim racing with arm, shared-pool wakeup, cancellation by direct
+successful retry, and rollback of a failed padded reservation. The public API test
+also checks that `DMESH_WC_TX_READY` is payload-free and consumed once.
+
+## Native BlueField runs
+
+All commands below used the audited configuration above. Every measured attempt,
+including rejected or overloaded cases, is retained.
+
+### Point runs
+
+Initial small-request point:
+
+```text
+./bench/bench.sh point dpumesh 1024 8 32 5 1000 1
+mrps=0.265039 gbps=2.1712 p50=117.00 p95=122.00 p99=172.00
+avg=118.60 min=56.52 max=3470.70 rcnt=1322972 fail=0 conc=32
+threads=1 reqsz=1024 repsz=8 durs=5.000 batch=1 reconns=0
+reconn_us=0.00 grabs=351 rets=351 recyc=66676 waits=0 pads=352
+reorder=0 dist=0:1323972
+```
+
+An initial response larger than the 256 KiB QP window completed without a
+stranded event-driven echo write:
+
+```text
+./bench/bench.sh point dpumesh 64 1048576 1 5 5 1
+mrps=0.001207 gbps=0.0006 p50=833.00 p95=866.00 p99=961.00
+avg=828.67 min=717.27 max=5470.21 rcnt=6027 fail=0 conc=1
+threads=1 reqsz=64 repsz=1048576 durs=5.000 batch=1 reconns=0
+reconn_us=0.00 grabs=1 rets=1 recyc=6032 waits=0 pads=0
+reorder=0 dist=1:6032
+```
+
+The same large-response point was repeated after the final deployment:
+
+```text
+mrps=0.001192 gbps=0.0006 p50=836.00 p95=882.00 p99=1089.00
+avg=838.72 min=721.10 max=3689.40 rcnt=5953 fail=0 conc=1
+threads=1 reqsz=64 repsz=1048576 durs=5.000 batch=1 reconns=0
+reconn_us=0.00 grabs=1 rets=1 recyc=5958 waits=0 pads=0
+reorder=0 dist=0:5958
+```
+
+### Verbs validator runs
+
+| Command parameters `(N,size,zc,window,pipeline)` | OK / fail | served | p50 | Disposition |
+|---|---:|---:|---:|---|
+| `(5000,65536,1,128,8)` | — | — | — | rejected before execution: `1<=size<=8192`, `1<=window<=256`, `1<=pipe<=256`, `batch>=1` |
+| `(10000,8192,1,128,64)` | 7,768 / 2,232 | 10,000 | 63,199.6 µs | overload failure; hit the 60 s anti-hang deadline |
+| `(10000,8192,1,32,8)` | 10,000 / 0 | 10,000 | 2,182.8 µs | pass |
+| `(10000,8192,1,64,32)` | 10,000 / 0 | 10,000 | 17,368.5 µs | initial pass |
+| final repeat `(10000,8192,1,64,32)` | 10,000 / 0 | 10,000 | 17,443.0 µs | pass |
+
+The overload is not counted as a pass even though the server eventually served
+all requests: the client deadline failed 2,232 outstanding operations. DPU logs
+around that attempt contained task-pool-empty warnings and one stale-upstream
+drop, with no process-fatal error. The deliberately invalid 65,536 B message was
+not a transport measurement because the validator rejected it at configuration
+validation.
+
+## gRPC verification
+
+### Native runtime smoke
+
+The real native runtime smoke used two reactors and two connections. One round
+sent request sizes 1, 64, 1,024, 8,191, 8,192, 8,193, and 65,537 bytes in the
+benchmark protocol: 14 messages, 365,256 wire bytes, `post_max=65,536`.
+
+The first run printed PASS for data transfer but exited 1 because LSan found
+98,304 bytes in two per-port inbox allocations. Channel cleanup was corrected to
+free all per-port inboxes. The same smoke then passed with leak detection enabled,
+RX `inbox_full=0`, `accept_full=0`, and clean `POD_QUIESCED`. A final post-deploy
+repeat produced the same 14-message/365,256-byte PASS with two reactors and two
+connections, zero RX drops, clean quiesce, and exit 0.
+
+### Real gRPC HTTP/2 smoke
+
+An earlier paired run passed with server `calls=4` and client service
+`bench-dpumesh`, four unary calls, 1,048,576-byte payloads, two reactors, and
+4,194,304 total client payload bytes. Both processes reported zero RX drops, clean
+quiesce, and no leak.
+
+The final repeat first exposed a configuration mistake: the server was started
+without `DPUMESH_SERVICE=bench-dpumesh` and registered as `service_id=-1`. The
+client failed with `UNAVAILABLE ... DPUmesh peer closed`; the server later failed
+its accept deadline. The DPU logged an unroutable 82-byte segment for service 10.
+This attempt is a failed setup, not an implementation result.
+
+After setting the server identity to `bench-dpumesh` (`service_id=10`) and leaving
+the client as a pure client (`service_id=-1`), the identical test passed:
+
+```text
+server: calls=4 reactors=2, RX drops 0, POD_QUIESCED
+client: service=bench-dpumesh calls=4 payload_bytes=4194304 reactors=2,
+        RX drops 0, POD_QUIESCED
+```
+
+## Result
+
+The native API now provides the missing event-driven TX capacity transition on
+the existing CQ fd, and the gRPC adapter consumes it without a retry timer. Host
+state-machine tests, representative native hardware paths, the real native gRPC
+runtime, and paired gRPC HTTP/2 all pass. The 128-window/64-pipeline overload is
+a recorded capacity/deadline failure and is not evidence of correctness at that
+load. No conclusion about comparative throughput is drawn from these single-run
+checks.
+
+
+---
+
+# Session 9 — controlled writable A/B performance audit (2026-07-20)
+
+## Result
+
+The writable change has no detected throughput regression at the report's 1 KiB
+headline point, but it does introduce a measurable throughput/latency cost when
+writes remain continuously backpressured. At 64 B request / 1 MiB reply, the
+post-change mean throughput is **8.57% lower**, median throughput is **7.77%
+lower**, and median p50 is **9.27% higher**. This is not a free regression: the
+event-driven implementation removes the old echo server's zero-timeout retry
+scan. Under the same 1 MiB workload, mean server CPU falls **55.61%**, total host
+CPU falls **42.07%**, and host CPU per Krps improves **36.02%**. The design
+therefore trades about nine percent of saturated backpressure throughput for a
+large reduction in wasted host CPU.
+
+At the 1 KiB / 8 B / concurrency-32 headline point, post-change throughput is
++0.80% by mean and +0.75% by median; the 95% bootstrap interval for the mean
+change is [-1.04%, +2.66%]. This does not support a fast-path throughput
+regression. Headline host CPU per Krps is directionally 4.32% worse by mean
+(6.01% by median), but this CPU companion has only three runs per variant and a
+large DPU-ARM outlier, so it is a signal for follow-up rather than a stable CPU
+regression claim.
+
+## Controlled design and provenance
+
+A is the post-change working tree and B is the clean pre-change artifact built
+from HEAD `dd95a5b4a8e068593c37d690ff7b1bcf62ae6ca5`. Both variants were built
+before measurement and selected by immutable image tags and full artifact
+hashes. The DPU was deployed once, then only the four native client/server pods
+and their host-mounted library were replaced. Point measurements used the
+bracketed order **A1 → B1 → B2 → A2**, three repetitions per block, giving six
+observations per variant and workload.
+
+| artifact | pre-change SHA-256 | post-change SHA-256 |
+|---|---|---|
+| bench_dpumesh | `8bc39d1c0e3fde094f9ff8c46834159d5c03b3705dc45ef5c006ea168f0baa78` | `679f3bf78e175efbe52d8c8725e6ce6ab88c3a8406d1f38bc6d54fbab88c7b03` |
+| echo_dpumesh | `eeea09b2ca0b8fa1b1c12e6637c8d3177c9a48caf7615c93f9ccb60ad7e7839a` | `4d2f07c1a3f98a7137be54742dfb9a78cc3805433892051ca290ce069aee9a67` |
+| libdpumesh.so.2 | `f3f67e9471e4ff14d6f219fb36ab94390f5b00b164501a57c68f7a1702c1253f` | `f69a40c8dd5e8d8277771c0e7936a6fe5168b75302ef808af0d5c8aee5f53251` |
+
+The post-change images were
+`docker.io/bench/bench-dpumesh:writable-post-dd95a5b4` and
+`docker.io/bench/echo-dpumesh:writable-post-dd95a5b4`; their runtime image IDs
+were `sha256:59edbfef…2408` and `sha256:35e818a3…3a19`. The corresponding
+pre-change tags ended in `writable-pre-dd95a5b4`. Before each block, every
+target pod reported data-ready, its in-pod binary/library hashes matched the
+selected artifact, and `bench/bench.sh pin fair` was reapplied. The experiment
+ended with all four target deployments and the host-mounted library restored to
+the post-change hashes.
+
+The same DPU process, PID **1329320**, ran from 2026-07-20 07:49:29 through the
+whole experiment; its executable hash was
+`fa6950519a7b5a2084afa0cfe5903f4fa9916bc3ca0e6670fad8a15e822aebe7`.
+The actual process environment and command line were:
+
+~~~text
+DPUMESH_ARM_EGRESS_THREADS=4
+DPUMESH_INGEST_SHARDS=4
+DPUMESH_RINGS_PER_POD=2
+DPUMESH_INGEST_REAP=
+DPUMESH_PROXY=
+DPUMESH_PROXY_FRAME_SVC=
+DPUMESH_PROXY_L7_SVC=
+DPUMESH_SHARD_SHARED=
+DPUMESH_SHARD_HOST_EMIT=
+DPUMESH_DIAG=
+./dpumesh_dpu -p 03:00.0 -r 94:00.0 -l 40
+~~~
+
+The live DPU log confirmed K=2 rings, four share-nothing ingest shards with the
+dedicated reaper enabled by the multi-shard configuration, four SG-DMA egress
+threads, passthrough connection-pinned routing, no frame/L7 service, DPA N=8
+(auto-selected from 254 available EUs, capped at eight), and an event-driven main
+loop. Host placement followed the report's fair profile: primary client core 0,
+primary echo core 1, additional echo replicas cores 6 and 7. The governor was
+performance with cores 0–7 fixed at 2.5 GHz.
+
+## Workloads and quality gate
+
+All point runs were closed-loop with one client thread. The 64 B, 1 KiB, and
+8 KiB request cases used an 8 B reply, concurrency 32, 15 s duration, and 1,000
+warm-up completions. The writable stress case used a 64 B request, 1 MiB reply,
+concurrency 1, 15 s duration, and five warm-up completions. CPU probes used 30 s
+windows and three repetitions per variant. There were **48 completed point
+runs, 121,327,806 measured completions, fail=0, and reorder=0**.
+
+The report accepts a point only when fail=0, reorder=0, and
+`throughput × average RTT / concurrency` lies in [0.98, 1.02]. Applying that
+rule to the reported fields without discretionary exclusions gives:
+
+| workload | pre accepted | post accepted | use |
+|---|---:|---:|---|
+| 64 B / 8 B | 3/6 | 2/6 | insufficient post sample; aggregate shown as diagnostic |
+| 1 KiB / 8 B | 6/6 | 6/6 | retained |
+| 8 KiB / 8 B | 0/6 | 0/6 | exploratory only |
+| 64 B / 1 MiB | 6/6 | 6/6 | retained |
+
+The rejected 64 B ratios are narrowly below the cutoff (about 0.979), while all
+8 KiB ratios are 0.957–0.975 in both variants. The 8 KiB post variant also
+reproduced a third-backend low mode in both A blocks (0.115220 and 0.114910 Mrps,
+versus 0.178553–0.180562 for the same repetition position before the change), but
+because neither the ordinary nor low-mode 8 KiB points pass the report's
+Little's-law gate, this is recorded as a diagnostic anomaly, not headline
+regression evidence.
+
+Three initial 1 MiB commands returned `ERR no_pod(bench-dpumesh)` because that
+shell lacked Kubernetes network permission. Cluster inspection showed the pod
+was running; no RUN command reached the benchmark. These are setup failures, not
+performance samples, and the three successful A1 repetitions were relabeled
+`64B_1MiB_valid` below.
+
+## Point summary
+
+Bootstrap intervals use deterministic independent resampling of the six
+observations in each variant. The 64 B and 8 KiB rows summarize all observations
+but remain non-retained under the gate above.
+
+| request / reply | pre mean / median Mrps | post mean / median Mrps | post mean change | 95% bootstrap interval | median p50 pre → post |
+|---|---:|---:|---:|---:|---:|
+| 64 B / 8 B, diagnostic | 0.258267 / 0.259199 | 0.254424 / 0.258306 | -1.49% | [-4.42%, +1.12%] | 117.0 → 117.0 µs |
+| 1 KiB / 8 B, retained | 0.245636 / 0.245923 | 0.247607 / 0.247762 | +0.80% | [-1.04%, +2.66%] | 118.0 → 118.0 µs |
+| 8 KiB / 8 B, exploratory | 0.181858 / 0.180555 | 0.157881 / 0.178036 | -13.18% | [-25.67%, -0.95%] | 184.0 → 185.5 µs |
+| 64 B / 1 MiB, retained | 0.001572 / 0.001571 | 0.001437 / 0.001449 | **-8.57%** | **[-10.14%, -7.33%]** | **625.5 → 683.5 µs** |
+
+For the retained 1 MiB case, the benchmark's `gbps` field counts request bytes.
+Computed from reply bytes, mean response goodput falls from approximately 13.19
+to 12.06 Gb/s, the same 8.57% change. Median average RTT rises from 636.50 to
+690.16 µs (+8.43%).
+
+## CPU companions
+
+At the 1 KiB headline point, the median achieved rate is effectively unchanged
+(0.247504 → 0.247031 Mrps, -0.19%). Median host total rises from 44.7 to 47.0
+%core (+5.15%), and median host CPU per Krps rises from 0.183 to 0.194 (+6.01%).
+DPU ARM has high run variation, including a 201.6%core post-change observation;
+its median moves from 316.7 to 303.7%core. With three observations per side this
+does not establish a stable CPU change.
+
+At 1 MiB reply pressure, the trade-off is stable across all three routed
+backends. Mean throughput changes 0.001578 → 0.001429 Mrps (-9.44%) and mean p50
+626 → 695 µs (+11.02%) in these 30 s probes. Mean client CPU is nearly flat
+(22.8 → 23.3%core), while server CPU falls 74.57 → 33.10%core (-55.61%), host
+total falls 97.37 → 56.40%core (-42.07%), and host CPU per Krps improves 61.707
+→ 39.482 (-36.02%). This directly identifies the removed zero-timeout reply scan
+as the source of the old variant's extra throughput and extra CPU consumption.
+
+## Complete point data
+
+The following CSV contains every field returned by every completed point run,
+plus the derived Little's-law ratio and gate result.
+
+~~~csv
+variant,block,workload,rep,mrps,gbps,p50,p95,p99,avg,min,max,rcnt,fail,conc,threads,reqsz,repsz,durs,batch,reconns,reconn_us,grabs,rets,recyc,waits,pads,reorder,dist,little_law,accepted
+post,A1,64B,1,0.246393,0.1262,117.00,227.00,340.00,127.35,82.59,5102.05,3694648,0,32,1,64,8,15.000,1,0,0.00,1,1,115488,0,0,0,0:3695648,0.980567,yes
+post,A1,64B,2,0.258202,0.1322,116.00,133.00,232.00,121.40,87.47,4188.21,3871736,0,32,1,64,8,15.000,1,0,0.00,1,1,121022,0,0,0,1:3872736,0.979554,no
+post,A1,64B,3,0.262796,0.1346,117.00,118.00,175.00,119.23,85.65,4299.91,3940824,0,32,1,64,8,15.000,1,0,0.00,1,1,123181,0,0,0,10:3941824,0.979161,no
+post,A1,1024B,1,0.250732,2.0540,117.00,153.00,340.00,125.41,65.97,3318.90,3759761,0,32,1,1024,8,15.000,1,0,0.00,230,230,163112,0,229,0,0:3760761,0.982634,yes
+post,A1,1024B,2,0.247782,2.0298,118.00,172.00,290.00,126.79,80.14,4808.25,3714571,0,32,1,1024,8,15.000,1,0,0.00,25,25,160305,0,24,0,1:3715571,0.981759,yes
+post,A1,1024B,3,0.241915,1.9818,118.00,228.00,401.00,129.70,67.26,3821.29,3627662,0,32,1,1024,8,15.000,1,0,0.00,65,65,140778,0,64,0,10:3628662,0.980512,yes
+post,A1,8192B,1,0.181513,11.8956,185.00,196.00,248.00,169.22,60.55,2701.84,2721474,0,32,1,8192,8,15.000,1,0,0.00,160499,160499,228532,127675,388753,0,0:2722474,0.959863,no
+post,A1,8192B,2,0.177950,11.6621,186.00,197.00,249.00,173.86,60.51,4241.88,2667950,0,32,1,8192,8,15.000,1,0,0.00,154679,154679,226859,91727,380873,0,1:2668950,0.966825,no
+post,A1,8192B,3,0.115220,7.5510,246.00,364.00,397.00,265.79,113.72,4000.77,1726975,0,32,1,8192,8,15.000,1,0,0.00,100548,100548,146819,121465,245990,0,10:1727975,0.957010,no
+post,A1,64B_1MiB_valid,1,0.001452,0.0007,684.00,702.00,792.00,688.71,624.09,4161.48,21769,0,1,1,64,1048576,15.000,1,0,0.00,1,1,21774,0,0,0,0:21774,1.000007,yes
+post,A1,64B_1MiB_valid,2,0.001446,0.0007,682.00,722.00,854.00,691.60,623.55,5297.79,21679,0,1,1,64,1048576,15.000,1,0,0.00,1,1,21684,0,0,0,1:21684,1.000054,yes
+post,A1,64B_1MiB_valid,3,0.001457,0.0007,683.00,699.00,716.00,686.00,607.76,4965.22,21854,0,1,1,64,1048576,15.000,1,0,0.00,1,1,21859,0,0,0,10:21859,0.999502,yes
+pre,B1,64B,1,0.254573,0.1303,117.00,171.00,238.00,123.24,79.07,4242.84,3817240,0,32,1,64,8,15.000,1,0,0.00,1,1,119319,0,0,0,0:3818240,0.980424,yes
+pre,B1,64B,2,0.261267,0.1338,117.00,119.00,228.00,120.01,87.29,10362.53,3917816,0,32,1,64,8,15.000,1,0,0.00,1,1,122462,0,0,0,1:3918816,0.979833,no
+pre,B1,64B,3,0.258171,0.1322,116.00,122.00,233.00,121.47,86.78,13010.40,3871480,0,32,1,64,8,15.000,1,0,0.00,1,1,121014,0,0,0,3:3872480,0.980001,yes
+pre,B1,1024B,1,0.246916,2.0227,118.00,176.00,289.00,127.05,66.22,5288.47,3702413,0,32,1,1024,8,15.000,1,0,0.00,154,154,153000,0,153,0,0:3703413,0.980334,yes
+pre,B1,1024B,2,0.243839,1.9975,118.00,177.00,291.00,128.62,70.57,6877.79,3655101,0,32,1,1024,8,15.000,1,0,0.00,23,23,150611,0,22,0,1:3656101,0.980080,yes
+pre,B1,1024B,3,0.246925,2.0228,119.00,170.00,347.00,127.46,79.68,15012.25,3702625,0,32,1,1024,8,15.000,1,0,0.00,3,3,194502,0,2,0,3:3703625,0.983533,yes
+pre,B1,8192B,1,0.186740,12.2382,183.00,192.00,242.00,165.70,58.56,5036.50,2799748,0,32,1,8192,8,15.000,1,0,0.00,166796,166796,233433,118241,399926,0,0:2800748,0.966963,no
+pre,B1,8192B,2,0.180548,11.8324,184.00,194.00,246.00,172.53,62.04,4422.59,2705798,0,32,1,8192,8,15.000,1,0,0.00,155479,155479,231400,74646,386398,0,1:2706798,0.973436,no
+pre,B1,8192B,3,0.180562,11.8333,184.00,194.00,248.00,172.85,62.55,6469.91,2707184,0,32,1,8192,8,15.000,1,0,0.00,157055,157055,230167,56386,386326,0,3:2708184,0.975317,no
+pre,B1,64B_1MiB_valid,1,0.001587,0.0008,626.00,643.00,688.00,629.98,570.26,4286.05,23780,0,1,1,64,1048576,15.000,1,0,0.00,1,1,23785,0,0,0,0:23785,0.999778,yes
+pre,B1,64B_1MiB_valid,2,0.001551,0.0008,625.00,744.00,1085.00,644.58,575.39,4629.65,23242,0,1,1,64,1048576,15.000,1,0,0.00,1,1,23247,0,0,0,1:23247,0.999744,yes
+pre,B1,64B_1MiB_valid,3,0.001564,0.0008,625.00,739.00,858.00,639.43,578.49,5217.75,23427,0,1,1,64,1048576,15.000,1,0,0.00,1,1,23432,0,0,0,3:23432,1.000069,yes
+pre,B2,64B,1,0.253131,0.1296,117.00,171.00,286.00,123.92,84.80,4149.75,3795896,0,32,1,64,8,15.000,1,0,0.00,1,1,118652,0,0,0,0:3796896,0.980250,yes
+pre,B2,64B,2,0.262235,0.1343,117.00,119.00,176.00,119.56,86.62,10918.56,3932344,0,32,1,64,8,15.000,1,0,0.00,1,1,122916,0,0,0,1:3933344,0.979776,no
+pre,B2,64B,3,0.260227,0.1332,116.00,119.00,230.00,120.49,86.19,4501.10,3902232,0,32,1,64,8,15.000,1,0,0.00,1,1,121975,0,0,0,3:3903232,0.979836,no
+pre,B2,1024B,1,0.237530,1.9458,118.00,231.00,292.00,132.04,58.94,3187.87,3561909,0,32,1,1024,8,15.000,1,0,0.00,154,154,134559,0,153,0,0:3562909,0.980108,yes
+pre,B2,1024B,2,0.244930,2.0065,118.00,175.00,344.00,128.31,82.44,14388.57,3671912,0,32,1,1024,8,15.000,1,0,0.00,18,18,159038,0,17,0,1:3672912,0.982093,yes
+pre,B2,1024B,3,0.253673,2.0781,119.00,138.00,238.00,124.09,79.91,3971.77,3803978,0,32,1,1024,8,15.000,1,0,0.00,11,11,199783,0,10,0,3:3804978,0.983696,yes
+pre,B2,8192B,1,0.185000,12.1242,183.00,193.00,245.00,167.08,60.81,3890.20,2773654,0,32,1,8192,8,15.000,1,0,0.00,165113,165113,231447,123348,396081,0,0:2774654,0.965931,no
+pre,B2,8192B,2,0.179744,11.7797,184.00,198.00,295.00,172.92,62.58,4962.29,2694203,0,32,1,8192,8,15.000,1,0,0.00,157519,157519,227904,87422,384185,0,1:2695203,0.971292,no
+pre,B2,8192B,3,0.178553,11.7017,184.00,202.00,300.00,174.05,62.38,5444.06,2675938,0,32,1,8192,8,15.000,1,0,0.00,156963,156963,225768,70422,380613,0,3:2676938,0.971161,no
+pre,B2,64B_1MiB_valid,1,0.001588,0.0008,626.00,643.00,688.00,629.65,567.68,3712.60,23789,0,1,1,64,1048576,15.000,1,0,0.00,1,1,23794,0,0,0,0:23794,0.999884,yes
+pre,B2,64B_1MiB_valid,2,0.001574,0.0008,625.00,673.00,823.00,635.22,575.87,14358.40,23575,0,1,1,64,1048576,15.000,1,0,0.00,1,1,23580,0,0,0,1:23580,0.999836,yes
+pre,B2,64B_1MiB_valid,3,0.001568,0.0008,626.00,723.00,854.00,637.78,571.54,4006.99,23485,0,1,1,64,1048576,15.000,1,0,0.00,1,1,23490,0,0,0,3:23490,1.000039,yes
+post,A2,64B,1,0.239895,0.1228,117.00,229.00,345.00,130.86,85.54,165534.63,3596088,0,32,1,64,8,15.000,1,0,0.00,1,1,112408,0,0,0,0:3597088,0.981021,yes
+post,A2,64B,2,0.258411,0.1323,116.00,126.00,233.00,121.29,88.39,4688.74,3874872,0,32,1,64,8,15.000,1,0,0.00,1,1,121120,0,0,0,1:3875872,0.979458,no
+post,A2,64B,3,0.260844,0.1336,117.00,118.00,230.00,120.14,80.06,3813.36,3911160,0,32,1,64,8,15.000,1,0,0.00,1,1,122254,0,0,0,10:3912160,0.979306,no
+post,A2,1024B,1,0.250670,2.0535,118.00,155.00,288.00,125.43,67.99,14320.88,3758821,0,32,1,1024,8,15.000,1,0,0.00,218,218,162344,0,232,0,0:3759821,0.982548,yes
+post,A2,1024B,2,0.247743,2.0295,118.00,173.00,290.00,126.75,74.42,4714.99,3713504,0,32,1,1024,8,15.000,1,0,0.00,27,27,163911,0,26,0,1:3714504,0.981295,yes
+post,A2,1024B,3,0.246800,2.0218,118.00,176.00,292.00,127.12,69.81,4702.37,3700868,0,32,1,1024,8,15.000,1,0,0.00,159,159,147065,0,158,0,10:3701868,0.980413,yes
+post,A2,8192B,1,0.179574,11.7686,185.00,201.00,258.00,170.86,60.52,3770.67,2692313,0,32,1,8192,8,15.000,1,0,0.00,161983,161983,223583,128574,383617,0,0:2693313,0.958813,no
+post,A2,8192B,2,0.178121,11.6733,185.00,196.00,248.00,173.96,69.12,5678.07,2670042,0,32,1,8192,8,15.000,1,0,0.00,152616,152616,229110,84929,381341,0,1:2671042,0.968310,no
+post,A2,8192B,3,0.114910,7.5307,246.00,365.00,403.00,266.42,110.89,12947.45,1722449,0,32,1,8192,8,15.000,1,0,0.00,100425,100425,146397,121117,245158,0,10:1723449,0.956698,no
+post,A2,64B_1MiB_valid,1,0.001453,0.0007,682.00,710.00,735.00,688.15,584.50,9848.90,21786,0,1,1,64,1048576,15.000,1,0,0.00,1,1,21791,0,0,0,0:21791,0.999882,yes
+post,A2,64B_1MiB_valid,2,0.001383,0.0007,727.00,745.00,906.00,722.70,641.12,12609.43,20746,0,1,1,64,1048576,15.000,1,0,0.00,1,1,20751,0,0,0,1:20751,0.999494,yes
+post,A2,64B_1MiB_valid,3,0.001433,0.0007,684.00,702.00,730.00,697.82,623.47,166966.07,21485,0,1,1,64,1048576,15.000,1,0,0.00,1,1,21490,0,0,0,10:21490,0.999976,yes
+~~~
+
+## Complete CPU data
+
+Headline, 1 KiB / 8 B / concurrency 32 / one thread / 30 s:
+
+~~~csv
+variant,rep,transport,req,reply,conc,threads,mrps,gbps,p50,p99,host_client_pct,host_server_pct,host_total_pct,dpu_arm_pct,host_pct_per_krps
+pre,1,dpumesh,1024,8,32,1,0.247504,2.0276,118.00,290.00,22.4,26.4,48.8,304.6,0.197
+pre,2,dpumesh,1024,8,32,1,0.244370,2.0019,118.00,292.00,20.4,24.3,44.7,316.7,0.183
+pre,3,dpumesh,1024,8,32,1,0.252421,2.0678,119.00,287.00,19.8,24.4,44.2,322.5,0.175
+post,1,dpumesh,1024,8,32,1,0.247089,2.0242,118.00,291.00,22.6,26.7,49.3,303.7,0.200
+post,2,dpumesh,1024,8,32,1,0.247031,2.0237,118.00,287.00,20.7,25.1,45.8,318.4,0.185
+post,3,dpumesh,1024,8,32,1,0.242430,1.9860,118.00,345.00,21,26,47,201.6,0.194
+~~~
+
+Backpressure, 64 B / 1 MiB / concurrency 1 / one thread / 30 s:
+
+~~~csv
+variant,rep,transport,req,reply,conc,threads,mrps,gbps,p50,p99,host_client_pct,host_server_pct,host_total_pct,dpu_arm_pct,host_pct_per_krps
+post,1,dpumesh,64,1048576,1,1,0.001450,0.0007,684.00,736.00,22.8,33,55.8,349.5,38.483
+post,2,dpumesh,64,1048576,1,1,0.001393,0.0007,717.00,858.00,23.9,32.6,56.5,397.9,40.560
+post,3,dpumesh,64,1048576,1,1,0.001444,0.0007,684.00,862.00,23.2,33.7,56.9,253.1,39.404
+pre,1,dpumesh,64,1048576,1,1,0.001582,0.0008,627.00,734.00,22.4,74,96.4,349.5,60.936
+pre,2,dpumesh,64,1048576,1,1,0.001581,0.0008,625.00,772.00,22.3,73.7,96,393.4,60.721
+pre,3,dpumesh,64,1048576,1,1,0.001571,0.0008,626.00,790.00,23.7,76,99.7,410.7,63.463
+~~~
+
+## Decision
+
+There is **no demonstrated 1 KiB fast-path throughput regression**. There is a
+**real backpressure throughput/latency regression of roughly 8–9%**, accompanied
+by a much larger and intentional reduction in retry-scan CPU: about 42% less
+total host CPU and 56% less server CPU in the tested 1 MiB case. The event-driven
+writable design should therefore be kept if eliminating timer/busy-poll behavior
+is the primary requirement, but its wake/retry path needs optimization if the
+old saturated large-reply throughput is also a release gate. The rejected 8 KiB
+third-backend anomaly should be reproduced with a quality-gated measurement
+method before being treated as a separate defect.

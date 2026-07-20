@@ -81,6 +81,7 @@ typedef struct dpumesh_ctx dpumesh_ctx_t;
 /* Max CQs per channel (= max parallel RX consumers). Each costs a ready ring +
  * an eventfd, so the cap is what bounds the accept-path notify fan-out. */
 #define DMESH_MAX_CQ      64
+#define DMESH_TX_READY_WORDS (DMESH_PORT_SPACE / 64)
 
 /* ====== Completion queue (public handle dmesh_cq_t; layout internal) ======
  *
@@ -121,6 +122,12 @@ struct dmesh_cq {
                                      * because dmesh_create_qp may run off the CQ's thread;
                                      * touched only at conn create/destroy, never on the
                                      * data path. */
+    /* TX readiness is multi-producer: the PE can reclaim a QP while any owner thread
+     * can return a surplus block to the channel pool. A bit per port therefore replaces
+     * the RX list's SPSC assumption. At most one bit is live per automatically armed QP. */
+    atomic_uint_fast64_t tx_ready[DMESH_TX_READY_WORDS];
+    atomic_uint_fast32_t tx_ready_count;
+    uint32_t             tx_ready_cursor; /* CQ-consumer round-robin word cursor */
     /* PE-published READY LIST for this CQ's conns. The PE pushes a conn's port the
      * moment its inbox goes empty->non-empty; the CQ thread drains it via
      * dmesh_next_ready instead of scanning conns or holding a per-conn fd. SPSC: PE =
@@ -198,9 +205,10 @@ void dpumesh_rx_free(dpumesh_ctx_t *ctx, int slot);
  *   slot carve fits the send-unit FIFO; reserve therefore admits ring bytes only.
  *
  *   NULL + errno:
- *     EAGAIN  the SQ is full: the per-conn block window (maxb) is exhausted and no
- *             block is recyclable/available. The
- *             caller retries later (a TX_ACK frees space); st_grow_waits counts these.
+ *     EAGAIN  either the per-conn block window (maxb) is exhausted or the shared
+ *             physical block pool is empty. The reserve automatically arms one
+ *             CQ TX_READY retry hint; QP ACK reclaim resolves the first cause and
+ *             a shared block return resolves the second. st_grow_waits counts both.
  *     EINVAL  len == 0, len > block_size, or the port is not a live conn.
  *
  * dpumesh_tx_commit(port, buf, len): validate the exact reserved pointer and finalize
@@ -258,6 +266,8 @@ int dpumesh_conn_recv(dpumesh_ctx_t *ctx, uint16_t port, sw_descriptor_t *out);
  * WITHOUT scanning every conn or holding a per-conn fd. Drain each returned conn to
  * EAGAIN (edge-triggered re-arm). Single-consumer (this CQ's thread). */
 void *dpumesh_next_ready(struct dmesh_cq *cq);
+/* Pop one QP whose automatically armed dmesh_alloc(EAGAIN) became retryable. */
+void *dpumesh_next_tx_ready(struct dmesh_cq *cq);
 
 /* ====== Connection lifecycle — INTERNAL, shared by both surfaces ======
  *

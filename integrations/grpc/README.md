@@ -51,17 +51,24 @@ Each reactor polls:
 | fd | Purpose |
 |---|---|
 | command eventfd | cross-thread connect, bind, close, shutdown |
-| native CQ eventfd | inbound connection, data, FIN |
-| timerfd | retry a QP whose `dmesh_alloc` returned `EAGAIN` |
+| native CQ eventfd | inbound connection, data, FIN, and armed TX readiness |
 
 All QP calls run on the CQ owner. QP destruction is deferred until the complete
 native completion batch has been dispatched. Data arriving before Endpoint bind
 is copied and replayed in order, followed by any retained FIN/error.
 
-The retry timer defaults to 50 µs because ABI 2 still lacks native writable
-notification. It is a correctness fallback, not the desired final readiness
-model. A future native TX-ready completion can remove the timer without changing
-the Endpoint write state machine.
+When `dmesh_alloc` returns `EAGAIN`, the native API has already armed a one-shot
+notification for that QP. The Endpoint retains its exact slice index and byte
+offset, flushes a committed prefix when necessary, and parks the connection.
+`DMESH_WC_TX_READY` names only the connection to retry; the reactor invokes its
+writable path only if that connection still has a parked write. A stale hint is
+ignored, and a second `EAGAIN` automatically rearms the next hint.
+
+This keeps the reactor fully event-driven with two fds. It has no timerfd, periodic
+retry pass, busy-poll, or scan across connections. Native readiness is a retry hint
+rather than a reservation, so the Endpoint state machine remains responsible for
+advancing its cursor only after a post succeeds and for completing the callback
+exactly once after the final flush.
 
 ## Build and tests
 
@@ -77,7 +84,8 @@ ASAN_OPTIONS=detect_leaks=0 ctest --test-dir build/grpc --output-on-failure
 ```
 
 The test suite covers Endpoint read/write state, one-flush-per-logical-write
-batching, EAGAIN retry, exact callback completion, CQ ownership, deferred close,
+batching, completion-driven EAGAIN retry, no retry before TX-ready, exact callback
+completion, CQ ownership, deferred close,
 inbound QPs, native symbol linkage, and paired real gRPC HTTP/2 over fake native
 transport. The BlueField smoke executable exercises the same runtime against the
 real native API.
@@ -111,9 +119,9 @@ codec is not an HTTP/2 parser and must not be enabled for a gRPC service.
 ## Current boundary
 
 Implemented: client and server endpoint injection, unary chttp2, multi-reactor
-CQ ownership, native lifecycle barriers, default TX batching, focused QPS
-benchmark, fake and hardware smoke paths.
+CQ ownership, completion-driven native TX readiness, native lifecycle barriers,
+default TX batching, focused QPS benchmark, fake and hardware smoke paths.
 
-Not yet established: native writable events, streaming/cancellation/TLS hardware
-matrices, production resource-quota allocator policy, long-duration resource
-plateau evidence, and forced-death isolation for already-issued host-memory DMA.
+Not yet established: streaming/cancellation/TLS hardware matrices, production
+resource-quota allocator policy, long-duration resource plateau evidence, and
+forced-death isolation for already-issued host-memory DMA.

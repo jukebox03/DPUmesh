@@ -3,11 +3,9 @@
 #include <errno.h>
 #include <poll.h>
 #include <sys/eventfd.h>
-#include <sys/timerfd.h>
 #include <unistd.h>
 
 #include <atomic>
-#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <deque>
@@ -59,15 +57,6 @@ void DrainCounterFd(int fd) {
   uint64_t value;
   while (::read(fd, &value, sizeof(value)) == sizeof(value)) {
   }
-}
-
-timespec ToTimespec(std::chrono::microseconds delay) {
-  const auto seconds =
-      std::chrono::duration_cast<std::chrono::seconds>(delay);
-  const auto nanoseconds =
-      std::chrono::duration_cast<std::chrono::nanoseconds>(delay - seconds);
-  return timespec{static_cast<time_t>(seconds.count()),
-                  static_cast<long>(nanoseconds.count())};
 }
 
 }  // namespace
@@ -162,8 +151,7 @@ class DmeshReactor::Impl final
           "DPUmesh reactor requires ops, channel and executors");
     }
     if (post_max_ <= 0 || options_.cq_batch_size == 0 ||
-        options_.cq_batch_size > static_cast<size_t>(std::numeric_limits<int>::max()) ||
-        options_.tx_retry_delay <= std::chrono::microseconds::zero()) {
+        options_.cq_batch_size > static_cast<size_t>(std::numeric_limits<int>::max())) {
       return absl::InvalidArgumentError("invalid DPUmesh reactor options");
     }
 
@@ -186,16 +174,6 @@ class DmeshReactor::Impl final
       cq_ = nullptr;
       return status;
     }
-    retry_fd_ = ::timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC | TFD_NONBLOCK);
-    if (retry_fd_ < 0) {
-      const absl::Status status = ErrnoStatus("timerfd_create", errno);
-      ::close(command_fd_);
-      command_fd_ = -1;
-      ops_->DestroyCq(cq_);
-      cq_ = nullptr;
-      return status;
-    }
-
     accepting_.store(true, std::memory_order_release);
     try {
       owner_thread_ = std::thread([self = shared_from_this()] {
@@ -203,9 +181,7 @@ class DmeshReactor::Impl final
       });
     } catch (const std::system_error& error) {
       accepting_.store(false, std::memory_order_release);
-      ::close(retry_fd_);
       ::close(command_fd_);
-      retry_fd_ = -1;
       command_fd_ = -1;
       ops_->DestroyCq(cq_);
       cq_ = nullptr;
@@ -367,10 +343,6 @@ class DmeshReactor::Impl final
     WakeCommandFd();
     if (owner_thread_.joinable()) owner_thread_.join();
 
-    if (retry_fd_ >= 0) {
-      ::close(retry_fd_);
-      retry_fd_ = -1;
-    }
     if (command_fd_ >= 0) {
       ::close(command_fd_);
       command_fd_ = -1;
@@ -514,6 +486,21 @@ class DmeshReactor::Impl final
     const std::shared_ptr<Connection>& connection = found->second;
     if (completion->opcode == DMESH_WC_CONN_REQ) return;
 
+    if (completion->opcode == DMESH_WC_TX_READY) {
+      if (connection->closing || connection->qp == nullptr) return;
+      /* Native EAGAIN arms one one-shot completion. Notify only a write that is
+       * actually parked; duplicate/stale hints are harmless. OnWritable may retry
+       * synchronously and reinsert the connection if shared capacity was consumed
+       * by another QP first. */
+      if (pending_tx_.erase(connection.get()) == 0) return;
+      if (auto driver = connection->driver.lock()) {
+        driver->OnWritable();
+      } else {
+        pending_tx_.insert(connection.get());
+      }
+      return;
+    }
+
     if (completion->opcode == DMESH_WC_RECV) {
       if (connection->closing || connection->remote_eof) {
         ops_->Release(channel_, completion);
@@ -620,24 +607,6 @@ class DmeshReactor::Impl final
     return did_work;
   }
 
-  void RetryPendingWrites() {
-    if (pending_tx_.empty()) return;
-    std::vector<Connection*> pending(pending_tx_.begin(), pending_tx_.end());
-    pending_tx_.clear();
-    for (Connection* raw : pending) {
-      auto found = connections_.find(raw->qp);
-      if (found == connections_.end() || found->second.get() != raw ||
-          raw->closing || raw->qp == nullptr) {
-        continue;
-      }
-      if (auto driver = raw->driver.lock()) {
-        driver->OnWritable();
-      } else {
-        pending_tx_.insert(raw);
-      }
-    }
-  }
-
   void SweepDeferredCloses() {
     for (const auto& connection : deferred_closes_) {
       dmesh_qp_t* qp = connection->qp;
@@ -652,35 +621,6 @@ class DmeshReactor::Impl final
 
     for (dmesh_qp_t* qp : deferred_unowned_qps_) ops_->DestroyQp(qp);
     deferred_unowned_qps_.clear();
-  }
-
-  void ArmRetryTimer() {
-    if (pending_tx_.empty() && !retry_timer_armed_) return;
-    if (!pending_tx_.empty() && retry_timer_armed_) return;
-    itimerspec timer{};
-    if (!pending_tx_.empty()) timer.it_value = ToTimespec(options_.tx_retry_delay);
-    if (timer.it_value.tv_sec == 0 && timer.it_value.tv_nsec == 0 &&
-        !pending_tx_.empty()) {
-      timer.it_value.tv_nsec = 1;
-    }
-    if (::timerfd_settime(retry_fd_, 0, &timer, nullptr) != 0) {
-      const absl::Status status = ErrnoStatus("timerfd_settime", errno);
-      std::vector<std::shared_ptr<Connection>> connections;
-      for (Connection* raw : pending_tx_) {
-        auto found = connections_.find(raw->qp);
-        if (found != connections_.end() && found->second.get() == raw) {
-          connections.push_back(found->second);
-        }
-      }
-      pending_tx_.clear();
-      for (const auto& connection : connections) {
-        FailConnectionOwner(connection, status);
-      }
-      SweepDeferredCloses();
-      retry_timer_armed_ = false;
-      return;
-    }
-    retry_timer_armed_ = !pending_tx_.empty();
   }
 
   void DrainCommands() {
@@ -719,14 +659,13 @@ class DmeshReactor::Impl final
 
   void ThreadMain() {
     owner_id_ = std::this_thread::get_id();
-    pollfd descriptors[3] = {
+    pollfd descriptors[2] = {
         pollfd{command_fd_, POLLIN, 0},
         pollfd{cq_fd_, POLLIN, 0},
-        pollfd{retry_fd_, POLLIN, 0},
     };
 
     while (!stop_requested_) {
-      const int result = ::poll(descriptors, 3, -1);
+      const int result = ::poll(descriptors, 2, -1);
       if (result < 0) {
         if (errno == EINTR) continue;
         stop_requested_ = true;
@@ -735,19 +674,14 @@ class DmeshReactor::Impl final
 
       const bool command_ready = (descriptors[0].revents & POLLIN) != 0;
       const bool cq_ready = (descriptors[1].revents & POLLIN) != 0;
-      const bool retry_ready = (descriptors[2].revents & POLLIN) != 0;
       if (command_ready) DrainCounterFd(command_fd_);
       if (cq_ready) DrainCounterFd(cq_fd_);
-      if (retry_ready) DrainCounterFd(retry_fd_);
-      if (retry_ready) retry_timer_armed_ = false;
 
       DrainCommands();
       if (stop_requested_) break;
 
-      const bool cq_work = DrainCq();
-      if (retry_ready || cq_work) RetryPendingWrites();
+      DrainCq();
       SweepDeferredCloses();
-      ArmRetryTimer();
     }
 
     ShutdownOwner();
@@ -764,12 +698,10 @@ class DmeshReactor::Impl final
   dmesh_cq_t* cq_ = nullptr;
   int cq_fd_ = -1;
   int command_fd_ = -1;
-  int retry_fd_ = -1;
   std::thread owner_thread_;
   std::thread::id owner_id_;
   std::atomic<bool> accepting_{false};
   bool stop_requested_ = false;
-  bool retry_timer_armed_ = false;
 
   std::mutex shutdown_mu_;
   std::mutex command_mu_;
