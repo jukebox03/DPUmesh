@@ -53,6 +53,8 @@ typedef struct {
     reply_t  q[REPLY_Q];
     int      qh, qn;         /* FIFO head, depth */
     uint32_t done;           /* bytes of q[qh]'s frame already posted */
+    uint32_t last_seq;       /* request sequence most recently decoded */
+    int      have_seq;
     int      idx;            /* this conn's slot in g_live */
     int      dead;           /* give up: stop replying, and get destroyed by the sweep in
                               * the loop below (dmesh.h forbids destroying mid-batch). */
@@ -81,7 +83,7 @@ static void reply_pump(dmesh_qp_t *c) {
                 off = BENCH_HDR_LEN;
             }
             memset(b + off, REPLY_FILL, want - off);
-            if (dmesh_post_send(c, b, want, 0, 0) != 0) { gc->dead = 1; return; }
+            if (dmesh_post_send(c, b, want) != 0) { gc->dead = 1; return; }
             gc->done += want;
         }
         gc->done = 0;
@@ -98,6 +100,11 @@ static void on_request(uint32_t seq, uint32_t req_len, uint32_t reply_size, void
     dmesh_qp_t *c = (dmesh_qp_t *)user;
     greeter_conn_t *gc = (greeter_conn_t *)c->user_data;
     if (gc->dead) return;                              /* reframer emits several per feed */
+    if (gc->have_seq && (int32_t)(seq - gc->last_seq) <= 0)
+        fprintf(stderr, "[greeter] non-increasing request seq=%u after=%u\n",
+                seq, gc->last_seq);
+    gc->last_seq = seq;
+    gc->have_seq = 1;
     if (g_app_work_us > 0) {                           /* simulate app-work on the host core */
         double t0 = bench_now_sec();
         while ((bench_now_sec() - t0) * 1e6 < (double)g_app_work_us) { }
@@ -187,7 +194,7 @@ int main(void) {
                     dmesh_wc_release(g_s, &wc[i]);
                     break;
                 case DMESH_WC_RECV_FIN:
-                    reclaim(c);                      /* FIN is the conn's last completion */
+                    if (gc) gc->dead = 1;
                     break;
                 case DMESH_WC_TX_READY:
                     if (gc && !gc->dead) reply_pump(c); /* targeted one-shot retry */

@@ -27,6 +27,23 @@ seed(struct dpumesh_ctx *ctx, struct dmesh_port_slot *ports, uint8_t *dma)
 int
 main(void)
 {
+    struct dmesh_port_slot rx = {0};
+    sw_descriptor_t d = { .seq = 7, .body_buf_slot = 100, .body_len = 10 };
+    assert(rx_seq_accept(&rx, &d));
+    d.body_buf_slot = 110;
+    d.body_len = 5;
+    assert(rx_seq_accept(&rx, &d));
+    d.body_buf_slot = 100;
+    d.body_len = 10;
+    assert(!rx_seq_accept(&rx, &d));
+    d.seq = 8;
+    d.body_buf_slot = 200;
+    d.body_len = 0;
+    assert(rx_seq_accept(&rx, &d));
+    assert(!rx_seq_accept(&rx, &d));
+    d.seq = 7;
+    assert(!rx_seq_accept(&rx, &d));
+
     static uint8_t dma[2 * 65536];
     struct dpumesh_ctx *ctx = calloc(1, sizeof(*ctx));
     struct dmesh_port_slot *ports = calloc(18, sizeof(*ports));

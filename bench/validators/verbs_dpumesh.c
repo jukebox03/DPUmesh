@@ -95,7 +95,7 @@ static int post_request(dmesh_qp_t *c) {
         for (uint32_t j = 0; j < cs->size; j++) stage[j] = patb(m, j);
         memcpy(b, stage, cs->size);
     }
-    if (dmesh_post_send(c, b, cs->size, 0, 0) != 0 || dmesh_flush(c) != 0) {
+    if (dmesh_post_send(c, b, cs->size) != 0 || dmesh_flush(c) != 0) {
         D_cl_postfail++;
         return -1;
     }
@@ -138,7 +138,7 @@ static int sq_drain(dmesh_qp_t *c) {
         uint8_t *b = (uint8_t *)dmesh_alloc(c, m->len);
         if (!b) { if (errno != EAGAIN) { D_sv_allocfail++; ss->dead = 1; } else D_sv_eagain++; break; }
         memcpy(b, m->b, m->len);
-        if (dmesh_post_send(c, b, m->len, 0, 0) != 0) { D_sv_postfail++; ss->dead = 1; break; }
+        if (dmesh_post_send(c, b, m->len) != 0) { D_sv_postfail++; ss->dead = 1; break; }
         free(m->b);
         ss->head = (ss->head + 1) % ss->cap; ss->cnt--;
         D_sv_sent++; posted++;
@@ -157,7 +157,7 @@ static int srv_recv(dmesh_qp_t *c, const dmesh_wc_t *w) {
         uint8_t *b = (uint8_t *)dmesh_alloc(c, w->len);
         if (b) {
             memcpy(b, w->buf, w->len);
-            if (dmesh_post_send(c, b, w->len, 0, 0) != 0 || dmesh_flush(c) != 0) {
+            if (dmesh_post_send(c, b, w->len) != 0 || dmesh_flush(c) != 0) {
                 D_sv_postfail++;
                 ss->dead = 1;
                 return 0;

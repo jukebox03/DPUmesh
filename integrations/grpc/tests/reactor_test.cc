@@ -206,7 +206,7 @@ void TestRxCopiesBeforeReleasingCredit() {
       [&status](absl::Status value) { status = std::move(value); }, &buffer,
       EventEngine::Endpoint::ReadArgs()));
 
-  fixture.state->InjectReceive(fixture.qp, 41, "incoming bytes");
+  fixture.state->InjectReceive(fixture.qp, "incoming bytes");
   CHECK_TRUE(fixture.state->WaitForReleaseCount(1, 2s));
   CHECK_TRUE(fixture.callbacks.WaitForSize(1, 2s));
   CHECK_EQ(Flatten(buffer), std::string("incoming bytes"));
@@ -240,7 +240,7 @@ void TestPrebindDataAndFinAreReplayedInOrder() {
   CHECK_EQ(qps.size(), size_t{1});
   dmesh_qp_t* qp = qps.front();
 
-  state->InjectReceive(qp, 7, "early data");
+  state->InjectReceive(qp, "early data");
   state->InjectFin(qp);
   CHECK_TRUE(state->WaitForReleaseCount(1, 2s));
 
@@ -277,35 +277,21 @@ void TestPrebindDataAndFinAreReplayedInOrder() {
   runtime.reset();
 }
 
-void TestStreamChangeFailsClosedAfterCqBatch() {
+void TestBatchedRxPreservesByteOrder() {
   Fixture fixture;
   fixture.state->InjectReceiveBatch(
-      fixture.qp, {{9, "valid"}, {10, "wrong stream"}, {10, "tail"}});
+      fixture.qp, {"first", "-second", "-tail"});
 
   CHECK_TRUE(fixture.state->WaitForReleaseCount(3, 2s));
-  CHECK_TRUE(fixture.state->WaitForDestroyCount(1, 2s));
   CHECK_EQ(fixture.state->mid_batch_destroy_count(), size_t{0});
 
   SliceBuffer data_buffer;
   bool data_callback_called = false;
   CHECK_TRUE(fixture.endpoint->Read(
-      [&data_callback_called](absl::Status) {
-        data_callback_called = true;
-      },
+      [&data_callback_called](absl::Status) { data_callback_called = true; },
       &data_buffer, EventEngine::Endpoint::ReadArgs()));
   CHECK_TRUE(!data_callback_called);
-  CHECK_EQ(Flatten(data_buffer), std::string("valid"));
-
-  SliceBuffer error_buffer;
-  std::optional<absl::Status> error_status;
-  CHECK_TRUE(!fixture.endpoint->Read(
-      [&error_status](absl::Status value) {
-        error_status = std::move(value);
-      },
-      &error_buffer, EventEngine::Endpoint::ReadArgs()));
-  CHECK_TRUE(fixture.callbacks.WaitForSize(1, 2s));
-  fixture.callbacks.RunAll();
-  CHECK_EQ(error_status->code(), absl::StatusCode::kUnavailable);
+  CHECK_EQ(Flatten(data_buffer), std::string("first-second-tail"));
 }
 
 void TestRemoteFinFailsPendingReadThenCloseIsDeferred() {
@@ -417,7 +403,7 @@ void TestUnownedConnectionRequestIsReleasedAndRejectedPostBatch() {
   auto runtime = std::move(*created);
 
   dmesh_qp_t* server_qp =
-      state->InjectConnectionRequest("first request", 51);
+      state->InjectConnectionRequest("first request");
   CHECK_TRUE(server_qp != nullptr);
   CHECK_TRUE(state->WaitForReleaseCount(1, 2s));
   CHECK_TRUE(state->WaitForDestroyCount(1, 2s));
@@ -442,7 +428,7 @@ void TestInboundConnectionIsAcceptedAndBecomesEndpointTransport() {
                  .ok());
 
   dmesh_qp_t* server_qp =
-      state->InjectConnectionRequest("gRPC client preface", 77);
+      state->InjectConnectionRequest("gRPC client preface");
   CHECK_TRUE(server_qp != nullptr);
   CHECK_TRUE(callbacks.WaitForSize(1, 2s));
   callbacks.RunAll();
@@ -525,7 +511,7 @@ void TestGrpcServerBridgeInjectsAcceptedEndpoint() {
       [&accept_error](const absl::Status& status) { accept_error = status; });
   CHECK_TRUE(attachment.ok());
 
-  dmesh_qp_t* server_qp = state->InjectConnectionRequest("preface", 18);
+  dmesh_qp_t* server_qp = state->InjectConnectionRequest("preface");
   CHECK_TRUE(server_qp != nullptr);
   CHECK_TRUE(callbacks.WaitForSize(1, 2s));
   callbacks.RunAll();
@@ -763,8 +749,7 @@ int main() {
       {"RX copies before releasing credit", TestRxCopiesBeforeReleasingCredit},
       {"pre-bind data and FIN replay in order",
        TestPrebindDataAndFinAreReplayedInOrder},
-      {"stream change fails after CQ batch",
-       TestStreamChangeFailsClosedAfterCqBatch},
+      {"batched RX preserves byte order", TestBatchedRxPreservesByteOrder},
       {"remote FIN fails read and defers close",
        TestRemoteFinFailsPendingReadThenCloseIsDeferred},
       {"post failure closes endpoint", TestPostFailureFailsEndpointAndClosesQp},

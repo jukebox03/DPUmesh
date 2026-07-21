@@ -1,8 +1,7 @@
-/* Self-routing byte-stream/frame validator for DPUMESH_PROXY=frame.
+/* Self-routing byte-stream validator for the DPU L7 codec.
  *
- * One thread and CQ drive client and echo roles. Frames use
- * [u32 total_len][u8 service][payload], may span or share native posts, and are
- * verified byte-for-byte after DPU reframing and SG-DMA delivery.
+ * One thread and CQ drive client and echo roles. Length-prefixed RPC frames may
+ * span or share native posts and are verified byte-for-byte after DPU framing.
  * Command: RUN <count> <payload-size> [frames-per-write]. */
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -19,13 +18,14 @@
 #include <dpumesh/dmesh.h>
 #include "dmesh_core.h"   /* dmesh_qp_open + dmesh_resolve_name: this validator's numeric
                            * multi-svc knob addresses by int, below the name surface */
+#include "../apps/bench.h"
 
 /* Send a best-effort control reply; failures are ignored. */
 static void ctl_reply(int fd, const char *s, size_t n) { (void)!write(fd, s, n); }
 
 #define CTRL_PORT   9092
-#define FRAME_HDR   5u                 /* [u32 total_len][u8 svc] — matches the DPU mock */
-#define FRAME_MAX   (256u * 1024u)     /* == PX_FRAME_MAX in dpu_proxy.c (mock poison cap) */
+#define FRAME_HDR   BENCH_HDR_LEN
+#define FRAME_MAX   (128u * 1024u)
 #define MAX_FPW     64                 /* frames packed per burst cap */
 #define CQ_BATCH    16
 #define MAX_SERVERS 4096
@@ -56,11 +56,10 @@ static inline uint8_t pat(long iter, uint8_t svc, uint32_t j) {
     return (uint8_t)(iter * 131u + svc * 17u + j);
 }
 
-/* Write one frame into buf: [u32 total][u8 svc][payload]. Returns total bytes. */
+/* Write one request frame into buf. Returns total bytes. */
 static uint32_t build_frame(uint8_t *buf, long iter, uint8_t svc, uint32_t size) {
     uint32_t total = FRAME_HDR + size;
-    memcpy(buf, &total, sizeof(total));        /* native LE, as the mock reads it */
-    buf[4] = svc;
+    bench_put_hdr(buf, BENCH_REQ_MAGIC, (uint32_t)iter, size, 0);
     for (uint32_t j = 0; j < size; j++)
         buf[FRAME_HDR + j] = pat(iter, svc, j);
     return total;
@@ -71,7 +70,7 @@ static uint32_t build_frame(uint8_t *buf, long iter, uint8_t svc, uint32_t size)
  * if dmesh_alloc reports EAGAIN (the conn's SQ is at its in-flight ceiling): the
  * RX buffer is transport memory that must be released promptly, so the bytes are
  * parked here in arrival order and a later pump ships them. Echoing is verbatim
- * bytes, never frames — the parser owns framing, so re-chunking is legal here. */
+ * bytes; the DPU codec owns framing, so re-chunking is legal here. */
 typedef struct { uint8_t *q; size_t cap, len; int dead; } sstate_t;
 
 /* Everything pump() touches: the echo side's conns plus the client's reassembly
@@ -110,7 +109,7 @@ static int sq_drain(dmesh_qp_t *c) {
         uint8_t *b = (uint8_t *)dmesh_alloc(c, n);
         if (!b) { if (errno != EAGAIN) ss->dead = 1; break; }
         memcpy(b, ss->q, n);
-        if (dmesh_post_send(c, b, n, 0, 0) != 0) { ss->dead = 1; break; }
+        if (dmesh_post_send(c, b, n) != 0) { ss->dead = 1; break; }
         ss->len -= n; memmove(ss->q, ss->q + n, ss->len);
         g_served += n; posted++;
     }
@@ -127,7 +126,7 @@ static void srv_recv(dmesh_qp_t *c, const dmesh_wc_t *w) {
         uint8_t *b = (uint8_t *)dmesh_alloc(c, w->len);
         if (b) {
             memcpy(b, w->buf, w->len);
-            if (dmesh_post_send(c, b, w->len, 0, 0) != 0 ||
+            if (dmesh_post_send(c, b, w->len) != 0 ||
                 dmesh_flush(c) != 0) ss->dead = 1;
             else g_served += w->len;
             return;
@@ -201,7 +200,7 @@ static int pump(rstate_t *st) {
 }
 
 /* Ship `burst` bytes as one byte stream. One dmesh_alloc reserves at most one
- * block, so a wider burst goes out as several posts — the mock reframes from the
+ * block, so a wider burst goes out as several posts — the codec reframes from the
  * length prefix regardless. dmesh_alloc NEVER blocks: on EAGAIN the conn's SQ is
  * at its in-flight ceiling, so keep the loop alive (the echo side shares this
  * thread and its TX_ACKs are what free the ring) and retry the same chunk.
@@ -221,7 +220,7 @@ static int send_burst(rstate_t *st, dmesh_qp_t *c, const uint8_t *sbuf, size_t b
             continue;
         }
         memcpy(b, sbuf + off, n);
-        if (dmesh_post_send(c, b, n, 0, 0) != 0) return -1;
+        if (dmesh_post_send(c, b, n) != 0) return -1;
         off += n;
     }
     return dmesh_flush(c);
@@ -251,7 +250,7 @@ static void run_stream(int conn_fd, long N, uint32_t size, int fpw) {
     dmesh_qp_t *c = NULL;
     cli_reconnect(&st, &c, g_service);
 
-    /* Early-abort: a run that cannot round-trip (wrong DPUMESH_PROXY, DPU down) burns
+    /* Early-abort: a run that cannot round-trip burns
      * the 5 s reply timeout every iteration — N×5 s would wedge for hours. Bail after a
      * burst of consecutive failures so the operator gets fast feedback. */
     const long MAX_CONSEC_FAIL = 40;
@@ -261,7 +260,8 @@ static void run_stream(int conn_fd, long N, uint32_t size, int fpw) {
     for (long i = 0; i < N; i++) {
         if (consec_fail >= MAX_CONSEC_FAIL) {
             fprintf(stderr, "[stream] ABORT after %ld consecutive failures "
-                    "(is the DPU up with DPUMESH_PROXY=frame?)\n", consec_fail);
+                    "(is service %d enabled in DPUMESH_PROXY_L7_SVC?)\n",
+                    consec_fail, g_service);
             break;
         }
         uint8_t svc = (uint8_t)g_service;

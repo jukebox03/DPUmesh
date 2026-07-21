@@ -69,7 +69,7 @@ A performance point is retained only if:
 - DPA EUs are hardware execution resources and are not interchangeable with ARM
   process CPU percentages.
 - A single repetition is directional evidence, not a stable median.
-- ABI-2 native batching is mandatory; incompatible batching ablations are not
+- ABI-3 native batching is mandatory; incompatible batching ablations are not
   regenerated.
 - L4 Envoy `tcp_proxy` is a valid transport baseline but not a measurement of
   HTTP/2 routing, retries, telemetry, or policy cost.
@@ -77,5 +77,5 @@ A performance point is retained only if:
   not the upstream distributed `qps_worker` scenario controller.
 
 The frozen ABI-1 campaign is in `bench/report/REPORT.md`; the chronological log,
-including the controlled ABI-2 automatic-batching A/B, is in `bench/RESULT.md`.
+including controlled batching and transport experiments, is in `bench/RESULT.md`.
 Deployment details are in `bench/report/DEPLOY.md`.

@@ -10,7 +10,7 @@ COPY build/bin/bench_sock /usr/local/bin/bench_sock
 COPY build/bin/echo_sock /usr/local/bin/echo_sock
 COPY build/lib/libdmesh_preload.so /usr/local/lib/libdmesh_preload.so
 COPY doca-libs/ /usr/local/lib/
-COPY build/lib/libdpumesh.so.2 /usr/local/lib/
+COPY build/lib/libdpumesh.so.3 /usr/local/lib/
 COPY bench/k8s/registry /etc/dpumesh/registry
 
 RUN ldconfig

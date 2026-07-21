@@ -208,7 +208,7 @@ void *dpumesh_next_tx_ready(struct dmesh_cq *cq);
 
 /* Pop the next NEW inbound connection off the channel-wide accept queue and BIND it
  * to `cq`: allocate a SERVER conn that learns its peer (pod,port) and holds the first
- * message body (c->rx_slot). NULL+EAGAIN if none pending; NULL+ENOMEM on alloc failure
+ * first fragment (c->rx_slot). NULL+EAGAIN if none pending; NULL+ENOMEM on alloc failure
  * (the message is dropped, its RX credit reclaimed). The native API folds this into
  * dmesh_poll_cq as DMESH_WC_CONN_REQ; the shim drives it from its dispatcher thread.
  * The queue is SPMC, so several CQs may call this concurrently — each conn goes to

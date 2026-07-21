@@ -1,30 +1,11 @@
 #ifndef DPU_PROXY_H
 #define DPU_PROXY_H
 
-/* DPU L4 engine beneath the L7 routing hook.
- *
- * Ordered per-connection windows become {offset,length,destination} segments and
- * per-destination SG-DMA units. TX custody ends after egress DMA completion.
- * Requests use passthrough, frame, or service-selected L7 parsing; replies use
- * passthrough with conntrack destinations. DPUMESH_PROXY,
- * DPUMESH_PROXY_FRAME_SVC, and DPUMESH_PROXY_L7_SVC select request parsing. */
+/* ARM byte-stream proxy with optional service-selected L7 framing. */
 
 #include <stdint.h>
 
 struct objects;
-
-/* ---- proxy return format (design/CORE.md §5 — the deliverable) ---- */
-
-struct dmesh_route_seg {
-    uint32_t off;    /* start within this call's input window (buf) */
-    uint32_t len;    /* segment length (> 0; a 0-length wire msg is the FIN) */
-    int32_t  dst;    /* destination backend pod (LB already done by L7), or
-                      * DMESH_SEG_DST_DEFER = let the L4 default route decide
-                      * (conn stickiness, else RR over the live backend set). */
-};
-
-/* Defer to the L4 route for the initial backend pin. */
-#define DMESH_SEG_DST_DEFER (-2)
 
 /* Return a ready pin, or -1 when the stream is terminal. */
 static inline int32_t dmesh_l4_pinned_backend(int32_t pinned_backend,
@@ -32,38 +13,19 @@ static inline int32_t dmesh_l4_pinned_backend(int32_t pinned_backend,
     return pinned_backend >= 0 && backend_ready ? pinned_backend : -1;
 }
 
-/* The proxy's view of one connection (one direction of one stream). The L4
- * engine owns the struct; the proxy reads it and may keep state in `user`. */
+/* The proxy's view of one direction of a connection. */
 typedef struct dmesh_proxy_conn {
-    int32_t  src_pod;      /* stream identity: sender pod ... */
-    uint16_t src_port;     /* ... and sender port (client port, or uP) */
-    int      is_reply;     /* 1 = upstream reply stream: dst is predetermined —
-                            * peer_* below is the conntrack answer; the proxy
-                            * confirms (returns peer_pod) rather than routing */
-    int16_t  dst_service;  /* the service the client addressed (request streams) */
-    int32_t  peer_pod;     /* reply streams: table-resolved destination (client) */
-    uint16_t peer_port;    /* reply streams: the client's real conn port */
-    void    *user;         /* proxy-owned per-conn state (L4 never touches it) */
+    int32_t  src_pod;
+    uint16_t src_port;
+    int      is_reply;
+    int16_t  dst_service;
+    int32_t  peer_pod;
+    uint16_t peer_port;
 } dmesh_proxy_conn;
-
-/* Route an ordered contiguous input window. Segments must be ascending,
- * non-overlapping, and within [0,*consumed). Return a segment count or a
- * negative protocol error. Zero consumption requests a larger contiguous view. */
-typedef int (*dmesh_proxy_route_fn)(struct objects *objs, dmesh_proxy_conn *conn,
-                                    const uint8_t *buf, uint32_t avail,
-                                    struct dmesh_route_seg *segs, int max,
-                                    uint32_t *consumed);
-
-/* Max segments the engine requests per proxy_route call. */
-#define DMESH_PROXY_SEG_MAX 32
 
 /* ---- engine lifecycle / hooks (called from dpu_worker.c) ---- */
 
-/* Create the engine — ALWAYS, whatever DPUMESH_PROXY says: it is the sole DPU→host
- * reverse path, not an option. The env only picks the deploy-default REQUEST parser
- * (unset/passthru/1 → passthru, frame → frame-all). objs->proxy is non-NULL after a
- * DOCA_SUCCESS return; the caller aborts the worker on failure. Requires objs->dev +
- * objs->pe live. */
+/* Create the engine. It is the sole DPU→host reverse path. */
 int px_init(struct objects *objs);
 
 /* Ingest one COMP_ENTRY_FORWARD (data or FIN, request or reply).
@@ -72,7 +34,7 @@ int px_init(struct objects *objs);
  * -1 = dropped (sender TX_ACKed). */
 int px_ingest_forward(struct objects *objs, int shard, void *entry /* dpu_comp_entry_t* */);
 
-/* Re-parse the conns that px_ship_seg backpressured (a pool was momentarily empty, so
+/* Re-parse the conns that egress allocation backpressured (a pool was momentarily empty, so
  * their bytes were left in the window rather than dropped). Call once per drain pass on
  * the thread owning `shard`, AFTER the egress has had a chance to free units. Returns
  * non-zero only if a conn made real progress, so an unrelieved pool lets the caller idle

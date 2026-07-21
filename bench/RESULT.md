@@ -6904,3 +6904,104 @@ cannot be proved from only three runs; it remains a watch item rather than a
 release-blocking regression. The more important observed risk is repeated
 client lifecycle/resource reclaim, which is a correctness/stability follow-up
 and is not hidden inside the accepted throughput result.
+
+---
+
+# Session 14 — ABI 3 native byte stream and DPU L7 frame routing
+
+Date: 2026-07-21. Source base: `feab255` plus the Session 14 working-tree
+implementation. Host: `rapids4`, Linux 5.15.0-185. The deployed BlueField build
+recompiled all 15 DPU C objects.
+
+## Implementation under test
+
+ABI 3 exposes one full-duplex byte stream per QP. The public completion contains
+only `qp`, `opcode`, `buf`, `len`, and the opaque `_rx_token`; backend/upstream
+stream ids are not part of the native, LD_PRELOAD, or gRPC contracts.
+
+Services 11 and 16 used the DPU L7 path. Its test codec recognizes the benchmark
+header `[magic, sequence, payload_length, auxiliary]`, waits for a complete frame
+of at most 128 KiB, and chooses one live backend for each request frame. Replies
+from all upstreams are assigned one downstream-QP sequence and serialized as
+complete frames. Frame bodies remain SG views over DPU staging, and each L7 frame
+is submitted as one DMA task. This avoids another ARM body copy but does not claim
+end-to-end zero-copy: DPA first copies host TX bytes into DPU staging.
+
+DPA-to-ARM forward completions and ARM-to-host reverse notifications are filtered
+by per-QP sequence. A replay cannot append an old staging extent twice or return
+one host landing credit twice. Ingest sequence state is committed only after
+transient allocation succeeds, preserving retry semantics under backpressure.
+
+## Environment
+
+```text
+DPUMESH_PROXY_L7_SVC=11,16
+DPUMESH_INGEST_SHARDS=4
+DPUMESH_ARM_EGRESS_THREADS=4
+DPUMESH_RINGS_PER_POD=2
+DPUMESH_LOG_LEVEL=40
+DPA execution units=8 (auto-detected, capped)
+CPU pinning=fair
+```
+
+Service 11 had three live backends. The native benchmark correlated replies by
+application sequence because cross-backend response order is intentionally not
+request order. All accepted samples had an essentially even three-way backend
+distribution.
+
+## Build and correctness results
+
+| Check | Result |
+|---|---:|
+| `make -j4 all` and host contract suite | 7/7 PASS |
+| gRPC Debug/ASan build and CTest | 4/4 PASS |
+| gRPC Release QPS benchmark build | PASS |
+| BlueField ARM/DPA build and full deployment | PASS |
+| Native loopback, 2,000 × 1 KiB | 2,000/2,000, 0 fail |
+| Verbs-shaped, 2,000 × 1 KiB, window 32, pipeline 4 | 2,000/2,000, 0 fail |
+| L7 stream, 2,000 × 1 KiB, 8 frames/write | 2,000/2,000, 0 fail |
+| L7 stream, 1,000 × 64 KiB, 4 frames/write | 1,000/1,000, 0 fail |
+| LD_PRELOAD, 2,000 × 1 KiB, 8 connections | 2,000/2,000, 0 fail |
+
+The final DPU log contained no proxy sequence-gap, poison, DMA, framing, or drop
+error. None of the three L7 backends reported a non-increasing application
+sequence. The startup-only DOCA `ctx DPA ops are empty` warnings remained and did
+not coincide with a data-path failure.
+
+## Native L7 performance
+
+Each row is the per-metric median of independent 10-second runs after warmup.
+QPS range shows run-to-run throughput spread. Goodput counts request payload bytes
+only, matching the benchmark's existing `gbps` field. Every repetition had
+`fail=0`.
+
+| Request / reply | Concurrency | Repetitions | Median kRPS | QPS range kRPS | Median Gb/s | p50 µs | p99 µs |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 KiB / 1 KiB | 1 | 3 | 5.177 | 5.156–5.367 | 0.0424 | 226 | 513 |
+| 1 KiB / 1 KiB | 32 | 5 | 172.890 | 171.069–177.524 | 1.4163 | 177 | 355 |
+| 16 KiB / 16 KiB | 16 | 5 | 73.559 | 72.968–73.854 | 9.6416 | 188 | 261 |
+| 64 KiB / 64 KiB | 4 | 3 | 10.925 | 10.837–10.967 | 5.7280 | 318 | 711 |
+
+The 16 KiB point is the strongest retained throughput result for this L7
+configuration. The 64 KiB point is lower despite larger payloads, so the current
+path does not scale monotonically with frame size. The concurrency-1 latency also
+varied materially across its three runs; its median is retained without treating
+one low sample as the headline.
+
+## gRPC L4 hardware receipt
+
+The Release gRPC v1.80 benchmark ran through service 13, which was deliberately
+left in L4 passthrough. This is one functional receipt, not a stable performance
+comparison:
+
+```text
+unary, 1 KiB request / 1 KiB response, concurrency 16
+warmup 1 s, measurement 5.001 s, one channel, one reactor
+101,199 attempted / 101,199 succeeded / 0 failed
+20,236.592 QPS, p50 580.057 us, p99 857.752 us
+client CPU 0.729 cores
+```
+
+The client completed `POD_QUIESCED` with zero native RX drops. This receipt proves
+that the ABI 3 gRPC adapter exchanges real HTTP/2 traffic over the current L4
+transport; it does not evaluate the simple L7 benchmark codec as an HTTP/2 proxy.

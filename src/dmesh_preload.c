@@ -122,8 +122,6 @@ typedef struct pfd {
     int  peer_closed;
     int  io_error;              /* sticky transport/RX protocol error */
     int  tx_blocked;            /* efd send buffer filled: kernel reports !POLLOUT */
-    int  stream_valid;
-    uint16_t stream;            /* one L4 passthrough stream per POSIX connection */
     int  refs;                 /* app fd aliases (dup); private efd NOT counted */
     int  active_ops;           /* wrappers that acquired this entry from g_fds */
     int  retired;              /* dispatcher closed resources; last op frees it */
@@ -330,17 +328,6 @@ static int pfd_queue_rx(pfd_t *e, const dmesh_wc_t *wc) {
         free(rx);
         return -1;
     }
-    if (!e->stream_valid) {
-        e->stream = wc->stream;
-        e->stream_valid = 1;
-    } else if (e->stream != wc->stream) {
-        e->io_error = EPROTO;
-        efd_signal(e);
-        pthread_mutex_unlock(&e->mu);
-        dmesh_wc_release(g_ch, &rx->wc);
-        free(rx);
-        return -1;
-    }
     if (e->rx_tail) e->rx_tail->next = rx; else e->rx_head = rx;
     e->rx_tail = rx;
     efd_signal(e);
@@ -349,16 +336,8 @@ static int pfd_queue_rx(pfd_t *e, const dmesh_wc_t *wc) {
 }
 
 static int pfd_rx_fin(pfd_t *e, const dmesh_wc_t *wc) {
+    (void)wc;
     pthread_mutex_lock(&e->mu);
-    if (!e->stream_valid) {
-        e->stream = wc->stream;
-        e->stream_valid = 1;
-    } else if (e->stream != wc->stream) {
-        e->io_error = EPROTO;
-        efd_signal(e);
-        pthread_mutex_unlock(&e->mu);
-        return -1;
-    }
     e->peer_closed = 1;
     efd_signal(e);                              /* EOF stays poll-readable */
     pthread_mutex_unlock(&e->mu);
@@ -724,7 +703,7 @@ static ssize_t stream_write_locked(pfd_t *e, const void *buf, size_t len) {
          * that cancellation in the kernel readiness fd as well. */
         fd_unblock_tx_locked(e);
         memcpy(dst, p + done, chunk);
-        if (dmesh_post_send(c, dst, chunk, 0, 0) != 0) {
+        if (dmesh_post_send(c, dst, chunk) != 0) {
             e->io_error = errno ? errno : EIO;
             return done ? (ssize_t)done : -1;
         }

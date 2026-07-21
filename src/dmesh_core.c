@@ -135,6 +135,9 @@ struct dmesh_port_slot {
     atomic_uint_fast32_t in_tail;           /* inbound SPSC producer (PE) */
     atomic_uint_fast64_t tx_f;              /* PE-thread logical cursor (ACK reclaim) */
     atomic_uint_fast16_t su_tail;           /* send-unit FIFO tail (PE writes/release, owner reads) */
+    uint16_t         rx_seq;                 /* current reverse-delivery unit */
+    uint32_t         rx_next_pos;            /* next fragment position within that unit */
+    uint8_t          rx_seq_valid;
 
     /* ---- shared ARM flag on its own line (both threads write it) ---- */
     /* Ready-list ownership flag. The PE arms after a push; the consumer disarms
@@ -631,6 +634,32 @@ static inline void arm_ready_after_push(struct dmesh_port_slot *psl, uint16_t dp
     }
 }
 
+/* Reverse notifications are ordered per destination QP. One delivery unit may span
+ * several adjacent landing fragments with the same sequence. */
+static inline int rx_seq_accept(struct dmesh_port_slot *psl,
+                                const sw_descriptor_t *desc) {
+    if (!psl->rx_seq_valid) {
+        psl->rx_seq = desc->seq;
+        psl->rx_next_pos = (uint32_t)desc->body_buf_slot + desc->body_len;
+        psl->rx_seq_valid = 1;
+        return 1;
+    }
+    uint16_t delta = (uint16_t)(desc->seq - psl->rx_seq);
+    if (delta == 0) {
+        if (desc->body_len == 0)
+            return 0;
+        if ((uint32_t)desc->body_buf_slot != psl->rx_next_pos)
+            return 0;
+        psl->rx_next_pos += desc->body_len;
+        return 1;
+    }
+    if (delta >= 0x8000u)
+        return 0;
+    psl->rx_seq = desc->seq;
+    psl->rx_next_pos = (uint32_t)desc->body_buf_slot + desc->body_len;
+    return 1;
+}
+
 static void rx_deliver_desc(dpumesh_ctx_t *ctx, const sw_descriptor_t *desc, int slot)
 {
     uint16_t dport = desc->dst_port;
@@ -643,6 +672,8 @@ static void rx_deliver_desc(dpumesh_ctx_t *ctx, const sw_descriptor_t *desc, int
      * The ready list is only for ACCEPTED conns (a pending conn is drained by
      * dmesh_accept, not next_ready). */
     if (role != DMESH_ROLE_FREE) {
+        if (!rx_seq_accept(psl, desc))
+            return;                         /* replay: the first notification owns the credit */
         int r = inbox_push(psl, desc);
         if (r == 0) {
             /* inbox full (app draining too slowly) → drop + reclaim the landing. */
@@ -668,6 +699,8 @@ static void rx_deliver_desc(dpumesh_ctx_t *ctx, const sw_descriptor_t *desc, int
         if (__atomic_load_n(&psl->role, __ATOMIC_ACQUIRE) != DMESH_ROLE_FREE) {
             /* raced live between the initial load and the lock → coalesce to inbox */
             pthread_mutex_unlock(&ctx->port_lock);
+            if (!rx_seq_accept(psl, desc))
+                return;
             int r = inbox_push(psl, desc);
             if (r == 0) { atomic_fetch_add_explicit(&ctx->st_rx_inbox_drops, 1, memory_order_relaxed);
                           rx_credit_return(ctx, slot); }
@@ -696,6 +729,9 @@ static void rx_deliver_desc(dpumesh_ctx_t *ctx, const sw_descriptor_t *desc, int
         atomic_store_explicit(&psl->in_tail, 0, memory_order_relaxed);
         psl->peer_pod  = desc->src_pod;
         psl->peer_port = desc->src_port;
+        psl->rx_seq = desc->seq;
+        psl->rx_next_pos = (uint32_t)desc->body_buf_slot + desc->body_len;
+        psl->rx_seq_valid = 1;
         psl->user      = NULL;
         psl->cq        = NULL;   /* no owner until a CQ accepts it (dmesh_accept binds) */
         port_reset_tx(psl);   /* fresh block-chain cursors; TX blocks grabbed LAZILY on first reply */
@@ -1953,6 +1989,9 @@ uint16_t dpumesh_alloc_port(dpumesh_ctx_t *ctx, int role, void *user, struct dme
             atomic_store_explicit(&psl->in_tail, 0, memory_order_relaxed);
             psl->peer_pod   = DMESH_POD_BLANK;
             psl->peer_port  = 0;
+            psl->rx_seq     = 0;
+            psl->rx_next_pos = 0;
+            psl->rx_seq_valid = 0;
             psl->user       = user;     /* visible before role (publish ordering below) */
             psl->cq         = cq;       /* ditto: the PE arms this CQ's list, not the ctx's */
             port_reset_tx(psl);         /* fresh block-chain cursors; first block grabbed LAZILY on first write */

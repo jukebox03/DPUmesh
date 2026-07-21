@@ -44,15 +44,12 @@ class FakeDmeshState final {
   bool WaitForReleaseCount(size_t count, std::chrono::milliseconds timeout);
   bool WaitForDestroyCount(size_t count, std::chrono::milliseconds timeout);
 
-  void InjectReceive(dmesh_qp_t* qp, uint16_t stream,
-                     const std::string& bytes);
-  void InjectReceiveBatch(
-      dmesh_qp_t* qp,
-      const std::vector<std::pair<uint16_t, std::string>>& receives);
+  void InjectReceive(dmesh_qp_t* qp, const std::string& bytes);
+  void InjectReceiveBatch(dmesh_qp_t* qp,
+                          const std::vector<std::string>& receives);
   void InjectFin(dmesh_qp_t* qp);
   void InjectTxReady(dmesh_qp_t* qp);
-  dmesh_qp_t* InjectConnectionRequest(const std::string& first_bytes,
-                                      uint16_t stream);
+  dmesh_qp_t* InjectConnectionRequest(const std::string& first_bytes);
 
   std::vector<std::vector<uint8_t>> Posts(dmesh_qp_t* qp) const;
   size_t alloc_calls(dmesh_qp_t* qp) const;

@@ -20,11 +20,10 @@
 #define WORKER_STACK_BYTES (256 * 1024)
 #define CQ_BATCH           64
 #define STOP_GRACE_SEC     15         /* watchdog kill margin past the run duration */
+#define DRAIN_GRACE_SEC    1.0        /* finish replies already issued at measurement end */
 #define REQ_FILL           42
 #define BENCH_MAX_BACKENDS 32         /* pod_id space we tally replies over (>= MAX_PODS) */
-#define MAX_STREAMS        32         /* inbound streams per conn == backends of the service */
-#define INFLIGHT_RING      1024       /* seq-indexed outstanding requests; sized for
-                                       * out-of-order completion spans */
+#define INFLIGHT_RING      1024       /* seq-indexed outstanding requests */
 
 static dmesh_channel_t *g_s           = NULL;   /* shared, thread-safe channel */
 static const char      *g_dst_service = "echo-dpumesh";  /* backend service NAME to address */
@@ -59,11 +58,8 @@ typedef struct {
     int              tx_active; /* a frame is mid-carve (must finish before the next) */
     long             outstanding;
     long             credits;   /* completions observed -> requests to reissue */
-    /* One reframer PER INBOUND STREAM (wc.stream). A reply longer than msg_max arrives
-     * as several completions, and on a per-message-routed service the backends reply
-     * concurrently, so another peer's bytes can land between two of them. Reassembling
-     * them all through one reframer would splice the streams together and desync. */
-    struct { uint16_t id; int used; bench_reframer_t rf; } rs[MAX_STREAMS];
+    bench_reframer_t rf;       /* the QP's ordered reply byte stream */
+    int              draining; /* measurement closed; retire outstanding replies only */
 
     /* per-thread results */
     long         rcnt;         /* total completions incl. warmup */
@@ -81,26 +77,6 @@ typedef struct {
     atomic_int   broken;       /* conn/alloc failure -> excluded from aggregate */
 } worker_t;
 
-/* Find (or start) this stream's reframer. Linear over MAX_STREAMS: a conn has at most
- * one stream per backend of the service, so the scan is a handful of compares and needs
- * no hashing. NULL = more distinct peers than MAX_STREAMS. */
-static bench_reframer_t *stream_rf(worker_t *w, uint16_t id) {
-    int free_i = -1;
-    for (int i = 0; i < MAX_STREAMS; i++) {
-        if (w->rs[i].used && w->rs[i].id == id) return &w->rs[i].rf;
-        if (!w->rs[i].used && free_i < 0) free_i = i;
-    }
-    if (free_i < 0) return NULL;
-    w->rs[free_i].used = 1;
-    w->rs[free_i].id   = id;
-    bench_reframe_reset(&w->rs[free_i].rf);
-    return &w->rs[free_i].rf;
-}
-
-static void streams_reset(worker_t *w) {
-    for (int i = 0; i < MAX_STREAMS; i++) w->rs[i].used = 0;
-}
-
 /* Fire once per fully-received reply frame. Correlate BY SEQ, not by arrival order: a
  * codec'd service load-balances every message, so replies from different backends
  * interleave and out-of-order is normal, not an error. `aux` carries the backend's
@@ -110,13 +86,21 @@ static void on_reply(uint32_t seq, uint32_t plen, uint32_t aux, void *user) {
     worker_t *w = (worker_t *)user;
     double now = bench_now_sec();
     uint32_t idx = seq % INFLIGHT_RING;
-    if (!w->live[idx] || w->slot_seq[idx] != seq) { w->fail++; return; }  /* not in flight */
+    if (!w->live[idx] || w->slot_seq[idx] != seq) {
+        if (w->fail < 8)
+            fprintf(stderr, "[bench] unmatched reply seq=%u backend=%u slot_seq=%u "
+                            "live=%u draining=%d\n",
+                    seq, aux, w->slot_seq[idx], w->live[idx], w->draining);
+        w->fail++;
+        return;
+    }
     w->live[idx] = 0;
+    w->outstanding--;
+    if (w->draining) return;
     double t0 = w->start_ts[idx];
     if (seq != w->prev_seq + 1) w->reorder++;   /* arrival order != send order */
     w->prev_seq = seq;
     if (aux < BENCH_MAX_BACKENDS) w->dist[aux]++;
-    w->outstanding--;
     if (w->rcnt >= w->warmup)
         bench_hist_record(&w->hist, (now - t0) * 1e6);
     w->rcnt++;
@@ -133,13 +117,10 @@ static int cq_pump(worker_t *w) {
     while ((n = dmesh_poll_cq(w->cq, wc, CQ_BATCH)) > 0) {  /* drain to 0 (edge-triggered rule) */
         for (int i = 0; i < n; i++) {
             if (wc[i].opcode == DMESH_WC_RECV) {
-                bench_reframer_t *rf = stream_rf(w, wc[i].stream);
-                if (!rf) w->fail++;           /* more peers than MAX_STREAMS */
-                else if (bench_reframe_feed(rf, wc[i].buf, wc[i].len,
-                                            BENCH_REP_MAGIC, on_reply, w) < 0) {
-                    /* Unrecoverable: this stream's boundary is lost. Fail loudly instead
-                     * of stalling forever on a reframer that will never complete a frame. */
-                    fprintf(stderr, "[bench] reply stream %u desync\n", wc[i].stream);
+                if (bench_reframe_feed(&w->rf, wc[i].buf, wc[i].len,
+                                       BENCH_REP_MAGIC, on_reply, w) < 0) {
+                    /* A framing error is terminal because later lengths are untrustworthy. */
+                    fprintf(stderr, "[bench] reply stream desync\n");
                     w->fail++;
                     atomic_store(&w->broken, 1);
                 }
@@ -162,6 +143,9 @@ static int cq_pump(worker_t *w) {
 static int issue(worker_t *w) {
     uint32_t total = BENCH_HDR_LEN + (uint32_t)w->req_size;
     if (!w->tx_active) {
+        /* A delayed reply may span more than the correlation table even though
+         * at most W requests are live. Skip occupied modulo slots. */
+        while (w->live[w->next_seq % INFLIGHT_RING]) w->next_seq++;
         w->start_ts[w->next_seq % INFLIGHT_RING] = bench_now_sec();
         w->tx_active = 1;
         w->tx_done   = 0;
@@ -178,7 +162,7 @@ static int issue(worker_t *w) {
             off = BENCH_HDR_LEN;
         }
         memset(b + off, REQ_FILL, want - off);
-        if (dmesh_post_send(w->c, b, want, 0, 0) != 0) return -1;
+        if (dmesh_post_send(w->c, b, want) != 0) return -1;
         w->tx_done += want;
     }
     w->tx_active = 0;
@@ -193,7 +177,7 @@ static int issue(worker_t *w) {
 static void *worker_fn(void *arg) {
     worker_t *w = (worker_t *)arg;
     double end = 0.0;
-    streams_reset(w);
+    bench_reframe_reset(&w->rf);
 
     if (bench_hist_init(&w->hist) < 0) { atomic_store(&w->broken, 1); return NULL; }
     w->start_ts = (double *)calloc(INFLIGHT_RING, sizeof(double));
@@ -219,7 +203,7 @@ static void *worker_fn(void *arg) {
     w->credits = w->W;                            /* prime the window through the loop below */
 
     while (!atomic_load(&w->broken) && !atomic_load(w->stop)) {
-        if (bench_now_sec() - start > w->duration) break;
+        if (bench_now_sec() - start > w->duration && !w->tx_active) break;
 
         int did = cq_pump(w) > 0;
         int issued = 0;
@@ -234,7 +218,7 @@ static void *worker_fn(void *arg) {
             dmesh_destroy_qp(w->c);                    /* vq_cur is this CQ's, i.e. ours */
             w->c = dmesh_create_qp(w->cq, g_dst_service);
             if (!w->c) { atomic_store(&w->broken, 1); break; }
-            streams_reset(w);                  /* fresh conn → fresh upstreams */
+            bench_reframe_reset(&w->rf);
             w->since_conn = 0;
             w->reconn_sec += bench_now_sec() - t0;
             w->reconns++;
@@ -263,6 +247,17 @@ static void *worker_fn(void *arg) {
         if (!did) { struct timespec ts = {0, 2000}; nanosleep(&ts, NULL); }  /* 2us */
     }
     end = bench_now_sec();
+
+    /* Retire replies issued before the measurement boundary. This keeps FIN behind
+     * the request/reply data and leaves the next control run with no stale traffic. */
+    w->draining = 1;
+    double drain_deadline = end + DRAIN_GRACE_SEC;
+    while (w->outstanding > 0 && bench_now_sec() < drain_deadline) {
+        if (!cq_pump(w)) {
+            struct timespec ts = {0, 2000};
+            nanosleep(&ts, NULL);
+        }
+    }
 
 done:
     /* Conn first, then its CQ (a conn outliving its CQ has nowhere to report). */

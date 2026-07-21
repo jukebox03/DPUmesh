@@ -5,7 +5,7 @@ Generated messages, stubs, services, RPC semantics, metadata, deadlines, HTTP/2,
 credentials, and TLS remain unchanged. DPUmesh is a byte-stream transport, not
 an RPC wrapper or HTTP/2 parser.
 
-The source contract is gRPC v1.80.0, C++17, and `libdpumesh.so.2`. The endpoint
+The source contract is gRPC v1.80.0, C++17, and `libdpumesh.so.3`. The endpoint
 injection APIs are experimental.
 
 ## Transport model

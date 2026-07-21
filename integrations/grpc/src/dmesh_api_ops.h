@@ -22,8 +22,7 @@ class DmeshApiOps {
   virtual dmesh_qp_t* CreateQp(dmesh_cq_t* cq, const char* service) = 0;
   virtual int DestroyQp(dmesh_qp_t* qp) = 0;
   virtual void* Alloc(dmesh_qp_t* qp, uint32_t len) = 0;
-  virtual int PostSend(dmesh_qp_t* qp, const void* buffer, uint32_t len,
-                       uint64_t work_id, uint32_t flags) = 0;
+  virtual int PostSend(dmesh_qp_t* qp, const void* buffer, uint32_t len) = 0;
   virtual int Flush(dmesh_qp_t* qp) = 0;
   virtual int PollCq(dmesh_cq_t* cq, dmesh_wc_t* completions,
                      int max_completions) = 0;
@@ -37,4 +36,3 @@ std::unique_ptr<DmeshApiOps> MakeNativeDmeshApiOps();
 }  // namespace dpumesh::grpc
 
 #endif  // DPUMESH_GRPC_DMESH_API_OPS_H
-

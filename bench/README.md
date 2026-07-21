@@ -66,6 +66,22 @@ CPU pinning. A bare `deploy` is valid for functional work but selects the `(1,1)
 ARM default; it is not the same experiment. The live DPU process environment,
 not the invoking shell, is the measurement authority.
 
+L7 validation is enabled per service. Service 11 is the native request/reply
+benchmark and service 16 is the stream validator:
+
+```sh
+DPUMESH_PROXY_L7_SVC=11,16 \
+DPUMESH_INGEST_SHARDS=4 \
+DPUMESH_ARM_EGRESS_THREADS=4 \
+DPUMESH_RINGS_PER_POD=2 \
+./bench/bench.sh deploy
+```
+
+The benchmark frame is a 16-byte length prefix followed by payload, with a
+128 KiB total-frame limit. The DPU routes each request frame independently and
+serializes complete response frames back into the client's one QP byte stream.
+Leaving service 11 out of the list measures backend-pinned L4 instead.
+
 On the BlueField ARM, capture it before every retained run:
 
 ```sh
@@ -111,7 +127,7 @@ The L4 headline comparison uses `fair`: one application core for each transport;
 for Envoy, the sidecar shares the assigned pod budget. DPU CPU is measured
 separately and must not be hidden when comparing total CPU/request.
 
-Native ABI 2 commits a loop-pass burst, automatically submits complete transport
+Native ABI 3 commits a loop-pass burst, automatically submits complete transport
 units, and flushes the trailing partial once. The `batch` control argument is
 accepted only for wire compatibility and is ignored. Unsupported batching
 ablation scripts exit without producing results.
@@ -127,8 +143,8 @@ CQ on wake. If a reply parks on `dmesh_alloc(EAGAIN)`, the core automatically ar
 that QP; `DMESH_WC_TX_READY` retries only the named reply. The server does not
 busy-poll, run a retry timer, or scan every pending QP.
 
-The controlled ABI-2 audit and its complete tables are recorded in
-[RESULT.md](RESULT.md#session-7--abi-2-automatic-batching-performance-audit).
+Retained native performance and correctness measurements are recorded in
+[RESULT.md](RESULT.md).
 
 ## 5. gRPC QPS measurements
 

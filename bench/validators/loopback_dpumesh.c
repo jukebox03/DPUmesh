@@ -87,7 +87,7 @@ static int sq_drain(dmesh_qp_t *c) {
         uint8_t *b = (uint8_t *)dmesh_alloc(c, n);
         if (!b) { if (errno != EAGAIN) ss->dead = 1; break; }
         memcpy(b, ss->q, n);
-        if (dmesh_post_send(c, b, n, 0, 0) != 0) { ss->dead = 1; break; }
+        if (dmesh_post_send(c, b, n) != 0) { ss->dead = 1; break; }
         ss->len -= n; memmove(ss->q, ss->q + n, ss->len);
         g_served++; posted++;
     }
@@ -104,7 +104,7 @@ static void srv_recv(dmesh_qp_t *c, const dmesh_wc_t *w) {
         uint8_t *b = (uint8_t *)dmesh_alloc(c, w->len);
         if (b) {
             memcpy(b, w->buf, w->len);
-            if (dmesh_post_send(c, b, w->len, 0, 0) != 0 ||
+            if (dmesh_post_send(c, b, w->len) != 0 ||
                 dmesh_flush(c) != 0) ss->dead = 1;
             else g_served++;
             return;
@@ -189,7 +189,7 @@ static int send_req(rstate_t *st, const uint8_t *body, uint8_t p, uint32_t size,
         if (b) {
             if (zc) { b[0] = p; b[size / 2] = p; b[size - 1] = p; }
             else    memcpy(b, body, size);
-            if (dmesh_post_send(st->cl, b, size, 0, 0) != 0) return -1;
+            if (dmesh_post_send(st->cl, b, size) != 0) return -1;
             return dmesh_flush(st->cl);
         }
         if (errno != EAGAIN) return -1;             /* EINVAL is permanent */

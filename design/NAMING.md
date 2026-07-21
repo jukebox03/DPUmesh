@@ -45,8 +45,9 @@ they do not bind a numeric transport port through the native API.
 
 A QP names a service, not a backend. In default L4 passthrough, its first data
 causes the DPU to select one ready backend and the resulting byte stream remains
-pinned. Optional per-service codecs may route distinct messages to distinct
-upstreams; in that case `wc.stream` distinguishes reply streams.
+pinned. An optional per-service codec can delimit frames and select an upstream
+for each request frame. Backend identities and upstream ports remain internal;
+the public QP continues to expose one response byte stream without a stream id.
 
 The DPU derives a service's current backend set from live registered pod slots.
 A pod participates only after `POD_INIT_RESULT(READY)` and is removed from

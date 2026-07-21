@@ -15,7 +15,7 @@ faster than direct TCP. The measured baselines and limitations are kept in the
 C/C++ application or gRPC
           │
           ▼
-libdpumesh.so.2 ─ registered TX/RX memory ─ BlueField DPA + ARM ─ backend TCP
+libdpumesh.so.3 ─ registered TX/RX memory ─ BlueField DPA + ARM ─ backend TCP
           ▲
           └─ CQ completions and optional epoll fd
 ```
@@ -33,10 +33,15 @@ bytes and `dmesh_post_send()` commits them into one ordered stream. A post
 automatically submits every newly complete transport batch; `dmesh_flush()`
 forces only the newest partial batch. The physical unit is an internal data-plane
 choice, not an application tuning parameter. A future one-shot batching timer may
-bound partial-batch latency; ABI 2 currently relies on flush or graceful close for
+bound partial-batch latency; ABI 3 currently relies on flush or graceful close for
 that tail, while abort discards it. Native publication writes a shared descriptor
 ring that the DPA already polls; it is not a socket syscall or a per-flush control
 message.
+
+Every public QP is one full-duplex byte stream. Optional DPU L7 framing is an
+internal routing policy and does not expose backend or stream ids through native
+completions. The in-tree L7 validator uses a simple length-prefixed benchmark
+frame; gRPC continues to use backend-pinned L4 passthrough so chttp2 owns HTTP/2.
 
 Backpressure remains nonblocking. If `dmesh_alloc()` returns `NULL/EAGAIN`, it
 also arms that QP internally. Capacity returned by a QP ACK or by the channel's
@@ -92,7 +97,7 @@ make -j2
 make test
 ```
 
-The build produces `build/lib/libdpumesh.so.2`, the preload library, and native
+The build produces `build/lib/libdpumesh.so.3`, the preload library, and native
 bench/validator binaries. The library target tracks all source and header inputs;
 public-header changes therefore rebuild both ABI and consumers.
 
@@ -138,6 +143,6 @@ connection attempt creates a QP; established L4 streams remain backend-pinned.
 - [Benchmark guide](bench/README.md): deployment and experiment commands
 - [Native contract tests](tests/README.md): fast host-only regression coverage
 - [Performance report](bench/report/REPORT.md): frozen ABI-1 campaign and interpretation
-- [Engineering results](bench/RESULT.md): chronological experiments, including the ABI-2 A/B audit
+- [Engineering results](bench/RESULT.md): chronological correctness and performance experiments
 
 `bench/RESULT.md` is an engineering experiment log, not a current specification.

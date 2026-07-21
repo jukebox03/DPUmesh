@@ -93,18 +93,12 @@ main(void)
 
     /* post_send commits and asks the core to publish complete transport batches;
      * it does not force the trailing partial through the public dmesh_flush. */
-    assert(dmesh_post_send(&qp, reservation, 32, 0, 0) == 0);
+    assert(dmesh_post_send(&qp, reservation, 32) == 0);
     assert(commit_calls == 1);
     assert(full_drain_calls == 1);
 
     errno = 0;
-    assert(dmesh_post_send(&qp, reservation, 32, 0, 1) == -1);
-    assert(errno == EINVAL);
-    assert(commit_calls == 1);
-    assert(full_drain_calls == 1);
-
-    errno = 0;
-    assert(dmesh_post_send(&qp, reservation + 1, 32, 0, 0) == -1);
+    assert(dmesh_post_send(&qp, reservation + 1, 32) == -1);
     assert(errno == EINVAL);
     assert(commit_calls == 2);
     assert(full_drain_calls == 1);
@@ -117,7 +111,7 @@ main(void)
     assert(dmesh_poll_cq(&cq, &wc, 1) == 1);
     assert(wc.qp == &qp);
     assert(wc.opcode == DMESH_WC_TX_READY);
-    assert(wc.buf == NULL && wc.len == 0 && wc.stream == 0 && wc.rx_slot == -1);
+    assert(wc.buf == NULL && wc.len == 0 && wc._rx_token == -1);
     assert(dmesh_poll_cq(&cq, &wc, 1) == 0);
 
     puts("native_api_contract_test: PASS");

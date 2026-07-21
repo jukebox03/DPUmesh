@@ -19,10 +19,13 @@ host process                         BlueField
                               forward-ring drain + TX DMA
 ```
 
-Host-to-DPU bodies are DMA-read from host TX memory by DPA execution units.
-BlueField ARM owns service selection, upstream sockets, and response routing.
-Responses return through ARM SG-DMA into the destination host RX mapping. The
-DPA path is forward-only.
+Host-to-DPU bodies are DMA-copied from host TX memory into DPU staging by DPA
+execution units. BlueField ARM owns service selection, upstream connections, and
+response routing. The ARM proxy gathers frame bodies directly from those staging
+extents into SG-DMA operations, without a second body copy. Responses land in the
+destination host RX mapping and remain there until the application releases the
+completion. This is zero-copy at the native RX boundary and staging-to-egress
+gathering, not an end-to-end zero-copy claim. The DPA path is forward-only.
 
 ## 2. Host ownership and concurrency
 
@@ -140,6 +143,12 @@ RX queue capacity and reverse admission are coupled. The transport never treats
 dropping an RX completion as ordinary flow control: loss of a credit or body is a
 correctness fault, not a throughput policy.
 
+Reverse records carry a per-destination-QP sequence. Several adjacent landing
+fragments may share one sequence when they belong to the same delivery unit. The
+host accepts that adjacent run once and ignores stale notification replays without
+returning the original landing credit twice. FIN participates in the same replay
+filter.
+
 ## 5. Registration and readiness
 
 Initialization has two externally visible phases but one success result:
@@ -188,11 +197,30 @@ control ACKs include pod id, EU id, status, and DMA generation. Duplicate
 `RING_ADD` overwrites the same logical registration rather than accumulating
 another ring, which makes ACK recovery safe.
 
+Forward completion metadata also retains the host descriptor sequence. ARM
+tracks the latest accepted sequence per source QP and discards stale completion
+replays before they can append the same staging extent twice. The sequence is
+committed only after transient ingest allocation succeeds, so a backpressured
+completion can be retried without being mistaken for a replay. A forward gap is
+reported because one QP is expected to arrive in descriptor order.
+
 ## 7. ARM proxy and reverse egress
 
 ARM owns the backend byte streams. In L4 mode a connection is pinned to one
-backend. Optional service codecs can expose message boundaries, but the gRPC path
-uses raw HTTP/2 passthrough.
+backend. Services listed in `DPUMESH_PROXY_L7_SVC` instead use the in-tree L7
+codec. The current codec recognizes a 16-byte header—magic, sequence, payload
+length, and auxiliary value—and accepts complete frames up to 128 KiB. It is a
+benchmark protocol, not an HTTP/2 parser; the gRPC path uses raw L4 passthrough.
+
+The L7 request parser retains a bounded head across ingress extents, selects one
+live backend for each complete frame, and records an internal upstream mapping.
+The response parser recovers the client QP from that mapping. Request and response
+bodies remain scatter/gather views over DPU staging. Each complete frame is one
+egress unit and one DMA task, preventing neighboring frames from sharing a DMA
+completion boundary. Replies from multiple upstreams receive one monotonically
+increasing delivery sequence and are serialized into the client's single public
+byte stream. Backend FIN releases only that internal upstream; client FIN fans out
+behind queued data and closes the downstream connection.
 
 A pinned stream terminates when its backend is lost. A new connection creates a
 QP and selects from the current ready backend set.
@@ -245,6 +273,8 @@ lifecycle checks observe the same ownership closure.
 | DPA execution units | deployment-selected, max 8 |
 | ARM ingest shards | deployment-selected, 1 default |
 | ARM egress workers | deployment-selected, 1 default |
+| L7 parse head | 4 KiB |
+| L7 frame | 128 KiB |
 | Initialization deadline | 30 s |
 | Graceful local cleanup deadline | 5 s |
 
@@ -258,6 +288,8 @@ The implementation relies on these invariants:
 - QP-window readiness requires reusable local capacity, while one pool return
   wakes at most one shared-pool waiter;
 - every RX landing and TX block remains owned until its matching credit or ACK;
+- stale forward and reverse notifications do not duplicate byte delivery or
+  release custody twice;
 - every asynchronous DPA/ARM result is validated against its slot generation;
 - graceful unmap follows remote quiescence, never mere send submission;
 - backpressure is surfaced as `EAGAIN`; batching size remains transport-private.

@@ -105,7 +105,7 @@ class FakeDmeshState::Impl final {
     (void)result;
   }
 
-  void QueueReceive(Qp* qp, uint16_t stream, const std::string& bytes) {
+  void QueueReceive(Qp* qp, const std::string& bytes) {
     const int32_t slot = next_rx_slot++;
     auto payload = std::make_shared<std::vector<uint8_t>>(bytes.begin(),
                                                           bytes.end());
@@ -115,8 +115,7 @@ class FakeDmeshState::Impl final {
     completion.value.opcode = DMESH_WC_RECV;
     completion.value.buf = payload->data();
     completion.value.len = static_cast<uint32_t>(payload->size());
-    completion.value.stream = stream;
-    completion.value.rx_slot = slot;
+    completion.value._rx_token = slot;
     qp->cq->completions.push_back(completion);
   }
 
@@ -261,11 +260,10 @@ class FakeDmeshApiOps final : public DmeshApiOps {
     return fake->allocation.data();
   }
 
-  int PostSend(dmesh_qp_t* qp, const void* buffer, uint32_t len,
-               uint64_t /*work_id*/, uint32_t flags) override {
+  int PostSend(dmesh_qp_t* qp, const void* buffer, uint32_t len) override {
     std::lock_guard<std::mutex> lock(impl_->mu);
     auto* fake = impl_->FindQp(qp);
-    if (fake == nullptr || !fake->alive || flags != 0 || buffer == nullptr ||
+    if (fake == nullptr || !fake->alive || buffer == nullptr ||
         len == 0 || len > fake->allocation.size() ||
         buffer != fake->allocation.data()) {
       errno = EINVAL;
@@ -329,11 +327,11 @@ class FakeDmeshApiOps final : public DmeshApiOps {
   void Release(dmesh_channel_t* channel, dmesh_wc_t* completion) override {
     std::lock_guard<std::mutex> lock(impl_->mu);
     if (channel != &impl_->channel || completion == nullptr ||
-        completion->rx_slot < 0) {
+        completion->_rx_token < 0) {
       return;
     }
-    impl_->rx_payloads.erase(completion->rx_slot);
-    completion->rx_slot = -1;
+    impl_->rx_payloads.erase(completion->_rx_token);
+    completion->_rx_token = -1;
     completion->buf = nullptr;
     ++impl_->releases;
   }
@@ -447,24 +445,21 @@ bool FakeDmeshState::WaitForDestroyCount(
                    [this, count] { return impl_->destroys >= count; });
 }
 
-void FakeDmeshState::InjectReceive(dmesh_qp_t* qp, uint16_t stream,
-                                   const std::string& bytes) {
+void FakeDmeshState::InjectReceive(dmesh_qp_t* qp, const std::string& bytes) {
   std::lock_guard<std::mutex> lock(impl_->mu);
   auto* fake = impl_->FindQp(qp);
   if (fake == nullptr || !fake->alive) return;
-  impl_->QueueReceive(fake, stream, bytes);
+  impl_->QueueReceive(fake, bytes);
   impl_->Signal(fake->cq);
 }
 
 void FakeDmeshState::InjectReceiveBatch(
     dmesh_qp_t* qp,
-    const std::vector<std::pair<uint16_t, std::string>>& receives) {
+    const std::vector<std::string>& receives) {
   std::lock_guard<std::mutex> lock(impl_->mu);
   auto* fake = impl_->FindQp(qp);
   if (fake == nullptr || !fake->alive) return;
-  for (const auto& receive : receives) {
-    impl_->QueueReceive(fake, receive.first, receive.second);
-  }
+  for (const auto& receive : receives) impl_->QueueReceive(fake, receive);
   impl_->Signal(fake->cq);
 }
 
@@ -475,7 +470,7 @@ void FakeDmeshState::InjectFin(dmesh_qp_t* qp) {
   Impl::Completion completion;
   completion.value.qp = qp;
   completion.value.opcode = DMESH_WC_RECV_FIN;
-  completion.value.rx_slot = -1;
+  completion.value._rx_token = -1;
   fake->cq->completions.push_back(completion);
   impl_->Signal(fake->cq);
 }
@@ -487,13 +482,13 @@ void FakeDmeshState::InjectTxReady(dmesh_qp_t* qp) {
   Impl::Completion completion;
   completion.value.qp = qp;
   completion.value.opcode = DMESH_WC_TX_READY;
-  completion.value.rx_slot = -1;
+  completion.value._rx_token = -1;
   fake->cq->completions.push_back(completion);
   impl_->Signal(fake->cq);
 }
 
 dmesh_qp_t* FakeDmeshState::InjectConnectionRequest(
-    const std::string& first_bytes, uint16_t stream) {
+    const std::string& first_bytes) {
   std::lock_guard<std::mutex> lock(impl_->mu);
   if (impl_->cqs.empty()) return nullptr;
   Impl::Cq* cq = impl_->cqs.front().get();
@@ -501,10 +496,9 @@ dmesh_qp_t* FakeDmeshState::InjectConnectionRequest(
   Impl::Completion request;
   request.value.qp = &fake->value;
   request.value.opcode = DMESH_WC_CONN_REQ;
-  request.value.stream = stream;
-  request.value.rx_slot = -1;
+  request.value._rx_token = -1;
   cq->completions.push_back(request);
-  if (!first_bytes.empty()) impl_->QueueReceive(fake, stream, first_bytes);
+  if (!first_bytes.empty()) impl_->QueueReceive(fake, first_bytes);
   impl_->Signal(cq);
   return &fake->value;
 }

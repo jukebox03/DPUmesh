@@ -54,7 +54,7 @@ slice bytes
   → dmesh_flush trailing partial at logical Write completion
 ```
 
-Native ABI 2 batches committed posts into transport-private physical units and
+Native ABI 3 batches committed posts into transport-private physical units and
 submits complete units immediately. If the bounded native window fills before the
 logical Write ends, the reactor forces any remaining partial, parks the cursor,
 and retries only after native capacity reclamation identifies that QP as ready.
@@ -75,8 +75,8 @@ then calls `dmesh_wc_release`. A pending read consumes queued slices; otherwise
 the slice remains in the Endpoint queue.
 
 Peer FIN ends the read half. Transport failure or Endpoint destruction completes
-both pending directions once with an error. In L4 mode one QP must retain one
-stream id; a change is treated as a transport violation.
+both pending directions once with an error. Each Endpoint QP is one byte stream;
+HTTP/2 framing and multiplexing remain entirely inside chttp2.
 
 ## Server path
 
@@ -96,7 +96,7 @@ The maintained tests require:
 - RX copy before release;
 - inbound QP conversion and pre-bind event replay;
 - real chttp2 unary exchange over paired Endpoints;
-- public-symbol linkage against `libdpumesh.so.2`.
+- public-symbol linkage against `libdpumesh.so.3`.
 
 Hardware validation additionally checks the native register/readiness barrier,
 real byte exchange, FIN, `POD_QUIESCED`, and slot reuse. Those observations show

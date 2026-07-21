@@ -21,9 +21,8 @@ class NativeDmeshApiOps final : public DmeshApiOps {
   void* Alloc(dmesh_qp_t* qp, uint32_t len) override {
     return dmesh_alloc(qp, len);
   }
-  int PostSend(dmesh_qp_t* qp, const void* buffer, uint32_t len,
-               uint64_t work_id, uint32_t flags) override {
-    return dmesh_post_send(qp, buffer, len, work_id, flags);
+  int PostSend(dmesh_qp_t* qp, const void* buffer, uint32_t len) override {
+    return dmesh_post_send(qp, buffer, len);
   }
   int Flush(dmesh_qp_t* qp) override { return dmesh_flush(qp); }
   int PollCq(dmesh_cq_t* cq, dmesh_wc_t* completions,
@@ -48,4 +47,3 @@ std::unique_ptr<DmeshApiOps> MakeNativeDmeshApiOps() {
 }
 
 }  // namespace dpumesh::grpc
-

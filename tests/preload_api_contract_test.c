@@ -84,11 +84,9 @@ void *dmesh_alloc(dmesh_qp_t *qp, uint32_t len) {
     assert(len <= sizeof(fake_reservation));
     return fake_reservation;
 }
-int dmesh_post_send(dmesh_qp_t *qp, const void *buf, uint32_t len,
-                    uint64_t wr_id, unsigned flags) {
+int dmesh_post_send(dmesh_qp_t *qp, const void *buf, uint32_t len) {
     (void)qp;
     assert(buf == fake_reservation);
-    assert(wr_id == 0 && flags == 0);
     assert(fake_posted_len + len <= sizeof(fake_posted));
     memcpy(fake_posted + fake_posted_len, buf, len);
     fake_posted_len += len;
@@ -102,8 +100,8 @@ int dmesh_flush(dmesh_qp_t *qp) {
 }
 void dmesh_wc_release(dmesh_channel_t *channel, dmesh_wc_t *wc) {
     (void)channel;
-    if (wc && wc->rx_slot >= 0) {
-        wc->rx_slot = -1;
+    if (wc && wc->_rx_token >= 0) {
+        wc->_rx_token = -1;
         atomic_fetch_add(&fake_release_calls, 1);
     }
 }
@@ -138,7 +136,7 @@ static void fake_complete(dmesh_wc_opcode_t opcode, dmesh_qp_t *qp) {
     fake_completions[fake_completion_count++] = (dmesh_wc_t){
         .qp = qp,
         .opcode = opcode,
-        .rx_slot = -1,
+        ._rx_token = -1,
     };
 }
 
@@ -241,8 +239,7 @@ static void test_rx_partial_peek_credit_and_fin(void) {
         .opcode = DMESH_WC_RECV,
         .buf = bytes,
         .len = 6,
-        .stream = 9,
-        .rx_slot = 17,
+        ._rx_token = 17,
     };
     assert(pfd_queue_rx(e, &wc) == 0);
     assert(fd_ready(e, POLLIN));
@@ -265,7 +262,7 @@ static void test_rx_partial_peek_credit_and_fin(void) {
     assert(errno == EAGAIN);
     assert(!fd_ready(e, POLLIN));
     dmesh_wc_t fin = { .qp = &fake_qp, .opcode = DMESH_WC_RECV_FIN,
-                       .stream = 9, .rx_slot = -1 };
+                       ._rx_token = -1 };
     assert(pfd_rx_fin(e, &fin) == 0);
     assert(fd_ready(e, POLLIN));
     assert(shim_recv(e, out, 1, MSG_DONTWAIT) == 0);
@@ -276,12 +273,12 @@ static void test_data_after_fin_fails_closed(void) {
     fake_reset();
     pfd_t *e = test_pfd();
     dmesh_wc_t fin = { .qp = &fake_qp, .opcode = DMESH_WC_RECV_FIN,
-                       .stream = 5, .rx_slot = -1 };
+                       ._rx_token = -1 };
     assert(pfd_rx_fin(e, &fin) == 0);
 
     static const uint8_t byte[] = "x";
     dmesh_wc_t data = { .qp = &fake_qp, .opcode = DMESH_WC_RECV, .buf = byte,
-                        .len = 1, .stream = 5, .rx_slot = 23 };
+                        .len = 1, ._rx_token = 23 };
     assert(pfd_queue_rx(e, &data) == -1);
     assert(e->io_error == EPROTO);
     assert(atomic_load(&fake_release_calls) == 1);
@@ -354,25 +351,20 @@ static void test_retire_waits_for_active_wrapper(void) {
     pfd_put(held);                         /* sanitizer verifies the final free */
 }
 
-static void test_stream_change_fails_closed(void) {
+static void test_rx_fragments_preserve_order(void) {
     fake_reset();
     pfd_t *e = test_pfd();
     static const uint8_t first[] = "a";
     static const uint8_t second[] = "b";
     dmesh_wc_t a = { .qp = &fake_qp, .opcode = DMESH_WC_RECV, .buf = first,
-                     .len = 1, .stream = 3, .rx_slot = 1 };
+                     .len = 1, ._rx_token = 1 };
     dmesh_wc_t b = { .qp = &fake_qp, .opcode = DMESH_WC_RECV, .buf = second,
-                     .len = 1, .stream = 4, .rx_slot = 2 };
+                     .len = 1, ._rx_token = 2 };
     assert(pfd_queue_rx(e, &a) == 0);
-    assert(pfd_queue_rx(e, &b) == -1);
-    assert(e->io_error == EPROTO);
-    assert(atomic_load(&fake_release_calls) == 1);  /* rejected second stream */
-    char out;
-    assert(shim_recv(e, &out, 1, MSG_DONTWAIT) == 1);
-    assert(out == 'a');
-    errno = 0;
-    assert(shim_recv(e, &out, 1, MSG_DONTWAIT) == -1);
-    assert(errno == EPROTO);
+    assert(pfd_queue_rx(e, &b) == 0);
+    char out[2];
+    assert(shim_recv(e, out, sizeof(out), MSG_WAITALL | MSG_DONTWAIT) == 2);
+    assert(memcmp(out, "ab", sizeof(out)) == 0);
     assert(atomic_load(&fake_release_calls) == 2);
     test_pfd_free(e);
 }
@@ -385,7 +377,7 @@ int main(void) {
     test_send_timeout_does_not_poll_native();
     test_rx_partial_peek_credit_and_fin();
     test_data_after_fin_fails_closed();
-    test_stream_change_fails_closed();
+    test_rx_fragments_preserve_order();
     test_fcntl_getfl_without_third_argument();
     test_install_fd_preserves_cloexec();
     test_retire_waits_for_active_wrapper();

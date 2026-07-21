@@ -1,7 +1,7 @@
 # DPUmesh Native API
 
 This document defines the current public contract of `<dpumesh/dmesh.h>`. The
-ABI is `libdpumesh.so.2`. The interface borrows the useful
+ABI is `libdpumesh.so.3`. The interface borrows the useful
 shape of RDMA verbs—channel, completion queue, QP, registered buffers—but it is
 a reliable full-duplex byte transport, not a remote-memory API.
 
@@ -74,10 +74,12 @@ what causes DPU routing and backend connection creation. Inbound connections
 arrive as `DMESH_WC_CONN_REQ`; their `wc.qp` is already usable and permanently
 bound to the CQ that accepted it.
 
-Default L4 passthrough pins a connection to one backend and preserves byte order.
-A service codec may route messages to several upstreams; in that mode the
-application reassembles independently by `wc.stream`. DPUmesh does not expose a
-numeric service id in this API.
+Every QP is one reliable full-duplex byte stream. Default L4 passthrough pins that
+stream to one backend. A service-selected DPU codec may recognize application
+frames and route complete frames to different upstreams, but this does not add a
+public stream identifier: the application still receives one ordered sequence of
+byte fragments and performs its own framing and request correlation. DPUmesh does
+not expose numeric service, backend, or upstream ids in this API.
 
 `dmesh_destroy_qp()` is graceful close: it submits the buffered tail before FIN,
 returns any held RX credit, and always frees the local QP. `dmesh_abort_qp()`
@@ -87,49 +89,39 @@ recalled. Either call may return `-1/EBADMSG`, and the pointer is invalid on eve
 return. Because one CQ poll can return several entries that name the same QP,
 defer destruction until the whole returned batch has been processed.
 
-## 4. TX: batching is the default
+## 4. TX: buffered sending and backpressure
 
-The send protocol is deliberately three-stage:
+The send API separates buffer reservation from submission so applications can
+produce data directly in transport-owned memory:
 
 ```c
 void *p = dmesh_alloc(qp, len);              /* reserve registered bytes */
 memcpy(p, source, len);                       /* or produce in place */
-dmesh_post_send(qp, p, len, 0, 0);           /* commit; full units auto-submit */
+dmesh_post_send(qp, p, len);                 /* commit the bytes */
 
 /* repeat alloc/post as useful */
-dmesh_flush(qp);                              /* force the newest partial now */
+dmesh_flush(qp);                              /* submit all buffered bytes now */
 ```
 
 `dmesh_alloc()` reserves one contiguous region of at most `dmesh_post_max()`.
 Only one unposted allocation may exist per QP. `dmesh_post_send()` requires the
-exact pointer returned by that allocation, rejects an oversized or repeated post,
-and requires `flags == 0`. `wr_id` is reserved. A successful post transfers byte
-ownership to the transport and automatically submits every newly complete
-transport batch. Usually one newest fillable partial remains buffered.
+exact pointer returned by that allocation and rejects an oversized or repeated
+post. After a successful post, the application must no longer access the committed
+bytes until the transport makes that storage available through a later allocation.
 
-`dmesh_flush()` forces every remaining committed byte, which normally means just
-that trailing partial. Small adjacent posts are batched automatically, but callers
-choose flush boundaries by latency or protocol semantics rather than by transport
-size. The current data plane uses 8 KiB physical units internally; that value is
-not a send-side application contract. There is no `SEND_MORE` mode.
+The transport may combine adjacent posts before submitting them. This does not
+create message boundaries: a QP remains an ordered byte stream. `dmesh_flush()`
+asks the transport to submit all committed bytes currently buffered on the QP,
+so callers should flush at latency-sensitive or protocol-defined write
+boundaries. Applications must not depend on a particular batching size, and
+there is no `SEND_MORE` mode.
 
-Submission is descriptor publication to a memory ring continuously consumed by
-the DPA. `post_send()` and `flush()` do not make a send syscall, wake a transport
-thread, or send a separate doorbell message. Batching changes how many adjacent
-bytes one descriptor covers, not whether a syscall is issued.
-
-The registered TX mapping is divided into physical blocks. A QP borrows blocks
-from a channel-wide pool as its logical byte ring grows and reuses or returns them
-after ACK reclamation. A block is allocation and reclamation storage, not an
-application message and not necessarily one DPA descriptor: several posts and
-several 8 KiB transport units can occupy one block. The block count per QP is a
-fixed configured ceiling, not a dynamically tuned target.
-
-The per-QP block window is clamped so its worst-case physical-unit carve fits the
-64-entry reclaim FIFO. Consequently a successfully committed window is always
-flushable without another per-QP admission step. The shared host-to-DPU ring may
-still apply bounded backoff; a ring stalled for its deadline returns
-`-1/EBADMSG`.
+Each QP has bounded outstanding-send capacity, and QPs also share the channel's
+overall transmit capacity. The transport recovers capacity as previously
+submitted data completes. These limits affect admission and readiness only; how
+the transport partitions or submits the underlying memory is not part of the
+API contract. If committed data cannot be submitted because of a transport
+fault, `dmesh_post_send()` or `dmesh_flush()` returns `-1/EBADMSG`.
 
 ### Backpressure
 
@@ -138,40 +130,34 @@ still apply bounded backoff; a ring stalled for its deadline returns
 | Result | Meaning |
 |---|---|
 | pointer | Reservation succeeded |
-| `NULL/EAGAIN` | Per-QP window or process block pool has no space now |
+| `NULL/EAGAIN` | QP or channel transmit capacity is temporarily exhausted |
 | `NULL/EINVAL` | Invalid length, QP, or outstanding-allocation state |
-| `NULL/ENOMEM` | Lazy per-QP bookkeeping allocation failed |
+| `NULL/ENOMEM` | Transport bookkeeping memory could not be allocated |
 
-Complete batches already generate ACKs. If allocation still reaches backpressure
-with a trailing partial buffered, flush that tail before waiting for more space.
-For multi-QP reactors, park the write and continue servicing other QPs rather
-than spinning on one connection.
+If allocation reaches backpressure while committed bytes remain buffered, flush
+them before waiting for more space. For multi-QP reactors, park the write and
+continue servicing other QPs rather than spinning on one connection.
 
-`EAGAIN` has two resource causes. The QP may have reached its configured block
-window, in which case its own forward ACK must make a whole block reusable or
-fully drain the window. Alternatively, every registered block in the channel's
-shared pool may currently be held by other QPs, even though this QP remains below
-its own ceiling. These causes are deliberately not exposed as separate errors;
-the correct application action is identical.
+`EAGAIN` may mean that the QP has reached its own outstanding-send limit or that
+the channel's shared transmit capacity is temporarily exhausted. The API does
+not distinguish these cases because the application handles both in the same
+way: wait for progress, then retry the allocation.
 
-Every `dmesh_alloc()` that returns `EAGAIN` automatically arms one notification
-for that QP. There is no public `dmesh_arm_writable()` call. The core snapshots
-the failed allocation state, publishes the arm, and rechecks the relevant ACK or
-pool generation, closing the reclaim-before-arm race. A qualifying QP reclaim
-queues `DMESH_WC_TX_READY`; a returned shared block wakes at most one valid pool
-waiter because it represents one new unit of capacity. Close and a successful
-direct retry cancel a stale arm or queued hint.
+Every `dmesh_alloc()` that returns `EAGAIN` automatically requests one readiness
+notification for that QP; there is no separate arm call. When relevant capacity
+becomes available, the owning CQ receives `DMESH_WC_TX_READY`. Closing the QP or
+successfully allocating on a direct retry cancels an obsolete request or hint.
 
-TX readiness is one-shot and edge-driven, not a permanent statement that a QP is
-writable. The completion names the QP whose parked write should retry, but does
-not reserve a block for it. Shared capacity can be consumed before the retry; if
-the retry returns `EAGAIN`, the same call has already armed the next notification.
-Polling applications may retry opportunistically without waiting, while sleeping
-event loops need neither a timer nor a scan of all QPs.
+TX readiness is a one-shot retry hint, not a guarantee that a particular
+allocation will succeed. The completion names the QP whose parked write should
+retry, but shared capacity may be consumed before that retry. If it returns
+`EAGAIN` again, that call has already requested the next notification. Polling
+applications may retry opportunistically, while sleeping event loops can rely on
+the CQ notification without running a timer or scanning every QP.
 
-There is no internal partial-batch timer. Code that needs bounded latency calls
-`dmesh_flush()` at its logical write boundary; graceful close also flushes, while
-`dmesh_abort_qp()` discards the unsent partial.
+DPUmesh does not flush buffered data on a timer. Code that needs bounded latency
+calls `dmesh_flush()` at its logical write boundary; graceful close also flushes,
+while `dmesh_abort_qp()` discards buffered data that has not been submitted.
 
 ## 5. RX and CQ notification
 
@@ -184,9 +170,22 @@ There is no internal partial-batch timer. Code that needs bounded latency calls
 | `DMESH_WC_RECV_FIN` | Peer EOF | none |
 | `DMESH_WC_TX_READY` | An `EAGAIN`-blocked QP should retry allocation | none |
 
-`wc.buf` points directly into the channel RX mmap. Copy it before release if the
-data must outlive the completion. `dmesh_wc_release()` is idempotent and remains
-valid after QP destruction because the credit belongs to the channel.
+`wc.buf` points directly into the channel RX mmap. A completion is a transport
+fragment, not an application message boundary; parsers must retain framing state
+across completions and may decode several frames from one logical byte stream.
+Copy bytes before release if they must outlive the completion.
+`dmesh_wc_release()` is idempotent and remains valid after QP destruction because
+the credit belongs to the channel.
+
+The completion fields have one meaning across all opcodes:
+
+| Field | Contract |
+|---|---|
+| `qp` | QP that owns the event; the newly accepted QP for `CONN_REQ` |
+| `opcode` | Event kind from the table above |
+| `buf` | RX-mmap view for `RECV`; otherwise `NULL` |
+| `len` | Fragment length for `RECV`; otherwise zero |
+| `_rx_token` | Opaque release token; applications neither read nor modify it |
 
 `dmesh_cq_fd()` exposes an optional eventfd for `poll`/`epoll`. Drain its counter,
 poll the CQ to zero, then sleep again. Spin-polling clients do not need the fd.
@@ -217,7 +216,7 @@ while ((n = dmesh_poll_cq(cq, wc, 64)) > 0) {
             bind_connection(wc[i].qp);
             break;
         case DMESH_WC_RECV:
-            consume(wc[i].qp, wc[i].buf, wc[i].len, wc[i].stream);
+            consume(wc[i].qp, wc[i].buf, wc[i].len);
             dmesh_wc_release(channel, &wc[i]);
             break;
         case DMESH_WC_RECV_FIN:
@@ -232,10 +231,10 @@ while ((n = dmesh_poll_cq(cq, wc, 64)) > 0) {
 }
 ```
 
-For `DMESH_WC_TX_READY`, `wc.qp` is the retry target and `buf == NULL`,
-`len == 0`, `stream == 0`, and `rx_slot == -1`. Calling
-`dmesh_wc_release()` on it is a harmless no-op. The application should ignore a
-stale hint if that QP no longer has a parked write.
+For `DMESH_WC_TX_READY`, `wc.qp` is the retry target, `buf == NULL`, `len == 0`,
+and `_rx_token == -1`. Calling `dmesh_wc_release()` on it is a harmless no-op.
+The application should ignore a stale hint if that QP no longer has a parked
+write.
 
 ## 6. POSIX and gRPC facades
 
@@ -275,5 +274,5 @@ retry timer.
 - No automatic deadline for an unflushed partial batch yet.
 - The registry is loaded once and is not live-reloaded.
 - Dynamic instances require a Service already present in the registry.
-- L4 passthrough is the supported gRPC mode; the simple message codec is not an
-  HTTP/2 parser.
+- L4 passthrough is the supported gRPC mode. The in-tree L7 validator uses a
+  bounded 16-byte length-prefixed benchmark frame, not HTTP/2.

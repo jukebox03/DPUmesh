@@ -34,14 +34,15 @@ operations, correct EOF delivery, and successful reverse-order destruction. A
 process exit without a crash is not sufficient: inspect the DPU log for DMA,
 generation, ring-ACK, egress, or cleanup warnings.
 
-All native validators use ABI-2 semantics: `post_send` commits and automatically
+All native validators use ABI-3 semantics: `post_send` commits and automatically
 submits complete transport units, while explicit `flush` forces each logical
 request, response batch, or large-write tail. A pass exercises both automatic
 full-unit submission and byte correctness.
 
-The L7 stream validator is not a gRPC validator. Its simple frame codec has a
-repository-specific message format and must not be enabled for HTTP/2. gRPC uses
-L4 passthrough and is tested by the C++ tests and
+The L7 stream validator is not a gRPC validator. Its 16-byte length-prefixed
+frame is bounded to 128 KiB and must not be enabled for HTTP/2. Run deployment
+with service 16 in `DPUMESH_PROXY_L7_SVC`. gRPC uses L4 passthrough and is tested
+by the C++ tests and
 `grpc_dpumesh_qps_benchmark` under `integrations/grpc`.
 
 Sanitizer validation and performance validation are separate. Use ASAN/UBSAN

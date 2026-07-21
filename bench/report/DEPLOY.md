@@ -79,7 +79,7 @@ The manifest still renders `ASYNC_THREADS`, `BENCH_PIPELINE`,
 `BENCH_COALESCE`, `ECHO_THREADS`, and `DPUMESH_ARENA_SLOTS` for compatibility
 with older images. The current C benchmark, echo, and validator programs do not
 read them. Workload concurrency, threads, reconnect cadence, validator window,
-and pipeline are command arguments. ABI 2 batching is mandatory and has no
+and pipeline are command arguments. ABI 3 batching is mandatory and has no
 environment toggle.
 
 `echo_dpumesh` is a single-CQ event loop. `echo_sock` uses a thread per accepted

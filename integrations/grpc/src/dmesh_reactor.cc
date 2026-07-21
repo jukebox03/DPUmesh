@@ -77,7 +77,6 @@ class DmeshReactor::Impl final
 
     dmesh_qp_t* qp = nullptr;
     std::weak_ptr<DmeshEndpointDriver> driver;
-    std::optional<uint16_t> stream;
     std::deque<QueuedReceive> prebind_receives;
     Terminal prebind_terminal = Terminal::kNone;
     absl::Status prebind_error = absl::OkStatus();
@@ -290,7 +289,7 @@ class DmeshReactor::Impl final
 
     std::memcpy(destination, bytes.data(), bytes.size());
     if (ops_->PostSend(connection->qp, destination,
-                       static_cast<uint32_t>(bytes.size()), 0, 0) != 0) {
+                       static_cast<uint32_t>(bytes.size())) != 0) {
       return PostResult::Error(ErrnoStatus("dmesh_post_send", errno));
     }
     connection->unflushed = true;
@@ -518,18 +517,6 @@ class DmeshReactor::Impl final
         FailConnectionOwner(
             connection,
             absl::InternalError("invalid DPUmesh receive completion"));
-        return;
-      }
-
-      if (!connection->stream.has_value()) {
-        connection->stream = completion->stream;
-      } else if (*connection->stream != completion->stream) {
-        ops_->Release(channel_, completion);
-        FailConnectionOwner(
-            connection,
-            absl::UnavailableError(absl::StrCat(
-                "DPUmesh passthru stream changed from ", *connection->stream,
-                " to ", completion->stream)));
         return;
       }
 

@@ -313,7 +313,7 @@ process_completion_queue(struct objects *objs, int max_batch)
         processed++;
     }
 
-    /* Resume conns the egress backpressured (px_ship_seg found a pool empty and left
+    /* Resume conns the egress backpressured (egress allocation left
      * their bytes in the window). Runs even when no completion arrived — a stalled conn
      * is waiting on an egress unit, not on new input. Counts as processed only if it
      * really advanced, so an unrelieved pool still lets the loop park. */
@@ -603,7 +603,7 @@ dpu_diag_dump(struct objects *objs)
             busy |= (objs->pods[i].txack_batch_n != 0 ||
                      objs->pods[i].rev_done_batch_n != 0);
     }
-    /* A conn backpressured by px_ship_seg is parked on a pool and moves nothing, so it
+    /* A conn backpressured by egress allocation is parked on a pool and moves nothing, so it
      * looks idle to every counter above. A climbing stall count keeps the dump alive. */
     uint64_t stalls = px_stall_total(objs);
     if (!busy && g_fl_total == prev_fl && g_single_acks == prev_sgl &&

@@ -236,6 +236,7 @@ struct dpu_upstream {
     int32_t  client_pod;
     uint16_t client_port;   /* the downstream client's REAL port */
     int32_t  backend_pod;
+    uint8_t  codec_id;
 };
 
 /* Reuse lookup: (client_pod, client_port, backend_pod) -> up_port, so a
@@ -279,7 +280,7 @@ static inline uint16_t dpu_upstream_find(struct dpu_conntrack *ct, int32_t cp,
 /* Allocate and index an upstream port. Owner-strided allocation encodes the
  * session shard; zero reports exhausted port space. */
 static inline uint16_t dpu_upstream_create(struct dpu_conntrack *ct, int32_t cp,
-                                           uint16_t cport, int32_t bpod,
+                                           uint16_t cport, int32_t bpod, uint8_t codec_id,
                                            uint16_t owner, uint16_t stride) {
     uint32_t span = 65536u - DMESH_UPORT_BASE;
     uint16_t uP = 0;
@@ -295,6 +296,7 @@ static inline uint16_t dpu_upstream_create(struct dpu_conntrack *ct, int32_t cp,
     ct->upstream[uP].client_pod  = cp;
     ct->upstream[uP].client_port = cport;
     ct->upstream[uP].backend_pod = bpod;
+    ct->upstream[uP].codec_id    = codec_id;
     uint32_t mask = DPU_CONN_HT_SIZE - 1u, i = dpu_ct_hash(cp, cport, bpod);
     for (uint32_t n = 0; n < DPU_CONN_HT_SIZE; n++) {
         struct dpu_conn_ht_entry *e = &ct->ht[(i + n) & mask];
