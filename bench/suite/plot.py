@@ -27,6 +27,17 @@ COLORS = {
 }
 def color(t): return COLORS.get(t, "#444444")
 
+def size_label(n):
+    if n >= 1024 * 1024 and n % (1024 * 1024) == 0: return f"{n // (1024 * 1024)} MiB"
+    if n >= 1024 and n % 1024 == 0: return f"{n // 1024} KiB"
+    return f"{n} B"
+
+def size_axis(axis, xs):
+    ticks = sorted(set(xs))
+    axis.set_xscale("log", base=2)
+    axis.set_xticks(ticks)
+    axis.set_xticklabels([size_label(x) for x in ticks], rotation=25, ha="right")
+
 def load(path):
     return list(csv.DictReader(open(path)))
 
@@ -45,18 +56,24 @@ def fig_rtt_vs_size(rows, out):
            and r["threads"] == "1" and r["stage"] == "rtt"]
     if not sel: return None
     ts = by_transport(sel, lambda r: True)
-    plt.figure(figsize=(6, 4))
+    fig, (a1, a2) = plt.subplots(1, 2, figsize=(10.5, 4))
     for t in sorted(ts):
         pts = sorted(ts[t], key=lambda r: int(r["req_size"]))
         xs = [int(r["req_size"]) for r in pts]
-        ys = [f(r, "p50_med") for r in pts]
-        lo = [f(r, "p50_lo") for r in pts]; hi = [f(r, "p50_hi") for r in pts]
-        plt.plot(xs, ys, marker="o", label=t, color=color(t))
-        plt.fill_between(xs, lo, hi, alpha=0.15, color=color(t))
-    plt.xscale("log", base=2); plt.xlabel("request size (bytes)")
-    plt.ylabel("unloaded p50 RTT (µs)"); plt.title("Unloaded RTT vs message size (conc=1)")
-    plt.grid(True, which="both", alpha=0.3); plt.legend(); plt.tight_layout()
-    p = os.path.join(out, "fig_rtt_vs_size.png"); plt.savefig(p, dpi=130); plt.close()
+        for axis, metric, label in ((a1, "p50", "p50 RTT (µs)"), (a2, "p99", "p99 RTT (µs)")):
+            ys = [f(r, f"{metric}_med") for r in pts]
+            lo = [f(r, f"{metric}_lo") for r in pts]
+            hi = [f(r, f"{metric}_hi") for r in pts]
+            axis.plot(xs, ys, marker="o", label=t, color=color(t))
+            axis.fill_between(xs, lo, hi, alpha=0.15, color=color(t))
+    for axis in (a1, a2):
+        size_axis(axis, [int(r["req_size"]) for r in sel]); axis.set_xlabel("request size")
+        axis.grid(True, which="both", alpha=0.3); axis.legend(fontsize=8)
+    a1.set_ylabel("p50 RTT (µs)"); a1.set_title("Median")
+    a2.set_ylabel("p99 RTT (µs)"); a2.set_title("Tail")
+    fig.suptitle("Unloaded RTT vs message size (concurrency=1)")
+    fig.tight_layout(rect=[0, 0, 1, .93])
+    p = os.path.join(out, "fig_rtt_vs_size.png"); fig.savefig(p, dpi=160); plt.close()
     return p
 
 def fig_lat_throughput(rows, out):
@@ -87,18 +104,26 @@ def fig_tput_vs_conc(rows, out):
     sel = [r for r in rows if r["mode"] == "closed" and r["stage"] == "conc"]
     if not sel: return None
     ts = by_transport(sel, lambda r: True)
-    plt.figure(figsize=(6, 4))
+    fig, (a1, a2) = plt.subplots(1, 2, figsize=(10.5, 4))
     for t in sorted(ts):
         pts = sorted(ts[t], key=lambda r: int(r["conc"]))
         xs = [int(r["conc"]) for r in pts]
         ys = [f(r, "mrps_med") for r in pts]
         lo = [f(r, "mrps_lo") for r in pts]; hi = [f(r, "mrps_hi") for r in pts]
-        plt.plot(xs, ys, marker="o", label=t, color=color(t))
-        plt.fill_between(xs, lo, hi, alpha=0.15, color=color(t))
-    plt.xscale("log", base=2); plt.xlabel("concurrency window (outstanding / conn)")
-    plt.ylabel("throughput (Mrps)"); plt.title("Closed-loop throughput vs concurrency")
-    plt.grid(True, which="both", alpha=0.3); plt.legend(); plt.tight_layout()
-    p = os.path.join(out, "fig_tput_vs_conc.png"); plt.savefig(p, dpi=130); plt.close()
+        a1.plot(xs, ys, marker="o", label=t, color=color(t))
+        a1.fill_between(xs, lo, hi, alpha=0.15, color=color(t))
+        ys = [f(r, "p99_med") for r in pts]
+        lo = [f(r, "p99_lo") for r in pts]; hi = [f(r, "p99_hi") for r in pts]
+        a2.plot(xs, ys, marker="o", label=t, color=color(t))
+        a2.fill_between(xs, lo, hi, alpha=0.15, color=color(t))
+    for axis in (a1, a2):
+        axis.set_xscale("log", base=2); axis.set_xlabel("outstanding requests / connection")
+        axis.grid(True, which="both", alpha=0.3); axis.legend(fontsize=8)
+    a1.set_ylabel("throughput (Mrps)"); a1.set_title("Throughput")
+    a2.set_ylabel("p99 latency (µs)"); a2.set_title("Tail latency")
+    fig.suptitle("Closed-loop scaling vs concurrency", y=.99)
+    fig.tight_layout(rect=[0, 0, 1, .91])
+    p = os.path.join(out, "fig_tput_vs_conc.png"); fig.savefig(p, dpi=160); plt.close()
     return p
 
 def fig_goodput_vs_size(rows, out):
@@ -122,14 +147,50 @@ def fig_goodput_vs_size(rows, out):
             if g is None or mr is None or av is None: continue
             N = mr * av
             if N < 28:  # meaningfully short of the requested 32
-                dy = -12 if t == "dpumesh-native" else 8
+                dy = -15 if t == "dpumesh-native" else 10
+                dx = 0
+                if t == "tcp-envoy":
+                    dx = -10 if sz == 524288 else (10 if sz >= 1048576 else 0)
                 plt.annotate(f"N≈{N:.1f}", (sz, g), textcoords="offset points",
-                             xytext=(0, dy), fontsize=6, color=color(t), ha="center")
-    plt.xscale("log", base=2); plt.xlabel("request size (bytes)")
+                             xytext=(dx, dy), fontsize=6, color=color(t), ha="center")
+    size_axis(plt.gca(), [int(r["req_size"]) for r in sel]); plt.xlabel("request size")
     plt.ylabel("request goodput (Gb/s)")
     plt.title("Goodput vs message size  (N = achieved concurrency)")
     plt.grid(True, which="both", alpha=0.3); plt.legend(); plt.tight_layout()
-    p = os.path.join(out, "fig_goodput_vs_size.png"); plt.savefig(p, dpi=130); plt.close()
+    p = os.path.join(out, "fig_goodput_vs_size.png"); plt.savefig(p, dpi=160); plt.close()
+    return p
+
+def fig_cpu_vs_size(cpu_rows, out):
+    """Current L4 campaign: host and DPU ARM CPU remain separate domains."""
+    if not cpu_rows: return None
+    ts = {}
+    for r in cpu_rows: ts.setdefault(tmap(r["transport"]), []).append(r)
+    fig, (a1, a2, a3) = plt.subplots(1, 3, figsize=(14, 4.2))
+    for t in sorted(ts):
+        pts = sorted(ts[t], key=lambda r: int(r["req"]))
+        xs = [int(r["req"]) for r in pts]
+        c = color(t)
+        for axis, metric in ((a1, "host_total_pct"), (a2, "host_us_per_req")):
+            ys = [(f(r, f"{metric}_med") or 0.0) / (100.0 if metric == "host_total_pct" else 1.0) for r in pts]
+            lo = [(f(r, f"{metric}_lo") or 0.0) / (100.0 if metric == "host_total_pct" else 1.0) for r in pts]
+            hi = [(f(r, f"{metric}_hi") or 0.0) / (100.0 if metric == "host_total_pct" else 1.0) for r in pts]
+            axis.plot(xs, ys, "-o", color=c, label=t)
+            axis.fill_between(xs, lo, hi, color=c, alpha=.15)
+        if t == "dpumesh-native":
+            ys = [(f(r, "dpu_arm_pct_med") or 0.0) / 100.0 for r in pts]
+            lo = [(f(r, "dpu_arm_pct_lo") or 0.0) / 100.0 for r in pts]
+            hi = [(f(r, "dpu_arm_pct_hi") or 0.0) / 100.0 for r in pts]
+            a3.plot(xs, ys, "-o", color=c, label="DPUmesh DPU ARM")
+            a3.fill_between(xs, lo, hi, color=c, alpha=.15)
+    for axis in (a1, a2, a3):
+        size_axis(axis, [int(r["req"]) for r in cpu_rows]); axis.set_xlabel("request size")
+        axis.grid(True, which="both", alpha=.3); axis.legend(fontsize=8)
+    a1.set_ylabel("host cores"); a1.set_title("Host CPU (client + server)")
+    a2.set_yscale("log"); a2.set_ylabel("host CPU (µs / request, log scale)"); a2.set_title("Host work per request")
+    a3.set_ylabel("DPU ARM cores"); a3.set_title("DPU ARM CPU (DPA EUs excluded)")
+    fig.suptitle("CPU cost vs message size — host and DPU ARM reported separately")
+    fig.tight_layout(rect=[0, 0, 1, .93])
+    p = os.path.join(out, "fig_cpu_vs_size.png"); fig.savefig(p, dpi=160); plt.close()
     return p
 
 def fig_lang_confound(rows, out):
@@ -279,7 +340,8 @@ def main():
     for extra in sys.argv[3:]:                       # dispatch extra CSVs by filename
         if not os.path.exists(extra): continue
         base = os.path.basename(extra)
-        if   "cpu"  in base: p = fig_cpu_accounting(load(extra), out)
+        if   "cpu_summary" in base: p = fig_cpu_vs_size(load(extra), out)
+        elif "cpu"  in base: p = fig_cpu_accounting(load(extra), out)
         elif "busy" in base: p = fig_busyapp(extra, out)
         elif "npod" in base:
             p = fig_npod(extra, out);  made += [x for x in [p] if x]

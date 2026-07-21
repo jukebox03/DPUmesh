@@ -33,7 +33,7 @@ class LCG:
 POINT_COLS = ["stage","transport","workload","mode","arrival","req_size","reply_size",
               "conc","threads","offered_mrps"]
 METRICS    = ["mrps","gbps","p50","p95","p99","p999","p9999","avg"]
-SUM_COLS   = ["drops","overflow","fail"]
+SUM_COLS   = ["drops","overflow","fail","reorder"]
 
 def median(xs):
     s = sorted(xs); n = len(s)
@@ -67,7 +67,7 @@ def main():
     for m in METRICS: out_cols += [f"{m}_med", f"{m}_lo", f"{m}_hi"]
     out_cols += SUM_COLS
 
-    w = csv.writer(open(sys.argv[2], "w"))
+    w = csv.writer(open(sys.argv[2], "w"), lineterminator="\n")
     w.writerow(out_cols)
     for key in sorted(groups):
         reps = groups[key]

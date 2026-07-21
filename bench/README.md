@@ -10,9 +10,8 @@ semantics, payloads, concurrency, warmup, duration, and CPU allocation.
 ```text
 bench.sh                 build, deploy, run, pin, inspect, and clean entry point
 apps/                    matched native-DPUmesh and POSIX benchmark applications
-k8s/                     namespace and pod topology
 docker/                  benchmark container images
-envoy/                   L4 tcp_proxy configuration
+k8s/                     pod topology and embedded L4 tcp_proxy configuration
 validators/              transport correctness programs
 suite/                   evaluation matrix and status
 report/                  deployment record and interpreted measurements
@@ -105,6 +104,14 @@ bounded diagnostic run, then restore warning-level output before measurement.
 ## 4. L4 measurements
 
 ```sh
+# Current repeated report campaign: native L4, two-sided Envoy, and direct TCP
+./bench/suite/current_l4.sh
+
+# Regenerate the two concise lab-meeting figures from the retained aggregates
+python3 bench/suite/plot_meeting.py \
+  bench/report/data/summary.csv bench/report/data/cpu_summary.csv \
+  bench/report/figures
+
 # Unloaded latency sweep
 ./bench/bench.sh latency both
 
@@ -216,5 +223,6 @@ test, native symbol linkage, and an optional BlueField client/server smoke binar
 6. Compare only matched semantics. The current gRPC comparison is DPUmesh versus
    direct TCP, not DPUmesh versus Envoy HTTP connection management.
 
-The frozen ABI-1 campaign is in [REPORT.md](report/REPORT.md). New engineering
-measurements and corrections are appended to [RESULT.md](RESULT.md).
+The current ABI 3 native L4 campaign is in [REPORT.md](report/REPORT.md).
+Chronological engineering experiments and corrections remain in
+[RESULT.md](RESULT.md).

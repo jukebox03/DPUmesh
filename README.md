@@ -142,7 +142,7 @@ connection attempt creates a QP; established L4 streams remain backend-pinned.
 - [gRPC integration](integrations/grpc/README.md): build and application bootstrap
 - [Benchmark guide](bench/README.md): deployment and experiment commands
 - [Native contract tests](tests/README.md): fast host-only regression coverage
-- [Performance report](bench/report/REPORT.md): frozen ABI-1 campaign and interpretation
+- [Performance report](bench/report/REPORT.md): current ABI 3 native L4 evaluation
 - [Engineering results](bench/RESULT.md): chronological correctness and performance experiments
 
 `bench/RESULT.md` is an engineering experiment log, not a current specification.

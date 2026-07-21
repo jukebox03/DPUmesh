@@ -11,15 +11,20 @@ PROJ_ROOT="$(cd "$BENCH_DIR/.." && pwd)"
 # (authoritative) instead of this shell's env. Runs themselves need only kubectl + nc.
 [ -f "$PROJ_ROOT/.env" ] && { set -a; source "$PROJ_ROOT/.env"; set +a; }
 NS="${NS:-test-bench}"; CTRL_PORT="${CTRL_PORT:-9092}"
-OUT="${OUT:-/tmp/dpumesh-bench/suite}"; mkdir -p "$OUT/figs"
+OUT="${OUT:-/tmp/dpumesh-bench/suite}"
+FIG_DIR="${FIG_DIR:-$OUT/figures}"
+mkdir -p "$OUT" "$FIG_DIR"
 TIDY="$OUT/tidy.csv"; SUMMARY="$OUT/summary.csv"; META="$OUT/meta.txt"
 
 DUR="${DUR:-20}"; WARMUP="${WARMUP:-1000}"; REPS="${REPS:-5}"
 RTT_SIZES="${RTT_SIZES:-64 256 1024 4096 16384 65536}"
+RTT_REPLY="${RTT_REPLY:-8}"
 CONC_STEPS="${CONC_STEPS:-1 2 4 8 16 32 64}"
+CONC_REQ="${CONC_REQ:-1024}"; CONC_REPLY="${CONC_REPLY:-8}"
 BW_SIZES="${BW_SIZES:-1024 8192 65536 524288 2097152 8000000}"
-BW_CONC="${BW_CONC:-32}"
+BW_REPLY="${BW_REPLY:-8}"; BW_CONC="${BW_CONC:-32}"
 CURVE_FRACS="${CURVE_FRACS:-0.10 0.25 0.50 0.70 0.85 0.90 0.95 1.00 1.10}"
+TRANSPORT_FILTER="${TRANSPORT_FILTER:-}"
 
 # transport id | app label | control port | kind (native|tcp|sock) | open-capable
 # `dpumesh-preload` is the matched-C workload over the socket facade; its
@@ -47,18 +52,21 @@ run_line() { printf '%s\n' "$1" | timeout "$(nc_to)s" nc -N "$2" "$CTRL_PORT" 2>
 {
   echo "date_utc   $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "commit     $(git -C "$PROJ_ROOT" rev-parse HEAD 2>/dev/null || echo NA)"
-  echo "dirty      $(git -C "$PROJ_ROOT" status --porcelain 2>/dev/null | wc -l) files (uncommitted eval-harness edits)"
+  echo "dirty      $(git -C "$PROJ_ROOT" status --porcelain 2>/dev/null | wc -l) working-tree paths at capture"
   echo "node       $(uname -n)  kernel $(uname -r)"
   echo "cpu        $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | sed 's/^ *//')"
-  echo "doca       $(dpkg -l 2>/dev/null | awk '/doca-runtime/{print $3; exit}' || echo NA)"
+  doca_version="$(dpkg -l 2>/dev/null | awk '/doca-runtime/{v=$3} END{print v}')"
+  echo "doca       ${doca_version:-NA}"
   echo "governor   $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo NA) @ $(awk '{printf "%.2fGHz",$1/1e6}' /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq 2>/dev/null || echo NA)"
   echo "kubectl    $(kubectl version --client -o json 2>/dev/null | tr -d '\n' | sed 's/.*gitVersion":"\([^"]*\).*/\1/' || echo NA)"
   echo "namespace  $NS"
   echo "params     DUR=$DUR WARMUP=$WARMUP REPS=$REPS"
+  echo "workloads  RTT_SIZES={$RTT_SIZES} RTT_REPLY=$RTT_REPLY CONC=${CONC_REQ}B/${CONC_REPLY}B CONC_STEPS={$CONC_STEPS} BW_SIZES={$BW_SIZES} BW_REPLY=$BW_REPLY BW_CONC=$BW_CONC"
+  echo "transports ${TRANSPORT_FILTER:-all-deployed}"
   # LIVE DPU operating point + binary hash, straight from the running process.
   if [ -n "${DPU_HOST:-}" ]; then
     echo "dpu        live /proc/<dpumesh_dpu>/environ + binary sha256:"
-    ssh -o ConnectTimeout=8 "$DPU_HOST" "echo '${DPU_PASS:-}' | sudo -S sh -c 'p=\$(pgrep -x dpumesh_dpu | head -1); echo pid=\$p etimes=\$(ps -o etimes= -p \$p 2>/dev/null | tr -d \" \")s; sha256sum ~/${DPU_PROJ:-DPUmesh}/doca/build/dpumesh_dpu 2>/dev/null; cat /proc/\$p/environ'" 2>/dev/null \
+    ssh -o ConnectTimeout=8 "$DPU_HOST" "sha256sum ~/${DPU_PROJ:-DPUmesh}/doca/build/dpumesh_dpu 2>/dev/null; echo '${DPU_PASS:-}' | sudo -S sh -c 'p=\$(pgrep -x dpumesh_dpu | head -1); echo pid=\$p etimes=\$(ps -o etimes= -p \$p 2>/dev/null | tr -d \" \")s; cat /proc/\$p/environ'" 2>/dev/null \
       | tr '\0' '\n' | grep -E 'pid=|dpumesh_dpu$|^DPUMESH_' | sed 's/^/    /' || echo "    (DPU query failed)"
   else
     echo "dpu        (no .env — DPU config NOT captured)"
@@ -77,6 +85,9 @@ declare -A IP KIND OPEN
 LIVE=()
 for row in "${TRANSPORTS[@]}"; do
   IFS='|' read -r id app port kind open <<<"$row"
+  if [ -n "$TRANSPORT_FILTER" ] && [[ " $TRANSPORT_FILTER " != *" $id "* ]]; then
+    continue
+  fi
   ip="$(pod_ip "$app")"
   if [ -z "$ip" ]; then warn "transport $id: pod app=$app not Running — skipping"; continue; fi
   IP[$id]="$ip"; KIND[$id]="$kind"; OPEN[$id]="$open"; LIVE+=("$id")
@@ -102,25 +113,26 @@ order_for_rep() { local n=${#LIVE[@]} s=$(( $1 % ${#LIVE[@]} )) i;
 
 # ---- stages ---------------------------------------------------------------
 stage_rtt() {
-  log "STAGE rtt: conc=1, sizes {$RTT_SIZES}, reps=$REPS"
+  log "STAGE rtt: reply=${RTT_REPLY}B, conc=1, sizes {$RTT_SIZES}, reps=$REPS"
   for rep in $(seq 1 "$REPS"); do for sz in $RTT_SIZES; do for tr in $(order_for_rep "$rep"); do
-    ok="$(run_line "RUN $sz 8 1 $DUR $WARMUP 1" "${IP[$tr]}")"
-    emit rtt "$tr" "${sz}B/8B" closed const "$sz" 8 1 1 "" "$rep" "$ok"
+    w=$WARMUP; [ "$sz" -ge 262144 ] && w=100
+    ok="$(run_line "RUN $sz $RTT_REPLY 1 $DUR $w 1" "${IP[$tr]}")"
+    emit rtt "$tr" "${sz}B/${RTT_REPLY}B" closed const "$sz" "$RTT_REPLY" 1 1 "" "$rep" "$ok"
   done; done; done
 }
 stage_conc() {
-  log "STAGE conc: 1KB, conc {$CONC_STEPS}, reps=$REPS"
+  log "STAGE conc: ${CONC_REQ}B/${CONC_REPLY}B, conc {$CONC_STEPS}, reps=$REPS"
   for rep in $(seq 1 "$REPS"); do for c in $CONC_STEPS; do for tr in $(order_for_rep "$rep"); do
-    ok="$(run_line "RUN 1024 8 $c $DUR $WARMUP 1" "${IP[$tr]}")"
-    emit conc "$tr" 1024B/8B closed const 1024 8 "$c" 1 "" "$rep" "$ok"
+    ok="$(run_line "RUN $CONC_REQ $CONC_REPLY $c $DUR $WARMUP 1" "${IP[$tr]}")"
+    emit conc "$tr" "${CONC_REQ}B/${CONC_REPLY}B" closed const "$CONC_REQ" "$CONC_REPLY" "$c" 1 "" "$rep" "$ok"
   done; done; done
 }
 stage_bw() {
-  log "STAGE bw: goodput vs size {$BW_SIZES}, conc=$BW_CONC, reps=$REPS"
+  log "STAGE bw: reply=${BW_REPLY}B, goodput vs size {$BW_SIZES}, conc=$BW_CONC, reps=$REPS"
   for rep in $(seq 1 "$REPS"); do for sz in $BW_SIZES; do for tr in $(order_for_rep "$rep"); do
     w=$WARMUP; [ "$sz" -ge 262144 ] && w=100
-    ok="$(run_line "RUN $sz 8 $BW_CONC $DUR $w 1" "${IP[$tr]}")"
-    emit bw "$tr" "${sz}B/8B" closed const "$sz" 8 "$BW_CONC" 1 "" "$rep" "$ok"
+    ok="$(run_line "RUN $sz $BW_REPLY $BW_CONC $DUR $w 1" "${IP[$tr]}")"
+    emit bw "$tr" "${sz}B/${BW_REPLY}B" closed const "$sz" "$BW_REPLY" "$BW_CONC" 1 "" "$rep" "$ok"
   done; done; done
 }
 stage_curve() {  # OPEN loop — only transports whose client supports it (kind=sock)
@@ -157,5 +169,5 @@ for st in ${STAGES[@]}; do
 done
 
 log "aggregating -> $SUMMARY"; python3 "$SUITE_DIR/analyze.py" "$TIDY" "$SUMMARY"
-log "plotting -> $OUT/figs"; python3 "$SUITE_DIR/plot.py" "$SUMMARY" "$OUT/figs"
-log "DONE. tidy=$TIDY summary=$SUMMARY meta=$META figs=$OUT/figs"
+log "plotting -> $FIG_DIR"; python3 "$SUITE_DIR/plot.py" "$SUMMARY" "$FIG_DIR"
+log "DONE. tidy=$TIDY summary=$SUMMARY meta=$META figures=$FIG_DIR"

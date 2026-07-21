@@ -1,35 +1,44 @@
-date_utc   2026-07-18T10:30:11Z
-commit     4beb0bef4872f70bf288533338022aaf49d4e19b
-dirty      24 files (uncommitted eval-harness edits)
+date_utc   2026-07-21T15:53:17Z
+commit     0eb697d41d77de66adea5c0a2d6c492e4aba0bfb
+dirty      29 working-tree paths at capture
 node       rapids4  kernel 5.15.0-185-generic
 cpu        INTEL(R) XEON(R) GOLD 6554S
 doca       3.1.0-091000
-NA
-governor   performance @ 2.48GHz
+governor   performance @ 2.49GHz
 kubectl    {  "clientVersion": {    "major": "1",    "minor": "31",    "gitVersion": "v1.31.14",    "gitCommit": "5e00b99bac504844579ec74886b6cc5c9611ca19",    "gitTreeState": "clean",    "buildDate": "2025-11-11T20:24:51Z",    "goVersion": "go1.24.9",    "compiler": "gc",    "platform": "linux/amd64"  },  "kustomizeVersion": "v5.4.2"}
 namespace  test-bench
-params     DUR=15 WARMUP=1000 REPS=8
+params     DUR=10 WARMUP=1000 REPS=5
+workloads  RTT_SIZES={64 256 1024 8192 65536 1048576} RTT_REPLY=8 CONC=1024B/1024B CONC_STEPS={1 2 4 8 16 32 64} BW_SIZES={64 1024 8192 65536 524288 1048576} BW_REPLY=8 BW_CONC=32
+transports dpumesh-native tcp-envoy tcp-direct
 dpu        live /proc/<dpumesh_dpu>/environ + binary sha256:
-    pid=120601 etimes=567s
+    d2e9ea56051271814265455eddf724b46072388444ab8e9e09d8498db7ce0d77  /home/jukebox/DPUmesh/doca/build/dpumesh_dpu
+    pid=1990068 etimes=173s
     DPUMESH_SHARD_SHARED=
-    DPUMESH_DIAG=
-    DPUMESH_RINGS_PER_POD=2
-    DPUMESH_PROXY=
     DPUMESH_INGEST_SHARDS=4
+    DPUMESH_DIAG=
     DPUMESH_SHARD_HOST_EMIT=
-    DPUMESH_PROXY_FRAME_SVC=
+    DPUMESH_RINGS_PER_POD=2
     DPUMESH_ARM_EGRESS_THREADS=4
-    DPUMESH_PROXY_L7_SVC=
     DPUMESH_INGEST_REAP=
+    DPUMESH_PROXY_L7_SVC=
     _=./dpumesh_dpu
 images     containerd k8s.io digests:
-    docker.io/bench/bench-dpumesh:latest  sha256:c924fc049554c406298fbe2b6dc130ed156b9eaa4531a33e834486e20a9ac806
-    docker.io/bench/bench-tcp:latest  sha256:5fd25c70c283051c6b35ef6d1147902a96ed8210dd4d28aaa0ad6c099122f254
-    docker.io/bench/echo-dpumesh:latest  sha256:383f92a32cfb6585d56ff7c07a4ab328ea37b6c2e16a5ad0064b34a53ca22f38
-    docker.io/bench/echo-tcp:latest  sha256:70a7849470f22875bc9782cc83e0d9397b72b2b5e8d4a1b05787876153cbb2c9
-    docker.io/bench/loopback-dpumesh:latest  sha256:62c42c9c2aea97b1c191bb1094b0a7dbfcb871872ea8ceeab0b0eb0fe89fd11c
-    docker.io/bench/preload-dpumesh:latest  sha256:30fbde7bbe62ce9b701dd21fde4a170b15503f5a5460cdac54bc3294e89bc5f6
-    docker.io/bench/stream-dpumesh:latest  sha256:7ea7c6102d1b92725697b89e52e06b24afa75d2cf7ae513fa4fa79b7ebf2886b
-    docker.io/bench/verbs-dpumesh:latest  sha256:e6d0de1697276ea8ab2441790d79cddb8cb84516055873675fb95a3906c91187
+    docker.io/bench/bench-dpumesh:before  sha256:331b23c713233a674c7d2e19234f00ef67667a379347d7c70116334d647cccfe
+    docker.io/bench/bench-dpumesh:diag  sha256:cf185c5d4c378e3ef32058166b2ff58fd0ffd9d8b173628a857de1872f008666
+    docker.io/bench/bench-dpumesh:latest  sha256:10e40e8965898e18099c73c3ef7511adf026fb859a61458d5f382e71151ca4f6
+    docker.io/bench/bench-dpumesh:writable-post-dd95a5b4  sha256:7ca967a9152316b313ad74c8fecd6f3cf0e4f7d344d55175a98841245282aa35
+    docker.io/bench/bench-dpumesh:writable-pre-dd95a5b4  sha256:8914de1af2ddad8065a168e221b9316134020d22691ef1248f24ae61c5f3cb23
+    docker.io/bench/bench-tcp:latest  sha256:f0710517f0277ef54993049690db9d38b6d2af300aac2997aa6e52a98a277904
+    docker.io/bench/echo-dpumesh:before  sha256:701c8ab4b2ad2d0e33d587e0092f6c1ac09548057b0857cf82745e5f007229d6
+    docker.io/bench/echo-dpumesh:diag  sha256:22e99701cf36c3cbdf667f212a825ec0227dbe80e209d72233d09c75ab06a507
+    docker.io/bench/echo-dpumesh:latest  sha256:bd4ca266d9175eb664e0e9590ebad41daae56058e6b5ab3d1c2b660889ca8366
+    docker.io/bench/echo-dpumesh:writable-post-dd95a5b4  sha256:03889247cea9522860b54d41e4fea12b9e97d5c72d92b61a3dbf09bdde8abf1a
+    docker.io/bench/echo-dpumesh:writable-pre-dd95a5b4  sha256:93f0bf5b990e5c4c06c7b2c63313a43ad059668bc04f0c70afa8d85b30526ec9
+    docker.io/bench/echo-tcp:latest  sha256:fac3b9cb5ae362403911ce51003978b7827f4d967a95f7e2b5b732c473afa2e6
+    docker.io/bench/loopback-dpumesh:latest  sha256:1031731dd396d8f19376e833c95203aef3963abbe32545bb332c3ed6515f655e
+    docker.io/bench/preload-dpumesh:latest  sha256:cd16ff1055ba2dbba8da1b046d4ca000bce9c3298354eb52d5a0471231d5a8dd
+    docker.io/bench/preload-sock:latest  sha256:7b16b364ef0cecdbdb6d91d65d830afc8a9991d5368b695a303f7d5f3be7c4b5
+    docker.io/bench/stream-dpumesh:latest  sha256:943d6a9e450f13505b069029888dd82b30f7b0125c9f3cdcc7af6dc9a5863d45
+    docker.io/bench/verbs-dpumesh:latest  sha256:ffdfff177ca26c2e0721ab76a476a87b6c6f89c0ab4802d34b35481759ea53af
     docker.io/envoyproxy/envoy:v1.30-latest  sha256:b5cc70f5fe5503858817e897ae1da5d873dc32cbc493790b4e330b8a42c4af9d
     docker.io/envoyproxy/envoy@sha256:b5cc70f5fe5503858817e897ae1da5d873dc32cbc493790b4e330b8a42c4af9d  sha256:b5cc70f5fe5503858817e897ae1da5d873dc32cbc493790b4e330b8a42c4af9d

@@ -76,6 +76,6 @@ A performance point is retained only if:
 - The focused gRPC harness is compatible with the official service schema but is
   not the upstream distributed `qps_worker` scenario controller.
 
-The frozen ABI-1 campaign is in `bench/report/REPORT.md`; the chronological log,
-including controlled batching and transport experiments, is in `bench/RESULT.md`.
-Deployment details are in `bench/report/DEPLOY.md`.
+The current ABI 3 native L4 campaign is in `bench/report/REPORT.md`; its exact
+deployment is in `bench/report/DEPLOY.md`. The chronological engineering log
+remains in `bench/RESULT.md`.

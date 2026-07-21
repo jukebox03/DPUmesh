@@ -1,0 +1,7 @@
+Live startup receipt, 2026-07-21 UTC
+K forward rings/pod = 2
+INGEST SHARDS = 4 (share-nothing, dedicated reaper)
+DPA auto-detect: 254 EUs available -> N=8 (cap 8)
+SG-DMA egress threads = 4
+L7 services = 0; passthrough routing = connection-pinned
+Main emit loop and ingest shards = event-driven

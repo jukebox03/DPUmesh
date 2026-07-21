@@ -1,7 +1,7 @@
 #!/bin/bash
 # Measure host-container and DPU ARM CPU across one fixed load window using process
 # tick deltas. TCP accounting includes Envoy. crictl maps pods to container PIDs.
-# Usage: cpu_probe.sh <dpumesh|tcp> <req> <reply> <conc> <dur> [threads] [tidy.csv]
+# Usage: cpu_probe.sh <dpumesh|tcp|direct> <req> <reply> <conc> <dur> [threads] [tidy.csv]
 set -euo pipefail
 
 SUITE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -10,8 +10,9 @@ PROJ_ROOT="$(cd "$SUITE_DIR/../.." && pwd)"
 NS="${NS:-test-bench}"; CTRL_PORT="${CTRL_PORT:-9092}"
 CLK="$(getconf CLK_TCK)"
 
-TR="${1:?transport dpumesh|tcp}"; REQ="${2:-1024}"; REP="${3:-8}"; CONC="${4:-32}"
+TR="${1:?transport dpumesh|tcp|direct}"; REQ="${2:-1024}"; REPLY="${3:-8}"; CONC="${4:-32}"
 DUR="${5:-10}"; THREADS="${6:-1}"; TIDY="${7:-}"
+CPU_REP="${CPU_REP:-1}"
 
 case "$TR" in
   # dpumesh service has multiple backend pods; passthrough pins the conn to ONE of
@@ -43,9 +44,16 @@ field()   { awk -v k="$2" '{for(i=1;i<=NF;i++){p=k"=";if(index($i,p)==1){print s
 CIP="$(pod_ip "$CLIENT_APP")"; [ -z "$CIP" ] && { echo "no $CLIENT_APP pod"; exit 1; }
 mapfile -t CPIDS < <(pod_pids "$CLIENT_APP")
 SPIDS=(); for sapp in $SERVER_APPS; do while read -r p; do [ -n "$p" ] && SPIDS+=("$p"); done < <(pod_pids "$sapp"); done
+# The direct path shares echo-tcp's pod with an idle Envoy container but bypasses
+# it on port 9092. Exclude that unrelated process from direct-path accounting.
+if [ "$TR" = direct ]; then
+  FILTERED=()
+  for p in "${SPIDS[@]}"; do [ "$(comm_of "$p")" = envoy ] || FILTERED+=("$p"); done
+  SPIDS=("${FILTERED[@]}")
+fi
 DPID=""; DT0=0; [ "$USE_DPU" = 1 ] && DPID="$(dpu_pid)"
 
-echo "== CPU probe: $TR  ${REQ}B/${REP}B conc=$CONC threads=$THREADS dur=${DUR}s =="
+echo "== CPU probe: $TR  ${REQ}B/${REPLY}B conc=$CONC threads=$THREADS dur=${DUR}s rep=$CPU_REP =="
 echo "   client=$CLIENT_APP pids: ${CPIDS[*]:-none}  server={$SERVER_APPS} pids: ${SPIDS[*]:-none}  dpu_pid=${DPID:-n/a}"
 
 # --- T0 snapshot ---
@@ -55,11 +63,15 @@ for p in "${CPIDS[@]}" "${SPIDS[@]}"; do T0[$p]=$(ticks "$p"); done
 W0=$(date +%s.%N)
 
 # --- load window (blocks dur seconds) ---
-OK=$(printf 'RUN %s %s %s %s 200 %s\n' "$REQ" "$REP" "$CONC" "$DUR" "$THREADS" \
+OK=$(printf 'RUN %s %s %s %s 200 %s\n' "$REQ" "$REPLY" "$CONC" "$DUR" "$THREADS" \
       | timeout "$((DUR+30))s" nc -N "$CIP" "$CTRL_PORT" 2>/dev/null || echo "ERR")
 W1=$(date +%s.%N)
 MRPS=$(field "$OK" mrps); GBPS=$(field "$OK" gbps); P50=$(field "$OK" p50); P99=$(field "$OK" p99)
 [ -z "$MRPS" ] && { echo "   run failed: $OK"; exit 1; }
+FAIL=$(field "$OK" fail); DROPS=$(field "$OK" drops); REORDER=$(field "$OK" reorder)
+[ "${FAIL:-0}" = 0 ] && [ "${DROPS:-0}" = 0 ] && [ "${REORDER:-0}" = 0 ] || {
+  echo "   invalid run: fail=${FAIL:-NA} drops=${DROPS:-NA} reorder=${REORDER:-NA}"; exit 1;
+}
 
 # --- T1 snapshot + deltas ---
 DT=$(awk -v a="$W0" -v b="$W1" 'BEGIN{print b-a}')
@@ -82,6 +94,6 @@ printf "     DPU ARM:    %s%%\n" "$DPU_PCT"
 printf "     host-eff:   %s %%core per Krps  (LOWER = more host-efficient)\n" "$EFF"
 
 if [ -n "$TIDY" ]; then
-  [ -s "$TIDY" ] || echo "transport,req,reply,conc,threads,mrps,gbps,p50,p99,host_client_pct,host_server_pct,host_total_pct,dpu_arm_pct,host_pct_per_krps" > "$TIDY"
-  echo "$TR,$REQ,$REP,$CONC,$THREADS,$MRPS,$GBPS,$P50,$P99,$csum,$ssum,$HOST,$DPU_PCT,$EFF" >> "$TIDY"
+  [ -s "$TIDY" ] || echo "rep,transport,req,reply,conc,threads,mrps,gbps,p50,p99,host_client_pct,host_server_pct,host_total_pct,dpu_arm_pct,host_pct_per_krps" > "$TIDY"
+  echo "$CPU_REP,$TR,$REQ,$REPLY,$CONC,$THREADS,$MRPS,$GBPS,$P50,$P99,$csum,$ssum,$HOST,$DPU_PCT,$EFF" >> "$TIDY"
 fi

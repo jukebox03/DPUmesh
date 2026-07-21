@@ -7005,3 +7005,50 @@ client CPU 0.729 cores
 The client completed `POD_QUIESCED` with zero native RX drops. This receipt proves
 that the ABI 3 gRPC adapter exchanges real HTTP/2 traffic over the current L4
 transport; it does not evaluate the simple L7 benchmark codec as an HTTP/2 proxy.
+
+---
+
+# Session 15 — Current ABI 3 native L4 evaluation
+
+Date: 2026-07-22 KST. This session replaces the frozen report dataset with a
+current three-path comparison. The primary baseline is TCP through two Envoy
+`tcp_proxy` sidecars; direct TCP is the no-proxy lower bound. Custom DPU L7 was
+disabled.
+
+```text
+DPUMESH_PROXY_L7_SVC=
+DPUMESH_INGEST_SHARDS=4
+DPUMESH_ARM_EGRESS_THREADS=4
+DPUMESH_RINGS_PER_POD=2
+DPUMESH_LOG_LEVEL=40
+DPA N=8 (auto-selected, cap 8)
+CPU pinning=fair
+```
+
+Every performance point used one client thread and connection, a 10-second
+measurement after warmup, five repetitions, and rotating transport order. The
+campaign retained 285 main runs and 75 CPU runs with zero failure, drop,
+overflow, or reorder. Native loopback completed 5,000/5,000, verbs-shaped
+window/pipeline validation completed 5,000/5,000, and LD_PRELOAD completed
+2,000/2,000. The final DPU log contained no runtime drop, poison, or DMA error.
+
+Key per-metric medians:
+
+| Workload | tcp-direct | tcp-envoy | dpumesh-native |
+|---|---:|---:|---:|
+| 1 KiB unloaded p50 | 23 µs | 60 µs | 114 µs |
+| 1 KiB/1 KiB, C=64 | 1.129 Mrps | 0.475 Mrps | 0.449 Mrps |
+| 8 KiB/8 B, C=32 | 31.20 Gb/s | 10.45 Gb/s | **11.73 Gb/s** |
+| 64 KiB/8 B, C=32 | 34.13 Gb/s | 12.24 Gb/s | 8.47 Gb/s |
+| 1 MiB/8 B, C=32 | 30.80 Gb/s | 14.46 Gb/s | 14.03 Gb/s |
+
+At 8 KiB, DPUmesh was 12.3% above Envoy goodput with p99 247 versus
+405 µs. Host CPU was 0.91 versus 1.19 cores, while DPU ARM used 4.20 cores.
+This is the strongest current offload point. At 1 KiB, DPUmesh reduced host CPU
+from 0.99 to 0.45 cores but remained 41% below Envoy throughput. At 64 KiB and
+above the native benchmark sustained only 3.7→1.3 effective outstanding
+requests versus the requested 32; large-message latency is therefore not a
+like-for-like loaded comparison.
+
+The concise current-state interpretation, exact aggregates, figures, and
+deployment receipt are in `bench/report/`.
