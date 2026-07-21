@@ -18,15 +18,22 @@
 
 namespace dpumesh::grpc {
 
+namespace internal {
+
+// Set target as authority only when the application omitted it.
+void SetDefaultAuthorityIfAbsent(
+    const std::string& target, ::grpc::ChannelArguments* args);
+
+}  // namespace internal
+
 using GrpcChannelCallback = absl::AnyInvocable<void(
     absl::StatusOr<std::shared_ptr<::grpc::Channel>>)>;
 
-// Asynchronously opens a native DPUmesh QP, wraps it in DmeshEndpoint, and
-// transfers it to a gRPC chttp2 client channel. The callback runs on the
-// DmeshRuntime callback executor.
+// Create a lazy gRPC channel that opens a targeted QP per connection. The
+// runtime must outlive the channel; DPUmesh owns GRPC_ARG_EVENT_ENGINE. The
+// callback runs on the runtime's callback executor.
 void ConnectDmeshGrpcChannel(
-    DmeshRuntime* runtime, std::string service,
-    grpc_event_engine::experimental::MemoryAllocator allocator,
+    DmeshRuntime* runtime, std::string target,
     std::shared_ptr<::grpc::ChannelCredentials> credentials,
     ::grpc::ChannelArguments args, GrpcChannelCallback callback);
 

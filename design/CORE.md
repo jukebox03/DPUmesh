@@ -194,6 +194,9 @@ ARM owns the backend byte streams. In L4 mode a connection is pinned to one
 backend. Optional service codecs can expose message boundaries, but the gRPC path
 uses raw HTTP/2 passthrough.
 
+A pinned stream terminates when its backend is lost. A new connection creates a
+QP and selects from the current ready backend set.
+
 Ingest shards own completion parsing and connection state. Egress workers own
 destination lanes, DOCA DMA engines, and reverse batches. Every queued lane item
 and DMA operation carries the destination pod generation. A stale completion can

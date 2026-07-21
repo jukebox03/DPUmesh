@@ -6644,3 +6644,263 @@ The previously disabled `dpumesh-preload` row is now wired to the dedicated
 - Matched-C curve peak receipts: `0.184219 Mrps` at 64 B and
   `0.153458 Mrps` at 1 KiB (4 connections); these are diagnostic, not a
   release-grade comparison.
+
+---
+
+# Session 12 — gRPC target/authority and reconnectable DPUmesh transport
+
+Date: 2026-07-21. Source base: `cab0b94` plus the uncommitted Session 12
+implementation and documentation changes.
+
+## Change under test
+
+The gRPC client now takes a DPUmesh Service-name `target` and ordinary
+`grpc::ChannelArguments`. It defaults `GRPC_ARG_DEFAULT_AUTHORITY` only when the
+application did not supply one. A per-channel EventEngine creates a fresh native
+QP on every gRPC connection attempt, so gRPC owns lazy connection and reconnect
+backoff. The DPU L4 proxy no longer re-picks a dead backend inside an existing
+byte stream; it terminates that stream and lets a new connection select from the
+current ready set.
+
+The QPS client gained explicit `AUTHORITY` and `WAIT_FOR_READY` inputs and emits
+target, authority, and wait policy in its result JSON.
+
+## Host correctness results
+
+| Command / build | Result | Covered scope |
+|---|---:|---|
+| `make test -j2` | 7/7 PASS | native API/control/batching/writable, preload, ABI, and new dead-pin L4 policy |
+| ASan/UBSan build + `ASAN_OPTIONS=detect_leaks=0 ctest --test-dir build/grpc --output-on-failure` | 4/4 PASS, 0.25 s | Endpoint, channel, reactor/runtime, native linkage |
+| TSan build + `TSAN_OPTIONS=halt_on_error=1 ctest --test-dir build/grpc-tsan --output-on-failure` | 4/4 PASS, 2.64 s | same suite under thread instrumentation |
+| Release `grpc_dpumesh_qps_benchmark` target | PASS | updated benchmark compiled against gRPC v1.80.0 |
+
+The reactor suite contains 19 focused cases. New cases verify that explicit
+authority is preserved, absent authority defaults to target, the channel is
+lazy, a transport FIN causes a second QP to be created, and both attempts carry
+the original `greeter` target. Fake-native lifecycle checks also verify that
+late/cancelled connection results close their QP.
+
+Leak detection is disabled only for this sandbox's ptrace restriction; ASan
+memory-access and UBSan checks remain enabled. No sanitizer finding occurred.
+
+## Loopback gRPC benchmark receipt
+
+This is a single short functional receipt, not a retained performance
+comparison. Server and client used the same Release binary on kernel loopback:
+
+```text
+server tcp 127.0.0.1:51087 120
+client tcp 127.0.0.1:51087 1 2 2 64 64 1 bench-authority.test 0
+```
+
+```json
+{"transport":"tcp","client_type":"SYNC_CLIENT","rpc_type":"UNARY","target":"127.0.0.1:51087","authority":"bench-authority.test","wait_for_ready":false,"channels":1,"concurrency":2,"request_bytes":64,"response_bytes":64,"warmup_seconds":1,"measurement_seconds":2.001,"attempted":5447,"succeeded":5447,"failed":0,"qps":2722.472,"latency_us":{"p50":724.450,"p90":1096.192,"p99":1357.295,"p999":1526.087},"client_cpu_seconds":1.121,"client_cpu_cores":0.560}
+```
+
+The result proves that the updated CLI and explicit authority path work for the
+matched TCP control. It does not establish a throughput claim: one run, a short
+duration, loopback placement, and sandbox scheduling are not a controlled
+campaign.
+
+## Hardware boundary
+
+`CCACHE_DISABLE=1 ninja -C build/doca` compiled every DPU C object, including
+the changed `dpu_proxy.c`, but the final binary did not link in this x86 host
+DOCA configuration. `DOCA_ARCH_DPU` was absent, so DPU-only definitions such as
+`setup_pod_dma`, `init_dpa_objects`, and `init_comch_dpa_msgq` were omitted while
+`dpu_worker.c` referenced them. This is an environment/target mismatch, not a
+failure in the changed pin-policy object; a real BlueField DPU build remains
+required.
+
+No BlueField runtime was available for a DPUmesh QPS run or an orchestrator
+create/delete campaign. Host tests prove fresh-QP reconnect and immutable stream
+pinning deterministically, but do not prove DMA execution, real backend death
+detection, Kubernetes readiness ordering, or resource plateaus. Those remain
+hardware validation items and must not be inferred from the loopback TCP result.
+
+---
+
+# Session 13 — gRPC target/authority performance regression check
+
+Date: 2026-07-21. This session supersedes Session 12's hardware boundary: a
+real BlueField build, deploy, and DPUmesh gRPC run were available for this
+measurement.
+
+## Question and comparison boundary
+
+The comparison asks whether the Session 12 client change—logical `target` plus
+ordinary gRPC channel arguments, lazy connect, and a reconnectable per-channel
+EventEngine—adds steady-state unary RPC cost. It does **not** compare the full
+current tree with a historical DPU binary:
+
+- `pre` is the Release gRPC QPS client built from exact commit `cab0b94` in a
+  detached worktree;
+- `post` is the Release client from `cab0b94` plus the uncommitted Session 12
+  implementation;
+- both clients dynamically load the same current `libdpumesh.so.2`, use the
+  same current DPU image, and talk to the same `post` QPS server. This keeps the
+  native/DPU data path and server constant and isolates the client adapter;
+- gRPC is v1.80.0. The SHA-256 values are:
+
+| artifact | SHA-256 |
+|---|---|
+| pre QPS binary | `01741dbd20d1a47b2917b7f448351f9ce0543beace5b3e7628c47d13ce83a160` |
+| post QPS binary | `a7c591172beaa7c5373617bffbb0810b672a0a6d452520ef6551e684c51962f2` |
+| shared `libdpumesh.so.2` | `706f8b9bae7781d0154a6fed0bdd83f3cf930e66a99d65c6dee80f2c918b4b5c` |
+| BlueField `dpumesh_dpu` | `97b7c31a5ecda1c554d3f8277a389d22c15a40e315f113913a161604efbead8f` |
+
+This arrangement measures client-side gRPC integration overhead. It is not an
+end-to-end before/after result for the L4 proxy changes in the dirty tree.
+The two QPS and shared-library hashes were rechecked inside the final pods.
+
+## Environment and method
+
+- Host/node: `rapids4`, Intel Xeon Gold 6554S, Linux 5.15.0-185; server and
+  client pods were on the same node with zero container restarts.
+- DPU deploy command:
+
+  ```text
+  DPUMESH_INGEST_SHARDS=4 DPUMESH_ARM_EGRESS_THREADS=4 \
+  DPUMESH_RINGS_PER_POD=2 DPUMESH_LOG_LEVEL=40 ./bench/bench.sh deploy
+  ```
+
+  The BlueField build recompiled 15 DPU C objects and every meshed pod reached
+  data-ready state. Thus the effective DPU configuration was four ingress
+  shards, four ARM egress workers, two rings per pod, warning-level logging.
+- QPS server: `bench-dpumesh` pod, `DPUMESH_SERVICE=bench-dpumesh`, core 0.
+  Client: `bench-dpumesh-2` pod, core 9. The logical target and default
+  authority were both `bench-dpumesh`; `wait_for_ready=false`.
+- Workload: one channel, synchronous unary `grpc.testing.BenchmarkService`,
+  concurrency 2, 64-byte request and 64-byte reply, one reactor.
+- Fresh-state A/B: fully restart the DPU and all pods before every observation;
+  5 s warmup and 30 s measurement. Order was `pre, post, post, pre, pre, post`.
+- Same-deployment cross-check: two deployments, two client lifecycles per
+  deployment, with order reversed (`post/pre`, then `pre/post`). Each client
+  again used 5 s warmup and 30 s measurement.
+- TCP control: one post server on kernel loopback, pinned to core 0; each client
+  was pinned to core 1. Four observations per version, 2 s warmup and 8 s
+  measurement, order `pre, post, post, pre, pre, post, post, pre`.
+
+The per-deployment DPUmesh commands, after copying both binaries into the pods,
+were equivalent to:
+
+```text
+env DPUMESH_SERVICE=bench-dpumesh taskset -c 0 \
+  /tmp/grpc_qps_post server dmesh bench-dpumesh 180 1
+taskset -c 9 /tmp/grpc_qps_pre \
+  client dmesh bench-dpumesh 5 30 2 64 64 1
+taskset -c 9 /tmp/grpc_qps_post \
+  client dmesh bench-dpumesh 5 30 2 64 64 1 bench-dpumesh 0
+```
+
+The TCP clients used the same payload and concurrency with target
+`127.0.0.1:51090`; post used authority `bench-authority.test` and
+`wait_for_ready=0`.
+
+The accepted samples had zero RPC failure, exact response-size validation, zero
+native RX drop at teardown, and successful `POD_QUIESCED`. CPU below is client
+process CPU, not total host plus DPU CPU.
+
+## BlueField DPUmesh fresh-state results
+
+| variant | rep | QPS | p50 us | p90 us | p99 us | p999 us | client cores | success/fail |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| pre | 1 | 11,592.624 | 152.588 | 165.382 | 491.235 | 844.906 | 0.508 | 347,780/0 |
+| pre | 2 | 11,203.817 | 153.067 | 182.193 | 522.476 | 867.028 | 0.494 | 336,116/0 |
+| pre | 3 | 11,800.153 | 151.623 | 162.663 | 480.672 | 807.364 | 0.515 | 354,006/0 |
+| post | 1 | 10,909.326 | 153.364 | 319.148 | 550.645 | 917.210 | 0.485 | 327,281/0 |
+| post | 2 | 11,123.054 | 153.711 | 191.073 | 532.391 | 881.266 | 0.490 | 333,693/0 |
+| post | 3 | 11,699.974 | 153.492 | 163.873 | 480.703 | 835.430 | 0.514 | 351,001/0 |
+
+| statistic (arithmetic mean) | pre | post | post change |
+|---|---:|---:|---:|
+| QPS | 11,532.198 | 11,244.118 | -2.50% |
+| QPS range | 11,203.817–11,800.153 | 10,909.326–11,699.974 | ranges overlap |
+| p50 | 152.426 us | 153.522 us | +0.72% |
+| p90 | 170.079 us | 224.698 us | +32.11% |
+| p99 | 498.128 us | 521.246 us | +4.64% |
+| p999 | 839.766 us | 877.969 us | +4.55% |
+| client CPU cores | 0.506 | 0.496 | -1.85% |
+
+The p90 mean is dominated by post repetition 1; the other post p90 values were
+191.073 and 163.873 us. With three observations and overlapping QPS ranges,
+these independent-deployment means are directional, not a confidence-qualified
+regression result.
+
+## Same-deployment adjacent-pair cross-check
+
+| deployment/order | variant | QPS | p50 us | p99 us | client cores |
+|---|---|---:|---:|---:|---:|
+| A, post first | post | 11,699.974 | 153.492 | 480.703 | 0.514 |
+| A, pre second | pre | 11,530.962 | 152.421 | 507.010 | 0.511 |
+| B, pre first | pre | 11,897.470 | 154.996 | 459.094 | 0.512 |
+| B, post second | post | 11,514.897 | 154.116 | 469.491 | 0.508 |
+
+Deployment A reuses post fresh-state repetition 3 as its first observation; it
+is not counted as an additional independent sample.
+
+Post changes by **+1.47%** in deployment A and **-3.22%** in deployment B.
+The two paired percentage changes average **-0.88%**; pooled QPS is
+11,714.216 pre versus 11,607.435 post (**-0.91%**). The sign changes with run
+order, so this cross-check does not demonstrate a stable adapter regression.
+
+## Direct TCP control
+
+| variant | rep | QPS | p50 us | p99 us | client cores | failure |
+|---|---:|---:|---:|---:|---:|---:|
+| pre | 1 | 16,064.782 | 121.603 | 149.901 | 0.652 | 0 |
+| pre | 2 | 15,779.908 | 124.605 | 150.140 | 0.665 | 0 |
+| pre | 3 | 15,826.280 | 123.779 | 149.018 | 0.666 | 0 |
+| pre | 4 | 15,762.873 | 124.369 | 150.886 | 0.670 | 0 |
+| post | 1 | 15,907.734 | 123.122 | 149.645 | 0.673 | 0 |
+| post | 2 | 16,131.938 | 122.110 | 146.514 | 0.646 | 0 |
+| post | 3 | 15,488.460 | 126.703 | 152.511 | 0.653 | 0 |
+| post | 4 | 15,856.841 | 123.797 | 149.094 | 0.671 | 0 |
+
+TCP mean QPS is 15,858.461 pre and 15,846.243 post (**-0.08%**). Mean p50
+changes 123.589 to 123.933 us (+0.28%), mean p99 changes 149.986 to 149.441 us
+(-0.36%), and mean client CPU changes 0.6633 to 0.6607 cores (-0.38%). The
+target/authority CLI and ordinary channel-argument path therefore show no
+measurable TCP steady-state regression in this workload.
+
+## Comparison with the Session 12 receipt
+
+Session 12 recorded one 2.001-second loopback sample at 2,722.472 QPS, p50
+724.450 us, and p99 1,357.295 us. The current four-sample post TCP mean is
+15,846.243 QPS (+482.05%), p50 123.933 us (-82.89%), and p99 149.441 us
+(-88.99%). This is **not a code-speedup claim**: Session 12 explicitly retained
+only a short functional receipt and did not pin client/server CPUs, whereas this
+session pins separate cores, runs four interleaved repetitions, and measures for
+8 seconds after warmup. The old number is unsuitable as a regression baseline;
+the controlled pre/post results above are the valid comparison.
+
+## Repeated-lifecycle diagnostic anomaly
+
+An initial attempt ran ten interleaved 10-second clients against one persistent
+DPU/server state. Samples 1–5 stayed at 11.2–11.5 kQPS. Starting at sample 6,
+both variants degraded: post produced 4.93 and 4.52 kQPS, then pre produced 5.02
+and 6.70 kQPS. The tenth (post) client failed with `Deadline Exceeded`, and its
+teardown timed out waiting 5 seconds for `POD_QUIESCED`. The DPU log recorded:
+
+```text
+proxy: dst pod 12 not ready — 17 bytes dropped (total 1)
+proxy: poisoning conn (11:32789): seg cannot be delivered
+```
+
+Because the deterioration affected both binaries and followed repeated pod-slot
+reuse, none of these samples is included in the performance means. Fresh-state
+and two-lifecycle accepted runs ended with clean quiesce and no recent DPU
+warning/error. The anomaly is nevertheless a real high-load create/destroy
+reliability finding and should be reproduced separately before claiming an
+unbounded dynamic-pod lifecycle plateau.
+
+## Decision
+
+There is **no demonstrated steady-state performance regression** from the new
+target/authority and reconnectable EventEngine API at this 64-byte unary point:
+TCP is -0.08%, while same-deployment DPUmesh pairs average -0.88% and disagree
+in sign. The independent fresh-deployment mean is lower by 2.50%, so zero cost
+cannot be proved from only three runs; it remains a watch item rather than a
+release-blocking regression. The more important observed risk is repeated
+client lifecycle/resource reclaim, which is a correctness/stability follow-up
+and is not hidden inside the accepted throughput result.

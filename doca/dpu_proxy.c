@@ -944,13 +944,13 @@ static int32_t px_route_message(struct objects *objs, int32_t cluster, int32_t h
     return dpu_route_l4(objs, (int16_t)cluster);
 }
 
-/* Resolve a byte-stream connection to one pinned backend. A dead backend is re-picked. */
+/* Resolve a byte stream to its pinned backend. A dead pin is terminal. */
 static int32_t px_resolve_backend(struct objects *objs, struct px_conn *c,
                                   int16_t cluster) {
     if (c->pinned_backend >= 0 && c->pinned_cluster == cluster) {
         struct pod_state *tp = find_pod_by_id(objs, c->pinned_backend);
-        if (tp && pod_data_ready(tp))
-            return c->pinned_backend;
+        return dmesh_l4_pinned_backend(c->pinned_backend,
+                                       tp && pod_data_ready(tp));
     }
     int32_t b = dpu_route_l4(objs, cluster);
     if (b >= 0) {

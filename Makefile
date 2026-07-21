@@ -111,14 +111,18 @@ $(TESTDIR)/native_writable_test: tests/native_writable_test.c src/dmesh_core.c $
 $(TESTDIR)/preload_api_contract_test: tests/preload_api_contract_test.c src/dmesh_preload.c $(LIB_HDRS) | dirs
 	$(CC) $(CFLAGS) -o $@ tests/preload_api_contract_test.c -lpthread -ldl
 
+$(TESTDIR)/l4_pin_policy_test: tests/l4_pin_policy_test.c doca/dpu_proxy.h | dirs
+	$(CC) $(CFLAGS) -I. -o $@ tests/l4_pin_policy_test.c
+
 test: $(TESTDIR)/native_api_contract_test $(TESTDIR)/native_control_state_test \
 	$(TESTDIR)/native_tx_batch_policy_test $(TESTDIR)/native_writable_test \
-	$(TESTDIR)/preload_api_contract_test $(PRELOAD)
+	$(TESTDIR)/preload_api_contract_test $(TESTDIR)/l4_pin_policy_test $(PRELOAD)
 	$(TESTDIR)/native_api_contract_test
 	$(TESTDIR)/native_control_state_test
 	$(TESTDIR)/native_tx_batch_policy_test
 	$(TESTDIR)/native_writable_test
 	$(TESTDIR)/preload_api_contract_test
+	$(TESTDIR)/l4_pin_policy_test
 	sh tests/abi_contract_test.sh $(LIB) $(PRELOAD) $(ABI_MAJOR)
 
 # dmesh API binaries link the transport library. One explicit rule each so the

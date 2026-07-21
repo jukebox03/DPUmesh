@@ -149,7 +149,8 @@ The binary syntax is:
 ```text
 grpc_dpumesh_qps_benchmark server <tcp|dmesh> ENDPOINT DURATION_S [REACTORS]
 grpc_dpumesh_qps_benchmark client <tcp|dmesh> TARGET WARMUP_S DURATION_S \
-    CONCURRENCY REQUEST_BYTES RESPONSE_BYTES [REACTORS]
+    CONCURRENCY REQUEST_BYTES RESPONSE_BYTES [REACTORS] [AUTHORITY=TARGET] \
+    [WAIT_FOR_READY=0]
 ```
 
 For a transport comparison, copy the identical binary to the same client and
@@ -158,6 +159,10 @@ pod IP, then run `server dmesh SERVICE ...` and target the same Service name.
 Use one channel and the same concurrency/payload matrix for both paths. Record
 the binary hash, pod/node identity, DPU knobs, success/failure counts, process CPU,
 and DPU logs with the output.
+
+`TARGET` is a TCP address or a DPUmesh Service name. `AUTHORITY` maps to
+`GRPC_ARG_DEFAULT_AUTHORITY` and defaults to `TARGET`; `WAIT_FOR_READY` applies
+to each RPC. The result JSON records all three values.
 
 ## 6. Correctness validators
 

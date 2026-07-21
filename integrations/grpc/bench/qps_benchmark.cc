@@ -21,6 +21,7 @@
 
 #include <grpc/event_engine/internal/memory_allocator_impl.h>
 #include <grpc/event_engine/memory_request.h>
+#include <grpc/impl/channel_arg_names.h>
 #include <grpcpp/create_channel.h>
 #include <grpcpp/passive_listener.h>
 #include <grpcpp/security/credentials.h>
@@ -162,7 +163,7 @@ double ProcessCpuSeconds() {
 PhaseResult RunPhase(const std::shared_ptr<::grpc::Channel>& channel,
                      size_t concurrency, size_t request_size,
                      size_t response_size, std::chrono::seconds duration,
-                     bool record_latency) {
+                     bool record_latency, bool wait_for_ready) {
   std::mutex start_mu;
   std::condition_variable start_cv;
   size_t ready = 0;
@@ -198,6 +199,7 @@ PhaseResult RunPhase(const std::shared_ptr<::grpc::Channel>& channel,
         // Bound every synchronous call so a server that disappears during a
         // benchmark cannot strand the process after the measurement deadline.
         context.set_deadline(std::chrono::system_clock::now() + 5s);
+        context.set_wait_for_ready(wait_for_ready);
         SimpleResponse response;
         const auto begin = Clock::now();
         const ::grpc::Status status = stub->UnaryCall(&context, request, &response);
@@ -354,7 +356,8 @@ absl::Status RunServer(const std::string& transport,
 }
 
 absl::Status RunClient(const std::string& transport,
-                       const std::string& target, size_t warmup_seconds,
+                       const std::string& target, const std::string& authority,
+                       bool wait_for_ready, size_t warmup_seconds,
                        size_t duration_seconds, size_t concurrency,
                        size_t request_size, size_t response_size,
                        size_t reactors) {
@@ -366,6 +369,10 @@ absl::Status RunClient(const std::string& transport,
   ThreadExecutor callbacks;
   std::unique_ptr<DmeshRuntime> runtime;
   std::shared_ptr<::grpc::Channel> channel;
+  ::grpc::ChannelArguments channel_args;
+  if (!authority.empty()) {
+    channel_args.SetString(GRPC_ARG_DEFAULT_AUTHORITY, authority);
+  }
   if (transport == "dmesh") {
     auto runtime_result = CreateRuntime(&callbacks, reactors);
     if (!runtime_result.ok()) return runtime_result.status();
@@ -374,8 +381,8 @@ absl::Status RunClient(const std::string& transport,
         std::shared_ptr<::grpc::Channel>>>>();
     auto future = promise->get_future();
     ConnectDmeshGrpcChannel(
-        runtime.get(), target, MakeAllocator(),
-        ::grpc::InsecureChannelCredentials(), ::grpc::ChannelArguments(),
+        runtime.get(), target,
+        ::grpc::InsecureChannelCredentials(), channel_args,
         [promise](absl::StatusOr<std::shared_ptr<::grpc::Channel>> result) {
           promise->set_value(std::move(result));
         });
@@ -386,15 +393,15 @@ absl::Status RunClient(const std::string& transport,
     if (!channel_result.ok()) return channel_result.status();
     channel = std::move(*channel_result);
   } else if (transport == "tcp") {
-    channel = ::grpc::CreateChannel(target,
-                                    ::grpc::InsecureChannelCredentials());
+    channel = ::grpc::CreateCustomChannel(
+        target, ::grpc::InsecureChannelCredentials(), channel_args);
   } else {
     return absl::InvalidArgumentError("transport must be tcp or dmesh");
   }
 
   const PhaseResult warmup =
       RunPhase(channel, concurrency, request_size, response_size,
-               std::chrono::seconds(warmup_seconds), false);
+               std::chrono::seconds(warmup_seconds), false, wait_for_ready);
   if (warmup.succeeded == 0 || warmup.failed != 0) {
     return absl::UnavailableError(
         std::string("warmup failed: ") + warmup.first_error);
@@ -402,7 +409,7 @@ absl::Status RunClient(const std::string& transport,
 
   PhaseResult measured =
       RunPhase(channel, concurrency, request_size, response_size,
-               std::chrono::seconds(duration_seconds), true);
+               std::chrono::seconds(duration_seconds), true, wait_for_ready);
   channel.reset();
   runtime.reset();
   if (measured.succeeded == 0 || measured.failed != 0) {
@@ -417,6 +424,10 @@ absl::Status RunClient(const std::string& transport,
   std::cout << std::fixed << std::setprecision(3)
             << "RESULT {\"transport\":\"" << transport
             << "\",\"client_type\":\"SYNC_CLIENT\",\"rpc_type\":\"UNARY\""
+            << ",\"target\":\"" << target << "\",\"authority\":\""
+            << (authority.empty() ? target : authority)
+            << "\",\"wait_for_ready\":"
+            << (wait_for_ready ? "true" : "false")
             << ",\"channels\":1,\"concurrency\":" << concurrency
             << ",\"request_bytes\":" << request_size
             << ",\"response_bytes\":" << response_size
@@ -441,7 +452,14 @@ void Usage(const char* program) {
       << " server <tcp|dmesh> ENDPOINT DURATION_S [REACTORS=1]\n  "
       << program
       << " client <tcp|dmesh> TARGET WARMUP_S DURATION_S CONCURRENCY "
-         "REQUEST_BYTES RESPONSE_BYTES [REACTORS=1]\n";
+         "REQUEST_BYTES RESPONSE_BYTES [REACTORS=1] [AUTHORITY=TARGET] "
+         "[WAIT_FOR_READY=0]\n";
+}
+
+absl::StatusOr<bool> ParseBool(const char* value, const char* name) {
+  if (std::string(value) == "0") return false;
+  if (std::string(value) == "1") return true;
+  return absl::InvalidArgumentError(std::string(name) + " must be 0 or 1");
 }
 
 }  // namespace
@@ -466,7 +484,7 @@ int main(int argc, char** argv) {
     status = dpumesh::grpc::qps::RunServer(argv[2], argv[3], *duration,
                                            *reactors);
   } else if (argc >= 2 && std::string(argv[1]) == "client") {
-    if (argc < 9 || argc > 10) {
+    if (argc < 9 || argc > 12) {
       dpumesh::grpc::qps::Usage(argv[0]);
       return EXIT_FAILURE;
     }
@@ -475,22 +493,29 @@ int main(int argc, char** argv) {
     auto concurrency = ParseSize(argv[6], "concurrency");
     auto request_size = ParseSize(argv[7], "request size", true);
     auto response_size = ParseSize(argv[8], "response size", true);
-    auto reactors = argc == 10 ? ParseSize(argv[9], "reactors")
+    auto reactors = argc >= 10 ? ParseSize(argv[9], "reactors")
                                : absl::StatusOr<size_t>(size_t{1});
+    const std::string authority = argc >= 11 ? argv[10] : argv[3];
+    auto wait_for_ready = argc >= 12
+                              ? dpumesh::grpc::qps::ParseBool(
+                                    argv[11], "wait_for_ready")
+                              : absl::StatusOr<bool>(false);
     if (!warmup.ok() || !duration.ok() || !concurrency.ok() ||
-        !request_size.ok() || !response_size.ok() || !reactors.ok()) {
+        !request_size.ok() || !response_size.ok() || !reactors.ok() ||
+        !wait_for_ready.ok()) {
       std::cerr << (!warmup.ok()       ? warmup.status()
                     : !duration.ok()   ? duration.status()
                     : !concurrency.ok() ? concurrency.status()
                     : !request_size.ok() ? request_size.status()
                     : !response_size.ok() ? response_size.status()
-                                          : reactors.status())
+                    : !reactors.ok()      ? reactors.status()
+                                          : wait_for_ready.status())
                 << '\n';
       return EXIT_FAILURE;
     }
     status = dpumesh::grpc::qps::RunClient(
-        argv[2], argv[3], *warmup, *duration, *concurrency, *request_size,
-        *response_size, *reactors);
+        argv[2], argv[3], authority, *wait_for_ready, *warmup, *duration,
+        *concurrency, *request_size, *response_size, *reactors);
   } else {
     dpumesh::grpc::qps::Usage(argv[0]);
     return EXIT_FAILURE;

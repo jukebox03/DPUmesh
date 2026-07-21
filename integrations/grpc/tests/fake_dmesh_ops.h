@@ -36,6 +36,7 @@ class FakeDmeshState final {
   dmesh_qp_t* WaitForClientQp(std::chrono::milliseconds timeout);
   bool WaitForClientQpCount(size_t count, std::chrono::milliseconds timeout);
   std::vector<dmesh_qp_t*> ClientQps() const;
+  std::vector<std::string> ClientTargets() const;
   bool WaitForPostCount(dmesh_qp_t* qp, size_t count,
                         std::chrono::milliseconds timeout);
   bool WaitForAllocCallCount(dmesh_qp_t* qp, size_t count,

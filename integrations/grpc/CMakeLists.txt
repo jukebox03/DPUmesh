@@ -158,6 +158,9 @@ if(DPUMESH_INCLUDE_DIR AND DPUMESH_LIBRARY)
   target_link_libraries(grpc_dpumesh_native PUBLIC dpumesh_native)
 
   add_library(grpc_dpumesh INTERFACE)
+  # Export bootstrap headers through the aggregate target.
+  target_include_directories(grpc_dpumesh INTERFACE
+    "${CMAKE_CURRENT_LIST_DIR}/src")
   target_link_libraries(grpc_dpumesh INTERFACE
     grpc_dpumesh_endpoint grpc_dpumesh_reactor grpc_dpumesh_native)
 

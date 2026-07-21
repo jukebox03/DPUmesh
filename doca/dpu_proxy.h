@@ -23,8 +23,14 @@ struct dmesh_route_seg {
                       * (conn stickiness, else RR over the live backend set). */
 };
 
-/* Defer sentinel — let the L4 default route (conn stickiness / RR) pick. */
+/* Defer to the L4 route for the initial backend pin. */
 #define DMESH_SEG_DST_DEFER (-2)
+
+/* Return a ready pin, or -1 when the stream is terminal. */
+static inline int32_t dmesh_l4_pinned_backend(int32_t pinned_backend,
+                                              int backend_ready) {
+    return pinned_backend >= 0 && backend_ready ? pinned_backend : -1;
+}
 
 /* The proxy's view of one connection (one direction of one stream). The L4
  * engine owns the struct; the proxy reads it and may keep state in `user`. */

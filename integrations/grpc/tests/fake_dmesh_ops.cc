@@ -129,6 +129,7 @@ class FakeDmeshState::Impl final {
   int32_t next_rx_slot = 1;
   dmesh_qp_t* last_client_qp = nullptr;
   std::vector<dmesh_qp_t*> client_qps;
+  std::vector<std::string> client_targets;
   std::vector<std::unique_ptr<Cq>> cqs;
   std::unordered_map<dmesh_qp_t*, std::unique_ptr<Qp>> qps;
   std::unordered_map<int32_t, std::shared_ptr<std::vector<uint8_t>>>
@@ -222,7 +223,9 @@ class FakeDmeshApiOps final : public DmeshApiOps {
       errno = EINVAL;
       return nullptr;
     }
-    return &impl_->NewQp(fake_cq, DMESH_ROLE_CLIENT)->value;
+    dmesh_qp_t* qp = &impl_->NewQp(fake_cq, DMESH_ROLE_CLIENT)->value;
+    impl_->client_targets.emplace_back(service);
+    return qp;
   }
 
   int DestroyQp(dmesh_qp_t* qp) override {
@@ -409,6 +412,11 @@ bool FakeDmeshState::WaitForClientQpCount(
 std::vector<dmesh_qp_t*> FakeDmeshState::ClientQps() const {
   std::lock_guard<std::mutex> lock(impl_->mu);
   return impl_->client_qps;
+}
+
+std::vector<std::string> FakeDmeshState::ClientTargets() const {
+  std::lock_guard<std::mutex> lock(impl_->mu);
+  return impl_->client_targets;
 }
 
 bool FakeDmeshState::WaitForPostCount(dmesh_qp_t* qp, size_t count,

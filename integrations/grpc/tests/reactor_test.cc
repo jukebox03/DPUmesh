@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <cstdlib>
 #include <iostream>
 #include <limits>
@@ -19,6 +20,7 @@
 #include <grpc/event_engine/slice.h>
 #include <grpc/event_engine/slice_buffer.h>
 #include <grpc/slice.h>
+#include <grpc/impl/channel_arg_names.h>
 #include <grpcpp/security/credentials.h>
 
 #include "absl/status/status.h"
@@ -80,6 +82,18 @@ std::string Flatten(SliceBuffer& buffer) {
                   buffer[i].size());
   }
   return output;
+}
+
+std::optional<std::string> StringChannelArgument(
+    const ::grpc::ChannelArguments& args, const char* key) {
+  const grpc_channel_args c_args = args.c_channel_args();
+  for (size_t i = 0; i < c_args.num_args; ++i) {
+    const grpc_arg& arg = c_args.args[i];
+    if (arg.type == GRPC_ARG_STRING && std::strcmp(arg.key, key) == 0) {
+      return std::string(arg.value.string);
+    }
+  }
+  return std::nullopt;
 }
 
 struct Fixture {
@@ -535,7 +549,6 @@ void TestGrpcClientBridgeBuildsChannelFromNativeConnect() {
 
   ConnectDmeshGrpcChannel(
       runtime.get(), "greeter",
-      MemoryAllocator(std::make_shared<TestMemoryAllocator>()),
       ::grpc::InsecureChannelCredentials(), ::grpc::ChannelArguments(),
       [&channel, &connect_error](
           absl::StatusOr<std::shared_ptr<::grpc::Channel>> result) {
@@ -550,14 +563,88 @@ void TestGrpcClientBridgeBuildsChannelFromNativeConnect() {
   callbacks.RunAll();
   CHECK_TRUE(!connect_error.has_value());
   CHECK_TRUE(channel != nullptr);
-  CHECK_EQ(state->ClientQps().size(), size_t{1});
+  CHECK_EQ(state->ClientQps().size(), size_t{0});
+
+  (void)channel->GetState(true);
+  CHECK_TRUE(state->WaitForClientQpCount(1, 2s));
 
   channel.reset();
   for (int i = 0; i < 20; ++i) {
     callbacks.RunAll();
     if (state->WaitForDestroyCount(1, 10ms)) break;
   }
-  CHECK_TRUE(state->WaitForDestroyCount(1, 2s));
+  // TSan can delay the EventEngine teardown timer.
+  CHECK_TRUE(state->WaitForDestroyCount(1, 10s));
+  runtime.reset();
+}
+
+void TestGrpcAuthorityIsDefaultedButNeverOverwritten() {
+  ::grpc::ChannelArguments defaulted;
+  internal::SetDefaultAuthorityIfAbsent("greeter", &defaulted);
+  CHECK_EQ(StringChannelArgument(defaulted, GRPC_ARG_DEFAULT_AUTHORITY),
+           std::optional<std::string>("greeter"));
+
+  ::grpc::ChannelArguments explicit_authority;
+  explicit_authority.SetString(GRPC_ARG_DEFAULT_AUTHORITY,
+                               "api.example.test");
+  internal::SetDefaultAuthorityIfAbsent("greeter", &explicit_authority);
+  CHECK_EQ(StringChannelArgument(explicit_authority,
+                                 GRPC_ARG_DEFAULT_AUTHORITY),
+           std::optional<std::string>("api.example.test"));
+}
+
+void TestGrpcClientReconnectCreatesFreshTargetedQp() {
+  ManualExecutor callbacks;
+  auto state = std::make_shared<FakeDmeshState>();
+  auto created = DmeshRuntime::Create(MakeFakeDmeshApiOps(state), &callbacks);
+  CHECK_TRUE(created.ok());
+  auto runtime = std::move(*created);
+
+  ::grpc::ChannelArguments args;
+  args.SetInt(GRPC_ARG_INITIAL_RECONNECT_BACKOFF_MS, 10);
+  args.SetInt(GRPC_ARG_MIN_RECONNECT_BACKOFF_MS, 10);
+  args.SetInt(GRPC_ARG_MAX_RECONNECT_BACKOFF_MS, 10);
+  std::shared_ptr<::grpc::Channel> channel;
+  ConnectDmeshGrpcChannel(
+      runtime.get(), "greeter", ::grpc::InsecureChannelCredentials(), args,
+      [&channel](absl::StatusOr<std::shared_ptr<::grpc::Channel>> result) {
+        CHECK_TRUE(result.ok());
+        channel = std::move(*result);
+      });
+  CHECK_TRUE(callbacks.WaitForSize(1, 2s));
+  callbacks.RunAll();
+  CHECK_TRUE(channel != nullptr);
+
+  (void)channel->GetState(true);
+  CHECK_TRUE(state->WaitForClientQpCount(1, 2s));
+  dmesh_qp_t* first = state->ClientQps().front();
+  const auto first_ready_deadline = std::chrono::steady_clock::now() + 2s;
+  while (std::chrono::steady_clock::now() < first_ready_deadline &&
+         !state->WaitForPostCount(first, 1, 10ms)) {
+    callbacks.RunAll();  // Deliver pending endpoint work.
+    std::this_thread::sleep_for(1ms);
+  }
+  CHECK_TRUE(state->WaitForPostCount(first, 1, 100ms));
+
+  state->InjectFin(first);
+  const auto deadline = std::chrono::steady_clock::now() + 3s;
+  while (std::chrono::steady_clock::now() < deadline &&
+         !state->WaitForClientQpCount(2, 10ms)) {
+    callbacks.RunAll();
+    std::this_thread::sleep_for(1ms);
+  }
+  callbacks.RunAll();
+  CHECK_TRUE(state->WaitForClientQpCount(2, 100ms));
+  const auto targets = state->ClientTargets();
+  CHECK_EQ(targets.size(), size_t{2});
+  CHECK_EQ(targets[0], std::string("greeter"));
+  CHECK_EQ(targets[1], std::string("greeter"));
+
+  channel.reset();
+  for (int i = 0; i < 100; ++i) {
+    callbacks.RunAll();
+    if (state->WaitForDestroyCount(2, 10ms)) break;
+  }
   runtime.reset();
 }
 
@@ -695,6 +782,10 @@ int main() {
        TestGrpcServerBridgeInjectsAcceptedEndpoint},
       {"gRPC client bridge builds channel",
        TestGrpcClientBridgeBuildsChannelFromNativeConnect},
+      {"gRPC authority preserves explicit override",
+       TestGrpcAuthorityIsDefaultedButNeverOverwritten},
+      {"gRPC reconnect creates a fresh targeted QP",
+       TestGrpcClientReconnectCreatesFreshTargetedQp},
       {"runtime destroys CQ before channel", TestRuntimeDestroysCqBeforeChannel},
       {"runtime round-robins CQ reactors",
        TestRuntimeRoundRobinsAcrossCqReactors},

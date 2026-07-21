@@ -254,13 +254,18 @@ native TX window, it may flush an accepted prefix to make forward progress. On
 `DMESH_WC_TX_READY`; blocking writes park on that fd, without a retry timer. The
 POSIX application never selects or observes the physical batch size.
 
-The gRPC C++ adapter maps one runtime to a channel, reactor shards to CQs, and
-EventEngine endpoints to QPs. It commits all slices of one EventEngine Write and
-flushes once at the logical write boundary. RX is copied into gRPC slices before
-the native credit is returned. TLS and HTTP/2 framing remain end-to-end and are
-not interpreted by DPUmesh. A reactor parks its exact slice cursor on `EAGAIN`
-and resumes only that connection when its CQ produces `DMESH_WC_TX_READY`; the
-adapter has no retry timer.
+The gRPC C++ adapter maps one runtime to channels, reactor shards to CQs, and
+EventEngine endpoints to QPs. Client bootstrap accepts a Service-name target,
+credentials, and `grpc::ChannelArguments`; absent authority defaults to the
+target. Each EventEngine `Connect` creates a targeted QP. Established L4 streams
+remain backend-pinned and terminate when that backend is lost. TLS and HTTP/2
+remain end-to-end.
+
+The adapter commits all slices of one EventEngine Write and flushes once at the
+logical write boundary. RX is copied into gRPC slices before the native credit
+is returned. A reactor parks its exact slice cursor on `EAGAIN` and resumes only
+that connection when its CQ produces `DMESH_WC_TX_READY`; the adapter has no
+retry timer.
 
 ## 7. Explicit limits
 
@@ -269,5 +274,6 @@ adapter has no retry timer.
   capacity.
 - No automatic deadline for an unflushed partial batch yet.
 - The registry is loaded once and is not live-reloaded.
+- Dynamic instances require a Service already present in the registry.
 - L4 passthrough is the supported gRPC mode; the simple message codec is not an
   HTTP/2 parser.

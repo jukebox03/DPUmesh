@@ -440,8 +440,9 @@ struct objects {
      * healthy backend SET of a service is DERIVED on demand from pods[] (single
      * source of truth: registered + service_id + dma_ready), so there is no
      * separate service->backend table to keep in sync — a disconnect removes a
-     * backend from the set automatically (no blackhole). This cursor just rotates
-     * the pick across that live set. Indexed by service_id [0,POD_ID_SPACE).
+     * backend from the set automatically. Existing pins terminate; new
+     * connections rotate across the live set. Indexed by service_id
+     * [0,POD_ID_SPACE).
      * Single ARM control thread advances it → no lock. Init to 0. */
     uint32_t svc_rr[POD_ID_SPACE];
 

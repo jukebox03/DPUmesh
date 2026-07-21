@@ -1,9 +1,10 @@
 # DPUmesh Naming and Identity
 
 DPUmesh separates application names from data-plane addresses. Applications use
-Kubernetes Service names; a process-local registry translates those names and
-socket destinations to compact service ids, while the DPU assigns ephemeral pod
-ids at registration.
+configured logical Service names; Kubernetes Service names are one common
+deployment convention, not a transport requirement. A process-local registry
+translates names and optional socket destinations to compact service ids, while
+the DPU assigns ephemeral backend slots at registration.
 
 ## 1. One registry, two facades
 
@@ -49,14 +50,22 @@ upstreams; in that case `wc.stream` distinguishes reply streams.
 
 The DPU derives a service's current backend set from live registered pod slots.
 A pod participates only after `POD_INIT_RESULT(READY)` and is removed from
-routing as soon as unregister or disconnect clears its live state.
+routing as soon as unregister or disconnect clears its live state. VMs,
+bare-metal processes, and pods can join or leave a configured Service without
+rewriting the registry. Backend loss terminates pinned L4 streams; new
+connections select from the current live set.
 
 ## 4. gRPC authority is separate
 
-The C++ adapter passes an explicit DPUmesh Service name when creating a channel
-or listener. That value chooses the transport destination. HTTP/2 `:authority`,
-TLS SNI, and certificate identity remain application/security-layer values;
-DPUmesh neither rewrites nor terminates them.
+The C++ client target is a configured Service name passed to each QP creation
+attempt. It is not an IP address or gRPC resolver URI.
+
+HTTP/2 `:authority`, TLS SNI, and certificate identity remain
+application-layer values. An explicit `GRPC_ARG_DEFAULT_AUTHORITY` is preserved;
+an absent value defaults to the target.
+
+The per-channel EventEngine creates a targeted QP for each `Connect`. The server
+uses the experimental `PassiveListener` endpoint-injection API.
 
 The repository implements endpoint injection, not a global
 `dpumesh:///service` resolver. Generated protobuf code, stubs, handlers, and RPC
@@ -64,10 +73,9 @@ methods are unchanged; only client/server bootstrap chooses the DPUmesh runtime.
 
 ## 5. Control-plane boundary
 
-This repository includes a static registry and benchmark deployment machinery,
-not a Kubernetes controller. It does not implement admission-time identity,
-EndpointSlice watching, live registry reload, or cryptographic workload
-identity. Registry consistency and `$DPUMESH_SERVICE` injection are deployment
-invariants. Kubernetes readiness and DPUmesh data-path readiness are distinct;
-only the DPUmesh initialization barrier proves that the registered DMA path is
-usable.
+This repository includes a static registry and deployment tooling, not an
+orchestrator controller. It does not implement admission identity, EndpointSlice
+watching, registry reload, or workload identity. Registry consistency and
+`$DPUMESH_SERVICE` injection are deployment invariants. Dynamic instances of a
+configured Service are supported; new Service names require registry updates.
+DPUmesh readiness is established by its initialization barrier.

@@ -19,6 +19,7 @@
 #include <grpc/event_engine/internal/memory_allocator_impl.h>
 #include <grpc/event_engine/memory_allocator.h>
 #include <grpc/event_engine/memory_request.h>
+#include <grpc/impl/channel_arg_names.h>
 #include <grpcpp/generic/async_generic_service.h>
 #include <grpcpp/generic/generic_stub.h>
 #include <grpcpp/security/credentials.h>
@@ -257,7 +258,8 @@ absl::Status RunServer(size_t calls, size_t reactors) {
   return absl::OkStatus();
 }
 
-absl::Status RunClient(const std::string& service, size_t calls,
+absl::Status RunClient(const std::string& target,
+                       const std::string& authority, size_t calls,
                        size_t payload_size, size_t reactors) {
   ThreadExecutor callbacks;
   auto runtime_result = CreateRuntime(&callbacks, reactors);
@@ -267,9 +269,13 @@ absl::Status RunClient(const std::string& service, size_t calls,
   auto promise = std::make_shared<std::promise<
       absl::StatusOr<std::shared_ptr<::grpc::Channel>>>>();
   auto future = promise->get_future();
+  ::grpc::ChannelArguments channel_args;
+  if (!authority.empty()) {
+    channel_args.SetString(GRPC_ARG_DEFAULT_AUTHORITY, authority);
+  }
   ConnectDmeshGrpcChannel(
-      runtime.get(), service, MakeAllocator(),
-      ::grpc::InsecureChannelCredentials(), ::grpc::ChannelArguments(),
+      runtime.get(), target,
+      ::grpc::InsecureChannelCredentials(), channel_args,
       [promise](absl::StatusOr<std::shared_ptr<::grpc::Channel>> result) {
         promise->set_value(std::move(result));
       });
@@ -314,7 +320,8 @@ absl::Status RunClient(const std::string& service, size_t calls,
   channel.reset();
   cq.Shutdown();
   runtime.reset();
-  std::cout << "PASS: native gRPC client service=" << service
+  std::cout << "PASS: native gRPC client target=" << target
+            << " authority=" << (authority.empty() ? target : authority)
             << " calls=" << calls << " payload_bytes=" << wire_payload
             << " reactors=" << reactors << '\n';
   return absl::OkStatus();
@@ -324,11 +331,12 @@ absl::Status RunClient(const std::string& service, size_t calls,
 }  // namespace dpumesh::grpc::testing
 
 int main(int argc, char** argv) {
-  if (argc < 3 || argc > 6) {
+  if (argc < 3 || argc > 7) {
     std::cerr
         << "usage:\n  " << argv[0]
         << " server CALLS [REACTORS=1]\n  " << argv[0]
-        << " client SERVICE CALLS [PAYLOAD=4096] [REACTORS=1]\n";
+        << " client TARGET CALLS [PAYLOAD=4096] [REACTORS=1] "
+           "[AUTHORITY=TARGET]\n";
     return EXIT_FAILURE;
   }
 
@@ -347,7 +355,7 @@ int main(int argc, char** argv) {
     status = dpumesh::grpc::testing::RunServer(*calls, *reactors);
   } else if (mode == "client") {
     if (argc < 4) {
-      std::cerr << "client mode requires SERVICE and CALLS\n";
+      std::cerr << "client mode requires TARGET and CALLS\n";
       return EXIT_FAILURE;
     }
     auto calls = dpumesh::grpc::testing::ParsePositive(argv[3], "calls");
@@ -366,8 +374,9 @@ int main(int argc, char** argv) {
                 << '\n';
       return EXIT_FAILURE;
     }
-    status = dpumesh::grpc::testing::RunClient(argv[2], *calls, *payload,
-                                               *reactors);
+    const std::string authority = argc >= 7 ? argv[6] : argv[2];
+    status = dpumesh::grpc::testing::RunClient(
+        argv[2], authority, *calls, *payload, *reactors);
   } else {
     std::cerr << "mode must be server or client\n";
     return EXIT_FAILURE;
