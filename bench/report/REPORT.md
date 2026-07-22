@@ -24,6 +24,18 @@ profile. Values below are per-metric medians; figure bands are deterministic 95%
 bootstrap confidence intervals. All 285 main runs and 75 CPU runs completed with
 zero failure, drop, overflow, or reorder.
 
+## Core trade-off
+
+The simplest current result is that DPUmesh does not yet broadly match Envoy's
+latency or throughput, but uses less host CPU time per completed request. Host
+work per request is lower at every size in the CPU sweep: by 48% at 64 B, 22% at
+1 KiB, 31% at 8 KiB, 11% at 64 KiB, and 44% at 1 MiB. Occupied cores are not used
+for this comparison because the paths achieve different throughput. Per-request
+normalization removes the first-order rate effect, but it is not a substitute for
+a rate-matched CPU run.
+
+![Latency, throughput, and host CPU work by message size](figures/fig_size_comparison.png)
+
 ## Results
 
 ### Latency and concurrency
@@ -44,6 +56,13 @@ DPUmesh p99 is higher at 188 versus 141 µs. Direct TCP reaches 1.129 Mrps.
 
 The response is 8 B and requested concurrency is 32. `N` is achieved
 concurrency computed as throughput × average RTT.
+
+The 512 KiB and 1 MiB L4 requests are logical benchmark frames, not single
+allocations. `bench_dpumesh` splits each frame into `dmesh_post_max()`-bounded
+posts; the ordered L4 byte stream carries them as 8 KiB transport units, and the
+receiver reframes the stream using the benchmark header's payload length. The
+separate in-tree L7 codec's 128 KiB frame limit does not apply because this
+campaign has `DPUMESH_PROXY_L7_SVC` disabled.
 
 | Request | Direct TCP Gb/s (N) | Envoy Gb/s (N) | DPUmesh Gb/s (N) |
 |---:|---:|---:|---:|

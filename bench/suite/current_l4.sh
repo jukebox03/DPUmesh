@@ -44,4 +44,5 @@ done
 python3 "$SUITE_DIR/analyze_cpu.py" "$CPU_RAW" "$CPU_SUMMARY"
 python3 "$SUITE_DIR/validate_l4.py" "$DATA_DIR/tidy.csv" "$CPU_RAW" "$REPS"
 python3 "$SUITE_DIR/plot.py" "$DATA_DIR/summary.csv" "$FIG_DIR" "$CPU_SUMMARY"
+python3 "$SUITE_DIR/plot_size_comparison.py" "$DATA_DIR/summary.csv" "$CPU_SUMMARY" "$FIG_DIR"
 echo "current_l4: PASS report=$REPORT_DIR"

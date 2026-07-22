@@ -83,5 +83,6 @@ The campaign writes only the current artifacts:
 - `data/summary.csv`: medians and 95% bootstrap intervals.
 - `data/cpu.csv` and `data/cpu_summary.csv`: host and DPU ARM accounting.
 - `data/meta.txt` and `data/dpu_startup.txt`: live provenance.
-- `figures/`: four detailed figures and two meeting figures regenerated from the
-  aggregate CSV files.
+- `figures/`: four detailed figures and one three-panel size-comparison figure regenerated
+  from the aggregate CSV files. The retained meeting figures are not part of the
+  current report-generation path.
