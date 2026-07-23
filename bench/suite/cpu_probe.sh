@@ -13,6 +13,8 @@ CLK="$(getconf CLK_TCK)"
 TR="${1:?transport dpumesh|tcp|direct}"; REQ="${2:-1024}"; REPLY="${3:-8}"; CONC="${4:-32}"
 DUR="${5:-10}"; THREADS="${6:-1}"; TIDY="${7:-}"
 CPU_REP="${CPU_REP:-1}"
+ALLOW_REORDER="${ALLOW_REORDER:-0}"   # L7 per-message LB may complete correlated RPCs out of order
+CPU_IDLE="${CPU_IDLE:-0}"             # 1 = sample the same processes without issuing RUN
 
 case "$TR" in
   # dpumesh service has multiple backend pods; passthrough pins the conn to ONE of
@@ -63,15 +65,22 @@ for p in "${CPIDS[@]}" "${SPIDS[@]}"; do T0[$p]=$(ticks "$p"); done
 W0=$(date +%s.%N)
 
 # --- load window (blocks dur seconds) ---
-OK=$(printf 'RUN %s %s %s %s 200 %s\n' "$REQ" "$REPLY" "$CONC" "$DUR" "$THREADS" \
-      | timeout "$((DUR+30))s" nc -N "$CIP" "$CTRL_PORT" 2>/dev/null || echo "ERR")
+if [ "$CPU_IDLE" = 1 ]; then
+  sleep "$DUR"
+  OK="OK mrps=0 gbps=0 p50=0 p99=0 fail=0 drops=0 reorder=0"
+else
+  OK=$(printf 'RUN %s %s %s %s 200 %s\n' "$REQ" "$REPLY" "$CONC" "$DUR" "$THREADS" \
+        | timeout "$((DUR+30))s" nc -N "$CIP" "$CTRL_PORT" 2>/dev/null || echo "ERR")
+fi
 W1=$(date +%s.%N)
 MRPS=$(field "$OK" mrps); GBPS=$(field "$OK" gbps); P50=$(field "$OK" p50); P99=$(field "$OK" p99)
 [ -z "$MRPS" ] && { echo "   run failed: $OK"; exit 1; }
 FAIL=$(field "$OK" fail); DROPS=$(field "$OK" drops); REORDER=$(field "$OK" reorder)
-[ "${FAIL:-0}" = 0 ] && [ "${DROPS:-0}" = 0 ] && [ "${REORDER:-0}" = 0 ] || {
+[ "${FAIL:-0}" = 0 ] && [ "${DROPS:-0}" = 0 ] && \
+  { [ "${REORDER:-0}" = 0 ] || [ "$ALLOW_REORDER" = 1 ]; } || {
   echo "   invalid run: fail=${FAIL:-NA} drops=${DROPS:-NA} reorder=${REORDER:-NA}"; exit 1;
 }
+[ "${REORDER:-0}" = 0 ] || echo "   note: accepting reorder=$REORDER (ALLOW_REORDER=1)"
 
 # --- T1 snapshot + deltas ---
 DT=$(awk -v a="$W0" -v b="$W1" 'BEGIN{print b-a}')
@@ -86,7 +95,7 @@ DPU_PCT="0.0"
 if [ -n "$DPID" ]; then d=$(( $(dpu_ticks "$DPID") - DT0 )); DPU_PCT=$(pct "$d"); fi
 
 HOST=$(awk -v a="$csum" -v b="$ssum" 'BEGIN{print a+b}')
-EFF=$(awk -v h="$HOST" -v m="$MRPS" 'BEGIN{printf (m>0)?"%.3f":"n/a", h/m/1000}')   # %core per Krps
+EFF=$(awk -v h="$HOST" -v m="$MRPS" 'BEGIN{if(m>0) printf "%.3f",h/m/1000; else printf "n/a"}')   # %core per Krps
 echo "   --- totals ---"
 printf "     achieved:   %.4f Mrps  gbps=%s  p50=%sus p99=%sus\n" "$MRPS" "$GBPS" "$P50" "$P99"
 printf "     HOST CPU:   client=%.1f%%  server=%.1f%%  TOTAL=%.1f%% (of one core)\n" "$csum" "$ssum" "$HOST"

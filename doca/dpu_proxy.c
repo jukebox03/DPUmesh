@@ -29,6 +29,7 @@
 #include <doca_buf_inventory.h>
 #include <doca_dma.h>
 
+#include <assert.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -50,6 +51,17 @@ DOCA_LOG_REGISTER(DPU_PROXY);
  * and are gathered directly into one egress unit. */
 #define PX_HEAD_MAX         (4u * 1024u)
 #define PX_L7_FRAME_MAX     (128u * 1024u)
+/* Bound ACK delay while collapsing physically adjacent 8 KiB DPA completions
+ * into one ARM window extent. A 128 KiB L7 frame then needs at most two pieces. */
+#define PX_ARRIVAL_COALESCE_MAX (64u * 1024u)
+/* Coalesce only complete frames already present in one parser pass. There is no
+ * timer/dwell: this caps one receiver notification while preserving low-load
+ * latency and bounds the SG width of the resulting DMA task. */
+#define PX_L7_EGRESS_COALESCE_MAX (64u * 1024u)
+/* With the normal 8 KiB forward completion, larger frames cannot contribute
+ * two complete messages to one parser pass. Keep them on the original direct
+ * enqueue path instead of paying aggregation bookkeeping for no possible gain. */
+#define PX_L7_EGRESS_COALESCE_FRAME_MAX (PX_ENTRY_BYTES_MAX / 2u)
 
 #define PX_DST_DEFER        (-2)
 #define PX_CODEC_L7         1u
@@ -59,7 +71,7 @@ DOCA_LOG_REGISTER(DPU_PROXY);
 #define PX_CREDIT_REFRESH_MARGIN 64
 
 /* Pool sizes. Arrivals are bounded by total in-flight sender slots
- * (MAX_PODS x 4096); units/pieces sized to match (pass-through is 1:1). */
+ * (MAX_PODS x DPU_BUFFER_SIZE/slot); units/pieces match pass-through 1:1. */
 #define PX_ARRIVAL_POOL  (MAX_PODS * (DPU_BUFFER_SIZE / DPUMESH_SLOT_SIZE))
 #define PX_UNIT_POOL     PX_ARRIVAL_POOL
 #define PX_PIECE_POOL    (2 * PX_ARRIVAL_POOL)
@@ -88,7 +100,7 @@ struct px_arrival {
     atomic_uint unfreed;          /* custody: (bytes not yet egressed/dropped) + in-window ref */
     uint32_t claimed_round;       /* scratch: seg-claimed bytes, one parse round (ingest-thread-only) */
     int32_t  ack_pod;             /* TX_ACK target (original sender, untranslated) */
-    uint16_t ack_port, ack_seq;
+    uint16_t ack_port, ack_first_seq, ack_seq;
 };
 
 /* One contiguous staging extent of a unit (an SG source piece). */
@@ -117,7 +129,7 @@ struct px_unit {
     uint8_t  emit_fin_done;
     int8_t   dst_pod_idx;         /* receiver pod slot (REV_DONE target; set at ship) */
     uint8_t  err;                 /* multi-thread done-queue: batch errored → skip REV_DONE */
-    uint8_t  frame_atomic;        /* complete L7 frame: one unit per DMA task */
+    uint8_t  dma_isolated;        /* keep this complete L7 group in one DMA task */
     struct px_piece *pieces, *pieces_tail;
     int npieces;
 };
@@ -152,12 +164,11 @@ struct px_batch {
  * A receiving conn always lands in ONE lane (region = dst_port % K): its
  * delivery order is the lane FIFO. */
 struct px_lane {
-    /* ingest→worker inbox: ingest (main thread) appends here under inq_lock; the
-     * owning egress worker splices it onto qhead (O(1)) at the top of its pump.
-     * qhead/qtail and everything below are then WORKER-LOCAL (no lock). For the
-     * single-thread default (n_eng==1) enqueue goes straight to qhead (no lock). */
-    struct px_unit  *inq_head, *inq_tail;
-    pthread_mutex_t  inq_lock;
+    /* One atomic LIFO per ingest producer. The egress owner exchanges each list
+     * and reverses it before appending, preserving FIFO order per shard/QP with
+     * no shared lane mutex. The final slot is reserved for main-thread synthetic
+     * work when ingest is sharded. */
+    struct px_unit  *inq[MAX_INGEST_SHARDS + 1];
     struct px_unit  *qhead, *qtail;   /* queued units (not yet submitted) — worker-local */
     struct px_batch *fhead, *ftail;   /* in-flight/completed batches, FIFO — worker-local */
     uint32_t cursor;                  /* next landing byte offset within the region */
@@ -277,6 +288,7 @@ struct dmesh_proxy {
 
     /* counters (no hot-path logging). Read by dpu_diag_dump under DPUMESH_DIAG=1. */
     uint64_t stat_msgs, stat_segs, stat_units, stat_batches, stat_drop_bytes;
+    uint64_t stat_arrival_merges, stat_egress_merges;
     /* Backpressure stalls, per pool. px_ship_range's EAGAIN path is otherwise silent, so
      * these are the only way to tell a stalled conn from a hung one. Bumped only once a
      * pool is dry — never on the hot path. */
@@ -438,7 +450,18 @@ static void px_free_batch_flush(struct dmesh_proxy *px, struct px_free_batch *fb
 /* All of this arrival's bytes are accounted (egressed or dropped): return the
  * sender's TX slot (batched TX_ACK, original untranslated identity) and free. */
 static void px_arrival_release(struct objects *objs, struct px_arrival *a) {
-    batch_or_send_tx_ack(objs, find_pod_by_id(objs, a->ack_pod), a->ack_port, a->ack_seq);
+    struct pod_state *src = find_pod_by_id(objs, a->ack_pod);
+    /* One coalesced arrival may cover several consecutive 8 KiB transport units.
+     * The host uses an exact-ACK reorder map, so retain every sequence while still
+     * batching them into Comch messages. This is safe even if another egress engine
+     * completes a later L7 message first. */
+    uint16_t seq = a->ack_first_seq;
+    for (;;) {
+        batch_or_send_tx_ack(objs, src, a->ack_port, seq);
+        if (seq == a->ack_seq)
+            break;
+        seq = (uint16_t)(seq + 1);
+    }
     __atomic_fetch_sub(&objs->pods[a->pod_idx].proxy_source_refs, 1,
                        __ATOMIC_ACQ_REL);
     px_arrival_free(objs->proxy, a);
@@ -464,7 +487,14 @@ static inline void px_custody_sub_fb(struct objects *objs, struct px_arrival *a,
     if (n == 0)
         return;
     if (atomic_fetch_sub_explicit(&a->unfreed, n, memory_order_acq_rel) == n) {
-        batch_or_send_tx_ack(objs, find_pod_by_id(objs, a->ack_pod), a->ack_port, a->ack_seq);
+        struct pod_state *src = find_pod_by_id(objs, a->ack_pod);
+        uint16_t seq = a->ack_first_seq;
+        for (;;) {
+            batch_or_send_tx_ack(objs, src, a->ack_port, seq);
+            if (seq == a->ack_seq)
+                break;
+            seq = (uint16_t)(seq + 1);
+        }
         __atomic_fetch_sub(&objs->pods[a->pod_idx].proxy_source_refs, 1,
                            __ATOMIC_ACQ_REL);
         px_fb_arr(fb, a);
@@ -791,26 +821,56 @@ static inline uint32_t px_unit_entries(const struct px_unit *u) {
 static void px_lane_enqueue(struct dmesh_proxy *px, int pod_idx, int region, struct px_unit *u) {
     struct px_lane *ln = &px->lanes[pod_idx][region];
     u->next = NULL;
-    /* Use the locked inbox whenever the PRODUCER (ingest) and CONSUMER (egress) of a
-     * lane can be different threads: n_eng>1 (egress workers own lanes) OR n_shards>1
-     * (multiple ingest processors enqueue to the same lane). The lane owner splices
-     * inq→qhead under the same lock (px_engine_pump / px_drain). Only the single-
-     * reaper + inline-egress default (both ==1) takes the lock-free direct path. */
+    /* Use a shard-private publish stack whenever producer and consumer can differ.
+     * QP ownership pins one ordered stream to one producer slot; the consumer reverses
+     * the exchanged list to recover FIFO order. */
     if (px->n_eng > 1 || px->n_shards > 1) {
-        pthread_mutex_lock(&ln->inq_lock);
-        /* inq_head is peeked LOCK-FREE by the lane owner (px_engine_pump / px_drain) to
-         * decide whether to take this lock at all; publish it with a release store so that
-         * peek's acquire load is a well-defined atomic, not a data race. inq_tail is only
-         * ever touched under the lock, so it stays plain. */
-        if (ln->inq_tail) ln->inq_tail->next = u;
-        else __atomic_store_n(&ln->inq_head, u, __ATOMIC_RELEASE);
-        ln->inq_tail = u;
-        pthread_mutex_unlock(&ln->inq_lock);
+        int producer = px_cur_shard ? px_cur_shard->id : px->n_shards;
+        if (producer < 0 || producer > MAX_INGEST_SHARDS)
+            producer = MAX_INGEST_SHARDS;
+        struct px_unit *old = __atomic_load_n(&ln->inq[producer], __ATOMIC_RELAXED);
+        do {
+            u->next = old;
+        } while (!__atomic_compare_exchange_n(&ln->inq[producer], &old, u, 0,
+                                               __ATOMIC_RELEASE, __ATOMIC_RELAXED));
     } else {
         if (ln->qtail) ln->qtail->next = u; else ln->qhead = u;
         ln->qtail = u;
     }
     __atomic_fetch_add(&px->stat_units, 1, __ATOMIC_RELAXED);   /* multiple ingest writers */
+}
+
+static int px_lane_inbox_nonempty(struct dmesh_proxy *px, struct px_lane *ln) {
+    int nprod = px->n_shards + 1;               /* ingest shards + main synthetic producer */
+    if (nprod > MAX_INGEST_SHARDS + 1) nprod = MAX_INGEST_SHARDS + 1;
+    for (int s = 0; s < nprod; s++)
+        if (__atomic_load_n(&ln->inq[s], __ATOMIC_ACQUIRE) != NULL)
+            return 1;
+    return 0;
+}
+
+/* Exchange and reverse each producer's LIFO publication list, then append it to
+ * the worker-local FIFO. Returns non-zero when at least one unit was transferred. */
+static int px_lane_splice_inbox(struct dmesh_proxy *px, struct px_lane *ln) {
+    int moved = 0;
+    int nprod = px->n_shards + 1;
+    if (nprod > MAX_INGEST_SHARDS + 1) nprod = MAX_INGEST_SHARDS + 1;
+    for (int s = 0; s < nprod; s++) {
+        struct px_unit *stack = __atomic_exchange_n(&ln->inq[s], NULL, __ATOMIC_ACQ_REL);
+        if (!stack)
+            continue;
+        struct px_unit *head = NULL, *tail = stack;
+        while (stack) {
+            struct px_unit *next = stack->next;
+            stack->next = head;
+            head = stack;
+            stack = next;
+        }
+        if (ln->qtail) ln->qtail->next = head; else ln->qhead = head;
+        ln->qtail = tail;
+        moved = 1;
+    }
+    return moved;
 }
 
 /* Queue one FIN/notify-only unit (0 length, 1 RX credit) to a lane. 1 = queued, 0 = the
@@ -912,15 +972,20 @@ static int32_t px_resolve_backend(struct objects *objs, struct px_conn *c,
     return b;
 }
 
-/* Gather the front stream range into one egress unit. */
-static int px_ship_range(struct objects *objs, struct px_conn *c,
-                         uint32_t len, int32_t route_dst) {
+/* Gather the front stream range into one egress unit without publishing it.
+ * This separation lets the L7 parser collapse complete, already-arrived frames
+ * before the egress worker can observe them; L4 publishes immediately below. */
+static int px_build_range(struct objects *objs, struct px_conn *c,
+                          uint32_t len, int32_t route_dst,
+                          struct px_unit **out_unit) {
     struct dmesh_proxy *px = objs->proxy;
     struct dpu_conntrack *ct = px_cur_shard->ct;   /* private or locked shared state */
     uint64_t sbeg = c->parse_pos, send_ = sbeg + len;
     int32_t dst_pod;
     uint16_t out_src_port = 0, out_dst_port = 0;
     struct px_conn *seq_owner = c;
+
+    *out_unit = NULL;
 
     if (c->pub.is_reply) {
         /* dst comes from the conntrack table; the proxy only confirms. */
@@ -1007,7 +1072,7 @@ static int px_ship_range(struct objects *objs, struct px_conn *c,
     u->org_port = c->pub.src_port;         /* un-rewritten: who to EOF if this unit dies */
     u->total_len = len;
     u->dst_pod_idx = (int8_t)(tp - objs->pods);
-    u->frame_atomic = (uint8_t)c->is_l7;
+    u->dma_isolated = (uint8_t)c->is_l7;
 
     /* map the stream range onto staging extents (zero-copy SG sources) */
     struct px_arrival *a = c->whead;
@@ -1051,14 +1116,29 @@ static int px_ship_range(struct objects *objs, struct px_conn *c,
     /* Only a unit that actually ships may consume a seq — a gap desyncs the peer's
      * per-conn sequence. Keep this below every failure return. */
     u->seq = c->pub.is_reply ? ++seq_owner->return_seq : ++c->egress_seq;
-    int K = tp->k_rings > 0 ? tp->k_rings : 1;
-    px_lane_enqueue(px, (int)(tp - objs->pods), (int)(out_dst_port % (uint16_t)K), u);
     px->stat_segs++;
+    *out_unit = u;
     return 1;
 }
 
+static void px_enqueue_unit(struct objects *objs, struct px_unit *u) {
+    struct pod_state *tp = &objs->pods[(int)u->dst_pod_idx];
+    int K = tp->k_rings > 0 ? tp->k_rings : 1;
+    px_lane_enqueue(objs->proxy, (int)u->dst_pod_idx,
+                    (int)(u->dst_port % (uint16_t)K), u);
+}
+
+static int px_ship_range(struct objects *objs, struct px_conn *c,
+                         uint32_t len, int32_t route_dst) {
+    struct px_unit *u = NULL;
+    int r = px_build_range(objs, c, len, route_dst, &u);
+    if (r > 0)
+        px_enqueue_unit(objs, u);
+    return r;
+}
+
 /* Park a connection whose pool allocation failed. Its parse position remains in
- * the window, and the ingest loop retries it on the next pass or epoll timeout. */
+ * the window, and the ingest loop retries it on the next drain pass. */
 static void px_stall(struct px_conn *c) {
     if (c->stalled)
         return;
@@ -1124,8 +1204,65 @@ static void px_parse(struct objects *objs, struct px_conn *c) {
     }
 }
 
-/* Decode complete frames and enqueue each frame as one SG unit. */
+static int px_l7_units_compatible(const struct px_unit *a,
+                                  const struct px_unit *b) {
+    return a->dst_pod_idx == b->dst_pod_idx &&
+           a->src_pod_id == b->src_pod_id &&
+           a->src_service == b->src_service &&
+           a->dst_service == b->dst_service &&
+           a->src_port == b->src_port &&
+           a->dst_port == b->dst_port &&
+           a->org_port == b->org_port &&
+           a->dma_isolated == b->dma_isolated;
+}
+
+/* Append a complete frame to a same-backend delivery unit. Its pieces retain
+ * their original arrival custody, so exact sender ACKs are unchanged. The first
+ * sequence labels the merged unit; skipped sequence values are legal because the
+ * receiver rejects only duplicates/stale values and accepts forward gaps. */
+static int px_l7_unit_absorb(struct dmesh_proxy *px, struct px_unit *dst,
+                             struct px_unit *src) {
+    if (!px_l7_units_compatible(dst, src) ||
+        dst->total_len + src->total_len > PX_L7_EGRESS_COALESCE_MAX ||
+        (uint32_t)(dst->npieces + src->npieces) > px->sg_pieces_max)
+        return 0;
+
+    if (dst->pieces_tail)
+        dst->pieces_tail->next = src->pieces;
+    else
+        dst->pieces = src->pieces;
+    if (src->pieces_tail)
+        dst->pieces_tail = src->pieces_tail;
+    dst->total_len += src->total_len;
+    dst->npieces += src->npieces;
+    src->pieces = src->pieces_tail = NULL;
+    src->npieces = 0;
+    px_unit_free_node(px, src);
+    __atomic_fetch_add(&px->stat_egress_merges, 1, __ATOMIC_RELAXED);
+    return 1;
+}
+
+struct px_l7_group {
+    int pod_idx;
+    struct px_unit *unit;
+};
+
+static void px_l7_flush_groups(struct objects *objs,
+                               struct px_l7_group *groups, int ngroups) {
+    for (int i = 0; i < ngroups; i++) {
+        if (!groups[i].unit)
+            continue;
+        px_enqueue_unit(objs, groups[i].unit);
+        groups[i].unit = NULL;
+    }
+}
+
+/* Decode complete frames. Frames already available in this parser pass are
+ * grouped per backend without waiting for more input. */
 static void px_parse_l7(struct objects *objs, struct px_conn *c) {
+    struct dmesh_proxy *px = objs->proxy;
+    struct px_l7_group groups[MAX_PODS];
+    int ngroups = 0;
     struct dmesh_l7_ctx ctx;
     ctx.service     = c->pub.dst_service;
     ctx.client_pod  = c->pub.src_pod;
@@ -1154,11 +1291,13 @@ static void px_parse_l7(struct objects *objs, struct px_conn *c) {
                 DMESH_L7_RESPONSE : DMESH_L7_REQUEST;
             int r = dmesh_l7_decode(direction, buf, avail, &ctx, &dec);
             if (r < 0) {
+                px_l7_flush_groups(objs, groups, ngroups);
                 px_poison(objs, c, "l7 route error");
                 return;
             }
             if (r == 0) {                      /* head not fully seen yet */
                 if (avail >= PX_HEAD_MAX) {    /* head bigger than the window → poison */
+                    px_l7_flush_groups(objs, groups, ngroups);
                     px_poison(objs, c, "l7 head exceeds PX_HEAD_MAX");
                     return;
                 }
@@ -1167,6 +1306,7 @@ static void px_parse_l7(struct objects *objs, struct px_conn *c) {
                 continue;
             }
             if (dec.total_len == 0 || dec.total_len > PX_L7_FRAME_MAX) {
+                px_l7_flush_groups(objs, groups, ngroups);
                 px_poison(objs, c, "l7 total_len out of range");
                 return;
             }
@@ -1174,6 +1314,7 @@ static void px_parse_l7(struct objects *objs, struct px_conn *c) {
             c->frame_dst = c->pub.is_reply ? c->pub.peer_pod :
                 px_route_message(objs, dec.cluster, dec.host);
             if (c->frame_dst < 0) {
+                px_l7_flush_groups(objs, groups, ngroups);
                 px_poison(objs, c, "l7 frame has no destination");
                 return;
             }
@@ -1183,19 +1324,45 @@ static void px_parse_l7(struct objects *objs, struct px_conn *c) {
         if (arrived < c->frame_len)
             break;
 
-        int r = px_ship_range(objs, c, c->frame_len, c->frame_dst);
+        int aggregate = c->frame_len <= PX_L7_EGRESS_COALESCE_FRAME_MAX;
+        if (!aggregate && ngroups > 0) {
+            /* Publish earlier small frames before a direct unit so per-backend
+             * lane order remains the original stream order. */
+            px_l7_flush_groups(objs, groups, ngroups);
+            ngroups = 0;
+        }
+        struct px_unit *u = NULL;
+        int r = aggregate ?
+            px_build_range(objs, c, c->frame_len, c->frame_dst, &u) :
+            px_ship_range(objs, c, c->frame_len, c->frame_dst);
         if (r == 0) {
             px_stall(c);
             break;
         }
         if (r < 0) {
+            px_l7_flush_groups(objs, groups, ngroups);
             px_poison(objs, c, "l7 frame cannot be delivered");
             return;
+        }
+        if (aggregate) {
+            int group_idx = (int)u->dst_pod_idx;
+            /* build_range derives this index from an element of objs->pods. */
+            assert(group_idx >= 0 && group_idx < MAX_PODS);
+            int g = 0;
+            while (g < ngroups && groups[g].pod_idx != group_idx)
+                g++;
+            if (g == ngroups) {
+                groups[ngroups++] = (struct px_l7_group){ .pod_idx = group_idx, .unit = u };
+            } else if (!px_l7_unit_absorb(px, groups[g].unit, u)) {
+                px_enqueue_unit(objs, groups[g].unit);
+                groups[g].unit = u;
+            }
         }
         px_advance(objs, c, c->frame_len);
         c->frame_len = 0;
         c->frame_dst = -1;
     }
+    px_l7_flush_groups(objs, groups, ngroups);
 }
 
 /* ====== FIN ====== */
@@ -1324,13 +1491,39 @@ int px_diag_str(struct objects *objs, char *buf, int cap) {
     if (!px || cap <= 0)
         return 0;
     return snprintf(buf, (size_t)cap,
-                    " px[msgs=%llu segs=%llu drop=%lluB stall=u%llu/p%llu/P%llu]",
+                    " px[msgs=%llu amerge=%llu segs=%llu umerge=%llu units=%llu batches=%llu "
+                    "drop=%lluB stall=u%llu/p%llu/P%llu]",
                     (unsigned long long)px->stat_msgs,
+                    (unsigned long long)px->stat_arrival_merges,
                     (unsigned long long)px->stat_segs,
+                    (unsigned long long)px->stat_egress_merges,
+                    (unsigned long long)px->stat_units,
+                    (unsigned long long)px->stat_batches,
                     (unsigned long long)px->stat_drop_bytes,
                     (unsigned long long)px->stat_stall_unit,
                     (unsigned long long)px->stat_stall_piece,
                     (unsigned long long)px->stat_stall_uport);
+}
+
+/* Collapse one physically adjacent DPA completion into an untouched tail window
+ * extent. Kept as a small pure state transition so the contiguity/custody contract
+ * has host-only regression coverage. */
+static int px_arrival_try_extend(struct px_conn *c, const dpu_comp_entry_t *e,
+                                 uint16_t seq_delta) {
+    struct px_arrival *tail = c->wtail;
+    if (seq_delta != 1 || !tail || tail->pod_idx != e->pod_idx ||
+        tail->ack_pod != e->src_pod_id || tail->ack_port != e->src_port ||
+        tail->staging_off + tail->len != e->buf_offset ||
+        tail->len + e->length > PX_ARRIVAL_COALESCE_MAX ||
+        tail->claimed_round != 0 ||
+        atomic_load_explicit(&tail->unfreed, memory_order_acquire) != tail->len + 1u)
+        return 0;
+
+    atomic_fetch_add_explicit(&tail->unfreed, e->length, memory_order_relaxed);
+    tail->len += e->length;
+    tail->ack_seq = e->seq;
+    c->stream_end += e->length;
+    return 1;
 }
 
 /* ====== ingest (forward completion → per-conn input window) ====== */
@@ -1401,6 +1594,22 @@ int px_ingest_forward(struct objects *objs, int shard, void *ventry) {
         return -1;
     }
 
+    /* The DPA must copy in <=8 KiB operations, but the ARM window does not need one
+     * object per operation. Extend an untouched tail arrival while sequence and DPU
+     * offsets are contiguous. Custody retains the full [ack_first_seq, ack_seq]
+     * range and releases every exact ACK together. Bound the run so one incomplete
+     * frame cannot hold an arbitrarily large prefix's ACK. */
+    if (px_arrival_try_extend(c, e, seq_delta)) {
+        c->ingest_seq = e->seq;
+        c->ingest_seq_valid = 1;
+        px->stat_msgs++;
+        px->stat_arrival_merges++;
+        px_parse(objs, c);
+        if (c->fin_pending)
+            px_try_fin(objs, c);
+        return 1;
+    }
+
     struct px_arrival *a = px_arrival_alloc(px);
     if (!a)
         return 0;                              /* pool full — retry (backpressure) */
@@ -1417,6 +1626,7 @@ int px_ingest_forward(struct objects *objs, int shard, void *ventry) {
     a->claimed_round = 0;
     a->ack_pod = e->src_pod_id;
     a->ack_port = e->src_port;
+    a->ack_first_seq = e->seq;
     a->ack_seq = e->seq;
     __atomic_fetch_add(&objs->pods[a->pod_idx].proxy_source_refs, 1,
                        __ATOMIC_ACQ_REL);
@@ -1710,8 +1920,9 @@ static void px_lane_drop_dead(struct px_engine *eng, struct px_lane *ln) {
         return;
     struct px_unit *head = ln->qhead, *tail = ln->qtail;
     ln->qhead = ln->qtail = NULL;
-    for (struct px_unit *u = head; u; u = u->next)
+    for (struct px_unit *u = head; u; u = u->next) {
         u->err = 1;                            /* skip REV_DONE; custody still released */
+    }
     pthread_mutex_lock(&eng->done_lock);
     if (eng->done_tail) eng->done_tail->next = head; else eng->done_head = head;
     eng->done_tail = tail;
@@ -1789,27 +2000,14 @@ static int px_engine_pump(struct objects *objs, struct px_engine *eng) {
         int quiet = dead;
         for (int r = 0; r < K; r++) {
             struct px_lane *ln = &px->lanes[i][r];
-            /* splice the ingest inbox onto the worker-local qhead (O(1)). Peek the head
-             * lock-free (acquire, paired with px_lane_enqueue's release store) so the empty
-             * case never touches the mutex; re-read under the lock before splicing. */
-            if (__atomic_load_n(&ln->inq_head, __ATOMIC_ACQUIRE)) {
-                pthread_mutex_lock(&ln->inq_lock);
-                struct px_unit *ih = ln->inq_head, *it = ln->inq_tail;
-                ln->inq_head = ln->inq_tail = NULL;
-                pthread_mutex_unlock(&ln->inq_lock);
-                if (ih) {
-                    if (ln->qtail) ln->qtail->next = ih; else ln->qhead = ih;
-                    ln->qtail = it;
-                    progressed = 1;
-                }
-            }
+            progressed |= px_lane_splice_inbox(px, ln);
             if (ln->fhead) px_lane_retire(eng, ln);
             if (dead) {
                 /* pod disconnected (or not yet ready): never submit to it. Drain any
                  * leftover queued units so they don't leak custody or mis-deliver to a
                  * pod that later REUSES this slot. */
                 px_lane_drop_dead(eng, ln);
-                if (__atomic_load_n(&ln->inq_head, __ATOMIC_ACQUIRE) ||
+                if (px_lane_inbox_nonempty(px, ln) ||
                     ln->qhead || ln->fhead || ln->refresh_inflight)
                     quiet = 0;
                 continue;
@@ -1829,7 +2027,7 @@ static int px_engine_pump(struct objects *objs, struct px_engine *eng) {
     return progressed;
 }
 
-/* egress worker thread body (n_eng>=2). Busy-polls its own PE + lanes; a short
+/* Egress worker thread body (n_eng>=2). Busy-polls its own PE + lanes; a short
  * yield when idle keeps it off a hot spin while still low-latency under load. */
 static void *px_worker_main(void *arg) {
     struct px_engine *eng = (struct px_engine *)arg;
@@ -1842,15 +2040,18 @@ static void *px_worker_main(void *arg) {
             /* Retired an SG-DMA batch to the done-queue → wake main to emit REV_DONE
              * promptly (no-op unless main is parked at low load / reaper on). */
             dpu_wake_main(objs);
-            idle = 0; continue;
+            idle = 0;
+            continue;
         }
         /* Idle: spin-yield briefly, then back off to a short sleep. An active
          * worker always makes progress and never reaches the sleep; only a
-         * worker with no assigned pods (n_eng > active dst pods) or a real lull
-         * sleeps — so an over-provisioned n_eng degrades gracefully instead of
-         * oversubscribing the ARM cores. */
-        if (++idle < 4096) sched_yield();
-        else { struct timespec ts = { 0, 50000 }; nanosleep(&ts, NULL); }  /* 50us */
+         * worker with no assigned pods or a real lull sleeps. */
+        if (++idle < 4096)
+            sched_yield();
+        else {
+            struct timespec ts = { 0, 50000 };
+            nanosleep(&ts, NULL);
+        }
     }
     /* drain remaining completions so no doca task/buf leaks at shutdown */
     for (int n = 0; n < 100000 && eng->dma_tasks_inflight > 0; n++)
@@ -1914,7 +2115,7 @@ static int px_lane_submit(struct objects *objs, struct px_engine *eng, int pod_i
             struct px_unit *u = ln->qhead;
             uint32_t ue = px_unit_entries(u);
             if (nunits > 0 &&
-                (take_tail->frame_atomic || u->frame_atomic ||
+                (take_tail->dma_isolated || u->dma_isolated ||
                  pieces + (uint32_t)u->npieces > px->sg_pieces_max ||
                  entries + ue > avail_entries ||
                  ln->cursor + bytes + u->total_len > region_size))
@@ -2169,11 +2370,6 @@ int px_init(struct objects *objs) {
     for (int i = PX_ARRIVAL_POOL - 1; i >= 0; i--) px_arrival_free(px, &px->arr_mem[i]);
     for (int i = PX_PIECE_POOL - 1; i >= 0; i--)   px_piece_free(px, &px->piece_mem[i]);
     for (int i = PX_UNIT_POOL - 1; i >= 0; i--)    { px->unit_mem[i].next = px->unit_free; px->unit_free = &px->unit_mem[i]; }
-    /* per-lane ingest→worker inbox locks (used only when n_eng>1) */
-    for (int i = 0; i < MAX_PODS; i++)
-        for (int r = 0; r < MAX_EU_PER_POD; r++)
-            pthread_mutex_init(&px->lanes[i][r].inq_lock, NULL);
-
     /* pool freelist lock (ingest reaper allocs / main frees); uncontended if reaper off */
     pthread_mutex_init(&px->pool_lock, NULL);
 
@@ -2271,7 +2467,9 @@ fail:
     }
     free(px->arr_mem); free(px->piece_mem);
     free(px->unit_mem);
-    for (int e = 0; e < MAX_ARM_ENG; e++) free(px->engines[e].batch_mem);
+    for (int e = 0; e < MAX_ARM_ENG; e++) {
+        free(px->engines[e].batch_mem);
+    }
     free(px);
     return ret;
 }

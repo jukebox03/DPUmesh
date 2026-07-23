@@ -46,14 +46,17 @@ static void cleanup_ctx(struct dpumesh_ctx *ctx);
  * concurrent new-conn bursts so the PE thread never has to drop on enqueue. */
 #define RX_QUEUE_SIZE 65536
 
-/* Per-connection power-of-two FIFO for sent, unacknowledged transport units. */
-#define TX_SU_DEPTH 64u
+/* Per-connection send-unit FIFOs are sized from the configured byte window.
+ * Sequence arithmetic is 16-bit, so keep the live window strictly below half
+ * the sequence space. */
+#define TX_SU_DEPTH_MIN 64u
+#define TX_SU_DEPTH_MAX 32768u
 
 /* Per-connection TX block-chain defaults over the shared TX mapping. */
-#define DPUMESH_TX_BLOCK_DEFAULT  65536   /* 64 KB */
-#define DPUMESH_TX_MAXB_DEFAULT   4        /* max blocks/conn (4 × 64 KB = 256 KB in-flight cap) */
+#define DPUMESH_TX_BLOCK_DEFAULT  (512 * 1024) /* 512 KiB contiguous extent */
+#define DPUMESH_TX_MAXB_DEFAULT   8           /* 8 × 512 KiB = 4 MiB/QP */
 #define DPUMESH_TX_H_DEFAULT      1        /* recycled-block cushion (hysteresis) */
-#define DMESH_TX_MAXB_CAP         8        /* compile-time cap for per-conn block arrays */
+#define DMESH_TX_MAXB_CAP         8        /* metadata slots for the 4 MiB default window */
 
 enum dmesh_tx_wait_state {
     DMESH_TX_WAIT_IDLE = 0,
@@ -116,8 +119,9 @@ struct dmesh_port_slot {
     uint32_t         blk_used[DMESH_TX_MAXB_CAP];/* committed content end offset in block k%maxb */
     int              nblk_owned;            /* physical blocks held (pblk-live + recyc); ≤ maxb */
     int              nrec;                  /* recyc depth (owner) */
-    uint16_t        *su_seq;                /* [TX_SU_DEPTH] shipped seq (lazy malloc, per slot) */
-    uint64_t        *su_end;                /* [TX_SU_DEPTH] shipped end cursor (lazy malloc, per slot) */
+    uint16_t        *su_seq;                /* [ctx->su_depth] shipped seq (lazy malloc) */
+    uint64_t        *su_end;                /* [ctx->su_depth] shipped end cursor */
+    uint8_t         *su_done;               /* [ctx->su_depth] exact ACK reorder marks */
 
     /* One-shot TX writable notification. The owner records the EAGAIN snapshot, then
      * release-publishes ARMED. Reclaim producers acquire that state before reading the
@@ -219,6 +223,7 @@ struct dpumesh_ctx {
     int   block_size;          /* bytes per block (= max contiguous message = alloc unit) */
     int   n_blocks;            /* number of blocks = num_slots*slot_size / block_size */
     int   maxb;                /* max blocks a conn may own (per-conn in-flight cap) */
+    uint32_t su_depth;         /* power-of-two send-unit FIFO depth for maxb*block_size */
     int   cushion_h;           /* recycled-block cushion depth (grow/shrink hysteresis) */
     atomic_uint_fast64_t block_free;   /* Treiber head: (tag<<32) | head_index */
     uint32_t *block_next;      /* [n_blocks]: free-list links */
@@ -893,10 +898,10 @@ static void init_config(dpumesh_ctx_t *ctx, const dpumesh_config_t *config, int 
         ctx->inbox_ring = (int)r;
     }
 
-    /* ELASTIC TX blocks. block_size (default 64 KB, >= slot_size) = the max contiguous
+    /* ELASTIC TX extents. block_size (default 512 KiB, >= slot_size) = the max contiguous
      * message = the allocation unit; the num_slots*slot_size TX buffer holds n_blocks =
      * (num_slots*slot_size)/block_size of them in a shared pool. maxb = per-conn block
-     * cap (default 4 => 256 KB in-flight/conn); cushion_h = recycled-block cushion
+     * cap (default 8 => 4 MiB in-flight/conn); cushion_h = recycled-block cushion
      * (grow/shrink hysteresis, default 1). Env: DPUMESH_TX_BLOCK / _TX_MAXB / _TX_H. */
     int bsz = DPUMESH_TX_BLOCK_DEFAULT;
     if ((env_val = getenv("DPUMESH_TX_BLOCK")) != NULL && atoi(env_val) > 0)
@@ -904,10 +909,6 @@ static void init_config(dpumesh_ctx_t *ctx, const dpumesh_config_t *config, int 
     if (bsz < ctx->slot_size) bsz = ctx->slot_size;    /* a block must hold >= 1 wire slot */
     size_t txbytes = (size_t)ctx->num_slots * (size_t)ctx->slot_size;
     if ((size_t)bsz > txbytes) bsz = (int)txbytes;
-    /* ...and at most TX_SU_DEPTH wire slots. This is the single-block half of the
-     * invariant completed by the maxb clamp below. */
-    if ((size_t)bsz > (size_t)TX_SU_DEPTH * (size_t)ctx->slot_size)
-        bsz = (int)((size_t)TX_SU_DEPTH * (size_t)ctx->slot_size);
     ctx->block_size = bsz;
     ctx->n_blocks   = (int)(txbytes / (size_t)bsz);
     if (ctx->n_blocks < 1) ctx->n_blocks = 1;
@@ -918,16 +919,19 @@ static void init_config(dpumesh_ctx_t *ctx, const dpumesh_config_t *config, int 
     if (mb < 1) mb = 1;
     if (mb > DMESH_TX_MAXB_CAP) mb = DMESH_TX_MAXB_CAP;
     if (mb > ctx->n_blocks) mb = ctx->n_blocks;        /* can't own more than the whole pool */
-    /* flush coalesces the whole committed window into <=8 KiB send units. Bound that
-     * window by the reclaim FIFO so every successful alloc remains flushable without
-     * a second admission point or a partial, permanently stuck batch. */
-    {
-        int su_per_block = (ctx->block_size + ctx->slot_size - 1) / ctx->slot_size;
-        int maxb_by_su = TX_SU_DEPTH / su_per_block;
-        if (maxb_by_su < 1) maxb_by_su = 1;
-        if (mb > maxb_by_su) mb = maxb_by_su;
-    }
     ctx->maxb = mb;
+
+    /* A QP can fill its complete byte window with <=slot_size descriptors. Size the
+     * reclaim FIFO to the next power of two so publication has no second admission
+     * point. Keep it below half the 16-bit sequence space for unambiguous ACK order. */
+    uint64_t need_su = ((uint64_t)ctx->block_size * (uint64_t)ctx->maxb +
+                        (uint64_t)ctx->slot_size - 1) / (uint64_t)ctx->slot_size;
+    uint32_t sd = TX_SU_DEPTH_MIN;
+    while ((uint64_t)sd < need_su && sd < TX_SU_DEPTH_MAX)
+        sd <<= 1;
+    if ((uint64_t)sd < need_su)
+        sd = TX_SU_DEPTH_MAX;
+    ctx->su_depth = sd;
 
     int hh = DPUMESH_TX_H_DEFAULT;
     if ((env_val = getenv("DPUMESH_TX_H")) != NULL && atoi(env_val) >= 0)
@@ -1171,7 +1175,7 @@ int dpumesh_init(dpumesh_ctx_t **out, int service_id,
     init_config(ctx, config, service_id);
 
     /* These limits are data-plane ABI, not tuning preferences. The DPA copies at
-     * most 8 KiB per descriptor, TX byte offsets mirror into a fixed 32 MiB DPU
+     * most 8 KiB per descriptor, TX byte offsets mirror into a fixed-size DPU
      * staging buffer, and reverse credits partition the RX buffer evenly over K. */
     size_t configured_bytes = (size_t)ctx->num_slots * (size_t)ctx->slot_size;
     size_t rx_quantum = (size_t)ctx->k_rings * DPUMESH_SLOT_SIZE;
@@ -1202,7 +1206,7 @@ int dpumesh_init(dpumesh_ctx_t **out, int service_id,
 
     /* Shared lock-free Treiber block pool. block_next[i] = i+1 threads the free-list;
      * block_free head starts at index 0 (all n_blocks free, tag 0); the last block links
-     * to n_blocks (the empty sentinel). Per-conn send-unit FIFOs (su_seq/su_end) are
+     * to n_blocks (the empty sentinel). Per-conn send-unit FIFOs (su_seq/su_end/su_done) are
      * lazily malloc'd per port slot (kept for the slot's life). */
     ctx->block_next = (uint32_t *)malloc((size_t)ctx->n_blocks * sizeof(uint32_t));
     if (!ctx->block_next) { errno = ENOMEM; goto fail; }
@@ -1382,6 +1386,7 @@ static void cleanup_ctx(dpumesh_ctx_t *ctx) {
             }
             if (ctx->ports[p].su_seq) { free(ctx->ports[p].su_seq); ctx->ports[p].su_seq = NULL; }
             if (ctx->ports[p].su_end) { free(ctx->ports[p].su_end); ctx->ports[p].su_end = NULL; }
+            if (ctx->ports[p].su_done) { free(ctx->ports[p].su_done); ctx->ports[p].su_done = NULL; }
         }
     }
 
@@ -1484,7 +1489,7 @@ static void block_pool_return(dpumesh_ctx_t *ctx, int32_t id) {
 
 /* Reset a slot's TX block-chain to a fresh (empty) conn: cursors 0, no blocks held.
  * NO block is grabbed here — the first block is taken LAZILY on the first tx_reserve.
- * su_seq/su_end (if already malloc'd for this slot) are kept and reused. */
+ * su_seq/su_end/su_done (if already malloc'd for this slot) are kept and reused. */
 static void port_reset_tx(struct dmesh_port_slot *psl) {
     psl->tx_w = psl->tx_c = psl->tx_s = 0;
     psl->resv_len = 0;
@@ -1573,16 +1578,19 @@ uint8_t *dpumesh_tx_reserve(dpumesh_ctx_t *ctx, uint16_t port, uint32_t len) {
     }
     if (psl->resv_len != 0) { errno = EINVAL; return NULL; } /* one outstanding alloc/QP */
     if (!psl->su_seq) {                                    /* lazy per-slot send-unit FIFO */
-        uint16_t *seq = (uint16_t *)malloc(TX_SU_DEPTH * sizeof(uint16_t));
-        uint64_t *end = (uint64_t *)malloc(TX_SU_DEPTH * sizeof(uint64_t));
-        if (!seq || !end) {
+        uint16_t *seq = (uint16_t *)malloc((size_t)ctx->su_depth * sizeof(uint16_t));
+        uint64_t *end = (uint64_t *)malloc((size_t)ctx->su_depth * sizeof(uint64_t));
+        uint8_t *done = (uint8_t *)calloc((size_t)ctx->su_depth, sizeof(uint8_t));
+        if (!seq || !end || !done) {
             free(seq);
             free(end);
+            free(done);
             errno = ENOMEM;
             return NULL;
         }
         psl->su_seq = seq;
         psl->su_end = end;
+        psl->su_done = done;
     }
 
     tx_refresh_blocks(ctx, psl);                           /* recycle / compact / shrink first */
@@ -1738,31 +1746,45 @@ void dpumesh_tx_sent(dpumesh_ctx_t *ctx, uint16_t port, uint16_t seq, uint32_t l
     struct dmesh_port_slot *psl = &ctx->ports[port];
     if (psl->nblk_owned <= 0 || !psl->su_seq) return;
     uint16_t h = atomic_load_explicit(&psl->su_head, memory_order_relaxed);
-    size_t idx = (size_t)(h & (TX_SU_DEPTH - 1));
+    size_t idx = (size_t)(h & (ctx->su_depth - 1));
     psl->tx_s += len;
     psl->su_seq[idx] = seq;
     psl->su_end[idx] = psl->tx_s;                          /* end cursor after this unit */
+    psl->su_done[idx] = 0;
     atomic_store_explicit(&psl->su_head, (uint_fast16_t)(h + 1), memory_order_release);
 }
 
-/* Apply a cumulative forward ACK by advancing tx_f through matching FIFO entries.
- * Stale and duplicate acknowledgements reclaim nothing. */
+/* Apply one exact forward ACK. DMA completions can reorder when successive L7
+ * messages choose different backend pods/egress engines. Mark the matching unit,
+ * then advance tx_f only across the contiguous completed FIFO prefix; a later ACK
+ * can never release an earlier unit whose DPU read is still in flight. */
 static inline void tx_reclaim_ack(dpumesh_ctx_t *ctx, uint16_t port, uint16_t seq) {
     if (port == 0 || port >= DMESH_PORT_SPACE) return;
     struct dmesh_port_slot *psl = &ctx->ports[port];
     uint16_t tail = atomic_load_explicit(&psl->su_tail, memory_order_relaxed);
     uint16_t head = atomic_load_explicit(&psl->su_head, memory_order_acquire);
     if (tail == head) return;                              /* nothing outstanding (su may be NULL) */
-    /* head != tail ⇒ the owner shipped ⇒ su_seq/su_end are allocated + visible (the
+    /* head != tail ⇒ the owner shipped ⇒ FIFO arrays are allocated + visible (the
      * su_head acquire orders the owner's lazy malloc before this). FIFO seqs ascend, so
-     * the popped set is a contiguous prefix ending at-or-before `seq`. */
+     * locate the exact sequence in O(1) from the tail sequence. Live depth is at most
+     * 32768, making the 16-bit forward distance unambiguous. */
+    uint16_t outstanding = (uint16_t)(head - tail);
+    size_t tail_idx = (size_t)(tail & (ctx->su_depth - 1));
+    uint16_t rel = (uint16_t)(seq - psl->su_seq[tail_idx]);
+    if (rel >= outstanding)
+        return;                                             /* stale, duplicate, or future */
+    size_t ack_idx = (size_t)((uint16_t)(tail + rel) & (ctx->su_depth - 1));
+    if (psl->su_seq[ack_idx] != seq)
+        return;                                             /* gap/FIN: never guess */
+    psl->su_done[ack_idx] = 1;
+
     uint64_t newf = 0;
     int popped = 0;
     while (tail != head) {
-        size_t idx = (size_t)(tail & (TX_SU_DEPTH - 1));
-        /* su_seq[idx] within (seq-TX_SU_DEPTH, seq]? distance wraps large if it is a
-         * FUTURE seq (> seq) or a stale ACK (< tail's seq) → stop. */
-        if ((uint16_t)(seq - psl->su_seq[idx]) >= TX_SU_DEPTH) break;
+        size_t idx = (size_t)(tail & (ctx->su_depth - 1));
+        if (!psl->su_done[idx])
+            break;
+        psl->su_done[idx] = 0;                              /* clean before slot reuse */
         newf = psl->su_end[idx];
         tail = (uint16_t)(tail + 1);
         popped++;

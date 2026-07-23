@@ -27,6 +27,23 @@ seed(struct dpumesh_ctx *ctx, struct dmesh_port_slot *ports, uint8_t *dma)
 int
 main(void)
 {
+    /* Production defaults: a 64 MiB shared pool, 512 KiB contiguous extents,
+     * and eight lazily-owned extents (4 MiB/QP). The reclaim FIFO must cover
+     * all 512 possible 8 KiB transport units without a second admission point. */
+    unsetenv("DPUMESH_TX_BLOCK");
+    unsetenv("DPUMESH_TX_MAXB");
+    unsetenv("DPUMESH_TX_H");
+    struct dpumesh_ctx *defaults = calloc(1, sizeof(*defaults));
+    assert(defaults != NULL);
+    init_config(defaults, NULL, DMESH_SVC_NONE);
+    assert(defaults->num_slots == 8192);
+    assert(defaults->slot_size == 8192);
+    assert(defaults->block_size == 512 * 1024);
+    assert(defaults->n_blocks == 128);
+    assert(defaults->maxb == 8);
+    assert(defaults->su_depth == 512);
+    free(defaults);
+
     struct dmesh_port_slot rx = {0};
     sw_descriptor_t d = { .seq = 7, .body_buf_slot = 100, .body_len = 10 };
     assert(rx_seq_accept(&rx, &d));

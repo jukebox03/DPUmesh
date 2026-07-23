@@ -15,7 +15,7 @@
 #define POD_ID_SPACE        128
 
 /* Per-pod DPU staging mirrors host TX byte offsets. */
-#define DPU_BUFFER_SIZE     (32 * 1024 * 1024)  /* 32MB = 4096 × 8KB */
+#define DPU_BUFFER_SIZE     (64 * 1024 * 1024)  /* 64MB = 8192 × 8KB */
 #define DPUMESH_SLOT_SIZE   8192               /* matches DPUMESH_SLOT_SIZE_DEFAULT */
 /* Forward descriptor count; the credit counter occupies the next slot. */
 #define DMA_RING_SIZE       4096

@@ -64,16 +64,8 @@ send_or_defer_tx_ack(struct objects *objs, struct pod_state *src_pod,
         return;
 
     if (r == DOCA_ERROR_AGAIN) {
-        /* Coalesce cumulative acknowledgements by connection and port, retaining the
-         * newest sequence. */
-        for (int i = 0; i < objs->num_deferred_tx_acks; i++) {
-            deferred_tx_ack_t *d = &objs->deferred_tx_acks[i];
-            if (d->conn != src_pod->connection || d->port != port)
-                continue;
-            if ((uint16_t)(seq - d->seq) < 0x8000u)   /* keep the newer of the two */
-                d->seq = seq;
-            return;
-        }
+        /* ACKs are exact, not cumulative: L7 egress can complete out of order when
+         * adjacent messages choose different backend pods/engines. Keep every seq. */
         if (objs->num_deferred_tx_acks < MAX_DEFERRED_TX_ACK) {
             int n = objs->num_deferred_tx_acks++;
             objs->deferred_tx_acks[n].conn = src_pod->connection;

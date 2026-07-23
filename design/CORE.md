@@ -215,9 +215,12 @@ benchmark protocol, not an HTTP/2 parser; the gRPC path uses raw L4 passthrough.
 The L7 request parser retains a bounded head across ingress extents, selects one
 live backend for each complete frame, and records an internal upstream mapping.
 The response parser recovers the client QP from that mapping. Request and response
-bodies remain scatter/gather views over DPU staging. Each complete frame is one
-egress unit and one DMA task, preventing neighboring frames from sharing a DMA
-completion boundary. Replies from multiple upstreams receive one monotonically
+bodies remain scatter/gather views over DPU staging. Complete frames already
+available in one parser pass are grouped by backend into a bounded egress unit
+without a dwell timer; frames larger than half one transport completion use the
+original direct path. Each group remains one SG-DMA task. This reduces reverse
+completion/wakeup granularity while preserving per-backend order and exact custody.
+Replies from multiple upstreams receive one monotonically
 increasing delivery sequence and are serialized into the client's single public
 byte stream. Backend FIN releases only that internal upstream; client FIN fans out
 behind queued data and closes the downstream connection.
