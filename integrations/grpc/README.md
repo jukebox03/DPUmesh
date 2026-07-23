@@ -5,7 +5,7 @@ Generated messages, stubs, services, RPC semantics, metadata, deadlines, HTTP/2,
 credentials, and TLS remain unchanged. DPUmesh is a byte-stream transport, not
 an RPC wrapper or HTTP/2 parser.
 
-The source contract is gRPC v1.80.0, C++17, and `libdpumesh.so.3`. The endpoint
+The source contract is gRPC v1.80.0, C++17, and `libdpumesh.so.4`. The endpoint
 injection APIs are experimental.
 
 ## Transport model
@@ -86,7 +86,7 @@ auto attachment = dpumesh::grpc::AttachDmeshGrpcServer(
     [](const absl::Status& error) { ReportAcceptError(error); });
 ```
 
-`AttachDmeshGrpcServer` converts `DMESH_WC_CONN_REQ` completions into endpoints
+`AttachDmeshGrpcServer` converts `DMESH_EVENT_CONN_REQ` events into endpoints
 and injects them into the listener. Shutdown stops traffic, calls `Detach()`,
 shuts down the gRPC server, destroys the server and listener, then destroys the
 runtime.
@@ -104,13 +104,13 @@ live set. In-flight RPCs retain normal gRPC deadline, retry, idempotency, and
 
 ## Data path
 
-Each runtime owns one native channel and configurable CQ reactor shards. A
-reactor is the sole consumer of its CQ and owns its QPs. RX bytes are copied
+Each runtime owns one native channel and configurable EQ reactor shards. A
+reactor is the sole consumer of its EQ and owns its QPs. RX bytes are copied
 into gRPC slices before native credit is released; TX slices are copied into
 registered native reservations.
 
 Writes flush at the EventEngine write boundary. On `EAGAIN`, the endpoint keeps
-its slice cursor and resumes on `DMESH_WC_TX_READY`. There is no busy poll,
+its slice cursor and resumes on `DMESH_EVENT_TX_READY`. There is no busy poll,
 retry timer, connection scan, or per-RPC wrapper dispatch.
 
 ## Build and test

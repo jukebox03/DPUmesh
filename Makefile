@@ -41,9 +41,9 @@ LIB_SRCS := \
 LIB_HDRS := $(shell rg --files include src doca -g '*.h')
 
 # ABI major. BUMP IT whenever the public ABI changes incompatibly — a field added to
-# dmesh_wc_t / dmesh_qp_t / dmesh_channel_t, a reorder, a signature change. The SONAME
+# dmesh_event_t / dmesh_qp_t / dmesh_channel_t, a reorder, a signature change. The SONAME
 # identifies incompatible public layouts at load time.
-ABI_MAJOR := 3
+ABI_MAJOR := 4
 LIB      := $(LIBDIR)/libdpumesh.so.$(ABI_MAJOR)
 LIB_LINK := $(LIBDIR)/libdpumesh.so
 
@@ -134,15 +134,15 @@ test: $(TESTDIR)/native_api_contract_test $(TESTDIR)/native_control_state_test \
 # dmesh API binaries link the transport library. One explicit rule each so the
 # source is a tracked prerequisite (rebuilds on edit).
 define DMESH_BIN_RULE
-$(BINDIR)/$(1): $($(1)_SRC) | dirs lib
+$(BINDIR)/$(1): $($(1)_SRC) $(LIB_LINK) | dirs
 	$$(CC) -O2 -g $$(DEPFLAGS) -Iinclude -Isrc -o $$@ $$< -L$$(LIBDIR) -ldpumesh -lpthread $$(RPATHS)
 	@echo "  -> $$@"
 endef
 $(foreach b,$(DMESH_BINS),$(eval $(call DMESH_BIN_RULE,$(b))))
 
-# The shim's data/CQ plane is a client of the public native API. It also compiles
+# The shim's data/EQ plane is a client of the public native API. It also compiles
 # against src/dmesh_core.h for narrow in-tree address-resolution and FIN hooks.
-$(PRELOAD): src/dmesh_preload.c | dirs lib
+$(PRELOAD): src/dmesh_preload.c $(LIB_LINK) | dirs
 	$(CC) -O2 -g $(DEPFLAGS) -fPIC -shared -Iinclude -Isrc -o $@ src/dmesh_preload.c \
 		-L$(LIBDIR) -ldpumesh -lpthread -ldl $(RPATHS)
 	@echo "  -> $@"

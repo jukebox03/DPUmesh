@@ -1,6 +1,6 @@
 /* Native self-routing validator.
  *
- * One thread and CQ drive client and echo roles for the same registered service.
+ * One thread and EQ drive client and echo roles for the same registered service.
  * The test verifies DPU service resolution and client/upstream port demultiplexing.
  * Command: RUN <count> <size> [zero-copy]. */
 #define _GNU_SOURCE
@@ -22,11 +22,11 @@ static void ctl_reply(int fd, const char *s, size_t n) { (void)!write(fd, s, n);
 
 
 #define CTRL_PORT   9092
-#define CQ_BATCH    16
+#define EVENT_BATCH    16
 #define MAX_SERVERS 4096
 
 static dmesh_channel_t *g_s      = NULL;
-static dmesh_cq_t      *g_cq     = NULL;  /* the one CQ both roles are polled from */
+static dmesh_eq_t      *g_eq     = NULL;  /* the one EQ both roles are polled from */
 static const char      *g_service = NULL; /* own service NAME (self-routing: connect to ourselves) */
 static int              g_msgmax  = 0;    /* max bytes per RECV == max bytes per echo post */
 static long             g_served  = 0;    /* requests the echo side replied to */
@@ -39,8 +39,8 @@ static int cmp_d(const void *a, const void *b) {
     double x = *(const double *)a, y = *(const double *)b;
     return (x > y) - (x < y);
 }
-/* 2us idle backoff, taken only when a pump found NO work: the CQ is the one wake
- * source, and SQ space frees silently (there are no send completions), so both
+/* 2us idle backoff, taken only when a pump found NO work: the EQ is the one wake
+ * source, and SQ space frees silently (there are no send events), so both
  * kinds of wait re-poll rather than sleep on the fd. */
 static void idle_wait(void) { struct timespec t = {0, 2000}; nanosleep(&t, NULL); }
 
@@ -96,8 +96,8 @@ static int sq_drain(dmesh_qp_t *c) {
 }
 
 /* Echo one inbound request. A fault only FLAGS the conn: it must stay alive until
- * the whole wc[] batch is dispatched, since later entries may still name it. */
-static void srv_recv(dmesh_qp_t *c, const dmesh_wc_t *w) {
+ * the whole events[] batch is dispatched, since later entries may still name it. */
+static void srv_recv(dmesh_qp_t *c, const dmesh_event_t *w) {
     sstate_t *ss = (sstate_t *)c->user_data;
     if (!ss || ss->dead) return;                    /* untracked / already faulted */
     if (ss->len == 0) {                             /* fast path: RX mmap -> TX ring */
@@ -125,7 +125,7 @@ static void srv_retire(rstate_t *st, dmesh_qp_t *c) {
 
 /* ---- client side: land the reply ---- */
 
-static void cli_recv(rstate_t *st, const dmesh_wc_t *w) {
+static void cli_recv(rstate_t *st, const dmesh_event_t *w) {
     if (w->len > st->size - st->got) { st->bad = 1; return; }   /* more bytes than we sent */
     memcpy(st->rb + st->got, w->buf, w->len);
     st->got += w->len;
@@ -136,34 +136,34 @@ static void cli_recv(rstate_t *st, const dmesh_wc_t *w) {
  * reassemble. Nothing to configure per size. */
 static void cli_reconnect(rstate_t *st) {
     dmesh_destroy_qp(st->cl);                            /* safe on NULL (first open) */
-    st->cl = dmesh_create_qp(g_cq, g_service);
+    st->cl = dmesh_create_qp(g_eq, g_service);
 }
 
-/* ---- the one CQ pump: dispatch by conn role, then retry stalled echoes ---- */
+/* ---- the one EQ pump: dispatch by conn role, then retry stalled echoes ---- */
 static int pump(rstate_t *st) {
-    dmesh_wc_t wc[CQ_BATCH];
-    int work = dmesh_poll_cq(g_cq, wc, CQ_BATCH);
+    dmesh_event_t events[EVENT_BATCH];
+    int work = dmesh_poll_eq(g_eq, events, EVENT_BATCH);
     if (work < 0) work = 0;
     for (int i = 0; i < work; i++) {
-        dmesh_qp_t *c = wc[i].qp;
-        switch (wc[i].opcode) {
+        dmesh_qp_t *c = events[i].qp;
+        switch (events[i].type) {
 
-        /* NB: nothing here may close a conn — dmesh_destroy_qp frees it, and poll_cq
+        /* NB: nothing here may close a conn — dmesh_destroy_qp frees it, and poll_eq
          * emits CONN_REQ together with that conn's already-landed messages, so a
          * later entry in THIS batch can still name it. Deaths are flagged and
          * collected by the sweep below. */
-        case DMESH_WC_CONN_REQ:                     /* the DPU looped a request back */
+        case DMESH_EVENT_CONN_REQ:                     /* the DPU looped a request back */
             c->user_data = st->nserv < MAX_SERVERS ? calloc(1, sizeof(sstate_t)) : NULL;
             if (c->user_data) st->servers[st->nserv++] = c;
             break;                                  /* untracked → never echoes → client times out */
 
-        case DMESH_WC_RECV:
-            if (c->role == DMESH_ROLE_SERVER) srv_recv(c, &wc[i]);
-            else                              cli_recv(st, &wc[i]);
-            dmesh_wc_release(g_s, &wc[i]);
+        case DMESH_EVENT_RECV:
+            if (c->role == DMESH_ROLE_SERVER) srv_recv(c, &events[i]);
+            else                              cli_recv(st, &events[i]);
+            dmesh_release_rx_buffer(g_s, &events[i]);
             break;
 
-        case DMESH_WC_RECV_FIN:                     /* our client's FIN → drop the echo conn */
+        case DMESH_EVENT_RECV_FIN:                     /* our client's FIN → drop the echo conn */
             if (c->role != DMESH_ROLE_SERVER) st->eof = 1;
             else if (c->user_data) ((sstate_t *)c->user_data)->dead = 1;
             break;
@@ -279,8 +279,8 @@ int main(void) {
     g_s = dmesh_create_channel();
     if (!g_s) { fprintf(stderr, "[loopback] create_channel failed\n"); return 1; }
     g_msgmax  = dmesh_msg_max(g_s);
-    g_cq = dmesh_create_cq(g_s);
-    if (!g_cq) { fprintf(stderr, "[loopback] create_cq failed\n"); return 1; }
+    g_eq = dmesh_create_eq(g_s);
+    if (!g_eq) { fprintf(stderr, "[loopback] create_eq failed\n"); return 1; }
     fprintf(stderr, "[loopback] ready: pod_id=%d own_service=%s\n", dmesh_pod_id(g_s), g_service);
 
     int srv = socket(AF_INET, SOCK_STREAM, 0);

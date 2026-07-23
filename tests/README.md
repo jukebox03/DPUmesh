@@ -10,7 +10,7 @@ are the first validation layer before the hardware validators under `bench/`.
 | `native_control_state_test.c` | Idempotent register, replay-safe unregister, and no slot reuse while cleanup is pending |
 | `native_tx_batch_policy_test.c` | Complete 8 KiB unit submission, explicit partial flush, physical-block tail ordering, and reverse-notification replay filtering |
 | `native_writable_test.c` | Automatic one-shot arm/recheck, QP and shared-pool readiness, stale-hint cancellation, and reservation rollback |
-| `preload_api_contract_test.c` | Public native TX usage, completion-driven blocking/nonblocking retry, honest `POLLOUT`, send timeout, ordered RX fragments, FIN validation, and fd-entry lifetime |
+| `preload_api_contract_test.c` | Public native TX usage, event-driven blocking/nonblocking retry, honest `POLLOUT`, send timeout, ordered RX fragments, FIN validation, and fd-entry lifetime |
 | `l4_pin_policy_test.c` | Live-pin stability and terminal backend loss |
 | `proxy_lane_queue_test.c` | Contiguous arrival custody/ACK ranges, bounded L7 egress-unit merging, lock-free per-shard lane publication, FIFO preservation, and concurrent producer stress |
 | `abi_contract_test.sh` | Library SONAME, required public symbols, and the preload library's versioned runtime dependency |
@@ -39,7 +39,7 @@ and a shared block return wakes one armed waiter. It also covers capacity return
 between failure and arm, direct-retry cancellation of a queued hint, and the rule
 that a failed cross-block reserve leaves the write cursor and padding counters
 unchanged. `native_api_contract_test.c` separately verifies the public
-`DMESH_WC_TX_READY` shape and one-shot consumption.
+`DMESH_EVENT_TX_READY` shape and one-shot consumption.
 
 `preload_api_contract_test.c` includes the production preload state machine and
 replaces native calls with deterministic fakes. It verifies that `EAGAIN` causes

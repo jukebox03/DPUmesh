@@ -168,7 +168,7 @@ void TestTxCopiesSplitsAndPostsOnOwnerThread() {
   CHECK_EQ(fixture.state->poll_thread_violation_count(), size_t{0});
 }
 
-void TestTxEagainRetriesFromCompletion() {
+void TestTxEagainRetriesFromEvent() {
   Fixture fixture;
   fixture.state->FailNextAlloc(fixture.qp, EAGAIN);
 
@@ -358,7 +358,7 @@ void TestCloseCancelsPermanentlyBlockedWrite() {
   CHECK_EQ(fixture.state->alloc_calls(fixture.qp), calls_after_close);
 }
 
-void TestCqPollFailureFailsAndClosesConnection() {
+void TestEqPollFailureFailsAndClosesConnection() {
   Fixture fixture;
   SliceBuffer buffer;
   std::optional<absl::Status> status;
@@ -634,18 +634,18 @@ void TestGrpcClientReconnectCreatesFreshTargetedQp() {
   runtime.reset();
 }
 
-void TestRuntimeDestroysCqBeforeChannel() {
+void TestRuntimeDestroysEqBeforeChannel() {
   ManualExecutor callbacks;
   auto state = std::make_shared<FakeDmeshState>();
   auto created = DmeshRuntime::Create(MakeFakeDmeshApiOps(state), &callbacks);
   CHECK_TRUE(created.ok());
   auto runtime = std::move(*created);
   runtime.reset();
-  CHECK_EQ(state->cq_destroy_count(), size_t{1});
+  CHECK_EQ(state->eq_destroy_count(), size_t{1});
   CHECK_EQ(state->channel_destroy_count(), size_t{1});
 }
 
-void TestRuntimeRoundRobinsAcrossCqReactors() {
+void TestRuntimeRoundRobinsAcrossEqReactors() {
   ManualExecutor callbacks;
   auto state = std::make_shared<FakeDmeshState>();
   DmeshRuntime::Options options;
@@ -676,12 +676,12 @@ void TestRuntimeRoundRobinsAcrossCqReactors() {
   CHECK_EQ(transports.size(), size_t{2});
   const auto qps = state->ClientQps();
   CHECK_EQ(qps.size(), size_t{2});
-  CHECK_TRUE(qps[0]->cq != qps[1]->cq);
+  CHECK_TRUE(qps[0]->eq != qps[1]->eq);
 
   transports.clear();
   CHECK_TRUE(state->WaitForDestroyCount(2, 2s));
   runtime.reset();
-  CHECK_EQ(state->cq_destroy_count(), size_t{2});
+  CHECK_EQ(state->eq_destroy_count(), size_t{2});
   CHECK_EQ(state->channel_destroy_count(), size_t{1});
   CHECK_EQ(state->poll_thread_violation_count(), size_t{0});
 }
@@ -726,7 +726,7 @@ void TestConcurrentConnectUsesMpscCommandQueues() {
   transports.clear();
   CHECK_TRUE(state->WaitForDestroyCount(kConnections, 2s));
   runtime.reset();
-  CHECK_EQ(state->cq_destroy_count(), size_t{4});
+  CHECK_EQ(state->eq_destroy_count(), size_t{4});
   CHECK_EQ(state->channel_destroy_count(), size_t{1});
   CHECK_EQ(state->poll_thread_violation_count(), size_t{0});
 }
@@ -744,8 +744,8 @@ int main() {
   const TestCase tests[] = {
       {"TX copies and splits on owner thread",
        TestTxCopiesSplitsAndPostsOnOwnerThread},
-      {"TX EAGAIN retries from completion",
-       TestTxEagainRetriesFromCompletion},
+      {"TX EAGAIN retries from event",
+       TestTxEagainRetriesFromEvent},
       {"RX copies before releasing credit", TestRxCopiesBeforeReleasingCredit},
       {"pre-bind data and FIN replay in order",
        TestPrebindDataAndFinAreReplayedInOrder},
@@ -755,8 +755,8 @@ int main() {
       {"post failure closes endpoint", TestPostFailureFailsEndpointAndClosesQp},
       {"close cancels permanently blocked write",
        TestCloseCancelsPermanentlyBlockedWrite},
-      {"CQ poll failure closes connection",
-       TestCqPollFailureFailsAndClosesConnection},
+      {"EQ poll failure closes connection",
+       TestEqPollFailureFailsAndClosesConnection},
       {"unknown service maps to unavailable",
        TestUnknownServiceMapsToUnavailable},
       {"unowned connection is rejected post-batch",
@@ -771,9 +771,9 @@ int main() {
        TestGrpcAuthorityIsDefaultedButNeverOverwritten},
       {"gRPC reconnect creates a fresh targeted QP",
        TestGrpcClientReconnectCreatesFreshTargetedQp},
-      {"runtime destroys CQ before channel", TestRuntimeDestroysCqBeforeChannel},
-      {"runtime round-robins CQ reactors",
-       TestRuntimeRoundRobinsAcrossCqReactors},
+      {"runtime destroys EQ before channel", TestRuntimeDestroysEqBeforeChannel},
+      {"runtime round-robins EQ reactors",
+       TestRuntimeRoundRobinsAcrossEqReactors},
       {"concurrent connect uses MPSC queues",
        TestConcurrentConnectUsesMpscCommandQueues},
   };

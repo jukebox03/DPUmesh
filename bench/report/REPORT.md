@@ -1,6 +1,6 @@
 # Current Native L4 Evaluation
 
-This report describes the ABI 3 native L4 implementation measured on
+This report describes the ABI 4 native L4 implementation measured on
 2026-07-22 KST. It contains no historical ABI data and no custom L7 result.
 
 ## Compared paths

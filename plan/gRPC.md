@@ -19,7 +19,7 @@ generated stub / handler
       chttp2
         │ ordered bytes
         ▼
- DmeshEndpoint ─ DmeshReactor ─ native CQ/QP ─ BlueField
+ DmeshEndpoint ─ DmeshReactor ─ native EQ/QP ─ BlueField
 ```
 
 The adapter is pinned to gRPC v1.80.0 because the endpoint injection APIs are
@@ -30,14 +30,14 @@ experimental. It uses only the public native C API.
 | Object | Owner | Constraint |
 |---|---|---|
 | native channel | `DmeshRuntime` | destroyed after all reactors |
-| native CQ | one `DmeshReactor` | exactly one polling thread |
+| native EQ | one `DmeshReactor` | exactly one polling thread |
 | native QP | one Endpoint connection | all operations on reactor owner |
-| RX completion | reactor/Endpoint handoff | copy before native credit release |
+| RX event | reactor/Endpoint handoff | copy before native credit release |
 | pending write | Endpoint state | one cursor, completed exactly once |
 
 Callbacks never run inline from transport operations. Cross-thread work enters a
 reactor through its command queue. A QP marked for close is freed only after the
-entire current CQ batch, because later entries can still name it.
+entire current EQ batch, because later entries can still name it.
 
 ## Write state machine
 
@@ -54,15 +54,15 @@ slice bytes
   → dmesh_flush trailing partial at logical Write completion
 ```
 
-Native ABI 3 batches committed posts into transport-private physical units and
+Native ABI 4 batches committed posts into transport-private physical units and
 submits complete units immediately. If the bounded native window fills before the
 logical Write ends, the reactor forces any remaining partial, parks the cursor,
 and retries only after native capacity reclamation identifies that QP as ready.
 The final callback is scheduled only after the final partial flush succeeds.
 
-`dmesh_alloc(EAGAIN)` automatically arms a one-shot `DMESH_WC_TX_READY`
-completion on the QP's CQ. The reactor retains the exact cursor and returns to its
-two-fd event loop: one command eventfd and one native CQ eventfd. It does not own a
+`dmesh_alloc(EAGAIN)` automatically arms a one-shot `DMESH_EVENT_TX_READY`
+event on the QP's EQ. The reactor retains the exact cursor and returns to its
+two-fd event loop: one command eventfd and one native EQ eventfd. It does not own a
 timerfd or scan all pending writes. On TX-ready it resumes only the named QP and
 ignores the hint if that connection no longer has a parked write. The hint does not
 reserve shared capacity; a repeated `EAGAIN` rearms the next transition.
@@ -70,8 +70,8 @@ reserve shared capacity; a repeated `EAGAIN` rearms the next transition.
 ## Read state machine
 
 Native RX memory cannot be retained by gRPC after credit return. For every
-`DMESH_WC_RECV`, the adapter allocates an exact-size gRPC slice, copies the bytes,
-then calls `dmesh_wc_release`. A pending read consumes queued slices; otherwise
+`DMESH_EVENT_RECV`, the adapter allocates an exact-size gRPC slice, copies the bytes,
+then calls `dmesh_release_rx_buffer`. A pending read consumes queued slices; otherwise
 the slice remains in the Endpoint queue.
 
 Peer FIN ends the read half. Transport failure or Endpoint destruction completes
@@ -80,8 +80,8 @@ HTTP/2 framing and multiplexing remain entirely inside chttp2.
 
 ## Server path
 
-Every reactor can consume the channel-wide native accept queue. The CQ that
-receives `DMESH_WC_CONN_REQ` becomes the permanent owner of that QP. The runtime
+Every reactor can consume the channel-wide native accept queue. The EQ that
+receives `DMESH_EVENT_CONN_REQ` becomes the permanent owner of that QP. The runtime
 wraps it as an Endpoint and submits it to gRPC's `PassiveListener`. No native
 listen-port call or application-level HTTP/2 parser is introduced.
 
@@ -91,12 +91,12 @@ The maintained tests require:
 
 - byte-exact split writes and one final flush;
 - no callback before the flush boundary;
-- exact cursor resume only after `DMESH_WC_TX_READY`, with no timer retry;
-- one CQ polling thread and no mid-batch QP destruction;
+- exact cursor resume only after `DMESH_EVENT_TX_READY`, with no timer retry;
+- one EQ polling thread and no mid-batch QP destruction;
 - RX copy before release;
 - inbound QP conversion and pre-bind event replay;
 - real chttp2 unary exchange over paired Endpoints;
-- public-symbol linkage against `libdpumesh.so.3`.
+- public-symbol linkage against `libdpumesh.so.4`.
 
 Hardware validation additionally checks the native register/readiness barrier,
 real byte exchange, FIN, `POD_QUIESCED`, and slot reuse. Those observations show
@@ -104,7 +104,7 @@ the exercised graceful path; they do not prove forced-death DMA isolation.
 
 ## Status and remaining work
 
-Race-free native TX-ready completion and completion-driven retry are implemented.
+Race-free native TX-ready publication and event-driven retry are implemented.
 The remaining integration work is:
 
 1. Exercise streaming, cancellation/deadline, and TLS/mTLS on BlueField.

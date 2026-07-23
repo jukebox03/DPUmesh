@@ -15,7 +15,7 @@
 struct fixture {
     struct dpumesh_ctx *ctx;
     struct dmesh_port_slot *ports;
-    struct dmesh_cq *cq;
+    struct dmesh_eq *eq;
     dmesh_channel_t channel;
     dmesh_qp_t qp;
     uint8_t dma[128];
@@ -27,8 +27,8 @@ static void fixture_init(struct fixture *f, int pool_empty)
     memset(f, 0, sizeof(*f));
     f->ctx = calloc(1, sizeof(*f->ctx));
     f->ports = calloc(TEST_PORT + 1, sizeof(*f->ports));
-    f->cq = calloc(1, sizeof(*f->cq));
-    assert(f->ctx != NULL && f->ports != NULL && f->cq != NULL);
+    f->eq = calloc(1, sizeof(*f->eq));
+    assert(f->ctx != NULL && f->ports != NULL && f->eq != NULL);
 
     f->ctx->slot_size = 16;
     f->ctx->block_size = 64;
@@ -50,19 +50,19 @@ static void fixture_init(struct fixture *f, int pool_empty)
         atomic_init(&f->ctx->pool_waiters[i], (uint_fast64_t)0);
 
     f->channel.ctx = f->ctx;
-    f->cq->ch = &f->channel;
-    f->cq->notify_efd = -1;
+    f->eq->ch = &f->channel;
+    f->eq->notify_efd = -1;
     for (uint32_t i = 0; i < DMESH_TX_READY_WORDS; i++)
-        atomic_init(&f->cq->tx_ready[i], (uint_fast64_t)0);
-    atomic_init(&f->cq->tx_ready_count, (uint_fast32_t)0);
+        atomic_init(&f->eq->tx_ready[i], (uint_fast64_t)0);
+    atomic_init(&f->eq->tx_ready_count, (uint_fast32_t)0);
 
     f->qp.ep = &f->channel;
-    f->qp.cq = f->cq;
+    f->qp.eq = f->eq;
     f->qp.local_port = TEST_PORT;
     struct dmesh_port_slot *psl = &f->ports[TEST_PORT];
     psl->role = DMESH_ROLE_CLIENT;
     psl->user = &f->qp;
-    psl->cq = f->cq;
+    psl->eq = f->eq;
     for (int i = 0; i < DMESH_TX_MAXB_CAP; i++) psl->pblk[i] = -1;
     atomic_init(&psl->tx_f, (uint_fast64_t)0);
     atomic_init(&psl->su_head, (uint_fast16_t)0);
@@ -79,7 +79,7 @@ static void fixture_destroy(struct fixture *f)
     free(f->ports[TEST_PORT].su_seq);
     free(f->ports[TEST_PORT].su_end);
     free(f->ports[TEST_PORT].su_done);
-    free(f->cq);
+    free(f->eq);
     free(f->ports);
     free(f->ctx);
 }
@@ -118,14 +118,14 @@ static void test_qp_window_wakes_at_block_reclaim(void)
     atomic_store(&psl->su_head, (uint_fast16_t)2);
     tx_reclaim_ack(f.ctx, TEST_PORT, 1);
     assert(atomic_load(&psl->tx_wait_state) == DMESH_TX_WAIT_ARMED);
-    assert(atomic_load(&f.cq->tx_ready_count) == 0);
+    assert(atomic_load(&f.eq->tx_ready_count) == 0);
 
-    /* Crossing the block boundary produces exactly one CQ completion. */
+    /* Crossing the block boundary produces exactly one EQ event. */
     tx_reclaim_ack(f.ctx, TEST_PORT, 2);
     assert(atomic_load(&psl->tx_wait_state) == DMESH_TX_WAIT_READY);
-    assert(atomic_load(&f.cq->tx_ready_count) == 1);
-    assert(dpumesh_next_tx_ready(f.cq) == &f.qp);
-    assert(dpumesh_next_tx_ready(f.cq) == NULL);
+    assert(atomic_load(&f.eq->tx_ready_count) == 1);
+    assert(dpumesh_next_tx_ready(f.eq) == &f.qp);
+    assert(dpumesh_next_tx_ready(f.eq) == NULL);
     assert(atomic_load(&psl->tx_wait_state) == DMESH_TX_WAIT_IDLE);
     fixture_destroy(&f);
 }
@@ -168,7 +168,7 @@ static void test_arm_recheck_closes_lost_wakeup(void)
     atomic_store(&psl->tx_f, (uint_fast64_t)64);
     tx_wait_arm(f.ctx, psl, TEST_PORT, DMESH_TX_WAIT_QP_RECLAIM);
     assert(atomic_load(&psl->tx_wait_state) == DMESH_TX_WAIT_READY);
-    assert(dpumesh_next_tx_ready(f.cq) == &f.qp);
+    assert(dpumesh_next_tx_ready(f.eq) == &f.qp);
     fixture_destroy(&f);
 }
 
@@ -186,14 +186,14 @@ static void test_shared_pool_return_and_direct_retry(void)
 
     block_pool_return(f.ctx, 0);
     assert(atomic_load(&psl->tx_wait_state) == DMESH_TX_WAIT_READY);
-    assert(atomic_load(&f.cq->tx_ready_count) == 1);
+    assert(atomic_load(&f.eq->tx_ready_count) == 1);
 
     /* Polling applications may retry first. Success consumes the block and cancels
-     * the obsolete queued completion, preserving one-shot semantics. */
+     * the obsolete queued event, preserving one-shot semantics. */
     assert(dpumesh_tx_reserve(f.ctx, TEST_PORT, 8) == f.dma);
     assert(atomic_load(&psl->tx_wait_state) == DMESH_TX_WAIT_IDLE);
-    assert(atomic_load(&f.cq->tx_ready_count) == 0);
-    assert(dpumesh_next_tx_ready(f.cq) == NULL);
+    assert(atomic_load(&f.eq->tx_ready_count) == 0);
+    assert(dpumesh_next_tx_ready(f.eq) == NULL);
     fixture_destroy(&f);
 }
 

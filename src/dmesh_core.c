@@ -11,7 +11,7 @@
 #include <time.h>
 #include <unistd.h>        /* close() for the host epoll RX path */
 #include <sys/epoll.h>     /* event-driven host PE progress (DPUMESH_HOST_EPOLL) */
-#include <sys/eventfd.h>   /* per-CQ readiness eventfd for native-epoll integration */
+#include <sys/eventfd.h>   /* per-EQ readiness eventfd for native-epoll integration */
 
 #include <doca_log.h>
 #include <doca_mmap.h>
@@ -92,7 +92,7 @@ struct dmesh_port_slot {
     void            *user;            /* app's conn handle (returned by dmesh_next_ready);
                                        * set BEFORE role is published so the PE never enqueues
                                        * a port whose handle isn't visible yet. */
-    struct dmesh_cq *cq;              /* the CQ owning this conn: the ONE ready list its
+    struct dmesh_eq *eq;              /* the EQ owning this conn: the ONE ready list its
                                        * edges are pushed to, and the ONE fd they wake.
                                        * Published with `user`, before role; cleared at
                                        * free_port, so the PE never arms a dead conn. */
@@ -155,12 +155,12 @@ struct dmesh_port_slot {
     atomic_uint_fast16_t su_head;     /* send-unit FIFO head (owner writes/release, PE reads) */
     char _cl_end[64];                 /* isolate this slot's consumer line from the next slot */
 };
-/* Ready-list SPSC ops (monotonic counters; PE producer, CQ thread consumer). Each
+/* Ready-list SPSC ops (monotonic counters; PE producer, EQ thread consumer). Each
  * list carries conn PORTS; dmesh_next_ready maps each to its slot->user. Provably
  * never full (≤ live conns < DMESH_PORT_SPACE; the on_ready flag admits each at most
  * once between drains), but the guard keeps a stray push from corrupting indices. */
-static inline void ready_push(struct dmesh_cq *cq, uint16_t port);
-static inline int  ready_pop(struct dmesh_cq *cq, uint16_t *port);
+static inline void ready_push(struct dmesh_eq *eq, uint16_t port);
+static inline int  ready_pop(struct dmesh_eq *eq, uint16_t *port);
 /* Inbound SPSC ring ops (monotonic counters; count = tail-head). */
 static inline int inbox_push(struct dmesh_port_slot *psl, const sw_descriptor_t *d) {
     uint_fast32_t t = atomic_load_explicit(&psl->in_tail, memory_order_relaxed);
@@ -268,16 +268,16 @@ struct dpumesh_ctx {
     pthread_t pe_tid;
     volatile int pe_running;
 
-    /* CQ registry. Each CQ owns its readiness eventfd + ready list; an ESTABLISHED
-     * conn's delivery wakes only its own CQ (psl->cq), which is what lets N threads
+    /* EQ registry. Each EQ owns its readiness eventfd + ready list; an ESTABLISHED
+     * conn's delivery wakes only its own EQ (psl->eq), which is what lets N threads
      * receive in parallel. This registry exists for the ONE delivery that has no conn
-     * yet: a NEW conn goes on the shared accept queue, so EVERY CQ is notified and
+     * yet: a NEW conn goes on the shared accept queue, so EVERY EQ is notified and
      * whichever one accepts it owns it. Cold path (once per conn), hence the mutex —
-     * it also makes dmesh_destroy_cq's unregister race-free against the PE. */
-    struct dmesh_cq *cqs[DMESH_MAX_CQ];
-    int              n_cqs;            /* high-water mark of cqs[]; slots may be NULL */
-    pthread_mutex_t  cq_lock;
-    int              cq_lock_initialized;
+     * it also makes dmesh_destroy_eq's unregister race-free against the PE. */
+    struct dmesh_eq *eqs[DMESH_MAX_EQ];
+    int              n_eqs;            /* high-water mark of eqs[]; slots may be NULL */
+    pthread_mutex_t  eq_lock;
+    int              eq_lock_initialized;
 
     /* Endpoint port table + allocator (oriented-tuple demux). */
     struct dmesh_port_slot *ports;     /* [DMESH_PORT_SPACE] */
@@ -406,87 +406,87 @@ static inline int rxq_try_pop(dpumesh_ctx_t *ctx, sw_descriptor_t *out)
     }
 }
 
-/* Wake the CQ eventfd consumer when notifications are enabled. Poll-only CQs use
+/* Wake the EQ eventfd consumer when notifications are enabled. Poll-only EQs use
  * the ready list without eventfd writes. */
-static inline void cq_notify(struct dmesh_cq *cq)
+static inline void eq_notify(struct dmesh_eq *eq)
 {
-    if (cq->notify_efd >= 0 &&
-        atomic_load_explicit(&cq->wants_notify, memory_order_acquire)) {
+    if (eq->notify_efd >= 0 &&
+        atomic_load_explicit(&eq->wants_notify, memory_order_acquire)) {
         uint64_t one = 1;
-        ssize_t w = write(cq->notify_efd, &one, sizeof(one));
+        ssize_t w = write(eq->notify_efd, &one, sizeof(one));
         (void)w;
     }
 }
 
-/* Wake EVERY CQ — only for the shared accept queue, whose conns have no CQ yet, so
+/* Wake EVERY EQ — only for the shared accept queue, whose conns have no EQ yet, so
  * any consumer may claim them. Cold (once per new conn); the lock also keeps a
- * concurrent dmesh_destroy_cq from freeing a CQ under us. */
-static void notify_all_cqs(dpumesh_ctx_t *ctx)
+ * concurrent dmesh_destroy_eq from freeing an EQ under us. */
+static void notify_all_eqs(dpumesh_ctx_t *ctx)
 {
-    pthread_mutex_lock(&ctx->cq_lock);
-    for (int i = 0; i < ctx->n_cqs; i++)
-        if (ctx->cqs[i]) cq_notify(ctx->cqs[i]);
-    pthread_mutex_unlock(&ctx->cq_lock);
+    pthread_mutex_lock(&ctx->eq_lock);
+    for (int i = 0; i < ctx->n_eqs; i++)
+        if (ctx->eqs[i]) eq_notify(ctx->eqs[i]);
+    pthread_mutex_unlock(&ctx->eq_lock);
 }
 
-/* Ready-list SPSC: PE pushes a ready conn's port; that conn's CQ thread pops it via
+/* Ready-list SPSC: PE pushes a ready conn's port; that conn's EQ thread pops it via
  * dmesh_next_ready. Monotonic counters (count = tail-head); ring index masks the
  * power-of-two DMESH_PORT_SPACE. */
-static inline void ready_push(struct dmesh_cq *cq, uint16_t port) {
-    uint_fast32_t t = atomic_load_explicit(&cq->ready_tail, memory_order_relaxed);
-    uint_fast32_t h = atomic_load_explicit(&cq->ready_head, memory_order_acquire);
+static inline void ready_push(struct dmesh_eq *eq, uint16_t port) {
+    uint_fast32_t t = atomic_load_explicit(&eq->ready_tail, memory_order_relaxed);
+    uint_fast32_t h = atomic_load_explicit(&eq->ready_head, memory_order_acquire);
     if (t - h >= DMESH_PORT_SPACE) return;   /* provably never full; guard anyway */
-    cq->ready_ring[t & (DMESH_PORT_SPACE - 1)] = port;
-    atomic_store_explicit(&cq->ready_tail, t + 1, memory_order_release);
+    eq->ready_ring[t & (DMESH_PORT_SPACE - 1)] = port;
+    atomic_store_explicit(&eq->ready_tail, t + 1, memory_order_release);
 }
-static inline int ready_pop(struct dmesh_cq *cq, uint16_t *port) {
-    uint_fast32_t h = atomic_load_explicit(&cq->ready_head, memory_order_relaxed);
-    uint_fast32_t t = atomic_load_explicit(&cq->ready_tail, memory_order_acquire);
+static inline int ready_pop(struct dmesh_eq *eq, uint16_t *port) {
+    uint_fast32_t h = atomic_load_explicit(&eq->ready_head, memory_order_relaxed);
+    uint_fast32_t t = atomic_load_explicit(&eq->ready_tail, memory_order_acquire);
     if (h == t) return 0;                                    /* empty */
-    *port = cq->ready_ring[h & (DMESH_PORT_SPACE - 1)];
-    atomic_store_explicit(&cq->ready_head, h + 1, memory_order_release);
+    *port = eq->ready_ring[h & (DMESH_PORT_SPACE - 1)];
+    atomic_store_explicit(&eq->ready_head, h + 1, memory_order_release);
     return 1;
 }
 
-/* TX-ready is a one-bit, one-shot completion per QP. Unlike the RX ready list it has
+/* TX-ready is a one-bit, one-shot event per QP. Unlike the RX ready list it has
  * two possible producers (the PE ACK path and any owner returning a shared block), so
  * publication and cancellation use an atomic bitmap. The count is only an empty fast
  * path; the bit itself is authoritative. */
-static inline void cq_tx_ready_set(struct dmesh_cq *cq, uint16_t port) {
+static inline void eq_tx_ready_set(struct dmesh_eq *eq, uint16_t port) {
     size_t word = (size_t)port >> 6;
     uint_fast64_t mask = (uint_fast64_t)1u << (port & 63u);
-    uint_fast64_t old = atomic_fetch_or_explicit(&cq->tx_ready[word], mask,
+    uint_fast64_t old = atomic_fetch_or_explicit(&eq->tx_ready[word], mask,
                                                   memory_order_release);
     if ((old & mask) == 0) {
-        atomic_fetch_add_explicit(&cq->tx_ready_count, 1, memory_order_release);
-        cq_notify(cq);
+        atomic_fetch_add_explicit(&eq->tx_ready_count, 1, memory_order_release);
+        eq_notify(eq);
     }
 }
 
-static inline void cq_tx_ready_clear(struct dmesh_cq *cq, uint16_t port) {
+static inline void eq_tx_ready_clear(struct dmesh_eq *eq, uint16_t port) {
     size_t word = (size_t)port >> 6;
     uint_fast64_t mask = (uint_fast64_t)1u << (port & 63u);
-    uint_fast64_t old = atomic_fetch_and_explicit(&cq->tx_ready[word], ~mask,
+    uint_fast64_t old = atomic_fetch_and_explicit(&eq->tx_ready[word], ~mask,
                                                    memory_order_acq_rel);
     if (old & mask)
-        atomic_fetch_sub_explicit(&cq->tx_ready_count, 1, memory_order_relaxed);
+        atomic_fetch_sub_explicit(&eq->tx_ready_count, 1, memory_order_relaxed);
 }
 
-static int cq_tx_ready_pop(struct dmesh_cq *cq, uint16_t *port) {
-    if (atomic_load_explicit(&cq->tx_ready_count, memory_order_acquire) == 0)
+static int eq_tx_ready_pop(struct dmesh_eq *eq, uint16_t *port) {
+    if (atomic_load_explicit(&eq->tx_ready_count, memory_order_acquire) == 0)
         return 0;
-    uint32_t start = cq->tx_ready_cursor;
+    uint32_t start = eq->tx_ready_cursor;
     for (uint32_t n = 0; n < DMESH_TX_READY_WORDS; n++) {
         uint32_t word = (start + n) & (DMESH_TX_READY_WORDS - 1);
-        uint_fast64_t bits = atomic_load_explicit(&cq->tx_ready[word], memory_order_acquire);
+        uint_fast64_t bits = atomic_load_explicit(&eq->tx_ready[word], memory_order_acquire);
         while (bits) {
             unsigned bit = (unsigned)__builtin_ctzll((unsigned long long)bits);
             uint_fast64_t mask = (uint_fast64_t)1u << bit;
-            uint_fast64_t old = atomic_fetch_and_explicit(&cq->tx_ready[word], ~mask,
+            uint_fast64_t old = atomic_fetch_and_explicit(&eq->tx_ready[word], ~mask,
                                                            memory_order_acq_rel);
             if (old & mask) {
-                atomic_fetch_sub_explicit(&cq->tx_ready_count, 1, memory_order_relaxed);
-                cq->tx_ready_cursor = (word + 1) & (DMESH_TX_READY_WORDS - 1);
+                atomic_fetch_sub_explicit(&eq->tx_ready_count, 1, memory_order_relaxed);
+                eq->tx_ready_cursor = (word + 1) & (DMESH_TX_READY_WORDS - 1);
                 *port = (uint16_t)(word * 64u + bit);
                 return 1;
             }
@@ -539,8 +539,8 @@ static int pool_waiter_claim(dpumesh_ctx_t *ctx, uint16_t *port) {
     return 0;
 }
 
-/* Change an armed QP into a queued completion exactly once. Cancellation may race
- * after the CAS (a polling caller can succeed before consuming the completion), so
+/* Change an armed QP into a queued event exactly once. Cancellation may race
+ * after the CAS (a polling caller can succeed before consuming the event), so
  * publication rechecks READY and removes the bit if the owner already cancelled it. */
 static int tx_wait_make_ready(dpumesh_ctx_t *ctx, uint16_t port) {
     struct dmesh_port_slot *psl = &ctx->ports[port];
@@ -552,19 +552,19 @@ static int tx_wait_make_ready(dpumesh_ctx_t *ctx, uint16_t port) {
         return 0;
 
     pool_waiter_clear(ctx, port);   /* no-op for a per-QP reclaim waiter */
-    struct dmesh_cq *cq = __atomic_load_n(&psl->cq, __ATOMIC_ACQUIRE);
+    struct dmesh_eq *eq = __atomic_load_n(&psl->eq, __ATOMIC_ACQUIRE);
     uint8_t role = __atomic_load_n(&psl->role, __ATOMIC_ACQUIRE);
-    if (!cq || (role != DMESH_ROLE_CLIENT && role != DMESH_ROLE_SERVER)) {
+    if (!eq || (role != DMESH_ROLE_CLIENT && role != DMESH_ROLE_SERVER)) {
         atomic_store_explicit(&psl->tx_wait_state, DMESH_TX_WAIT_IDLE,
                               memory_order_release);
         return 0;
     }
 
-    cq_tx_ready_set(cq, port);
+    eq_tx_ready_set(eq, port);
     if (atomic_load_explicit(&psl->tx_wait_state, memory_order_acquire) !=
             DMESH_TX_WAIT_READY ||
-        __atomic_load_n(&psl->cq, __ATOMIC_ACQUIRE) != cq)
-        cq_tx_ready_clear(cq, port);
+        __atomic_load_n(&psl->eq, __ATOMIC_ACQUIRE) != eq)
+        eq_tx_ready_clear(eq, port);
     return 1;
 }
 
@@ -573,8 +573,8 @@ static void tx_wait_cancel(dpumesh_ctx_t *ctx, struct dmesh_port_slot *psl,
     atomic_exchange_explicit(&psl->tx_wait_state, DMESH_TX_WAIT_IDLE,
                              memory_order_acq_rel);
     pool_waiter_clear(ctx, port);
-    struct dmesh_cq *cq = __atomic_load_n(&psl->cq, __ATOMIC_ACQUIRE);
-    if (cq) cq_tx_ready_clear(cq, port);
+    struct dmesh_eq *eq = __atomic_load_n(&psl->eq, __ATOMIC_ACQUIRE);
+    if (eq) eq_tx_ready_clear(eq, port);
 }
 
 static int tx_wait_qp_retryable(dpumesh_ctx_t *ctx, struct dmesh_port_slot *psl) {
@@ -626,16 +626,16 @@ static void tx_wait_arm(dpumesh_ctx_t *ctx, struct dmesh_port_slot *psl,
 static void port_reset_tx(struct dmesh_port_slot *psl);
 static inline void tx_reclaim_ack(dpumesh_ctx_t *ctx, uint16_t port, uint16_t seq);
 
-/* Arm a connection on its CQ ready list after inbox publication. The fence pairs
+/* Arm a connection on its EQ ready list after inbox publication. The fence pairs
  * with the receive-side fence to preserve an empty-to-ready transition. */
 static inline void arm_ready_after_push(struct dmesh_port_slot *psl, uint16_t dport) {
     if (__atomic_load_n(&psl->role, __ATOMIC_ACQUIRE) == DMESH_ROLE_SERVER_PENDING) return;
-    struct dmesh_cq *cq = __atomic_load_n(&psl->cq, __ATOMIC_ACQUIRE);
-    if (!cq) return;
+    struct dmesh_eq *eq = __atomic_load_n(&psl->eq, __ATOMIC_ACQUIRE);
+    if (!eq) return;
     atomic_thread_fence(memory_order_seq_cst);
     if (atomic_exchange_explicit(&psl->on_ready, 1u, memory_order_acq_rel) == 0) {
-        ready_push(cq, dport);
-        cq_notify(cq);
+        ready_push(eq, dport);
+        eq_notify(eq);
     }
 }
 
@@ -686,7 +686,7 @@ static void rx_deliver_desc(dpumesh_ctx_t *ctx, const sw_descriptor_t *desc, int
             DOCA_LOG_ERR("RX deliver: conn %u inbox full, dropping seq=%u", dport, desc->seq);
             rx_credit_return(ctx, slot);
         } else {
-            /* Arm the owning CQ's ready list (flag-based, race-free — see
+            /* Arm the owning EQ's ready list (flag-based, race-free — see
              * arm_ready_after_push). A SERVER_PENDING slot promoted concurrently is
              * handled inside the helper via its own role re-read; a still-pending slot
              * is skipped (drained by dmesh_accept). Single-producer (PE thread). */
@@ -738,7 +738,7 @@ static void rx_deliver_desc(dpumesh_ctx_t *ctx, const sw_descriptor_t *desc, int
         psl->rx_next_pos = (uint32_t)desc->body_buf_slot + desc->body_len;
         psl->rx_seq_valid = 1;
         psl->user      = NULL;
-        psl->cq        = NULL;   /* no owner until a CQ accepts it (dmesh_accept binds) */
+        psl->eq        = NULL;   /* no owner until an EQ accepts it (dmesh_accept binds) */
         port_reset_tx(psl);   /* fresh block-chain cursors; TX blocks grabbed LAZILY on first reply */
         __atomic_store_n(&psl->role, DMESH_ROLE_SERVER_PENDING, __ATOMIC_RELEASE);
         pthread_mutex_unlock(&ctx->port_lock);
@@ -756,7 +756,7 @@ static void rx_deliver_desc(dpumesh_ctx_t *ctx, const sw_descriptor_t *desc, int
         c->desc = *desc;
         atomic_store_explicit(&c->seq, pos + 1, memory_order_release);
         atomic_store_explicit(&ctx->rx_enq, pos + 1, memory_order_relaxed);
-        notify_all_cqs(ctx);       /* no owner yet → every CQ may accept it */
+        notify_all_eqs(ctx);       /* no owner yet → every EQ may accept it */
         return;
     }
 
@@ -1168,9 +1168,9 @@ int dpumesh_init(dpumesh_ctx_t **out, int service_id,
     *out = NULL;
     dpumesh_ctx_t *ctx = (dpumesh_ctx_t *)calloc(1, sizeof(dpumesh_ctx_t));
     if (!ctx) { errno = ENOMEM; return -1; }
-    int prc = pthread_mutex_init(&ctx->cq_lock, NULL);
+    int prc = pthread_mutex_init(&ctx->eq_lock, NULL);
     if (prc != 0) { errno = prc; goto fail; }
-    ctx->cq_lock_initialized = 1;
+    ctx->eq_lock_initialized = 1;
 
     init_config(ctx, config, service_id);
 
@@ -1351,19 +1351,19 @@ static void cleanup_ctx(dpumesh_ctx_t *ctx) {
         pthread_join(ctx->pe_tid, NULL);
     }
 
-    /* PE thread joined → no more cq_notify() writers. Surviving CQs (an app that
+    /* PE thread joined → no more eq_notify() writers. Surviving EQs (an app that
      * dropped the channel without destroying them) are reaped here. */
-    for (int i = 0; i < ctx->n_cqs; i++) {
-        struct dmesh_cq *cq = ctx->cqs[i];
-        if (!cq) continue;
-        if (cq->notify_efd >= 0) close(cq->notify_efd);
-        ctx->cqs[i] = NULL;
-        free(cq->accept_spare);
-        free(cq);
+    for (int i = 0; i < ctx->n_eqs; i++) {
+        struct dmesh_eq *eq = ctx->eqs[i];
+        if (!eq) continue;
+        if (eq->notify_efd >= 0) close(eq->notify_efd);
+        ctx->eqs[i] = NULL;
+        free(eq->accept_spare);
+        free(eq);
     }
-    if (ctx->cq_lock_initialized) {
-        pthread_mutex_destroy(&ctx->cq_lock);
-        ctx->cq_lock_initialized = 0;
+    if (ctx->eq_lock_initialized) {
+        pthread_mutex_destroy(&ctx->eq_lock);
+        ctx->eq_lock_initialized = 0;
     }
 
     /* Disconnect first. Reaching Comch IDLE causes the DPU to unpublish this pod
@@ -1977,12 +1977,12 @@ const char *dpumesh_get_worker_id(dpumesh_ctx_t *ctx) {
  * ==================================================================== */
 
 /* Allocate a host-unique port (>=1) and register it as a CLIENT or SERVER socket.
- * `user` is the app's conn handle (returned later by dmesh_next_ready) and `cq` the
- * completion queue that owns it; both are stored BEFORE role is published so the PE,
+ * `user` is the app's conn handle (returned later by dmesh_next_ready) and `eq` the
+ * event queue that owns it; both are stored BEFORE role is published so the PE,
  * which may deliver + enqueue this port the instant it sees role!=FREE, never hands
  * back a NULL handle or arms an unbound conn. The role is published with RELEASE so
  * the PE's ACQUIRE-load sees a fully-initialized slot. Returns 0 on exhaustion. */
-uint16_t dpumesh_alloc_port(dpumesh_ctx_t *ctx, int role, void *user, struct dmesh_cq *cq) {
+uint16_t dpumesh_alloc_port(dpumesh_ctx_t *ctx, int role, void *user, struct dmesh_eq *eq) {
     pthread_mutex_lock(&ctx->port_lock);
     /* Client ports use a widening window below DMESH_UPORT_BASE. Inbox storage is
      * retained per visited port, and cursor rotation delays port-number reuse. */
@@ -2015,10 +2015,10 @@ uint16_t dpumesh_alloc_port(dpumesh_ctx_t *ctx, int role, void *user, struct dme
             psl->rx_next_pos = 0;
             psl->rx_seq_valid = 0;
             psl->user       = user;     /* visible before role (publish ordering below) */
-            psl->cq         = cq;       /* ditto: the PE arms this CQ's list, not the ctx's */
+            psl->eq         = eq;       /* ditto: the PE arms this EQ's list, not the ctx's */
             port_reset_tx(psl);         /* fresh block-chain cursors; first block grabbed LAZILY on first write */
             /* Publish role LAST (RELEASE) so the PE's ACQUIRE-load sees the fully
-             * initialized inbox/head/tail/user/cq/chain before it can deliver here. */
+             * initialized inbox/head/tail/user/eq/chain before it can deliver here. */
             __atomic_store_n(&psl->role, (uint8_t)role, __ATOMIC_RELEASE);
             pthread_mutex_unlock(&ctx->port_lock);
             return (uint16_t)p;
@@ -2035,9 +2035,9 @@ uint16_t dpumesh_alloc_port(dpumesh_ctx_t *ctx, int role, void *user, struct dme
     return 0;
 }
 
-/* Promote a pending server port to the accepting CQ exactly once. Returns the port
+/* Promote a pending server port to the accepting EQ exactly once. Returns the port
  * on success or zero when it is no longer pending. */
-uint16_t dpumesh_accept_port(dpumesh_ctx_t *ctx, uint16_t port, void *user, struct dmesh_cq *cq) {
+uint16_t dpumesh_accept_port(dpumesh_ctx_t *ctx, uint16_t port, void *user, struct dmesh_eq *eq) {
     if (port == 0 || port >= DMESH_PORT_SPACE) return 0;
     struct dmesh_port_slot *psl = &ctx->ports[port];
     pthread_mutex_lock(&ctx->port_lock);
@@ -2046,7 +2046,7 @@ uint16_t dpumesh_accept_port(dpumesh_ctx_t *ctx, uint16_t port, void *user, stru
         return 0;   /* not pending (already accepted / freed / race) */
     }
     psl->user = user;
-    psl->cq   = cq;             /* both visible before the role publish below */
+    psl->eq   = eq;             /* both visible before the role publish below */
     __atomic_store_n(&psl->role, DMESH_ROLE_SERVER, __ATOMIC_RELEASE);
     pthread_mutex_unlock(&ctx->port_lock);
     return port;
@@ -2067,9 +2067,9 @@ void dpumesh_free_port(dpumesh_ctx_t *ctx, uint16_t port) {
     __atomic_store_n(&psl->role, DMESH_ROLE_FREE, __ATOMIC_RELEASE);
     tx_wait_cancel(ctx, psl, port);
     psl->user = NULL;
-    /* Unbind the CQ (RELEASE) too: arm_ready_after_push skips a NULL cq, so the PE
+    /* Unbind the EQ (RELEASE) too: arm_ready_after_push skips a NULL eq, so the PE
      * stops touching a ready list whose owner may be destroyed next. */
-    __atomic_store_n(&psl->cq, NULL, __ATOMIC_RELEASE);
+    __atomic_store_n(&psl->eq, NULL, __ATOMIC_RELEASE);
     try_return_blocks(ctx, psl);
     if (psl->inbox) {
         sw_descriptor_t d;
@@ -2107,17 +2107,17 @@ int dpumesh_conn_recv(dpumesh_ctx_t *ctx, uint16_t port, sw_descriptor_t *out) {
     return 0;
 }
 
-/* Pop the next conn that has inbound, from THIS CQ's PE-published ready list, and
+/* Pop the next conn that has inbound, from THIS EQ's PE-published ready list, and
  * return its app handle (the `user` registered at alloc). NULL when the list is
  * drained. No scan: the PE put exactly the ready conns here. A list entry whose conn
  * has since closed (role==FREE) is skipped — its port may even have been recycled,
  * but round-robin allocation makes that astronomically distant; either way a stale
- * entry only ever costs one extra empty drain. Single-consumer (this CQ's thread);
- * call it after waking on dmesh_cq_fd, drain each returned conn to EAGAIN. */
-void *dpumesh_next_ready(struct dmesh_cq *cq) {
-    dpumesh_ctx_t *ctx = cq->ch->ctx;
+ * entry only ever costs one extra empty drain. Single-consumer (this EQ's thread);
+ * call it after waking on dmesh_eq_fd, drain each returned conn to EAGAIN. */
+void *dpumesh_next_ready(struct dmesh_eq *eq) {
+    dpumesh_ctx_t *ctx = eq->ch->ctx;
     uint16_t port;
-    while (ready_pop(cq, &port)) {
+    while (ready_pop(eq, &port)) {
         struct dmesh_port_slot *psl = &ctx->ports[port];
         uint8_t role = __atomic_load_n(&psl->role, __ATOMIC_ACQUIRE);
         /* Return only ACCEPTED conns. Skip FREE (closed since enqueued → stale) and
@@ -2132,10 +2132,10 @@ void *dpumesh_next_ready(struct dmesh_cq *cq) {
 /* Pop one automatically armed TX retry hint. The bitmap bit is removed first, then
  * READY->IDLE consumes the one-shot. If a direct retry already succeeded, its cancel
  * changed the state to IDLE and this stale bit is skipped. */
-void *dpumesh_next_tx_ready(struct dmesh_cq *cq) {
-    dpumesh_ctx_t *ctx = cq->ch->ctx;
+void *dpumesh_next_tx_ready(struct dmesh_eq *eq) {
+    dpumesh_ctx_t *ctx = eq->ch->ctx;
     uint16_t port;
-    while (cq_tx_ready_pop(cq, &port)) {
+    while (eq_tx_ready_pop(eq, &port)) {
         struct dmesh_port_slot *psl = &ctx->ports[port];
         uint_fast32_t expected = DMESH_TX_WAIT_READY;
         if (!atomic_compare_exchange_strong_explicit(&psl->tx_wait_state, &expected,
@@ -2145,7 +2145,7 @@ void *dpumesh_next_tx_ready(struct dmesh_cq *cq) {
             continue;
         uint8_t role = __atomic_load_n(&psl->role, __ATOMIC_ACQUIRE);
         if ((role == DMESH_ROLE_CLIENT || role == DMESH_ROLE_SERVER) &&
-            __atomic_load_n(&psl->cq, __ATOMIC_ACQUIRE) == cq)
+            __atomic_load_n(&psl->eq, __ATOMIC_ACQUIRE) == eq)
             return psl->user;
     }
     return NULL;
@@ -2206,18 +2206,18 @@ dmesh_channel_t *dmesh_create_channel(void) {
     return s;
 }
 
-/* Same EBUSY rule one level up: a CQ outliving its channel points at a freed ctx, and
- * tearing the transport down under a live CQ is the same use-after-free as tearing a CQ
- * down under a live QP. Destroy the CQs first (which their own EBUSY makes you destroy
+/* Same EBUSY rule one level up: an EQ outliving its channel points at a freed ctx, and
+ * tearing the transport down under a live EQ is the same use-after-free as tearing an EQ
+ * down under a live QP. Destroy the EQs first (which their own EBUSY makes you destroy
  * the QPs first). Returns 0, or -1 + EBUSY with nothing released. */
 int dmesh_destroy_channel(dmesh_channel_t *s) {
     if (!s) return 0;
     if (s->ctx) {
         dpumesh_ctx_t *ctx = s->ctx;
         int live = 0;
-        pthread_mutex_lock(&ctx->cq_lock);
-        for (int i = 0; i < ctx->n_cqs; i++) if (ctx->cqs[i]) { live = 1; break; }
-        pthread_mutex_unlock(&ctx->cq_lock);
+        pthread_mutex_lock(&ctx->eq_lock);
+        for (int i = 0; i < ctx->n_eqs; i++) if (ctx->eqs[i]) { live = 1; break; }
+        pthread_mutex_unlock(&ctx->eq_lock);
         if (live) { errno = EBUSY; return -1; }
         dpumesh_destroy(ctx);
     }
@@ -2229,107 +2229,107 @@ int dmesh_pod_id(dmesh_channel_t *s)   { return s->pod_id; }
 int dmesh_msg_max(dmesh_channel_t *s)  { return s->slot_size; }
 int dmesh_post_max(dmesh_channel_t *s) { return s->block_size; }
 
-/* ===== Completion queue ===== */
+/* ===== Event queue ===== */
 
-/* Readiness is active at CQ creation. The eventfd is optional; polling remains
+/* Readiness is active at EQ creation. The eventfd is optional; polling remains
  * available when eventfd creation fails. */
-dmesh_cq_t *dmesh_create_cq(dmesh_channel_t *ch) {
+dmesh_eq_t *dmesh_create_eq(dmesh_channel_t *ch) {
     if (!ch) { errno = EINVAL; return NULL; }
-    dmesh_cq_t *cq = (dmesh_cq_t *)calloc(1, sizeof(*cq));
-    if (!cq) { errno = ENOMEM; return NULL; }
-    cq->accept_spare = (dmesh_qp_t *)calloc(1, sizeof(*cq->accept_spare));
-    if (!cq->accept_spare) { free(cq); errno = ENOMEM; return NULL; }
-    cq->ch         = ch;
-    cq->notify_efd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    dmesh_eq_t *eq = (dmesh_eq_t *)calloc(1, sizeof(*eq));
+    if (!eq) { errno = ENOMEM; return NULL; }
+    eq->accept_spare = (dmesh_qp_t *)calloc(1, sizeof(*eq->accept_spare));
+    if (!eq->accept_spare) { free(eq); errno = ENOMEM; return NULL; }
+    eq->ch         = ch;
+    eq->notify_efd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     for (uint32_t i = 0; i < DMESH_TX_READY_WORDS; i++)
-        atomic_init(&cq->tx_ready[i], (uint_fast64_t)0);
-    atomic_init(&cq->tx_ready_count, (uint_fast32_t)0);
-    cq->tx_ready_cursor = 0;
-    atomic_init(&cq->ready_head, (uint_fast32_t)0);
-    atomic_init(&cq->ready_tail, (uint_fast32_t)0);
-    atomic_init(&cq->nqp, 0);
-    atomic_init(&cq->wants_notify, 0);   /* poll-only until dmesh_cq_fd is called */
+        atomic_init(&eq->tx_ready[i], (uint_fast64_t)0);
+    atomic_init(&eq->tx_ready_count, (uint_fast32_t)0);
+    eq->tx_ready_cursor = 0;
+    atomic_init(&eq->ready_head, (uint_fast32_t)0);
+    atomic_init(&eq->ready_tail, (uint_fast32_t)0);
+    atomic_init(&eq->nqp, 0);
+    atomic_init(&eq->wants_notify, 0);   /* poll-only until dmesh_eq_fd is called */
 
     dpumesh_ctx_t *ctx = ch->ctx;
-    pthread_mutex_lock(&ctx->cq_lock);
+    pthread_mutex_lock(&ctx->eq_lock);
     int idx = -1;
-    for (int i = 0; i < ctx->n_cqs; i++) if (!ctx->cqs[i]) { idx = i; break; }
-    if (idx < 0 && ctx->n_cqs < DMESH_MAX_CQ) idx = ctx->n_cqs++;
-    if (idx >= 0) ctx->cqs[idx] = cq;
-    pthread_mutex_unlock(&ctx->cq_lock);
-    if (idx < 0) {   /* cap reached: an unregistered CQ would miss every accept */
-        if (cq->notify_efd >= 0) close(cq->notify_efd);
-        free(cq->accept_spare);
-        free(cq);
+    for (int i = 0; i < ctx->n_eqs; i++) if (!ctx->eqs[i]) { idx = i; break; }
+    if (idx < 0 && ctx->n_eqs < DMESH_MAX_EQ) idx = ctx->n_eqs++;
+    if (idx >= 0) ctx->eqs[idx] = eq;
+    pthread_mutex_unlock(&ctx->eq_lock);
+    if (idx < 0) {   /* cap reached: an unregistered EQ would miss every accept */
+        if (eq->notify_efd >= 0) close(eq->notify_efd);
+        free(eq->accept_spare);
+        free(eq);
         errno = EMFILE;
         return NULL;
     }
-    cq->reg_idx = idx;
-    return cq;
+    eq->reg_idx = idx;
+    return eq;
 }
 
-/* Unregister FIRST (under cq_lock, so a concurrent accept-path notify_all_cqs either
+/* Unregister FIRST (under eq_lock, so a concurrent accept-path notify_all_eqs either
  * saw us before or never sees us again), then free. Conns still bound here would have
- * nowhere to report, so ibv_destroy_cq's EBUSY rule is CHECKED, not just documented:
+ * nowhere to report, so dmesh_destroy_eq's EBUSY rule is CHECKED, not just documented:
  * freeing under a live QP leaves the PE arming a ready list in freed memory. */
-int dmesh_destroy_cq(dmesh_cq_t *cq) {
-    if (!cq) return 0;
-    if (atomic_load_explicit(&cq->nqp, memory_order_acquire) > 0) {
+int dmesh_destroy_eq(dmesh_eq_t *eq) {
+    if (!eq) return 0;
+    if (atomic_load_explicit(&eq->nqp, memory_order_acquire) > 0) {
         errno = EBUSY;
         return -1;
     }
-    dpumesh_ctx_t *ctx = cq->ch->ctx;
-    pthread_mutex_lock(&ctx->cq_lock);
-    if (ctx->cqs[cq->reg_idx] == cq) ctx->cqs[cq->reg_idx] = NULL;
-    pthread_mutex_unlock(&ctx->cq_lock);
-    if (cq->notify_efd >= 0) close(cq->notify_efd);
-    free(cq->accept_spare);
-    free(cq);
+    dpumesh_ctx_t *ctx = eq->ch->ctx;
+    pthread_mutex_lock(&ctx->eq_lock);
+    if (ctx->eqs[eq->reg_idx] == eq) ctx->eqs[eq->reg_idx] = NULL;
+    pthread_mutex_unlock(&ctx->eq_lock);
+    if (eq->notify_efd >= 0) close(eq->notify_efd);
+    free(eq->accept_spare);
+    free(eq);
     return 0;
 }
 
 /* Handing out the fd is the caller DECLARING it may sleep on it, so latch wants_notify
  * (the PE starts writing the fd on ready edges) and self-kick once: any conn armed while
- * the CQ was still poll-only (wants_notify==0, no wakeup written) is already on the ready
+ * the EQ was still poll-only (wants_notify==0, no wakeup written) is already on the ready
  * list but left no edge on the fd, so without this the caller's first epoll_wait could
  * block despite pending work. The release store publishes the flag to the PE thread
  * before the kick. Idempotent: repeated calls just re-kick (one spurious wakeup). */
-int dmesh_cq_fd(dmesh_cq_t *cq) {
-    if (!cq) return -1;
-    atomic_store_explicit(&cq->wants_notify, 1, memory_order_release);
-    if (cq->notify_efd >= 0) {
+int dmesh_eq_fd(dmesh_eq_t *eq) {
+    if (!eq) return -1;
+    atomic_store_explicit(&eq->wants_notify, 1, memory_order_release);
+    if (eq->notify_efd >= 0) {
         uint64_t one = 1;
-        ssize_t w = write(cq->notify_efd, &one, sizeof(one));
+        ssize_t w = write(eq->notify_efd, &one, sizeof(one));
         (void)w;
     }
-    return cq->notify_efd;
+    return eq->notify_efd;
 }
 
 /* ===== Connection setup ===== */
 
-dmesh_qp_t *dmesh_accept(dmesh_cq_t *cq) {
-    dmesh_channel_t *s = cq->ch;
+dmesh_qp_t *dmesh_accept(dmesh_eq_t *eq) {
+    dmesh_channel_t *s = eq->ch;
     /* Reserve the QP object before consuming the shared accept queue. */
-    if (!cq->accept_spare) {
-        cq->accept_spare = (dmesh_qp_t *)calloc(1, sizeof(*cq->accept_spare));
-        if (!cq->accept_spare) { errno = ENOMEM; return NULL; }
+    if (!eq->accept_spare) {
+        eq->accept_spare = (dmesh_qp_t *)calloc(1, sizeof(*eq->accept_spare));
+        if (!eq->accept_spare) { errno = ENOMEM; return NULL; }
     }
     sw_descriptor_t req;
     if (dpumesh_dequeue(s->ctx, &req) < 0 || !req.valid) {
         errno = EAGAIN;
         return NULL;
     }
-    dmesh_qp_t *c = cq->accept_spare;
-    cq->accept_spare = NULL;
+    dmesh_qp_t *c = eq->accept_spare;
+    eq->accept_spare = NULL;
     /* Model B: the PE created a SERVER_PENDING slot at message-1 delivery (port =
      * req.dst_port = uP, with any pipelined messages 2..P already coalesced in its
      * inbox). Promote it to a live SERVER conn, attach THIS handle, and bind it to the
-     * CQ that won it — dmesh_next_ready then returns it on this CQ only. */
-    uint16_t ps = dpumesh_accept_port(s->ctx, req.dst_port, c, cq);
+     * EQ that won it — dmesh_next_ready then returns it on this EQ only. */
+    uint16_t ps = dpumesh_accept_port(s->ctx, req.dst_port, c, eq);
     if (ps == 0) { dpumesh_rx_free(s->ctx, req.body_buf_slot); free(c); errno = ENOMEM; return NULL; }
 
     c->ep          = s;
-    c->cq          = cq;
+    c->eq          = eq;
     c->role        = DMESH_ROLE_SERVER;
     c->local_port  = ps;                 /* == req.dst_port == uP */
     c->remote_pod  = req.src_pod;        /* learned peer (for replies + further sends) */
@@ -2340,21 +2340,21 @@ dmesh_qp_t *dmesh_accept(dmesh_cq_t *cq) {
     c->rx_buf      = dpumesh_rx_buf(s->ctx, req.body_buf_slot);
     c->rx_len      = req.body_len;
     c->rx_pos      = 0;
-    atomic_fetch_add_explicit(&cq->nqp, 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(&eq->nqp, 1, memory_order_relaxed);
     return c;
 }
 
 /* Integer entry point (internal, dmesh_core.h): the shim and the name-taking public
  * wrapper below both land here. Purely local — no round trip. */
-dmesh_qp_t *dmesh_qp_open(dmesh_cq_t *cq, int dst_service_id) {
-    dmesh_channel_t *s = cq->ch;
+dmesh_qp_t *dmesh_qp_open(dmesh_eq_t *eq, int dst_service_id) {
+    dmesh_channel_t *s = eq->ch;
     dmesh_qp_t *c = (dmesh_qp_t *)calloc(1, sizeof(*c));
     if (!c) { errno = ENOMEM; return NULL; }
-    /* c = the port's handle, cq = the ready list its inbound edges arm */
-    uint16_t pc = dpumesh_alloc_port(s->ctx, DMESH_ROLE_CLIENT, c, cq);
+    /* c = the port's handle, eq = the ready list its inbound edges arm */
+    uint16_t pc = dpumesh_alloc_port(s->ctx, DMESH_ROLE_CLIENT, c, eq);
     if (pc == 0) { free(c); errno = ENOMEM; return NULL; }
     c->ep          = s;
-    c->cq          = cq;
+    c->eq          = eq;
     c->role        = DMESH_ROLE_CLIENT;
     c->local_port  = pc;
     c->dst_service = (int16_t)dst_service_id;
@@ -2362,20 +2362,20 @@ dmesh_qp_t *dmesh_qp_open(dmesh_cq_t *cq, int dst_service_id) {
     c->remote_port = DMESH_PORT_BLANK;
     c->seq         = 0;
     c->rx_slot     = -1;
-    atomic_fetch_add_explicit(&cq->nqp, 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(&eq->nqp, 1, memory_order_relaxed);
     return c;
 }
 
 /* Resolve the Kubernetes Service name and open the public QP. */
-dmesh_qp_t *dmesh_create_qp(dmesh_cq_t *cq, const char *service_name) {
-    if (!cq || !service_name) { errno = EINVAL; return NULL; }
+dmesh_qp_t *dmesh_create_qp(dmesh_eq_t *eq, const char *service_name) {
+    if (!eq || !service_name) { errno = EINVAL; return NULL; }
     int svc = dmesh_resolve_name(service_name);
     if (svc < 0) return NULL;                 /* errno = ENOENT from resolve_name */
-    return dmesh_qp_open(cq, svc);
+    return dmesh_qp_open(eq, svc);
 }
 
-dmesh_qp_t *dmesh_next_ready(dmesh_cq_t *cq) {
-    return (dmesh_qp_t *)dpumesh_next_ready(cq);
+dmesh_qp_t *dmesh_next_ready(dmesh_eq_t *eq) {
+    return (dmesh_qp_t *)dpumesh_next_ready(eq);
 }
 
 /* ===== TX publication + teardown ===== */
@@ -2430,7 +2430,7 @@ static int dmesh_release_qp(dmesh_qp_t *c, int graceful) {
     if (!c) return 0;
     int close_result = 0, close_errno = 0;
     dpumesh_ctx_t *ctx = c->ep->ctx;
-    if (c->cq && c->cq->vq_cur == c) c->cq->vq_cur = NULL; /* poll_cq resume cursor */
+    if (c->eq && c->eq->drain_cur == c) c->eq->drain_cur = NULL; /* poll_eq resume cursor */
     if (graceful && dmesh_flush(c) != 0) {
         close_result = -1;
         close_errno = errno;
@@ -2450,7 +2450,7 @@ static int dmesh_release_qp(dmesh_qp_t *c, int graceful) {
     }
     conn_free_rx(c);                                       /* return the held RX credit */
     if (c->local_port) dpumesh_free_port(ctx, c->local_port);
-    if (c->cq) atomic_fetch_sub_explicit(&c->cq->nqp, 1, memory_order_release);
+    if (c->eq) atomic_fetch_sub_explicit(&c->eq->nqp, 1, memory_order_release);
     free(c);
     if (close_result != 0) errno = close_errno;
     return close_result;

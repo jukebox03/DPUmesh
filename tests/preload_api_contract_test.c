@@ -26,9 +26,9 @@ static atomic_int fake_post_calls;
 static atomic_int fake_flush_calls;
 static atomic_int fake_release_calls;
 static size_t fake_posted_len;
-static dmesh_wc_t fake_completions[16];
-static int fake_completion_count;
-static int fake_completion_pos;
+static dmesh_event_t fake_events[16];
+static int fake_event_count;
+static int fake_event_pos;
 
 static void fake_reset(void) {
     atomic_store(&fake_alloc_calls, 0);
@@ -38,8 +38,8 @@ static void fake_reset(void) {
     atomic_store(&fake_flush_calls, 0);
     atomic_store(&fake_release_calls, 0);
     fake_posted_len = 0;
-    fake_completion_count = 0;
-    fake_completion_pos = 0;
+    fake_event_count = 0;
+    fake_event_pos = 0;
     memset(fake_posted, 0, sizeof(fake_posted));
 }
 
@@ -53,22 +53,22 @@ dmesh_channel_t *dmesh_create_channel(void) { return &fake_channel; }
 int dmesh_destroy_channel(dmesh_channel_t *channel) { (void)channel; return 0; }
 int dmesh_pod_id(dmesh_channel_t *channel) { return channel->pod_id; }
 int dmesh_msg_max(dmesh_channel_t *channel) { return channel->slot_size; }
-dmesh_cq_t *dmesh_create_cq(dmesh_channel_t *channel) {
-    (void)channel; return (dmesh_cq_t *)(uintptr_t)1;
+dmesh_eq_t *dmesh_create_eq(dmesh_channel_t *channel) {
+    (void)channel; return (dmesh_eq_t *)(uintptr_t)1;
 }
-int dmesh_destroy_cq(dmesh_cq_t *cq) { (void)cq; return 0; }
-int dmesh_cq_fd(dmesh_cq_t *cq) { (void)cq; return -1; }
-dmesh_qp_t *dmesh_qp_open(dmesh_cq_t *cq, int service) {
-    (void)cq; (void)service; return &fake_qp;
+int dmesh_destroy_eq(dmesh_eq_t *eq) { (void)eq; return 0; }
+int dmesh_eq_fd(dmesh_eq_t *eq) { (void)eq; return -1; }
+dmesh_qp_t *dmesh_qp_open(dmesh_eq_t *eq, int service) {
+    (void)eq; (void)service; return &fake_qp;
 }
 int dmesh_destroy_qp(dmesh_qp_t *qp) { (void)qp; return 0; }
 int dmesh_abort_qp(dmesh_qp_t *qp) { (void)qp; return 0; }
 int dmesh_send_fin(dmesh_qp_t *qp) { (void)qp; return 0; }
-int dmesh_poll_cq(dmesh_cq_t *cq, dmesh_wc_t *wc, int nwc) {
-    (void)cq;
+int dmesh_poll_eq(dmesh_eq_t *eq, dmesh_event_t *events, int max_events) {
+    (void)eq;
     int n = 0;
-    while (n < nwc && fake_completion_pos < fake_completion_count)
-        wc[n++] = fake_completions[fake_completion_pos++];
+    while (n < max_events && fake_event_pos < fake_event_count)
+        events[n++] = fake_events[fake_event_pos++];
     return n;
 }
 void *dmesh_alloc(dmesh_qp_t *qp, uint32_t len) {
@@ -98,10 +98,10 @@ int dmesh_flush(dmesh_qp_t *qp) {
     atomic_fetch_add(&fake_flush_calls, 1);
     return 0;
 }
-void dmesh_wc_release(dmesh_channel_t *channel, dmesh_wc_t *wc) {
+void dmesh_release_rx_buffer(dmesh_channel_t *channel, dmesh_event_t *event) {
     (void)channel;
-    if (wc && wc->_rx_token >= 0) {
-        wc->_rx_token = -1;
+    if (event && event->_rx_token >= 0) {
+        event->_rx_token = -1;
         atomic_fetch_add(&fake_release_calls, 1);
     }
 }
@@ -130,12 +130,12 @@ static int fd_ready(pfd_t *e, short events) {
     return n > 0 && (p.revents & events) != 0;
 }
 
-static void fake_complete(dmesh_wc_opcode_t opcode, dmesh_qp_t *qp) {
-    assert(fake_completion_count < (int)(sizeof(fake_completions) /
-                                         sizeof(fake_completions[0])));
-    fake_completions[fake_completion_count++] = (dmesh_wc_t){
+static void fake_emit_event(dmesh_event_type_t type, dmesh_qp_t *qp) {
+    assert(fake_event_count < (int)(sizeof(fake_events) /
+                                         sizeof(fake_events[0])));
+    fake_events[fake_event_count++] = (dmesh_event_t){
         .qp = qp,
-        .opcode = opcode,
+        .type = type,
         ._rx_token = -1,
     };
 }
@@ -166,9 +166,9 @@ static void test_nonblocking_eagain_and_pollout_edge(void) {
     assert(atomic_load(&fake_alloc_calls) == 1);
     assert(!fd_ready(e, POLLOUT));
 
-    g_cq = (dmesh_cq_t *)(uintptr_t)1;
-    fake_complete(DMESH_WC_TX_READY, &fake_qp);
-    dispatcher_drain_cq();
+    g_eq = (dmesh_eq_t *)(uintptr_t)1;
+    fake_emit_event(DMESH_EVENT_TX_READY, &fake_qp);
+    dispatcher_drain_eq();
     assert(fd_ready(e, POLLOUT));
     assert(shim_send(e, "x", 1, MSG_DONTWAIT) == 1);
     assert(atomic_load(&fake_alloc_calls) == 2);
@@ -190,7 +190,7 @@ static void *blocking_sender(void *arg) {
     return NULL;
 }
 
-static void test_blocking_send_waits_for_completion(void) {
+static void test_blocking_send_waits_for_event(void) {
     fake_reset();
     pfd_t *e = test_pfd();
     atomic_store(&fake_fail_allocs, 1);
@@ -205,9 +205,9 @@ static void test_blocking_send_waits_for_completion(void) {
     assert(atomic_load(&fake_alloc_calls) == 1);  /* no timer/busy retry */
     assert(!atomic_load(&arg.done));
 
-    g_cq = (dmesh_cq_t *)(uintptr_t)1;
-    fake_complete(DMESH_WC_TX_READY, &fake_qp);
-    dispatcher_drain_cq();
+    g_eq = (dmesh_eq_t *)(uintptr_t)1;
+    fake_emit_event(DMESH_EVENT_TX_READY, &fake_qp);
+    dispatcher_drain_eq();
     assert(pthread_join(thread, NULL) == 0);
     assert(arg.result == 8);
     assert(atomic_load(&fake_alloc_calls) == 3);  /* two 4-byte posts after wake */
@@ -234,14 +234,14 @@ static void test_rx_partial_peek_credit_and_fin(void) {
     fake_reset();
     pfd_t *e = test_pfd();
     static const uint8_t bytes[] = "abcdef";
-    dmesh_wc_t wc = {
+    dmesh_event_t event = {
         .qp = &fake_qp,
-        .opcode = DMESH_WC_RECV,
+        .type = DMESH_EVENT_RECV,
         .buf = bytes,
         .len = 6,
         ._rx_token = 17,
     };
-    assert(pfd_queue_rx(e, &wc) == 0);
+    assert(pfd_queue_rx(e, &event) == 0);
     assert(fd_ready(e, POLLIN));
 
     char out[8] = {0};
@@ -261,7 +261,7 @@ static void test_rx_partial_peek_credit_and_fin(void) {
     assert(shim_recv(e, out, 1, MSG_DONTWAIT) == -1);
     assert(errno == EAGAIN);
     assert(!fd_ready(e, POLLIN));
-    dmesh_wc_t fin = { .qp = &fake_qp, .opcode = DMESH_WC_RECV_FIN,
+    dmesh_event_t fin = { .qp = &fake_qp, .type = DMESH_EVENT_RECV_FIN,
                        ._rx_token = -1 };
     assert(pfd_rx_fin(e, &fin) == 0);
     assert(fd_ready(e, POLLIN));
@@ -272,12 +272,12 @@ static void test_rx_partial_peek_credit_and_fin(void) {
 static void test_data_after_fin_fails_closed(void) {
     fake_reset();
     pfd_t *e = test_pfd();
-    dmesh_wc_t fin = { .qp = &fake_qp, .opcode = DMESH_WC_RECV_FIN,
+    dmesh_event_t fin = { .qp = &fake_qp, .type = DMESH_EVENT_RECV_FIN,
                        ._rx_token = -1 };
     assert(pfd_rx_fin(e, &fin) == 0);
 
     static const uint8_t byte[] = "x";
-    dmesh_wc_t data = { .qp = &fake_qp, .opcode = DMESH_WC_RECV, .buf = byte,
+    dmesh_event_t data = { .qp = &fake_qp, .type = DMESH_EVENT_RECV, .buf = byte,
                         .len = 1, ._rx_token = 23 };
     assert(pfd_queue_rx(e, &data) == -1);
     assert(e->io_error == EPROTO);
@@ -356,9 +356,9 @@ static void test_rx_fragments_preserve_order(void) {
     pfd_t *e = test_pfd();
     static const uint8_t first[] = "a";
     static const uint8_t second[] = "b";
-    dmesh_wc_t a = { .qp = &fake_qp, .opcode = DMESH_WC_RECV, .buf = first,
+    dmesh_event_t a = { .qp = &fake_qp, .type = DMESH_EVENT_RECV, .buf = first,
                      .len = 1, ._rx_token = 1 };
-    dmesh_wc_t b = { .qp = &fake_qp, .opcode = DMESH_WC_RECV, .buf = second,
+    dmesh_event_t b = { .qp = &fake_qp, .type = DMESH_EVENT_RECV, .buf = second,
                      .len = 1, ._rx_token = 2 };
     assert(pfd_queue_rx(e, &a) == 0);
     assert(pfd_queue_rx(e, &b) == 0);
@@ -373,7 +373,7 @@ int main(void) {
     ENSURE_REAL();
     test_native_chunking_and_one_flush();
     test_nonblocking_eagain_and_pollout_edge();
-    test_blocking_send_waits_for_completion();
+    test_blocking_send_waits_for_event();
     test_send_timeout_does_not_poll_native();
     test_rx_partial_peek_credit_and_fin();
     test_data_after_fin_fails_closed();

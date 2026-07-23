@@ -9,13 +9,13 @@ class NativeDmeshApiOps final : public DmeshApiOps {
   int DestroyChannel(dmesh_channel_t* channel) override {
     return dmesh_destroy_channel(channel);
   }
-  dmesh_cq_t* CreateCq(dmesh_channel_t* channel) override {
-    return dmesh_create_cq(channel);
+  dmesh_eq_t* CreateEq(dmesh_channel_t* channel) override {
+    return dmesh_create_eq(channel);
   }
-  int DestroyCq(dmesh_cq_t* cq) override { return dmesh_destroy_cq(cq); }
-  int CqFd(dmesh_cq_t* cq) override { return dmesh_cq_fd(cq); }
-  dmesh_qp_t* CreateQp(dmesh_cq_t* cq, const char* service) override {
-    return dmesh_create_qp(cq, service);
+  int DestroyEq(dmesh_eq_t* eq) override { return dmesh_destroy_eq(eq); }
+  int EqFd(dmesh_eq_t* eq) override { return dmesh_eq_fd(eq); }
+  dmesh_qp_t* CreateQp(dmesh_eq_t* eq, const char* service) override {
+    return dmesh_create_qp(eq, service);
   }
   int DestroyQp(dmesh_qp_t* qp) override { return dmesh_destroy_qp(qp); }
   void* Alloc(dmesh_qp_t* qp, uint32_t len) override {
@@ -25,12 +25,13 @@ class NativeDmeshApiOps final : public DmeshApiOps {
     return dmesh_post_send(qp, buffer, len);
   }
   int Flush(dmesh_qp_t* qp) override { return dmesh_flush(qp); }
-  int PollCq(dmesh_cq_t* cq, dmesh_wc_t* completions,
-             int max_completions) override {
-    return dmesh_poll_cq(cq, completions, max_completions);
+  int PollEq(dmesh_eq_t* eq, dmesh_event_t* events,
+             int max_events) override {
+    return dmesh_poll_eq(eq, events, max_events);
   }
-  void Release(dmesh_channel_t* channel, dmesh_wc_t* completion) override {
-    dmesh_wc_release(channel, completion);
+  void ReleaseRxBuffer(dmesh_channel_t* channel,
+                       dmesh_event_t* event) override {
+    dmesh_release_rx_buffer(channel, event);
   }
   int MessageMax(dmesh_channel_t* channel) override {
     return dmesh_msg_max(channel);

@@ -1,4 +1,4 @@
-/* Native allocation, posting, polling, and completion-release API.
+/* Native allocation, posting, event polling, and RX-buffer release API.
  * Operations run on the caller thread and expose registered RX/TX memory. */
 #include "dmesh_core.h"
 
@@ -22,116 +22,116 @@ int dmesh_post_send(dmesh_qp_t *c, const void *buf, uint32_t len) {
     return dmesh_flush_full(c);
 }
 
-/* ===== Completion queue ===== */
+/* ===== Event queue ===== */
 
-/* Emit one completion for a landed message descriptor. A 0-length body is the
+/* Emit one event for a landed message descriptor. A 0-length body is the
  * wire FIN marker: its landing credit is returned here (nothing to hand out) and
  * the conn latches EOF. */
-static void cq_emit(dmesh_channel_t *s, dmesh_qp_t *c, dmesh_wc_t *w,
+static void eq_emit(dmesh_channel_t *s, dmesh_qp_t *c, dmesh_event_t *event,
                     int32_t slot, uint32_t body_len) {
-    w->qp = c;
-    if (body_len == 0) {                     /* FIN → EOF completion */
+    event->qp = c;
+    if (body_len == 0) {                     /* FIN → EOF event */
         dpumesh_rx_free(s->ctx, slot);
         c->peer_closed = 1;
-        w->opcode  = DMESH_WC_RECV_FIN;
-        w->buf     = NULL;
-        w->len     = 0;
-        w->_rx_token = -1;
+        event->type      = DMESH_EVENT_RECV_FIN;
+        event->buf       = NULL;
+        event->len       = 0;
+        event->_rx_token = -1;
         return;
     }
-    w->opcode  = DMESH_WC_RECV;
-    w->buf     = dpumesh_rx_buf(s->ctx, slot);
-    w->len     = body_len;
-    w->_rx_token = slot;                     /* credit held until wc_release */
+    event->type      = DMESH_EVENT_RECV;
+    event->buf       = dpumesh_rx_buf(s->ctx, slot);
+    event->len       = body_len;
+    event->_rx_token = slot;                 /* held until release_rx_buffer */
 }
 
-/* Drain one connection into wc[]. `drained` reports whether its inbox emptied.
+/* Drain one connection into events[]. `drained` reports whether its inbox emptied.
  * An accept-held first message is emitted before queued messages. */
-static int cq_drain_conn(dmesh_channel_t *s, dmesh_qp_t *c,
-                         dmesh_wc_t *wc, int nwc, int *drained) {
+static int eq_drain_conn(dmesh_channel_t *s, dmesh_qp_t *c,
+                         dmesh_event_t *events, int max_events, int *drained) {
     int n = 0;
     *drained = 0;
 
     if (c->rx_slot >= 0) {                   /* accept-held first message */
-        if (n >= nwc) return n;
-        cq_emit(s, c, &wc[n++], c->rx_slot, c->rx_len);
+        if (n >= max_events) return n;
+        eq_emit(s, c, &events[n++], c->rx_slot, c->rx_len);
         c->rx_slot = -1; c->rx_buf = NULL; c->rx_len = 0; c->rx_pos = 0;
     }
 
     for (;;) {
-        if (n >= nwc) return n;              /* wc[] full; inbox may hold more */
+        if (n >= max_events) return n;       /* events[] full; inbox may hold more */
         sw_descriptor_t d;
         if (!dpumesh_conn_recv(s->ctx, c->local_port, &d)) break;
-        cq_emit(s, c, &wc[n++], d.body_buf_slot, d.body_len);
+        eq_emit(s, c, &events[n++], d.body_buf_slot, d.body_len);
     }
     *drained = 1;
     return n;
 }
 
-int dmesh_poll_cq(dmesh_cq_t *cq, dmesh_wc_t *wc, int nwc) {
-    if (!cq || !wc || nwc <= 0) { errno = EINVAL; return -1; }
-    dmesh_channel_t *s = cq->ch;
+int dmesh_poll_eq(dmesh_eq_t *eq, dmesh_event_t *events, int max_events) {
+    if (!eq || !events || max_events <= 0) { errno = EINVAL; return -1; }
+    dmesh_channel_t *s = eq->ch;
     int n = 0, drained;
 
-    /* 1. Resume the conn cut off by wc[] filling up last call. Its inbox never went
+    /* 1. Resume the conn cut off by events[] filling up last call. Its inbox never went
      * empty, so the ready list holds no fresh edge for it — this cursor is the only
      * path back (dmesh_destroy_qp clears the cursor if the conn dies). */
-    if (cq->vq_cur) {
-        dmesh_qp_t *c = cq->vq_cur;
-        n += cq_drain_conn(s, c, wc + n, nwc - n, &drained);
+    if (eq->drain_cur) {
+        dmesh_qp_t *c = eq->drain_cur;
+        n += eq_drain_conn(s, c, events + n, max_events - n, &drained);
         if (!drained) return n;
-        cq->vq_cur = NULL;
+        eq->drain_cur = NULL;
     }
 
-    /* 2. New inbound conns off the SHARED accept queue (SPMC — sibling CQs may be
+    /* 2. New inbound conns off the SHARED accept queue (SPMC — sibling EQs may be
      * popping it too; whichever wins one owns it). One CONN_REQ, then the conn's
      * already-landed messages (held first message + any pipelined ones coalesced while
      * it was SERVER_PENDING — those predate the promote, so they too never re-edge). */
-    while (n < nwc) {
+    while (n < max_events) {
         errno = 0;
-        dmesh_qp_t *c = dmesh_accept(cq);
+        dmesh_qp_t *c = dmesh_accept(eq);
         if (!c) {
             if (errno == ENOMEM) continue;   /* dropped entry consumed; keep draining */
             break;                           /* EAGAIN: accept queue empty */
         }
-        wc[n].qp      = c;
-        wc[n].opcode  = DMESH_WC_CONN_REQ;
-        wc[n].buf     = NULL;
-        wc[n].len     = 0;
-        wc[n]._rx_token = -1;
+        events[n].qp        = c;
+        events[n].type      = DMESH_EVENT_CONN_REQ;
+        events[n].buf       = NULL;
+        events[n].len       = 0;
+        events[n]._rx_token = -1;
         n++;
-        n += cq_drain_conn(s, c, wc + n, nwc - n, &drained);
-        if (!drained) { cq->vq_cur = c; return n; }
+        n += eq_drain_conn(s, c, events + n, max_events - n, &drained);
+        if (!drained) { eq->drain_cur = c; return n; }
     }
 
     /* 3. QPs whose automatically armed alloc(EAGAIN) became retryable. TX readiness
-     * is deliberately emitted before bulk RX so a read-heavy CQ cannot starve writes.
+     * is deliberately emitted before bulk RX so a read-heavy EQ cannot starve writes.
      * It is a hint, not a reservation; the application retries only the named QP. */
-    while (n < nwc) {
-        dmesh_qp_t *c = (dmesh_qp_t *)dpumesh_next_tx_ready(cq);
+    while (n < max_events) {
+        dmesh_qp_t *c = (dmesh_qp_t *)dpumesh_next_tx_ready(eq);
         if (!c) break;
-        wc[n].qp      = c;
-        wc[n].opcode  = DMESH_WC_TX_READY;
-        wc[n].buf     = NULL;
-        wc[n].len     = 0;
-        wc[n]._rx_token = -1;
+        events[n].qp        = c;
+        events[n].type      = DMESH_EVENT_TX_READY;
+        events[n].buf       = NULL;
+        events[n].len       = 0;
+        events[n]._rx_token = -1;
         n++;
     }
 
-    /* 4. This CQ's established conns with inbound (edge-armed by the PE). A spurious
+    /* 4. This EQ's established conns with inbound (edge-armed by the PE). A spurious
      * entry (inbox already drained via 1/2) emits nothing — harmless. */
-    while (n < nwc) {
-        dmesh_qp_t *c = dmesh_next_ready(cq);
+    while (n < max_events) {
+        dmesh_qp_t *c = dmesh_next_ready(eq);
         if (!c) break;
-        n += cq_drain_conn(s, c, wc + n, nwc - n, &drained);
-        if (!drained) { cq->vq_cur = c; return n; }
+        n += eq_drain_conn(s, c, events + n, max_events - n, &drained);
+        if (!drained) { eq->drain_cur = c; return n; }
     }
     return n;
 }
 
-void dmesh_wc_release(dmesh_channel_t *s, dmesh_wc_t *wc) {
-    if (!s || !wc || wc->_rx_token < 0) return;
-    dpumesh_rx_free(s->ctx, wc->_rx_token);
-    wc->_rx_token = -1;                      /* idempotent */
-    wc->buf     = NULL;
+void dmesh_release_rx_buffer(dmesh_channel_t *s, dmesh_event_t *event) {
+    if (!s || !event || event->_rx_token < 0) return;
+    dpumesh_rx_free(s->ctx, event->_rx_token);
+    event->_rx_token = -1;                  /* idempotent */
+    event->buf = NULL;
 }

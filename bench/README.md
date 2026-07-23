@@ -36,7 +36,7 @@ DPUmesh without changing RPC messages or service code.
 `bench_sock` and `echo_sock` are the matched L4 baseline. Their frame contains
 request id, request length, response length, and body. The response preserves the
 id and requested size. Large bodies are transported as a byte sequence and may
-span multiple DPUmesh completions.
+span multiple DPUmesh receive events.
 
 The gRPC benchmark is a closed-loop synchronous unary workload with one channel
 and a configurable number of client threads/outstanding RPCs. Warmup samples are
@@ -134,7 +134,7 @@ The L4 headline comparison uses `fair`: one application core for each transport;
 for Envoy, the sidecar shares the assigned pod budget. DPU CPU is measured
 separately and must not be hidden when comparing total CPU/request.
 
-Native ABI 3 commits a loop-pass burst, automatically submits complete transport
+Native ABI 4 commits a loop-pass burst, automatically submits complete transport
 units, and flushes the trailing partial once. The `batch` control argument is
 accepted only for wire compatibility and is ignored. Unsupported batching
 ablation scripts exit without producing results.
@@ -145,9 +145,9 @@ doorbell. Applications choose protocol/latency flush boundaries and do not choos
 the 8 KiB physical unit.
 
 The native echo server is also the reference event-driven backpressure pattern.
-It registers one native CQ fd with epoll, blocks without a timeout, and drains the
-CQ on wake. If a reply parks on `dmesh_alloc(EAGAIN)`, the core automatically arms
-that QP; `DMESH_WC_TX_READY` retries only the named reply. The server does not
+It registers one native EQ fd with epoll, blocks without a timeout, and drains the
+EQ on wake. If a reply parks on `dmesh_alloc(EAGAIN)`, the core automatically arms
+that QP; `DMESH_EVENT_TX_READY` retries only the named reply. The server does not
 busy-poll, run a retry timer, or scan every pending QP.
 
 Retained native performance and correctness measurements are recorded in
@@ -207,7 +207,7 @@ the real registration, DMA, byte-transfer, FIN, and cleanup paths on BlueField:
 
 The validator-specific contracts are in [validators/README.md](validators/README.md).
 The C++ gRPC tests are executed separately with CTest and include fake-native
-reactor tests, completion-gated writable retry, a paired real gRPC HTTP/2 channel
+reactor tests, event-gated writable retry, a paired real gRPC HTTP/2 channel
 test, native symbol linkage, and an optional BlueField client/server smoke binary.
 
 ## 7. Measurement rules
@@ -223,6 +223,6 @@ test, native symbol linkage, and an optional BlueField client/server smoke binar
 6. Compare only matched semantics. The current gRPC comparison is DPUmesh versus
    direct TCP, not DPUmesh versus Envoy HTTP connection management.
 
-The current ABI 3 native L4 campaign is in [REPORT.md](report/REPORT.md).
+The current ABI 4 native L4 campaign is in [REPORT.md](report/REPORT.md).
 Chronological engineering experiments and corrections remain in
 [RESULT.md](RESULT.md).

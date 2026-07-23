@@ -9,6 +9,8 @@ static uint8_t reservation[64];
 static int reserve_calls;
 static int commit_calls;
 static int full_drain_calls;
+static int rx_free_calls;
+static int last_rx_slot = -1;
 static dmesh_qp_t *tx_ready_qp;
 
 uint8_t *
@@ -38,24 +40,24 @@ dmesh_flush_full(dmesh_qp_t *qp)
     return 0;
 }
 
-dmesh_qp_t *dmesh_accept(dmesh_cq_t *cq)
+dmesh_qp_t *dmesh_accept(dmesh_eq_t *eq)
 {
-    (void)cq;
+    (void)eq;
     errno = EAGAIN;
     return NULL;
 }
 
-void *dpumesh_next_tx_ready(struct dmesh_cq *cq)
+void *dpumesh_next_tx_ready(struct dmesh_eq *eq)
 {
-    (void)cq;
+    (void)eq;
     dmesh_qp_t *qp = tx_ready_qp;
     tx_ready_qp = NULL;
     return qp;
 }
 
-dmesh_qp_t *dmesh_next_ready(dmesh_cq_t *cq)
+dmesh_qp_t *dmesh_next_ready(dmesh_eq_t *eq)
 {
-    (void)cq;
+    (void)eq;
     return NULL;
 }
 
@@ -77,7 +79,8 @@ uint8_t *dpumesh_rx_buf(dpumesh_ctx_t *ctx, int slot)
 void dpumesh_rx_free(dpumesh_ctx_t *ctx, int slot)
 {
     (void)ctx;
-    (void)slot;
+    rx_free_calls++;
+    last_rx_slot = slot;
 }
 
 int
@@ -103,16 +106,31 @@ main(void)
     assert(commit_calls == 2);
     assert(full_drain_calls == 1);
 
-    /* poll_cq exposes the core one-shot as a complete, payload-free API WC. */
-    struct dmesh_cq cq = {0};
-    dmesh_wc_t wc = {0};
-    cq.ch = &channel;
+    /* poll_eq exposes the core one-shot as a payload-free API event. */
+    struct dmesh_eq eq = {0};
+    dmesh_event_t event = {0};
+    eq.ch = &channel;
     tx_ready_qp = &qp;
-    assert(dmesh_poll_cq(&cq, &wc, 1) == 1);
-    assert(wc.qp == &qp);
-    assert(wc.opcode == DMESH_WC_TX_READY);
-    assert(wc.buf == NULL && wc.len == 0 && wc._rx_token == -1);
-    assert(dmesh_poll_cq(&cq, &wc, 1) == 0);
+    assert(dmesh_poll_eq(&eq, &event, 1) == 1);
+    assert(event.qp == &qp);
+    assert(event.type == DMESH_EVENT_TX_READY);
+    assert(event.buf == NULL && event.len == 0 && event._rx_token == -1);
+    assert(dmesh_poll_eq(&eq, &event, 1) == 0);
+
+    uint8_t payload = 0x5a;
+    event = (dmesh_event_t){
+        .qp = &qp,
+        .type = DMESH_EVENT_RECV,
+        .buf = &payload,
+        .len = 1,
+        ._rx_token = 23,
+    };
+    dmesh_release_rx_buffer(&channel, &event);
+    assert(rx_free_calls == 1 && last_rx_slot == 23);
+    assert(event.buf == NULL && event._rx_token == -1);
+    assert(event.type == DMESH_EVENT_RECV && event.len == 1);
+    dmesh_release_rx_buffer(&channel, &event);
+    assert(rx_free_calls == 1);
 
     puts("native_api_contract_test: PASS");
     return 0;

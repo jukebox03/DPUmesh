@@ -15,16 +15,16 @@ faster than direct TCP. The measured baselines and limitations are kept in the
 C/C++ application or gRPC
           │
           ▼
-libdpumesh.so.3 ─ registered TX/RX memory ─ BlueField DPA + ARM ─ backend TCP
+libdpumesh.so.4 ─ registered TX/RX memory ─ BlueField DPA + ARM ─ backend TCP
           ▲
-          └─ CQ completions and optional epoll fd
+          └─ EQ events and optional epoll fd
 ```
 
 The host exposes three integration surfaces:
 
 | Surface | Purpose |
 |---|---|
-| `<dpumesh/dmesh.h>` | Native channel/CQ/QP API with registered TX and zero-copy RX |
+| `<dpumesh/dmesh.h>` | Native channel/EQ/QP API with registered TX and zero-copy RX |
 | `libdmesh_preload.so` | POSIX socket compatibility for libc-based C/C++ binaries |
 | `integrations/grpc` | gRPC C++ v1.80 Endpoint and PassiveListener integration |
 
@@ -33,21 +33,21 @@ bytes and `dmesh_post_send()` commits them into one ordered stream. A post
 automatically submits every newly complete transport batch; `dmesh_flush()`
 forces only the newest partial batch. The physical unit is an internal data-plane
 choice, not an application tuning parameter. A future one-shot batching timer may
-bound partial-batch latency; ABI 3 currently relies on flush or graceful close for
+bound partial-batch latency; ABI 4 currently relies on flush or graceful close for
 that tail, while abort discards it. Native publication writes a shared descriptor
 ring that the DPA already polls; it is not a socket syscall or a per-flush control
 message.
 
 Every public QP is one full-duplex byte stream. Optional DPU L7 framing is an
 internal routing policy and does not expose backend or stream ids through native
-completions. The in-tree L7 validator uses a simple length-prefixed benchmark
+events. The in-tree L7 validator uses a simple length-prefixed benchmark
 frame; gRPC continues to use backend-pinned L4 passthrough so chttp2 owns HTTP/2.
 
 Backpressure remains nonblocking. If `dmesh_alloc()` returns `NULL/EAGAIN`, it
 also arms that QP internally. Capacity returned by a QP ACK or by the channel's
-shared registered-block pool produces one `DMESH_WC_TX_READY` completion on the
-QP's CQ and wakes the same optional CQ fd used for receive events. Applications
-park only the named write and retry it from the completion; they need no explicit
+shared registered-block pool produces one `DMESH_EVENT_TX_READY` event on the
+QP's EQ and wakes the same optional EQ fd used for receive events. Applications
+park only the named write and retry it from the event; they need no explicit
 arm call, per-QP fd, retry timer, busy-poll, or scan of all QPs. Readiness is a
 one-shot retry hint rather than a capacity reservation, so another `EAGAIN`
 simply arms the next transition.
@@ -70,7 +70,7 @@ and replied `POD_QUIESCED`.
 Those retries are phase-local. A ready channel does not periodically send
 registration heartbeats, and unregister traffic starts only when channel
 destruction begins. The steady-state data plane uses the imported rings and
-completion path.
+reverse DMA path.
 
 Per-slot DMA generations reject delayed work from a prior registration. Forced
 process death during an already-issued DMA remains outside the graceful reclaim
@@ -97,7 +97,7 @@ make -j2
 make test
 ```
 
-The build produces `build/lib/libdpumesh.so.3`, the preload library, and native
+The build produces `build/lib/libdpumesh.so.4`, the preload library, and native
 bench/validator binaries. The library target tracks all source and header inputs;
 public-header changes therefore rebuild both ABI and consumers.
 
@@ -136,13 +136,13 @@ connection attempt creates a QP; established L4 streams remain backend-pinned.
 
 ## Documentation
 
-- [Native API](design/API.md): exact lifecycle, batching, CQ, and error contracts
+- [Native API](design/API.md): exact lifecycle, batching, EQ, and error contracts
 - [Core architecture](design/CORE.md): host/DPA/ARM custody and replay barriers
 - [Naming](design/NAMING.md): registry, service identity, and routing meaning
 - [gRPC integration](integrations/grpc/README.md): build and application bootstrap
 - [Benchmark guide](bench/README.md): deployment and experiment commands
 - [Native contract tests](tests/README.md): fast host-only regression coverage
-- [Performance report](bench/report/REPORT.md): current ABI 3 native L4 evaluation
+- [Performance report](bench/report/REPORT.md): current ABI 4 native L4 evaluation
 - [Engineering results](bench/RESULT.md): chronological correctness and performance experiments
 
 `bench/RESULT.md` is an engineering experiment log, not a current specification.

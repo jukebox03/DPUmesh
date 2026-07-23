@@ -36,7 +36,7 @@ typedef struct {
 /* ====== SwDescriptor (host-internal RX/TX descriptor, packed) ====== */
 /* Host-internal descriptor (NOT a wire layout): the façade builds it for
  * dpumesh_enqueue (translated to dma_desc) and dpumesh_dequeue fills it from a
- * delivered completion. Carries the oriented endpoint tuple — see design/API.md §5/§6. */
+ * delivered RX event. Carries the oriented endpoint tuple — see design/API.md §5/§6. */
 typedef struct {
     int32_t  body_buf_slot;         /* TX slot (send) | RX landing byte-offset (recv) */
     uint32_t body_len;
@@ -56,31 +56,31 @@ typedef struct dpumesh_ctx dpumesh_ctx_t;
 
 /* Connection table index space: port [1,65535] IS a connection; 0 = BLANK. */
 #define DMESH_PORT_SPACE  65536
-/* Max CQs per channel (= max parallel RX consumers). Each costs a ready ring +
+/* Max EQs per channel (= max parallel RX consumers). Each costs a ready ring +
  * an eventfd, so the cap is what bounds the accept-path notify fan-out. */
-#define DMESH_MAX_CQ      64
+#define DMESH_MAX_EQ      64
 #define DMESH_TX_READY_WORDS (DMESH_PORT_SPACE / 64)
 
-/* One consumer thread owns each CQ and its RX ready list. The channel-wide accept
- * queue allows any CQ to claim a new connection. */
-struct dmesh_cq {
+/* One consumer thread owns each EQ and its RX ready list. The channel-wide accept
+ * queue allows any EQ to claim a new connection. */
+struct dmesh_eq {
     dmesh_channel_t   *ch;
     struct dmesh_qp *accept_spare; /* preallocated before consuming an accept descriptor;
                                     * prevents OOM from stranding SERVER_PENDING */
-    struct dmesh_qp *vq_cur;   /* poll_cq resume cursor: the conn whose inbox was only
-                                  * partially drained because the caller's wc[] filled (its
+    struct dmesh_qp *drain_cur;   /* poll_eq resume cursor: the conn whose inbox was only
+                                  * partially drained because the caller's events[] filled (its
                                   * inbox never went empty, so the ready list holds no fresh
                                   * edge — this is the only path back to it). Owned by this
-                                  * CQ's thread; dmesh_destroy_qp clears it on a matching conn. */
-    int                notify_efd;  /* this CQ's readiness fd; ALWAYS armed (created live —
-                                     * dmesh_cq_fd only hands it out, it never enables it). */
-    /* Set when dmesh_cq_fd exposes notify_efd. Poll-only CQs skip eventfd writes. */
+                                  * EQ's thread; dmesh_destroy_qp clears it on a matching conn. */
+    int                notify_efd;  /* this EQ's readiness fd; ALWAYS armed (created live —
+                                     * dmesh_eq_fd only hands it out, it never enables it). */
+    /* Set when dmesh_eq_fd exposes notify_efd. Poll-only EQs skip eventfd writes. */
     atomic_int         wants_notify;
-    int                reg_idx;     /* slot in ctx->cqs[], for destroy */
-    atomic_int         nqp;         /* live QPs bound here. Enforces ibv_destroy_cq's EBUSY
+    int                reg_idx;     /* slot in ctx->eqs[], for destroy */
+    atomic_int         nqp;         /* live QPs bound here. Enforces destroy_eq's EBUSY
                                      * rule instead of only documenting it: a conn outliving
-                                     * its CQ reports completions into freed memory. Atomic
-                                     * because dmesh_create_qp may run off the CQ's thread;
+                                     * its EQ reports events into freed memory. Atomic
+                                     * because dmesh_create_qp may run off the EQ's thread;
                                      * touched only at conn create/destroy, never on the
                                      * data path. */
     /* TX readiness is multi-producer: the PE can reclaim a QP while any owner thread
@@ -88,15 +88,15 @@ struct dmesh_cq {
      * the RX list's SPSC assumption. At most one bit is live per automatically armed QP. */
     atomic_uint_fast64_t tx_ready[DMESH_TX_READY_WORDS];
     atomic_uint_fast32_t tx_ready_count;
-    uint32_t             tx_ready_cursor; /* CQ-consumer round-robin word cursor */
-    /* PE-published READY LIST for this CQ's conns. The PE pushes a conn's port the
-     * moment its inbox goes empty->non-empty; the CQ thread drains it via
+    uint32_t             tx_ready_cursor; /* EQ-consumer round-robin word cursor */
+    /* PE-published READY LIST for this EQ's conns. The PE pushes a conn's port the
+     * moment its inbox goes empty->non-empty; the EQ thread drains it via
      * dmesh_next_ready instead of scanning conns or holding a per-conn fd. SPSC: PE =
-     * sole producer (ready_tail), this CQ's thread = sole consumer (ready_head). Sized
+     * sole producer (ready_tail), this EQ's thread = sole consumer (ready_head). Sized
      * to the port space so it never overflows (each live conn appears at most once —
      * the on_ready flag dedups). */
     char _rl_pad0[64];
-    atomic_uint_fast32_t ready_head;   /* consumer (this CQ's thread) */
+    atomic_uint_fast32_t ready_head;   /* consumer (this EQ's thread) */
     char _rl_pad1[64];
     atomic_uint_fast32_t ready_tail;   /* producer (PE) */
     char _rl_pad2[64];
@@ -120,9 +120,9 @@ int dmesh_resolve_name(const char *name);         /* name → svc, -1 + ENOENT *
 int dmesh_resolve_addr(uint32_t ip_net, uint16_t port_host);  /* ClusterIP:port → svc, -1 = not meshed */
 
 /* Integer entry point for the CLIENT QP, shared by the shim and the public
- * name-taking wrapper. The public dmesh_create_qp(cq, name) lives in
+ * name-taking wrapper. The public dmesh_create_qp(eq, name) lives in
  * dmesh_core.c and calls this after resolve_name. */
-dmesh_qp_t *dmesh_qp_open(dmesh_cq_t *cq, int dst_service_id);
+dmesh_qp_t *dmesh_qp_open(dmesh_eq_t *eq, int dst_service_id);
 
 /* ====== Query configured values ====== */
 int dpumesh_get_slot_size(dpumesh_ctx_t *ctx);
@@ -139,8 +139,8 @@ const char *dpumesh_get_worker_id(dpumesh_ctx_t *ctx);
 /* ====== Raw Buffer API ====== */
 
 /* Pop one NEW-connection descriptor off the accept ring. NON-BLOCKING: 0 + *desc,
- * or -1 when empty. Readiness comes from any CQ's fd (dmesh_cq_fd): the ring is
- * SPMC, so every CQ is woken and may pop. */
+ * or -1 when empty. Readiness comes from any EQ's fd (dmesh_eq_fd): the ring is
+ * SPMC, so every EQ is woken and may pop. */
 int dpumesh_dequeue(dpumesh_ctx_t *ctx, sw_descriptor_t *desc);
 
 /* Get pointer to RX buffer data for a slot (zero-copy read). */
@@ -174,14 +174,14 @@ int dpumesh_enqueue(dpumesh_ctx_t *ctx, const sw_descriptor_t *desc);
 
 /* Allocate a host-unique conn port (>=1) as CLIENT or SERVER (allocates its inbound
  * ring); 0 on exhaustion. `user` is the app's conn handle, returned later by
- * dpumesh_next_ready; `cq` is the completion queue this conn's ready-edges go to.
+ * dpumesh_next_ready; `eq` is the event queue this conn's ready-edges go to.
  * Both are stored before the port goes live, so a ready-list entry never dereferences
  * NULL. Release with dpumesh_free_port (reclaims undelivered inbound credits). */
-uint16_t dpumesh_alloc_port(dpumesh_ctx_t *ctx, int role, void *user, struct dmesh_cq *cq);
+uint16_t dpumesh_alloc_port(dpumesh_ctx_t *ctx, int role, void *user, struct dmesh_eq *eq);
 /* Promote a PE-created DMESH_ROLE_SERVER_PENDING slot to a live SERVER conn: attach
- * the app's conn handle `user` and bind it to the accepting `cq`. Returns `port` on
+ * the app's conn handle `user` and bind it to the accepting `eq`. Returns `port` on
  * success, 0 if the slot is not pending (already accepted / freed / race). */
-uint16_t dpumesh_accept_port(dpumesh_ctx_t *ctx, uint16_t port, void *user, struct dmesh_cq *cq);
+uint16_t dpumesh_accept_port(dpumesh_ctx_t *ctx, uint16_t port, void *user, struct dmesh_eq *eq);
 void     dpumesh_free_port(dpumesh_ctx_t *ctx, uint16_t port);
 
 /* Pop the next inbound message descriptor for a conn (CLIENT or SERVER — one path).
@@ -189,14 +189,14 @@ void     dpumesh_free_port(dpumesh_ctx_t *ctx, uint16_t port);
  * via dpumesh_rx_free after reading), or 0 if the conn inbox is empty. */
 int dpumesh_conn_recv(dpumesh_ctx_t *ctx, uint16_t port, sw_descriptor_t *out);
 
-/* Pop the next READY conn ON THIS CQ (one whose inbox went empty→non-empty since you
+/* Pop the next READY conn ON THIS EQ (one whose inbox went empty→non-empty since you
  * last drained it) and return the `user` handle registered at alloc; NULL when
- * drained. The CQ's fd (dmesh_cq_fd) wakes you; this names the conns to service
+ * drained. The EQ's fd (dmesh_eq_fd) wakes you; this names the conns to service
  * WITHOUT scanning every conn or holding a per-conn fd. Drain each returned conn to
- * EAGAIN (edge-triggered re-arm). Single-consumer (this CQ's thread). */
-void *dpumesh_next_ready(struct dmesh_cq *cq);
+ * EAGAIN (edge-triggered re-arm). Single-consumer (this EQ's thread). */
+void *dpumesh_next_ready(struct dmesh_eq *eq);
 /* Pop one QP whose automatically armed dmesh_alloc(EAGAIN) became retryable. */
-void *dpumesh_next_tx_ready(struct dmesh_cq *cq);
+void *dpumesh_next_tx_ready(struct dmesh_eq *eq);
 
 /* ====== Connection lifecycle — INTERNAL, shared by both surfaces ======
  *
@@ -207,18 +207,18 @@ void *dpumesh_next_tx_ready(struct dmesh_cq *cq);
  * file; only the three below stay internal. */
 
 /* Pop the next NEW inbound connection off the channel-wide accept queue and BIND it
- * to `cq`: allocate a SERVER conn that learns its peer (pod,port) and holds the first
+ * to `eq`: allocate a SERVER conn that learns its peer (pod,port) and holds the first
  * first fragment (c->rx_slot). NULL+EAGAIN if none pending; NULL+ENOMEM on alloc failure
  * (the message is dropped, its RX credit reclaimed). The native API folds this into
- * dmesh_poll_cq as DMESH_WC_CONN_REQ; the shim drives it from its dispatcher thread.
- * The queue is SPMC, so several CQs may call this concurrently — each conn goes to
+ * dmesh_poll_eq as DMESH_EVENT_CONN_REQ; the shim drives it from its dispatcher thread.
+ * The queue is SPMC, so several EQs may call this concurrently — each conn goes to
  * exactly one of them, which owns it from then on. */
-dmesh_qp_t *dmesh_accept(dmesh_cq_t *cq);
+dmesh_qp_t *dmesh_accept(dmesh_eq_t *eq);
 
-/* Pop the next conn that has inbound, from THIS CQ's ready list (the PE puts ready
+/* Pop the next conn that has inbound, from THIS EQ's ready list (the PE puts ready
  * conns here, so there is NO scan and NO per-conn fd). Returns the SAME conn handle
  * created at accept/connect, or NULL when drained. Single-consumer. */
-dmesh_qp_t *dmesh_next_ready(dmesh_cq_t *cq);
+dmesh_qp_t *dmesh_next_ready(dmesh_eq_t *eq);
 
 /* Submit every complete wire slot currently committed on this QP, leaving only the
  * newest fillable partial slot buffered. This is the post_send fast path; unlike the

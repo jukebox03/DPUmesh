@@ -21,7 +21,7 @@ performance claim.
 
 ### Functional transport
 
-The native validators cover channel/CQ/QP creation, inbound QPs, ordered data,
+The native validators cover channel/EQ/QP creation, inbound QPs, ordered data,
 fragmentation, RX credit, FIN, and reverse destruction. The preload validator
 covers socket interception and TCP fallback. These tests establish API behavior;
 they do not establish competitive performance.
@@ -69,13 +69,13 @@ A performance point is retained only if:
 - DPA EUs are hardware execution resources and are not interchangeable with ARM
   process CPU percentages.
 - A single repetition is directional evidence, not a stable median.
-- ABI-3 native batching is mandatory; incompatible batching ablations are not
+- ABI-4 native batching is mandatory; incompatible batching ablations are not
   regenerated.
 - L4 Envoy `tcp_proxy` is a valid transport baseline but not a measurement of
   HTTP/2 routing, retries, telemetry, or policy cost.
 - The focused gRPC harness is compatible with the official service schema but is
   not the upstream distributed `qps_worker` scenario controller.
 
-The current ABI 3 native L4 campaign is in `bench/report/REPORT.md`; its exact
+The current ABI 4 native L4 campaign is in `bench/report/REPORT.md`; its exact
 deployment is in `bench/report/DEPLOY.md`. The chronological engineering log
 remains in `bench/RESULT.md`.

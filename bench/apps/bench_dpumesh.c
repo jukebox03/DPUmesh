@@ -1,4 +1,4 @@
-/* Closed-loop native RPC benchmark. Each thread owns one CQ and connection and
+/* Closed-loop native RPC benchmark. Each thread owns one EQ and connection and
  * reports throughput, latency, failures, ordering, routing, and TX-pool metrics. */
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -18,7 +18,7 @@
 #define CTRL_PORT          9092
 #define MAX_THREADS        64
 #define WORKER_STACK_BYTES (256 * 1024)
-#define CQ_BATCH           64
+#define EVENT_BATCH           64
 #define STOP_GRACE_SEC     15         /* watchdog kill margin past the run duration */
 #define DRAIN_GRACE_SEC    1.0        /* finish replies already issued at measurement end */
 #define REQ_FILL           42
@@ -35,38 +35,38 @@ typedef struct {
     int          req_size;
     int          reply_size;
     int          W;            /* concurrency window (outstanding per thread) */
-    long         warmup;       /* completions excluded from measurement */
+    long         warmup;       /* events excluded from measurement */
     double       duration;     /* run length in seconds */
     double       start_at;     /* shared barrier: all threads begin at this time */
-    long         reconn;       /* completions per conn before close+reconnect (0 = never) */
+    long         reconn;       /* events per conn before close+reconnect (0 = never) */
     int          batch;        /* control/result layout field */
     atomic_int  *stop;         /* watchdog / abort flag */
 
     /* per-thread transport + pipeline state. ALL of it — issue side and reply side
-     * alike — is owned by this one thread: the conn lives on this thread's own CQ, so
-     * only this thread can ever poll its completions. No cross-thread state, hence no
+     * alike — is owned by this one thread: the conn lives on this thread's own EQ, so
+     * only this thread can ever poll its events. No cross-thread state, hence no
      * lock and no atomics below. */
-    dmesh_cq_t      *cq;        /* this thread's CQ (single-consumer, polled here only) */
+    dmesh_eq_t      *eq;        /* this thread's EQ (single-consumer, polled here only) */
     dmesh_qp_t    *c;
     /* Outstanding requests, direct-mapped by seq % INFLIGHT_RING (see above). */
     double          *start_ts;  /* issue time */
     uint32_t        *slot_seq;  /* which seq owns the slot (collision check) */
     uint8_t         *live;      /* 1 = awaiting its reply */
     uint32_t         next_seq;  /* next seq to assign on issue */
-    uint32_t         prev_seq;  /* seq of the previous completion — only to count reordering */
+    uint32_t         prev_seq;  /* seq of the previous event — only to count reordering */
     uint32_t         tx_done;   /* bytes of the in-flight request frame already posted */
     int              tx_active; /* a frame is mid-carve (must finish before the next) */
     long             outstanding;
-    long             credits;   /* completions observed -> requests to reissue */
+    long             credits;   /* events observed -> requests to reissue */
     bench_reframer_t rf;       /* the QP's ordered reply byte stream */
     int              draining; /* measurement closed; retire outstanding replies only */
 
     /* per-thread results */
-    long         rcnt;         /* total completions incl. warmup */
-    long         since_conn;   /* completions on the CURRENT conn (churn trigger) */
+    long         rcnt;         /* total events incl. warmup */
+    long         since_conn;   /* events on the CURRENT conn (churn trigger) */
     long         reconns;      /* reconnects performed */
     double       reconn_sec;   /* wall time inside close+connect+pin (sums) */
-    long         fail;         /* completions that named a seq we never had outstanding */
+    long         fail;         /* events that named a seq we never had outstanding */
     long         reorder;      /* replies that arrived out of send order. 0 on a pinned
                                 * (no-codec) service; >0 is the visible proof that a
                                 * codec'd service load-balances per message. */
@@ -80,7 +80,7 @@ typedef struct {
 /* Fire once per fully-received reply frame. Correlate BY SEQ, not by arrival order: a
  * codec'd service load-balances every message, so replies from different backends
  * interleave and out-of-order is normal, not an error. `aux` carries the backend's
- * pod_id. Runs on w's own thread: the completion came off w's own CQ. */
+ * pod_id. Runs on w's own thread: the event came off w's own EQ. */
 static void on_reply(uint32_t seq, uint32_t plen, uint32_t aux, void *user) {
     (void)plen;
     worker_t *w = (worker_t *)user;
@@ -109,23 +109,23 @@ static void on_reply(uint32_t seq, uint32_t plen, uint32_t aux, void *user) {
     w->credits++;
 }
 
-/* Drain THIS thread's CQ. Every completion on it belongs to this worker's conn — no
+/* Drain THIS thread's EQ. Every event on it belongs to this worker's conn — no
  * dispatch, no lock, no sharing with the other threads. Returns the count harvested. */
-static int cq_pump(worker_t *w) {
-    dmesh_wc_t wc[CQ_BATCH];
+static int eq_pump(worker_t *w) {
+    dmesh_event_t events[EVENT_BATCH];
     int got = 0, n;
-    while ((n = dmesh_poll_cq(w->cq, wc, CQ_BATCH)) > 0) {  /* drain to 0 (edge-triggered rule) */
+    while ((n = dmesh_poll_eq(w->eq, events, EVENT_BATCH)) > 0) {  /* drain to 0 (edge-triggered rule) */
         for (int i = 0; i < n; i++) {
-            if (wc[i].opcode == DMESH_WC_RECV) {
-                if (bench_reframe_feed(&w->rf, wc[i].buf, wc[i].len,
+            if (events[i].type == DMESH_EVENT_RECV) {
+                if (bench_reframe_feed(&w->rf, events[i].buf, events[i].len,
                                        BENCH_REP_MAGIC, on_reply, w) < 0) {
                     /* A framing error is terminal because later lengths are untrustworthy. */
                     fprintf(stderr, "[bench] reply stream desync\n");
                     w->fail++;
                     atomic_store(&w->broken, 1);
                 }
-                dmesh_wc_release(g_s, &wc[i]);
-            } else if (wc[i].opcode == DMESH_WC_RECV_FIN) {
+                dmesh_release_rx_buffer(g_s, &events[i]);
+            } else if (events[i].type == DMESH_EVENT_RECV_FIN) {
                 atomic_store(&w->broken, 1);              /* backend FIN — abort this thread */
             }
         }
@@ -186,11 +186,11 @@ static void *worker_fn(void *arg) {
     if (!w->start_ts || !w->slot_seq || !w->live) { atomic_store(&w->broken, 1); goto done; }
     w->prev_seq = UINT32_MAX;                   /* so seq 0 counts as in-order */
 
-    /* This thread's OWN CQ, and its conn on it: nothing on this CQ belongs to anyone
-     * else, so poll_cq below is contention-free. This is the scaling knob. */
-    w->cq = dmesh_create_cq(g_s);
-    if (!w->cq) { atomic_store(&w->broken, 1); goto done; }
-    w->c = dmesh_create_qp(w->cq, g_dst_service);
+    /* This thread's OWN EQ, and its conn on it: nothing on this EQ belongs to anyone
+     * else, so poll_eq below is contention-free. This is the scaling knob. */
+    w->eq = dmesh_create_eq(g_s);
+    if (!w->eq) { atomic_store(&w->broken, 1); goto done; }
+    w->c = dmesh_create_qp(w->eq, g_dst_service);
     if (!w->c) { atomic_store(&w->broken, 1); goto done; }
 
     /* barrier: all threads start together */
@@ -205,18 +205,18 @@ static void *worker_fn(void *arg) {
     while (!atomic_load(&w->broken) && !atomic_load(w->stop)) {
         if (bench_now_sec() - start > w->duration && !w->tx_active) break;
 
-        int did = cq_pump(w) > 0;
+        int did = eq_pump(w) > 0;
         int issued = 0;
 
-        /* Connection churn: once `reconn` completions landed on this conn, STOP
+        /* Connection churn: once `reconn` events landed on this conn, STOP
          * issuing (the gate below), drain to 0 outstanding, then swap the conn.
          * Reconnect wall time is accumulated so the per-reconnect cost is a
          * direct measurement (not inferred from the rate delta). */
         int churn = (w->reconn > 0 && w->since_conn >= w->reconn);
         if (churn && w->outstanding == 0 && !w->tx_active) {
             double t0 = bench_now_sec();
-            dmesh_destroy_qp(w->c);                    /* vq_cur is this CQ's, i.e. ours */
-            w->c = dmesh_create_qp(w->cq, g_dst_service);
+            dmesh_destroy_qp(w->c);                    /* drain cursor is this EQ's, i.e. ours */
+            w->c = dmesh_create_qp(w->eq, g_dst_service);
             if (!w->c) { atomic_store(&w->broken, 1); break; }
             bench_reframe_reset(&w->rf);
             w->since_conn = 0;
@@ -253,16 +253,16 @@ static void *worker_fn(void *arg) {
     w->draining = 1;
     double drain_deadline = end + DRAIN_GRACE_SEC;
     while (w->outstanding > 0 && bench_now_sec() < drain_deadline) {
-        if (!cq_pump(w)) {
+        if (!eq_pump(w)) {
             struct timespec ts = {0, 2000};
             nanosleep(&ts, NULL);
         }
     }
 
 done:
-    /* Conn first, then its CQ (a conn outliving its CQ has nowhere to report). */
+    /* Conn first, then its EQ (a conn outliving its EQ has nowhere to report). */
     if (w->c) { dmesh_destroy_qp(w->c); w->c = NULL; }
-    if (w->cq) { dmesh_destroy_cq(w->cq); w->cq = NULL; }
+    if (w->eq) { dmesh_destroy_eq(w->eq); w->eq = NULL; }
     w->dura = (end > 0.0 && w->rcnt > w->warmup) ? (end - w->warmup_end) : 0.0;
     free(w->start_ts);
     free(w->slot_seq);

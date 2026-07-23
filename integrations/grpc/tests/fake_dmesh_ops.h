@@ -15,7 +15,7 @@ namespace dpumesh::grpc::testing {
 
 class FakeDmeshApiOps;
 
-// Thread-safe fake of the public DPUmesh API. Its CQ fd is a real eventfd, so
+// Thread-safe fake of the public DPUmesh API. Its EQ fd is a real eventfd, so
 // reactor tests exercise the production poll/eventfd owner-thread loop rather
 // than a separate test-only scheduler.
 class FakeDmeshState final {
@@ -59,7 +59,7 @@ class FakeDmeshState final {
   size_t mid_batch_destroy_count() const;
   size_t poll_thread_violation_count() const;
   size_t channel_destroy_count() const;
-  size_t cq_destroy_count() const;
+  size_t eq_destroy_count() const;
 
  private:
   class Impl;

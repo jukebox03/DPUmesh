@@ -1,6 +1,6 @@
 /* LD_PRELOAD POSIX-socket facade. Registry-matched TCP endpoints use DPUmesh; all
  * other descriptors remain kernel-backed. A dispatcher translates native
- * completions into socket readiness. */
+ * events into socket readiness. */
 #define _GNU_SOURCE
 #include <dlfcn.h>
 #include <stdio.h>
@@ -23,7 +23,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
-#include "dmesh_core.h"    /* The data/completion plane uses the public native API.
+#include "dmesh_core.h"    /* The data/event plane uses the public native API.
                             * This in-tree adapter still needs narrow control-plane
                             * hooks for ClusterIP resolution, numeric QP open, and
                             * POSIX shutdown's transport FIN. */
@@ -106,8 +106,8 @@ static void preload_ctor(void) {
 #define PRELOAD_MAX_FDS 65536
 
 typedef struct preload_rx {
-    dmesh_wc_t wc;              /* owns one native RX credit until fully consumed */
-    uint32_t pos;               /* POSIX partial-read cursor within wc.buf */
+    dmesh_event_t event;              /* owns one native RX credit until fully consumed */
+    uint32_t pos;               /* POSIX partial-read cursor within event.buf */
     struct preload_rx *next;
 } preload_rx_t;
 
@@ -247,7 +247,7 @@ static void fd_unblock_tx_locked(pfd_t *e) {
 /* ===================== channel + dispatcher thread ===================== */
 
 static dmesh_channel_t *g_ch;
-static dmesh_cq_t *g_cq;                 /* the ONE CQ: the dispatcher is the single
+static dmesh_eq_t *g_eq;                 /* the ONE EQ: the dispatcher is the single
                                           * consumer for every shim conn (see THREAD
                                           * MODEL), so one is exactly right here. */
 static int  g_wake_fd = -1;              /* wakes the dispatcher for the close queue */
@@ -294,28 +294,28 @@ static void close_q_push(pfd_t *e) {
 static void release_rx_list(preload_rx_t *head) {
     while (head) {
         preload_rx_t *next = head->next;
-        dmesh_wc_release(g_ch, &head->wc);
+        dmesh_release_rx_buffer(g_ch, &head->event);
         free(head);
         head = next;
     }
 }
 
-/* Transfer one native RECV completion into the POSIX fd's pull queue. The RX mmap
+/* Transfer one native RECV event into the POSIX fd's pull queue. The RX mmap
  * remains zero-copy up to read()/recv(); its credit is released only after the app
  * consumes the final byte. A socket facade supports one pinned L4 stream, so fail
  * closed instead of silently concatenating replies from different DPU streams. */
-static int pfd_queue_rx(pfd_t *e, const dmesh_wc_t *wc) {
+static int pfd_queue_rx(pfd_t *e, const dmesh_event_t *event) {
     preload_rx_t *rx = calloc(1, sizeof(*rx));
     if (!rx) {
-        dmesh_wc_t drop = *wc;
-        dmesh_wc_release(g_ch, &drop);
+        dmesh_event_t drop = *event;
+        dmesh_release_rx_buffer(g_ch, &drop);
         pthread_mutex_lock(&e->mu);
         e->io_error = ENOMEM;
         efd_signal(e);
         pthread_mutex_unlock(&e->mu);
         return -1;
     }
-    rx->wc = *wc;
+    rx->event = *event;
 
     pthread_mutex_lock(&e->mu);
     if (e->peer_closed && !e->io_error) {
@@ -324,7 +324,7 @@ static int pfd_queue_rx(pfd_t *e, const dmesh_wc_t *wc) {
     }
     if (e->io_error || !e->conn) {
         pthread_mutex_unlock(&e->mu);
-        dmesh_wc_release(g_ch, &rx->wc);
+        dmesh_release_rx_buffer(g_ch, &rx->event);
         free(rx);
         return -1;
     }
@@ -335,8 +335,8 @@ static int pfd_queue_rx(pfd_t *e, const dmesh_wc_t *wc) {
     return 0;
 }
 
-static int pfd_rx_fin(pfd_t *e, const dmesh_wc_t *wc) {
-    (void)wc;
+static int pfd_rx_fin(pfd_t *e, const dmesh_event_t *event) {
+    (void)event;
     pthread_mutex_lock(&e->mu);
     e->peer_closed = 1;
     efd_signal(e);                              /* EOF stays poll-readable */
@@ -356,26 +356,26 @@ static void defer_qp_once(dmesh_qp_t **qps, int *nqps, int cap, dmesh_qp_t *qp) 
     if (*nqps < cap) qps[(*nqps)++] = qp;
 }
 
-/* One CQ consumer for every native completion type. QP destruction is deferred until
+/* One EQ consumer for every native event type. QP destruction is deferred until
  * the complete returned batch has been inspected because later entries may name the
  * same QP. */
-static void dispatcher_drain_cq(void) {
-    dmesh_wc_t wc[64];
+static void dispatcher_drain_eq(void) {
+    dmesh_event_t events[64];
     for (;;) {
-        int n = dmesh_poll_cq(g_cq, wc, (int)(sizeof(wc) / sizeof(wc[0])));
+        int n = dmesh_poll_eq(g_eq, events, (int)(sizeof(events) / sizeof(events[0])));
         if (n == 0) return;
         if (n < 0) {
-            DBG("dmesh_poll_cq failed: %s", strerror(errno));
+            DBG("dmesh_poll_eq failed: %s", strerror(errno));
             return;
         }
         dmesh_qp_t *deferred[64];
         int ndeferred = 0;
 
         for (int i = 0; i < n; i++) {
-            dmesh_qp_t *c = wc[i].qp;
+            dmesh_qp_t *c = events[i].qp;
             pfd_t *e = c ? (pfd_t *)c->user_data : NULL;
-            switch (wc[i].opcode) {
-            case DMESH_WC_CONN_REQ:
+            switch (events[i].type) {
+            case DMESH_EVENT_CONN_REQ:
                 if (!c) break;
                 if (g_listener == NULL && g_listener_closed) {
                     defer_qp_once(deferred, &ndeferred, 64, c);
@@ -395,24 +395,24 @@ static void dispatcher_drain_cq(void) {
                     c->remote_port);
                 break;
 
-            case DMESH_WC_RECV:
-                if (!e || pfd_queue_rx(e, &wc[i]) != 0) {
-                    if (!e) dmesh_wc_release(g_ch, &wc[i]);
+            case DMESH_EVENT_RECV:
+                if (!e || pfd_queue_rx(e, &events[i]) != 0) {
+                    if (!e) dmesh_release_rx_buffer(g_ch, &events[i]);
                     if (e) defer_qp_once(deferred, &ndeferred, 64, c);
                 }
                 break;
 
-            case DMESH_WC_RECV_FIN:
-                if (e && pfd_rx_fin(e, &wc[i]) != 0)
+            case DMESH_EVENT_RECV_FIN:
+                if (e && pfd_rx_fin(e, &events[i]) != 0)
                     defer_qp_once(deferred, &ndeferred, 64, c);
                 break;
 
-            case DMESH_WC_TX_READY:
+            case DMESH_EVENT_TX_READY:
                 if (e) pfd_tx_ready(e);
                 break;
 
             default:
-                dmesh_wc_release(g_ch, &wc[i]);
+                dmesh_release_rx_buffer(g_ch, &events[i]);
                 if (e) {
                     pthread_mutex_lock(&e->mu);
                     e->io_error = EPROTO;
@@ -442,19 +442,19 @@ static void dispatcher_drain_cq(void) {
 
 static void *dispatcher_main(void *arg) {
     (void)arg;
-    int ch_fd = dmesh_cq_fd(g_cq);
+    int eq_fd = dmesh_eq_fd(g_eq);
     struct pollfd pfds[2] = {
-        { .fd = ch_fd,     .events = POLLIN },
+        { .fd = eq_fd,     .events = POLLIN },
         { .fd = g_wake_fd, .events = POLLIN },
     };
-    DBG("dispatcher up (ch_fd=%d wake_fd=%d)", ch_fd, g_wake_fd);
+    DBG("dispatcher up (eq_fd=%d wake_fd=%d)", eq_fd, g_wake_fd);
     for (;;) {
         (void)poll(pfds, 2, -1);
 
         if (pfds[0].revents & POLLIN) {
             uint64_t v;
-            while (real_read(ch_fd, &v, sizeof v) > 0) {}
-            dispatcher_drain_cq();
+            while (real_read(eq_fd, &v, sizeof v) > 0) {}
+            dispatcher_drain_eq();
         }
 
         if (pfds[1].revents & POLLIN) {
@@ -483,7 +483,7 @@ static void *dispatcher_main(void *arg) {
                 pthread_mutex_unlock(&e->mu);
                 release_rx_list(rx);
                 if (c2)
-                    dmesh_destroy_qp(c2);              /* single-thread vs CQ polling: safe.
+                    dmesh_destroy_qp(c2);              /* single-thread vs EQ polling: safe.
                                                         * A shutdown(SHUT_WR) FIN already sent
                                                         * latched fin_sent, so this sends no
                                                         * second one. */
@@ -510,20 +510,20 @@ static void channel_init(void) {
      * per process, created on first mapped socket op. */
     dmesh_channel_t *ch = dmesh_create_channel();
     if (!ch) { DBG("dmesh_create_channel() FAILED (will retry)"); return; }
-    dmesh_cq_t *cq = dmesh_create_cq(ch);
-    if (!cq || dmesh_cq_fd(cq) < 0) {   /* no readiness fd → dispatcher would be deaf */
-        dmesh_destroy_cq(cq);
+    dmesh_eq_t *eq = dmesh_create_eq(ch);
+    if (!eq || dmesh_eq_fd(eq) < 0) {   /* no readiness fd → dispatcher would be deaf */
+        dmesh_destroy_eq(eq);
         dmesh_destroy_channel(ch);
-        DBG("dmesh cq unavailable (will retry)");
+        DBG("dmesh eq unavailable (will retry)");
         return;
     }
     if (g_wake_fd < 0)                  /* kept across a failed attempt (no re-create leak) */
         g_wake_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     pthread_t t;
-    g_ch = ch; g_cq = cq;               /* dispatcher reads both */
+    g_ch = ch; g_eq = eq;               /* dispatcher reads both */
     if (g_wake_fd < 0 || pthread_create(&t, NULL, dispatcher_main, NULL) != 0) {
-        g_ch = NULL; g_cq = NULL;
-        dmesh_destroy_cq(cq);
+        g_ch = NULL; g_eq = NULL;
+        dmesh_destroy_eq(eq);
         dmesh_destroy_channel(ch);
         DBG("dispatcher start FAILED");
         return;
@@ -593,7 +593,7 @@ static int wait_writable(pfd_t *e, long timeout_ms) {
 }
 
 /* ========================= data-path helpers ==========================
- * Native RECV completions remain queued on each pfd until POSIX read consumes them;
+ * Native RECV events remain queued on each pfd until POSIX read consumes them;
  * this preserves the single required RX copy without exposing transport fragments. */
 
 /* One receive attempt honoring the lost-wakeup discipline. Returns >0 bytes, 0 EOF,
@@ -614,15 +614,15 @@ static ssize_t rx_once(pfd_t *e, void *buf, size_t len, int peek) {
         return -1;
     }
 
-    size_t avail = (size_t)rx->wc.len - rx->pos;
+    size_t avail = (size_t)rx->event.len - rx->pos;
     size_t n = len < avail ? len : avail;
-    if (n) memcpy(buf, rx->wc.buf + rx->pos, n);
+    if (n) memcpy(buf, rx->event.buf + rx->pos, n);
     if (!peek) {
         rx->pos += (uint32_t)n;
-        if (rx->pos == rx->wc.len) {
+        if (rx->pos == rx->event.len) {
             e->rx_head = rx->next;
             if (!e->rx_head) e->rx_tail = NULL;
-            dmesh_wc_release(g_ch, &rx->wc);
+            dmesh_release_rx_buffer(g_ch, &rx->event);
             free(rx);
         }
     }
@@ -807,7 +807,7 @@ int connect(int fd, const struct sockaddr *addr, socklen_t alen) {
                 so_type != SOCK_STREAM)
                 return real_connect(fd, addr, alen);
             if (ensure_channel() < 0) { errno = ENETUNREACH; return -1; }
-            dmesh_qp_t *c = dmesh_qp_open(g_cq, svc);
+            dmesh_qp_t *c = dmesh_qp_open(g_eq, svc);
             if (!c) return -1;                     /* ENOMEM */
             pfd_t *e = pfd_new(c);
             if (!e) { dmesh_destroy_qp(c); errno = ENOMEM; return -1; }
@@ -1259,7 +1259,7 @@ int ioctl(int fd, unsigned long req, ...) {
         size_t available = 0;
         pthread_mutex_lock(&e->mu);
         for (preload_rx_t *rx = e->rx_head; rx; rx = rx->next)
-            available += (size_t)rx->wc.len - rx->pos;
+            available += (size_t)rx->event.len - rx->pos;
         pthread_mutex_unlock(&e->mu);
         *(int *)arg = available > INT_MAX ? INT_MAX : (int)available;
         pfd_put(e);

@@ -1,6 +1,6 @@
 /* Event-driven native DPUmesh Greeter server.
  *
- * One CQ and epoll loop reframe bench.h requests and return the requested reply
+ * One EQ and epoll loop reframe bench.h requests and return the requested reply
  * size with the same sequence id. EAGAIN parks the reply until TX_READY names the
  * connection. BENCH_WORKER_ID selects the advertised service. */
 #define _GNU_SOURCE
@@ -17,13 +17,13 @@
 #include "bench.h"
 
 #define MAX_EVENTS   8
-#define CQ_BATCH     64
+#define EVENT_BATCH     64
 #define MAX_CONNS    256
 #define REPLY_Q      1024        /* deferred reply frames per conn (>= the client window) */
 #define REPLY_FILL   43
 
 static dmesh_channel_t *g_s        = NULL;
-static dmesh_cq_t      *g_cq       = NULL;   /* the one event loop's CQ */
+static dmesh_eq_t      *g_eq       = NULL;   /* the one event loop's EQ */
 static uint32_t         g_post_max = 0;   /* max bytes one dmesh_alloc/post can carry */
 static uint32_t         g_pod_id   = 0;   /* our DPU-assigned pod_id, stamped into every
                                            * reply's aux so the client can see WHICH backend
@@ -148,10 +148,10 @@ int main(void) {
     if (!g_s) { fprintf(stderr, "[greeter] dmesh_create_channel failed\n"); return 1; }
     g_post_max = (uint32_t)dmesh_post_max(g_s);
 
-    g_cq = dmesh_create_cq(g_s);
-    if (!g_cq) { fprintf(stderr, "[greeter] dmesh_create_cq failed\n"); return 1; }
-    int dfd = dmesh_cq_fd(g_cq);
-    if (dfd < 0) { fprintf(stderr, "[greeter] cq_fd unavailable\n"); return 1; }
+    g_eq = dmesh_create_eq(g_s);
+    if (!g_eq) { fprintf(stderr, "[greeter] dmesh_create_eq failed\n"); return 1; }
+    int dfd = dmesh_eq_fd(g_eq);
+    if (dfd < 0) { fprintf(stderr, "[greeter] eq_fd unavailable\n"); return 1; }
     int epfd = epoll_create1(0);
     if (epfd < 0) { perror("epoll_create1"); return 1; }
     struct epoll_event ev = { .events = EPOLLIN, .data = { .fd = dfd } };
@@ -161,42 +161,42 @@ int main(void) {
     fprintf(stderr, "[greeter] ready (SayHello, single-loop): pod_id=%d service=%s channel_fd=%d\n",
             dmesh_pod_id(g_s), service, dfd);
 
-    struct epoll_event events[MAX_EVENTS];
-    dmesh_wc_t wc[CQ_BATCH];
+    struct epoll_event epoll_events[MAX_EVENTS];
+    dmesh_event_t events[EVENT_BATCH];
     for (;;) {
         { static double lr = 0; double now = bench_now_sec();   /* live app-work: poll the file
              * every 0.5s (robust vs SIGHUP, which a libdpumesh thread can absorb). */
           if (now - lr > 0.5) { lr = now; load_work(); } }
-        /* CQ fd covers RX, accepts, and armed TX-ready transitions, so parked replies
+        /* EQ fd covers RX, accepts, and armed TX-ready transitions, so parked replies
          * need neither a timer nor a zero-timeout sweep. */
-        int nfds = epoll_wait(epfd, events, MAX_EVENTS, -1);
+        int nfds = epoll_wait(epfd, epoll_events, MAX_EVENTS, -1);
         if (nfds < 0) { if (errno == EINTR) { if (g_reload) { g_reload = 0; load_work(); } continue; } perror("epoll_wait"); break; }
         if (g_reload) { g_reload = 0; load_work(); }
 
         uint64_t cnt; while (read(dfd, &cnt, sizeof cnt) > 0) { }   /* drain level counter */
 
         int n;
-        while ((n = dmesh_poll_cq(g_cq, wc, CQ_BATCH)) > 0) {       /* drain to 0 before sleeping */
+        while ((n = dmesh_poll_eq(g_eq, events, EVENT_BATCH)) > 0) {       /* drain to 0 before sleeping */
             for (int i = 0; i < n; i++) {
-                dmesh_qp_t *c = wc[i].qp;
+                dmesh_qp_t *c = events[i].qp;
                 greeter_conn_t *gc = (greeter_conn_t *)c->user_data;
-                switch (wc[i].opcode) {
-                case DMESH_WC_CONN_REQ:
+                switch (events[i].type) {
+                case DMESH_EVENT_CONN_REQ:
                     if (!attach(c)) fprintf(stderr, "[greeter] attach failed (conn idle)\n");
                     break;
-                case DMESH_WC_RECV:
+                case DMESH_EVENT_RECV:
                     if (gc && !gc->dead &&
-                        bench_reframe_feed(&gc->rf, wc[i].buf, wc[i].len,
+                        bench_reframe_feed(&gc->rf, events[i].buf, events[i].len,
                                            BENCH_REQ_MAGIC, on_request, c) < 0) {
                         fprintf(stderr, "[greeter] request stream desync — dropping conn\n");
                         gc->dead = 1;
                     }
-                    dmesh_wc_release(g_s, &wc[i]);
+                    dmesh_release_rx_buffer(g_s, &events[i]);
                     break;
-                case DMESH_WC_RECV_FIN:
+                case DMESH_EVENT_RECV_FIN:
                     if (gc) gc->dead = 1;
                     break;
-                case DMESH_WC_TX_READY:
+                case DMESH_EVENT_TX_READY:
                     if (gc && !gc->dead) reply_pump(c); /* targeted one-shot retry */
                     break;
                 }
@@ -220,7 +220,7 @@ int main(void) {
         }
     }
 
-    dmesh_destroy_cq(g_cq);
+    dmesh_destroy_eq(g_eq);
     dmesh_destroy_channel(g_s);
     return 0;
 }

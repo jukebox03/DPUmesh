@@ -1,9 +1,9 @@
 /* Self-routing concurrency-depth validator.
  *
- * One thread and CQ drive client and echo roles. Byte markers detect truncation,
+ * One thread and EQ drive client and echo roles. Byte markers detect truncation,
  * misrouting, and reordering across configurable connection and pipeline depth.
  * Command: RUN <count> <size> [zero-copy] [window] [pipeline].
- * DMESH_CQ_BATCH controls completion batch size. */
+ * DMESH_EQ_BATCH controls event batch size. */
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -31,7 +31,7 @@ static void ctl_reply(int fd, const char *s, size_t n) { (void)!write(fd, s, n);
 #define MAX_PIPELINE  256
 
 static dmesh_channel_t *g_s       = NULL;
-static dmesh_cq_t      *g_cq      = NULL;  /* the one CQ both roles are polled from */
+static dmesh_eq_t      *g_eq      = NULL;  /* the one EQ both roles are polled from */
 static const char      *g_service = "verbs-dpumesh";  /* own service NAME (self-routing) */
 
 /* diagnostics (single-threaded, so plain counters). The allocfail pair counts only
@@ -148,9 +148,9 @@ static int sq_drain(dmesh_qp_t *c) {
 }
 
 /* Echo one inbound request. Returns messages posted. A fault only FLAGS the conn: it
- * must stay alive until the whole wc[] batch is dispatched, since later entries may
+ * must stay alive until the whole events[] batch is dispatched, since later entries may
  * still name it. */
-static int srv_recv(dmesh_qp_t *c, const dmesh_wc_t *w) {
+static int srv_recv(dmesh_qp_t *c, const dmesh_event_t *w) {
     sstate_t *ss = (sstate_t *)c->user_data;
     if (!ss || ss->dead) return 0;                  /* untracked / already faulted */
     if (ss->cnt == 0) {                             /* fast path: RX mmap -> TX ring */
@@ -201,20 +201,20 @@ static void run_verbs(int conn_fd, long N, uint32_t size, int zc,
     D_cl_allocfail = D_cl_postfail = D_sv_allocfail = D_sv_postfail = 0;
     D_cl_eagain = D_sv_eagain = 0;
 
-    int cqfd = dmesh_cq_fd(g_cq);
+    int eqfd = dmesh_eq_fd(g_eq);
     int epfd = epoll_create1(0);
-    struct epoll_event ev = { .events = EPOLLIN, .data = { .fd = cqfd } };
-    epoll_ctl(epfd, EPOLL_CTL_ADD, cqfd, &ev);
+    struct epoll_event ev = { .events = EPOLLIN, .data = { .fd = eqfd } };
+    epoll_ctl(epfd, EPOLL_CTL_ADD, eqfd, &ev);
 
     double *lat = (double *)malloc((size_t)N * sizeof(double));
-    dmesh_wc_t *wc = (dmesh_wc_t *)malloc((size_t)batch * sizeof(dmesh_wc_t));
+    dmesh_event_t *events = (dmesh_event_t *)malloc((size_t)batch * sizeof(dmesh_event_t));
     dmesh_qp_t **clients = (dmesh_qp_t **)calloc((size_t)window, sizeof(*clients));
     cstate_t *cst = (cstate_t *)calloc((size_t)window, sizeof(*cst));
     /* SERVER conns the DPU loops back to us — tracked so teardown closes them all. */
     static dmesh_qp_t *servers[MAX_SERVERS]; int nserv = 0;
-    if (!lat || !wc || !clients || !cst) {
+    if (!lat || !events || !clients || !cst) {
         ctl_reply(conn_fd, "ERR oom\n", 8);
-        free(lat); free(wc); free(clients); free(cst); close(epfd); return;
+        free(lat); free(events); free(clients); free(cst); close(epfd); return;
     }
 
     long ok = 0, fail = 0, served = 0, nlat = 0;
@@ -224,7 +224,7 @@ static void run_verbs(int conn_fd, long N, uint32_t size, int zc,
      * round-trips across the conns; the sweep below primes every pipeline on the first
      * pass, so a conn backpressured at prime time is topped up rather than failed. */
     for (int i = 0; i < window; i++) {
-        dmesh_qp_t *c = dmesh_create_qp(g_cq, g_service);
+        dmesh_qp_t *c = dmesh_create_qp(g_eq, g_service);
         if (!c) {                                  /* can't even connect -> abort */
             for (int j = 0; j < window; j++) if (clients[j]) dmesh_destroy_qp(clients[j]);
             fail += N; goto report;
@@ -240,39 +240,39 @@ static void run_verbs(int conn_fd, long N, uint32_t size, int zc,
     double deadline = now_sec() + 60.0;            /* global anti-hang guard */
 
     while (completed < N || nserv > 0) {
-        int n = dmesh_poll_cq(g_cq, wc, batch);
+        int n = dmesh_poll_eq(g_eq, events, batch);
         if (n < 0) { break; }                      /* only EINVAL — impossible here */
         for (int i = 0; i < n; i++) {
-            dmesh_qp_t *c = wc[i].qp;
-            switch (wc[i].opcode) {
+            dmesh_qp_t *c = events[i].qp;
+            switch (events[i].type) {
 
             /* NB: nothing in this batch loop may close a conn — dmesh_destroy_qp frees it,
-             * and poll_cq emits CONN_REQ together with that conn's already-landed
+             * and poll_eq emits CONN_REQ together with that conn's already-landed
              * messages, so a later entry in THIS batch can still name it. Deaths are
              * flagged and collected by the sweep below. */
-            case DMESH_WC_CONN_REQ:                /* the DPU looped our request back */
+            case DMESH_EVENT_CONN_REQ:                /* the DPU looped our request back */
                 c->user_data = nserv < MAX_SERVERS ? calloc(1, sizeof(sstate_t)) : NULL;
                 if (c->user_data) servers[nserv++] = c;
                 break;                             /* untracked -> never echoes -> client times out */
 
-            case DMESH_WC_RECV:
+            case DMESH_EVENT_RECV:
                 if (c->role == DMESH_ROLE_SERVER) {          /* a request -> echo verbatim */
                     D_sv_recv++;
-                    served += srv_recv(c, &wc[i]);
-                    dmesh_wc_release(g_s, &wc[i]);
+                    served += srv_recv(c, &events[i]);
+                    dmesh_release_rx_buffer(g_s, &events[i]);
                 } else {                                     /* a reply -> validate FIFO */
                     D_cl_recv++;
                     cstate_t *cs = (cstate_t *)c->user_data;
                     int bad = 1;
-                    if (cs && cs->cnt > 0 && wc[i].len == cs->size) {
+                    if (cs && cs->cnt > 0 && events[i].len == cs->size) {
                         out_slot_t os = cs->ring[cs->head];
                         cs->head = (cs->head + 1) % cs->cap; cs->cnt--;
                         bad = 0;                                 /* full byte-exact compare */
                         for (uint32_t j = 0; j < cs->size; j++)
-                            if (wc[i].buf[j] != patb(os.marker, j)) { bad = 1; break; }
+                            if (events[i].buf[j] != patb(os.marker, j)) { bad = 1; break; }
                         if (!bad && nlat < N) lat[nlat++] = (now_sec() - os.t0) * 1e6;
                     }
-                    dmesh_wc_release(g_s, &wc[i]);
+                    dmesh_release_rx_buffer(g_s, &events[i]);
                     if (bad) fail++; else ok++;
                     completed++;
                     if (cs) {
@@ -287,7 +287,7 @@ static void run_verbs(int conn_fd, long N, uint32_t size, int zc,
                 }
                 break;
 
-            case DMESH_WC_RECV_FIN:                /* peer closed — role picks the state type */
+            case DMESH_EVENT_RECV_FIN:                /* peer closed — role picks the state type */
                 if (c->role == DMESH_ROLE_SERVER) {
                     if (c->user_data) ((sstate_t *)c->user_data)->dead = 1;
                 } else if (c->user_data) ((cstate_t *)c->user_data)->done = 1;
@@ -298,7 +298,7 @@ static void run_verbs(int conn_fd, long N, uint32_t size, int zc,
         /* Sweep, every pass: ship what backpressure refused — client pipes below their
          * window, echoes the server SQ turned away — and retire the conns flagged during
          * the batch. Coming back here IS the EAGAIN retry: SQ space frees silently (there
-         * are no send completions), so allocating again is the only way to find out. */
+         * are no send events), so allocating again is the only way to find out. */
         int posted = 0;
         for (int i = 0; i < window; i++) {
             dmesh_qp_t *c = clients[i];
@@ -322,9 +322,9 @@ static void run_verbs(int conn_fd, long N, uint32_t size, int zc,
 
         if (now_sec() > deadline) break;
         if (n == 0 && posted == 0) {
-            /* idle: sleep on the CQ fd (drain counter FIRST, per the edge rule),
+            /* idle: sleep on the EQ fd (drain counter FIRST, per the edge rule),
              * then loop back to poll. 200ms tick doubles as the deadline check. */
-            uint64_t cnt; while (read(cqfd, &cnt, sizeof cnt) > 0) { }
+            uint64_t cnt; while (read(eqfd, &cnt, sizeof cnt) > 0) { }
             struct epoll_event evs; epoll_wait(epfd, &evs, 1, 200);
         }
     }
@@ -362,7 +362,7 @@ report:
     fprintf(stderr, "[verbs] DONE N=%ld size=%u zc=%d window=%d pipe=%d batch=%d "
             "ok=%ld fail=%ld served=%ld p50=%.1fus\n",
             N, size, zc, window, pipeline, batch, ok, fail, served, p50);
-    free(lat); free(wc); free(clients); free(cst); close(epfd);
+    free(lat); free(events); free(clients); free(cst); close(epfd);
 }
 
 /* ============================================================ control TCP */
@@ -390,8 +390,8 @@ int main(void) {
 
     g_s = dmesh_create_channel();
     if (!g_s) { fprintf(stderr, "[verbs] create_channel failed\n"); return 1; }
-    g_cq = dmesh_create_cq(g_s);
-    if (!g_cq) { fprintf(stderr, "[verbs] create_cq failed\n"); return 1; }
+    g_eq = dmesh_create_eq(g_s);
+    if (!g_eq) { fprintf(stderr, "[verbs] create_eq failed\n"); return 1; }
     fprintf(stderr, "[verbs] ready: pod_id=%d own_service=%s msg_max=%d (verbs façade)\n",
             dmesh_pod_id(g_s), g_service, dmesh_msg_max(g_s));
 

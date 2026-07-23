@@ -4633,7 +4633,7 @@ not failures. Use `DPUMESH_LOG_LEVEL=50` to see registration/RING_ADD/RING_DEL.
 
 ---
 
-# API consolidation (4 surfaces → 2) + multi-CQ; HW validation
+# API consolidation (4 surfaces → 2) + multi-EQ; HW validation
 
 Collapsed the host surface to **exactly two public APIs**: the native API
 (`include/dpumesh/dmesh.h`, RDMA-verbs-shaped, zero-copy both ways) and the POSIX socket
@@ -4687,27 +4687,27 @@ Two spins provably removed rather than tuned:
   moved into the shim's own `stream_write` in the same change. `sched_yield` count in
   `src/` is now **0**.
 
-## Multi-CQ — shipped on fidelity, NOT on performance
+## Multi-EQ — shipped on fidelity, NOT on performance
 
-`ibv_create_cq`/`dmesh_create_cq` now exists; each CQ owns its own ready list + completion
-fd, and a QP belongs to the CQ that created or accepted it. The accept queue stays
-channel-wide and multi-consumer (it already was), so every CQ may poll it and whichever
+`dmesh_create_eq` creates an event queue with its own ready list and event fd,
+and a QP belongs to the EQ that created or accepted it. The accept queue stays
+channel-wide and multi-consumer, so every EQ may poll it and whichever
 accepts a conn owns it — SO_REUSEPORT-style distribution for free.
 
 **A/B (one build, temporary knob, since removed), shards=2+egress2, conc=4/thread:**
 
-| threads | one CQ + mutex | CQ per thread | Δ |
+| threads | one EQ + mutex | EQ per thread | Δ |
 |---|---|---|---|
 | 1 | 0.0301 | 0.0312 | +3.7% |
 | 2 | 0.0627 | 0.0653 | +4.2% |
 | 4 | 0.0798 | 0.0837 | +4.9% |
 | 8 | 0.1391 (p50 225 µs) | 0.1464 (p50 186 µs) | +5.2% (p50 −17%) |
 
-**The shared CQ scales 4.6x too.** Multi-CQ is worth ~5% Mrps / ~17% p50 at 8 threads —
-real, but it was never the bottleneck. It ships because folding the CQ into the channel
+**The shared EQ scales 4.6x too.** Multi-EQ is worth ~5% Mrps / ~17% p50 at 8 threads —
+real, but it was never the bottleneck. It ships because folding the EQ into the channel
 bakes "one RX consumer per process" into the API — a ceiling the host hits the moment the
-DPU stops being the binding constraint (③ host-emit). One CQ per thread is what verbs does
-and costs ~nothing.
+DPU stops being the binding constraint (③ host-emit). One EQ per thread preserves
+single-owner polling and costs ~nothing.
 
 ## RETRACTED: the "~2x regression" was a measurement artifact
 
@@ -4739,16 +4739,16 @@ below saturation; at conc=4/thread (shards=2+egress2):
 
 **6.8x from 1→4 threads**, then the DPU cap (~0.20) binds and 8 threads just queues.
 
-## Core bug found and fixed: `poll_cq` silently under-delivered
+## Core bug found and fixed: `poll_eq` silently under-delivered
 
 `loopback` failed 100% after the port — request routed back and echoed (`nserv=1
 served=1`), reply never landed (`got=0/1024`). Root cause: `ctx->notify_enabled` gated
-`arm_ready_after_push`, and the flag was only set by `dmesh_cq_fd()`. **A pure-polling
+`arm_ready_after_push`, and the flag was only set by `dmesh_eq_fd()`. **A pure-polling
 client that never asks for the fd received nothing on ESTABLISHED conns** — a new conn's
 first message rides the separate accept queue, which is *not* gated, hence the
 request-works/reply-vanishes asymmetry. `verbs_dpumesh.c` passed only because it happens to
 call `cq_fd`. Fixed in the core, not the validator: `notify_enabled` **deleted**; readiness
-is live from `dmesh_create_cq`. `cq_fd` is now purely the optional idle-sleep path.
+is live from `dmesh_create_eq`. `cq_fd` is now purely the optional idle-sleep path.
 
 ## Method notes
 
@@ -4793,7 +4793,7 @@ but `reply_pump` refuses to touch a conn it has given up on, **without clearing 
 ```c
 while (gc->qn > 0 && !gc->dead) { ... }                   /* dead -> return, qn untouched */
 ```
-So `dead=1` + non-empty FIFO reads as "work pending" **forever**: timeout pinned at 0, `poll_cq`
+So `dead=1` + non-empty FIFO reads as "work pending" **forever**: timeout pinned at 0, `poll_eq`
 returns 0, `reply_pump` does nothing → tight `epoll_wait`+`read` spin. `dead` is latched at three
 sites (`dmesh_alloc` non-EAGAIN fault, `post_send` fault, `qn >= REPLY_Q` overflow).
 
@@ -4804,11 +4804,11 @@ non-blocking `dmesh_alloc` merely *amplified* a missing line into a pegged core.
 
 The predicate mismatch is a symptom. `dead` exists because the API forbids destroying mid-batch:
 
-> `dmesh.h` / `API.md`: *poll_cq can emit CONN_REQ plus that QP's landed messages in **one batch**,
-> so destroying mid-batch dangles later `wc[]` entries.* **Defer destroys to a sweep after the batch.**
+> `dmesh.h` / `API.md`: *poll_eq can emit CONN_REQ plus that QP's landed messages in **one batch**,
+> so destroying mid-batch dangles later `events[]` entries.* **Defer destroys to a sweep after the batch.**
 > And `dmesh_post_send` → `EBADMSG` is documented as **"descriptor fault → destroy the QP"**.
 
-`reply_pump` runs inside the batch (via `on_request` ← `bench_reframe_feed` ← the `poll_cq` loop),
+`reply_pump` runs inside the batch (via `on_request` ← `bench_reframe_feed` ← the `poll_eq` loop),
 so it *cannot* destroy — it can only mark. `dead` IS that mark. **The greeter never wrote the
 sweep**, so the destroy was deferred forever and dead conns became zombies: still in `g_live`, still
 holding a `MAX_CONNS` slot, reclaimed only at `RECV_FIN` — which an **idle-but-alive** peer never
@@ -4823,8 +4823,8 @@ for (int i = g_nlive - 1; i >= 0; i--) {
     if (((greeter_conn_t *)g_live[i]->user_data)->dead) reclaim(g_live[i]);
 }
 ```
-Safe here and only here: past the `wc[]` batch, and `dmesh_destroy_qp` clears the CQ resume cursor
-itself (`if (c->cq && c->cq->vq_cur == c) c->cq->vq_cur = NULL`) and discards unsent TX bytes.
+Safe here and only here: past the `events[]` batch, and `dmesh_destroy_qp` clears the EQ drain cursor
+itself (`if (c->eq && c->eq->drain_cur == c) c->eq->drain_cur = NULL`) and discards unsent TX bytes.
 It fixes three things at once, where the predicate patch fixed one:
 - the peer gets a **FIN** and *learns*, instead of waiting forever for a reply that never comes;
 - the `g_live` / `MAX_CONNS` slot is freed instead of leaking to a zombie;
@@ -4910,7 +4910,7 @@ the baseline-config trap). Consequences:
   `sq_sig_all = 1` and calls `rdma_get_send_comp()`. Replaced with the honest reason: nothing needs
   one (you do not own the send buffer; TX_ACKs reclaim the ring on the PE thread) — and flagged
   that this is weaker now that `grow_waits` ≠ 0.
-- **`API.md` §4a/§4b**: §4b's retry-in-place `while (!(b = dmesh_alloc(...))) poll_cq(...)` is
+- **`API.md` §4a/§4b**: §4b's retry-in-place `while (!(b = dmesh_alloc(...))) poll_eq(...)` is
   correct **only** for a single-conn program (it IS the whole loop; nothing to starve). Marked as
   such, and §4a now warns a reactor must park instead + keep the parked set exact.
 - **`EAGAIN` is documented as non-fatal** in both `API.md` and `dmesh.h`.
@@ -4918,11 +4918,11 @@ the baseline-config trap). Consequences:
 ## Mine, not the code's
 
 I spent several turns trying to force `dmesh_alloc` onto the `ibv_post_send` contract and proposed,
-then withdrew, three designs (`DMESH_WC_SEND`, blocking-alloc, create-time budget). All were
+then withdrew, three designs (`DMESH_EVENT_SEND`, blocking-alloc, create-time budget). All were
 category errors: **verbs has no allocator**, so "what would verbs do?" has no answer for `alloc` —
 the finite *shared* buffer decides the semantics, not the label. The user's framing was right:
 alloc failure is a resource condition, not an error, and a reactor API has exactly ONE wait point
-(the CQ), so a second one inside `alloc` is incoherent. Net API change: **none**.
+(the EQ), so a second one inside `alloc` is incoherent. Net API change: **none**.
 
 ## Which site latched `dead`? — NOT reproduced; narrowed to one by elimination
 
@@ -5075,7 +5075,7 @@ recover path itself is regression-covered.
 
 **Change:** `design/NAMING.md` Phase 0. The `service_id` integer's provenance moved from the user
 (three hand-typed sources) to a file-backed resolver (`src/dmesh_resolve.c`). Public API is now
-name-only (`dmesh_create_channel(void)`, `dmesh_create_qp(cq, const char*)`); identity comes from
+name-only (`dmesh_create_channel(void)`, `dmesh_create_qp(eq, const char*)`); identity comes from
 `$DPUMESH_SERVICE` resolved through the registry; `DPUMESH_SERVICE_ID` and the shim's
 `DMESH_PRELOAD_{SVC,LISTEN,MAP,REGISTRY}` are **deleted**. **The DPU and the wire ABI are UNCHANGED**
 — this is a host-side provenance refactor, so the pass criterion is **NEUTRAL** (0-fail, identity
@@ -5100,12 +5100,12 @@ assigned pod_ids and derived backends unchanged (`worker=svcN` = the resolved id
 ### Validator matrix — all 0-fail
 | validator | new path exercised | N / config | result |
 |---|---|---|---|
-| loopback | `create_channel()` id + `create_qp(cq,name)` self | 50000 × 8192B | **50000/0**, p50 117.1µs |
+| loopback | `create_channel()` id + `create_qp(eq,name)` self | 50000 × 8192B | **50000/0**, p50 117.1µs |
 | verbs | verbs façade, name self-addressing | 50000 × 8192B (w1,p1) | **50000/0**, p50 103.5µs |
 | verbs | " | 50000 × 4096B (w4,p8) | **50000/0**, p50 148.9µs |
 | stream | name id (svc16); self byte-stream | 20000 × 1024B self | **20000/0**, 20.58 MB, p50 115.7µs |
 | preload | shim `resolve_addr`+`config_identity`+`listen_port` | 5000 × 1024B, 8 conns | **5000/0**, p50 123µs, p99 433µs, 23126 rps |
-| bench client | pure client → `create_qp(cq,"echo-dpumesh")` + DPU LB | req64 conc1 5s | **fail=0**, p50 114µs, rcnt 37492 |
+| bench client | pure client → `create_qp(eq,"echo-dpumesh")` + DPU LB | req64 conc1 5s | **fail=0**, p50 114µs, rcnt 37492 |
 | bench client | " (LB/bandwidth path) | req1024 conc32 5s | **fail=0**, p50 340µs, 0.805 Gb/s, rcnt 490216 |
 
 ### Verdict
@@ -5357,7 +5357,7 @@ report.
   sequence. The conntrack `uP` find-or-create above it is idempotent under retry, so an EAGAIN
   after it is still clean.
 - **TERMINAL closes the stream.** New `px_fin_to_sender` queues a 0-length unit back to
-  `(src_pod, src_port)` → the sender gets `DMESH_WC_RECV_FIN`. `length==0` is the only error code
+  `(src_pod, src_port)` → the sender gets `DMESH_EVENT_RECV_FIN`. `length==0` is the only error code
   point the wire has, and closing is exactly what Envoy's tcp_proxy does when its upstream fails.
   Symmetric: the sender is the client on a request stream, the backend on a reply stream (its
   server QP's `local_port == uP`, so `dst_port = uP` demuxes correctly).
@@ -5453,7 +5453,7 @@ latency/bandwidth/rate — all 0-fail.
 
 **Bench change:** `stream`'s `SVC_LIST` (multi-service fan-out) is REMOVED. No pod in the bench
 topology can serve it: `echo-dpumesh*` are Greeters (bench.h framing, not a verbatim echo), and
-`loopback`/`verbs` echo verbatim but block in `accept()` when idle and never poll their CQ, so
+`loopback`/`verbs` echo verbatim but block in `accept()` when idle and never poll their EQ, so
 any non-self target simply burns the 5 s reply timeout. `RUN <N> <SIZE> [<FPW>]` now.
 
 ---
@@ -5535,7 +5535,7 @@ both need fault injection. `stat_drop_bytes`/`stall` stayed 0 throughout (`DPUME
 
 ---
 
-# (session 4) — one QP carries N inbound streams: `dmesh_wc_t.stream` — the reply-side half of per-message LB
+# (session 4) — one QP carries N inbound streams: `dmesh_event_t.stream` — the reply-side half of per-message LB
 
 **What this closes.** Per-message LB gives one QP several upstreams at once, and their replies
 all land on that QP. The transport merged them into ONE byte stream and threw away the sender —
@@ -5543,7 +5543,7 @@ which L4 cannot represent. TCP has no such problem: N peers means N sockets. Her
 QP, so the transport must say WHICH. It already knows: a reply carries `src_port = uP`, the DPU's
 upstream id, and it reaches the host in the descriptor. `cq_emit` was dropping it.
 
-`dmesh_wc_t` gains `uint16_t stream`. No wire change (the id already arrives), no new function —
+`dmesh_event_t` gains `uint16_t stream`. No wire change (the id already arrives), no new function —
 the API is still 16 calls. `stream` is opaque (an upstream number, not a pod), so "the client never
 names a pod" holds. On a no-codec service every reply comes from the one pinned backend and
 `stream` never varies: existing apps ignore it.
@@ -5598,10 +5598,10 @@ Validators unchanged: loopback 8 K + 64 K(zc), verbs pipeline=8, preload — all
 ## A build bug this exposed — silent ABI skew
 
 The first `(c)` deploy SIGSEGV'd all three greeters (exit 139) and delivered zero replies. Cause:
-**the Makefile tracked only `.c` prerequisites, never headers.** Growing `dmesh_wc_t` rebuilt
+**the Makefile tracked only `.c` prerequisites, never headers.** Growing `dmesh_event_t` rebuilt
 `libdpumesh.so` but left `echo_dpumesh` stale (19:50 vs 20:59), and the pods bind-mount the `.so`
 from the host while baking the binary into the image — so a new library wrote `w->stream` past the
-end of an old 24-byte struct, off the end of the caller's `wc[]` array.
+end of an old 24-byte struct, off the end of the caller's `events[]` array.
 
 Fixed with `-MMD -MP -MF $(DEPDIR)/$(@F).d` on every compile plus `-include $(wildcard
 $(DEPDIR)/*.d)`. Verified: `touch include/dpumesh/dmesh.h` now rebuilds every dependent binary; a
@@ -5772,8 +5772,8 @@ A loader error at startup instead of memory corruption mid-run.
 so a post with no live reserve silently shipped whatever sat at the write head: **uninitialised
 ring memory, on the wire, no error anywhere**. It now rejects (EINVAL) and consumes the reserve,
 making "one post per alloc" enforced rather than documented. `dmesh_post_send` also rejects unknown
-flags. `dmesh_destroy_cq` / `dmesh_destroy_channel` now return `-1 + EBUSY` instead of freeing
-under a live QP/CQ (ibverbs' rule, checked).
+flags. `dmesh_destroy_eq` / `dmesh_destroy_channel` now return `-1 + EBUSY` instead of freeing
+under a live QP/EQ (checked by the native lifecycle).
 
 ## P2 — per-port inbox memory was bounded only by total churn
 
@@ -5787,7 +5787,7 @@ just-closed port from catching an in-flight reply.
 
 Dead `route-affinity` comments (3, in `dpu_proxy.h`; nothing in code); the stale
 `su_seq[region*TX_SU_DEPTH+i]` comment (indexing is flat); the redundant first half of the
-credit-refresh condition; `wc.stream` left uninitialised on CONN_REQ (caller stack garbage); the
+credit-refresh condition; `event.stream` left uninitialised on CONN_REQ (caller stack garbage); the
 4 DPA msgQ callbacks compiled into the HOST library where they are unreachable (moved inside
 `DOCA_ARCH_DPU`); 12 unchecked control-socket `write()`s in the validators. **Host build: 0
 warnings** (was 16).
@@ -5958,9 +5958,9 @@ Throughput is FLAT vs client threads (1thr 0.101, 4thr 0.099) → DPU-side singl
 not the client.
 
 ## Host-side internal opts (src/dmesh_core.{c,h}; public API untouched)
-- **notification gating**: `struct dmesh_cq.wants_notify`; `cq_notify` skips the per-message
-  `eventfd` write for poll-only CQs (RPC bench + verbs client never call `dmesh_cq_fd`).
-  `dmesh_cq_fd` latches it + self-kicks (closes the arm race). Same signature/contract.
+- **notification gating**: `struct dmesh_eq.wants_notify`; `cq_notify` skips the per-message
+  `eventfd` write for poll-only EQs (RPC bench + verbs client never call `dmesh_eq_fd`).
+  `dmesh_eq_fd` latches it + self-kicks (closes the arm race). Same signature/contract.
 - **false-sharing split**: `dmesh_port_slot` PE-written atomics (in_tail/tx_f/su_tail) vs
   owner-written (in_head/su_head) on separate cache lines; `on_ready` its own line.
 - Effect isolated at (1,1): conc=1 p50 114 (unchanged floor), p99 ~413→~370. Throughput
@@ -6063,7 +6063,7 @@ Tests the `plan/bench.md` hypothesis that the E1 throughput gap is partly a benc
 (TCP batches its window into one syscall; DPUmesh flushed per RPC). Added a matched-batching mode
 to the bench apps — client coalesces the burst issued per loop pass into one doorbell (`RUN` 8th arg
 `batch`; `bench_dpumesh.c` sets `DMESH_SEND_MORE` on the final chunk, one `dmesh_flush` per pass);
-server coalesces a CQ batch's replies into one doorbell/conn (`/tmp/reply_batch` file-poll;
+server coalesces an EQ batch's replies into one doorbell/conn (`/tmp/reply_batch` file-poll;
 `echo_dpumesh.c`). Live (4,4), 1 KB/8 B, one conn, 6 reps/cell, **0 fail / 0 reorder** everywhere.
 Raw: `report/data/batch_ablation.csv`, `report/data/batch_cpu.csv`.
 
@@ -6186,8 +6186,8 @@ and diagnostic runs, not a controlled transport-performance comparison. The
 ## Implemented contract
 
 `dmesh_alloc(NULL/EAGAIN)` now arms its own QP internally. QP-window reclaim and
-shared-block-pool return converge on one `DMESH_WC_TX_READY` opcode delivered by
-the QP's existing CQ and optional CQ eventfd. A snapshot/recheck closes the
+shared-block-pool return converge on one `DMESH_EVENT_TX_READY` event delivered by
+the QP's existing EQ and optional EQ eventfd. A snapshot/recheck closes the
 failure-to-arm race; each arm queues at most one retry hint; successful direct
 retry and close cancel obsolete hints. A shared block return wakes at most one
 valid pool waiter. The native echo loop and gRPC reactor park only the affected
@@ -6248,7 +6248,7 @@ respectively.
 The writable white-box test covers exact block-boundary wakeup, no same-block
 false wakeup, reclaim racing with arm, shared-pool wakeup, cancellation by direct
 successful retry, and rollback of a failed padded reservation. The public API test
-also checks that `DMESH_WC_TX_READY` is payload-free and consumed once.
+also checks that `DMESH_EVENT_TX_READY` is payload-free and consumed once.
 
 ## Native BlueField runs
 
@@ -6347,7 +6347,7 @@ client: service=bench-dpumesh calls=4 payload_bytes=4194304 reactors=2,
 ## Result
 
 The native API now provides the missing event-driven TX capacity transition on
-the existing CQ fd, and the gRPC adapter consumes it without a retry timer. Host
+the existing EQ fd, and the gRPC adapter consumes it without a retry timer. Host
 state-machine tests, representative native hardware paths, the real native gRPC
 runtime, and paired gRPC HTTP/2 all pass. The 128-window/64-pipeline overload is
 a recorded capacity/deadline failure and is not evidence of correctness at that
@@ -6598,10 +6598,10 @@ method before being treated as a separate defect.
 
 ---
 
-# Session 10 — LD_PRELOAD migration to the native CQ contract
+# Session 10 — LD_PRELOAD migration to the native EQ contract
 
 The preload data path now uses `dmesh_alloc`/`dmesh_post_send`/`dmesh_flush` and
-consumes `CONN_REQ`, `RECV`, `RECV_FIN`, and `TX_READY` through `dmesh_poll_cq`.
+consumes `CONN_REQ`, `RECV`, `RECV_FIN`, and `TX_READY` through `dmesh_poll_eq`.
 The old raw-ring and internal ready-list calls are absent from the rebuilt shim.
 Its app-visible socketpair suppresses `POLLOUT` after native `EAGAIN` and restores
 it only on `TX_READY`; blocking writers park on that kernel fd without a timer.
@@ -6907,7 +6907,7 @@ and is not hidden inside the accepted throughput result.
 
 ---
 
-# Session 14 — ABI 3 native byte stream and DPU L7 frame routing
+# Session 14 — ABI 4 native byte stream and DPU L7 frame routing
 
 Date: 2026-07-21. Source base: `feab255` plus the Session 14 working-tree
 implementation. Host: `rapids4`, Linux 5.15.0-185. The deployed BlueField build
@@ -6915,8 +6915,8 @@ recompiled all 15 DPU C objects.
 
 ## Implementation under test
 
-ABI 3 exposes one full-duplex byte stream per QP. The public completion contains
-only `qp`, `opcode`, `buf`, `len`, and the opaque `_rx_token`; backend/upstream
+ABI 4 exposes one full-duplex byte stream per QP. The public event contains
+only `qp`, `type`, `buf`, `len`, and the opaque `_rx_token`; backend/upstream
 stream ids are not part of the native, LD_PRELOAD, or gRPC contracts.
 
 Services 11 and 16 used the DPU L7 path. Its test codec recognizes the benchmark
@@ -7003,12 +7003,12 @@ client CPU 0.729 cores
 ```
 
 The client completed `POD_QUIESCED` with zero native RX drops. This receipt proves
-that the ABI 3 gRPC adapter exchanges real HTTP/2 traffic over the current L4
+that the ABI 4 gRPC adapter exchanges real HTTP/2 traffic over the current L4
 transport; it does not evaluate the simple L7 benchmark codec as an HTTP/2 proxy.
 
 ---
 
-# Session 15 — Current ABI 3 native L4 evaluation
+# Session 15 — Current ABI 4 native L4 evaluation
 
 Date: 2026-07-22 KST. This session replaces the frozen report dataset with a
 current three-path comparison. The primary baseline is TCP through two Envoy

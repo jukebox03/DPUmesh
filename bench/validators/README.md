@@ -10,7 +10,7 @@ rather than replace the hardware validators below.
 | Validator | Programs | Contract exercised |
 |---|---|---|
 | Loopback | `loopback_dpumesh.c` | One process registers, connects to its own Service, exchanges data, and closes |
-| Verbs-shaped | `verbs_dpumesh.c` | Channel/CQ/QP lifecycle, windowed commit/flush sends, polling, and RX credit release |
+| Verbs-shaped | `verbs_dpumesh.c` | Channel/EQ/QP lifecycle, windowed commit/flush sends, event polling, and RX buffer release |
 | Stream/L7 | `stream_dpumesh.c` | Fragmented framed messages through the optional frame codec |
 | POSIX preload | `preload_runner.c`, `tcp_echo.c`, `tcp_client.c` | Unmodified socket connect/listen/accept/read/write behavior and TCP fallback |
 | Matched-C preload | `preload_sock.Dockerfile`, `bench_sock`, `echo_sock` | Same L4 benchmark workload over the socket facade; control TCP stays kernel, data uses DPUmesh |
@@ -34,7 +34,7 @@ operations, correct EOF delivery, and successful reverse-order destruction. A
 process exit without a crash is not sufficient: inspect the DPU log for DMA,
 generation, ring-ACK, egress, or cleanup warnings.
 
-All native validators use ABI-3 semantics: `post_send` commits and automatically
+All native validators use ABI-4 semantics: `post_send` commits and automatically
 submits complete transport units, while explicit `flush` forces each logical
 request, response batch, or large-write tail. A pass exercises both automatic
 full-unit submission and byte correctness.

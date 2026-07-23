@@ -38,7 +38,7 @@ assignment. The id is observable through `dmesh_pod_id()` only after the later
 readiness barrier completes.
 
 `$DPUMESH_PORT` is used only by the preload listener facade. Native servers and
-the gRPC PassiveListener receive inbound QPs as `DMESH_WC_CONN_REQ` completions;
+the gRPC PassiveListener receive inbound QPs as `DMESH_EVENT_CONN_REQ` events;
 they do not bind a numeric transport port through the native API.
 
 ## 3. Routing meaning

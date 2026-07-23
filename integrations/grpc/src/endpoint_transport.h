@@ -36,7 +36,7 @@ struct PostResult {
   }
 };
 
-// Seam between the EventEngine endpoint state machine and the CQ reactor.
+// Seam between the EventEngine endpoint state machine and the EQ reactor.
 // Post() consumes the complete span synchronously on kAccepted;
 // callers retain ownership on every other result. Post() and Close() must not
 // invoke DmeshEndpointDriver inline; reactor events are delivered separately.

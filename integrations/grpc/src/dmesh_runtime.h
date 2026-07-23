@@ -14,7 +14,7 @@
 
 namespace dpumesh::grpc {
 
-// Process-level DPUmesh ownership: one channel and N independent CQ reactors.
+// Process-level DPUmesh ownership: one channel and N independent EQ reactors.
 // The callback executor must outlive the runtime and every endpoint created by
 // one of its reactors. The runtime itself must also outlive those endpoints,
 // because each endpoint uses its owning reactor as the work executor.

@@ -10,7 +10,7 @@ single owner until an explicit acknowledgement transfers or releases it.
 ```text
 host process                         BlueField
 ┌────────────────────┐     ┌──────────────────────────────┐
-│ channel / CQ / QP  │     │ ARM control + stream proxy   │
+│ channel / EQ / QP  │     │ ARM control + stream proxy   │
 │ registered TX mmap ├─DPA►│ backend sockets / conntrack  ├── TCP backend
 │ registered RX mmap │◄─DMA┤ SG-DMA reverse egress        │
 └────────────────────┘     └──────────────▲───────────────┘
@@ -24,23 +24,23 @@ execution units. BlueField ARM owns service selection, upstream connections, and
 response routing. The ARM proxy gathers frame bodies directly from those staging
 extents into SG-DMA operations, without a second body copy. Responses land in the
 destination host RX mapping and remain there until the application releases the
-completion. This is zero-copy at the native RX boundary and staging-to-egress
+RX buffer. This is zero-copy at the native RX boundary and staging-to-egress
 gathering, not an end-to-end zero-copy claim. The DPA path is forward-only.
 
 ## 2. Host ownership and concurrency
 
 One `dpumesh_ctx` owns the DOCA device, Comch client, K forward rings, TX block
-pool, RX mapping, accept queue, CQ registry, and PE progress thread. The PE
-thread is the sole Comch progress owner. Each CQ has an SPSC ready-list: the PE
-publishes a port once, and the CQ's one application thread drains it.
+pool, RX mapping, accept queue, EQ registry, and PE progress thread. The PE
+thread is the sole Comch progress owner. Each EQ has an SPSC ready-list: the PE
+publishes a port once, and the EQ's one application thread drains it.
 
-The CQ also owns one eventfd shared by accept, RX/FIN, and TX-ready transitions;
+The EQ also owns one eventfd shared by accept, RX/FIN, and TX-ready transitions;
 there is no per-QP fd.
 
 Per-QP inboxes preserve arrival order without scanning the global port table.
 An atomic arm/disarm handshake closes the empty-inbox/ready-edge race. A QP
-never migrates between CQs, and an application must finish dispatching a returned
-CQ batch before freeing any QP named by it.
+never migrates between EQs, and an application must finish dispatching a returned
+event batch before freeing any QP named by it.
 
 TX readiness uses a separate atomic bitmap because its producers include both the
 PE ACK path and application-owner threads returning blocks to the shared pool.
@@ -124,23 +124,23 @@ increments a pool epoch and claims at most one live waiter from the round-robin
 bitmap: one returned block advertises one retry opportunity, not writability for
 every blocked QP.
 
-A successful transition sets the QP bit in its CQ's multi-producer bitmap and
-writes the CQ eventfd if notification was requested. `dmesh_poll_cq` consumes that
-bit as `DMESH_WC_TX_READY` before bulk established-RX work, avoiding TX starvation
-on a read-heavy CQ. The completion is a retry hint, not a block reservation.
+A successful transition sets the QP bit in its EQ's multi-producer bitmap and
+writes the EQ eventfd if notification was requested. `dmesh_poll_eq` consumes that
+bit as `DMESH_EVENT_TX_READY` before bulk established-RX work, avoiding TX starvation
+on a read-heavy EQ. The event is a retry hint, not a block reservation.
 `dmesh_alloc` returning `EAGAIN` again rearms the QP. An opportunistic successful
-retry, QP close, or CQ unbind cancels an obsolete state and removes any stale bit.
+retry, QP close, or EQ unbind cancels an obsolete state and removes any stale bit.
 
 ## 4. RX custody
 
 The host RX mmap is divided into 8 KiB landing units. ARM emits batched reverse
-completion records; the PE routes each record to a QP inbox or the shared accept
-queue. A `RECV` completion transfers temporary read access to the application.
-`wc_release` returns the landing credit exactly once, allowing that offset to be
-reused.
+delivery records; the PE routes each record to a QP inbox or the shared accept
+queue. A `RECV` event transfers temporary read access to the application.
+`dmesh_release_rx_buffer` returns the landing credit exactly once, allowing that
+offset to be reused.
 
 RX queue capacity and reverse admission are coupled. The transport never treats
-dropping an RX completion as ordinary flow control: loss of a credit or body is a
+dropping an RX event as ordinary flow control: loss of a credit or body is a
 correctness fault, not a throughput policy.
 
 Reverse records carry a per-destination-QP sequence. Several adjacent landing
@@ -259,7 +259,7 @@ DMA stopped. Disconnect cleanup continues on the DPU. Complete containment after
 SIGKILL or hardware failure requires a stronger platform isolation mechanism and
 is not claimed here.
 
-Local teardown joins the PE before freeing CQ state and releases each per-port
+Local teardown joins the PE before freeing EQ state and releases each per-port
 inbox and lazy reclaim array before the port table, so host-only and hardware
 lifecycle checks observe the same ownership closure.
 
@@ -283,7 +283,7 @@ lifecycle checks observe the same ownership closure.
 
 The implementation relies on these invariants:
 
-- one PE owner and one consumer per CQ;
+- one PE owner and one consumer per EQ;
 - per-QP wire order equals committed byte order;
 - `post_send` emits complete units and `flush` emits the trailing partial;
 - a failed reservation does not advance the QP write cursor or add block padding;

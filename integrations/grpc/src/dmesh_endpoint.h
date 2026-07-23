@@ -16,7 +16,7 @@ namespace dpumesh::grpc {
 
 class DmeshEndpointState;
 
-// A reactor locks a weak reference to this object for each CQ event. A driver
+// A reactor locks a weak reference to this object for each EQ event. A driver
 // already locked by the reactor keeps the shared endpoint state valid for that
 // event, while the public destructor still transitions it to closing immediately.
 class DmeshEndpointDriver final {
