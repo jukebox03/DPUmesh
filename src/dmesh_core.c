@@ -200,10 +200,8 @@ struct dpumesh_ctx {
     /* DOCA objects */
     struct objects doca_objs;
     void *dma_buffer;          /* Host TX buffer (PCI mmap, CPU→DPU source) */
-    /* K forward descriptor rings (EU-sharding). dpumesh_enqueue conn-shards
-     * across them (ring = src_port % K). Posting is LOCK-FREE MPSC — a Vyukov
-     * bounded queue lives in each ring (enq_pos ticket + per-slot seq[]); no
-     * per-ring mutex. K=1 uses one ring. */
+    /* K forward descriptor rings selected by source port. Posting uses an MPSC
+     * ticket and per-descriptor generation sequence. */
     struct dma_ring *dma_rings[MAX_EU_PER_POD];
     /* Reverse credit region size = rx_dma_buf_size / k_rings. The DPA reports an
      * absolute landing pos; ring_idx = pos / rx_region_size selects which ring's
@@ -363,8 +361,7 @@ static void *pe_progress_fn(void *arg) {
  * RX data hook — called from PE progress thread via comch callback
  * ==================================================================== */
 
-/* Return one unit of reverse-DMA admission credit to the DPA (it polls this
- * counter at the extra slot past the dma_ring; see dpumesh_rx_free). */
+/* Return one unit of reverse-DMA admission credit. */
 static inline void rx_credit_return(dpumesh_ctx_t *ctx, int pos)
 {
     /* Per-ring credit: the reverse region a landing fell in maps 1:1 to a forward
@@ -374,7 +371,9 @@ static inline void rx_credit_return(dpumesh_ctx_t *ctx, int pos)
     if (idx < 0 || idx >= ctx->k_rings) idx = 0;
     struct dma_ring *r = ctx->dma_rings[idx];
     if (r && r->descs) {
-        volatile uint64_t *credit = (volatile uint64_t *)(r->descs + r->size);
+        volatile uint64_t *credit =
+            (volatile uint64_t *)(r->descs +
+                                  DMA_RING_CREDIT_SLOT(r->size));
         __sync_add_and_fetch(credit, 1);
     }
 }
@@ -870,10 +869,7 @@ static void init_config(dpumesh_ctx_t *ctx, const dpumesh_config_t *config, int 
     ctx->slot_size = (config && config->slot_size > 0) ? config->slot_size
                                                        : DPUMESH_SLOT_SIZE_DEFAULT;
 
-    /* K = forward rings per pod (EU-sharding). Deploy option DPUMESH_RINGS_PER_POD
-     * (default 2) — MUST match the DPU's K (forward rings pair 1:1; a mismatch stalls
-     * dma_ready). A conn pins to ONE ring (src_port % K); conns spread across K.
-     * K ≤ N (=4 on the DPU); values > MAX_EU_PER_POD are clamped. */
+    /* K forward rings per pod. The host and DPU use the same value. */
     ctx->k_rings = DPUMESH_RINGS_PER_POD_DEFAULT;
     { const char *ke = getenv("DPUMESH_RINGS_PER_POD");
       if (ke && *ke) { int v = atoi(ke);
@@ -1409,8 +1405,6 @@ static void cleanup_ctx(dpumesh_ctx_t *ctx) {
             ring->mmap = NULL;
             ring->descs = NULL;
         }
-        free(ring->seq);
-        ring->seq = NULL;
         free(ring);
         ctx->dma_rings[j] = NULL;
     }
@@ -1839,8 +1833,7 @@ int dpumesh_enqueue(dpumesh_ctx_t *ctx, const sw_descriptor_t *desc) {
     int ridx = dmesh_forward_ring(desc->src_port, ctx->k_rings);
     struct dma_ring *ring = ctx->dma_rings[ridx];
 
-    /* Claim the connection ring with a bounded MPSC ticket. The slot sequence and
-     * valid flag prevent reuse before DPA consumption. */
+    /* Claim the connection ring with a bounded MPSC ticket. */
     /* Fail fast on a ring already declared dead — do NOT burn a ticket on it. */
     if (__atomic_load_n(&ring->dead, __ATOMIC_ACQUIRE)) {
         DOCA_LOG_ERR("ENQUEUE rejected: DMA ring %d is dead (no DPA consumer)", ridx);
@@ -1854,15 +1847,12 @@ int dpumesh_enqueue(dpumesh_ctx_t *ctx, const sw_descriptor_t *desc) {
         struct timespec backoff = {0, 1000}; /* 1µs initial */
         struct timespec deadline; int have_dl = 0;
         for (;;) {
-            uint64_t s = __atomic_load_n(&ring->seq[ring_slot], __ATOMIC_ACQUIRE);
-            if (s == t) break;                                   /* free for me */
-            if (t >= ring->size && s == t - ring->size + 1 && dma->valid == 0) {
-                /* prev generation published + DPA-consumed → reclaim this cell */
-                __atomic_store_n(&ring->seq[ring_slot], t, __ATOMIC_RELEASE);
+            uint64_t consumer_head =
+                __atomic_load_n(&ring->ctrl->consumer_head,
+                                __ATOMIC_ACQUIRE);
+            if (t - consumer_head < ring->size)
                 break;
-            }
-            /* prev generation not yet published+consumed → ring full here
-             * (throttled WARN, best-effort under concurrency) */
+            /* The consumer has not released this ticket's slot. */
             uint64_t pr = __atomic_fetch_add(&ring->busy_probes, 1, __ATOMIC_RELAXED);
             if ((pr & 4095u) == 0)
                 DOCA_LOG_WARN("DMA ring %d busy at slot=%u (size=%u) [stuck x%llu]",
@@ -1907,13 +1897,7 @@ int dpumesh_enqueue(dpumesh_ctx_t *ctx, const sw_descriptor_t *desc) {
     dma->dst_pod_id  = desc->dst_pod;
     dma->src_pod_id  = ctx->pod_id;
 
-    __sync_synchronize();
-    dma->valid = 1;                                     /* publish to DPA */
-    /* Vyukov: mark this cell PRODUCED so the next generation (ticket t+size) can
-     * reclaim it once the DPA consumes this descriptor (valid→0). Release-ordered
-     * AFTER valid=1, so a reclaiming producer that observes this seq also sees
-     * valid's effect (never a stale pre-consume 0). */
-    __atomic_store_n(&ring->seq[ring_slot], t + 1, __ATOMIC_RELEASE);
+    dma_ring_publish_desc(ring, t);
 
     DOCA_LOG_DBG("ENQUEUE: seq=%u dst_svc=%d dst_pod=%d ring=%d slot=%u len=%u",
                  desc->seq, desc->dst_service, desc->dst_pod, ridx, ring_slot, desc->body_len);

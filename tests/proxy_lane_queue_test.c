@@ -7,7 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* White-box stress coverage for the production shard->egress publication queue.
+/* White-box stress coverage for the production worker->egress publication queue.
  * Function-section GC discards the hardware paths from the included source. */
 #include "../doca/dpu_proxy.c"
 
@@ -31,7 +31,7 @@ struct done_producer_arg {
 static void *producer_main(void *opaque)
 {
     struct producer_arg *a = (struct producer_arg *)opaque;
-    px_cur_shard = &a->px->shards[a->id];
+    px_cur_worker = &a->px->workers[a->id];
     for (int i = 0; i < PER_PRODUCER; i++) {
         struct px_unit *u = &a->units[i];
         memset(u, 0, sizeof(*u));
@@ -140,9 +140,9 @@ int main(void)
     assert(!px_l7_unit_absorb(px, &merged, &incompatible));
 
     px->n_eng = 2;
-    px->n_shards = PRODUCERS;
+    px->n_workers = PRODUCERS;
     for (int s = 0; s < PRODUCERS; s++)
-        px->shards[s].id = s;
+        px->workers[s].id = s;
 
     struct px_unit *units[PRODUCERS];
     struct producer_arg args[PRODUCERS];
@@ -186,7 +186,7 @@ int main(void)
 
     /* Same-owner FIFO and cross-owner inbox. */
     px->run_to_completion = 1;
-    px_cur_shard = &px->shards[0];
+    px_cur_worker = &px->workers[0];
     struct px_unit local_unit, remote_unit;
     memset(&local_unit, 0, sizeof(local_unit));
     memset(&remote_unit, 0, sizeof(remote_unit));
@@ -287,7 +287,7 @@ int main(void)
     assert(wakes == 1);
 
     atomic_store_explicit(&px->pool_waiters, 0, memory_order_relaxed);
-    px_cur_shard = &px->shards[0];
+    px_cur_worker = &px->workers[0];
     px_pool_mark_waiter(px);
     assert(atomic_exchange_explicit(&px->pool_waiters, 0,
                                     memory_order_acq_rel) == 1u);

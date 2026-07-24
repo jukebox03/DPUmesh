@@ -39,13 +39,10 @@ extern doca_dpa_func_t thread_init_rpc;
 extern struct doca_dpa_app *DPU_mesh_dpa_app;
 #endif
 
-/* Current ingest shard id; zero selects the shared completion queue. */
-__thread int dpu_reap_shard = 0;
+/* Current ARM data worker ID. */
+__thread int dpu_worker_id = 0;
 
-/* The DPA msgQ task callbacks are wired up only by init_dpa_objects, which is itself
- * DPU-only — so on the host they are dead weight the compiler warns about. Same guard,
- * one block. (dmesh_doca_dpa_comch_msgq_ctx_state_changed_cb below stays OUT: comch_msgq.c
- * is in the host library and references it.) */
+/* DPU-only DPA MsgQ callbacks. */
 #ifdef DOCA_ARCH_DPU
 
 /*
@@ -67,13 +64,16 @@ static void dmesh_doca_dpa_msgq_recv_cb(struct doca_comch_consumer_task_post_rec
 	struct objects *objs = ctx_user_data.ptr;
 	struct doca_task *task = doca_comch_consumer_task_post_recv_as_task(recv_task);
 
-    /* Route to the reaping shard queue for M>=2, otherwise to comp_queue. */
+    /* Route completions to the current ARM worker. */
     dpu_comp_queue_t *q = &objs->comp_queue;
     struct doca_task **defrecv = objs->deferred_recv;
     int *ndef = &objs->num_deferred_recv;
-    if (objs->n_ingest_shards >= 2) {
-        struct dpu_ingest_shard *sh = &objs->ingest_shards[dpu_reap_shard];
-        q = &sh->queue; defrecv = sh->deferred_recv; ndef = &sh->num_deferred_recv;
+    if (objs->n_data_workers >= 2) {
+        struct dpu_data_worker *worker_state =
+            &objs->data_workers[dpu_worker_id];
+        q = &worker_state->queue;
+        defrecv = worker_state->deferred_recv;
+        ndef = &worker_state->num_deferred_recv;
     }
 
     data_len = doca_comch_consumer_task_post_recv_get_imm_data_len(recv_task);
@@ -452,7 +452,7 @@ init_dpa_objects(struct objects *objs)
                       DPA_THREADS_AUTO_CAP, MAX_DPA_EU);
     }
 
-    int A = objs->n_ingest_shards >= 1 ? objs->n_ingest_shards : 1;
+    int A = objs->n_data_workers >= 1 ? objs->n_data_workers : 1;
     if (objs->k_rings > objs->num_dpa_threads) {
         DOCA_LOG_ERR("Invalid topology: K=%d forward rings exceeds N=%d DPA EUs. "
                      "Host and DPU K cannot be clamped independently.",
@@ -1132,7 +1132,7 @@ dpa_eu_for_ring(const struct objects *objs, int pod_id, int ring)
 {
     return dmesh_dpa_eu_for_ring(pod_id, objs->k_rings, ring,
                                  objs->num_dpa_threads,
-                                 objs->n_ingest_shards);
+                                 objs->n_data_workers);
 }
 
 /* Create and publish a pod's DMA buffers, ring metadata, and DPA thread state. */
@@ -1199,7 +1199,9 @@ setup_pod_dma(struct objects *objs, struct pod_state *pod)
      * the EU thread; additional rings use ADD_RING. */
     for (int j = 0; j < K; j++) {
         int k_j = dpa_eu_for_ring(objs, pod->pod_id, j);
-        result = setup_dpa_buf_array_pod(objs, DMA_RING_SIZE + 1, pod->ring_mmaps[j], &pod->buf_arrs[j]);
+        result = setup_dpa_buf_array_pod(
+            objs, DMA_RING_SIZE + DMA_RING_EXTRA_SLOTS,
+            pod->ring_mmaps[j], &pod->buf_arrs[j]);
         if (result != DOCA_SUCCESS) {
             DOCA_LOG_ERR("setup_pod_dma: buf_arr[%d] failed for pod %d: %s",
                          j, pod->pod_id, doca_error_get_descr(result));

@@ -17,8 +17,8 @@ init_comch_dpa_msgq(struct objects *objs, struct doca_pe *pe)
 {
 	doca_error_t result;
 
-	/* Channel k binds to consumer_pes[k % M]; M==1 uses the supplied PE. */
-	int nb = objs->n_ingest_shards >= 1 ? objs->n_ingest_shards : 1;
+		/* Channel k binds to consumer_pes[k % A]. */
+	int nb = objs->n_data_workers >= 1 ? objs->n_data_workers : 1;
 	for (int k = 0; k < objs->num_dpa_threads; k++) {
 		result = dmesh_doca_dpa_comch_create(objs, k);
 		if (result != DOCA_SUCCESS) {

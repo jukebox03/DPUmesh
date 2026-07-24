@@ -222,10 +222,7 @@ struct pod_state {
      * slot's next tenant registered. Stamped into the submitted op so px_dma_err_cb
      * can tell whose DMA failed and not kill a live pod. Also drives px_lane_rearm. */
     uint32_t dma_generation;
-    /* Init handshake with the DPA. setup_pod_dma publishes setup_complete only
-     * after all ARM-side fields and sends are prepared. Each EU then contributes
-     * one bit to add_ack_mask. All accesses are atomic because DPA receive
-     * callbacks can run on ingest-owner threads while main publishes READY. */
+    /* DPA setup barrier. Each EU contributes one bit to add_ack_mask. */
     uint32_t dpa_add_expected_mask;
     uint32_t dpa_add_ack_mask;
     int dpa_add_ack_failed;
@@ -255,16 +252,11 @@ struct pod_state {
      * reuse is forbidden until it reaches zero. */
     uint32_t proxy_source_refs;
 
-    /* EU-sharding: K forward descriptor rings spread across K EUs (K=k_rings).
-     * The host exports K DMA_RING mmaps in order; ring_mmap_count counts arrivals
-     * so the import handler fills ring_mmaps[0..K-1]. The host TX data buffer
-     * (remote_mmap) and host RX buffer are shared/partitioned, not K-plural. */
+    /* K forward descriptor rings mapped to K DPA EUs. */
     int k_rings;                                   /* = objs->k_rings */
     struct doca_mmap *ring_mmaps[MAX_EU_PER_POD];  /* Host-exported forward rings */
-    /* Host VA of each forward ring's desc array. The RX credit counter lives at
-     * ring_host_addrs[j] + DMA_RING_SIZE*sizeof(dma_desc) (the +1 slot); the
-     * proxy engine (dpu_proxy.c) DMA-reads it for its egress admission — the
-     * same counter the DPA reverse admission polls. */
+    /* Host VA of each forward ring. The proxy DMA-reads its credit slot for
+     * egress admission. */
     void *ring_host_addrs[MAX_EU_PER_POD];
     int ring_mmap_count;                           /* DMA_RING exports received */
     struct doca_mmap *remote_mmap;   /* Host TX buffer mmap (shared by all K rings) */
@@ -361,8 +353,7 @@ static inline uint16_t dpu_upstream_find(struct dpu_conntrack *ct, int32_t cp,
     return 0;
 }
 
-/* Allocate and index an upstream port. Owner-strided allocation encodes the
- * session shard; zero reports exhausted port space. */
+/* Allocate an upstream port that encodes the return-path worker. */
 static inline uint16_t dpu_upstream_create(struct dpu_conntrack *ct, int32_t cp,
                                            uint16_t cport, int32_t bpod, uint8_t codec_id,
                                            uint16_t owner, uint16_t stride) {
@@ -425,9 +416,8 @@ static inline void dpu_upstream_free(struct dpu_conntrack *ct, uint16_t uP) {
     ct->ht[hole].in_use = 0;
 }
 
-/* Ingest completions are assigned by raw-port owner. Shards run DPA reap,
- * parse/route, and their matching DMA engine; main performs Comch sends. */
-#define MAX_INGEST_SHARDS 8
+/* ARM workers own completion progress, connection state, and SG-DMA. */
+#define MAX_ARM_WORKERS 8
 #define DPU_PENDING_TXACK_SIZE 16384
 
 _Static_assert((DPU_PENDING_TXACK_SIZE & (DPU_PENDING_TXACK_SIZE - 1)) == 0,
@@ -439,26 +429,25 @@ struct dpu_pending_txack_entry {
     uint16_t seq;
 };
 
-struct dpu_ingest_shard {
+struct dpu_data_worker {
     struct objects *objs;
     int id;
-    /* This shard owns consumer_pes[id] and its notification fd. */
-    struct doca_pe *pe;          /* = objs->consumer_pes[id]; reaped + WAKE'd by this shard only */
-    dpu_comp_queue_t queue;      /* recv-cb (this shard) -> process (this shard): SPSC same-thread */
-    /* Per-PE recv backpressure (the recv tasks of the channels bound to this PE). */
+    struct doca_pe *pe;          /* consumer_pes[id] */
+    dpu_comp_queue_t queue;      /* callback-to-worker completion queue */
+    /* Receive tasks deferred by completion-queue backpressure. */
     struct doca_task *deferred_recv[MAX_DEFERRED_RECV];
     int num_deferred_recv;
     /* Safety-net MPSC inbox for a completion received by the wrong owner. */
-    dpu_mpsc_comp_queue_t xshard;
+    dpu_mpsc_comp_queue_t cross_worker;
     /* Worker-produced, main-consumed SPSC TX-ACK ring. */
     struct dpu_pending_txack_entry pending_txack[DPU_PENDING_TXACK_SIZE];
     _Alignas(64) atomic_uint pending_txack_head; /* main-owned */
     _Alignas(64) atomic_uint pending_txack_tail; /* worker-owned */
     atomic_ullong stat_local_completions;
-    atomic_ullong stat_xshard_out;
-    atomic_ullong stat_xshard_in;
-    int wake_fd;                 /* cross-shard eventfd */
-    atomic_int parked;           /* 1 = shard is about to / is blocked in epoll_wait */
+    atomic_ullong stat_cross_worker_out;
+    atomic_ullong stat_cross_worker_in;
+    int wake_fd;                 /* cross-worker eventfd */
+    atomic_int parked;           /* worker is entering or blocked in epoll_wait */
     atomic_int init_state;       /* 0=pending, 1=epoll ready, -1=thread init failed */
     pthread_t thread;
     volatile int stop;
@@ -514,9 +503,9 @@ struct objects {
     /* comch data path related */
     struct local_mem_bufs *consumer_mem;
     struct doca_comch_consumer *consumer;
-    struct doca_pe *consumer_pe;   /* == consumer_pes[0] (the data-path consumer + M==1 channels) */
-    /* DPA channel k binds to consumer_pes[k % M]; shard m owns consumer_pes[m]. */
-    struct doca_pe *consumer_pes[MAX_INGEST_SHARDS];
+    struct doca_pe *consumer_pe;   /* consumer_pes[0] */
+    /* DPA channel k binds to consumer_pes[k % A]. */
+    struct doca_pe *consumer_pes[MAX_ARM_WORKERS];
 
 	doca_error_t consumer_result;  /* Last result from a consumer callback (comch_consumer.c). */
 
@@ -548,8 +537,7 @@ struct objects {
      * Data workers advance it with a relaxed atomic. Init to 0. */
     uint32_t svc_rr[POD_ID_SPACE];
 
-    /* DPU-owned connection tracking (model B). Heap-allocated (large) in
-     * run_dpu_worker; single-threaded (control PE thread) so no lock. */
+    /* Connection tracking for A=1 and shared-routing mode. */
     struct dpu_conntrack *conntrack;
 
     /* Deferred completion queue (DPU only) */
@@ -587,30 +575,22 @@ struct objects {
     pthread_mutex_t consumer_retry_lock;
     int consumer_retry_lock_initialized;
 
-    /* Optional ingest reaper. It owns consumer_pe and publishes completions to the
-     * SPSC queue; otherwise the main loop progresses the PE inline. */
-    int reaper_active;
-    volatile int reaper_stop;
-    pthread_t reaper_thread;
-    /* Ingest/egress-to-main eventfd handoff. */
-    int reaper_wake_fd;          /* eventfd: ingest/egress producers write, main reads */
-    atomic_int main_parked;      /* 1 = main is about to / is blocked in epoll_wait */
+    int dedicated_workers;       /* A>=2 uses dedicated ARM worker threads */
+    int main_wake_fd;
+    atomic_int main_parked;
 
-    /* Ingest sharding; M>=2 assigns one consumer PE and queue per shard. */
-    int n_ingest_shards;                       /* M (>=2 = sharded; <=1 = single reaper) */
-    int shard_shared_routing;                  /* 1 = shared+lock, 0 = share-nothing */
-    struct dpu_ingest_shard ingest_shards[MAX_INGEST_SHARDS];
-    pthread_mutex_t routing_lock;              /* shared conntrack and route tables */
+    int n_data_workers;                         /* A */
+    int worker_shared_routing;                  /* shared state with lock */
+    struct dpu_data_worker data_workers[MAX_ARM_WORKERS];
+    pthread_mutex_t routing_lock;
 
 };
 
-/* Ingest hand-off: the single ARM thread's recv-cb pushes each completion to the
- * comp_queue, drained by the main loop. Returns 0 on enqueue, -1 if full
- * (caller drops + logs). */
-static inline int ingest_push(struct objects *objs, const dpu_comp_entry_t *e) {
+/* A=1 completion queue used by the main thread. */
+static inline int completion_push(struct objects *objs, const dpu_comp_entry_t *e) {
     return comp_queue_enqueue(&objs->comp_queue, e);
 }
-static inline uint32_t ingest_usage(struct objects *objs) {
+static inline uint32_t completion_usage(struct objects *objs) {
     return comp_queue_usage(&objs->comp_queue);
 }
 

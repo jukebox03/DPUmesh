@@ -136,9 +136,12 @@ process_mmap_msg(struct objects *objs, struct doca_comch_connection *conn,
 		return DOCA_ERROR_INVALID_VALUE;
 	}
 	if (mmap_msg->mmap_type == DMA_RING &&
-	    buf_size != (DMA_RING_SIZE + 1u) * sizeof(struct dma_desc)) {
+	    buf_size !=
+		(DMA_RING_SIZE + DMA_RING_EXTRA_SLOTS) * sizeof(struct dma_desc)) {
 		DOCA_LOG_ERR("Pod %d: invalid ring bytes=%zu expected=%zu", pod->pod_id,
-		             buf_size, (DMA_RING_SIZE + 1u) * sizeof(struct dma_desc));
+		             buf_size,
+		             (DMA_RING_SIZE + DMA_RING_EXTRA_SLOTS) *
+				sizeof(struct dma_desc));
 		return DOCA_ERROR_INVALID_VALUE;
 	}
 	if (mmap_msg->mmap_type == DMA_BUFFER && buf_size > DPU_BUFFER_SIZE) {
@@ -180,10 +183,7 @@ process_mmap_msg(struct objects *objs, struct doca_comch_connection *conn,
 		pod->remote_buf_size = buf_size;
 	} else { /* DMA_RING */
 		pod->ring_mmaps[pod->ring_mmap_count] = imported_mmap;
-		/* Save this forward ring's host base VA (same index the ring mmap was
-		 * stored at above). The proxy egress admission (dpu_proxy.c) DMA-reads
-		 * the host freed counter at base + DMA_RING_SIZE*sizeof(dma_desc) — the
-		 * +1 credit slot — the same counter the DPA reverse admission polls. */
+		/* Save the host base used by proxy egress credit reads. */
 		pod->ring_host_addrs[pod->ring_mmap_count] = remote_addr;
 		pod->ring_mmap_count++;
 	}

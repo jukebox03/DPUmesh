@@ -52,7 +52,7 @@ topology explicit:
 
 ```sh
 DPUMESH_DPA_THREADS=16 \
-DPUMESH_INGEST_SHARDS=2 \
+DPUMESH_ARM_WORKERS=2 \
 DPUMESH_RINGS_PER_POD=2 \
 DPUMESH_ARM_PIN=1 \
 DPUMESH_PROXY_L7_SVC=16 \
@@ -77,7 +77,7 @@ per-message LB on the native request/reply benchmark too, enable both services:
 ```sh
 DPUMESH_PROXY_L7_SVC=11,16 \
 DPUMESH_DPA_THREADS=16 \
-DPUMESH_INGEST_SHARDS=2 \
+DPUMESH_ARM_WORKERS=2 \
 DPUMESH_RINGS_PER_POD=2 \
 DPUMESH_ARM_PIN=1 \
 ./bench/bench.sh deploy

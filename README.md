@@ -110,7 +110,7 @@ bring-up path rebuilds and deploys both sides together:
 
 ```sh
 DPUMESH_DPA_THREADS=16 \
-DPUMESH_INGEST_SHARDS=2 \
+DPUMESH_ARM_WORKERS=2 \
 DPUMESH_RINGS_PER_POD=2 \
 DPUMESH_ARM_PIN=1 \
 ./bench/bench.sh deploy
@@ -118,12 +118,12 @@ DPUMESH_ARM_PIN=1 \
 ```
 
 A bare deploy selects one ARM data worker. With `A>=2`, each worker owns its DPA
-consumer PE, connection/conntrack shard, parser/routing state, and matching
+consumer PE, connection and conntrack state, parser/routing state, and matching
 SG-DMA engine. `K` and `N` must be multiples of `A`; an incompatible requested
 worker count is reduced at startup and reported in the DPU log.
 
 `DPUMESH_DPA_THREADS` accepts up to 32 EUs; automatic selection uses up to 16.
-`DPUMESH_INGEST_SHARDS` sets the number of homogeneous ARM data workers.
+`DPUMESH_ARM_WORKERS` sets the number of ARM data workers.
 
 The gRPC adapter has an independent CMake build:
 

@@ -101,15 +101,9 @@ struct px_arrival {
     int32_t  pod_idx;             /* staging owner (objs->pods[] slot) */
     uint32_t staging_off;
     uint32_t len;
-    /* Custody is CROSS-THREAD once ingest is sharded/reaped: the ingest processor
-     * that created this arrival accounts DROPPED bytes (px_advance) and removes the
-     * window reference, while MAIN (egress emit) accounts EGRESSED bytes. `unfreed`
-     * = (bytes not yet egressed/dropped) + (1 while linked in the window). Every
-     * decrement is an atomic_fetch_sub (lost-update-free); whichever brings it to 0
-     * releases the arrival EXACTLY once — the byte decrements sum to len and the one
-     * window-ref removal accounts the +1, matching the initial len+1. */
+    /* Remaining bytes plus one reference while linked in the input window. */
     atomic_uint unfreed;          /* custody: (bytes not yet egressed/dropped) + in-window ref */
-    uint32_t claimed_round;       /* scratch: seg-claimed bytes, one parse round (ingest-thread-only) */
+    uint32_t claimed_round;       /* scratch: seg-claimed bytes, one parse round (forward-thread-only) */
     int32_t  ack_pod;             /* TX_ACK target (original sender, untranslated) */
     uint16_t ack_port, ack_first_seq, ack_seq;
 };
@@ -179,11 +173,10 @@ struct px_done_chunk {
  * A receiving conn always lands in ONE lane (region = dst_port % K): its
  * delivery order is the lane FIFO. */
 struct px_lane {
-    /* One atomic LIFO per ingest producer. The egress owner exchanges each list
-     * and reverses it before appending, preserving FIFO order per shard/QP with
-     * no shared lane mutex. The final slot is reserved for main-thread synthetic
-     * work when ingest is sharded. */
-    struct px_unit  *inq[MAX_INGEST_SHARDS + 1];
+    /* One atomic LIFO per ARM data worker. The egress owner exchanges each list
+     * and reverses it before appending, preserving FIFO order per worker/QP with
+     * no shared lane mutex. The final slot is reserved for main. */
+    struct px_unit  *inq[MAX_ARM_WORKERS + 1];
     struct px_unit  *qhead, *qtail;   /* queued units (not yet submitted) — worker-local */
     struct px_batch *fhead, *ftail;   /* in-flight/completed batches, FIFO — worker-local */
     uint32_t cursor;                  /* next landing byte offset within the region */
@@ -215,11 +208,11 @@ struct px_conn {
      * because a pool was momentarily empty. parse_pos did NOT advance, so the bytes are
      * still in the window; px_drain_stalled re-parses from exactly where it stopped. */
     int      stalled;
-    struct px_conn *stall_next;       /* shard-local stall list (shard thread only) */
+    struct px_conn *stall_next;       /* worker-local stall list (worker thread only) */
     int32_t  fin_ack_pod;
     uint16_t fin_ack_port, fin_ack_seq;
-    uint16_t ingest_seq;              /* latest DPA forward completion consumed */
-    uint8_t  ingest_seq_valid;
+    uint16_t forward_seq;              /* latest DPA forward completion consumed */
+    uint8_t  forward_seq_valid;
     uint16_t egress_seq;              /* per-conn delivery unit counter */
     uint16_t return_seq;              /* units serialized back to this downstream QP */
     int      dst_service_set;
@@ -236,7 +229,7 @@ struct px_conn {
 };
 
 #define MAX_ARM_ENG 8
-_Static_assert(MAX_ARM_ENG == MAX_INGEST_SHARDS,
+_Static_assert(MAX_ARM_ENG == MAX_ARM_WORKERS,
                "one DMA engine is required for every ARM data worker");
 
 /* A data worker owns its DOCA resources and regions where region % A == id.
@@ -244,7 +237,7 @@ _Static_assert(MAX_ARM_ENG == MAX_INGEST_SHARDS,
 struct px_engine {
     struct objects *objs;
     int      id;
-    int      threaded;                /* 1 = ingest-shard-owned; 0 = inline on main */
+    int      threaded;                /* 1 = ARM-worker-owned; 0 = inline on main */
     struct doca_dma           *dma;
     struct doca_ctx           *dma_ctx;
     struct doca_pe            *pe;     /* own PE (threaded) / objs->pe (inline) */
@@ -264,19 +257,19 @@ struct px_engine {
     struct px_done_chunk done_ring[PX_DONE_RING_CAP];
     _Alignas(64) atomic_uint done_prod;        /* worker-owned cache line */
     _Alignas(64) atomic_uint done_cons;        /* main-owned cache line */
-    struct px_unit  *emit_head, *emit_tail;   /* ingest-local resumable drain list */
+    struct px_unit  *emit_head, *emit_tail;   /* forward-local resumable drain list */
     /* Lane wake state. wake_fd remains as a test/fallback hook; production
-     * shard-owned engines wake ingest_shards[id].wake_fd. */
+     * worker-owned engines wake data_workers[id].wake_fd. */
     int      wake_fd;
     atomic_int parked;
     atomic_ullong stat_wakes;
     atomic_ullong stat_wake_errors;
 };
 
-/* Per-ingest-shard routing state. Connection windows are shard-local; conntrack is
- * either shard-local or shared under routing_lock. */
-struct px_shard {
-    struct px_conn **buckets;      /* PX_CONN_HASH buckets, per-shard */
+/* Per-ARM-worker routing state. Connection windows are worker-local; conntrack is
+ * either worker-local or shared under routing_lock. */
+struct px_worker_state {
+    struct px_conn **buckets;      /* PX_CONN_HASH buckets, per-worker */
     struct dpu_conntrack *ct;      /* private or shared conntrack */
     int id;
     int owner_stride;              /* upstream-port owner stride */
@@ -287,12 +280,12 @@ struct dmesh_proxy {
     uint8_t  svc_l7[POD_ID_SPACE];       /* DPUMESH_PROXY_L7_SVC csv → route via the L7 author hook */
     uint32_t sg_pieces_max;
 
-    /* Per-shard connection tables with private or shared conntrack state. */
-    struct px_shard shards[MAX_INGEST_SHARDS];
-    int n_shards;
+    /* Per-worker connection tables with private or shared conntrack state. */
+    struct px_worker_state workers[MAX_ARM_WORKERS];
+    int n_workers;
     int share_nothing;                /* 1 = private conntrack; 0 = shared under lock */
 
-    /* Fixed arrival, piece, and unit pools shared by ingest and emit. */
+    /* Fixed arrival, piece, and unit pools shared by forward and emit. */
     struct px_arrival *arr_mem,  *arr_free;
     struct px_piece   *piece_mem, *piece_free;
     struct px_unit    *unit_mem, *unit_free;
@@ -334,10 +327,10 @@ static void px_engine_wake(struct px_engine *eng) {
     atomic_int *parked = &eng->parked;
     int wake_fd = eng->wake_fd;
     if (wake_fd < 0 && eng->objs && eng->id >= 0 &&
-        eng->id < eng->objs->n_ingest_shards) {
-        struct dpu_ingest_shard *sh = &eng->objs->ingest_shards[eng->id];
-        parked = &sh->parked;
-        wake_fd = sh->wake_fd;
+        eng->id < eng->objs->n_data_workers) {
+        struct dpu_data_worker *worker_state = &eng->objs->data_workers[eng->id];
+        parked = &worker_state->parked;
+        wake_fd = worker_state->wake_fd;
     }
     if (wake_fd < 0)
         return;
@@ -361,16 +354,16 @@ static void px_engine_wake(struct px_engine *eng) {
 #define PX_SCRATCH_CELL 64
 #define PX_SCRATCH_OFF(pi, r) (((size_t)(pi) * MAX_EU_PER_POD + (size_t)(r)) * PX_SCRATCH_CELL)
 
-/* Thread-local routing state for the active ingest shard. */
-static __thread struct px_shard *px_cur_shard;
+/* Routing state for the current ARM data worker. */
+static __thread struct px_worker_state *px_cur_worker;
 
-/* Lock shared routing state; private and single-shard state need no lock. */
+/* Lock shared routing state; private and single-worker state need no lock. */
 static inline void px_route_lock(struct objects *objs) {
-    if (objs->proxy->n_shards > 1 && !objs->proxy->share_nothing)
+    if (objs->proxy->n_workers > 1 && !objs->proxy->share_nothing)
         pthread_mutex_lock(&objs->routing_lock);
 }
 static inline void px_route_unlock(struct objects *objs) {
-    if (objs->proxy->n_shards > 1 && !objs->proxy->share_nothing)
+    if (objs->proxy->n_workers > 1 && !objs->proxy->share_nothing)
         pthread_mutex_unlock(&objs->routing_lock);
 }
 
@@ -397,11 +390,11 @@ static void px_wake_workers(struct dmesh_proxy *px, uint32_t mask) {
 }
 
 static inline void px_pool_mark_waiter(struct dmesh_proxy *px) {
-    if (!px_cur_shard || px_cur_shard->id < 0 ||
-        px_cur_shard->id >= px->n_eng || px_cur_shard->id >= 32)
+    if (!px_cur_worker || px_cur_worker->id < 0 ||
+        px_cur_worker->id >= px->n_eng || px_cur_worker->id >= 32)
         return;
     atomic_fetch_or_explicit(&px->pool_waiters,
-                             1u << (unsigned)px_cur_shard->id,
+                             1u << (unsigned)px_cur_worker->id,
                              memory_order_release);
 }
 
@@ -609,8 +602,8 @@ static inline uint32_t px_conn_hash(int32_t pod, uint16_t port) {
 }
 
 static struct px_conn *px_conn_find(struct dmesh_proxy *px, int32_t pod, uint16_t port) {
-    (void)px;   /* conn table is per-shard (px_cur_shard) */
-    struct px_conn *c = px_cur_shard->buckets[px_conn_hash(pod, port)];
+    (void)px;   /* conn table is per-worker (px_cur_worker) */
+    struct px_conn *c = px_cur_worker->buckets[px_conn_hash(pod, port)];
     while (c && !(c->pub.src_pod == pod && c->pub.src_port == port))
         c = c->hnext;
     return c;
@@ -632,8 +625,8 @@ static struct px_conn *px_conn_get(struct dmesh_proxy *px, int32_t pod, uint16_t
     c->pinned_backend = -1;                /* unpinned until the first LB pick */
     c->pinned_cluster = DMESH_SVC_NONE;
     uint32_t h = px_conn_hash(pod, port);
-    c->hnext = px_cur_shard->buckets[h];
-    px_cur_shard->buckets[h] = c;
+    c->hnext = px_cur_worker->buckets[h];
+    px_cur_worker->buckets[h] = c;
     return c;
 }
 
@@ -655,7 +648,7 @@ static void px_resolve_route(struct objects *objs, struct px_conn *c,
     }
     if (is_reply && c->pub.src_port >= DMESH_UPORT_BASE) {
         px_route_lock(objs);
-        struct dpu_upstream *u = &px_cur_shard->ct->upstream[c->pub.src_port];
+        struct dpu_upstream *u = &px_cur_worker->ct->upstream[c->pub.src_port];
         if (u->in_use && u->codec_id == PX_CODEC_L7)
             c->is_l7 = 1;
         px_route_unlock(objs);
@@ -677,14 +670,14 @@ static void px_conn_del(struct objects *objs, struct px_conn *c) {
     free(c->seam);
     if (c->stalled) {                          /* unlink before the free — px_drain_stalled
                                                 * would otherwise walk into freed memory */
-        struct px_conn **sl = &px_cur_shard->stall_head;
+        struct px_conn **sl = &px_cur_worker->stall_head;
         while (*sl && *sl != c)
             sl = &(*sl)->stall_next;
         if (*sl)
             *sl = c->stall_next;
         c->stalled = 0;
     }
-    struct px_conn **link = &px_cur_shard->buckets[px_conn_hash(c->pub.src_pod, c->pub.src_port)];
+    struct px_conn **link = &px_cur_worker->buckets[px_conn_hash(c->pub.src_pod, c->pub.src_port)];
     while (*link && *link != c)
         link = &(*link)->hnext;
     if (*link)
@@ -924,8 +917,8 @@ static void px_lane_enqueue(struct dmesh_proxy *px, int pod_idx, int region, str
     int owner = px_engine_id_for_lane(px, pod_idx, region);
     /* Same-owner traffic uses the private FIFO; cross-owner traffic uses the
      * publication inbox. */
-    if (px->run_to_completion && px_cur_shard &&
-        px_cur_shard->id == owner) {
+    if (px->run_to_completion && px_cur_worker &&
+        px_cur_worker->id == owner) {
         if (ln->qtail)
             ln->qtail->next = u;
         else
@@ -934,13 +927,13 @@ static void px_lane_enqueue(struct dmesh_proxy *px, int pod_idx, int region, str
         __atomic_fetch_add(&px->stat_units, 1, __ATOMIC_RELAXED);
         return;
     }
-    /* Use a shard-private publish stack whenever producer and consumer can differ.
+    /* Use a worker-private publish stack whenever producer and consumer can differ.
      * QP ownership pins one ordered stream to one producer slot; the consumer reverses
      * the exchanged list to recover FIFO order. */
-    if (px->n_eng > 1 || px->n_shards > 1) {
-        int producer = px_cur_shard ? px_cur_shard->id : px->n_shards;
-        if (producer < 0 || producer > MAX_INGEST_SHARDS)
-            producer = MAX_INGEST_SHARDS;
+    if (px->n_eng > 1 || px->n_workers > 1) {
+        int producer = px_cur_worker ? px_cur_worker->id : px->n_workers;
+        if (producer < 0 || producer > MAX_ARM_WORKERS)
+            producer = MAX_ARM_WORKERS;
         struct px_unit *old = __atomic_load_n(&ln->inq[producer], __ATOMIC_RELAXED);
         do {
             u->next = old;
@@ -950,14 +943,14 @@ static void px_lane_enqueue(struct dmesh_proxy *px, int pod_idx, int region, str
         if (ln->qtail) ln->qtail->next = u; else ln->qhead = u;
         ln->qtail = u;
     }
-    __atomic_fetch_add(&px->stat_units, 1, __ATOMIC_RELAXED);   /* multiple ingest writers */
+    __atomic_fetch_add(&px->stat_units, 1, __ATOMIC_RELAXED);   /* multiple forward writers */
     if (px->n_eng > 1)
         px_engine_wake(&px->engines[owner]);
 }
 
 static int px_lane_inbox_nonempty(struct dmesh_proxy *px, struct px_lane *ln) {
-    int nprod = px->n_shards + 1;               /* ingest shards + main synthetic producer */
-    if (nprod > MAX_INGEST_SHARDS + 1) nprod = MAX_INGEST_SHARDS + 1;
+    int nprod = px->n_workers + 1;               /* ARM workers plus main */
+    if (nprod > MAX_ARM_WORKERS + 1) nprod = MAX_ARM_WORKERS + 1;
     for (int s = 0; s < nprod; s++)
         if (__atomic_load_n(&ln->inq[s], __ATOMIC_ACQUIRE) != NULL)
             return 1;
@@ -968,8 +961,8 @@ static int px_lane_inbox_nonempty(struct dmesh_proxy *px, struct px_lane *ln) {
  * the worker-local FIFO. Returns non-zero when at least one unit was transferred. */
 static int px_lane_splice_inbox(struct dmesh_proxy *px, struct px_lane *ln) {
     int moved = 0;
-    int nprod = px->n_shards + 1;
-    if (nprod > MAX_INGEST_SHARDS + 1) nprod = MAX_INGEST_SHARDS + 1;
+    int nprod = px->n_workers + 1;
+    if (nprod > MAX_ARM_WORKERS + 1) nprod = MAX_ARM_WORKERS + 1;
     for (int s = 0; s < nprod; s++) {
         struct px_unit *stack = __atomic_exchange_n(&ln->inq[s], NULL, __ATOMIC_ACQ_REL);
         if (!stack)
@@ -1026,7 +1019,7 @@ static int px_queue_fin_unit(struct objects *objs, struct px_conn *c,
 }
 
 /* Send EOF to the origin of an undeliverable unit. This operates on the unit so
- * emit paths do not access another shard's connection table. */
+ * emit paths do not access another worker's connection table. */
 static void px_eof_to_origin(struct objects *objs, const struct px_unit *fu) {
     struct dmesh_proxy *px = objs->proxy;
     struct pod_state *sp = find_pod_by_id(objs, fu->src_pod_id);
@@ -1094,7 +1087,7 @@ static int px_build_range(struct objects *objs, struct px_conn *c,
                           uint32_t len, int32_t route_dst,
                           struct px_unit **out_unit) {
     struct dmesh_proxy *px = objs->proxy;
-    struct dpu_conntrack *ct = px_cur_shard->ct;   /* private or locked shared state */
+    struct dpu_conntrack *ct = px_cur_worker->ct;   /* private or locked shared state */
     uint64_t sbeg = c->parse_pos, send_ = sbeg + len;
     int32_t dst_pod;
     uint16_t out_src_port = 0, out_dst_port = 0;
@@ -1145,17 +1138,16 @@ static int px_build_range(struct objects *objs, struct px_conn *c,
         uint16_t uP = dpu_upstream_find(ct, c->pub.src_pod, c->pub.src_port, dst_pod);
         int created = 0;
         if (uP == 0) {
-            /* Encode this shard in the upstream port for reply dispatch. */
+            /* Encode this worker in the upstream port for reply dispatch. */
             uP = dpu_upstream_create(ct, c->pub.src_pod, c->pub.src_port, dst_pod,
                                      c->is_l7 ? PX_CODEC_L7 : 0,
-                                     (uint16_t)px_cur_shard->id,
-                                     (uint16_t)px_cur_shard->owner_stride);
+                                     (uint16_t)px_cur_worker->id,
+                                     (uint16_t)px_cur_worker->owner_stride);
             created = (uP != 0);
         }
         px_route_unlock(objs);
-        /* Remove stale reply state when a uP is newly allocated. Owner encoding
-         * locates the state on this shard for M==1 and share-nothing mode. */
-        if (created && (px->n_shards <= 1 || px->share_nothing))
+        /* Clear reply state for a newly allocated upstream port. */
+        if (created && (px->n_workers <= 1 || px->share_nothing))
             px_conn_del_key(objs, dst_pod, uP);
         if (uP == 0) {
             /* Every uP is in use. Transient — a client FIN frees one. */
@@ -1253,13 +1245,13 @@ static int px_ship_range(struct objects *objs, struct px_conn *c,
 }
 
 /* Park a connection whose pool allocation failed. Its parse position remains in
- * the window, and the ingest loop retries it on the next drain pass. */
+ * the window, and the forward loop retries it on the next drain pass. */
 static void px_stall(struct px_conn *c) {
     if (c->stalled)
         return;
     c->stalled = 1;
-    c->stall_next = px_cur_shard->stall_head;
-    px_cur_shard->stall_head = c;
+    c->stall_next = px_cur_worker->stall_head;
+    px_cur_worker->stall_head = c;
 }
 
 /* ====== parse loop ====== */
@@ -1272,7 +1264,7 @@ static int px_resolve_reply_peer(struct objects *objs, struct px_conn *c) {
     uint16_t cport = 0;
     if (c->pub.src_port >= DMESH_UPORT_BASE) {
         px_route_lock(objs);
-        struct dpu_upstream *u = &px_cur_shard->ct->upstream[c->pub.src_port];
+        struct dpu_upstream *u = &px_cur_worker->ct->upstream[c->pub.src_port];
         if (u->in_use) {
             have = 1;
             cpod = u->client_pod;
@@ -1486,7 +1478,7 @@ static void px_parse_l7(struct objects *objs, struct px_conn *c) {
  * and parks the connection. Each upstream is freed after its FIN unit is queued. */
 static int px_try_fin(struct objects *objs, struct px_conn *c) {
     struct dmesh_proxy *px = objs->proxy;
-    struct dpu_conntrack *ct = px_cur_shard->ct;   /* private or locked shared state */
+    struct dpu_conntrack *ct = px_cur_worker->ct;   /* private or locked shared state */
     if (!c->fin_pending)
         return 0;
     /* FIN = no more input: an unconsumed tail is a truncated unit — drop it
@@ -1523,8 +1515,8 @@ static int px_try_fin(struct objects *objs, struct px_conn *c) {
             px_route_lock(objs);
             dpu_upstream_free(ct, uP);         /* only now: this one's FIN is on its lane */
             px_route_unlock(objs);
-            /* Private routing keeps this upstream's reply stream on this shard. */
-            if (px->n_shards <= 1 || px->share_nothing)
+            /* Private routing keeps this upstream's reply stream on this worker. */
+            if (px->n_workers <= 1 || px->share_nothing)
                 px_conn_del_key(objs, b, uP);
         }
     } else {
@@ -1552,18 +1544,14 @@ static int px_try_fin(struct objects *objs, struct px_conn *c) {
     return 1;
 }
 
-/* Re-parse every conn px_stall parked. Call it once per drain pass, from the same
- * thread that owns `shard` (the conn table and the stall list are shard-private, so no
- * lock). Returns non-zero only when a conn actually made PROGRESS — a conn that re-parks
- * without moving parse_pos reports nothing, so an empty pool lets the loop go idle and
- * sleep instead of spinning on a retry that cannot yet succeed. */
-int px_drain_stalled(struct objects *objs, int shard) {
+/* Resume connections on one worker's stall list. */
+int px_drain_stalled(struct objects *objs, int worker_id) {
     struct dmesh_proxy *px = objs->proxy;
-    px_cur_shard = &px->shards[shard];
-    struct px_conn *c = px_cur_shard->stall_head;
+    px_cur_worker = &px->workers[worker_id];
+    struct px_conn *c = px_cur_worker->stall_head;
     if (!c)
         return 0;
-    px_cur_shard->stall_head = NULL;           /* pop all; px_parse re-parks what still stalls */
+    px_cur_worker->stall_head = NULL;           /* pop all; px_parse re-parks what still stalls */
     int did = 0;
     while (c) {
         struct px_conn *next = c->stall_next;
@@ -1649,16 +1637,14 @@ static int px_arrival_try_extend(struct px_conn *c, const dpu_comp_entry_t *e,
     return 1;
 }
 
-/* ====== ingest (forward completion → per-conn input window) ====== */
+/* ====== forward (forward completion → per-conn input window) ====== */
 
-int px_ingest_forward(struct objects *objs, int shard, void *ventry) {
+int px_process_forward(struct objects *objs, int worker_id, void *ventry) {
     struct dmesh_proxy *px = objs->proxy;
     dpu_comp_entry_t *e = (dpu_comp_entry_t *)ventry;
 
-    /* Bind this thread to its shard's private routing state (conn table +
-     * conntrack) for the whole parse/route call graph. Shard 0 = the
-     * single-reaper / inline path (its structures ARE the shared ones for M<=1). */
-    px_cur_shard = &px->shards[shard];
+    /* Bind the worker's connection and routing state. */
+    px_cur_worker = &px->workers[worker_id];
 
     struct pod_state *fwd = (e->pod_idx >= 0 && e->pod_idx < objs->num_pods)
         ? &objs->pods[e->pod_idx] : NULL;
@@ -1668,7 +1654,7 @@ int px_ingest_forward(struct objects *objs, int shard, void *ventry) {
         /* The source was unpublished after the recv callback queued this item,
          * or the slot was already re-tenanted. Never ACK through find_pod_by_id:
          * that could return the new tenant and corrupt its sequence accounting. */
-        DOCA_LOG_INFO("proxy ingest: dropping stale completion pod_idx=%d src=%d gen=%u seq=%u",
+        DOCA_LOG_INFO("proxy forward: dropping stale completion pod_idx=%d src=%d gen=%u seq=%u",
                       e->pod_idx, e->src_pod_id, e->generation, e->seq);
         return -1;
     }
@@ -1679,7 +1665,7 @@ int px_ingest_forward(struct objects *objs, int shard, void *ventry) {
         return 0;                              /* alloc pressure — retry */
     if (c->pub.is_reply != is_reply) {
         /* a port number cannot flip roles (client < UPORT_BASE <= uP) */
-        DOCA_LOG_ERR("proxy ingest: conn (%d:%u) role flip (reply=%d->%d)",
+        DOCA_LOG_ERR("proxy forward: conn (%d:%u) role flip (reply=%d->%d)",
                      e->src_pod_id, e->src_port, c->pub.is_reply, is_reply);
         c->pub.is_reply = is_reply;
     }
@@ -1690,17 +1676,17 @@ int px_ingest_forward(struct objects *objs, int shard, void *ventry) {
         px_resolve_route(objs, c, is_reply, e->dst_service);
     }
 
-    uint16_t seq_delta = c->ingest_seq_valid ?
-        (uint16_t)(e->seq - c->ingest_seq) : 1u;
-    if (c->ingest_seq_valid && (seq_delta == 0 || seq_delta >= 0x8000u))
+    uint16_t seq_delta = c->forward_seq_valid ?
+        (uint16_t)(e->seq - c->forward_seq) : 1u;
+    if (c->forward_seq_valid && (seq_delta == 0 || seq_delta >= 0x8000u))
         return 1;                             /* the original owns custody and ACK */
-    if (c->ingest_seq_valid && seq_delta != 1)
-        DOCA_LOG_WARN("proxy ingest: sequence gap conn=(%d:%u) prev=%u next=%u",
-                      e->src_pod_id, e->src_port, c->ingest_seq, e->seq);
+    if (c->forward_seq_valid && seq_delta != 1)
+        DOCA_LOG_WARN("proxy forward: sequence gap conn=(%d:%u) prev=%u next=%u",
+                      e->src_pod_id, e->src_port, c->forward_seq, e->seq);
 
     if (e->length == 0) {                      /* FIN */
-        c->ingest_seq = e->seq;
-        c->ingest_seq_valid = 1;
+        c->forward_seq = e->seq;
+        c->forward_seq_valid = 1;
         c->fin_pending = 1;
         c->fin_ack_pod = e->src_pod_id;
         c->fin_ack_port = e->src_port;
@@ -1710,8 +1696,8 @@ int px_ingest_forward(struct objects *objs, int shard, void *ventry) {
     }
 
     if (c->dead) {                             /* poisoned stream: drop + ack */
-        c->ingest_seq = e->seq;
-        c->ingest_seq_valid = 1;
+        c->forward_seq = e->seq;
+        c->forward_seq_valid = 1;
         batch_or_send_tx_ack(objs, find_pod_by_id(objs, e->src_pod_id), e->src_port, e->seq);
         px->stat_drop_bytes += e->length;
         return -1;
@@ -1723,8 +1709,8 @@ int px_ingest_forward(struct objects *objs, int shard, void *ventry) {
      * range and releases every exact ACK together. Bound the run so one incomplete
      * frame cannot hold an arbitrarily large prefix's ACK. */
     if (px_arrival_try_extend(c, e, seq_delta)) {
-        c->ingest_seq = e->seq;
-        c->ingest_seq_valid = 1;
+        c->forward_seq = e->seq;
+        c->forward_seq_valid = 1;
         px->stat_msgs++;
         px->stat_arrival_merges++;
         px_parse(objs, c);
@@ -1736,8 +1722,8 @@ int px_ingest_forward(struct objects *objs, int shard, void *ventry) {
     struct px_arrival *a = px_arrival_alloc(px);
     if (!a)
         return 0;                              /* pool full — retry (backpressure) */
-    c->ingest_seq = e->seq;
-    c->ingest_seq_valid = 1;
+    c->forward_seq = e->seq;
+    c->forward_seq_valid = 1;
     a->stream_base = c->stream_end;
     a->pod_idx = e->pod_idx;
     a->staging_off = e->buf_offset;
@@ -1849,9 +1835,7 @@ static void px_dma_err_cb(struct doca_dma_task_memcpy *t, union doca_data tud,
     b->done = 1;
 }
 
-/* Kick a lazy DMA read of the host's freed counter for lane (pod, region).
- * Same counter the DPA reverse admission used: the extra slot past forward
- * ring `region`'s descs, bumped by the host per freed landing. */
+/* Kick a lazy DMA read of the host's freed counter for lane (pod, region). */
 static void px_lane_refresh_credit(struct objects *objs, struct px_engine *eng,
                                    int pod_idx, struct pod_state *pod, int region,
                                    struct px_lane *ln) {
@@ -1867,7 +1851,8 @@ static void px_lane_refresh_credit(struct objects *objs, struct px_engine *eng,
         return;
     }
     uint8_t *host_credit = (uint8_t *)pod->ring_host_addrs[region] +
-                           (size_t)DMA_RING_SIZE * sizeof(struct dma_desc);
+                           (size_t)DMA_RING_CREDIT_SLOT(DMA_RING_SIZE) *
+                               sizeof(struct dma_desc);
     uint8_t *cell = px->scratch + PX_SCRATCH_OFF(pod_idx, region);
     struct px_op *op = &px->refresh_ops[pod_idx][region];
     struct doca_buf *src = NULL, *dst = NULL;
@@ -2074,7 +2059,7 @@ static int px_engine_emit(struct objects *objs, struct px_engine *eng,
         __atomic_fetch_sub(&pod->egress_pending_emit, 1, __ATOMIC_ACQ_REL);
         px_fb_unit(fb, u);                     /* batched free (caller splices) */
         did = 1;
-        /* Cap how many freed nodes main holds back, so a concurrent shard alloc can
+        /* Cap how many freed nodes main holds back, so a concurrent worker alloc can
          * never starve the pool while the drain span is long. */
         if (fb->n >= PX_FREE_BATCH_FLUSH)
             px_free_batch_flush(px, fb);
@@ -2222,35 +2207,37 @@ static int px_worker_progress(struct px_engine *eng) {
     return progressed;
 }
 
-int px_worker_drain(struct objects *objs, int worker) {
+int px_worker_drain(struct objects *objs, int worker_id) {
     struct dmesh_proxy *px = objs ? objs->proxy : NULL;
-    if (!px || px->n_eng <= 1 || worker < 0 || worker >= px->n_eng)
+    if (!px || px->n_eng <= 1 || worker_id < 0 || worker_id >= px->n_eng)
         return 0;
-    return px_worker_progress(&px->engines[worker]);
+    return px_worker_progress(&px->engines[worker_id]);
 }
 
-int px_worker_notification_fd(struct objects *objs, int worker) {
+int px_worker_notification_fd(struct objects *objs, int worker_id) {
     struct dmesh_proxy *px = objs ? objs->proxy : NULL;
     doca_notification_handle_t handle = 0;
-    if (!px || px->n_eng <= 1 || worker < 0 || worker >= px->n_eng ||
-        doca_pe_get_notification_handle(px->engines[worker].pe,
+    if (!px || px->n_eng <= 1 || worker_id < 0 || worker_id >= px->n_eng ||
+        doca_pe_get_notification_handle(px->engines[worker_id].pe,
                                         &handle) != DOCA_SUCCESS)
         return -1;
     return (int)handle;
 }
 
-int px_worker_arm_notification(struct objects *objs, int worker) {
+int px_worker_arm_notification(struct objects *objs, int worker_id) {
     struct dmesh_proxy *px = objs ? objs->proxy : NULL;
-    if (!px || px->n_eng <= 1 || worker < 0 || worker >= px->n_eng)
+    if (!px || px->n_eng <= 1 || worker_id < 0 || worker_id >= px->n_eng)
         return 0;
-    return doca_pe_request_notification(px->engines[worker].pe) == DOCA_SUCCESS;
+    return doca_pe_request_notification(px->engines[worker_id].pe) ==
+           DOCA_SUCCESS;
 }
 
-void px_worker_clear_notification(struct objects *objs, int worker, int fd) {
+void px_worker_clear_notification(struct objects *objs, int worker_id, int fd) {
     struct dmesh_proxy *px = objs ? objs->proxy : NULL;
-    if (!px || px->n_eng <= 1 || worker < 0 || worker >= px->n_eng || fd < 0)
+    if (!px || px->n_eng <= 1 || worker_id < 0 ||
+        worker_id >= px->n_eng || fd < 0)
         return;
-    (void)doca_pe_clear_notification(px->engines[worker].pe,
+    (void)doca_pe_clear_notification(px->engines[worker_id].pe,
                                      (doca_notification_handle_t)fd);
 }
 
@@ -2535,26 +2522,26 @@ int px_init(struct objects *objs) {
 
     int n_l7_svc = px_parse_svc_csv(getenv("DPUMESH_PROXY_L7_SVC"), px->svc_l7);
 
-    /* Each ingest shard owns a connection table. Conntrack is private in
+    /* Each ARM data worker owns a connection table. Conntrack is private in
      * share-nothing mode and shared under routing_lock otherwise. */
-    px->n_shards = objs->n_ingest_shards >= 1 ? objs->n_ingest_shards : 1;
-    if (px->n_shards > MAX_INGEST_SHARDS) px->n_shards = MAX_INGEST_SHARDS;
-    px->share_nothing = !objs->shard_shared_routing;
-    for (int s = 0; s < px->n_shards; s++) {
-        struct px_shard *sh = &px->shards[s];
-        sh->id = s;
-        sh->buckets = (struct px_conn **)calloc(PX_CONN_HASH, sizeof(*sh->buckets));
-        if (!sh->buckets)
+    px->n_workers = objs->n_data_workers >= 1 ? objs->n_data_workers : 1;
+    if (px->n_workers > MAX_ARM_WORKERS) px->n_workers = MAX_ARM_WORKERS;
+    px->share_nothing = !objs->worker_shared_routing;
+    for (int s = 0; s < px->n_workers; s++) {
+        struct px_worker_state *worker_state = &px->workers[s];
+        worker_state->id = s;
+        worker_state->buckets = (struct px_conn **)calloc(PX_CONN_HASH, sizeof(*worker_state->buckets));
+        if (!worker_state->buckets)
             goto oom;
-        if (px->n_shards >= 2 && px->share_nothing) {
-            sh->ct = (struct dpu_conntrack *)calloc(1, sizeof(struct dpu_conntrack));
-            if (!sh->ct)
+        if (px->n_workers >= 2 && px->share_nothing) {
+            worker_state->ct = (struct dpu_conntrack *)calloc(1, sizeof(struct dpu_conntrack));
+            if (!worker_state->ct)
                 goto oom;
-            sh->ct->next_uport = DMESH_UPORT_BASE;
-            sh->owner_stride = px->n_shards;      /* owner-strided upstream ports */
+            worker_state->ct->next_uport = DMESH_UPORT_BASE;
+            worker_state->owner_stride = px->n_workers;      /* owner-strided upstream ports */
         } else {
-            sh->ct = objs->conntrack;             /* shared conntrack */
-            sh->owner_stride = 1;
+            worker_state->ct = objs->conntrack;             /* shared conntrack */
+            worker_state->owner_stride = 1;
         }
     }
 
@@ -2581,7 +2568,7 @@ int px_init(struct objects *objs) {
     }
 
     /* A>=2 uses one DMA engine per data worker. */
-    int n_eng = px->n_shards;
+    int n_eng = px->n_workers;
     if (n_eng < 1) n_eng = 1;
     if (n_eng > MAX_ARM_ENG) n_eng = MAX_ARM_ENG;
     px->n_eng = n_eng;
@@ -2641,7 +2628,7 @@ int px_init(struct objects *objs) {
     DOCA_LOG_WARN("DPU PROXY MODE ON (run-to-completion SG-DMA, N/K/A=%d/%d/%d; "
                   "l7-services=%d, lb=round-robin; passthru=conn-pinned, "
                   "l7=frame-serialized, sg_pieces=%u)",
-                  objs->num_dpa_threads, objs->k_rings, objs->n_ingest_shards,
+                  objs->num_dpa_threads, objs->k_rings, objs->n_data_workers,
                   n_l7_svc, px->sg_pieces_max);
     return DOCA_SUCCESS;
 
@@ -2650,11 +2637,11 @@ oom:
 fail:
     DOCA_LOG_ERR("proxy init failed: %s", doca_error_get_descr(ret));
     objs->proxy = NULL;
-    for (int s = 0; s < MAX_INGEST_SHARDS; s++) {
-        free(px->shards[s].buckets);
-        /* Free only shard-private conntrack state. */
-        if (px->shards[s].ct && px->shards[s].ct != objs->conntrack)
-            free(px->shards[s].ct);
+    for (int s = 0; s < MAX_ARM_WORKERS; s++) {
+        free(px->workers[s].buckets);
+        /* Free only worker-private conntrack state. */
+        if (px->workers[s].ct && px->workers[s].ct != objs->conntrack)
+            free(px->workers[s].ct);
     }
     free(px->arr_mem); free(px->piece_mem);
     free(px->unit_mem);

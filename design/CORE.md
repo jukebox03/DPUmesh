@@ -25,8 +25,8 @@ ARM worker (port % A)
        main Comch emitter
 ```
 
-`N`, `K`, and `A` are the numbers of DPA EUs, forward rings per pod, and
-homogeneous ARM data workers. A valid topology satisfies:
+`N`, `K`, and `A` are the numbers of DPA EUs, forward rings per pod, and ARM
+data workers. A valid topology satisfies:
 
 ```text
 1 ≤ A ≤ K ≤ N
@@ -98,6 +98,13 @@ Each EU owns one DPA thread and Comch channel. It processes ring control, drains
 forward descriptors, copies request bytes into DPU staging, and publishes
 completion metadata to its ARM worker.
 
+Each forward ring is a bounded MPSC queue. The host assigns a monotonic ticket,
+writes one 64-byte descriptor, and publishes `publish_seq = ticket + 1`. The DPA
+consumes consecutive generations in ring order. It drains at most 32 descriptors
+per ring in one round, then publishes one shared `consumer_head` for that ring.
+Each round uses one read-window invalidation and one writeback when progress was
+made. Each submitted DMA completion uses `FLUSH`.
+
 Ring control and completion records carry pod generation and descriptor
 sequence. Generation and sequence checks reject stale records.
 
@@ -106,13 +113,13 @@ sequence. Generation and sequence checks reject stale records.
 Each ARM worker owns:
 
 - one DPA consumer PE and completion queue;
-- one connection-table and conntrack shard;
+- one connection table and conntrack instance;
 - parser and routing state;
 - destination regions where `region % A == worker`;
 - one SG-DMA engine and PE;
 - one TX-ACK SPSC ring and one completed-unit SPSC ring.
 
-One worker iteration reaps up to 64 DPA completions, retries stalled parsers,
+One worker iteration processes up to 64 DPA completions, retries stalled parsers,
 submits SG-DMA, progresses DMA completions, and retires destination lanes. Idle
 workers wait on DPA PE, DMA PE, and worker event descriptors.
 
@@ -166,6 +173,7 @@ objects in order.
 | QP TX window | 4 blocks, FIFO-clamped |
 | Send-unit reclaim FIFO | 64 descriptors/QP |
 | Forward rings per pod | 2 default, max 8 |
+| Forward descriptors per ring round | 32 |
 | DPA EUs | auto max 16, explicit max 32 |
 | ARM data workers | 1 default, max 8 |
 | L7 parse head | 4 KiB |

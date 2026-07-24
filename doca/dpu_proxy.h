@@ -28,25 +28,18 @@ typedef struct dmesh_proxy_conn {
 /* Create the engine. It is the sole DPU→host reverse path. */
 int px_init(struct objects *objs);
 
-/* Ingest one COMP_ENTRY_FORWARD (data or FIN, request or reply).
- * `shard` selects its connection and routing state. Returns 1 = consumed, 0 = retry
- * (transient resource exhaustion; the caller keeps the completion queued),
- * -1 = dropped (sender TX_ACKed). */
-int px_ingest_forward(struct objects *objs, int shard, void *entry /* dpu_comp_entry_t* */);
+/* Process one forward completion on its connection owner. */
+int px_process_forward(struct objects *objs, int worker_id,
+                       void *entry /* dpu_comp_entry_t* */);
 
-/* Re-parse the conns that egress allocation backpressured (a pool was momentarily empty, so
- * their bytes were left in the window rather than dropped). Call once per drain pass on
- * the thread owning `shard`, AFTER the egress has had a chance to free units. Returns
- * non-zero only if a conn made real progress, so an unrelieved pool lets the caller idle
- * and sleep. */
-int px_drain_stalled(struct objects *objs, int shard);
+/* Resume connections stalled by egress allocation. */
+int px_drain_stalled(struct objects *objs, int worker_id);
 
-/* Run the DMA submit/completion/retire stages owned by one homogeneous ARM
- * worker. A>=2 ingest shards call this from their own event loop. */
-int px_worker_drain(struct objects *objs, int worker);
-int px_worker_notification_fd(struct objects *objs, int worker);
-int px_worker_arm_notification(struct objects *objs, int worker);
-void px_worker_clear_notification(struct objects *objs, int worker, int fd);
+/* Progress one ARM worker's SG-DMA engine. */
+int px_worker_drain(struct objects *objs, int worker_id);
+int px_worker_notification_fd(struct objects *objs, int worker_id);
+int px_worker_arm_notification(struct objects *objs, int worker_id);
+void px_worker_clear_notification(struct objects *objs, int worker_id, int fd);
 
 /* ---- delivery counters (DIAG only; see dpu_diag_dump) ----
  * The proxy's two failure modes are invisible from the outside: a DROP loses bytes and

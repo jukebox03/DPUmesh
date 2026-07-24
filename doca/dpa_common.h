@@ -47,7 +47,7 @@ struct dpa_thread_arg {
 	volatile uint32_t num_rings;
 	uint32_t _pad2;
 	struct dpa_ring_info rings[MAX_DPA_RINGS];
-	uint32_t desc_idx[MAX_DPA_RINGS];
+	uint64_t consumer_head[MAX_DPA_RINGS];
 	/* Incarnation paired with rings[] and echoed by FWD_DONE. */
 	uint32_t ring_generation[MAX_DPA_RINGS];
 } __attribute__((__packed__, aligned(8)));
@@ -144,13 +144,18 @@ _Static_assert(sizeof(struct comch_msg) == 60, "comch_msg ABI drift");
 
 /* ====== DMA ring descriptor ====== */
 
-/* Exactly 64 bytes = one cache line per descriptor. This isolation is
- * load-bearing, not just padding: the DPA clears valid=0 and flushes via
- * __dpa_thread_window_writeback(), which operates at cache-line granularity.
- * If two descriptors shared a line, that writeback would read-modify-write the
- * whole line and clobber a neighbouring slot the host had concurrently filled
- * (valid=1) — breaking the lossless single-owner-per-slot handshake. Keep one
- * descriptor per cache line. */
+/* The shared ring contains descriptor slots, one RX-credit slot, and one
+ * consumer-head control slot. */
+#define DMA_RING_EXTRA_SLOTS       2u
+#define DMA_RING_CREDIT_SLOT(size) (size)
+#define DMA_RING_CTRL_SLOT(size)   ((size) + 1u)
+
+struct dma_ring_ctrl {
+	volatile uint64_t consumer_head;
+	uint8_t reserved[56];
+} __attribute__((aligned(64)));
+
+/* Exactly 64 bytes = one cache line per descriptor. */
 struct dma_desc {
 	doca_dpa_dev_mmap_t mmap;      /* 4B */
 	uint64_t addr;                 /* 8B */
@@ -165,17 +170,18 @@ struct dma_desc {
 	uint8_t pad0[4];               /* 4B: aligns src_pod_id, and holds the struct at its fixed
 	                                * 64B cache line (see above) — widen it, never shrink. */
 	int32_t src_pod_id;            /* 4B host sender field; DPA uses ring->pod_id */
-	uint8_t reserved[27];          /* fixed descriptor padding */
-	volatile uint8_t valid;        /* 1B */
+	uint8_t reserved[20];          /* fixed descriptor padding */
+	volatile uint64_t publish_seq; /* ticket+1; generation-safe MPSC publication */
 } __attribute__((__packed__, aligned(8)));
 
 /* Keep Host/DPA descriptor ABI stable across toolchains. */
+_Static_assert(sizeof(struct dma_ring_ctrl) == 64, "dma_ring_ctrl must be 64 bytes");
 _Static_assert(sizeof(struct dma_desc) == 64, "dma_desc must be 64 bytes");
 _Static_assert(offsetof(struct dma_desc, addr) == 4, "dma_desc.addr offset mismatch");
 _Static_assert(offsetof(struct dma_desc, size) == 12, "dma_desc.size offset mismatch");
 _Static_assert(offsetof(struct dma_desc, seq) == 16, "dma_desc.seq offset mismatch");
 _Static_assert(offsetof(struct dma_desc, dst_pod_id) == 24, "dma_desc.dst_pod_id offset mismatch");
 _Static_assert(offsetof(struct dma_desc, src_pod_id) == 32, "dma_desc.src_pod_id offset mismatch");
-_Static_assert(offsetof(struct dma_desc, valid) == 63, "dma_desc.valid offset mismatch");
+_Static_assert(offsetof(struct dma_desc, publish_seq) == 56, "dma_desc.publish_seq offset mismatch");
 
 #endif

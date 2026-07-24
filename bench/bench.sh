@@ -169,15 +169,15 @@ start_dpu() {
     local l7_svc="${DPUMESH_PROXY_L7_SVC:-}"
     local dpa_threads="${DPUMESH_DPA_THREADS:-}" arm_pin="${DPUMESH_ARM_PIN:-1}"
     local rings="${DPUMESH_RINGS_PER_POD:-}"
-    local reap="${DPUMESH_INGEST_REAP:-}"
-    local shards="${DPUMESH_INGEST_SHARDS:-}" shard_shared="${DPUMESH_SHARD_SHARED:-}"
+    local workers="${DPUMESH_ARM_WORKERS:-}"
+    local shared_routing="${DPUMESH_WORKER_SHARED_ROUTING:-}"
     local diag="${DPUMESH_DIAG:-}"
-    step "=== Starting dpumesh_dpu (l7_svc='$l7_svc' dpa_threads='$dpa_threads' rings_per_pod='$rings' arm_workers='$shards' arm_pin='$arm_pin' ingest_reap='$reap' shard_shared='$shard_shared') ==="
+    step "=== Starting dpumesh_dpu (l7_svc='$l7_svc' dpa_threads='$dpa_threads' rings_per_pod='$rings' arm_workers='$workers' arm_pin='$arm_pin' shared_routing='$shared_routing') ==="
     stop_dpu
     local dpu_home; dpu_home=$(ssh "$DPU_HOST" 'echo $HOME')
     ssh "$DPU_HOST" "cat > /tmp/start_dpu_bench.sh << 'LAUNCHER'
 #!/bin/bash
-screen -dmS dpumesh-bench bash -c \"cd $dpu_home/$DPU_BUILD && DPUMESH_PROXY_L7_SVC=$l7_svc DPUMESH_DPA_THREADS=$dpa_threads DPUMESH_RINGS_PER_POD=$rings DPUMESH_INGEST_REAP=$reap DPUMESH_INGEST_SHARDS=$shards DPUMESH_ARM_PIN=$arm_pin DPUMESH_SHARD_SHARED=$shard_shared DPUMESH_DIAG=$diag ./dpumesh_dpu $DPU_PCI -l $log_level > $DPU_LOG 2>&1\"
+screen -dmS dpumesh-bench bash -c \"cd $dpu_home/$DPU_BUILD && DPUMESH_PROXY_L7_SVC=$l7_svc DPUMESH_DPA_THREADS=$dpa_threads DPUMESH_RINGS_PER_POD=$rings DPUMESH_ARM_WORKERS=$workers DPUMESH_ARM_PIN=$arm_pin DPUMESH_WORKER_SHARED_ROUTING=$shared_routing DPUMESH_DIAG=$diag ./dpumesh_dpu $DPU_PCI -l $log_level > $DPU_LOG 2>&1\"
 sleep 2
 pgrep -x dpumesh_dpu | head -1 || echo NO_PID
 LAUNCHER
@@ -426,7 +426,7 @@ arm_balance() {
             comm=dmesh-main
         fi
         case "$comm" in
-            dmesh-main|dmesh-reap|dmesh-w*)
+            dmesh-main|dmesh-w*)
                 pct=$(awk -v d="$delta" -v h="$hz" -v s="$dt" 'BEGIN{printf "%.1f",100*d/h/s}')
                 printf "   %-15s %7s %8s %10s %10s%%\n" "$comm" "$tid" "$cpu" "$allowed" "$pct"
                 [ -z "$csv" ] || echo "$comm,$tid,$cpu,$allowed,$pct,$delta" >>"$csv"

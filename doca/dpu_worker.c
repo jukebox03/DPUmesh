@@ -26,20 +26,18 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <stdint.h>
-#include <sched.h>         /* sched_yield in the ingest reaper thread */
-#include <pthread.h>       /* ingest reaper thread */
-#include <sys/epoll.h>     /* event-driven DPU main loop (epoll on PE handles) */
-#include <sys/eventfd.h>   /* event-driven reaper -> main wake (no busy-spin) */
+#include <sched.h>
+#include <pthread.h>
+#include <sys/epoll.h>
+#include <sys/eventfd.h>
 
 DOCA_LOG_REGISTER(DPU_WORKER);
 
-/* Per-thread flag: 1 on the ingest reaper/shard thread. batch_or_send_tx_ack checks it
- * to DEFER its (rare, FIN/error/drop) TX_ACKs to main instead of touching the comch
- * send path (objs->pe is single-threaded on main). Main + egress workers leave it 0. */
-__thread int dpu_t_is_ingest = 0;
+/* Set on dedicated ARM data workers. */
+__thread int dpu_t_is_worker = 0;
 
-/* recv-cb uses this id to select the current shard queue. */
-extern __thread int dpu_reap_shard;
+/* ARM worker selected by the DPA receive callback. */
+extern __thread int dpu_worker_id;
 
 /* DPUMESH_DIAG emits batch state and idle-flush counters once per second. */
 static int g_dpu_diag = 0;
@@ -47,8 +45,7 @@ static uint64_t g_lull_hits = 0, g_drain_iters = 0;
 static int g_arm_pin_enabled = 0;
 static int g_arm_allowed_n = 0;
 static cpu_set_t g_arm_allowed;
-/* batch-16 hang debug: TX_ACK flush-size histogram + single-send fallbacks.
- * Cross-checked against the host's ACKB rx counters to localize a loss. */
+/* TX_ACK batch counters. */
 static uint64_t g_fl_total = 0, g_fl_n15 = 0, g_fl_n16 = 0, g_single_acks = 0;
 
 static void
@@ -175,17 +172,16 @@ void
 batch_or_send_tx_ack(struct objects *objs, struct pod_state *src_pod,
                      uint16_t port, uint16_t seq)
 {
-    /* Ingest thread (reaper): must not touch the comch send path (objs->pe is
-     * single-threaded on main). Each worker publishes to its own SPSC ring. */
-    if (dpu_t_is_ingest) {
+    /* Dedicated workers publish TX_ACKs to main through SPSC rings. */
+    if (dpu_t_is_worker) {
         if (!src_pod) return;   /* target gone → nothing to ack */
-        int shard = dpu_reap_shard;
-        if (shard < 0 || shard >= objs->n_ingest_shards)
-            shard = 0;
-        struct dpu_ingest_shard *sh = &objs->ingest_shards[shard];
-        uint32_t tail = atomic_load_explicit(&sh->pending_txack_tail,
+        int worker = dpu_worker_id;
+        if (worker < 0 || worker >= objs->n_data_workers)
+            worker = 0;
+        struct dpu_data_worker *worker_state = &objs->data_workers[worker];
+        uint32_t tail = atomic_load_explicit(&worker_state->pending_txack_tail,
                                              memory_order_relaxed);
-        uint32_t head = atomic_load_explicit(&sh->pending_txack_head,
+        uint32_t head = atomic_load_explicit(&worker_state->pending_txack_head,
                                              memory_order_acquire);
         uint32_t next = (tail + 1u) & (DPU_PENDING_TXACK_SIZE - 1u);
         if (next == head) {
@@ -193,15 +189,15 @@ batch_or_send_tx_ack(struct objects *objs, struct pod_state *src_pod,
             if ((pend_full++ & 0xFFFFu) == 0)
                 DOCA_LOG_ERR("worker %d pending_txack full (total %llu) — "
                              "main not draining; port=%u",
-                             shard, (unsigned long long)pend_full, port);
+                             worker, (unsigned long long)pend_full, port);
             return;
         }
-        sh->pending_txack[tail] = (struct dpu_pending_txack_entry) {
+        worker_state->pending_txack[tail] = (struct dpu_pending_txack_entry) {
             .pod_id = src_pod->pod_id,
             .port = port,
             .seq = seq,
         };
-        atomic_store_explicit(&sh->pending_txack_tail, next,
+        atomic_store_explicit(&worker_state->pending_txack_tail, next,
                               memory_order_release);
         dpu_wake_main(objs);
         return;
@@ -274,8 +270,7 @@ lb_pick(struct objects *objs, int16_t svc)
     int n = collect_live_hosts(objs, svc, hosts);
     if (n <= 0)
         return -1;
-    /* Per-service RR cursor. Sharded ingest advances it from M threads — a relaxed
-     * atomic keeps it race-free; a rare double-pick only nudges LB balance (benign). */
+    /* ARM workers share the per-service round-robin cursor. */
     uint32_t i = __atomic_fetch_add(&objs->svc_rr[svc], 1, __ATOMIC_RELAXED);
     return hosts[i % (uint32_t)n];
 }
@@ -337,21 +332,21 @@ static int
 drain_pending_txack(struct objects *objs)
 {
     int sent = 0;
-    for (int s = 0; s < objs->n_ingest_shards && sent < 8192; s++) {
-        struct dpu_ingest_shard *sh = &objs->ingest_shards[s];
-        uint32_t head = atomic_load_explicit(&sh->pending_txack_head,
+    for (int s = 0; s < objs->n_data_workers && sent < 8192; s++) {
+        struct dpu_data_worker *worker_state = &objs->data_workers[s];
+        uint32_t head = atomic_load_explicit(&worker_state->pending_txack_head,
                                              memory_order_relaxed);
-        uint32_t tail = atomic_load_explicit(&sh->pending_txack_tail,
+        uint32_t tail = atomic_load_explicit(&worker_state->pending_txack_tail,
                                              memory_order_acquire);
         while (head != tail && sent < 8192) {
-            struct dpu_pending_txack_entry e = sh->pending_txack[head];
+            struct dpu_pending_txack_entry e = worker_state->pending_txack[head];
             head = (head + 1u) & (DPU_PENDING_TXACK_SIZE - 1u);
-            atomic_store_explicit(&sh->pending_txack_head, head,
+            atomic_store_explicit(&worker_state->pending_txack_head, head,
                                   memory_order_release);
             batch_or_send_tx_ack(objs, find_pod_by_id(objs, e.pod_id),
                                  e.port, e.seq);
             sent++;
-            tail = atomic_load_explicit(&sh->pending_txack_tail,
+            tail = atomic_load_explicit(&worker_state->pending_txack_tail,
                                         memory_order_acquire);
         }
     }
@@ -359,11 +354,11 @@ drain_pending_txack(struct objects *objs)
 }
 
 static uint32_t
-pending_txack_usage(const struct dpu_ingest_shard *sh)
+pending_txack_usage(const struct dpu_data_worker *worker_state)
 {
-    uint32_t tail = atomic_load_explicit(&sh->pending_txack_tail,
+    uint32_t tail = atomic_load_explicit(&worker_state->pending_txack_tail,
                                          memory_order_acquire);
-    uint32_t head = atomic_load_explicit(&sh->pending_txack_head,
+    uint32_t head = atomic_load_explicit(&worker_state->pending_txack_head,
                                          memory_order_acquire);
     return (tail - head) & (DPU_PENDING_TXACK_SIZE - 1u);
 }
@@ -383,10 +378,8 @@ process_completion_queue(struct objects *objs, int max_batch)
         if (!entry)
             break;
 
-        /* Returns 1 consumed, 0 retry (alloc/pool pressure — retain entry),
-         * -1 dropped (sender already TX_ACKed). Shard 0: the single-reaper /
-         * inline path (its private structures ARE the shared ones for M<=1). */
-        int result = px_ingest_forward(objs, 0, entry);
+        /* Worker 0 owns the A=1 connection and routing state. */
+        int result = px_process_forward(objs, 0, entry);
         if (result == 0)
             break;  /* engine backpressure, retry next iteration */
 
@@ -403,62 +396,53 @@ process_completion_queue(struct objects *objs, int max_batch)
     return processed;
 }
 
-/* Each data worker owns one consumer PE, connection shard, and DMA engine.
- * The main thread performs Comch sends. */
-
-/* Select the connection owner; xshard handles non-owner completions. */
+/* Select the connection owner. */
 static inline int
-owner_shard(struct objects *objs, int here, const dpu_comp_entry_t *e)
+owner_worker(struct objects *objs, int here, const dpu_comp_entry_t *e)
 {
-    if (objs->shard_shared_routing || objs->n_ingest_shards <= 1)
+    if (objs->worker_shared_routing || objs->n_data_workers <= 1)
         return here;
-    return dmesh_worker_for_port(e->src_port, objs->n_ingest_shards);
+    return dmesh_worker_for_port(e->src_port, objs->n_data_workers);
 }
 
-/* Wake a parked shard after a cross-shard handoff. */
+/* Wake a parked worker after a cross-worker handoff. */
 static void
-dpu_wake_shard(struct dpu_ingest_shard *sh)
+dpu_wake_worker(struct dpu_data_worker *worker_state)
 {
-    if (sh->wake_fd < 0)
+    if (worker_state->wake_fd < 0)
         return;
     int expected = 1;
     if (!atomic_compare_exchange_strong_explicit(
-            &sh->parked, &expected, 0,
+            &worker_state->parked, &expected, 0,
             memory_order_acq_rel, memory_order_acquire))
         return;
     uint64_t one = 1;
     ssize_t n;
     do {
-        n = write(sh->wake_fd, &one, sizeof(one));
+        n = write(worker_state->wake_fd, &one, sizeof(one));
     } while (n < 0 && errno == EINTR);
     (void)n;
 }
 
-/* Hand a reply to its owner shard. Returns -1 when the inbox is full. */
+/* Hand a reply to its owner worker. Returns -1 when the inbox is full. */
 static int
-xshard_handoff(struct objects *objs, int owner, const dpu_comp_entry_t *e)
+cross_worker_handoff(struct objects *objs, int owner, const dpu_comp_entry_t *e)
 {
-    struct dpu_ingest_shard *dst = &objs->ingest_shards[owner];
-    return mpsc_comp_queue_enqueue(&dst->xshard, e);
+    struct dpu_data_worker *dst = &objs->data_workers[owner];
+    return mpsc_comp_queue_enqueue(&dst->cross_worker, e);
 }
 
 /* ====== DPU Worker ====== */
 
-/* Consumer-side REAP: progress consumer_pe (DPA forward completions → comp_queue),
- * release recv backpressure (resubmit deferred recv tasks once comp_queue drains
- * below BP_LOW), and drain the consumer_retry stash. Every step here touches
- * consumer_pe / its recv-task pool, so it MUST run on exactly one thread — the
- * ingest reaper when active, else inline on the main loop. Returns whether the
- * consumer PE advanced. */
+/* Progress the A=1 consumer PE and its deferred receive tasks. */
 static int
-dpu_reap_iteration(struct objects *objs)
+dpu_progress_data_pe(struct objects *objs)
 {
     int did_consumer = doca_pe_progress(objs->consumer_pe);
 
-    /* Backpressure release: resubmit deferred recv tasks once the ingest
-     * hand-off (comp_queue) drains below BP_LOW. */
+    /* Resubmit receives below the completion-queue low watermark. */
     if (objs->num_deferred_recv > 0 &&
-        ingest_usage(objs) < COMP_QUEUE_BP_LOW) {
+        completion_usage(objs) < COMP_QUEUE_BP_LOW) {
         int remaining = 0, resubmitted = 0, original = objs->num_deferred_recv;
         for (int i = 0; i < original; i++) {
             struct doca_task *t = objs->deferred_recv[i];
@@ -487,7 +471,7 @@ dpu_reap_iteration(struct objects *objs)
 void
 dpu_wake_main(struct objects *objs)
 {
-    if (objs->reaper_wake_fd < 0)
+    if (objs->main_wake_fd < 0)
         return;
     int expected = 1;
     if (!atomic_compare_exchange_strong_explicit(
@@ -497,78 +481,12 @@ dpu_wake_main(struct objects *objs)
     uint64_t one = 1;
     ssize_t n;
     do {
-        n = write(objs->reaper_wake_fd, &one, sizeof(one));
+        n = write(objs->main_wake_fd, &one, sizeof(one));
     } while (n < 0 && errno == EINTR);
     (void)n;
 }
 
-static void dpu_send_wake(struct objects *objs);   /* fwd decl: the reaper sends the DPA keepalive */
-
-/* Ingest reaper owns consumer_pe, parses queued completions, and wakes main for emit. */
-static void *
-dpu_reaper_main(void *arg)
-{
-    struct objects *objs = (struct objects *)arg;
-    dpu_t_is_ingest = 1;   /* our TX_ACKs defer to main (comch send is main-only) */
-    dpu_arm_name_current("reap", 0);
-    dpu_arm_pin_current("worker", 0);
-
-    doca_notification_handle_t cfd = 0;
-    int ep = -1;
-    if (doca_pe_get_notification_handle(objs->consumer_pe, &cfd) == DOCA_SUCCESS)
-        ep = epoll_create1(0);
-    if (ep >= 0) {
-        struct epoll_event ec = { .events = EPOLLIN, .data = { .u32 = 0 } };  /* consumer_pe */
-        if (epoll_ctl(ep, EPOLL_CTL_ADD, (int)cfd, &ec) != 0) { close(ep); ep = -1; }
-    }
-    if (ep < 0) {
-        /* Without a notification fd the reaper cannot sleep; busy-spin is forbidden,
-         * so stop and let the caller fall back to the inline (reaper-off) driver. */
-        DOCA_LOG_ERR("reaper: consumer_pe epoll setup failed — reaper disabled");
-        objs->reaper_active = 0;
-        objs->reaper_stop = 1;
-        return NULL;
-    }
-
-    /* The DPA WAKE keepalive (poke a parked EU ~1 kHz) is a comch producer send on
-     * the dpa_comch channels — which are bound to consumer_pe. Only the consumer_pe
-     * OWNER may submit on it, so the reaper (not main) sends it while the reaper is
-     * active; otherwise main's submit races the reaper's doca_pe_progress and corrupts
-     * the PE (the DPA then parks forever → forward ingest freezes). */
-    struct timespec r_last, r_now;
-    clock_gettime(CLOCK_MONOTONIC, &r_last);
-    while (!objs->reaper_stop) {
-        clock_gettime(CLOCK_MONOTONIC, &r_now);
-        if ((r_now.tv_sec - r_last.tv_sec) + (r_now.tv_nsec - r_last.tv_nsec) / 1e9 >= 0.001) {
-            dpu_send_wake(objs);
-            r_last = r_now;
-        }
-        int did  = dpu_reap_iteration(objs);            /* reap DPA completions → comp_queue */
-        int proc = process_completion_queue(objs, 128); /* parse/route (ingest) → egress lanes */
-        if (did || proc) {
-            dpu_wake_main(objs);      /* egress work / deferred TX_ACKs → let main emit+send */
-            continue;                 /* stay hot while there is work */
-        }
-        /* Idle: arm consumer_pe, RE-CHECK once (close the drain→arm race), then block
-         * on epoll (1 ms backstop to re-poll even if a notification is missed). */
-        (void)doca_pe_request_notification(objs->consumer_pe);
-        did  = dpu_reap_iteration(objs);
-        proc = process_completion_queue(objs, 128);
-        if (did || proc) {
-            (void)doca_pe_clear_notification(objs->consumer_pe, cfd);
-            dpu_wake_main(objs);
-            continue;
-        }
-        struct epoll_event evs[1];
-        (void)epoll_wait(ep, evs, 1, 1);
-        (void)doca_pe_clear_notification(objs->consumer_pe, cfd);
-    }
-    close(ep);
-    return NULL;
-}
-
-/* Convert the asynchronous EU ADD_ACK barrier into the only data-plane ready
- * publication. Runs on main because Comch result sends are main-PE-owned. */
+/* Publish pod readiness after all EU setup acknowledgements arrive. */
 static int
 dpu_finalize_pending_pod_inits(struct objects *objs)
 {
@@ -617,20 +535,12 @@ dpu_finalize_pending_pod_inits(struct objects *objs)
     return finalized;
 }
 
-/* One pass of the DPU worker's drain work: reap the consumer PE (unless the reaper
- * thread owns it), progress the ctrl PE, retry deferred TX_ACKs, drain the
- * completion queue, run egress. Returns non-zero if any progress was made. The
- * event-driven driver uses this to detect the idle point; the busy-poll driver
- * calls it once per iteration. Shared by both drivers so they cannot drift. */
+/* Progress the main-owned control, emission, and A=1 data paths. */
 static int
 dpu_drain_iteration(struct objects *objs)
 {
-    /* Reap + process inline unless the reaper thread owns ingest. When the reaper is
-     * active it does BOTH reap (consumer_pe → comp_queue) AND process (comp_queue →
-     * px_ingest_forward: parse/route). consumer_pe/deferred_recv/consumer_retry and the
-     * proxy conn-table/conntrack are then its exclusive domain; main is left with
-     * ctrl + emit + all comch sends. */
-    uint8_t did_consumer = objs->reaper_active ? 0 : (uint8_t)dpu_reap_iteration(objs);
+    /* A=1 progresses data inline; A>=2 leaves data progress to ARM workers. */
+    uint8_t did_consumer = objs->dedicated_workers ? 0 : (uint8_t)dpu_progress_data_pe(objs);
     uint8_t did_ctrl     = doca_pe_progress(objs->pe);  /* new conns, REGISTER, TX_DATA */
     int finalized_init   = dpu_finalize_pending_pod_inits(objs);
     int sent_init_result = server_flush_pod_init_results(objs);
@@ -639,12 +549,11 @@ dpu_drain_iteration(struct objects *objs)
      * slots are available. */
     drain_deferred_tx_acks(objs);
 
-    /* Send the TX_ACKs the ingest thread deferred to us (comch send is main-only). */
-    int sent_pend = objs->reaper_active ? drain_pending_txack(objs) : 0;
+    /* Emit worker-produced TX_ACKs from the main Comch PE. */
+    int sent_pend = objs->dedicated_workers ? drain_pending_txack(objs) : 0;
 
-    /* Drain deferred completion queue (proxy ingest) — only when reaper OFF; the
-     * reaper does process_completion_queue itself when active. */
-    int proc = objs->reaper_active ? 0 : process_completion_queue(objs, 128);
+    /* A=1 processes its completion queue on main. */
+    int proc = objs->dedicated_workers ? 0 : process_completion_queue(objs, 128);
 
     /* SG-DMA egress: submit queued per-dst batches + emit completed batches'
      * REV_DONE entries and custody TX_ACKs (the unified DPU→host reverse path). */
@@ -656,7 +565,7 @@ dpu_drain_iteration(struct objects *objs)
     int cleaned_pods = server_progress_pod_cleanup(objs);
 
     /* Flush partial batches when the active progress path is idle. */
-    int lull = objs->reaper_active ? (!px_progressed && sent_pend == 0) : (proc == 0);
+    int lull = objs->dedicated_workers ? (!px_progressed && sent_pend == 0) : (proc == 0);
     if (lull)
         for (int i = 0; i < objs->num_pods; i++) {
             flush_txack_batch(objs, &objs->pods[i]);
@@ -671,7 +580,7 @@ dpu_drain_iteration(struct objects *objs)
 
 /* DIAG dump (once/sec): per-pod TX_ACK/REV_DONE batch fill + pending_txack + how often
  * the idle-flush fired. A pod stuck with tx>0/rev>0 while lull=0 == starvation (batch
- * below threshold + no idle-flush). Shard queue depths show ingest backlog.
+ * below threshold + no idle-flush). Worker queue depths show forward backlog.
  * QUIET AT IDLE: skipped while nothing moved since the last dump (no queued/batched
  * work and all flush counters frozen) — the line before silence carries the final
  * counters, so a fully-idle hang still leaves its state in the log without the
@@ -683,9 +592,9 @@ dpu_diag_dump(struct objects *objs)
     static int prev_pend = -1;   /* -1 → always print the first dump */
     uint32_t pending = 0;
     int busy = 0;
-    for (int s = 0; s < objs->n_ingest_shards; s++) {
-        pending += pending_txack_usage(&objs->ingest_shards[s]);
-        busy |= (comp_queue_usage(&objs->ingest_shards[s].queue) != 0);
+    for (int s = 0; s < objs->n_data_workers; s++) {
+        pending += pending_txack_usage(&objs->data_workers[s]);
+        busy |= (comp_queue_usage(&objs->data_workers[s].queue) != 0);
     }
     busy |= pending != 0;
     {
@@ -716,14 +625,14 @@ dpu_diag_dump(struct objects *objs)
                   (int)pending,
                   (unsigned long long)g_fl_total, (unsigned long long)g_fl_n15,
                   (unsigned long long)g_fl_n16, (unsigned long long)g_single_acks);
-    for (int s = 0; s < objs->n_ingest_shards && n < (int)sizeof(buf) - 90; s++) {
-        struct dpu_ingest_shard *sh = &objs->ingest_shards[s];
+    for (int s = 0; s < objs->n_data_workers && n < (int)sizeof(buf) - 90; s++) {
+        struct dpu_data_worker *worker_state = &objs->data_workers[s];
         n += snprintf(buf + n, sizeof(buf) - n, "%u/l%llu/x%llu ",
-                      comp_queue_usage(&sh->queue),
+                      comp_queue_usage(&worker_state->queue),
                       (unsigned long long)atomic_load_explicit(
-                          &sh->stat_local_completions, memory_order_relaxed),
+                          &worker_state->stat_local_completions, memory_order_relaxed),
                       (unsigned long long)atomic_load_explicit(
-                          &sh->stat_xshard_out, memory_order_relaxed));
+                          &worker_state->stat_cross_worker_out, memory_order_relaxed));
     }
     n += snprintf(buf + n, sizeof(buf) - n, "] pods:");
     int np = __atomic_load_n(&objs->num_pods, __ATOMIC_ACQUIRE);
@@ -743,9 +652,7 @@ dpu_diag_dump(struct objects *objs)
     g_drain_iters = 0;
 }
 
-/* Send DPA_MSG_WAKE to every running EU (the ~1 ms keepalive). A parked EU is not
- * woken by a silent forward-ring desc->valid=1 store (no completion), so the ARM
- * pokes it on cadence; it re-scans its rings on the WAKE. No-op under load. */
+/* Send the periodic wake message to every running DPA EU. */
 static void
 dpu_send_wake(struct objects *objs)
 {
@@ -760,208 +667,201 @@ dpu_send_wake(struct objects *objs)
                                                 &trigger, sizeof(trigger));
 }
 
-/* ====== Design-A shard thread body (M consumer PEs) ====== */
+/* ====== ARM data workers ====== */
 
-/* Send DPA WAKE to this shard's channels. Only the owning shard submits on each
- * channel's producer PE. */
+/* Send the periodic wake message to this worker's DPA channels. */
 static void
-dpu_send_wake_shard(struct objects *objs, int id)
+dpu_send_wake_worker(struct objects *objs, int id)
 {
     if (!objs->dpa_thread_running_any)
         return;
     struct comch_msg trigger;
     memset(&trigger, 0, sizeof(trigger));
     trigger.type = DPA_MSG_WAKE;
-    int M = objs->n_ingest_shards;
-    for (int k = id; k < objs->num_dpa_threads; k += M)
+    int worker_count = objs->n_data_workers;
+    for (int k = id; k < objs->num_dpa_threads; k += worker_count)
         if (objs->dpa_thread_running[k])
             (void)dmesh_doca_dpa_msgq_send_try(&objs->dpa_comches[k]->send,
                                                 &trigger, sizeof(trigger));
 }
 
-/* Per-shard REAP: progress THIS shard's PE (recv-cb fills sh->queue), release its
- * recv backpressure, and — shard 0 only, which owns the data-path consumer's PE —
- * drain the consumer_retry stash. Returns whether the PE advanced. */
+/* Progress one worker's consumer PE and deferred receive tasks. */
 static int
-dpu_reap_shard_pe(struct objects *objs, struct dpu_ingest_shard *sh)
+dpu_progress_worker_pe(struct objects *objs, struct dpu_data_worker *worker_state)
 {
-    int did = doca_pe_progress(sh->pe);
-    if (sh->num_deferred_recv > 0 &&
-        comp_queue_usage(&sh->queue) < COMP_QUEUE_BP_LOW) {
-        int remaining = 0, original = sh->num_deferred_recv;
+    int did = doca_pe_progress(worker_state->pe);
+    if (worker_state->num_deferred_recv > 0 &&
+        comp_queue_usage(&worker_state->queue) < COMP_QUEUE_BP_LOW) {
+        int remaining = 0, original = worker_state->num_deferred_recv;
         for (int i = 0; i < original; i++) {
-            struct doca_task *t = sh->deferred_recv[i];
+            struct doca_task *t = worker_state->deferred_recv[i];
             if (doca_task_submit(t) != DOCA_SUCCESS)
-                sh->deferred_recv[remaining++] = t;
+                worker_state->deferred_recv[remaining++] = t;
         }
-        sh->num_deferred_recv = remaining;
+        worker_state->num_deferred_recv = remaining;
     }
-    if (sh->id == 0)
+    if (worker_state->id == 0)
         objects_drain_consumer_retry(objs);
     return did;
 }
 
 /* Maximum DPA completions processed before DMA progress. */
-#define DPU_SHARD_INGEST_BUDGET 64
+#define DPU_WORKER_COMPLETION_BUDGET 64
 
-/* Drain local and cross-shard completions while preserving each queue's front on
+/* Drain local and cross-worker completions while preserving each queue's front on
  * backpressure. Returns the number of completions advanced. */
 static int
-dpu_shard_run(struct objects *objs, struct dpu_ingest_shard *sh)
+dpu_worker_run(struct objects *objs, struct dpu_data_worker *worker_state)
 {
-    int did = 0, woke[MAX_INGEST_SHARDS] = { 0 };
+    int did = 0, woke[MAX_ARM_WORKERS] = { 0 };
 
-    /* own reaped completions (this shard's EU) */
-    for (int n = 0; n < DPU_SHARD_INGEST_BUDGET; n++) {
-        dpu_comp_entry_t *e = comp_queue_peek(&sh->queue);
+    /* Completions received through this worker's consumer PE. */
+    for (int n = 0; n < DPU_WORKER_COMPLETION_BUDGET; n++) {
+        dpu_comp_entry_t *e = comp_queue_peek(&worker_state->queue);
         if (!e)
             break;
-        int owner = owner_shard(objs, sh->id, e);
-        if (owner == sh->id) {
-            if (px_ingest_forward(objs, sh->id, e) == 0)
+        int owner = owner_worker(objs, worker_state->id, e);
+        if (owner == worker_state->id) {
+            if (px_process_forward(objs, worker_state->id, e) == 0)
                 break;                   /* engine backpressure — retain, retry */
-            atomic_fetch_add_explicit(&sh->stat_local_completions, 1,
+            atomic_fetch_add_explicit(&worker_state->stat_local_completions, 1,
                                       memory_order_relaxed);
         } else {
-            if (xshard_handoff(objs, owner, e) != 0)
+            if (cross_worker_handoff(objs, owner, e) != 0)
                 break;                   /* owner inbox full — retain, retry */
             woke[owner] = 1;
-            atomic_fetch_add_explicit(&sh->stat_xshard_out, 1,
+            atomic_fetch_add_explicit(&worker_state->stat_cross_worker_out, 1,
                                       memory_order_relaxed);
         }
-        comp_queue_dequeue(&sh->queue);
+        comp_queue_dequeue(&worker_state->queue);
         did++;
     }
 
-    /* Cross-shard reply inbox. */
-    for (int n = 0; n < DPU_SHARD_INGEST_BUDGET; n++) {
-        dpu_comp_entry_t *xe = mpsc_comp_queue_peek(&sh->xshard);
+    /* Cross-worker reply inbox. */
+    for (int n = 0; n < DPU_WORKER_COMPLETION_BUDGET; n++) {
+        dpu_comp_entry_t *xe = mpsc_comp_queue_peek(&worker_state->cross_worker);
         if (!xe)
             break;
-        if (px_ingest_forward(objs, sh->id, xe) == 0)
+        if (px_process_forward(objs, worker_state->id, xe) == 0)
             break;                       /* backpressure — leave the front, retry */
-        mpsc_comp_queue_dequeue(&sh->xshard);
-        atomic_fetch_add_explicit(&sh->stat_xshard_in, 1,
+        mpsc_comp_queue_dequeue(&worker_state->cross_worker);
+        atomic_fetch_add_explicit(&worker_state->stat_cross_worker_in, 1,
                                   memory_order_relaxed);
         did++;
     }
 
-    /* Resume this shard's egress-backpressured conns (see process_completion_queue).
-     * Shard-local list, shard-local conn table → no lock. */
-    did += px_drain_stalled(objs, sh->id);
+    /* Resume connections stalled by egress backpressure. */
+    did += px_drain_stalled(objs, worker_state->id);
     /* Submit DMA, progress completions, and retire owned lanes. */
-    did += px_worker_drain(objs, sh->id);
+    did += px_worker_drain(objs, worker_state->id);
 
-    for (int s = 0; s < objs->n_ingest_shards; s++)
+    for (int s = 0; s < objs->n_data_workers; s++)
         if (woke[s])
-            dpu_wake_shard(&objs->ingest_shards[s]);
+            dpu_wake_worker(&objs->data_workers[s]);
     return did;
 }
 
-/* Ingest shard owner for its consumer PE, wake fd, queue, and DPA channels. */
+/* ARM data worker event loop. */
 static void *
-dpu_shard_main(void *arg)
+dpu_data_worker_main(void *arg)
 {
-    struct dpu_ingest_shard *sh = (struct dpu_ingest_shard *)arg;
-    struct objects *objs = sh->objs;
-    dpu_t_is_ingest = 1;                 /* our TX_ACKs defer to main (comch send is main-only) */
-    dpu_reap_shard = sh->id;             /* recv-cb routes completions to sh->queue */
-    dpu_arm_name_current("worker", sh->id);
-    dpu_arm_pin_current("worker", sh->id);
+    struct dpu_data_worker *worker_state = (struct dpu_data_worker *)arg;
+    struct objects *objs = worker_state->objs;
+    dpu_t_is_worker = 1;
+    dpu_worker_id = worker_state->id;
+    dpu_arm_name_current("worker", worker_state->id);
+    dpu_arm_pin_current("worker", worker_state->id);
 
     doca_notification_handle_t cfd = 0;
-    int dfd = px_worker_notification_fd(objs, sh->id);
+    int dfd = px_worker_notification_fd(objs, worker_state->id);
     int ep = -1;
-    if (doca_pe_get_notification_handle(sh->pe, &cfd) == DOCA_SUCCESS)
+    if (doca_pe_get_notification_handle(worker_state->pe, &cfd) == DOCA_SUCCESS)
         ep = epoll_create1(0);
     if (ep >= 0) {
         struct epoll_event ec = { .events = EPOLLIN, .data = { .u32 = 0 } };  /* own PE fd */
-        struct epoll_event ew = { .events = EPOLLIN, .data = { .u32 = 1 } };  /* cross-shard wake */
+        struct epoll_event ew = { .events = EPOLLIN, .data = { .u32 = 1 } };  /* cross-worker wake */
         if (epoll_ctl(ep, EPOLL_CTL_ADD, (int)cfd, &ec) != 0 ||
-            epoll_ctl(ep, EPOLL_CTL_ADD, sh->wake_fd, &ew) != 0) { close(ep); ep = -1; }
+            epoll_ctl(ep, EPOLL_CTL_ADD, worker_state->wake_fd, &ew) != 0) { close(ep); ep = -1; }
         if (ep >= 0 && dfd >= 0) {
             struct epoll_event ed = { .events = EPOLLIN, .data = { .u32 = 2 } };
             if (epoll_ctl(ep, EPOLL_CTL_ADD, dfd, &ed) != 0) {
                 DOCA_LOG_WARN("worker %d: DMA PE notification unavailable; "
-                              "1 ms event-loop backstop remains active", sh->id);
+                              "1 ms event-loop backstop remains active", worker_state->id);
                 dfd = -1;
             }
         }
     }
     if (ep < 0) {
-        DOCA_LOG_ERR("ingest shard %d: consumer_pe epoll setup failed — shard disabled", sh->id);
-        atomic_store_explicit(&sh->init_state, -1, memory_order_release);
+        DOCA_LOG_ERR("ARM worker %d: consumer PE event-loop setup failed",
+                     worker_state->id);
+        atomic_store_explicit(&worker_state->init_state, -1, memory_order_release);
         return NULL;
     }
 
-    atomic_store_explicit(&sh->init_state, 1, memory_order_release);
+    atomic_store_explicit(&worker_state->init_state, 1, memory_order_release);
 
     struct timespec last, now;
     clock_gettime(CLOCK_MONOTONIC, &last);
-    while (!sh->stop) {
+    while (!worker_state->stop) {
         clock_gettime(CLOCK_MONOTONIC, &now);
         if ((now.tv_sec - last.tv_sec) + (now.tv_nsec - last.tv_nsec) / 1e9 >= 0.001) {
-            dpu_send_wake_shard(objs, sh->id);
+            dpu_send_wake_worker(objs, worker_state->id);
             last = now;
         }
-        int did = dpu_reap_shard_pe(objs, sh);
-        int run = dpu_shard_run(objs, sh);
+        int did = dpu_progress_worker_pe(objs, worker_state);
+        int run = dpu_worker_run(objs, worker_state);
         if (did || run) {
             dpu_wake_main(objs);
             continue;                    /* stay hot while there is work */
         }
-        /* Idle: arm own PE, PARK, RE-CHECK (close the reap→park + xshard→park races),
-         * then sleep on {DPA PE, DMA PE, cross-shard wake}, 1 ms backstop. */
-        (void)doca_pe_request_notification(sh->pe);
+        /* Arm notifications, recheck queues, then wait up to 1 ms. */
+        (void)doca_pe_request_notification(worker_state->pe);
         if (dfd >= 0)
-            (void)px_worker_arm_notification(objs, sh->id);
-        atomic_store_explicit(&sh->parked, 1, memory_order_release);
-        if (dpu_reap_shard_pe(objs, sh) || dpu_shard_run(objs, sh) ||
-            !mpsc_comp_queue_empty(&sh->xshard)) {
-            atomic_store_explicit(&sh->parked, 0, memory_order_release);
-            (void)doca_pe_clear_notification(sh->pe, cfd);
-            px_worker_clear_notification(objs, sh->id, dfd);
+            (void)px_worker_arm_notification(objs, worker_state->id);
+        atomic_store_explicit(&worker_state->parked, 1, memory_order_release);
+        if (dpu_progress_worker_pe(objs, worker_state) || dpu_worker_run(objs, worker_state) ||
+            !mpsc_comp_queue_empty(&worker_state->cross_worker)) {
+            atomic_store_explicit(&worker_state->parked, 0, memory_order_release);
+            (void)doca_pe_clear_notification(worker_state->pe, cfd);
+            px_worker_clear_notification(objs, worker_state->id, dfd);
             dpu_wake_main(objs);
             continue;
         }
         struct epoll_event evs[3];
         (void)epoll_wait(ep, evs, 3, 1);
-        atomic_store_explicit(&sh->parked, 0, memory_order_release);
-        uint64_t drain; ssize_t rn = read(sh->wake_fd, &drain, sizeof(drain)); (void)rn;
-        (void)doca_pe_clear_notification(sh->pe, cfd);
-        px_worker_clear_notification(objs, sh->id, dfd);
+        atomic_store_explicit(&worker_state->parked, 0, memory_order_release);
+        uint64_t drain; ssize_t rn = read(worker_state->wake_fd, &drain, sizeof(drain)); (void)rn;
+        (void)doca_pe_clear_notification(worker_state->pe, cfd);
+        px_worker_clear_notification(objs, worker_state->id, dfd);
     }
     close(ep);
     return NULL;
 }
 
 static void
-stop_ingest_shards(struct objects *objs)
+stop_data_workers(struct objects *objs)
 {
-    for (int s = 0; s < objs->n_ingest_shards; s++) {
-        struct dpu_ingest_shard *sh = &objs->ingest_shards[s];
-        if (!sh->running)
+    for (int s = 0; s < objs->n_data_workers; s++) {
+        struct dpu_data_worker *worker_state = &objs->data_workers[s];
+        if (!worker_state->running)
             continue;
-        sh->stop = 1;
-        dpu_wake_shard(sh);
+        worker_state->stop = 1;
+        dpu_wake_worker(worker_state);
     }
-    for (int s = 0; s < objs->n_ingest_shards; s++) {
-        struct dpu_ingest_shard *sh = &objs->ingest_shards[s];
-        if (!sh->running)
+    for (int s = 0; s < objs->n_data_workers; s++) {
+        struct dpu_data_worker *worker_state = &objs->data_workers[s];
+        if (!worker_state->running)
             continue;
-        pthread_join(sh->thread, NULL);
-        sh->running = 0;
-        if (sh->wake_fd >= 0) {
-            close(sh->wake_fd);
-            sh->wake_fd = -1;
+        pthread_join(worker_state->thread, NULL);
+        worker_state->running = 0;
+        if (worker_state->wake_fd >= 0) {
+            close(worker_state->wake_fd);
+            worker_state->wake_fd = -1;
         }
     }
 }
 
-/* Final readiness barrier. Call only after the selected main-loop driver (and
- * any ingest-owner threads) is fully constructed. This is the only place that
- * raises dpu_ready, so POD_INIT_READY cannot precede a component whose setup may
- * still fail. */
+/* Publish DPU readiness after all selected execution paths are initialized. */
 static void
 dpu_publish_ready_and_setup_pods(struct objects *objs)
 {
@@ -995,35 +895,24 @@ run_dpu_worker(struct objects *objs)
 {
     doca_error_t result;
 
-    /* Event-driven main loop: the ARM SLEEPS on epoll over the two PE notification
-     * handles, waking on a real DPA→DPU completion (FWD_DONE/REV_DONE), a host
-     * control message, OR a ~1 ms epoll timeout. On each tick it sends the 1 ms
-     * DPU→DPA WAKE keepalive (the DPA EU parks when idle and a silent desc->valid=1
-     * store can't wake it, so the ARM pokes it ~1 kHz). This is NOT busy-poll — the
-     * ARM sleeps between ticks, so idle CPU is a few % (≈1 kHz wakeups), vs a full
-     * core for busy-poll. If the epoll setup fails, it falls back to busy-poll. */
+    /* DPA wake cadence for parked EUs. */
     const double keepalive_sec = 0.001;   /* 1 ms DPU→DPA WAKE cadence */
     struct timespec now, last_kick;
     double kick_elapsed;
 
     DOCA_LOG_INFO("Starting DPU worker");
 
-    /* Init pods table. See object.h pods[] concurrency model — lock-free
-     * with atomic publication on `registered`; no mutex needed. */
+    /* Initialize pod state. */
     memset(objs->pods, 0, sizeof(objs->pods));
     objs->num_pods = 0;
 
-    /* find_pod_by_id's O(1) pod_id->slot map starts empty (-1 = no live pod). The
-     * per-service LB cursor starts at 0. Done before any PE/thread starts, so plain
-     * stores are race-free here. (The service->backend set is derived from pods[]
-     * live, so there is no service table to initialize.) */
+    /* Initialize pod lookup and load-balancer cursors. */
     for (int i = 0; i < POD_ID_SPACE; i++) {
         objs->pod_id_to_slot[i] = -1;
         objs->svc_rr[i]         = 0;
     }
 
-    /* Init DPU connection tracking (model B). Heap-allocated — too large to embed
-     * on the stack. calloc zeroes every in_use flag; next_uport starts at BASE. */
+    /* Initialize shared connection tracking. */
     objs->conntrack = calloc(1, sizeof(struct dpu_conntrack));
     if (!objs->conntrack) {
         DOCA_LOG_ERR("Failed to allocate DPU connection tracking table");
@@ -1037,8 +926,7 @@ run_dpu_worker(struct objects *objs)
     objs->comp_queue.tail = 0;
     objs->num_deferred_recv = 0;
 
-    /* Not ready until DPA + msgq init completes (below). Gates process_mmap_msg's
-     * setup_pod_dma so a fast host's early mmaps don't set up before the msgq. */
+    /* Readiness is published after all data paths are initialized. */
     objs->dpu_ready = 0;
 
     /* Configure DPA EU threads and forward rings before the server accepts pod
@@ -1057,70 +945,68 @@ run_dpu_worker(struct objects *objs)
               objs->k_rings = v;
       } }
 
-    /* A=1 runs inline; A>=2 uses homogeneous data workers. */
-    objs->reaper_active = 0;
-    objs->reaper_stop = 0;
-    objs->reaper_wake_fd = -1;                       /* -1 → dpu_wake_main is a no-op */
+    /* A=1 runs on main; A>=2 uses dedicated ARM data workers. */
+    objs->dedicated_workers = 0;
+    objs->main_wake_fd = -1;
     atomic_store_explicit(&objs->main_parked, 0, memory_order_relaxed);
-    /* Configure data-worker shards. Shared routing uses routing_lock; the
-     * default keeps connection and conntrack state private to each worker. */
-    objs->n_ingest_shards = 1;
-    objs->shard_shared_routing = 0;
+    /* Configure ARM data workers and routing ownership. */
+    objs->n_data_workers = 1;
+    objs->worker_shared_routing = 0;
     pthread_mutex_init(&objs->routing_lock, NULL);
-    for (int s = 0; s < MAX_INGEST_SHARDS; s++) {
-        struct dpu_ingest_shard *sh = &objs->ingest_shards[s];
-        sh->objs = objs;
-        sh->id = s;
-        sh->pe = NULL;                   /* = consumer_pes[s], set once PEs exist */
-        sh->queue.head = sh->queue.tail = 0;
-        mpsc_comp_queue_init(&sh->xshard);
-        atomic_init(&sh->pending_txack_head, 0);
-        atomic_init(&sh->pending_txack_tail, 0);
-        atomic_init(&sh->stat_local_completions, 0);
-        atomic_init(&sh->stat_xshard_out, 0);
-        atomic_init(&sh->stat_xshard_in, 0);
-        sh->num_deferred_recv = 0;
-        sh->wake_fd = -1;
-        atomic_store_explicit(&sh->parked, 0, memory_order_relaxed);
-        atomic_store_explicit(&sh->init_state, 0, memory_order_relaxed);
-        sh->stop = 0;
-        sh->running = 0;
+    for (int s = 0; s < MAX_ARM_WORKERS; s++) {
+        struct dpu_data_worker *worker_state = &objs->data_workers[s];
+        worker_state->objs = objs;
+        worker_state->id = s;
+        worker_state->pe = NULL;
+        worker_state->queue.head = worker_state->queue.tail = 0;
+        mpsc_comp_queue_init(&worker_state->cross_worker);
+        atomic_init(&worker_state->pending_txack_head, 0);
+        atomic_init(&worker_state->pending_txack_tail, 0);
+        atomic_init(&worker_state->stat_local_completions, 0);
+        atomic_init(&worker_state->stat_cross_worker_out, 0);
+        atomic_init(&worker_state->stat_cross_worker_in, 0);
+        worker_state->num_deferred_recv = 0;
+        worker_state->wake_fd = -1;
+        atomic_store_explicit(&worker_state->parked, 0, memory_order_relaxed);
+        atomic_store_explicit(&worker_state->init_state, 0, memory_order_relaxed);
+        worker_state->stop = 0;
+        worker_state->running = 0;
     }
-    for (int s = 0; s < MAX_INGEST_SHARDS; s++)
+    for (int s = 0; s < MAX_ARM_WORKERS; s++)
         objs->consumer_pes[s] = NULL;
-    { const char *me = getenv("DPUMESH_INGEST_SHARDS");
+    { const char *me = getenv("DPUMESH_ARM_WORKERS");
       if (me && *me) { int v = atoi(me);
-          if (v > MAX_INGEST_SHARDS) v = MAX_INGEST_SHARDS;
-          if (v >= 1) objs->n_ingest_shards = v; } }
+          if (v > MAX_ARM_WORKERS)
+              v = MAX_ARM_WORKERS;
+          if (v >= 1) objs->n_data_workers = v; } }
     {
-        int requested = objs->n_ingest_shards;
-        while (objs->n_ingest_shards > 1 &&
-               (objs->n_ingest_shards > objs->k_rings ||
-                objs->k_rings % objs->n_ingest_shards != 0))
-            objs->n_ingest_shards--;
-        if (objs->n_ingest_shards != requested)
-            DOCA_LOG_WARN("ARM worker alignment: requested A=%d -> A=%d because "
-                          "K=%d must be a multiple of A",
-                          requested, objs->n_ingest_shards, objs->k_rings);
+        int requested = objs->n_data_workers;
+        while (objs->n_data_workers > 1 &&
+               (objs->n_data_workers > objs->k_rings ||
+                objs->k_rings % objs->n_data_workers != 0))
+            objs->n_data_workers--;
+        if (objs->n_data_workers != requested)
+            DOCA_LOG_WARN("ARM worker count adjusted: requested A=%d, active A=%d, K=%d",
+                          requested, objs->n_data_workers, objs->k_rings);
     }
-    { const char *se = getenv("DPUMESH_SHARD_SHARED");
-      if (se && atoi(se) >= 1) objs->shard_shared_routing = 1; }
+    { const char *se = getenv("DPUMESH_WORKER_SHARED_ROUTING");
+      if (se && atoi(se) >= 1) objs->worker_shared_routing = 1; }
     { const char *de = getenv("DPUMESH_DIAG");
       if (de && atoi(de) >= 1) g_dpu_diag = 1; }
-    if (objs->n_ingest_shards >= 2)
-        objs->reaper_active = 1;          /* M>=2: main runs the emit-only loop (shards reap their own PEs) */
+    if (objs->n_data_workers >= 2)
+        objs->dedicated_workers = 1;
 
     dpu_arm_affinity_init();
     DOCA_LOG_WARN("Requested data topology: K/A=%d/%d (N finalized after DPA query)",
-                  objs->k_rings, objs->n_ingest_shards);
+                  objs->k_rings, objs->n_data_workers);
     DOCA_LOG_WARN("ARM data path = %s",
-                  objs->n_ingest_shards >= 2
-                      ? "homogeneous worker threads"
+                  objs->n_data_workers >= 2
+                      ? "dedicated worker threads"
                       : "single run-to-completion main thread");
-    if (objs->n_ingest_shards >= 2)
-        DOCA_LOG_WARN("INGEST SHARDS = %d (mode=%s) — parse/route parallelized",
-                      objs->n_ingest_shards,
-                      objs->shard_shared_routing ? "shared-routing+lock"
+    if (objs->n_data_workers >= 2)
+        DOCA_LOG_WARN("ARM DATA WORKERS = %d (routing=%s)",
+                      objs->n_data_workers,
+                      objs->worker_shared_routing ? "shared-routing+lock"
                                                  : "share-nothing");
 
     /* 1. comch control path server (waits for first connection) */
@@ -1141,16 +1027,17 @@ run_dpu_worker(struct objects *objs)
         return;
     }
 
-    /* Create one consumer PE per ingest shard; creation failure selects M=1. */
+    /* Create one consumer PE per ARM data worker. */
     objs->consumer_pes[0] = objs->consumer_pe;
-    if (objs->n_ingest_shards >= 2) {
-        for (int s = 1; s < objs->n_ingest_shards; s++) {
+    if (objs->n_data_workers >= 2) {
+        for (int s = 1; s < objs->n_data_workers; s++) {
             result = doca_pe_create(&objs->consumer_pes[s]);
             if (result != DOCA_SUCCESS) {
-                DOCA_LOG_ERR("Failed to create consumer PE for shard %d: %s — disabling sharding",
+                DOCA_LOG_ERR("Failed to create consumer PE for worker %d: %s",
                              s, doca_error_get_descr(result));
                 for (int t = 1; t < s; t++) { doca_pe_destroy(objs->consumer_pes[t]); objs->consumer_pes[t] = NULL; }
-                objs->n_ingest_shards = 1;
+                objs->n_data_workers = 1;
+                objs->dedicated_workers = 0;
                 break;
             }
         }
@@ -1178,7 +1065,7 @@ run_dpu_worker(struct objects *objs)
         }
     }
 
-    /* Channel k binds to consumer_pes[k % M]. */
+    /* DPA channel k binds to consumer_pes[k % A]. */
     result = init_comch_dpa_msgq(objs, objs->consumer_pe);
     if (result != DOCA_SUCCESS) {
         DOCA_LOG_ERR("Failed to init comch DPA msgq: %s",
@@ -1188,15 +1075,10 @@ run_dpu_worker(struct objects *objs)
     }
 
     /* Pin workers to [0,A) and main to A when available. */
-    dpu_arm_pin_current("main", objs->reaper_active
-                                ? objs->n_ingest_shards : 0);
+    dpu_arm_pin_current("main", objs->dedicated_workers
+                                ? objs->n_data_workers : 0);
 
-    /* 6. SG-DMA egress engine (dpu_proxy.c) — the UNIFIED DPU→host reverse path,
-     *    ALWAYS on. Requires objs->dev (opened in dpu_main before run_dpu_worker)
-     *    + objs->pe (step 1) live. DPUMESH_PROXY only selects the request parser
-     *    (passthru default = metadata L4 route; frame; L7). This MUST precede
-     *    dpu_ready: otherwise the host can observe READY and send a request while
-     *    the reverse/route engine is still NULL. */
+    /* SG-DMA DPU-to-host path and request parser. */
     result = px_init(objs);
     if (result != DOCA_SUCCESS) {
         DOCA_LOG_ERR("Failed to init L7-proxy L4 engine: %s",
@@ -1205,138 +1087,104 @@ run_dpu_worker(struct objects *objs)
         return;
     }
 
-    /* dpu_ready remains false until the selected driver below is fully built. */
-
-    /* Each ingest shard owns one consumer PE and cross-shard wake fd. */
-    if (objs->n_ingest_shards >= 2) {
-        for (int s = 0; s < objs->n_ingest_shards; s++) {
-            struct dpu_ingest_shard *sh = &objs->ingest_shards[s];
-            sh->pe = objs->consumer_pes[s];
-            sh->wake_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-            if (sh->wake_fd < 0) {
-                DOCA_LOG_ERR("Ingest shard %d spawn failed (eventfd/thread) — aborting", s);
-                stop_ingest_shards(objs);
+    /* Each ARM data worker owns one consumer PE and wake fd. */
+    if (objs->n_data_workers >= 2) {
+        for (int s = 0; s < objs->n_data_workers; s++) {
+            struct dpu_data_worker *worker_state = &objs->data_workers[s];
+            worker_state->pe = objs->consumer_pes[s];
+            worker_state->wake_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+            if (worker_state->wake_fd < 0) {
+                DOCA_LOG_ERR("ARM worker %d eventfd creation failed", s);
+                stop_data_workers(objs);
                 cleanup_objects(objs);
                 return;
             }
-            if (pthread_create(&sh->thread, NULL, dpu_shard_main, sh) != 0) {
-                DOCA_LOG_ERR("Ingest shard %d spawn failed (eventfd/thread) — aborting", s);
-                close(sh->wake_fd);
-                sh->wake_fd = -1;
-                stop_ingest_shards(objs);
+            if (pthread_create(&worker_state->thread, NULL, dpu_data_worker_main, worker_state) != 0) {
+                DOCA_LOG_ERR("ARM worker %d thread creation failed", s);
+                close(worker_state->wake_fd);
+                worker_state->wake_fd = -1;
+                stop_data_workers(objs);
                 cleanup_objects(objs);
                 return;
             }
-            sh->running = 1;
+            worker_state->running = 1;
             const struct timespec init_pause = { .tv_sec = 0, .tv_nsec = 100000 };
             int attempts = 0;
-            while (atomic_load_explicit(&sh->init_state, memory_order_acquire) == 0 &&
+            while (atomic_load_explicit(&worker_state->init_state, memory_order_acquire) == 0 &&
                    attempts++ < 20000)
                 nanosleep(&init_pause, NULL);
-            if (atomic_load_explicit(&sh->init_state, memory_order_acquire) != 1) {
-                DOCA_LOG_ERR("Ingest shard %d did not initialize its event loop", s);
-                stop_ingest_shards(objs);
+            if (atomic_load_explicit(&worker_state->init_state, memory_order_acquire) != 1) {
+                DOCA_LOG_ERR("ARM worker %d event loop did not initialize", s);
+                stop_data_workers(objs);
                 cleanup_objects(objs);
                 return;
             }
         }
-        DOCA_LOG_WARN("INGEST SHARD THREADS spawned: %d (event-driven, each owns its consumer PE)",
-                      objs->n_ingest_shards);
+        DOCA_LOG_WARN("ARM DATA WORKER THREADS = %d", objs->n_data_workers);
     }
 
-    /* ===== Ingest-reaper driver =====
-     * When the reaper is enabled, spawn the thread that OWNS consumer_pe (reaps
-     * DPA forward completions into comp_queue). The main loop drains comp_queue,
-     * progresses the control PE, and runs egress. On spawn failure, fall through to the
-     * inline event-driven driver below (reaper_active cleared → reap inline). */
-    if (objs->reaper_active) {
-        /* Set up the reaper→main wake (eventfd) + main's epoll {ctrl_pe, eventfd}
-         * BEFORE spawning, so any setup failure cleanly disables the reaper and
-         * falls through to the normal event-driven driver (no half-started state,
-         * no busy-spin). */
+    /* Dedicated data workers feed the main Comch emitter through SPSC queues. */
+    if (objs->dedicated_workers) {
         atomic_store_explicit(&objs->main_parked, 0, memory_order_release);
-        objs->reaper_wake_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+        objs->main_wake_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
         doca_notification_handle_t pfd = 0;
         int rep = -1;
-        if (objs->reaper_wake_fd >= 0 &&
+        if (objs->main_wake_fd >= 0 &&
             doca_pe_get_notification_handle(objs->pe, &pfd) == DOCA_SUCCESS)
             rep = epoll_create1(0);
         if (rep >= 0) {
             struct epoll_event ept = { .events = EPOLLIN, .data = { .u32 = 1 } };  /* ctrl pe   */
-            struct epoll_event ee  = { .events = EPOLLIN, .data = { .u32 = 2 } };  /* reaper wake */
+            struct epoll_event ee  = { .events = EPOLLIN, .data = { .u32 = 2 } };  /* worker wake */
             if (epoll_ctl(rep, EPOLL_CTL_ADD, (int)pfd, &ept) != 0 ||
-                epoll_ctl(rep, EPOLL_CTL_ADD, objs->reaper_wake_fd, &ee) != 0) {
+                epoll_ctl(rep, EPOLL_CTL_ADD, objs->main_wake_fd, &ee) != 0) {
                 close(rep); rep = -1;
             }
         }
-        /* Shards reap their own PEs; M==1 uses the single reaper or inline driver. */
-        int reaper_ok = (rep >= 0);
-        if (reaper_ok && objs->n_ingest_shards < 2)
-            reaper_ok = (pthread_create(&objs->reaper_thread, NULL, dpu_reaper_main, objs) == 0);
-        if (!reaper_ok) {
-            if (objs->n_ingest_shards >= 2) {
-                DOCA_LOG_ERR("main emit-loop epoll setup failed with %d ingest shards — aborting",
-                             objs->n_ingest_shards);
-                if (rep >= 0) close(rep);
-                stop_ingest_shards(objs);
-                cleanup_objects(objs);
-                return;
-            }
-            DOCA_LOG_ERR("Ingest reaper setup failed (eventfd/epoll/thread) — falling back to inline reap");
-            if (rep >= 0) close(rep);
-            if (objs->reaper_wake_fd >= 0) { close(objs->reaper_wake_fd); objs->reaper_wake_fd = -1; }
-            objs->reaper_active = 0;
-            /* fall through to the normal event-driven driver below */
-        } else {
-            dpu_publish_ready_and_setup_pods(objs);
-            DOCA_LOG_WARN("MAIN EMIT LOOP (event-driven): %s; main sleeps on "
-                          "{ctrl_pe, wake_fd} — no busy-spin",
-                          objs->n_ingest_shards >= 2
-                              ? "M ingest shards each own their consumer PE"
-                              : "reaper owns consumer_pe");
-            clock_gettime(CLOCK_MONOTONIC, &last_kick);
-            struct timespec last_dbg = last_kick;
-            (void)last_kick; (void)kick_elapsed;   /* reaper/shards own keepalive */
-            while (true) {
-                int progressed = dpu_drain_iteration(objs);   /* reap skipped (reaper owns it) */
-                if (g_dpu_diag) {
-                    clock_gettime(CLOCK_MONOTONIC, &now);
-                    if ((now.tv_sec - last_dbg.tv_sec) + (now.tv_nsec - last_dbg.tv_nsec) / 1e9 >= 1.0) {
-                        dpu_diag_dump(objs);
-                        last_dbg = now;
-                    }
-                }
-                /* NOTE: main does NOT send the DPA WAKE here — the reaper owns
-                 * consumer_pe and sends it (else main's submit races the reaper). */
-                if (progressed)
-                    continue;   /* work → re-poll, no sleep (low latency under load) */
-
-                /* Idle: arm ctrl_pe, PARK (so the reaper will signal us), RE-CHECK
-                 * once to close the drain→park race, then SLEEP on epoll. The 1 ms
-                 * timeout re-sends the keepalive and backstops any missed wake. */
-                (void)doca_pe_request_notification(objs->pe);
-                atomic_store_explicit(&objs->main_parked, 1, memory_order_release);
-                if (dpu_drain_iteration(objs)) {
-                    atomic_store_explicit(&objs->main_parked, 0, memory_order_release);
-                    (void)doca_pe_clear_notification(objs->pe, pfd);
-                    continue;
-                }
-                struct epoll_event evs[2];
-                (void)epoll_wait(rep, evs, 2, 1);
-                atomic_store_explicit(&objs->main_parked, 0, memory_order_release);
-                uint64_t drain; ssize_t rn = read(objs->reaper_wake_fd, &drain, sizeof(drain)); (void)rn;
-                (void)doca_pe_clear_notification(objs->pe, pfd);
-            }
-            return;  /* not reached */
+        if (rep < 0) {
+            DOCA_LOG_ERR("main emitter event-loop setup failed for %d data workers",
+                         objs->n_data_workers);
+            stop_data_workers(objs);
+            cleanup_objects(objs);
+            return;
         }
+
+        dpu_publish_ready_and_setup_pods(objs);
+        DOCA_LOG_WARN("MAIN COMCH EMITTER: workers=%d, event-driven",
+                      objs->n_data_workers);
+        struct timespec last_dbg;
+        clock_gettime(CLOCK_MONOTONIC, &last_dbg);
+        while (true) {
+            int progressed = dpu_drain_iteration(objs);
+            if (g_dpu_diag) {
+                clock_gettime(CLOCK_MONOTONIC, &now);
+                if ((now.tv_sec - last_dbg.tv_sec) +
+                        (now.tv_nsec - last_dbg.tv_nsec) / 1e9 >= 1.0) {
+                    dpu_diag_dump(objs);
+                    last_dbg = now;
+                }
+            }
+            if (progressed)
+                continue;
+
+            (void)doca_pe_request_notification(objs->pe);
+            atomic_store_explicit(&objs->main_parked, 1, memory_order_release);
+            if (dpu_drain_iteration(objs)) {
+                atomic_store_explicit(&objs->main_parked, 0, memory_order_release);
+                (void)doca_pe_clear_notification(objs->pe, pfd);
+                continue;
+            }
+            struct epoll_event evs[2];
+            (void)epoll_wait(rep, evs, 2, 1);
+            atomic_store_explicit(&objs->main_parked, 0, memory_order_release);
+            uint64_t drain;
+            ssize_t rn = read(objs->main_wake_fd, &drain, sizeof(drain));
+            (void)rn;
+            (void)doca_pe_clear_notification(objs->pe, pfd);
+        }
+        return;
     }
 
-    /* ===== Event-driven driver =====
-     * epoll over {consumer_pe fd, ctrl pe fd}. Each pass: drain → send the 1 ms
-     * keepalive WAKE on cadence → if idle, arm → re-poll → block on epoll with a
-     * 1 ms timeout (so we wake to re-send the keepalive even with no completion).
-     * The ARM SLEEPS between ticks (epoll), so idle CPU is a few % (~1 kHz wakeups)
-     * — not the full core busy-poll burns. Falls back to busy-poll if setup fails. */
+    /* A=1 event loop over the consumer and control PEs. */
     doca_notification_handle_t cfd = 0, pfd = 0;
     doca_error_t hc = doca_pe_get_notification_handle(objs->consumer_pe, &cfd);
     doca_error_t hp = doca_pe_get_notification_handle(objs->pe, &pfd);
@@ -1378,10 +1226,7 @@ run_dpu_worker(struct objects *objs)
     while (true) {
         int progressed = dpu_drain_iteration(objs);   /* ONE pass */
 
-        /* 1 ms DPU→DPA keepalive WAKE, gated to ~1 kHz (checked every pass, not
-         * only when sleeping, so a sustained-load stretch still pokes a briefly-
-         * parked reverse EU). At idle the 1 ms epoll timeout below brings us back
-         * here to re-send it. */
+        /* Periodic DPA wake. */
         clock_gettime(CLOCK_MONOTONIC, &now);
         if (g_dpu_diag &&
             (now.tv_sec - last_dbg.tv_sec) + (now.tv_nsec - last_dbg.tv_nsec) / 1e9 >= 1.0) {
@@ -1398,23 +1243,17 @@ run_dpu_worker(struct objects *objs)
         if (progressed)
             continue;   /* work this pass → poll again (no sleep under load) */
 
-        /* Idle: arm both PEs, then RE-POLL once before blocking (arm→re-check→
-         * block) to close the drain→arm race — a completion landing between the
-         * last drain and the arm must not be stranded. */
+        /* Arm both PEs and recheck before blocking. */
         (void)doca_pe_request_notification(objs->consumer_pe);
         (void)doca_pe_request_notification(objs->pe);
 
         if (dpu_drain_iteration(objs)) {
-            /* Work arrived during/just before arm — handle it, don't sleep. */
             (void)doca_pe_clear_notification(objs->consumer_pe, cfd);
             (void)doca_pe_clear_notification(objs->pe, pfd);
             continue;
         }
 
-        /* SLEEP on epoll with a 1 ms timeout: wake on a real completion (FWD_DONE/
-         * REV_DONE/ctrl) OR after ≤1 ms to re-send the keepalive WAKE. The ARM
-         * sleeps between ticks → idle CPU a few % (~1 kHz wakeups), NOT a busy-poll
-         * full core. The timeout also backstops any missed PE notification. */
+        /* Wait for PE activity or the 1 ms DPA wake interval. */
         struct epoll_event evs[2];
         (void)epoll_wait(ep, evs, 2, 1);
 

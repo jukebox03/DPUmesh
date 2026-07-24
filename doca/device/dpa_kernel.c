@@ -97,10 +97,7 @@ static void handle_dpu_msg(struct dpa_thread_arg *thread_arg, const struct comch
             if (slot < MAX_DPA_RINGS) {
                 thread_arg->rings[slot] = add_msg->ring;
                 thread_arg->ring_generation[slot] = add_msg->generation;
-                /* MUST reset: this rings[] slot may be recycled (RING_DEL swap-with-last,
-                 * or the overwrite above), so desc_idx could still hold the previous
-                 * occupant's cursor and we'd read the wrong descriptor forever. */
-                thread_arg->desc_idx[slot] = 0;
+                thread_arg->consumer_head[slot] = 0;
                 if (slot == thread_arg->num_rings)
                     thread_arg->num_rings++;
                 DOCA_DPA_DEV_LOG_INFO("Added ring: pod_id=%d, r=%u, num_rings=%u\n",
@@ -120,18 +117,19 @@ static void handle_dpu_msg(struct dpa_thread_arg *thread_arg, const struct comch
             struct comch_add_ring_msg *del_msg = (struct comch_add_ring_msg *)msg;
             /* Only ring.pod_id is meaningful (struct reused so the wire ABI + its
              * _Static_asserts stay frozen). Swap-with-last keeps rings[0,num_rings)
-             * dense; desc_idx must travel with the entry it belongs to. */
+             * dense; consumer_head must travel with its ring. */
             for (uint32_t r = 0; r < thread_arg->num_rings; r++) {
                 if (thread_arg->rings[r].pod_id != del_msg->ring.pod_id)
                     continue;
                 uint32_t last = thread_arg->num_rings - 1;
                 if (r != last) {
-                    thread_arg->rings[r]    = thread_arg->rings[last];
-                    thread_arg->desc_idx[r] = thread_arg->desc_idx[last];
+                    thread_arg->rings[r] = thread_arg->rings[last];
+                    thread_arg->consumer_head[r] =
+                        thread_arg->consumer_head[last];
                     thread_arg->ring_generation[r] =
                         thread_arg->ring_generation[last];
                 }
-                thread_arg->desc_idx[last] = 0;
+                thread_arg->consumer_head[last] = 0;
                 thread_arg->ring_generation[last] = 0;
                 /* Plain store is enough: this EU is the only mutator (handle_msgs runs
                  * on it), and num_rings is volatile so the drain loop re-reads it. */
@@ -207,12 +205,16 @@ static uint32_t drain_producer_completions(struct dpa_thread_arg *thread_arg)
     return count;
 }
 
-/*
- * Drain forward descriptors (Host→DPU) from ring r: up to RING_BATCH_CAP
- * consecutive valid descs per call. Returns the number of dma_copy ops issued
- * (0 if ring idle). The window is fresh from the single read_inv in
- * drain_all_rings, so each new desc address reads correctly on first access.
- */
+static struct dma_ring_ctrl *fwd_ring_ctrl(const struct dpa_ring_info *ring)
+{
+    doca_dpa_dev_buf_t buf =
+        doca_dpa_dev_buf_array_get_buf(ring->buf_arr,
+                                      DMA_RING_CTRL_SLOT(ring->buf_arr_size));
+    return (struct dma_ring_ctrl *)doca_dpa_dev_buf_get_external_ptr(buf);
+}
+
+/* Drain one fair-share quantum from ring r. A descriptor is visible only when
+ * its generation matches the next consumer ticket. */
 static int process_fwd_ring(struct dpa_thread_arg *thread_arg, uint32_t r)
 {
     doca_dpa_dev_comch_producer_t producer = thread_arg->dpa_producer;
@@ -220,23 +222,26 @@ static int process_fwd_ring(struct dpa_thread_arg *thread_arg, uint32_t r)
     struct dpa_ring_info *ring = &thread_arg->rings[r];
     struct comch_dma_comp_msg comp;
     int total_chunks = 0;
+    uint32_t desc_idx =
+        (uint32_t)(thread_arg->consumer_head[r] % ring->buf_arr_size);
 
     for (int b = 0; b < RING_BATCH_CAP; b++) {
         doca_dpa_dev_buf_t buf =
-            doca_dpa_dev_buf_array_get_buf(ring->buf_arr, thread_arg->desc_idx[r]);
-        struct dma_desc *desc =
-            (struct dma_desc *)doca_dpa_dev_buf_get_external_ptr(buf);
+            doca_dpa_dev_buf_array_get_buf(ring->buf_arr, desc_idx);
+        volatile struct dma_desc *desc =
+            (volatile struct dma_desc *)doca_dpa_dev_buf_get_external_ptr(buf);
 
-        if (!desc->valid)
-            break;                       /* ring drained */
+        if (desc->publish_seq != thread_arg->consumer_head[r] + 1)
+            break;
 
         /* Host enforces desc->size <= slot_size (= DPA_DMA_COPY_MAX = 8KB) in
          * dpumesh_enqueue. Anything larger is a caller bug; drop. */
         if (desc->size > DPA_DMA_COPY_MAX) {
             DOCA_DPA_DEV_LOG_INFO("FWD: desc size %u > %u (slot cap); dropping ring=%u slot=%u\n",
-                                  desc->size, DPA_DMA_COPY_MAX, r, thread_arg->desc_idx[r]);
-            desc->valid = 0;   /* flushed by the batched writeback in drain_all_rings */
-            thread_arg->desc_idx[r] = (thread_arg->desc_idx[r] + 1) % ring->buf_arr_size;
+                                  desc->size, DPA_DMA_COPY_MAX, r, desc_idx);
+            thread_arg->consumer_head[r]++;
+            if (++desc_idx == ring->buf_arr_size)
+                desc_idx = 0;
             total_chunks += 1;
             continue;
         }
@@ -251,7 +256,7 @@ static int process_fwd_ring(struct dpa_thread_arg *thread_arg, uint32_t r)
         }
         if (stalled) {
             DOCA_DPA_DEV_LOG_INFO("FWD: consumer timeout (ring=%u slot=%u). Retrying.\n",
-                                  r, thread_arg->desc_idx[r]);
+                                  r, desc_idx);
             break;
         }
 
@@ -293,64 +298,51 @@ static int process_fwd_ring(struct dpa_thread_arg *thread_arg, uint32_t r)
                                     DOCA_DPA_DEV_SUBMIT_FLAG_OPTIMIZE_REPORTS);
         /* no pos[r] advance — the staging offset is host-driven (mirror) */
 
-        /* Flip valid=0; the actual host-visible writeback is batched once per
-         * drain_all_rings inner iter. Each desc owns its own 64B cache line, so
-         * deferring the flush cannot clobber a neighbour. */
-        desc->valid = 0;
-
-        thread_arg->desc_idx[r] = (thread_arg->desc_idx[r] + 1) % ring->buf_arr_size;
+        thread_arg->consumer_head[r]++;
+        if (++desc_idx == ring->buf_arr_size)
+            desc_idx = 0;
         total_chunks += 1;
     }
 
     return total_chunks;
 }
 
-/* Drain valid forward descriptors from every ring. Message polling and producer
- * completion acknowledgement are throttled within the scan. */
+/* Drain each ring in round-robin quanta. */
 #define HANDLE_MSGS_EVERY 32
 #define DRAIN_COMPLETIONS_EVERY 8
 
-/* poll_msgs: when 0, this scan does NOT touch the consumer-completion queue
- * (no handle_msgs). The pre-park re-scan uses poll_msgs=0 so it cannot silently
- * consume a WAKE that lands in the arm→reschedule window — the caller drains and
- * COUNTS messages explicitly so a racing wake is detected, not lost. */
+/* poll_msgs is clear for the pre-park rescan: its caller drains and counts
+ * consumer completions explicitly so a racing one-shot wake is not lost. */
 static int drain_all_rings(struct dpa_thread_arg *thread_arg, int poll_msgs)
 {
     int total_dma_calls = 0;
-    int found;
-    uint32_t iter_counter = 0;
+    uint32_t iter = 0;
 
-    do {
-        found = 0;
-        if (poll_msgs && (iter_counter & (HANDLE_MSGS_EVERY - 1)) == 0)
+    for (;;) {
+        int found = 0;
+
+        if (poll_msgs && (iter & (HANDLE_MSGS_EVERY - 1)) == 0)
             handle_msgs(thread_arg);
-        if ((iter_counter & (DRAIN_COMPLETIONS_EVERY - 1)) == 0)
+        if ((iter & (DRAIN_COMPLETIONS_EVERY - 1)) == 0)
             drain_producer_completions(thread_arg);
-        iter_counter++;
-
-        /* One window invalidation per iteration covers every ring's desc reads:
-         * read_inv is a window-wide read fence (__DPA_MMIO, R, R), so the first
-         * read of each address this iter is fresh. */
+        iter++;
         __dpa_thread_window_read_inv();
 
-        /* Forward rings (Host→DPU) */
         uint32_t nr = thread_arg->num_rings;
         for (uint32_t r = 0; r < nr; r++) {
             int chunks = process_fwd_ring(thread_arg, r);
             if (chunks > 0) {
-                found++;
+                struct dma_ring_ctrl *ctrl =
+                    fwd_ring_ctrl(&thread_arg->rings[r]);
+                ctrl->consumer_head = thread_arg->consumer_head[r];
                 total_dma_calls += chunks;
+                found++;
             }
         }
-
-        /* Batched writeback: process_fwd_ring only stores desc->valid=0 in DPA
-         * cache; this single window-wide fence flushes all of this iteration's
-         * frees to host memory at once. Each desc owns its own 64B cache line, so
-         * the batched flush never touches a neighbouring slot the host is
-         * concurrently filling. */
-        if (found)
-            __dpa_thread_window_writeback();
-    } while (found > 0);
+        if (found == 0)
+            break;
+        __dpa_thread_window_writeback();
+    }
 
     return total_dma_calls;
 }
@@ -388,14 +380,11 @@ __dpa_global__ void run_dma_manager(uint64_t arg)
         } else if (++idle_spins >= IDLE_SPINS_BEFORE_PARK) {
             doca_dpa_dev_comch_consumer_completion_request_notification(thread_arg->dpa_consumer_comp);
             doca_dpa_dev_completion_request_notification(thread_arg->dpa_producer_comp);
-            /* Re-scan after arming. handle_msgs() drains+COUNTS the consumer queue
-             * so a WAKE/RING_ADD that landed in the arm window is DETECTED; the ring
-             * re-scan runs with poll_msgs=0 so it cannot silently consume a WAKE.
-             * Park only if BOTH sources came up empty — otherwise loop and re-arm
-             * next cycle (never park with a consumed one-shot notification). */
+            /* Re-scan after arming. handle_msgs() drains and counts the consumer
+             * queue so a control message in the arm window prevents parking. */
             uint32_t msgs = handle_msgs(thread_arg);
             uint32_t producer_comps = drain_producer_completions(thread_arg);
-            int rescan = drain_all_rings(thread_arg, 0);   /* rings only (silent host writes) */
+            int rescan = drain_all_rings(thread_arg, 0);
             if (msgs == 0 && producer_comps == 0 && rescan == 0)
                 doca_dpa_dev_thread_reschedule();   /* park; woken by WAKE completion */
             idle_spins = 0;                       /* reset after wake */

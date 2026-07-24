@@ -106,6 +106,6 @@ main(void)
     assert(atomic_load_explicit(&finished, memory_order_acquire) == PRODUCERS);
     assert(mpsc_comp_queue_empty(queue));
     free(queue);
-    puts("ingest_mpsc_queue_test: PASS");
+    puts("worker_mpsc_queue_test: PASS");
     return 0;
 }

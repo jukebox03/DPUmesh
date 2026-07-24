@@ -1,0 +1,12 @@
+section,topology,pin,host_cores,connections,req_bytes,reply_bytes,concurrency_per_connection,mrps,gbps,p50_us,fail
+forward_ring_run,16/2/2,fair,1,4,1024,1024,32,0.653265,5.3515,181,0
+forward_ring_run,16/2/2,fair,1,4,1024,1024,32,0.651052,5.3334,181,0
+forward_ring_run,16/2/2,fair,1,4,1024,1024,32,0.658275,5.3926,181,0
+forward_ring_run,16/2/2,fair,1,4,8192,8,16,0.241423,15.8219,244,0
+forward_ring_run,16/2/2,fair,1,4,8192,8,16,0.240117,15.7363,245,0
+forward_ring_run,16/2/2,fair,1,4,8192,8,16,0.239825,15.7172,245,0
+connection_scale,16/2/2,fair,1,1,1024,1024,32,0.182679,1.4965,175,0
+connection_scale,16/2/2,fair,1,2,1024,1024,32,0.347019,2.8428,178,0
+connection_scale,16/2/2,fair,1,4,1024,1024,32,0.653265,5.3515,181,0
+connection_scale,16/2/2,hw,2,4,1024,1024,32,0.664414,5.4429,182,0
+connection_scale,16/2/2,hw,2,8,1024,1024,32,1.105263,9.0543,222,0
