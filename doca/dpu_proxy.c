@@ -30,8 +30,13 @@
 #include <doca_dma.h>
 
 #include <assert.h>
+#include <errno.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/epoll.h>
+#include <sys/eventfd.h>
+#include <unistd.h>
 
 DOCA_LOG_REGISTER(DPU_PROXY);
 
@@ -77,6 +82,16 @@ DOCA_LOG_REGISTER(DPU_PROXY);
 #define PX_PIECE_POOL    (2 * PX_ARRIVAL_POOL)
 #define PX_BATCH_POOL    1024
 #define PX_CONN_HASH     (1u << 15)   /* buckets (chained) */
+
+/* Worker-to-main completion ring. */
+#define PX_DONE_RING_CAP 1024u
+_Static_assert((PX_DONE_RING_CAP & (PX_DONE_RING_CAP - 1u)) == 0,
+               "PX_DONE_RING_CAP must be a power of two");
+
+/* Egress worker idle policy. */
+#define PX_EGRESS_SPIN_US_DEFAULT      600u
+#define PX_EGRESS_SPIN_US_MAX         1000u
+#define PX_EGRESS_RETRY_NS           50000L
 
 /* ====== internal structs ====== */
 
@@ -128,7 +143,7 @@ struct px_unit {
     uint32_t emit_off;            /* REV_DONE emission cursor (resumable) */
     uint8_t  emit_fin_done;
     int8_t   dst_pod_idx;         /* receiver pod slot (REV_DONE target; set at ship) */
-    uint8_t  err;                 /* multi-thread done-queue: batch errored → skip REV_DONE */
+    uint8_t  err;                 /* batch errored; skip REV_DONE */
     uint8_t  dma_isolated;        /* keep this complete L7 group in one DMA task */
     struct px_piece *pieces, *pieces_tail;
     int npieces;
@@ -156,6 +171,10 @@ struct px_batch {
     volatile int done, error;
     struct doca_buf *src_head, *dst_buf;
     struct px_op op;
+};
+
+struct px_done_chunk {
+    struct px_unit *head, *tail;
 };
 
 /* Per-(dst pod slot, region) egress lane. Region r = the slice of the host RX
@@ -243,9 +262,21 @@ struct px_engine {
     int      dma_stalled;
     int      dma_fault_warned;
     struct px_batch *batch_mem, *batch_free;
-    struct px_unit  *done_head, *done_tail;   /* worker→ingest, under done_lock */
-    pthread_mutex_t  done_lock;
+    /* Worker-to-main SPSC completion ring. */
+    struct px_done_chunk done_ring[PX_DONE_RING_CAP];
+    _Alignas(64) atomic_uint done_prod;        /* worker-owned cache line */
+    _Alignas(64) atomic_uint done_cons;        /* main-owned cache line */
     struct px_unit  *emit_head, *emit_tail;   /* ingest-local resumable drain list */
+    /* Lane wake state. */
+    int      wake_fd;
+    int      epoll_fd;
+    int      event_ready;
+    atomic_int parked;
+    uint32_t spin_us;
+    atomic_ullong stat_parks;
+    atomic_ullong stat_park_rechecks;
+    atomic_ullong stat_wakes;
+    atomic_ullong stat_wake_errors;
     pthread_t thread;
     volatile int stop;
 };
@@ -294,6 +325,38 @@ struct dmesh_proxy {
      * pool is dry — never on the hot path. */
     uint64_t stat_stall_unit, stat_stall_piece, stat_stall_uport;
 };
+
+/* Destination-lane engine owner. */
+static inline int px_engine_id_for_lane(const struct dmesh_proxy *px,
+                                        int pod_idx, int region) {
+    (void)region;
+    return pod_idx % px->n_eng;
+}
+
+static inline struct px_engine *px_engine_for_lane(struct dmesh_proxy *px,
+                                                    int pod_idx, int region) {
+    return &px->engines[px_engine_id_for_lane(px, pod_idx, region)];
+}
+
+static void px_engine_wake(struct px_engine *eng) {
+    if (!eng->threaded || eng->wake_fd < 0)
+        return;
+    int expected = 1;
+    if (!atomic_compare_exchange_strong_explicit(&eng->parked, &expected, 0,
+                                                  memory_order_acq_rel,
+                                                  memory_order_acquire))
+        return;
+    uint64_t one = 1;
+    ssize_t n;
+    do {
+        n = write(eng->wake_fd, &one, sizeof(one));
+    } while (n < 0 && errno == EINTR);
+    if (n == (ssize_t)sizeof(one))
+        atomic_fetch_add_explicit(&eng->stat_wakes, 1, memory_order_relaxed);
+    else
+        atomic_fetch_add_explicit(&eng->stat_wake_errors, 1,
+                                  memory_order_relaxed);
+}
 
 #define PX_SCRATCH_CELL 64
 #define PX_SCRATCH_OFF(pi, r) (((size_t)(pi) * MAX_EU_PER_POD + (size_t)(r)) * PX_SCRATCH_CELL)
@@ -838,6 +901,8 @@ static void px_lane_enqueue(struct dmesh_proxy *px, int pod_idx, int region, str
         ln->qtail = u;
     }
     __atomic_fetch_add(&px->stat_units, 1, __ATOMIC_RELAXED);   /* multiple ingest writers */
+    if (px->n_eng > 1)
+        px_engine_wake(px_engine_for_lane(px, pod_idx, region));
 }
 
 static int px_lane_inbox_nonempty(struct dmesh_proxy *px, struct px_lane *ln) {
@@ -1490,9 +1555,21 @@ int px_diag_str(struct objects *objs, char *buf, int cap) {
     struct dmesh_proxy *px = objs->proxy;
     if (!px || cap <= 0)
         return 0;
+    unsigned long long parks = 0, rechecks = 0, wakes = 0, wake_errors = 0;
+    for (int e = 0; e < px->n_eng; e++) {
+        parks += atomic_load_explicit(&px->engines[e].stat_parks,
+                                      memory_order_relaxed);
+        rechecks += atomic_load_explicit(&px->engines[e].stat_park_rechecks,
+                                         memory_order_relaxed);
+        wakes += atomic_load_explicit(&px->engines[e].stat_wakes,
+                                      memory_order_relaxed);
+        wake_errors += atomic_load_explicit(&px->engines[e].stat_wake_errors,
+                                            memory_order_relaxed);
+    }
     return snprintf(buf, (size_t)cap,
                     " px[msgs=%llu amerge=%llu segs=%llu umerge=%llu units=%llu batches=%llu "
-                    "drop=%lluB stall=u%llu/p%llu/P%llu]",
+                    "drop=%lluB stall=u%llu/p%llu/P%llu park=%llu/recheck%llu "
+                    "wake=%llu/err%llu]",
                     (unsigned long long)px->stat_msgs,
                     (unsigned long long)px->stat_arrival_merges,
                     (unsigned long long)px->stat_segs,
@@ -1502,7 +1579,8 @@ int px_diag_str(struct objects *objs, char *buf, int cap) {
                     (unsigned long long)px->stat_drop_bytes,
                     (unsigned long long)px->stat_stall_unit,
                     (unsigned long long)px->stat_stall_piece,
-                    (unsigned long long)px->stat_stall_uport);
+                    (unsigned long long)px->stat_stall_uport,
+                    parks, rechecks, wakes, wake_errors);
 }
 
 /* Collapse one physically adjacent DPA completion into an untouched tail window
@@ -1800,16 +1878,63 @@ static int px_emit_rev_entry(struct objects *objs, struct pod_state *pod,
 static int px_lane_submit(struct objects *objs, struct px_engine *eng, int pod_idx,
                           struct pod_state *pod, int region, struct px_lane *ln);
 
-/* ===== multi-thread egress: worker pump + ingest done-queue drain =====
- * n_eng>=2 only. The worker owns lanes' cursor/credit/qhead/fhead + its own
- * doca dma/pe/inv/batch pool; it retires completed batches into the engine
- * done-queue (units, not batches — batch pool stays worker-local). The ingest
- * (main) thread drains the done-queue for REV_DONE + custody + unit/piece free,
- * so unit/piece/arrival pools + comch stay INGEST-only (no locks). */
+/* ===== multi-thread egress ===== */
 
-/* worker: retire completed batches of one lane into the engine done-queue. */
-static void px_lane_retire(struct px_engine *eng, struct px_lane *ln) {
+static int px_done_ring_has_space(struct px_engine *eng) {
+    uint32_t prod = atomic_load_explicit(&eng->done_prod, memory_order_relaxed);
+    uint32_t cons = atomic_load_explicit(&eng->done_cons, memory_order_acquire);
+    return prod - cons < PX_DONE_RING_CAP;
+}
+
+/* Worker publishes one FIFO unit chain. */
+static int px_done_publish(struct px_engine *eng,
+                           struct px_unit *head, struct px_unit *tail,
+                           int pod_idx, uint32_t count) {
+    uint32_t prod = atomic_load_explicit(&eng->done_prod, memory_order_relaxed);
+    uint32_t cons = atomic_load_explicit(&eng->done_cons, memory_order_acquire);
+    if (prod - cons >= PX_DONE_RING_CAP)
+        return 0;
+
+    __atomic_fetch_add(&eng->objs->pods[pod_idx].egress_pending_emit,
+                       count, __ATOMIC_RELAXED);
+
+    struct px_done_chunk *slot = &eng->done_ring[prod & (PX_DONE_RING_CAP - 1u)];
+    slot->head = head;
+    slot->tail = tail;
+    atomic_store_explicit(&eng->done_prod, prod + 1u, memory_order_release);
+    return 1;
+}
+
+/* Main transfers published chains to the emit queue. */
+static int px_done_pull(struct px_engine *eng) {
+    uint32_t cons = atomic_load_explicit(&eng->done_cons, memory_order_relaxed);
+    uint32_t prod = atomic_load_explicit(&eng->done_prod, memory_order_acquire);
+    int pulled = 0;
+
+    while (cons != prod) {
+        struct px_done_chunk *slot =
+            &eng->done_ring[cons & (PX_DONE_RING_CAP - 1u)];
+        if (eng->emit_tail)
+            eng->emit_tail->next = slot->head;
+        else
+            eng->emit_head = slot->head;
+        eng->emit_tail = slot->tail;
+        slot->head = slot->tail = NULL;
+        cons++;
+        pulled = 1;
+    }
+    if (pulled)
+        atomic_store_explicit(&eng->done_cons, cons, memory_order_release);
+    return pulled;
+}
+
+/* Retire completed lane batches into the done ring. */
+static int px_lane_retire(struct px_engine *eng, struct px_lane *ln) {
+    if (!ln->fhead || !ln->fhead->done || !px_done_ring_has_space(eng))
+        return 0;
+
     struct px_unit *head = NULL, *tail = NULL;
+    uint32_t count = 0;
     while (ln->fhead && ln->fhead->done) {
         struct px_batch *b = ln->fhead;
         if (b->error)
@@ -1820,6 +1945,7 @@ static void px_lane_retire(struct px_engine *eng, struct px_lane *ln) {
             u->next = NULL;
             if (tail) tail->next = u; else head = u;
             tail = u;
+            count++;
             u = nx;
         }
         b->units = NULL;
@@ -1827,29 +1953,18 @@ static void px_lane_retire(struct px_engine *eng, struct px_lane *ln) {
         if (!ln->fhead) ln->ftail = NULL;
         px_batch_free_node(eng, b);
     }
-    if (head) {
-        pthread_mutex_lock(&eng->done_lock);
-        if (eng->done_tail) eng->done_tail->next = head; else eng->done_head = head;
-        eng->done_tail = tail;
-        pthread_mutex_unlock(&eng->done_lock);
-    }
+    if (!head)
+        return 0;
+    assert(px_done_publish(eng, head, tail, (int)head->dst_pod_idx, count));
+    return 1;
 }
 
-/* ingest: drain one engine's done-queue → REV_DONE + custody + free. Resumable
- * on comch send-pool backpressure (units stay on the engine's ingest-local
- * emit list). Single-consumer (main thread). */
+/* Main emits completed units and releases custody. */
 static int px_engine_emit(struct objects *objs, struct px_engine *eng,
                           struct px_free_batch *fb) {
     struct dmesh_proxy *px = objs->proxy;
-    /* pull the worker's completed units into the ingest-local drain list */
-    pthread_mutex_lock(&eng->done_lock);
-    if (eng->done_head) {
-        if (eng->emit_tail) eng->emit_tail->next = eng->done_head;
-        else eng->emit_head = eng->done_head;
-        eng->emit_tail = eng->done_tail;
-        eng->done_head = eng->done_tail = NULL;
-    }
-    pthread_mutex_unlock(&eng->done_lock);
+    /* Pull published chains into the resumable emit list. */
+    (void)px_done_pull(eng);
 
     int did = 0;
     int32_t eof_pod = -1; uint16_t eof_port = 0;   /* collapse a run of same-origin failures */
@@ -1900,6 +2015,7 @@ static int px_engine_emit(struct objects *objs, struct px_engine *eng,
         }
         eng->emit_head = u->next;
         if (!eng->emit_head) eng->emit_tail = NULL;
+        __atomic_fetch_sub(&pod->egress_pending_emit, 1, __ATOMIC_ACQ_REL);
         px_fb_unit(fb, u);                     /* batched free (caller splices) */
         did = 1;
         /* Cap how many freed nodes main holds back, so a concurrent shard alloc can
@@ -1910,23 +2026,19 @@ static int px_engine_emit(struct objects *objs, struct px_engine *eng,
     return did;
 }
 
-/* A lane whose pod went not-ready (disconnected mid-flight) can never deliver its
- * queued-but-unsubmitted units. Route them to the done-queue with err=1 so the ingest
- * thread releases their custody (TX_ACK the senders) + frees them WITHOUT a REV_DONE
- * (no delivery to a dead pod). Runs on the worker that OWNS this lane (no race on
- * qhead); the only shared step is the existing done_lock. No poll/wait/timer. */
-static void px_lane_drop_dead(struct px_engine *eng, struct px_lane *ln) {
-    if (!ln->qhead)
-        return;
+/* Retire queued units for a disconnected destination. */
+static int px_lane_drop_dead(struct px_engine *eng, struct px_lane *ln) {
+    if (!ln->qhead || !px_done_ring_has_space(eng))
+        return 0;
     struct px_unit *head = ln->qhead, *tail = ln->qtail;
+    uint32_t count = 0;
     ln->qhead = ln->qtail = NULL;
     for (struct px_unit *u = head; u; u = u->next) {
         u->err = 1;                            /* skip REV_DONE; custody still released */
+        count++;
     }
-    pthread_mutex_lock(&eng->done_lock);
-    if (eng->done_tail) eng->done_tail->next = head; else eng->done_head = head;
-    eng->done_tail = tail;
-    pthread_mutex_unlock(&eng->done_lock);
+    assert(px_done_publish(eng, head, tail, (int)head->dst_pod_idx, count));
+    return 1;
 }
 
 /* worker: one pass over this engine's owned lanes (splice inbox→qhead, submit,
@@ -1982,7 +2094,8 @@ static int px_engine_recover(struct px_engine *eng) {
     return 1;
 }
 
-static int px_engine_pump(struct objects *objs, struct px_engine *eng) {
+static int px_engine_pump(struct objects *objs, struct px_engine *eng,
+                          int *published_done) {
     struct dmesh_proxy *px = objs->proxy;
     int progressed = 0;
     int npods = __atomic_load_n(&objs->num_pods, __ATOMIC_ACQUIRE);
@@ -2001,12 +2114,18 @@ static int px_engine_pump(struct objects *objs, struct px_engine *eng) {
         for (int r = 0; r < K; r++) {
             struct px_lane *ln = &px->lanes[i][r];
             progressed |= px_lane_splice_inbox(px, ln);
-            if (ln->fhead) px_lane_retire(eng, ln);
+            if (ln->fhead) {
+                int retired = px_lane_retire(eng, ln);
+                progressed |= retired;
+                *published_done |= retired;
+            }
             if (dead) {
                 /* pod disconnected (or not yet ready): never submit to it. Drain any
                  * leftover queued units so they don't leak custody or mis-deliver to a
                  * pod that later REUSES this slot. */
-                px_lane_drop_dead(eng, ln);
+                int dropped = px_lane_drop_dead(eng, ln);
+                progressed |= dropped;
+                *published_done |= dropped;
                 if (px_lane_inbox_nonempty(px, ln) ||
                     ln->qhead || ln->fhead || ln->refresh_inflight)
                     quiet = 0;
@@ -2027,31 +2146,110 @@ static int px_engine_pump(struct objects *objs, struct px_engine *eng) {
     return progressed;
 }
 
-/* Egress worker thread body (n_eng>=2). Busy-polls its own PE + lanes; a short
- * yield when idle keeps it off a hot spin while still low-latency under load. */
+static int px_worker_progress(struct px_engine *eng) {
+    int published_done = 0;
+    int progressed = doca_pe_progress(eng->pe) ? 1 : 0;
+    progressed |= px_engine_pump(eng->objs, eng, &published_done);
+    if (published_done)
+        dpu_wake_main(eng->objs);
+    return progressed;
+}
+
+static uint64_t px_monotonic_ns(void) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (uint64_t)now.tv_sec * 1000000000ull + (uint64_t)now.tv_nsec;
+}
+
+static void px_engine_drain_wake_fd(struct px_engine *eng) {
+    uint64_t value;
+    while (read(eng->wake_fd, &value, sizeof(value)) == (ssize_t)sizeof(value))
+        ;
+}
+
+static int px_engine_has_work(struct px_engine *eng) {
+    if (eng->dma_stalled || eng->dma_tasks_inflight > 0)
+        return 1;
+
+    struct dmesh_proxy *px = eng->objs->proxy;
+    int npods = __atomic_load_n(&eng->objs->num_pods, __ATOMIC_ACQUIRE);
+    for (int i = eng->id; i < npods; i += px->n_eng) {
+        int K = eng->objs->pods[i].k_rings > 0 ? eng->objs->pods[i].k_rings : 1;
+        for (int r = 0; r < K; r++) {
+            struct px_lane *ln = &px->lanes[i][r];
+            if (px_lane_inbox_nonempty(px, ln) || ln->qhead || ln->fhead ||
+                ln->refresh_inflight)
+                return 1;
+        }
+    }
+    return 0;
+}
+
+static void px_engine_retry_backoff(void) {
+    struct timespec pause = { .tv_sec = 0, .tv_nsec = PX_EGRESS_RETRY_NS };
+    nanosleep(&pause, NULL);
+}
+
+static int px_engine_park(struct px_engine *eng) {
+    atomic_store_explicit(&eng->parked, 1, memory_order_release);
+    if (eng->stop || px_worker_progress(eng) ||
+        px_engine_has_work(eng)) {
+        atomic_fetch_add_explicit(&eng->stat_park_rechecks, 1,
+                                  memory_order_relaxed);
+        atomic_store_explicit(&eng->parked, 0, memory_order_release);
+        px_engine_drain_wake_fd(eng);
+        return 1;
+    }
+
+    atomic_fetch_add_explicit(&eng->stat_parks, 1, memory_order_relaxed);
+    struct epoll_event event;
+    int n;
+    do {
+        n = epoll_wait(eng->epoll_fd, &event, 1, -1);
+    } while (n < 0 && errno == EINTR && !eng->stop);
+    (void)n;
+
+    atomic_store_explicit(&eng->parked, 0, memory_order_release);
+    px_engine_drain_wake_fd(eng);
+    return 0;
+}
+
+/* Threaded egress loop. */
 static void *px_worker_main(void *arg) {
     struct px_engine *eng = (struct px_engine *)arg;
-    struct objects *objs = eng->objs;
-    unsigned idle = 0;
+    uint64_t idle_since_ns = 0;
+    unsigned active_idle = 0;
     while (!eng->stop) {
-        int p = doca_pe_progress(eng->pe) ? 1 : 0;
-        p |= px_engine_pump(objs, eng);
-        if (p) {
-            /* Retired an SG-DMA batch to the done-queue → wake main to emit REV_DONE
-             * promptly (no-op unless main is parked at low load / reaper on). */
-            dpu_wake_main(objs);
-            idle = 0;
+        if (px_worker_progress(eng)) {
+            idle_since_ns = 0;
+            active_idle = 0;
             continue;
         }
-        /* Idle: spin-yield briefly, then back off to a short sleep. An active
-         * worker always makes progress and never reaches the sleep; only a
-         * worker with no assigned pods or a real lull sleeps. */
-        if (++idle < 4096)
-            sched_yield();
-        else {
-            struct timespec ts = { 0, 50000 };
-            nanosleep(&ts, NULL);
+
+        if (px_engine_has_work(eng)) {
+            if (++active_idle < 4096) {
+                sched_yield();
+            } else {
+                px_engine_retry_backoff();
+            }
+            idle_since_ns = 0;
+            continue;
         }
+        active_idle = 0;
+
+        uint64_t now_ns = px_monotonic_ns();
+        if (idle_since_ns == 0)
+            idle_since_ns = now_ns;
+        if (now_ns - idle_since_ns < (uint64_t)eng->spin_us * 1000ull)
+            continue;
+
+        if (!eng->event_ready) {
+            px_engine_retry_backoff();
+            idle_since_ns = 0;
+            continue;
+        }
+        (void)px_engine_park(eng);
+        idle_since_ns = 0;
     }
     /* drain remaining completions so no doca task/buf leaks at shutdown */
     for (int n = 0; n < 100000 && eng->dma_tasks_inflight > 0; n++)
@@ -2260,11 +2458,7 @@ int px_drain(struct objects *objs) {
         return 0;
     int progressed = 0;
     if (px->n_eng > 1) {
-        /* n_eng>=2: the egress workers do submit+SG-DMA+retire on their own
-         * threads; the ingest (main) thread only drains each engine's done-queue
-         * for REV_DONE + custody + pool free. One deferred-free batch spans ALL
-         * engines and is spliced back to the pool in a SINGLE locked op per drain,
-         * so main's pool_lock traffic is O(1)/drain instead of O(units). */
+        /* Workers run DMA; main drains completion rings. */
         struct px_free_batch fb = { 0 };
         for (int e = 0; e < px->n_eng; e++)
             progressed |= px_engine_emit(objs, &px->engines[e], &fb);
@@ -2273,7 +2467,8 @@ int px_drain(struct objects *objs) {
     }
     /* Single-thread mode runs the same lane retirement path inline. */
     struct px_engine *eng = &px->engines[0];
-    progressed |= px_engine_pump(objs, eng);
+    int published_done = 0;
+    progressed |= px_engine_pump(objs, eng, &published_done);
     {
         struct px_free_batch fb = { 0 };
         progressed |= px_engine_emit(objs, eng, &fb);
@@ -2289,20 +2484,9 @@ int px_pod_reclaim_ready(struct objects *objs, int pod_idx) {
     struct pod_state *pod = &objs->pods[pod_idx];
     if (!__atomic_load_n(&pod->egress_quiesced, __ATOMIC_ACQUIRE) ||
         __atomic_load_n(&pod->egress_inflight, __ATOMIC_ACQUIRE) != 0 ||
+        __atomic_load_n(&pod->egress_pending_emit, __ATOMIC_ACQUIRE) != 0 ||
         __atomic_load_n(&pod->proxy_source_refs, __ATOMIC_ACQUIRE) != 0)
         return 0;
-
-    struct px_engine *eng = &px->engines[pod_idx % px->n_eng];
-    int found = 0;
-    pthread_mutex_lock(&eng->done_lock);
-    for (struct px_unit *u = eng->done_head; u; u = u->next)
-        if (u->dst_pod_idx == pod_idx) { found = 1; break; }
-    pthread_mutex_unlock(&eng->done_lock);
-    if (found)
-        return 0;
-    for (struct px_unit *u = eng->emit_head; u; u = u->next)
-        if (u->dst_pod_idx == pod_idx)
-            return 0;
     return 1;
 }
 
@@ -2329,13 +2513,40 @@ static int px_parse_svc_csv(const char *env, uint8_t *table) {
     return count;
 }
 
+static int px_engine_event_setup(struct px_engine *eng) {
+    int wake_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    int epoll_fd = epoll_create1(EPOLL_CLOEXEC);
+    if (wake_fd < 0 || epoll_fd < 0) {
+        if (wake_fd >= 0) close(wake_fd);
+        if (epoll_fd >= 0) close(epoll_fd);
+        return 0;
+    }
+
+    struct epoll_event wake_ev = { .events = EPOLLIN };
+    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, wake_fd, &wake_ev) != 0) {
+        close(epoll_fd);
+        close(wake_fd);
+        return 0;
+    }
+
+    eng->wake_fd = wake_fd;
+    eng->epoll_fd = epoll_fd;
+    eng->event_ready = 1;
+    return 1;
+}
+
 int px_init(struct objects *objs) {
     objs->proxy = NULL;
+    int started_workers = 0;
 
     /* The SG-DMA egress engine is the DPU-to-host reverse path. */
     struct dmesh_proxy *px = (struct dmesh_proxy *)calloc(1, sizeof(*px));
     if (!px)
         return DOCA_ERROR_NO_MEMORY;
+    for (int e = 0; e < MAX_ARM_ENG; e++) {
+        px->engines[e].wake_fd = -1;
+        px->engines[e].epoll_fd = -1;
+    }
 
     int n_l7_svc = px_parse_svc_csv(getenv("DPUMESH_PROXY_L7_SVC"), px->svc_l7);
 
@@ -2390,16 +2601,32 @@ int px_init(struct objects *objs) {
                        if (v >= 1 && v <= MAX_ARM_ENG) n_eng = v; } }
     px->n_eng = n_eng;
 
-    /* Per-engine DOCA dma/pe/inventory/batch-pool. n_eng==1 shares the control
-     * PE (objs->pe, progressed by the main loop); each threaded engine owns a PE
-     * its worker busy-polls. The ctx user_data = the engine (completion cbs). */
+    uint32_t egress_spin_us = PX_EGRESS_SPIN_US_DEFAULT;
+    { const char *se = getenv("DPUMESH_EGRESS_SPIN_US");
+      if (se && *se) {
+          char *end = NULL;
+          unsigned long v = strtoul(se, &end, 10);
+          if (end != se && *end == '\0' && v <= PX_EGRESS_SPIN_US_MAX)
+              egress_spin_us = (uint32_t)v;
+      } }
+
+    /* Per-engine DMA, PE, inventory, and batch pool. */
     doca_error_t ret = DOCA_SUCCESS;
     for (int e = 0; e < n_eng; e++) {
         struct px_engine *eng = &px->engines[e];
         eng->objs = objs;
         eng->id = e;
         eng->threaded = (n_eng > 1);
-        pthread_mutex_init(&eng->done_lock, NULL);
+        eng->wake_fd = -1;
+        eng->epoll_fd = -1;
+        eng->spin_us = egress_spin_us;
+        atomic_init(&eng->done_prod, 0);
+        atomic_init(&eng->done_cons, 0);
+        atomic_init(&eng->parked, 0);
+        atomic_init(&eng->stat_parks, 0);
+        atomic_init(&eng->stat_park_rechecks, 0);
+        atomic_init(&eng->stat_wakes, 0);
+        atomic_init(&eng->stat_wake_errors, 0);
         eng->batch_mem = (struct px_batch *)calloc(PX_BATCH_POOL, sizeof(*eng->batch_mem));
         if (!eng->batch_mem) { ret = DOCA_ERROR_NO_MEMORY; goto fail; }
         for (int i = PX_BATCH_POOL - 1; i >= 0; i--) px_batch_free_node(eng, &eng->batch_mem[i]);
@@ -2427,6 +2654,9 @@ int px_init(struct objects *objs) {
         if (ret != DOCA_SUCCESS) goto fail;
         ret = doca_buf_inventory_start(eng->inv);
         if (ret != DOCA_SUCCESS) goto fail;
+        if (eng->threaded && !px_engine_event_setup(eng))
+            DOCA_LOG_WARN("proxy: egress worker %d wake setup failed — "
+                          "using timed backoff", e);
     }
 
     /* credit-read landing cells (shared mmap; each cell touched by one engine) */
@@ -2443,22 +2673,31 @@ int px_init(struct objects *objs) {
             if (pthread_create(&px->engines[e].thread, NULL, px_worker_main,
                                &px->engines[e]) != 0) {
                 DOCA_LOG_ERR("proxy: failed to spawn egress worker %d", e);
-                objs->proxy = NULL;
                 ret = DOCA_ERROR_OPERATING_SYSTEM;
                 goto fail;
             }
+            started_workers++;
         }
     }
-    DOCA_LOG_WARN("DPU PROXY MODE ON (SG-DMA egress, egress-threads=%d; "
+    DOCA_LOG_WARN("DPU PROXY MODE ON (SG-DMA egress, N/K/M/E=%d/%d/%d/%d, "
+                  "egress-spin-us=%u; "
                   "l7-services=%d, lb=round-robin; passthru=conn-pinned, "
                   "l7=frame-serialized, sg_pieces=%u)",
-                  n_eng, n_l7_svc, px->sg_pieces_max);
+                  objs->num_dpa_threads, objs->k_rings, objs->n_ingest_shards,
+                  n_eng, egress_spin_us, n_l7_svc, px->sg_pieces_max);
     return DOCA_SUCCESS;
 
 oom:
     ret = DOCA_ERROR_NO_MEMORY;
 fail:
     DOCA_LOG_ERR("proxy init failed: %s", doca_error_get_descr(ret));
+    for (int e = 0; e < started_workers; e++) {
+        px->engines[e].stop = 1;
+        px_engine_wake(&px->engines[e]);
+    }
+    for (int e = 0; e < started_workers; e++)
+        pthread_join(px->engines[e].thread, NULL);
+    objs->proxy = NULL;
     for (int s = 0; s < MAX_INGEST_SHARDS; s++) {
         free(px->shards[s].buckets);
         /* Free only shard-private conntrack state. */
@@ -2468,6 +2707,10 @@ fail:
     free(px->arr_mem); free(px->piece_mem);
     free(px->unit_mem);
     for (int e = 0; e < MAX_ARM_ENG; e++) {
+        if (px->engines[e].epoll_fd >= 0)
+            close(px->engines[e].epoll_fd);
+        if (px->engines[e].wake_fd >= 0)
+            close(px->engines[e].wake_fd);
         free(px->engines[e].batch_mem);
     }
     free(px);

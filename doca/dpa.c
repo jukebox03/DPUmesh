@@ -1087,6 +1087,13 @@ dmesh_fill_dpa_ring_info(struct objects *objs, struct pod_state *pod, int j,
     return DOCA_SUCCESS;
 }
 
+/* Forward-ring EU owner. */
+static inline int
+dpa_eu_for_ring(int pod_id, int k_rings, int ring, int n_eu)
+{
+    return (pod_id * k_rings + ring) % n_eu;
+}
+
 /* Create and publish a pod's DMA buffers, ring metadata, and DPA thread state. */
 doca_error_t
 setup_pod_dma(struct objects *objs, struct pod_state *pod)
@@ -1101,6 +1108,7 @@ setup_pod_dma(struct objects *objs, struct pod_state *pod)
     pod->k_rings = K;
     __atomic_store_n(&pod->egress_quiesced, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&pod->egress_inflight, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&pod->egress_pending_emit, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&pod->proxy_source_refs, 0, __ATOMIC_RELEASE);
 
     /* Every target EU must ACK this exact incarnation. Publish the expected
@@ -1109,7 +1117,7 @@ setup_pod_dma(struct objects *objs, struct pod_state *pod)
                                               __ATOMIC_ACQ_REL);
     uint32_t expected_mask = 0;
     for (int j = 0; j < K; j++)
-        expected_mask |= 1u << ((pod->pod_id * K + j) % N);
+        expected_mask |= 1u << dpa_eu_for_ring(pod->pod_id, K, j, N);
     __atomic_store_n(&pod->dpa_add_ack_mask, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&pod->dpa_add_ack_failed, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&pod->dpa_setup_complete, 0, __ATOMIC_RELEASE);
@@ -1147,7 +1155,7 @@ setup_pod_dma(struct objects *objs, struct pod_state *pod)
      * EU does h2d_memcpy + thread_run + WAKE; later rings (this pod or others)
      * send ADD_RING. */
     for (int j = 0; j < K; j++) {
-        int k_j = (pod->pod_id * K + j) % N;
+        int k_j = dpa_eu_for_ring(pod->pod_id, K, j, N);
         result = setup_dpa_buf_array_pod(objs, DMA_RING_SIZE + 1, pod->ring_mmaps[j], &pod->buf_arrs[j]);
         if (result != DOCA_SUCCESS) {
             DOCA_LOG_ERR("setup_pod_dma: buf_arr[%d] failed for pod %d: %s",
@@ -1267,7 +1275,7 @@ progress_setup_pod_dma(struct objects *objs, struct pod_state *pod)
     uint32_t generation = __atomic_load_n(&pod->dma_generation,
                                            __ATOMIC_ACQUIRE);
     for (int j = 0; j < K; j++) {
-        int eu = (pod->pod_id * K + j) % N;
+        int eu = dpa_eu_for_ring(pod->pod_id, K, j, N);
         uint32_t bit = 1u << eu;
         if ((expected & bit) == 0 || (acked & bit) != 0)
             continue;
@@ -1310,7 +1318,7 @@ teardown_pod_dma(struct objects *objs, struct pod_state *pod)
 
     uint32_t expected = 0;
     for (int j = 0; j < K; j++) {
-        int k_j = (pod->pod_id * K + j) % N;
+        int k_j = dpa_eu_for_ring(pod->pod_id, K, j, N);
         if (objs->dpa_thread_running[k_j])
             expected |= 1u << k_j;
     }
@@ -1345,7 +1353,7 @@ progress_teardown_pod_dma(struct objects *objs, struct pod_state *pod)
     uint32_t generation = __atomic_load_n(&pod->dma_generation,
                                            __ATOMIC_ACQUIRE);
     for (int j = 0; j < K; j++) {
-        int eu = (pod->pod_id * K + j) % N;
+        int eu = dpa_eu_for_ring(pod->pod_id, K, j, N);
         uint32_t bit = 1u << eu;
         if ((expected & bit) == 0 || (acked & bit) != 0)
             continue;

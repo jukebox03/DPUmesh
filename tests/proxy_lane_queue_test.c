@@ -21,6 +21,13 @@ struct producer_arg {
     atomic_int *done;
 };
 
+struct done_producer_arg {
+    struct px_engine *eng;
+    struct px_unit *units;
+    int count;
+    atomic_int *done;
+};
+
 static void *producer_main(void *opaque)
 {
     struct producer_arg *a = (struct producer_arg *)opaque;
@@ -35,6 +42,21 @@ static void *producer_main(void *opaque)
             sched_yield();
     }
     atomic_fetch_add_explicit(a->done, 1, memory_order_release);
+    return NULL;
+}
+
+static void *done_producer_main(void *opaque)
+{
+    struct done_producer_arg *a = (struct done_producer_arg *)opaque;
+    for (int i = 0; i < a->count; i++) {
+        struct px_unit *u = &a->units[i];
+        memset(u, 0, sizeof(*u));
+        u->dst_pod_idx = 0;
+        u->seq = (uint16_t)(i + 1);
+        while (!px_done_publish(a->eng, u, u, 0, 1))
+            sched_yield();
+    }
+    atomic_store_explicit(a->done, 1, memory_order_release);
     return NULL;
 }
 
@@ -160,7 +182,73 @@ int main(void)
     assert(!px_lane_inbox_nonempty(px, ln));
     assert(__atomic_load_n(&px->stat_units, __ATOMIC_RELAXED) ==
            PRODUCERS * PER_PRODUCER);
+
+    /* Worker-to-main SPSC completion ring. */
+    struct objects *objs = calloc(1, sizeof(*objs));
+    assert(objs != NULL);
+    objs->proxy = px;
+    struct px_engine *eng = &px->engines[0];
+    eng->objs = objs;
+    atomic_init(&eng->done_prod, 0);
+    atomic_init(&eng->done_cons, 0);
+    enum { DONE_UNITS = 20000 };
+    struct px_unit *done_units = calloc(DONE_UNITS, sizeof(*done_units));
+    assert(done_units != NULL);
+    atomic_int done_published;
+    atomic_init(&done_published, 0);
+    struct done_producer_arg done_arg = {
+        .eng = eng,
+        .units = done_units,
+        .count = DONE_UNITS,
+        .done = &done_published,
+    };
+    pthread_t done_tid;
+    assert(pthread_create(&done_tid, NULL, done_producer_main, &done_arg) == 0);
+
+    int done_consumed = 0;
+    while (done_consumed < DONE_UNITS) {
+        (void)px_done_pull(eng);
+        while (eng->emit_head) {
+            struct px_unit *u = eng->emit_head;
+            eng->emit_head = u->next;
+            if (!eng->emit_head)
+                eng->emit_tail = NULL;
+            assert(u->seq == (uint16_t)(done_consumed + 1));
+            __atomic_fetch_sub(&objs->pods[0].egress_pending_emit, 1,
+                               __ATOMIC_ACQ_REL);
+            done_consumed++;
+        }
+        if (!atomic_load_explicit(&done_published, memory_order_acquire))
+            sched_yield();
+    }
+    pthread_join(done_tid, NULL);
+    assert(atomic_load_explicit(&eng->done_prod, memory_order_acquire) ==
+           atomic_load_explicit(&eng->done_cons, memory_order_acquire));
+    assert(__atomic_load_n(&objs->pods[0].egress_pending_emit,
+                           __ATOMIC_ACQUIRE) == 0);
+    free(done_units);
+
+    /* Coalesced worker wake. */
+    eng->threaded = 1;
+    eng->wake_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    assert(eng->wake_fd >= 0);
+    atomic_init(&eng->parked, 1);
+    atomic_init(&eng->stat_wakes, 0);
+    atomic_init(&eng->stat_wake_errors, 0);
+    px_engine_wake(eng);
+    px_engine_wake(eng);
+    uint64_t wakes = 0;
+    assert(read(eng->wake_fd, &wakes, sizeof(wakes)) == (ssize_t)sizeof(wakes));
+    assert(wakes == 1);
+    assert(atomic_load_explicit(&eng->parked, memory_order_acquire) == 0);
+    assert(atomic_load_explicit(&eng->stat_wakes, memory_order_relaxed) == 1);
+    assert(atomic_load_explicit(&eng->stat_wake_errors,
+                                memory_order_relaxed) == 0);
+    close(eng->wake_fd);
+    eng->wake_fd = -1;
+
     pthread_mutex_destroy(&px->pool_lock);
+    free(objs);
     free(px);
     puts("proxy_lane_queue_test: PASS");
     return 0;

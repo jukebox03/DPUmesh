@@ -54,6 +54,7 @@ reported L4 `(4,4)` operating point, deploy with the DPU knobs explicit:
 ```sh
 DPUMESH_INGEST_SHARDS=4 \
 DPUMESH_ARM_EGRESS_THREADS=4 \
+DPUMESH_EGRESS_SPIN_US=600 \
 DPUMESH_RINGS_PER_POD=2 \
 DPUMESH_LOG_LEVEL=40 \
 ./bench/bench.sh deploy
@@ -72,6 +73,7 @@ benchmark and service 16 is the stream validator:
 DPUMESH_PROXY_L7_SVC=11,16 \
 DPUMESH_INGEST_SHARDS=4 \
 DPUMESH_ARM_EGRESS_THREADS=4 \
+DPUMESH_EGRESS_SPIN_US=600 \
 DPUMESH_RINGS_PER_POD=2 \
 ./bench/bench.sh deploy
 ```

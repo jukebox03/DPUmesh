@@ -166,16 +166,17 @@ stop_dpu() {
 start_dpu() {
     local log_level="${DPUMESH_LOG_LEVEL:-40}"
     local l7_svc="${DPUMESH_PROXY_L7_SVC:-}"
-    local arm_threads="${DPUMESH_ARM_EGRESS_THREADS:-}" rings="${DPUMESH_RINGS_PER_POD:-}"
+    local arm_threads="${DPUMESH_ARM_EGRESS_THREADS:-}" egress_spin="${DPUMESH_EGRESS_SPIN_US:-}"
+    local rings="${DPUMESH_RINGS_PER_POD:-}"
     local reap="${DPUMESH_INGEST_REAP:-}"
-    local shards="${DPUMESH_INGEST_SHARDS:-}" shard_shared="${DPUMESH_SHARD_SHARED:-}" shard_emit="${DPUMESH_SHARD_HOST_EMIT:-}"
+    local shards="${DPUMESH_INGEST_SHARDS:-}" shard_shared="${DPUMESH_SHARD_SHARED:-}"
     local diag="${DPUMESH_DIAG:-}"
-    step "=== Starting dpumesh_dpu (l7_svc='$l7_svc' arm_egress_threads='$arm_threads' rings_per_pod='$rings' ingest_reap='$reap' ingest_shards='$shards' shard_shared='$shard_shared' shard_host_emit='$shard_emit') ==="
+    step "=== Starting dpumesh_dpu (l7_svc='$l7_svc' arm_egress_threads='$arm_threads' egress_spin_us='$egress_spin' rings_per_pod='$rings' ingest_reap='$reap' ingest_shards='$shards' shard_shared='$shard_shared') ==="
     stop_dpu
     local dpu_home; dpu_home=$(ssh "$DPU_HOST" 'echo $HOME')
     ssh "$DPU_HOST" "cat > /tmp/start_dpu_bench.sh << 'LAUNCHER'
 #!/bin/bash
-screen -dmS dpumesh-bench bash -c \"cd $dpu_home/$DPU_BUILD && DPUMESH_PROXY_L7_SVC=$l7_svc DPUMESH_ARM_EGRESS_THREADS=$arm_threads DPUMESH_RINGS_PER_POD=$rings DPUMESH_INGEST_REAP=$reap DPUMESH_INGEST_SHARDS=$shards DPUMESH_SHARD_SHARED=$shard_shared DPUMESH_SHARD_HOST_EMIT=$shard_emit DPUMESH_DIAG=$diag ./dpumesh_dpu $DPU_PCI -l $log_level > $DPU_LOG 2>&1\"
+screen -dmS dpumesh-bench bash -c \"cd $dpu_home/$DPU_BUILD && DPUMESH_PROXY_L7_SVC=$l7_svc DPUMESH_ARM_EGRESS_THREADS=$arm_threads DPUMESH_EGRESS_SPIN_US=$egress_spin DPUMESH_RINGS_PER_POD=$rings DPUMESH_INGEST_REAP=$reap DPUMESH_INGEST_SHARDS=$shards DPUMESH_SHARD_SHARED=$shard_shared DPUMESH_DIAG=$diag ./dpumesh_dpu $DPU_PCI -l $log_level > $DPU_LOG 2>&1\"
 sleep 2
 pgrep -f 'dpumesh_dpu.*03:00' || echo NO_PID
 LAUNCHER

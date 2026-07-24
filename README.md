@@ -111,6 +111,7 @@ bring-up path rebuilds and deploys both sides together:
 ```sh
 DPUMESH_INGEST_SHARDS=4 \
 DPUMESH_ARM_EGRESS_THREADS=4 \
+DPUMESH_EGRESS_SPIN_US=600 \
 DPUMESH_RINGS_PER_POD=2 \
 ./bench/bench.sh deploy
 ./bench/bench.sh latency both
@@ -119,6 +120,7 @@ DPUMESH_RINGS_PER_POD=2 \
 A bare deploy selects the resource-minimal `(1,1)` ARM default and is not
 comparable to the report's `(4,4)` measurements. Retained results must capture
 the environment of the live `dpumesh_dpu` process.
+`DPUMESH_EGRESS_SPIN_US` sets the egress HOT grace (default 600, range 0–1000).
 
 The gRPC adapter has an independent CMake build:
 

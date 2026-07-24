@@ -20,6 +20,7 @@
 #include <doca_pe.h>
 
 #include <time.h>
+#include <errno.h>
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -332,12 +333,19 @@ owner_shard(struct objects *objs, int here, const dpu_comp_entry_t *e)
 static void
 dpu_wake_shard(struct dpu_ingest_shard *sh)
 {
-    if (sh->wake_fd >= 0 &&
-        atomic_load_explicit(&sh->parked, memory_order_acquire)) {
-        uint64_t one = 1;
-        ssize_t n = write(sh->wake_fd, &one, sizeof(one));
-        (void)n;
-    }
+    if (sh->wake_fd < 0)
+        return;
+    int expected = 1;
+    if (!atomic_compare_exchange_strong_explicit(
+            &sh->parked, &expected, 0,
+            memory_order_acq_rel, memory_order_acquire))
+        return;
+    uint64_t one = 1;
+    ssize_t n;
+    do {
+        n = write(sh->wake_fd, &one, sizeof(one));
+    } while (n < 0 && errno == EINTR);
+    (void)n;
 }
 
 /* Hand a reply to its owner shard. Returns -1 when the inbox is full. */
@@ -345,10 +353,7 @@ static int
 xshard_handoff(struct objects *objs, int owner, const dpu_comp_entry_t *e)
 {
     struct dpu_ingest_shard *dst = &objs->ingest_shards[owner];
-    pthread_mutex_lock(&dst->xshard_lock);
-    int rc = comp_queue_enqueue(&dst->xshard, e);
-    pthread_mutex_unlock(&dst->xshard_lock);
-    return rc;
+    return mpsc_comp_queue_enqueue(&dst->xshard, e);
 }
 
 /* ====== DPU Worker ====== */
@@ -392,21 +397,23 @@ dpu_reap_iteration(struct objects *objs)
     return did_consumer;
 }
 
-/* Wake the main loop if it is parked in epoll (edge signal via the eventfd). Guarded
- * by main_parked so there is NO write() per message while main is spinning under load
- * (main only parks at idle). A missed edge is harmless: main's epoll has a 1 ms
- * keepalive timeout that re-polls, so the eventfd is a latency optimization, not a
- * correctness dependency. Non-static: egress workers (dpu_proxy.c) also wake main when
- * an SG-DMA batch completes so emit is prompt at low load. */
+/* Wake the main loop once per park interval. */
 void
 dpu_wake_main(struct objects *objs)
 {
-    if (objs->reaper_wake_fd >= 0 &&
-        atomic_load_explicit(&objs->main_parked, memory_order_acquire)) {
-        uint64_t one = 1;
-        ssize_t n = write(objs->reaper_wake_fd, &one, sizeof(one));
-        (void)n;
-    }
+    if (objs->reaper_wake_fd < 0)
+        return;
+    int expected = 1;
+    if (!atomic_compare_exchange_strong_explicit(
+            &objs->main_parked, &expected, 0,
+            memory_order_acq_rel, memory_order_acquire))
+        return;
+    uint64_t one = 1;
+    ssize_t n;
+    do {
+        n = write(objs->reaper_wake_fd, &one, sizeof(one));
+    } while (n < 0 && errno == EINTR);
+    (void)n;
 }
 
 static void dpu_send_wake(struct objects *objs);   /* fwd decl: the reaper sends the DPA keepalive */
@@ -721,14 +728,14 @@ dpu_shard_run(struct objects *objs, struct dpu_ingest_shard *sh)
         did++;
     }
 
-    /* Cross-shard reply inbox; producers serialize and this shard consumes. */
+    /* Cross-shard reply inbox. */
     for (int n = 0; n < 512; n++) {
-        dpu_comp_entry_t *xe = comp_queue_peek(&sh->xshard);
+        dpu_comp_entry_t *xe = mpsc_comp_queue_peek(&sh->xshard);
         if (!xe)
             break;
         if (px_ingest_forward(objs, sh->id, xe) == 0)
             break;                       /* backpressure — leave the front, retry */
-        comp_queue_dequeue(&sh->xshard);
+        mpsc_comp_queue_dequeue(&sh->xshard);
         did++;
     }
 
@@ -788,7 +795,7 @@ dpu_shard_main(void *arg)
         (void)doca_pe_request_notification(sh->pe);
         atomic_store_explicit(&sh->parked, 1, memory_order_release);
         if (dpu_reap_shard_pe(objs, sh) || dpu_shard_run(objs, sh) ||
-            !comp_queue_empty(&sh->xshard)) {
+            !mpsc_comp_queue_empty(&sh->xshard)) {
             atomic_store_explicit(&sh->parked, 0, memory_order_release);
             (void)doca_pe_clear_notification(sh->pe, cfd);
             dpu_wake_main(objs);
@@ -950,7 +957,6 @@ run_dpu_worker(struct objects *objs)
      * routing_lock, while private routing transfers replies to their owner shard. */
     objs->n_ingest_shards = 1;
     objs->shard_shared_routing = 0;
-    objs->shard_host_emit = 0;
     pthread_mutex_init(&objs->routing_lock, NULL);
     for (int s = 0; s < MAX_INGEST_SHARDS; s++) {
         struct dpu_ingest_shard *sh = &objs->ingest_shards[s];
@@ -958,8 +964,7 @@ run_dpu_worker(struct objects *objs)
         sh->id = s;
         sh->pe = NULL;                   /* = consumer_pes[s], set once PEs exist */
         sh->queue.head = sh->queue.tail = 0;
-        sh->xshard.head = sh->xshard.tail = 0;
-        pthread_mutex_init(&sh->xshard_lock, NULL);
+        mpsc_comp_queue_init(&sh->xshard);
         sh->num_deferred_recv = 0;
         sh->wake_fd = -1;
         atomic_store_explicit(&sh->parked, 0, memory_order_relaxed);
@@ -975,8 +980,6 @@ run_dpu_worker(struct objects *objs)
           if (v >= 1) objs->n_ingest_shards = v; } }
     { const char *se = getenv("DPUMESH_SHARD_SHARED");
       if (se && atoi(se) >= 1) objs->shard_shared_routing = 1; }
-    { const char *he = getenv("DPUMESH_SHARD_HOST_EMIT");
-      if (he && atoi(he) >= 1) objs->shard_host_emit = 1; }
     { const char *de = getenv("DPUMESH_DIAG");
       if (de && atoi(de) >= 1) g_dpu_diag = 1; }
     if (objs->n_ingest_shards >= 2)
@@ -985,10 +988,10 @@ run_dpu_worker(struct objects *objs)
     DOCA_LOG_WARN("Ingest reaper = %s (DPUMESH_INGEST_REAP)",
                   objs->reaper_active ? "ON (dedicated thread)" : "off (inline on main)");
     if (objs->n_ingest_shards >= 2)
-        DOCA_LOG_WARN("INGEST SHARDS = %d (mode=%s%s) — parse/route parallelized",
+        DOCA_LOG_WARN("INGEST SHARDS = %d (mode=%s) — parse/route parallelized",
                       objs->n_ingest_shards,
-                      objs->shard_shared_routing ? "① shared-routing+lock" : "② share-nothing",
-                      objs->shard_host_emit ? " + ③ host-emit" : "");
+                      objs->shard_shared_routing ? "shared-routing+lock"
+                                                 : "share-nothing");
 
     /* 1. comch control path server (waits for first connection) */
     result = init_comch_ctrl_path_server("DPUMesh", objs, true);

@@ -694,6 +694,7 @@ pods_add_connection(struct objects *objs, struct doca_comch_connection *conn)
 	objs->pods[idx].dpa_del_last_send_ns = 0;
 	objs->pods[idx].egress_quiesced = 0;
 	objs->pods[idx].egress_inflight = 0;
+	objs->pods[idx].egress_pending_emit = 0;
 	objs->pods[idx].proxy_source_refs = 0;
 	__atomic_store_n(&objs->pods[idx].registered, 0, __ATOMIC_RELEASE);
 	if (idx == n)

@@ -1,6 +1,8 @@
 #ifndef OBJECT_H_
 #define OBJECT_H_
 
+#include <stddef.h>
+#include <stdint.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <doca_dev.h>
@@ -98,6 +100,83 @@ CQ_INLINE uint32_t comp_queue_usage(const dpu_comp_queue_t *q) {
     return DPU_COMP_QUEUE_SIZE - head + tail;
 }
 
+/* Bounded MPSC completion queue. */
+typedef struct {
+    atomic_size_t sequence;
+    dpu_comp_entry_t entry;
+} dpu_mpsc_comp_slot_t;
+
+typedef struct {
+    dpu_mpsc_comp_slot_t slots[DPU_COMP_QUEUE_SIZE];
+    _Alignas(64) atomic_size_t enqueue_pos;
+    _Alignas(64) size_t dequeue_pos;       /* single-consumer owned */
+} dpu_mpsc_comp_queue_t;
+
+_Static_assert((DPU_COMP_QUEUE_SIZE & (DPU_COMP_QUEUE_SIZE - 1)) == 0,
+               "DPU_COMP_QUEUE_SIZE must be a power of two");
+
+CQ_INLINE void mpsc_comp_queue_init(dpu_mpsc_comp_queue_t *q) {
+    atomic_init(&q->enqueue_pos, 0);
+    q->dequeue_pos = 0;
+    for (size_t i = 0; i < DPU_COMP_QUEUE_SIZE; i++)
+        atomic_init(&q->slots[i].sequence, i);
+}
+
+CQ_INLINE int mpsc_comp_queue_enqueue(dpu_mpsc_comp_queue_t *q,
+                                      const dpu_comp_entry_t *e) {
+    size_t pos = atomic_load_explicit(&q->enqueue_pos, memory_order_relaxed);
+    dpu_mpsc_comp_slot_t *slot;
+
+    for (;;) {
+        slot = &q->slots[pos & (DPU_COMP_QUEUE_SIZE - 1u)];
+        size_t sequence =
+            atomic_load_explicit(&slot->sequence, memory_order_acquire);
+        intptr_t delta = (intptr_t)sequence - (intptr_t)pos;
+        if (delta == 0) {
+            if (atomic_compare_exchange_weak_explicit(
+                    &q->enqueue_pos, &pos, pos + 1,
+                    memory_order_relaxed, memory_order_relaxed))
+                break;
+        } else if (delta < 0) {
+            return -1;                    /* bounded queue full */
+        } else {
+            pos = atomic_load_explicit(&q->enqueue_pos,
+                                       memory_order_relaxed);
+        }
+    }
+
+    slot->entry = *e;
+    atomic_store_explicit(&slot->sequence, pos + 1, memory_order_release);
+    return 0;
+}
+
+CQ_INLINE dpu_comp_entry_t *
+mpsc_comp_queue_peek(dpu_mpsc_comp_queue_t *q) {
+    size_t pos = q->dequeue_pos;
+    dpu_mpsc_comp_slot_t *slot =
+        &q->slots[pos & (DPU_COMP_QUEUE_SIZE - 1u)];
+    size_t sequence =
+        atomic_load_explicit(&slot->sequence, memory_order_acquire);
+    return sequence == pos + 1 ? &slot->entry : NULL;
+}
+
+CQ_INLINE void mpsc_comp_queue_dequeue(dpu_mpsc_comp_queue_t *q) {
+    size_t pos = q->dequeue_pos;
+    dpu_mpsc_comp_slot_t *slot =
+        &q->slots[pos & (DPU_COMP_QUEUE_SIZE - 1u)];
+    size_t sequence =
+        atomic_load_explicit(&slot->sequence, memory_order_acquire);
+    if (sequence != pos + 1)
+        return;
+    q->dequeue_pos = pos + 1;
+    atomic_store_explicit(&slot->sequence, pos + DPU_COMP_QUEUE_SIZE,
+                          memory_order_release);
+}
+
+CQ_INLINE int mpsc_comp_queue_empty(dpu_mpsc_comp_queue_t *q) {
+    return mpsc_comp_queue_peek(q) == NULL;
+}
+
 /* Backpressure threshold: defer recv task resubmission when queue exceeds
  * BP_HIGH to slow DPA inflow; resume resubmission below BP_LOW. Absolute values
  * so enlarging the queue does not move the trip points. */
@@ -166,6 +245,8 @@ struct pod_state {
     uint64_t dpa_del_last_send_ns;
     int egress_quiesced;
     uint32_t egress_inflight;
+    /* Retired units awaiting main-thread emission and custody release. */
+    uint32_t egress_pending_emit;
     /* Number of proxy arrivals whose bytes still reference this slot's reusable
      * DPU staging buffer (window ref or queued/in-flight egress piece). Slot
      * reuse is forbidden until it reaches zero. */
@@ -355,9 +436,8 @@ struct dpu_ingest_shard {
     struct doca_task *deferred_recv[MAX_DEFERRED_RECV];
     int num_deferred_recv;
     /* MPSC inbox for replies handed to their upstream-port owner shard. */
-    dpu_comp_queue_t xshard;
-    pthread_mutex_t  xshard_lock;
-    int wake_fd;                 /* eventfd: a cross-shard producer wakes this shard when it parks */
+    dpu_mpsc_comp_queue_t xshard;
+    int wake_fd;                 /* cross-shard eventfd */
     atomic_int parked;           /* 1 = shard is about to / is blocked in epoll_wait */
     atomic_int init_state;       /* 0=pending, 1=epoll ready, -1=thread init failed */
     pthread_t thread;
@@ -496,17 +576,13 @@ struct objects {
     struct { int32_t pod_id; uint16_t port; uint16_t seq; } pending_txack[16384];
     int pending_txack_n;
     pthread_mutex_t pending_txack_lock;
-    /* Event-driven hand-off reaper -> main (NO busy-spin): the reaper sleeps on
-     * consumer_pe's epoll fd; after it reaps into comp_queue it wakes the main loop
-     * via reaper_wake_fd — but ONLY when main is parked (main_parked=1), so there is
-     * no write() per message under load. Main sleeps on {ctrl_pe fd, reaper_wake_fd}. */
-    int reaper_wake_fd;          /* eventfd: reaper writes, main reads */
+    /* Ingest/egress-to-main eventfd handoff. */
+    int reaper_wake_fd;          /* eventfd: ingest/egress producers write, main reads */
     atomic_int main_parked;      /* 1 = main is about to / is blocked in epoll_wait */
 
     /* Ingest sharding; M>=2 assigns one consumer PE and queue per shard. */
     int n_ingest_shards;                       /* M (>=2 = sharded; <=1 = single reaper) */
     int shard_shared_routing;                  /* 1 = shared+lock, 0 = share-nothing */
-    int shard_host_emit;                       /* 1 = shard emits REV_DONE/TX_ACK */
     struct dpu_ingest_shard ingest_shards[MAX_INGEST_SHARDS];
     pthread_mutex_t routing_lock;              /* shared conntrack and route tables */
 

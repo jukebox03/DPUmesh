@@ -233,6 +233,22 @@ destination lanes, DOCA DMA engines, and reverse batches. Every queued lane item
 and DMA operation carries the destination pod generation. A stale completion can
 therefore be discarded instead of touching a reused pod slot.
 
+Threaded egress workers poll while active and wait on a lane eventfd after the
+HOT grace. Each worker publishes completed units to main through a bounded SPSC
+ring. Main owns Comch emission and custody release. Each pod counts retired units
+pending on main.
+
+The four parallelism values describe different ownership axes:
+
+| Symbol | Meaning | Owner key |
+|---|---|---|
+| N | DPA execution units | `(pod_id × K + ring) mod N` |
+| K | forward rings per pod | source port modulo K |
+| M | ARM ingest shards | DPA channel modulo M, then connection owner |
+| E | ARM egress engines | destination pod slot modulo E |
+
+In share-nothing mode, cross-shard replies use a bounded MPSC queue.
+
 ## 8. Remote reclaim
 
 Graceful shutdown is another replayable barrier:
