@@ -1,15 +1,20 @@
 #ifndef DMESH_COMMON_H
 #define DMESH_COMMON_H
 
-/* DPA capacity. Ring j of pod p maps to EU (p*K + j) % N. */
-#define MAX_DPA_EU          8   /* max DPA EU threads: array cap (dpa_threads[]) + the N clamp */
+/* DPA capacity. Ring/EU/ARM ownership is defined in dmesh_topology.h. */
+#define MAX_DPA_EU          32  /* DPUMESH_DPA_THREADS limit */
+#define DPA_THREADS_AUTO_CAP 16 /* automatic selection cap */
 #define MAX_DPA_RINGS       8   /* per-EU forward-ring capacity (rings[] per EU) */
-#define DPA_THREADS_DEFAULT 4   /* default N; env DPUMESH_DPA_THREADS overrides */
+#define DPA_THREADS_DEFAULT 8   /* fallback N when the device query is unavailable */
 #define DPUMESH_RINGS_PER_POD_DEFAULT 2   /* default K; env DPUMESH_RINGS_PER_POD */
 #define MAX_EU_PER_POD      MAX_DPA_RINGS  /* per-pod ring array (a pod spans <= K <= this EUs) */
 
-/* pods[] capacity; the runtime cap is MAX_DPA_RINGS * N / K. */
-#define MAX_PODS   (MAX_DPA_RINGS * MAX_DPA_EU / DPUMESH_RINGS_PER_POD_DEFAULT)  /* 8*8/2 = 32 */
+#if MAX_DPA_EU > 32
+#error "MAX_DPA_EU exceeds the uint32_t DPA ADD/DEL ACK masks"
+#endif
+
+/* Pod-state table capacity. */
+#define MAX_PODS   32
 
 /* Complete nonnegative int8 pod-id space. */
 #define POD_ID_SPACE        128

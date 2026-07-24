@@ -109,18 +109,21 @@ The BlueField program is built from `doca/meson.build`. The supported benchmark
 bring-up path rebuilds and deploys both sides together:
 
 ```sh
-DPUMESH_INGEST_SHARDS=4 \
-DPUMESH_ARM_EGRESS_THREADS=4 \
-DPUMESH_EGRESS_SPIN_US=600 \
+DPUMESH_DPA_THREADS=16 \
+DPUMESH_INGEST_SHARDS=2 \
 DPUMESH_RINGS_PER_POD=2 \
+DPUMESH_ARM_PIN=1 \
 ./bench/bench.sh deploy
 ./bench/bench.sh latency both
 ```
 
-A bare deploy selects the resource-minimal `(1,1)` ARM default and is not
-comparable to the report's `(4,4)` measurements. Retained results must capture
-the environment of the live `dpumesh_dpu` process.
-`DPUMESH_EGRESS_SPIN_US` sets the egress HOT grace (default 600, range 0–1000).
+A bare deploy selects one ARM data worker. With `A>=2`, each worker owns its DPA
+consumer PE, connection/conntrack shard, parser/routing state, and matching
+SG-DMA engine. `K` and `N` must be multiples of `A`; an incompatible requested
+worker count is reduced at startup and reported in the DPU log.
+
+`DPUMESH_DPA_THREADS` accepts up to 32 EUs; automatic selection uses up to 16.
+`DPUMESH_INGEST_SHARDS` sets the number of homogeneous ARM data workers.
 
 The gRPC adapter has an independent CMake build:
 
@@ -144,7 +147,4 @@ connection attempt creates a QP; established L4 streams remain backend-pinned.
 - [gRPC integration](integrations/grpc/README.md): build and application bootstrap
 - [Benchmark guide](bench/README.md): deployment and experiment commands
 - [Native contract tests](tests/README.md): fast host-only regression coverage
-- [Performance report](bench/report/REPORT.md): current ABI 4 native L4 evaluation
-- [Engineering results](bench/RESULT.md): chronological correctness and performance experiments
-
-`bench/RESULT.md` is an engineering experiment log, not a current specification.
+- [Performance report](bench/report/REPORT.md): current topology evaluation

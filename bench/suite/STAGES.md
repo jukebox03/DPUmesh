@@ -58,8 +58,8 @@ A performance point is retained only if:
 - client and server report consistent success counts;
 - payload semantics are identical across transports;
 - warmup is excluded and measurement duration is explicit;
-- CPU pinning, DPU N/K, ingest shards, egress workers, binary provenance, and node
-  placement are recorded;
+- CPU pinning, DPU N/K/A topology, binary provenance, and node placement are
+  recorded;
 - logging is at warning level unless the run is explicitly diagnostic;
 - the point is below an obvious saturation knee when used for latency comparison.
 
@@ -76,6 +76,5 @@ A performance point is retained only if:
 - The focused gRPC harness is compatible with the official service schema but is
   not the upstream distributed `qps_worker` scenario controller.
 
-The current ABI 4 native L4 campaign is in `bench/report/REPORT.md`; its exact
-deployment is in `bench/report/DEPLOY.md`. The chronological engineering log
-remains in `bench/RESULT.md`.
+The current evaluation is in `bench/report/REPORT.md`; its deployment is in
+`bench/report/DEPLOY.md`.

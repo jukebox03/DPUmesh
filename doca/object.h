@@ -244,7 +244,10 @@ struct pod_state {
     uint32_t dpa_del_ack_mask;
     uint64_t dpa_del_last_send_ns;
     int egress_quiesced;
+    /* Pod teardown waits for every region%A owner bit. */
+    uint32_t egress_quiesced_mask;
     uint32_t egress_inflight;
+    uint32_t egress_inflight_worker[MAX_EU_PER_POD];
     /* Retired units awaiting main-thread emission and custody release. */
     uint32_t egress_pending_emit;
     /* Number of proxy arrivals whose bytes still reference this slot's reusable
@@ -368,7 +371,8 @@ static inline uint16_t dpu_upstream_create(struct dpu_conntrack *ct, int32_t cp,
     if (stride < 1) stride = 1;
     for (uint32_t k = 0; k < span; k++) {
         uint32_t p = DMESH_UPORT_BASE + ((ct->next_uport - DMESH_UPORT_BASE + k) % span);
-        if (stride > 1 && ((p - DMESH_UPORT_BASE) % stride) != owner) continue;
+        /* Encode the return-path worker as p % A. */
+        if (stride > 1 && (p % stride) != owner) continue;
         if (!ct->upstream[p].in_use) { uP = (uint16_t)p; break; }
     }
     if (uP == 0) return 0;
@@ -421,10 +425,19 @@ static inline void dpu_upstream_free(struct dpu_conntrack *ct, uint16_t uP) {
     ct->ht[hole].in_use = 0;
 }
 
-/* Ingest completions are assigned to shard queues by connection hash or upstream
- * port owner. Shards parse and route data, while the main thread performs comch
- * sends. Each shard sleeps on its wake descriptor when idle. */
+/* Ingest completions are assigned by raw-port owner. Shards run DPA reap,
+ * parse/route, and their matching DMA engine; main performs Comch sends. */
 #define MAX_INGEST_SHARDS 8
+#define DPU_PENDING_TXACK_SIZE 16384
+
+_Static_assert((DPU_PENDING_TXACK_SIZE & (DPU_PENDING_TXACK_SIZE - 1)) == 0,
+               "DPU_PENDING_TXACK_SIZE must be a power of two");
+
+struct dpu_pending_txack_entry {
+    int32_t pod_id;
+    uint16_t port;
+    uint16_t seq;
+};
 
 struct dpu_ingest_shard {
     struct objects *objs;
@@ -435,8 +448,15 @@ struct dpu_ingest_shard {
     /* Per-PE recv backpressure (the recv tasks of the channels bound to this PE). */
     struct doca_task *deferred_recv[MAX_DEFERRED_RECV];
     int num_deferred_recv;
-    /* MPSC inbox for replies handed to their upstream-port owner shard. */
+    /* Safety-net MPSC inbox for a completion received by the wrong owner. */
     dpu_mpsc_comp_queue_t xshard;
+    /* Worker-produced, main-consumed SPSC TX-ACK ring. */
+    struct dpu_pending_txack_entry pending_txack[DPU_PENDING_TXACK_SIZE];
+    _Alignas(64) atomic_uint pending_txack_head; /* main-owned */
+    _Alignas(64) atomic_uint pending_txack_tail; /* worker-owned */
+    atomic_ullong stat_local_completions;
+    atomic_ullong stat_xshard_out;
+    atomic_ullong stat_xshard_in;
     int wake_fd;                 /* cross-shard eventfd */
     atomic_int parked;           /* 1 = shard is about to / is blocked in epoll_wait */
     atomic_int init_state;       /* 0=pending, 1=epoll ready, -1=thread init failed */
@@ -470,8 +490,8 @@ struct objects {
      * this before destroying the exported mmaps. */
     int32_t pod_quiesced;
 
-    /* Shared DPA device with N EU threads. Ring j of a pod maps to
-     * (pod_id*K + j) % N, and each EU owns one thread and comch channel. */
+    /* Shared DPA device with N EU threads. The common topology maps each ring
+     * to an EU whose EU%A equals ring%A. */
     struct doca_dpa *dpa;                                   /* shared DPA device */
     struct dmesh_doca_dpa_thread *dpa_threads[MAX_DPA_EU];
     struct dmesh_doca_dpa_comch  *dpa_comches[MAX_DPA_EU];
@@ -488,7 +508,7 @@ struct objects {
      * window → proxy_route (mock) → per-dst SG-DMA egress machinery. DPUMESH_PROXY
      * only selects the request parser (passthru default / frame / L7). */
     struct dmesh_proxy *proxy;
-    int dpa_thread_running[MAX_DPA_RINGS];  /* per-EU: 1 = thread k started */
+    int dpa_thread_running[MAX_DPA_EU];     /* per-EU: 1 = thread k started */
     int dpa_thread_running_any;             /* 1 = at least one EU started (keepalive guard) */
 
     /* comch data path related */
@@ -525,7 +545,7 @@ struct objects {
      * backend from the set automatically. Existing pins terminate; new
      * connections rotate across the live set. Indexed by service_id
      * [0,POD_ID_SPACE).
-     * Single ARM control thread advances it → no lock. Init to 0. */
+     * Data workers advance it with a relaxed atomic. Init to 0. */
     uint32_t svc_rr[POD_ID_SPACE];
 
     /* DPU-owned connection tracking (model B). Heap-allocated (large) in
@@ -572,10 +592,6 @@ struct objects {
     int reaper_active;
     volatile int reaper_stop;
     pthread_t reaper_thread;
-    /* Ingest threads enqueue control TX_ACKs here for the main-thread comch owner. */
-    struct { int32_t pod_id; uint16_t port; uint16_t seq; } pending_txack[16384];
-    int pending_txack_n;
-    pthread_mutex_t pending_txack_lock;
     /* Ingest/egress-to-main eventfd handoff. */
     int reaper_wake_fd;          /* eventfd: ingest/egress producers write, main reads */
     atomic_int main_parked;      /* 1 = main is about to / is blocked in epoll_wait */

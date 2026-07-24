@@ -159,26 +159,27 @@ ensure_envoy_image() {
 ### ------------------------------------------------------------ DPU process
 stop_dpu() {
     info "Stopping dpumesh_dpu..."
-    ssh "$DPU_HOST" "echo '$DPU_PASS' | sudo -S killall -9 dpumesh_dpu 2>/dev/null; true" 2>&1 | sed 's/^\[sudo\][^:]*: *//' || true
+    # Match process command lines even when the main thread has been renamed.
+    ssh "$DPU_HOST" "echo '$DPU_PASS' | sudo -S bash -c \"pids=\\\$(pgrep -f '[d]pumesh_dpu'); [ -z \\\"\\\$pids\\\" ] || kill -9 \\\$pids\" 2>/dev/null; true" 2>&1 | sed 's/^\[sudo\][^:]*: *//' || true
     sleep 5
 }
 
 start_dpu() {
     local log_level="${DPUMESH_LOG_LEVEL:-40}"
     local l7_svc="${DPUMESH_PROXY_L7_SVC:-}"
-    local arm_threads="${DPUMESH_ARM_EGRESS_THREADS:-}" egress_spin="${DPUMESH_EGRESS_SPIN_US:-}"
+    local dpa_threads="${DPUMESH_DPA_THREADS:-}" arm_pin="${DPUMESH_ARM_PIN:-1}"
     local rings="${DPUMESH_RINGS_PER_POD:-}"
     local reap="${DPUMESH_INGEST_REAP:-}"
     local shards="${DPUMESH_INGEST_SHARDS:-}" shard_shared="${DPUMESH_SHARD_SHARED:-}"
     local diag="${DPUMESH_DIAG:-}"
-    step "=== Starting dpumesh_dpu (l7_svc='$l7_svc' arm_egress_threads='$arm_threads' egress_spin_us='$egress_spin' rings_per_pod='$rings' ingest_reap='$reap' ingest_shards='$shards' shard_shared='$shard_shared') ==="
+    step "=== Starting dpumesh_dpu (l7_svc='$l7_svc' dpa_threads='$dpa_threads' rings_per_pod='$rings' arm_workers='$shards' arm_pin='$arm_pin' ingest_reap='$reap' shard_shared='$shard_shared') ==="
     stop_dpu
     local dpu_home; dpu_home=$(ssh "$DPU_HOST" 'echo $HOME')
     ssh "$DPU_HOST" "cat > /tmp/start_dpu_bench.sh << 'LAUNCHER'
 #!/bin/bash
-screen -dmS dpumesh-bench bash -c \"cd $dpu_home/$DPU_BUILD && DPUMESH_PROXY_L7_SVC=$l7_svc DPUMESH_ARM_EGRESS_THREADS=$arm_threads DPUMESH_EGRESS_SPIN_US=$egress_spin DPUMESH_RINGS_PER_POD=$rings DPUMESH_INGEST_REAP=$reap DPUMESH_INGEST_SHARDS=$shards DPUMESH_SHARD_SHARED=$shard_shared DPUMESH_DIAG=$diag ./dpumesh_dpu $DPU_PCI -l $log_level > $DPU_LOG 2>&1\"
+screen -dmS dpumesh-bench bash -c \"cd $dpu_home/$DPU_BUILD && DPUMESH_PROXY_L7_SVC=$l7_svc DPUMESH_DPA_THREADS=$dpa_threads DPUMESH_RINGS_PER_POD=$rings DPUMESH_INGEST_REAP=$reap DPUMESH_INGEST_SHARDS=$shards DPUMESH_ARM_PIN=$arm_pin DPUMESH_SHARD_SHARED=$shard_shared DPUMESH_DIAG=$diag ./dpumesh_dpu $DPU_PCI -l $log_level > $DPU_LOG 2>&1\"
 sleep 2
-pgrep -f 'dpumesh_dpu.*03:00' || echo NO_PID
+pgrep -x dpumesh_dpu | head -1 || echo NO_PID
 LAUNCHER
 chmod +x /tmp/start_dpu_bench.sh"
     local pid; pid=$(ssh "$DPU_HOST" "echo '$DPU_PASS' | sudo -S bash /tmp/start_dpu_bench.sh" 2>&1 | sed 's/^\[sudo\][^:]*: *//')
@@ -276,7 +277,16 @@ apply_manifest() {
 scale_up_with_wait() {
     local app="$1" expected_log="$2"
     kubectl scale deployment "$app" --replicas=0 -n "$NS" 2>/dev/null || true
-    sleep 1
+    # Wait for an empty label set before creating the replacement pod.
+    local i=0
+    while [ "$i" -lt 120 ] &&
+          [ -n "$(kubectl get pods -n "$NS" -l "app=$app" -o name 2>/dev/null)" ]; do
+        sleep 0.25
+        i=$((i + 1))
+    done
+    if [ -n "$(kubectl get pods -n "$NS" -l "app=$app" -o name 2>/dev/null)" ]; then
+        err "$app old pod did not terminate"; exit 1
+    fi
     kubectl scale deployment "$app" --replicas=1 -n "$NS"
     if ! kubectl wait --for=condition=Ready pod -l "app=$app" -n "$NS" --timeout=120s 2>&1; then
         err "$app failed to start"; kubectl describe pod -l "app=$app" -n "$NS" | tail -15; exit 1
@@ -327,12 +337,16 @@ deploy() {
     ensure_namespace
     clean_failed_pods
     apply_manifest
-    sync_sources
-    build_dpu
-    build_host
-    build_bench_binaries
-    build_images
-    ensure_envoy_image
+    if [ "${DPUMESH_DEPLOY_REUSE_ARTIFACTS:-0}" = 1 ]; then
+        info "Reusing already-built DPU binary and container images"
+    else
+        sync_sources
+        build_dpu
+        build_host
+        build_bench_binaries
+        build_images
+        ensure_envoy_image
+    fi
     start_dpu
     start_pods
     pin_pods fair
@@ -355,6 +369,103 @@ show_status() {
     echo "=== pods ===";    kubectl get pods   -n "$NS" -o wide
     echo "=== services ==="; kubectl get svc    -n "$NS"
     echo "=== deploys ===";  kubectl get deploy -n "$NS"
+}
+
+### ------------------------------------------------------------ DPU ARM worker balance
+# Snapshot DPU process threads as:
+#   T <tid> <comm> <last_cpu> <allowed_cpus> <user+system ticks>
+dpu_thread_snapshot() {
+    dpu_sudo 'pid=$(pgrep -x dpumesh_dpu | head -1); [ -z "$pid" ] && exit 1; echo "HZ $(getconf CLK_TCK) PID $pid"; for task in /proc/$pid/task/*; do tid=${task##*/}; comm=$(<"$task/comm"); stat=$(<"$task/stat"); rest=${stat#*) }; set -- $rest; ticks=$((${12}+${13})); cpu=${37}; allowed=$(while read -r key value; do [ "$key" = "Cpus_allowed_list:" ] && { echo "$value"; break; }; done < "$task/status"); echo "T $tid $comm $cpu $allowed $ticks"; done'
+}
+
+arm_balance() {
+    need_env
+    local req="${1:-1024}" reply="${2:-8}" conc="${3:-32}"
+    local dur="${4:-10}" threads="${5:-2}" csv="${6:-}"
+    local snap0 snap1 result w0 w1 dt hz dpid
+    declare -A tick0 comm0
+
+    snap0=$(dpu_thread_snapshot) || { err "dpumesh_dpu is not running on the DPU"; return 1; }
+    read -r _ hz _ dpid <<<"$(head -n1 <<<"$snap0")"
+    while read -r tag tid comm cpu allowed ticks; do
+        [ "$tag" = T ] || continue
+        tick0["$tid"]="$ticks"
+        comm0["$tid"]="$comm"
+    done <<<"$snap0"
+
+    step "=== DPU ARM balance: ${req}B/${reply}B conc=$conc threads=$threads dur=${dur}s ==="
+    w0=$(date +%s.%N)
+    result=$(run_point dpumesh "$req" "$reply" "$conc" "$dur" 200 "$threads")
+    w1=$(date +%s.%N)
+    [[ "$result" == OK* ]] || { err "load failed: $result"; return 1; }
+    local fail drops reorder
+    fail=$(field "$result" fail); drops=$(field "$result" drops); reorder=$(field "$result" reorder)
+    [ "${fail:-0}" = 0 ] && [ "${drops:-0}" = 0 ] && [ "${reorder:-0}" = 0 ] ||
+        { err "invalid load: fail=${fail:-NA} drops=${drops:-NA} reorder=${reorder:-NA}"; return 1; }
+
+    snap1=$(dpu_thread_snapshot)
+    dt=$(awk -v a="$w0" -v b="$w1" 'BEGIN{print b-a}')
+    echo "   $result"
+    echo "   DPU pid=$dpid elapsed=${dt}s (100% = one ARM core)"
+    printf "   %-15s %7s %8s %10s %11s\n" THREAD TID LAST_CPU ALLOWED CORE_PCT
+    [ -z "$csv" ] || {
+        mkdir -p "$(dirname "$csv")"
+        echo "thread,tid,last_cpu,allowed_cpus,core_pct,tick_delta" >"$csv"
+    }
+
+    local worker_rows="" worker_count=0 worker_sum=0 worker_min="" worker_max=0
+    local total_ticks=0 app_ticks=0
+    while read -r tag tid comm cpu allowed ticks; do
+        [ "$tag" = T ] || continue
+        [ -n "${tick0[$tid]+x}" ] || continue
+        local delta pct
+        delta=$((ticks - tick0[$tid]))
+        [ "$delta" -ge 0 ] || continue
+        total_ticks=$((total_ticks + delta))
+        if [ "$tid" = "$dpid" ]; then
+            comm=dmesh-main
+        fi
+        case "$comm" in
+            dmesh-main|dmesh-reap|dmesh-w*)
+                pct=$(awk -v d="$delta" -v h="$hz" -v s="$dt" 'BEGIN{printf "%.1f",100*d/h/s}')
+                printf "   %-15s %7s %8s %10s %10s%%\n" "$comm" "$tid" "$cpu" "$allowed" "$pct"
+                [ -z "$csv" ] || echo "$comm,$tid,$cpu,$allowed,$pct,$delta" >>"$csv"
+                app_ticks=$((app_ticks + delta))
+                case "$comm" in
+                    dmesh-w*)
+                        worker_count=$((worker_count + 1))
+                        worker_sum=$(awk -v a="$worker_sum" -v b="$pct" 'BEGIN{print a+b}')
+                        worker_rows="${worker_rows}${pct}"$'\n'
+                        [ -n "$worker_min" ] || worker_min="$pct"
+                        worker_min=$(awk -v a="$worker_min" -v b="$pct" \
+                            'BEGIN{if (a < b) print a; else print b}')
+                        worker_max=$(awk -v a="$worker_max" -v b="$pct" \
+                            'BEGIN{if (a > b) print a; else print b}')
+                        ;;
+                esac
+                ;;
+        esac
+    done <<<"$snap1"
+
+    local total_pct helper_pct
+    total_pct=$(awk -v d="$total_ticks" -v h="$hz" -v s="$dt" 'BEGIN{printf "%.1f",100*d/h/s}')
+    helper_pct=$(awk -v d="$((total_ticks-app_ticks))" -v h="$hz" -v s="$dt" 'BEGIN{printf "%.1f",100*d/h/s}')
+    printf "   total process: %s%%  named main/workers: " "$total_pct"
+    awk -v d="$app_ticks" -v h="$hz" -v s="$dt" 'BEGIN{printf "%.1f%%",100*d/h/s}'
+    printf "  SDK/helper threads: %s%%\n" "$helper_pct"
+    if [ "$worker_count" -ge 2 ]; then
+        local avg cv
+        avg=$(awk -v s="$worker_sum" -v n="$worker_count" 'BEGIN{printf "%.1f",s/n}')
+        cv=$(awk -v mean="$avg" '
+            NF {n++; sum+=($1-mean)*($1-mean)}
+            END {
+                if (mean > 0 && n > 0) printf "%.1f",100*sqrt(sum/n)/mean;
+                else printf "0.0"
+            }' <<<"$worker_rows")
+        printf "   worker balance: n=%d avg=%s%% min=%s%% max=%s%% CV=%s%%\n" \
+               "$worker_count" "$avg" "$worker_min" "$worker_max" "$cv"
+    fi
+    [ -z "$csv" ] || info "-> $csv"
 }
 
 ### ------------------------------------------------------------ benchmark (RUN)
@@ -497,6 +608,7 @@ case "$CMD" in
     cleanup)   cleanup ;;
     dpulog)    ssh "$DPU_HOST" "echo '$DPU_PASS' | sudo -S tail -${1:-40} $DPU_LOG" 2>&1 | sed 's/^\[sudo\][^:]*: *//' ;;
     dpucpu)    dpu_sudo 'pid=$(pgrep -x dpumesh_dpu | head -1); [ -z "$pid" ] && { echo "dpumesh_dpu not running"; exit 0; }; echo "=== dpumesh_dpu pid=$pid per-thread %CPU ==="; top -bH -d 1 -n 2 -p "$pid" | awk "/ PID +USER/{n++} n==2{print}"' ;;
+    armbalance) arm_balance "$@" ;;
     *)
         cat <<EOF
 Usage: $0 <command> [args]
@@ -507,6 +619,7 @@ Usage: $0 <command> [args]
   loopback|stream|preload [args]             feature validators
   verbs <N> <size> <zc> <window> <pipeline>  native-API loopback validator: window conns x pipeline outstanding
   pin [fair|hw|hw3|hw6]                       (re)pin pods to cores
+  armbalance [req reply conc dur threads [csv]]   DPU main/worker per-core CPU during one point
   status | logs | cleanup | dpulog [n] | dpucpu
 
 Sweep knobs (env): OUT LAT_DUR BW_DUR RATE_DUR WARMUP BW_CONC RATE_CONC RATE_THREADS LAT_SIZES BW_SIZES

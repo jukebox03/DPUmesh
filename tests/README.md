@@ -12,8 +12,10 @@ are the first validation layer before the hardware validators under `bench/`.
 | `native_writable_test.c` | Automatic one-shot arm/recheck, QP and shared-pool readiness, stale-hint cancellation, and reservation rollback |
 | `preload_api_contract_test.c` | Public native TX usage, event-driven blocking/nonblocking retry, honest `POLLOUT`, send timeout, ordered RX fragments, FIN validation, and fd-entry lifetime |
 | `l4_pin_policy_test.c` | Live-pin stability and terminal backend loss |
+| `lb_policy_test.c` | Live-backend filtering and concurrent service round-robin selection |
 | `proxy_lane_queue_test.c` | Arrival merging, shard→lane publication, worker→main SPSC completion, and worker wake coalescing |
 | `ingest_mpsc_queue_test.c` | Cross-shard MPSC FIFO, full-queue, and wraparound behavior |
+| `topology_test.c` | Connection-affine port→ring→DPA-EU→ARM-worker mapping invariants |
 | `abi_contract_test.sh` | Library SONAME, required public symbols, and the preload library's versioned runtime dependency |
 
 Run all tests from the repository root:

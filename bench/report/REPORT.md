@@ -1,113 +1,94 @@
-# Current Native L4 Evaluation
+# Current DPUmesh Evaluation
 
-This report describes the ABI 4 native L4 implementation measured on
-2026-07-22 KST. It contains no historical ABI data and no custom L7 result.
+This report covers the connection-affine ARM data path measured on
+2026-07-24 KST.
 
-## Compared paths
+## Implementation
 
 ```text
-dpumesh-native  bench_dpumesh ─ libdpumesh ─ PCIe/DPA ─ DPU ARM proxy
-                                 ─ DPA/PCIe ─ echo_dpumesh
-
-tcp-envoy      bench_sock ─ client Envoy tcp_proxy ─ Service
-                           ─ server Envoy tcp_proxy ─ echo_sock
-
-tcp-direct     bench_sock ─ kernel TCP/Service ─ echo_sock
+connection port
+      │
+      ▼
+forward ring (port % K)
+      │
+      ▼
+DPA EU (EU % A == ring % A)
+      │
+      ▼
+ARM worker (port % A)
+  {connection table, parser, route/LB, SG-DMA}
+      │
+      ▼
+main Comch emitter
 ```
 
-`tcp-envoy` is the primary mesh baseline because both compared paths traverse a
-proxy layer. `tcp-direct` is the no-proxy lower bound.
+`N`, `K`, and `A` denote DPA EUs, forward rings per pod, and homogeneous ARM
+data workers. `A` divides `K` and `N`, and `K ≤ N`. Each connection remains on
+one ARM worker. DPU-created upstream ports preserve the same owner on replies.
 
-Every point uses one client thread and one connection, a 10-second measurement
-after warmup, five repetitions, rotating transport order, and the fair CPU
-profile. Values below are per-metric medians; figure bands are deterministic 95%
-bootstrap confidence intervals. All 285 main runs and 75 CPU runs completed with
-zero failure, drop, overflow, or reorder.
+L4 pins a connection to one backend. Services in `DPUMESH_PROXY_L7_SVC` select a
+ready backend for each complete frame while retaining the connection table on
+its owner worker. The main thread owns Comch sends and pod lifecycle control.
 
-## Core trade-off
+## ARM and connection scaling
 
-The simplest current result is that DPUmesh does not yet broadly match Envoy's
-latency or throughput, but uses less host CPU time per completed request. Host
-work per request is lower at every size in the CPU sweep: by 48% at 64 B, 22% at
-1 KiB, 31% at 8 KiB, 11% at 64 KiB, and 44% at 1 MiB. Occupied cores are not used
-for this comparison because the paths achieve different throughput. Per-request
-normalization removes the first-order rate effect, but it is not a substitute for
-a rate-matched CPU run.
+The ARM sweep used `N=16`, `K=4`, four persistent connections, two host client
+cores, and zero failures, drops, or transport reorder.
 
-![Latency, throughput, and host CPU work by message size](figures/fig_size_comparison.png)
+| Request / reply | A=1 | A=2 | A=4 |
+|---|---:|---:|---:|
+| 1 KiB / 1 KiB, concurrency 32/connection | 0.504 Mrps | 0.619 Mrps | 0.628 Mrps |
+| 8 KiB / 8 B, concurrency 16/connection | 5.59 Gb/s | 12.69 Gb/s | 16.29 Gb/s |
 
-## Results
+The connection sweep used `N/K/A=16/4/4`.
 
-### Latency and concurrency
+| Request / reply | 1 connection | 2 connections | 4 connections |
+|---|---:|---:|---:|
+| 1 KiB / 1 KiB, concurrency 32/connection | 0.182 Mrps | 0.352 Mrps | 0.628 Mrps |
+| 8 KiB / 8 B, concurrency 16/connection | 5.51 Gb/s | 10.36 Gb/s | 16.29 Gb/s |
 
-At 1 KiB and concurrency one, DPUmesh pays the DPU traversal cost: p50 is
-114 µs versus 60 µs through Envoy and 23 µs through direct TCP. At 1 MiB the
-DPUmesh p50 is 691 µs, slightly below Envoy's 723 µs.
+At `A=4` with the 8 KiB workload, the main thread used 91.1% of one ARM core.
+The four data workers used 84.2%, 83.2%, 77.2%, and 82.2%. All workers were
+active.
 
-With a balanced 1 KiB request and 1 KiB reply at concurrency 64, DPUmesh reaches
-0.449 Mrps, 5.4% below Envoy's 0.475 Mrps. Their p50 values are 124 and 126 µs;
-DPUmesh p99 is higher at 188 versus 141 µs. Direct TCP reaches 1.129 Mrps.
+Increasing the host client allowance from one to two cores at `N/K/A=16/2/2`
+produced these 1 KiB results:
 
-![Unloaded RTT](figures/fig_rtt_vs_size.png)
+| Connections | 1 host core | 2 host cores |
+|---:|---:|---:|
+| 4 | 0.649 Mrps | 0.656 Mrps |
+| 8 | 1.024 Mrps | 1.074 Mrps |
 
-![Concurrency scaling](figures/fig_tput_vs_conc.png)
+## Load balancing
 
-### Goodput by request size
+The L7 hardware check used `N/K/A=16/2/2`, one client connection, three ready
+backends, and 1,548,486 completed replies. Backend counts were
+516,329 / 516,329 / 516,328, with zero failure and drop. The connection remained
+on one ARM owner. Application request IDs recorded 1,479,259 out-of-order
+completions because independent backends complete frames independently.
 
-The response is 8 B and requested concurrency is 32. `N` is achieved
-concurrency computed as throughput × average RTT.
+## Validation
 
-The 512 KiB and 1 MiB L4 requests are logical benchmark frames, not single
-allocations. `bench_dpumesh` splits each frame into `dmesh_post_max()`-bounded
-posts; the ordered L4 byte stream carries them as 8 KiB transport units, and the
-receiver reframes the stream using the benchmark header's payload length. The
-separate in-tree L7 codec's 128 KiB frame limit does not apply because this
-campaign has `DPUMESH_PROXY_L7_SVC` disabled.
+The deployed implementation passed:
 
-| Request | Direct TCP Gb/s (N) | Envoy Gb/s (N) | DPUmesh Gb/s (N) |
-|---:|---:|---:|---:|
-| 8 KiB | 31.20 (28.8) | 10.45 (31.8) | **11.73 (30.8)** |
-| 64 KiB | 34.13 (31.4) | **12.24 (32.0)** | 8.47 (3.7) |
-| 512 KiB | 30.91 (32.1) | **14.36 (23.3)** | 13.47 (1.5) |
-| 1 MiB | 30.80 (32.2) | **14.46 (11.5)** | 14.03 (1.3) |
+- native loopback and verbs validation;
+- preload validation with eight connections;
+- L7 stream validation with eight frames per write;
+- reconnect validation with about 36,000 reconnects;
+- 128 KiB and 1 MiB L4 logical-frame transfers;
+- host unit, ABI, preload, LB, queue, and topology tests.
 
-At 8 KiB, DPUmesh delivers 12.3% more goodput than Envoy, with p50 185 versus
-195 µs and p99 247 versus 405 µs, while both paths sustain approximately the
-requested window. This is a useful reference point, not the overall result. At
-64 KiB and above, the native benchmark does not maintain the same outstanding
-window, so its low latency is not a like-for-like loaded-latency win. The
-large-message points are retained as achieved goodput, with `N` shown explicitly.
+## Operational constraints
 
-![Goodput](figures/fig_goodput_vs_size.png)
+- One connection uses one ARM data worker. Additional workers require
+  connections whose ports cover additional values modulo `A`.
+- `A` divides `K` and `N`; `K` does not exceed `N`.
+- Strict application reply order uses L4 connection pinning or application-level
+  stream IDs and reordering.
+- The main Comch emitter is shared by all ARM data workers.
+- Automatic DPA selection uses up to 16 EUs; explicit configuration supports up
+  to 32.
 
-### CPU
-
-CPU is measured as process tick deltas; 1.0 means one fully occupied core. Host
-client and server costs are summed. Envoy includes both sidecars. DPU ARM is a
-separate processor domain and is not added to host cores. DPA execution units are
-not represented by ARM process CPU.
-
-| Request | Direct host | Envoy host | DPUmesh host | DPU ARM | DPUmesh throughput vs Envoy |
-|---:|---:|---:|---:|---:|---:|
-| 64 B | 1.06 | 1.02 | **0.26** | 2.64 | -50% |
-| 1 KiB | 0.99 | 0.99 | **0.45** | 3.14 | -41% |
-| 8 KiB | 1.90 | 1.19 | **0.91** | 4.20 | **+12%** |
-| 64 KiB | 1.78 | 1.39 | **0.85** | 3.67 | -32% |
-| 1 MiB | 1.59 | 1.63 | **0.90** | 3.65 | -2% |
-
-At 8 KiB, DPUmesh improves throughput by 12%, lowers host CPU by 23%, and lowers
-host work per request by 31% versus Envoy. This is evidence of host-side offload
-in one operating region, not a broad performance or total-CPU-efficiency claim;
-the ARM cost remains substantial.
-
-![CPU](figures/fig_cpu_vs_size.png)
-
-## Conclusion
-
-DPUmesh currently has three primary optimization targets: the small-message DPU
-traversal floor, DPU ARM cost, and the large-message outstanding-window collapse.
-The 8 KiB point and lower host CPU show that the architecture can be competitive
-in a limited region, but they do not yet support a broad performance claim.
-
-Raw repetitions, aggregates, provenance, and startup configuration are in
-[`data/`](data/). Exact deployment details are in [DEPLOY.md](DEPLOY.md).
+Raw rows are in
+[`data/rtc_scaling_2026-07-24.csv`](data/rtc_scaling_2026-07-24.csv). The
+reference deployment is in [DEPLOY.md](DEPLOY.md).

@@ -693,7 +693,10 @@ pods_add_connection(struct objects *objs, struct doca_comch_connection *conn)
 	objs->pods[idx].dpa_del_ack_mask = 0;
 	objs->pods[idx].dpa_del_last_send_ns = 0;
 	objs->pods[idx].egress_quiesced = 0;
+	objs->pods[idx].egress_quiesced_mask = 0;
 	objs->pods[idx].egress_inflight = 0;
+	memset(objs->pods[idx].egress_inflight_worker, 0,
+	       sizeof(objs->pods[idx].egress_inflight_worker));
 	objs->pods[idx].egress_pending_emit = 0;
 	objs->pods[idx].proxy_source_refs = 0;
 	__atomic_store_n(&objs->pods[idx].registered, 0, __ATOMIC_RELEASE);
@@ -723,12 +726,13 @@ pod_begin_cleanup(struct objects *objs, struct pod_state *pod)
 
 	/* Stop every producer before asking either DMA engine to quiesce. Keep all
 	 * imported handles published in the private slot until both barriers pass. */
+	__atomic_store_n(&pod->egress_quiesced, 0, __ATOMIC_RELEASE);
+	__atomic_store_n(&pod->egress_quiesced_mask, 0, __ATOMIC_RELEASE);
 	__atomic_store_n(&pod->dma_ready, 0, __ATOMIC_RELEASE);
 	__atomic_store_n(&pod->registered, 0, __ATOMIC_RELEASE);
 	if (pod->pod_id >= 0 && pod->pod_id < POD_ID_SPACE)
 		__atomic_store_n(&objs->pod_id_to_slot[pod->pod_id], -1,
 		                 __ATOMIC_RELEASE);
-	__atomic_store_n(&pod->egress_quiesced, 0, __ATOMIC_RELEASE);
 	pod->txack_batch_n = 0;
 	pod->rev_done_batch_n = 0;
 	pod->cleanup_reply_sent = 0;

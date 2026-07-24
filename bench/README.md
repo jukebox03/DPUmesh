@@ -15,7 +15,6 @@ k8s/                     pod topology and embedded L4 tcp_proxy configuration
 validators/              transport correctness programs
 suite/                   evaluation matrix and status
 report/                  deployment record and interpreted measurements
-RESULT.md                 condensed engineering experiment record
 ```
 
 The gRPC C++ workload is built from `integrations/grpc`. It uses the generated
@@ -47,34 +46,40 @@ it is a focused transport harness rather than the upstream multi-scenario
 
 ## 3. Reproducible deployment
 
-Create a repository-root `.env` excluded from version control with the machine-specific
-values described in [DEPLOY.md](report/DEPLOY.md). For a result comparable to the
-reported L4 `(4,4)` operating point, deploy with the DPU knobs explicit:
+Create a repository-root `.env` excluded from version control with the
+machine-specific values in [DEPLOY.md](report/DEPLOY.md). Deploy with the
+topology explicit:
 
 ```sh
-DPUMESH_INGEST_SHARDS=4 \
-DPUMESH_ARM_EGRESS_THREADS=4 \
-DPUMESH_EGRESS_SPIN_US=600 \
+DPUMESH_DPA_THREADS=16 \
+DPUMESH_INGEST_SHARDS=2 \
 DPUMESH_RINGS_PER_POD=2 \
+DPUMESH_ARM_PIN=1 \
+DPUMESH_PROXY_L7_SVC=16 \
 DPUMESH_LOG_LEVEL=40 \
 ./bench/bench.sh deploy
 ```
 
 This command builds host and DPU artifacts, synchronizes the DPU sources, imports
-container images, starts the DPU process and pods in order, and applies the fair
-CPU pinning. A bare `deploy` is valid for functional work but selects the `(1,1)`
-ARM default; it is not the same experiment. The live DPU process environment,
-not the invoking shell, is the measurement authority.
+container images, starts the DPU process and pods in order, and applies CPU
+pinning. A bare `deploy` is valid for functional work but selects one ARM data
+worker. The live DPU process environment, not the invoking shell, is the
+measurement authority.
 
-L7 validation is enabled per service. Service 11 is the native request/reply
-benchmark and service 16 is the stream validator:
+`DPUMESH_DEPLOY_REUSE_ARTIFACTS=1` skips build and image import while still
+restarting the DPU and every pod. Use it only when source and image inputs are
+unchanged.
+
+The configuration above keeps benchmark service 11 connection-pinned L4 while
+enabling L7 framing only for stream validator service 16. To exercise
+per-message LB on the native request/reply benchmark too, enable both services:
 
 ```sh
 DPUMESH_PROXY_L7_SVC=11,16 \
-DPUMESH_INGEST_SHARDS=4 \
-DPUMESH_ARM_EGRESS_THREADS=4 \
-DPUMESH_EGRESS_SPIN_US=600 \
+DPUMESH_DPA_THREADS=16 \
+DPUMESH_INGEST_SHARDS=2 \
 DPUMESH_RINGS_PER_POD=2 \
+DPUMESH_ARM_PIN=1 \
 ./bench/bench.sh deploy
 ```
 
@@ -127,6 +132,9 @@ python3 bench/suite/plot_meeting.py \
 ./bench/bench.sh point dpumesh 1024 1024 32 10 1000 1
 ./bench/bench.sh point tcp     1024 1024 32 10 1000 1
 
+# Measure DPU main/data-worker CPU and pinned ARM cores.
+./bench/bench.sh armbalance 1024 8 32 10 2 /tmp/arm-balance.csv
+
 # Pinning presets
 ./bench/bench.sh pin fair
 ./bench/bench.sh pin hw3
@@ -152,8 +160,7 @@ EQ on wake. If a reply parks on `dmesh_alloc(EAGAIN)`, the core automatically ar
 that QP; `DMESH_EVENT_TX_READY` retries only the named reply. The server does not
 busy-poll, run a retry timer, or scan every pending QP.
 
-Retained native performance and correctness measurements are recorded in
-[RESULT.md](RESULT.md).
+Retained measurements are recorded in [REPORT.md](report/REPORT.md).
 
 ## 5. gRPC QPS measurements
 
@@ -225,6 +232,4 @@ test, native symbol linkage, and an optional BlueField client/server smoke binar
 6. Compare only matched semantics. The current gRPC comparison is DPUmesh versus
    direct TCP, not DPUmesh versus Envoy HTTP connection management.
 
-The current ABI 4 native L4 campaign is in [REPORT.md](report/REPORT.md).
-Chronological engineering experiments and corrections remain in
-[RESULT.md](RESULT.md).
+The current evaluation is in [REPORT.md](report/REPORT.md).

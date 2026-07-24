@@ -97,6 +97,7 @@ int main(void)
     struct dmesh_proxy *px = calloc(1, sizeof(*px));
     assert(px != NULL);
     assert(pthread_mutex_init(&px->pool_lock, NULL) == 0);
+    atomic_init(&px->pool_waiters, 0);
 
     /* Complete L7 frames with identical delivery metadata collapse into one
      * unit, keeping piece order/custody and the first delivery sequence. */
@@ -183,6 +184,27 @@ int main(void)
     assert(__atomic_load_n(&px->stat_units, __ATOMIC_RELAXED) ==
            PRODUCERS * PER_PRODUCER);
 
+    /* Same-owner FIFO and cross-owner inbox. */
+    px->run_to_completion = 1;
+    px_cur_shard = &px->shards[0];
+    struct px_unit local_unit, remote_unit;
+    memset(&local_unit, 0, sizeof(local_unit));
+    memset(&remote_unit, 0, sizeof(remote_unit));
+    struct px_lane *local_lane = &px->lanes[1][0];   /* region 0 -> worker 0 */
+    struct px_lane *remote_lane = &px->lanes[1][1];  /* region 1 -> worker 1 */
+    px_lane_enqueue(px, 1, 0, &local_unit);
+    assert(local_lane->qhead == &local_unit && local_lane->qtail == &local_unit);
+    assert(!px_lane_inbox_nonempty(px, local_lane));
+    local_lane->qhead = local_lane->qtail = NULL;
+
+    px_lane_enqueue(px, 1, 1, &remote_unit);
+    assert(remote_lane->qhead == NULL);
+    assert(px_lane_inbox_nonempty(px, remote_lane));
+    assert(px_lane_splice_inbox(px, remote_lane));
+    assert(remote_lane->qhead == &remote_unit && remote_lane->qtail == &remote_unit);
+    remote_lane->qhead = remote_lane->qtail = NULL;
+    px->run_to_completion = 0;
+
     /* Worker-to-main SPSC completion ring. */
     struct objects *objs = calloc(1, sizeof(*objs));
     assert(objs != NULL);
@@ -246,6 +268,32 @@ int main(void)
                                 memory_order_relaxed) == 0);
     close(eng->wake_fd);
     eng->wake_fd = -1;
+
+    /* Owner-selective wake and shared-pool waiter mask. */
+    struct px_engine *eng0 = &px->engines[0];
+    struct px_engine *eng1 = &px->engines[1];
+    eng0->threaded = eng1->threaded = 1;
+    eng0->wake_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    eng1->wake_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    assert(eng0->wake_fd >= 0 && eng1->wake_fd >= 0);
+    atomic_store_explicit(&eng0->parked, 1, memory_order_release);
+    atomic_init(&eng1->parked, 1);
+    atomic_init(&eng1->stat_wakes, 0);
+    atomic_init(&eng1->stat_wake_errors, 0);
+    px_wake_workers(px, 1u << 1);
+    errno = 0;
+    assert(read(eng0->wake_fd, &wakes, sizeof(wakes)) == -1 && errno == EAGAIN);
+    assert(read(eng1->wake_fd, &wakes, sizeof(wakes)) == (ssize_t)sizeof(wakes));
+    assert(wakes == 1);
+
+    atomic_store_explicit(&px->pool_waiters, 0, memory_order_relaxed);
+    px_cur_shard = &px->shards[0];
+    px_pool_mark_waiter(px);
+    assert(atomic_exchange_explicit(&px->pool_waiters, 0,
+                                    memory_order_acq_rel) == 1u);
+    close(eng0->wake_fd);
+    close(eng1->wake_fd);
+    eng0->wake_fd = eng1->wake_fd = -1;
 
     pthread_mutex_destroy(&px->pool_lock);
     free(objs);

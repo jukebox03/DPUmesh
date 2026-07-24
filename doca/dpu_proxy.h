@@ -41,6 +41,13 @@ int px_ingest_forward(struct objects *objs, int shard, void *entry /* dpu_comp_e
  * and sleep. */
 int px_drain_stalled(struct objects *objs, int shard);
 
+/* Run the DMA submit/completion/retire stages owned by one homogeneous ARM
+ * worker. A>=2 ingest shards call this from their own event loop. */
+int px_worker_drain(struct objects *objs, int worker);
+int px_worker_notification_fd(struct objects *objs, int worker);
+int px_worker_arm_notification(struct objects *objs, int worker);
+void px_worker_clear_notification(struct objects *objs, int worker, int fd);
+
 /* ---- delivery counters (DIAG only; see dpu_diag_dump) ----
  * The proxy's two failure modes are invisible from the outside: a DROP loses bytes and
  * still TX_ACKs the sender, and a STALL looks exactly like a hang. Both are counted, and
@@ -54,7 +61,7 @@ uint64_t px_stall_total(struct objects *objs);
  * bytes written, 0 if the proxy is not up. */
 int px_diag_str(struct objects *objs, char *buf, int cap);
 
-/* Owner shard encoded as (up_port - BASE) % M. */
+/* Owner worker encoded as the wire-visible up_port % A. */
 int px_uport_owner(uint16_t up_port, int m);
 
 /* One drain pass: submit per-destination SG-DMA batches, emit completed

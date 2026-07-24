@@ -37,6 +37,20 @@ producer_main(void *opaque)
 int
 main(void)
 {
+    /* Upstream ports carry the same raw-port owner that host ring selection
+     * uses. LB backend choice does not change that connection owner. */
+    struct dpu_conntrack *ct = calloc(1, sizeof(*ct));
+    assert(ct != NULL);
+    ct->next_uport = DMESH_UPORT_BASE;
+    for (uint16_t owner = 0; owner < 4; owner++) {
+        uint16_t up = dpu_upstream_create(ct, 3, (uint16_t)(101 + owner),
+                                          7, 0, owner, 4);
+        assert(up >= DMESH_UPORT_BASE);
+        assert(up % 4 == owner);
+        assert(ct->upstream[up].backend_pod == 7);
+    }
+    free(ct);
+
     dpu_mpsc_comp_queue_t *queue = malloc(sizeof(*queue));
     assert(queue != NULL);
     mpsc_comp_queue_init(queue);

@@ -114,6 +114,10 @@ $(TESTDIR)/preload_api_contract_test: tests/preload_api_contract_test.c src/dmes
 $(TESTDIR)/l4_pin_policy_test: tests/l4_pin_policy_test.c doca/dpu_proxy.h | dirs
 	$(CC) $(CFLAGS) -I. -o $@ tests/l4_pin_policy_test.c
 
+$(TESTDIR)/lb_policy_test: tests/lb_policy_test.c doca/dpu_worker.c $(LIB_HDRS) | dirs
+	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -Wl,--gc-sections \
+		-o $@ tests/lb_policy_test.c $(DOCA_LIBS) -lpthread $(RPATHS)
+
 $(TESTDIR)/proxy_lane_queue_test: tests/proxy_lane_queue_test.c doca/dpu_proxy.c $(LIB_HDRS) | dirs
 	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -Wl,--gc-sections \
 		-o $@ tests/proxy_lane_queue_test.c $(DOCA_LIBS) -lpthread $(RPATHS)
@@ -121,18 +125,25 @@ $(TESTDIR)/proxy_lane_queue_test: tests/proxy_lane_queue_test.c doca/dpu_proxy.c
 $(TESTDIR)/ingest_mpsc_queue_test: tests/ingest_mpsc_queue_test.c doca/object.h | dirs
 	$(CC) $(CFLAGS) -o $@ tests/ingest_mpsc_queue_test.c -lpthread
 
+$(TESTDIR)/topology_test: tests/topology_test.c include/dpumesh/dmesh_topology.h | dirs
+	$(CC) $(CFLAGS) -o $@ tests/topology_test.c
+
 test: $(TESTDIR)/native_api_contract_test $(TESTDIR)/native_control_state_test \
 	$(TESTDIR)/native_tx_batch_policy_test $(TESTDIR)/native_writable_test \
 	$(TESTDIR)/preload_api_contract_test $(TESTDIR)/l4_pin_policy_test \
-	$(TESTDIR)/proxy_lane_queue_test $(TESTDIR)/ingest_mpsc_queue_test $(PRELOAD)
+	$(TESTDIR)/lb_policy_test \
+	$(TESTDIR)/proxy_lane_queue_test $(TESTDIR)/ingest_mpsc_queue_test \
+	$(TESTDIR)/topology_test $(PRELOAD)
 	$(TESTDIR)/native_api_contract_test
 	$(TESTDIR)/native_control_state_test
 	$(TESTDIR)/native_tx_batch_policy_test
 	$(TESTDIR)/native_writable_test
 	$(TESTDIR)/preload_api_contract_test
 	$(TESTDIR)/l4_pin_policy_test
+	$(TESTDIR)/lb_policy_test
 	$(TESTDIR)/proxy_lane_queue_test
 	$(TESTDIR)/ingest_mpsc_queue_test
+	$(TESTDIR)/topology_test
 	sh tests/abi_contract_test.sh $(LIB) $(PRELOAD) $(ABI_MAJOR)
 
 # dmesh API binaries link the transport library. One explicit rule each so the

@@ -14,6 +14,7 @@
 #include "dpu_worker.h"
 #include "comch_consumer.h"
 #include <dpumesh/dmesh_common.h>
+#include <dpumesh/dmesh_topology.h>
 #include "ring.h"
 #include "buffer.h"
 #include <stdlib.h>
@@ -311,7 +312,9 @@ static void dmesh_doca_dpa_msgq_send_cb(struct doca_comch_producer_task_send *se
 	if (payload != NULL) {
 		if (payload->is_wake && payload->msgq != NULL)
 			payload->msgq->wake_inflight = 0;
-		free(payload);
+		if (payload->msgq == NULL ||
+		    payload != payload->msgq->wake_payload)
+			free(payload);
 	}
 
 	struct doca_task *task = doca_comch_producer_task_send_as_task(send_task);
@@ -337,7 +340,9 @@ static void dmesh_doca_dpa_msgq_send_error_cb(struct doca_comch_producer_task_se
 	if (payload != NULL) {
 		if (payload->is_wake && payload->msgq != NULL)
 			payload->msgq->wake_inflight = 0;
-		free(payload);
+		if (payload->msgq == NULL ||
+		    payload != payload->msgq->wake_payload)
+			free(payload);
     }
     doca_task_free(task);
 }
@@ -433,22 +438,45 @@ init_dpa_objects(struct objects *objs)
         goto destroy_dpa;
     }
 
-    /* AUTO-DETECT N: query the device's available EUs (unless DPUMESH_DPA_THREADS
-     * pinned it). Use min(available, MAX_DPA_EU); then clamp K <= N. Finalized here,
-     * before the EU threads are created and before setup_pod_dma (main loop) maps a
-     * pod's K rings to EUs — so process_mmap_msg always sees the right N/K. */
+    /* Select N before creating EU threads and mapping pod rings. */
     if (objs->dpa_threads_auto) {
         unsigned int avail = 0;
         doca_error_t er = doca_dpa_get_total_num_eus_available(objs->dpa, &avail);
         int n = (er == DOCA_SUCCESS && avail >= 1) ? (int)avail : objs->num_dpa_threads;
-        if (n > MAX_DPA_EU) n = MAX_DPA_EU;
+        if (n > DPA_THREADS_AUTO_CAP) n = DPA_THREADS_AUTO_CAP;
         if (n < 1) n = 1;
         objs->num_dpa_threads = n;
-        DOCA_LOG_WARN("DPA auto-detect: %u EUs available -> N=%d (cap MAX_DPA_EU=%d)",
-                      avail, objs->num_dpa_threads, MAX_DPA_EU);
+        DOCA_LOG_WARN("DPA auto-detect: %u EUs available -> N=%d "
+                      "(auto cap=%d, explicit cap=%d)",
+                      avail, objs->num_dpa_threads,
+                      DPA_THREADS_AUTO_CAP, MAX_DPA_EU);
     }
-    if (objs->k_rings > objs->num_dpa_threads)
-        objs->k_rings = objs->num_dpa_threads;   /* K <= N */
+
+    int A = objs->n_ingest_shards >= 1 ? objs->n_ingest_shards : 1;
+    if (objs->k_rings > objs->num_dpa_threads) {
+        DOCA_LOG_ERR("Invalid topology: K=%d forward rings exceeds N=%d DPA EUs. "
+                     "Host and DPU K cannot be clamped independently.",
+                     objs->k_rings, objs->num_dpa_threads);
+        result = DOCA_ERROR_INVALID_VALUE;
+        goto destroy_dpa;
+    }
+    /* Align N to the ARM-worker ownership groups. */
+    int aligned_n = objs->num_dpa_threads -
+                    (objs->num_dpa_threads % A);
+    if (aligned_n != objs->num_dpa_threads) {
+        DOCA_LOG_WARN("Topology alignment: N %d -> %d so N %% A(%d) == 0",
+                      objs->num_dpa_threads, aligned_n, A);
+        objs->num_dpa_threads = aligned_n;
+    }
+    if (!dmesh_topology_valid(objs->k_rings, objs->num_dpa_threads, A)) {
+        DOCA_LOG_ERR("Invalid connection-affine topology N/K/A=%d/%d/%d",
+                     objs->num_dpa_threads, objs->k_rings, A);
+        result = DOCA_ERROR_INVALID_VALUE;
+        goto destroy_dpa;
+    }
+    DOCA_LOG_WARN("Connection-affine topology active: N/K/A=%d/%d/%d "
+                  "(EU%%A == ring%%A == port%%A)",
+                  objs->num_dpa_threads, objs->k_rings, A);
 
     /* Point every EU thread struct at the shared device. */
     for (int k = 0; k < objs->num_dpa_threads; k++)
@@ -972,7 +1000,16 @@ dmesh_doca_dpa_msgq_send_try(struct dmesh_doca_dpa_msgq *msgq, void *msg, uint32
     if (is_wake && msgq->wake_inflight)
         return DOCA_SUCCESS;
 
-    payload = malloc(sizeof(*payload) + msg_size);
+    if (is_wake) {
+        payload = msgq->wake_payload;
+        if (payload == NULL) {
+            payload = malloc(sizeof(*payload) + msg_size);
+            if (payload != NULL)
+                msgq->wake_payload = payload;
+        }
+    } else {
+        payload = malloc(sizeof(*payload) + msg_size);
+    }
     if (payload == NULL)
         return DOCA_ERROR_NO_MEMORY;
     payload->msgq = msgq;
@@ -984,7 +1021,8 @@ dmesh_doca_dpa_msgq_send_try(struct dmesh_doca_dpa_msgq *msgq, void *msg, uint32
                                                        msgq->target_consumer_id,
                                                        &send_task);
     if (result != DOCA_SUCCESS) {
-        free(payload);
+        if (!is_wake)
+            free(payload);
         return result;
     }
 
@@ -994,7 +1032,8 @@ dmesh_doca_dpa_msgq_send_try(struct dmesh_doca_dpa_msgq *msgq, void *msg, uint32
 
     result = doca_task_submit(task);
     if (result != DOCA_SUCCESS) {
-        free(payload);
+        if (!is_wake)
+            free(payload);
         doca_task_free(task);
         return result;
     }
@@ -1089,9 +1128,11 @@ dmesh_fill_dpa_ring_info(struct objects *objs, struct pod_state *pod, int j,
 
 /* Forward-ring EU owner. */
 static inline int
-dpa_eu_for_ring(int pod_id, int k_rings, int ring, int n_eu)
+dpa_eu_for_ring(const struct objects *objs, int pod_id, int ring)
 {
-    return (pod_id * k_rings + ring) % n_eu;
+    return dmesh_dpa_eu_for_ring(pod_id, objs->k_rings, ring,
+                                 objs->num_dpa_threads,
+                                 objs->n_ingest_shards);
 }
 
 /* Create and publish a pod's DMA buffers, ring metadata, and DPA thread state. */
@@ -1107,7 +1148,11 @@ setup_pod_dma(struct objects *objs, struct pod_state *pod)
     if (K > N) K = N;
     pod->k_rings = K;
     __atomic_store_n(&pod->egress_quiesced, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&pod->egress_quiesced_mask, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&pod->egress_inflight, 0, __ATOMIC_RELEASE);
+    for (int a = 0; a < MAX_EU_PER_POD; a++)
+        __atomic_store_n(&pod->egress_inflight_worker[a], 0,
+                         __ATOMIC_RELEASE);
     __atomic_store_n(&pod->egress_pending_emit, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&pod->proxy_source_refs, 0, __ATOMIC_RELEASE);
 
@@ -1117,7 +1162,7 @@ setup_pod_dma(struct objects *objs, struct pod_state *pod)
                                               __ATOMIC_ACQ_REL);
     uint32_t expected_mask = 0;
     for (int j = 0; j < K; j++)
-        expected_mask |= 1u << dpa_eu_for_ring(pod->pod_id, K, j, N);
+        expected_mask |= 1u << dpa_eu_for_ring(objs, pod->pod_id, j);
     __atomic_store_n(&pod->dpa_add_ack_mask, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&pod->dpa_add_ack_failed, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&pod->dpa_setup_complete, 0, __ATOMIC_RELEASE);
@@ -1150,12 +1195,10 @@ setup_pod_dma(struct objects *objs, struct pod_state *pod)
     /* (The per-pod DPU staging buffer is NOT exported to the host: the host never
      * reads it — the SG-DMA egress lands into the receiver's own rx_dma_buffer.) */
 
-    /* 2. Forward rings: ring j -> EU k_j = (pod_id*K + j) % N. K consecutive EUs
-     * per pod; consecutive pods land on disjoint EU sets. The FIRST ring on each
-     * EU does h2d_memcpy + thread_run + WAKE; later rings (this pod or others)
-     * send ADD_RING. */
+    /* Map each worker's K/A rings across its N/A EUs. The first ring starts
+     * the EU thread; additional rings use ADD_RING. */
     for (int j = 0; j < K; j++) {
-        int k_j = dpa_eu_for_ring(pod->pod_id, K, j, N);
+        int k_j = dpa_eu_for_ring(objs, pod->pod_id, j);
         result = setup_dpa_buf_array_pod(objs, DMA_RING_SIZE + 1, pod->ring_mmaps[j], &pod->buf_arrs[j]);
         if (result != DOCA_SUCCESS) {
             DOCA_LOG_ERR("setup_pod_dma: buf_arr[%d] failed for pod %d: %s",
@@ -1275,7 +1318,7 @@ progress_setup_pod_dma(struct objects *objs, struct pod_state *pod)
     uint32_t generation = __atomic_load_n(&pod->dma_generation,
                                            __ATOMIC_ACQUIRE);
     for (int j = 0; j < K; j++) {
-        int eu = dpa_eu_for_ring(pod->pod_id, K, j, N);
+        int eu = dpa_eu_for_ring(objs, pod->pod_id, j);
         uint32_t bit = 1u << eu;
         if ((expected & bit) == 0 || (acked & bit) != 0)
             continue;
@@ -1318,7 +1361,7 @@ teardown_pod_dma(struct objects *objs, struct pod_state *pod)
 
     uint32_t expected = 0;
     for (int j = 0; j < K; j++) {
-        int k_j = dpa_eu_for_ring(pod->pod_id, K, j, N);
+        int k_j = dpa_eu_for_ring(objs, pod->pod_id, j);
         if (objs->dpa_thread_running[k_j])
             expected |= 1u << k_j;
     }
@@ -1353,7 +1396,7 @@ progress_teardown_pod_dma(struct objects *objs, struct pod_state *pod)
     uint32_t generation = __atomic_load_n(&pod->dma_generation,
                                            __ATOMIC_ACQUIRE);
     for (int j = 0; j < K; j++) {
-        int eu = dpa_eu_for_ring(pod->pod_id, K, j, N);
+        int eu = dpa_eu_for_ring(objs, pod->pod_id, j);
         uint32_t bit = 1u << eu;
         if ((expected & bit) == 0 || (acked & bit) != 0)
             continue;

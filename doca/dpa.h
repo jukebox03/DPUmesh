@@ -29,6 +29,8 @@ struct dmesh_doca_dpa_msgq {
 	 * coalescing, a parked EU can accumulate 1 kHz WAKEs until control messages
 	 * such as RING_DEL/ADD_RING fail with DOCA_ERROR_AGAIN. */
 	int wake_inflight;
+	/* Reusable payload for the channel's single in-flight keepalive. */
+	void *wake_payload;
 };
 
 struct dmesh_doca_dpa_comch {

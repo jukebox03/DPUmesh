@@ -28,6 +28,7 @@
 #include "doca/comch_common.h"
 #include "doca/comch_msgq.h"
 #include "doca/dpa_common.h"
+#include <dpumesh/dmesh_topology.h>
 
 DOCA_LOG_REGISTER(DPUMESH_DOCA);
 
@@ -1835,7 +1836,7 @@ int dpumesh_enqueue(dpumesh_ctx_t *ctx, const sw_descriptor_t *desc) {
 
     /* Hash each connection to one forward ring, preserving its order while
      * spreading connections across K EUs. TX byte-ring admission provides flow control. */
-    int ridx = (int)((unsigned)desc->src_port % (unsigned)ctx->k_rings);
+    int ridx = dmesh_forward_ring(desc->src_port, ctx->k_rings);
     struct dma_ring *ring = ctx->dma_rings[ridx];
 
     /* Claim the connection ring with a bounded MPSC ticket. The slot sequence and
