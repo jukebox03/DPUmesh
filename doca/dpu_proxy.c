@@ -30,8 +30,7 @@
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/epoll.h>
-#include <sys/eventfd.h>
+#include <time.h>
 #include <unistd.h>
 
 DOCA_LOG_REGISTER(DPU_PROXY);
@@ -169,6 +168,16 @@ struct px_rev_pub {
 /* One submitted SG-DMA op: a FIFO prefix of a lane's units landing at one
  * contiguous dst range. Retired (entries emitted + custody released) strictly
  * in submission order per lane. */
+enum px_batch_state {
+    PX_BATCH_INFLIGHT = 0,
+    PX_BATCH_DONE,
+    PX_BATCH_RETRY_PENDING,
+    PX_BATCH_ERROR,
+};
+
+#define PX_BATCH_RETRY_MAX 1u
+#define PX_BATCH_RETRY_GRACE_NS (1000u * 1000u)
+
 struct px_batch {
     struct px_batch *next;
     struct px_unit  *units;       /* FIFO */
@@ -176,7 +185,8 @@ struct px_batch {
     uint32_t pod_generation;      /* destination slot incarnation at submit */
     uint32_t entries;             /* RX credits consumed */
     uint32_t bytes;
-    volatile int done, error;
+    volatile int state;           /* enum px_batch_state */
+    uint8_t retry_count;
     struct doca_buf *src_head, *dst_buf;
     struct px_op op;
 };
@@ -195,11 +205,7 @@ struct px_ack_release_queue {
     _Alignas(64) size_t dequeue_pos;
 };
 
-/* Per-(dst pod slot, region) egress lane. Region r = the slice of the host RX
- * buffer whose landings the host credits back to forward ring r — the same
- * pos→ring mapping the DPA reverse path used, so host code is untouched.
- * A receiving conn always lands in ONE lane (region = dst_port % K): its
- * delivery order is the lane FIFO. */
+/* Per-(destination pod, landing stripe) egress lane. */
 struct px_lane {
     /* One atomic LIFO per ARM data worker. The egress owner exchanges each list
      * and reverses it before appending, preserving FIFO order per worker/QP. */
@@ -241,7 +247,6 @@ struct px_conn {
     uint16_t fin_ack_port, fin_ack_seq;
     uint16_t forward_seq;              /* latest DPA forward completion consumed */
     uint8_t  forward_seq_valid;
-    uint16_t egress_seq;              /* per-conn delivery unit counter */
     uint16_t return_seq;              /* units serialized back to this downstream QP */
     int      dst_service_set;
     int      is_l7;
@@ -278,6 +283,9 @@ struct px_engine {
      * submit, and px_lane_refresh_credit — or the engine retry-spins instead. */
     int      dma_stalled;
     int      dma_fault_warned;
+    uint64_t retry_after_ns;       /* earliest retry timestamp */
+    uint32_t retry_batches;        /* retry-pending batches */
+    struct px_batch *retry_probe;  /* active exclusive retry */
     struct px_batch *batch_mem, *batch_free;
     struct px_unit  *emit_head, *emit_tail;
     struct px_ack_release_queue ack_releases;
@@ -306,9 +314,6 @@ struct dmesh_proxy {
     struct px_piece   *piece_mem, *piece_free;
     struct px_unit    *unit_mem, *unit_free;
     pthread_mutex_t    pool_lock;
-    /* Empty-pool waiters; returned nodes wake only the recorded workers. */
-    atomic_uint         pool_waiters;
-
     struct px_lane lanes[MAX_PODS][MAX_EU_PER_POD];
     struct px_op   refresh_ops[MAX_PODS][MAX_EU_PER_POD];
     struct px_op   rev_ops[MAX_PODS][MAX_EU_PER_POD];
@@ -323,14 +328,15 @@ struct dmesh_proxy {
     struct doca_mmap *rev_scratch_mmap;
     uint8_t *rev_scratch;
 
-    /* Data-path counters. */
-    uint64_t stat_msgs, stat_segs, stat_units, stat_batches, stat_drop_bytes;
-    uint64_t stat_arrival_merges, stat_egress_merges;
-    /* Backpressure stalls, per pool. px_ship_range's EAGAIN path is otherwise silent, so
-     * these are the only way to tell a stalled conn from a hung one. Bumped only once a
-     * pool is dry — never on the hot path. */
-    uint64_t stat_stall_unit, stat_stall_piece, stat_stall_uport;
+    atomic_ullong stat_stall_unit;
+    atomic_ullong stat_stall_piece;
+    atomic_ullong stat_stall_uport;
 };
+
+static inline uint64_t px_stat_inc(atomic_ullong *counter)
+{
+    return atomic_fetch_add_explicit(counter, 1, memory_order_relaxed) + 1;
+}
 
 /* Destination-lane engine owner. */
 static inline int px_engine_id_for_lane(const struct dmesh_proxy *px,
@@ -339,17 +345,32 @@ static inline int px_engine_id_for_lane(const struct dmesh_proxy *px,
     return region % px->n_eng;
 }
 
+static inline int
+px_landing_stripes(const struct pod_state *pod)
+{
+    int K = pod->k_rings > 0 ? pod->k_rings : 1;
+    int L = pod->landing_stripes > 0 ? pod->landing_stripes : 1;
+    return L <= K && K % L == 0 ? L : 1;
+}
+
+/* One cell holds every credit shard of a landing stripe (at most K counters). */
+#define PX_SCRATCH_CELL 64
+#define PX_SCRATCH_OFF(pi, r) (((size_t)(pi) * MAX_EU_PER_POD + (size_t)(r)) * PX_SCRATCH_CELL)
+_Static_assert(MAX_EU_PER_POD * sizeof(uint64_t) <= PX_SCRATCH_CELL,
+               "credit shard cell must hold K counters");
+
+/* Release a worker parked on its notification handles. */
 static void px_engine_wake(struct px_engine *eng) {
     if (!eng->objs || eng->id < 0 ||
         eng->id >= eng->objs->n_data_workers)
         return;
     struct dpu_data_worker *worker_state = &eng->objs->data_workers[eng->id];
-    atomic_int *parked = &worker_state->parked;
     int wake_fd = worker_state->wake_fd;
     if (wake_fd < 0)
         return;
     int expected = 1;
-    if (!atomic_compare_exchange_strong_explicit(parked, &expected, 0,
+    if (!atomic_compare_exchange_strong_explicit(&worker_state->parked,
+                                                  &expected, 0,
                                                   memory_order_acq_rel,
                                                   memory_order_acquire))
         return;
@@ -361,18 +382,8 @@ static void px_engine_wake(struct px_engine *eng) {
     (void)n;
 }
 
-#define PX_SCRATCH_CELL 64
-#define PX_SCRATCH_OFF(pi, r) (((size_t)(pi) * MAX_EU_PER_POD + (size_t)(r)) * PX_SCRATCH_CELL)
-
 /* Routing state for the current ARM data worker. */
 static __thread struct px_worker_state *px_cur_worker;
-
-/* Return the worker encoded in the wire-visible upstream port. */
-int px_uport_owner(uint16_t up_port, int m) {
-    if (m <= 1 || up_port < DMESH_UPORT_BASE)
-        return 0;
-    return dmesh_worker_for_port(up_port, m);
-}
 
 /* ====== pools ====== */
 
@@ -458,30 +469,6 @@ px_emit_tx_ack(struct objects *objs, int32_t pod_id, uint16_t port, uint16_t seq
     return px_rev_append_ack(&objs->proxy->engines[owner], pod, port, seq);
 }
 
-static void px_wake_workers(struct dmesh_proxy *px, uint32_t mask) {
-    for (int e = 0; e < px->n_eng; e++)
-        if (mask & (1u << (unsigned)e))
-            px_engine_wake(&px->engines[e]);
-}
-
-static inline void px_pool_mark_waiter(struct dmesh_proxy *px) {
-    if (!px_cur_worker || px_cur_worker->id < 0 ||
-        px_cur_worker->id >= px->n_eng || px_cur_worker->id >= 32)
-        return;
-    atomic_fetch_or_explicit(&px->pool_waiters,
-                             1u << (unsigned)px_cur_worker->id,
-                             memory_order_release);
-}
-
-/* Wake workers waiting for a shared-pool return. */
-static inline void px_pool_wake_waiters(struct dmesh_proxy *px) {
-    if (atomic_load_explicit(&px->pool_waiters, memory_order_relaxed) == 0)
-        return;
-    uint32_t waiters = atomic_exchange_explicit(&px->pool_waiters, 0,
-                                                memory_order_acq_rel);
-    px_wake_workers(px, waiters);
-}
-
 static struct px_arrival *px_arrival_alloc(struct dmesh_proxy *px) {
     struct px_arrival *a = tls_arr_mag;
     if (a) { tls_arr_mag = a->next; return a; }
@@ -493,10 +480,8 @@ static struct px_arrival *px_arrival_alloc(struct dmesh_proxy *px) {
         px->arr_free = t->next; t->next = NULL;      /* detach the run [a..t] */
     }
     pthread_mutex_unlock(&px->pool_lock);
-    if (!a) {
-        px_pool_mark_waiter(px);
+    if (!a)
         return NULL;
-    }
     tls_arr_mag = a->next;                           /* rest of the run → magazine */
     return a;
 }
@@ -504,7 +489,6 @@ static void px_arrival_free(struct dmesh_proxy *px, struct px_arrival *a) {
     pthread_mutex_lock(&px->pool_lock);
     a->next = px->arr_free; px->arr_free = a;
     pthread_mutex_unlock(&px->pool_lock);
-    px_pool_wake_waiters(px);
 }
 static struct px_piece *px_piece_alloc(struct dmesh_proxy *px) {
     struct px_piece *p = tls_piece_mag;
@@ -517,10 +501,8 @@ static struct px_piece *px_piece_alloc(struct dmesh_proxy *px) {
         px->piece_free = t->next; t->next = NULL;
     }
     pthread_mutex_unlock(&px->pool_lock);
-    if (!p) {
-        px_pool_mark_waiter(px);
+    if (!p)
         return NULL;
-    }
     tls_piece_mag = p->next;
     return p;
 }
@@ -528,7 +510,6 @@ static void px_piece_free(struct dmesh_proxy *px, struct px_piece *p) {
     pthread_mutex_lock(&px->pool_lock);
     p->next = px->piece_free; px->piece_free = p;
     pthread_mutex_unlock(&px->pool_lock);
-    px_pool_wake_waiters(px);
 }
 static struct px_unit *px_unit_alloc(struct dmesh_proxy *px) {
     struct px_unit *u = tls_unit_mag;
@@ -541,10 +522,8 @@ static struct px_unit *px_unit_alloc(struct dmesh_proxy *px) {
         px->unit_free = t->next; t->next = NULL;
     }
     pthread_mutex_unlock(&px->pool_lock);
-    if (!u) {
-        px_pool_mark_waiter(px);
+    if (!u)
         return NULL;
-    }
     tls_unit_mag = u->next;
     memset(u, 0, sizeof(*u));
     return u;
@@ -560,7 +539,6 @@ static void px_unit_free_node(struct dmesh_proxy *px, struct px_unit *u) {
     }
     u->next = px->unit_free; px->unit_free = u;
     pthread_mutex_unlock(&px->pool_lock);
-    px_pool_wake_waiters(px);
 }
 static struct px_batch *px_batch_alloc(struct px_engine *eng) {
     struct px_batch *b = eng->batch_free;
@@ -571,16 +549,14 @@ static void px_batch_free_node(struct px_engine *eng, struct px_batch *b) {
     b->next = eng->batch_free; eng->batch_free = b;
 }
 
-/* Main-thread deferred frees are returned in one locked splice per drain span. */
-/* Maximum units retained before a deferred-free flush. */
+/* Batch shared-pool returns. */
 #define PX_FREE_BATCH_FLUSH  256
 struct px_free_batch {
     struct px_unit    *u_head, *u_tail;
     struct px_piece   *p_head, *p_tail;
     struct px_arrival *a_head, *a_tail;
-    int                n;                 /* units held since the last flush */
+    int                n;
 };
-/* Move a unit and its whole piece chain into the batch — no lock. */
 static inline void px_fb_unit(struct px_free_batch *fb, struct px_unit *u) {
     struct px_piece *ph = u->pieces;
     if (ph) {
@@ -597,8 +573,8 @@ static inline void px_fb_unit(struct px_free_batch *fb, struct px_unit *u) {
 static inline void px_fb_arr(struct px_free_batch *fb, struct px_arrival *a) {
     a->next = fb->a_head; fb->a_head = a;
     if (!fb->a_tail) fb->a_tail = a;
+    fb->n++;
 }
-/* Splice everything collected onto the shared freelists under ONE pool_lock. */
 static void px_free_batch_flush(struct dmesh_proxy *px, struct px_free_batch *fb) {
     if (!fb->u_head && !fb->p_head && !fb->a_head) return;
     pthread_mutex_lock(&px->pool_lock);
@@ -606,7 +582,6 @@ static void px_free_batch_flush(struct dmesh_proxy *px, struct px_free_batch *fb
     if (fb->p_head) { fb->p_tail->next = px->piece_free; px->piece_free = fb->p_head; }
     if (fb->a_head) { fb->a_tail->next = px->arr_free;   px->arr_free   = fb->a_head; }
     pthread_mutex_unlock(&px->pool_lock);
-    px_pool_wake_waiters(px);
     fb->u_head = fb->u_tail = NULL;
     fb->p_head = fb->p_tail = NULL;
     fb->a_head = fb->a_tail = NULL;
@@ -629,11 +604,8 @@ px_queue_arrival_release(struct objects *objs, struct px_arrival *a)
         return 0;
     a->ack_emit_seq = a->ack_first_seq;
     a->release_next = NULL;
-    if (px_ack_queue_push(&px->engines[owner].ack_releases, a)) {
-        if (owner != px_cur_worker->id)
-            px_engine_wake(&px->engines[owner]);
+    if (px_ack_queue_push(&px->engines[owner].ack_releases, a))
         return 1;
-    }
 
     /* Detached arrivals remain covered by proxy_source_refs until ACK publication. */
     struct px_engine *current = &px->engines[px_cur_worker->id];
@@ -712,6 +684,18 @@ static struct px_conn *px_conn_get(struct dmesh_proxy *px, int32_t pod, uint16_t
     c->hnext = px_cur_worker->buckets[h];
     px_cur_worker->buckets[h] = c;
     return c;
+}
+
+static uint16_t *px_delivery_seq_counter(struct dmesh_proxy *px,
+                                         int32_t pod, uint16_t port) {
+    if (port >= DMESH_UPORT_BASE) {
+        struct dpu_upstream *up = &px_cur_worker->ct->upstream[port];
+        if (!up->in_use || up->backend_pod != pod)
+            return NULL;
+        return &up->delivery_seq;
+    }
+    struct px_conn *c = px_conn_find(px, pod, port);
+    return c ? &c->return_seq : NULL;
 }
 
 static void px_drop_window(struct objects *objs, struct px_conn *c, const char *why);
@@ -905,7 +889,6 @@ static void px_advance(struct objects *objs, struct px_conn *c, uint32_t consume
             uint32_t dropped = covered > a->claimed_round ? covered - a->claimed_round : 0;
             a->claimed_round = 0;
             px_custody_sub(objs, a, dropped);  /* still in window (+1 ref) → cannot release here */
-            objs->proxy->stat_drop_bytes += dropped;
         }
         a = a->next;
     }
@@ -935,22 +918,23 @@ static void px_drop_window(struct objects *objs, struct px_conn *c, const char *
     }
 }
 
-/* Send a zero-length EOF unit to the stream sender. EOF is the wire-level failure
- * signal for both request and reply directions. */
-/* 1 = the sender has been told (or is gone), 0 = the unit pool is momentarily dry and
- * NOTHING was mutated — the caller must latch the debt and retry, never drop it: a lost
- * EOF is a sender that hangs forever. */
+/* Queue EOF in the sender's delivery sequence. */
 static int px_fin_to_sender(struct objects *objs, struct px_conn *c) {
     struct dmesh_proxy *px = objs->proxy;
     struct pod_state *sp = find_pod_by_id(objs, c->pub.src_pod);
     if (!sp || !pod_data_ready(sp) || !sp->host_rx_addr)
         return 1;                          /* the sender is gone too — nobody to tell */
+    uint16_t *seq = px_delivery_seq_counter(px, c->pub.src_pod,
+                                            c->pub.src_port);
+    if (!seq)
+        return 1;
     struct px_unit *u = px_unit_alloc(px);
     if (!u) {
-        if ((px->stat_stall_unit++ & 0xFFFFu) == 0)
+        uint64_t stalls = px_stat_inc(&px->stat_stall_unit);
+        if (((stalls - 1u) & 0xFFFFu) == 0)
             DOCA_LOG_WARN("proxy: unit pool dry — deferring EOF to %d:%u (total %llu)",
                           c->pub.src_pod, c->pub.src_port,
-                          (unsigned long long)px->stat_stall_unit);
+                          (unsigned long long)stalls);
         return 0;
     }
     u->src_pod_id  = (int8_t)c->pub.src_pod;
@@ -958,12 +942,13 @@ static int px_fin_to_sender(struct objects *objs, struct px_conn *c) {
     u->dst_service = (int8_t)sp->service_id;
     u->src_port    = c->pub.src_port;
     u->dst_port    = c->pub.src_port;      /* the demux key: the sender's own conn */
-    u->seq         = ++c->egress_seq;      /* informational on the RX path */
+    u->seq         = ++*seq;
     u->total_len   = 0;                    /* 0-length == FIN == EOF */
     u->org_port    = 0;                    /* synthetic EOF: never notify about itself */
     u->dst_pod_idx = (int8_t)(sp - objs->pods);
-    int K = sp->k_rings > 0 ? sp->k_rings : 1;
-    px_lane_enqueue(px, (int)(sp - objs->pods), (int)(c->pub.src_port % (uint16_t)K), u);
+    int L = px_landing_stripes(sp);
+    px_lane_enqueue(px, (int)(sp - objs->pods),
+                    (int)(c->pub.src_port % (uint16_t)L), u);
     return 1;
 }
 
@@ -993,6 +978,21 @@ static inline uint32_t px_unit_entries(const struct px_unit *u) {
     return u->total_len ? (u->total_len + PX_ENTRY_BYTES_MAX - 1) / PX_ENTRY_BYTES_MAX : 1;
 }
 
+enum px_lane_wrap_action {
+    PX_LANE_WRAP_NONE,
+    PX_LANE_WRAP_WAIT,
+    PX_LANE_WRAP_RESET,
+};
+
+static inline enum px_lane_wrap_action
+px_lane_wrap_action(uint64_t cursor, uint32_t len,
+                    uint64_t region_size, uint64_t inflight)
+{
+    if (cursor + len <= region_size)
+        return PX_LANE_WRAP_NONE;
+    return inflight == 0 ? PX_LANE_WRAP_RESET : PX_LANE_WRAP_WAIT;
+}
+
 static void px_lane_enqueue(struct dmesh_proxy *px, int pod_idx, int region, struct px_unit *u) {
     struct px_lane *ln = &px->lanes[pod_idx][region];
     u->next = NULL;
@@ -1005,7 +1005,6 @@ static void px_lane_enqueue(struct dmesh_proxy *px, int pod_idx, int region, str
         else
             ln->qhead = u;
         ln->qtail = u;
-        __atomic_fetch_add(&px->stat_units, 1, __ATOMIC_RELAXED);
         return;
     }
     assert(px_cur_worker && px_cur_worker->id >= 0 &&
@@ -1016,7 +1015,6 @@ static void px_lane_enqueue(struct dmesh_proxy *px, int pod_idx, int region, str
         u->next = old;
     } while (!__atomic_compare_exchange_n(&ln->inq[producer], &old, u, 0,
                                            __ATOMIC_RELEASE, __ATOMIC_RELAXED));
-    __atomic_fetch_add(&px->stat_units, 1, __ATOMIC_RELAXED);
     if (px->n_eng > 1)
         px_engine_wake(&px->engines[owner]);
 }
@@ -1035,6 +1033,10 @@ static int px_lane_splice_inbox(struct dmesh_proxy *px, struct px_lane *ln) {
     int moved = 0;
     int nprod = px->n_workers;
     for (int s = 0; s < nprod; s++) {
+        /* Read before claiming: an empty inbox must not steal the line from its
+         * producer. A push racing the read is republished by the producer wake. */
+        if (__atomic_load_n(&ln->inq[s], __ATOMIC_RELAXED) == NULL)
+            continue;
         struct px_unit *stack = __atomic_exchange_n(&ln->inq[s], NULL, __ATOMIC_ACQ_REL);
         if (!stack)
             continue;
@@ -1052,26 +1054,21 @@ static int px_lane_splice_inbox(struct dmesh_proxy *px, struct px_lane *ln) {
     return moved;
 }
 
-/* Queue one FIN/notify-only unit (0 length, 1 RX credit) to a lane. 1 = queued, 0 = the
- * unit pool is momentarily dry; NOTHING is mutated, so the caller can simply retry. A
- * dropped FIN means the peer never sees EOF and its conn leaks, so this must never be
- * treated as best-effort. */
+/* Queue one FIN unit in the destination delivery sequence. */
 static int px_queue_fin_unit(struct objects *objs, struct px_conn *c,
                              struct pod_state *dst_pod,
                              uint16_t out_src_port, uint16_t out_dst_port) {
     struct dmesh_proxy *px = objs->proxy;
-    struct px_conn *seq_owner = c;
-    if (c->pub.is_reply) {
-        seq_owner = px_conn_find(px, dst_pod->pod_id, out_dst_port);
-        if (!seq_owner)
-            return 1;
-    }
+    uint16_t *seq = px_delivery_seq_counter(px, dst_pod->pod_id, out_dst_port);
+    if (!seq)
+        return 1;
     struct px_unit *u = px_unit_alloc(px);
     if (!u) {
-        if ((px->stat_stall_unit++ & 0xFFFFu) == 0)
+        uint64_t stalls = px_stat_inc(&px->stat_stall_unit);
+        if (((stalls - 1u) & 0xFFFFu) == 0)
             DOCA_LOG_WARN("proxy: unit pool dry — deferring FIN to pod %d port %u "
                           "(total %llu)", dst_pod->pod_id, out_dst_port,
-                          (unsigned long long)px->stat_stall_unit);
+                          (unsigned long long)stalls);
         return 0;
     }
     struct pod_state *sp = find_pod_by_id(objs, c->pub.src_pod);
@@ -1080,22 +1077,25 @@ static int px_queue_fin_unit(struct objects *objs, struct px_conn *c,
     u->dst_service = (int8_t)c->pub.dst_service;
     u->src_port = out_src_port;
     u->dst_port = out_dst_port;
-    u->seq = c->pub.is_reply ? ++seq_owner->return_seq : ++c->egress_seq;
+    u->seq = ++*seq;
     u->total_len = 0;
     u->org_port = 0;                       /* synthetic EOF: never notify about itself */
     u->dst_pod_idx = (int8_t)(dst_pod - objs->pods);
-    int K = dst_pod->k_rings > 0 ? dst_pod->k_rings : 1;
-    px_lane_enqueue(px, (int)(dst_pod - objs->pods), (int)(out_dst_port % (uint16_t)K), u);
+    int L = px_landing_stripes(dst_pod);
+    px_lane_enqueue(px, (int)(dst_pod - objs->pods),
+                    (int)(out_dst_port % (uint16_t)L), u);
     return 1;
 }
 
-/* Send EOF to the origin of an undeliverable unit. This operates on the unit so
- * emit paths do not access another worker's connection table. */
+/* Queue EOF to the origin of an undeliverable unit. */
 static void px_eof_to_origin(struct objects *objs, const struct px_unit *fu) {
     struct dmesh_proxy *px = objs->proxy;
     struct pod_state *sp = find_pod_by_id(objs, fu->src_pod_id);
     if (!sp || !pod_data_ready(sp) || !sp->host_rx_addr)
         return;                            /* the origin is gone too — nobody to tell */
+    uint16_t *seq = px_delivery_seq_counter(px, fu->src_pod_id, fu->org_port);
+    if (!seq)
+        return;
     struct px_unit *u = px_unit_alloc(px);
     if (!u) {
         DOCA_LOG_ERR("proxy: unit pool empty — EOF to %d:%u LOST (it will hang)",
@@ -1107,30 +1107,41 @@ static void px_eof_to_origin(struct objects *objs, const struct px_unit *fu) {
     u->dst_service = (int8_t)sp->service_id;
     u->src_port    = fu->org_port;
     u->dst_port    = fu->org_port;         /* the demux key: the origin's own conn */
-    u->seq         = fu->seq;              /* informational on the RX path */
+    u->seq         = ++*seq;
     u->total_len   = 0;                    /* 0-length == FIN == EOF */
     u->org_port    = 0;
     u->dst_pod_idx = (int8_t)(sp - objs->pods);
-    int K = sp->k_rings > 0 ? sp->k_rings : 1;
-    px_lane_enqueue(px, (int)(sp - objs->pods), (int)(fu->org_port % (uint16_t)K), u);
+    int L = px_landing_stripes(sp);
+    px_lane_enqueue(px, (int)(sp - objs->pods),
+                    (int)(fu->org_port % (uint16_t)L), u);
 }
 
-/* Route one codec-delimited L7 message. A nonnegative host must be a live backend
- * of the selected cluster; DMESH_LB_DEFER invokes load balancing. */
-static int32_t px_route_message(struct objects *objs, int32_t cluster, int32_t host) {
+/* Route one codec-delimited L7 message. */
+static int32_t px_route_message(struct objects *objs, int32_t addressed_cluster,
+                                const int32_t *addressed_hosts, int n_addressed,
+                                int32_t cluster, int32_t host) {
     if (cluster < 0 || cluster >= POD_ID_SPACE)
-        return -1;                             /* not a service id */
+        return -1;
+    if (cluster == addressed_cluster) {
+        if (host >= 0) {
+            for (int i = 0; i < n_addressed; i++)
+                if (addressed_hosts[i] == host)
+                    return host;
+            return -1;
+        }
+        if (n_addressed <= 0)
+            return -1;
+        uint32_t i = __atomic_fetch_add(&objs->svc_rr[cluster], 1,
+                                        __ATOMIC_RELAXED);
+        return addressed_hosts[i % (uint32_t)n_addressed];
+    }
     if (host >= 0) {
-        /* The hook may have RE-CLUSTERED this message, and the endpoint list it was shown
-         * (dmesh_l7_ctx.hosts) is the ADDRESSED cluster's. Honor an override only if the
-         * pod really backs the cluster being routed to — checking mere liveness would let
-         * a content-routing hook deliver into a different service entirely. */
         int32_t hosts[MAX_PODS];
         int n = collect_live_hosts(objs, (int16_t)cluster, hosts);
         for (int i = 0; i < n; i++)
             if (hosts[i] == host)
                 return host;
-        return -1;                             /* not this cluster's backend, or dead */
+        return -1;
     }
     return dpu_route_l4(objs, (int16_t)cluster);
 }
@@ -1162,7 +1173,7 @@ static int px_build_range(struct objects *objs, struct px_conn *c,
     uint64_t sbeg = c->parse_pos, send_ = sbeg + len;
     int32_t dst_pod;
     uint16_t out_src_port = 0, out_dst_port = 0;
-    struct px_conn *seq_owner = c;
+    uint16_t *seq_counter = NULL;
 
     *out_unit = NULL;
 
@@ -1171,9 +1182,10 @@ static int px_build_range(struct objects *objs, struct px_conn *c,
         dst_pod = c->pub.peer_pod;
         out_dst_port = c->pub.peer_port;
         out_src_port = c->pub.src_port;
-        seq_owner = px_conn_find(px, dst_pod, out_dst_port);
+        struct px_conn *seq_owner = px_conn_find(px, dst_pod, out_dst_port);
         if (!seq_owner)
             return -1;
+        seq_counter = &seq_owner->return_seq;
         if (route_dst >= 0 && route_dst != dst_pod)
             DOCA_LOG_WARN("proxy: reply seg dst=%d overridden by conntrack (pod %d)",
                           route_dst, dst_pod);
@@ -1191,17 +1203,13 @@ static int px_build_range(struct objects *objs, struct px_conn *c,
 
     struct pod_state *tp = find_pod_by_id(objs, dst_pod);
     if (!tp || !pod_data_ready(tp) || !tp->host_rx_mmap || !tp->host_rx_addr) {
-        /* Fires per-seg while a pod is mid-(re)start — floods the DPU log during pod
-         * churn. Throttle to first + 1-in-65536 (main thread → static needs no lock). */
-        static uint64_t dst_notready_drops;
-        if ((dst_notready_drops++ & 0xFFFFu) == 0)
+        /* Throttle destination-unavailable logs. */
+        static atomic_ullong dst_notready_drops;
+        uint64_t drops = px_stat_inc(&dst_notready_drops);
+        if (((drops - 1u) & 0xFFFFu) == 0)
             DOCA_LOG_ERR("proxy: dst pod %d not ready — %u bytes dropped (total %llu)",
-                         dst_pod, len, (unsigned long long)dst_notready_drops);
-        return -1;                             /* the dst is gone — TERMINAL, not EAGAIN:
-                                                * waiting for it would stall the conn on a
-                                                * pod that may never come back, and on the
-                                                * L7 destination is already latched to it,
-                                                * so this message is broken either way. */
+                         dst_pod, len, (unsigned long long)drops);
+        return -1;
     }
 
     if (!c->pub.is_reply) {
@@ -1220,23 +1228,26 @@ static int px_build_range(struct objects *objs, struct px_conn *c,
             px_conn_del_key(objs, dst_pod, uP);
         if (uP == 0) {
             /* Every uP is in use. Transient — a client FIN frees one. */
-            if ((px->stat_stall_uport++ & 0xFFFFu) == 0)
+            uint64_t stalls = px_stat_inc(&px->stat_stall_uport);
+            if (((stalls - 1u) & 0xFFFFu) == 0)
                 DOCA_LOG_WARN("proxy: upstream space full (%d:%u -> pod %d) — stalling "
                               "(total %llu); a FIN frees one",
                               c->pub.src_pod, c->pub.src_port, dst_pod,
-                              (unsigned long long)px->stat_stall_uport);
+                              (unsigned long long)stalls);
             return 0;                          /* EAGAIN: nothing mutated */
         }
         out_src_port = uP;
         out_dst_port = uP;
+        seq_counter = &ct->upstream[uP].delivery_seq;
     }
 
     struct px_unit *u = px_unit_alloc(px);
     if (!u) {
-        if ((px->stat_stall_unit++ & 0xFFFFu) == 0)
+        uint64_t stalls = px_stat_inc(&px->stat_stall_unit);
+        if (((stalls - 1u) & 0xFFFFu) == 0)
             DOCA_LOG_WARN("proxy: unit pool dry — stalling %u bytes (total %llu). The pool "
                           "is sized 1:1 with arrivals; frame/L7 can spend several per arrival.",
-                          len, (unsigned long long)px->stat_stall_unit);
+                          len, (unsigned long long)stalls);
         return 0;                              /* EAGAIN: the egress will free one */
     }
     struct pod_state *sp = find_pod_by_id(objs, c->pub.src_pod);
@@ -1260,9 +1271,10 @@ static int px_build_range(struct objects *objs, struct px_conn *c,
         uint64_t take_end = send_ < aend ? send_ : aend;
         struct px_piece *p = px_piece_alloc(px);
         if (!p) {
-            if ((px->stat_stall_piece++ & 0xFFFFu) == 0)
+            uint64_t stalls = px_stat_inc(&px->stat_stall_piece);
+            if (((stalls - 1u) & 0xFFFFu) == 0)
             DOCA_LOG_WARN("proxy: piece pool dry — stalling %u bytes (total %llu)",
-                          len, (unsigned long long)px->stat_stall_piece);
+                          len, (unsigned long long)stalls);
             px_unit_free_node(px, u);          /* frees its pieces too */
             return 0;                          /* EAGAIN: nothing claimed yet */
         }
@@ -1289,19 +1301,16 @@ static int px_build_range(struct objects *objs, struct px_conn *c,
     for (struct px_piece *p = u->pieces; p; p = p->next)
         p->arr->claimed_round += p->len;
 
-    /* Only a unit that actually ships may consume a seq — a gap desyncs the peer's
-     * per-conn sequence. Keep this below every failure return. */
-    u->seq = c->pub.is_reply ? ++seq_owner->return_seq : ++c->egress_seq;
-    px->stat_segs++;
+    u->seq = ++*seq_counter;
     *out_unit = u;
     return 1;
 }
 
 static void px_enqueue_unit(struct objects *objs, struct px_unit *u) {
     struct pod_state *tp = &objs->pods[(int)u->dst_pod_idx];
-    int K = tp->k_rings > 0 ? tp->k_rings : 1;
+    int L = px_landing_stripes(tp);
     px_lane_enqueue(objs->proxy, (int)u->dst_pod_idx,
-                    (int)(u->dst_port % (uint16_t)K), u);
+                    (int)(u->dst_port % (uint16_t)L), u);
 }
 
 static int px_ship_range(struct objects *objs, struct px_conn *c,
@@ -1412,7 +1421,6 @@ static int px_l7_unit_absorb(struct dmesh_proxy *px, struct px_unit *dst,
     src->pieces = src->pieces_tail = NULL;
     src->npieces = 0;
     px_unit_free_node(px, src);
-    __atomic_fetch_add(&px->stat_egress_merges, 1, __ATOMIC_RELAXED);
     return 1;
 }
 
@@ -1486,7 +1494,9 @@ static void px_parse_l7(struct objects *objs, struct px_conn *c) {
             }
             c->frame_len = dec.total_len;
             c->frame_dst = c->pub.is_reply ? c->pub.peer_pod :
-                px_route_message(objs, dec.cluster, dec.host);
+                px_route_message(objs, c->pub.dst_service,
+                                 hostbuf, ctx.n_hosts,
+                                 dec.cluster, dec.host);
             if (c->frame_dst < 0) {
                 px_l7_flush_groups(objs, groups, ngroups);
                 px_poison(objs, c, "l7 frame has no destination");
@@ -1726,7 +1736,6 @@ int px_process_forward(struct objects *objs, int worker_id, void *ventry) {
             return 0;
         c->forward_seq = e->seq;
         c->forward_seq_valid = 1;
-        px->stat_drop_bytes += e->length;
         return -1;
     }
 
@@ -1738,8 +1747,6 @@ int px_process_forward(struct objects *objs, int worker_id, void *ventry) {
     if (px_arrival_try_extend(c, e, seq_delta)) {
         c->forward_seq = e->seq;
         c->forward_seq_valid = 1;
-        px->stat_msgs++;
-        px->stat_arrival_merges++;
         px_parse(objs, c);
         if (c->fin_pending)
             px_try_fin(objs, c);
@@ -1775,8 +1782,6 @@ int px_process_forward(struct objects *objs, int worker_id, void *ventry) {
         c->whead = a;
     c->wtail = a;
     c->stream_end += a->len;
-    px->stat_msgs++;
-
     px_parse(objs, c);
     /* px_parse may have poisoned + FIN may already be latched */
     if (c->fin_pending)
@@ -1800,6 +1805,72 @@ px_pod_inflight_sub(struct px_engine *eng, struct pod_state *pod)
     __atomic_fetch_sub(&pod->egress_inflight_worker[eng->id], 1,
                        __ATOMIC_ACQ_REL);
     __atomic_fetch_sub(&pod->egress_inflight, 1, __ATOMIC_ACQ_REL);
+}
+
+static uint64_t
+px_monotonic_ns(void)
+{
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (uint64_t)now.tv_sec * 1000000000ull + (uint64_t)now.tv_nsec;
+}
+
+static int
+px_engine_retry_grace_active(struct px_engine *eng)
+{
+    if (eng->retry_after_ns == 0)
+        return 0;
+    if (px_monotonic_ns() < eng->retry_after_ns)
+        return 1;
+    eng->retry_after_ns = 0;
+    return 0;
+}
+
+/* Test whether a batch still targets the published pod incarnation. */
+static int
+px_batch_destination_current(struct objects *objs, const struct px_batch *b)
+{
+    if (b->pod_idx < 0 || b->pod_idx >= MAX_PODS)
+        return 0;
+    const struct pod_state *pod = &objs->pods[b->pod_idx];
+    return pod_data_ready(pod) &&
+           pod->host_rx_mmap != NULL &&
+           pod->host_rx_addr != NULL &&
+           __atomic_load_n(&pod->dma_generation, __ATOMIC_ACQUIRE) ==
+               b->pod_generation;
+}
+
+static void
+px_batch_leave_retry(struct px_engine *eng, struct px_batch *b)
+{
+    if (b->retry_count == 0)
+        return;
+    if (eng->retry_probe == b)
+        eng->retry_probe = NULL;
+    assert(eng->retry_batches > 0);
+    eng->retry_batches--;
+}
+
+static void
+px_batch_record_error(struct px_engine *eng, struct px_batch *b,
+                      doca_error_t status)
+{
+    int was_retry = b->retry_count != 0;
+
+    if (eng->retry_probe == b)
+        eng->retry_probe = NULL;
+    if (status == DOCA_ERROR_IO_FAILED &&
+        px_batch_destination_current(eng->objs, b) &&
+        b->retry_count < PX_BATCH_RETRY_MAX) {
+        if (!was_retry)
+            eng->retry_batches++;
+        b->retry_count++;
+        b->state = PX_BATCH_RETRY_PENDING;
+        return;
+    }
+    if (was_retry)
+        px_batch_leave_retry(eng, b);
+    b->state = PX_BATCH_ERROR;
 }
 
 static void
@@ -1871,8 +1942,16 @@ static void px_dma_done_cb(struct doca_dma_task_memcpy *t, union doca_data tud,
         struct pod_state *pod = &objs->pods[op->pod_idx];
         px_pod_inflight_sub(eng, pod);
         struct px_lane *ln = &objs->proxy->lanes[op->pod_idx][op->region];
-        ln->cached_freed = *(volatile uint64_t *)
-            (objs->proxy->scratch + PX_SCRATCH_OFF(op->pod_idx, op->region));
+        int K = pod->k_rings > 0 ? pod->k_rings : 1;
+        int L = px_landing_stripes(pod);
+        int nshards = K / L;
+        volatile uint64_t *freed = (volatile uint64_t *)
+            (objs->proxy->scratch +
+             PX_SCRATCH_OFF(op->pod_idx, op->region));
+        uint64_t total = 0;
+        for (int i = 0; i < nshards; i++)
+            total += freed[i];
+        ln->cached_freed = total;
         ln->refresh_inflight = 0;
         if (op->src_buf) { doca_buf_dec_refcount(op->src_buf, NULL); op->src_buf = NULL; }
         if (op->dst_buf) { doca_buf_dec_refcount(op->dst_buf, NULL); op->dst_buf = NULL; }
@@ -1882,7 +1961,8 @@ static void px_dma_done_cb(struct doca_dma_task_memcpy *t, union doca_data tud,
     px_pod_inflight_sub(eng, &objs->pods[b->pod_idx]);
     if (b->src_head) { doca_buf_dec_refcount(b->src_head, NULL); b->src_head = NULL; }
     if (b->dst_buf)  { doca_buf_dec_refcount(b->dst_buf, NULL);  b->dst_buf = NULL; }
-    b->done = 1;                               /* retired in px_drain (in order) */
+    px_batch_leave_retry(eng, b);
+    b->state = PX_BATCH_DONE;                  /* retired in px_drain (in order) */
 }
 
 static void px_dma_err_cb(struct doca_dma_task_memcpy *t, union doca_data tud,
@@ -1894,7 +1974,7 @@ static void px_dma_err_cb(struct doca_dma_task_memcpy *t, union doca_data tud,
     doca_task_free(doca_dma_task_memcpy_as_task(t));
     eng->dma_tasks_inflight--;
 
-    /* Latch I/O faults for context recovery. */
+    /* IO failures stall the shared engine context. */
     if (st == DOCA_ERROR_IO_FAILED)
         eng->dma_stalled = 1;
 
@@ -1912,10 +1992,6 @@ static void px_dma_err_cb(struct doca_dma_task_memcpy *t, union doca_data tud,
                 dpu_request_host_doorbell(objs, pod,
                     pub->notified_epoch + 1u);
         }
-        if (st == DOCA_ERROR_IO_FAILED &&
-            __atomic_load_n(&pod->dma_generation, __ATOMIC_ACQUIRE) ==
-                op->pod_generation)
-            __atomic_store_n(&pod->dma_ready, 0, __ATOMIC_RELEASE);
         DOCA_LOG_ERR("proxy: reverse ring DMA kind=%d failed "
                      "(pod slot %d region %d): %s",
                      op->kind, op->pod_idx, op->region,
@@ -1927,12 +2003,6 @@ static void px_dma_err_cb(struct doca_dma_task_memcpy *t, union doca_data tud,
         px_pod_inflight_sub(eng, &objs->pods[op->pod_idx]);
         DOCA_LOG_ERR("proxy: credit refresh DMA failed: %s", doca_error_get_descr(st));
         objs->proxy->lanes[op->pod_idx][op->region].refresh_inflight = 0;
-        /* An I/O failure for the current pod generation clears data-plane readiness. */
-        if (st == DOCA_ERROR_IO_FAILED) {
-            struct pod_state *dead = &objs->pods[op->pod_idx];
-            if (__atomic_load_n(&dead->dma_generation, __ATOMIC_ACQUIRE) == op->pod_generation)
-                __atomic_store_n(&dead->dma_ready, 0, __ATOMIC_RELEASE);
-        }
         if (op->src_buf) { doca_buf_dec_refcount(op->src_buf, NULL); op->src_buf = NULL; }
         if (op->dst_buf) { doca_buf_dec_refcount(op->dst_buf, NULL); op->dst_buf = NULL; }
         return;
@@ -1943,66 +2013,158 @@ static void px_dma_err_cb(struct doca_dma_task_memcpy *t, union doca_data tud,
                  b->pod_idx, b->region, b->bytes, doca_error_get_descr(st));
     if (b->src_head) { doca_buf_dec_refcount(b->src_head, NULL); b->src_head = NULL; }
     if (b->dst_buf)  { doca_buf_dec_refcount(b->dst_buf, NULL);  b->dst_buf = NULL; }
-    b->error = 1;
-    b->done = 1;
+    px_batch_record_error(eng, b, st);
 }
 
-/* Kick a lazy DMA read of the host's freed counter for lane (pod, region). */
+/* Submit a batch at its recorded landing position. */
+static doca_error_t
+px_batch_submit_dma(struct objects *objs, struct px_engine *eng,
+                    struct pod_state *pod, struct px_batch *b)
+{
+    struct doca_buf *src_head = NULL;
+    struct doca_buf *dst = NULL;
+    doca_error_t ret = DOCA_SUCCESS;
+
+    assert(b->units != NULL && b->bytes != 0);
+    assert(b->src_head == NULL && b->dst_buf == NULL);
+
+    for (struct px_unit *u = b->units;
+         u && ret == DOCA_SUCCESS; u = u->next) {
+        for (struct px_piece *p = u->pieces; p; p = p->next) {
+            struct pod_state *src_pod = &objs->pods[p->pod_idx];
+            void *addr = (uint8_t *)src_pod->dma_buffer + p->staging_off;
+            struct doca_buf *buf = NULL;
+            ret = doca_buf_inventory_buf_get_by_addr(
+                eng->inv, src_pod->local_mmap, addr, p->len, &buf);
+            if (ret != DOCA_SUCCESS)
+                break;
+            ret = doca_buf_set_data(buf, addr, p->len);
+            if (ret != DOCA_SUCCESS) {
+                doca_buf_dec_refcount(buf, NULL);
+                break;
+            }
+            if (!src_head) {
+                src_head = buf;
+            } else {
+                ret = doca_buf_chain_list(src_head, buf);
+                if (ret != DOCA_SUCCESS) {
+                    doca_buf_dec_refcount(buf, NULL);
+                    break;
+                }
+            }
+        }
+    }
+    if (ret == DOCA_SUCCESS) {
+        uint64_t dst_off = b->units->landing_pos;
+        ret = doca_buf_inventory_buf_get_by_addr(
+            eng->inv, pod->host_rx_mmap,
+            (uint8_t *)pod->host_rx_addr + dst_off, b->bytes, &dst);
+    }
+
+    struct doca_dma_task_memcpy *task = NULL;
+    if (ret == DOCA_SUCCESS) {
+        union doca_data user_data = { .ptr = &b->op };
+        ret = doca_dma_task_memcpy_alloc_init(
+            eng->dma, src_head, dst, user_data, &task);
+        if (ret == DOCA_SUCCESS) {
+            ret = doca_task_try_submit(
+                doca_dma_task_memcpy_as_task(task));
+            if (ret != DOCA_SUCCESS)
+                doca_task_free(doca_dma_task_memcpy_as_task(task));
+        }
+    }
+    if (ret != DOCA_SUCCESS) {
+        if (src_head)
+            doca_buf_dec_refcount(src_head, NULL);
+        if (dst)
+            doca_buf_dec_refcount(dst, NULL);
+        return ret;
+    }
+
+    b->src_head = src_head;
+    b->dst_buf = dst;
+    b->state = PX_BATCH_INFLIGHT;
+    eng->dma_tasks_inflight++;
+    px_pod_inflight_add(eng, pod);
+    return DOCA_SUCCESS;
+}
+
+/* Read all host credit shards for one landing stripe. */
 static void px_lane_refresh_credit(struct objects *objs, struct px_engine *eng,
                                    int pod_idx, struct pod_state *pod, int region,
                                    struct px_lane *ln) {
     struct dmesh_proxy *px = objs->proxy;
     if (ln->refresh_inflight || eng->dma_tasks_inflight >= PX_DMA_TASKS)
         return;
-    if (!pod->ring_mmaps[region] || !pod->ring_host_addrs[region]) {
-        if (!ln->warned_no_credit_addr) {
-            DOCA_LOG_ERR("proxy: pod %d ring %d has no host credit address — lane stalled",
-                         pod->pod_id, region);
-            ln->warned_no_credit_addr = 1;
-        }
-        return;
-    }
-    uint8_t *host_credit = (uint8_t *)pod->ring_host_addrs[region] +
-                           (size_t)DMA_RING_CREDIT_SLOT(DMA_RING_SIZE) *
-                               sizeof(struct dma_desc);
+    int K = pod->k_rings > 0 ? pod->k_rings : 1;
+    int L = px_landing_stripes(pod);
+    int nshards = K / L;
     uint8_t *cell = px->scratch + PX_SCRATCH_OFF(pod_idx, region);
     struct px_op *op = &px->refresh_ops[pod_idx][region];
-    struct doca_buf *src = NULL, *dst = NULL;
-    doca_error_t ret;
+    struct doca_buf *src_head = NULL, *dst = NULL;
+    doca_error_t ret = DOCA_SUCCESS;
 
-    ret = doca_buf_inventory_buf_get_by_addr(eng->inv, pod->ring_mmaps[region],
-                                             host_credit, sizeof(uint64_t), &src);
-    if (ret != DOCA_SUCCESS)
-        return;
-    if (doca_buf_set_data(src, host_credit, sizeof(uint64_t)) != DOCA_SUCCESS)
-        goto fail;
+    for (int shard = region; shard < K; shard += L) {
+        if (!pod->ring_mmaps[shard] || !pod->ring_host_addrs[shard]) {
+            if (!ln->warned_no_credit_addr) {
+                DOCA_LOG_ERR("proxy: pod %d stripe %d has no credit shard %d",
+                             pod->pod_id, region, shard);
+                ln->warned_no_credit_addr = 1;
+            }
+            goto fail;
+        }
+        uint8_t *host_credit =
+            (uint8_t *)pod->ring_host_addrs[shard] +
+            (size_t)DMA_RING_CREDIT_SLOT(DMA_RING_SIZE) *
+                sizeof(struct dma_desc);
+        struct doca_buf *src = NULL;
+        ret = doca_buf_inventory_buf_get_by_addr(
+            eng->inv, pod->ring_mmaps[shard], host_credit,
+            sizeof(uint64_t), &src);
+        if (ret != DOCA_SUCCESS)
+            goto fail;
+        ret = doca_buf_set_data(src, host_credit, sizeof(uint64_t));
+        if (ret != DOCA_SUCCESS) {
+            doca_buf_dec_refcount(src, NULL);
+            goto fail;
+        }
+        if (!src_head) {
+            src_head = src;
+        } else {
+            ret = doca_buf_chain_list(src_head, src);
+            if (ret != DOCA_SUCCESS) {
+                doca_buf_dec_refcount(src, NULL);
+                goto fail;
+            }
+        }
+    }
     ret = doca_buf_inventory_buf_get_by_addr(eng->inv, px->scratch_mmap,
-                                             cell, sizeof(uint64_t), &dst);
+                                             cell,
+                                             (size_t)nshards *
+                                                 sizeof(uint64_t),
+                                             &dst);
     if (ret != DOCA_SUCCESS)
         goto fail;
 
     op->kind = 1;
     op->pod_idx = pod_idx;
     op->region = region;
-    /* Stamp WHICH incarnation of this slot we are reading, so a late error cannot be
-     * blamed on whatever pod occupies the slot by the time it lands. */
     op->pod_generation = __atomic_load_n(&pod->dma_generation, __ATOMIC_ACQUIRE);
-    op->src_buf = src;
+    op->src_buf = src_head;
     op->dst_buf = dst;
     union doca_data ud = { .ptr = op };
     struct doca_dma_task_memcpy *t = NULL;
-    ret = doca_dma_task_memcpy_alloc_init(eng->dma, src, dst, ud, &t);
+    ret = doca_dma_task_memcpy_alloc_init(eng->dma, src_head, dst, ud, &t);
     if (ret != DOCA_SUCCESS) {
-        /* BAD_STATE = the shared ctx faulted; latch so px_engine_recover restarts it.
-         * This path must latch, not just the SG-batch submit: after a fault the refresh
-         * never lands, so credits never arrive and px_lane_submit breaks out before it
-         * ever reaches that submit — leaving nothing to latch and an unbounded spin. */
         if (ret == DOCA_ERROR_BAD_STATE)
             eng->dma_stalled = 1;
         goto fail;
     }
-    if (doca_task_try_submit(doca_dma_task_memcpy_as_task(t)) != DOCA_SUCCESS) {
+    ret = doca_task_try_submit(doca_dma_task_memcpy_as_task(t));
+    if (ret != DOCA_SUCCESS) {
         doca_task_free(doca_dma_task_memcpy_as_task(t));
+        if (ret == DOCA_ERROR_BAD_STATE)
+            eng->dma_stalled = 1;
         goto fail;
     }
     ln->refresh_inflight = 1;
@@ -2010,7 +2172,7 @@ static void px_lane_refresh_credit(struct objects *objs, struct px_engine *eng,
     px_pod_inflight_add(eng, pod);
     return;
 fail:
-    if (src) doca_buf_dec_refcount(src, NULL);
+    if (src_head) doca_buf_dec_refcount(src_head, NULL);
     if (dst) doca_buf_dec_refcount(dst, NULL);
     op->src_buf = op->dst_buf = NULL;
 }
@@ -2103,7 +2265,7 @@ px_rev_kick_lane(struct px_engine *eng, int pod_idx, int region)
                                     px->rev_scratch_mmap, local_base,
                                     pod->rev_ring_mmaps[region],
                                     remote_entries, bytes))
-                return 1;
+                return 0;
             pub->publish_tail = pub->producer_tail + pub->publish_count;
             pub->state = PX_REV_META_INFLIGHT;
             return 1;
@@ -2119,7 +2281,7 @@ px_rev_kick_lane(struct px_engine *eng, int pod_idx, int region)
         if (!px_rev_submit_copy(eng, pod_idx, region, 4,
                                 pod->rev_ring_mmaps[region], remote_ctrl,
                                 px->rev_scratch_mmap, local_ctrl, 64u))
-            return 1;
+            return 0;
         pub->state = PX_REV_CTRL_INFLIGHT;
         return 1;
     }
@@ -2132,11 +2294,16 @@ px_rev_kick_all(struct px_engine *eng)
     struct objects *objs = eng->objs;
     struct dmesh_proxy *px = objs->proxy;
     int progressed = 0;
+    /* Data retries are exclusive with reverse publication. */
+    if (eng->retry_batches || px_engine_retry_grace_active(eng))
+        return 0;
     int npods = __atomic_load_n(&objs->num_pods, __ATOMIC_ACQUIRE);
     for (int p = 0; p < npods; p++) {
         struct pod_state *pod = &objs->pods[p];
-        int K = pod->k_rings > 0 ? pod->k_rings : 1;
-        for (int r = eng->id; r < K; r += px->n_eng)
+        if (!pod_data_ready(pod))
+            continue;
+        int L = px_landing_stripes(pod);
+        for (int r = eng->id; r < L; r += px->n_eng)
             progressed |= px_rev_kick_lane(eng, p, r);
     }
     return progressed;
@@ -2148,8 +2315,8 @@ px_rev_append_ack(struct px_engine *eng, struct pod_state *pod,
 {
     struct dmesh_proxy *px = eng->objs->proxy;
     int pod_idx = (int)(pod - eng->objs->pods);
-    int K = pod->k_rings > 0 ? pod->k_rings : 1;
-    int region = port % K;
+    int L = px_landing_stripes(pod);
+    int region = port % L;
     if (region % px->n_eng != eng->id)
         return 0;
     struct px_rev_pub *pub = &px->lanes[pod_idx][region].rev;
@@ -2182,15 +2349,14 @@ px_ack_retry_handoffs(struct px_engine *eng)
         if (!eng->ack_retry_head)
             eng->ack_retry_tail = NULL;
         a->release_next = NULL;
-        if (owner != eng->id)
-            px_engine_wake(&px->engines[owner]);
         moved++;
     }
     return moved;
 }
 
 static int
-px_drain_ack_releases(struct px_engine *eng, uint32_t budget)
+px_drain_ack_releases(struct px_engine *eng, uint32_t budget,
+                      struct px_free_batch *fb)
 {
     struct objects *objs = eng->objs;
     int emitted = 0;
@@ -2203,7 +2369,7 @@ px_drain_ack_releases(struct px_engine *eng, uint32_t budget)
             /* A disconnected sender has no mapping or TX state to reclaim. */
             __atomic_fetch_sub(&objs->pods[a->pod_idx].proxy_source_refs, 1,
                                __ATOMIC_ACQ_REL);
-            px_arrival_free(objs->proxy, a);
+            px_fb_arr(fb, a);
             px_ack_queue_pop(&eng->ack_releases);
             emitted++;
             continue;
@@ -2217,7 +2383,7 @@ px_drain_ack_releases(struct px_engine *eng, uint32_t budget)
         }
         __atomic_fetch_sub(&objs->pods[a->pod_idx].proxy_source_refs, 1,
                            __ATOMIC_ACQ_REL);
-        px_arrival_free(objs->proxy, a);
+        px_fb_arr(fb, a);
         px_ack_queue_pop(&eng->ack_releases);
     }
     return emitted;
@@ -2228,8 +2394,8 @@ static int px_emit_rev_entry(struct objects *objs, struct px_engine *eng,
                              struct pod_state *pod,
                              const struct dmesh_rev_done_entry *e) {
     int pod_idx = (int)(pod - objs->pods);
-    int K = pod->k_rings > 0 ? pod->k_rings : 1;
-    int region = e->dst_port % K;
+    int L = px_landing_stripes(pod);
+    int region = e->dst_port % L;
     if (region % objs->proxy->n_eng != eng->id)
         return 0;
     struct px_rev_pub *pub = &objs->proxy->lanes[pod_idx][region].rev;
@@ -2265,18 +2431,23 @@ px_emit_append(struct px_engine *eng, struct px_unit *head,
 
 /* Retire completed lane batches into the worker emission queue. */
 static int px_lane_retire(struct px_engine *eng, struct px_lane *ln) {
-    if (!ln->fhead || !ln->fhead->done)
+    if (!ln->fhead ||
+        (ln->fhead->state != PX_BATCH_DONE &&
+         ln->fhead->state != PX_BATCH_ERROR))
         return 0;
 
     struct px_unit *head = NULL, *tail = NULL;
     uint32_t count = 0;
-    while (ln->fhead && ln->fhead->done) {
+    while (ln->fhead &&
+           (ln->fhead->state == PX_BATCH_DONE ||
+            ln->fhead->state == PX_BATCH_ERROR)) {
         struct px_batch *b = ln->fhead;
-        if (b->error)
+        int error = b->state == PX_BATCH_ERROR;
+        if (error)
             ln->sent_entries -= b->entries;   /* host never freed these landings */
         for (struct px_unit *u = b->units; u; ) {
             struct px_unit *nx = u->next;
-            u->err = (uint8_t)b->error;
+            u->err = (uint8_t)error;
             u->next = NULL;
             if (tail) tail->next = u; else head = u;
             tail = u;
@@ -2303,6 +2474,8 @@ static int px_engine_emit(struct objects *objs, struct px_engine *eng,
     while (eng->emit_head) {
         struct px_unit *u = eng->emit_head;
         struct pod_state *pod = &objs->pods[(int)u->dst_pod_idx];
+        if (!pod_data_ready(pod))
+            u->err = 1;                        /* destination disappeared after DMA */
         if (u->err && u->org_port &&
             !(u->src_pod_id == eof_pod && u->org_port == eof_port)) {
             px_eof_to_origin(objs, u);             /* undelivered != delivered */
@@ -2372,6 +2545,82 @@ static int px_lane_drop_dead(struct px_engine *eng, struct px_lane *ln) {
     return 1;
 }
 
+/* Terminalize retry-pending batches during pod cleanup. */
+static int
+px_lane_fail_pending_retries(struct px_engine *eng, struct px_lane *ln)
+{
+    int failed = 0;
+    for (struct px_batch *b = ln->fhead; b; b = b->next) {
+        if (b->state != PX_BATCH_RETRY_PENDING)
+            continue;
+        px_batch_leave_retry(eng, b);
+        b->state = PX_BATCH_ERROR;
+        failed = 1;
+    }
+    return failed;
+}
+
+/* Clear reverse publication state after its in-flight task exits. */
+static int
+px_rev_drop_dead(struct px_rev_pub *pub)
+{
+    if (pub->state == PX_REV_META_INFLIGHT ||
+        pub->state == PX_REV_CTRL_INFLIGHT)
+        return 0;
+    int changed = pub->count != 0 ||
+                  pub->publish_count != 0 ||
+                  pub->state != PX_REV_IDLE ||
+                  pub->producer_tail != 0 ||
+                  pub->publish_tail != 0 ||
+                  pub->cached_head != 0 ||
+                  pub->notified_epoch != 0;
+    if (changed)
+        memset(pub, 0, sizeof(*pub));
+    return changed;
+}
+
+static void
+px_engine_latch_bad_state(struct px_engine *eng, doca_error_t status)
+{
+    if (!eng->dma_fault_warned) {
+        DOCA_LOG_ERR("proxy: egress dma ctx faulted (engine %d): %s — "
+                     "stopping submit (needs restart)", eng->id,
+                     doca_error_get_descr(status));
+        eng->dma_fault_warned = 1;
+    }
+    eng->dma_stalled = 1;
+}
+
+/* Retry the lane head with at most one retry DMA active per engine. */
+static int
+px_lane_retry_head(struct objects *objs, struct px_engine *eng,
+                   struct pod_state *pod, struct px_lane *ln)
+{
+    struct px_batch *b = ln->fhead;
+    if (!b || b->state != PX_BATCH_RETRY_PENDING ||
+        eng->retry_probe != NULL || eng->dma_stalled)
+        return 0;
+    if (px_engine_retry_grace_active(eng))
+        return 0;
+    if (!px_batch_destination_current(objs, b)) {
+        px_batch_leave_retry(eng, b);
+        b->state = PX_BATCH_ERROR;
+        return 1;
+    }
+
+    doca_error_t ret = px_batch_submit_dma(objs, eng, pod, b);
+    if (ret == DOCA_SUCCESS) {
+        eng->retry_probe = b;
+        DOCA_LOG_WARN("proxy: retrying collateral SG-DMA batch "
+                      "(pod slot %d region %d, %u bytes)",
+                      b->pod_idx, b->region, b->bytes);
+        return 1;
+    }
+    if (ret == DOCA_ERROR_BAD_STATE)
+        px_engine_latch_bad_state(eng, ret);
+    return 0;
+}
+
 /* Worker: one pass over this engine's owned lanes (splice inbox→qhead, submit,
  * retire). Owns destination regions where region % A == worker id. */
 /* Restart this engine's shared DMA context after it reaches IDLE. */
@@ -2394,14 +2643,14 @@ static int px_engine_recover(struct px_engine *eng) {
         return 0;
 
     if (st == DOCA_CTX_STATE_RUNNING) {
-        /* Never actually went down (or already healed) — resume submitting. */
+        eng->retry_after_ns = px_monotonic_ns() + PX_BATCH_RETRY_GRACE_NS;
         eng->dma_stalled = 0;
         eng->dma_fault_warned = 0;
-        return 0;
+        return 1;
     }
     if (st == DOCA_CTX_STATE_IDLE) {
         if (doca_ctx_start(eng->dma_ctx) != DOCA_SUCCESS)
-            return 1;                     /* still down; keep the caller awake to retry */
+            return 0;
         eng->dma_tasks_inflight = 0;
         /* Clear refresh state only for lanes owned by this engine. */
         struct dmesh_proxy *px = eng->objs->proxy;
@@ -2415,15 +2664,14 @@ static int px_engine_recover(struct px_engine *eng) {
                 __atomic_fetch_sub(&eng->objs->pods[p].egress_inflight, lost,
                                    __ATOMIC_ACQ_REL);
         }
+        eng->retry_after_ns = px_monotonic_ns() + PX_BATCH_RETRY_GRACE_NS;
         eng->dma_stalled = 0;
         eng->dma_fault_warned = 0;
-        DOCA_LOG_WARN("proxy: egress dma ctx restarted after fault (engine %d) — "
-                      "a peer pod's host memory went away mid-DMA", eng->id);
-        return 0;
+        DOCA_LOG_WARN("proxy: egress DMA context restarted (engine %d)",
+                      eng->id);
+        return 1;
     }
-    /* Drive the PE while the DMA context is stopping or starting. */
-    doca_pe_progress(eng->pe);
-    return 1;
+    return doca_pe_progress(eng->pe) ? 1 : 0;
 }
 
 static int px_engine_pump(struct objects *objs, struct px_engine *eng,
@@ -2440,10 +2688,10 @@ static int px_engine_pump(struct objects *objs, struct px_engine *eng,
     }
     for (int i = 0; i < npods; i++) {
         struct pod_state *pod = &objs->pods[i];
-        int K = pod->k_rings > 0 ? pod->k_rings : 1;
+        int L = px_landing_stripes(pod);
         int dead = !pod_data_ready(pod);
         int quiet = dead;
-        for (int r = eng->id; r < K; r += px->n_eng) {
+        for (int r = eng->id; r < L; r += px->n_eng) {
             struct px_lane *ln = &px->lanes[i][r];
             progressed |= px_lane_splice_inbox(px, ln);
             if (ln->fhead) {
@@ -2455,6 +2703,12 @@ static int px_engine_pump(struct objects *objs, struct px_engine *eng,
                 /* pod disconnected (or not yet ready): never submit to it. Drain any
                  * leftover queued units so they don't leak custody or mis-deliver to a
                  * pod that later REUSES this slot. */
+                if (px_lane_fail_pending_retries(eng, ln)) {
+                    int retired = px_lane_retire(eng, ln);
+                    progressed |= retired;
+                    *published_done |= retired;
+                }
+                progressed |= px_rev_drop_dead(&ln->rev);
                 int dropped = px_lane_drop_dead(eng, ln);
                 progressed |= dropped;
                 *published_done |= dropped;
@@ -2468,6 +2722,17 @@ static int px_engine_pump(struct objects *objs, struct px_engine *eng,
             uint32_t gen = __atomic_load_n(&pod->dma_generation, __ATOMIC_ACQUIRE);
             if (ln->pod_generation != gen)
                 px_lane_rearm(ln, gen);
+            if (ln->fhead &&
+                ln->fhead->state == PX_BATCH_RETRY_PENDING) {
+                progressed |= px_lane_retry_head(objs, eng, pod, ln);
+                if (ln->fhead &&
+                    (ln->fhead->state == PX_BATCH_DONE ||
+                     ln->fhead->state == PX_BATCH_ERROR)) {
+                    int retired = px_lane_retire(eng, ln);
+                    progressed |= retired;
+                    *published_done |= retired;
+                }
+            }
             if (ln->qhead) progressed |= px_lane_submit(objs, eng, i, pod, r, ln);
         }
         if (dead) {
@@ -2475,12 +2740,18 @@ static int px_engine_pump(struct objects *objs, struct px_engine *eng,
                                 __ATOMIC_ACQUIRE) != 0)
                 quiet = 0;
             uint32_t bit = 1u << eng->id;
+            /* Read first: an unchanged bit must not steal the line from the
+             * peers that publish their own quiesce state in the same word. */
+            uint32_t mask = __atomic_load_n(&pod->egress_quiesced_mask,
+                                            __ATOMIC_ACQUIRE);
             if (quiet) {
-                uint32_t previous = __atomic_fetch_or(
-                    &pod->egress_quiesced_mask, bit, __ATOMIC_ACQ_REL);
-                if ((previous & bit) == 0)
-                    dpu_wake_main(eng->objs);
-            } else {
+                if ((mask & bit) == 0) {
+                    uint32_t previous = __atomic_fetch_or(
+                        &pod->egress_quiesced_mask, bit, __ATOMIC_ACQ_REL);
+                    if ((previous & bit) == 0)
+                        dpu_wake_main(eng->objs);
+                }
+            } else if (mask & bit) {
                 __atomic_fetch_and(&pod->egress_quiesced_mask, ~bit,
                                    __ATOMIC_ACQ_REL);
             }
@@ -2489,25 +2760,29 @@ static int px_engine_pump(struct objects *objs, struct px_engine *eng,
     return progressed;
 }
 
-static int px_worker_progress(struct px_engine *eng) {
+static int
+px_worker_has_pending(struct px_engine *eng)
+{
+    return eng->dma_stalled || eng->dma_tasks_inflight > 0 ||
+           eng->retry_batches > 0 || eng->retry_probe != NULL;
+}
+
+static enum px_progress_state
+px_worker_progress(struct px_engine *eng) {
     px_cur_worker = &eng->objs->proxy->workers[eng->id];
     int published_done = 0;
     int progressed = doca_pe_progress(eng->pe) ? 1 : 0;
     progressed |= px_engine_pump(eng->objs, eng, &published_done);
     struct px_free_batch fb = { 0 };
     progressed |= px_engine_emit(eng->objs, eng, &fb);
-    px_free_batch_flush(eng->objs->proxy, &fb);
     progressed |= px_ack_retry_handoffs(eng);
-    progressed |= px_drain_ack_releases(eng, 256);
+    progressed |= px_drain_ack_releases(eng, 256, &fb);
+    px_free_batch_flush(eng->objs->proxy, &fb);
     progressed |= px_rev_kick_all(eng);
-    return progressed;
-}
-
-int px_worker_drain(struct objects *objs, int worker_id) {
-    struct dmesh_proxy *px = objs ? objs->proxy : NULL;
-    if (!px || px->n_eng < 1 || worker_id < 0 || worker_id >= px->n_eng)
-        return 0;
-    return px_worker_progress(&px->engines[worker_id]);
+    if (progressed)
+        return PX_PROGRESS_PROGRESSED;
+    return px_worker_has_pending(eng) ?
+        PX_PROGRESS_PENDING : PX_PROGRESS_IDLE;
 }
 
 int px_worker_notification_fd(struct objects *objs, int worker_id) {
@@ -2537,6 +2812,14 @@ void px_worker_clear_notification(struct objects *objs, int worker_id, int fd) {
                                      (doca_notification_handle_t)fd);
 }
 
+enum px_progress_state
+px_worker_drain(struct objects *objs, int worker_id) {
+    struct dmesh_proxy *px = objs ? objs->proxy : NULL;
+    if (!px || px->n_eng < 1 || worker_id < 0 || worker_id >= px->n_eng)
+        return PX_PROGRESS_IDLE;
+    return px_worker_progress(&px->engines[worker_id]);
+}
+
 /* Submit queued units of one lane as SG batches while credits, region space,
  * pieces and task slots allow. */
 static int px_lane_submit(struct objects *objs, struct px_engine *eng, int pod_idx,
@@ -2548,12 +2831,16 @@ static int px_lane_submit(struct objects *objs, struct px_engine *eng, int pod_i
         return 0;
     if (eng->dma_stalled)                      /* ctx faulted — don't spin/flood (below) */
         return 0;
+    if (px_engine_retry_grace_active(eng))
+        return 0;
+    if (eng->retry_batches)                    /* serialize retry probes */
+        return 0;
     if (!pod_data_ready(pod) || !pod->host_rx_addr || !pod->host_rx_mmap)
         return 0;
 
-    int K = pod->k_rings > 0 ? pod->k_rings : 1;
-    uint64_t region_size = pod->host_rx_buf_size / (uint64_t)K;
-    uint32_t rq = pod->rq_depth / (uint32_t)K;
+    int L = px_landing_stripes(pod);
+    uint64_t region_size = pod->host_rx_buf_size / (uint64_t)L;
+    uint32_t rq = pod->rq_depth / (uint32_t)L;
     if (region_size == 0 || rq == 0)
         return 0;
 
@@ -2576,10 +2863,18 @@ static int px_lane_submit(struct objects *objs, struct px_engine *eng, int pod_i
             for (struct px_piece *p = u->pieces; p; p = p->next)
                 px_custody_sub(objs, p->arr, p->len);   /* over-region drop: release iff last */
             px_unit_free_node(px, u);
+            did = 1;
             continue;
         }
-        if (ln->cursor + ln->qhead->total_len > region_size)
-            ln->cursor = 0;                    /* wrap (count-credit model) */
+        enum px_lane_wrap_action wrap =
+            px_lane_wrap_action(ln->cursor, ln->qhead->total_len,
+                                region_size, inflight);
+        if (wrap == PX_LANE_WRAP_WAIT) {
+            px_lane_refresh_credit(objs, eng, pod_idx, pod, region, ln);
+            break;
+        }
+        if (wrap == PX_LANE_WRAP_RESET)
+            ln->cursor = 0;
 
         struct px_batch *b = px_batch_alloc(eng);
         if (!b)
@@ -2610,6 +2905,7 @@ static int px_lane_submit(struct objects *objs, struct px_engine *eng, int pod_i
                     px_custody_sub(objs, p->arr, p->len);   /* drop path: release iff last */
                 }
                 px_unit_free_node(px, u);
+                did = 1;
                 continue;
             }
             u->landing_pos = (uint32_t)((uint64_t)region * region_size + ln->cursor + bytes);
@@ -2642,56 +2938,12 @@ static int px_lane_submit(struct objects *objs, struct px_engine *eng, int pod_i
         b->op.kind = 0;
         b->op.batch = b;
 
-        uint64_t dst_off = (uint64_t)region * region_size + ln->cursor;
-
         if (bytes == 0) {                      /* notify-only batch (FINs) */
-            b->done = 1;
+            b->state = PX_BATCH_DONE;
         } else {
-            /* build the chained SG source + single contiguous dst, submit */
-            struct doca_buf *src_head = NULL, *dst = NULL;
-            doca_error_t ret = DOCA_SUCCESS;
-            for (struct px_unit *u = take_head; u && ret == DOCA_SUCCESS; u = u->next) {
-                for (struct px_piece *p = u->pieces; p; p = p->next) {
-                    struct pod_state *sp = &objs->pods[p->pod_idx];
-                    void *addr = (uint8_t *)sp->dma_buffer + p->staging_off;
-                    struct doca_buf *buf = NULL;
-                    ret = doca_buf_inventory_buf_get_by_addr(eng->inv, sp->local_mmap,
-                                                             addr, p->len, &buf);
-                    if (ret != DOCA_SUCCESS)
-                        break;
-                    ret = doca_buf_set_data(buf, addr, p->len);
-                    if (ret != DOCA_SUCCESS) {
-                        doca_buf_dec_refcount(buf, NULL);
-                        break;
-                    }
-                    if (!src_head) {
-                        src_head = buf;
-                    } else {
-                        ret = doca_buf_chain_list(src_head, buf);
-                        if (ret != DOCA_SUCCESS) {
-                            doca_buf_dec_refcount(buf, NULL);
-                            break;
-                        }
-                    }
-                }
-            }
-            if (ret == DOCA_SUCCESS)
-                ret = doca_buf_inventory_buf_get_by_addr(eng->inv, pod->host_rx_mmap,
-                        (uint8_t *)pod->host_rx_addr + dst_off, bytes, &dst);
-            struct doca_dma_task_memcpy *t = NULL;
-            if (ret == DOCA_SUCCESS) {
-                union doca_data ud = { .ptr = &b->op };
-                ret = doca_dma_task_memcpy_alloc_init(eng->dma, src_head, dst, ud, &t);
-                if (ret == DOCA_SUCCESS) {
-                    ret = doca_task_try_submit(doca_dma_task_memcpy_as_task(t));
-                    if (ret != DOCA_SUCCESS)
-                        doca_task_free(doca_dma_task_memcpy_as_task(t));
-                }
-            }
+            doca_error_t ret = px_batch_submit_dma(objs, eng, pod, b);
             if (ret != DOCA_SUCCESS) {
                 /* Put the units back at the lane HEAD (order preserved). */
-                if (src_head) doca_buf_dec_refcount(src_head, NULL);
-                if (dst) doca_buf_dec_refcount(dst, NULL);
                 take_tail->next = ln->qhead;
                 ln->qhead = take_head;
                 if (!ln->qtail)
@@ -2701,21 +2953,10 @@ static int px_lane_submit(struct objects *objs, struct px_engine *eng, int pod_i
                  * succeed and floods DOCA's internal "state IDLE" log forever, so
                  * STALL this engine's submits instead of spinning. Any other error
                  * (NO_MEMORY / inventory) is a real transient shortage → retry. */
-                if (ret == DOCA_ERROR_BAD_STATE) {
-                    if (!eng->dma_fault_warned) {
-                        DOCA_LOG_ERR("proxy: egress dma ctx faulted (engine %d): %s — "
-                                     "stopping submit (needs restart)", eng->id,
-                                     doca_error_get_descr(ret));
-                        eng->dma_fault_warned = 1;
-                    }
-                    eng->dma_stalled = 1;
-                }
+                if (ret == DOCA_ERROR_BAD_STATE)
+                    px_engine_latch_bad_state(eng, ret);
                 break;
             }
-            b->src_head = src_head;
-            b->dst_buf = dst;
-            eng->dma_tasks_inflight++;
-            px_pod_inflight_add(eng, pod);
         }
 
         ln->cursor += bytes;
@@ -2726,7 +2967,6 @@ static int px_lane_submit(struct objects *objs, struct px_engine *eng, int pod_i
         else
             ln->fhead = b;
         ln->ftail = b;
-        px->stat_batches++;
         did = 1;
     }
     return did;
@@ -2775,6 +3015,7 @@ static int px_parse_svc_csv(const char *env, uint8_t *table) {
 
 int px_init(struct objects *objs) {
     objs->proxy = NULL;
+    doca_error_t ret = DOCA_SUCCESS;
 
     /* The SG-DMA egress engine is the DPU-to-host reverse path. */
     struct dmesh_proxy *px = (struct dmesh_proxy *)calloc(1, sizeof(*px));
@@ -2805,7 +3046,9 @@ int px_init(struct objects *objs) {
         goto oom;
     /* Free-list helpers require the pool lock. */
     pthread_mutex_init(&px->pool_lock, NULL);
-    atomic_init(&px->pool_waiters, 0);
+    atomic_init(&px->stat_stall_unit, 0);
+    atomic_init(&px->stat_stall_piece, 0);
+    atomic_init(&px->stat_stall_uport, 0);
     for (int i = PX_ARRIVAL_POOL - 1; i >= 0; i--) px_arrival_free(px, &px->arr_mem[i]);
     for (int i = PX_PIECE_POOL - 1; i >= 0; i--)   px_piece_free(px, &px->piece_mem[i]);
     for (int i = PX_UNIT_POOL - 1; i >= 0; i--)    { px->unit_mem[i].next = px->unit_free; px->unit_free = &px->unit_mem[i]; }
@@ -2819,6 +3062,14 @@ int px_init(struct objects *objs) {
             cap > 0 && cap < px->sg_pieces_max)
             px->sg_pieces_max = cap;
     }
+    int landing_stripes =
+        objs->n_data_workers > 0 ? objs->n_data_workers : 1;
+    int credit_shards =
+        (objs->k_rings > 0 ? objs->k_rings : 1) / landing_stripes;
+    if (credit_shards > (int)px->sg_pieces_max) {
+        ret = DOCA_ERROR_INVALID_VALUE;
+        goto fail;
+    }
 
     /* One DMA engine and PE per data worker. */
     int n_eng = px->n_workers;
@@ -2827,7 +3078,6 @@ int px_init(struct objects *objs) {
     px->n_eng = n_eng;
 
     /* Per-engine DMA, PE, inventory, and batch pool. */
-    doca_error_t ret = DOCA_SUCCESS;
     for (int e = 0; e < n_eng; e++) {
         struct px_engine *eng = &px->engines[e];
         eng->objs = objs;

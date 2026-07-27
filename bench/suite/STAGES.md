@@ -30,9 +30,10 @@ they do not establish competitive performance.
 
 The BlueField gRPC smoke covers 30 create/use/destroy rounds, server and client
 slot reuse, 60 unary RPCs, bilateral `POD_QUIESCED`, three exact 1 MiB payloads,
-and recovery after an unexpected disconnect. This validates graceful reclaim
-and liveness recovery. It does not establish memory isolation after arbitrary
-host failure during in-flight DMA.
+and recovery after an unexpected disconnect. The native fault run deletes one
+backend during traffic, retains healthy-backend delivery, and admits the
+replacement pod. These tests cover graceful reclaim, shared-DMA fault scope,
+and liveness recovery; they do not enumerate every host-failure timing.
 
 ### L4 performance
 
@@ -57,7 +58,7 @@ A performance point is retained only if:
 - client and server report consistent success counts;
 - payload semantics are identical across transports;
 - warmup is excluded and measurement duration is explicit;
-- CPU pinning, DPU N/K/A topology, binary provenance, and node placement are
+- CPU pinning, DPU N/K/A/L topology, binary provenance, and node placement are
   recorded;
 - logging is at warning level unless the run is explicitly diagnostic;
 - the point is below an obvious saturation knee when used for latency comparison.

@@ -46,7 +46,7 @@ Comch RUNNING
   → POD_REGISTER / POD_ASSIGNED
   → K rings + TX mmap + RX mmap imported
   → generation-matched RING_ADD_ACK from every target EU
-  → POD_INIT_RESULT(READY)
+  → POD_INIT_RESULT(READY, L)
 ```
 
 Registration is idempotent. While assignment or readiness is pending, the host
@@ -57,9 +57,10 @@ The overall initialization deadline is 30 seconds.
 
 Graceful channel destruction sends `POD_UNREGISTER` every 100 ms until
 `POD_QUIESCED` or the five-second local deadline. The host retains exported
-memory until that barrier. Unexpected disconnect still invokes DPU-side cleanup,
-but forced process death during an already-issued DMA is outside the graceful
-safety claim.
+memory until that barrier. Unexpected disconnect invokes DPU-side unpublication
+and cleanup. A shared DMA-context fault restarts the worker context without
+changing pod readiness; a current-generation payload batch receives one ordered
+retry.
 
 The replay timers exist only inside these transitions. After READY, the channel
 does not poll registration state or emit periodic control messages. Unregister is

@@ -1137,7 +1137,16 @@ setup_pod_dma(struct objects *objs, struct pod_state *pod)
     int N = objs->num_dpa_threads;
     int K = objs->k_rings > 0 ? objs->k_rings : 1;
     if (K > N) K = N;
+    int L = objs->n_data_workers > 0 ? objs->n_data_workers : 1;
+    /* The host is told L and shards its credit returns by it, so a geometry the
+     * egress engine cannot honour must fail the pod instead of degrading. */
+    if (L > K || K % L != 0) {
+        DOCA_LOG_ERR("pod %d: unusable landing geometry K=%d L=%d",
+                     pod->pod_id, K, L);
+        return DOCA_ERROR_INVALID_VALUE;
+    }
     pod->k_rings = K;
+    pod->landing_stripes = L;
     __atomic_store_n(&pod->egress_quiesced, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&pod->egress_quiesced_mask, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&pod->egress_inflight, 0, __ATOMIC_RELEASE);

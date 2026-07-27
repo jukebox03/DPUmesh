@@ -8,15 +8,16 @@ are the first validation layer before the hardware validators under `bench/`.
 |---|---|
 | `native_api_contract_test.c` | `alloc`/`post_send` validation and automatic complete-unit submission |
 | `native_control_state_test.c` | Idempotent register, replay-safe unregister, and no slot reuse while cleanup is pending |
-| `native_tx_batch_policy_test.c` | Complete 8 KiB unit submission, explicit partial flush, physical-block tail ordering, and reverse-notification replay filtering |
+| `native_tx_batch_policy_test.c` | TX batching, physical-block ordering, RX landing geometry, and sharded credit return |
 | `native_writable_test.c` | Automatic one-shot arm/recheck, QP and shared-pool readiness, stale-hint cancellation, and reservation rollback |
 | `preload_api_contract_test.c` | Public native TX usage, event-driven blocking/nonblocking retry, honest `POLLOUT`, send timeout, ordered RX fragments, FIN validation, and fd-entry lifetime |
 | `l4_pin_policy_test.c` | Live-pin stability and terminal backend loss |
 | `lb_policy_test.c` | Live-backend filtering and concurrent service round-robin selection |
-| `proxy_lane_queue_test.c` | Arrival merging, worker→lane publication, and worker wake coalescing |
+| `proxy_lane_queue_test.c` | Lane FIFO, fault-retry ordering, landing geometry, and DMA progress states |
 | `worker_mpsc_queue_test.c` | Cross-worker MPSC FIFO, full-queue, and wraparound behavior |
 | `topology_test.c` | Connection-affine port→ring→DPA-EU→ARM-worker mapping invariants |
 | `ring_counter_test.c` | MPSC descriptor-generation publication, wraparound, and shared consumer-head admission |
+| `dma_fault_scope_test.sh` | Shared DMA-context faults trigger engine recovery without unpublishing healthy pods |
 | `abi_contract_test.sh` | Library SONAME, required public symbols, and the preload library's versioned runtime dependency |
 
 Run all tests from the repository root:

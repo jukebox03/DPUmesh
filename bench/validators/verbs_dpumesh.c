@@ -324,7 +324,7 @@ static void run_verbs(int conn_fd, long N, uint32_t size, int zc,
         if (n == 0 && posted == 0) {
             /* idle: sleep on the EQ fd (drain counter FIRST, per the edge rule),
              * then loop back to poll. 200ms tick doubles as the deadline check. */
-            uint64_t cnt; while (read(eqfd, &cnt, sizeof cnt) > 0) { }
+            uint64_t cnt; ssize_t rd = read(eqfd, &cnt, sizeof cnt); (void)rd;
             struct epoll_event evs; epoll_wait(epfd, &evs, 1, 200);
         }
     }

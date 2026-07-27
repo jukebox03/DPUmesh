@@ -3,23 +3,50 @@
 DPUmesh is a BlueField transport with registered host memory, DPA forwarding,
 ARM routing, and DPU-initiated SG-DMA.
 
+## Topology
+
+`N`, `K`, `A`, and `L` denote DPA EUs, rings per pod, ARM data workers, and RX
+landing stripes.
+
+```text
+1 ≤ L = A ≤ K ≤ N
+K % L = 0
+N % A = 0
+```
+
+The data-plane mappings are:
+
+```text
+forward ring       = source port % K
+ARM owner          = port % A
+RX landing stripe  = destination port % L
+reverse ring       = destination port % L
+```
+
+A connection remains on one ARM worker. Each worker owns its connection tables,
+DPA completion PE, SG-DMA context, DMA callbacks, destination lanes, and reverse
+ring producers. One worker may own multiple rings.
+
 ## Data path
 
 ```text
 host QP
   │
   ▼
-forward ring (source port % K)
+K forward rings
   │
   ▼
-DPA EU
+DPA EUs
   │ completion metadata
   ▼
-ARM worker (connection owner)
+A ARM workers
   ├─ connection and conntrack state
   ├─ L4 routing or framed L7 load balancing
-  ├─ payload SG-DMA and DMA completion
-  └─ reverse ring publication
+  ├─ payload SG-DMA
+  └─ reverse publication
+          │
+          ▼
+L reverse rings
           │ REV_DONE / TX_ACK
           ▼
 host PE progress thread
@@ -27,24 +54,11 @@ host PE progress thread
 DPU main thread: registration, teardown, and host doorbells
 ```
 
-`N`, `K`, and `A` denote DPA EUs, rings per pod, and ARM data workers.
+## Host memory and rings
 
-```text
-1 ≤ A ≤ K ≤ N
-K % A = 0
-N % A = 0
-EU % A = ring % A = port % A
-```
-
-A connection remains on one ARM worker. A worker owns its connection tables,
-DPA completion PE, SG-DMA engine, DMA completion callbacks, destination lanes,
-and reverse-ring producers.
-
-## Host
-
-One `dpumesh_ctx` owns the Comch client, K forward rings, K reverse rings, the
-registered TX and RX mappings, the TX block pool, EQ registry, and PE progress
-thread.
+One `dpumesh_ctx` owns K forward rings, K reverse rings, registered TX/RX
+mappings, the TX block pool, EQ registry, and PE progress thread. The 64 MiB RX
+mapping is divided into L equal landing stripes.
 
 Each QP is a full-duplex ordered byte stream bound to one EQ. Its TX cursors
 maintain:
@@ -55,57 +69,63 @@ free ≤ sent ≤ committed ≤ write
 
 `dmesh_alloc` reserves registered bytes. `dmesh_post_send` commits complete
 8 KiB transport units, and `dmesh_flush` publishes a trailing partial unit.
-`TX_ACK` advances `free`. `REV_DONE` creates RX, FIN, and accept events.
+`TX_ACK` advances `free`; `REV_DONE` creates RX, FIN, and accept events.
 
-TX capacity pressure returns `EAGAIN` and arms one
-`DMESH_EVENT_TX_READY` transition. RX landing credits return when the
-application releases the receive buffer.
+Each landing stripe aggregates `K/L` credit counters. The host shards returned
+credits by landing position. The DPU reads the counters with one SG-DMA and uses
+their sum as the stripe credit.
 
-## Forward rings and DPA
+A stripe is filled by a byte cursor. The cursor returns to the stripe head only
+once every landing it holds has been released.
 
-Each forward ring is a bounded MPSC queue. A host producer reserves a monotonic
+## DPA and ARM execution
+
+Each forward ring is a bounded MPSC queue. A producer reserves a monotonic
 ticket, writes one descriptor, and publishes `publish_seq = ticket + 1`. The DPA
-consumes consecutive tickets and publishes one `consumer_head` after each
-drain.
+consumes consecutive tickets, copies request bytes into DPU staging, and sends
+completion metadata to the connection owner.
 
-Each EU processes ring control, copies request bytes into DPU staging, and sends
-completion metadata to the ARM worker selected by the connection owner mapping.
-Pod generation and descriptor sequence fields reject stale asynchronous work.
-
-## ARM workers
-
-One worker iteration:
+An ARM data worker polls its own completion handles. One iteration:
 
 1. consumes up to 64 DPA completions;
-2. processes connection parsing and routing;
+2. parses and routes connection data;
 3. submits and progresses SG-DMA;
 4. retires completed destination lanes;
 5. emits `REV_DONE` and exact per-sequence `TX_ACK` entries;
-6. publishes pending reverse-ring entries.
+6. publishes reverse-ring entries.
+
+A worker stays hot while an iteration advances work. Otherwise it arms its DPA
+and SG-DMA completion handles, rechecks, and blocks on them, its cross-worker
+eventfd, and a 1 ms interval.
 
 Same-owner lanes use a private FIFO. Cross-owner delivery and ACK custody use
-bounded MPSC queues. Idle workers wait on their DPA PE, DMA PE, and worker event
-descriptors.
+bounded MPSC queues. L4 selects one backend for a connection. Services in
+`DPUMESH_PROXY_L7_SVC` use 16-byte frames and select a ready backend per frame.
 
-L4 selects one backend for the lifetime of a connection. Services listed in
-`DPUMESH_PROXY_L7_SVC` use a 16-byte framed codec and select a ready backend per
-complete frame. Response bytes remain ordered within the client stream.
+## DMA fault handling
 
-## Reverse rings and host wake
+Each ARM worker uses one DMA context shared by its pods. `IO_FAILED` stalls and
+restarts that context without changing pod readiness. A failed payload batch
+whose destination generation is still current is retried once at the head of
+its lane FIFO. The exclusive retry preserves lane order.
 
-Each region has one worker producer and one host consumer. A 32-byte reverse
-slot contains `REV_DONE` or `TX_ACK` and becomes visible when:
+Pod readiness is controlled by the registration connection. Disconnect cleanup
+removes the pod from routing, clears DMA readiness, drains worker custody, and
+destroys imported mappings.
+
+## Reverse publication
+
+Each landing stripe has one reverse ring, one worker producer, and one host
+consumer. A 32-byte slot contains `REV_DONE` or `TX_ACK` and becomes visible
+when:
 
 ```text
 publish_seq = consumer ticket + 1
 ```
 
-The worker publishes all entries accumulated during its current iteration.
-The host drains visible entries and writes one monotonic `consumer_head`.
-
-Before blocking, the host increments `arm_epoch` and rechecks the rings. A
-worker reads the reverse control cache line after publication. A new armed epoch
-requests one Comch doorbell through the DPU main thread.
+The host drains visible entries and writes one monotonic `consumer_head`. Before
+blocking, it increments `arm_epoch` and rechecks the rings. A newly observed
+epoch produces one Comch doorbell through the DPU main thread.
 
 ## Registration and teardown
 
@@ -115,12 +135,12 @@ Host                                      BlueField ARM / DPA
  |<---------------- POD_ASSIGNED ------------|
  |-- forward rings, TX/RX, reverse rings --->|
  |                              RING_ADD to EUs
- |<----------- POD_INIT_RESULT(READY) --------|
+ |<------ POD_INIT_RESULT(READY, L) ----------|
 
  |-- POD_UNREGISTER ------------------------>|
  |                              stop routing
  |                              RING_DEL to EUs
- |                              drain ARM DMA and reverse publishers
+ |                              drain DMA and reverse publishers
  |                              destroy imported mappings
  |<---------------- POD_QUIESCED -------------|
 ```
@@ -136,19 +156,18 @@ exports until `POD_QUIESCED`.
 | Transport unit | 8 KiB |
 | Host TX mapping | 8,192 units / 64 MiB |
 | Host RX mapping | 8,192 units / 64 MiB |
+| RX landing stripes | L = A |
 | TX block | 512 KiB |
 | QP TX window | 8 blocks / 4 MiB |
-| Send-unit reclaim FIFO | 512 entries |
 | Forward ring | 4,096 descriptors |
-| Forward descriptors per ring round | 32 |
 | Reverse ring | 8,192 entries |
 | Reverse entry | 32 B |
-| Reverse publication stage | 64 entries |
-| DPA EUs | automatic 16, explicit maximum 32 |
+| DPA EUs | automatic 16, maximum 32 |
 | Rings per pod | default 2, maximum 8 |
 | ARM data workers | default 1, maximum 8 |
+| Payload DMA retries | 1 |
 | L7 frame | 128 KiB |
 
-The implementation preserves per-connection order, exact TX and RX custody,
-one reverse-ring producer, generation-safe teardown, and bounded nonblocking
-backpressure.
+The implementation preserves per-connection order, exact TX/RX custody,
+single-producer reverse rings, generation-safe teardown, and bounded
+nonblocking backpressure.

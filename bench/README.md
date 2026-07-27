@@ -52,18 +52,18 @@ topology explicit:
 
 ```sh
 DPUMESH_DPA_THREADS=16 \
-DPUMESH_ARM_WORKERS=8 \
+DPUMESH_ARM_WORKERS=2 \
 DPUMESH_RINGS_PER_POD=8 \
 DPUMESH_PROXY_L7_SVC=16 \
 DPUMESH_LOG_LEVEL=40 \
 ./bench/bench.sh deploy
 ```
 
-This command builds host and DPU artifacts, synchronizes the DPU sources, imports
+This command builds host and DPU artifacts, synchronizes DPU sources, imports
 container images, starts the DPU process and pods in order, and applies CPU
-pinning. A bare `deploy` is valid for functional work but selects one ARM data
-worker. The live DPU process environment, not the invoking shell, is the
-measurement authority.
+pinning. It selects `N/K/A/L=16/8/2/2`: eight rings, two polling ARM workers, and
+two RX landing stripes. A bare `deploy` selects one ARM worker. The live DPU
+process environment is the measurement authority.
 
 The configuration above keeps benchmark service 11 connection-pinned L4 while
 enabling L7 framing only for stream validator service 16. To exercise
@@ -72,7 +72,7 @@ per-message LB on the native request/reply benchmark too, enable both services:
 ```sh
 DPUMESH_PROXY_L7_SVC=11,16 \
 DPUMESH_DPA_THREADS=16 \
-DPUMESH_ARM_WORKERS=8 \
+DPUMESH_ARM_WORKERS=2 \
 DPUMESH_RINGS_PER_POD=8 \
 ./bench/bench.sh deploy
 ```
@@ -216,7 +216,7 @@ test, native symbol linkage, and an optional BlueField client/server smoke binar
 4. Report p50 and tail latency with QPS; a saturated point can improve QPS while
    invalidating latency comparison.
 5. Capture host application CPU, Envoy CPU when present, DPU ARM CPU, and active
-   DPA configuration. Host-only CPU is not total system cost.
+   `N/K/A/L` topology. Host-only CPU is not total system cost.
 6. Compare only matched semantics. The current gRPC comparison is DPUmesh versus
    direct TCP, not DPUmesh versus Envoy HTTP connection management.
 

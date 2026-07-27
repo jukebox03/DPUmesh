@@ -453,7 +453,7 @@ static void *dispatcher_main(void *arg) {
 
         if (pfds[0].revents & POLLIN) {
             uint64_t v;
-            while (real_read(eq_fd, &v, sizeof v) > 0) {}
+            (void)real_read(eq_fd, &v, sizeof v);
             dispatcher_drain_eq();
         }
 

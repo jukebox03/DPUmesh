@@ -145,7 +145,10 @@ struct dmesh_pod_assigned_msg {
     uint8_t  type;              /* = DMESH_MSG_POD_ASSIGNED */
     uint8_t  _pad[3];
     int32_t  pod_id;            /* the assigned pod id (>= 0) */
+    int32_t  landing_stripes;   /* host RX partitions and reverse rings to export */
 };
+_Static_assert(sizeof(struct dmesh_pod_assigned_msg) == 12,
+               "dmesh_pod_assigned_msg ABI drift");
 
 /* DPU→Host terminal result for the second phase of channel initialization.
  * Keep the type byte at offset 0 because the host dispatches on recv_buffer[0]. */
@@ -154,8 +157,9 @@ struct dmesh_pod_init_result_msg {
     uint8_t  _pad[3];
     int32_t  pod_id;            /* assigned pod, or -1 when registration itself failed */
     int32_t  result;            /* enum dmesh_pod_init_result; never PENDING on the wire */
+    int32_t  landing_stripes;   /* host RX buffer partitions */
 };
-_Static_assert(sizeof(struct dmesh_pod_init_result_msg) == 12,
+_Static_assert(sizeof(struct dmesh_pod_init_result_msg) == 16,
                "dmesh_pod_init_result_msg ABI drift");
 
 /* Graceful teardown is a protocol barrier, not merely a Comch disconnect. The

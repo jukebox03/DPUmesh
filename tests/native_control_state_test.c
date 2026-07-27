@@ -15,6 +15,7 @@ main(void)
     assert(objs != NULL);
     objs->num_dpa_threads = 4;
     objs->k_rings = 2;
+    objs->n_data_workers = 2;
     for (int i = 0; i < POD_ID_SPACE; i++)
         objs->pod_id_to_slot[i] = -1;
 
@@ -26,6 +27,7 @@ main(void)
     assert(assigned == 0);
     assert(objs->pods[0].registered == 1);
     assert(objs->pod_id_to_slot[assigned] == 0);
+    assert(objs->pods[0].landing_stripes == 2);
 
     /* Identical REGISTER is a replay, not a conflicting second tenant. */
     assert(pods_register(objs, conn, -1, 7) == assigned);

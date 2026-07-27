@@ -117,8 +117,9 @@ process_mmap_msg(struct objects *objs, struct doca_comch_connection *conn,
 	}
 
 	int kmax = objs->k_rings > 0 ? objs->k_rings : 1;
+	int lmax = objs->n_data_workers > 0 ? objs->n_data_workers : 1;
 	if (mmap_msg->mmap_type == DMA_RING) {
-		/* The protocol is ordered: K forward rings, TX, RX, then K reverse rings. */
+		/* The protocol is ordered: K forward rings, TX, RX, then L reverse rings. */
 		if (pod->ring_mmap_count >= kmax || pod->remote_mmap != NULL ||
 		    pod->host_rx_mmap != NULL || pod->rev_ring_mmap_count != 0) {
 			DOCA_LOG_ERR("Pod %d: out-of-order/extra DMA_RING (count=%d k=%d)",
@@ -143,9 +144,9 @@ process_mmap_msg(struct objects *objs, struct doca_comch_connection *conn,
 	} else if (mmap_msg->mmap_type == DMA_REV_RING) {
 		if (pod->ring_mmap_count != kmax || pod->remote_mmap == NULL ||
 		    pod->host_rx_mmap == NULL ||
-		    pod->rev_ring_mmap_count >= kmax) {
+		    pod->rev_ring_mmap_count >= lmax) {
 			DOCA_LOG_ERR("Pod %d: out-of-order/extra reverse ring (count=%d/%d)",
-			             pod->pod_id, pod->rev_ring_mmap_count, kmax);
+			             pod->pod_id, pod->rev_ring_mmap_count, lmax);
 			return DOCA_ERROR_INVALID_VALUE;
 		}
 	} else {
@@ -153,9 +154,7 @@ process_mmap_msg(struct objects *objs, struct doca_comch_connection *conn,
 		return DOCA_ERROR_INVALID_VALUE;
 	}
 
-	/* Validate the imported range before giving it to DOCA/DPA. The ring shape is
-	 * wire ABI; TX offsets mirror into a fixed DPU staging buffer; RX is split
-	 * into K regions at 8 KiB credit granularity. */
+	/* Validate the imported range before publishing it to the data plane. */
 	if (((uintptr_t)remote_addr & 127u) != 0) {
 		DOCA_LOG_ERR("Pod %d: mmap base is not 128-byte aligned: %p",
 		             pod->pod_id, remote_addr);
@@ -175,13 +174,17 @@ process_mmap_msg(struct objects *objs, struct doca_comch_connection *conn,
 		             pod->pod_id, buf_size, (unsigned)DPU_BUFFER_SIZE);
 		return DOCA_ERROR_INVALID_VALUE;
 	}
+	int landing_stripes = objs->n_data_workers > 0 ?
+		objs->n_data_workers : 1;
 	if (mmap_msg->mmap_type == DMA_HOST_RX_BUFFER &&
 	    (buf_size != pod->remote_buf_size ||
-	     buf_size < (size_t)kmax * DPUMESH_SLOT_SIZE ||
-	     buf_size % ((size_t)kmax * DPUMESH_SLOT_SIZE) != 0)) {
-		DOCA_LOG_ERR("Pod %d: invalid RX bytes=%zu (TX=%zu K=%d slot=%d)",
-		             pod->pod_id, buf_size, pod->remote_buf_size, kmax,
-		             DPUMESH_SLOT_SIZE);
+	     buf_size < (size_t)landing_stripes * DPUMESH_SLOT_SIZE ||
+	     buf_size %
+		     ((size_t)landing_stripes * DPUMESH_SLOT_SIZE) != 0)) {
+		DOCA_LOG_ERR("Pod %d: invalid RX bytes=%zu "
+			     "(TX=%zu K=%d L=%d slot=%d)",
+		             pod->pod_id, buf_size, pod->remote_buf_size,
+			     kmax, landing_stripes, DPUMESH_SLOT_SIZE);
 		return DOCA_ERROR_INVALID_VALUE;
 	}
 	if (mmap_msg->mmap_type == DMA_REV_RING &&
@@ -227,14 +230,14 @@ process_mmap_msg(struct objects *objs, struct doca_comch_connection *conn,
 	DOCA_LOG_INFO("Pod %d: mmap_type=%d stored (fwd=%d/%d rev=%d/%d tx=%p rx=%p)",
 		      pod->pod_id, mmap_msg->mmap_type,
 		      pod->ring_mmap_count, kmax,
-		      pod->rev_ring_mmap_count, kmax,
+		      pod->rev_ring_mmap_count, lmax,
 		      (void *)pod->remote_mmap, (void *)pod->host_rx_mmap);
 
 	/* Start per-pod DMA setup when DPU initialization and every required host
 	 * mapping are ready. Pending mappings are handled by the worker setup pass. */
 	if (objs->dpu_ready && pod->ring_mmap_count == kmax && pod->remote_mmap &&
 	    pod->host_rx_mmap &&
-	    pod->rev_ring_mmap_count == kmax &&
+	    pod->rev_ring_mmap_count == lmax &&
 	    !pod->dma_ready) {
 		result = setup_pod_dma(objs, pod);
 		if (result != DOCA_SUCCESS) {

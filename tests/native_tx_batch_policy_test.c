@@ -58,6 +58,69 @@ main(void)
     d.seq = 7;
     assert(!rx_seq_accept(&rx, &d));
 
+    /* Rejected descriptors return their landing credit. */
+    struct dpumesh_ctx *credit_ctx = calloc(1, sizeof(*credit_ctx));
+    struct dmesh_port_slot *credit_ports = calloc(18, sizeof(*credit_ports));
+    struct dma_desc *credit_descs = calloc(2, sizeof(*credit_descs));
+    assert(credit_ctx != NULL && credit_ports != NULL && credit_descs != NULL);
+    struct dma_ring credit_ring = {
+        .size = 1,
+        .descs = credit_descs,
+    };
+    credit_ctx->ports = credit_ports;
+    credit_ctx->k_rings = 1;
+    credit_ctx->rx_region_size = 8192;
+    credit_ctx->dma_rings[0] = &credit_ring;
+    atomic_init(&credit_ports[17].role, DMESH_ROLE_CLIENT);
+    credit_ports[17].rx_seq_valid = 1;
+    credit_ports[17].rx_seq = 9;
+    sw_descriptor_t stale = {
+        .dst_port = 17,
+        .seq = 8,
+        .body_buf_slot = 0,
+        .body_len = 1,
+    };
+    rx_deliver_desc(credit_ctx, &stale, 0);
+    volatile uint64_t *returned =
+        (volatile uint64_t *)(credit_descs + DMA_RING_CREDIT_SLOT(1));
+    assert(*returned == 1);
+    free(credit_descs);
+    free(credit_ports);
+    free(credit_ctx);
+
+    struct dpumesh_ctx *geometry = calloc(1, sizeof(*geometry));
+    assert(geometry != NULL);
+    geometry->k_rings = 8;
+    geometry->rx_dma_buf_size = 8u * DPUMESH_SLOT_SIZE;
+    assert(configure_landing_geometry(geometry, 2) == DOCA_SUCCESS);
+    assert(geometry->rx_region_size == 4u * DPUMESH_SLOT_SIZE);
+    for (int r = 0; r < geometry->k_rings; r++) {
+        struct dma_ring *ring = calloc(1, sizeof(*ring));
+        assert(ring != NULL);
+        ring->size = 1;
+        ring->descs = calloc(2, sizeof(*ring->descs));
+        assert(ring->descs != NULL);
+        geometry->dma_rings[r] = ring;
+    }
+    for (int stripe = 0; stripe < 2; stripe++) {
+        for (int shard = 0; shard < 4; shard++) {
+            int pos = (int)((size_t)stripe * geometry->rx_region_size +
+                            (size_t)shard * DPUMESH_SLOT_SIZE);
+            assert(rx_credit_shard_index(geometry, pos) ==
+                   stripe + shard * 2);
+            rx_credit_return(geometry, pos);
+        }
+    }
+    for (int r = 0; r < geometry->k_rings; r++) {
+        volatile uint64_t *counter =
+            (volatile uint64_t *)(geometry->dma_rings[r]->descs +
+                                  DMA_RING_CREDIT_SLOT(1));
+        assert(*counter == 1);
+        free(geometry->dma_rings[r]->descs);
+        free(geometry->dma_rings[r]);
+    }
+    free(geometry);
+
     static uint8_t dma[2 * 65536];
     struct dpumesh_ctx *ctx = calloc(1, sizeof(*ctx));
     struct dmesh_port_slot *ports = calloc(18, sizeof(*ports));

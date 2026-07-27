@@ -7161,3 +7161,114 @@ DPU ARM process: 0.15 cores
 
 The host contract suite, DPU build, full deployment, and runtime log check
 completed without test failures or DPU runtime errors.
+
+# Session 17 — Host notification path audit
+
+Load point: 8 KiB request / 8 B reply, `conc=32`, `threads=2`, `BENCH_CORE_BASE=0`,
+`pin fair` (one core per pod).
+
+## Single eventfd read
+
+The EQ notification fd is created with `EFD_NONBLOCK | EFD_CLOEXEC`, so one `read`
+returns the accumulated counter and resets it. `bench/apps/echo_dpumesh.c:176`,
+`bench/validators/verbs_dpumesh.c:327`, and `src/dmesh_preload.c:455` issue one read
+per wake.
+
+Application thread, `strace -c`: `epoll_wait 48,119`, `read 48,118`, 0 read errors.
+Two syscalls per wake.
+
+## Per-thread syscall split
+
+`strace -f -ff` over one window, both threads of one `echo-dpumesh` process:
+
+| Thread | epoll_wait | read | write |
+|---|---:|---:|---:|
+| Application | 48,119 | 48,118 | 4 |
+| PE progress | 102,083 | 102,183 | 48,344 |
+
+The PE thread issues 72% of the process's syscalls. Its eventfd writes match the
+application's wakes one for one, so a consumer-armed gate on `eq_notify` has nothing
+to suppress.
+
+## Reverse-ring entries and PE wakes
+
+Sampled `ctx->rev_rings[0]->head` and the application's served counter 8 s apart:
+
+```text
+reverse entries  1,579,369 / 8 s
+requests served    861,885 / 8 s
+                   1.83 entries per request
+```
+
+An echo server's reverse ring carries one `REV_DONE` for the inbound request and one
+`TX_ACK` for the reply it sends. The two are produced at different times, so they land
+in separate publish batches and raise separate doorbells. PE wakes are therefore 2.12
+per application wake; the `TX_ACK` wake advances TX cursors and does not wake the
+application.
+
+## Context switches
+
+Sampled from `/proc/<tid>/status` over 10 s with no tracer attached.
+
+| Pinning | App voluntary/s | PE voluntary/s | PE involuntary/s | Goodput |
+|---|---:|---:|---:|---:|
+| One core per pod (`fair`) | 85,598 | 16,570 | 78,115 | 13.88 Gb/s |
+| Two cores per pod (`hw`) | 21,062 | 23,184 | 1.5 | 15.72 Gb/s |
+
+PE involuntary switches track application wakes one for one: the eventfd write wakes
+the application, which preempts the PE thread on the shared core. A second core removes
+them and raises the application's batch size fourfold.
+
+## Per-request host cost
+
+Three locked read-modify-writes and two sequentially consistent fences:
+
+| Site | Operation |
+|---|---|
+| `dmesh_core.c:402` | `rx_credit_return` counter increment on registered memory |
+| `dmesh_core.c:661` | `arm_ready_after_push` ready-list arm |
+| `dmesh_core.c:1883` | forward-ring ticket reservation |
+
+The remaining atomics are cold: this run reported `grabs=79480`, `waits=0`, and
+`pads=212299` against 19.06 M requests.
+
+## Receipts
+
+```text
+pin fair:  OK mrps=0.211825 gbps=13.8822 p50=291.00 p95=489.00 p99=641.00 fail=0
+pin hw:    OK mrps=0.239014 gbps=15.6640 p50=251.00 p95=416.00 p99=531.00 fail=0
+```
+
+Goodput here is not comparable with Session 16, which used a different pinning profile:
+`pin fair` gives the multi-threaded `bench_dpumesh` client one core for four threads.
+
+## Method
+
+`strace -c` slows a spinning thread enough that counts from separate per-thread windows
+cannot be compared with each other. Absolute rates come from context-switch counters,
+and `strace` supplies only ratios measured inside a single window.
+
+## Ready-list arm read gate
+
+`arm_ready_after_push` reads `on_ready` before the exchange, so a connection that is
+already armed leaves the shared line untouched.
+
+Three runs each, same load point and pinning.
+
+| | Goodput | Client | Server | Host total | DPU ARM | Host cores/Mrps | p99 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Exchange only | 13.903 Gb/s | 29.03% | 71.07% | 100.10% | 144.77% | 0.4720 | 582 µs |
+| Read gate | 14.082 Gb/s | 28.37% | 71.13% | 99.50% | 145.87% | 0.4630 | 570 µs |
+
+```text
+before  host-eff 0.475 / 0.471 / 0.470
+after   host-eff 0.457 / 0.464 / 0.468
+```
+
+The gain is on the client, whose 32 outstanding requests per connection frequently find
+the connection already armed. The server, which holds one request at a time, arms on
+nearly every delivery and is unchanged. Sample ranges for client CPU and host
+efficiency do not overlap.
+
+Validators after the change: loopback 20,000/0, verbs 20,000/0, stream 10,000/0
+(10,400,000 bytes), preload 3,000/0.

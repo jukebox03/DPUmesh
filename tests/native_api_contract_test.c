@@ -12,6 +12,8 @@ static int full_drain_calls;
 static int rx_free_calls;
 static int last_rx_slot = -1;
 static dmesh_qp_t *tx_ready_qp;
+static int accept_calls;
+static int accept_errno = EAGAIN;
 
 uint8_t *
 dpumesh_tx_reserve(dpumesh_ctx_t *ctx, uint16_t port, uint32_t len)
@@ -43,7 +45,8 @@ dmesh_flush_full(dmesh_qp_t *qp)
 dmesh_qp_t *dmesh_accept(dmesh_eq_t *eq)
 {
     (void)eq;
-    errno = EAGAIN;
+    accept_calls++;
+    errno = accept_errno;
     return NULL;
 }
 
@@ -110,6 +113,11 @@ main(void)
     struct dmesh_eq eq = {0};
     dmesh_event_t event = {0};
     eq.ch = &channel;
+    accept_errno = ENOMEM;
+    accept_calls = 0;
+    assert(dmesh_poll_eq(&eq, &event, 1) == 0);
+    assert(accept_calls == 1);
+    accept_errno = EAGAIN;
     tx_ready_qp = &qp;
     assert(dmesh_poll_eq(&eq, &event, 1) == 1);
     assert(event.qp == &qp);

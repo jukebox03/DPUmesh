@@ -153,10 +153,11 @@ static void server_message_recv_callback(struct doca_comch_event_msg_recv *event
 			if (result != DOCA_SUCCESS) {
 				if (pod != NULL) {
 					int kmax = objs->k_rings > 0 ? objs->k_rings : 1;
+					int lmax = objs->n_data_workers > 0 ? objs->n_data_workers : 1;
 					enum dmesh_pod_init_result init_result =
 						(pod->ring_mmap_count == kmax && pod->remote_mmap != NULL &&
 						 pod->host_rx_mmap != NULL &&
-						 pod->rev_ring_mmap_count == kmax)
+						 pod->rev_ring_mmap_count == lmax)
 							? DMESH_POD_INIT_DPA_FAILED
 							: DMESH_POD_INIT_MMAP_FAILED;
 					(void)server_publish_pod_init_result(objs, pod, init_result);
@@ -178,7 +179,8 @@ static void server_message_recv_callback(struct doca_comch_event_msg_recv *event
 		if (assigned >= 0) {
 			/* Reply with the assigned pod_id so the host can address itself.
 			 * Non-blocking send (no PE re-entry from this callback). */
-			struct dmesh_pod_assigned_msg am = { .type = DMESH_MSG_POD_ASSIGNED };
+			struct dmesh_pod_assigned_msg am = { .type = DMESH_MSG_POD_ASSIGNED,
+						     .landing_stripes = objs->n_data_workers };
 			am.pod_id = assigned;
 			doca_error_t sr = server_send_msg_to_conn(objs, comch_connection,
 			                                          (const char *)&am, sizeof(am));
@@ -192,6 +194,7 @@ static void server_message_recv_callback(struct doca_comch_event_msg_recv *event
 					.type = DMESH_MSG_POD_INIT_RESULT,
 					.pod_id = pod->pod_id,
 					.result = pod->init_result,
+					.landing_stripes = pod->landing_stripes,
 				};
 				sr = server_send_msg_to_conn(objs, comch_connection,
 				                             (const char *)&im, sizeof(im));
@@ -204,6 +207,7 @@ static void server_message_recv_callback(struct doca_comch_event_msg_recv *event
 				.type = DMESH_MSG_POD_INIT_RESULT,
 				.pod_id = -1,
 				.result = DMESH_POD_INIT_REGISTER_FAILED,
+				.landing_stripes = objs->n_data_workers,
 			};
 			doca_error_t sr = server_send_msg_to_conn(objs, comch_connection,
 			                                          (const char *)&im, sizeof(im));
@@ -550,6 +554,7 @@ send_pod_init_result(struct objects *objs, struct pod_state *pod)
 		.type = DMESH_MSG_POD_INIT_RESULT,
 		.pod_id = pod->pod_id,
 		.result = pod->init_result,
+		.landing_stripes = pod->landing_stripes,
 	};
 	doca_error_t result = server_send_msg_to_conn(objs, pod->connection,
 	                                               (const char *)&msg, sizeof(msg));
@@ -641,6 +646,7 @@ pods_add_connection(struct objects *objs, struct doca_comch_connection *conn)
 	objs->pods[idx].connection = conn;
 	objs->pods[idx].pod_id = -1;  /* not yet registered */
 	objs->pods[idx].service_id = DMESH_SVC_NONE;
+	objs->pods[idx].landing_stripes = objs->n_data_workers;
 	objs->pods[idx].rev_ring_mmap_count = 0;
 	objs->pods[idx].rev_doorbell_pending_epoch = 0;
 	objs->pods[idx].rev_doorbell_sent_epoch = 0;
@@ -843,6 +849,7 @@ server_progress_pod_cleanup(struct objects *objs)
 		pod->host_rx_buf_size = 0;
 		pod->rq_depth = 0;
 		pod->k_rings = 0;
+		pod->landing_stripes = 0;
 		pod->init_result = DMESH_POD_INIT_PENDING;
 		pod->init_result_sent = 0;
 		pod->dpa_add_expected_mask = 0;

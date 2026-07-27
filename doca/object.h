@@ -239,6 +239,7 @@ struct pod_state {
 
     /* K forward descriptor rings mapped to K DPA EUs. */
     int k_rings;                                   /* = objs->k_rings */
+    int landing_stripes;                           /* L = ARM data workers */
     struct doca_mmap *ring_mmaps[MAX_EU_PER_POD];  /* Host-exported forward rings */
     /* Host VA of each forward ring. The proxy DMA-reads its credit slot for
      * egress admission. */
@@ -291,6 +292,7 @@ struct dpu_upstream {
     uint16_t client_port;   /* the downstream client's REAL port */
     int32_t  backend_pod;
     uint8_t  codec_id;
+    uint16_t delivery_seq;
 };
 
 /* Reuse lookup: (client_pod, client_port, backend_pod) -> up_port, so a
@@ -351,6 +353,7 @@ static inline uint16_t dpu_upstream_create(struct dpu_conntrack *ct, int32_t cp,
     ct->upstream[uP].client_port = cport;
     ct->upstream[uP].backend_pod = bpod;
     ct->upstream[uP].codec_id    = codec_id;
+    ct->upstream[uP].delivery_seq = 0;
     uint32_t mask = DPU_CONN_HT_SIZE - 1u, i = dpu_ct_hash(cp, cport, bpod);
     for (uint32_t n = 0; n < DPU_CONN_HT_SIZE; n++) {
         struct dpu_conn_ht_entry *e = &ct->ht[(i + n) & mask];
@@ -437,6 +440,7 @@ struct objects {
     /* POD_ASSIGNED is only phase 1. Phase 2 finishes when the DPU reports
      * READY after importing all mmaps and installing the DPA rings. */
     int32_t pod_init_result;
+    int32_t landing_stripes;
     /* Set by the client recv callback after the DPU has removed all DPA/ARM
      * references and destroyed its imported mmap views. Host teardown waits on
      * this before destroying the exported mmaps. */

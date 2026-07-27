@@ -173,7 +173,7 @@ int main(void) {
         if (nfds < 0) { if (errno == EINTR) { if (g_reload) { g_reload = 0; load_work(); } continue; } perror("epoll_wait"); break; }
         if (g_reload) { g_reload = 0; load_work(); }
 
-        uint64_t cnt; while (read(dfd, &cnt, sizeof cnt) > 0) { }   /* drain level counter */
+        uint64_t cnt; ssize_t rd = read(dfd, &cnt, sizeof cnt); (void)rd;  /* one read drains the counter */
 
         int n;
         while ((n = dmesh_poll_eq(g_eq, events, EVENT_BATCH)) > 0) {       /* drain to 0 before sleeping */

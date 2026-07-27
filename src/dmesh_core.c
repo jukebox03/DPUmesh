@@ -193,6 +193,7 @@ struct dpumesh_ctx {
     int  num_slots;
     int  slot_size;
     int  k_rings;              /* K = forward rings per pod; 1 selects one ring */
+    int  landing_stripes;      /* L = host RX buffer partitions */
     int  inbox_ring;           /* per-conn inbound descriptor ring depth (pow2), sized to the
                                 * DPU per-region reverse-credit budget so the inbox-full drop
                                 * (rx_deliver_desc) is unreachable in steady use. */
@@ -204,9 +205,7 @@ struct dpumesh_ctx {
     struct dma_ring *dma_rings[MAX_EU_PER_POD];
     struct rev_ring *rev_rings[MAX_EU_PER_POD];
     uint64_t rev_arm_epoch;
-    /* Reverse credit region size = rx_dma_buf_size / k_rings. The DPA reports an
-     * absolute landing pos; ring_idx = pos / rx_region_size selects which ring's
-     * credit slot to return. K=1 → region = whole buffer → ring_idx always 0. */
+    /* Host RX landing stripe size. */
     size_t rx_region_size;
     doca_dpa_dev_mmap_t dpa_mmap_handle;  /* DPA handle for local mmap (used in TX descriptors) */
 
@@ -336,7 +335,7 @@ static void *pe_progress_fn(void *arg) {
              * landing between the last drain and the arm must not be stranded. */
             (void)doca_pe_request_notification(pe);
             uint64_t epoch = ++ctx->rev_arm_epoch;
-            for (int r = 0; r < ctx->k_rings; r++)
+            for (int r = 0; r < ctx->landing_stripes; r++)
                 __atomic_store_n(&ctx->rev_rings[r]->ctrl->arm_epoch,
                                  epoch, __ATOMIC_RELEASE);
             if (doca_pe_progress(pe) || drain_rev_rings(ctx, 256) > 0) {
@@ -374,14 +373,27 @@ static void *pe_progress_fn(void *arg) {
  * RX data hook — called from PE progress thread via comch callback
  * ==================================================================== */
 
+static inline int
+rx_credit_shard_index(const dpumesh_ctx_t *ctx, int pos)
+{
+    int K = ctx->k_rings > 0 ? ctx->k_rings : 1;
+    int L = ctx->landing_stripes > 0 ? ctx->landing_stripes : 1;
+    if (L > K || K % L != 0 || ctx->rx_region_size == 0 || pos < 0)
+        return 0;
+    size_t absolute = (size_t)pos;
+    int stripe = (int)(absolute / ctx->rx_region_size);
+    if (stripe >= L)
+        stripe = L - 1;
+    int shards = K / L;
+    size_t stripe_pos = absolute - (size_t)stripe * ctx->rx_region_size;
+    int shard = (int)((stripe_pos / DPUMESH_SLOT_SIZE) % (size_t)shards);
+    return stripe + shard * L;
+}
+
 /* Return one unit of reverse-DMA admission credit. */
 static inline void rx_credit_return(dpumesh_ctx_t *ctx, int pos)
 {
-    /* Per-ring credit: the reverse region a landing fell in maps 1:1 to a forward
-     * ring (disjoint regions, ring j owns [j*R,(j+1)*R)). Return credit to that
-     * ring's slot so the DPA EU owning rev ring j sees its own freed count. */
-    int idx = (ctx->rx_region_size > 0) ? (int)((size_t)pos / ctx->rx_region_size) : 0;
-    if (idx < 0 || idx >= ctx->k_rings) idx = 0;
+    int idx = rx_credit_shard_index(ctx, pos);
     struct dma_ring *r = ctx->dma_rings[idx];
     if (r && r->descs) {
         volatile uint64_t *credit =
@@ -646,6 +658,10 @@ static inline void arm_ready_after_push(struct dmesh_port_slot *psl, uint16_t dp
     struct dmesh_eq *eq = __atomic_load_n(&psl->eq, __ATOMIC_ACQUIRE);
     if (!eq) return;
     atomic_thread_fence(memory_order_seq_cst);
+    /* Read first: an already-armed conn must not steal the line from the consumer
+     * that disarms it. */
+    if (atomic_load_explicit(&psl->on_ready, memory_order_acquire) != 0)
+        return;
     if (atomic_exchange_explicit(&psl->on_ready, 1u, memory_order_acq_rel) == 0) {
         ready_push(eq, dport);
         eq_notify(eq);
@@ -690,8 +706,10 @@ static void rx_deliver_desc(dpumesh_ctx_t *ctx, const sw_descriptor_t *desc, int
      * The ready list is only for ACCEPTED conns (a pending conn is drained by
      * dmesh_accept, not next_ready). */
     if (role != DMESH_ROLE_FREE) {
-        if (!rx_seq_accept(psl, desc))
-            return;                         /* replay: the first notification owns the credit */
+        if (!rx_seq_accept(psl, desc)) {
+            rx_credit_return(ctx, slot);
+            return;
+        }
         int r = inbox_push(psl, desc);
         if (r == 0) {
             /* inbox full (app draining too slowly) → drop + reclaim the landing. */
@@ -717,8 +735,10 @@ static void rx_deliver_desc(dpumesh_ctx_t *ctx, const sw_descriptor_t *desc, int
         if (__atomic_load_n(&psl->role, __ATOMIC_ACQUIRE) != DMESH_ROLE_FREE) {
             /* raced live between the initial load and the lock → coalesce to inbox */
             pthread_mutex_unlock(&ctx->port_lock);
-            if (!rx_seq_accept(psl, desc))
+            if (!rx_seq_accept(psl, desc)) {
+                rx_credit_return(ctx, slot);
                 return;
+            }
             int r = inbox_push(psl, desc);
             if (r == 0) { atomic_fetch_add_explicit(&ctx->st_rx_inbox_drops, 1, memory_order_relaxed);
                           rx_credit_return(ctx, slot); }
@@ -821,7 +841,7 @@ static int drain_rev_rings(dpumesh_ctx_t *ctx, uint32_t budget)
         return 0;
 
     uint32_t drained = 0;
-    for (int r = 0; r < ctx->k_rings && drained < budget; r++) {
+    for (int r = 0; r < ctx->landing_stripes && drained < budget; r++) {
         struct rev_ring *ring = ctx->rev_rings[r];
         if (!ring)
             continue;
@@ -868,18 +888,6 @@ static void init_config(dpumesh_ctx_t *ctx, const dpumesh_config_t *config, int 
     { const char *ke = getenv("DPUMESH_RINGS_PER_POD");
       if (ke && *ke) { int v = atoi(ke);
                        if (v >= 1 && v <= MAX_EU_PER_POD) ctx->k_rings = v; } }
-
-    /* Match each connection inbox to one reverse-credit region. */
-    {
-        uint64_t rq_depth = (uint64_t)ctx->num_slots * (uint64_t)ctx->slot_size
-                            / (uint64_t)DPUMESH_SLOT_SIZE;
-        uint32_t k = ctx->k_rings > 0 ? (uint32_t)ctx->k_rings : 1u;
-        uint64_t want = rq_depth / k;
-        if (want > 65536u) want = 65536u;
-        uint32_t r = RX_INBOX_MIN_CAPACITY;
-        while ((uint64_t)r < want) r <<= 1;
-        ctx->inbox_ring = (int)r;
-    }
 
     /* Fixed-size TX extents are allocated from the shared host TX buffer. */
     int bsz = TX_BLOCK_SIZE;
@@ -949,6 +957,32 @@ static doca_error_t require_running_control_path(dpumesh_ctx_t *ctx) {
                                            : DOCA_ERROR_CONNECTION_ABORTED;
 }
 
+static doca_error_t
+configure_landing_geometry(dpumesh_ctx_t *ctx, int landing_stripes)
+{
+    int K = ctx->k_rings > 0 ? ctx->k_rings : 1;
+    if (landing_stripes < 1 || landing_stripes > K ||
+        K % landing_stripes != 0 ||
+        ctx->rx_dma_buf_size < (size_t)landing_stripes * DPUMESH_SLOT_SIZE ||
+        ctx->rx_dma_buf_size %
+            ((size_t)landing_stripes * DPUMESH_SLOT_SIZE) != 0)
+        return DOCA_ERROR_INVALID_VALUE;
+
+    ctx->landing_stripes = landing_stripes;
+    ctx->rx_region_size =
+        ctx->rx_dma_buf_size / (size_t)landing_stripes;
+
+    uint64_t rq_depth = ctx->rx_dma_buf_size / DPUMESH_SLOT_SIZE;
+    uint64_t want = rq_depth / (uint32_t)landing_stripes;
+    if (want > 65536u)
+        want = 65536u;
+    uint32_t ring = RX_INBOX_MIN_CAPACITY;
+    while ((uint64_t)ring < want)
+        ring <<= 1;
+    ctx->inbox_ring = (int)ring;
+    return DOCA_SUCCESS;
+}
+
 static doca_error_t wait_for_pod_init_result(dpumesh_ctx_t *ctx) {
     const struct timespec pause = { .tv_sec = 0, .tv_nsec = 10000 };
     struct timespec start, now;
@@ -959,7 +993,20 @@ static doca_error_t wait_for_pod_init_result(dpumesh_ctx_t *ctx) {
         int32_t init_result = __atomic_load_n(&ctx->doca_objs.pod_init_result,
                                               __ATOMIC_ACQUIRE);
         if (init_result == DMESH_POD_INIT_READY) {
-            DOCA_LOG_INFO("DPU pod is data-ready: pod_id=%d", ctx->pod_id);
+            int32_t landing_stripes =
+                __atomic_load_n(&ctx->doca_objs.landing_stripes,
+                                __ATOMIC_RELAXED);
+            doca_error_t geometry =
+                configure_landing_geometry(ctx, landing_stripes);
+            if (geometry != DOCA_SUCCESS) {
+                DOCA_LOG_ERR("DPU returned invalid landing geometry: K=%d L=%d bytes=%zu",
+                             ctx->k_rings, landing_stripes,
+                             ctx->rx_dma_buf_size);
+                return geometry;
+            }
+            DOCA_LOG_INFO("DPU pod is data-ready: pod_id=%d K=%d L=%d",
+                          ctx->pod_id, ctx->k_rings,
+                          ctx->landing_stripes);
             return DOCA_SUCCESS;
         }
         if (init_result > DMESH_POD_INIT_READY) {
@@ -1011,6 +1058,8 @@ static doca_error_t init_control_path(dpumesh_ctx_t *ctx) {
     __atomic_store_n(&ctx->doca_objs.assigned_pod_id, -1, __ATOMIC_RELEASE);
     __atomic_store_n(&ctx->doca_objs.pod_init_result, DMESH_POD_INIT_PENDING,
                      __ATOMIC_RELEASE);
+    __atomic_store_n(&ctx->doca_objs.landing_stripes, 0,
+                     __ATOMIC_RELAXED);
     __atomic_store_n(&ctx->doca_objs.pod_quiesced, 0, __ATOMIC_RELEASE);
     ctx->reg_msg.type = DMESH_MSG_POD_REGISTER;
     ctx->reg_msg.pod_id = -1;                    /* DPU assigns this node's address */
@@ -1064,7 +1113,15 @@ static doca_error_t init_control_path(dpumesh_ctx_t *ctx) {
         return DOCA_ERROR_TIME_OUT;
     }
     ctx->pod_id = assigned;
-    DOCA_LOG_INFO("DPU assigned pod_id=%d (service_id=%d)", ctx->pod_id, ctx->service_id);
+    int L = __atomic_load_n(&ctx->doca_objs.landing_stripes, __ATOMIC_RELAXED);
+    int K = ctx->k_rings > 0 ? ctx->k_rings : 1;
+    if (L < 1 || L > K || K % L != 0) {
+        DOCA_LOG_ERR("DPU returned invalid landing stripes: K=%d L=%d", K, L);
+        return DOCA_ERROR_INVALID_VALUE;
+    }
+    ctx->landing_stripes = L;
+    DOCA_LOG_INFO("DPU assigned pod_id=%d (service_id=%d K=%d L=%d)",
+                  ctx->pod_id, ctx->service_id, K, L);
     return DOCA_SUCCESS;
 }
 
@@ -1097,10 +1154,9 @@ static doca_error_t init_datapath(dpumesh_ctx_t *ctx) {
     result = doca_mmap_dev_get_dpa_handle(ctx->doca_objs.local_mmap, ctx->doca_objs.dev, &ctx->dpa_mmap_handle);
     if (result != DOCA_SUCCESS) return result;
 
-    /* Allocate Host RX DMA buffer (PCI mmap, DPA writes DPU→CPU data here).
-     * Partitioned into k_rings disjoint reverse regions (rx_region_size each). */
+    /* Allocate the Host RX DMA buffer. */
     ctx->rx_dma_buf_size = buf_size;
-    ctx->rx_region_size = ctx->rx_dma_buf_size / (ctx->k_rings > 0 ? ctx->k_rings : 1);
+    ctx->rx_region_size = 0;
     result = alloc_buffer_and_set_mmap(&ctx->rx_dma_mmap,
                                        ctx->doca_objs.dev,
                                        &ctx->rx_dma_buffer,
@@ -1120,7 +1176,7 @@ static doca_error_t init_datapath(dpumesh_ctx_t *ctx) {
         return result;
     }
 
-    for (int j = 0; j < ctx->k_rings; j++) {
+    for (int j = 0; j < ctx->landing_stripes; j++) {
         result = setup_rev_ring(&ctx->doca_objs, &ctx->rev_rings[j]);
         if (result != DOCA_SUCCESS)
             return result;
@@ -1233,8 +1289,10 @@ int dpumesh_init(dpumesh_ctx_t **out, int service_id,
         goto fail;
     }
 
-    DOCA_LOG_INFO("DPUmesh DOCA initialized: worker=%s pod_id=%d inbox_ring=%d (rq/K)",
-                  ctx->worker_id, ctx->pod_id, ctx->inbox_ring);
+    DOCA_LOG_INFO("DPUmesh DOCA initialized: worker=%s pod_id=%d "
+                  "inbox_ring=%d K=%d L=%d",
+                  ctx->worker_id, ctx->pod_id, ctx->inbox_ring,
+                  ctx->k_rings, ctx->landing_stripes);
 
     *out = ctx;
     return 0;

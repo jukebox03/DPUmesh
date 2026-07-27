@@ -148,7 +148,7 @@ owner_worker(struct objects *objs, int here, const dpu_comp_entry_t *e)
     return dmesh_worker_for_port(e->src_port, objs->n_data_workers);
 }
 
-/* Wake a parked worker after a cross-worker handoff. */
+/* Release a worker parked on its notification handles. */
 static void
 dpu_wake_worker(struct dpu_data_worker *worker_state)
 {
@@ -172,7 +172,10 @@ static int
 cross_worker_handoff(struct objects *objs, int owner, const dpu_comp_entry_t *e)
 {
     struct dpu_data_worker *dst = &objs->data_workers[owner];
-    return mpsc_comp_queue_enqueue(&dst->cross_worker, e);
+    int rc = mpsc_comp_queue_enqueue(&dst->cross_worker, e);
+    if (rc == 0)
+        dpu_wake_worker(dst);
+    return rc;
 }
 
 /* ====== DPU Worker ====== */
@@ -328,32 +331,36 @@ dpu_send_wake_worker(struct objects *objs, int id)
 }
 
 /* Progress one worker's consumer PE and deferred receive tasks. */
-static int
+static enum px_progress_state
 dpu_progress_worker_pe(struct objects *objs, struct dpu_data_worker *worker_state)
 {
-    int did = doca_pe_progress(worker_state->pe);
+    enum px_progress_state state = doca_pe_progress(worker_state->pe) ?
+        PX_PROGRESS_PROGRESSED : PX_PROGRESS_IDLE;
     if (worker_state->num_deferred_recv > 0 &&
         comp_queue_usage(&worker_state->queue) < COMP_QUEUE_BP_LOW) {
         int remaining = 0, original = worker_state->num_deferred_recv;
         for (int i = 0; i < original; i++) {
             struct doca_task *t = worker_state->deferred_recv[i];
-            if (doca_task_submit(t) != DOCA_SUCCESS)
+            if (doca_task_submit(t) != DOCA_SUCCESS) {
                 worker_state->deferred_recv[remaining++] = t;
+            } else {
+                state = PX_PROGRESS_PROGRESSED;
+            }
         }
         worker_state->num_deferred_recv = remaining;
     }
-    return did;
+    (void)objs;
+    return state;
 }
 
 /* Maximum DPA completions processed before DMA progress. */
 #define DPU_WORKER_COMPLETION_BUDGET 64
 
-/* Drain local and cross-worker completions while preserving each queue's front on
- * backpressure. Returns the number of completions advanced. */
-static int
+/* Drain local and cross-worker completions. */
+static enum px_progress_state
 dpu_worker_run(struct objects *objs, struct dpu_data_worker *worker_state)
 {
-    int did = 0, woke[MAX_ARM_WORKERS] = { 0 };
+    int did = 0;
 
     /* Completions received through this worker's consumer PE. */
     for (int n = 0; n < DPU_WORKER_COMPLETION_BUDGET; n++) {
@@ -362,14 +369,15 @@ dpu_worker_run(struct objects *objs, struct dpu_data_worker *worker_state)
             break;
         int owner = owner_worker(objs, worker_state->id, e);
         if (owner == worker_state->id) {
-            if (px_process_forward(objs, worker_state->id, e) == 0)
+            if (px_process_forward(objs, worker_state->id, e) == 0) {
                 break;                   /* engine backpressure — retain, retry */
+            }
             atomic_fetch_add_explicit(&worker_state->stat_local_completions, 1,
                                       memory_order_relaxed);
         } else {
-            if (cross_worker_handoff(objs, owner, e) != 0)
+            if (cross_worker_handoff(objs, owner, e) != 0) {
                 break;                   /* owner inbox full — retain, retry */
-            woke[owner] = 1;
+            }
             atomic_fetch_add_explicit(&worker_state->stat_cross_worker_out, 1,
                                       memory_order_relaxed);
         }
@@ -382,8 +390,9 @@ dpu_worker_run(struct objects *objs, struct dpu_data_worker *worker_state)
         dpu_comp_entry_t *xe = mpsc_comp_queue_peek(&worker_state->cross_worker);
         if (!xe)
             break;
-        if (px_process_forward(objs, worker_state->id, xe) == 0)
+        if (px_process_forward(objs, worker_state->id, xe) == 0) {
             break;                       /* backpressure — leave the front, retry */
+        }
         mpsc_comp_queue_dequeue(&worker_state->cross_worker);
         atomic_fetch_add_explicit(&worker_state->stat_cross_worker_in, 1,
                                   memory_order_relaxed);
@@ -393,15 +402,43 @@ dpu_worker_run(struct objects *objs, struct dpu_data_worker *worker_state)
     /* Resume connections stalled by egress backpressure. */
     did += px_drain_stalled(objs, worker_state->id);
     /* Submit DMA, progress completions, and retire owned lanes. */
-    did += px_worker_drain(objs, worker_state->id);
+    enum px_progress_state proxy_state =
+        px_worker_drain(objs, worker_state->id);
 
-    for (int s = 0; s < objs->n_data_workers; s++)
-        if (woke[s])
-            dpu_wake_worker(&objs->data_workers[s]);
-    return did;
+    if (did)
+        return PX_PROGRESS_PROGRESSED;
+    return proxy_state;
 }
 
-/* ARM data worker event loop. */
+#if defined(__aarch64__)
+static inline uint64_t dpu_wake_clock_now(void)
+{
+    uint64_t value;
+    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(value));
+    return value;
+}
+
+static inline uint64_t dpu_wake_clock_hz(void)
+{
+    uint64_t value;
+    __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(value));
+    return value;
+}
+#else
+static inline uint64_t dpu_wake_clock_now(void)
+{
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (uint64_t)now.tv_sec * 1000000000ull + (uint64_t)now.tv_nsec;
+}
+
+static inline uint64_t dpu_wake_clock_hz(void)
+{
+    return 1000000000ull;
+}
+#endif
+
+/* ARM data worker polling loop. */
 static void *
 dpu_data_worker_main(void *arg)
 {
@@ -439,24 +476,27 @@ dpu_data_worker_main(void *arg)
 
     atomic_store_explicit(&worker_state->init_state, 1, memory_order_release);
 
-    struct timespec last, now;
-    clock_gettime(CLOCK_MONOTONIC, &last);
+    uint64_t wake_period = dpu_wake_clock_hz() / 1000u;
+    if (wake_period == 0)
+        wake_period = 1;
+    uint64_t wake_deadline = dpu_wake_clock_now() + wake_period;
     while (!worker_state->stop) {
-        clock_gettime(CLOCK_MONOTONIC, &now);
-        if ((now.tv_sec - last.tv_sec) + (now.tv_nsec - last.tv_nsec) / 1e9 >= 0.001) {
+        uint64_t now = dpu_wake_clock_now();
+        if ((int64_t)(now - wake_deadline) >= 0) {
             dpu_send_wake_worker(objs, worker_state->id);
-            last = now;
+            wake_deadline = now + wake_period;
         }
-        int did = dpu_progress_worker_pe(objs, worker_state);
-        int run = dpu_worker_run(objs, worker_state);
-        if (did || run)
+        enum px_progress_state did = dpu_progress_worker_pe(objs, worker_state);
+        enum px_progress_state run = dpu_worker_run(objs, worker_state);
+        if (did == PX_PROGRESS_PROGRESSED || run == PX_PROGRESS_PROGRESSED)
             continue;                    /* stay hot while there is work */
         /* Arm notifications, recheck queues, then wait up to 1 ms. */
         (void)doca_pe_request_notification(worker_state->pe);
         if (dfd >= 0)
             (void)px_worker_arm_notification(objs, worker_state->id);
         atomic_store_explicit(&worker_state->parked, 1, memory_order_release);
-        if (dpu_progress_worker_pe(objs, worker_state) || dpu_worker_run(objs, worker_state) ||
+        if (dpu_progress_worker_pe(objs, worker_state) == PX_PROGRESS_PROGRESSED ||
+            dpu_worker_run(objs, worker_state) == PX_PROGRESS_PROGRESSED ||
             !mpsc_comp_queue_empty(&worker_state->cross_worker)) {
             atomic_store_explicit(&worker_state->parked, 0, memory_order_release);
             (void)doca_pe_clear_notification(worker_state->pe, cfd);
@@ -503,6 +543,7 @@ dpu_publish_ready_and_setup_pods(struct objects *objs)
 {
     objs->dpu_ready = 1;
     int kmax = objs->k_rings > 0 ? objs->k_rings : 1;
+    int lmax = objs->n_data_workers > 0 ? objs->n_data_workers : 1;
     int n = __atomic_load_n(&objs->num_pods, __ATOMIC_ACQUIRE);
     for (int i = 0; i < n; i++) {
         struct pod_state *pod = &objs->pods[i];
@@ -511,7 +552,7 @@ dpu_publish_ready_and_setup_pods(struct objects *objs)
             continue;
         if (pod->ring_mmap_count != kmax || pod->remote_mmap == NULL ||
             pod->host_rx_mmap == NULL ||
-            pod->rev_ring_mmap_count != kmax ||
+            pod->rev_ring_mmap_count != lmax ||
             pod->dma_ready)
             continue;
 
@@ -697,8 +738,6 @@ run_dpu_worker(struct objects *objs)
             }
             if (pthread_create(&worker_state->thread, NULL, dpu_data_worker_main, worker_state) != 0) {
                 DOCA_LOG_ERR("ARM worker %d thread creation failed", s);
-                close(worker_state->wake_fd);
-                worker_state->wake_fd = -1;
                 stop_data_workers(objs);
                 cleanup_objects(objs);
                 return;
@@ -710,7 +749,7 @@ run_dpu_worker(struct objects *objs)
                    attempts++ < 20000)
                 nanosleep(&init_pause, NULL);
             if (atomic_load_explicit(&worker_state->init_state, memory_order_acquire) != 1) {
-                DOCA_LOG_ERR("ARM worker %d event loop did not initialize", s);
+                DOCA_LOG_ERR("ARM worker %d polling loop did not initialize", s);
                 stop_data_workers(objs);
                 cleanup_objects(objs);
                 return;

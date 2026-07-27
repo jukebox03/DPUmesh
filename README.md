@@ -56,7 +56,7 @@ Channel creation returns only after a replayable two-phase barrier:
 
 ```text
 POD_REGISTER → POD_ASSIGNED → mmap/ring import → all DPA RING_ADD_ACKs
-             → POD_INIT_RESULT(READY)
+             → POD_INIT_RESULT(READY, L)
 ```
 
 The host retries registration while either assignment or readiness is pending;
@@ -70,9 +70,10 @@ registration heartbeats, and unregister traffic starts only when channel
 destruction begins. The steady-state data plane uses the imported rings and
 reverse DMA path.
 
-Per-slot DMA generations reject delayed work from a prior registration. Forced
-process death during an already-issued DMA remains outside the graceful reclaim
-guarantee.
+Per-slot DMA generations reject delayed work from a prior registration. A
+worker-level DMA fault restarts the shared context without unpublishing healthy
+pods. Current-generation payload batches receive one ordered retry; control-path
+disconnect remains authoritative for pod removal and mapping teardown.
 
 ## Repository
 
@@ -108,17 +109,18 @@ bring-up path rebuilds and deploys both sides together:
 
 ```sh
 DPUMESH_DPA_THREADS=16 \
-DPUMESH_ARM_WORKERS=8 \
+DPUMESH_ARM_WORKERS=2 \
 DPUMESH_RINGS_PER_POD=8 \
 ./bench/bench.sh deploy
 ./bench/bench.sh latency both
 ```
 
-A bare deploy selects one ARM data worker. Each worker owns its DPA consumer PE,
-connection and conntrack state, parser/routing state, SG-DMA engine, completion
-callbacks, and reverse-ring producers. `K` and `N` must be multiples of `A`; an
-incompatible requested worker count is reduced at startup and reported in the
-DPU log.
+A bare deploy selects one ARM data worker. Each polling worker owns its DPA
+consumer PE, connection state, SG-DMA context, completion callbacks, and
+reverse-ring producers. `K` controls rings, `A` controls ARM workers, and the
+64 MiB RX mapping uses `L=A` landing stripes. `K` and `N` must be multiples of
+`A`; an incompatible worker count is reduced at startup and reported in the DPU
+log.
 
 `DPUMESH_DPA_THREADS` accepts up to 32 EUs; automatic selection uses up to 16.
 `DPUMESH_ARM_WORKERS` sets the number of ARM data workers.

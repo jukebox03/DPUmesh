@@ -147,6 +147,7 @@ test: $(TESTDIR)/native_api_contract_test $(TESTDIR)/native_control_state_test \
 	$(TESTDIR)/worker_mpsc_queue_test
 	$(TESTDIR)/topology_test
 	$(TESTDIR)/ring_counter_test
+	sh tests/dma_fault_scope_test.sh
 	sh tests/abi_contract_test.sh $(LIB) $(PRELOAD) $(ABI_MAJOR)
 
 # dmesh API binaries link the transport library. One explicit rule each so the

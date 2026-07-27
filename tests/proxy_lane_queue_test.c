@@ -75,7 +75,6 @@ int main(void)
     struct dmesh_proxy *px = calloc(1, sizeof(*px));
     assert(px != NULL);
     assert(pthread_mutex_init(&px->pool_lock, NULL) == 0);
-    atomic_init(&px->pool_waiters, 0);
 
     /* Complete L7 frames with identical delivery metadata collapse into one
      * unit, keeping piece order/custody and the first delivery sequence. */
@@ -107,7 +106,6 @@ int main(void)
     assert(merged.total_len == 2200 && merged.npieces == 2 && merged.seq == 7);
     assert(merged.pieces == &p1 && merged.pieces_tail == &p2 && p1.next == &p2);
     assert(extra.pieces == NULL && px->unit_free == &extra);
-    assert(px->stat_egress_merges == 1);
 
     struct px_unit incompatible;
     memset(&incompatible, 0, sizeof(incompatible));
@@ -159,8 +157,31 @@ int main(void)
         free(units[s]);
     }
     assert(!px_lane_inbox_nonempty(px, ln));
-    assert(__atomic_load_n(&px->stat_units, __ATOMIC_RELAXED) ==
-           PRODUCERS * PER_PRODUCER);
+
+    assert(px_lane_wrap_action(24577, 8192, 32768, 3) ==
+           PX_LANE_WRAP_WAIT);
+    assert(px_lane_wrap_action(24577, 8192, 32768, 0) ==
+           PX_LANE_WRAP_RESET);
+    assert(px_lane_wrap_action(16384, 8192, 32768, 3) ==
+           PX_LANE_WRAP_NONE);
+
+    /* Delivery sequences are scoped to destination host QPs. */
+    px->workers[0].buckets =
+        calloc(PX_CONN_HASH, sizeof(*px->workers[0].buckets));
+    px->workers[0].ct = calloc(1, sizeof(*px->workers[0].ct));
+    assert(px->workers[0].buckets != NULL && px->workers[0].ct != NULL);
+    px->workers[0].ct->next_uport = DMESH_UPORT_BASE;
+    px_cur_worker = &px->workers[0];
+    struct px_conn *downstream = px_conn_get(px, 5, 1234, 0, 1);
+    assert(downstream != NULL);
+    assert(px_delivery_seq_counter(px, 5, 1234) ==
+           &downstream->return_seq);
+    uint16_t upstream = dpu_upstream_create(px->workers[0].ct,
+                                            5, 1234, 7, 0, 0, 1);
+    assert(upstream >= DMESH_UPORT_BASE);
+    assert(px_delivery_seq_counter(px, 7, upstream) ==
+           &px->workers[0].ct->upstream[upstream].delivery_seq);
+    assert(px_delivery_seq_counter(px, 8, upstream) == NULL);
 
     /* Same-owner FIFO and cross-owner inbox. */
     px->n_eng = 2;
@@ -187,54 +208,113 @@ int main(void)
     struct px_engine *eng = &px->engines[0];
     eng->objs = objs;
 
-    /* Coalesced worker wake. */
-    objs->n_data_workers = 2;
-    eng->objs = objs;
-    eng->id = 0;
-    objs->data_workers[0].wake_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-    assert(objs->data_workers[0].wake_fd >= 0);
-    atomic_init(&objs->data_workers[0].parked, 1);
-    px_engine_wake(eng);
-    px_engine_wake(eng);
-    uint64_t wakes = 0;
-    assert(read(objs->data_workers[0].wake_fd, &wakes, sizeof(wakes)) ==
-           (ssize_t)sizeof(wakes));
-    assert(wakes == 1);
-    assert(atomic_load_explicit(&objs->data_workers[0].parked,
-                                memory_order_acquire) == 0);
-    close(objs->data_workers[0].wake_fd);
-    objs->data_workers[0].wake_fd = -1;
-
-    /* Owner-selective wake and shared-pool waiter mask. */
-    struct px_engine *eng0 = &px->engines[0];
-    struct px_engine *eng1 = &px->engines[1];
-    eng0->objs = eng1->objs = objs;
-    eng0->id = 0;
-    eng1->id = 1;
-    objs->data_workers[0].wake_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-    objs->data_workers[1].wake_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-    assert(objs->data_workers[0].wake_fd >= 0 &&
-           objs->data_workers[1].wake_fd >= 0);
-    atomic_store_explicit(&objs->data_workers[0].parked, 1,
+    /* Current batches retry once; stale or repeated failures are terminal. */
+    struct pod_state *retry_pod = &objs->pods[0];
+    atomic_store_explicit(&retry_pod->dma_ready, 1, memory_order_release);
+    atomic_store_explicit(&retry_pod->dma_generation, 7,
                           memory_order_release);
-    atomic_init(&objs->data_workers[1].parked, 1);
-    px_wake_workers(px, 1u << 1);
-    errno = 0;
-    assert(read(objs->data_workers[0].wake_fd, &wakes, sizeof(wakes)) == -1 &&
-           errno == EAGAIN);
-    assert(read(objs->data_workers[1].wake_fd, &wakes, sizeof(wakes)) ==
-           (ssize_t)sizeof(wakes));
-    assert(wakes == 1);
+    retry_pod->host_rx_mmap = (struct doca_mmap *)(uintptr_t)1;
+    retry_pod->host_rx_addr = (void *)(uintptr_t)1;
+    struct px_batch retry_batch;
+    memset(&retry_batch, 0, sizeof(retry_batch));
+    retry_batch.pod_idx = 0;
+    retry_batch.pod_generation = 7;
+    retry_batch.state = PX_BATCH_INFLIGHT;
+    px_batch_record_error(eng, &retry_batch, DOCA_ERROR_IO_FAILED);
+    assert(retry_batch.state == PX_BATCH_RETRY_PENDING);
+    assert(retry_batch.retry_count == 1 && eng->retry_batches == 1);
+    eng->retry_probe = &retry_batch;
+    retry_batch.state = PX_BATCH_INFLIGHT;
+    px_batch_record_error(eng, &retry_batch, DOCA_ERROR_IO_FAILED);
+    assert(retry_batch.state == PX_BATCH_ERROR);
+    assert(eng->retry_batches == 0 && eng->retry_probe == NULL);
 
-    atomic_store_explicit(&px->pool_waiters, 0, memory_order_relaxed);
-    px_cur_worker = &px->workers[0];
-    px_pool_mark_waiter(px);
-    assert(atomic_exchange_explicit(&px->pool_waiters, 0,
-                                    memory_order_acq_rel) == 1u);
-    close(objs->data_workers[0].wake_fd);
-    close(objs->data_workers[1].wake_fd);
+    struct px_batch stale_batch;
+    memset(&stale_batch, 0, sizeof(stale_batch));
+    stale_batch.pod_idx = 0;
+    stale_batch.pod_generation = 6;
+    stale_batch.state = PX_BATCH_INFLIGHT;
+    px_batch_record_error(eng, &stale_batch, DOCA_ERROR_IO_FAILED);
+    assert(stale_batch.state == PX_BATCH_ERROR);
+    assert(eng->retry_batches == 0);
+
+    /* Reverse publication state clears after its DMA task exits. */
+    struct px_rev_pub dead_pub;
+    memset(&dead_pub, 0, sizeof(dead_pub));
+    dead_pub.count = 3;
+    dead_pub.publish_count = 2;
+    dead_pub.producer_tail = 9;
+    dead_pub.state = PX_REV_META_INFLIGHT;
+    assert(!px_rev_drop_dead(&dead_pub));
+    assert(dead_pub.count == 3);
+    dead_pub.state = PX_REV_IDLE;
+    assert(px_rev_drop_dead(&dead_pub));
+    assert(dead_pub.count == 0 && dead_pub.publish_count == 0);
+    assert(dead_pub.producer_tail == 0 && dead_pub.state == PX_REV_IDLE);
+
+    /* Batch retirement follows fqueue order. */
+    struct px_lane ordered_lane;
+    struct px_batch ordered_batches[3];
+    struct px_unit ordered_units[3];
+    memset(&ordered_lane, 0, sizeof(ordered_lane));
+    memset(ordered_batches, 0, sizeof(ordered_batches));
+    memset(ordered_units, 0, sizeof(ordered_units));
+    for (int i = 0; i < 3; i++) {
+        ordered_batches[i].units = &ordered_units[i];
+        ordered_batches[i].entries = 1;
+        ordered_units[i].dst_pod_idx = 0;
+        ordered_units[i].seq = (uint16_t)(i + 1);
+        if (i < 2)
+            ordered_batches[i].next = &ordered_batches[i + 1];
+    }
+    ordered_batches[0].state = PX_BATCH_DONE;
+    ordered_batches[1].state = PX_BATCH_RETRY_PENDING;
+    ordered_batches[1].retry_count = 1;
+    ordered_batches[2].state = PX_BATCH_DONE;
+    ordered_lane.fhead = &ordered_batches[0];
+    ordered_lane.ftail = &ordered_batches[2];
+    ordered_lane.sent_entries = 3;
+    eng->retry_batches = 1;
+    assert(px_lane_retire(eng, &ordered_lane));
+    assert(ordered_lane.fhead == &ordered_batches[1]);
+    assert(eng->emit_head == &ordered_units[0]);
+    assert(ordered_units[0].next == NULL);
+    px_batch_leave_retry(eng, &ordered_batches[1]);
+    ordered_batches[1].state = PX_BATCH_DONE;
+    assert(px_lane_retire(eng, &ordered_lane));
+    assert(ordered_lane.fhead == NULL && ordered_lane.ftail == NULL);
+    assert(eng->emit_head == &ordered_units[0]);
+    assert(ordered_units[0].next == &ordered_units[1]);
+    assert(ordered_units[1].next == &ordered_units[2]);
+    assert(ordered_units[2].next == NULL);
+    assert(eng->retry_batches == 0 && ordered_lane.sent_entries == 3);
+    eng->emit_head = eng->emit_tail = NULL;
+    eng->batch_free = NULL;
+    atomic_store_explicit(&retry_pod->egress_pending_emit, 0,
+                          memory_order_relaxed);
+
+    retry_pod->k_rings = 8;
+    retry_pod->landing_stripes = 2;
+    assert(px_landing_stripes(retry_pod) == 2);
+    assert(px_progress_merge(PX_PROGRESS_IDLE, PX_PROGRESS_PENDING) ==
+           PX_PROGRESS_PENDING);
+    assert(px_progress_merge(PX_PROGRESS_PENDING, PX_PROGRESS_PROGRESSED) ==
+           PX_PROGRESS_PROGRESSED);
+    __atomic_store_n(&objs->num_pods, 1, __ATOMIC_RELEASE);
+    struct px_unit pending_unit;
+    memset(&pending_unit, 0, sizeof(pending_unit));
+    px->lanes[0][0].qhead = px->lanes[0][0].qtail = &pending_unit;
+    assert(!px_worker_has_pending(eng));
+    eng->dma_tasks_inflight = 1;
+    assert(px_worker_has_pending(eng));
+    eng->dma_tasks_inflight = 0;
+    px->lanes[0][0].qhead = px->lanes[0][0].qtail = NULL;
+    __atomic_store_n(&objs->num_pods, 0, __ATOMIC_RELEASE);
 
     pthread_mutex_destroy(&px->pool_lock);
+    free(downstream);
+    free(px->workers[0].ct);
+    free(px->workers[0].buckets);
     free(objs);
     free(px);
     puts("proxy_lane_queue_test: PASS");

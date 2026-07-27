@@ -1,92 +1,99 @@
 # Current DPUmesh Evaluation
 
-Measurements were collected on 2026-07-24 KST with the deployment in
+Measurements were collected on 2026-07-27 KST with the deployment in
 [DEPLOY.md](DEPLOY.md).
 
 ## Implementation
 
-```text
-host forward ring
-        │
-        ▼
-      DPA EU
-        │
-        ▼
-ARM worker (connection owner)
-  connection · route/LB · SG-DMA · DMA completion
-        │
-        ▼
-host reverse ring (REV_DONE / TX_ACK)
-        │
-        ▼
-host PE progress thread
+The evaluated topology is `N/K/A/L=16/8/2/2`.
 
-DPU main: lifecycle control and armed-host doorbells
+```text
+K forward rings → N DPA EUs → A polling ARM workers
+                                      │
+                                      ├─ connection and routing state
+                                      ├─ shared per-worker SG-DMA context
+                                      └─ L RX landing stripes → K reverse rings
 ```
 
-The deployed topology is `N/K/A=16/8/8`. A connection is assigned by
-`port % A`. Each worker owns its connection state, DPA completion PE, SG-DMA
-engine, DMA completion callbacks, and reverse-ring producers. The main thread
-does not process payload completions.
+RX landing geometry is independent of ring count. The 64 MiB host RX mapping is
+split into `L=A` stripes. Each stripe aggregates `K/L` sharded credit counters.
+Data workers use run-to-completion polling; the main control thread remains
+event-driven.
 
-Reverse entries use monotonic `publish_seq`. The host publishes one
-`consumer_head` after a drain and one `arm_epoch` before blocking. A newly
-observed armed epoch produces one Comch doorbell.
+A shared DMA-context fault restarts the worker context without changing pod
+readiness. A current-generation payload batch receives one ordered retry.
+Control-path disconnect removes the pod and releases its imported mappings.
 
 ## 8 KiB request / 8 B reply
 
-The client used one pinned host core. Each loaded row is the median of three
-15-second samples with zero failures, drops, and reorder.
+The client used concurrency 32, two threads, a 1,000-request warmup, and a
+10-second measurement. Each row is one run; all runs completed with zero
+failures and zero reorder.
 
-| Connections × outstanding | Throughput | p50 | p99 | Host CPU | DPU ARM | Host cores/Mrps |
-|---:|---:|---:|---:|---:|---:|---:|
-| 16 × 32 | 0.5024 Mrps / 32.93 Gb/s | 976 µs | 1,817 µs | 1.35 cores | 6.98 cores | 2.69 |
-| 16 × 4 | 0.2071 Mrps / 13.57 Gb/s | 302 µs | 584 µs | 1.55 cores | 7.26 cores | 7.50 |
-| 4 × 16 | 0.1943 Mrps / 12.73 Gb/s | 303 µs | 596 µs | 1.11 cores | 4.04 cores | 5.61 |
-| 1 × 1 | 0.00525 Mrps / 0.344 Gb/s | 172 µs | 432 µs | — | — | — |
+| Run | Throughput | p50 | p99 |
+|---:|---:|---:|---:|
+| 1 | 13.9482 Gb/s | 300 µs | 539 µs |
+| 2 | 13.9340 Gb/s | 301 µs | 532 µs |
+| 3 | 13.1310 Gb/s | 308 µs | 535 µs |
+| Median | **13.9340 Gb/s** | **301 µs** | **535 µs** |
 
-At 16 × 32, `512 / 0.5024 Mrps = 1.02 ms`. At 16 × 4,
-`64 / 0.2071 Mrps = 309 µs`; at 4 × 16, `64 / 0.1943 Mrps = 329 µs`.
-Loaded latency tracks the closed-loop queue depth. The single-outstanding p50 is
-172 µs.
+## Performance comparison
 
-## DPU thread placement
+The retained comparison uses the same 8 KiB request, 8 B reply, and two client
+threads.
 
-The 512-outstanding sample used:
+| Topology | Throughput | p99 | Throughput change |
+|---|---:|---:|---:|
+| `K=2, A=2` reference | 14.15 Gb/s | 492 µs | — |
+| `K=8, A=8` reference | 10.04 Gb/s | 671 µs | -29.0% vs. K=2 |
+| `K=8, A=2, L=2` current | 13.934 Gb/s | 535 µs | -1.5% vs. K=2 |
+
+The current topology improves throughput by 38.8% and reduces p99 by 20.3%
+relative to the `K=8, A=8` reference. Relative to the `K=2, A=2` reference,
+throughput is 1.5% lower and p99 is 8.7% higher.
+
+## DPU ARM
+
+The `armbalance` run produced 14.059 Gb/s, p50 300 µs, and p99 535 µs.
 
 | Thread set | CPU |
 |---|---:|
-| Main, pinned to core 8 | 25.5% |
-| Workers, pinned to cores 0–7 | 84.7% average |
-| Worker range | 80.3–87.1% |
-| Worker coefficient of variation | 2.5% |
-| Total process | 7.04 cores |
+| Main | 41.9% |
+| Worker 0 | 105.3% |
+| Worker 1 | 105.2% |
+| Total process | 252.8% |
+| Worker coefficient of variation | 0.1% |
 
-The eight workers are balanced and reach higher utilization than the main
-thread.
+The polling cost is bounded by `A=2`; increasing `K` does not create additional
+ARM workers. With no benchmark traffic, each polling worker uses approximately
+one ARM core and the main thread is idle, for an approximately two-core floor.
 
-## Host CPU
+## Memory and synchronization
 
-The 512-outstanding point used 0.68 client cores and 0.67 server cores, summed
-across the three backend processes. Host efficiency was 2.69 cores/Mrps.
+| Resource | Current value |
+|---|---:|
+| Host TX mapping per pod | 64 MiB |
+| Host RX mapping per pod | 64 MiB |
+| RX allocation for landing stripes | partitioned, not replicated |
+| Credit scratch cell | 64 B; up to eight counters |
+| New landing/credit locks | none |
 
-With no workload, the measured client and backend processes used 0.00 host
-cores. The DPU process used 0.15 ARM cores.
+Landing selection, credit sharding, and counter aggregation add no mutex to the
+data path. The existing shared object-pool lock is unchanged.
 
 ## Validation
 
-The deployed topology passed:
-
-- native loopback: 10,000/10,000, p50 230.6 µs;
-- verbs facade: 10,000/10,000, p50 148.4 µs;
-- framed L7 stream: 5,000/5,000, p50 231.0 µs;
-- preload: 3,000/3,000 over eight connections, p50/p99 155/508 µs;
-- host unit, queue, topology, ring-counter, and ABI tests.
+- `make -j4 test`: all native, queue, topology, fault-scope, and ABI tests pass.
+- BlueField build: 14 DPU C objects compiled successfully.
+- Deployment: all DPUmesh pods reached data-ready with `K=8, L=2`.
+- Backend deletion during a 12-second transfer: `rcnt=582,484`, `fail=0`.
+- Replacement backend: data-ready as pod slot 0 with `K=8, L=2`.
+- DPU log: no poison, fault, or failed-DMA record in the retained run.
 
 ## Constraints
 
-- One connection uses one ARM data worker.
-- Connections must cover distinct values modulo `A` to use additional workers.
-- `A` divides `K` and `N`; `K ≤ N`.
+- One connection uses one ARM worker.
+- `L=A`, `K % A=0`, `N % A=0`, and `K≤N`.
 - L4 keeps one backend per connection.
 - Framed L7 may select a backend per frame.
+- Polling ARM cost is proportional to `A`, independent of offered load.

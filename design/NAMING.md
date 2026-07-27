@@ -50,7 +50,7 @@ for each request frame. Backend identities and upstream ports remain internal;
 the public QP continues to expose one response byte stream without a stream id.
 
 The DPU derives a service's current backend set from live registered pod slots.
-A pod participates only after `POD_INIT_RESULT(READY)` and is removed from
+A pod participates only after `POD_INIT_RESULT(READY, L)` and is removed from
 routing as soon as unregister or disconnect clears its live state. VMs,
 bare-metal processes, and pods can join or leave a configured Service without
 rewriting the registry. Backend loss terminates pinned L4 streams; new

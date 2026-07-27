@@ -116,8 +116,12 @@ static void client_message_recv_callback(struct doca_comch_event_msg_recv *event
 		if (msg_len == sizeof(struct dmesh_pod_assigned_msg)) {
 			const struct dmesh_pod_assigned_msg *am =
 				(const struct dmesh_pod_assigned_msg *)recv_buffer;
-			if (am->pod_id >= 0 && am->pod_id < POD_ID_SPACE)
+			if (am->pod_id >= 0 && am->pod_id < POD_ID_SPACE) {
+				/* Published before the pod id the init loop waits on. */
+				__atomic_store_n(&objs->landing_stripes,
+						 am->landing_stripes, __ATOMIC_RELAXED);
 				__atomic_store_n(&objs->assigned_pod_id, am->pod_id, __ATOMIC_RELEASE);
+			}
 			else
 				DOCA_LOG_ERR("DPU returned invalid assigned pod_id=%d", am->pod_id);
 		} else {
@@ -135,6 +139,9 @@ static void client_message_recv_callback(struct doca_comch_event_msg_recv *event
 				                                           __ATOMIC_ACQUIRE);
 				if (im->result == DMESH_POD_INIT_REGISTER_FAILED ||
 				    (assigned >= 0 && im->pod_id == assigned)) {
+					__atomic_store_n(&objs->landing_stripes,
+					                 im->landing_stripes,
+					                 __ATOMIC_RELAXED);
 					__atomic_store_n(&objs->pod_init_result, im->result,
 					                 __ATOMIC_RELEASE);
 				} else {

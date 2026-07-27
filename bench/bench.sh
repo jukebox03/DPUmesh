@@ -186,25 +186,35 @@ chmod +x /tmp/start_dpu_bench.sh"
 }
 
 ### ------------------------------------------------------------ CPU pinning
-# fair (default): 1 host core per pod — the apples-to-apples 1-core comparison
-# (dpumesh app gets a full core since transport is on the DPU; tcp app shares its
-# core with its sidecar). hw/hw3/hw6: multi-core for the dpumesh side only, to
-# chase the transport ceiling (not comparable to TCP).
+# Pods run on one NUMA node, selected by BENCH_CORE_BASE. fair (default): 1
+# host core per pod — the apples-to-apples 1-core comparison (dpumesh app gets a
+# full core since transport is on the DPU; tcp app shares its core with its
+# sidecar). hw/hw3/hw6: multi-core for the dpumesh side only, to chase the
+# transport ceiling (not comparable to TCP).
+BENCH_CORE_BASE="${BENCH_CORE_BASE:-0}"
+# Shift a comma-separated core list onto the benchmark NUMA node.
+core_list() {
+    local out="" c
+    for c in ${1//,/ }; do out="${out:+$out,}$((BENCH_CORE_BASE + c))"; done
+    echo "$out"
+}
 get_pod_cores() {
-    local app="$1" profile="${2:-fair}"
+    local app="$1" profile="${2:-fair}" rel=""
     case "$profile" in
-        hw)  case "$app" in bench-dpumesh) echo "0,4";; echo-dpumesh) echo "1,5";; bench-tcp) echo "2";; echo-tcp) echo "3";; *) echo "";; esac ;;
-        hw3) case "$app" in bench-dpumesh) echo "0,4,6";; echo-dpumesh) echo "1,5,7";; bench-tcp) echo "2";; echo-tcp) echo "3";; *) echo "";; esac ;;
-        hw6) case "$app" in bench-dpumesh) echo "0,4,6,8,10,12";; echo-dpumesh) echo "1,5,7,9,11,13";; bench-tcp) echo "2";; echo-tcp) echo "3";; *) echo "";; esac ;;
+        hw)  case "$app" in bench-dpumesh) rel="0,4";; echo-dpumesh) rel="1,5";; bench-tcp) rel="2";; echo-tcp) rel="3";; esac ;;
+        hw3) case "$app" in bench-dpumesh) rel="0,4,6";; echo-dpumesh) rel="1,5,7";; bench-tcp) rel="2";; echo-tcp) rel="3";; esac ;;
+        hw6) case "$app" in bench-dpumesh) rel="0,4,6,8,10,12";; echo-dpumesh) rel="1,5,7,9,11,13";; bench-tcp) rel="2";; echo-tcp) rel="3";; esac ;;
         fair|*)
             case "$app" in
-                bench-dpumesh) echo "0";; echo-dpumesh) echo "1";;
-                bench-tcp) echo "2";; echo-tcp) echo "3";;
-                loopback-dpumesh) echo "4,5";; preload-dpumesh|preload-echo|preload-bench) echo "4,5";; stream-dpumesh) echo "4,5";; verbs-dpumesh) echo "4,5";;
-                echo-dpumesh-13) echo "6";; echo-dpumesh-14) echo "7";; bench-direct) echo "8";;
-                bench-dpumesh-2) echo "9";; bench-dpumesh-3) echo "10";; *) echo "";;
+                bench-dpumesh) rel="0";; echo-dpumesh) rel="1";;
+                bench-tcp) rel="2";; echo-tcp) rel="3";;
+                loopback-dpumesh) rel="4,5";; preload-dpumesh|preload-echo|preload-bench) rel="4,5";; stream-dpumesh) rel="4,5";; verbs-dpumesh) rel="4,5";;
+                echo-dpumesh-13) rel="6";; echo-dpumesh-14) rel="7";; bench-direct) rel="8";;
+                bench-dpumesh-2) rel="9";; bench-dpumesh-3) rel="10";;
             esac ;;
     esac
+    [ -z "$rel" ] && { echo ""; return; }
+    core_list "$rel"
 }
 
 pin_pods() {
@@ -212,9 +222,10 @@ pin_pods() {
     step "=== Pinning pods to dedicated cores (taskset, profile=$profile) ==="
     command -v jq >/dev/null 2>&1 || { err "jq not found (apt install jq)"; return 1; }
     if command -v cpupower >/dev/null 2>&1; then
-        info "CPU governor=performance, fixed 2.5 GHz on cores 0-7"
-        echo "$HOST_PASS" | sudo -S cpupower -c 0-7 frequency-set -g performance >/dev/null 2>&1 || true
-        echo "$HOST_PASS" | sudo -S cpupower -c 0-7 frequency-set -d 2.5GHz -u 2.5GHz >/dev/null 2>&1 || true
+        local dvfs="${BENCH_CORE_BASE}-$((BENCH_CORE_BASE + 17))"
+        info "CPU governor=performance, fixed 2.5 GHz on cores $dvfs"
+        echo "$HOST_PASS" | sudo -S cpupower -c "$dvfs" frequency-set -g performance >/dev/null 2>&1 || true
+        echo "$HOST_PASS" | sudo -S cpupower -c "$dvfs" frequency-set -d 2.5GHz -u 2.5GHz >/dev/null 2>&1 || true
     else
         warn "cpupower not found; skipping DVFS lock"
     fi

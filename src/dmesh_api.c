@@ -90,10 +90,8 @@ int dmesh_poll_eq(dmesh_eq_t *eq, dmesh_event_t *events, int max_events) {
     while (n < max_events) {
         errno = 0;
         dmesh_qp_t *c = dmesh_accept(eq);
-        if (!c) {
-            if (errno == ENOMEM) continue;   /* dropped entry consumed; keep draining */
-            break;                           /* EAGAIN: accept queue empty */
-        }
+        if (!c)
+            break;
         events[n].qp        = c;
         events[n].type      = DMESH_EVENT_CONN_REQ;
         events[n].buf       = NULL;
