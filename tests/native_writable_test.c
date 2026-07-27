@@ -32,9 +32,9 @@ static void fixture_init(struct fixture *f, int pool_empty)
 
     f->ctx->slot_size = 16;
     f->ctx->block_size = 64;
-    f->ctx->maxb = 2;
+    f->ctx->blocks_per_conn = 2;
     f->ctx->su_depth = 8;       /* 2 blocks × 4 transport units/block */
-    f->ctx->cushion_h = 1;
+    f->ctx->recycle_reserve = 1;
     f->ctx->n_blocks = 2;
     f->ctx->dma_buffer = f->dma;
     f->ctx->ports = f->ports;
@@ -63,7 +63,7 @@ static void fixture_init(struct fixture *f, int pool_empty)
     psl->role = DMESH_ROLE_CLIENT;
     psl->user = &f->qp;
     psl->eq = f->eq;
-    for (int i = 0; i < DMESH_TX_MAXB_CAP; i++) psl->pblk[i] = -1;
+    for (int i = 0; i < TX_BLOCKS_PER_CONN; i++) psl->pblk[i] = -1;
     atomic_init(&psl->tx_f, (uint_fast64_t)0);
     atomic_init(&psl->su_head, (uint_fast16_t)0);
     atomic_init(&psl->su_tail, (uint_fast16_t)0);
@@ -228,9 +228,9 @@ static void test_default_four_mib_window_and_dynamic_fifo(void)
 
     ctx->slot_size = 8192;
     ctx->block_size = 512 * 1024;
-    ctx->maxb = 8;
+    ctx->blocks_per_conn = 8;
     ctx->su_depth = 512;
-    ctx->cushion_h = 1;
+    ctx->recycle_reserve = 1;
     ctx->n_blocks = 8;
     ctx->dma_buffer = dma;
     ctx->ports = ports;
@@ -243,7 +243,7 @@ static void test_default_four_mib_window_and_dynamic_fifo(void)
 
     struct dmesh_port_slot *psl = &ports[TEST_PORT];
     psl->role = DMESH_ROLE_CLIENT;
-    for (int i = 0; i < DMESH_TX_MAXB_CAP; i++) psl->pblk[i] = -1;
+    for (int i = 0; i < TX_BLOCKS_PER_CONN; i++) psl->pblk[i] = -1;
     atomic_init(&psl->tx_f, (uint_fast64_t)0);
     atomic_init(&psl->su_head, (uint_fast16_t)0);
     atomic_init(&psl->su_tail, (uint_fast16_t)0);

@@ -167,17 +167,15 @@ stop_dpu() {
 start_dpu() {
     local log_level="${DPUMESH_LOG_LEVEL:-40}"
     local l7_svc="${DPUMESH_PROXY_L7_SVC:-}"
-    local dpa_threads="${DPUMESH_DPA_THREADS:-}" arm_pin="${DPUMESH_ARM_PIN:-1}"
+    local dpa_threads="${DPUMESH_DPA_THREADS:-}"
     local rings="${DPUMESH_RINGS_PER_POD:-}"
     local workers="${DPUMESH_ARM_WORKERS:-}"
-    local shared_routing="${DPUMESH_WORKER_SHARED_ROUTING:-}"
-    local diag="${DPUMESH_DIAG:-}"
-    step "=== Starting dpumesh_dpu (l7_svc='$l7_svc' dpa_threads='$dpa_threads' rings_per_pod='$rings' arm_workers='$workers' arm_pin='$arm_pin' shared_routing='$shared_routing') ==="
+    step "=== Starting dpumesh_dpu (l7_svc='$l7_svc' dpa_threads='$dpa_threads' rings_per_pod='$rings' arm_workers='$workers') ==="
     stop_dpu
     local dpu_home; dpu_home=$(ssh "$DPU_HOST" 'echo $HOME')
     ssh "$DPU_HOST" "cat > /tmp/start_dpu_bench.sh << 'LAUNCHER'
 #!/bin/bash
-screen -dmS dpumesh-bench bash -c \"cd $dpu_home/$DPU_BUILD && DPUMESH_PROXY_L7_SVC=$l7_svc DPUMESH_DPA_THREADS=$dpa_threads DPUMESH_RINGS_PER_POD=$rings DPUMESH_ARM_WORKERS=$workers DPUMESH_ARM_PIN=$arm_pin DPUMESH_WORKER_SHARED_ROUTING=$shared_routing DPUMESH_DIAG=$diag ./dpumesh_dpu $DPU_PCI -l $log_level > $DPU_LOG 2>&1\"
+screen -dmS dpumesh-bench bash -c \"cd $dpu_home/$DPU_BUILD && DPUMESH_PROXY_L7_SVC=$l7_svc DPUMESH_DPA_THREADS=$dpa_threads DPUMESH_RINGS_PER_POD=$rings DPUMESH_ARM_WORKERS=$workers ./dpumesh_dpu $DPU_PCI -l $log_level > $DPU_LOG 2>&1\"
 sleep 2
 pgrep -x dpumesh_dpu | head -1 || echo NO_PID
 LAUNCHER
@@ -266,9 +264,10 @@ apply_manifest() {
     command -v envsubst >/dev/null 2>&1 || { err "envsubst not found (apt install gettext-base)"; exit 1; }
     export IMG_BENCH_DPU IMG_ECHO_DPU IMG_LOOPBACK_DPU IMG_STREAM_DPU IMG_VERBS_DPU IMG_PRELOAD_DPU IMG_PRELOAD_SOCK IMG_BENCH_TCP IMG_ECHO_TCP IMG_ENVOY
     export CTRL_PORT TCP_PORT HOST_PCI LIB_OUT
-    export DPUMESH_RINGS_PER_POD="${DPUMESH_RINGS_PER_POD:-2}" ASYNC_THREADS="${ASYNC_THREADS:-4}" \
+    export DPUMESH_RINGS_PER_POD="${DPUMESH_RINGS_PER_POD:-2}" \
+           ASYNC_THREADS="${ASYNC_THREADS:-4}" \
            BENCH_PIPELINE="${BENCH_PIPELINE:-8}" BENCH_COALESCE="${BENCH_COALESCE:-0}" \
-           ECHO_THREADS="${ECHO_THREADS:-3}" DPUMESH_ARENA_SLOTS="${DPUMESH_ARENA_SLOTS:-512}" \
+           ECHO_THREADS="${ECHO_THREADS:-3}" \
            DMESH_PRELOAD_DEBUG="${DMESH_PRELOAD_DEBUG:-0}"
     envsubst < "$MANIFEST" | kubectl apply -n "$NS" -f -
     info "K8s resources applied"
@@ -337,16 +336,12 @@ deploy() {
     ensure_namespace
     clean_failed_pods
     apply_manifest
-    if [ "${DPUMESH_DEPLOY_REUSE_ARTIFACTS:-0}" = 1 ]; then
-        info "Reusing already-built DPU binary and container images"
-    else
-        sync_sources
-        build_dpu
-        build_host
-        build_bench_binaries
-        build_images
-        ensure_envoy_image
-    fi
+    sync_sources
+    build_dpu
+    build_host
+    build_bench_binaries
+    build_images
+    ensure_envoy_image
     start_dpu
     start_pods
     pin_pods fair
@@ -404,7 +399,8 @@ arm_balance() {
         { err "invalid load: fail=${fail:-NA} drops=${drops:-NA} reorder=${reorder:-NA}"; return 1; }
 
     snap1=$(dpu_thread_snapshot)
-    dt=$(awk -v a="$w0" -v b="$w1" 'BEGIN{print b-a}')
+    dt=$(field "$result" durs)
+    [ -n "$dt" ] || dt=$(awk -v a="$w0" -v b="$w1" 'BEGIN{print b-a}')
     echo "   $result"
     echo "   DPU pid=$dpid elapsed=${dt}s (100% = one ARM core)"
     printf "   %-15s %7s %8s %10s %11s\n" THREAD TID LAST_CPU ALLOWED CORE_PCT

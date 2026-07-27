@@ -10,7 +10,7 @@
 #include <stdatomic.h>
 #include <time.h>
 #include <unistd.h>        /* close() for the host epoll RX path */
-#include <sys/epoll.h>     /* event-driven host PE progress (DPUMESH_HOST_EPOLL) */
+#include <sys/epoll.h>
 #include <sys/eventfd.h>   /* per-EQ readiness eventfd for native-epoll integration */
 
 #include <doca_log.h>
@@ -24,7 +24,6 @@
 #include "doca/buffer.h"
 #include "doca/ring.h"
 #include "doca/comch_client.h"
-#include "doca/comch_consumer.h"
 #include "doca/comch_common.h"
 #include "doca/comch_msgq.h"
 #include "doca/dpa_common.h"
@@ -37,6 +36,7 @@ static const char *doca_err_str(doca_error_t rc) {
 }
 
 static void cleanup_ctx(struct dpumesh_ctx *ctx);
+static int drain_rev_rings(struct dpumesh_ctx *ctx, uint32_t budget);
 
 /* ====================================================================
  * dpumesh_ctx — internal state
@@ -54,10 +54,9 @@ static void cleanup_ctx(struct dpumesh_ctx *ctx);
 #define TX_SU_DEPTH_MAX 32768u
 
 /* Per-connection TX block-chain defaults over the shared TX mapping. */
-#define DPUMESH_TX_BLOCK_DEFAULT  (512 * 1024) /* 512 KiB contiguous extent */
-#define DPUMESH_TX_MAXB_DEFAULT   8           /* 8 × 512 KiB = 4 MiB/QP */
-#define DPUMESH_TX_H_DEFAULT      1        /* recycled-block cushion (hysteresis) */
-#define DMESH_TX_MAXB_CAP         8        /* metadata slots for the 4 MiB default window */
+#define TX_BLOCK_SIZE          (512 * 1024)
+#define TX_BLOCKS_PER_CONN     8
+#define TX_RECYCLED_CUSHION    1
 
 enum dmesh_tx_wait_state {
     DMESH_TX_WAIT_IDLE = 0,
@@ -74,7 +73,7 @@ enum dmesh_tx_wait_reason {
 /* Full-duplex connections are indexed by local port; port zero denotes an accept.
  * Inbound descriptor queues are allocated per live connection and sized from the
  * DPU reverse-credit budget. Bodies remain in the shared RX mapping. */
-#define DMESH_INBOX_RING_MIN  256u
+#define RX_INBOX_MIN_CAPACITY 256u
 
 /* Starting width of the client-port window (dpumesh_alloc_port). Sets both the floor on
  * port-number reuse distance and the floor on how many per-port inboxes a process can
@@ -115,10 +114,10 @@ struct dmesh_port_slot {
     uint64_t         tail_blk;              /* oldest live logical block index (owner) */
     uint64_t         head_blk_next;         /* next logical block index needing a physical block
                                              * (blocks [tail_blk, head_blk_next) are backed) */
-    int32_t          pblk[DMESH_TX_MAXB_CAP];    /* logical k%maxb -> physical block id; -1 = none */
-    int32_t          recyc[DMESH_TX_MAXB_CAP];   /* drained blocks held for reuse (owner) */
-    uint32_t         blk_used[DMESH_TX_MAXB_CAP];/* committed content end offset in block k%maxb */
-    int              nblk_owned;            /* physical blocks held (pblk-live + recyc); ≤ maxb */
+    int32_t          pblk[TX_BLOCKS_PER_CONN];    /* logical block slot -> physical block; -1 = none */
+    int32_t          recyc[TX_BLOCKS_PER_CONN];   /* drained blocks held for reuse (owner) */
+    uint32_t         blk_used[TX_BLOCKS_PER_CONN];/* committed content end within each block */
+    int              nblk_owned;            /* live and recycled physical blocks */
     int              nrec;                  /* recyc depth (owner) */
     uint16_t        *su_seq;                /* [ctx->su_depth] shipped seq (lazy malloc) */
     uint64_t        *su_end;                /* [ctx->su_depth] shipped end cursor */
@@ -203,6 +202,8 @@ struct dpumesh_ctx {
     /* K forward descriptor rings selected by source port. Posting uses an MPSC
      * ticket and per-descriptor generation sequence. */
     struct dma_ring *dma_rings[MAX_EU_PER_POD];
+    struct rev_ring *rev_rings[MAX_EU_PER_POD];
+    uint64_t rev_arm_epoch;
     /* Reverse credit region size = rx_dma_buf_size / k_rings. The DPA reports an
      * absolute landing pos; ring_idx = pos / rx_region_size selects which ring's
      * credit slot to return. K=1 → region = whole buffer → ring_idx always 0. */
@@ -221,14 +222,14 @@ struct dpumesh_ctx {
      * chains and send-unit FIFOs are owner-thread-local. */
     int   block_size;          /* bytes per block (= max contiguous message = alloc unit) */
     int   n_blocks;            /* number of blocks = num_slots*slot_size / block_size */
-    int   maxb;                /* max blocks a conn may own (per-conn in-flight cap) */
-    uint32_t su_depth;         /* power-of-two send-unit FIFO depth for maxb*block_size */
-    int   cushion_h;           /* recycled-block cushion depth (grow/shrink hysteresis) */
+    int   blocks_per_conn;     /* per-connection in-flight block limit */
+    uint32_t su_depth;         /* power-of-two send-unit FIFO depth */
+    int   recycle_reserve;     /* recycled blocks retained per connection */
     atomic_uint_fast64_t block_free;   /* Treiber head: (tag<<32) | head_index */
     uint32_t *block_next;      /* [n_blocks]: free-list links */
     pthread_mutex_t block_lock;    /* close-path block return (exactly-once handoff, cold) */
     int block_lock_initialized;
-    /* QPs below their own maxb but blocked on the process-wide pool. A returned
+    /* QPs below their own limit but blocked on the process-wide pool. A returned
      * physical block claims one bit, so one capacity unit wakes at most one waiter.
      * The bitmap is channel-wide because local ports are channel-unique. */
     atomic_uint_fast64_t pool_epoch;
@@ -322,12 +323,23 @@ static void *pe_progress_fn(void *arg) {
     if (ep >= 0) {
         /* ===== Event-driven: drain → arm → re-check → block ===== */
         while (ctx->pe_running) {
-            while (doca_pe_progress(pe)) { /* drain all ready completions */ }
+            int did;
+            do {
+                did = 0;
+                while (doca_pe_progress(pe))
+                    did = 1;
+                if (drain_rev_rings(ctx, 256) > 0)
+                    did = 1;
+            } while (did);
 
             /* Arm, then re-check once to close the drain→arm race: a completion
              * landing between the last drain and the arm must not be stranded. */
             (void)doca_pe_request_notification(pe);
-            if (doca_pe_progress(pe)) {
+            uint64_t epoch = ++ctx->rev_arm_epoch;
+            for (int r = 0; r < ctx->k_rings; r++)
+                __atomic_store_n(&ctx->rev_rings[r]->ctrl->arm_epoch,
+                                 epoch, __ATOMIC_RELEASE);
+            if (doca_pe_progress(pe) || drain_rev_rings(ctx, 256) > 0) {
                 (void)doca_pe_clear_notification(pe, pfd);
                 continue;
             }
@@ -347,6 +359,7 @@ static void *pe_progress_fn(void *arg) {
         uint8_t did = 0;
         if (pe)
             did |= doca_pe_progress(pe);
+        did |= drain_rev_rings(ctx, 256) > 0;
         if (did) {
             idle = 0;                 /* work seen — keep spinning tight */
         } else if (++idle >= PE_IDLE_SPIN) {
@@ -764,12 +777,7 @@ static void rx_deliver_desc(dpumesh_ctx_t *ctx, const sw_descriptor_t *desc, int
     rx_credit_return(ctx, slot);
 }
 
-/*
- * Parse + deliver one BATCH_REV_DONE entry at rx_dma_buffer[pos] whose body
- * length is dma_len. Per-message metadata (the oriented endpoint tuple) is
- * taken from the entry — NOT from the DMA payload, which is the body itself
- * (no in-band header). Returns 0 on success, -1 on malformed/undeliverable.
- */
+/* Deliver one completed reverse-DMA entry. */
 static int process_rx_dma_entry(dpumesh_ctx_t *ctx, const struct dmesh_rev_done_entry *e) {
     uint32_t pos = e->pos, dma_len = e->length;
     if (!ctx->rx_dma_buffer || (size_t)pos + dma_len > ctx->rx_dma_buf_size) {
@@ -807,62 +815,48 @@ static int process_rx_dma_entry(dpumesh_ctx_t *ctx, const struct dmesh_rev_done_
     return 0;
 }
 
-static void rx_data_hook(void *hook_ctx, const uint8_t *data, uint32_t len) {
-    dpumesh_ctx_t *ctx = (dpumesh_ctx_t *)hook_ctx;
-    /* Dispatch BATCH_FWD_ACK and BATCH_REV_DONE by their first-byte type. */
-    uint8_t mtype = data[0];
+static int drain_rev_rings(dpumesh_ctx_t *ctx, uint32_t budget)
+{
+    if (budget == 0)
+        return 0;
 
-
-    if (mtype == DMESH_MSG_BATCH_FWD_ACK) {
-        /* Batched TX_ACK: reclaim each (port,seq)'s bytes from the conn's TX
-         * byte-ring (FIFO tail-reclaim). One message → K frees. */
-        if (len < 4) {
-            DOCA_LOG_ERR("BATCH_TX_ACK: too short (len=%u)", len);
-            return;
+    uint32_t drained = 0;
+    for (int r = 0; r < ctx->k_rings && drained < budget; r++) {
+        struct rev_ring *ring = ctx->rev_rings[r];
+        if (!ring)
+            continue;
+        uint64_t head = ring->head;
+        while (drained < budget) {
+            const struct dmesh_rev_ring_entry *entry =
+                &ring->entries[head % ring->size];
+            uint64_t expected = head + 1u;
+            if (__atomic_load_n(&entry->publish_seq,
+                                __ATOMIC_ACQUIRE) != expected)
+                break;
+            if (entry->kind == DMESH_REV_ENTRY_DONE) {
+                if (process_rx_dma_entry(ctx, &entry->payload.done) != 0)
+                    DOCA_LOG_WARN("Reverse ring %d rejected REV_DONE at ticket=%llu",
+                                  r, (unsigned long long)head);
+            } else if (entry->kind == DMESH_REV_ENTRY_TX_ACK) {
+                tx_reclaim_ack(ctx, entry->payload.ack.port,
+                               entry->payload.ack.seq);
+            } else {
+                DOCA_LOG_ERR("Reverse ring %d invalid kind=%u at ticket=%llu",
+                             r, entry->kind, (unsigned long long)head);
+            }
+            head++;
+            drained++;
         }
-        const struct dmesh_batch_tx_ack_msg *b = (const struct dmesh_batch_tx_ack_msg *)data;
-        uint32_t n = b->count;
-        if (n > BATCH_TXACK_MAX) n = BATCH_TXACK_MAX;
-        if (len < 4u + 4u * n) {
-            DOCA_LOG_ERR("BATCH_TX_ACK: len=%u short for count=%u", len, n);
-            return;
+        if (head != ring->head) {
+            ring->head = head;
+            __atomic_store_n(&ring->ctrl->consumer_head, head,
+                             __ATOMIC_RELEASE);
         }
-        /* Each ACK advances the conn's TX ring tail (FIFO). A miss (seq !=
-         * tail's) = an already-freed / duplicate / dropped-under-overload ACK →
-         * harmless no-op. */
-        for (uint32_t i = 0; i < n; i++)
-            tx_reclaim_ack(ctx, b->acks[i].port, b->acks[i].seq);
-        return;
     }
-
-
-    if (mtype == DMESH_MSG_BATCH_REV_DONE) {
-        /* Deliver every entry in the reverse-DMA completion batch. */
-        if (len < 4) {
-            DOCA_LOG_ERR("BATCH_REV_DONE: too short (len=%u)", len);
-            return;
-        }
-        const struct dmesh_batch_rev_done_msg *b = (const struct dmesh_batch_rev_done_msg *)data;
-        uint32_t n = b->count;
-        if (n > BATCH_REVDONE_MAX) n = BATCH_REVDONE_MAX;
-        if (len < 4u + 16u * n) {
-            DOCA_LOG_ERR("BATCH_REV_DONE: len=%u short for count=%u", len, n);
-            return;
-        }
-        for (uint32_t i = 0; i < n; i++) {
-            /* Bounds/size validation happens inside process_rx_dma_entry. */
-            const struct dmesh_rev_done_entry *e = &b->entries[i];
-            if (process_rx_dma_entry(ctx, e) != 0)
-                DOCA_LOG_WARN("BATCH_REV_DONE: process_rx_dma_entry failed pos=%u len=%u",
-                              e->pos, e->length);
-        }
-        return;
-    }
+    return (int)drained;
 }
 
 static void init_config(dpumesh_ctx_t *ctx, const dpumesh_config_t *config, int service_id) {
-    const char *env_val;
-
     /* Programmatic values override the fixed slot-count and slot-size defaults. */
     ctx->num_slots = (config && config->num_slots > 0) ? config->num_slots
                                                        : DPUMESH_NUM_SLOTS_DEFAULT;
@@ -875,53 +869,35 @@ static void init_config(dpumesh_ctx_t *ctx, const dpumesh_config_t *config, int 
       if (ke && *ke) { int v = atoi(ke);
                        if (v >= 1 && v <= MAX_EU_PER_POD) ctx->k_rings = v; } }
 
-    /* Per-conn inbox depth = the DPU's per-region reverse-credit budget, so a hot conn
-     * cannot overflow its inbox before the DPU's credit runs out (which back-pressures
-     * cleanly instead of the SILENT drop in rx_deliver_desc). The DPU caps in-flight
-     * landings per region at rq = rq_depth/K, rq_depth = host_rx_bytes/DPUMESH_SLOT_SIZE
-     * = num_slots*slot_size/DPUMESH_SLOT_SIZE (comch_common.c). Round up to a power of two
-     * (the ring is masked), floor at DMESH_INBOX_RING_MIN, cap so one conn's inbox stays
-     * bounded. DPUMESH_INBOX_RING overrides the computed depth (still pow2 + floored). */
+    /* Match each connection inbox to one reverse-credit region. */
     {
         uint64_t rq_depth = (uint64_t)ctx->num_slots * (uint64_t)ctx->slot_size
                             / (uint64_t)DPUMESH_SLOT_SIZE;
         uint32_t k = ctx->k_rings > 0 ? (uint32_t)ctx->k_rings : 1u;
         uint64_t want = rq_depth / k;
-        if ((env_val = getenv("DPUMESH_INBOX_RING")) != NULL && atoi(env_val) > 0)
-            want = (uint64_t)atoi(env_val);
-        if (want > 65536u) want = 65536u;                  /* cap ≈ 65536 × 24B = 1.5MB/conn */
-        uint32_t r = DMESH_INBOX_RING_MIN;
-        while ((uint64_t)r < want) r <<= 1;                /* round up to pow2, >= floor */
+        if (want > 65536u) want = 65536u;
+        uint32_t r = RX_INBOX_MIN_CAPACITY;
+        while ((uint64_t)r < want) r <<= 1;
         ctx->inbox_ring = (int)r;
     }
 
-    /* ELASTIC TX extents. block_size (default 512 KiB, >= slot_size) = the max contiguous
-     * message = the allocation unit; the num_slots*slot_size TX buffer holds n_blocks =
-     * (num_slots*slot_size)/block_size of them in a shared pool. maxb = per-conn block
-     * cap (default 8 => 4 MiB in-flight/conn); cushion_h = recycled-block cushion
-     * (grow/shrink hysteresis, default 1). Env: DPUMESH_TX_BLOCK / _TX_MAXB / _TX_H. */
-    int bsz = DPUMESH_TX_BLOCK_DEFAULT;
-    if ((env_val = getenv("DPUMESH_TX_BLOCK")) != NULL && atoi(env_val) > 0)
-        bsz = atoi(env_val);
-    if (bsz < ctx->slot_size) bsz = ctx->slot_size;    /* a block must hold >= 1 wire slot */
+    /* Fixed-size TX extents are allocated from the shared host TX buffer. */
+    int bsz = TX_BLOCK_SIZE;
+    if (bsz < ctx->slot_size) bsz = ctx->slot_size;
     size_t txbytes = (size_t)ctx->num_slots * (size_t)ctx->slot_size;
     if ((size_t)bsz > txbytes) bsz = (int)txbytes;
     ctx->block_size = bsz;
     ctx->n_blocks   = (int)(txbytes / (size_t)bsz);
     if (ctx->n_blocks < 1) ctx->n_blocks = 1;
 
-    int mb = DPUMESH_TX_MAXB_DEFAULT;
-    if ((env_val = getenv("DPUMESH_TX_MAXB")) != NULL && atoi(env_val) > 0)
-        mb = atoi(env_val);
-    if (mb < 1) mb = 1;
-    if (mb > DMESH_TX_MAXB_CAP) mb = DMESH_TX_MAXB_CAP;
-    if (mb > ctx->n_blocks) mb = ctx->n_blocks;        /* can't own more than the whole pool */
-    ctx->maxb = mb;
+    int mb = TX_BLOCKS_PER_CONN;
+    if (mb > ctx->n_blocks) mb = ctx->n_blocks;
+    ctx->blocks_per_conn = mb;
 
     /* A QP can fill its complete byte window with <=slot_size descriptors. Size the
      * reclaim FIFO to the next power of two so publication has no second admission
      * point. Keep it below half the 16-bit sequence space for unambiguous ACK order. */
-    uint64_t need_su = ((uint64_t)ctx->block_size * (uint64_t)ctx->maxb +
+    uint64_t need_su = ((uint64_t)ctx->block_size * (uint64_t)ctx->blocks_per_conn +
                         (uint64_t)ctx->slot_size - 1) / (uint64_t)ctx->slot_size;
     uint32_t sd = TX_SU_DEPTH_MIN;
     while ((uint64_t)sd < need_su && sd < TX_SU_DEPTH_MAX)
@@ -930,12 +906,9 @@ static void init_config(dpumesh_ctx_t *ctx, const dpumesh_config_t *config, int 
         sd = TX_SU_DEPTH_MAX;
     ctx->su_depth = sd;
 
-    int hh = DPUMESH_TX_H_DEFAULT;
-    if ((env_val = getenv("DPUMESH_TX_H")) != NULL && atoi(env_val) >= 0)
-        hh = atoi(env_val);
-    if (hh < 0) hh = 0;
-    if (hh > mb) hh = mb;                              /* cushion can't exceed the per-conn cap */
-    ctx->cushion_h = hh;
+    int hh = TX_RECYCLED_CUSHION;
+    if (hh > mb) hh = mb;
+    ctx->recycle_reserve = hh;
 
     /* The registry resolves $DPUMESH_SERVICE to the advertised service id.
      * SVC_NONE is client-only. The DPU assigns pod_id during registration. */
@@ -1042,7 +1015,6 @@ static doca_error_t init_control_path(dpumesh_ctx_t *ctx) {
     ctx->reg_msg.type = DMESH_MSG_POD_REGISTER;
     ctx->reg_msg.pod_id = -1;                    /* DPU assigns this node's address */
     ctx->reg_msg.service_id = ctx->service_id;   /* DPU: pods[our slot].service_id = this (the LB set is derived from it) */
-
     result = client_send_msg(&ctx->doca_objs, (const char *)&ctx->reg_msg, sizeof(ctx->reg_msg));
     if (result != DOCA_SUCCESS) return result;
     DOCA_LOG_INFO("Sent REGISTER to DPU: service_id=%d (awaiting pod_id)", ctx->service_id);
@@ -1099,11 +1071,7 @@ static doca_error_t init_control_path(dpumesh_ctx_t *ctx) {
 static doca_error_t init_datapath(dpumesh_ctx_t *ctx) {
     doca_error_t result;
 
-    /* Host datapath consumer intentionally NOT created: its ID is never advertised
-     * to the DPU and the host PE thread never progresses consumer_pe, so it would
-     * only waste ~2 GiB (CC_DATA_PATH_MSG_SIZE × CC_DATA_PATH_TASK_NUM). CPU→DPU
-     * uses the DMA ring; DPU→CPU uses reverse DMA; DPU→Host control (BATCH_FWD_ACK /
-     * BATCH_REV_DONE) arrives on the comch control-path client (objs->pe). */
+    /* Comch carries control messages. DMA rings carry data and completions. */
 
     /* K forward descriptor rings, exported in order as DMA_RING (sent BEFORE
      * DMA_BUFFER so the DPU's setup trigger sees all K before pairing). */
@@ -1150,6 +1118,12 @@ static doca_error_t init_datapath(dpumesh_ctx_t *ctx) {
     if (result != DOCA_SUCCESS) {
         DOCA_LOG_ERR("Failed to export Host RX buffer to DPU: %s", doca_err_str(result));
         return result;
+    }
+
+    for (int j = 0; j < ctx->k_rings; j++) {
+        result = setup_rev_ring(&ctx->doca_objs, &ctx->rev_rings[j]);
+        if (result != DOCA_SUCCESS)
+            return result;
     }
 
     /* A successful send submission is not remote acceptance. The DPU returns
@@ -1242,7 +1216,7 @@ int dpumesh_init(dpumesh_ctx_t **out, int service_id,
         atomic_init(&ctx->ports[p].tx_wait_tail_blk, (uint_fast64_t)0);
         atomic_init(&ctx->ports[p].tx_wait_tx_w, (uint_fast64_t)0);
         atomic_init(&ctx->ports[p].tx_wait_pool_epoch, (uint_fast64_t)0);
-        for (int b = 0; b < DMESH_TX_MAXB_CAP; b++)
+        for (int b = 0; b < TX_BLOCKS_PER_CONN; b++)
             ctx->ports[p].pblk[b] = -1;
     }
     prc = pthread_mutex_init(&ctx->port_lock, NULL);
@@ -1250,9 +1224,6 @@ int dpumesh_init(dpumesh_ctx_t **out, int service_id,
     ctx->port_lock_initialized = 1;
     ctx->next_port = 1;
     ctx->port_span = DMESH_PORT_SPAN_MIN;
-
-    ctx->doca_objs.rx_data_hook = rx_data_hook;
-    ctx->doca_objs.rx_hook_ctx = ctx;
 
     ctx->pe_running = 1;
     prc = pthread_create(&ctx->pe_tid, NULL, pe_progress_fn, ctx);
@@ -1398,6 +1369,17 @@ static void cleanup_ctx(dpumesh_ctx_t *ctx) {
     }
 
     for (int j = 0; j < MAX_EU_PER_POD; j++) {
+        struct rev_ring *rev = ctx->rev_rings[j];
+        if (rev) {
+            if (rev->mmap && rev->entries &&
+                destroy_mmap_and_free_buffer(rev->mmap,
+                                             rev->entries) == DOCA_SUCCESS) {
+                rev->mmap = NULL;
+                rev->entries = NULL;
+            }
+            free(rev);
+            ctx->rev_rings[j] = NULL;
+        }
         struct dma_ring *ring = ctx->dma_rings[j];
         if (!ring) continue;
         if (ring->mmap && ring->descs &&
@@ -1494,7 +1476,7 @@ static void port_reset_tx(struct dmesh_port_slot *psl) {
     psl->head_blk_next = 0;
     psl->nblk_owned    = 0;
     psl->nrec          = 0;
-    for (int b = 0; b < DMESH_TX_MAXB_CAP; b++) psl->pblk[b] = -1;
+    for (int b = 0; b < TX_BLOCKS_PER_CONN; b++) psl->pblk[b] = -1;
     atomic_store_explicit(&psl->su_head, 0, memory_order_relaxed);
     atomic_store_explicit(&psl->su_tail, 0, memory_order_relaxed);
     atomic_store_explicit(&psl->tx_wait_state, DMESH_TX_WAIT_IDLE,
@@ -1504,15 +1486,16 @@ static void port_reset_tx(struct dmesh_port_slot *psl) {
 }
 
 /* OWNER-only (live conn): recycle drained tail blocks into recyc, compact a fully-
- * drained conn back to logical 0, and shrink surplus recyc (> cushion_h) to the pool.
+ * drained conn back to logical 0, and return surplus recycled blocks to the pool.
  * Called from reserve before the grow decision, so steady sliding reuses drained
  * blocks (0 pool ops) and only a net demand change grabs/returns. */
 static void tx_refresh_blocks(dpumesh_ctx_t *ctx, struct dmesh_port_slot *psl) {
-    uint64_t bs = (uint64_t)ctx->block_size, maxb = (uint64_t)ctx->maxb;
+    uint64_t bs = (uint64_t)ctx->block_size;
+    uint64_t block_slots = (uint64_t)ctx->blocks_per_conn;
     uint64_t f = atomic_load_explicit(&psl->tx_f, memory_order_acquire);
     uint64_t f_blk = f / bs;
     while (psl->tail_blk < f_blk) {                        /* logical block fully freed → recycle */
-        int s = (int)(psl->tail_blk % maxb);
+        int s = (int)(psl->tail_blk % block_slots);
         if (psl->pblk[s] >= 0) { psl->recyc[psl->nrec++] = psl->pblk[s]; psl->pblk[s] = -1; }
         psl->tail_blk++;
     }
@@ -1521,14 +1504,14 @@ static void tx_refresh_blocks(dpumesh_ctx_t *ctx, struct dmesh_port_slot *psl) {
     if (f == psl->tx_w &&
         atomic_load_explicit(&psl->su_head, memory_order_relaxed) ==
         atomic_load_explicit(&psl->su_tail, memory_order_acquire)) {
-        int s = (int)(f_blk % maxb);
+        int s = (int)(f_blk % block_slots);
         if (psl->pblk[s] >= 0) { psl->recyc[psl->nrec++] = psl->pblk[s]; psl->pblk[s] = -1; }
         psl->tx_w = psl->tx_c = psl->tx_s = 0;
         atomic_store_explicit(&psl->tx_f, 0, memory_order_relaxed);
         psl->tail_blk = 0;
         psl->head_blk_next = 0;
     }
-    while (psl->nrec > ctx->cushion_h) {                   /* shrink: return surplus to the pool */
+    while (psl->nrec > ctx->recycle_reserve) {
         block_pool_return(ctx, psl->recyc[--psl->nrec]);
         psl->nblk_owned--;
     }
@@ -1546,9 +1529,9 @@ static void try_return_blocks(dpumesh_ctx_t *ctx, struct dmesh_port_slot *psl) {
     pthread_mutex_lock(&ctx->block_lock);
     if (psl->nblk_owned > 0 &&
         psl->tx_w == atomic_load_explicit(&psl->tx_f, memory_order_acquire)) {
-        uint64_t maxb = (uint64_t)ctx->maxb;
+        uint64_t block_slots = (uint64_t)ctx->blocks_per_conn;
         for (uint64_t k = psl->tail_blk; k < psl->head_blk_next; k++) {  /* all assigned blocks */
-            int s = (int)(k % maxb);
+            int s = (int)(k % block_slots);
             if (psl->pblk[s] >= 0) { block_pool_return(ctx, psl->pblk[s]); psl->pblk[s] = -1; }
         }
         while (psl->nrec > 0) block_pool_return(ctx, psl->recyc[--psl->nrec]);
@@ -1564,7 +1547,8 @@ static void try_return_blocks(dpumesh_ctx_t *ctx, struct dmesh_port_slot *psl) {
 uint8_t *dpumesh_tx_reserve(dpumesh_ctx_t *ctx, uint16_t port, uint32_t len) {
     if (port == 0 || port >= DMESH_PORT_SPACE) { errno = EINVAL; return NULL; }
     struct dmesh_port_slot *psl = &ctx->ports[port];
-    uint64_t bs = (uint64_t)ctx->block_size, maxb = (uint64_t)ctx->maxb;
+    uint64_t bs = (uint64_t)ctx->block_size;
+    uint64_t block_slots = (uint64_t)ctx->blocks_per_conn;
     if (len == 0 || (uint64_t)len > bs) { errno = EINVAL; return NULL; }  /* must fit a block */
     uint8_t role = __atomic_load_n(&psl->role, __ATOMIC_ACQUIRE);
     if (role != DMESH_ROLE_CLIENT && role != DMESH_ROLE_SERVER) {
@@ -1600,10 +1584,9 @@ uint8_t *dpumesh_tx_reserve(dpumesh_ctx_t *ctx, uint16_t port, uint32_t len) {
     int32_t reserved_phys = -1;
     if (psl->head_blk_next <= need_k) {                    /* a new block must be backed */
         uint64_t b = psl->head_blk_next;
-        /* Block b is admissible only once b-maxb has drained: that both caps in-flight
-         * bytes per conn and keeps slot b%maxb from aliasing a still-live block. */
-        int have = (b - psl->tail_blk < maxb) &&
-                   (psl->nrec > 0 || psl->nblk_owned < ctx->maxb);
+        /* A logical block may reuse its slot after the previous occupant drains. */
+        int have = (b - psl->tail_blk < block_slots) &&
+                   (psl->nrec > 0 || psl->nblk_owned < ctx->blocks_per_conn);
         if (!have) {
             atomic_fetch_add_explicit(&ctx->st_grow_waits, 1, memory_order_relaxed);
             tx_wait_arm(ctx, psl, port, DMESH_TX_WAIT_QP_RECLAIM);
@@ -1631,7 +1614,7 @@ uint8_t *dpumesh_tx_reserve(dpumesh_ctx_t *ctx, uint16_t port, uint32_t len) {
     tx_wait_cancel(ctx, psl, port);
 
     if (pad) {                                             /* commit to the pad: we WILL succeed */
-        psl->blk_used[k % maxb] = off;                     /* seal block k content end */
+        psl->blk_used[k % block_slots] = off;              /* seal block k content end */
         psl->tx_w = (k + 1) * bs;                          /* pad to the next block boundary */
         k   = need_k;
         off = 0;
@@ -1643,7 +1626,7 @@ uint8_t *dpumesh_tx_reserve(dpumesh_ctx_t *ctx, uint16_t port, uint32_t len) {
      * block, so this loop runs at most once past the probe. */
     while (psl->head_blk_next <= k) {
         uint64_t b = psl->head_blk_next;
-        int bslot = (int)(b % maxb);
+        int bslot = (int)(b % block_slots);
         if (psl->nrec > 0) {                               /* reuse a recycled block (no pool op) */
             psl->pblk[bslot] = psl->recyc[--psl->nrec];
             atomic_fetch_add_explicit(&ctx->st_recycle_hits, 1, memory_order_relaxed);
@@ -1656,7 +1639,7 @@ uint8_t *dpumesh_tx_reserve(dpumesh_ctx_t *ctx, uint16_t port, uint32_t len) {
         psl->blk_used[bslot] = 0;
         psl->head_blk_next = b + 1;
     }
-    int s = (int)(k % maxb);
+    int s = (int)(k % block_slots);
     psl->resv_len = len;
     psl->resv_moff = (uint64_t)((size_t)psl->pblk[s] * (size_t)bs + off);
     return (uint8_t *)ctx->dma_buffer + psl->resv_moff;
@@ -1679,7 +1662,8 @@ int dpumesh_tx_commit(dpumesh_ctx_t *ctx, uint16_t port,
     uint64_t k = psl->tx_w / bs;                           /* block the reserve placed the body in */
     psl->tx_w += len;
     psl->tx_c  = psl->tx_w;
-    psl->blk_used[k % (uint64_t)ctx->maxb] = (uint32_t)(psl->tx_w - k * bs);  /* content end in block k */
+    psl->blk_used[k % (uint64_t)ctx->blocks_per_conn] =
+        (uint32_t)(psl->tx_w - k * bs);
     psl->resv_len = 0;                                     /* reserve consumed: one post per alloc */
     psl->resv_moff = 0;
     return 0;
@@ -1697,7 +1681,8 @@ void dpumesh_tx_discard_unsent(dpumesh_ctx_t *ctx, uint16_t port) {
     psl->resv_moff = 0;
     uint64_t bs = (uint64_t)ctx->block_size;
     uint64_t k = psl->tx_s / bs;
-    psl->blk_used[k % (uint64_t)ctx->maxb] = (uint32_t)(psl->tx_s - k * bs);
+    psl->blk_used[k % (uint64_t)ctx->blocks_per_conn] =
+        (uint32_t)(psl->tx_s - k * bs);
 }
 
 /* Return the next committed descriptor without advancing tx_s. Padded block tails
@@ -1706,12 +1691,13 @@ int dpumesh_tx_next_send(dpumesh_ctx_t *ctx, uint16_t port, int flush_partial,
                          size_t *out_moff, uint32_t *out_len) {
     struct dmesh_port_slot *psl = &ctx->ports[port];
     if (psl->nblk_owned <= 0) return 0;
-    uint64_t bs = (uint64_t)ctx->block_size, maxb = (uint64_t)ctx->maxb;
+    uint64_t bs = (uint64_t)ctx->block_size;
+    uint64_t block_slots = (uint64_t)ctx->blocks_per_conn;
     for (;;) {
         if (psl->tx_s >= psl->tx_c) return 0;              /* nothing committed to ship */
         uint64_t k = psl->tx_s / bs;
         uint32_t off = (uint32_t)(psl->tx_s % bs);
-        uint32_t used = psl->blk_used[k % maxb];
+        uint32_t used = psl->blk_used[k % block_slots];
         if (off >= used) {                                 /* block k content exhausted → skip pad */
             psl->tx_s = (k + 1) * bs;                       /* jump to the next block start */
             continue;
@@ -1728,14 +1714,14 @@ int dpumesh_tx_next_send(dpumesh_ctx_t *ctx, uint16_t port, int flush_partial,
             psl->tx_c <= content_end)
             return 0;
         uint32_t chunk = (avail < (uint64_t)ctx->slot_size) ? (uint32_t)avail : (uint32_t)ctx->slot_size;
-        *out_moff = (size_t)psl->pblk[k % maxb] * (size_t)bs + off;
+        *out_moff = (size_t)psl->pblk[k % block_slots] * (size_t)bs + off;
         *out_len  = chunk;
         return 1;
     }
 }
 
-/* Record a shipped descriptor's (seq -> end cursor) in the per-conn send-unit FIFO and
- * advance the send head. A BATCH_FWD_ACK(port,seq) later pops it (FIFO) to advance tx_f.
+/* Record a shipped descriptor's (seq -> end cursor) in the per-conn send-unit FIFO.
+ * A TX_ACK later advances tx_f.
  * `len` = the descriptor length (0 for a FIN — holds no bytes). Owner thread. */
 void dpumesh_tx_sent(dpumesh_ctx_t *ctx, uint16_t port, uint16_t seq, uint32_t len) {
     struct dmesh_port_slot *psl = &ctx->ports[port];
@@ -1878,11 +1864,7 @@ int dpumesh_enqueue(dpumesh_ctx_t *ctx, const sw_descriptor_t *desc) {
         }
     }
 
-    /* TX byte lifetime: the façade calls dpumesh_tx_sent right after this enqueue
-     * to record the shipped descriptor (seq -> end cursor) in the conn's send-unit
-     * FIFO; the DPU's BATCH_FWD_ACK advances the conn's free cursor (rx_data_hook ->
-     * tx_reclaim_ack). Both legs (client request / server reply) are identical —
-     * request-vs-response is not a wire flag, just the oriented tuple. */
+    /* The send-unit FIFO retains TX bytes until the reverse ring returns TX_ACK. */
 
     dma->mmap = ctx->dpa_mmap_handle;
     dma->addr = (uint64_t)ctx->dma_buffer + (size_t)desc->body_buf_slot;  /* byte offset */

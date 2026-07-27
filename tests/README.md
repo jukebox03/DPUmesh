@@ -13,7 +13,7 @@ are the first validation layer before the hardware validators under `bench/`.
 | `preload_api_contract_test.c` | Public native TX usage, event-driven blocking/nonblocking retry, honest `POLLOUT`, send timeout, ordered RX fragments, FIN validation, and fd-entry lifetime |
 | `l4_pin_policy_test.c` | Live-pin stability and terminal backend loss |
 | `lb_policy_test.c` | Live-backend filtering and concurrent service round-robin selection |
-| `proxy_lane_queue_test.c` | Arrival merging, worker→lane publication, worker→main SPSC completion, and worker wake coalescing |
+| `proxy_lane_queue_test.c` | Arrival merging, worker→lane publication, and worker wake coalescing |
 | `worker_mpsc_queue_test.c` | Cross-worker MPSC FIFO, full-queue, and wraparound behavior |
 | `topology_test.c` | Connection-affine port→ring→DPA-EU→ARM-worker mapping invariants |
 | `ring_counter_test.c` | MPSC descriptor-generation publication, wraparound, and shared consumer-head admission |

@@ -9,7 +9,6 @@
 #include <doca_error.h>
 #include <doca_log.h>
 
-#include "comch_consumer.h"
 #include "object.h"
 #include "comch_common.h"
 
@@ -107,22 +106,13 @@ static void client_message_recv_callback(struct doca_comch_event_msg_recv *event
 	/* Dispatch on the 1-byte type at offset 0. */
 	switch (recv_buffer[0])
 	{
-	case DMESH_MSG_BATCH_FWD_ACK:
-		/* Batched TX_ACK — coalesced free of K (port,seq) TX slots. */
-		if (objs->rx_data_hook)
-			objs->rx_data_hook(objs->rx_hook_ctx, recv_buffer, msg_len);
-		break;
-
-	case DMESH_MSG_BATCH_REV_DONE:
-		/* Batched reverse-DMA completion — coalesced delivery of K responses. */
-		if (objs->rx_data_hook)
-			objs->rx_data_hook(objs->rx_hook_ctx, recv_buffer, msg_len);
+	case DMESH_MSG_REV_DOORBELL:
+		/* The Comch PE notification wakes the host progress thread. Reverse
+		 * entries are consumed from the exported rings after PE progress. */
 		break;
 
 	case DMESH_MSG_POD_ASSIGNED:
-		/* DPU assigned this node's pod_id at registration. Stash it for the
-		 * init-time register wait loop to pick up. NOT via rx_data_hook (the
-		 * PE thread / hook aren't wired until the end of dpumesh_init). */
+		/* Publish the assigned pod_id to the initialization thread. */
 		if (msg_len == sizeof(struct dmesh_pod_assigned_msg)) {
 			const struct dmesh_pod_assigned_msg *am =
 				(const struct dmesh_pod_assigned_msg *)recv_buffer;
@@ -292,7 +282,7 @@ doca_error_t init_comch_ctrl_path_client(const char *server_name,
 	/* register event callback for new comsumer and expired consumer */
 	if (is_fast_path) {
 		result = doca_comch_client_event_consumer_register(objs->cc_client,
-									client_new_consumer_callback, expired_consumer_callback);
+									dmesh_consumer_connected, dmesh_consumer_expired);
 		if (result != DOCA_SUCCESS) {
 			DOCA_LOG_ERR("Failed adding consumer event cb with error = %s", doca_error_get_name(result));
 			goto destroy_client;

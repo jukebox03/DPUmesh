@@ -24,14 +24,14 @@ typedef uint64_t doca_dpa_dev_buf_arr_t;
 typedef uint32_t doca_dpa_dev_mmap_t;
 
 /* Deferred completion queue — DPU only.
- * Consumer callback enqueues; main loop drains.
- * Single-threaded (same DPU worker), so no lock needed.
+ * Consumer callback enqueues; the owning data worker drains.
+ * Each queue has one producer PE and one worker consumer.
  * Sized with headroom so in-flight recv tasks across all active EUs cannot
  * overflow it above BP_HIGH even at MAX_DPA_RINGS active EUs. */
 #define DPU_COMP_QUEUE_SIZE 16384
 
-/* One forward-DMA completion (CPU→DPU), handed from the DPA recv callback to the
- * main loop, which feeds it to the SG-DMA egress engine (dpu_proxy.c). */
+/* One forward-DMA completion (CPU→DPU), handed from the DPA callback to the
+ * connection-owning SG-DMA worker. */
 typedef struct {
     int32_t  src_pod_id;
     int32_t  dst_pod_id;   /* DMESH_POD_BLANK -> resolve dst_service */
@@ -184,27 +184,12 @@ CQ_INLINE int mpsc_comp_queue_empty(dpu_mpsc_comp_queue_t *q) {
 #define COMP_QUEUE_BP_LOW   2048
 
 /* Max deferred recv tasks. When comp_queue ≥ BP_HIGH the DPA recv-cb stashes
- * completed recv tasks here for the main loop to resubmit once it drains below
+ * completed recv tasks here for the PE owner to resubmit once it drains below
  * BP_LOW. Sized to hold every in-flight recv task across all EUs. */
 #define MAX_DEFERRED_RECV  8192
 
-/* Max deferred TX_ACK sends. The DPU MUST eventually deliver every TX_ACK —
- * dropping one parks the host's pending entry until the reclaim timeout — so we
- * never drop on the AGAIN path; we defer and retry each main-loop iteration. */
-#define MAX_DEFERRED_TX_ACK  16384
-
-/* TX_ACK we couldn't send synchronously because the comch send pool was
- * full. Stored verbatim so the main loop can retry without recomputing. */
-typedef struct {
-    struct doca_comch_connection *conn;
-    uint16_t  port;   /* source endpoint port of the acked leg (TX_ACK key with seq) */
-    uint16_t  seq;
-} deferred_tx_ack_t;
-
-/* Mirrored DOCA task counts gate submissions. TASK_POOL_MARGIN covers concurrent
- * submitters, and MAX_CONSUMER_RETRY bounds tasks awaiting resubmission. */
+/* Mirrored DOCA task counts gate submissions. */
 #define TASK_POOL_MARGIN 8
-#define MAX_CONSUMER_RETRY 256
 
 
 /* Per-pod state (DPU only) */
@@ -245,7 +230,7 @@ struct pod_state {
     uint32_t egress_quiesced_mask;
     uint32_t egress_inflight;
     uint32_t egress_inflight_worker[MAX_EU_PER_POD];
-    /* Retired units awaiting main-thread emission and custody release. */
+    /* Retired units awaiting completion emission and custody release. */
     uint32_t egress_pending_emit;
     /* Number of proxy arrivals whose bytes still reference this slot's reusable
      * DPU staging buffer (window ref or queued/in-flight egress piece). Slot
@@ -278,23 +263,16 @@ struct pod_state {
     struct doca_mmap *host_rx_mmap;
     void *host_rx_addr;
     size_t host_rx_buf_size;
+    struct doca_mmap *rev_ring_mmaps[MAX_EU_PER_POD];
+    void *rev_ring_host_addrs[MAX_EU_PER_POD];
+    int rev_ring_mmap_count;
+    uint64_t rev_doorbell_pending_epoch;
+    uint64_t rev_doorbell_sent_epoch;
 
     /* Host's RX RQ depth (= num_slots), derived from host_rx_buf_size. Used by the
      * SG-DMA egress admission as the cap on in-flight reverse DMAs (dpu_proxy.c). */
     uint32_t rq_depth;
 
-    /* Batched TX_ACK accumulator. Response-forward TX_ACKs destined to THIS pod
-     * accumulate here; flushed as one dmesh_batch_tx_ack_msg when full or on the
-     * idle (drain-empty, proc==0) flush. Single ARM thread owns this — no lock. */
-    struct dmesh_tx_ack_entry txack_batch[BATCH_TXACK_MAX];
-    int      txack_batch_n;
-
-    /* Batched REV_DONE accumulator (mirror of txack_batch). Reverse-DMA
-     * completions destined to THIS pod accumulate here; flushed as one
-     * dmesh_batch_rev_done_msg when full or on the idle (drain-empty, proc==0)
-     * flush. Single ARM thread owns this — no lock. */
-    struct dmesh_rev_done_entry rev_done_batch[BATCH_REVDONE_MAX];
-    int      rev_done_batch_n;
 };
 
 /* Acquire the DMA publication gate before reading the pod's data-plane fields. */
@@ -418,17 +396,6 @@ static inline void dpu_upstream_free(struct dpu_conntrack *ct, uint16_t uP) {
 
 /* ARM workers own completion progress, connection state, and SG-DMA. */
 #define MAX_ARM_WORKERS 8
-#define DPU_PENDING_TXACK_SIZE 16384
-
-_Static_assert((DPU_PENDING_TXACK_SIZE & (DPU_PENDING_TXACK_SIZE - 1)) == 0,
-               "DPU_PENDING_TXACK_SIZE must be a power of two");
-
-struct dpu_pending_txack_entry {
-    int32_t pod_id;
-    uint16_t port;
-    uint16_t seq;
-};
-
 struct dpu_data_worker {
     struct objects *objs;
     int id;
@@ -439,10 +406,6 @@ struct dpu_data_worker {
     int num_deferred_recv;
     /* Safety-net MPSC inbox for a completion received by the wrong owner. */
     dpu_mpsc_comp_queue_t cross_worker;
-    /* Worker-produced, main-consumed SPSC TX-ACK ring. */
-    struct dpu_pending_txack_entry pending_txack[DPU_PENDING_TXACK_SIZE];
-    _Alignas(64) atomic_uint pending_txack_head; /* main-owned */
-    _Alignas(64) atomic_uint pending_txack_tail; /* worker-owned */
     atomic_ullong stat_local_completions;
     atomic_ullong stat_cross_worker_out;
     atomic_ullong stat_cross_worker_in;
@@ -487,31 +450,15 @@ struct objects {
     int num_dpa_threads;                                    /* N (auto-detected unless DPUMESH_DPA_THREADS set) */
     int dpa_threads_auto;                                   /* 1 = N auto-detected from the device */
     int k_rings;                            /* K rings per pod across K EUs */
-    int dpu_ready;   /* 0 until DPA + msgq init done. Gates setup_pod_dma so a fast
-                      * host whose mmaps arrive DURING init (before the DPA msgq is
-                      * up) doesn't setup too early; those pods run in a deferred
-                      * pass in run_dpu_worker once this is published. */
-    /* SG-DMA egress engine (dpu_proxy.c) — the unified, always-on DPU→host reverse
-     * path (px_init aborts the worker on failure, so this is never NULL at run
-     * time). Every forward completion (request AND reply) runs the per-conn input
-     * window → proxy_route (mock) → per-dst SG-DMA egress machinery. DPUMESH_PROXY
-     * only selects the request parser (passthru default / frame / L7). */
+    int dpu_ready;
+    /* Worker-owned routing, SG-DMA, and reverse-ring publication. */
     struct dmesh_proxy *proxy;
     int dpa_thread_running[MAX_DPA_EU];     /* per-EU: 1 = thread k started */
     int dpa_thread_running_any;             /* 1 = at least one EU started (keepalive guard) */
 
-    /* comch data path related */
-    struct local_mem_bufs *consumer_mem;
-    struct doca_comch_consumer *consumer;
     struct doca_pe *consumer_pe;   /* consumer_pes[0] */
     /* DPA channel k binds to consumer_pes[k % A]. */
     struct doca_pe *consumer_pes[MAX_ARM_WORKERS];
-
-	doca_error_t consumer_result;  /* Last result from a consumer callback (comch_consumer.c). */
-
-    /* RX data hook (comch control path → dpumesh_ctx) */
-    void (*rx_data_hook)(void *hook_ctx, const uint8_t *data, uint32_t len);
-    void *rx_hook_ctx;
 
     /* Append-only DPU pod table. `registered` is the release/acquire publication
      * gate; slots remain stable for the process lifetime. */
@@ -537,27 +484,6 @@ struct objects {
      * Data workers advance it with a relaxed atomic. Init to 0. */
     uint32_t svc_rr[POD_ID_SPACE];
 
-    /* Connection tracking for A=1 and shared-routing mode. */
-    struct dpu_conntrack *conntrack;
-
-    /* Deferred completion queue (DPU only) */
-    dpu_comp_queue_t comp_queue;
-
-    /* Backpressure: deferred consumer recv tasks (DPU only).
-     * When comp_queue is nearly full, consumer callbacks defer recv task
-     * resubmission here. DPA sees consumer_empty and pauses. Main loop
-     * resubmits when queue drains below BP_LOW. */
-    struct doca_task *deferred_recv[MAX_DEFERRED_RECV];
-    int num_deferred_recv;
-
-    /* Deferred TX_ACK sends (DPU only). When a batched TX_ACK send returns
-     * AGAIN (comch send pool full), we stash the ACK here and the main
-     * loop retries each iteration after pe_progress drains completions.
-     * The DPU is the only authority that can free a host's TX slot, so we
-     * never drop a TX_ACK — deferring keeps the contract intact. */
-    deferred_tx_ack_t deferred_tx_acks[MAX_DEFERRED_TX_ACK];
-    int num_deferred_tx_acks;
-
     /* ====== In-flight counters for DOCA task pools ======
      * Mirror DOCA's internal task pool usage so submits can be gated
      * BEFORE calling doca_task_submit, avoiding DOCA_ERROR_AGAIN entirely.
@@ -565,34 +491,13 @@ struct objects {
      * submits may come from other threads (e.g. host worker threads). */
     atomic_int send_tasks_in_flight;   /* comch send task pool (server or client) */
     int        send_tasks_max;          /* CC_SEND_TASK_NUM */
-    atomic_int recv_tasks_in_flight;   /* comch consumer post_recv task pool */
-    int        recv_tasks_max;          /* CC_DATA_PATH_TASK_NUM */
 
-    /* Rare-case retry list: consumer recv tasks whose gated submit still
-     * failed (e.g. transient ctx state). Drained from main PE loop. */
-    struct doca_task *consumer_retry[MAX_CONSUMER_RETRY];
-    int num_consumer_retry;
-    pthread_mutex_t consumer_retry_lock;
-    int consumer_retry_lock_initialized;
-
-    int dedicated_workers;       /* A>=2 uses dedicated ARM worker threads */
     int main_wake_fd;
     atomic_int main_parked;
 
     int n_data_workers;                         /* A */
-    int worker_shared_routing;                  /* shared state with lock */
     struct dpu_data_worker data_workers[MAX_ARM_WORKERS];
-    pthread_mutex_t routing_lock;
-
 };
-
-/* A=1 completion queue used by the main thread. */
-static inline int completion_push(struct objects *objs, const dpu_comp_entry_t *e) {
-    return comp_queue_enqueue(&objs->comp_queue, e);
-}
-static inline uint32_t completion_usage(struct objects *objs) {
-    return comp_queue_usage(&objs->comp_queue);
-}
 
 /* ====== Task-pool helpers ======
  * Acquire/release a slot in an atomic in-flight counter. Acquire may fail
@@ -606,27 +511,12 @@ static inline int doca_pool_try_acquire(atomic_int *cnt, int max) {
     }
     return 1;
 }
-/* Race-free variant for callers known to be single-threaded (e.g. recv
- * completion → resubmit on the PE thread). Checks against the true pool
- * max without the concurrent-submitter margin, so a bootstrap that filled
- * the pool to `max` can round-trip every released slot back in. */
-static inline int doca_pool_try_acquire_exact(atomic_int *cnt, int max) {
-    int new_count = atomic_fetch_add(cnt, 1) + 1;
-    if (new_count > max) {
-        atomic_fetch_sub(cnt, 1);
-        return 0;
-    }
-    return 1;
-}
 static inline void doca_pool_release(atomic_int *cnt) {
     atomic_fetch_sub(cnt, 1);
 }
 
-/* Progress the control and consumer PEs during send retry loops. */
-static inline void progress_all_pes(struct objects *objs) {
+static inline void progress_control_pe(struct objects *objs) {
     doca_pe_progress(objs->pe);
-    if (objs->consumer_pe)
-        doca_pe_progress(objs->consumer_pe);
 }
 
 void
@@ -640,11 +530,5 @@ cleanup_comch_object(struct objects *objs);
 /* Prime task-pool counters (call once from control-path init). */
 void
 objects_init_task_pools(struct objects *objs);
-
-/* Drain consumer_retry list: try gated-submit each stashed task.
- * Safe to call from any thread that progresses the consumer PE.
- * Returns number of tasks successfully submitted. */
-int
-objects_drain_consumer_retry(struct objects *objs);
 
 #endif // OBJECT_H_

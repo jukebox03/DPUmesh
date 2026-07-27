@@ -52,9 +52,8 @@ topology explicit:
 
 ```sh
 DPUMESH_DPA_THREADS=16 \
-DPUMESH_ARM_WORKERS=2 \
-DPUMESH_RINGS_PER_POD=2 \
-DPUMESH_ARM_PIN=1 \
+DPUMESH_ARM_WORKERS=8 \
+DPUMESH_RINGS_PER_POD=8 \
 DPUMESH_PROXY_L7_SVC=16 \
 DPUMESH_LOG_LEVEL=40 \
 ./bench/bench.sh deploy
@@ -66,10 +65,6 @@ pinning. A bare `deploy` is valid for functional work but selects one ARM data
 worker. The live DPU process environment, not the invoking shell, is the
 measurement authority.
 
-`DPUMESH_DEPLOY_REUSE_ARTIFACTS=1` skips build and image import while still
-restarting the DPU and every pod. Use it only when source and image inputs are
-unchanged.
-
 The configuration above keeps benchmark service 11 connection-pinned L4 while
 enabling L7 framing only for stream validator service 16. To exercise
 per-message LB on the native request/reply benchmark too, enable both services:
@@ -77,9 +72,8 @@ per-message LB on the native request/reply benchmark too, enable both services:
 ```sh
 DPUMESH_PROXY_L7_SVC=11,16 \
 DPUMESH_DPA_THREADS=16 \
-DPUMESH_ARM_WORKERS=2 \
-DPUMESH_RINGS_PER_POD=2 \
-DPUMESH_ARM_PIN=1 \
+DPUMESH_ARM_WORKERS=8 \
+DPUMESH_RINGS_PER_POD=8 \
 ./bench/bench.sh deploy
 ```
 
@@ -144,15 +138,9 @@ The L4 headline comparison uses `fair`: one application core for each transport;
 for Envoy, the sidecar shares the assigned pod budget. DPU CPU is measured
 separately and must not be hidden when comparing total CPU/request.
 
-Native ABI 4 commits a loop-pass burst, automatically submits complete transport
-units, and flushes the trailing partial once. The `batch` control argument is
-accepted only for wire compatibility and is ignored. Unsupported batching
-ablation scripts exit without producing results.
-
-Here batching means adjacent posts share descriptor payloads in the polled DPA
-ring. It does not mean that a whole loop pass becomes one syscall or one control
-doorbell. Applications choose protocol/latency flush boundaries and do not choose
-the 8 KiB physical unit.
+Native ABI 4 automatically submits complete 8 KiB transport units. Applications
+use `dmesh_flush()` at protocol or latency boundaries for a trailing partial
+unit.
 
 The native echo server is also the reference event-driven backpressure pattern.
 It registers one native EQ fd with epoll, blocks without a timeout, and drains the

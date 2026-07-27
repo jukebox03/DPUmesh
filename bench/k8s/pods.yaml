@@ -212,7 +212,6 @@ spec:
         - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
         - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
         - { name: DPUMESH_SERVICE, value: "loopback-dpumesh" }
-        - { name: DPUMESH_ARENA_SLOTS, value: "${DPUMESH_ARENA_SLOTS}" }
         securityContext: { privileged: true }
         volumeMounts:
         - { mountPath: /dev/infiniband, name: infiniband }
@@ -251,7 +250,6 @@ spec:
         - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
         - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
         - { name: DPUMESH_SERVICE, value: "verbs-dpumesh" }
-        - { name: DPUMESH_ARENA_SLOTS, value: "${DPUMESH_ARENA_SLOTS}" }
         securityContext: { privileged: true }
         volumeMounts:
         - { mountPath: /dev/infiniband, name: infiniband }

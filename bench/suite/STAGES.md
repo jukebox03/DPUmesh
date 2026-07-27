@@ -28,11 +28,10 @@ they do not establish competitive performance.
 
 ### Lifecycle and remote reclaim
 
-The BlueField gRPC smoke ran 30 create/use/destroy rounds, reused server and
-client pod slots, exchanged 60 unary RPCs, and observed `POD_QUIESCED` on both
-sides each round. It also transferred three exact 1 MiB payloads and recovered
-after an unexpected disconnect. This demonstrates bounded graceful reclaim and
-observed liveness recovery. It does not prove memory isolation across arbitrary
+The BlueField gRPC smoke covers 30 create/use/destroy rounds, server and client
+slot reuse, 60 unary RPCs, bilateral `POD_QUIESCED`, three exact 1 MiB payloads,
+and recovery after an unexpected disconnect. This validates graceful reclaim
+and liveness recovery. It does not establish memory isolation after arbitrary
 host failure during in-flight DMA.
 
 ### L4 performance
@@ -69,8 +68,6 @@ A performance point is retained only if:
 - DPA EUs are hardware execution resources and are not interchangeable with ARM
   process CPU percentages.
 - A single repetition is directional evidence, not a stable median.
-- ABI-4 native batching is mandatory; incompatible batching ablations are not
-  regenerated.
 - L4 Envoy `tcp_proxy` is a valid transport baseline but not a measurement of
   HTTP/2 routing, retries, telemetry, or policy cost.
 - The focused gRPC harness is compatible with the official service schema but is

@@ -8,7 +8,6 @@
 #include "common.h"
 #include "object.h"
 #include "comch_common.h"
-#include "comch_consumer.h"
 #include "dpa.h"      /* teardown_pod_dma (DOCA_ARCH_DPU only) */
 #include "dpu_proxy.h"
 
@@ -64,7 +63,7 @@ server_send_msg(struct objects *objs, const char *msg, size_t len)
 	 * progress PE while waiting to make room. */
 	int acq_retry = 0;
 	while (!doca_pool_try_acquire(&objs->send_tasks_in_flight, objs->send_tasks_max)) {
-		progress_all_pes(objs);
+		progress_control_pe(objs);
 		if (++acq_retry > 10000) {
 			DOCA_LOG_ERR("server_send_msg: send pool full after %d PE progresses", acq_retry);
 			return DOCA_ERROR_AGAIN;
@@ -156,7 +155,8 @@ static void server_message_recv_callback(struct doca_comch_event_msg_recv *event
 					int kmax = objs->k_rings > 0 ? objs->k_rings : 1;
 					enum dmesh_pod_init_result init_result =
 						(pod->ring_mmap_count == kmax && pod->remote_mmap != NULL &&
-						 pod->host_rx_mmap != NULL)
+						 pod->host_rx_mmap != NULL &&
+						 pod->rev_ring_mmap_count == kmax)
 							? DMESH_POD_INIT_DPA_FAILED
 							: DMESH_POD_INIT_MMAP_FAILED;
 					(void)server_publish_pod_init_result(objs, pod, init_result);
@@ -173,7 +173,8 @@ static void server_message_recv_callback(struct doca_comch_event_msg_recv *event
 			DOCA_LOG_ERR("Received invalid REGISTER message");
 			return;
 		}
-		int assigned = pods_register(objs, comch_connection, reg->pod_id, reg->service_id);
+		int assigned = pods_register(objs, comch_connection, reg->pod_id,
+		                             reg->service_id);
 		if (assigned >= 0) {
 			/* Reply with the assigned pod_id so the host can address itself.
 			 * Non-blocking send (no PE re-entry from this callback). */
@@ -413,8 +414,8 @@ init_comch_ctrl_path_server(const char *server_name, struct objects *objs, bool 
     /* Config the data_path related events */
 	if (is_fast_path) {
 		result = doca_comch_server_event_consumer_register(objs->cc_server,
-									server_new_consumer_callback,
-									expired_consumer_callback);
+									dmesh_consumer_connected,
+									dmesh_consumer_expired);
 		if (result != DOCA_SUCCESS) {
 			DOCA_LOG_ERR("Failed adding consumer event cb with error = %s", doca_error_get_name(result));
 			goto destroy_server;
@@ -598,46 +599,6 @@ server_flush_pod_init_results(struct objects *objs)
 }
 
 
-/* Send a batched TX_ACK (n (port,seq) entries, 1..BATCH_TXACK_MAX) as one
- * message. Only the first 4 + 4*n bytes are transmitted. DOCA_ERROR_AGAIN if the
- * send pool is full (caller retains the batch). */
-doca_error_t
-server_send_batch_tx_ack_to(struct objects *objs,
-                            struct doca_comch_connection *conn,
-                            const struct dmesh_tx_ack_entry *acks, int n)
-{
-	if (n <= 0)
-		return DOCA_SUCCESS;
-	struct dmesh_batch_tx_ack_msg m;
-	m.type = DMESH_MSG_BATCH_FWD_ACK;
-	m.count = (uint8_t)n;
-	m._pad[0] = m._pad[1] = 0;
-	for (int i = 0; i < n; i++)
-		m.acks[i] = acks[i];
-	size_t wire = 4 + 4u * (size_t)n;   /* header + only the valid entries */
-	return server_send_msg_to_conn(objs, conn, (const char *)&m, wire);
-}
-
-/* Send a batched REV_DONE (n completions, 1..BATCH_REVDONE_MAX) as one message.
- * Only 4 + 16*n bytes are transmitted. AGAIN if the send pool is full (caller
- * retains the batch). Mirrors server_send_batch_tx_ack_to. */
-doca_error_t
-server_send_batch_rev_done_to(struct objects *objs,
-                              struct doca_comch_connection *conn,
-                              const struct dmesh_rev_done_entry *entries, int n)
-{
-	if (n <= 0)
-		return DOCA_SUCCESS;
-	struct dmesh_batch_rev_done_msg m;
-	m.type = DMESH_MSG_BATCH_REV_DONE;
-	m.count = (uint8_t)n;
-	m._pad[0] = m._pad[1] = 0;
-	for (int i = 0; i < n; i++)
-		m.entries[i] = entries[i];
-	size_t wire = 4 + 16u * (size_t)n;   /* header + only the valid entries */
-	return server_send_msg_to_conn(objs, conn, (const char *)&m, wire);
-}
-
 /* ====================================================================
  * Pod connection management
  * ==================================================================== */
@@ -680,6 +641,9 @@ pods_add_connection(struct objects *objs, struct doca_comch_connection *conn)
 	objs->pods[idx].connection = conn;
 	objs->pods[idx].pod_id = -1;  /* not yet registered */
 	objs->pods[idx].service_id = DMESH_SVC_NONE;
+	objs->pods[idx].rev_ring_mmap_count = 0;
+	objs->pods[idx].rev_doorbell_pending_epoch = 0;
+	objs->pods[idx].rev_doorbell_sent_epoch = 0;
 	objs->pods[idx].init_result = DMESH_POD_INIT_PENDING;
 	objs->pods[idx].init_result_sent = 0;
 	objs->pods[idx].dpa_add_expected_mask = 0;
@@ -713,7 +677,8 @@ pod_has_imported_resources(const struct pod_state *pod)
 	if (pod->remote_mmap || pod->host_rx_mmap)
 		return 1;
 	for (int j = 0; j < MAX_EU_PER_POD; j++)
-		if (pod->buf_arrs[j] || pod->ring_mmaps[j])
+		if (pod->buf_arrs[j] || pod->ring_mmaps[j] ||
+		    pod->rev_ring_mmaps[j])
 			return 1;
 	return 0;
 }
@@ -733,8 +698,6 @@ pod_begin_cleanup(struct objects *objs, struct pod_state *pod)
 	if (pod->pod_id >= 0 && pod->pod_id < POD_ID_SPACE)
 		__atomic_store_n(&objs->pod_id_to_slot[pod->pod_id], -1,
 		                 __ATOMIC_RELEASE);
-	pod->txack_batch_n = 0;
-	pod->rev_done_batch_n = 0;
 	pod->cleanup_reply_sent = 0;
 	__atomic_store_n(&pod->cleanup_pending, 1, __ATOMIC_RELEASE);
 #ifdef DOCA_ARCH_DPU
@@ -816,6 +779,18 @@ pod_destroy_imported_resources(struct pod_state *pod)
 			pod->ring_host_addrs[j] = NULL;
 		}
 	}
+	for (int j = 0; j < MAX_EU_PER_POD; j++) {
+		if (pod->rev_ring_mmaps[j] != NULL) {
+			doca_error_t result = doca_mmap_destroy(pod->rev_ring_mmaps[j]);
+			if (result != DOCA_SUCCESS) {
+				DOCA_LOG_ERR("pod %d: reverse ring mmap[%d] reclaim failed: %s",
+				             pod->pod_id, j, doca_error_get_name(result));
+				return 0;
+			}
+			pod->rev_ring_mmaps[j] = NULL;
+			pod->rev_ring_host_addrs[j] = NULL;
+		}
+	}
 	if (pod->remote_mmap != NULL) {
 		doca_error_t result = doca_mmap_destroy(pod->remote_mmap);
 		if (result != DOCA_SUCCESS) {
@@ -859,6 +834,9 @@ server_progress_pod_cleanup(struct objects *objs)
 			continue;
 
 		pod->ring_mmap_count = 0;
+		pod->rev_ring_mmap_count = 0;
+		pod->rev_doorbell_pending_epoch = 0;
+		pod->rev_doorbell_sent_epoch = 0;
 		pod->remote_addr = NULL;
 		pod->remote_buf_size = 0;
 		pod->host_rx_addr = NULL;

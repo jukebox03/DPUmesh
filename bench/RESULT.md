@@ -7052,3 +7052,112 @@ like-for-like loaded comparison.
 
 The concise current-state interpretation, exact aggregates, figures, and
 deployment receipt are in `bench/report/`.
+
+---
+
+# Session 16 — Reverse-ring rev+ack deployment
+
+Date: 2026-07-24 KST.
+
+```text
+N/K/A=16/8/8
+DPUMESH_PROXY_L7_SVC=16
+DPUMESH_LOG_LEVEL=40
+request/reply=8192 B / 8 B
+CPU pinning=fair
+```
+
+## Cleanup before/after
+
+Both configurations use reverse-ring `REV_DONE` and `TX_ACK`. Each value is the
+median of three 15-second runs with 16 connections and 32 outstanding requests
+per connection.
+
+| Metric | Before | After | Change |
+|---|---:|---:|---:|
+| Throughput | 0.4934 Mrps | 0.5024 Mrps | +1.8% |
+| Goodput | 32.34 Gb/s | 32.93 Gb/s | +1.8% |
+| p50 | 1,001 µs | 976 µs | -2.5% |
+| p99 | 1,850 µs | 1,817 µs | -1.8% |
+| Host CPU | 1.34 cores | 1.35 cores | +0.01 cores |
+| Host CPU efficiency | 2.71 cores/Mrps | 2.69 cores/Mrps | -0.7% |
+| DPU ARM CPU | 7.62 cores | 6.98 cores | -8.4% |
+
+One matched ARM balance sample measured the main thread at 70.8% before and
+25.5% after.
+
+## Current workload points
+
+Loaded rows are medians of three 15-second runs with zero failures, drops, and
+reorder.
+
+| Connections × outstanding | Throughput | Goodput | p50 | p99 | Host CPU | DPU ARM | Host cores/Mrps |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 16 × 32 | 0.5024 Mrps | 32.93 Gb/s | 976 µs | 1,817 µs | 1.35 cores | 6.98 cores | 2.69 |
+| 16 × 4 | 0.2071 Mrps | 13.57 Gb/s | 302 µs | 584 µs | 1.55 cores | 7.26 cores | 7.50 |
+| 4 × 16 | 0.1943 Mrps | 12.73 Gb/s | 303 µs | 596 µs | 1.11 cores | 4.04 cores | 5.61 |
+| 1 × 1 | 0.00525 Mrps | 0.344 Gb/s | 172 µs | 432 µs | — | — | — |
+
+## Initial completion-transport A/B
+
+The matched 4-connection, 16-outstanding dataset contains five repetitions per
+configuration.
+
+| Metric | Comch completion | Reverse-ring rev+ack |
+|---|---:|---:|
+| Throughput | 0.2415 Mrps | 0.2224 Mrps |
+| Goodput | 15.83 Gb/s | 14.58 Gb/s |
+| p50 | 241 µs | 272 µs |
+| p99 | 484 µs | 535 µs |
+| Host CPU | 1.43 cores | 1.21 cores |
+| DPU ARM CPU | 4.14 cores | 4.30 cores |
+| Host CPU efficiency | 5.94 cores/Mrps | 5.43 cores/Mrps |
+
+## Final deployment confirmation
+
+The final `N/K/A=16/8/8` deployment produced:
+
+```text
+ARM-balance load:
+0.505223 Mrps, 33.1103 Gb/s, p50 986 µs, p99 1,686 µs
+
+Host-CPU load:
+0.500061 Mrps, 32.7720 Gb/s, p50 982 µs, p99 1,916 µs
+host 1.328 cores, DPU ARM 6.999 cores
+```
+
+ARM placement during the confirmation load:
+
+| Thread | Pinned core | Core utilization |
+|---|---:|---:|
+| Main | 8 | 25.9% |
+| Worker 0 | 0 | 86.4% |
+| Worker 1 | 1 | 85.5% |
+| Worker 2 | 2 | 84.3% |
+| Worker 3 | 3 | 88.3% |
+| Worker 4 | 4 | 85.0% |
+| Worker 5 | 5 | 81.5% |
+| Worker 6 | 6 | 83.1% |
+| Worker 7 | 7 | 84.1% |
+
+Worker utilization averaged 84.8%, ranged from 81.5% to 88.3%, and had a 2.3%
+coefficient of variation. Total DPU process utilization was 7.05 cores.
+
+Idle measurement:
+
+```text
+host client and three backends: 0.00 cores
+DPU ARM process: 0.15 cores
+```
+
+## Validation
+
+| Validator | Result | Latency |
+|---|---:|---:|
+| Native loopback | 10,000/10,000 | p50 230.6 µs |
+| Verbs facade | 10,000/10,000 | p50 148.4 µs |
+| Framed L7 stream | 5,000/5,000, 41,040,000 bytes | p50 231.0 µs |
+| POSIX preload | 3,000/3,000 over 8 connections | p50/p99 155/508 µs |
+
+The host contract suite, DPU build, full deployment, and runtime log check
+completed without test failures or DPU runtime errors.

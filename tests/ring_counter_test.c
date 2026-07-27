@@ -115,11 +115,43 @@ test_concurrent_wrap(void)
     free(s);
 }
 
+static int
+reverse_entry_ready(const struct dmesh_rev_ring_entry *entries,
+                    uint32_t size, uint64_t ticket)
+{
+    const struct dmesh_rev_ring_entry *entry = &entries[ticket % size];
+    return __atomic_load_n(&entry->publish_seq, __ATOMIC_ACQUIRE) ==
+           ticket + 1u;
+}
+
+static void
+test_reverse_generation_wrap(void)
+{
+    enum { SIZE = 8 };
+    struct dmesh_rev_ring_entry entries[SIZE] = { 0 };
+
+    for (uint64_t ticket = 0; ticket < SIZE; ticket++) {
+        entries[ticket].kind = DMESH_REV_ENTRY_TX_ACK;
+        entries[ticket].payload.ack.seq = (uint16_t)ticket;
+        __atomic_store_n(&entries[ticket].publish_seq, ticket + 1u,
+                         __ATOMIC_RELEASE);
+        assert(reverse_entry_ready(entries, SIZE, ticket));
+    }
+
+    assert(!reverse_entry_ready(entries, SIZE, SIZE));
+    entries[0].payload.ack.seq = SIZE;
+    __atomic_store_n(&entries[0].publish_seq, SIZE + 1u,
+                     __ATOMIC_RELEASE);
+    assert(reverse_entry_ready(entries, SIZE, SIZE));
+    assert(entries[0].payload.ack.seq == SIZE);
+}
+
 int
 main(void)
 {
     test_out_of_order_prefix();
     test_concurrent_wrap();
+    test_reverse_generation_wrap();
     puts("ring_counter_test: PASS");
     return 0;
 }

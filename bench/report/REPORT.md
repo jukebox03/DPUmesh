@@ -1,114 +1,92 @@
 # Current DPUmesh Evaluation
 
-This report covers the connection-affine ARM data path measured on
-2026-07-24 KST.
+Measurements were collected on 2026-07-24 KST with the deployment in
+[DEPLOY.md](DEPLOY.md).
 
 ## Implementation
 
 ```text
-connection port
-      │
-      ▼
-forward ring (port % K)
-      │
-      ▼
-DPA EU (EU % A == ring % A)
-      │
-      ▼
-ARM worker (port % A)
-  {connection table, parser, route/LB, SG-DMA}
-      │
-      ▼
-main Comch emitter
+host forward ring
+        │
+        ▼
+      DPA EU
+        │
+        ▼
+ARM worker (connection owner)
+  connection · route/LB · SG-DMA · DMA completion
+        │
+        ▼
+host reverse ring (REV_DONE / TX_ACK)
+        │
+        ▼
+host PE progress thread
+
+DPU main: lifecycle control and armed-host doorbells
 ```
 
-`N`, `K`, and `A` denote DPA EUs, forward rings per pod, and ARM data workers.
-`A` divides `K` and `N`, and `K ≤ N`. Each connection remains on
-one ARM worker. DPU-created upstream ports preserve the same owner on replies.
+The deployed topology is `N/K/A=16/8/8`. A connection is assigned by
+`port % A`. Each worker owns its connection state, DPA completion PE, SG-DMA
+engine, DMA completion callbacks, and reverse-ring producers. The main thread
+does not process payload completions.
 
-The forward ring is a bounded MPSC queue. The host publishes each 64-byte
-descriptor with its monotonic ticket generation. The DPA consumes consecutive
-generations, drains up to 32 descriptors per ring and round, and publishes one
-shared `consumer_head` after progress. A round uses one read-window invalidation
-and one writeback. DMA completion submission uses `FLUSH`.
+Reverse entries use monotonic `publish_seq`. The host publishes one
+`consumer_head` after a drain and one `arm_epoch` before blocking. A newly
+observed armed epoch produces one Comch doorbell.
 
-L4 pins a connection to one backend. Services in `DPUMESH_PROXY_L7_SVC` select a
-ready backend for each complete frame while retaining the connection table on
-its owner worker. The main thread owns Comch sends and pod lifecycle control.
+## 8 KiB request / 8 B reply
 
-## Forward DMA ring
+The client used one pinned host core. Each loaded row is the median of three
+15-second samples with zero failures, drops, and reorder.
 
-The deployed `N/K/A=16/2/2` configuration produced these three-run medians with
-four client connections:
+| Connections × outstanding | Throughput | p50 | p99 | Host CPU | DPU ARM | Host cores/Mrps |
+|---:|---:|---:|---:|---:|---:|---:|
+| 16 × 32 | 0.5024 Mrps / 32.93 Gb/s | 976 µs | 1,817 µs | 1.35 cores | 6.98 cores | 2.69 |
+| 16 × 4 | 0.2071 Mrps / 13.57 Gb/s | 302 µs | 584 µs | 1.55 cores | 7.26 cores | 7.50 |
+| 4 × 16 | 0.1943 Mrps / 12.73 Gb/s | 303 µs | 596 µs | 1.11 cores | 4.04 cores | 5.61 |
+| 1 × 1 | 0.00525 Mrps / 0.344 Gb/s | 172 µs | 432 µs | — | — | — |
 
-| Request / reply | Throughput | p50 |
-|---|---:|---:|
-| 1 KiB / 1 KiB, concurrency 32/connection | 0.653 Mrps | 181 µs |
-| 8 KiB / 8 B, concurrency 16/connection | 15.74 Gb/s | 245 µs |
+At 16 × 32, `512 / 0.5024 Mrps = 1.02 ms`. At 16 × 4,
+`64 / 0.2071 Mrps = 309 µs`; at 4 × 16, `64 / 0.1943 Mrps = 329 µs`.
+Loaded latency tracks the closed-loop queue depth. The single-outstanding p50 is
+172 µs.
 
-## ARM and connection scaling
+## DPU thread placement
 
-The ARM sweep used `N=16`, `K=4`, four persistent connections, two host client
-cores, and zero failures, drops, or transport reorder.
+The 512-outstanding sample used:
 
-| Request / reply | A=1 | A=2 | A=4 |
-|---|---:|---:|---:|
-| 1 KiB / 1 KiB, concurrency 32/connection | 0.504 Mrps | 0.619 Mrps | 0.628 Mrps |
-| 8 KiB / 8 B, concurrency 16/connection | 5.59 Gb/s | 12.69 Gb/s | 16.29 Gb/s |
+| Thread set | CPU |
+|---|---:|
+| Main, pinned to core 8 | 25.5% |
+| Workers, pinned to cores 0–7 | 84.7% average |
+| Worker range | 80.3–87.1% |
+| Worker coefficient of variation | 2.5% |
+| Total process | 7.04 cores |
 
-The connection sweep used `N/K/A=16/4/4`.
+The eight workers are balanced and reach higher utilization than the main
+thread.
 
-| Request / reply | 1 connection | 2 connections | 4 connections |
-|---|---:|---:|---:|
-| 1 KiB / 1 KiB, concurrency 32/connection | 0.182 Mrps | 0.352 Mrps | 0.628 Mrps |
-| 8 KiB / 8 B, concurrency 16/connection | 5.51 Gb/s | 10.36 Gb/s | 16.29 Gb/s |
+## Host CPU
 
-Current `N/K/A=16/2/2` 1 KiB scaling:
+The 512-outstanding point used 0.68 client cores and 0.67 server cores, summed
+across the three backend processes. Host efficiency was 2.69 cores/Mrps.
 
-| Host cores | Connections | Throughput |
-|---:|---:|---:|
-| 1 | 1 | 0.183 Mrps |
-| 1 | 2 | 0.347 Mrps |
-| 1 | 4 | 0.653 Mrps |
-| 2 | 4 | 0.664 Mrps |
-| 2 | 8 | 1.105 Mrps |
-
-At the 8 KiB saturation point, the main thread used 92.1% of one ARM core. The
-two data workers used 94.8% and 94.6%; worker CPU CV was 0.1%.
-
-## Load balancing
-
-The L7 hardware check used `N/K/A=16/2/2`, one client connection, three ready
-backends, and 1,548,486 completed replies. Backend counts were
-516,329 / 516,329 / 516,328, with zero failure and drop. The connection remained
-on one ARM owner. Application request IDs recorded 1,479,259 out-of-order
-completions because independent backends complete frames independently.
+With no workload, the measured client and backend processes used 0.00 host
+cores. The DPU process used 0.15 ARM cores.
 
 ## Validation
 
-The deployed implementation passed:
+The deployed topology passed:
 
-- 10,000-operation 8 KiB native loopback and verbs validation;
-- 3,000-operation preload validation with eight connections;
-- 5,000-frame 8 KiB L7 stream validation;
-- reconnect validation with about 36,000 reconnects;
-- 128 KiB and 1 MiB L4 logical-frame transfers;
-- host unit, ABI, preload, LB, queue, and topology tests.
+- native loopback: 10,000/10,000, p50 230.6 µs;
+- verbs facade: 10,000/10,000, p50 148.4 µs;
+- framed L7 stream: 5,000/5,000, p50 231.0 µs;
+- preload: 3,000/3,000 over eight connections, p50/p99 155/508 µs;
+- host unit, queue, topology, ring-counter, and ABI tests.
 
-## Operational constraints
+## Constraints
 
-- One connection uses one ARM data worker. Additional workers require
-  connections whose ports cover additional values modulo `A`.
-- `K` bounds per-pod ring parallelism; `N` distributes rings across pods.
-- `A` divides `K` and `N`; `K` does not exceed `N`.
-- Strict application reply order uses L4 connection pinning or application-level
-  stream IDs and reordering.
-- The main Comch emitter is shared by all ARM data workers and is saturated in
-  the measured 8 KiB configuration.
-- Automatic DPA selection uses up to 16 EUs; explicit configuration supports up
-  to 32.
-
-Raw rows are in
-[`data/rtc_scaling_2026-07-24.csv`](data/rtc_scaling_2026-07-24.csv) and
-[`data/dma_ring_2026-07-24.csv`](data/dma_ring_2026-07-24.csv). The reference
-deployment is in [DEPLOY.md](DEPLOY.md).
+- One connection uses one ARM data worker.
+- Connections must cover distinct values modulo `A` to use additional workers.
+- `A` divides `K` and `N`; `K ≤ N`.
+- L4 keeps one backend per connection.
+- Framed L7 may select a backend per frame.

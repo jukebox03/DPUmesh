@@ -12,7 +12,6 @@
 #include "dpa_common.h"
 #include "comch_common.h"
 #include "dpu_worker.h"
-#include "comch_consumer.h"
 #include <dpumesh/dmesh_common.h>
 #include <dpumesh/dmesh_topology.h>
 #include "ring.h"
@@ -64,17 +63,11 @@ static void dmesh_doca_dpa_msgq_recv_cb(struct doca_comch_consumer_task_post_rec
 	struct objects *objs = ctx_user_data.ptr;
 	struct doca_task *task = doca_comch_consumer_task_post_recv_as_task(recv_task);
 
-    /* Route completions to the current ARM worker. */
-    dpu_comp_queue_t *q = &objs->comp_queue;
-    struct doca_task **defrecv = objs->deferred_recv;
-    int *ndef = &objs->num_deferred_recv;
-    if (objs->n_data_workers >= 2) {
-        struct dpu_data_worker *worker_state =
-            &objs->data_workers[dpu_worker_id];
-        q = &worker_state->queue;
-        defrecv = worker_state->deferred_recv;
-        ndef = &worker_state->num_deferred_recv;
-    }
+    struct dpu_data_worker *worker_state =
+        &objs->data_workers[dpu_worker_id];
+    dpu_comp_queue_t *q = &worker_state->queue;
+    struct doca_task **defrecv = worker_state->deferred_recv;
+    int *ndef = &worker_state->num_deferred_recv;
 
     data_len = doca_comch_consumer_task_post_recv_get_imm_data_len(recv_task);
 
@@ -129,9 +122,7 @@ static void dmesh_doca_dpa_msgq_recv_cb(struct doca_comch_consumer_task_post_rec
             uint32_t payload_len = comp_msg->length;
             uint32_t body_offset = comp_msg->pos;
 
-            /* Enqueue for deferred processing in main loop.
-             * TX_ACK + SG-DMA egress routing handled there — never send
-             * from inside this callback (re-entrant PE corruption risk). */
+            /* Publish the completion to the owning data worker. */
             dpu_comp_entry_t entry;
             entry.src_pod_id = src_pod_id;
             entry.dst_pod_id = dst_pod_id;

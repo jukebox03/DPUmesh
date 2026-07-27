@@ -152,7 +152,7 @@ void dpumesh_rx_free(dpumesh_ctx_t *ctx, int slot);
 /* Per-connection TX byte-ring lifecycle: reserve, fill, commit, select, enqueue,
  * and mark sent. Reserve is nonblocking and arms TX_READY on EAGAIN. Selection
  * returns full units unless flush_partial is set or block-ordering requires a
- * sealed tail. BATCH_FWD_ACK reclaims sent units by sequence. */
+ * sealed tail. TX_ACK reclaims sent units by sequence. */
 uint8_t *dpumesh_tx_reserve(dpumesh_ctx_t *ctx, uint16_t port, uint32_t len);
 int      dpumesh_tx_commit(dpumesh_ctx_t *ctx, uint16_t port,
                            const void *buf, uint32_t len);

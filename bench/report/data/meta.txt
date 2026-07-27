@@ -15,7 +15,6 @@ dpu        live /proc/<dpumesh_dpu>/environ + binary sha256:
     pid=1990068 etimes=173s
     DPUMESH_SHARD_SHARED=
     DPUMESH_INGEST_SHARDS=4
-    DPUMESH_DIAG=
     DPUMESH_SHARD_HOST_EMIT=
     DPUMESH_RINGS_PER_POD=2
     DPUMESH_ARM_EGRESS_THREADS=4

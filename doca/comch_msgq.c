@@ -26,7 +26,7 @@ init_comch_dpa_msgq(struct objects *objs, struct doca_pe *pe)
 			return result;
 		}
 
-		struct doca_pe *chan_pe = (nb >= 2 && objs->consumer_pes[k % nb])
+		struct doca_pe *chan_pe = (nb >= 1 && objs->consumer_pes[k % nb])
 		                          ? objs->consumer_pes[k % nb] : pe;
 		struct dmesh_doca_dpa_msgq_create_attr msgq_attr = {
 			.dev = objs->dev,

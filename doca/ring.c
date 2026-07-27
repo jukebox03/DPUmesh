@@ -58,3 +58,33 @@ int setup_dma_ring(struct objects *objs, size_t size, struct dma_ring **out_ring
     }
     return 0;
 }
+
+int setup_rev_ring(struct objects *objs, struct rev_ring **out_ring)
+{
+    struct rev_ring *ring = (struct rev_ring *)calloc(1, sizeof(*ring));
+    if (!ring)
+        return DOCA_ERROR_NO_MEMORY;
+
+    ring->size = DMA_REV_RING_SIZE;
+    doca_error_t result = alloc_buffer_and_set_mmap(
+        &ring->mmap, objs->dev, (void **)&ring->entries,
+        DMA_REV_RING_BYTES, DOCA_ACCESS_FLAG_PCI_READ_WRITE);
+    if (result != DOCA_SUCCESS) {
+        free(ring);
+        return result;
+    }
+    memset(ring->entries, 0, DMA_REV_RING_BYTES);
+    ring->ctrl = (struct dmesh_rev_ring_ctrl *)
+        ((uint8_t *)ring->entries +
+         (size_t)ring->size * sizeof(*ring->entries));
+
+    result = export_mmap_to_remote(objs, ring->mmap, ring->entries,
+                                   DMA_REV_RING_BYTES, DMA_REV_RING);
+    if (result != DOCA_SUCCESS) {
+        destroy_mmap_and_free_buffer(ring->mmap, ring->entries);
+        free(ring);
+        return result;
+    }
+    *out_ring = ring;
+    return DOCA_SUCCESS;
+}

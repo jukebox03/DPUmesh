@@ -5,7 +5,7 @@
 #include <doca_comch.h>
 #include <doca_ctx.h>
 
-#include "comch_common.h"  /* dmesh_rev_done_entry for server_send_batch_rev_done_to */
+#include "comch_common.h"
 
 struct objects; /* Forward declaration */
 struct pod_state;
@@ -41,18 +41,6 @@ server_flush_pod_init_results(struct objects *objs);
 int
 server_progress_pod_cleanup(struct objects *objs);
 
-
-/* Batched TX_ACK: coalesce n (port,seq) entries into one message. */
-doca_error_t
-server_send_batch_tx_ack_to(struct objects *objs,
-							struct doca_comch_connection *conn,
-							const struct dmesh_tx_ack_entry *acks, int n);
-
-/* Batched REV_DONE: coalesce n reverse-DMA completions into one message. */
-doca_error_t
-server_send_batch_rev_done_to(struct objects *objs,
-							  struct doca_comch_connection *conn,
-							  const struct dmesh_rev_done_entry *entries, int n);
 
 /* Find a pod by pod_id. Returns NULL if not found. */
 struct pod_state *

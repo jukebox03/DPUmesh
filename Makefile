@@ -35,7 +35,6 @@ LIB_SRCS := \
 	doca/comch_common.c \
 	doca/comch_client.c \
 	doca/comch_server.c \
-	doca/comch_consumer.c \
 	doca/comch_msgq.c \
 	doca/dpa.c
 LIB_HDRS := $(shell rg --files include src doca -g '*.h')

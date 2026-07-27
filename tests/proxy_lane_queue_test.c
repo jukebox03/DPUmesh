@@ -7,24 +7,17 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* White-box stress coverage for the production worker->egress publication queue.
- * Function-section GC discards the hardware paths from the included source. */
+/* White-box stress coverage for worker lane publication. */
 #include "../doca/dpu_proxy.c"
 
 #define PRODUCERS 2
 #define PER_PRODUCER 20000
+#define TEST_REGION 2
 
 struct producer_arg {
     struct dmesh_proxy *px;
     struct px_unit *units;
     int id;
-    atomic_int *done;
-};
-
-struct done_producer_arg {
-    struct px_engine *eng;
-    struct px_unit *units;
-    int count;
     atomic_int *done;
 };
 
@@ -37,26 +30,11 @@ static void *producer_main(void *opaque)
         memset(u, 0, sizeof(*u));
         u->src_pod_id = (int8_t)a->id;
         u->seq = (uint16_t)(i + 1);
-        px_lane_enqueue(a->px, 0, 0, u);
+        px_lane_enqueue(a->px, 0, TEST_REGION, u);
         if ((i & 127) == 0)
             sched_yield();
     }
     atomic_fetch_add_explicit(a->done, 1, memory_order_release);
-    return NULL;
-}
-
-static void *done_producer_main(void *opaque)
-{
-    struct done_producer_arg *a = (struct done_producer_arg *)opaque;
-    for (int i = 0; i < a->count; i++) {
-        struct px_unit *u = &a->units[i];
-        memset(u, 0, sizeof(*u));
-        u->dst_pod_idx = 0;
-        u->seq = (uint16_t)(i + 1);
-        while (!px_done_publish(a->eng, u, u, 0, 1))
-            sched_yield();
-    }
-    atomic_store_explicit(a->done, 1, memory_order_release);
     return NULL;
 }
 
@@ -139,7 +117,7 @@ int main(void)
     incompatible.npieces = 0;
     assert(!px_l7_unit_absorb(px, &merged, &incompatible));
 
-    px->n_eng = 2;
+    px->n_eng = 3;
     px->n_workers = PRODUCERS;
     for (int s = 0; s < PRODUCERS; s++)
         px->workers[s].id = s;
@@ -156,7 +134,7 @@ int main(void)
         assert(pthread_create(&tids[s], NULL, producer_main, &args[s]) == 0);
     }
 
-    struct px_lane *ln = &px->lanes[0][0];
+    struct px_lane *ln = &px->lanes[0][TEST_REGION];
     uint32_t last[PRODUCERS] = {0};
     int consumed = 0;
     while (consumed < PRODUCERS * PER_PRODUCER) {
@@ -185,7 +163,7 @@ int main(void)
            PRODUCERS * PER_PRODUCER);
 
     /* Same-owner FIFO and cross-owner inbox. */
-    px->run_to_completion = 1;
+    px->n_eng = 2;
     px_cur_worker = &px->workers[0];
     struct px_unit local_unit, remote_unit;
     memset(&local_unit, 0, sizeof(local_unit));
@@ -203,87 +181,49 @@ int main(void)
     assert(px_lane_splice_inbox(px, remote_lane));
     assert(remote_lane->qhead == &remote_unit && remote_lane->qtail == &remote_unit);
     remote_lane->qhead = remote_lane->qtail = NULL;
-    px->run_to_completion = 0;
-
-    /* Worker-to-main SPSC completion ring. */
     struct objects *objs = calloc(1, sizeof(*objs));
     assert(objs != NULL);
     objs->proxy = px;
     struct px_engine *eng = &px->engines[0];
     eng->objs = objs;
-    atomic_init(&eng->done_prod, 0);
-    atomic_init(&eng->done_cons, 0);
-    enum { DONE_UNITS = 20000 };
-    struct px_unit *done_units = calloc(DONE_UNITS, sizeof(*done_units));
-    assert(done_units != NULL);
-    atomic_int done_published;
-    atomic_init(&done_published, 0);
-    struct done_producer_arg done_arg = {
-        .eng = eng,
-        .units = done_units,
-        .count = DONE_UNITS,
-        .done = &done_published,
-    };
-    pthread_t done_tid;
-    assert(pthread_create(&done_tid, NULL, done_producer_main, &done_arg) == 0);
-
-    int done_consumed = 0;
-    while (done_consumed < DONE_UNITS) {
-        (void)px_done_pull(eng);
-        while (eng->emit_head) {
-            struct px_unit *u = eng->emit_head;
-            eng->emit_head = u->next;
-            if (!eng->emit_head)
-                eng->emit_tail = NULL;
-            assert(u->seq == (uint16_t)(done_consumed + 1));
-            __atomic_fetch_sub(&objs->pods[0].egress_pending_emit, 1,
-                               __ATOMIC_ACQ_REL);
-            done_consumed++;
-        }
-        if (!atomic_load_explicit(&done_published, memory_order_acquire))
-            sched_yield();
-    }
-    pthread_join(done_tid, NULL);
-    assert(atomic_load_explicit(&eng->done_prod, memory_order_acquire) ==
-           atomic_load_explicit(&eng->done_cons, memory_order_acquire));
-    assert(__atomic_load_n(&objs->pods[0].egress_pending_emit,
-                           __ATOMIC_ACQUIRE) == 0);
-    free(done_units);
 
     /* Coalesced worker wake. */
-    eng->threaded = 1;
-    eng->wake_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-    assert(eng->wake_fd >= 0);
-    atomic_init(&eng->parked, 1);
-    atomic_init(&eng->stat_wakes, 0);
-    atomic_init(&eng->stat_wake_errors, 0);
+    objs->n_data_workers = 2;
+    eng->objs = objs;
+    eng->id = 0;
+    objs->data_workers[0].wake_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    assert(objs->data_workers[0].wake_fd >= 0);
+    atomic_init(&objs->data_workers[0].parked, 1);
     px_engine_wake(eng);
     px_engine_wake(eng);
     uint64_t wakes = 0;
-    assert(read(eng->wake_fd, &wakes, sizeof(wakes)) == (ssize_t)sizeof(wakes));
+    assert(read(objs->data_workers[0].wake_fd, &wakes, sizeof(wakes)) ==
+           (ssize_t)sizeof(wakes));
     assert(wakes == 1);
-    assert(atomic_load_explicit(&eng->parked, memory_order_acquire) == 0);
-    assert(atomic_load_explicit(&eng->stat_wakes, memory_order_relaxed) == 1);
-    assert(atomic_load_explicit(&eng->stat_wake_errors,
-                                memory_order_relaxed) == 0);
-    close(eng->wake_fd);
-    eng->wake_fd = -1;
+    assert(atomic_load_explicit(&objs->data_workers[0].parked,
+                                memory_order_acquire) == 0);
+    close(objs->data_workers[0].wake_fd);
+    objs->data_workers[0].wake_fd = -1;
 
     /* Owner-selective wake and shared-pool waiter mask. */
     struct px_engine *eng0 = &px->engines[0];
     struct px_engine *eng1 = &px->engines[1];
-    eng0->threaded = eng1->threaded = 1;
-    eng0->wake_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-    eng1->wake_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-    assert(eng0->wake_fd >= 0 && eng1->wake_fd >= 0);
-    atomic_store_explicit(&eng0->parked, 1, memory_order_release);
-    atomic_init(&eng1->parked, 1);
-    atomic_init(&eng1->stat_wakes, 0);
-    atomic_init(&eng1->stat_wake_errors, 0);
+    eng0->objs = eng1->objs = objs;
+    eng0->id = 0;
+    eng1->id = 1;
+    objs->data_workers[0].wake_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    objs->data_workers[1].wake_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    assert(objs->data_workers[0].wake_fd >= 0 &&
+           objs->data_workers[1].wake_fd >= 0);
+    atomic_store_explicit(&objs->data_workers[0].parked, 1,
+                          memory_order_release);
+    atomic_init(&objs->data_workers[1].parked, 1);
     px_wake_workers(px, 1u << 1);
     errno = 0;
-    assert(read(eng0->wake_fd, &wakes, sizeof(wakes)) == -1 && errno == EAGAIN);
-    assert(read(eng1->wake_fd, &wakes, sizeof(wakes)) == (ssize_t)sizeof(wakes));
+    assert(read(objs->data_workers[0].wake_fd, &wakes, sizeof(wakes)) == -1 &&
+           errno == EAGAIN);
+    assert(read(objs->data_workers[1].wake_fd, &wakes, sizeof(wakes)) ==
+           (ssize_t)sizeof(wakes));
     assert(wakes == 1);
 
     atomic_store_explicit(&px->pool_waiters, 0, memory_order_relaxed);
@@ -291,9 +231,8 @@ int main(void)
     px_pool_mark_waiter(px);
     assert(atomic_exchange_explicit(&px->pool_waiters, 0,
                                     memory_order_acq_rel) == 1u);
-    close(eng0->wake_fd);
-    close(eng1->wake_fd);
-    eng0->wake_fd = eng1->wake_fd = -1;
+    close(objs->data_workers[0].wake_fd);
+    close(objs->data_workers[1].wake_fd);
 
     pthread_mutex_destroy(&px->pool_lock);
     free(objs);

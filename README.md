@@ -32,11 +32,9 @@ The native send path batches by default. `dmesh_alloc()` reserves registered
 bytes and `dmesh_post_send()` commits them into one ordered stream. A post
 automatically submits every newly complete transport batch; `dmesh_flush()`
 forces only the newest partial batch. The physical unit is an internal data-plane
-choice, not an application tuning parameter. A future one-shot batching timer may
-bound partial-batch latency; ABI 4 currently relies on flush or graceful close for
-that tail, while abort discards it. Native publication writes a shared descriptor
-ring that the DPA already polls; it is not a socket syscall or a per-flush control
-message.
+choice, not an application tuning parameter. Graceful close flushes the trailing
+partial unit; abort discards it. Native publication writes the shared descriptor
+ring polled by the DPA.
 
 Every public QP is one full-duplex byte stream. Optional DPU L7 framing is an
 internal routing policy and does not expose backend or stream ids through native
@@ -110,17 +108,17 @@ bring-up path rebuilds and deploys both sides together:
 
 ```sh
 DPUMESH_DPA_THREADS=16 \
-DPUMESH_ARM_WORKERS=2 \
-DPUMESH_RINGS_PER_POD=2 \
-DPUMESH_ARM_PIN=1 \
+DPUMESH_ARM_WORKERS=8 \
+DPUMESH_RINGS_PER_POD=8 \
 ./bench/bench.sh deploy
 ./bench/bench.sh latency both
 ```
 
-A bare deploy selects one ARM data worker. With `A>=2`, each worker owns its DPA
-consumer PE, connection and conntrack state, parser/routing state, and matching
-SG-DMA engine. `K` and `N` must be multiples of `A`; an incompatible requested
-worker count is reduced at startup and reported in the DPU log.
+A bare deploy selects one ARM data worker. Each worker owns its DPA consumer PE,
+connection and conntrack state, parser/routing state, SG-DMA engine, completion
+callbacks, and reverse-ring producers. `K` and `N` must be multiples of `A`; an
+incompatible requested worker count is reduced at startup and reported in the
+DPU log.
 
 `DPUMESH_DPA_THREADS` accepts up to 32 EUs; automatic selection uses up to 16.
 `DPUMESH_ARM_WORKERS` sets the number of ARM data workers.

@@ -12,6 +12,26 @@
 #include <dpumesh/dmesh_common.h>
 DOCA_LOG_REGISTER(COMCH_COMMON);
 
+void
+dmesh_consumer_connected(struct doca_comch_event_consumer *event,
+                         struct doca_comch_connection *connection,
+                         uint32_t id)
+{
+	(void)event;
+	(void)connection;
+	DOCA_LOG_INFO("Remote consumer connected: id=%u", id);
+}
+
+void
+dmesh_consumer_expired(struct doca_comch_event_consumer *event,
+                       struct doca_comch_connection *connection,
+                       uint32_t id)
+{
+	(void)event;
+	(void)connection;
+	(void)id;
+}
+
 
 doca_error_t
 export_mmap_to_remote(struct objects *objs, struct doca_mmap *mmap, void *buffer, size_t buf_size, enum mmap_type mmap_type)
@@ -98,28 +118,34 @@ process_mmap_msg(struct objects *objs, struct doca_comch_connection *conn,
 
 	int kmax = objs->k_rings > 0 ? objs->k_rings : 1;
 	if (mmap_msg->mmap_type == DMA_RING) {
-		/* The protocol is deliberately ordered: exactly K rings, then TX, then
-		 * RX. This turns a host/DPU K mismatch into an explicit failure instead
-		 * of an indefinitely pending pod. */
+		/* The protocol is ordered: K forward rings, TX, RX, then K reverse rings. */
 		if (pod->ring_mmap_count >= kmax || pod->remote_mmap != NULL ||
-		    pod->host_rx_mmap != NULL) {
+		    pod->host_rx_mmap != NULL || pod->rev_ring_mmap_count != 0) {
 			DOCA_LOG_ERR("Pod %d: out-of-order/extra DMA_RING (count=%d k=%d)",
 				     pod->pod_id, pod->ring_mmap_count, kmax);
 			return DOCA_ERROR_INVALID_VALUE;
 		}
 	} else if (mmap_msg->mmap_type == DMA_BUFFER) {
 		if (pod->ring_mmap_count != kmax || pod->remote_mmap != NULL ||
-		    pod->host_rx_mmap != NULL) {
+		    pod->host_rx_mmap != NULL || pod->rev_ring_mmap_count != 0) {
 			DOCA_LOG_ERR("Pod %d: out-of-order/duplicate TX mmap (rings=%d/%d)",
 			             pod->pod_id, pod->ring_mmap_count, kmax);
 			return DOCA_ERROR_INVALID_VALUE;
 		}
 	} else if (mmap_msg->mmap_type == DMA_HOST_RX_BUFFER) {
 		if (pod->ring_mmap_count != kmax || pod->remote_mmap == NULL ||
-		    pod->host_rx_mmap != NULL) {
+		    pod->host_rx_mmap != NULL || pod->rev_ring_mmap_count != 0) {
 			DOCA_LOG_ERR("Pod %d: out-of-order/duplicate RX mmap (rings=%d/%d tx=%p)",
 			             pod->pod_id, pod->ring_mmap_count, kmax,
 			             (void *)pod->remote_mmap);
+			return DOCA_ERROR_INVALID_VALUE;
+		}
+	} else if (mmap_msg->mmap_type == DMA_REV_RING) {
+		if (pod->ring_mmap_count != kmax || pod->remote_mmap == NULL ||
+		    pod->host_rx_mmap == NULL ||
+		    pod->rev_ring_mmap_count >= kmax) {
+			DOCA_LOG_ERR("Pod %d: out-of-order/extra reverse ring (count=%d/%d)",
+			             pod->pod_id, pod->rev_ring_mmap_count, kmax);
 			return DOCA_ERROR_INVALID_VALUE;
 		}
 	} else {
@@ -158,6 +184,12 @@ process_mmap_msg(struct objects *objs, struct doca_comch_connection *conn,
 		             DPUMESH_SLOT_SIZE);
 		return DOCA_ERROR_INVALID_VALUE;
 	}
+	if (mmap_msg->mmap_type == DMA_REV_RING &&
+	    buf_size != DMA_REV_RING_BYTES) {
+		DOCA_LOG_ERR("Pod %d: invalid reverse ring bytes=%zu expected=%zu",
+		             pod->pod_id, buf_size, (size_t)DMA_REV_RING_BYTES);
+		return DOCA_ERROR_INVALID_VALUE;
+	}
 
 	result = doca_mmap_create_from_export(NULL, mmap_msg->export_desc,
 					      export_desc_len,
@@ -181,22 +213,29 @@ process_mmap_msg(struct objects *objs, struct doca_comch_connection *conn,
 		pod->remote_mmap = imported_mmap;
 		pod->remote_addr = remote_addr;
 		pod->remote_buf_size = buf_size;
-	} else { /* DMA_RING */
+	} else if (mmap_msg->mmap_type == DMA_RING) {
 		pod->ring_mmaps[pod->ring_mmap_count] = imported_mmap;
 		/* Save the host base used by proxy egress credit reads. */
 		pod->ring_host_addrs[pod->ring_mmap_count] = remote_addr;
 		pod->ring_mmap_count++;
+	} else { /* DMA_REV_RING */
+		pod->rev_ring_mmaps[pod->rev_ring_mmap_count] = imported_mmap;
+		pod->rev_ring_host_addrs[pod->rev_ring_mmap_count] = remote_addr;
+		pod->rev_ring_mmap_count++;
 	}
 
-	DOCA_LOG_INFO("Pod %d: mmap_type=%d stored (ring_mmaps=%d/%d, remote_mmap=%p, host_rx_mmap=%p)",
+	DOCA_LOG_INFO("Pod %d: mmap_type=%d stored (fwd=%d/%d rev=%d/%d tx=%p rx=%p)",
 		      pod->pod_id, mmap_msg->mmap_type,
 		      pod->ring_mmap_count, kmax,
+		      pod->rev_ring_mmap_count, kmax,
 		      (void *)pod->remote_mmap, (void *)pod->host_rx_mmap);
 
 	/* Start per-pod DMA setup when DPU initialization and every required host
 	 * mapping are ready. Pending mappings are handled by the worker setup pass. */
 	if (objs->dpu_ready && pod->ring_mmap_count == kmax && pod->remote_mmap &&
-	    pod->host_rx_mmap && !pod->dma_ready) {
+	    pod->host_rx_mmap &&
+	    pod->rev_ring_mmap_count == kmax &&
+	    !pod->dma_ready) {
 		result = setup_pod_dma(objs, pod);
 		if (result != DOCA_SUCCESS) {
 			DOCA_LOG_ERR("setup_pod_dma failed for pod %d: %s",

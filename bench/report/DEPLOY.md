@@ -6,18 +6,17 @@ This is the deployment contract for [REPORT.md](REPORT.md).
 
 ```sh
 DPUMESH_DPA_THREADS=16
-DPUMESH_RINGS_PER_POD=2
-DPUMESH_ARM_WORKERS=2
-DPUMESH_ARM_PIN=1
+DPUMESH_RINGS_PER_POD=8
+DPUMESH_ARM_WORKERS=8
 DPUMESH_PROXY_L7_SVC=16
-DPUMESH_DIAG=1
 DPUMESH_LOG_LEVEL=40
 ```
 
-This selects `N/K/A=16/2/2`. Each ARM data worker owns one DPA consumer PE, a
+This selects `N/K/A=16/8/8`. Each ARM data worker owns one DPA consumer PE, a
 private connection table, conntrack state, parser/routing state, and one SG-DMA
-engine. The main thread owns Comch emission and lifecycle control. Service 16
-uses the framed L7 codec; other services use connection-pinned L4.
+engine. Worker-owned reverse rings carry `REV_DONE` and `TX_ACK`. The main
+thread owns lifecycle control and reverse-ring doorbells. Service 16 uses the
+framed L7 codec; other services use connection-pinned L4.
 
 ## Host
 
@@ -31,11 +30,9 @@ uses the framed L7 codec; other services use connection-pinned L4.
 
 ```sh
 DPUMESH_DPA_THREADS=16 \
-DPUMESH_RINGS_PER_POD=2 \
-DPUMESH_ARM_WORKERS=2 \
-DPUMESH_ARM_PIN=1 \
+DPUMESH_RINGS_PER_POD=8 \
+DPUMESH_ARM_WORKERS=8 \
 DPUMESH_PROXY_L7_SVC=16 \
-DPUMESH_DIAG=1 \
 DPUMESH_LOG_LEVEL=40 \
 ./bench/bench.sh deploy
 ```
@@ -43,26 +40,12 @@ DPUMESH_LOG_LEVEL=40 \
 `deploy` builds host and DPU artifacts, imports images, restarts the DPU process,
 starts all pods, waits for registration readiness, and applies `fair` pinning.
 
-Use the current artifacts without rebuilding them:
-
-```sh
-DPUMESH_DEPLOY_REUSE_ARTIFACTS=1 \
-DPUMESH_DPA_THREADS=16 \
-DPUMESH_RINGS_PER_POD=2 \
-DPUMESH_ARM_WORKERS=2 \
-DPUMESH_ARM_PIN=1 \
-DPUMESH_PROXY_L7_SVC=16 \
-DPUMESH_DIAG=1 \
-DPUMESH_LOG_LEVEL=40 \
-./bench/bench.sh deploy
-```
-
 ## Verification
 
 ```sh
 ./bench/bench.sh status
 ./bench/bench.sh dpulog 500
-./bench/bench.sh armbalance 8192 8 16 10 4 /tmp/arm-balance.csv
+./bench/bench.sh armbalance 8192 8 32 15 16 /tmp/arm-balance.csv
 make test
 ```
 

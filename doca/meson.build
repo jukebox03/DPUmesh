@@ -32,7 +32,6 @@ srcs = [
     'comch_common.c',
     'comch_server.c',
     'comch_client.c',
-    'comch_consumer.c',
     'comch_msgq.c',
     'dpa.c',
     'dpu_proxy.c',

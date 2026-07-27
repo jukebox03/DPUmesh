@@ -5,6 +5,7 @@
 #include <stddef.h>
 
 #include "dpa_common.h"
+#include "comch_common.h"
 
 struct doca_dev;
 struct doca_mmap;
@@ -25,6 +26,14 @@ struct dma_ring {
     int dead;
 };
 
+struct rev_ring {
+    struct doca_mmap *mmap;
+    uint32_t size;
+    struct dmesh_rev_ring_entry *entries;
+    struct dmesh_rev_ring_ctrl *ctrl;
+    uint64_t head;
+};
+
 /* Publish one completed MPSC ticket after its descriptor payload. */
 static inline void
 dma_ring_publish_desc(struct dma_ring *ring, uint64_t ticket)
@@ -35,4 +44,7 @@ dma_ring_publish_desc(struct dma_ring *ring, uint64_t ticket)
 
 /* Create and export one host→DPU forward descriptor ring. */
 int setup_dma_ring(struct objects *objs, size_t size, struct dma_ring **out_ring);
+
+/* Create and export one DPU→host reverse completion ring. */
+int setup_rev_ring(struct objects *objs, struct rev_ring **out_ring);
 #endif /* RING_H */

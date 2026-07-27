@@ -46,7 +46,7 @@ for symbol in \
     dmesh_wc_release
 do
     if printf '%s\n' "$symbols" | grep -Fqx "$symbol"; then
-        fail "legacy public symbol still exported: $symbol"
+        fail "removed public symbol still exported: $symbol"
     fi
 done
 

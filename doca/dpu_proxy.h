@@ -41,33 +41,14 @@ int px_worker_notification_fd(struct objects *objs, int worker_id);
 int px_worker_arm_notification(struct objects *objs, int worker_id);
 void px_worker_clear_notification(struct objects *objs, int worker_id, int fd);
 
-/* ---- delivery counters (DIAG only; see dpu_diag_dump) ----
- * The proxy's two failure modes are invisible from the outside: a DROP loses bytes and
- * still TX_ACKs the sender, and a STALL looks exactly like a hang. Both are counted, and
- * these are the only way to read them — everything else is silent by design. */
-
-/* Total backpressure stalls (unit + piece + upstream). A number that keeps CLIMBING
- * means a pool is chronically dry; a number that is merely non-zero is normal. */
-uint64_t px_stall_total(struct objects *objs);
-
-/* Append " px[...]" (msgs/segs/dropped-bytes/per-pool stalls) to `buf`. Returns the
- * bytes written, 0 if the proxy is not up. */
-int px_diag_str(struct objects *objs, char *buf, int cap);
-
 /* Owner worker encoded as the wire-visible up_port % A. */
 int px_uport_owner(uint16_t up_port, int m);
 
-/* One drain pass: submit per-destination SG-DMA batches, emit completed
- * batches' REV_DONE entries + custody TX_ACKs, kick credit refreshes.
- * Returns non-zero if any progress was made. */
-int px_drain(struct objects *objs);
-
 /* True only after the egress owner has stopped submitting for this dead pod,
  * every destination DMA/credit read has completed, all lane queues are empty,
- * and no worker→main completion still names the slot. The control path uses
+ * and no worker completion still names the slot. The control path uses
  * this as the ARM half of POD_QUIESCED before destroying imported host mmaps. */
 int px_pod_reclaim_ready(struct objects *objs, int pod_idx);
 
-/* dpu_worker idle flushes the per-pod REV_DONE and TX_ACK batches. */
 
 #endif /* DPU_PROXY_H */
