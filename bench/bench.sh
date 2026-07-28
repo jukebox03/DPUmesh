@@ -45,7 +45,8 @@ IMG_STREAM_DPU="bench/stream-dpumesh:latest"
 IMG_VERBS_DPU="bench/verbs-dpumesh:latest"
 IMG_BENCH_TCP="bench/bench-tcp:latest"
 IMG_ECHO_TCP="bench/echo-tcp:latest"
-IMG_ENVOY="envoyproxy/envoy:v1.30-latest"
+IMG_ENVOY_BASE="envoyproxy/envoy:v1.30-latest"
+IMG_ENVOY="bench/envoy-numa:v1.30-latest"
 
 # benchmark sweep knobs
 OUT="${OUT:-/tmp/dpumesh-bench}"
@@ -54,10 +55,101 @@ WARMUP="${WARMUP:-1000}"; BW_CONC="${BW_CONC:-32}"; RATE_CONC="${RATE_CONC:-32}"
 RATE_THREADS="${RATE_THREADS:-1 2 4 8}"
 LAT_SIZES="${LAT_SIZES:-64 128 256 512 1024}"
 BW_SIZES="${BW_SIZES:-32 128 512 2048 8192 32768 131072 524288 1000000 2097152 8000000}"
+BENCH_NUMA_NODE="${BENCH_NUMA_NODE:-}"
+BENCH_CORE_BASE="${BENCH_CORE_BASE:-}"
+BENCH_NUMA_POLICY="${BENCH_NUMA_POLICY:-local}"
+BENCH_DEPLOY_SCOPE="${BENCH_DEPLOY_SCOPE:-all}"
+BENCH_NUMA_CONFIGURED=0
 
 need_env() { : "${DPU_HOST:?.env missing DPU_HOST}" "${HOST_PASS:?.env missing HOST_PASS}" \
                 "${DPU_PASS:?.env missing DPU_PASS}" "${HOST_PCI:?.env missing HOST_PCI}" \
                 "${DPU_PCI:?.env missing DPU_PCI}"; }
+
+cpu_in_list() {
+    local cpu="$1" list="$2" part lo hi
+    local parts=()
+    IFS=',' read -r -a parts <<<"$list"
+    for part in "${parts[@]}"; do
+        if [[ "$part" == *-* ]]; then
+            lo="${part%-*}"; hi="${part#*-}"
+        else
+            lo="$part"; hi="$part"
+        fi
+        [ "$cpu" -ge "$lo" ] && [ "$cpu" -le "$hi" ] && return 0
+    done
+    return 1
+}
+
+# Bind benchmark processes and their first-touch allocations to the NUMA node
+# local to the host-side BlueField PCI function. Exact per-pod taskset pinning
+# happens after startup, but the image entrypoint applies BENCH_NUMA_NODE before
+# dpumesh_init() allocates and registers DMA memory.
+configure_host_numa() {
+    [ "$BENCH_NUMA_CONFIGURED" = 0 ] || return 0
+    : "${HOST_PCI:?HOST_PCI is required for NUMA placement}"
+
+    case "$BENCH_NUMA_POLICY" in
+        auto)
+            BENCH_NUMA_NODE=""
+            BENCH_CORE_BASE="${BENCH_CORE_BASE:-0}"
+            [[ "$BENCH_CORE_BASE" =~ ^[0-9]+$ ]] || {
+                err "invalid BENCH_CORE_BASE=$BENCH_CORE_BASE"
+                return 1
+            }
+            local online_cpus; online_cpus=$(</sys/devices/system/cpu/online)
+            cpu_in_list "$BENCH_CORE_BASE" "$online_cpus" &&
+                cpu_in_list "$((BENCH_CORE_BASE + 17))" "$online_cpus" || {
+                err "benchmark core range ${BENCH_CORE_BASE}-$((BENCH_CORE_BASE + 17)) is not online {$online_cpus}"
+                return 1
+            }
+            BENCH_NUMA_CONFIGURED=1
+            info "Host NUMA: automatic policy, benchmark cores ${BENCH_CORE_BASE}-$((BENCH_CORE_BASE + 17))"
+            return 0
+            ;;
+        local) ;;
+        *)
+            err "BENCH_NUMA_POLICY must be local|auto (got $BENCH_NUMA_POLICY)"
+            return 1
+            ;;
+    esac
+
+    local bdf="${HOST_PCI#0000:}"
+    local pci_path="/sys/bus/pci/devices/0000:$bdf"
+    [ -r "$pci_path/numa_node" ] || {
+        err "PCI NUMA node unavailable: $pci_path/numa_node"
+        return 1
+    }
+    local detected_node; detected_node=$(<"$pci_path/numa_node")
+    [[ "$detected_node" =~ ^[0-9]+$ ]] || {
+        err "PCI $HOST_PCI has no usable NUMA node (reported $detected_node)"
+        return 1
+    }
+    if [ -n "$BENCH_NUMA_NODE" ] && [ "$BENCH_NUMA_NODE" != "$detected_node" ]; then
+        err "BENCH_NUMA_NODE=$BENCH_NUMA_NODE conflicts with PCI $HOST_PCI node $detected_node"
+        return 1
+    fi
+    BENCH_NUMA_NODE="$detected_node"
+
+    local cpulist_path="/sys/devices/system/node/node${BENCH_NUMA_NODE}/cpulist"
+    [ -r "$cpulist_path" ] || {
+        err "NUMA CPU list unavailable: $cpulist_path"
+        return 1
+    }
+    local node_cpus; node_cpus=$(<"$cpulist_path")
+    local first_cpu="${node_cpus%%[-,]*}"
+    BENCH_CORE_BASE="${BENCH_CORE_BASE:-$first_cpu}"
+    [[ "$BENCH_CORE_BASE" =~ ^[0-9]+$ ]] || {
+        err "invalid BENCH_CORE_BASE=$BENCH_CORE_BASE"
+        return 1
+    }
+    cpu_in_list "$BENCH_CORE_BASE" "$node_cpus" &&
+        cpu_in_list "$((BENCH_CORE_BASE + 17))" "$node_cpus" || {
+        err "benchmark core range ${BENCH_CORE_BASE}-$((BENCH_CORE_BASE + 17)) is not inside NUMA node $BENCH_NUMA_NODE CPUs {$node_cpus}"
+        return 1
+    }
+    BENCH_NUMA_CONFIGURED=1
+    info "Host NUMA: PCI $HOST_PCI -> node $BENCH_NUMA_NODE, benchmark cores ${BENCH_CORE_BASE}-$((BENCH_CORE_BASE + 17))"
+}
 
 dpu_sudo() {
     ssh "$DPU_HOST" "echo '$DPU_PASS' | sudo -S bash -c '$1'" 2>&1 | sed 's/^\[sudo\][^:]*: *//'
@@ -138,22 +230,20 @@ build_images() {
     build_image "$BENCH_DIR/validators/preload_sock.Dockerfile"     "$IMG_PRELOAD_SOCK" "$PROJ_ROOT"
     build_image "$BENCH_DIR/docker/bench_sock.Dockerfile"          "$IMG_BENCH_TCP"    "$PROJ_ROOT"
     build_image "$BENCH_DIR/docker/echo_sock.Dockerfile"           "$IMG_ECHO_TCP"     "$PROJ_ROOT"
-    docker builder prune -f >/dev/null 2>&1 || true
     info "All images built and imported to containerd"
 }
 
 ensure_envoy_image() {
-    local img="$IMG_ENVOY"
-    if echo "$HOST_PASS" | sudo -S ctr -n k8s.io images list -q 2>/dev/null | grep -v '^\[sudo\]' | grep -q "docker.io/$img"; then
-        info "Envoy image already in containerd"; return 0
+    if ! docker image inspect "$IMG_ENVOY_BASE" >/dev/null 2>&1; then
+        info "Pulling Envoy base image: $IMG_ENVOY_BASE"
+        docker pull "$IMG_ENVOY_BASE" || {
+            err "docker pull $IMG_ENVOY_BASE failed"
+            exit 1
+        }
     fi
-    if ! docker image inspect "$img" >/dev/null 2>&1; then
-        info "Pulling Envoy image: $img"
-        docker pull "$img" || { err "docker pull $img failed"; exit 1; }
-    fi
-    info "Importing Envoy image to containerd k8s.io ns..."
+    info "Building NUMA-aware Envoy image"
     echo "$HOST_PASS" | sudo -S true 2>/dev/null
-    docker save "$img" | sudo ctr -n k8s.io images import -
+    build_image "$BENCH_DIR/docker/envoy_numa.Dockerfile" "$IMG_ENVOY" "$PROJ_ROOT"
 }
 
 ### ------------------------------------------------------------ DPU process
@@ -191,7 +281,6 @@ chmod +x /tmp/start_dpu_bench.sh"
 # full core since transport is on the DPU; tcp app shares its core with its
 # sidecar). hw/hw3/hw6: multi-core for the dpumesh side only, to chase the
 # transport ceiling (not comparable to TCP).
-BENCH_CORE_BASE="${BENCH_CORE_BASE:-0}"
 # Shift a comma-separated core list onto the benchmark NUMA node.
 core_list() {
     local out="" c
@@ -204,6 +293,20 @@ get_pod_cores() {
         hw)  case "$app" in bench-dpumesh) rel="0,4";; echo-dpumesh) rel="1,5";; bench-tcp) rel="2";; echo-tcp) rel="3";; esac ;;
         hw3) case "$app" in bench-dpumesh) rel="0,4,6";; echo-dpumesh) rel="1,5,7";; bench-tcp) rel="2";; echo-tcp) rel="3";; esac ;;
         hw6) case "$app" in bench-dpumesh) rel="0,4,6,8,10,12";; echo-dpumesh) rel="1,5,7,9,11,13";; bench-tcp) rel="2";; echo-tcp) rel="3";; esac ;;
+        l4)
+            # Five measured paths get two exclusive cores each. Every other
+            # running benchmark pod is kept off those cores and off each other.
+            case "$app" in
+                preload-bench) rel="0";; preload-echo) rel="1";;
+                bench-direct) rel="2";; echo-plain) rel="3";;
+                bench-tcp) rel="4";; echo-tcp) rel="5";;
+                bench-tcp-strict) rel="6";; echo-tcp-strict) rel="7";;
+                bench-dpumesh) rel="8";; echo-dpumesh) rel="9";;
+                bench-dpumesh-2) rel="10";; bench-dpumesh-3) rel="11";;
+                echo-dpumesh-13) rel="12";; echo-dpumesh-14) rel="13";;
+                loopback-dpumesh) rel="14";; stream-dpumesh) rel="15";;
+                verbs-dpumesh) rel="16";; preload-dpumesh) rel="17";;
+            esac ;;
         fair|*)
             case "$app" in
                 bench-dpumesh) rel="0";; echo-dpumesh) rel="1";;
@@ -219,6 +322,7 @@ get_pod_cores() {
 
 pin_pods() {
     local profile="${1:-fair}"
+    configure_host_numa
     step "=== Pinning pods to dedicated cores (taskset, profile=$profile) ==="
     command -v jq >/dev/null 2>&1 || { err "jq not found (apt install jq)"; return 1; }
     if command -v cpupower >/dev/null 2>&1; then
@@ -229,9 +333,12 @@ pin_pods() {
     else
         warn "cpupower not found; skipping DVFS lock"
     fi
-    for app in bench-dpumesh bench-dpumesh-2 bench-dpumesh-3 echo-dpumesh echo-dpumesh-13 echo-dpumesh-14 loopback-dpumesh stream-dpumesh verbs-dpumesh preload-dpumesh preload-echo preload-bench bench-tcp echo-tcp bench-direct; do
+    for app in bench-dpumesh bench-dpumesh-2 bench-dpumesh-3 echo-dpumesh echo-dpumesh-13 echo-dpumesh-14 loopback-dpumesh stream-dpumesh verbs-dpumesh preload-dpumesh preload-echo preload-bench bench-tcp echo-tcp bench-tcp-strict echo-tcp-strict bench-direct echo-plain; do
         local cores pod_id; cores=$(get_pod_cores "$app" "$profile"); [ -z "$cores" ] && continue
-        pod_id=$(echo "$HOST_PASS" | sudo -S crictl pods --label "app=$app" -q 2>/dev/null | head -n 1)
+        # sed consumes the full stream. `head` can close early and make crictl
+        # exit with SIGPIPE under this script's `set -o pipefail`.
+        pod_id=$(echo "$HOST_PASS" | sudo -S crictl pods --label "app=$app" -q 2>/dev/null |
+            sed -n '1p')
         if [ -z "$pod_id" ]; then warn "$app: pod not found, skipping"; continue; fi
         info "$app → core(s) $cores (pod=$pod_id)"
         for cid in $(echo "$HOST_PASS" | sudo -S crictl ps --pod "$pod_id" -q 2>/dev/null); do
@@ -261,6 +368,51 @@ ensure_namespace() {
     if [ "$phase" != "Active" ]; then info "Creating namespace $NS"; kubectl create ns "$NS"; fi
 }
 
+# Issue a short-lived benchmark CA plus separate client/server certificates.
+# The Secret is recreated before pods start, so STRICT always exercises mTLS
+# without checking private key material into the repository.
+ensure_envoy_tls_secret() {
+    command -v openssl >/dev/null 2>&1 || {
+        err "openssl not found; it is required for the STRICT Envoy path"
+        exit 1
+    }
+    (
+        local cert_dir
+        cert_dir=$(mktemp -d /tmp/dpumesh-envoy-mtls.XXXXXX)
+        trap 'rm -rf -- "$cert_dir"' EXIT
+
+        openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
+            -subj "/CN=dpumesh-bench-ca" \
+            -keyout "$cert_dir/ca.key" -out "$cert_dir/ca.crt" >/dev/null 2>&1
+        openssl req -newkey rsa:2048 -nodes \
+            -subj "/CN=echo-tcp-strict" \
+            -addext "subjectAltName=DNS:echo-tcp-strict" \
+            -addext "extendedKeyUsage=serverAuth" \
+            -keyout "$cert_dir/server.key" -out "$cert_dir/server.csr" >/dev/null 2>&1
+        openssl x509 -req -days 2 -copy_extensions copy \
+            -in "$cert_dir/server.csr" -CA "$cert_dir/ca.crt" \
+            -CAkey "$cert_dir/ca.key" -CAcreateserial \
+            -out "$cert_dir/server.crt" >/dev/null 2>&1
+        openssl req -newkey rsa:2048 -nodes \
+            -subj "/CN=bench-tcp-strict" \
+            -addext "extendedKeyUsage=clientAuth" \
+            -keyout "$cert_dir/client.key" -out "$cert_dir/client.csr" >/dev/null 2>&1
+        openssl x509 -req -days 2 -copy_extensions copy \
+            -in "$cert_dir/client.csr" -CA "$cert_dir/ca.crt" \
+            -CAkey "$cert_dir/ca.key" -CAcreateserial \
+            -out "$cert_dir/client.crt" >/dev/null 2>&1
+
+        kubectl create secret generic envoy-mtls -n "$NS" \
+            --from-file=ca.crt="$cert_dir/ca.crt" \
+            --from-file=server.crt="$cert_dir/server.crt" \
+            --from-file=server.key="$cert_dir/server.key" \
+            --from-file=client.crt="$cert_dir/client.crt" \
+            --from-file=client.key="$cert_dir/client.key" \
+            --dry-run=client -o yaml | kubectl apply -f -
+    )
+    info "Envoy benchmark mTLS Secret ready"
+}
+
 clean_failed_pods() {
     local n; n=$(kubectl get pods -n "$NS" --field-selector=status.phase=Failed --no-headers 2>/dev/null | wc -l)
     if [ "$n" -gt 0 ]; then
@@ -271,10 +423,11 @@ clean_failed_pods() {
 
 # Render bench/k8s/pods.yaml with envsubst and apply it (replicas: 0).
 apply_manifest() {
+    configure_host_numa
     step "=== Applying K8s manifest (replicas=0) ==="
     command -v envsubst >/dev/null 2>&1 || { err "envsubst not found (apt install gettext-base)"; exit 1; }
     export IMG_BENCH_DPU IMG_ECHO_DPU IMG_LOOPBACK_DPU IMG_STREAM_DPU IMG_VERBS_DPU IMG_PRELOAD_DPU IMG_PRELOAD_SOCK IMG_BENCH_TCP IMG_ECHO_TCP IMG_ENVOY
-    export CTRL_PORT TCP_PORT HOST_PCI LIB_OUT
+    export CTRL_PORT TCP_PORT HOST_PCI LIB_OUT BENCH_NUMA_NODE
     export DPUMESH_RINGS_PER_POD="${DPUMESH_RINGS_PER_POD:-2}" \
            ASYNC_THREADS="${ASYNC_THREADS:-4}" \
            BENCH_PIPELINE="${BENCH_PIPELINE:-8}" BENCH_COALESCE="${BENCH_COALESCE:-0}" \
@@ -320,23 +473,40 @@ scale_up_with_wait() {
     fi
 }
 
-# Start every meshed pod during the full deploy. The stream validator requires
-# its service id in DPUMESH_PROXY_L7_SVC.
+# `core` starts only the three backends and one client. This is required for
+# low-N controls such as N=8/K=8, whose DPA ring capacity admits only eight live
+# pods. `l4` starts the five measured paths but only the base native backend, so
+# dead weighted-LB backends can never enter the DPU registry. The default `all`
+# scope starts the complete benchmark and validator set.
 start_pods() {
-    step "=== Starting pods (innermost first) ==="
+    local scope="$BENCH_DEPLOY_SCOPE"
+    case "$scope" in all|core|l4) ;;
+        *) err "BENCH_DEPLOY_SCOPE must be all|core|l4 (got $scope)"; exit 1;;
+    esac
+    step "=== Starting pods (innermost first, scope=$scope) ==="
     local ready="DPU pod is data-ready"
     scale_up_with_wait "echo-dpumesh"     "$ready"
-    scale_up_with_wait "echo-dpumesh-13"  "$ready"
-    scale_up_with_wait "echo-dpumesh-14"  "$ready"
+    if [ "$scope" != l4 ]; then
+        scale_up_with_wait "echo-dpumesh-13"  "$ready"
+        scale_up_with_wait "echo-dpumesh-14"  "$ready"
+    fi
     scale_up_with_wait "bench-dpumesh"    "$ready"
-    scale_up_with_wait "bench-dpumesh-2"  "$ready"  # extra meshed clients for N-pod amortization
-    scale_up_with_wait "bench-dpumesh-3"  "$ready"
-    scale_up_with_wait "loopback-dpumesh" "$ready"
-    scale_up_with_wait "preload-dpumesh"  "$ready"
+    [ "$scope" = core ] && return 0
+    if [ "$scope" = all ]; then
+        scale_up_with_wait "bench-dpumesh-2"  "$ready"  # extra meshed clients for N-pod amortization
+        scale_up_with_wait "bench-dpumesh-3"  "$ready"
+        scale_up_with_wait "loopback-dpumesh" "$ready"
+        scale_up_with_wait "preload-dpumesh"  "$ready"
+    fi
     scale_up_with_wait "preload-echo"     "$ready"
     scale_up_with_wait "preload-bench"    ""
-    scale_up_with_wait "verbs-dpumesh"    "$ready"
-    scale_up_with_wait "stream-dpumesh"   "$ready"
+    if [ "$scope" = all ]; then
+        scale_up_with_wait "verbs-dpumesh"    "$ready"
+        scale_up_with_wait "stream-dpumesh"   "$ready"
+    fi
+    scale_up_with_wait "echo-plain"       ""
+    scale_up_with_wait "echo-tcp-strict"  ""
+    scale_up_with_wait "bench-tcp-strict" ""
     scale_up_with_wait "echo-tcp"  ""
     scale_up_with_wait "bench-tcp" ""
     scale_up_with_wait "bench-direct" ""     # direct-TCP client (targets echo_sock, no sidecar)
@@ -344,7 +514,9 @@ start_pods() {
 
 deploy() {
     need_env
+    configure_host_numa
     ensure_namespace
+    ensure_envoy_tls_secret
     clean_failed_pods
     apply_manifest
     sync_sources
@@ -359,13 +531,13 @@ deploy() {
     info "=== Deploy complete ==="
     echo "  Run:  $0 latency|bandwidth|rate|all [dpumesh|tcp|both]"
     echo "        $0 loopback|verbs|stream|preload ...   (validators)"
-    echo "  Re-pin:  $0 pin [fair|hw|hw3|hw6]"
+    echo "  Re-pin:  $0 pin [fair|l4|hw|hw3|hw6]"
 }
 
 cleanup() { info "Deleting namespace $NS"; kubectl delete ns "$NS" --ignore-not-found=true 2>/dev/null || true; stop_dpu; }
 
 show_logs() {
-    for app in bench-dpumesh echo-dpumesh echo-dpumesh-13 echo-dpumesh-14 loopback-dpumesh stream-dpumesh verbs-dpumesh preload-dpumesh preload-echo preload-bench bench-tcp echo-tcp bench-direct; do
+    for app in bench-dpumesh echo-dpumesh echo-dpumesh-13 echo-dpumesh-14 loopback-dpumesh stream-dpumesh verbs-dpumesh preload-dpumesh preload-echo preload-bench bench-tcp echo-tcp bench-tcp-strict echo-tcp-strict bench-direct echo-plain; do
         echo "=== $app ==="
         kubectl logs -n "$NS" -l "app=$app" --all-containers=true --prefix=true --tail=20 2>/dev/null || true
         echo
@@ -625,10 +797,11 @@ Usage: $0 <command> [args]
   point <sol> <req> <reply> <conc> <dur> <warmup> <threads> [reconn]   one raw RUN (reconn = conn-churn period)
   loopback|stream|preload [args]             feature validators
   verbs <N> <size> <zc> <window> <pipeline>  native-API loopback validator: window conns x pipeline outstanding
-  pin [fair|hw|hw3|hw6]                       (re)pin pods to cores
+  pin [fair|l4|hw|hw3|hw6]                    (re)pin pods to cores
   armbalance [req reply conc dur threads [csv]]   DPU main/worker per-core CPU during one point
   status | logs | cleanup | dpulog [n] | dpucpu
 
+Deploy knobs (env): BENCH_NUMA_POLICY=local|auto BENCH_DEPLOY_SCOPE=all|core|l4
 Sweep knobs (env): OUT LAT_DUR BW_DUR RATE_DUR WARMUP BW_CONC RATE_CONC RATE_THREADS LAT_SIZES BW_SIZES
 EOF
         ;;

@@ -1,0 +1,49 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 1K of event 'cycles'
+# Event count (approx.): 49634754187
+#
+# Overhead  Command          Shared Object            Symbol                                          IPC   [IPC Coverage]
+# ........  ...............  .......................  ..............................................  ....................
+#
+     1.17%  bench_sock       [kernel.kallsyms]        [k] vfs_write                                   -      -            
+     0.87%  wrk:worker_7     [kernel.kallsyms]        [k] __switch_to                                 -      -            
+     0.64%  wrk:worker_7     libc.so.6                [.] __memmove_avx512_unaligned_erms             -      -            
+     0.61%  echo_sock        [kernel.kallsyms]        [k] copy_user_enhanced_fast_string              -      -            
+     0.51%  wrk:worker_9     [kernel.kallsyms]        [k] copy_user_enhanced_fast_string              -      -            
+     0.51%  wrk:worker_6     [kernel.kallsyms]        [k] copy_user_enhanced_fast_string              -      -            
+     0.51%  wrk:worker_8     [kernel.kallsyms]        [k] psi_group_change                            -      -            
+     0.51%  echo_sock        [kernel.kallsyms]        [k] psi_group_change                            -      -            
+     0.44%  wrk:worker_27    [kernel.kallsyms]        [k] tcp_rcv_space_adjust                        -      -            
+     0.41%  wrk:worker_6     [kernel.kallsyms]        [k] aa_dfa_match_len                            -      -            
+     0.31%  bench_sock       [kernel.kallsyms]        [k] kmem_cache_free                             -      -            
+     0.31%  wrk:worker_27    libc.so.6                [.] pthread_mutex_lock@@GLIBC_2.2.5             -      -            
+     0.31%  wrk:worker_27    [kernel.kallsyms]        [k] _raw_spin_lock_bh                           -      -            
+     0.31%  wrk:worker_6     envoy                    [.] 0x0000000003db92ca                          -      -            
+     0.31%  wrk:worker_19    [kernel.kallsyms]        [k] psi_group_change                            -      -            
+     0.31%  bench_sock       [kernel.kallsyms]        [k] ip_rcv_core                                 -      -            
+     0.31%  bench_sock       [kernel.kallsyms]        [k] _raw_spin_lock                              -      -            
+     0.31%  bench_sock       libc.so.6                [.] read                                        -      -            
+     0.31%  wrk:worker_19    [kernel.kallsyms]        [k] fib_table_lookup                            -      -            
+     0.31%  wrk:worker_6     [nf_tables]              [k] nft_do_chain                                -      -            
+     0.31%  bench_sock       [kernel.kallsyms]        [k] nf_hook_slow                                -      -            
+     0.31%  bench_sock       [kernel.kallsyms]        [k] tcp_sendmsg_locked                          -      -            
+     0.31%  wrk:worker_27    [nf_conntrack]           [k] __nf_conntrack_find_get                     -      -            
+     0.31%  wrk:worker_13    [kernel.kallsyms]        [k] copy_user_enhanced_fast_string              -      -            
+     0.31%  wrk:worker_7     [kernel.kallsyms]        [k] _raw_spin_lock_irqsave                      -      -            
+     0.31%  wrk:worker_25    [kernel.kallsyms]        [k] rcu_all_qs                                  -      -            
+     0.31%  wrk:worker_25    [kernel.kallsyms]        [k] __alloc_skb                                 -      -            
+     0.31%  wrk:worker_25    [kernel.kallsyms]        [k] restore_fpregs_from_fpstate                 -      -            
+     0.31%  wrk:worker_8     [nf_conntrack]           [k] __nf_conntrack_find_get                     -      -            
+     0.31%  wrk:worker_7     [kernel.kallsyms]        [k] psi_group_change                            -      -            
+     0.31%  echo_sock        [kernel.kallsyms]        [k] __update_load_avg_se                        -      -            
+     0.31%  wrk:worker_7     [kernel.kallsyms]        [k] copy_user_enhanced_fast_string              -      -            
+     0.31%  wrk:worker_7     [kernel.kallsyms]        [k] __update_load_avg_se                        -      -            
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

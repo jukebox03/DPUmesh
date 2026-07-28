@@ -65,6 +65,19 @@ pinning. It selects `N/K/A/L=16/8/2/2`: eight rings, two polling ARM workers, an
 two RX landing stripes. A bare `deploy` selects one ARM worker. The live DPU
 process environment is the measurement authority.
 
+`deploy` reads the host BlueField PCI function's NUMA node from sysfs. Benchmark
+entrypoints apply that CPU and memory policy before allocating registered DMA
+memory, and the later per-pod pinning stays within the same node. This is
+intentional even when automatic NUMA balancing is enabled: registered DMA
+mappings were observed not to migrate.
+
+Use `BENCH_NUMA_POLICY=auto` only for the unbound NUMA control. The default is
+`local`. `BENCH_DEPLOY_SCOPE=core` starts only the three backends and one client;
+it is used by low-N controls whose DPA ring capacity cannot admit every validator
+pod. `BENCH_DEPLOY_SCOPE=l4` starts only the five L4 comparison paths and never
+registers the two extra weighted-LB native backends; this is the scope used by
+`bench/suite/l4_proxy_data.sh`.
+
 The configuration above keeps benchmark service 11 connection-pinned L4 while
 enabling L7 framing only for stream validator service 16. To exercise
 per-message LB on the native request/reply benchmark too, enable both services:
@@ -76,6 +89,20 @@ DPUMESH_ARM_WORKERS=2 \
 DPUMESH_RINGS_PER_POD=8 \
 ./bench/bench.sh deploy
 ```
+
+Run the complete repeated sweep with:
+
+```sh
+OUT=bench/report/data/sweep-final \
+  ./bench/suite/sweep_final.sh --dry-run
+OUT=bench/report/data/sweep-final \
+  ./bench/suite/sweep_final.sh
+```
+
+The same `OUT` may be reused after interruption; completed run IDs are skipped.
+The campaign validates every live topology, records TX `grow_waits`, produces
+raw and summary CSVs, restores the final N32/A8/K8 local-NUMA deployment, and
+runs correctness validators.
 
 The benchmark frame is a 16-byte length prefix followed by payload, with a
 128 KiB total-frame limit. The DPU routes each request frame independently and

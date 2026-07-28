@@ -122,7 +122,7 @@ reverse-ring producers. `K` controls rings, `A` controls ARM workers, and the
 `A`; an incompatible worker count is reduced at startup and reported in the DPU
 log.
 
-`DPUMESH_DPA_THREADS` accepts up to 32 EUs; automatic selection uses up to 16.
+`DPUMESH_DPA_THREADS` accepts up to 32 EUs; automatic selection uses up to 32.
 `DPUMESH_ARM_WORKERS` sets the number of ARM data workers.
 
 The gRPC adapter has an independent CMake build:

@@ -50,6 +50,7 @@ LIB_LINK := $(LIBDIR)/libdpumesh.so
 # dmesh_* API clients (socket/epoll façade over dmesh.h)
 DMESH_BINS := bench_dpumesh echo_dpumesh loopback_dpumesh stream_dpumesh verbs_dpumesh
 bench_dpumesh_SRC    := bench/apps/bench_dpumesh.c
+bench_dpumesh_LIBS   := -lm
 echo_dpumesh_SRC     := bench/apps/echo_dpumesh.c
 loopback_dpumesh_SRC := bench/validators/loopback_dpumesh.c
 stream_dpumesh_SRC   := bench/validators/stream_dpumesh.c
@@ -154,7 +155,7 @@ test: $(TESTDIR)/native_api_contract_test $(TESTDIR)/native_control_state_test \
 # source is a tracked prerequisite (rebuilds on edit).
 define DMESH_BIN_RULE
 $(BINDIR)/$(1): $($(1)_SRC) $(LIB_LINK) | dirs
-	$$(CC) -O2 -g $$(DEPFLAGS) -Iinclude -Isrc -o $$@ $$< -L$$(LIBDIR) -ldpumesh -lpthread $$(RPATHS)
+	$$(CC) -O2 -g $$(DEPFLAGS) -Iinclude -Isrc -o $$@ $$< -L$$(LIBDIR) -ldpumesh -lpthread $$($(1)_LIBS) $$(RPATHS)
 	@echo "  -> $$@"
 endef
 $(foreach b,$(DMESH_BINS),$(eval $(call DMESH_BIN_RULE,$(b))))

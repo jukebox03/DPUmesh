@@ -13,6 +13,13 @@ CLK="$(getconf CLK_TCK)"
 TR="${1:?transport dpumesh|tcp|direct}"; REQ="${2:-1024}"; REPLY="${3:-8}"; CONC="${4:-32}"
 DUR="${5:-10}"; THREADS="${6:-1}"; TIDY="${7:-}"
 CPU_REP="${CPU_REP:-1}"
+CPU_RUN_ID="${CPU_RUN_ID:-$CPU_REP}"
+CPU_STAGE="${CPU_STAGE:-manual}"
+CPU_N="${CPU_N:-unknown}"
+CPU_K="${CPU_K:-unknown}"
+CPU_A="${CPU_A:-unknown}"
+CPU_PIN="${CPU_PIN:-unknown}"
+CPU_NUMA_POLICY="${CPU_NUMA_POLICY:-unknown}"
 ALLOW_REORDER="${ALLOW_REORDER:-0}"   # L7 per-message LB may complete correlated RPCs out of order
 CPU_IDLE="${CPU_IDLE:-0}"             # 1 = sample the same processes without issuing RUN
 
@@ -73,7 +80,8 @@ else
         | timeout "$((DUR+30))s" nc -N "$CIP" "$CTRL_PORT" 2>/dev/null || echo "ERR")
 fi
 W1=$(date +%s.%N)
-MRPS=$(field "$OK" mrps); GBPS=$(field "$OK" gbps); P50=$(field "$OK" p50); P99=$(field "$OK" p99)
+MRPS=$(field "$OK" mrps); GBPS=$(field "$OK" gbps)
+P50=$(field "$OK" p50); P95=$(field "$OK" p95); P99=$(field "$OK" p99)
 [ -z "$MRPS" ] && { echo "   run failed: $OK"; exit 1; }
 FAIL=$(field "$OK" fail); DROPS=$(field "$OK" drops); REORDER=$(field "$OK" reorder)
 [ "${FAIL:-0}" = 0 ] && [ "${DROPS:-0}" = 0 ] && \
@@ -81,6 +89,14 @@ FAIL=$(field "$OK" fail); DROPS=$(field "$OK" drops); REORDER=$(field "$OK" reor
   echo "   invalid run: fail=${FAIL:-NA} drops=${DROPS:-NA} reorder=${REORDER:-NA}"; exit 1;
 }
 [ "${REORDER:-0}" = 0 ] || echo "   note: accepting reorder=$REORDER (ALLOW_REORDER=1)"
+FAIL="${FAIL:-0}"; DROPS="${DROPS:-0}"; REORDER="${REORDER:-0}"
+P95="${P95:-0}"
+WAITS="$(field "$OK" waits)"; WAITS="${WAITS:-0}"
+GRABS="$(field "$OK" grabs)"; GRABS="${GRABS:-0}"
+RETS="$(field "$OK" rets)"; RETS="${RETS:-0}"
+RECYC="$(field "$OK" recyc)"; RECYC="${RECYC:-0}"
+PADS="$(field "$OK" pads)"; PADS="${PADS:-0}"
+DIST="$(field "$OK" dist)"
 
 # --- T1 snapshot + deltas ---
 DT=$(awk -v a="$W0" -v b="$W1" 'BEGIN{print b-a}')
@@ -101,8 +117,27 @@ printf "     achieved:   %.4f Mrps  gbps=%s  p50=%sus p99=%sus\n" "$MRPS" "$GBPS
 printf "     HOST CPU:   client=%.1f%%  server=%.1f%%  TOTAL=%.1f%% (of one core)\n" "$csum" "$ssum" "$HOST"
 printf "     DPU ARM:    %s%%\n" "$DPU_PCT"
 printf "     host-eff:   %s %%core per Krps  (LOWER = more host-efficient)\n" "$EFF"
+[ "$USE_DPU" = 0 ] || printf "     TX stats:   grow_waits=%s grabs=%s rets=%s recyc=%s pads=%s dist=%s\n" \
+  "$WAITS" "$GRABS" "$RETS" "$RECYC" "$PADS" "${DIST:-none}"
 
 if [ -n "$TIDY" ]; then
-  [ -s "$TIDY" ] || echo "rep,transport,req,reply,conc,threads,mrps,gbps,p50,p99,host_client_pct,host_server_pct,host_total_pct,dpu_arm_pct,host_pct_per_krps" > "$TIDY"
-  echo "$CPU_REP,$TR,$REQ,$REPLY,$CONC,$THREADS,$MRPS,$GBPS,$P50,$P99,$csum,$ssum,$HOST,$DPU_PCT,$EFF" >> "$TIDY"
+  LEGACY_HEADER="rep,transport,req,reply,conc,threads,mrps,gbps,p50,p99,host_client_pct,host_server_pct,host_total_pct,dpu_arm_pct,host_pct_per_krps"
+  EXTENDED_HEADER="run_id,stage,n,k,a,pin,numa_policy,rep,transport,req,reply,conc,threads,mrps,gbps,p50,p95,p99,host_client_pct,host_server_pct,host_total_pct,dpu_arm_pct,host_pct_per_krps,fail,drops,reorder,grow_waits,grabs,rets,recycle_hits,pads,backend_dist"
+  [ -s "$TIDY" ] || printf '%s\n' "$EXTENDED_HEADER" > "$TIDY"
+  HEADER="$(head -n 1 "$TIDY")"
+  case "$HEADER" in
+    "$LEGACY_HEADER")
+      printf '%s\n' "$CPU_REP,$TR,$REQ,$REPLY,$CONC,$THREADS,$MRPS,$GBPS,$P50,$P99,$csum,$ssum,$HOST,$DPU_PCT,$EFF" >> "$TIDY"
+      ;;
+    "$EXTENDED_HEADER")
+      DIST_ESCAPED="${DIST//\"/\"\"}"
+      printf '%s\n' \
+        "$CPU_RUN_ID,$CPU_STAGE,$CPU_N,$CPU_K,$CPU_A,$CPU_PIN,$CPU_NUMA_POLICY,$CPU_REP,$TR,$REQ,$REPLY,$CONC,$THREADS,$MRPS,$GBPS,$P50,$P95,$P99,$csum,$ssum,$HOST,$DPU_PCT,$EFF,$FAIL,$DROPS,$REORDER,$WAITS,$GRABS,$RETS,$RECYC,$PADS,\"$DIST_ESCAPED\"" \
+        >> "$TIDY"
+      ;;
+    *)
+      echo "unsupported CPU CSV header in $TIDY" >&2
+      exit 2
+      ;;
+  esac
 fi

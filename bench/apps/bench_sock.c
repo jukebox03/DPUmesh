@@ -192,6 +192,26 @@ static int connect_target(void) {
     return fd;
 }
 
+/* epoll_wait() rounds sub-millisecond deadlines down to zero, which turns any
+ * open-loop rate above 1000 arrivals/s per worker into an accidental busy-spin.
+ * epoll_pwait2() keeps the scheduled arrival clock at nanosecond resolution while
+ * still waking early for socket readiness. */
+static int epoll_wait_until(int ep, struct epoll_event *out, double deadline) {
+    double dt = deadline - bench_now_sec();
+    if (dt < 0.0) dt = 0.0;
+    if (dt > 0.020) dt = 0.020;
+    struct timespec ts;
+    ts.tv_sec = (time_t)dt;
+    ts.tv_nsec = (long)((dt - (double)ts.tv_sec) * 1e9);
+    int n = epoll_pwait2(ep, out, 1, &ts, NULL);
+    if (n < 0 && errno == ENOSYS) {
+        int timeout_ms = (int)ceil(dt * 1e3);
+        if (dt > 0.0 && timeout_ms < 1) timeout_ms = 1;
+        n = epoll_wait(ep, out, 1, timeout_ms);
+    }
+    return n;
+}
+
 static void *worker_fn(void *arg) {
     worker_t *w = (worker_t *)arg;
     double start = 0.0, end = 0.0;
@@ -272,15 +292,13 @@ static void *worker_fn(void *arg) {
         /* Sleep until the socket is ready — or, in open loop, until the next
          * scheduled send. A short cap bounds how long a quiet loop parks so the
          * duration check stays responsive. */
-        int timeout_ms;
-        if (w->mode == MODE_OPEN) {
-            double dt = (w->sched_next - bench_now_sec()) * 1e3;
-            timeout_ms = dt < 0 ? 0 : (dt > 20 ? 20 : (int)dt);
-        } else {
-            timeout_ms = (w->outstanding > 0 || w->tx.len) ? 20 : 1;
-        }
         struct epoll_event out[1];
-        epoll_wait(ep, out, 1, timeout_ms);
+        if (w->mode == MODE_OPEN) {
+            epoll_wait_until(ep, out, w->sched_next);
+        } else {
+            int timeout_ms = (w->outstanding > 0 || w->tx.len) ? 20 : 1;
+            epoll_wait(ep, out, 1, timeout_ms);
+        }
     }
     end = bench_now_sec();
 done_ep:
@@ -348,9 +366,12 @@ static void run_bench(int conn_fd, int mode, int req_size, int reply_size, int c
     bench_hist_t agg; bench_hist_init(&agg);
     double mrps = 0.0, gbps = 0.0;
     long total_ok = 0, total_fail = 0, total_reorder = 0, total_drops = 0;
+    long total_scheduled = 0, total_pending = 0;
     for (int i = 0; i < threads; i++) {
         long measured = w[i].rcnt - w[i].warmup; if (measured < 0) measured = 0;
         total_fail += w[i].fail; total_reorder += w[i].reorder; total_drops += w[i].drops;
+        total_scheduled += (long)w[i].next_seq + w[i].drops;
+        total_pending += w[i].outstanding;
         if (!atomic_load(&w[i].broken) && w[i].dura > 1e-9 && measured > 0) {
             mrps += (double)measured / w[i].dura * 1e-6;
             gbps += 8e-9 * (double)measured * (double)req_size / w[i].dura;
@@ -369,10 +390,12 @@ static void run_bench(int conn_fd, int mode, int req_size, int reply_size, int c
     double offered_mrps = (mode == MODE_OPEN) ? rate * 1e-6 : mrps;
     int n = snprintf(reply, sizeof reply,
         "OK mrps=%.6f gbps=%.4f p50=%.2f p95=%.2f p99=%.2f p999=%.2f p9999=%.2f "
-        "avg=%.2f min=%.2f max=%.2f rcnt=%ld fail=%ld conc=%d threads=%d reqsz=%d repsz=%d "
+        "avg=%.2f min=%.2f max=%.2f rcnt=%ld scheduled=%ld pending=%ld fail=%ld "
+        "conc=%d threads=%d reqsz=%d repsz=%d "
         "durs=%.3f offered_mrps=%.6f drops=%ld overflow=%llu reorder=%ld mode=%s arr=%s\n",
         mrps, gbps, p50, p95, p99, p999, p9999, avg, mn, mx,
-        total_ok, total_fail, conc, threads, req_size, reply_size, duration,
+        total_ok, total_scheduled, total_pending, total_fail,
+        conc, threads, req_size, reply_size, duration,
         offered_mrps, total_drops, (unsigned long long)overflow, total_reorder,
         mode == MODE_OPEN ? "open" : "closed", arrival == ARR_POISSON ? "poisson" : "const");
     if (write(conn_fd, reply, (size_t)n) < 0) {}

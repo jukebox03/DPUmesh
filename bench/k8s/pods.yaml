@@ -18,6 +18,7 @@ spec:
         imagePullPolicy: Never
         ports: [{ containerPort: ${CTRL_PORT} }]
         env:
+        - { name: BENCH_NUMA_NODE, value: "${BENCH_NUMA_NODE}" }
         - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
         - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
         - { name: BENCH_DST_SERVICE, value: "echo-dpumesh" }   # peer by k8s Service NAME (pure client)
@@ -59,6 +60,7 @@ spec:
         imagePullPolicy: Never
         ports: [{ containerPort: ${CTRL_PORT} }]
         env:
+        - { name: BENCH_NUMA_NODE, value: "${BENCH_NUMA_NODE}" }
         - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
         - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
         - { name: BENCH_DST_SERVICE, value: "echo-dpumesh" }
@@ -90,6 +92,7 @@ spec:
         imagePullPolicy: Never
         ports: [{ containerPort: ${CTRL_PORT} }]
         env:
+        - { name: BENCH_NUMA_NODE, value: "${BENCH_NUMA_NODE}" }
         - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
         - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
         - { name: BENCH_DST_SERVICE, value: "echo-dpumesh" }
@@ -120,6 +123,7 @@ spec:
         image: docker.io/${IMG_ECHO_DPU}
         imagePullPolicy: Never
         env:
+        - { name: BENCH_NUMA_NODE, value: "${BENCH_NUMA_NODE}" }
         - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
         - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
         - { name: DPUMESH_SERVICE, value: "echo-dpumesh" }     # identity: k8s Service name → registry
@@ -150,6 +154,7 @@ spec:
         image: docker.io/${IMG_ECHO_DPU}
         imagePullPolicy: Never
         env:
+        - { name: BENCH_NUMA_NODE, value: "${BENCH_NUMA_NODE}" }
         - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
         - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
         - { name: DPUMESH_SERVICE, value: "echo-dpumesh" }   # 2nd backend of the SAME service (fan-out)
@@ -178,6 +183,7 @@ spec:
         image: docker.io/${IMG_ECHO_DPU}
         imagePullPolicy: Never
         env:
+        - { name: BENCH_NUMA_NODE, value: "${BENCH_NUMA_NODE}" }
         - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
         - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
         - { name: DPUMESH_SERVICE, value: "echo-dpumesh" }   # 3rd backend of the SAME service (fan-out)
@@ -209,6 +215,7 @@ spec:
         imagePullPolicy: Never
         ports: [{ containerPort: ${CTRL_PORT} }]
         env:
+        - { name: BENCH_NUMA_NODE, value: "${BENCH_NUMA_NODE}" }
         - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
         - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
         - { name: DPUMESH_SERVICE, value: "loopback-dpumesh" }
@@ -247,6 +254,7 @@ spec:
         imagePullPolicy: Never
         ports: [{ containerPort: ${CTRL_PORT} }]
         env:
+        - { name: BENCH_NUMA_NODE, value: "${BENCH_NUMA_NODE}" }
         - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
         - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
         - { name: DPUMESH_SERVICE, value: "verbs-dpumesh" }
@@ -284,6 +292,7 @@ spec:
         imagePullPolicy: Never
         ports: [{ containerPort: ${CTRL_PORT} }]
         env:
+        - { name: BENCH_NUMA_NODE, value: "${BENCH_NUMA_NODE}" }
         - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
         - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
         - { name: DPUMESH_SERVICE, value: "stream-dpumesh" }
@@ -321,6 +330,7 @@ spec:
         imagePullPolicy: Never
         ports: [{ containerPort: ${CTRL_PORT} }]
         env:
+        - { name: BENCH_NUMA_NODE, value: "${BENCH_NUMA_NODE}" }
         - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
         - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
         - { name: PRELOAD_SVC, value: "15" }
@@ -360,14 +370,16 @@ spec:
       - name: preload-echo
         image: docker.io/${IMG_PRELOAD_SOCK}
         imagePullPolicy: Never
-        command: ["/usr/local/bin/echo_sock"]
+        command: ["/usr/local/bin/numa-entrypoint.sh"]
+        args: ["/usr/local/bin/echo_sock"]
         env:
+        - { name: BENCH_NUMA_NODE, value: "${BENCH_NUMA_NODE}" }
         - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
         - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
         - { name: DPUMESH_SERVICE, value: "preload-sock" }
         - { name: DPUMESH_PORT, value: "9100" }
         - { name: ECHO_PORT, value: "9100" }
-        - { name: LD_PRELOAD, value: "/usr/local/lib/libdmesh_preload.so" }
+        - { name: NUMA_TARGET_LD_PRELOAD, value: "/usr/local/lib/libdmesh_preload.so" }
         securityContext: { privileged: true }
         volumeMounts:
         - { mountPath: /dev/infiniband, name: infiniband }
@@ -391,13 +403,15 @@ spec:
       - name: preload-bench
         image: docker.io/${IMG_PRELOAD_SOCK}
         imagePullPolicy: Never
-        command: ["/usr/local/bin/bench_sock"]
+        command: ["/usr/local/bin/numa-entrypoint.sh"]
+        args: ["/usr/local/bin/bench_sock"]
         env:
+        - { name: BENCH_NUMA_NODE, value: "${BENCH_NUMA_NODE}" }
         - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
         - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
         - { name: BENCH_TARGET, value: "10.96.0.18:9100" }
         - { name: CTRL_PORT, value: "${CTRL_PORT}" }
-        - { name: LD_PRELOAD, value: "/usr/local/lib/libdmesh_preload.so" }
+        - { name: NUMA_TARGET_LD_PRELOAD, value: "/usr/local/lib/libdmesh_preload.so" }
         securityContext: { privileged: true }
         volumeMounts:
         - { mountPath: /dev/infiniband, name: infiniband }
@@ -440,10 +454,13 @@ spec:
         imagePullPolicy: Never
         ports: [{ containerPort: ${CTRL_PORT} }]
         env:
+        - { name: BENCH_NUMA_NODE, value: "${BENCH_NUMA_NODE}" }
         - { name: BENCH_TARGET, value: "127.0.0.1:${TCP_PORT}" }
       - name: sidecar1
         image: docker.io/${IMG_ENVOY}
         imagePullPolicy: IfNotPresent
+        env:
+        - { name: BENCH_NUMA_NODE, value: "${BENCH_NUMA_NODE}" }
         args: ["-c", "/etc/envoy/envoy.yaml", "--log-level", "warn"]
         ports: [{ containerPort: ${TCP_PORT} }]
         volumeMounts:
@@ -476,11 +493,14 @@ spec:
         image: docker.io/${IMG_ECHO_TCP}
         imagePullPolicy: Never
         env:
+        - { name: BENCH_NUMA_NODE, value: "${BENCH_NUMA_NODE}" }
         - { name: ECHO_PORT, value: "9092" }
         ports: [{ containerPort: 9092 }]
       - name: sidecar2
         image: docker.io/${IMG_ENVOY}
         imagePullPolicy: IfNotPresent
+        env:
+        - { name: BENCH_NUMA_NODE, value: "${BENCH_NUMA_NODE}" }
         args: ["-c", "/etc/envoy/envoy.yaml", "--log-level", "warn"]
         ports: [{ containerPort: ${TCP_PORT} }]
         volumeMounts:
@@ -495,15 +515,112 @@ spec:
   selector: { app: echo-tcp }
   ports: [{ port: ${TCP_PORT}, targetPort: ${TCP_PORT} }]
 ---
-# echo-direct Service: routes straight to echo-tcp's echo_sock (port 9092), bypassing BOTH
-# Envoy sidecars — the direct-kernel-TCP ablation. It reuses the echo-tcp pod's server, so the
-# server core (echo_sock, core 3) is identical to the tcp-envoy path; only the client path (no
-# sidecars) differs, isolating exactly the sidecar tax.
+# Strict Envoy path: the same bench_sock/echo_sock pair and two TCP proxies as
+# bench-tcp/echo-tcp, but the inter-pod proxy leg requires mutual TLS.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bench-tcp-strict
+spec:
+  replicas: 0
+  selector: { matchLabels: { app: bench-tcp-strict } }
+  template:
+    metadata: { labels: { app: bench-tcp-strict } }
+    spec:
+      containers:
+      - name: bench-tcp-strict
+        image: docker.io/${IMG_BENCH_TCP}
+        imagePullPolicy: Never
+        ports: [{ containerPort: ${CTRL_PORT} }]
+        env:
+        - { name: BENCH_NUMA_NODE, value: "${BENCH_NUMA_NODE}" }
+        - { name: BENCH_TARGET, value: "127.0.0.1:${TCP_PORT}" }
+      - name: sidecar1
+        image: docker.io/${IMG_ENVOY}
+        imagePullPolicy: IfNotPresent
+        env:
+        - { name: BENCH_NUMA_NODE, value: "${BENCH_NUMA_NODE}" }
+        args: ["-c", "/etc/envoy/envoy.yaml", "--log-level", "warn"]
+        ports: [{ containerPort: ${TCP_PORT} }]
+        volumeMounts:
+        - { mountPath: /etc/envoy, name: strict-client-config, readOnly: true }
+        - { mountPath: /etc/envoy/tls, name: envoy-mtls, readOnly: true }
+      volumes:
+      - { name: strict-client-config, configMap: { name: strict-client-config } }
+      - { name: envoy-mtls, secret: { secretName: envoy-mtls } }
+---
 apiVersion: v1
 kind: Service
-metadata: { name: echo-direct }
+metadata: { name: bench-tcp-strict }
 spec:
-  selector: { app: echo-tcp }
+  selector: { app: bench-tcp-strict }
+  ports: [{ port: ${CTRL_PORT}, targetPort: ${CTRL_PORT} }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-tcp-strict
+spec:
+  replicas: 0
+  selector: { matchLabels: { app: echo-tcp-strict } }
+  template:
+    metadata: { labels: { app: echo-tcp-strict } }
+    spec:
+      containers:
+      - name: echo-tcp-strict
+        image: docker.io/${IMG_ECHO_TCP}
+        imagePullPolicy: Never
+        env:
+        - { name: BENCH_NUMA_NODE, value: "${BENCH_NUMA_NODE}" }
+        - { name: ECHO_PORT, value: "9092" }
+        ports: [{ containerPort: 9092 }]
+      - name: sidecar2
+        image: docker.io/${IMG_ENVOY}
+        imagePullPolicy: IfNotPresent
+        env:
+        - { name: BENCH_NUMA_NODE, value: "${BENCH_NUMA_NODE}" }
+        args: ["-c", "/etc/envoy/envoy.yaml", "--log-level", "warn"]
+        ports: [{ containerPort: ${TCP_PORT} }]
+        volumeMounts:
+        - { mountPath: /etc/envoy, name: strict-server-config, readOnly: true }
+        - { mountPath: /etc/envoy/tls, name: envoy-mtls, readOnly: true }
+      volumes:
+      - { name: strict-server-config, configMap: { name: strict-server-config } }
+      - { name: envoy-mtls, secret: { secretName: envoy-mtls } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: echo-tcp-strict }
+spec:
+  selector: { app: echo-tcp-strict }
+  ports: [{ port: ${TCP_PORT}, targetPort: ${TCP_PORT} }]
+---
+# Dedicated raw-TCP server. It uses the same echo_sock image without an idle
+# sidecar sharing its core.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-plain
+spec:
+  replicas: 0
+  selector: { matchLabels: { app: echo-plain } }
+  template:
+    metadata: { labels: { app: echo-plain } }
+    spec:
+      containers:
+      - name: echo-plain
+        image: docker.io/${IMG_ECHO_TCP}
+        imagePullPolicy: Never
+        env:
+        - { name: BENCH_NUMA_NODE, value: "${BENCH_NUMA_NODE}" }
+        - { name: ECHO_PORT, value: "9092" }
+        ports: [{ containerPort: 9092 }]
+---
+apiVersion: v1
+kind: Service
+metadata: { name: echo-plain }
+spec:
+  selector: { app: echo-plain }
   ports: [{ port: 9092, targetPort: 9092 }]
 ---
 # bench-direct: matched-C client (bench_sock) pointed straight at echo_sock (no sidecar).
@@ -523,7 +640,8 @@ spec:
         imagePullPolicy: Never
         ports: [{ containerPort: ${CTRL_PORT} }]
         env:
-        - { name: BENCH_TARGET, value: "echo-direct:9092" }
+        - { name: BENCH_NUMA_NODE, value: "${BENCH_NUMA_NODE}" }
+        - { name: BENCH_TARGET, value: "echo-plain:9092" }
 ---
 apiVersion: v1
 kind: Service
@@ -587,6 +705,90 @@ data:
         connect_timeout: 5s
         load_assignment:
           cluster_name: upstream
+          endpoints:
+          - lb_endpoints:
+            - endpoint:
+                address:
+                  socket_address: { address: 127.0.0.1, port_value: 9092 }
+---
+# STRICT-equivalent client sidecar. The application-facing leg remains local
+# plaintext, while the inter-pod sidecar leg requires a client certificate and
+# validates the server against the benchmark CA.
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: strict-client-config }
+data:
+  envoy.yaml: |
+    static_resources:
+      listeners:
+      - name: tcp_listener
+        address:
+          socket_address: { address: 0.0.0.0, port_value: ${TCP_PORT} }
+        filter_chains:
+        - filters:
+          - name: envoy.filters.network.tcp_proxy
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
+              stat_prefix: tcp_strict
+              cluster: strict_upstream
+      clusters:
+      - name: strict_upstream
+        type: STRICT_DNS
+        connect_timeout: 5s
+        load_assignment:
+          cluster_name: strict_upstream
+          endpoints:
+          - lb_endpoints:
+            - endpoint:
+                address:
+                  socket_address: { address: echo-tcp-strict, port_value: ${TCP_PORT} }
+        transport_socket:
+          name: envoy.transport_sockets.tls
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+            sni: echo-tcp-strict
+            common_tls_context:
+              tls_certificates:
+              - certificate_chain: { filename: /etc/envoy/tls/client.crt }
+                private_key: { filename: /etc/envoy/tls/client.key }
+              validation_context:
+                trusted_ca: { filename: /etc/envoy/tls/ca.crt }
+---
+# STRICT-equivalent server sidecar. Client certificates are mandatory on the
+# inter-pod leg; traffic to the co-located echo application is local plaintext.
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: strict-server-config }
+data:
+  envoy.yaml: |
+    static_resources:
+      listeners:
+      - name: tcp_listener
+        address:
+          socket_address: { address: 0.0.0.0, port_value: ${TCP_PORT} }
+        filter_chains:
+        - transport_socket:
+            name: envoy.transport_sockets.tls
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+              require_client_certificate: true
+              common_tls_context:
+                tls_certificates:
+                - certificate_chain: { filename: /etc/envoy/tls/server.crt }
+                  private_key: { filename: /etc/envoy/tls/server.key }
+                validation_context:
+                  trusted_ca: { filename: /etc/envoy/tls/ca.crt }
+          filters:
+          - name: envoy.filters.network.tcp_proxy
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
+              stat_prefix: tcp_strict
+              cluster: local_echo
+      clusters:
+      - name: local_echo
+        connect_timeout: 5s
+        load_assignment:
+          cluster_name: local_echo
           endpoints:
           - lb_endpoints:
             - endpoint:

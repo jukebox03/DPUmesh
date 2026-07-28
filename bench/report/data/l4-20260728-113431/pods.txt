@@ -1,0 +1,11 @@
+NAME                               READY   STATUS    RESTARTS   AGE   IP            NODE      NOMINATED NODE   READINESS GATES
+bench-direct-9d5cf8b99-tfrp7       1/1     Running   0          67m   10.244.0.77   rapids4   <none>           <none>
+bench-dpumesh-75d4f4b777-7qk6g     1/1     Running   0          67m   10.244.0.69   rapids4   <none>           <none>
+bench-tcp-7b8dc7b6f7-22ltn         2/2     Running   0          67m   10.244.0.76   rapids4   <none>           <none>
+bench-tcp-strict-b678c66b7-qp4kb   2/2     Running   0          67m   10.244.0.74   rapids4   <none>           <none>
+echo-dpumesh-f98c98b9-7mbnw        1/1     Running   0          67m   10.244.0.68   rapids4   <none>           <none>
+echo-plain-867b9d4789-jpmvs        1/1     Running   0          67m   10.244.0.72   rapids4   <none>           <none>
+echo-tcp-6b7d6d46f6-pmrnw          2/2     Running   0          67m   10.244.0.75   rapids4   <none>           <none>
+echo-tcp-strict-7d69765b5b-7zvwh   2/2     Running   0          67m   10.244.0.73   rapids4   <none>           <none>
+preload-bench-856d8bf994-xxdnz     1/1     Running   0          67m   10.244.0.71   rapids4   <none>           <none>
+preload-echo-86568cf7b6-6qss9      1/1     Running   0          67m   10.244.0.70   rapids4   <none>           <none>

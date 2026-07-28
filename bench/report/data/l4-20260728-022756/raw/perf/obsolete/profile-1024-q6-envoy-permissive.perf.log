@@ -1,0 +1,2 @@
+[ perf record: Woken up 1 times to write data ]
+[ perf record: Captured and wrote 1.889 MB /home/jukebox/DPUmesh/bench/report/data/l4-20260728-022756/raw/perf/profile-1024-q6-envoy-permissive.data (1016 samples) ]

@@ -1,0 +1,1684 @@
+apiVersion: v1
+items:
+- apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    annotations:
+      deployment.kubernetes.io/revision: "5"
+      kubectl.kubernetes.io/last-applied-configuration: |
+        {"apiVersion":"apps/v1","kind":"Deployment","metadata":{"annotations":{},"name":"bench-direct","namespace":"test-bench"},"spec":{"replicas":0,"selector":{"matchLabels":{"app":"bench-direct"}},"template":{"metadata":{"labels":{"app":"bench-direct"}},"spec":{"containers":[{"env":[{"name":"BENCH_NUMA_NODE","value":"1"},{"name":"BENCH_TARGET","value":"echo-plain:9092"}],"image":"docker.io/bench/bench-tcp:latest","imagePullPolicy":"Never","name":"bench-direct","ports":[{"containerPort":9092}]}]}}}}
+    creationTimestamp: "2026-07-18T10:20:10Z"
+    generation: 360
+    name: bench-direct
+    namespace: test-bench
+    resourceVersion: "31585164"
+    uid: 9713dabc-1263-48de-860f-c1cd1b09bb80
+  spec:
+    progressDeadlineSeconds: 600
+    replicas: 1
+    revisionHistoryLimit: 10
+    selector:
+      matchLabels:
+        app: bench-direct
+    strategy:
+      rollingUpdate:
+        maxSurge: 25%
+        maxUnavailable: 25%
+      type: RollingUpdate
+    template:
+      metadata:
+        creationTimestamp: null
+        labels:
+          app: bench-direct
+      spec:
+        containers:
+        - env:
+          - name: BENCH_NUMA_NODE
+            value: "1"
+          - name: BENCH_TARGET
+            value: echo-plain:9092
+          image: docker.io/bench/bench-tcp:latest
+          imagePullPolicy: Never
+          name: bench-direct
+          ports:
+          - containerPort: 9092
+            protocol: TCP
+          resources: {}
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+        dnsPolicy: ClusterFirst
+        restartPolicy: Always
+        schedulerName: default-scheduler
+        securityContext: {}
+        terminationGracePeriodSeconds: 30
+  status:
+    availableReplicas: 1
+    conditions:
+    - lastTransitionTime: "2026-07-18T10:20:10Z"
+      lastUpdateTime: "2026-07-27T16:26:15Z"
+      message: ReplicaSet "bench-direct-9d5cf8b99" has successfully progressed.
+      reason: NewReplicaSetAvailable
+      status: "True"
+      type: Progressing
+    - lastTransitionTime: "2026-07-27T17:11:04Z"
+      lastUpdateTime: "2026-07-27T17:11:04Z"
+      message: Deployment has minimum availability.
+      reason: MinimumReplicasAvailable
+      status: "True"
+      type: Available
+    observedGeneration: 360
+    readyReplicas: 1
+    replicas: 1
+    updatedReplicas: 1
+- apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    annotations:
+      deployment.kubernetes.io/revision: "80"
+      kubectl.kubernetes.io/last-applied-configuration: |
+        {"apiVersion":"apps/v1","kind":"Deployment","metadata":{"annotations":{},"name":"bench-dpumesh","namespace":"test-bench"},"spec":{"replicas":0,"selector":{"matchLabels":{"app":"bench-dpumesh"}},"template":{"metadata":{"labels":{"app":"bench-dpumesh"}},"spec":{"containers":[{"env":[{"name":"BENCH_NUMA_NODE","value":"1"},{"name":"DPUMESH_PCI_ADDR","value":"94:00.0"},{"name":"DPUMESH_RINGS_PER_POD","value":"8"},{"name":"BENCH_DST_SERVICE","value":"echo-dpumesh"},{"name":"ASYNC_THREADS","value":"4"},{"name":"BENCH_PIPELINE","value":"8"},{"name":"BENCH_COALESCE","value":"0"}],"image":"docker.io/bench/bench-dpumesh:latest","imagePullPolicy":"Never","name":"bench-dpumesh","ports":[{"containerPort":9092}],"securityContext":{"privileged":true},"volumeMounts":[{"mountPath":"/dev/infiniband","name":"infiniband"},{"mountPath":"/usr/local/lib/libdpumesh.so.4","name":"libdpumesh-so","subPath":"libdpumesh.so.4"}]}],"hostname":"bench-dpumesh","volumes":[{"hostPath":{"path":"/dev/infiniband"},"name":"infiniband"},{"hostPath":{"path":"/home/jukebox/DPUmesh/build/lib","type":"Directory"},"name":"libdpumesh-so"}]}}}}
+    creationTimestamp: "2026-06-22T04:21:19Z"
+    generation: 986
+    name: bench-dpumesh
+    namespace: test-bench
+    resourceVersion: "31584792"
+    uid: 28350f87-774a-466e-b61b-9732b9376898
+  spec:
+    progressDeadlineSeconds: 600
+    replicas: 1
+    revisionHistoryLimit: 10
+    selector:
+      matchLabels:
+        app: bench-dpumesh
+    strategy:
+      rollingUpdate:
+        maxSurge: 25%
+        maxUnavailable: 25%
+      type: RollingUpdate
+    template:
+      metadata:
+        creationTimestamp: null
+        labels:
+          app: bench-dpumesh
+      spec:
+        containers:
+        - env:
+          - name: BENCH_NUMA_NODE
+            value: "1"
+          - name: DPUMESH_PCI_ADDR
+            value: "94:00.0"
+          - name: DPUMESH_RINGS_PER_POD
+            value: "8"
+          - name: BENCH_DST_SERVICE
+            value: echo-dpumesh
+          - name: ASYNC_THREADS
+            value: "4"
+          - name: BENCH_PIPELINE
+            value: "8"
+          - name: BENCH_COALESCE
+            value: "0"
+          image: docker.io/bench/bench-dpumesh:latest
+          imagePullPolicy: Never
+          name: bench-dpumesh
+          ports:
+          - containerPort: 9092
+            protocol: TCP
+          resources: {}
+          securityContext:
+            privileged: true
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          volumeMounts:
+          - mountPath: /dev/infiniband
+            name: infiniband
+          - mountPath: /usr/local/lib/libdpumesh.so.4
+            name: libdpumesh-so
+            subPath: libdpumesh.so.4
+        dnsPolicy: ClusterFirst
+        hostname: bench-dpumesh
+        restartPolicy: Always
+        schedulerName: default-scheduler
+        securityContext: {}
+        terminationGracePeriodSeconds: 30
+        volumes:
+        - hostPath:
+            path: /dev/infiniband
+            type: ""
+          name: infiniband
+        - hostPath:
+            path: /home/jukebox/DPUmesh/build/lib
+            type: Directory
+          name: libdpumesh-so
+  status:
+    availableReplicas: 1
+    conditions:
+    - lastTransitionTime: "2026-06-22T04:21:19Z"
+      lastUpdateTime: "2026-07-27T13:02:10Z"
+      message: ReplicaSet "bench-dpumesh-75d4f4b777" has successfully progressed.
+      reason: NewReplicaSetAvailable
+      status: "True"
+      type: Progressing
+    - lastTransitionTime: "2026-07-27T17:10:38Z"
+      lastUpdateTime: "2026-07-27T17:10:38Z"
+      message: Deployment has minimum availability.
+      reason: MinimumReplicasAvailable
+      status: "True"
+      type: Available
+    observedGeneration: 986
+    readyReplicas: 1
+    replicas: 1
+    updatedReplicas: 1
+- apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    annotations:
+      deployment.kubernetes.io/revision: "33"
+      kubectl.kubernetes.io/last-applied-configuration: |
+        {"apiVersion":"apps/v1","kind":"Deployment","metadata":{"annotations":{},"name":"bench-dpumesh-2","namespace":"test-bench"},"spec":{"replicas":0,"selector":{"matchLabels":{"app":"bench-dpumesh-2"}},"template":{"metadata":{"labels":{"app":"bench-dpumesh-2"}},"spec":{"containers":[{"env":[{"name":"BENCH_NUMA_NODE","value":"1"},{"name":"DPUMESH_PCI_ADDR","value":"94:00.0"},{"name":"DPUMESH_RINGS_PER_POD","value":"8"},{"name":"BENCH_DST_SERVICE","value":"echo-dpumesh"},{"name":"ASYNC_THREADS","value":"4"},{"name":"BENCH_PIPELINE","value":"8"},{"name":"BENCH_COALESCE","value":"0"}],"image":"docker.io/bench/bench-dpumesh:latest","imagePullPolicy":"Never","name":"bench-dpumesh-2","ports":[{"containerPort":9092}],"securityContext":{"privileged":true},"volumeMounts":[{"mountPath":"/dev/infiniband","name":"infiniband"},{"mountPath":"/usr/local/lib/libdpumesh.so.4","name":"libdpumesh-so","subPath":"libdpumesh.so.4"}]}],"hostname":"bench-dpumesh-2","volumes":[{"hostPath":{"path":"/dev/infiniband"},"name":"infiniband"},{"hostPath":{"path":"/home/jukebox/DPUmesh/build/lib","type":"Directory"},"name":"libdpumesh-so"}]}}}}
+    creationTimestamp: "2026-07-18T11:46:30Z"
+    generation: 368
+    name: bench-dpumesh-2
+    namespace: test-bench
+    resourceVersion: "31584814"
+    uid: 6b3f6a89-d32a-41e4-9133-bf33cf81f74d
+  spec:
+    progressDeadlineSeconds: 600
+    replicas: 1
+    revisionHistoryLimit: 10
+    selector:
+      matchLabels:
+        app: bench-dpumesh-2
+    strategy:
+      rollingUpdate:
+        maxSurge: 25%
+        maxUnavailable: 25%
+      type: RollingUpdate
+    template:
+      metadata:
+        creationTimestamp: null
+        labels:
+          app: bench-dpumesh-2
+      spec:
+        containers:
+        - env:
+          - name: BENCH_NUMA_NODE
+            value: "1"
+          - name: DPUMESH_PCI_ADDR
+            value: "94:00.0"
+          - name: DPUMESH_RINGS_PER_POD
+            value: "8"
+          - name: BENCH_DST_SERVICE
+            value: echo-dpumesh
+          - name: ASYNC_THREADS
+            value: "4"
+          - name: BENCH_PIPELINE
+            value: "8"
+          - name: BENCH_COALESCE
+            value: "0"
+          image: docker.io/bench/bench-dpumesh:latest
+          imagePullPolicy: Never
+          name: bench-dpumesh-2
+          ports:
+          - containerPort: 9092
+            protocol: TCP
+          resources: {}
+          securityContext:
+            privileged: true
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          volumeMounts:
+          - mountPath: /dev/infiniband
+            name: infiniband
+          - mountPath: /usr/local/lib/libdpumesh.so.4
+            name: libdpumesh-so
+            subPath: libdpumesh.so.4
+        dnsPolicy: ClusterFirst
+        hostname: bench-dpumesh-2
+        restartPolicy: Always
+        schedulerName: default-scheduler
+        securityContext: {}
+        terminationGracePeriodSeconds: 30
+        volumes:
+        - hostPath:
+            path: /dev/infiniband
+            type: ""
+          name: infiniband
+        - hostPath:
+            path: /home/jukebox/DPUmesh/build/lib
+            type: Directory
+          name: libdpumesh-so
+  status:
+    availableReplicas: 1
+    conditions:
+    - lastTransitionTime: "2026-07-18T11:46:30Z"
+      lastUpdateTime: "2026-07-27T13:02:10Z"
+      message: ReplicaSet "bench-dpumesh-2-76f5485ccb" has successfully progressed.
+      reason: NewReplicaSetAvailable
+      status: "True"
+      type: Progressing
+    - lastTransitionTime: "2026-07-27T17:10:39Z"
+      lastUpdateTime: "2026-07-27T17:10:39Z"
+      message: Deployment has minimum availability.
+      reason: MinimumReplicasAvailable
+      status: "True"
+      type: Available
+    observedGeneration: 368
+    readyReplicas: 1
+    replicas: 1
+    updatedReplicas: 1
+- apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    annotations:
+      deployment.kubernetes.io/revision: "33"
+      kubectl.kubernetes.io/last-applied-configuration: |
+        {"apiVersion":"apps/v1","kind":"Deployment","metadata":{"annotations":{},"name":"bench-dpumesh-3","namespace":"test-bench"},"spec":{"replicas":0,"selector":{"matchLabels":{"app":"bench-dpumesh-3"}},"template":{"metadata":{"labels":{"app":"bench-dpumesh-3"}},"spec":{"containers":[{"env":[{"name":"BENCH_NUMA_NODE","value":"1"},{"name":"DPUMESH_PCI_ADDR","value":"94:00.0"},{"name":"DPUMESH_RINGS_PER_POD","value":"8"},{"name":"BENCH_DST_SERVICE","value":"echo-dpumesh"},{"name":"ASYNC_THREADS","value":"4"},{"name":"BENCH_PIPELINE","value":"8"},{"name":"BENCH_COALESCE","value":"0"}],"image":"docker.io/bench/bench-dpumesh:latest","imagePullPolicy":"Never","name":"bench-dpumesh-3","ports":[{"containerPort":9092}],"securityContext":{"privileged":true},"volumeMounts":[{"mountPath":"/dev/infiniband","name":"infiniband"},{"mountPath":"/usr/local/lib/libdpumesh.so.4","name":"libdpumesh-so","subPath":"libdpumesh.so.4"}]}],"hostname":"bench-dpumesh-3","volumes":[{"hostPath":{"path":"/dev/infiniband"},"name":"infiniband"},{"hostPath":{"path":"/home/jukebox/DPUmesh/build/lib","type":"Directory"},"name":"libdpumesh-so"}]}}}}
+    creationTimestamp: "2026-07-18T11:46:30Z"
+    generation: 368
+    name: bench-dpumesh-3
+    namespace: test-bench
+    resourceVersion: "31584842"
+    uid: 69d763a0-5b7f-4a84-87d1-86415607bccd
+  spec:
+    progressDeadlineSeconds: 600
+    replicas: 1
+    revisionHistoryLimit: 10
+    selector:
+      matchLabels:
+        app: bench-dpumesh-3
+    strategy:
+      rollingUpdate:
+        maxSurge: 25%
+        maxUnavailable: 25%
+      type: RollingUpdate
+    template:
+      metadata:
+        creationTimestamp: null
+        labels:
+          app: bench-dpumesh-3
+      spec:
+        containers:
+        - env:
+          - name: BENCH_NUMA_NODE
+            value: "1"
+          - name: DPUMESH_PCI_ADDR
+            value: "94:00.0"
+          - name: DPUMESH_RINGS_PER_POD
+            value: "8"
+          - name: BENCH_DST_SERVICE
+            value: echo-dpumesh
+          - name: ASYNC_THREADS
+            value: "4"
+          - name: BENCH_PIPELINE
+            value: "8"
+          - name: BENCH_COALESCE
+            value: "0"
+          image: docker.io/bench/bench-dpumesh:latest
+          imagePullPolicy: Never
+          name: bench-dpumesh-3
+          ports:
+          - containerPort: 9092
+            protocol: TCP
+          resources: {}
+          securityContext:
+            privileged: true
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          volumeMounts:
+          - mountPath: /dev/infiniband
+            name: infiniband
+          - mountPath: /usr/local/lib/libdpumesh.so.4
+            name: libdpumesh-so
+            subPath: libdpumesh.so.4
+        dnsPolicy: ClusterFirst
+        hostname: bench-dpumesh-3
+        restartPolicy: Always
+        schedulerName: default-scheduler
+        securityContext: {}
+        terminationGracePeriodSeconds: 30
+        volumes:
+        - hostPath:
+            path: /dev/infiniband
+            type: ""
+          name: infiniband
+        - hostPath:
+            path: /home/jukebox/DPUmesh/build/lib
+            type: Directory
+          name: libdpumesh-so
+  status:
+    availableReplicas: 1
+    conditions:
+    - lastTransitionTime: "2026-07-18T11:46:30Z"
+      lastUpdateTime: "2026-07-27T13:02:10Z"
+      message: ReplicaSet "bench-dpumesh-3-7d8c6ddb5c" has successfully progressed.
+      reason: NewReplicaSetAvailable
+      status: "True"
+      type: Progressing
+    - lastTransitionTime: "2026-07-27T17:10:41Z"
+      lastUpdateTime: "2026-07-27T17:10:41Z"
+      message: Deployment has minimum availability.
+      reason: MinimumReplicasAvailable
+      status: "True"
+      type: Available
+    observedGeneration: 368
+    readyReplicas: 1
+    replicas: 1
+    updatedReplicas: 1
+- apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    annotations:
+      deployment.kubernetes.io/revision: "6"
+      kubectl.kubernetes.io/last-applied-configuration: |
+        {"apiVersion":"apps/v1","kind":"Deployment","metadata":{"annotations":{},"name":"bench-tcp","namespace":"test-bench"},"spec":{"replicas":0,"selector":{"matchLabels":{"app":"bench-tcp"}},"template":{"metadata":{"labels":{"app":"bench-tcp"}},"spec":{"containers":[{"env":[{"name":"BENCH_NUMA_NODE","value":"1"},{"name":"BENCH_TARGET","value":"127.0.0.1:9091"}],"image":"docker.io/bench/bench-tcp:latest","imagePullPolicy":"Never","name":"bench-tcp","ports":[{"containerPort":9092}]},{"args":["-c","/etc/envoy/envoy.yaml","--log-level","warn"],"env":[{"name":"BENCH_NUMA_NODE","value":"1"}],"image":"docker.io/bench/envoy-numa:v1.30-latest","imagePullPolicy":"IfNotPresent","name":"sidecar1","ports":[{"containerPort":9091}],"volumeMounts":[{"mountPath":"/etc/envoy","name":"sidecar1-config","readOnly":true}]}],"volumes":[{"configMap":{"name":"sidecar1-config"},"name":"sidecar1-config"}]}}}}
+    creationTimestamp: "2026-06-22T04:21:19Z"
+    generation: 930
+    name: bench-tcp
+    namespace: test-bench
+    resourceVersion: "31585134"
+    uid: 653112b3-6522-4352-af0a-7747fb5fbaf8
+  spec:
+    progressDeadlineSeconds: 600
+    replicas: 1
+    revisionHistoryLimit: 10
+    selector:
+      matchLabels:
+        app: bench-tcp
+    strategy:
+      rollingUpdate:
+        maxSurge: 25%
+        maxUnavailable: 25%
+      type: RollingUpdate
+    template:
+      metadata:
+        annotations:
+          kubectl.kubernetes.io/restartedAt: "2026-07-18T15:23:43+09:00"
+        creationTimestamp: null
+        labels:
+          app: bench-tcp
+      spec:
+        containers:
+        - env:
+          - name: BENCH_NUMA_NODE
+            value: "1"
+          - name: BENCH_TARGET
+            value: 127.0.0.1:9091
+          image: docker.io/bench/bench-tcp:latest
+          imagePullPolicy: Never
+          name: bench-tcp
+          ports:
+          - containerPort: 9092
+            protocol: TCP
+          resources: {}
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+        - args:
+          - -c
+          - /etc/envoy/envoy.yaml
+          - --log-level
+          - warn
+          env:
+          - name: BENCH_NUMA_NODE
+            value: "1"
+          image: docker.io/bench/envoy-numa:v1.30-latest
+          imagePullPolicy: IfNotPresent
+          name: sidecar1
+          ports:
+          - containerPort: 9091
+            protocol: TCP
+          resources: {}
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          volumeMounts:
+          - mountPath: /etc/envoy
+            name: sidecar1-config
+            readOnly: true
+        dnsPolicy: ClusterFirst
+        restartPolicy: Always
+        schedulerName: default-scheduler
+        securityContext: {}
+        terminationGracePeriodSeconds: 30
+        volumes:
+        - configMap:
+            defaultMode: 420
+            name: sidecar1-config
+          name: sidecar1-config
+  status:
+    availableReplicas: 1
+    conditions:
+    - lastTransitionTime: "2026-06-22T04:21:20Z"
+      lastUpdateTime: "2026-07-27T13:02:13Z"
+      message: ReplicaSet "bench-tcp-7b8dc7b6f7" has successfully progressed.
+      reason: NewReplicaSetAvailable
+      status: "True"
+      type: Progressing
+    - lastTransitionTime: "2026-07-27T17:11:02Z"
+      lastUpdateTime: "2026-07-27T17:11:02Z"
+      message: Deployment has minimum availability.
+      reason: MinimumReplicasAvailable
+      status: "True"
+      type: Available
+    observedGeneration: 930
+    readyReplicas: 1
+    replicas: 1
+    updatedReplicas: 1
+- apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    annotations:
+      deployment.kubernetes.io/revision: "1"
+      kubectl.kubernetes.io/last-applied-configuration: |
+        {"apiVersion":"apps/v1","kind":"Deployment","metadata":{"annotations":{},"name":"bench-tcp-strict","namespace":"test-bench"},"spec":{"replicas":0,"selector":{"matchLabels":{"app":"bench-tcp-strict"}},"template":{"metadata":{"labels":{"app":"bench-tcp-strict"}},"spec":{"containers":[{"env":[{"name":"BENCH_NUMA_NODE","value":"1"},{"name":"BENCH_TARGET","value":"127.0.0.1:9091"}],"image":"docker.io/bench/bench-tcp:latest","imagePullPolicy":"Never","name":"bench-tcp-strict","ports":[{"containerPort":9092}]},{"args":["-c","/etc/envoy/envoy.yaml","--log-level","warn"],"env":[{"name":"BENCH_NUMA_NODE","value":"1"}],"image":"docker.io/bench/envoy-numa:v1.30-latest","imagePullPolicy":"IfNotPresent","name":"sidecar1","ports":[{"containerPort":9091}],"volumeMounts":[{"mountPath":"/etc/envoy","name":"strict-client-config","readOnly":true},{"mountPath":"/etc/envoy/tls","name":"envoy-mtls","readOnly":true}]}],"volumes":[{"configMap":{"name":"strict-client-config"},"name":"strict-client-config"},{"name":"envoy-mtls","secret":{"secretName":"envoy-mtls"}}]}}}}
+    creationTimestamp: "2026-07-27T16:26:13Z"
+    generation: 6
+    name: bench-tcp-strict
+    namespace: test-bench
+    resourceVersion: "31585077"
+    uid: ebcfa096-be2b-4268-aef3-e275b77efe12
+  spec:
+    progressDeadlineSeconds: 600
+    replicas: 1
+    revisionHistoryLimit: 10
+    selector:
+      matchLabels:
+        app: bench-tcp-strict
+    strategy:
+      rollingUpdate:
+        maxSurge: 25%
+        maxUnavailable: 25%
+      type: RollingUpdate
+    template:
+      metadata:
+        creationTimestamp: null
+        labels:
+          app: bench-tcp-strict
+      spec:
+        containers:
+        - env:
+          - name: BENCH_NUMA_NODE
+            value: "1"
+          - name: BENCH_TARGET
+            value: 127.0.0.1:9091
+          image: docker.io/bench/bench-tcp:latest
+          imagePullPolicy: Never
+          name: bench-tcp-strict
+          ports:
+          - containerPort: 9092
+            protocol: TCP
+          resources: {}
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+        - args:
+          - -c
+          - /etc/envoy/envoy.yaml
+          - --log-level
+          - warn
+          env:
+          - name: BENCH_NUMA_NODE
+            value: "1"
+          image: docker.io/bench/envoy-numa:v1.30-latest
+          imagePullPolicy: IfNotPresent
+          name: sidecar1
+          ports:
+          - containerPort: 9091
+            protocol: TCP
+          resources: {}
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          volumeMounts:
+          - mountPath: /etc/envoy
+            name: strict-client-config
+            readOnly: true
+          - mountPath: /etc/envoy/tls
+            name: envoy-mtls
+            readOnly: true
+        dnsPolicy: ClusterFirst
+        restartPolicy: Always
+        schedulerName: default-scheduler
+        securityContext: {}
+        terminationGracePeriodSeconds: 30
+        volumes:
+        - configMap:
+            defaultMode: 420
+            name: strict-client-config
+          name: strict-client-config
+        - name: envoy-mtls
+          secret:
+            defaultMode: 420
+            secretName: envoy-mtls
+  status:
+    availableReplicas: 1
+    conditions:
+    - lastTransitionTime: "2026-07-27T16:26:13Z"
+      lastUpdateTime: "2026-07-27T16:26:14Z"
+      message: ReplicaSet "bench-tcp-strict-b678c66b7" has successfully progressed.
+      reason: NewReplicaSetAvailable
+      status: "True"
+      type: Progressing
+    - lastTransitionTime: "2026-07-27T17:10:58Z"
+      lastUpdateTime: "2026-07-27T17:10:58Z"
+      message: Deployment has minimum availability.
+      reason: MinimumReplicasAvailable
+      status: "True"
+      type: Available
+    observedGeneration: 6
+    readyReplicas: 1
+    replicas: 1
+    updatedReplicas: 1
+- apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    annotations:
+      deployment.kubernetes.io/revision: "69"
+      kubectl.kubernetes.io/last-applied-configuration: |
+        {"apiVersion":"apps/v1","kind":"Deployment","metadata":{"annotations":{},"name":"echo-dpumesh","namespace":"test-bench"},"spec":{"replicas":0,"selector":{"matchLabels":{"app":"echo-dpumesh"}},"template":{"metadata":{"labels":{"app":"echo-dpumesh"}},"spec":{"containers":[{"env":[{"name":"BENCH_NUMA_NODE","value":"1"},{"name":"DPUMESH_PCI_ADDR","value":"94:00.0"},{"name":"DPUMESH_RINGS_PER_POD","value":"8"},{"name":"DPUMESH_SERVICE","value":"echo-dpumesh"},{"name":"ECHO_THREADS","value":"3"}],"image":"docker.io/bench/echo-dpumesh:latest","imagePullPolicy":"Never","name":"echo-dpumesh","securityContext":{"privileged":true},"volumeMounts":[{"mountPath":"/dev/infiniband","name":"infiniband"},{"mountPath":"/usr/local/lib/libdpumesh.so.4","name":"libdpumesh-so","subPath":"libdpumesh.so.4"}]}],"hostname":"echo-dpumesh","volumes":[{"hostPath":{"path":"/dev/infiniband"},"name":"infiniband"},{"hostPath":{"path":"/home/jukebox/DPUmesh/build/lib","type":"Directory"},"name":"libdpumesh-so"}]}}}}
+    creationTimestamp: "2026-06-22T04:21:19Z"
+    generation: 1095
+    name: echo-dpumesh
+    namespace: test-bench
+    resourceVersion: "31584705"
+    uid: c08eef5b-4e67-468d-acaa-081b4cf4aa63
+  spec:
+    progressDeadlineSeconds: 600
+    replicas: 1
+    revisionHistoryLimit: 10
+    selector:
+      matchLabels:
+        app: echo-dpumesh
+    strategy:
+      rollingUpdate:
+        maxSurge: 25%
+        maxUnavailable: 25%
+      type: RollingUpdate
+    template:
+      metadata:
+        annotations:
+          kubectl.kubernetes.io/restartedAt: "2026-07-01T19:03:22+09:00"
+        creationTimestamp: null
+        labels:
+          app: echo-dpumesh
+      spec:
+        containers:
+        - env:
+          - name: BENCH_NUMA_NODE
+            value: "1"
+          - name: DPUMESH_PCI_ADDR
+            value: "94:00.0"
+          - name: DPUMESH_RINGS_PER_POD
+            value: "8"
+          - name: DPUMESH_SERVICE
+            value: echo-dpumesh
+          - name: ECHO_THREADS
+            value: "3"
+          image: docker.io/bench/echo-dpumesh:latest
+          imagePullPolicy: Never
+          name: echo-dpumesh
+          resources: {}
+          securityContext:
+            privileged: true
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          volumeMounts:
+          - mountPath: /dev/infiniband
+            name: infiniband
+          - mountPath: /usr/local/lib/libdpumesh.so.4
+            name: libdpumesh-so
+            subPath: libdpumesh.so.4
+        dnsPolicy: ClusterFirst
+        hostname: echo-dpumesh
+        restartPolicy: Always
+        schedulerName: default-scheduler
+        securityContext: {}
+        terminationGracePeriodSeconds: 30
+        volumes:
+        - hostPath:
+            path: /dev/infiniband
+            type: ""
+          name: infiniband
+        - hostPath:
+            path: /home/jukebox/DPUmesh/build/lib
+            type: Directory
+          name: libdpumesh-so
+  status:
+    availableReplicas: 1
+    conditions:
+    - lastTransitionTime: "2026-06-22T04:21:19Z"
+      lastUpdateTime: "2026-07-27T13:02:10Z"
+      message: ReplicaSet "echo-dpumesh-f98c98b9" has successfully progressed.
+      reason: NewReplicaSetAvailable
+      status: "True"
+      type: Progressing
+    - lastTransitionTime: "2026-07-27T17:10:30Z"
+      lastUpdateTime: "2026-07-27T17:10:30Z"
+      message: Deployment has minimum availability.
+      reason: MinimumReplicasAvailable
+      status: "True"
+      type: Available
+    observedGeneration: 1095
+    readyReplicas: 1
+    replicas: 1
+    updatedReplicas: 1
+- apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    annotations:
+      deployment.kubernetes.io/revision: "69"
+      kubectl.kubernetes.io/last-applied-configuration: |
+        {"apiVersion":"apps/v1","kind":"Deployment","metadata":{"annotations":{},"name":"echo-dpumesh-13","namespace":"test-bench"},"spec":{"replicas":0,"selector":{"matchLabels":{"app":"echo-dpumesh-13"}},"template":{"metadata":{"labels":{"app":"echo-dpumesh-13"}},"spec":{"containers":[{"env":[{"name":"BENCH_NUMA_NODE","value":"1"},{"name":"DPUMESH_PCI_ADDR","value":"94:00.0"},{"name":"DPUMESH_RINGS_PER_POD","value":"8"},{"name":"DPUMESH_SERVICE","value":"echo-dpumesh"},{"name":"ECHO_THREADS","value":"3"}],"image":"docker.io/bench/echo-dpumesh:latest","imagePullPolicy":"Never","name":"echo-dpumesh-13","securityContext":{"privileged":true},"volumeMounts":[{"mountPath":"/dev/infiniband","name":"infiniband"},{"mountPath":"/usr/local/lib/libdpumesh.so.4","name":"libdpumesh-so","subPath":"libdpumesh.so.4"}]}],"hostname":"echo-dpumesh-13","volumes":[{"hostPath":{"path":"/dev/infiniband"},"name":"infiniband"},{"hostPath":{"path":"/home/jukebox/DPUmesh/build/lib","type":"Directory"},"name":"libdpumesh-so"}]}}}}
+    creationTimestamp: "2026-07-01T05:47:12Z"
+    generation: 835
+    name: echo-dpumesh-13
+    namespace: test-bench
+    resourceVersion: "31584748"
+    uid: 249b8b87-70b3-45ca-b546-5cccd4669605
+  spec:
+    progressDeadlineSeconds: 600
+    replicas: 1
+    revisionHistoryLimit: 10
+    selector:
+      matchLabels:
+        app: echo-dpumesh-13
+    strategy:
+      rollingUpdate:
+        maxSurge: 25%
+        maxUnavailable: 25%
+      type: RollingUpdate
+    template:
+      metadata:
+        creationTimestamp: null
+        labels:
+          app: echo-dpumesh-13
+      spec:
+        containers:
+        - env:
+          - name: BENCH_NUMA_NODE
+            value: "1"
+          - name: DPUMESH_PCI_ADDR
+            value: "94:00.0"
+          - name: DPUMESH_RINGS_PER_POD
+            value: "8"
+          - name: DPUMESH_SERVICE
+            value: echo-dpumesh
+          - name: ECHO_THREADS
+            value: "3"
+          image: docker.io/bench/echo-dpumesh:latest
+          imagePullPolicy: Never
+          name: echo-dpumesh-13
+          resources: {}
+          securityContext:
+            privileged: true
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          volumeMounts:
+          - mountPath: /dev/infiniband
+            name: infiniband
+          - mountPath: /usr/local/lib/libdpumesh.so.4
+            name: libdpumesh-so
+            subPath: libdpumesh.so.4
+        dnsPolicy: ClusterFirst
+        hostname: echo-dpumesh-13
+        restartPolicy: Always
+        schedulerName: default-scheduler
+        securityContext: {}
+        terminationGracePeriodSeconds: 30
+        volumes:
+        - hostPath:
+            path: /dev/infiniband
+            type: ""
+          name: infiniband
+        - hostPath:
+            path: /home/jukebox/DPUmesh/build/lib
+            type: Directory
+          name: libdpumesh-so
+  status:
+    availableReplicas: 1
+    conditions:
+    - lastTransitionTime: "2026-07-01T05:47:12Z"
+      lastUpdateTime: "2026-07-27T13:02:11Z"
+      message: ReplicaSet "echo-dpumesh-13-86c6f8f97b" has successfully progressed.
+      reason: NewReplicaSetAvailable
+      status: "True"
+      type: Progressing
+    - lastTransitionTime: "2026-07-27T17:10:36Z"
+      lastUpdateTime: "2026-07-27T17:10:36Z"
+      message: Deployment has minimum availability.
+      reason: MinimumReplicasAvailable
+      status: "True"
+      type: Available
+    observedGeneration: 835
+    readyReplicas: 1
+    replicas: 1
+    updatedReplicas: 1
+- apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    annotations:
+      deployment.kubernetes.io/revision: "69"
+      kubectl.kubernetes.io/last-applied-configuration: |
+        {"apiVersion":"apps/v1","kind":"Deployment","metadata":{"annotations":{},"name":"echo-dpumesh-14","namespace":"test-bench"},"spec":{"replicas":0,"selector":{"matchLabels":{"app":"echo-dpumesh-14"}},"template":{"metadata":{"labels":{"app":"echo-dpumesh-14"}},"spec":{"containers":[{"env":[{"name":"BENCH_NUMA_NODE","value":"1"},{"name":"DPUMESH_PCI_ADDR","value":"94:00.0"},{"name":"DPUMESH_RINGS_PER_POD","value":"8"},{"name":"DPUMESH_SERVICE","value":"echo-dpumesh"},{"name":"ECHO_THREADS","value":"3"}],"image":"docker.io/bench/echo-dpumesh:latest","imagePullPolicy":"Never","name":"echo-dpumesh-14","securityContext":{"privileged":true},"volumeMounts":[{"mountPath":"/dev/infiniband","name":"infiniband"},{"mountPath":"/usr/local/lib/libdpumesh.so.4","name":"libdpumesh-so","subPath":"libdpumesh.so.4"}]}],"hostname":"echo-dpumesh-14","volumes":[{"hostPath":{"path":"/dev/infiniband"},"name":"infiniband"},{"hostPath":{"path":"/home/jukebox/DPUmesh/build/lib","type":"Directory"},"name":"libdpumesh-so"}]}}}}
+    creationTimestamp: "2026-07-01T05:47:12Z"
+    generation: 842
+    name: echo-dpumesh-14
+    namespace: test-bench
+    resourceVersion: "31584770"
+    uid: 60081bc4-4fe9-48ca-bcaf-4dcd31598cf8
+  spec:
+    progressDeadlineSeconds: 600
+    replicas: 1
+    revisionHistoryLimit: 10
+    selector:
+      matchLabels:
+        app: echo-dpumesh-14
+    strategy:
+      rollingUpdate:
+        maxSurge: 25%
+        maxUnavailable: 25%
+      type: RollingUpdate
+    template:
+      metadata:
+        creationTimestamp: null
+        labels:
+          app: echo-dpumesh-14
+      spec:
+        containers:
+        - env:
+          - name: BENCH_NUMA_NODE
+            value: "1"
+          - name: DPUMESH_PCI_ADDR
+            value: "94:00.0"
+          - name: DPUMESH_RINGS_PER_POD
+            value: "8"
+          - name: DPUMESH_SERVICE
+            value: echo-dpumesh
+          - name: ECHO_THREADS
+            value: "3"
+          image: docker.io/bench/echo-dpumesh:latest
+          imagePullPolicy: Never
+          name: echo-dpumesh-14
+          resources: {}
+          securityContext:
+            privileged: true
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          volumeMounts:
+          - mountPath: /dev/infiniband
+            name: infiniband
+          - mountPath: /usr/local/lib/libdpumesh.so.4
+            name: libdpumesh-so
+            subPath: libdpumesh.so.4
+        dnsPolicy: ClusterFirst
+        hostname: echo-dpumesh-14
+        restartPolicy: Always
+        schedulerName: default-scheduler
+        securityContext: {}
+        terminationGracePeriodSeconds: 30
+        volumes:
+        - hostPath:
+            path: /dev/infiniband
+            type: ""
+          name: infiniband
+        - hostPath:
+            path: /home/jukebox/DPUmesh/build/lib
+            type: Directory
+          name: libdpumesh-so
+  status:
+    availableReplicas: 1
+    conditions:
+    - lastTransitionTime: "2026-07-01T05:47:12Z"
+      lastUpdateTime: "2026-07-27T13:02:12Z"
+      message: ReplicaSet "echo-dpumesh-14-789dcf897f" has successfully progressed.
+      reason: NewReplicaSetAvailable
+      status: "True"
+      type: Progressing
+    - lastTransitionTime: "2026-07-27T17:10:37Z"
+      lastUpdateTime: "2026-07-27T17:10:37Z"
+      message: Deployment has minimum availability.
+      reason: MinimumReplicasAvailable
+      status: "True"
+      type: Available
+    observedGeneration: 842
+    readyReplicas: 1
+    replicas: 1
+    updatedReplicas: 1
+- apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    annotations:
+      deployment.kubernetes.io/revision: "1"
+      kubectl.kubernetes.io/last-applied-configuration: |
+        {"apiVersion":"apps/v1","kind":"Deployment","metadata":{"annotations":{},"name":"echo-plain","namespace":"test-bench"},"spec":{"replicas":0,"selector":{"matchLabels":{"app":"echo-plain"}},"template":{"metadata":{"labels":{"app":"echo-plain"}},"spec":{"containers":[{"env":[{"name":"BENCH_NUMA_NODE","value":"1"},{"name":"ECHO_PORT","value":"9092"}],"image":"docker.io/bench/echo-tcp:latest","imagePullPolicy":"Never","name":"echo-plain","ports":[{"containerPort":9092}]}]}}}}
+    creationTimestamp: "2026-07-27T16:26:13Z"
+    generation: 6
+    name: echo-plain
+    namespace: test-bench
+    resourceVersion: "31585025"
+    uid: 7c842630-6625-48ac-aafa-c51b02008b88
+  spec:
+    progressDeadlineSeconds: 600
+    replicas: 1
+    revisionHistoryLimit: 10
+    selector:
+      matchLabels:
+        app: echo-plain
+    strategy:
+      rollingUpdate:
+        maxSurge: 25%
+        maxUnavailable: 25%
+      type: RollingUpdate
+    template:
+      metadata:
+        creationTimestamp: null
+        labels:
+          app: echo-plain
+      spec:
+        containers:
+        - env:
+          - name: BENCH_NUMA_NODE
+            value: "1"
+          - name: ECHO_PORT
+            value: "9092"
+          image: docker.io/bench/echo-tcp:latest
+          imagePullPolicy: Never
+          name: echo-plain
+          ports:
+          - containerPort: 9092
+            protocol: TCP
+          resources: {}
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+        dnsPolicy: ClusterFirst
+        restartPolicy: Always
+        schedulerName: default-scheduler
+        securityContext: {}
+        terminationGracePeriodSeconds: 30
+  status:
+    availableReplicas: 1
+    conditions:
+    - lastTransitionTime: "2026-07-27T16:26:13Z"
+      lastUpdateTime: "2026-07-27T16:26:14Z"
+      message: ReplicaSet "echo-plain-867b9d4789" has successfully progressed.
+      reason: NewReplicaSetAvailable
+      status: "True"
+      type: Progressing
+    - lastTransitionTime: "2026-07-27T17:10:55Z"
+      lastUpdateTime: "2026-07-27T17:10:55Z"
+      message: Deployment has minimum availability.
+      reason: MinimumReplicasAvailable
+      status: "True"
+      type: Available
+    observedGeneration: 6
+    readyReplicas: 1
+    replicas: 1
+    updatedReplicas: 1
+- apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    annotations:
+      deployment.kubernetes.io/revision: "5"
+      kubectl.kubernetes.io/last-applied-configuration: |
+        {"apiVersion":"apps/v1","kind":"Deployment","metadata":{"annotations":{},"name":"echo-tcp","namespace":"test-bench"},"spec":{"replicas":0,"selector":{"matchLabels":{"app":"echo-tcp"}},"template":{"metadata":{"labels":{"app":"echo-tcp"}},"spec":{"containers":[{"env":[{"name":"BENCH_NUMA_NODE","value":"1"},{"name":"ECHO_PORT","value":"9092"}],"image":"docker.io/bench/echo-tcp:latest","imagePullPolicy":"Never","name":"echo-tcp","ports":[{"containerPort":9092}]},{"args":["-c","/etc/envoy/envoy.yaml","--log-level","warn"],"env":[{"name":"BENCH_NUMA_NODE","value":"1"}],"image":"docker.io/bench/envoy-numa:v1.30-latest","imagePullPolicy":"IfNotPresent","name":"sidecar2","ports":[{"containerPort":9091}],"volumeMounts":[{"mountPath":"/etc/envoy","name":"sidecar2-config","readOnly":true}]}],"volumes":[{"configMap":{"name":"sidecar2-config"},"name":"sidecar2-config"}]}}}}
+    creationTimestamp: "2026-06-22T04:21:20Z"
+    generation: 944
+    name: echo-tcp
+    namespace: test-bench
+    resourceVersion: "31585106"
+    uid: cf052e27-5ac6-4118-af68-d2617e01019e
+  spec:
+    progressDeadlineSeconds: 600
+    replicas: 1
+    revisionHistoryLimit: 10
+    selector:
+      matchLabels:
+        app: echo-tcp
+    strategy:
+      rollingUpdate:
+        maxSurge: 25%
+        maxUnavailable: 25%
+      type: RollingUpdate
+    template:
+      metadata:
+        creationTimestamp: null
+        labels:
+          app: echo-tcp
+      spec:
+        containers:
+        - env:
+          - name: BENCH_NUMA_NODE
+            value: "1"
+          - name: ECHO_PORT
+            value: "9092"
+          image: docker.io/bench/echo-tcp:latest
+          imagePullPolicy: Never
+          name: echo-tcp
+          ports:
+          - containerPort: 9092
+            protocol: TCP
+          resources: {}
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+        - args:
+          - -c
+          - /etc/envoy/envoy.yaml
+          - --log-level
+          - warn
+          env:
+          - name: BENCH_NUMA_NODE
+            value: "1"
+          image: docker.io/bench/envoy-numa:v1.30-latest
+          imagePullPolicy: IfNotPresent
+          name: sidecar2
+          ports:
+          - containerPort: 9091
+            protocol: TCP
+          resources: {}
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          volumeMounts:
+          - mountPath: /etc/envoy
+            name: sidecar2-config
+            readOnly: true
+        dnsPolicy: ClusterFirst
+        restartPolicy: Always
+        schedulerName: default-scheduler
+        securityContext: {}
+        terminationGracePeriodSeconds: 30
+        volumes:
+        - configMap:
+            defaultMode: 420
+            name: sidecar2-config
+          name: sidecar2-config
+  status:
+    availableReplicas: 1
+    conditions:
+    - lastTransitionTime: "2026-06-22T04:21:20Z"
+      lastUpdateTime: "2026-07-27T13:02:14Z"
+      message: ReplicaSet "echo-tcp-6b7d6d46f6" has successfully progressed.
+      reason: NewReplicaSetAvailable
+      status: "True"
+      type: Progressing
+    - lastTransitionTime: "2026-07-27T17:11:00Z"
+      lastUpdateTime: "2026-07-27T17:11:00Z"
+      message: Deployment has minimum availability.
+      reason: MinimumReplicasAvailable
+      status: "True"
+      type: Available
+    observedGeneration: 944
+    readyReplicas: 1
+    replicas: 1
+    updatedReplicas: 1
+- apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    annotations:
+      deployment.kubernetes.io/revision: "1"
+      kubectl.kubernetes.io/last-applied-configuration: |
+        {"apiVersion":"apps/v1","kind":"Deployment","metadata":{"annotations":{},"name":"echo-tcp-strict","namespace":"test-bench"},"spec":{"replicas":0,"selector":{"matchLabels":{"app":"echo-tcp-strict"}},"template":{"metadata":{"labels":{"app":"echo-tcp-strict"}},"spec":{"containers":[{"env":[{"name":"BENCH_NUMA_NODE","value":"1"},{"name":"ECHO_PORT","value":"9092"}],"image":"docker.io/bench/echo-tcp:latest","imagePullPolicy":"Never","name":"echo-tcp-strict","ports":[{"containerPort":9092}]},{"args":["-c","/etc/envoy/envoy.yaml","--log-level","warn"],"env":[{"name":"BENCH_NUMA_NODE","value":"1"}],"image":"docker.io/bench/envoy-numa:v1.30-latest","imagePullPolicy":"IfNotPresent","name":"sidecar2","ports":[{"containerPort":9091}],"volumeMounts":[{"mountPath":"/etc/envoy","name":"strict-server-config","readOnly":true},{"mountPath":"/etc/envoy/tls","name":"envoy-mtls","readOnly":true}]}],"volumes":[{"configMap":{"name":"strict-server-config"},"name":"strict-server-config"},{"name":"envoy-mtls","secret":{"secretName":"envoy-mtls"}}]}}}}
+    creationTimestamp: "2026-07-27T16:26:13Z"
+    generation: 6
+    name: echo-tcp-strict
+    namespace: test-bench
+    resourceVersion: "31585050"
+    uid: 0f325b36-afe0-4314-af3a-bee8efa4a12e
+  spec:
+    progressDeadlineSeconds: 600
+    replicas: 1
+    revisionHistoryLimit: 10
+    selector:
+      matchLabels:
+        app: echo-tcp-strict
+    strategy:
+      rollingUpdate:
+        maxSurge: 25%
+        maxUnavailable: 25%
+      type: RollingUpdate
+    template:
+      metadata:
+        creationTimestamp: null
+        labels:
+          app: echo-tcp-strict
+      spec:
+        containers:
+        - env:
+          - name: BENCH_NUMA_NODE
+            value: "1"
+          - name: ECHO_PORT
+            value: "9092"
+          image: docker.io/bench/echo-tcp:latest
+          imagePullPolicy: Never
+          name: echo-tcp-strict
+          ports:
+          - containerPort: 9092
+            protocol: TCP
+          resources: {}
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+        - args:
+          - -c
+          - /etc/envoy/envoy.yaml
+          - --log-level
+          - warn
+          env:
+          - name: BENCH_NUMA_NODE
+            value: "1"
+          image: docker.io/bench/envoy-numa:v1.30-latest
+          imagePullPolicy: IfNotPresent
+          name: sidecar2
+          ports:
+          - containerPort: 9091
+            protocol: TCP
+          resources: {}
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          volumeMounts:
+          - mountPath: /etc/envoy
+            name: strict-server-config
+            readOnly: true
+          - mountPath: /etc/envoy/tls
+            name: envoy-mtls
+            readOnly: true
+        dnsPolicy: ClusterFirst
+        restartPolicy: Always
+        schedulerName: default-scheduler
+        securityContext: {}
+        terminationGracePeriodSeconds: 30
+        volumes:
+        - configMap:
+            defaultMode: 420
+            name: strict-server-config
+          name: strict-server-config
+        - name: envoy-mtls
+          secret:
+            defaultMode: 420
+            secretName: envoy-mtls
+  status:
+    availableReplicas: 1
+    conditions:
+    - lastTransitionTime: "2026-07-27T16:26:13Z"
+      lastUpdateTime: "2026-07-27T16:26:14Z"
+      message: ReplicaSet "echo-tcp-strict-7d69765b5b" has successfully progressed.
+      reason: NewReplicaSetAvailable
+      status: "True"
+      type: Progressing
+    - lastTransitionTime: "2026-07-27T17:10:56Z"
+      lastUpdateTime: "2026-07-27T17:10:56Z"
+      message: Deployment has minimum availability.
+      reason: MinimumReplicasAvailable
+      status: "True"
+      type: Available
+    observedGeneration: 6
+    readyReplicas: 1
+    replicas: 1
+    updatedReplicas: 1
+- apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    annotations:
+      deployment.kubernetes.io/revision: "50"
+      kubectl.kubernetes.io/last-applied-configuration: |
+        {"apiVersion":"apps/v1","kind":"Deployment","metadata":{"annotations":{},"name":"loopback-dpumesh","namespace":"test-bench"},"spec":{"replicas":0,"selector":{"matchLabels":{"app":"loopback-dpumesh"}},"template":{"metadata":{"labels":{"app":"loopback-dpumesh"}},"spec":{"containers":[{"env":[{"name":"BENCH_NUMA_NODE","value":"1"},{"name":"DPUMESH_PCI_ADDR","value":"94:00.0"},{"name":"DPUMESH_RINGS_PER_POD","value":"8"},{"name":"DPUMESH_SERVICE","value":"loopback-dpumesh"}],"image":"docker.io/bench/loopback-dpumesh:latest","imagePullPolicy":"Never","name":"loopback-dpumesh","ports":[{"containerPort":9092}],"securityContext":{"privileged":true},"volumeMounts":[{"mountPath":"/dev/infiniband","name":"infiniband"},{"mountPath":"/usr/local/lib/libdpumesh.so.4","name":"libdpumesh-so","subPath":"libdpumesh.so.4"}]}],"hostname":"loopback-dpumesh","volumes":[{"hostPath":{"path":"/dev/infiniband"},"name":"infiniband"},{"hostPath":{"path":"/home/jukebox/DPUmesh/build/lib","type":"Directory"},"name":"libdpumesh-so"}]}}}}
+    creationTimestamp: "2026-06-29T14:02:59Z"
+    generation: 834
+    name: loopback-dpumesh
+    namespace: test-bench
+    resourceVersion: "31584867"
+    uid: b1fdc0d6-2e24-4d0c-a89c-ac486fddfa5e
+  spec:
+    progressDeadlineSeconds: 600
+    replicas: 1
+    revisionHistoryLimit: 10
+    selector:
+      matchLabels:
+        app: loopback-dpumesh
+    strategy:
+      rollingUpdate:
+        maxSurge: 25%
+        maxUnavailable: 25%
+      type: RollingUpdate
+    template:
+      metadata:
+        creationTimestamp: null
+        labels:
+          app: loopback-dpumesh
+      spec:
+        containers:
+        - env:
+          - name: BENCH_NUMA_NODE
+            value: "1"
+          - name: DPUMESH_PCI_ADDR
+            value: "94:00.0"
+          - name: DPUMESH_RINGS_PER_POD
+            value: "8"
+          - name: DPUMESH_SERVICE
+            value: loopback-dpumesh
+          image: docker.io/bench/loopback-dpumesh:latest
+          imagePullPolicy: Never
+          name: loopback-dpumesh
+          ports:
+          - containerPort: 9092
+            protocol: TCP
+          resources: {}
+          securityContext:
+            privileged: true
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          volumeMounts:
+          - mountPath: /dev/infiniband
+            name: infiniband
+          - mountPath: /usr/local/lib/libdpumesh.so.4
+            name: libdpumesh-so
+            subPath: libdpumesh.so.4
+        dnsPolicy: ClusterFirst
+        hostname: loopback-dpumesh
+        restartPolicy: Always
+        schedulerName: default-scheduler
+        securityContext: {}
+        terminationGracePeriodSeconds: 30
+        volumes:
+        - hostPath:
+            path: /dev/infiniband
+            type: ""
+          name: infiniband
+        - hostPath:
+            path: /home/jukebox/DPUmesh/build/lib
+            type: Directory
+          name: libdpumesh-so
+  status:
+    availableReplicas: 1
+    conditions:
+    - lastTransitionTime: "2026-06-29T14:02:59Z"
+      lastUpdateTime: "2026-07-27T13:02:12Z"
+      message: ReplicaSet "loopback-dpumesh-69d9db7f45" has successfully progressed.
+      reason: NewReplicaSetAvailable
+      status: "True"
+      type: Progressing
+    - lastTransitionTime: "2026-07-27T17:10:44Z"
+      lastUpdateTime: "2026-07-27T17:10:44Z"
+      message: Deployment has minimum availability.
+      reason: MinimumReplicasAvailable
+      status: "True"
+      type: Available
+    observedGeneration: 834
+    readyReplicas: 1
+    replicas: 1
+    updatedReplicas: 1
+- apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    annotations:
+      deployment.kubernetes.io/revision: "31"
+      kubectl.kubernetes.io/last-applied-configuration: |
+        {"apiVersion":"apps/v1","kind":"Deployment","metadata":{"annotations":{},"name":"preload-bench","namespace":"test-bench"},"spec":{"replicas":0,"selector":{"matchLabels":{"app":"preload-bench"}},"template":{"metadata":{"labels":{"app":"preload-bench"}},"spec":{"containers":[{"args":["/usr/local/bin/bench_sock"],"command":["/usr/local/bin/numa-entrypoint.sh"],"env":[{"name":"BENCH_NUMA_NODE","value":"1"},{"name":"DPUMESH_PCI_ADDR","value":"94:00.0"},{"name":"DPUMESH_RINGS_PER_POD","value":"8"},{"name":"BENCH_TARGET","value":"10.96.0.18:9100"},{"name":"CTRL_PORT","value":"9092"},{"name":"NUMA_TARGET_LD_PRELOAD","value":"/usr/local/lib/libdmesh_preload.so"}],"image":"docker.io/bench/preload-sock:latest","imagePullPolicy":"Never","name":"preload-bench","securityContext":{"privileged":true},"volumeMounts":[{"mountPath":"/dev/infiniband","name":"infiniband"},{"mountPath":"/usr/local/lib/libdpumesh.so.4","name":"libdpumesh-so","subPath":"libdpumesh.so.4"}]}],"hostname":"preload-bench","volumes":[{"hostPath":{"path":"/dev/infiniband"},"name":"infiniband"},{"hostPath":{"path":"/home/jukebox/DPUmesh/build/lib","type":"Directory"},"name":"libdpumesh-so"}]}}}}
+    creationTimestamp: "2026-07-20T10:08:09Z"
+    generation: 310
+    name: preload-bench
+    namespace: test-bench
+    resourceVersion: "31584945"
+    uid: 436ee6ca-d192-4f5b-a8c2-679d2bdf32be
+  spec:
+    progressDeadlineSeconds: 600
+    replicas: 1
+    revisionHistoryLimit: 10
+    selector:
+      matchLabels:
+        app: preload-bench
+    strategy:
+      rollingUpdate:
+        maxSurge: 25%
+        maxUnavailable: 25%
+      type: RollingUpdate
+    template:
+      metadata:
+        creationTimestamp: null
+        labels:
+          app: preload-bench
+      spec:
+        containers:
+        - args:
+          - /usr/local/bin/bench_sock
+          command:
+          - /usr/local/bin/numa-entrypoint.sh
+          env:
+          - name: BENCH_NUMA_NODE
+            value: "1"
+          - name: DPUMESH_PCI_ADDR
+            value: "94:00.0"
+          - name: DPUMESH_RINGS_PER_POD
+            value: "8"
+          - name: BENCH_TARGET
+            value: 10.96.0.18:9100
+          - name: CTRL_PORT
+            value: "9092"
+          - name: NUMA_TARGET_LD_PRELOAD
+            value: /usr/local/lib/libdmesh_preload.so
+          image: docker.io/bench/preload-sock:latest
+          imagePullPolicy: Never
+          name: preload-bench
+          resources: {}
+          securityContext:
+            privileged: true
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          volumeMounts:
+          - mountPath: /dev/infiniband
+            name: infiniband
+          - mountPath: /usr/local/lib/libdpumesh.so.4
+            name: libdpumesh-so
+            subPath: libdpumesh.so.4
+        dnsPolicy: ClusterFirst
+        hostname: preload-bench
+        restartPolicy: Always
+        schedulerName: default-scheduler
+        securityContext: {}
+        terminationGracePeriodSeconds: 30
+        volumes:
+        - hostPath:
+            path: /dev/infiniband
+            type: ""
+          name: infiniband
+        - hostPath:
+            path: /home/jukebox/DPUmesh/build/lib
+            type: Directory
+          name: libdpumesh-so
+  status:
+    availableReplicas: 1
+    conditions:
+    - lastTransitionTime: "2026-07-20T10:08:09Z"
+      lastUpdateTime: "2026-07-27T13:02:13Z"
+      message: ReplicaSet "preload-bench-856d8bf994" has successfully progressed.
+      reason: NewReplicaSetAvailable
+      status: "True"
+      type: Progressing
+    - lastTransitionTime: "2026-07-27T17:10:49Z"
+      lastUpdateTime: "2026-07-27T17:10:49Z"
+      message: Deployment has minimum availability.
+      reason: MinimumReplicasAvailable
+      status: "True"
+      type: Available
+    observedGeneration: 310
+    readyReplicas: 1
+    replicas: 1
+    updatedReplicas: 1
+- apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    annotations:
+      deployment.kubernetes.io/revision: "53"
+      kubectl.kubernetes.io/last-applied-configuration: |
+        {"apiVersion":"apps/v1","kind":"Deployment","metadata":{"annotations":{},"name":"preload-dpumesh","namespace":"test-bench"},"spec":{"replicas":0,"selector":{"matchLabels":{"app":"preload-dpumesh"}},"template":{"metadata":{"labels":{"app":"preload-dpumesh"}},"spec":{"containers":[{"env":[{"name":"BENCH_NUMA_NODE","value":"1"},{"name":"DPUMESH_PCI_ADDR","value":"94:00.0"},{"name":"DPUMESH_RINGS_PER_POD","value":"8"},{"name":"PRELOAD_SVC","value":"15"},{"name":"ECHO_PORT","value":"9095"},{"name":"DMESH_PRELOAD_DEBUG","value":"0"}],"image":"docker.io/bench/preload-dpumesh:latest","imagePullPolicy":"Never","name":"preload-dpumesh","ports":[{"containerPort":9092}],"securityContext":{"privileged":true},"volumeMounts":[{"mountPath":"/dev/infiniband","name":"infiniband"},{"mountPath":"/usr/local/lib/libdpumesh.so.4","name":"libdpumesh-so","subPath":"libdpumesh.so.4"}]}],"hostname":"preload-dpumesh","volumes":[{"hostPath":{"path":"/dev/infiniband"},"name":"infiniband"},{"hostPath":{"path":"/home/jukebox/DPUmesh/build/lib","type":"Directory"},"name":"libdpumesh-so"}]}}}}
+    creationTimestamp: "2026-07-02T16:51:07Z"
+    generation: 770
+    name: preload-dpumesh
+    namespace: test-bench
+    resourceVersion: "31584892"
+    uid: e4a5ebfa-d471-43f7-88a7-c6ada299a694
+  spec:
+    progressDeadlineSeconds: 600
+    replicas: 1
+    revisionHistoryLimit: 10
+    selector:
+      matchLabels:
+        app: preload-dpumesh
+    strategy:
+      rollingUpdate:
+        maxSurge: 25%
+        maxUnavailable: 25%
+      type: RollingUpdate
+    template:
+      metadata:
+        annotations:
+          kubectl.kubernetes.io/restartedAt: "2026-07-03T02:20:48+09:00"
+        creationTimestamp: null
+        labels:
+          app: preload-dpumesh
+      spec:
+        containers:
+        - env:
+          - name: BENCH_NUMA_NODE
+            value: "1"
+          - name: DPUMESH_PCI_ADDR
+            value: "94:00.0"
+          - name: DPUMESH_RINGS_PER_POD
+            value: "8"
+          - name: PRELOAD_SVC
+            value: "15"
+          - name: ECHO_PORT
+            value: "9095"
+          - name: DMESH_PRELOAD_DEBUG
+            value: "0"
+          image: docker.io/bench/preload-dpumesh:latest
+          imagePullPolicy: Never
+          name: preload-dpumesh
+          ports:
+          - containerPort: 9092
+            protocol: TCP
+          resources: {}
+          securityContext:
+            privileged: true
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          volumeMounts:
+          - mountPath: /dev/infiniband
+            name: infiniband
+          - mountPath: /usr/local/lib/libdpumesh.so.4
+            name: libdpumesh-so
+            subPath: libdpumesh.so.4
+        dnsPolicy: ClusterFirst
+        hostname: preload-dpumesh
+        restartPolicy: Always
+        schedulerName: default-scheduler
+        securityContext: {}
+        terminationGracePeriodSeconds: 30
+        volumes:
+        - hostPath:
+            path: /dev/infiniband
+            type: ""
+          name: infiniband
+        - hostPath:
+            path: /home/jukebox/DPUmesh/build/lib
+            type: Directory
+          name: libdpumesh-so
+  status:
+    availableReplicas: 1
+    conditions:
+    - lastTransitionTime: "2026-07-02T16:51:07Z"
+      lastUpdateTime: "2026-07-27T13:02:13Z"
+      message: ReplicaSet "preload-dpumesh-58d44ff4d7" has successfully progressed.
+      reason: NewReplicaSetAvailable
+      status: "True"
+      type: Progressing
+    - lastTransitionTime: "2026-07-27T17:10:46Z"
+      lastUpdateTime: "2026-07-27T17:10:46Z"
+      message: Deployment has minimum availability.
+      reason: MinimumReplicasAvailable
+      status: "True"
+      type: Available
+    observedGeneration: 770
+    readyReplicas: 1
+    replicas: 1
+    updatedReplicas: 1
+- apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    annotations:
+      deployment.kubernetes.io/revision: "31"
+      kubectl.kubernetes.io/last-applied-configuration: |
+        {"apiVersion":"apps/v1","kind":"Deployment","metadata":{"annotations":{},"name":"preload-echo","namespace":"test-bench"},"spec":{"replicas":0,"selector":{"matchLabels":{"app":"preload-echo"}},"template":{"metadata":{"labels":{"app":"preload-echo"}},"spec":{"containers":[{"args":["/usr/local/bin/echo_sock"],"command":["/usr/local/bin/numa-entrypoint.sh"],"env":[{"name":"BENCH_NUMA_NODE","value":"1"},{"name":"DPUMESH_PCI_ADDR","value":"94:00.0"},{"name":"DPUMESH_RINGS_PER_POD","value":"8"},{"name":"DPUMESH_SERVICE","value":"preload-sock"},{"name":"DPUMESH_PORT","value":"9100"},{"name":"ECHO_PORT","value":"9100"},{"name":"NUMA_TARGET_LD_PRELOAD","value":"/usr/local/lib/libdmesh_preload.so"}],"image":"docker.io/bench/preload-sock:latest","imagePullPolicy":"Never","name":"preload-echo","securityContext":{"privileged":true},"volumeMounts":[{"mountPath":"/dev/infiniband","name":"infiniband"},{"mountPath":"/usr/local/lib/libdpumesh.so.4","name":"libdpumesh-so","subPath":"libdpumesh.so.4"}]}],"hostname":"preload-echo","volumes":[{"hostPath":{"path":"/dev/infiniband"},"name":"infiniband"},{"hostPath":{"path":"/home/jukebox/DPUmesh/build/lib","type":"Directory"},"name":"libdpumesh-so"}]}}}}
+    creationTimestamp: "2026-07-20T10:08:09Z"
+    generation: 316
+    name: preload-echo
+    namespace: test-bench
+    resourceVersion: "31584921"
+    uid: b08dc8cf-48e3-4f21-8111-601fd3f84bd9
+  spec:
+    progressDeadlineSeconds: 600
+    replicas: 1
+    revisionHistoryLimit: 10
+    selector:
+      matchLabels:
+        app: preload-echo
+    strategy:
+      rollingUpdate:
+        maxSurge: 25%
+        maxUnavailable: 25%
+      type: RollingUpdate
+    template:
+      metadata:
+        creationTimestamp: null
+        labels:
+          app: preload-echo
+      spec:
+        containers:
+        - args:
+          - /usr/local/bin/echo_sock
+          command:
+          - /usr/local/bin/numa-entrypoint.sh
+          env:
+          - name: BENCH_NUMA_NODE
+            value: "1"
+          - name: DPUMESH_PCI_ADDR
+            value: "94:00.0"
+          - name: DPUMESH_RINGS_PER_POD
+            value: "8"
+          - name: DPUMESH_SERVICE
+            value: preload-sock
+          - name: DPUMESH_PORT
+            value: "9100"
+          - name: ECHO_PORT
+            value: "9100"
+          - name: NUMA_TARGET_LD_PRELOAD
+            value: /usr/local/lib/libdmesh_preload.so
+          image: docker.io/bench/preload-sock:latest
+          imagePullPolicy: Never
+          name: preload-echo
+          resources: {}
+          securityContext:
+            privileged: true
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          volumeMounts:
+          - mountPath: /dev/infiniband
+            name: infiniband
+          - mountPath: /usr/local/lib/libdpumesh.so.4
+            name: libdpumesh-so
+            subPath: libdpumesh.so.4
+        dnsPolicy: ClusterFirst
+        hostname: preload-echo
+        restartPolicy: Always
+        schedulerName: default-scheduler
+        securityContext: {}
+        terminationGracePeriodSeconds: 30
+        volumes:
+        - hostPath:
+            path: /dev/infiniband
+            type: ""
+          name: infiniband
+        - hostPath:
+            path: /home/jukebox/DPUmesh/build/lib
+            type: Directory
+          name: libdpumesh-so
+  status:
+    availableReplicas: 1
+    conditions:
+    - lastTransitionTime: "2026-07-20T10:08:09Z"
+      lastUpdateTime: "2026-07-27T13:02:13Z"
+      message: ReplicaSet "preload-echo-86568cf7b6" has successfully progressed.
+      reason: NewReplicaSetAvailable
+      status: "True"
+      type: Progressing
+    - lastTransitionTime: "2026-07-27T17:10:47Z"
+      lastUpdateTime: "2026-07-27T17:10:47Z"
+      message: Deployment has minimum availability.
+      reason: MinimumReplicasAvailable
+      status: "True"
+      type: Available
+    observedGeneration: 316
+    readyReplicas: 1
+    replicas: 1
+    updatedReplicas: 1
+- apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    annotations:
+      deployment.kubernetes.io/revision: "48"
+      kubectl.kubernetes.io/last-applied-configuration: |
+        {"apiVersion":"apps/v1","kind":"Deployment","metadata":{"annotations":{},"name":"stream-dpumesh","namespace":"test-bench"},"spec":{"replicas":0,"selector":{"matchLabels":{"app":"stream-dpumesh"}},"template":{"metadata":{"labels":{"app":"stream-dpumesh"}},"spec":{"containers":[{"env":[{"name":"BENCH_NUMA_NODE","value":"1"},{"name":"DPUMESH_PCI_ADDR","value":"94:00.0"},{"name":"DPUMESH_RINGS_PER_POD","value":"8"},{"name":"DPUMESH_SERVICE","value":"stream-dpumesh"}],"image":"docker.io/bench/stream-dpumesh:latest","imagePullPolicy":"Never","name":"stream-dpumesh","ports":[{"containerPort":9092}],"securityContext":{"privileged":true},"volumeMounts":[{"mountPath":"/dev/infiniband","name":"infiniband"},{"mountPath":"/usr/local/lib/libdpumesh.so.4","name":"libdpumesh-so","subPath":"libdpumesh.so.4"}]}],"hostname":"stream-dpumesh","volumes":[{"hostPath":{"path":"/dev/infiniband"},"name":"infiniband"},{"hostPath":{"path":"/home/jukebox/DPUmesh/build/lib","type":"Directory"},"name":"libdpumesh-so"}]}}}}
+    creationTimestamp: "2026-07-03T12:27:23Z"
+    generation: 556
+    name: stream-dpumesh
+    namespace: test-bench
+    resourceVersion: "31584995"
+    uid: e414706f-0016-40b7-bdf0-60c0dbe9281c
+  spec:
+    progressDeadlineSeconds: 600
+    replicas: 1
+    revisionHistoryLimit: 10
+    selector:
+      matchLabels:
+        app: stream-dpumesh
+    strategy:
+      rollingUpdate:
+        maxSurge: 25%
+        maxUnavailable: 25%
+      type: RollingUpdate
+    template:
+      metadata:
+        creationTimestamp: null
+        labels:
+          app: stream-dpumesh
+      spec:
+        containers:
+        - env:
+          - name: BENCH_NUMA_NODE
+            value: "1"
+          - name: DPUMESH_PCI_ADDR
+            value: "94:00.0"
+          - name: DPUMESH_RINGS_PER_POD
+            value: "8"
+          - name: DPUMESH_SERVICE
+            value: stream-dpumesh
+          image: docker.io/bench/stream-dpumesh:latest
+          imagePullPolicy: Never
+          name: stream-dpumesh
+          ports:
+          - containerPort: 9092
+            protocol: TCP
+          resources: {}
+          securityContext:
+            privileged: true
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          volumeMounts:
+          - mountPath: /dev/infiniband
+            name: infiniband
+          - mountPath: /usr/local/lib/libdpumesh.so.4
+            name: libdpumesh-so
+            subPath: libdpumesh.so.4
+        dnsPolicy: ClusterFirst
+        hostname: stream-dpumesh
+        restartPolicy: Always
+        schedulerName: default-scheduler
+        securityContext: {}
+        terminationGracePeriodSeconds: 30
+        volumes:
+        - hostPath:
+            path: /dev/infiniband
+            type: ""
+          name: infiniband
+        - hostPath:
+            path: /home/jukebox/DPUmesh/build/lib
+            type: Directory
+          name: libdpumesh-so
+  status:
+    availableReplicas: 1
+    conditions:
+    - lastTransitionTime: "2026-07-03T12:27:23Z"
+      lastUpdateTime: "2026-07-27T13:02:13Z"
+      message: ReplicaSet "stream-dpumesh-947b97f5d" has successfully progressed.
+      reason: NewReplicaSetAvailable
+      status: "True"
+      type: Progressing
+    - lastTransitionTime: "2026-07-27T17:10:52Z"
+      lastUpdateTime: "2026-07-27T17:10:52Z"
+      message: Deployment has minimum availability.
+      reason: MinimumReplicasAvailable
+      status: "True"
+      type: Available
+    observedGeneration: 556
+    readyReplicas: 1
+    replicas: 1
+    updatedReplicas: 1
+- apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    annotations:
+      deployment.kubernetes.io/revision: "43"
+      kubectl.kubernetes.io/last-applied-configuration: |
+        {"apiVersion":"apps/v1","kind":"Deployment","metadata":{"annotations":{},"name":"verbs-dpumesh","namespace":"test-bench"},"spec":{"replicas":0,"selector":{"matchLabels":{"app":"verbs-dpumesh"}},"template":{"metadata":{"labels":{"app":"verbs-dpumesh"}},"spec":{"containers":[{"env":[{"name":"BENCH_NUMA_NODE","value":"1"},{"name":"DPUMESH_PCI_ADDR","value":"94:00.0"},{"name":"DPUMESH_RINGS_PER_POD","value":"8"},{"name":"DPUMESH_SERVICE","value":"verbs-dpumesh"}],"image":"docker.io/bench/verbs-dpumesh:latest","imagePullPolicy":"Never","name":"verbs-dpumesh","ports":[{"containerPort":9092}],"securityContext":{"privileged":true},"volumeMounts":[{"mountPath":"/dev/infiniband","name":"infiniband"},{"mountPath":"/usr/local/lib/libdpumesh.so.4","name":"libdpumesh-so","subPath":"libdpumesh.so.4"}]}],"hostname":"verbs-dpumesh","volumes":[{"hostPath":{"path":"/dev/infiniband"},"name":"infiniband"},{"hostPath":{"path":"/home/jukebox/DPUmesh/build/lib","type":"Directory"},"name":"libdpumesh-so"}]}}}}
+    creationTimestamp: "2026-07-14T09:01:07Z"
+    generation: 532
+    name: verbs-dpumesh
+    namespace: test-bench
+    resourceVersion: "31584970"
+    uid: ff5b2832-fb1f-4fcb-a7a3-91b20b67679e
+  spec:
+    progressDeadlineSeconds: 600
+    replicas: 1
+    revisionHistoryLimit: 10
+    selector:
+      matchLabels:
+        app: verbs-dpumesh
+    strategy:
+      rollingUpdate:
+        maxSurge: 25%
+        maxUnavailable: 25%
+      type: RollingUpdate
+    template:
+      metadata:
+        creationTimestamp: null
+        labels:
+          app: verbs-dpumesh
+      spec:
+        containers:
+        - env:
+          - name: BENCH_NUMA_NODE
+            value: "1"
+          - name: DPUMESH_PCI_ADDR
+            value: "94:00.0"
+          - name: DPUMESH_RINGS_PER_POD
+            value: "8"
+          - name: DPUMESH_SERVICE
+            value: verbs-dpumesh
+          image: docker.io/bench/verbs-dpumesh:latest
+          imagePullPolicy: Never
+          name: verbs-dpumesh
+          ports:
+          - containerPort: 9092
+            protocol: TCP
+          resources: {}
+          securityContext:
+            privileged: true
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          volumeMounts:
+          - mountPath: /dev/infiniband
+            name: infiniband
+          - mountPath: /usr/local/lib/libdpumesh.so.4
+            name: libdpumesh-so
+            subPath: libdpumesh.so.4
+        dnsPolicy: ClusterFirst
+        hostname: verbs-dpumesh
+        restartPolicy: Always
+        schedulerName: default-scheduler
+        securityContext: {}
+        terminationGracePeriodSeconds: 30
+        volumes:
+        - hostPath:
+            path: /dev/infiniband
+            type: ""
+          name: infiniband
+        - hostPath:
+            path: /home/jukebox/DPUmesh/build/lib
+            type: Directory
+          name: libdpumesh-so
+  status:
+    availableReplicas: 1
+    conditions:
+    - lastTransitionTime: "2026-07-14T09:01:08Z"
+      lastUpdateTime: "2026-07-27T13:02:13Z"
+      message: ReplicaSet "verbs-dpumesh-6564d99f74" has successfully progressed.
+      reason: NewReplicaSetAvailable
+      status: "True"
+      type: Progressing
+    - lastTransitionTime: "2026-07-27T17:10:51Z"
+      lastUpdateTime: "2026-07-27T17:10:51Z"
+      message: Deployment has minimum availability.
+      reason: MinimumReplicasAvailable
+      status: "True"
+      type: Available
+    observedGeneration: 532
+    readyReplicas: 1
+    replicas: 1
+    updatedReplicas: 1
+kind: List
+metadata:
+  resourceVersion: ""

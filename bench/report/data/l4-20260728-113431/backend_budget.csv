@@ -1,0 +1,15 @@
+observed_utc,config,kind,locator,expected_ready,observed_ready
+2026-07-28T02:35:44Z,plain,service,echo-plain,1,1
+2026-07-28T02:35:44Z,envoy-permissive,service,echo-tcp,1,1
+2026-07-28T02:35:44Z,envoy-strict,service,echo-tcp-strict,1,1
+2026-07-28T02:35:44Z,dpumesh-preload,service,preload-sock,1,1
+2026-07-28T02:35:44Z,dpumesh-native,deployment,echo-dpumesh,1,1
+2026-07-28T02:35:44Z,dpumesh-native,deployment,echo-dpumesh-13,0,0
+2026-07-28T02:35:44Z,dpumesh-native,deployment,echo-dpumesh-14,0,0
+2026-07-28T03:42:52Z,plain,service,echo-plain,1,1
+2026-07-28T03:42:52Z,envoy-permissive,service,echo-tcp,1,1
+2026-07-28T03:42:52Z,envoy-strict,service,echo-tcp-strict,1,1
+2026-07-28T03:42:52Z,dpumesh-preload,service,preload-sock,1,1
+2026-07-28T03:42:52Z,dpumesh-native,deployment,echo-dpumesh,1,1
+2026-07-28T03:42:52Z,dpumesh-native,deployment,echo-dpumesh-13,0,0
+2026-07-28T03:42:52Z,dpumesh-native,deployment,echo-dpumesh-14,0,0

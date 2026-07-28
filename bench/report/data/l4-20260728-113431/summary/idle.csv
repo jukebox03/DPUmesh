@@ -1,0 +1,6 @@
+config,expected_reps,observed_reps,host_cgroup_cores_med,host_cgroup_cores_min,host_cgroup_cores_max,host_busy_cores_med,host_busy_cores_min,host_busy_cores_max,dpu_arm_cores_med,dpu_arm_cores_min,dpu_arm_cores_max
+plain,3,3,0.000000,0.000000,0.000000,0.017991,0.015993,0.025986,NA,NA,NA
+envoy-permissive,3,3,0.007539,0.007420,0.007854,0.023988,0.015992,0.039979,NA,NA,NA
+envoy-strict,3,3,0.007870,0.007405,0.008076,0.017991,0.013993,0.017992,NA,NA,NA
+dpumesh-preload,3,3,0.000158,0.000146,0.000162,0.015993,0.011994,0.019990,0.132472,0.131725,0.133581
+dpumesh-native,3,3,0.000157,0.000156,0.000157,0.013993,0.011994,0.023988,0.133333,0.129870,0.137291

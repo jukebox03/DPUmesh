@@ -1,0 +1,130 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 1K of event 'cycles'
+# Event count (approx.): 49620762408
+#
+# Overhead  Command          Shared Object            Symbol                                          IPC   [IPC Coverage]
+# ........  ...............  .......................  ..............................................  ....................
+#
+     2.35%  echo_sock        [nf_tables]              [k] nft_do_chain                                -      -            
+     2.07%  bench_sock       [nf_tables]              [k] nft_do_chain                                -      -            
+     1.45%  bench_sock       [kernel.kallsyms]        [k] psi_group_change                            -      -            
+     1.33%  echo_sock        [kernel.kallsyms]        [k] psi_group_change                            -      -            
+     1.23%  echo_sock        [nf_conntrack]           [k] __nf_conntrack_find_get                     -      -            
+     1.22%  echo_sock        [kernel.kallsyms]        [k] __siphash_unaligned                         -      -            
+     1.13%  bench_sock       [kernel.kallsyms]        [k] fib_table_lookup                            -      -            
+     1.13%  echo_sock        [kernel.kallsyms]        [k] _raw_spin_lock                              -      -            
+     1.03%  echo_sock        [kernel.kallsyms]        [k] strncpy                                     -      -            
+     1.02%  echo_sock        [kernel.kallsyms]        [k] enqueue_task_fair                           -      -            
+     0.97%  echo_sock        [kernel.kallsyms]        [k] memset_erms                                 -      -            
+     0.92%  echo_sock        [kernel.kallsyms]        [k] native_queued_spin_lock_slowpath.part.0     -      -            
+     0.92%  echo_sock        [kernel.kallsyms]        [k] _raw_spin_lock_bh                           -      -            
+     0.82%  bench_sock       [kernel.kallsyms]        [k] __skb_datagram_iter                         -      -            
+     0.82%  bench_sock       [kernel.kallsyms]        [k] set_next_buddy                              -      -            
+     0.82%  bench_sock       [nf_conntrack]           [k] __nf_conntrack_find_get                     -      -            
+     0.82%  echo_sock        [kernel.kallsyms]        [k] tcp_check_space                             -      -            
+     0.72%  bench_sock       [kernel.kallsyms]        [k] __fget_files                                -      -            
+     0.72%  bench_sock       [kernel.kallsyms]        [k] strncpy                                     -      -            
+     0.72%  bench_sock       [kernel.kallsyms]        [k] update_load_avg                             -      -            
+     0.72%  bench_sock       [kernel.kallsyms]        [k] __alloc_skb                                 -      -            
+     0.72%  bench_sock       [kernel.kallsyms]        [k] ip_send_check                               -      -            
+     0.72%  bench_sock       [kernel.kallsyms]        [k] __update_load_avg_se                        -      -            
+     0.72%  bench_sock       [kernel.kallsyms]        [k] __update_load_avg_cfs_rq                    -      -            
+     0.72%  echo_sock        [nf_conntrack]           [k] tcp_in_window                               -      -            
+     0.72%  echo_sock        [kernel.kallsyms]        [k] __alloc_skb                                 -      -            
+     0.65%  swapper          [kernel.kallsyms]        [k] psi_group_change                            -      -            
+     0.62%  bench_sock       [kernel.kallsyms]        [k] aa_compute_perms                            -      -            
+     0.62%  bench_sock       [kernel.kallsyms]        [k] arch_exit_to_user_mode_prepare.constprop.0  -      -            
+     0.62%  bench_sock       [kernel.kallsyms]        [k] enqueue_task_fair                           -      -            
+     0.62%  bench_sock       [kernel.kallsyms]        [k] _raw_spin_lock                              -      -            
+     0.62%  bench_sock       [kernel.kallsyms]        [k] __siphash_unaligned                         -      -            
+     0.62%  echo_sock        [kernel.kallsyms]        [k] set_next_buddy                              -      -            
+     0.62%  echo_sock        [kernel.kallsyms]        [k] update_load_avg                             -      -            
+     0.62%  echo_sock        [kernel.kallsyms]        [k] update_rq_clock                             -      -            
+     0.51%  bench_sock       [kernel.kallsyms]        [k] tcp_sendmsg_locked                          -      -            
+     0.51%  bench_sock       [nf_conntrack]           [k] tcp_in_window                               -      -            
+     0.51%  bench_sock       [kernel.kallsyms]        [k] update_rq_clock                             -      -            
+     0.51%  bench_sock       [kernel.kallsyms]        [k] __schedule                                  -      -            
+     0.51%  bench_sock       [kernel.kallsyms]        [k] try_to_wake_up                              -      -            
+     0.51%  bench_sock       [kernel.kallsyms]        [k] _raw_spin_lock_irqsave                      -      -            
+     0.51%  bench_sock       [nf_conntrack]           [k] nf_conntrack_tcp_packet                     -      -            
+     0.51%  bench_sock       [kernel.kallsyms]        [k] __inet_lookup_established                   -      -            
+     0.51%  echo_sock        [kernel.kallsyms]        [k] copy_user_enhanced_fast_string              -      -            
+     0.51%  echo_sock        [kernel.kallsyms]        [k] _raw_spin_lock_irqsave                      -      -            
+     0.51%  echo_sock        [nf_conntrack]           [k] nf_ct_deliver_cached_events                 -      -            
+     0.51%  echo_sock        [kernel.kallsyms]        [k] __tcp_transmit_skb                          -      -            
+     0.51%  echo_sock        [kernel.kallsyms]        [k] __skb_datagram_iter                         -      -            
+     0.51%  echo_sock        [kernel.kallsyms]        [k] try_to_wake_up                              -      -            
+     0.41%  echo_sock        [kernel.kallsyms]        [k] nf_hook_slow                                -      -            
+     0.41%  bench_sock       [kernel.kallsyms]        [k] aa_label_sk_perm.part.0                     -      -            
+     0.41%  bench_sock       [nf_tables]              [k] nft_do_chain_ipv4                           -      -            
+     0.41%  bench_sock       libc.so.6                [.] __GI___libc_write                           -      -            
+     0.41%  bench_sock       [kernel.kallsyms]        [k] native_queued_spin_lock_slowpath.part.0     -      -            
+     0.41%  bench_sock       [kernel.kallsyms]        [k] tcp_check_space                             -      -            
+     0.41%  bench_sock       [kernel.kallsyms]        [k] ep_poll                                     -      -            
+     0.41%  bench_sock       [kernel.kallsyms]        [k] tcp_recvmsg_locked                          -      -            
+     0.41%  bench_sock       [kernel.kallsyms]        [k] update_curr                                 -      -            
+     0.41%  bench_sock       [kernel.kallsyms]        [k] __switch_to                                 -      -            
+     0.41%  bench_sock       [kernel.kallsyms]        [k] copy_user_enhanced_fast_string              -      -            
+     0.41%  bench_sock       [br_netfilter]           [k] br_nf_forward_finish                        -      -            
+     0.41%  bench_sock       [nft_counter]            [k] nft_counter_eval                            -      -            
+     0.41%  bench_sock       [xt_conntrack]           [k] conntrack_mt.isra.0                         -      -            
+     0.41%  bench_sock       [kernel.kallsyms]        [k] __ksize                                     -      -            
+     0.41%  bench_sock       [kernel.kallsyms]        [k] nf_hook_slow                                -      -            
+     0.41%  bench_sock       [kernel.kallsyms]        [k] slab_free_freelist_hook.constprop.0         -      -            
+     0.41%  bench_sock       [kernel.kallsyms]        [k] copy_user_generic_unrolled                  -      -            
+     0.41%  echo_sock        [kernel.kallsyms]        [k] __update_load_avg_se                        -      -            
+     0.41%  bench_sock       [nft_compat]             [k] nft_match_eval                              -      -            
+     0.41%  echo_sock        [kernel.kallsyms]        [k] rcu_read_unlock_strict                      -      -            
+     0.41%  echo_sock        [nf_conntrack]           [k] nf_conntrack_in                             -      -            
+     0.41%  echo_sock        [kernel.kallsyms]        [k] slab_free_freelist_hook.constprop.0         -      -            
+     0.41%  echo_sock        [kernel.kallsyms]        [k] __switch_to                                 -      -            
+     0.41%  echo_sock        [kernel.kallsyms]        [k] __local_bh_enable_ip                        -      -            
+     0.41%  bench_sock       [kernel.kallsyms]        [k] ip_finish_output2                           -      -            
+     0.41%  echo_sock        [kernel.kallsyms]        [k] tcp_sendmsg_locked                          -      -            
+     0.41%  echo_sock        [kernel.kallsyms]        [k] update_curr                                 -      -            
+     0.31%  bench_sock       [nf_tables]              [k] nft_immediate_eval                          -      -            
+     0.31%  echo_sock        [kernel.kallsyms]        [k] check_preempt_wakeup                        -      -            
+     0.31%  bench_sock       libc.so.6                [.] epoll_pwait2                                -      -            
+     0.31%  bench_sock       [kernel.kallsyms]        [k] __calc_delta                                -      -            
+     0.31%  bench_sock       [kernel.kallsyms]        [k] select_estimate_accuracy                    -      -            
+     0.31%  bench_sock       [kernel.kallsyms]        [k] sk_stream_alloc_skb                         -      -            
+     0.31%  bench_sock       [kernel.kallsyms]        [k] tcp_rcv_established                         -      -            
+     0.31%  bench_sock       [kernel.kallsyms]        [k] __local_bh_enable_ip                        -      -            
+     0.31%  bench_sock       [kernel.kallsyms]        [k] entry_SYSCALL_64                            -      -            
+     0.31%  bench_sock       [kernel.kallsyms]        [k] read_tsc                                    -      -            
+     0.31%  bench_sock       [kernel.kallsyms]        [k] cpuacct_charge                              -      -            
+     0.31%  bench_sock       [br_netfilter]           [k] br_nf_pre_routing_finish                    -      -            
+     0.31%  bench_sock       [kernel.kallsyms]        [k] _raw_spin_lock_bh                           -      -            
+     0.31%  bench_sock       [kernel.kallsyms]        [k] aa_profile_af_perm                          -      -            
+     0.31%  bench_sock       [kernel.kallsyms]        [k] psi_flags_change                            -      -            
+     0.31%  bench_sock       [kernel.kallsyms]        [k] aa_dfa_match_len                            -      -            
+     0.31%  echo_sock        [kernel.kallsyms]        [k] psi_task_switch                             -      -            
+     0.31%  bench_sock       [kernel.kallsyms]        [k] syscall_return_via_sysret                   -      -            
+     0.31%  echo_sock        [kernel.kallsyms]        [k] tcp_rcv_established                         -      -            
+     0.31%  echo_sock        [nf_conntrack]           [k] resolve_normal_ct                           -      -            
+     0.31%  echo_sock        [kernel.kallsyms]        [k] sock_read_iter                              -      -            
+     0.31%  echo_sock        [kernel.kallsyms]        [k] wait_woken                                  -      -            
+     0.31%  echo_sock        [kernel.kallsyms]        [k] tcp_write_xmit                              -      -            
+     0.31%  echo_sock        [nf_defrag_ipv4]         [k] ipv4_conntrack_defrag                       -      -            
+     0.31%  echo_sock        [kernel.kallsyms]        [k] tcp_schedule_loss_probe.part.0              -      -            
+     0.31%  echo_sock        [kernel.kallsyms]        [k] reweight_entity                             -      -            
+     0.31%  echo_sock        [kernel.kallsyms]        [k] ip_send_check                               -      -            
+     0.31%  echo_sock        [kernel.kallsyms]        [k] kmem_cache_alloc                            -      -            
+     0.31%  echo_sock        [kernel.kallsyms]        [k] ip_finish_output2                           -      -            
+     0.31%  echo_sock        [nf_tables]              [k] nft_meta_get_eval                           -      -            
+     0.31%  echo_sock        [nf_conntrack]           [k] nf_conntrack_tcp_packet                     -      -            
+     0.31%  echo_sock        [kernel.kallsyms]        [k] __mod_timer                                 -      -            
+     0.31%  echo_sock        [kernel.kallsyms]        [k] tcp_recvmsg_locked                          -      -            
+     0.31%  echo_sock        [kernel.kallsyms]        [k] enqueue_entity                              -      -            
+     0.31%  echo_sock        [xt_conntrack]           [k] conntrack_mt_v3                             -      -            
+     0.31%  echo_sock        [nft_compat]             [k] nft_match_large_eval                        -      -            
+     0.31%  echo_sock        [kernel.kallsyms]        [k] netif_rx_internal                           -      -            
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

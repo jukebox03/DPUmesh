@@ -1,0 +1,14 @@
+check,value
+expected_load_rows,315
+observed_load_rows,305
+missing_load_rows,10
+expected_idle_rows,15
+observed_idle_rows,15
+invalid_validation_status_rows,0
+fail_sum,0
+overflow_sum,0
+reorder_sum,0
+clean_load_rows,255
+unclean_load_rows,50
+expected_perf_profiles,15
+observed_perf_profiles,0

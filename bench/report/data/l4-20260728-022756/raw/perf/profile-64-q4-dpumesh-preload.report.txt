@@ -1,0 +1,107 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 1K of event 'cycles'
+# Event count (approx.): 43461050806
+#
+# Overhead  Command          Shared Object               Symbol                                          IPC   [IPC Coverage]
+# ........  ...............  ..........................  ..............................................  ....................
+#
+     3.10%  bench_sock       [kernel.kallsyms]           [k] psi_group_change                            -      -            
+     2.97%  echo_sock        [kernel.kallsyms]           [k] psi_group_change                            -      -            
+     2.81%  swapper          [kernel.kallsyms]           [k] mwait_idle_with_hints.constprop.0           -      -            
+     1.41%  echo_sock        [kernel.kallsyms]           [k] restore_fpregs_from_fpstate                 -      -            
+     1.34%  bench_sock       [kernel.kallsyms]           [k] __update_load_avg_cfs_rq                    -      -            
+     1.34%  bench_sock       [kernel.kallsyms]           [k] update_load_avg                             -      -            
+     1.33%  bench_sock       [kernel.kallsyms]           [k] _raw_spin_lock_irqsave                      -      -            
+     1.32%  echo_sock        libc.so.6                   [.] pthread_mutex_lock@@GLIBC_2.2.5             -      -            
+     1.13%  echo_sock        [kernel.kallsyms]           [k] __switch_to                                 -      -            
+     1.11%  bench_sock       [kernel.kallsyms]           [k] reweight_entity                             -      -            
+     1.09%  bench_sock       [kernel.kallsyms]           [k] __switch_to                                 -      -            
+     1.04%  echo_sock        [kernel.kallsyms]           [k] __calc_delta                                -      -            
+     1.00%  bench_sock       [kernel.kallsyms]           [k] dequeue_task_fair                           -      -            
+     0.95%  echo_sock        [kernel.kallsyms]           [k] native_queued_spin_lock_slowpath.part.0     -      -            
+     0.89%  bench_sock       [kernel.kallsyms]           [k] restore_fpregs_from_fpstate                 -      -            
+     0.89%  bench_sock       [kernel.kallsyms]           [k] native_sched_clock                          -      -            
+     0.89%  bench_sock       [kernel.kallsyms]           [k] exit_to_user_mode_loop                      -      -            
+     0.89%  bench_sock       [kernel.kallsyms]           [k] syscall_return_via_sysret                   -      -            
+     0.88%  bench_sock       libc.so.6                   [.] pthread_mutex_unlock@@GLIBC_2.2.5           -      -            
+     0.88%  bench_sock       [kernel.kallsyms]           [k] __update_load_avg_se                        -      -            
+     0.85%  echo_sock        [kernel.kallsyms]           [k] _raw_spin_lock_irqsave                      -      -            
+     0.78%  bench_sock       [kernel.kallsyms]           [k] entry_SYSCALL_64                            -      -            
+     0.78%  bench_sock       [kernel.kallsyms]           [k] update_curr                                 -      -            
+     0.78%  bench_sock       [kernel.kallsyms]           [k] syscall_exit_to_user_mode                   -      -            
+     0.77%  bench_sock       [kernel.kallsyms]           [k] save_fpregs_to_fpstate                      -      -            
+     0.76%  echo_sock        [kernel.kallsyms]           [k] __fget_files                                -      -            
+     0.67%  bench_sock       [kernel.kallsyms]           [k] __rseq_handle_notify_resume                 -      -            
+     0.67%  bench_sock       libc.so.6                   [.] pthread_mutex_lock@@GLIBC_2.2.5             -      -            
+     0.67%  bench_sock       [kernel.kallsyms]           [k] __fget_files                                -      -            
+     0.67%  bench_sock       [kernel.kallsyms]           [k] update_cfs_group                            -      -            
+     0.67%  echo_sock        libc.so.6                   [.] read                                        -      -            
+     0.66%  echo_sock        [kernel.kallsyms]           [k] syscall_return_via_sysret                   -      -            
+     0.66%  echo_sock        [kernel.kallsyms]           [k] reweight_entity                             -      -            
+     0.66%  echo_sock        [kernel.kallsyms]           [k] __update_load_avg_cfs_rq                    -      -            
+     0.65%  echo_sock        [kernel.kallsyms]           [k] _raw_spin_lock_irq                          -      -            
+     0.57%  echo_sock        [kernel.kallsyms]           [k] __update_load_avg_se                        -      -            
+     0.57%  echo_sock        [kernel.kallsyms]           [k] update_load_avg                             -      -            
+     0.57%  echo_sock        [kernel.kallsyms]           [k] __rseq_handle_notify_resume                 -      -            
+     0.56%  bench_sock       [kernel.kallsyms]           [k] fput_many                                   -      -            
+     0.56%  bench_sock       [kernel.kallsyms]           [k] memcg_slab_post_alloc_hook                  -      -            
+     0.55%  bench_sock       [kernel.kallsyms]           [k] _raw_spin_lock_irq                          -      -            
+     0.55%  bench_sock       [kernel.kallsyms]           [k] native_apic_msr_eoi_write                   -      -            
+     0.55%  bench_sock       [kernel.kallsyms]           [k] enqueue_task_fair                           -      -            
+     0.55%  bench_sock       [kernel.kallsyms]           [k] pick_next_entity                            -      -            
+     0.53%  echo_sock        [kernel.kallsyms]           [k] eventfd_poll                                -      -            
+     0.47%  echo_sock        [kernel.kallsyms]           [k] _raw_spin_lock                              -      -            
+     0.47%  echo_sock        [kernel.kallsyms]           [k] native_sched_clock                          -      -            
+     0.47%  echo_sock        [kernel.kallsyms]           [k] entry_SYSCALL_64_after_hwframe              -      -            
+     0.47%  echo_sock        [kernel.kallsyms]           [k] __get_user_8                                -      -            
+     0.47%  echo_sock        [kernel.kallsyms]           [k] copy_user_generic_unrolled                  -      -            
+     0.47%  echo_sock        [kernel.kallsyms]           [k] enqueue_task_fair                           -      -            
+     0.47%  echo_sock        [kernel.kallsyms]           [k] __put_user_nocheck_8                        -      -            
+     0.47%  echo_sock        [kernel.kallsyms]           [k] __schedule                                  -      -            
+     0.45%  bench_sock       [kernel.kallsyms]           [k] try_to_wake_up                              -      -            
+     0.45%  bench_sock       [kernel.kallsyms]           [k] x64_sys_call                                -      -            
+     0.45%  bench_sock       [kernel.kallsyms]           [k] unix_stream_read_generic                    -      -            
+     0.44%  bench_sock       [kernel.kallsyms]           [k] ep_send_events                              -      -            
+     0.44%  bench_sock       [kernel.kallsyms]           [k] __get_user_8                                -      -            
+     0.44%  bench_sock       [kernel.kallsyms]           [k] do_syscall_64                               -      -            
+     0.44%  bench_sock       [kernel.kallsyms]           [k] arch_exit_to_user_mode_prepare.constprop.0  -      -            
+     0.44%  bench_sock       libc.so.6                   [.] __GI___lll_lock_wait                        -      -            
+     0.44%  bench_sock       libc.so.6                   [.] epoll_pwait2                                -      -            
+     0.44%  bench_sock       [kernel.kallsyms]           [k] __calc_delta                                -      -            
+     0.44%  bench_sock       [kernel.kallsyms]           [k] iterate_groups                              -      -            
+     0.44%  bench_sock       [kernel.kallsyms]           [k] ep_item_poll.isra.0                         -      -            
+     0.38%  echo_sock        [kernel.kallsyms]           [k] arch_exit_to_user_mode_prepare.constprop.0  -      -            
+     0.38%  echo_sock        [kernel.kallsyms]           [k] do_poll.constprop.0                         -      -            
+     0.38%  echo_sock        [kernel.kallsyms]           [k] clear_buddies                               -      -            
+     0.38%  echo_sock        libc.so.6                   [.] pthread_mutex_unlock@@GLIBC_2.2.5           -      -            
+     0.38%  echo_sock        [kernel.kallsyms]           [k] x64_sys_call                                -      -            
+     0.38%  echo_sock        [kernel.kallsyms]           [k] entry_SYSCALL_64                            -      -            
+     0.38%  echo_sock        [kernel.kallsyms]           [k] fput_many                                   -      -            
+     0.38%  echo_sock        [kernel.kallsyms]           [k] update_curr                                 -      -            
+     0.37%  echo_sock        [kernel.kallsyms]           [k] cpuacct_charge                              -      -            
+     0.34%  bench_sock       libc.so.6                   [.] read                                        -      -            
+     0.33%  bench_sock       [kernel.kallsyms]           [k] vfs_write                                   -      -            
+     0.33%  bench_sock       [kernel.kallsyms]           [k] send_call_function_single_ipi               -      -            
+     0.33%  bench_sock       [kernel.kallsyms]           [k] ktime_get_ts64                              -      -            
+     0.33%  bench_sock       libc.so.6                   [.] __GI___lll_lock_wake                        -      -            
+     0.33%  bench_sock       [kernel.kallsyms]           [k] kmem_cache_alloc_node                       -      -            
+     0.33%  bench_sock       [kernel.kallsyms]           [k] syscall_enter_from_user_mode                -      -            
+     0.33%  bench_sock       libc.so.6                   [.] __GI___pthread_disable_asynccancel          -      -            
+     0.29%  echo_sock        [kernel.kallsyms]           [k] update_cfs_group                            -      -            
+     0.29%  echo_sock        [kernel.kallsyms]           [k] do_syscall_64                               -      -            
+     0.28%  echo_sock        [kernel.kallsyms]           [k] update_min_vruntime                         -      -            
+     0.28%  echo_sock        [kernel.kallsyms]           [k] switch_fpu_return                           -      -            
+     0.28%  echo_sock        [kernel.kallsyms]           [k] finish_task_switch.isra.0                   -      -            
+     0.28%  echo_sock        [kernel.kallsyms]           [k] exit_to_user_mode_loop                      -      -            
+     0.28%  echo_sock        [kernel.kallsyms]           [k] futex_wait                                  -      -            
+     0.28%  echo_sock        libc.so.6                   [.] epoll_wait                                  -      -            
+     0.28%  echo_sock        [kernel.kallsyms]           [k] __put_user_nocheck_4                        -      -            
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

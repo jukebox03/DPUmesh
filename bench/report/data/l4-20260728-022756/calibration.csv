@@ -1,0 +1,13 @@
+run_id,config,payload_bytes,reply_bytes,concurrency,threads,mrps,gbps,p50_us,p99_us,fail,drops,reorder
+cal-low-64-plain,plain,64,8,4,4,0.362735,0.1857,42.00,54.00,0,0,0
+cal-low-64-envoy-permissive,envoy-permissive,64,8,4,4,0.144282,0.0739,107.00,171.00,0,0,0
+cal-low-64-envoy-strict,envoy-strict,64,8,4,4,0.136993,0.0701,113.00,185.00,0,0,0
+cal-low-64-dpumesh-preload,dpumesh-preload,64,8,4,4,0.111591,0.0571,137.00,245.00,0,0,0
+cal-low-1024-plain,plain,1024,8,4,4,0.264021,2.1629,59.00,74.00,0,0,0
+cal-low-1024-envoy-permissive,envoy-permissive,1024,8,4,4,0.127013,1.0405,138.00,183.00,0,0,0
+cal-low-1024-envoy-strict,envoy-strict,1024,8,4,4,0.120049,0.9834,162.00,195.00,0,0,0
+cal-low-1024-dpumesh-preload,dpumesh-preload,1024,8,4,4,0.105218,0.8619,144.00,294.00,0,0,0
+cal-low-8192-plain,plain,8192,8,4,4,0.243961,15.9882,64.00,81.00,0,0,0
+cal-low-8192-envoy-permissive,envoy-permissive,8192,8,4,4,0.105109,6.8884,161.00,226.00,0,0,0
+cal-low-8192-envoy-strict,envoy-strict,8192,8,4,4,0.068030,4.4584,228.00,364.00,0,0,0
+cal-low-8192-dpumesh-preload,dpumesh-preload,8192,8,4,4,0.055445,3.6336,284.00,404.00,0,0,0

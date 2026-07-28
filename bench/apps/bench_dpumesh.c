@@ -1,5 +1,6 @@
-/* Closed-loop native RPC benchmark. Each thread owns one EQ and connection and
- * reports throughput, latency, failures, ordering, routing, and TX-pool metrics. */
+/* Native DPUmesh RPC benchmark. RUN uses a closed fixed-concurrency window.
+ * OPEN schedules constant or Poisson arrivals and measures latency from the
+ * scheduled send time. Each thread owns one EQ and connection. */
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -9,6 +10,7 @@
 #include <errno.h>
 #include <signal.h>
 #include <stdatomic.h>
+#include <math.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 
@@ -23,7 +25,11 @@
 #define DRAIN_GRACE_SEC    1.0        /* finish replies already issued at measurement end */
 #define REQ_FILL           42
 #define BENCH_MAX_BACKENDS 32         /* pod_id space we tally replies over (>= MAX_PODS) */
-#define INFLIGHT_RING      1024       /* seq-indexed outstanding requests */
+#define INFLIGHT_RING      (1u << 16) /* seq-indexed outstanding requests */
+#define OPEN_CAP           (INFLIGHT_RING / 2)
+
+enum { MODE_CLOSED = 0, MODE_OPEN = 1 };
+enum { ARR_CONST = 0, ARR_POISSON = 1 };
 
 static dmesh_channel_t *g_s           = NULL;   /* shared, thread-safe channel */
 static const char      *g_dst_service = "echo-dpumesh";  /* backend service NAME to address */
@@ -34,7 +40,10 @@ typedef struct {
     /* config (shared, read-only during the run) */
     int          req_size;
     int          reply_size;
+    int          mode;         /* MODE_CLOSED | MODE_OPEN */
     int          W;            /* concurrency window (outstanding per thread) */
+    double       rate;         /* open: this thread's offered RPS */
+    int          arrival;      /* open: ARR_CONST | ARR_POISSON */
     long         warmup;       /* events excluded from measurement */
     double       duration;     /* run length in seconds */
     double       start_at;     /* shared barrier: all threads begin at this time */
@@ -58,11 +67,16 @@ typedef struct {
     int              tx_active; /* a frame is mid-carve (must finish before the next) */
     long             outstanding;
     long             credits;   /* events observed -> requests to reissue */
+    double           sched_next; /* open: next scheduled send time */
+    uint64_t         prng;       /* open/poisson: per-thread xorshift state */
     bench_reframer_t rf;       /* the QP's ordered reply byte stream */
     int              draining; /* measurement closed; retire outstanding replies only */
 
     /* per-thread results */
     long         rcnt;         /* total events incl. warmup */
+    long         scheduled;    /* open-loop arrivals, accepted or dropped */
+    long         pending;      /* requests outstanding at measurement end */
+    long         drops;        /* open-loop arrivals rejected by backpressure */
     long         since_conn;   /* events on the CURRENT conn (churn trigger) */
     long         reconns;      /* reconnects performed */
     double       reconn_sec;   /* wall time inside close+connect+pin (sums) */
@@ -76,6 +90,12 @@ typedef struct {
     bench_hist_t hist;         /* post-warmup latencies (us) */
     atomic_int   broken;       /* conn/alloc failure -> excluded from aggregate */
 } worker_t;
+
+static double prng_exp_gap(worker_t *w, double rate) {
+    w->prng ^= w->prng << 13; w->prng ^= w->prng >> 7; w->prng ^= w->prng << 17;
+    double u = ((double)(w->prng >> 11) + 1.0) / 9007199254740993.0;
+    return -log(u) / rate;
+}
 
 /* Fire once per fully-received reply frame. Correlate BY SEQ, not by arrival order: a
  * codec'd service load-balances every message, so replies from different backends
@@ -137,16 +157,16 @@ static int eq_pump(worker_t *w) {
 /* Ship one request frame: [hdr | payload], carved into <= post_max posts. Complete
  * transport units publish as posts commit; the event-loop boundary flushes the tail. The
  * payload is constant filler, so it is written straight into the TX ring — no
- * staging buffer. start_ts is stamped when the frame STARTS, so the closed-loop
- * latency includes any SQ queueing, as it did when the write blocked.
+ * staging buffer. start_ts is stamped when the frame STARTS: actual issue time
+ * for RUN, intended arrival time for OPEN.
  * Returns 1 = frame posted, 0 = SQ full (resume from tx_done), -1 = hard fault. */
-static int issue(worker_t *w) {
+static int issue(worker_t *w, double stamp) {
     uint32_t total = BENCH_HDR_LEN + (uint32_t)w->req_size;
     if (!w->tx_active) {
         /* A delayed reply may span more than the correlation table even though
          * at most W requests are live. Skip occupied modulo slots. */
         while (w->live[w->next_seq % INFLIGHT_RING]) w->next_seq++;
-        w->start_ts[w->next_seq % INFLIGHT_RING] = bench_now_sec();
+        w->start_ts[w->next_seq % INFLIGHT_RING] = stamp;
         w->tx_active = 1;
         w->tx_done   = 0;
     }
@@ -179,19 +199,32 @@ static void *worker_fn(void *arg) {
     double end = 0.0;
     bench_reframe_reset(&w->rf);
 
-    if (bench_hist_init(&w->hist) < 0) { atomic_store(&w->broken, 1); return NULL; }
+    if (bench_hist_init(&w->hist) < 0) {
+        fprintf(stderr, "[bench] worker histogram allocation failed\n");
+        atomic_store(&w->broken, 1); return NULL;
+    }
     w->start_ts = (double *)calloc(INFLIGHT_RING, sizeof(double));
     w->slot_seq = (uint32_t *)calloc(INFLIGHT_RING, sizeof(uint32_t));
     w->live     = (uint8_t *)calloc(INFLIGHT_RING, 1);
-    if (!w->start_ts || !w->slot_seq || !w->live) { atomic_store(&w->broken, 1); goto done; }
+    if (!w->start_ts || !w->slot_seq || !w->live) {
+        fprintf(stderr, "[bench] worker correlation-ring allocation failed\n");
+        atomic_store(&w->broken, 1); goto done;
+    }
     w->prev_seq = UINT32_MAX;                   /* so seq 0 counts as in-order */
 
     /* This thread's OWN EQ, and its conn on it: nothing on this EQ belongs to anyone
      * else, so poll_eq below is contention-free. This is the scaling knob. */
     w->eq = dmesh_create_eq(g_s);
-    if (!w->eq) { atomic_store(&w->broken, 1); goto done; }
+    if (!w->eq) {
+        fprintf(stderr, "[bench] worker dmesh_create_eq failed: errno=%d\n", errno);
+        atomic_store(&w->broken, 1); goto done;
+    }
     w->c = dmesh_create_qp(w->eq, g_dst_service);
-    if (!w->c) { atomic_store(&w->broken, 1); goto done; }
+    if (!w->c) {
+        fprintf(stderr, "[bench] worker dmesh_create_qp(%s) failed: errno=%d\n",
+                g_dst_service, errno);
+        atomic_store(&w->broken, 1); goto done;
+    }
 
     /* barrier: all threads start together */
     while (bench_now_sec() < w->start_at) {
@@ -200,10 +233,12 @@ static void *worker_fn(void *arg) {
     }
     double start = bench_now_sec();
     w->warmup_end = start;                        /* fallback if warmup never reached */
+    w->sched_next = start;
     w->credits = w->W;                            /* prime the window through the loop below */
 
     while (!atomic_load(&w->broken) && !atomic_load(w->stop)) {
-        if (bench_now_sec() - start > w->duration && !w->tx_active) break;
+        double now = bench_now_sec();
+        if (now - start > w->duration && !w->tx_active) break;
 
         int did = eq_pump(w) > 0;
         int issued = 0;
@@ -212,7 +247,8 @@ static void *worker_fn(void *arg) {
          * issuing (the gate below), drain to 0 outstanding, then swap the conn.
          * Reconnect wall time is accumulated so the per-reconnect cost is a
          * direct measurement (not inferred from the rate delta). */
-        int churn = (w->reconn > 0 && w->since_conn >= w->reconn);
+        int churn = (w->mode == MODE_CLOSED &&
+                     w->reconn > 0 && w->since_conn >= w->reconn);
         if (churn && w->outstanding == 0 && !w->tx_active) {
             double t0 = bench_now_sec();
             dmesh_destroy_qp(w->c);                    /* drain cursor is this EQ's, i.e. ours */
@@ -227,18 +263,50 @@ static void *worker_fn(void *arg) {
             did = 1;
         }
 
-        /* Keep the window full … unless draining to churn. A mid-carve frame always
-         * finishes first: it holds the conn's byte stream open. */
-        while (w->tx_active || (!churn && w->credits > 0)) {
-            if (!w->tx_active && bench_now_sec() - start > w->duration) {
-                w->credits = 0; break;
+        if (w->mode == MODE_CLOSED) {
+            /* Keep the window full … unless draining to churn. A mid-carve frame
+             * always finishes first: it holds the conn's byte stream open. */
+            while (w->tx_active || (!churn && w->credits > 0)) {
+                if (!w->tx_active && bench_now_sec() - start > w->duration) {
+                    w->credits = 0; break;
+                }
+                int r = issue(w, bench_now_sec());
+                if (r < 0) { atomic_store(&w->broken, 1); break; }
+                if (r == 0) break;                /* SQ full: resume next pass */
+                w->credits--;
+                did = 1;
+                issued = 1;
             }
-            int r = issue(w);
-            if (r < 0) { atomic_store(&w->broken, 1); break; }
-            if (r == 0) break;                    /* SQ full: resume on the next pass */
-            w->credits--;
-            did = 1;
-            issued = 1;
+        } else {
+            /* Finish a previously accepted frame before accepting another. */
+            if (w->tx_active) {
+                int r = issue(w, 0.0);
+                if (r < 0) atomic_store(&w->broken, 1);
+                else if (r > 0) { did = 1; issued = 1; }
+            }
+
+            /* Arrival timestamps advance independently of transport progress.
+             * A frame already mid-carve or OPEN_CAP outstanding is explicit
+             * backpressure, so later due arrivals are counted as drops. */
+            now = bench_now_sec();
+            if (now - start <= w->duration && !atomic_load(&w->broken)) {
+                while (now >= w->sched_next) {
+                    double sched = w->sched_next;
+                    double gap = (w->arrival == ARR_POISSON)
+                               ? prng_exp_gap(w, w->rate) : 1.0 / w->rate;
+                    w->sched_next += gap;
+                    w->scheduled++;
+                    if (w->tx_active || w->outstanding >= OPEN_CAP) {
+                        w->drops++;
+                        continue;
+                    }
+                    int r = issue(w, sched);
+                    if (r < 0) { atomic_store(&w->broken, 1); break; }
+                    if (r > 0) { did = 1; issued = 1; }
+                    /* r == 0 means this logical request was accepted and will
+                     * resume from tx_done; subsequent due arrivals will drop. */
+                }
+            }
         }
         /* One logical latency boundary for the burst. post_send may already have
          * submitted complete physical units; this forces the remaining tail. */
@@ -247,6 +315,7 @@ static void *worker_fn(void *arg) {
         if (!did) { struct timespec ts = {0, 2000}; nanosleep(&ts, NULL); }  /* 2us */
     }
     end = bench_now_sec();
+    w->pending = w->outstanding;
 
     /* Retire replies issued before the measurement boundary. This keeps FIN behind
      * the request/reply data and leaves the next control run with no stale traffic. */
@@ -284,10 +353,13 @@ static void *watchdog_fn(void *arg) {
 }
 
 /* ------------------------------------------------------------ one benchmark run */
-static void run_bench(int conn_fd, int req_size, int reply_size, int concurrency,
-                      double duration, long warmup, int threads, long reconn, int batch) {
-    char reply[768];
-    if (req_size < 0 || reply_size < 1 || concurrency < 1 || duration <= 0 || threads < 1) {
+static void run_bench(int conn_fd, int mode, int req_size, int reply_size,
+                      int concurrency, double duration, long warmup, int threads,
+                      double rate, int arrival, long reconn, int batch) {
+    char reply[1024];
+    if (req_size < 0 || reply_size < 1 || duration <= 0 || threads < 1 ||
+        (mode == MODE_CLOSED && concurrency < 1) ||
+        (mode == MODE_OPEN && rate <= 0)) {
         const char *e = "ERR invalid args\n";
         if (write(conn_fd, e, strlen(e)) < 0) {} return;
     }
@@ -296,8 +368,14 @@ static void run_bench(int conn_fd, int req_size, int reply_size, int concurrency
     if (reconn < 0) reconn = 0;
 
     (void)batch; /* wire-compatibility field; transport batching is automatic */
-    fprintf(stderr, "[bench] RUN req=%d reply=%d conc=%d dur=%.1fs warmup=%ld threads=%d reconn=%ld batch=auto dst_svc=%s\n",
-            req_size, reply_size, concurrency, duration, warmup, threads, reconn, g_dst_service);
+    char load[32];
+    if (mode == MODE_OPEN) snprintf(load, sizeof load, "rate=%.0f", rate);
+    else                   snprintf(load, sizeof load, "conc=%d", concurrency);
+    fprintf(stderr,
+            "[bench] %s req=%d reply=%d %s dur=%.1fs warmup=%ld threads=%d "
+            "reconn=%ld batch=auto dst_svc=%s\n",
+            mode == MODE_OPEN ? "OPEN" : "RUN", req_size, reply_size, load,
+            duration, warmup, threads, reconn, g_dst_service);
 
     dmesh_tx_stats_t st0, st1;                    /* elastic-pool event deltas over the run */
     dmesh_get_tx_stats(g_s, &st0);
@@ -314,14 +392,20 @@ static void run_bench(int conn_fd, int req_size, int reply_size, int concurrency
     for (int i = 0; i < threads; i++) {
         w[i].req_size   = req_size;
         w[i].reply_size = reply_size;
+        w[i].mode       = mode;
         w[i].W          = concurrency;
+        w[i].rate       = rate / (double)threads;
+        w[i].arrival    = arrival;
         w[i].warmup     = warmup;
         w[i].duration   = duration;
         w[i].start_at   = start_at;
         w[i].reconn     = reconn;
         w[i].batch      = 1;
         w[i].stop       = &stop;
+        w[i].prng       = 0x9e3779b97f4a7c15ULL ^
+                          ((uint64_t)(i + 1) * 0x100000001b3ULL);
         if (pthread_create(&tid[i], &attr, worker_fn, &w[i]) != 0) {
+            fprintf(stderr, "[bench] pthread_create worker=%d failed\n", i);
             atomic_store(&w[i].broken, 1); tid[i] = 0;
         }
     }
@@ -338,12 +422,22 @@ static void run_bench(int conn_fd, int req_size, int reply_size, int concurrency
     bench_hist_t agg; bench_hist_init(&agg);
     double mrps = 0.0, gbps = 0.0, reconn_sec = 0.0;
     long total_ok = 0, total_fail = 0, total_reconns = 0, total_reorder = 0;
+    int worker_fail = 0;
+    long total_scheduled = 0, total_pending = 0, total_drops = 0;
     long dist[BENCH_MAX_BACKENDS] = { 0 };
     for (int i = 0; i < threads; i++) {
         long measured = w[i].rcnt - w[i].warmup;
         if (measured < 0) measured = 0;
         total_fail += w[i].fail;
+        if (atomic_load(&w[i].broken)) {
+            worker_fail++;
+            total_fail++;
+        }
         total_reorder += w[i].reorder;
+        total_scheduled += (mode == MODE_OPEN) ? w[i].scheduled
+                                               : (long)w[i].next_seq;
+        total_pending += w[i].pending;
+        total_drops += w[i].drops;
         for (int b = 0; b < BENCH_MAX_BACKENDS; b++) dist[b] += w[i].dist[b];
         total_reconns += w[i].reconns;
         reconn_sec    += w[i].reconn_sec;
@@ -357,20 +451,29 @@ static void run_bench(int conn_fd, int req_size, int reply_size, int concurrency
     }
 
     double p50 = bench_hist_pct(&agg, 50.0), p95 = bench_hist_pct(&agg, 95.0);
-    double p99 = bench_hist_pct(&agg, 99.0);
+    double p99 = bench_hist_pct(&agg, 99.0), p999 = bench_hist_pct(&agg, 99.9);
+    double p9999 = bench_hist_pct(&agg, 99.99);
     double avg = bench_hist_avg(&agg), mn = bench_hist_min(&agg), mx = bench_hist_max(&agg);
+    uint64_t overflow = agg.overflow;
     bench_hist_free(&agg);
 
     dmesh_get_tx_stats(g_s, &st1);
     double reconn_us = (total_reconns > 0) ? reconn_sec * 1e6 / (double)total_reconns : 0.0;
+    double offered_mrps = (mode == MODE_OPEN) ? rate * 1e-6 : mrps;
 
     int n = snprintf(reply, sizeof reply,
-        "OK mrps=%.6f gbps=%.4f p50=%.2f p95=%.2f p99=%.2f avg=%.2f min=%.2f max=%.2f "
-        "rcnt=%ld fail=%ld conc=%d threads=%d reqsz=%d repsz=%d durs=%.3f batch=%d "
+        "OK mrps=%.6f gbps=%.4f p50=%.2f p95=%.2f p99=%.2f p999=%.2f p9999=%.2f "
+        "avg=%.2f min=%.2f max=%.2f rcnt=%ld scheduled=%ld pending=%ld fail=%ld "
+        "conc=%d threads=%d reqsz=%d repsz=%d durs=%.3f offered_mrps=%.6f "
+        "drops=%ld overflow=%llu worker_fail=%d mode=%s arr=%s batch=%d "
         "reconns=%ld reconn_us=%.2f grabs=%llu rets=%llu recyc=%llu waits=%llu pads=%llu "
         "reorder=%ld",
-        mrps, gbps, p50, p95, p99, avg, mn, mx,
-        total_ok, total_fail, concurrency, threads, req_size, reply_size, duration, 1,
+        mrps, gbps, p50, p95, p99, p999, p9999, avg, mn, mx,
+        total_ok, total_scheduled, total_pending, total_fail,
+        concurrency, threads, req_size, reply_size, duration, offered_mrps,
+        total_drops, (unsigned long long)overflow, worker_fail,
+        mode == MODE_OPEN ? "open" : "closed",
+        arrival == ARR_POISSON ? "poisson" : "const", 1,
         total_reconns, reconn_us,
         st1.pool_grabs - st0.pool_grabs, st1.pool_returns - st0.pool_returns,
         st1.recycle_hits - st0.recycle_hits, st1.grow_waits - st0.grow_waits,
@@ -410,10 +513,27 @@ static void handle_ctrl(int fd) {
         /* RUN <req_size> <reply_size> <concurrency> <duration> <warmup> <threads> [reconn] [batch] */
         sscanf(buf, "%*s %d %d %d %lf %ld %d %ld %d", &req, &rep, &conc,
                &dur, &warm, &threads, &reconn, &batch);
-        run_bench(fd, req, rep, conc, dur, warm, threads, reconn, batch);
+        run_bench(fd, MODE_CLOSED, req, rep, conc, dur, warm, threads,
+                  0.0, ARR_CONST, reconn, batch);
         close(fd); return;
     }
-    if (write(fd, "ERR use: RUN <req> <reply> <conc> <dur> <warmup> <threads> [reconn] [batch] | PING\n", 83) < 0) {}
+    if (sscanf(buf, "%15s", cmd) == 1 && strcmp(cmd, "OPEN") == 0) {
+        int req = 32, rep = 8, threads = 1;
+        double dur = 10.0, rate = 100000.0;
+        long warm = 1000;
+        char arr[16] = "const";
+        /* OPEN <req> <reply> <threads> <duration> <warmup> <rate> [const|poisson] */
+        sscanf(buf, "%*s %d %d %d %lf %ld %lf %15s",
+               &req, &rep, &threads, &dur, &warm, &rate, arr);
+        int arrival = (strcmp(arr, "poisson") == 0) ? ARR_POISSON : ARR_CONST;
+        run_bench(fd, MODE_OPEN, req, rep, 0, dur, warm, threads,
+                  rate, arrival, 0, 0);
+        close(fd); return;
+    }
+    const char *u =
+        "ERR use: RUN <req> <reply> <conc> <dur> <warmup> <threads> [reconn] [batch] | "
+        "OPEN <req> <reply> <threads> <dur> <warmup> <rate> [const|poisson] | PING\n";
+    if (write(fd, u, strlen(u)) < 0) {}
     close(fd);
 }
 

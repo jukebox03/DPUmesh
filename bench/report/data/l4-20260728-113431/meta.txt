@@ -1,0 +1,20 @@
+started_utc=2026-07-28T02:35:47Z
+collector_version=6
+commit=e3044fc4d3147b6c3070cf50a42ea1ed7c8bcd3c
+dirty_paths=31
+host=rapids4
+kernel=5.15.0-186-generic
+cpu=INTEL(R) XEON(R) GOLD 6554S
+cgroup=cgroup2fs
+params=PAYLOADS={64 1024 8192} REPLY=8 CONNECTIONS=4 ARRIVAL=const REPS=3 DUR=10 WARMUP=200 PILOT_DUR=2 SCOUT_DUR=10 SCOUT_START_RPS=5000 SCOUT_GROWTH=1.35 SCOUT_MAX_STEPS=24 SCOUT_REFINE_STEPS=4 COMMON_FACTORS={0.25 0.50 0.75 0.90} KNEE_FACTORS={0.85 1.00 1.05} IDLE_REPS=3 IDLE_DUR=5 ENABLE_PERF=1
+clean_policy=achieved/offered>=0.98 generator_drops/scheduled<=0.001 scheduled/(offered*duration)=0.98..1.02 p99_us<=10000 fail=0 reorder=0 overflow=0
+scout_vote_policy=two independent runs per candidate; a 1-1 split triggers a third run; at least two clean votes are required; recovery follows every bad vote
+topology=N/K/A=32/8/8 L7=disabled NUMA=PCI-local pin=l4
+host_budget=2 exclusive host cores per config: client endpoint=1 server endpoint=1; Envoy app+sidecar share the endpoint core
+semantics=open-loop only for capacity discovery and retained load; 4 persistent data connections within each timed run; no configured closed-loop in-flight count; control listener excluded from data path
+aggregation=one client endpoint and one active server backend for every config; throughput is single-backend end-to-end, not a multi-backend aggregate
+binary_equivalence=plain,envoy-permissive,envoy-strict,dpumesh-preload use byte-identical bench_sock/echo_sock; dpumesh-native uses bench_dpumesh/echo_dpumesh and is a direct-API upper-bound series
+envoy=PERMISSIVE-equivalent is plaintext TCP proxy; STRICT-equivalent is mTLS with mandatory client cert
+comparison_boundary=primary apples-to-apples claims use the four POSIX paths; native shares framing, arrivals, core budget, DPU topology and backend count but not the application API; DPUmesh and Envoy STRICT are not security-equivalent
+mpstat=sysstat version 12.5.2
+resumed_collector_version=7

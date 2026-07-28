@@ -1,0 +1,19 @@
+NAME                                READY   STATUS    RESTARTS   AGE   IP             NODE      NOMINATED NODE   READINESS GATES
+bench-direct-9d5cf8b99-n68nq        1/1     Running   0          17s   10.244.0.3     rapids4   <none>           <none>
+bench-dpumesh-2-76f5485ccb-d4t4s    1/1     Running   0          42s   10.244.0.243   rapids4   <none>           <none>
+bench-dpumesh-3-7d8c6ddb5c-fjkmn    1/1     Running   0          41s   10.244.0.244   rapids4   <none>           <none>
+bench-dpumesh-75d4f4b777-srwhn      1/1     Running   0          43s   10.244.0.242   rapids4   <none>           <none>
+bench-tcp-7b8dc7b6f7-t6rfn          2/2     Running   0          20s   10.244.0.2     rapids4   <none>           <none>
+bench-tcp-strict-b678c66b7-xjsfq    2/2     Running   0          23s   10.244.0.253   rapids4   <none>           <none>
+echo-dpumesh-13-86c6f8f97b-g7mq8    1/1     Running   0          45s   10.244.0.240   rapids4   <none>           <none>
+echo-dpumesh-14-789dcf897f-f4brk    1/1     Running   0          44s   10.244.0.241   rapids4   <none>           <none>
+echo-dpumesh-f98c98b9-g6msh         1/1     Running   0          52s   10.244.0.239   rapids4   <none>           <none>
+echo-plain-867b9d4789-mjtwk         1/1     Running   0          28s   10.244.0.251   rapids4   <none>           <none>
+echo-tcp-6b7d6d46f6-wh74p           2/2     Running   0          22s   10.244.0.254   rapids4   <none>           <none>
+echo-tcp-strict-7d69765b5b-mltlp    2/2     Running   0          25s   10.244.0.252   rapids4   <none>           <none>
+loopback-dpumesh-69d9db7f45-lxkk8   1/1     Running   0          38s   10.244.0.245   rapids4   <none>           <none>
+preload-bench-856d8bf994-jhkzw      1/1     Running   0          33s   10.244.0.248   rapids4   <none>           <none>
+preload-dpumesh-58d44ff4d7-gf8bp    1/1     Running   0          36s   10.244.0.246   rapids4   <none>           <none>
+preload-echo-86568cf7b6-xsk6d       1/1     Running   0          35s   10.244.0.247   rapids4   <none>           <none>
+stream-dpumesh-947b97f5d-rs6c5      1/1     Running   0          30s   10.244.0.250   rapids4   <none>           <none>
+verbs-dpumesh-6564d99f74-r2mtp      1/1     Running   0          31s   10.244.0.249   rapids4   <none>           <none>

@@ -1,0 +1,13 @@
+payload_bytes,config,rate_index,offered_rps,target_70pct_peak_rps
+64,plain,6,333981,1562344
+64,envoy-permissive,7,659082,697303
+64,envoy-strict,7,659082,652181
+64,dpumesh-preload,4,85760,549810
+1024,plain,5,149363,1290614
+1024,envoy-permissive,7,562756,570694
+1024,envoy-strict,6,289922,367035
+1024,dpumesh-preload,4,76949,282105
+8192,plain,8,306941,331500
+8192,envoy-permissive,7,172993,168453
+8192,envoy-strict,6,97499,82031
+8192,dpumesh-preload,4,30970,100955

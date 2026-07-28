@@ -7272,3 +7272,114 @@ efficiency do not overlap.
 
 Validators after the change: loopback 20,000/0, verbs 20,000/0, stream 10,000/0
 (10,400,000 bytes), preload 3,000/0.
+
+# Session 18 — Topology and load sweep
+
+8 KiB request / 8 B reply, `BENCH_CORE_BASE=0`, three `echo-dpumesh` backends.
+`DPUMESH_ARM_WORKERS` and `DPUMESH_RINGS_PER_POD` set per deployment; every
+configuration negotiated exactly as requested (`16/2/1`, `16/2/2`, `16/4/2`,
+`16/4/4`, `16/8/8`).
+
+## ARM workers and rings against host threads
+
+`conc=32`, `pin fair`. Goodput in Gb/s.
+
+| A/K | 1 thread | 2 | 4 | 8 |
+|---|---:|---:|---:|---:|
+| 1/2 | 10.53 | 14.08 | 15.17 | 16.63 |
+| 2/2 | 10.80 | 19.58 | 19.61 | 21.39 |
+| 2/4 | 11.07 | 20.53 | 26.20 | 31.96 |
+| 4/4 | 11.08 | 20.81 | 29.92 | 38.44 |
+| 8/8 | 11.13 | 16.75 | 27.62 | 41.20 |
+
+Host cores per Mrps:
+
+| A/K | 1 thread | 2 | 4 | 8 |
+|---|---:|---:|---:|---:|
+| 1/2 | 0.416 | 0.465 | 0.517 | 0.484 |
+| 2/2 | 0.402 | 0.392 | 0.503 | 0.470 |
+| 2/4 | 0.394 | 0.373 | 0.367 | 0.303 |
+| 4/4 | 0.392 | 0.373 | 0.333 | 0.272 |
+| 8/8 | 0.405 | 0.463 | 0.373 | 0.251 |
+
+One connection per host thread bounds parallelism: at one thread every topology
+delivers 10.5–11.1 Gb/s at p50 186 µs. Rings above workers help — 2/4 delivers
+26.20 Gb/s at four threads against 19.61 for 2/2.
+
+DPU ARM cost per Gb/s at eight threads: 2/4 uses 7.7%, 4/4 uses 11.1%, 8/8 uses 16.2%.
+
+## Concurrency
+
+`A/K=4/4`, two threads, `pin fair`.
+
+| conc | Goodput | p50 | p99 | Host | DPU ARM |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 0.68 Gb/s | 175 µs | 460 µs | 31.6% | 103.1% |
+| 2 | 1.27 | 177 | 464 | 40.1% | 109.5% |
+| 4 | 2.66 | 177 | 413 | 51.0% | 135.9% |
+| 8 | 5.84 | 178 | 349 | 73.7% | 201.7% |
+| 16 | 11.21 | 181 | 253 | 103.1% | 240.4% |
+| 32 | 17.86 | 237 | 387 | 106.8% | 249.0% |
+
+p50 holds at 175–181 µs to `conc=16` and rises at 32.
+
+## TCP with Envoy sidecars
+
+`pin fair`. Thread scaling at `conc=32`, then concurrency at two threads.
+
+| threads | Goodput | p50 | p99 | Host | Host cores/Mrps |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 10.25 Gb/s | 200 µs | 406 µs | 117.5% | 0.751 |
+| 2 | 16.93 | 238 | 384 | 191.7% | 0.742 |
+| 4 | 14.03 | 595 | 864 | 171.1% | 0.799 |
+| 8 | 15.26 | 1088 | 1575 | 188.5% | 0.810 |
+
+| conc | Goodput | p50 | p99 | Host |
+|---:|---:|---:|---:|---:|
+| 1 | 2.15 Gb/s | 59 µs | 72 µs | 185.9% |
+| 2 | 4.15 | 61 | 84 | 187.5% |
+| 4 | 7.25 | 70 | 106 | 186.6% |
+| 8 | 9.79 | 96 | 180 | 181.7% |
+| 16 | 12.65 | 139 | 273 | 173.1% |
+| 32 | 16.93 | 238 | 384 | 191.7% |
+
+TCP peaks at two threads and declines beyond. Its host cost stays near 185% across
+the whole concurrency range. Its p50 floor is 59 µs against DPUmesh's 175 µs.
+
+## Transport comparison
+
+`conc=32`, `pin fair`, DPUmesh at `A/K=4/4`.
+
+| threads | DPUmesh | TCP | DPUmesh cores/Mrps | TCP cores/Mrps |
+|---:|---:|---:|---:|---:|
+| 1 | 11.08 Gb/s | 10.25 Gb/s | 0.392 | 0.751 |
+| 2 | 20.81 | 16.93 | 0.373 | 0.742 |
+| 4 | 29.92 | 14.03 | 0.333 | 0.799 |
+| 8 | 38.44 | 15.26 | 0.272 | 0.810 |
+
+At eight threads DPUmesh delivers 2.5 times the goodput for one third of the host
+cost per request, and spends 428% of DPU ARM to do it.
+
+## Pinning
+
+`A/K=4/4`, `conc=32`. Two cores per pod (`pin hw`) against one (`pin fair`).
+
+| threads | fair | hw |
+|---:|---:|---:|
+| 1 | 11.08 Gb/s | 10.30 Gb/s |
+| 2 | 20.81 | 20.16 |
+| 4 | 29.92 | 31.53 |
+| 8 | 38.44 | 36.94 |
+
+The second core does not change goodput at four ARM workers. TCP is likewise flat
+(10.40 / 16.63 / 15.69 / 15.30) because its host cost already saturates two cores.
+
+## Notes
+
+`A/K=8/8` at eight threads first read 37.48 Gb/s with 91.4% host and 0.160
+cores/Mrps; two rechecks gave 41.20 and 40.40 Gb/s with 158.0% and 156.8% host and
+0.251 and 0.254 cores/Mrps. The first sample omitted a backend and is discarded.
+
+`A/K=4/4` at two threads and `conc=32` read 20.81 Gb/s in the topology sweep and
+17.86 Gb/s in the concurrency sweep, so single samples at this load point carry about
+14% spread.
