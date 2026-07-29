@@ -12,10 +12,12 @@
 #include <stdatomic.h>
 #include <math.h>
 #include <sys/socket.h>
+#include <sys/epoll.h>
 #include <netinet/in.h>
 
 #include <dpumesh/dmesh.h>
 #include "bench.h"
+#include "bench_selftest.h"
 
 #define CTRL_PORT          9092
 #define MAX_THREADS        64
@@ -27,6 +29,12 @@
 #define BENCH_MAX_BACKENDS 32         /* pod_id space we tally replies over (>= MAX_PODS) */
 #define INFLIGHT_RING      (1u << 16) /* seq-indexed outstanding requests */
 #define OPEN_CAP           (INFLIGHT_RING / 2)
+#define TX_TAIL_DELAY_SEC  0.001      /* how long a committed tail waits for a successor */
+/* Ceiling on a backpressure park. TX_READY wakes the worker as soon as capacity
+ * returns; this only caps a one-shot that was consumed or raced. An open-loop
+ * worker forfeits every arrival it sleeps through, so the ceiling stays an order
+ * of magnitude below the stall that would exhaust the admission-drop budget. */
+#define TX_PARK_MAX_SEC    0.00005
 
 enum { MODE_CLOSED = 0, MODE_OPEN = 1 };
 enum { ARR_CONST = 0, ARR_POISSON = 1 };
@@ -65,6 +73,9 @@ typedef struct {
     uint32_t         prev_seq;  /* seq of the previous event — only to count reordering */
     uint32_t         tx_done;   /* bytes of the in-flight request frame already posted */
     int              tx_active; /* a frame is mid-carve (must finish before the next) */
+    int              tx_dirty;  /* committed tail may still need dmesh_flush */
+    double           tx_flush_at; /* deadline at which that tail publishes regardless */
+    int              tx_blocked; /* dmesh_alloc hit EAGAIN; wait for DMESH_EVENT_TX_READY */
     long             outstanding;
     long             credits;   /* events observed -> requests to reissue */
     double           sched_next; /* open: next scheduled send time */
@@ -147,6 +158,8 @@ static int eq_pump(worker_t *w) {
                 dmesh_release_rx_buffer(g_s, &events[i]);
             } else if (events[i].type == DMESH_EVENT_RECV_FIN) {
                 atomic_store(&w->broken, 1);              /* backend FIN — abort this thread */
+            } else if (events[i].type == DMESH_EVENT_TX_READY) {
+                w->tx_blocked = 0;                        /* reservations may resume */
             }
         }
         got += n;
@@ -154,8 +167,26 @@ static int eq_pump(worker_t *w) {
     return got;
 }
 
+/* Returns the number of ready descriptors: 0 means the deadline expired with the
+ * EQ silent. -1 is a hard fault. */
+static int eq_wait(int epoll_fd, int eq_fd, double deadline) {
+    struct epoll_event event;
+    int ready = bench_epoll_wait_until(epoll_fd, &event, deadline);
+    if (ready < 0) {
+        if (errno == EINTR) return 0;
+        return -1;
+    }
+    if (ready > 0 && event.data.fd == eq_fd) {
+        uint64_t count;
+        ssize_t n = read(eq_fd, &count, sizeof count);
+        if (n < 0 && errno != EAGAIN && errno != EINTR)
+            return -1;
+    }
+    return ready;
+}
+
 /* Ship one request frame: [hdr | payload], carved into <= post_max posts. Complete
- * transport units publish as posts commit; the event-loop boundary flushes the tail. The
+ * transport units publish as posts commit; the coalescing window governs the tail. The
  * payload is constant filler, so it is written straight into the TX ring — no
  * staging buffer. start_ts is stamped when the frame STARTS: actual issue time
  * for RUN, intended arrival time for OPEN.
@@ -183,6 +214,7 @@ static int issue(worker_t *w, double stamp) {
         }
         memset(b + off, REQ_FILL, want - off);
         if (dmesh_post_send(w->c, b, want) != 0) return -1;
+        w->tx_dirty = 1;
         w->tx_done += want;
     }
     w->tx_active = 0;
@@ -194,9 +226,18 @@ static int issue(worker_t *w, double stamp) {
     return 1;
 }
 
+static int flush_tail(worker_t *w) {
+    if (!w->tx_dirty) return 0;
+    if (dmesh_flush(w->c) != 0) return -1;
+    w->tx_dirty = 0;
+    w->tx_flush_at = 0.0;
+    return 0;
+}
+
 static void *worker_fn(void *arg) {
     worker_t *w = (worker_t *)arg;
     double end = 0.0;
+    int epoll_fd = -1;
     bench_reframe_reset(&w->rf);
 
     if (bench_hist_init(&w->hist) < 0) {
@@ -217,6 +258,18 @@ static void *worker_fn(void *arg) {
     w->eq = dmesh_create_eq(g_s);
     if (!w->eq) {
         fprintf(stderr, "[bench] worker dmesh_create_eq failed: errno=%d\n", errno);
+        atomic_store(&w->broken, 1); goto done;
+    }
+    int eq_fd = dmesh_eq_fd(w->eq);
+    if (eq_fd < 0) {
+        fprintf(stderr, "[bench] worker dmesh_eq_fd failed: errno=%d\n", errno);
+        atomic_store(&w->broken, 1); goto done;
+    }
+    epoll_fd = epoll_create1(EPOLL_CLOEXEC);
+    struct epoll_event eq_event = { .events = EPOLLIN, .data.fd = eq_fd };
+    if (epoll_fd < 0 ||
+        epoll_ctl(epoll_fd, EPOLL_CTL_ADD, eq_fd, &eq_event) < 0) {
+        fprintf(stderr, "[bench] worker epoll setup failed: errno=%d\n", errno);
         atomic_store(&w->broken, 1); goto done;
     }
     w->c = dmesh_create_qp(w->eq, g_dst_service);
@@ -240,8 +293,14 @@ static void *worker_fn(void *arg) {
         double now = bench_now_sec();
         if (now - start > w->duration && !w->tx_active) break;
 
+        if (w->tx_dirty && w->tx_flush_at > 0.0 && now >= w->tx_flush_at) {
+            if (flush_tail(w) != 0) {
+                atomic_store(&w->broken, 1);
+                break;
+            }
+        }
+
         int did = eq_pump(w) > 0;
-        int issued = 0;
 
         /* Connection churn: once `reconn` events landed on this conn, STOP
          * issuing (the gate below), drain to 0 outstanding, then swap the conn.
@@ -259,6 +318,9 @@ static void *worker_fn(void *arg) {
             w->reconn_sec += bench_now_sec() - t0;
             w->reconns++;
             w->credits = w->W;                    /* window re-primed fresh */
+            w->tx_dirty = 0;
+            w->tx_flush_at = 0.0;
+            w->tx_blocked = 0;                    /* the old conn's one-shot is gone */
             churn = 0;
             did = 1;
         }
@@ -266,23 +328,23 @@ static void *worker_fn(void *arg) {
         if (w->mode == MODE_CLOSED) {
             /* Keep the window full … unless draining to churn. A mid-carve frame
              * always finishes first: it holds the conn's byte stream open. */
-            while (w->tx_active || (!churn && w->credits > 0)) {
+            while (!w->tx_blocked && (w->tx_active || (!churn && w->credits > 0))) {
                 if (!w->tx_active && bench_now_sec() - start > w->duration) {
                     w->credits = 0; break;
                 }
                 int r = issue(w, bench_now_sec());
                 if (r < 0) { atomic_store(&w->broken, 1); break; }
-                if (r == 0) break;                /* SQ full: resume next pass */
+                if (r == 0) { w->tx_blocked = 1; break; }
                 w->credits--;
                 did = 1;
-                issued = 1;
             }
         } else {
             /* Finish a previously accepted frame before accepting another. */
-            if (w->tx_active) {
+            if (w->tx_active && !w->tx_blocked) {
                 int r = issue(w, 0.0);
                 if (r < 0) atomic_store(&w->broken, 1);
-                else if (r > 0) { did = 1; issued = 1; }
+                else if (r > 0) did = 1;
+                else w->tx_blocked = 1;
             }
 
             /* Arrival timestamps advance independently of transport progress.
@@ -296,25 +358,54 @@ static void *worker_fn(void *arg) {
                                ? prng_exp_gap(w, w->rate) : 1.0 / w->rate;
                     w->sched_next += gap;
                     w->scheduled++;
-                    if (w->tx_active || w->outstanding >= OPEN_CAP) {
+                    if (w->tx_blocked || w->tx_active ||
+                        w->outstanding >= OPEN_CAP) {
                         w->drops++;
                         continue;
                     }
                     int r = issue(w, sched);
                     if (r < 0) { atomic_store(&w->broken, 1); break; }
-                    if (r > 0) { did = 1; issued = 1; }
+                    if (r > 0) did = 1;
+                    else w->tx_blocked = 1;
                     /* r == 0 means this logical request was accepted and will
                      * resume from tx_done; subsequent due arrivals will drop. */
                 }
             }
         }
-        /* One logical latency boundary for the burst. post_send may already have
-         * submitted complete physical units; this forces the remaining tail. */
-        if (issued && !atomic_load(&w->broken))
-            if (dmesh_flush(w->c) != 0) atomic_store(&w->broken, 1);
-        if (!did) { struct timespec ts = {0, 2000}; nanosleep(&ts, NULL); }  /* 2us */
+        /* Complete transport units publish inside post_send. The trailing
+         * partial is retained only while a published unit is still outstanding:
+         * its completion is what a successor would share a descriptor with.
+         * With the transport idle there is nothing to coalesce against, so the
+         * tail ships at once and an isolated request pays no delay. */
+        if (w->tx_dirty) {
+            if (!dmesh_tx_inflight(w->c)) {
+                if (flush_tail(w) != 0) { atomic_store(&w->broken, 1); break; }
+            } else if (w->tx_flush_at == 0.0) {
+                w->tx_flush_at = bench_now_sec() + TX_TAIL_DELAY_SEC;
+            }
+        }
+        if (!did) {
+            /* Sleep to the next arrival, or to a retained tail's publication
+             * deadline when that falls first. A blocked reservation has no
+             * arrival it can serve, so it parks on TX_READY instead: reservations
+             * fail until the transport reclaims capacity, and re-attempting at
+             * the arrival rate spends the core on failures that also delay the
+             * publication releasing them. */
+            double deadline = w->tx_blocked ? bench_now_sec() + TX_PARK_MAX_SEC
+                            : w->mode == MODE_CLOSED ? bench_now_sec() + 0.020
+                            : w->sched_next;
+            if (w->tx_dirty && w->tx_flush_at > 0.0 && w->tx_flush_at < deadline)
+                deadline = w->tx_flush_at;
+            int ready = eq_wait(epoll_fd, eq_fd, deadline);
+            if (ready < 0) atomic_store(&w->broken, 1);
+            /* A silent deadline means no one-shot is coming; one retry restores
+             * liveness. */
+            else if (ready == 0) w->tx_blocked = 0;
+        }
     }
     end = bench_now_sec();
+    if (!atomic_load(&w->broken) && flush_tail(w) != 0)
+        atomic_store(&w->broken, 1);
     w->pending = w->outstanding;
 
     /* Retire replies issued before the measurement boundary. This keeps FIN behind
@@ -323,13 +414,18 @@ static void *worker_fn(void *arg) {
     double drain_deadline = end + DRAIN_GRACE_SEC;
     while (w->outstanding > 0 && bench_now_sec() < drain_deadline) {
         if (!eq_pump(w)) {
-            struct timespec ts = {0, 2000};
-            nanosleep(&ts, NULL);
+            double deadline = bench_now_sec() + 0.020;
+            if (deadline > drain_deadline) deadline = drain_deadline;
+            if (eq_wait(epoll_fd, eq_fd, deadline) < 0) {
+                atomic_store(&w->broken, 1);
+                break;
+            }
         }
     }
 
 done:
     /* Conn first, then its EQ (a conn outliving its EQ has nowhere to report). */
+    if (epoll_fd >= 0) close(epoll_fd);
     if (w->c) { dmesh_destroy_qp(w->c); w->c = NULL; }
     if (w->eq) { dmesh_destroy_eq(w->eq); w->eq = NULL; }
     w->dura = (end > 0.0 && w->rcnt > w->warmup) ? (end - w->warmup_end) : 0.0;
@@ -420,7 +516,10 @@ static void run_bench(int conn_fd, int mode, int req_size, int reply_size,
 
     /* aggregate: sum per-thread rates, merge latency histograms */
     bench_hist_t agg; bench_hist_init(&agg);
-    double mrps = 0.0, gbps = 0.0, reconn_sec = 0.0;
+    double mrps = 0.0, request_gbps = 0.0, response_gbps = 0.0;
+    double request_frame = (double)BENCH_HDR_LEN + (double)req_size;
+    double response_frame = (double)BENCH_HDR_LEN + (double)reply_size;
+    double reconn_sec = 0.0;
     long total_ok = 0, total_fail = 0, total_reconns = 0, total_reorder = 0;
     int worker_fail = 0;
     long total_scheduled = 0, total_pending = 0, total_drops = 0;
@@ -443,7 +542,9 @@ static void run_bench(int conn_fd, int mode, int req_size, int reply_size,
         reconn_sec    += w[i].reconn_sec;
         if (!atomic_load(&w[i].broken) && w[i].dura > 1e-9 && measured > 0) {
             mrps += (double)measured / w[i].dura * 1e-6;
-            gbps += 8e-9 * (double)measured * (double)req_size / w[i].dura;
+            double rps = (double)measured / w[i].dura;
+            request_gbps += 8e-9 * rps * request_frame;
+            response_gbps += 8e-9 * rps * response_frame;
             total_ok += measured;
             bench_hist_merge(&agg, &w[i].hist);
         }
@@ -460,17 +561,23 @@ static void run_bench(int conn_fd, int mode, int req_size, int reply_size,
     dmesh_get_tx_stats(g_s, &st1);
     double reconn_us = (total_reconns > 0) ? reconn_sec * 1e6 / (double)total_reconns : 0.0;
     double offered_mrps = (mode == MODE_OPEN) ? rate * 1e-6 : mrps;
+    double gbps = request_gbps + response_gbps;
 
     int n = snprintf(reply, sizeof reply,
-        "OK mrps=%.6f gbps=%.4f p50=%.2f p95=%.2f p99=%.2f p999=%.2f p9999=%.2f "
+        "OK mrps=%.6f gbps=%.4f req_gbps=%.4f resp_gbps=%.4f "
+        "p50=%.2f p95=%.2f p99=%.2f p999=%.2f p9999=%.2f "
         "avg=%.2f min=%.2f max=%.2f rcnt=%ld scheduled=%ld pending=%ld fail=%ld "
-        "conc=%d threads=%d reqsz=%d repsz=%d durs=%.3f offered_mrps=%.6f "
+        "conc=%d threads=%d reqsz=%d repsz=%d reqframe=%u respframe=%u "
+        "durs=%.3f offered_mrps=%.6f "
         "drops=%ld overflow=%llu worker_fail=%d mode=%s arr=%s batch=%d "
         "reconns=%ld reconn_us=%.2f grabs=%llu rets=%llu recyc=%llu waits=%llu pads=%llu "
         "reorder=%ld",
-        mrps, gbps, p50, p95, p99, p999, p9999, avg, mn, mx,
+        mrps, gbps, request_gbps, response_gbps,
+        p50, p95, p99, p999, p9999, avg, mn, mx,
         total_ok, total_scheduled, total_pending, total_fail,
-        concurrency, threads, req_size, reply_size, duration, offered_mrps,
+        concurrency, threads, req_size, reply_size,
+        BENCH_HDR_LEN + (uint32_t)req_size,
+        BENCH_HDR_LEN + (uint32_t)reply_size, duration, offered_mrps,
         total_drops, (unsigned long long)overflow, worker_fail,
         mode == MODE_OPEN ? "open" : "closed",
         arrival == ARR_POISSON ? "poisson" : "const", 1,
@@ -530,9 +637,29 @@ static void handle_ctrl(int fd) {
                   rate, arrival, 0, 0);
         close(fd); return;
     }
+    if (sscanf(buf, "%15s", cmd) == 1 && strcmp(cmd, "SELFTEST") == 0) {
+        int payload, threads;
+        double duration, rate;
+        char arr[16];
+        char reply[512];
+        int fields = sscanf(buf, "%*s %d %d %lf %lf %15s",
+                            &payload, &threads, &duration, &rate, arr);
+        int arrival = fields == 5 && strcmp(arr, "poisson") == 0
+                    ? ARR_POISSON : ARR_CONST;
+        if (fields != 5 || (strcmp(arr, "const") != 0 &&
+                            strcmp(arr, "poisson") != 0) ||
+            threads > MAX_THREADS ||
+            bench_run_selftest(reply, sizeof reply, payload, threads, duration,
+                               rate, arrival) < 0) {
+            snprintf(reply, sizeof reply, "ERR invalid SELFTEST args\n");
+        }
+        if (write(fd, reply, strlen(reply)) < 0) {}
+        close(fd); return;
+    }
     const char *u =
         "ERR use: RUN <req> <reply> <conc> <dur> <warmup> <threads> [reconn] [batch] | "
-        "OPEN <req> <reply> <threads> <dur> <warmup> <rate> [const|poisson] | PING\n";
+        "OPEN <req> <reply> <threads> <dur> <warmup> <rate> [const|poisson] | "
+        "SELFTEST <payload> <threads> <dur> <rate> <const|poisson> | PING\n";
     if (write(fd, u, strlen(u)) < 0) {}
     close(fd);
 }
@@ -548,8 +675,29 @@ static int ctrl_listen(int port) {
     return fd;
 }
 
-int main(void) {
+int main(int argc, char **argv) {
     signal(SIGPIPE, SIG_IGN);
+    if (argc > 1) {
+        char reply[512];
+        int payload, threads, arrival;
+        double duration, rate;
+        if (argc != 7 || strcmp(argv[1], "--selftest") != 0 ||
+            sscanf(argv[2], "%d", &payload) != 1 ||
+            sscanf(argv[3], "%d", &threads) != 1 ||
+            sscanf(argv[4], "%lf", &duration) != 1 ||
+            sscanf(argv[5], "%lf", &rate) != 1 ||
+            (strcmp(argv[6], "const") != 0 && strcmp(argv[6], "poisson") != 0) ||
+            threads > MAX_THREADS) {
+            fprintf(stderr, "usage: %s --selftest <payload> <threads> <dur> "
+                            "<rate> <const|poisson>\n", argv[0]);
+            return 2;
+        }
+        arrival = strcmp(argv[6], "poisson") == 0 ? ARR_POISSON : ARR_CONST;
+        int rc = bench_run_selftest(reply, sizeof reply, payload, threads,
+                                    duration, rate, arrival);
+        fputs(reply, stdout);
+        return rc == 0 ? 0 : 1;
+    }
     if (getenv("BENCH_DST_SERVICE")) g_dst_service = getenv("BENCH_DST_SERVICE");
 
     g_s = dmesh_create_channel();                     /* pure client ($DPUMESH_SERVICE unset) */

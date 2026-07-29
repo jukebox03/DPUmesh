@@ -1,9 +1,0 @@
-config,role,app,container,path,sha256
-plain,client,bench-direct,bench-direct,/usr/local/bin/bench_sock,38512a6261297cee2fcae78ebce00c529d178b0a46b42a3dff7669dac13a1027
-plain,server,echo-plain,echo-plain,/usr/local/bin/echo_sock,011885d4793cf213e9ab5aa4b9af8d2fa9d83492ac5af50219f32e9214a4593e
-envoy-permissive,client,bench-tcp,bench-tcp,/usr/local/bin/bench_sock,38512a6261297cee2fcae78ebce00c529d178b0a46b42a3dff7669dac13a1027
-envoy-permissive,server,echo-tcp,echo-tcp,/usr/local/bin/echo_sock,011885d4793cf213e9ab5aa4b9af8d2fa9d83492ac5af50219f32e9214a4593e
-envoy-strict,client,bench-tcp-strict,bench-tcp-strict,/usr/local/bin/bench_sock,38512a6261297cee2fcae78ebce00c529d178b0a46b42a3dff7669dac13a1027
-envoy-strict,server,echo-tcp-strict,echo-tcp-strict,/usr/local/bin/echo_sock,011885d4793cf213e9ab5aa4b9af8d2fa9d83492ac5af50219f32e9214a4593e
-dpumesh-preload,client,preload-bench,preload-bench,/usr/local/bin/bench_sock,38512a6261297cee2fcae78ebce00c529d178b0a46b42a3dff7669dac13a1027
-dpumesh-preload,server,preload-echo,preload-echo,/usr/local/bin/echo_sock,011885d4793cf213e9ab5aa4b9af8d2fa9d83492ac5af50219f32e9214a4593e

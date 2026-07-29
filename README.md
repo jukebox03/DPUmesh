@@ -5,9 +5,8 @@ DMA. Applications address a Kubernetes Service; the DPU owns backend selection,
 connection tracking, host-to-DPU forwarding, and reverse DMA. The default mode
 is an ordered L4 byte stream. DPUmesh does not terminate TLS or interpret HTTP/2.
 
-This repository is a research prototype, not a claim that offload is already
-faster than direct TCP. The measured baselines and limitations are kept in the
-[performance report](bench/report/REPORT.md).
+This repository is a research prototype. The evaluation contract and current
+dataset status are in the [performance report](bench/report/REPORT.md).
 
 ## Architecture
 
@@ -143,7 +142,7 @@ connection attempt creates a QP; established L4 streams remain backend-pinned.
 
 - [Native API](design/API.md): exact lifecycle, batching, EQ, and error contracts
 - [Core architecture](design/CORE.md): host/DPA/ARM custody and replay barriers
-- [Naming](design/NAMING.md): registry, service identity, and routing meaning
+- [Control plane](design/CONTROL.md): registry, identity, membership, and node boundary
 - [gRPC integration](integrations/grpc/README.md): build and application bootstrap
 - [Benchmark guide](bench/README.md): deployment and experiment commands
 - [Native contract tests](tests/README.md): fast host-only regression coverage

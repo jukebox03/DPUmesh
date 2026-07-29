@@ -1,5 +1,0 @@
-role,pid,cgroup,usage_usec,user_usec,system_usec,nr_throttled,throttled_usec
-client_app,2493419,/sys/fs/cgroup/kubepods.slice/kubepods-besteffort.slice/kubepods-besteffort-pode95ee274_363f_4962_97f9_32969ddd06c7.slice/cri-containerd-fc5516ff46cb9064f4bb6e07e6fb853bd926f624d1118d1e9649f06699a96666.scope,228117313,136152837,91964476,0,0
-server_app,2493003,/sys/fs/cgroup/kubepods.slice/kubepods-besteffort.slice/kubepods-besteffort-pod046de729_85ae_4d37_8cd9_dc7ccd135104.slice/cri-containerd-30539dba89c884f83c33ef47504413d22d35b550ac650e7784906cb8b02ba2f4.scope,197570042,89881039,107689003,0,0
-client_sidecar,0,-,0,0,0,0,0
-server_sidecar,0,-,0,0,0,0,0

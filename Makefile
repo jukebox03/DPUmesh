@@ -58,12 +58,12 @@ verbs_dpumesh_SRC    := bench/validators/verbs_dpumesh.c
 
 # LD_PRELOAD shim (interposes libc sockets → dmesh) + its vanilla-TCP validators
 PRELOAD := $(LIBDIR)/libdmesh_preload.so
-PLAIN_BINS := tcp_echo tcp_client preload_runner bench_sock echo_sock  # pure POSIX, no dmesh link
+POSIX_BINS := tcp_echo tcp_client preload_runner bench_sock echo_sock  # pure POSIX, no dmesh link
 tcp_echo_SRC       := bench/validators/tcp_echo.c
 tcp_client_SRC     := bench/validators/tcp_client.c
 preload_runner_SRC := bench/validators/preload_runner.c
-# bench_sock/echo_sock: the MATCHED C-language TCP baseline (bench.h wire frame). Same
-# binary runs over direct TCP, TCP+Envoy, and DPUmesh-preload — isolating the transport.
+# bench_sock/echo_sock use the same C-language wire protocol and binaries for
+# TCP+Envoy and DPUmesh-preload, so only the transport differs between them.
 bench_sock_SRC     := bench/apps/bench_sock.c
 echo_sock_SRC      := bench/apps/echo_sock.c
 
@@ -88,7 +88,7 @@ $(LIB): $(LIB_SRCS) $(LIB_HDRS) | dirs
 $(LIB_LINK): $(LIB)
 	@ln -sf $(notdir $(LIB)) $@
 
-bench: lib $(addprefix $(BINDIR)/,$(DMESH_BINS)) $(PRELOAD) $(addprefix $(BINDIR)/,$(PLAIN_BINS))
+bench: lib $(addprefix $(BINDIR)/,$(DMESH_BINS)) $(PRELOAD) $(addprefix $(BINDIR)/,$(POSIX_BINS))
 
 # Focused host-only contract tests. Function-section GC lets each test link the
 # production source that owns the state machine without constructing DOCA hardware.
@@ -136,7 +136,8 @@ test: $(TESTDIR)/native_api_contract_test $(TESTDIR)/native_control_state_test \
 	$(TESTDIR)/preload_api_contract_test $(TESTDIR)/l4_pin_policy_test \
 	$(TESTDIR)/lb_policy_test \
 	$(TESTDIR)/proxy_lane_queue_test $(TESTDIR)/worker_mpsc_queue_test \
-	$(TESTDIR)/topology_test $(TESTDIR)/ring_counter_test $(PRELOAD)
+	$(TESTDIR)/topology_test $(TESTDIR)/ring_counter_test $(PRELOAD) \
+	$(BINDIR)/bench_dpumesh $(BINDIR)/bench_sock
 	$(TESTDIR)/native_api_contract_test
 	$(TESTDIR)/native_control_state_test
 	$(TESTDIR)/native_tx_batch_policy_test
@@ -150,6 +151,10 @@ test: $(TESTDIR)/native_api_contract_test $(TESTDIR)/native_control_state_test \
 	$(TESTDIR)/ring_counter_test
 	sh tests/dma_fault_scope_test.sh
 	sh tests/abi_contract_test.sh $(LIB) $(PRELOAD) $(ABI_MAJOR)
+	sh tests/generator_selftest_test.sh $(BINDIR)/bench_dpumesh $(BINDIR)/bench_sock
+	sh tests/l4_collector_contract_test.sh
+	python3 tests/analyze_saturation_test.py
+	python3 tests/summarize_l4_test.py
 
 # dmesh API binaries link the transport library. One explicit rule each so the
 # source is a tracked prerequisite (rebuilds on edit).

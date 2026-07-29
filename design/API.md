@@ -24,14 +24,14 @@ EQ's owner thread; create more EQs to scale across threads. The transport PE is 
 separate single producer of EQ-ready edges. `qp->user_data` belongs entirely to
 the application.
 
-The public surface consists of seventeen calls:
+The public surface consists of eighteen calls:
 
 | Group | Calls |
 |---|---|
 | Channel | `create_channel`, `destroy_channel`, `pod_id`, `msg_max`, `post_max` |
 | EQ | `create_eq`, `destroy_eq`, `eq_fd` |
 | QP | `create_qp`, `destroy_qp`, `abort_qp` |
-| TX | `alloc`, `post_send`, `flush` |
+| TX | `alloc`, `post_send`, `flush`, `tx_inflight` |
 | Events | `poll_eq`, `release_rx_buffer` |
 | Diagnostics | `get_tx_stats` |
 
@@ -111,11 +111,11 @@ post. After a successful post, the application must no longer access the committ
 bytes until the transport makes that storage available through a later allocation.
 
 The transport may combine adjacent posts before submitting them. This does not
-create message boundaries: a QP remains an ordered byte stream. `dmesh_flush()`
-asks the transport to submit all committed bytes currently buffered on the QP,
-so callers should flush at latency-sensitive or protocol-defined write
-boundaries. Applications must not depend on a particular batching size, and
-there is no `SEND_MORE` mode.
+create message boundaries: a QP remains an ordered byte stream. Complete
+transport units are submitted as posts commit; only the newest partial unit
+stays buffered. `dmesh_flush()` submits that remainder, so callers flush at
+latency-sensitive or protocol-defined write boundaries. Applications must not
+depend on a particular batching size, and there is no `SEND_MORE` mode.
 
 Each QP has bounded outstanding-send capacity, and QPs also share the channel's
 overall transmit capacity. The transport recovers capacity as previously
@@ -152,13 +152,26 @@ successfully allocating on a direct retry cancels an obsolete request or hint.
 TX readiness is a one-shot retry hint, not a guarantee that a particular
 allocation will succeed. The event names the QP whose parked write should
 retry, but shared capacity may be consumed before that retry. If it returns
-`EAGAIN` again, that call has already requested the next notification. Polling
-applications may retry opportunistically, while sleeping event loops can rely on
-the EQ notification without running a timer or scanning every QP.
+`EAGAIN` again, that call has already requested the next notification.
 
-DPUmesh does not flush buffered data on a timer. Code that needs bounded latency
-calls `dmesh_flush()` at its logical write boundary; graceful close also flushes,
-while `dmesh_abort_qp()` discards buffered data that has not been submitted.
+Retry on that notification rather than on an application clock. Reservations
+fail while the transport is still reclaiming capacity, so a caller that
+re-attempts at its own arrival rate spends its core on failing reservations and
+delays the very publication that releases them. An event loop parks the blocked
+QP, keeps servicing the others, and resumes it on `DMESH_EVENT_TX_READY` — no
+timer, and no scan of every QP.
+
+DPUmesh does not flush buffered data on a timer. A sender that wants successive
+writes to share one descriptor chooses how long to retain the partial unit, and
+`dmesh_tx_inflight()` is the signal for that choice: it is nonzero while a
+published unit on the QP still awaits acknowledgement. An idle QP has no
+completion for a successor to arrive behind, so retaining its tail buys no
+batching and only adds delay. A QP with work outstanding will usually accept
+more bytes before that work completes, so retention there costs latency bounded
+by the sender's own deadline and saves a descriptor. Code that needs bounded
+latency calls `dmesh_flush()` at its logical write boundary; graceful close also
+flushes, while `dmesh_abort_qp()` discards buffered data that has not been
+submitted.
 
 ## 5. RX and EQ notification
 
@@ -243,17 +256,24 @@ write.
 `libdmesh_preload.so` is a POSIX adapter over the native data/event contract.
 It uses `dmesh_alloc`/`dmesh_post_send`/`dmesh_flush` for TX and consumes
 `DMESH_EVENT_RECV`, `DMESH_EVENT_RECV_FIN`, and `DMESH_EVENT_TX_READY` from
-`dmesh_poll_eq`; it does not use the internal raw-ring or ready-list APIs. Narrow
-in-tree hooks remain for ClusterIP resolution, numeric QP creation, and transport
-FIN because those operations are specific to socket interception rather than the
-public service-name API.
+`dmesh_poll_eq`. Internal hooks provide ClusterIP resolution, numeric QP
+creation, transport FIN, and temporary EQ notification suppression.
 
-The preload path copies because POSIX `read`/`write` require application buffers;
-it flushes once at each POSIX write boundary. If one write exceeds the bounded
-native TX window, it may flush an accepted prefix to make forward progress. On
-`EAGAIN`, its real kernel fd suppresses `EPOLLOUT` until the EQ delivers
-`DMESH_EVENT_TX_READY`; blocking writes park on that fd, without a retry timer. The
-POSIX application never selects or observes the physical batch size.
+The preload path copies POSIX `read`/`write` application buffers and applies the
+retention rule above on the application's behalf: a write on a QP with
+`dmesh_tx_inflight()` clear is published immediately, and writes committed while
+a unit is in flight are coalesced and published by a 1 ms dirty-QP pass.
+Backpressure and blocking receive publish pending bytes before parking; shutdown
+and close publish pending bytes before FIN.
+
+One process-wide EQ serves the mapped descriptors. Dispatcher and waiter drains
+are serialized. A blocking receive may consume two EQ batches before parking.
+Receive readiness is signalled once per descriptor per drained batch. EQ eventfd
+writes are suppressed during waiter drains and restored when pending work remains.
+
+On `EAGAIN`, the kernel descriptor suppresses `EPOLLOUT` until
+`DMESH_EVENT_TX_READY`. Blocking writes park on that descriptor. The POSIX
+application does not select or observe the physical batch size.
 
 The gRPC C++ adapter maps one runtime to channels, reactor shards to EQs, and
 EventEngine endpoints to QPs. Client bootstrap accepts a Service-name target,

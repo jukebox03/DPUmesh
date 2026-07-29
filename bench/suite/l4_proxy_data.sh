@@ -4,11 +4,11 @@
 #
 # Usage:
 #   ./bench/suite/l4_proxy_data.sh [--dry-run] [--preflight-only] [--quick] [--no-deploy]
-#                                  [--no-perf] [--out DIR]
+#                                  [--no-perf] [--target-verify] [--out DIR]
 # Reusing --out resumes by run_id without overwriting completed rows.
 set -euo pipefail
 
-COLLECTOR_VERSION=7
+COLLECTOR_VERSION=17
 SUITE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJ_ROOT="$(cd "$SUITE_DIR/../.." && pwd)"
 BENCH="$PROJ_ROOT/bench/bench.sh"
@@ -16,9 +16,13 @@ BENCH="$PROJ_ROOT/bench/bench.sh"
 
 NS="${NS:-test-bench}"
 CTRL_PORT="${CTRL_PORT:-9092}"
-PAYLOADS="${PAYLOADS:-64 1024 8192}"
-REPLY="${REPLY:-8}"
-THREADS="${THREADS:-4}"
+BENCH_HEADER_BYTES=16
+FRAME_SIZES="${FRAME_SIZES:-64 1024 8192}"
+DPU_DPA_THREADS=32
+DPU_RINGS_PER_POD=8
+DPU_ARM_WORKERS=8
+MIN_DPU_CONNECTIONS=$DPU_ARM_WORKERS
+THREADS="${THREADS:-$DPU_ARM_WORKERS}"
 ARRIVAL="${ARRIVAL:-const}"
 REPS="${REPS:-3}"
 DUR="${DUR:-10}"
@@ -30,60 +34,110 @@ PILOT_DUR="${PILOT_DUR:-2}"
 SCOUT_DUR="${SCOUT_DUR:-10}"
 SCOUT_START_RPS="${SCOUT_START_RPS:-5000}"
 SCOUT_GROWTH="${SCOUT_GROWTH:-1.35}"
-SCOUT_MAX_STEPS="${SCOUT_MAX_STEPS:-24}"
+SCOUT_MAX_STEPS="${SCOUT_MAX_STEPS:-40}"
 SCOUT_REFINE_STEPS="${SCOUT_REFINE_STEPS:-4}"
-SCOUT_MAX_RPS="${SCOUT_MAX_RPS:-3000000}"
-SCOUT_MAX_GBPS="${SCOUT_MAX_GBPS:-40}"
+SCOUT_MAX_RPS="${SCOUT_MAX_RPS:-0}"
+SCOUT_MAX_GBPS="${SCOUT_MAX_GBPS:-100}"
 # Four common rates give same-x comparisons. Three per-config rates resolve the
 # local knee. Duplicate integer rates are removed when rates.csv is built.
 COMMON_FACTORS="${COMMON_FACTORS:-0.25 0.50 0.75 0.90}"
 KNEE_FACTORS="${KNEE_FACTORS:-0.85 1.00 1.05}"
+CONFIG_SPAN_FACTORS="${CONFIG_SPAN_FACTORS:-0.05 0.15 0.30 0.50 0.70}"
+# The common rates scale the lowest discovered knee. "frame:rps ..." pins that
+# anchor instead, which holds the common grid — and therefore every already
+# measured config's rate indexes — fixed while other configs are re-measured.
+COMMON_ANCHOR_RPS="${COMMON_ANCHOR_RPS:-}"
 MIN_ACHIEVED_RATIO="${MIN_ACHIEVED_RATIO:-0.98}"
-MAX_GENERATOR_DROP_RATIO="${MAX_GENERATOR_DROP_RATIO:-0.001}"
+MAX_ADMISSION_DROP_RATIO="${MAX_ADMISSION_DROP_RATIO:-0.001}"
+MAX_SCHEDULER_DROP_RATIO="${MAX_SCHEDULER_DROP_RATIO:-0.001}"
 MIN_SCHEDULE_RATIO="${MIN_SCHEDULE_RATIO:-0.98}"
 MAX_SCHEDULE_RATIO="${MAX_SCHEDULE_RATIO:-1.02}"
 P99_SLA_US="${P99_SLA_US:-10000}"
+CORE_SATURATION_THRESHOLD="${CORE_SATURATION_THRESHOLD:-0.95}"
 IDLE_REPS="${IDLE_REPS:-3}"
 IDLE_DUR="${IDLE_DUR:-5}"
+GENERATOR_SELFTEST_DUR="${GENERATOR_SELFTEST_DUR:-1}"
+GENERATOR_SELFTEST_REPS="${GENERATOR_SELFTEST_REPS:-3}"
+GENERATOR_SELFTEST_START_RPS="${GENERATOR_SELFTEST_START_RPS:-500000}"
+GENERATOR_SELFTEST_GROWTH="${GENERATOR_SELFTEST_GROWTH:-1.5}"
+GENERATOR_SELFTEST_MAX_RPS="${GENERATOR_SELFTEST_MAX_RPS:-0}"
+GENERATOR_SELFTEST_MAX_STEPS="${GENERATOR_SELFTEST_MAX_STEPS:-16}"
+MIN_GENERATOR_HEADROOM="${MIN_GENERATOR_HEADROOM:-1.25}"
+MAX_RECOVERY_REDEPLOYS="${MAX_RECOVERY_REDEPLOYS:-12}"
+MAX_RUN_RETRIES="${MAX_RUN_RETRIES:-3}"
+TARGET_FRAME="${TARGET_FRAME:-64}"
+TARGET_CONFIRM_RATES="${TARGET_CONFIRM_RATES:-1536816 1852228 2021585 2122664}"
+TARGET_GROWTH="${TARGET_GROWTH:-1.10}"
+TARGET_BRACKET_RATIO="${TARGET_BRACKET_RATIO:-1.03}"
+TARGET_MAX_ROUNDS="${TARGET_MAX_ROUNDS:-12}"
 ENABLE_PERF="${ENABLE_PERF:-1}"
 DEPLOY="${DEPLOY:-1}"
+RECOVERY_REDEPLOYS=0
 DRY_RUN=0
 PREFLIGHT_ONLY=0
 QUICK=0
+TARGET_VERIFY=0
 OUT="${OUT:-}"
 
-CONFIGS=(plain envoy-permissive envoy-strict dpumesh-preload dpumesh-native)
+CONFIG_LIST="${CONFIGS:-envoy-permissive envoy-strict dpumesh-preload dpumesh-native}"
+read -r -a CONFIGS <<<"$CONFIG_LIST"
+declare -A CONFIG_SEEN=()
+DPU_CONFIG_SELECTED=0
+for config in "${CONFIGS[@]}"; do
+  case "$config" in
+    envoy-permissive|envoy-strict|dpumesh-preload|dpumesh-native) ;;
+    *) echo "unknown CONFIGS entry: $config" >&2; exit 2 ;;
+  esac
+  [ -z "${CONFIG_SEEN[$config]:-}" ] ||
+    { echo "duplicate CONFIGS entry: $config" >&2; exit 2; }
+  CONFIG_SEEN[$config]=1
+  case "$config" in dpumesh-preload|dpumesh-native) DPU_CONFIG_SELECTED=1 ;; esac
+done
+[ "${#CONFIGS[@]}" -gt 0 ] || { echo "CONFIGS must not be empty" >&2; exit 2; }
 
 usage() {
   cat <<EOF
-Usage: $0 [--dry-run] [--preflight-only] [--quick] [--no-deploy] [--no-perf] [--out DIR]
+Usage: $0 [--dry-run] [--preflight-only] [--quick] [--no-deploy] [--no-perf] [--target-verify] [--out DIR]
 
 Default matrix:
-  configs      plain, Envoy plaintext (PERMISSIVE-equivalent),
-               Envoy mutual TLS (STRICT-equivalent), DPUmesh L4 preload,
-               DPUmesh native API
-  payloads     {$PAYLOADS} bytes; reply=$REPLY bytes
+  configs      Envoy plaintext (PERMISSIVE-equivalent), Envoy mutual TLS
+               (STRICT-equivalent), DPUmesh L4 preload, DPUmesh native API
+  frames       {$FRAME_SIZES} bytes in each direction, including the
+               ${BENCH_HEADER_BYTES}-byte benchmark header
+  connections  $THREADS persistent connections; DPUmesh requires at least
+               $MIN_DPU_CONNECTIONS to cover all $DPU_ARM_WORKERS connection-affine shards
   host budget  exactly 1 client core + 1 server core/config
   discovery    ${PILOT_DUR}s OPEN pilot ramp; candidate bracket endpoints and
                $SCOUT_REFINE_STEPS refinements use ${SCOUT_DUR}s OPEN votes
   retained     4 common matched rates + 3 per-config knee rates (deduplicated)
   repetitions  $REPS x ${DUR}s; idle=$IDLE_REPS x ${IDLE_DUR}s/config
-  topology     DPU N/K/A=32/8/8, L7 disabled, PCI-local NUMA,
+  topology     DPU N/K/A=$DPU_DPA_THREADS/$DPU_RINGS_PER_POD/$DPU_ARM_WORKERS,
+               L7 disabled, PCI-local NUMA,
                l4-only deployment scope and l4 pin profile
 
 Environment overrides:
-  PAYLOADS REPLY THREADS ARRIVAL REPS DUR WARMUP
+  FRAME_SIZES THREADS ARRIVAL REPS DUR WARMUP
   PILOT_DUR SCOUT_DUR SCOUT_START_RPS SCOUT_GROWTH SCOUT_MAX_STEPS
   SCOUT_REFINE_STEPS SCOUT_MAX_RPS SCOUT_MAX_GBPS
-  COMMON_FACTORS KNEE_FACTORS MIN_ACHIEVED_RATIO
-  MAX_GENERATOR_DROP_RATIO MIN_SCHEDULE_RATIO MAX_SCHEDULE_RATIO P99_SLA_US
-  IDLE_REPS IDLE_DUR ENABLE_PERF DEPLOY NS CTRL_PORT OUT
+  CONFIGS COMMON_FACTORS KNEE_FACTORS CONFIG_SPAN_FACTORS COMMON_ANCHOR_RPS
+  MIN_ACHIEVED_RATIO
+  MAX_ADMISSION_DROP_RATIO MAX_SCHEDULER_DROP_RATIO
+  MIN_SCHEDULE_RATIO MAX_SCHEDULE_RATIO P99_SLA_US CORE_SATURATION_THRESHOLD
+  IDLE_REPS IDLE_DUR GENERATOR_SELFTEST_DUR GENERATOR_SELFTEST_REPS
+  GENERATOR_SELFTEST_START_RPS GENERATOR_SELFTEST_GROWTH
+  GENERATOR_SELFTEST_MAX_RPS GENERATOR_SELFTEST_MAX_STEPS
+  MIN_GENERATOR_HEADROOM MAX_RECOVERY_REDEPLOYS MAX_RUN_RETRIES
+  TARGET_FRAME TARGET_CONFIRM_RATES TARGET_GROWTH TARGET_BRACKET_RATIO
+  TARGET_MAX_ROUNDS
+  ENABLE_PERF DEPLOY NS CTRL_PORT OUT
 
 --quick sets REPS=1 DUR=2 PILOT_DUR=1 SCOUT_DUR=2 SCOUT_REFINE_STEPS=1,
 IDLE_REPS=1 IDLE_DUR=2 and disables perf.
 --preflight-only stops after deployment/live-state, binary, OPEN smoke,
 single-backend, and fixed-core validation; no scout or retained run is started.
 --no-deploy validates and re-pins the live stack.
+--target-verify adds three-run cross-checks for Envoy and closes open DPUmesh
+64-byte capacity bounds to within TARGET_BRACKET_RATIO.
 EOF
 }
 
@@ -94,6 +148,7 @@ while [ "$#" -gt 0 ]; do
     --quick) QUICK=1; shift ;;
     --no-deploy) DEPLOY=0; shift ;;
     --no-perf) ENABLE_PERF=0; shift ;;
+    --target-verify) TARGET_VERIFY=1; shift ;;
     --out)
       [ "$#" -ge 2 ] || { echo "--out needs a directory" >&2; exit 2; }
       OUT="$2"; shift 2 ;;
@@ -108,51 +163,129 @@ if [ "$QUICK" = 1 ]; then
 fi
 
 is_uint() { [[ "$1" =~ ^[1-9][0-9]*$ ]]; }
-for value in "$REPLY" "$THREADS" "$REPS" "$DUR" "$WARMUP" "$PILOT_DUR" "$SCOUT_DUR" \
+for value in "$THREADS" "$REPS" "$DUR" "$WARMUP" "$PILOT_DUR" "$SCOUT_DUR" \
              "$SCOUT_START_RPS" "$SCOUT_MAX_STEPS" "$SCOUT_REFINE_STEPS" \
-             "$SCOUT_MAX_RPS" "$IDLE_REPS" "$IDLE_DUR"; do
+             "$IDLE_REPS" "$IDLE_DUR" "$MAX_RECOVERY_REDEPLOYS" \
+             "$MAX_RUN_RETRIES" "$TARGET_FRAME" "$TARGET_MAX_ROUNDS"; do
   is_uint "$value" || { echo "positive integer required, got: $value" >&2; exit 2; }
 done
+if [ "$DPU_CONFIG_SELECTED" = 1 ] && [ "$THREADS" -lt "$MIN_DPU_CONNECTIONS" ]; then
+  echo "THREADS=$THREADS underfills the $DPU_ARM_WORKERS connection-affine DPU shards; require >=$MIN_DPU_CONNECTIONS" >&2
+  exit 2
+fi
+if [ "$DPU_CONFIG_SELECTED" = 1 ] &&
+   [ "$((THREADS % DPU_ARM_WORKERS))" -ne 0 ]; then
+  echo "THREADS=$THREADS does not distribute evenly across $DPU_ARM_WORKERS connection-affine DPU shards; require a multiple of $DPU_ARM_WORKERS" >&2
+  exit 2
+fi
+for frame in $FRAME_SIZES; do
+  is_uint "$frame" ||
+    { echo "positive integer frame size required, got: $frame" >&2; exit 2; }
+  [ "$frame" -gt "$BENCH_HEADER_BYTES" ] ||
+    { echo "frame size must exceed ${BENCH_HEADER_BYTES}B: $frame" >&2; exit 2; }
+done
+[[ "$SCOUT_MAX_RPS" =~ ^[0-9]+$ ]] ||
+  { echo "SCOUT_MAX_RPS must be a non-negative integer" >&2; exit 2; }
+for value in "$GENERATOR_SELFTEST_DUR" "$GENERATOR_SELFTEST_REPS" \
+             "$GENERATOR_SELFTEST_START_RPS" \
+             "$GENERATOR_SELFTEST_MAX_STEPS"; do
+  is_uint "$value" || { echo "positive integer required, got: $value" >&2; exit 2; }
+done
+[[ "$GENERATOR_SELFTEST_MAX_RPS" =~ ^[0-9]+$ ]] ||
+  { echo "GENERATOR_SELFTEST_MAX_RPS must be a non-negative integer" >&2; exit 2; }
 case "$ARRIVAL" in const|poisson) ;; *) echo "ARRIVAL must be const|poisson" >&2; exit 2;; esac
 awk -v x="$SCOUT_GROWTH" 'BEGIN{exit !(x>1.0)}' ||
   { echo "SCOUT_GROWTH must be > 1" >&2; exit 2; }
+awk -v x="$GENERATOR_SELFTEST_GROWTH" 'BEGIN{exit !(x>1.0)}' ||
+  { echo "GENERATOR_SELFTEST_GROWTH must be > 1" >&2; exit 2; }
+awk -v x="$TARGET_GROWTH" 'BEGIN{exit !(x>1.0)}' ||
+  { echo "TARGET_GROWTH must be > 1" >&2; exit 2; }
+awk -v x="$TARGET_BRACKET_RATIO" 'BEGIN{exit !(x>1.0)}' ||
+  { echo "TARGET_BRACKET_RATIO must be > 1" >&2; exit 2; }
 for value in "$SCOUT_MAX_GBPS" "$MIN_ACHIEVED_RATIO" \
-             "$MAX_GENERATOR_DROP_RATIO" "$MIN_SCHEDULE_RATIO" \
-             "$MAX_SCHEDULE_RATIO" "$P99_SLA_US"; do
+             "$MAX_ADMISSION_DROP_RATIO" "$MAX_SCHEDULER_DROP_RATIO" \
+             "$MIN_SCHEDULE_RATIO" "$MIN_GENERATOR_HEADROOM" \
+             "$MAX_SCHEDULE_RATIO" "$P99_SLA_US" \
+             "$CORE_SATURATION_THRESHOLD"; do
   awk -v x="$value" 'BEGIN{exit !(x>0)}' ||
     { echo "positive numeric value required, got: $value" >&2; exit 2; }
 done
 awk -v lo="$MIN_SCHEDULE_RATIO" -v hi="$MAX_SCHEDULE_RATIO" \
   'BEGIN{exit !(lo<=1 && hi>=1 && lo<=hi)}' ||
   { echo "schedule ratio bounds must contain 1.0" >&2; exit 2; }
-for value in $COMMON_FACTORS $KNEE_FACTORS; do
+awk -v x="$CORE_SATURATION_THRESHOLD" 'BEGIN{exit !(x>0 && x<=1)}' ||
+  { echo "CORE_SATURATION_THRESHOLD must be in (0, 1]" >&2; exit 2; }
+for value in $COMMON_FACTORS $KNEE_FACTORS $CONFIG_SPAN_FACTORS; do
   awk -v x="$value" 'BEGIN{exit !(x>0)}' ||
     { echo "load factors must be positive, got: $value" >&2; exit 2; }
 done
+for value in $TARGET_CONFIRM_RATES; do
+  is_uint "$value" ||
+    { echo "positive integer target rate required, got: $value" >&2; exit 2; }
+done
+if [ "$TARGET_VERIFY" = 1 ]; then
+  [ "$REPS" -eq 3 ] ||
+    { echo "--target-verify requires REPS=3" >&2; exit 2; }
+  [ "$DUR" -ge 10 ] ||
+    { echo "--target-verify requires DUR>=10" >&2; exit 2; }
+  case " $FRAME_SIZES " in
+    *" $TARGET_FRAME "*) ;;
+    *) echo "TARGET_FRAME=$TARGET_FRAME is not in FRAME_SIZES={$FRAME_SIZES}" >&2; exit 2 ;;
+  esac
+fi
 
-payload_count=$(wc -w <<<"$PAYLOADS")
-max_rates_per_config=$(( $(wc -w <<<"$COMMON_FACTORS") + $(wc -w <<<"$KNEE_FACTORS") ))
-load_rows_max=$((payload_count * max_rates_per_config * ${#CONFIGS[@]} * REPS))
+payload_count=$(wc -w <<<"$FRAME_SIZES")
+base_rates_per_config=$(( $(wc -w <<<"$COMMON_FACTORS") + $(wc -w <<<"$KNEE_FACTORS") ))
+span_rates_per_config=$(wc -w <<<"$CONFIG_SPAN_FACTORS")
+max_rates_per_config=$((base_rates_per_config + span_rates_per_config))
+load_rows_max=$((payload_count * ${#CONFIGS[@]} *
+  (base_rates_per_config * REPS + span_rates_per_config)))
 idle_rows=$((${#CONFIGS[@]} * IDLE_REPS))
 profile_rows=0
 [ "$ENABLE_PERF" = 0 ] || profile_rows=$((payload_count * ${#CONFIGS[@]}))
 pilot_points_max=$((payload_count * ${#CONFIGS[@]} * SCOUT_MAX_STEPS))
 vote_points_expected=$((payload_count * ${#CONFIGS[@]} * (SCOUT_REFINE_STEPS + 2)))
 vote_raw_expected=$((vote_points_expected * 2))
+generator_rows_max=$((2 * payload_count * GENERATOR_SELFTEST_MAX_STEPS *
+  GENERATOR_SELFTEST_REPS))
 window_minutes_expected=$(awk -v l="$load_rows_max" -v d="$DUR" -v i="$idle_rows" \
   -v id="$IDLE_DUR" -v pp="$pilot_points_max" -v pd="$PILOT_DUR" \
   -v vr="$vote_raw_expected" -v sd="$SCOUT_DUR" -v pr="$profile_rows" \
-  'BEGIN{printf "%.1f",(l*d+i*id+pp*pd+vr*sd+pr*d)/60}')
+  -v gr="$generator_rows_max" -v gd="$GENERATOR_SELFTEST_DUR" \
+  'BEGIN{printf "%.1f",(l*d+i*id+pp*pd+vr*sd+pr*d+gr*gd)/60}')
 
 if [ "$DRY_RUN" = 1 ]; then
   echo "L4 collection dry run"
   echo "  fixed host budget: 2 cores/config (client=1, server=1)"
+  echo "  connections:       $THREADS persistent ($((THREADS / DPU_ARM_WORKERS)) per shard across $DPU_ARM_WORKERS DPU shards)"
   echo "  load rows (max):  $load_rows_max"
+  echo "                    span rates run once; common/knee rates run $REPS times"
   echo "  idle rows:        $idle_rows"
   echo "  pilot points max: $pilot_points_max x ${PILOT_DUR}s"
   echo "  knee votes:       usually $vote_raw_expected x ${SCOUT_DUR}s"
   echo "                    (2 votes/point, 3rd on disagreement)"
   echo "  perf replays:     $profile_rows"
+  echo "  generator tests:  POSIX/native frame construction and scheduler ceilings,"
+  echo "                    up to $generator_rows_max x ${GENERATOR_SELFTEST_DUR}s"
+  if [ "$SCOUT_MAX_RPS" -eq 0 ]; then
+    echo "  scout RPS cap:    no fixed cap; ${SCOUT_MAX_GBPS}Gb/s per-direction frame bound"
+  else
+    echo "  scout RPS cap:    min(${SCOUT_MAX_RPS} rps, ${SCOUT_MAX_GBPS}Gb/s per-direction frame bound)"
+  fi
+  for payload in $FRAME_SIZES; do
+    cap=$(awk -v hard="$SCOUT_MAX_RPS" -v gbps="$SCOUT_MAX_GBPS" -v p="$payload" '
+      BEGIN {
+        wire=gbps*1e9/(8*p)
+        printf "%.0f",(hard>0 && hard<wire ? hard : wire)
+      }')
+    echo "                    frame=${payload}B cap=${cap} rps"
+  done
+  echo "  generator cap:    $([ "$GENERATOR_SELFTEST_MAX_RPS" -eq 0 ] && echo none || echo "$GENERATOR_SELFTEST_MAX_RPS rps")"
+  echo "  generator clean:  schedule ratio $MIN_SCHEDULE_RATIO..$MAX_SCHEDULE_RATIO,"
+  echo "                    scheduler drop ratio <= $MAX_SCHEDULER_DROP_RATIO"
+  echo "  generator margin: ceiling >= ${MIN_GENERATOR_HEADROOM}x every path knee"
+  echo "  recovery deploys: at most $MAX_RECOVERY_REDEPLOYS canonical generations"
+  echo "  run retries:      at most $MAX_RUN_RETRIES retries after validated runtime failure"
   echo "  expected timed:   ~$window_minutes_expected min before recovery/commands"
   if [ "$QUICK" = 1 ]; then
     echo "  expected wall:    usually 30-50 min including deploy"
@@ -160,10 +293,10 @@ if [ "$DRY_RUN" = 1 ]; then
     echo "  expected wall:    usually 110-140 min including deploy/profiling"
   fi
   echo "  clean point:      achieved/offered >= $MIN_ACHIEVED_RATIO,"
-  echo "                    generator drops/scheduled <= $MAX_GENERATOR_DROP_RATIO,"
+  echo "                    admission drops/scheduled <= $MAX_ADMISSION_DROP_RATIO,"
   echo "                    schedule ratio $MIN_SCHEDULE_RATIO..$MAX_SCHEDULE_RATIO,"
   echo "                    p99 <= ${P99_SLA_US}us, fail/reorder/overflow=0"
-  echo "  DPU:              N/K/A=32/8/8, L7 disabled"
+  echo "  DPU:              N/K/A=$DPU_DPA_THREADS/$DPU_RINGS_PER_POD/$DPU_ARM_WORKERS, L7 disabled"
   echo "  output:           ${OUT:-bench/report/data/l4-<timestamp>}"
   exit 0
 fi
@@ -187,12 +320,41 @@ KNEES="$OUT/knees.csv"
 RATES="$OUT/rates.csv"
 PERF_POINTS="$OUT/perf_points.csv"
 PERF_MANIFEST="$OUT/perf_manifest.csv"
+PERF_FAILURES="$OUT/failed_profiles.csv"
+GENERATOR_SELFTEST="$OUT/generator_selftest.csv"
+GENERATOR_LIMITS="$OUT/generator_limits.csv"
+GENERATOR_HEADROOM="$OUT/generator_headroom.csv"
 META="$OUT/meta.txt"
 LOG="$OUT/run.log"
 mkdir -p "$MPSTAT_DIR" "$SNAP_DIR" "$PERF_DIR"
 exec > >(tee -a "$LOG") 2>&1
 MPSTAT_PID=0
 PERF_PID=0
+MEASURE_WROTE=0
+declare -A RUN_RETRY_COUNTS=()
+declare -A PROFILE_RETRY_COUNTS=()
+if [ -s "$META" ]; then
+  RECOVERY_REDEPLOYS=$(awk -F'[=_]' '
+    /^recovery_redeploy_[0-9]+=/ {
+      split($0, left, "=")
+      split(left[1], part, "_")
+      if(part[3]+0 > max) max=part[3]+0
+    }
+    END {print max+0}
+  ' "$META")
+fi
+if [ -s "$OUT/failed_attempts.csv" ]; then
+  while IFS=, read -r _observed run_id _rest; do
+    [ "$run_id" != run_id ] || continue
+    RUN_RETRY_COUNTS[$run_id]=$(( ${RUN_RETRY_COUNTS[$run_id]:-0} + 1 ))
+  done <"$OUT/failed_attempts.csv"
+fi
+if [ -s "$PERF_FAILURES" ]; then
+  while IFS=, read -r _observed run_id _attempt _rest; do
+    [ "$run_id" != run_id ] || continue
+    PROFILE_RETRY_COUNTS[$run_id]=$(( ${PROFILE_RETRY_COUNTS[$run_id]:-0} + 1 ))
+  done <"$PERF_FAILURES"
+fi
 
 cleanup_background() {
   if [ "${MPSTAT_PID:-0}" -gt 0 ]; then
@@ -220,6 +382,14 @@ warn() { printf '\033[1;33m[l4]\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[0;31m[l4]\033[0m %s\n' "$*" >&2; exit 1; }
 field() {
   awk -v k="$2" '{for(i=1;i<=NF;i++){p=k"=";if(index($i,p)==1){print substr($i,length(p)+1);exit}}}' <<<"$1"
+}
+frame_body() {
+  echo "$(($1 - BENCH_HEADER_BYTES))"
+}
+frame_result_ok() {
+  local result="$1" frame="$2"
+  [ "$(field "$result" reqframe)" = "$frame" ] &&
+    [ "$(field "$result" respframe)" = "$frame" ]
 }
 completed() {
   local csv="$1" run_id="$2"
@@ -251,13 +421,6 @@ run_control() {
 
 set_config() {
   case "$1" in
-    plain)
-      CLIENT_APP=bench-direct; CLIENT_CONTAINER=bench-direct
-      SERVER_APP=echo-plain; SERVER_CONTAINER=echo-plain
-      CLIENT_SIDECAR=""; SERVER_SIDECAR=""
-      CLIENT_BINARY=/usr/local/bin/bench_sock
-      SERVER_BINARY=/usr/local/bin/echo_sock
-      BINARY_CLASS=posix ;;
     envoy-permissive)
       CLIENT_APP=bench-tcp; CLIENT_CONTAINER=bench-tcp
       SERVER_APP=echo-tcp; SERVER_CONTAINER=echo-tcp
@@ -290,6 +453,14 @@ set_config() {
   esac
 }
 
+config_selected() {
+  local want="$1" config
+  for config in "${CONFIGS[@]}"; do
+    [ "$config" = "$want" ] && return 0
+  done
+  return 1
+}
+
 is_dpu_config() {
   [ "$1" = dpumesh-preload ] || [ "$1" = dpumesh-native ]
 }
@@ -309,6 +480,11 @@ validate_result() {
   [ "$allow_drops" = 1 ] || [ "${drops:-1}" = 0 ]
 }
 
+verify_swap_disabled() {
+  [ "$(awk 'NR>1 {n++} END {print n+0}' /proc/swaps)" -eq 0 ] ||
+    die "swap is enabled; run sudo swapoff -a before deployment"
+}
+
 enforce_single_native_backend() {
   local app
   for app in echo-dpumesh-13 echo-dpumesh-14; do
@@ -322,23 +498,31 @@ enforce_single_native_backend() {
 
 deploy_stack() {
   if [ "$DEPLOY" = 1 ]; then
-    log "deploying canonical L4 stack: N/K/A=32/8/8, local NUMA, L7 disabled"
-    env DPUMESH_DPA_THREADS=32 DPUMESH_RINGS_PER_POD=8 \
-      DPUMESH_ARM_WORKERS=8 DPUMESH_PROXY_L7_SVC= DPUMESH_LOG_LEVEL=40 \
+    log "deploying canonical L4 stack: N/K/A=$DPU_DPA_THREADS/$DPU_RINGS_PER_POD/$DPU_ARM_WORKERS, local NUMA, L7 disabled"
+    env DPUMESH_DPA_THREADS="$DPU_DPA_THREADS" \
+      DPUMESH_RINGS_PER_POD="$DPU_RINGS_PER_POD" \
+      DPUMESH_ARM_WORKERS="$DPU_ARM_WORKERS" \
+      DPUMESH_PROXY_L7_SVC= DPUMESH_LOG_LEVEL=40 \
       BENCH_NUMA_POLICY=local BENCH_DEPLOY_SCOPE=l4 "$BENCH" deploy
   else
     log "using existing deployment (--no-deploy)"
   fi
   enforce_single_native_backend
   BENCH_NUMA_POLICY=local "$BENCH" pin l4
-  local dpu_log
+  local dpu_log dpu_topology
   dpu_log=$("$BENCH" dpulog 240)
-  grep -q "Connection-affine topology active: N/K/A=32/8/8" <<<"$dpu_log" ||
-    die "live DPU is not the required N/K/A=32/8/8 topology"
-  grep -q "l7-services=0" <<<"$dpu_log" ||
+  dpu_topology=$(ssh -n -o ConnectTimeout=8 "$DPU_HOST" \
+    "echo '$DPU_PASS' | sudo -S sh -c \
+      'grep \"Connection-affine topology active:\" /tmp/dpumesh_dpu_bench.log | tail -1; \
+       grep \"DPU PROXY MODE ON\" /tmp/dpumesh_dpu_bench.log | tail -1'" \
+    2>/dev/null || true)
+  grep -q "Connection-affine topology active: N/K/A=$DPU_DPA_THREADS/$DPU_RINGS_PER_POD/$DPU_ARM_WORKERS" <<<"$dpu_topology" ||
+    die "live DPU is not the required N/K/A=$DPU_DPA_THREADS/$DPU_RINGS_PER_POD/$DPU_ARM_WORKERS topology"
+  grep -q "l7-services=0" <<<"$dpu_topology" ||
     die "live DPU did not confirm l7-services=0"
   {
     printf '===== observed_utc=%s =====\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf '%s\n' "$dpu_topology"
     printf '%s\n' "$dpu_log"
   } >>"$OUT/dpu-log.txt"
 }
@@ -362,11 +546,11 @@ verify_binaries() {
     csv_row "$config" "$BINARY_CLASS" server "$SERVER_APP" "$SERVER_CONTAINER" \
       "$SERVER_BINARY" "$h" >>"$hashes"
   done
-  [ "$(awk -F, 'NR>1 && $2=="posix" && $3=="client"{h[$7]=1} END{print length(h)}' "$hashes")" = 1 ] ||
+  [ "$(awk -F, 'NR>1 && $2=="posix" && $3=="client"{h[$7]=1} END{print length(h)}' "$hashes")" -le 1 ] ||
     die "POSIX client binaries differ across configs; see $hashes"
-  [ "$(awk -F, 'NR>1 && $2=="posix" && $3=="server"{h[$7]=1} END{print length(h)}' "$hashes")" = 1 ] ||
+  [ "$(awk -F, 'NR>1 && $2=="posix" && $3=="server"{h[$7]=1} END{print length(h)}' "$hashes")" -le 1 ] ||
     die "POSIX server binaries differ across configs; see $hashes"
-  log "binary audit PASS: four POSIX paths are byte-identical; native API binaries recorded separately"
+  log "binary audit PASS: selected POSIX paths are byte-identical; native API binaries recorded separately"
 }
 
 verify_single_backends() {
@@ -381,51 +565,176 @@ verify_single_backends() {
     printf '%s\n' "$header" >"$out"
   fi
   for config_service in \
-    "plain:echo-plain" \
     "envoy-permissive:echo-tcp" \
     "envoy-strict:echo-tcp-strict" \
     "dpumesh-preload:preload-sock"; do
     IFS=: read -r config service <<<"$config_service"
+    config_selected "$config" || continue
     count=$(kubectl get endpoints -n "$NS" "$service" -o json 2>/dev/null |
       jq '[.subsets[]?.addresses[]?] | length')
     [ "$count" = 1 ] ||
       die "$config service $service has $count ready backend addresses; exactly one is required"
     csv_row "$observed" "$config" service "$service" 1 "$count" >>"$out"
   done
-  for app_expected in \
-    "echo-dpumesh:1" "echo-dpumesh-13:0" "echo-dpumesh-14:0"; do
-    IFS=: read -r app expected <<<"$app_expected"
-    read -r desired ready < <(kubectl get deployment -n "$NS" "$app" -o json |
-      jq -r '[.spec.replicas // 0, .status.readyReplicas // 0] | @tsv')
-    [ "$desired" = "$expected" ] && [ "$ready" = "$expected" ] ||
-      die "native backend deployment $app desired=$desired ready=$ready; expected=$expected"
-    csv_row "$observed" dpumesh-native deployment "$app" "$expected" "$ready" >>"$out"
-  done
+  if config_selected dpumesh-native; then
+    for app_expected in \
+      "echo-dpumesh:1" "echo-dpumesh-13:0" "echo-dpumesh-14:0"; do
+      IFS=: read -r app expected <<<"$app_expected"
+      read -r desired ready < <(kubectl get deployment -n "$NS" "$app" -o json |
+        jq -r '[.spec.replicas // 0, .status.readyReplicas // 0] | @tsv')
+      [ "$desired" = "$expected" ] && [ "$ready" = "$expected" ] ||
+        die "native backend deployment $app desired=$desired ready=$ready; expected=$expected"
+      csv_row "$observed" dpumesh-native deployment "$app" "$expected" "$ready" >>"$out"
+    done
+  fi
   log "backend budget PASS: exactly one ready server backend/config"
 }
 
 smoke_all() {
-  local config result quality clean attempt
+  local config result quality clean attempt body
+  body=$(frame_body 64)
   for config in "${CONFIGS[@]}"; do
     set_config "$config"
     clean=0
     for attempt in 1 2; do
       result=$(run_control "$CLIENT_APP" \
-        "OPEN 64 $REPLY $THREADS 2 20 $SCOUT_START_RPS const" 2)
+        "OPEN $body $body $THREADS 2 20 $SCOUT_START_RPS const" 2)
       quality=$(classify_open_result "$result" "$SCOUT_START_RPS" 2)
       IFS=, read -r clean _ <<<"$quality"
       log "smoke $config attempt=$attempt clean=$clean: $result"
       if [ "$clean" = 1 ] && validate_result "$result" 0 &&
+         frame_result_ok "$result" 64 &&
          native_backend_ok "$config" "$result"; then
         break
       fi
       sleep 2
     done
-    [ "$clean" = 1 ] && validate_result "$result" 0 ||
+    [ "$clean" = 1 ] && validate_result "$result" 0 &&
+      frame_result_ok "$result" 64 ||
       die "smoke failed twice for $config"
     native_backend_ok "$config" "$result" ||
       die "native smoke used zero or multiple backends: $(field "$result" dist)"
   done
+}
+
+run_generator_selftests() {
+  local header="run_id,generator,config,frame_bytes,threads,duration_s,offered_rps,rep,scheduled,scheduler_drops,schedule_ratio,scheduler_drop_ratio,clean,raw_result"
+  local limits_tmp="$GENERATOR_LIMITS.tmp.$$"
+  local config kind payload body rate rep run_id result raw_result scheduled drops
+  local schedule_ratio drop_ratio clean clean_reps good bad status step next
+  local bad_text
+  local -A representative=()
+
+  if [ -s "$GENERATOR_SELFTEST" ]; then
+    [ "$(head -n 1 "$GENERATOR_SELFTEST")" = "$header" ] ||
+      die "generator_selftest.csv schema differs from this collector version"
+  else
+    printf '%s\n' "$header" >"$GENERATOR_SELFTEST"
+  fi
+  for config in "${CONFIGS[@]}"; do
+    [ "$config" = dpumesh-native ] && kind=native || kind=posix
+    [ -n "${representative[$kind]:-}" ] || representative[$kind]="$config"
+  done
+
+  echo "generator,config,frame_bytes,highest_clean_rps,lowest_bad_rps,status,reps,duration_s" \
+    >"$limits_tmp"
+  for kind in posix native; do
+    config="${representative[$kind]:-}"
+    [ -n "$config" ] || continue
+    set_config "$config"
+    for payload in $FRAME_SIZES; do
+      body=$(frame_body "$payload")
+      rate="$GENERATOR_SELFTEST_START_RPS"
+      good=0; bad=0; status=step_limited
+      for step in $(seq 1 "$GENERATOR_SELFTEST_MAX_STEPS"); do
+        [ "$GENERATOR_SELFTEST_MAX_RPS" -eq 0 ] ||
+          [ "$rate" -le "$GENERATOR_SELFTEST_MAX_RPS" ] ||
+          rate="$GENERATOR_SELFTEST_MAX_RPS"
+        clean_reps=0
+        for rep in $(seq 1 "$GENERATOR_SELFTEST_REPS"); do
+          run_id="selftest-${kind}-p${payload}-r${rate}-v${rep}"
+          raw_result="$RAW/$run_id.result.txt"
+          if completed "$GENERATOR_SELFTEST" "$run_id"; then
+            clean=$(awk -F, -v id="$run_id" '$1==id{v=$13} END{print v}' \
+              "$GENERATOR_SELFTEST")
+          else
+            result=$(run_control "$CLIENT_APP" \
+              "SELFTEST $body $THREADS $GENERATOR_SELFTEST_DUR $rate $ARRIVAL" \
+              "$GENERATOR_SELFTEST_DUR")
+            printf '%s\n' "$result" >"$raw_result"
+            scheduled=$(field "$result" scheduled)
+            drops=$(field "$result" drops)
+            schedule_ratio=$(field "$result" schedule_ratio)
+            drop_ratio=$(field "$result" drop_ratio)
+            clean=0
+            if [[ "$result" == OK* ]] &&
+               awk -v x="${schedule_ratio:-0}" -v lo="$MIN_SCHEDULE_RATIO" \
+                 -v hi="$MAX_SCHEDULE_RATIO" 'BEGIN{exit !(x>=lo && x<=hi)}' &&
+               awk -v x="${drop_ratio:-1}" -v hi="$MAX_SCHEDULER_DROP_RATIO" \
+                 'BEGIN{exit !(x>=0 && x<=hi)}'; then
+              clean=1
+            fi
+            csv_row "$run_id" "$kind" "$config" "$payload" "$THREADS" \
+              "$GENERATOR_SELFTEST_DUR" "$rate" "$rep" "${scheduled:-NA}" \
+              "${drops:-NA}" "${schedule_ratio:-NA}" "${drop_ratio:-NA}" \
+              "$clean" "$raw_result" >>"$GENERATOR_SELFTEST"
+          fi
+          [ "$clean" = 1 ] && clean_reps=$((clean_reps + 1))
+        done
+        if [ "$clean_reps" -eq "$GENERATOR_SELFTEST_REPS" ]; then
+          good="$rate"
+          if [ "$GENERATOR_SELFTEST_MAX_RPS" -gt 0 ] &&
+             [ "$rate" -ge "$GENERATOR_SELFTEST_MAX_RPS" ]; then
+            status=right_censored
+            break
+          fi
+          next=$(awk -v x="$rate" -v g="$GENERATOR_SELFTEST_GROWTH" \
+            'BEGIN{n=int(x*g+.5);if(n<=x)n=x+1;print n}')
+          rate="$next"
+        else
+          bad="$rate"
+          status=bracketed
+          break
+        fi
+      done
+      [ "$good" -gt 0 ] ||
+        die "generator selftest has no clean lower bound for $kind/$payload"
+      [ "$bad" -gt 0 ] && bad_text="$bad" || bad_text=NA
+      csv_row "$kind" "$config" "$payload" "$good" "$bad_text" "$status" \
+        "$GENERATOR_SELFTEST_REPS" "$GENERATOR_SELFTEST_DUR" >>"$limits_tmp"
+      log "generator selftest $kind/$payload clean_ceiling=$good first_bad=$bad_text status=$status"
+    done
+  done
+  mv "$limits_tmp" "$GENERATOR_LIMITS"
+}
+
+validate_generator_headroom() {
+  local header="config,frame_bytes,generator,knee_rps,generator_clean_rps,headroom_ratio,required_ratio,status"
+  local tmp="$GENERATOR_HEADROOM.tmp.$$"
+  local config payload knee generator ceiling ratio bad=0
+  printf '%s\n' "$header" >"$tmp"
+  while IFS=, read -r config payload knee _rest; do
+    [ "$config" != config ] || continue
+    [ "$config" = dpumesh-native ] && generator=native || generator=posix
+    ceiling=$(awk -F, -v g="$generator" -v p="$payload" \
+      'NR>1 && $1==g && $3==p{print $4; exit}' "$GENERATOR_LIMITS")
+    [ -n "$ceiling" ] || die "missing generator ceiling for $generator/$payload"
+    ratio=$(awk -v c="$ceiling" -v k="$knee" \
+      'BEGIN{if(k>0)printf "%.6f",c/k;else print "NA"}')
+    if awk -v x="$ratio" -v required="$MIN_GENERATOR_HEADROOM" \
+      'BEGIN{exit !(x>=required)}'; then
+      csv_row "$config" "$payload" "$generator" "$knee" "$ceiling" \
+        "$ratio" "$MIN_GENERATOR_HEADROOM" pass >>"$tmp"
+    else
+      csv_row "$config" "$payload" "$generator" "$knee" "$ceiling" \
+        "$ratio" "$MIN_GENERATOR_HEADROOM" fail >>"$tmp"
+      bad=1
+    fi
+  done <"$KNEES"
+  mv "$tmp" "$GENERATOR_HEADROOM"
+  [ "$bad" -eq 0 ] ||
+    die "generator headroom below ${MIN_GENERATOR_HEADROOM}x; see $GENERATOR_HEADROOM"
+  log "generator headroom PASS: every path knee is below 1/${MIN_GENERATOR_HEADROOM} of its frame-specific generator ceiling"
 }
 
 container_pid() {
@@ -479,6 +788,22 @@ validate_one_core_pid() {
   bad=$(awk -F: -v want="$expected" '$3!=want{print}' <<<"$masks")
   [ -z "$bad" ] ||
     die "$role container is not wholly pinned to core $expected (pid:tid:mask ${bad//$'\n'/;})"
+}
+
+validate_resolved_pinning() {
+  local config="$1" context="$2" cc sc budget
+  cc=$(allowed_core "$CLIENT_APP_PID")
+  sc=$(allowed_core "$SERVER_APP_PID")
+  budget=$(recorded_host_core_budget "$config")
+  [[ "$cc" =~ ^[0-9]+$ ]] && [[ "$sc" =~ ^[0-9]+$ ]] &&
+    [ "$cc" != "$sc" ] && [ "$budget" -eq 2 ] ||
+    die "$context has an invalid fixed-core budget: client=$cc server=$sc recorded=$budget"
+  validate_one_core_pid "$context/client_app" "$CLIENT_APP_PID" "$cc"
+  validate_one_core_pid "$context/server_app" "$SERVER_APP_PID" "$sc"
+  validate_one_core_pid "$context/client_sidecar" "$CLIENT_SIDECAR_PID" "$cc"
+  validate_one_core_pid "$context/server_sidecar" "$SERVER_SIDECAR_PID" "$sc"
+  PIN_CLIENT_CORE="$cc"
+  PIN_SERVER_CORE="$sc"
 }
 
 record_and_validate_core_budget() {
@@ -597,6 +922,55 @@ proc_delta() {
     }
     END{print sum+0}' "$before" "$after"
 }
+proc_core_busy() {
+  local core="$1" before="$2" after="$3" dt="$4"
+  awk -F, -v want="cpu$core" -v elapsed="$dt" -v hz="$CLK_TCK" '
+    NR==FNR {
+      if($1==want) {
+        old=$2+$3+$4+$7+$8+$9
+        found_old=1
+      }
+      next
+    }
+    $1==want {
+      current=$2+$3+$4+$7+$8+$9
+      found_new=1
+    }
+    END {
+      if(found_old && found_new && elapsed>0)
+        printf "%.6f",(current-old)/hz/elapsed
+      else
+        print "NA"
+    }
+  ' "$before" "$after"
+}
+validate_core_busy_sample() {
+  local context="$1" client="$2" server="$3"
+  awk -v a="$client" -v b="$server" '
+    BEGIN {
+      exit !(a!="NA" && b!="NA" && a>=0 && b>=0 && a<=1.10 && b<=1.10)
+    }
+  ' || die "$context has an invalid physical-core sample: client=$client server=$server"
+}
+core_saturation_vote() {
+  local good_client="$1" good_server="$2" bad_client="$3" bad_server="$4"
+  awk -v gc="$good_client" -v gs="$good_server" \
+      -v bc="$bad_client" -v bs="$bad_server" \
+      -v threshold="$CORE_SATURATION_THRESHOLD" '
+    BEGIN {
+      seen=0
+      split(gc " " gs " " bc " " bs, values, " ")
+      for(i=1;i<=4;i++) {
+        if(values[i]!="" && values[i]!="NA") {
+          seen=1
+          if(values[i]+0>=threshold) saturated=1
+        }
+      }
+      if(!seen) print "NA"
+      else print saturated ? 1 : 0
+    }
+  '
+}
 to_cores_ticks() {
   awk -v d="$1" -v hz="$CLK_TCK" -v dt="$2" \
     'BEGIN{if(dt>0) printf "%.6f",d/hz/dt; else print "NA"}'
@@ -609,6 +983,40 @@ dpu_snapshot() {
       [ -n \"\$p\" ] || exit 1; hz=\$(getconf CLK_TCK); up=\$(cut -d\" \" -f1 /proc/uptime); \
       stat=\$(cat /proc/\$p/stat); rest=\${stat#*) }; set -- \$rest; \
       echo \$p \$hz \$((\${12}+\${13})) \$up'" 2>/dev/null
+}
+
+dpu_delta_cores() {
+  local before="$1" after="$2"
+  local pid0 hz0 tick0 up0 pid1 hz1 tick1 up1
+  [ -n "$before" ] && [ -n "$after" ] || { echo NA; return; }
+  read -r pid0 hz0 tick0 up0 <<<"$before"
+  read -r pid1 hz1 tick1 up1 <<<"$after"
+  if [ "$pid0" != "$pid1" ] || [ -z "$hz1" ]; then
+    echo NA
+    return
+  fi
+  awk -v a="$tick0" -v b="$tick1" -v hz="$hz1" -v t0="$up0" -v t1="$up1" '
+    BEGIN {
+      dt=t1-t0
+      if(dt>0 && hz>0) printf "%.6f",(b-a)/hz/dt
+      else print "NA"
+    }
+  '
+}
+
+recorded_host_core_budget() {
+  local config="$1"
+  awk -F, -v want="$config" '
+    NR>1 && $2==want {
+      if($1!=latest) {
+        delete cores
+        latest=$1
+      }
+      if($1==latest && ($3=="client_app" || $3=="server_app"))
+        cores[$5]=1
+    }
+    END {print length(cores)+0}
+  ' "$OUT/core_budget.csv"
 }
 
 start_perf() {
@@ -671,9 +1079,9 @@ classify_open_result() {
   awk -v x="$achieved_ratio" -v lo="$MIN_ACHIEVED_RATIO" \
     'BEGIN{exit !(x>=lo)}' ||
     { clean=0; reasons="${reasons:+$reasons+}achieved"; }
-  awk -v x="$drop_ratio" -v hi="$MAX_GENERATOR_DROP_RATIO" \
+  awk -v x="$drop_ratio" -v hi="$MAX_ADMISSION_DROP_RATIO" \
     'BEGIN{exit !(x<=hi)}' ||
-    { clean=0; reasons="${reasons:+$reasons+}generator_drop"; }
+    { clean=0; reasons="${reasons:+$reasons+}admission_drop"; }
   awk -v x="$schedule_ratio" -v lo="$MIN_SCHEDULE_RATIO" -v hi="$MAX_SCHEDULE_RATIO" \
     'BEGIN{exit !(x>=lo && x<=hi)}' ||
     { clean=0; reasons="${reasons:+$reasons+}scheduler"; }
@@ -688,7 +1096,7 @@ classify_open_result() {
 record_failed_attempt() {
   local run_id="$1" phase="$2" config="$3" payload="$4" offered="$5"
   local reason="$6" raw_result="$7" output="$OUT/failed_attempts.csv"
-  local header="observed_utc,run_id,phase,config,payload_bytes,offered_rps,reason,raw_result"
+  local header="observed_utc,run_id,phase,config,frame_bytes,offered_rps,reason,raw_result"
   if [ -s "$output" ]; then
     [ "$(head -n 1 "$output")" = "$header" ] ||
       die "failed_attempts.csv schema differs from this collector version"
@@ -699,23 +1107,71 @@ record_failed_attempt() {
     "$payload" "$offered" "$reason" "$raw_result" >>"$output"
 }
 
+preserve_failed_run_artifacts() {
+  local run_id="$1" attempt="$2"
+  local failed_dir="$RAW/failed/${run_id}-attempt${attempt}"
+  local path
+  mkdir -p "$failed_dir"
+  for path in \
+    "$RAW/$run_id.result.txt" \
+    "$MPSTAT_DIR/$run_id.txt" \
+    "$SNAP_DIR/$run_id.cgroup.before.csv" \
+    "$SNAP_DIR/$run_id.cgroup.after.csv" \
+    "$SNAP_DIR/$run_id.proc.before.csv" \
+    "$SNAP_DIR/$run_id.proc.after.csv"; do
+    [ ! -e "$path" ] || mv "$path" "$failed_dir/"
+  done
+  printf '%s\n' "$failed_dir/$(basename "$RAW/$run_id.result.txt")"
+}
+
 scout_one() {
   local stage="$1" seq="$2" config="$3" payload="$4" offered="$5"
   local duration="$6" visit="$7"
+  local body
+  body=$(frame_body "$payload")
   local run_id result quality clean achieved_ratio schedule_ratio drop_ratio reason
-  local attempt attempt_raw attempt_reason
+  local attempt attempt_raw attempt_reason before_proc after_proc
+  local host_t0 host_t1 host_dt core_client core_server host_core_budget
+  local client_busy server_busy host_busy dpu0 dpu1 dpu_cores tx_grow_waits
   local raw_base="$RAW/scout-${payload}-${config}-${stage}${seq}-v${visit}.result"
   local raw_result
   run_id="scout-${payload}-${config}-${stage}${seq}-v${visit}"
   if completed "$SCOUT" "$run_id"; then return; fi
   set_config "$config"
+  resolve_pids
+  validate_resolved_pinning "$config" "$run_id"
+  core_client="$PIN_CLIENT_CORE"
+  core_server="$PIN_SERVER_CORE"
+  host_core_budget=$(recorded_host_core_budget "$config")
   for attempt in 1 2; do
     attempt_raw="${raw_base}.attempt${attempt}.txt"
+    before_proc="$SNAP_DIR/$run_id-attempt$attempt.proc.before.csv"
+    after_proc="$SNAP_DIR/$run_id-attempt$attempt.proc.after.csv"
+    dpu0=""; dpu1=""
+    if [ "$stage" != pilot ] && is_dpu_config "$config"; then
+      dpu0=$(dpu_snapshot || true)
+    fi
+    host_t0=$(date +%s.%N)
+    snapshot_proc "$before_proc" "$core_client" "$core_server"
     result=$(run_control "$CLIENT_APP" \
-      "OPEN $payload $REPLY $THREADS $duration $WARMUP $offered $ARRIVAL" "$duration")
+      "OPEN $body $body $THREADS $duration $WARMUP $offered $ARRIVAL" "$duration")
+    snapshot_proc "$after_proc" "$core_client" "$core_server"
+    host_t1=$(date +%s.%N)
+    if [ "$stage" != pilot ] && is_dpu_config "$config"; then
+      dpu1=$(dpu_snapshot || true)
+    fi
+    host_dt=$(awk -v a="$host_t0" -v b="$host_t1" 'BEGIN{printf "%.9f",b-a}')
+    client_busy=$(proc_core_busy "$core_client" "$before_proc" "$after_proc" "$host_dt")
+    server_busy=$(proc_core_busy "$core_server" "$before_proc" "$after_proc" "$host_dt")
+    validate_core_busy_sample "$run_id-attempt$attempt" "$client_busy" "$server_busy"
+    host_busy=$(awk -v a="$client_busy" -v b="$server_busy" '
+      BEGIN{if(a=="NA" || b=="NA")print "NA";else printf "%.6f",a+b}
+    ')
+    dpu_cores=$(dpu_delta_cores "$dpu0" "$dpu1")
     printf '%s\n' "$result" >"$attempt_raw"
     raw_result="$attempt_raw"
-    if [[ "$result" == OK* ]] && native_backend_ok "$config" "$result"; then
+    if [[ "$result" == OK* ]] && frame_result_ok "$result" "$payload" &&
+       native_backend_ok "$config" "$result"; then
       break
     fi
     attempt_reason=runtime_error
@@ -729,6 +1185,8 @@ scout_one() {
     die "$run_id failed twice at runtime; see $OUT/failed_attempts.csv"
   quality=$(classify_open_result "$result" "$offered" "$duration")
   IFS=, read -r clean achieved_ratio schedule_ratio drop_ratio reason <<<"$quality"
+  tx_grow_waits=$(field "$result" waits)
+  tx_grow_waits="${tx_grow_waits:-NA}"
   csv_row "$run_id" "$stage" "$seq" "$config" "$payload" "$offered" \
     "$duration" \
     "$(awk -v m="$(field "$result" mrps)" 'BEGIN{printf "%.3f",m*1e6}')" \
@@ -736,13 +1194,20 @@ scout_one() {
     "$(field "$result" scheduled)" "$(field "$result" drops)" \
     "$(field "$result" pending)" "$(field "$result" fail)" \
     "$(field "$result" overflow)" "$(field "$result" reorder)" \
-    "$achieved_ratio" "$schedule_ratio" "$drop_ratio" "$clean" "$reason" \
+    "$achieved_ratio" "$schedule_ratio" "$drop_ratio" \
+    "$client_busy" "$server_busy" "$host_busy" "$host_core_budget" "$dpu_cores" \
+    "$tx_grow_waits" \
+    "$clean" "$reason" \
     "$raw_result" >>"$SCOUT"
-  log "$run_id offered=$offered clean=$clean reason=$reason"
+  log "$run_id offered=$offered host_busy=$host_busy dpu=$dpu_cores clean=$clean reason=$reason"
 }
 
 scout_clean() {
-  awk -F, -v id="$1" '$1==id{v=$20} END{print v}' "$SCOUT"
+  awk -F, -v id="$1" '
+    NR==1{for(i=1;i<=NF;i++)h[$i]=i;next}
+    $h["run_id"]==id{v=$h["clean"]}
+    END{print v}
+  ' "$SCOUT"
 }
 
 SCOUT_DECISION=""
@@ -794,18 +1259,23 @@ pilot_point() {
 }
 
 recover_config() {
-  local config="$1" payload="$2" result quality clean recovery_rate
+  local config="$1" payload="$2" result quality clean recovery_rate body
+  body=$(frame_body "$payload")
   recovery_rate="$SCOUT_START_RPS"
   set_config "$config"
   result=$(run_control "$CLIENT_APP" \
-    "OPEN $payload $REPLY $THREADS $PILOT_DUR $WARMUP $recovery_rate $ARRIVAL" "$PILOT_DUR")
+    "OPEN $body $body $THREADS $PILOT_DUR $WARMUP $recovery_rate $ARRIVAL" "$PILOT_DUR")
   quality=$(classify_open_result "$result" "$recovery_rate" "$PILOT_DUR")
   IFS=, read -r clean _ <<<"$quality"
-  if [ "$clean" = 1 ] && native_backend_ok "$config" "$result"; then
+  if [ "$clean" = 1 ] && frame_result_ok "$result" "$payload" &&
+     native_backend_ok "$config" "$result"; then
     log "recovery PASS: $config/$payload at $recovery_rate rps"
     return
   fi
   warn "recovery failed for $config/$payload; forcing a canonical full redeploy"
+  RECOVERY_REDEPLOYS=$((RECOVERY_REDEPLOYS + 1))
+  [ "$RECOVERY_REDEPLOYS" -le "$MAX_RECOVERY_REDEPLOYS" ] ||
+    die "canonical recovery redeploy limit exceeded: $RECOVERY_REDEPLOYS > $MAX_RECOVERY_REDEPLOYS"
   printf '%s config=%s payload=%s result=%q\n' \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$config" "$payload" "$result" \
     >>"$OUT/recovery.log"
@@ -817,12 +1287,38 @@ recover_config() {
   smoke_all
   verify_single_backends
   record_and_validate_core_budget
-  die "recovery required a full redeploy; this output generation is closed. Restart with a new --out directory"
+  kubectl get pods -n "$NS" -o wide >"$OUT/pods.txt"
+  kubectl get deployments -n "$NS" -o yaml >"$OUT/deployments.yaml"
+  printf 'recovery_redeploy_%d=%s config=%s payload=%s\n' \
+    "$RECOVERY_REDEPLOYS" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    "$config" "$payload" >>"$META"
+  log "canonical recovery redeploy PASS: generation=$RECOVERY_REDEPLOYS/$MAX_RECOVERY_REDEPLOYS"
+}
+
+scout_metric_at() {
+  local config="$1" payload="$2" offered="$3" metric="$4"
+  awk -F, -v c="$config" -v p="$payload" -v r="$offered" -v metric="$metric" '
+    NR==1 {for(i=1;i<=NF;i++)h[$i]=i; next}
+    $h["stage"]!="pilot" && $h["config"]==c &&
+      $h["frame_bytes"]==p && $h["offered_rps"]==r {
+        value=$h[metric]
+        if(value!="" && value!="NA") print value
+      }
+  ' "$SCOUT" | sort -n | awk '
+    {v[++n]=$1}
+    END {
+      if(!n) {print "NA"; exit}
+      if(n%2) printf "%.6f",v[(n+1)/2]
+      else printf "%.6f",(v[n/2]+v[n/2+1])/2
+    }
+  '
 }
 
 discover_knee() {
   local config="$1" payload="$2" rate cap step clean idx candidate
   local good=0 bad=0 mid status=bracketed
+  local good_client good_server bad_client bad_server host_budget core_saturated
+  local good_dpu bad_dpu good_waits bad_waits capacity_signal
   local ramp_rates=()
   if awk -F, -v c="$config" -v p="$payload" \
     'NR>1 && $1==c && $2==p{found=1} END{exit !found}' "$KNEES"; then
@@ -831,7 +1327,7 @@ discover_knee() {
   cap=$(awk -v hard="$SCOUT_MAX_RPS" -v gbps="$SCOUT_MAX_GBPS" -v p="$payload" '
     BEGIN {
       wire=gbps*1e9/(8*p)
-      x=(wire<hard?wire:hard)
+      x=(hard>0 && hard<wire ? hard : wire)
       printf "%.0f",x
     }')
   rate="$SCOUT_START_RPS"
@@ -878,9 +1374,18 @@ discover_knee() {
   done
   [ "$good" -gt 0 ] ||
     die "no long-window clean lower bound for $config/$payload"
+  good_client=$(scout_metric_at "$config" "$payload" "$good" client_busy_cores)
+  good_server=$(scout_metric_at "$config" "$payload" "$good" server_busy_cores)
+  good_dpu=$(scout_metric_at "$config" "$payload" "$good" dpu_arm_cores)
+  good_waits=$(scout_metric_at "$config" "$payload" "$good" tx_grow_waits)
+  host_budget=$(recorded_host_core_budget "$config")
   if [ "$bad" -eq 0 ]; then
+    core_saturated=$(core_saturation_vote "$good_client" "$good_server" NA NA)
     status=right_censored
-    csv_row "$config" "$payload" "$good" NA NA "$status" "$SCOUT_DUR" >>"$KNEES"
+    csv_row "$config" "$payload" "$good" NA NA "$status" "$SCOUT_DUR" \
+      "$good_client" "$good_server" NA NA "$host_budget" "$core_saturated" \
+      "$CORE_SATURATION_THRESHOLD" "$good_dpu" NA "$good_waits" NA \
+      search_cap >>"$KNEES"
     warn "$config/$payload stayed clean through the pilot search at $good rps"
     return
   fi
@@ -896,22 +1401,52 @@ discover_knee() {
       bad="$mid"
     fi
   done
+  good_client=$(scout_metric_at "$config" "$payload" "$good" client_busy_cores)
+  good_server=$(scout_metric_at "$config" "$payload" "$good" server_busy_cores)
+  good_dpu=$(scout_metric_at "$config" "$payload" "$good" dpu_arm_cores)
+  good_waits=$(scout_metric_at "$config" "$payload" "$good" tx_grow_waits)
+  bad_client=$(scout_metric_at "$config" "$payload" "$bad" client_busy_cores)
+  bad_server=$(scout_metric_at "$config" "$payload" "$bad" server_busy_cores)
+  bad_dpu=$(scout_metric_at "$config" "$payload" "$bad" dpu_arm_cores)
+  bad_waits=$(scout_metric_at "$config" "$payload" "$bad" tx_grow_waits)
+  core_saturated=$(core_saturation_vote \
+    "$good_client" "$good_server" "$bad_client" "$bad_server")
+  capacity_signal=sla_or_admission
+  [ "$core_saturated" != 1 ] || capacity_signal=host_core
+  if [ "$core_saturated" != 1 ] &&
+     awk -v x="$bad_waits" 'BEGIN{exit !(x!="NA" && x>0)}'; then
+    capacity_signal=dmesh_tx_backpressure
+  fi
   csv_row "$config" "$payload" "$good" "$bad" \
     "$(awk -v a="$good" -v b="$bad" 'BEGIN{printf "%.6f",b/a}')" "$status" \
-    "$SCOUT_DUR" >>"$KNEES"
+    "$SCOUT_DUR" "$good_client" "$good_server" "$bad_client" "$bad_server" \
+    "$host_budget" "$core_saturated" "$CORE_SATURATION_THRESHOLD" \
+    "$good_dpu" "$bad_dpu" \
+    "$good_waits" "$bad_waits" "$capacity_signal" >>"$KNEES"
   log "knee $config/$payload clean=$good first_bad=$bad bracket=$(awk -v a="$good" -v b="$bad" 'BEGIN{printf "%.3fx",b/a}')"
 }
 
+common_anchor() {
+  local payload="$1" entry
+  for entry in $COMMON_ANCHOR_RPS; do
+    [ "${entry%%:*}" = "$payload" ] || continue
+    printf '%s\n' "${entry##*:}"
+    return
+  done
+}
+
 build_rate_plan() {
-  local tmp="$RATES.tmp.$$" payload config min_knee knee factor rate idx source
+  local tmp="$RATES.tmp.$$" payload config min_knee anchor knee factor rate idx source
   local values=()
-  echo "payload_bytes,config,rate_index,offered_rps,source,min_knee_rps,config_knee_rps" >"$tmp"
-  for payload in $PAYLOADS; do
+  echo "frame_bytes,config,rate_index,offered_rps,source,min_knee_rps,config_knee_rps" >"$tmp"
+  for payload in $FRAME_SIZES; do
     min_knee=$(awk -F, -v p="$payload" -v want="${#CONFIGS[@]}" '
       NR>1 && $2==p{if(!n || $3<min)min=$3;n++}
       END{if(n==want)print min}' "$KNEES")
     [ -n "$min_knee" ] ||
       die "need ${#CONFIGS[@]} discovered knees for payload=$payload"
+    anchor=$(common_anchor "$payload")
+    [ -z "$anchor" ] || min_knee="$anchor"
     for config in "${CONFIGS[@]}"; do
       knee=$(awk -F, -v p="$payload" -v c="$config" \
         'NR>1 && $1==c && $2==p{print $3}' "$KNEES")
@@ -927,13 +1462,27 @@ build_rate_plan() {
           'BEGIN{r=int(x*f+.5);if(r<1)r=1;print r}')
         values+=("$rate:knee")
       done
+      for factor in $CONFIG_SPAN_FACTORS; do
+        rate=$(awk -v x="$knee" -v f="$factor" \
+          'BEGIN{r=int(x*f+.5);if(r<1)r=1;print r}')
+        values+=("$rate:span")
+      done
       idx=0
       while IFS=: read -r rate source; do
         idx=$((idx + 1))
         csv_row "$payload" "$config" "$idx" "$rate" "$source" "$min_knee" "$knee" >>"$tmp"
       done < <(printf '%s\n' "${values[@]}" |
-        awk -F: '{if(!seen[$1]++){rate[$1]=$1;source[$1]=$2}else if(source[$1]!=$2)source[$1]="common+knee"}
-                   END{for(r in rate)print rate[r]":"source[r]}' | sort -t: -k1,1n)
+        awk -F: '
+          {
+            rate[$1]=$1
+            key=$1 SUBSEP $2
+            if(!seen[key]++) {
+              if(source[$1]=="") source[$1]=$2
+              else source[$1]=source[$1]"+"$2
+            }
+          }
+          END{for(r in rate)print rate[r]":"source[r]}
+        ' | sort -t: -k1,1n)
     done
   done
   mv "$tmp" "$RATES"
@@ -942,10 +1491,13 @@ build_rate_plan() {
 
 measure_one() {
   local phase="$1" config="$2" payload="$3" rate_index="$4" offered="$5" rep="$6"
+  local body
+  if [ "$phase" = idle ]; then body=0; else body=$(frame_body "$payload"); fi
   local run_id before_cg after_cg before_proc after_proc raw_result mpstat_file
   local dpu0="" dpu1="" result host_t0 host_t1 host_dt core_client core_server core_csv
   local status=ok
 
+  MEASURE_WROTE=0
   run_id="${phase}-${payload}-q${rate_index}-${config}-r${rep}"
   if completed "$RESULTS" "$run_id"; then
     log "skip completed $run_id"
@@ -953,10 +1505,9 @@ measure_one() {
   fi
   set_config "$config"
   resolve_pids
-  core_client=$(allowed_core "$CLIENT_APP_PID")
-  core_server=$(allowed_core "$SERVER_APP_PID")
-  [[ "$core_client" =~ ^[0-9]+$ ]] && [[ "$core_server" =~ ^[0-9]+$ ]] ||
-    die "$run_id is not single-core pinned: client=$core_client server=$core_server"
+  validate_resolved_pinning "$config" "$run_id"
+  core_client="$PIN_CLIENT_CORE"
+  core_server="$PIN_SERVER_CORE"
   core_csv="$core_client"
   [ "$core_server" = "$core_client" ] || core_csv="$core_csv,$core_server"
 
@@ -970,20 +1521,20 @@ measure_one() {
   mpstat -P ALL 1 >"$mpstat_file" 2>&1 &
   MPSTAT_PID=$!
   is_dpu_config "$config" && dpu0=$(dpu_snapshot)
+  host_t0=$(date +%s.%N)
   snapshot_cgroups "$before_cg"
   snapshot_proc "$before_proc" "$core_client" "$core_server"
-  host_t0=$(date +%s.%N)
 
   if [ "$phase" = idle ]; then
     sleep "$IDLE_DUR"
-    result="OK rcnt=0 scheduled=0 pending=0 fail=0 mrps=0 gbps=0 p50=0 p95=0 p99=0 p999=0 p9999=0 avg=0 min=0 max=0 durs=$IDLE_DUR offered_mrps=0 drops=0 overflow=0 reorder=0 mode=idle arr=none"
+    result="OK rcnt=0 scheduled=0 pending=0 fail=0 mrps=0 gbps=0 req_gbps=0 resp_gbps=0 p50=0 p95=0 p99=0 p999=0 p9999=0 avg=0 min=0 max=0 durs=$IDLE_DUR offered_mrps=0 drops=0 overflow=0 reorder=0 mode=idle arr=none"
   else
     result=$(run_control "$CLIENT_APP" \
-      "OPEN $payload $REPLY $THREADS $DUR $WARMUP $offered $ARRIVAL" "$DUR")
+      "OPEN $body $body $THREADS $DUR $WARMUP $offered $ARRIVAL" "$DUR")
   fi
-  host_t1=$(date +%s.%N)
   snapshot_proc "$after_proc" "$core_client" "$core_server"
   snapshot_cgroups "$after_cg"
+  host_t1=$(date +%s.%N)
   is_dpu_config "$config" && dpu1=$(dpu_snapshot)
   printf '%s\n' "$result" >"$raw_result"
 
@@ -1022,6 +1573,7 @@ measure_one() {
 
   local p_user p_nice p_system p_irq p_soft p_steal p_busy
   local host_user host_system host_irq host_soft host_busy system_soft
+  local client_core_busy server_core_busy
   p_user=$(proc_delta selected 2 "$before_proc" "$after_proc")
   p_nice=$(proc_delta selected 3 "$before_proc" "$after_proc")
   p_system=$(proc_delta selected 4 "$before_proc" "$after_proc")
@@ -1034,6 +1586,9 @@ measure_one() {
   host_irq=$(to_cores_ticks "$p_irq" "$host_dt")
   host_soft=$(to_cores_ticks "$p_soft" "$host_dt")
   host_busy=$(to_cores_ticks "$p_busy" "$host_dt")
+  client_core_busy=$(proc_core_busy "$core_client" "$before_proc" "$after_proc" "$host_dt")
+  server_core_busy=$(proc_core_busy "$core_server" "$before_proc" "$after_proc" "$host_dt")
+  validate_core_busy_sample "$run_id" "$client_core_busy" "$server_core_busy"
   system_soft=$(to_cores_ticks "$(proc_delta all 8 "$before_proc" "$after_proc")" "$host_dt")
 
   local dpu_cores=NA dpu_dt
@@ -1051,16 +1606,22 @@ measure_one() {
     status=dpu_snapshot_error
   fi
 
-  local ok scheduled pending fail drops overflow reorder reported_offered achieved gbps
+  local ok scheduled pending fail drops overflow reorder reported_offered achieved
+  local gbps request_gbps response_gbps
+  local tx_grow_waits
   local p50 p95 p99 p999 p9999 avg min max measured_dur
   if [[ "$result" == OK* ]]; then
     ok=$(field "$result" rcnt); scheduled=$(field "$result" scheduled)
     pending=$(field "$result" pending); fail=$(field "$result" fail)
     drops=$(field "$result" drops); overflow=$(field "$result" overflow)
     reorder=$(field "$result" reorder)
+    tx_grow_waits=$(field "$result" waits)
+    tx_grow_waits="${tx_grow_waits:-NA}"
     reported_offered=$(awk -v m="$(field "$result" offered_mrps)" 'BEGIN{printf "%.0f",m*1e6}')
     achieved=$(awk -v m="$(field "$result" mrps)" 'BEGIN{printf "%.3f",m*1e6}')
     gbps=$(field "$result" gbps)
+    request_gbps=$(field "$result" req_gbps)
+    response_gbps=$(field "$result" resp_gbps)
     p50=$(field "$result" p50); p95=$(field "$result" p95); p99=$(field "$result" p99)
     p999=$(field "$result" p999); p9999=$(field "$result" p9999)
     avg=$(field "$result" avg); min=$(field "$result" min); max=$(field "$result" max)
@@ -1068,41 +1629,56 @@ measure_one() {
     [ "${fail:-1}" = 0 ] || status=fail
     [ "${reorder:-1}" = 0 ] || status=reorder
     if [ "$phase" != idle ]; then
+      frame_result_ok "$result" "$payload" || status=frame_size_mismatch
       native_backend_ok "$config" "$result" || status=backend_fanout
     fi
   else
     ok=NA; scheduled=NA; pending=NA; fail=1; drops=NA; overflow=NA; reorder=NA
-    reported_offered=NA; achieved=NA; gbps=NA
+    tx_grow_waits=NA
+    reported_offered=NA; achieved=NA; gbps=NA; request_gbps=NA; response_gbps=NA
     p50=NA; p95=NA; p99=NA; p999=NA; p9999=NA
     avg=NA; min=NA; max=NA; measured_dur="$host_dt"
     status=runtime_error
   fi
   local perf_data=NA
   local arrival_value="$ARRIVAL"
-  local sla_clean=NA achieved_ratio=NA schedule_ratio=NA generator_drop_ratio=NA
+  local sla_clean=NA achieved_ratio=NA schedule_ratio=NA admission_drop_ratio=NA
   local clean_reason=idle quality
   [ "$phase" != idle ] || arrival_value=none
   if [ "$phase" = load ]; then
     quality=$(classify_open_result "$result" "$offered" "$DUR")
-    IFS=, read -r sla_clean achieved_ratio schedule_ratio generator_drop_ratio clean_reason \
+    IFS=, read -r sla_clean achieved_ratio schedule_ratio admission_drop_ratio clean_reason \
       <<<"$quality"
   fi
   if [ "$status" != ok ]; then
+    local retry_count preserved_raw
+    retry_count=$(( ${RUN_RETRY_COUNTS[$run_id]:-0} + 1 ))
+    RUN_RETRY_COUNTS[$run_id]="$retry_count"
+    preserved_raw=$(preserve_failed_run_artifacts "$run_id" "$retry_count")
     record_failed_attempt "$run_id" "$phase" "$config" "$payload" "$offered" \
-      "$status" "$raw_result"
-    die "$run_id failed before CSV commit: status=$status; raw data and snapshots were preserved"
+      "$status" "$preserved_raw"
+    [ "$retry_count" -le "$MAX_RUN_RETRIES" ] ||
+      die "$run_id exceeded MAX_RUN_RETRIES=$MAX_RUN_RETRIES; failed attempts are preserved"
+    warn "$run_id runtime status=$status; recovering and retrying ($retry_count/$MAX_RUN_RETRIES)"
+    recover_config "$config" "$payload"
+    measure_one "$phase" "$config" "$payload" "$rate_index" "$offered" "$rep"
+    return
   fi
-  csv_row "$run_id" "$phase" "$config" "$payload" "$REPLY" "$THREADS" \
+  csv_row "$run_id" "$phase" "$config" "$payload" "$body" "$body" "$THREADS" \
     "$arrival_value" "$rate_index" "$offered" "$reported_offered" "$rep" \
-    "$measured_dur" "$achieved" "$gbps" "$p50" "$p95" "$p99" "$p999" "$p9999" \
+    "$measured_dur" "$achieved" "$gbps" "$request_gbps" "$response_gbps" \
+    "$p50" "$p95" "$p99" "$p999" "$p9999" \
     "$avg" "$min" "$max" "$ok" "$scheduled" "$pending" "$fail" "$drops" "$overflow" "$reorder" \
     "$ca_c" "$ca_usr_c" "$ca_sys_c" "$sa_c" "$sa_usr_c" "$sa_sys_c" \
     "$cs_c" "$cs_usr_c" "$cs_sys_c" "$ss_c" "$ss_usr_c" "$ss_sys_c" \
-    "$host_cg" "$host_cg_user" "$host_cg_system" "$host_busy" "$host_user" \
+    "$host_cg" "$host_cg_user" "$host_cg_system" "$host_busy" \
+    "$client_core_busy" "$server_core_busy" "$host_user" \
     "$host_system" "$host_irq" "$host_soft" "$system_soft" "$dpu_cores" \
+    "$tx_grow_waits" \
     "$throttled_count" "$throttled_seconds" "${core_client};${core_server}" \
     "$mpstat_file" "$perf_data" "$status" "$sla_clean" "$achieved_ratio" \
-    "$schedule_ratio" "$generator_drop_ratio" "$clean_reason" >>"$RESULTS"
+    "$schedule_ratio" "$admission_drop_ratio" "$clean_reason" >>"$RESULTS"
+  MEASURE_WROTE=1
   log "$run_id offered=$offered achieved=$achieved p99=$p99 host_cgroup=$host_cg host_busy=$host_busy dpu=$dpu_cores status=$status clean=$sla_clean reason=$clean_reason"
 }
 
@@ -1113,10 +1689,358 @@ result_sla_clean() {
     END{print v}' "$RESULTS"
 }
 
+append_target_rate() {
+  local config="$1" rate_index="$2" offered="$3" source="$4"
+  local existing min_knee anchor knee
+  existing=$(awk -F, -v p="$TARGET_FRAME" -v c="$config" -v i="$rate_index" '
+    NR>1 && $1==p && $2==c && $3==i {print $4","$5}
+  ' "$RATES")
+  if [ -n "$existing" ]; then
+    [ "$existing" = "$offered,$source" ] ||
+      die "target rate conflict: $config/$TARGET_FRAME/q$rate_index existing=$existing requested=$offered,$source"
+    return
+  fi
+  min_knee=$(awk -F, -v p="$TARGET_FRAME" -v want="${#CONFIGS[@]}" '
+    NR>1 && $2==p {if(!n || $3<min)min=$3;n++}
+    END {if(n==want)print min}
+  ' "$KNEES")
+  knee=$(awk -F, -v p="$TARGET_FRAME" -v c="$config" '
+    NR>1 && $1==c && $2==p {print $3}
+  ' "$KNEES")
+  [ -n "$min_knee" ] && [ -n "$knee" ] ||
+    die "missing knee metadata for target rate $config/$TARGET_FRAME"
+  anchor=$(common_anchor "$TARGET_FRAME")
+  [ -z "$anchor" ] || min_knee="$anchor"
+  csv_row "$TARGET_FRAME" "$config" "$rate_index" "$offered" "$source" \
+    "$min_knee" "$knee" >>"$RATES"
+}
+
+restore_target_rates() {
+  [ -s "$RESULTS" ] || return
+  while IFS=, read -r frame config rate_index offered; do
+    local source=target-extension
+    [ "$rate_index" -ge 200 ] || source=target-confirm
+    append_target_rate "$config" "$rate_index" "$offered" "$source"
+  done < <(awk -F, -v p="$TARGET_FRAME" '
+    NR==1 {
+      for(i=1;i<=NF;i++)h[$i]=i
+      next
+    }
+    $h["phase"]=="load" &&
+      $h["frame_bytes"]==p &&
+      $h["rate_index"]>=100 {
+      key=$h["config"] SUBSEP $h["rate_index"]
+      if(!seen[key]++)
+        print $h["frame_bytes"]","$h["config"]","$h["rate_index"]","$h["offered_rps"]
+    }
+  ' "$RESULTS")
+}
+
+target_measure_one() {
+  local config="$1" rate_index="$2" offered="$3" rep="$4" run_id
+  measure_one load "$config" "$TARGET_FRAME" "$rate_index" "$offered" "$rep"
+  run_id="load-${TARGET_FRAME}-q${rate_index}-${config}-r${rep}"
+  [ "$MEASURE_WROTE" = 0 ] ||
+    [ "$(result_sla_clean "$run_id")" = 1 ] ||
+    recover_config "$config" "$TARGET_FRAME"
+}
+
+target_point_vote() {
+  local config="$1" rate_index="$2"
+  awk -F, -v p="$TARGET_FRAME" -v c="$config" -v q="$rate_index" '
+    NR==1 {
+      for(i=1;i<=NF;i++)h[$i]=i
+      next
+    }
+    $h["phase"]=="load" &&
+      $h["frame_bytes"]==p &&
+      $h["config"]==c &&
+      $h["rate_index"]==q {
+      total++
+      if($h["validation_status"]!="ok") invalid++
+      if($h["sla_clean"]==1) clean++
+    }
+    END {print clean+0","total+0","invalid+0}
+  ' "$RESULTS"
+}
+
+verify_target_point() {
+  local config="$1" rate_index="$2" clean total invalid
+  IFS=, read -r clean total invalid <<<"$(target_point_vote "$config" "$rate_index")"
+  [ "$total" -eq "$REPS" ] && [ "$invalid" -eq 0 ] ||
+    die "incomplete target point: $config/$TARGET_FRAME/q$rate_index rows=$total invalid=$invalid"
+  [ "$clean" -ge 2 ]
+}
+
+target_verify_envoy() {
+  local rates=() offered rate_index rep idx config i
+  local configs=()
+  for config in envoy-permissive envoy-strict; do
+    config_selected "$config" && configs+=("$config")
+  done
+  [ "${#configs[@]}" -gt 0 ] || return
+
+  rate_index=100
+  for offered in $TARGET_CONFIRM_RATES; do
+    rate_index=$((rate_index + 1))
+    rates+=("$offered")
+    for config in "${configs[@]}"; do
+      append_target_rate "$config" "$rate_index" "$offered" target-confirm
+    done
+  done
+
+  log "target verification: Envoy cross-rates, $REPS x ${DUR}s"
+  for rep in $(seq 1 "$REPS"); do
+    if ((rep % 2 == 1)); then
+      mapfile -t TARGET_INDEXES < <(seq 0 $((${#rates[@]} - 1)))
+    else
+      mapfile -t TARGET_INDEXES < <(seq $((${#rates[@]} - 1)) -1 0)
+    fi
+    for idx in "${TARGET_INDEXES[@]}"; do
+      rate_index=$((101 + idx))
+      offered="${rates[$idx]}"
+      if (((rep + idx) % 2 == 0)); then
+        for config in "${configs[@]}"; do
+          target_measure_one "$config" "$rate_index" "$offered" "$rep"
+        done
+      else
+        for ((i=${#configs[@]}-1; i>=0; i--)); do
+          target_measure_one "${configs[$i]}" "$rate_index" "$offered" "$rep"
+        done
+      fi
+    done
+  done
+  for idx in "${!rates[@]}"; do
+    rate_index=$((101 + idx))
+    for config in "${configs[@]}"; do
+      verify_target_point "$config" "$rate_index" || true
+    done
+  done
+}
+
+complete_restored_target_extensions() {
+  local config rate_index offered rep
+  while IFS=, read -r config rate_index offered; do
+    for rep in $(seq 1 "$REPS"); do
+      target_measure_one "$config" "$rate_index" "$offered" "$rep"
+    done
+    verify_target_point "$config" "$rate_index" || true
+  done < <(awk -F, -v p="$TARGET_FRAME" '
+    NR>1 && $1==p && $3>=200 {print $2","$3","$4}
+  ' "$RATES" | sort -t, -k2,2n -k1,1)
+}
+
+target_close_envoy_ties() {
+  local offered config idx rate_index clean total invalid rep
+  local tie_configs=() tie_offered=() tie_indexes=()
+  idx=0
+  for offered in $TARGET_CONFIRM_RATES; do
+    idx=$((idx + 1))
+    for config in envoy-permissive envoy-strict; do
+      config_selected "$config" || continue
+      IFS=, read -r clean total invalid < <(awk -F, -v p="$TARGET_FRAME" \
+        -v c="$config" -v r="$offered" '
+        NR==1 {
+          for(i=1;i<=NF;i++)h[$i]=i
+          next
+        }
+        $h["phase"]=="load" &&
+          $h["frame_bytes"]==p &&
+          $h["config"]==c &&
+          $h["offered_rps"]==r {
+          total++
+          if($h["validation_status"]!="ok") invalid++
+          if($h["sla_clean"]==1) clean++
+        }
+        END {print clean+0","total+0","invalid+0}
+      ' "$RESULTS")
+      [ "$invalid" -eq 0 ] ||
+        die "invalid Envoy target rows: $config/$offered invalid=$invalid"
+      if [ "$total" -gt 0 ] &&
+         [ $((total % 2)) -eq 0 ] &&
+         [ "$clean" -eq $((total / 2)) ]; then
+        rate_index=$((110 + idx))
+        append_target_rate "$config" "$rate_index" "$offered" target-confirm
+        tie_configs+=("$config")
+        tie_offered+=("$offered")
+        tie_indexes+=("$rate_index")
+      fi
+    done
+  done
+  [ "${#tie_configs[@]}" -gt 0 ] || return
+
+  log "target verification: resolving ${#tie_configs[@]} Envoy tied boundary points"
+  for rep in $(seq 1 "$REPS"); do
+    if ((rep % 2 == 1)); then
+      for idx in "${!tie_configs[@]}"; do
+        target_measure_one "${tie_configs[$idx]}" "${tie_indexes[$idx]}" \
+          "${tie_offered[$idx]}" "$rep"
+      done
+    else
+      for ((idx=${#tie_configs[@]}-1; idx>=0; idx--)); do
+        target_measure_one "${tie_configs[$idx]}" "${tie_indexes[$idx]}" \
+          "${tie_offered[$idx]}" "$rep"
+      done
+    fi
+  done
+  for idx in "${!tie_configs[@]}"; do
+    verify_target_point "${tie_configs[$idx]}" "${tie_indexes[$idx]}" || true
+  done
+}
+
+next_target_rate_index() {
+  local config="$1"
+  awk -F, -v p="$TARGET_FRAME" -v c="$config" '
+    NR>1 && $1==p && $2==c && $3>=200 && $3>m {m=$3}
+    END {print (m ? m+1 : 201)}
+  ' "$RATES"
+}
+
+target_close_dpu_bounds() {
+  local config stable bad status ratio round rep candidate rate_index
+  local clean total invalid idx
+  local configs=()
+  declare -A GOOD=() BAD=() PHASE=() CANDIDATE=() RATE_INDEX=()
+
+  for config in dpumesh-preload dpumesh-native; do
+    config_selected "$config" || continue
+    IFS=, read -r stable bad status < <(awk -F, -v p="$TARGET_FRAME" -v c="$config" '
+      NR>1 && $1==c && $2==p {print $3","$4","$5}
+    ' "$OUT/retained_capacity.csv")
+    [ -n "${stable:-}" ] ||
+      die "no retained capacity for $config/$TARGET_FRAME"
+    configs+=("$config")
+    GOOD[$config]="$stable"
+    if [ "${bad:-NA}" = NA ]; then
+      BAD[$config]=NA
+      PHASE[$config]=expand
+    else
+      BAD[$config]="$bad"
+      ratio=$(awk -v g="$stable" -v b="$bad" 'BEGIN{printf "%.9f",b/g}')
+      if awk -v r="$ratio" -v limit="$TARGET_BRACKET_RATIO" \
+        'BEGIN{exit !(r<=limit)}'; then
+        PHASE[$config]=done
+      else
+        PHASE[$config]=refine
+      fi
+    fi
+  done
+
+  [ "${#configs[@]}" -gt 0 ] || return
+  log "target verification: closing DPUmesh $TARGET_FRAME-byte capacity bounds"
+  for round in $(seq 1 "$TARGET_MAX_ROUNDS"); do
+    local active=()
+    for config in "${configs[@]}"; do
+      [ "${PHASE[$config]}" != done ] || continue
+      if [ "${PHASE[$config]}" = expand ]; then
+        candidate=$(awk -v g="${GOOD[$config]}" -v growth="$TARGET_GROWTH" '
+          BEGIN {x=int(g*growth+.5); if(x<=g)x=g+1; print x}
+        ')
+      else
+        candidate=$(awk -v g="${GOOD[$config]}" -v b="${BAD[$config]}" '
+          BEGIN {x=int(sqrt(g*b)+.5); if(x<=g)x=g+1; if(x>=b)x=b-1; print x}
+        ')
+        if [ "$candidate" -le "${GOOD[$config]}" ] ||
+           [ "$candidate" -ge "${BAD[$config]}" ]; then
+          PHASE[$config]=done
+          continue
+        fi
+      fi
+      rate_index=$(next_target_rate_index "$config")
+      append_target_rate "$config" "$rate_index" "$candidate" target-extension
+      CANDIDATE[$config]="$candidate"
+      RATE_INDEX[$config]="$rate_index"
+      active+=("$config")
+    done
+    [ "${#active[@]}" -gt 0 ] || break
+
+    for rep in $(seq 1 "$REPS"); do
+      if ((rep % 2 == 1)); then
+        for config in "${active[@]}"; do
+          target_measure_one "$config" "${RATE_INDEX[$config]}" \
+            "${CANDIDATE[$config]}" "$rep"
+        done
+      else
+        for ((idx=${#active[@]}-1; idx>=0; idx--)); do
+          config="${active[$idx]}"
+          target_measure_one "$config" "${RATE_INDEX[$config]}" \
+            "${CANDIDATE[$config]}" "$rep"
+        done
+      fi
+    done
+
+    for config in "${active[@]}"; do
+      IFS=, read -r clean total invalid \
+        <<<"$(target_point_vote "$config" "${RATE_INDEX[$config]}")"
+      [ "$total" -eq "$REPS" ] && [ "$invalid" -eq 0 ] ||
+        die "incomplete DPU target point: $config/q${RATE_INDEX[$config]} rows=$total invalid=$invalid"
+      if [ "$clean" -ge 2 ]; then
+        GOOD[$config]="${CANDIDATE[$config]}"
+      else
+        BAD[$config]="${CANDIDATE[$config]}"
+        PHASE[$config]=refine
+      fi
+      if [ "${BAD[$config]}" != NA ]; then
+        ratio=$(awk -v g="${GOOD[$config]}" -v b="${BAD[$config]}" \
+          'BEGIN{printf "%.9f",b/g}')
+        if awk -v r="$ratio" -v limit="$TARGET_BRACKET_RATIO" \
+          'BEGIN{exit !(r<=limit)}'; then
+          PHASE[$config]=done
+        fi
+      fi
+      log "target $config clean_votes=$clean/$total good=${GOOD[$config]} bad=${BAD[$config]}"
+    done
+  done
+
+  for config in "${configs[@]}"; do
+    [ "${PHASE[$config]}" = done ] ||
+      die "target bound remained open after $TARGET_MAX_ROUNDS rounds: $config good=${GOOD[$config]} bad=${BAD[$config]}"
+  done
+}
+
+validate_target_bounds() {
+  local config stable bad status ratio
+  for config in dpumesh-preload dpumesh-native; do
+    config_selected "$config" || continue
+    IFS=, read -r stable bad status < <(awk -F, -v p="$TARGET_FRAME" -v c="$config" '
+      NR>1 && $1==c && $2==p {print $3","$4","$5}
+    ' "$OUT/retained_capacity.csv")
+    [ "$status" = bracketed ] && [ "$bad" != NA ] ||
+      die "target capacity is not bracketed: $config/$TARGET_FRAME status=$status"
+    ratio=$(awk -v g="$stable" -v b="$bad" 'BEGIN{printf "%.9f",b/g}')
+    awk -v r="$ratio" -v limit="$TARGET_BRACKET_RATIO" \
+      'BEGIN{exit !(r<=limit)}' ||
+      die "target bracket is wider than $TARGET_BRACKET_RATIO: $config ratio=$ratio"
+  done
+}
+
+run_target_verification() {
+  restore_target_rates
+  target_verify_envoy
+  complete_restored_target_extensions
+  python3 "$SUITE_DIR/analyze_saturation.py" "$OUT" \
+    --sat-threshold "$CORE_SATURATION_THRESHOLD"
+  target_close_envoy_ties
+  python3 "$SUITE_DIR/analyze_saturation.py" "$OUT" \
+    --sat-threshold "$CORE_SATURATION_THRESHOLD"
+  target_close_dpu_bounds
+  python3 "$SUITE_DIR/analyze_saturation.py" "$OUT" \
+    --sat-threshold "$CORE_SATURATION_THRESHOLD"
+  validate_target_bounds
+  if ! grep -q '^target_verification=' "$META"; then
+    echo "target_verification=frame=$TARGET_FRAME envoy_rates={$TARGET_CONFIRM_RATES} reps=$REPS duration_s=$DUR dpu_growth=$TARGET_GROWTH max_bracket_ratio=$TARGET_BRACKET_RATIO" \
+      >>"$META"
+  fi
+  if ! grep -q '^target_tie_policy=' "$META"; then
+    echo "target_tie_policy=add three runs when aggregate clean and bad votes tie at an Envoy confirmation rate" \
+      >>"$META"
+  fi
+}
+
 select_perf_points() {
-  echo "payload_bytes,config,rate_index,offered_rps,target_70pct_peak_rps" >"$PERF_POINTS"
+  echo "frame_bytes,config,rate_index,offered_rps,target_70pct_peak_rps" >"$PERF_POINTS"
   local payload config knee target candidate
-  for payload in $PAYLOADS; do
+  for payload in $FRAME_SIZES; do
     for config in "${CONFIGS[@]}"; do
       knee=$(awk -F, -v p="$payload" -v c="$config" \
         'NR>1 && $1==c && $2==p{print $3}' "$KNEES")
@@ -1124,7 +2048,7 @@ select_perf_points() {
       candidate=$(awk -F, -v p="$payload" -v c="$config" \
         -v reps="$REPS" -v target="$target" '
         NR==1 {for(i=1;i<=NF;i++)h[$i]=i; next}
-        $h["phase"]=="load" && $h["payload_bytes"]==p && $h["config"]==c {
+        $h["phase"]=="load" && $h["frame_bytes"]==p && $h["config"]==c {
           key=$h["rate_index"] SUBSEP $h["offered_rps"]
           n[key]++
           if ($h["validation_status"]!="ok" || $h["sla_clean"]!=1)
@@ -1176,57 +2100,105 @@ sync_perf_manifest_points() {
   mv "$manifest_tmp" "$PERF_MANIFEST"
 }
 
+preserve_failed_profile_artifacts() {
+  local run_id="$1" attempt="$2"
+  local destination="$PERF_DIR/failed/${run_id}-attempt${attempt}" suffix
+  mkdir -p "$destination"
+  for suffix in data report.txt perf.log; do
+    [ ! -e "$PERF_DIR/$run_id.$suffix" ] ||
+      mv "$PERF_DIR/$run_id.$suffix" "$destination/"
+  done
+  printf '%s\n' "$destination"
+}
+
+record_failed_profile() {
+  local run_id="$1" attempt="$2" status="$3" preserved="$4"
+  if [ ! -s "$PERF_FAILURES" ]; then
+    printf '%s\n' "observed_utc,run_id,attempt,status,preserved_dir" >"$PERF_FAILURES"
+  fi
+  csv_row "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$run_id" "$attempt" \
+    "$status" "$preserved" >>"$PERF_FAILURES"
+}
+
 profile_one() {
   local payload="$1" config="$2" rate_index="$3" offered="$4"
-  local run_id result status=ok achieved p99 fail drops reorder scheduled
+  local body
+  body=$(frame_body "$payload")
+  local run_id result status achieved p99 fail drops reorder scheduled
   local quality clean achieved_ratio schedule_ratio drop_ratio reason
   local core_client core_server core_csv existing_status manifest_tmp
+  local retry_count preserved
   run_id="profile-${payload}-q${rate_index}-${config}"
   existing_status=$(awk -F, -v r="$run_id" '$1==r{s=$NF} END{print s}' "$PERF_MANIFEST")
   if [ "$existing_status" = ok ]; then
     log "skip completed $run_id"
     return
   fi
+  retry_count="${PROFILE_RETRY_COUNTS[$run_id]:-0}"
   if [ -n "$existing_status" ]; then
-    warn "retrying $run_id after previous status=$existing_status"
+    retry_count=$((retry_count + 1))
+    PROFILE_RETRY_COUNTS[$run_id]="$retry_count"
+    preserved=$(preserve_failed_profile_artifacts "$run_id" "$retry_count")
+    record_failed_profile "$run_id" "$retry_count" "$existing_status" "$preserved"
+    warn "preserved $run_id status=$existing_status; retrying ($retry_count/$MAX_RUN_RETRIES)"
     manifest_tmp="$PERF_MANIFEST.retry.$$"
     awk -F, -v r="$run_id" '$1!=r' "$PERF_MANIFEST" >"$manifest_tmp"
     mv "$manifest_tmp" "$PERF_MANIFEST"
+    [ "$retry_count" -le "$MAX_RUN_RETRIES" ] ||
+      die "$run_id exceeded MAX_RUN_RETRIES=$MAX_RUN_RETRIES; failed profile attempts are preserved"
+    recover_config "$config" "$payload"
   fi
-  set_config "$config"
-  resolve_pids
-  core_client=$(allowed_core "$CLIENT_APP_PID")
-  core_server=$(allowed_core "$SERVER_APP_PID")
-  [[ "$core_client" =~ ^[0-9]+$ ]] && [[ "$core_server" =~ ^[0-9]+$ ]] ||
-    die "$run_id is not single-core pinned"
-  core_csv="$core_client"
-  [ "$core_server" = "$core_client" ] || core_csv="$core_csv,$core_server"
-  PERF_PID=0; PERF_OK=0; PERF_CORES=""; PERF_DATA_PATH=NA; PERF_REPORT_PATH=NA; PERF_PIDS=""
-  start_perf "$run_id" "$core_csv"
-  sleep 0.2
-  result=$(run_control "$CLIENT_APP" \
-    "OPEN $payload $REPLY $THREADS $DUR $WARMUP $offered $ARRIVAL" "$DUR")
-  stop_perf
+  while :; do
+    status=ok
+    set_config "$config"
+    resolve_pids
+    validate_resolved_pinning "$config" "$run_id"
+    core_client="$PIN_CLIENT_CORE"
+    core_server="$PIN_SERVER_CORE"
+    core_csv="$core_client"
+    [ "$core_server" = "$core_client" ] || core_csv="$core_csv,$core_server"
+    PERF_PID=0; PERF_OK=0; PERF_CORES=""; PERF_DATA_PATH=NA; PERF_REPORT_PATH=NA; PERF_PIDS=""
+    start_perf "$run_id" "$core_csv"
+    sleep 0.2
+    result=$(run_control "$CLIENT_APP" \
+      "OPEN $body $body $THREADS $DUR $WARMUP $offered $ARRIVAL" "$DUR")
+    stop_perf
 
-  if [[ "$result" == OK* ]]; then
-    achieved=$(awk -v m="$(field "$result" mrps)" 'BEGIN{printf "%.3f",m*1e6}')
-    p99=$(field "$result" p99); fail=$(field "$result" fail)
-    drops=$(field "$result" drops); reorder=$(field "$result" reorder)
-    scheduled=$(field "$result" scheduled)
-    quality=$(classify_open_result "$result" "$offered" "$DUR")
-    IFS=, read -r clean achieved_ratio schedule_ratio drop_ratio reason <<<"$quality"
-    [ "$clean" = 1 ] || status="profile_$reason"
-    native_backend_ok "$config" "$result" || status=backend_fanout
-  else
-    achieved=NA; p99=NA; fail=1; drops=NA; reorder=NA
-    status=runtime_error
-  fi
-  [ "$PERF_OK" = 1 ] || status=perf_error
-  csv_row "$run_id" "$config" "$payload" "$rate_index" "$offered" \
-    "$achieved" "$p99" "$fail" "$drops" "$reorder" "$PERF_CORES" "${PERF_PIDS//,/;}" \
-    "$PERF_DATA_PATH" "$PERF_REPORT_PATH" "$status" >>"$PERF_MANIFEST"
-  [ "$status" = ok ] || die "$run_id failed: status=$status result=$result"
-  log "$run_id perf replay complete: achieved=$achieved p99=$p99"
+    if [[ "$result" == OK* ]]; then
+      achieved=$(awk -v m="$(field "$result" mrps)" 'BEGIN{printf "%.3f",m*1e6}')
+      p99=$(field "$result" p99); fail=$(field "$result" fail)
+      drops=$(field "$result" drops); reorder=$(field "$result" reorder)
+      scheduled=$(field "$result" scheduled)
+      quality=$(classify_open_result "$result" "$offered" "$DUR")
+      IFS=, read -r clean achieved_ratio schedule_ratio drop_ratio reason <<<"$quality"
+      [ "$clean" = 1 ] || status="profile_$reason"
+      frame_result_ok "$result" "$payload" || status=frame_size_mismatch
+      native_backend_ok "$config" "$result" || status=backend_fanout
+    else
+      achieved=NA; p99=NA; fail=1; drops=NA; reorder=NA
+      status=runtime_error
+    fi
+    [ "$PERF_OK" = 1 ] || status=perf_error
+    csv_row "$run_id" "$config" "$payload" "$rate_index" "$offered" \
+      "$achieved" "$p99" "$fail" "$drops" "$reorder" "$PERF_CORES" "${PERF_PIDS//,/;}" \
+      "$PERF_DATA_PATH" "$PERF_REPORT_PATH" "$status" >>"$PERF_MANIFEST"
+    if [ "$status" = ok ]; then
+      log "$run_id perf replay complete: achieved=$achieved p99=$p99"
+      return
+    fi
+
+    retry_count=$((retry_count + 1))
+    PROFILE_RETRY_COUNTS[$run_id]="$retry_count"
+    preserved=$(preserve_failed_profile_artifacts "$run_id" "$retry_count")
+    record_failed_profile "$run_id" "$retry_count" "$status" "$preserved"
+    manifest_tmp="$PERF_MANIFEST.retry.$$"
+    awk -F, -v r="$run_id" '$1!=r' "$PERF_MANIFEST" >"$manifest_tmp"
+    mv "$manifest_tmp" "$PERF_MANIFEST"
+    [ "$retry_count" -le "$MAX_RUN_RETRIES" ] ||
+      die "$run_id exceeded MAX_RUN_RETRIES=$MAX_RUN_RETRIES; failed profile attempts are preserved"
+    warn "$run_id status=$status; recovering and retrying ($retry_count/$MAX_RUN_RETRIES)"
+    recover_config "$config" "$payload"
+  done
 }
 
 validate_profiles() {
@@ -1253,7 +2225,10 @@ rotate_configs() {
 validate_dataset() {
   local actual_load actual_idle actual_knees actual_scout actual_decisions
   local expected_load bad duplicates
-  expected_load=$(( ($(wc -l <"$RATES") - 1) * REPS ))
+  expected_load=$(awk -F, -v reps="$REPS" '
+    NR>1 {n += ($5=="span" ? 1 : reps)}
+    END {print n+0}
+  ' "$RATES")
   actual_load=$(awk -F, 'NR>1 && $2=="load"{n++} END{print n+0}' "$RESULTS")
   actual_idle=$(awk -F, 'NR>1 && $2=="idle"{n++} END{print n+0}' "$RESULTS")
   actual_knees=$(awk -F, 'NR>1{n++} END{print n+0}' "$KNEES")
@@ -1284,12 +2259,13 @@ validate_dataset() {
       if(FNR>1) {
         key=$1 SUBSEP $2 SUBSEP $3
         expected[key]=$4
+        expected_reps[key]=($5=="span" ? 1 : reps)
       }
       next
     }
     FNR==1 {for(i=1;i<=NF;i++)h[$i]=i;next}
     $h["phase"]=="load" {
-      key=$h["payload_bytes"] SUBSEP $h["config"] SUBSEP $h["rate_index"]
+      key=$h["frame_bytes"] SUBSEP $h["config"] SUBSEP $h["rate_index"]
       if(!(key in expected))
         bad[++nb]=$h["run_id"]":unplanned"
       else if($h["offered_rps"] != expected[key])
@@ -1298,7 +2274,8 @@ validate_dataset() {
     }
     END {
       for(key in expected)
-        if(count[key]!=reps) bad[++nb]="planned_point:"key":rows="count[key]
+        if(count[key]!=expected_reps[key])
+          bad[++nb]="planned_point:"key":rows="count[key]":expected="expected_reps[key]
       for(i=1;i<=nb;i++)print bad[i]
     }' "$RATES" "$RESULTS")
   [ -z "$bad" ] || die "result/rate-plan mismatch:\n$bad"
@@ -1318,6 +2295,7 @@ validate_dataset() {
 
 log "output=$OUT"
 log "planned workload: load_max=$load_rows_max idle=$idle_rows pilot_max=$pilot_points_max knee_vote_runs_typical=$vote_raw_expected perf_replays=$profile_rows expected_timed~${window_minutes_expected}min"
+verify_swap_disabled
 echo "$HOST_PASS" | sudo -S -v >/dev/null
 CLK_TCK=$(getconf CLK_TCK)
 deploy_stack
@@ -1329,7 +2307,7 @@ record_and_validate_core_budget
 if [ "$PREFLIGHT_ONLY" = 1 ]; then
   kubectl get pods -n "$NS" -o wide >"$OUT/pods.txt"
   kubectl get deployments -n "$NS" -o yaml >"$OUT/deployments.yaml"
-  log "PREFLIGHT PASS: binaries, five OPEN paths, single backends, DPU topology, and 10 endpoint cores"
+  log "PREFLIGHT PASS: binaries, ${#CONFIGS[@]} OPEN paths, single backends, DPU topology, and $((2 * ${#CONFIGS[@]})) endpoint cores"
   exit 0
 fi
 
@@ -1343,16 +2321,20 @@ if [ ! -s "$META" ]; then
     echo "kernel=$(uname -r)"
     echo "cpu=$(awk -F: '/model name/{sub(/^ /,"",$2);print $2;exit}' /proc/cpuinfo)"
     echo "cgroup=$(stat -fc %T /sys/fs/cgroup 2>/dev/null || echo NA)"
-    echo "params=PAYLOADS={$PAYLOADS} REPLY=$REPLY CONNECTIONS=$THREADS ARRIVAL=$ARRIVAL REPS=$REPS DUR=$DUR WARMUP=$WARMUP PILOT_DUR=$PILOT_DUR SCOUT_DUR=$SCOUT_DUR SCOUT_START_RPS=$SCOUT_START_RPS SCOUT_GROWTH=$SCOUT_GROWTH SCOUT_MAX_STEPS=$SCOUT_MAX_STEPS SCOUT_REFINE_STEPS=$SCOUT_REFINE_STEPS COMMON_FACTORS={$COMMON_FACTORS} KNEE_FACTORS={$KNEE_FACTORS} IDLE_REPS=$IDLE_REPS IDLE_DUR=$IDLE_DUR ENABLE_PERF=$ENABLE_PERF"
-    echo "clean_policy=achieved/offered>=$MIN_ACHIEVED_RATIO generator_drops/scheduled<=$MAX_GENERATOR_DROP_RATIO scheduled/(offered*duration)=$MIN_SCHEDULE_RATIO..$MAX_SCHEDULE_RATIO p99_us<=$P99_SLA_US fail=0 reorder=0 overflow=0"
+    echo "swap=disabled"
+    echo "params=CONFIGS={$CONFIG_LIST} FRAME_SIZES={$FRAME_SIZES} BENCH_HEADER_BYTES=$BENCH_HEADER_BYTES REQUEST_RESPONSE=symmetric CONNECTIONS=$THREADS ARRIVAL=$ARRIVAL REPS=$REPS DUR=$DUR WARMUP=$WARMUP PILOT_DUR=$PILOT_DUR SCOUT_DUR=$SCOUT_DUR SCOUT_START_RPS=$SCOUT_START_RPS SCOUT_GROWTH=$SCOUT_GROWTH SCOUT_MAX_STEPS=$SCOUT_MAX_STEPS SCOUT_REFINE_STEPS=$SCOUT_REFINE_STEPS COMMON_FACTORS={$COMMON_FACTORS} KNEE_FACTORS={$KNEE_FACTORS} CONFIG_SPAN_FACTORS={$CONFIG_SPAN_FACTORS} IDLE_REPS=$IDLE_REPS IDLE_DUR=$IDLE_DUR GENERATOR_SELFTEST_DUR=$GENERATOR_SELFTEST_DUR GENERATOR_SELFTEST_REPS=$GENERATOR_SELFTEST_REPS GENERATOR_SELFTEST_START_RPS=$GENERATOR_SELFTEST_START_RPS GENERATOR_SELFTEST_GROWTH=$GENERATOR_SELFTEST_GROWTH GENERATOR_SELFTEST_MAX_RPS=$GENERATOR_SELFTEST_MAX_RPS MIN_GENERATOR_HEADROOM=$MIN_GENERATOR_HEADROOM MAX_RECOVERY_REDEPLOYS=$MAX_RECOVERY_REDEPLOYS MAX_RUN_RETRIES=$MAX_RUN_RETRIES CORE_SATURATION_THRESHOLD=$CORE_SATURATION_THRESHOLD ENABLE_PERF=$ENABLE_PERF"
+    echo "clean_policy=achieved/offered>=$MIN_ACHIEVED_RATIO admission_drops/scheduled<=$MAX_ADMISSION_DROP_RATIO scheduled/(offered*duration)=$MIN_SCHEDULE_RATIO..$MAX_SCHEDULE_RATIO p99_us<=$P99_SLA_US fail=0 reorder=0 overflow=0"
+    echo "generator_policy=scheduler_drops/(scheduled+scheduler_drops)<=$MAX_SCHEDULER_DROP_RATIO schedule_ratio=$MIN_SCHEDULE_RATIO..$MAX_SCHEDULE_RATIO"
     echo "scout_vote_policy=two independent runs per candidate; a 1-1 split triggers a third run; at least two clean votes are required; recovery follows every bad vote"
-    echo "topology=N/K/A=32/8/8 L7=disabled NUMA=PCI-local pin=l4"
+    echo "recovery_policy=low-rate recovery first; canonical redeploy with full invariant validation on failure; maximum $MAX_RECOVERY_REDEPLOYS redeploys; runtime-failed rows are excluded, preserved, and retried up to $MAX_RUN_RETRIES times"
+    echo "topology=N/K/A=$DPU_DPA_THREADS/$DPU_RINGS_PER_POD/$DPU_ARM_WORKERS L7=disabled NUMA=PCI-local pin=l4"
     echo "host_budget=2 exclusive host cores per config: client endpoint=1 server endpoint=1; Envoy app+sidecar share the endpoint core"
-    echo "semantics=open-loop only for capacity discovery and retained load; 4 persistent data connections within each timed run; no configured closed-loop in-flight count; control listener excluded from data path"
+    echo "host_saturation=physical endpoint /proc/stat busy >=$CORE_SATURATION_THRESHOLD at either accepted bracket endpoint; cgroup CPU is attribution only"
+    echo "semantics=open-loop only for capacity discovery and retained load; $THREADS persistent data connections within each timed run; at least one connection per connection-affine DPU shard; no configured closed-loop in-flight count; control listener excluded from data path"
     echo "aggregation=one client endpoint and one active server backend for every config; throughput is single-backend end-to-end, not a multi-backend aggregate"
-    echo "binary_equivalence=plain,envoy-permissive,envoy-strict,dpumesh-preload use byte-identical bench_sock/echo_sock; dpumesh-native uses bench_dpumesh/echo_dpumesh and is a direct-API upper-bound series"
+    echo "binary_equivalence=envoy-permissive,envoy-strict,dpumesh-preload use byte-identical bench_sock/echo_sock; dpumesh-native uses bench_dpumesh/echo_dpumesh"
     echo "envoy=PERMISSIVE-equivalent is plaintext TCP proxy; STRICT-equivalent is mTLS with mandatory client cert"
-    echo "comparison_boundary=primary apples-to-apples claims use the four POSIX paths; native shares framing, arrivals, core budget, DPU topology and backend count but not the application API; DPUmesh and Envoy STRICT are not security-equivalent"
+    echo "comparison_boundary=dpumesh-preload and dpumesh-native are both primary DPUmesh series; native shares framing, arrivals, core budget, DPU topology and backend count but uses the direct API; DPUmesh and Envoy STRICT are not security-equivalent"
     echo "mpstat=$(mpstat -V 2>&1 | sed -n '1p')"
   } >"$META"
 else
@@ -1362,24 +2344,36 @@ else
     echo "resumed_collector_version=$COLLECTOR_VERSION" >>"$META"
   fi
 fi
+if [ -n "$COMMON_ANCHOR_RPS" ] && ! grep -q '^common_anchor_rps=' "$META"; then
+  echo "common_anchor_rps=$COMMON_ANCHOR_RPS" >>"$META"
+fi
+run_generator_selftests
+while IFS=, read -r generator _config payload highest bad status reps duration; do
+  [ "$generator" != generator ] || continue
+  key="generator_selftest_${generator}_${payload}B"
+  if ! grep -q "^${key}=" "$META"; then
+    echo "${key}=highest_clean_rps=$highest lowest_bad_rps=$bad status=$status reps=$reps duration_s=$duration file=$GENERATOR_LIMITS" \
+      >>"$META"
+  fi
+done <"$GENERATOR_LIMITS"
 kubectl get pods -n "$NS" -o wide >"$OUT/pods.txt"
 kubectl get deployments -n "$NS" -o yaml >"$OUT/deployments.yaml"
 
-SCOUT_HEADER="run_id,stage,sequence,config,payload_bytes,offered_rps,duration_s,achieved_rps,p50_us,p99_us,scheduled,generator_drops,pending,fail,overflow,reorder,achieved_ratio,schedule_ratio,generator_drop_ratio,clean,reason,raw_result"
+SCOUT_HEADER="run_id,stage,sequence,config,frame_bytes,offered_rps,duration_s,achieved_rps,p50_us,p99_us,scheduled,admission_drops,pending,fail,overflow,reorder,achieved_ratio,schedule_ratio,admission_drop_ratio,client_busy_cores,server_busy_cores,host_busy_cores,host_core_budget,dpu_arm_cores,tx_grow_waits,clean,reason,raw_result"
 if [ -s "$SCOUT" ]; then
   [ "$(head -n 1 "$SCOUT")" = "$SCOUT_HEADER" ] ||
     die "scout.csv schema differs from this collector version; choose a new --out directory"
 else
   printf '%s\n' "$SCOUT_HEADER" >"$SCOUT"
 fi
-SCOUT_DECISION_HEADER="point_id,stage,sequence,config,payload_bytes,offered_rps,duration_s,runs,clean_votes,bad_votes,decision"
+SCOUT_DECISION_HEADER="point_id,stage,sequence,config,frame_bytes,offered_rps,duration_s,runs,clean_votes,bad_votes,decision"
 if [ -s "$SCOUT_DECISIONS" ]; then
   [ "$(head -n 1 "$SCOUT_DECISIONS")" = "$SCOUT_DECISION_HEADER" ] ||
     die "scout_decisions.csv schema differs from this collector version; choose a new --out directory"
 else
   printf '%s\n' "$SCOUT_DECISION_HEADER" >"$SCOUT_DECISIONS"
 fi
-KNEE_HEADER="config,payload_bytes,highest_clean_rps,lowest_bad_rps,bracket_ratio,status,validation_duration_s"
+KNEE_HEADER="config,frame_bytes,highest_clean_rps,lowest_bad_rps,bracket_ratio,status,validation_duration_s,highest_clean_client_busy,highest_clean_server_busy,lowest_bad_client_busy,lowest_bad_server_busy,host_core_budget,core_saturated,core_saturation_threshold,highest_clean_dpu_arm_cores,lowest_bad_dpu_arm_cores,highest_clean_tx_grow_waits,lowest_bad_tx_grow_waits,capacity_signal"
 if [ -s "$KNEES" ]; then
   [ "$(head -n 1 "$KNEES")" = "$KNEE_HEADER" ] ||
     die "knees.csv schema differs from this collector version; choose a new --out directory"
@@ -1387,15 +2381,15 @@ else
   printf '%s\n' "$KNEE_HEADER" >"$KNEES"
 fi
 [ -s "$PERF_POINTS" ] ||
-  echo "payload_bytes,config,rate_index,offered_rps,target_70pct_peak_rps" >"$PERF_POINTS"
-PERF_HEADER="run_id,config,payload_bytes,rate_index,offered_rps,achieved_rps,p99_us,fail,drops,reorder,core_list,pids,perf_data,perf_report,status"
+  echo "frame_bytes,config,rate_index,offered_rps,target_70pct_peak_rps" >"$PERF_POINTS"
+PERF_HEADER="run_id,config,frame_bytes,rate_index,offered_rps,achieved_rps,p99_us,fail,drops,reorder,core_list,pids,perf_data,perf_report,status"
 if [ -s "$PERF_MANIFEST" ]; then
   [ "$(head -n 1 "$PERF_MANIFEST")" = "$PERF_HEADER" ] ||
     die "perf_manifest.csv schema differs from this collector version; choose a new --out directory"
 else
   printf '%s\n' "$PERF_HEADER" >"$PERF_MANIFEST"
 fi
-RESULT_HEADER="run_id,phase,config,payload_bytes,reply_bytes,connections,arrival,rate_index,offered_rps,reported_offered_rps,rep,duration_s,achieved_rps,gbps,p50_us,p95_us,p99_us,p999_us,p9999_us,avg_us,min_us,max_us,ok,scheduled,pending,fail,generator_drops,overflow,reorder,client_app_cores,client_app_user_cores,client_app_system_cores,server_app_cores,server_app_user_cores,server_app_system_cores,client_sidecar_cores,client_sidecar_user_cores,client_sidecar_system_cores,server_sidecar_cores,server_sidecar_user_cores,server_sidecar_system_cores,host_cgroup_cores,host_cgroup_user_cores,host_cgroup_system_cores,host_busy_cores,host_user_cores,host_system_cores,host_irq_cores,host_softirq_cores,system_softirq_cores,dpu_arm_cores,nr_throttled,throttled_seconds,core_list,mpstat_file,perf_data,validation_status,sla_clean,achieved_ratio,schedule_ratio,generator_drop_ratio,clean_reason"
+RESULT_HEADER="run_id,phase,config,frame_bytes,request_body_bytes,response_body_bytes,connections,arrival,rate_index,offered_rps,reported_offered_rps,rep,duration_s,achieved_rps,gbps,request_gbps,response_gbps,p50_us,p95_us,p99_us,p999_us,p9999_us,avg_us,min_us,max_us,ok,scheduled,pending,fail,admission_drops,overflow,reorder,client_app_cores,client_app_user_cores,client_app_system_cores,server_app_cores,server_app_user_cores,server_app_system_cores,client_sidecar_cores,client_sidecar_user_cores,client_sidecar_system_cores,server_sidecar_cores,server_sidecar_user_cores,server_sidecar_system_cores,host_cgroup_cores,host_cgroup_user_cores,host_cgroup_system_cores,host_busy_cores,client_core_busy_cores,server_core_busy_cores,host_user_cores,host_system_cores,host_irq_cores,host_softirq_cores,system_softirq_cores,dpu_arm_cores,tx_grow_waits,nr_throttled,throttled_seconds,core_list,mpstat_file,perf_data,validation_status,sla_clean,achieved_ratio,schedule_ratio,admission_drop_ratio,clean_reason"
 if [ -s "$RESULTS" ]; then
   [ "$(head -n 1 "$RESULTS")" = "$RESULT_HEADER" ] ||
     die "results.csv schema differs from this collector version; choose a new --out directory"
@@ -1404,12 +2398,13 @@ else
 fi
 
 log "discovering per-config OPEN-loop SLA knees"
-for payload in $PAYLOADS; do
+for payload in $FRAME_SIZES; do
   mapfile -t CONFIG_ORDER < <(rotate_configs "$payload")
   for config in "${CONFIG_ORDER[@]}"; do
     discover_knee "$config" "$payload"
   done
 done
+validate_generator_headroom
 build_rate_plan
 
 log "collecting idle baselines"
@@ -1421,7 +2416,7 @@ for rep in $(seq 1 "$IDLE_REPS"); do
 done
 
 log "collecting open-loop load sweep"
-for payload in $PAYLOADS; do
+for payload in $FRAME_SIZES; do
   for rep in $(seq 1 "$REPS"); do
     max_index=$(awk -F, -v p="$payload" 'NR>1 && $1==p && $3>m{m=$3} END{print m+0}' "$RATES")
     if ((rep % 2 == 1)); then
@@ -1432,18 +2427,30 @@ for payload in $PAYLOADS; do
     for rate_index in "${RATE_INDEXES[@]}"; do
       mapfile -t CONFIG_ORDER < <(rotate_configs "$((rep + rate_index + payload))")
       for config in "${CONFIG_ORDER[@]}"; do
+        source=$(awk -F, -v p="$payload" -v c="$config" -v i="$rate_index" \
+          'NR>1 && $1==p && $2==c && $3==i{print $5}' "$RATES")
+        [ -n "$source" ] || continue
+        [ "$source" != span ] || [ "$rep" -eq 1 ] || continue
         offered=$(awk -F, -v p="$payload" -v c="$config" -v i="$rate_index" \
           'NR>1 && $1==p && $2==c && $3==i{print $4}' "$RATES")
         [ -n "$offered" ] || continue
         measure_one load "$config" "$payload" "$rate_index" "$offered" "$rep"
         run_id="load-${payload}-q${rate_index}-${config}-r${rep}"
-        [ "$(result_sla_clean "$run_id")" = 1 ] ||
+        [ "$MEASURE_WROTE" = 0 ] ||
+          [ "$(result_sla_clean "$run_id")" = 1 ] ||
           recover_config "$config" "$payload"
       done
     done
   done
 done
 
+if [ "$TARGET_VERIFY" = 1 ]; then
+  run_target_verification
+fi
+
+log "deriving saturation and retained-knee stability"
+python3 "$SUITE_DIR/analyze_saturation.py" "$OUT" \
+  --sat-threshold "$CORE_SATURATION_THRESHOLD"
 validate_dataset
 if [ "$ENABLE_PERF" = 1 ]; then
   log "selecting clean primary points and collecting separate perf replays"

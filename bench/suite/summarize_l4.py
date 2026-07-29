@@ -13,14 +13,6 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 
-CONFIGS = [
-    "plain",
-    "envoy-permissive",
-    "envoy-strict",
-    "dpumesh-preload",
-    "dpumesh-native",
-]
-
 METRICS = [
     "achieved_rps",
     "achieved_ratio",
@@ -50,6 +42,11 @@ METRICS = [
 def read_csv(path):
     with path.open(newline="") as handle:
         return list(csv.DictReader(handle))
+
+
+def perf_enabled(path):
+    match = re.search(r"\bENABLE_PERF=([01])\b", path.read_text())
+    return match is None or match.group(1) == "1"
 
 
 def number(value):
@@ -112,12 +109,17 @@ def add_derived_cpu(row):
         )
 
 
-def parse_expected_reps(meta_path):
+def parse_meta(meta_path):
     text = meta_path.read_text()
-    match = re.search(r"\bREPS=(\d+)", text)
-    if not match:
-        raise SystemExit(f"cannot find REPS in {meta_path}")
-    return int(match.group(1))
+    reps = re.search(r"\bREPS=(\d+)", text)
+    idle_reps = re.search(r"\bIDLE_REPS=(\d+)", text)
+    configs = re.search(r"\bCONFIGS=\{([^}]*)\}", text)
+    if not reps:
+        raise SystemExit(f"cannot parse REPS in {meta_path}")
+    selected = configs.group(1).split() if configs else []
+    return selected, int(reps.group(1)), int(
+        idle_reps.group(1) if idle_reps else reps.group(1)
+    )
 
 
 def write_csv(path, header, rows):
@@ -140,8 +142,10 @@ def main():
     for row in results:
         add_derived_cpu(row)
     rates = read_csv(dataset / "rates.csv")
-    expected_reps = parse_expected_reps(dataset / "meta.txt")
-    config_rank = {config: index for index, config in enumerate(CONFIGS)}
+    configs, expected_reps, expected_idle_reps = parse_meta(dataset / "meta.txt")
+    if not configs:
+        configs = list(dict.fromkeys(row["config"] for row in rates))
+    config_rank = {config: index for index, config in enumerate(configs)}
 
     idle_rows = [row for row in results if row["phase"] == "idle"]
     load_rows = [row for row in results if row["phase"] == "load"]
@@ -161,7 +165,7 @@ def main():
     groups = defaultdict(list)
     for row in load_rows:
         key = (
-            int(row["payload_bytes"]),
+            int(row["frame_bytes"]),
             row["config"],
             int(row["rate_index"]),
             int(row["offered_rps"]),
@@ -171,13 +175,13 @@ def main():
     rate_rows = sorted(
         rates,
         key=lambda row: (
-            int(row["payload_bytes"]),
+            int(row["frame_bytes"]),
             config_rank[row["config"]],
             int(row["rate_index"]),
         ),
     )
     point_header = [
-        "payload_bytes",
+        "frame_bytes",
         "config",
         "rate_index",
         "offered_rps",
@@ -199,7 +203,7 @@ def main():
             "host_incremental_cores_med",
             "host_cores_per_mrps_med",
             "dpu_incremental_cores_med",
-            "generator_drops_sum",
+            "admission_drops_sum",
             "fail_sum",
             "overflow_sum",
             "reorder_sum",
@@ -212,14 +216,15 @@ def main():
     knee_rows = []
     for rate in rate_rows:
         key = (
-            int(rate["payload_bytes"]),
+            int(rate["frame_bytes"]),
             rate["config"],
             int(rate["rate_index"]),
             int(rate["offered_rps"]),
         )
         rows = sorted(groups.get(key, []), key=lambda row: int(row["rep"]))
+        point_expected_reps = 1 if rate["source"] == "span" else expected_reps
         present = {int(row["rep"]) for row in rows}
-        for rep in range(1, expected_reps + 1):
+        for rep in range(1, point_expected_reps + 1):
             if rep not in present:
                 missing_rows.append(
                     [
@@ -246,9 +251,9 @@ def main():
             rate["source"],
             rate["min_knee_rps"],
             rate["config_knee_rps"],
-            expected_reps,
+            point_expected_reps,
             len(rows),
-            expected_reps - len(rows),
+            point_expected_reps - len(rows),
             sum(row["validation_status"] == "ok" for row in rows),
             clean_count,
             fmt(clean_count / len(rows) if rows else None),
@@ -276,7 +281,7 @@ def main():
                 fmt(median(host_incremental)),
                 fmt(median(host_per_mrps)),
                 fmt(median(dpu_incremental)),
-                summed(rows, "generator_drops"),
+                summed(rows, "admission_drops"),
                 summed(rows, "fail"),
                 summed(rows, "overflow"),
                 summed(rows, "reorder"),
@@ -303,10 +308,10 @@ def main():
         "dpu_arm_cores_max",
     ]
     idle_summary = []
-    for config in CONFIGS:
+    for config in configs:
         rows = idle_by_config[config]
         idle_summary.append(
-            [config, expected_reps, len(rows)]
+            [config, expected_idle_reps, len(rows)]
             + metric_stats(rows, "host_cgroup_cores")
             + metric_stats(rows, "host_busy_cores")
             + metric_stats(rows, "dpu_arm_cores")
@@ -314,10 +319,13 @@ def main():
 
     integrity_header = ["check", "value"]
     integrity_rows = [
-        ["expected_load_rows", len(rates) * expected_reps],
+        [
+            "expected_load_rows",
+            sum(1 if row["source"] == "span" else expected_reps for row in rates),
+        ],
         ["observed_load_rows", len(load_rows)],
         ["missing_load_rows", len(missing_rows)],
-        ["expected_idle_rows", len(CONFIGS) * expected_reps],
+        ["expected_idle_rows", len(configs) * expected_idle_reps],
         ["observed_idle_rows", len(idle_rows)],
         [
             "invalid_validation_status_rows",
@@ -328,7 +336,14 @@ def main():
         ["reorder_sum", summed(load_rows, "reorder")],
         ["clean_load_rows", sum(row["sla_clean"] == "1" for row in load_rows)],
         ["unclean_load_rows", sum(row["sla_clean"] == "0" for row in load_rows)],
-        ["expected_perf_profiles", len(CONFIGS) * len({row["payload_bytes"] for row in rates})],
+        [
+            "expected_perf_profiles",
+            (
+                len(configs) * len({row["frame_bytes"] for row in rates})
+                if perf_enabled(dataset / "meta.txt")
+                else 0
+            ),
+        ],
         [
             "observed_perf_profiles",
             max(0, sum(1 for _ in (dataset / "perf_manifest.csv").open()) - 1),
@@ -343,7 +358,7 @@ def main():
         output / "missing_runs.csv",
         [
             "run_id",
-            "payload_bytes",
+            "frame_bytes",
             "config",
             "rate_index",
             "offered_rps",
@@ -355,8 +370,9 @@ def main():
     write_csv(output / "integrity.csv", integrity_header, integrity_rows)
 
     print(
-        f"summarize_l4: load={len(load_rows)}/{len(rates) * expected_reps}, "
-        f"idle={len(idle_rows)}/{len(CONFIGS) * expected_reps}, "
+        f"summarize_l4: load={len(load_rows)}/"
+        f"{sum(1 if row['source'] == 'span' else expected_reps for row in rates)}, "
+        f"idle={len(idle_rows)}/{len(configs) * expected_idle_reps}, "
         f"missing={len(missing_rows)}, output={output}"
     )
 

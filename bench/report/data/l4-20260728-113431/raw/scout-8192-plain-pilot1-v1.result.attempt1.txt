@@ -1,1 +1,0 @@
-OK mrps=0.004998 gbps=0.3276 p50=160.00 p95=251.00 p99=279.00 p999=331.00 p9999=777.00 avg=159.93 min=38.17 max=859.44 rcnt=9200 scheduled=10000 pending=0 fail=0 conc=0 threads=4 reqsz=8192 repsz=8 durs=2.000 offered_mrps=0.005000 drops=0 overflow=0 reorder=0 mode=open arr=const

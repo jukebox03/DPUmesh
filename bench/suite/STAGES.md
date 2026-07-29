@@ -1,78 +1,57 @@
 # DPUmesh Evaluation Coverage
 
-This document indexes what the repository's evaluation has and has not measured.
-It does not convert an unmeasured configuration into a
-performance claim.
+## L4 performance
 
-## Transport matrix
+The current L4 campaign measures four primary configurations with one workload
+contract:
 
-| Transport | Correctness exercised | Performance data | Application semantics |
-|---|---|---|---|
-| Direct kernel TCP | Yes | Yes | Matched POSIX frame workload |
-| TCP through Envoy `tcp_proxy` | Yes | Yes | Same POSIX frame workload |
-| Native DPUmesh | Yes | Yes | Matched request/reply workload |
-| DPUmesh preload | Yes | Matched-C diagnostic/performance path; no headline claim yet | Same POSIX binary |
-| gRPC C++ over direct TCP | Yes | Harness available; no retained comparison result | `grpc.testing.BenchmarkService` unary |
-| gRPC C++ over DPUmesh | Yes | Harness available; no retained comparison result | Identical generated service and calls |
-| Envoy HTTP/2 gRPC proxy | No result | No result | Not represented in existing measurements |
-| gRPC Go over DPUmesh | No implementation | No result | Not represented in the working tree |
+| Configuration | Application API | Data path |
+|---|---|---|
+| `envoy-permissive` | POSIX | two Envoy TCP sidecars, plaintext |
+| `envoy-strict` | POSIX | two Envoy TCP sidecars, mutual TLS |
+| `dpumesh-preload` | POSIX | DPUmesh L4 through `LD_PRELOAD` |
+| `dpumesh-native` | native DPUmesh | DPUmesh L4 through the native API |
 
-## Evidence categories
+All configurations use the same frame, arrival schedule, frame-size matrix,
+connection count, host-core budget, and single backend. The POSIX paths use the
+same application binaries. Host and DPU ARM CPU are reported separately.
 
-### Functional transport
+The complete contract, deployment settings, results, and reproduction commands
+are in [`bench/report/REPORT.md`](../report/REPORT.md).
 
-The native validators cover channel/EQ/QP creation, inbound QPs, ordered data,
-fragmentation, RX credit, FIN, and reverse destruction. The preload validator
-covers socket interception and TCP fallback. These tests establish API behavior;
-they do not establish competitive performance.
+## Correctness
 
-### Lifecycle and remote reclaim
+Host-only tests cover native API state, batching, writable notification,
+preload readiness and publication, topology, and collector analysis contracts.
+Run them with:
 
-The BlueField gRPC smoke covers 30 create/use/destroy rounds, server and client
-slot reuse, 60 unary RPCs, bilateral `POD_QUIESCED`, three exact 1 MiB payloads,
-and recovery after an unexpected disconnect. The native fault run deletes one
-backend during traffic, retains healthy-backend delivery, and admits the
-replacement pod. These tests cover graceful reclaim, shared-DMA fault scope,
-and liveness recovery; they do not enumerate every host-failure timing.
+```sh
+make test
+```
 
-### L4 performance
+Hardware validators cover native loopback, verbs-shaped lifecycle, fragmented
+streams, POSIX preload behavior, byte agreement, EOF, and reverse destruction.
+Their commands and acceptance criteria are in
+[`bench/validators/README.md`](../validators/README.md).
 
-The matched L4 report contains unloaded latency, throughput versus concurrency,
-batching symmetry, host plus DPU ARM CPU, DPU configuration sweeps, and selected
-busy-application probes. Its strongest comparison is direct TCP versus Envoy
-`tcp_proxy` versus native DPUmesh on one node. It does not represent an L7 mesh.
+## gRPC
 
-### gRPC performance
+The C++ adapter uses one generated unary service over direct TCP or DPUmesh L4.
+Its build, functional tests, and benchmark command are in
+[`integrations/grpc/README.md`](../../integrations/grpc/README.md). It is not
+part of the L4 campaign.
 
-The current harness uses one generated service, one channel, synchronous unary
-RPCs, configurable concurrent client threads, separate warmup, and percentile
-latency. TCP and DPUmesh use the same binary and RPC implementation. This isolates
-the endpoint transport for the measured shape, but it does not cover streaming,
-async/callback APIs, multiple subchannels, TLS, or an Envoy HTTP/2 proxy.
+## Acceptance
 
-## Measurement acceptance rules
+A retained performance point requires:
 
-A performance point is retained only if:
+- zero request, reorder, and overflow failures;
+- matching request and response frame sizes;
+- explicit warmup and measurement duration;
+- recorded binary hashes, core affinity, NUMA placement, backend count, and
+  DPU topology;
+- valid generator scheduling and a clean SLA point;
+- separate host and DPU ARM CPU accounting.
 
-- request/RPC failures are zero;
-- client and server report consistent success counts;
-- payload semantics are identical across transports;
-- warmup is excluded and measurement duration is explicit;
-- CPU pinning, DPU N/K/A/L topology, binary provenance, and node placement are
-  recorded;
-- logging is at warning level unless the run is explicitly diagnostic;
-- the point is below an obvious saturation knee when used for latency comparison.
-
-## Interpretation boundaries
-
-- Host CPU savings are not total CPU savings. DPU ARM cost must be reported.
-- DPA EUs are hardware execution resources and are not interchangeable with ARM
-  process CPU percentages.
-- A single repetition is directional evidence, not a stable median.
-- L4 Envoy `tcp_proxy` is a valid transport baseline but not a measurement of
-  HTTP/2 routing, retries, telemetry, or policy cost.
-- The focused gRPC harness is compatible with the official service schema but is
-  not the upstream distributed `qps_worker` scenario controller.
-
-The current evaluation is in `bench/report/REPORT.md`; its deployment is in
-`bench/report/DEPLOY.md`.
+Envoy `tcp_proxy` represents L4 proxy cost. It does not represent HTTP routing,
+retry, telemetry, or policy processing.

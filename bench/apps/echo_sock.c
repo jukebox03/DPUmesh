@@ -1,4 +1,4 @@
-/* Blocking Greeter server for direct TCP, Envoy, and preload transports.
+/* Blocking Greeter server for Envoy and DPUmesh preload.
  * Each connection has its own thread and reframer. Replies contain the byte count
  * requested in the frame's aux field. */
 #define _GNU_SOURCE

@@ -3,7 +3,7 @@
 The benchmark tree contains the deploy harness, matched transport workloads,
 feature validators, and measured reports for the current working tree.
 Results are meaningful only when the compared paths use the same request/reply
-semantics, payloads, concurrency, warmup, duration, and CPU allocation.
+semantics, frame sizes, concurrency, warmup, duration, and CPU allocation.
 
 ## 1. Layout
 
@@ -25,8 +25,7 @@ DPUmesh without changing RPC messages or service code.
 
 | Name | Client/server program | Data path |
 |---|---|---|
-| `tcp-direct` | `bench_sock` / `echo_sock` | kernel TCP |
-| `tcp-envoy` | same POSIX programs | kernel TCP through Envoy `tcp_proxy` |
+| `tcp-envoy` | `bench_sock` / `echo_sock` | kernel TCP through Envoy `tcp_proxy` |
 | `dpumesh-native` | `bench_dpumesh` / `echo_dpumesh` | native C API |
 | `dpumesh-preload` | same POSIX programs | socket facade over DPUmesh |
 | `grpc-tcp` | `grpc_dpumesh_qps_benchmark` | gRPC C++ over kernel TCP |
@@ -46,78 +45,28 @@ it is a focused transport harness rather than the upstream multi-scenario
 
 ## 3. Reproducible deployment
 
-Create a repository-root `.env` excluded from version control with the
-machine-specific values in [DEPLOY.md](report/DEPLOY.md). Deploy with the
-topology explicit:
+Create the repository-root `.env` described in
+[REPORT.md](report/REPORT.md). Disable swap before deployment:
 
 ```sh
-DPUMESH_DPA_THREADS=16 \
-DPUMESH_ARM_WORKERS=2 \
+sudo swapoff -a
+
+DPUMESH_DPA_THREADS=32 \
 DPUMESH_RINGS_PER_POD=8 \
-DPUMESH_PROXY_L7_SVC=16 \
+DPUMESH_ARM_WORKERS=8 \
+DPUMESH_PROXY_L7_SVC= \
 DPUMESH_LOG_LEVEL=40 \
+BENCH_NUMA_POLICY=local \
+BENCH_DEPLOY_SCOPE=l4 \
 ./bench/bench.sh deploy
 ```
 
-This command builds host and DPU artifacts, synchronizes DPU sources, imports
-container images, starts the DPU process and pods in order, and applies CPU
-pinning. It selects `N/K/A/L=16/8/2/2`: eight rings, two polling ARM workers, and
-two RX landing stripes. A bare `deploy` selects one ARM worker. The live DPU
-process environment is the measurement authority.
+This selects `N/K/A/L=32/8/8/8`, connection-pinned L4, and PCI-local NUMA
+placement. The L4 collector uses eight persistent connections, one for each
+connection-affine DPU shard. `BENCH_NUMA_POLICY=auto` selects the unbound
+NUMA control.
 
-`deploy` reads the host BlueField PCI function's NUMA node from sysfs. Benchmark
-entrypoints apply that CPU and memory policy before allocating registered DMA
-memory, and the later per-pod pinning stays within the same node. This is
-intentional even when automatic NUMA balancing is enabled: registered DMA
-mappings were observed not to migrate.
-
-Use `BENCH_NUMA_POLICY=auto` only for the unbound NUMA control. The default is
-`local`. `BENCH_DEPLOY_SCOPE=core` starts only the three backends and one client;
-it is used by low-N controls whose DPA ring capacity cannot admit every validator
-pod. `BENCH_DEPLOY_SCOPE=l4` starts only the five L4 comparison paths and never
-registers the two extra weighted-LB native backends; this is the scope used by
-`bench/suite/l4_proxy_data.sh`.
-
-The configuration above keeps benchmark service 11 connection-pinned L4 while
-enabling L7 framing only for stream validator service 16. To exercise
-per-message LB on the native request/reply benchmark too, enable both services:
-
-```sh
-DPUMESH_PROXY_L7_SVC=11,16 \
-DPUMESH_DPA_THREADS=16 \
-DPUMESH_ARM_WORKERS=2 \
-DPUMESH_RINGS_PER_POD=8 \
-./bench/bench.sh deploy
-```
-
-Run the complete repeated sweep with:
-
-```sh
-OUT=bench/report/data/sweep-final \
-  ./bench/suite/sweep_final.sh --dry-run
-OUT=bench/report/data/sweep-final \
-  ./bench/suite/sweep_final.sh
-```
-
-The same `OUT` may be reused after interruption; completed run IDs are skipped.
-The campaign validates every live topology, records TX `grow_waits`, produces
-raw and summary CSVs, restores the final N32/A8/K8 local-NUMA deployment, and
-runs correctness validators.
-
-The benchmark frame is a 16-byte length prefix followed by payload, with a
-128 KiB total-frame limit. The DPU routes each request frame independently and
-serializes complete response frames back into the client's one QP byte stream.
-Leaving service 11 out of the list measures backend-pinned L4 instead.
-
-On the BlueField ARM, capture it before every retained run:
-
-```sh
-sudo xargs -0 -n1 -a "/proc/$(pgrep -n dpumesh_dpu)/environ" \
-  | grep '^DPUMESH_' | sort
-ps -ww -p "$(pgrep -n dpumesh_dpu)" -o args=
-```
-
-Useful read-only checks are:
+Read-only deployment checks are:
 
 ```sh
 ./bench/bench.sh status
@@ -126,56 +75,43 @@ Useful read-only checks are:
 ./bench/bench.sh dpucpu
 ```
 
-Routine deployments use warning-level logging. Raise the log level only for a
-bounded diagnostic run, then restore warning-level output before measurement.
-
 ## 4. L4 measurements
 
 ```sh
-# Current repeated report campaign: native L4, two-sided Envoy, and direct TCP
-./bench/suite/current_l4.sh
+# Inspect the matrix and duration.
+./bench/suite/l4_proxy_data.sh --dry-run
 
-# Regenerate the two concise lab-meeting figures from the retained aggregates
-python3 bench/suite/plot_meeting.py \
-  bench/report/data/summary.csv bench/report/data/cpu_summary.csv \
-  bench/report/figures
+# Validate deployment and invariants.
+./bench/suite/l4_proxy_data.sh \
+  --preflight-only --out /tmp/l4-preflight
 
-# Unloaded latency sweep
-./bench/bench.sh latency both
+# Collect the complete dataset.
+./bench/suite/l4_proxy_data.sh \
+  --target-verify \
+  --out bench/report/data/l4-$(date +%Y%m%d-%H%M%S)
 
-# Payload/goodput sweep
-./bench/bench.sh bandwidth both
-
-# Thread/rate sweep
-./bench/bench.sh rate both
-
-# Exact point: transport request reply concurrency duration warmup threads
-./bench/bench.sh point dpumesh 1024 1024 32 10 1000 1
-./bench/bench.sh point tcp     1024 1024 32 10 1000 1
-
-# Measure DPU main/data-worker CPU and pinned ARM cores.
-./bench/bench.sh armbalance 1024 8 32 10 2 /tmp/arm-balance.csv
-
-# Pinning presets
-./bench/bench.sh pin fair
-./bench/bench.sh pin hw3
+# Rebuild derived tables.
+python3 bench/suite/analyze_saturation.py <dataset>
+python3 bench/suite/summarize_l4.py <dataset>
 ```
 
-The L4 headline comparison uses `fair`: one application core for each transport;
-for Envoy, the sidecar shares the assigned pod budget. DPU CPU is measured
-separately and must not be hidden when comparing total CPU/request.
+The four primary configurations are Envoy plaintext, Envoy mTLS, DPUmesh
+preload, and DPUmesh native. Each owns one client core and one server
+core. Envoy sidecars share the endpoint cores. DPU ARM CPU is a separate metric.
+The analysis reports both maximum clean throughput under this fixed budget and
+the throughput where either physical endpoint core reaches 0.95 utilization,
+including the retained-point clean count. System-wide softirq is recorded
+separately. Cgroup CPU is process attribution only; saturation is determined
+from each pinned physical core across the highest-clean/first-bad boundary.
 
-Native ABI 4 automatically submits complete 8 KiB transport units. Applications
-use `dmesh_flush()` at protocol or latency boundaries for a trailing partial
-unit.
+Capacity discovery has no fixed RPS ceiling. It stops at the configured
+per-direction frame-rate bound or an explicit `SCOUT_MAX_RPS`. The L4 matrix
+uses symmetric 64 B, 1 KiB, and 8 KiB request/response frames, including the
+16 B benchmark header. POSIX and native generator ramps include frame
+construction. Every path knee requires at least 1.25× generator headroom.
 
-The native echo server is also the reference event-driven backpressure pattern.
-It registers one native EQ fd with epoll, blocks without a timeout, and drains the
-EQ on wake. If a reply parks on `dmesh_alloc(EAGAIN)`, the core automatically arms
-that QP; `DMESH_EVENT_TX_READY` retries only the named reply. The server does not
-busy-poll, run a retry timer, or scan every pending QP.
-
-Retained measurements are recorded in [REPORT.md](report/REPORT.md).
+The complete metric and analysis contract is in
+[REPORT.md](report/REPORT.md).
 
 ## 5. gRPC QPS measurements
 
@@ -203,7 +139,7 @@ grpc_dpumesh_qps_benchmark client <tcp|dmesh> TARGET WARMUP_S DURATION_S \
 For a transport comparison, copy the identical binary to the same client and
 server pods. Run `server tcp 0.0.0.0:PORT ...` with a client target of the server
 pod IP, then run `server dmesh SERVICE ...` and target the same Service name.
-Use one channel and the same concurrency/payload matrix for both paths. Record
+Use one channel and the same concurrency/frame-size matrix for both paths. Record
 the binary hash, pod/node identity, DPU knobs, success/failure counts, process CPU,
 and DPU logs with the output.
 

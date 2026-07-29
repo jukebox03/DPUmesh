@@ -294,25 +294,24 @@ get_pod_cores() {
         hw3) case "$app" in bench-dpumesh) rel="0,4,6";; echo-dpumesh) rel="1,5,7";; bench-tcp) rel="2";; echo-tcp) rel="3";; esac ;;
         hw6) case "$app" in bench-dpumesh) rel="0,4,6,8,10,12";; echo-dpumesh) rel="1,5,7,9,11,13";; bench-tcp) rel="2";; echo-tcp) rel="3";; esac ;;
         l4)
-            # Five measured paths get two exclusive cores each. Every other
+            # Four measured paths get two exclusive cores each. Every other
             # running benchmark pod is kept off those cores and off each other.
             case "$app" in
                 preload-bench) rel="0";; preload-echo) rel="1";;
-                bench-direct) rel="2";; echo-plain) rel="3";;
-                bench-tcp) rel="4";; echo-tcp) rel="5";;
-                bench-tcp-strict) rel="6";; echo-tcp-strict) rel="7";;
-                bench-dpumesh) rel="8";; echo-dpumesh) rel="9";;
-                bench-dpumesh-2) rel="10";; bench-dpumesh-3) rel="11";;
-                echo-dpumesh-13) rel="12";; echo-dpumesh-14) rel="13";;
-                loopback-dpumesh) rel="14";; stream-dpumesh) rel="15";;
-                verbs-dpumesh) rel="16";; preload-dpumesh) rel="17";;
+                bench-tcp) rel="2";; echo-tcp) rel="3";;
+                bench-tcp-strict) rel="4";; echo-tcp-strict) rel="5";;
+                bench-dpumesh) rel="6";; echo-dpumesh) rel="7";;
+                bench-dpumesh-2) rel="8";; bench-dpumesh-3) rel="9";;
+                echo-dpumesh-13) rel="10";; echo-dpumesh-14) rel="11";;
+                loopback-dpumesh) rel="12";; stream-dpumesh) rel="13";;
+                verbs-dpumesh) rel="14";; preload-dpumesh) rel="15";;
             esac ;;
         fair|*)
             case "$app" in
                 bench-dpumesh) rel="0";; echo-dpumesh) rel="1";;
                 bench-tcp) rel="2";; echo-tcp) rel="3";;
                 loopback-dpumesh) rel="4,5";; preload-dpumesh|preload-echo|preload-bench) rel="4,5";; stream-dpumesh) rel="4,5";; verbs-dpumesh) rel="4,5";;
-                echo-dpumesh-13) rel="6";; echo-dpumesh-14) rel="7";; bench-direct) rel="8";;
+                echo-dpumesh-13) rel="6";; echo-dpumesh-14) rel="7";;
                 bench-dpumesh-2) rel="9";; bench-dpumesh-3) rel="10";;
             esac ;;
     esac
@@ -333,7 +332,7 @@ pin_pods() {
     else
         warn "cpupower not found; skipping DVFS lock"
     fi
-    for app in bench-dpumesh bench-dpumesh-2 bench-dpumesh-3 echo-dpumesh echo-dpumesh-13 echo-dpumesh-14 loopback-dpumesh stream-dpumesh verbs-dpumesh preload-dpumesh preload-echo preload-bench bench-tcp echo-tcp bench-tcp-strict echo-tcp-strict bench-direct echo-plain; do
+    for app in bench-dpumesh bench-dpumesh-2 bench-dpumesh-3 echo-dpumesh echo-dpumesh-13 echo-dpumesh-14 loopback-dpumesh stream-dpumesh verbs-dpumesh preload-dpumesh preload-echo preload-bench bench-tcp echo-tcp bench-tcp-strict echo-tcp-strict; do
         local cores pod_id; cores=$(get_pod_cores "$app" "$profile"); [ -z "$cores" ] && continue
         # sed consumes the full stream. `head` can close early and make crictl
         # exit with SIGPIPE under this script's `set -o pipefail`.
@@ -504,12 +503,10 @@ start_pods() {
         scale_up_with_wait "verbs-dpumesh"    "$ready"
         scale_up_with_wait "stream-dpumesh"   "$ready"
     fi
-    scale_up_with_wait "echo-plain"       ""
     scale_up_with_wait "echo-tcp-strict"  ""
     scale_up_with_wait "bench-tcp-strict" ""
     scale_up_with_wait "echo-tcp"  ""
     scale_up_with_wait "bench-tcp" ""
-    scale_up_with_wait "bench-direct" ""     # direct-TCP client (targets echo_sock, no sidecar)
 }
 
 deploy() {
@@ -537,7 +534,7 @@ deploy() {
 cleanup() { info "Deleting namespace $NS"; kubectl delete ns "$NS" --ignore-not-found=true 2>/dev/null || true; stop_dpu; }
 
 show_logs() {
-    for app in bench-dpumesh echo-dpumesh echo-dpumesh-13 echo-dpumesh-14 loopback-dpumesh stream-dpumesh verbs-dpumesh preload-dpumesh preload-echo preload-bench bench-tcp echo-tcp bench-tcp-strict echo-tcp-strict bench-direct echo-plain; do
+    for app in bench-dpumesh echo-dpumesh echo-dpumesh-13 echo-dpumesh-14 loopback-dpumesh stream-dpumesh verbs-dpumesh preload-dpumesh preload-echo preload-bench bench-tcp echo-tcp bench-tcp-strict echo-tcp-strict; do
         echo "=== $app ==="
         kubectl logs -n "$NS" -l "app=$app" --all-containers=true --prefix=true --tail=20 2>/dev/null || true
         echo

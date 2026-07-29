@@ -1,2 +1,0 @@
-observed_utc,run_id,phase,config,payload_bytes,offered_rps,reason,raw_result
-2026-07-28T03:20:39Z,idle-0-q0-dpumesh-native-r1,idle,dpumesh-native,0,0,collector_v6_idle_validation_bug,/home/jukebox/DPUmesh/bench/report/data/l4-20260728-113431/raw/idle-0-q0-dpumesh-native-r1.result.failed-v6.txt

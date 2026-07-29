@@ -1,4 +1,4 @@
-/* Matched-C POSIX RPC benchmark client for direct TCP, Envoy, and DPUmesh preload.
+/* Matched-C POSIX RPC benchmark client for Envoy and DPUmesh preload.
  *
  * RUN uses a closed fixed-concurrency window. OPEN schedules constant or Poisson
  * arrivals and measures latency from scheduled send time. bench.h defines the
@@ -16,12 +16,14 @@
 #include <math.h>
 #include <fcntl.h>
 #include <netdb.h>
+#include <dlfcn.h>
 #include <sys/socket.h>
 #include <sys/epoll.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 
 #include "bench.h"
+#include "bench_selftest.h"
 
 #define CTRL_PORT_DEFAULT  9092
 #define MAX_THREADS        64
@@ -192,26 +194,6 @@ static int connect_target(void) {
     return fd;
 }
 
-/* epoll_wait() rounds sub-millisecond deadlines down to zero, which turns any
- * open-loop rate above 1000 arrivals/s per worker into an accidental busy-spin.
- * epoll_pwait2() keeps the scheduled arrival clock at nanosecond resolution while
- * still waking early for socket readiness. */
-static int epoll_wait_until(int ep, struct epoll_event *out, double deadline) {
-    double dt = deadline - bench_now_sec();
-    if (dt < 0.0) dt = 0.0;
-    if (dt > 0.020) dt = 0.020;
-    struct timespec ts;
-    ts.tv_sec = (time_t)dt;
-    ts.tv_nsec = (long)((dt - (double)ts.tv_sec) * 1e9);
-    int n = epoll_pwait2(ep, out, 1, &ts, NULL);
-    if (n < 0 && errno == ENOSYS) {
-        int timeout_ms = (int)ceil(dt * 1e3);
-        if (dt > 0.0 && timeout_ms < 1) timeout_ms = 1;
-        n = epoll_wait(ep, out, 1, timeout_ms);
-    }
-    return n;
-}
-
 static void *worker_fn(void *arg) {
     worker_t *w = (worker_t *)arg;
     double start = 0.0, end = 0.0;
@@ -294,7 +276,7 @@ static void *worker_fn(void *arg) {
          * duration check stays responsive. */
         struct epoll_event out[1];
         if (w->mode == MODE_OPEN) {
-            epoll_wait_until(ep, out, w->sched_next);
+            bench_epoll_wait_until(ep, out, w->sched_next);
         } else {
             int timeout_ms = (w->outstanding > 0 || w->tx.len) ? 20 : 1;
             epoll_wait(ep, out, 1, timeout_ms);
@@ -326,6 +308,11 @@ static void *watchdog_fn(void *arg) {
 static void run_bench(int conn_fd, int mode, int req_size, int reply_size, int conc,
                       double duration, long warmup, int threads, double rate, int arrival) {
     char reply[768];
+    typedef int (*preload_stats_fn)(unsigned long long out[7]);
+    preload_stats_fn read_preload_stats =
+        (preload_stats_fn)dlsym(RTLD_DEFAULT, "dmesh_preload_tx_stats");
+    unsigned long long tx0[7] = {0}, tx1[7] = {0};
+    int have_tx0 = read_preload_stats && read_preload_stats(tx0) == 0;
     if (req_size < 0 || reply_size < 1 || duration <= 0 || threads < 1 ||
         (mode == MODE_CLOSED && conc < 1) || (mode == MODE_OPEN && rate <= 0)) {
         const char *e = "ERR invalid args\n"; if (write(conn_fd, e, strlen(e)) < 0) {} return;
@@ -364,7 +351,9 @@ static void run_bench(int conn_fd, int mode, int req_size, int reply_size, int c
     atomic_store(&early, 1); pthread_join(wd, NULL);
 
     bench_hist_t agg; bench_hist_init(&agg);
-    double mrps = 0.0, gbps = 0.0;
+    double mrps = 0.0, request_gbps = 0.0, response_gbps = 0.0;
+    double request_frame = (double)BENCH_HDR_LEN + (double)req_size;
+    double response_frame = (double)BENCH_HDR_LEN + (double)reply_size;
     long total_ok = 0, total_fail = 0, total_reorder = 0, total_drops = 0;
     long total_scheduled = 0, total_pending = 0;
     for (int i = 0; i < threads; i++) {
@@ -374,7 +363,9 @@ static void run_bench(int conn_fd, int mode, int req_size, int reply_size, int c
         total_pending += w[i].outstanding;
         if (!atomic_load(&w[i].broken) && w[i].dura > 1e-9 && measured > 0) {
             mrps += (double)measured / w[i].dura * 1e-6;
-            gbps += 8e-9 * (double)measured * (double)req_size / w[i].dura;
+            double rps = (double)measured / w[i].dura;
+            request_gbps += 8e-9 * rps * request_frame;
+            response_gbps += 8e-9 * rps * response_frame;
             total_ok += measured;
             bench_hist_merge(&agg, &w[i].hist);
         }
@@ -388,16 +379,37 @@ static void run_bench(int conn_fd, int mode, int req_size, int reply_size, int c
     bench_hist_free(&agg);
 
     double offered_mrps = (mode == MODE_OPEN) ? rate * 1e-6 : mrps;
+    double gbps = request_gbps + response_gbps;
+    int have_tx1 = have_tx0 && read_preload_stats(tx1) == 0;
+    char tx_stats[192];
+    if (have_tx1) {
+        snprintf(tx_stats, sizeof tx_stats,
+                 "grabs=%llu rets=%llu recyc=%llu waits=%llu pads=%llu "
+                 "wwin=%llu wpool=%llu",
+                 tx1[0] - tx0[0], tx1[1] - tx0[1], tx1[2] - tx0[2],
+                 tx1[3] - tx0[3], tx1[4] - tx0[4],
+                 tx1[5] - tx0[5], tx1[6] - tx0[6]);
+    } else {
+        snprintf(tx_stats, sizeof tx_stats,
+                 "grabs=NA rets=NA recyc=NA waits=NA pads=NA "
+                 "wwin=NA wpool=NA");
+    }
     int n = snprintf(reply, sizeof reply,
-        "OK mrps=%.6f gbps=%.4f p50=%.2f p95=%.2f p99=%.2f p999=%.2f p9999=%.2f "
+        "OK mrps=%.6f gbps=%.4f req_gbps=%.4f resp_gbps=%.4f "
+        "p50=%.2f p95=%.2f p99=%.2f p999=%.2f p9999=%.2f "
         "avg=%.2f min=%.2f max=%.2f rcnt=%ld scheduled=%ld pending=%ld fail=%ld "
-        "conc=%d threads=%d reqsz=%d repsz=%d "
-        "durs=%.3f offered_mrps=%.6f drops=%ld overflow=%llu reorder=%ld mode=%s arr=%s\n",
-        mrps, gbps, p50, p95, p99, p999, p9999, avg, mn, mx,
+        "conc=%d threads=%d reqsz=%d repsz=%d reqframe=%u respframe=%u "
+        "durs=%.3f offered_mrps=%.6f drops=%ld overflow=%llu reorder=%ld "
+        "mode=%s arr=%s %s\n",
+        mrps, gbps, request_gbps, response_gbps,
+        p50, p95, p99, p999, p9999, avg, mn, mx,
         total_ok, total_scheduled, total_pending, total_fail,
-        conc, threads, req_size, reply_size, duration,
+        conc, threads, req_size, reply_size,
+        BENCH_HDR_LEN + (uint32_t)req_size,
+        BENCH_HDR_LEN + (uint32_t)reply_size, duration,
         offered_mrps, total_drops, (unsigned long long)overflow, total_reorder,
-        mode == MODE_OPEN ? "open" : "closed", arrival == ARR_POISSON ? "poisson" : "const");
+        mode == MODE_OPEN ? "open" : "closed",
+        arrival == ARR_POISSON ? "poisson" : "const", tx_stats);
     if (write(conn_fd, reply, (size_t)n) < 0) {}
     fprintf(stderr, "[bench_sock] DONE %s", reply);
     free(w); free(tid);
@@ -429,8 +441,28 @@ static void handle_ctrl(int fd) {
         run_bench(fd, MODE_OPEN, req, rep, 0, dur, warm, threads, rate, arrival);
         close(fd); return;
     }
+    if (sscanf(buf, "%15s", cmd) == 1 && strcmp(cmd, "SELFTEST") == 0) {
+        int payload, threads;
+        double duration, rate;
+        char arr[16];
+        char reply[512];
+        int fields = sscanf(buf, "%*s %d %d %lf %lf %15s",
+                            &payload, &threads, &duration, &rate, arr);
+        int arrival = fields == 5 && strcmp(arr, "poisson") == 0
+                    ? ARR_POISSON : ARR_CONST;
+        if (fields != 5 || (strcmp(arr, "const") != 0 &&
+                            strcmp(arr, "poisson") != 0) ||
+            threads > MAX_THREADS ||
+            bench_run_selftest(reply, sizeof reply, payload, threads, duration,
+                               rate, arrival) < 0) {
+            snprintf(reply, sizeof reply, "ERR invalid SELFTEST args\n");
+        }
+        if (write(fd, reply, strlen(reply)) < 0) {}
+        close(fd); return;
+    }
     const char *u = "ERR use: RUN <req> <reply> <conc> <dur> <warmup> <threads> | "
-                    "OPEN <req> <reply> <threads> <dur> <warmup> <rate> [const|poisson] | PING\n";
+                    "OPEN <req> <reply> <threads> <dur> <warmup> <rate> [const|poisson] | "
+                    "SELFTEST <payload> <threads> <dur> <rate> <const|poisson> | PING\n";
     if (write(fd, u, strlen(u)) < 0) {}
     close(fd);
 }
@@ -460,8 +492,29 @@ static void parse_target(void) {
     }
 }
 
-int main(void) {
+int main(int argc, char **argv) {
     signal(SIGPIPE, SIG_IGN);
+    if (argc > 1) {
+        char reply[512];
+        int payload, threads, arrival;
+        double duration, rate;
+        if (argc != 7 || strcmp(argv[1], "--selftest") != 0 ||
+            sscanf(argv[2], "%d", &payload) != 1 ||
+            sscanf(argv[3], "%d", &threads) != 1 ||
+            sscanf(argv[4], "%lf", &duration) != 1 ||
+            sscanf(argv[5], "%lf", &rate) != 1 ||
+            (strcmp(argv[6], "const") != 0 && strcmp(argv[6], "poisson") != 0) ||
+            threads > MAX_THREADS) {
+            fprintf(stderr, "usage: %s --selftest <payload> <threads> <dur> "
+                            "<rate> <const|poisson>\n", argv[0]);
+            return 2;
+        }
+        arrival = strcmp(argv[6], "poisson") == 0 ? ARR_POISSON : ARR_CONST;
+        int rc = bench_run_selftest(reply, sizeof reply, payload, threads,
+                                    duration, rate, arrival);
+        fputs(reply, stdout);
+        return rc == 0 ? 0 : 1;
+    }
     parse_target();
     int ctrl_port = getenv("CTRL_PORT") ? atoi(getenv("CTRL_PORT")) : CTRL_PORT_DEFAULT;
 

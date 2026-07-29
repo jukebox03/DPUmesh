@@ -24,7 +24,15 @@ static atomic_int fake_fail_allocs;
 static atomic_int fake_fail_forever;
 static atomic_int fake_post_calls;
 static atomic_int fake_flush_calls;
+static atomic_int fake_inflight;
 static atomic_int fake_release_calls;
+static atomic_int fake_suppress_depth;
+static atomic_int fake_suppress_calls;
+static atomic_int fake_poll_active;
+static atomic_int fake_poll_max_active;
+static atomic_int fake_poll_delay_us;
+static atomic_int fake_destroy_calls;
+static atomic_int fake_destroy_during_poll;
 static size_t fake_posted_len;
 static dmesh_event_t fake_events[16];
 static int fake_event_count;
@@ -36,7 +44,15 @@ static void fake_reset(void) {
     atomic_store(&fake_fail_forever, 0);
     atomic_store(&fake_post_calls, 0);
     atomic_store(&fake_flush_calls, 0);
+    atomic_store(&fake_inflight, 0);
     atomic_store(&fake_release_calls, 0);
+    atomic_store(&fake_suppress_depth, 0);
+    atomic_store(&fake_suppress_calls, 0);
+    atomic_store(&fake_poll_active, 0);
+    atomic_store(&fake_poll_max_active, 0);
+    atomic_store(&fake_poll_delay_us, 0);
+    atomic_store(&fake_destroy_calls, 0);
+    atomic_store(&fake_destroy_during_poll, 0);
     fake_posted_len = 0;
     fake_event_count = 0;
     fake_event_pos = 0;
@@ -53,22 +69,56 @@ dmesh_channel_t *dmesh_create_channel(void) { return &fake_channel; }
 int dmesh_destroy_channel(dmesh_channel_t *channel) { (void)channel; return 0; }
 int dmesh_pod_id(dmesh_channel_t *channel) { return channel->pod_id; }
 int dmesh_msg_max(dmesh_channel_t *channel) { return channel->slot_size; }
+void dpumesh_get_wait_split(dpumesh_ctx_t *ctx, unsigned long long *window,
+                            unsigned long long *pool) {
+    (void)ctx;
+    if (window) *window = 6;
+    if (pool) *pool = 7;
+}
+void dmesh_get_tx_stats(dmesh_channel_t *channel, dmesh_tx_stats_t *out) {
+    (void)channel;
+    *out = (dmesh_tx_stats_t){
+        .pool_grabs = 1,
+        .pool_returns = 2,
+        .recycle_hits = 3,
+        .grow_waits = 4,
+        .block_pads = 5,
+    };
+}
 dmesh_eq_t *dmesh_create_eq(dmesh_channel_t *channel) {
     (void)channel; return (dmesh_eq_t *)(uintptr_t)1;
 }
 int dmesh_destroy_eq(dmesh_eq_t *eq) { (void)eq; return 0; }
 int dmesh_eq_fd(dmesh_eq_t *eq) { (void)eq; return -1; }
+void dmesh_eq_suppress_notify(dmesh_eq_t *eq, int delta) {
+    (void)eq;
+    atomic_fetch_add(&fake_suppress_depth, delta);
+    atomic_fetch_add(&fake_suppress_calls, 1);
+}
 dmesh_qp_t *dmesh_qp_open(dmesh_eq_t *eq, int service) {
     (void)eq; (void)service; return &fake_qp;
 }
-int dmesh_destroy_qp(dmesh_qp_t *qp) { (void)qp; return 0; }
+int dmesh_destroy_qp(dmesh_qp_t *qp) {
+    (void)qp;
+    atomic_fetch_add(&fake_destroy_calls, 1);
+    if (atomic_load(&fake_poll_active) != 0)
+        atomic_store(&fake_destroy_during_poll, 1);
+    return 0;
+}
 int dmesh_abort_qp(dmesh_qp_t *qp) { (void)qp; return 0; }
 int dmesh_send_fin(dmesh_qp_t *qp) { (void)qp; return 0; }
 int dmesh_poll_eq(dmesh_eq_t *eq, dmesh_event_t *events, int max_events) {
     (void)eq;
+    int active = atomic_fetch_add(&fake_poll_active, 1) + 1;
+    int maximum = atomic_load(&fake_poll_max_active);
+    while (active > maximum &&
+           !atomic_compare_exchange_weak(&fake_poll_max_active, &maximum, active)) {}
+    int delay = atomic_load(&fake_poll_delay_us);
+    if (delay > 0) usleep((useconds_t)delay);
     int n = 0;
     while (n < max_events && fake_event_pos < fake_event_count)
         events[n++] = fake_events[fake_event_pos++];
+    atomic_fetch_sub(&fake_poll_active, 1);
     return n;
 }
 void *dmesh_alloc(dmesh_qp_t *qp, uint32_t len) {
@@ -96,7 +146,12 @@ int dmesh_post_send(dmesh_qp_t *qp, const void *buf, uint32_t len) {
 int dmesh_flush(dmesh_qp_t *qp) {
     (void)qp;
     atomic_fetch_add(&fake_flush_calls, 1);
+    atomic_store(&fake_inflight, 1);
     return 0;
+}
+int dmesh_tx_inflight(dmesh_qp_t *qp) {
+    (void)qp;
+    return atomic_load(&fake_inflight);
 }
 void dmesh_release_rx_buffer(dmesh_channel_t *channel, dmesh_event_t *event) {
     (void)channel;
@@ -115,6 +170,7 @@ static pfd_t *test_pfd(void) {
 }
 
 static void test_pfd_free(pfd_t *e) {
+    dirty_unlink(e);
     release_rx_list(e->rx_head);
     real_close(e->sigfd);
     real_close(e->efd);
@@ -168,7 +224,7 @@ static void test_nonblocking_eagain_and_pollout_edge(void) {
 
     g_eq = (dmesh_eq_t *)(uintptr_t)1;
     fake_emit_event(DMESH_EVENT_TX_READY, &fake_qp);
-    dispatcher_drain_eq();
+    dispatcher_drain_eq(NULL, 0);
     assert(fd_ready(e, POLLOUT));
     assert(shim_send(e, "x", 1, MSG_DONTWAIT) == 1);
     assert(atomic_load(&fake_alloc_calls) == 2);
@@ -207,7 +263,7 @@ static void test_blocking_send_waits_for_event(void) {
 
     g_eq = (dmesh_eq_t *)(uintptr_t)1;
     fake_emit_event(DMESH_EVENT_TX_READY, &fake_qp);
-    dispatcher_drain_eq();
+    dispatcher_drain_eq(NULL, 0);
     assert(pthread_join(thread, NULL) == 0);
     assert(arg.result == 8);
     assert(atomic_load(&fake_alloc_calls) == 3);  /* two 4-byte posts after wake */
@@ -241,7 +297,7 @@ static void test_rx_partial_peek_credit_and_fin(void) {
         .len = 6,
         ._rx_token = 17,
     };
-    assert(pfd_queue_rx(e, &event) == 0);
+    assert(pfd_queue_rx(e, &event, 0) == 0);
     assert(fd_ready(e, POLLIN));
 
     char out[8] = {0};
@@ -263,7 +319,7 @@ static void test_rx_partial_peek_credit_and_fin(void) {
     assert(!fd_ready(e, POLLIN));
     dmesh_event_t fin = { .qp = &fake_qp, .type = DMESH_EVENT_RECV_FIN,
                        ._rx_token = -1 };
-    assert(pfd_rx_fin(e, &fin) == 0);
+    assert(pfd_rx_fin(e, &fin, 0) == 0);
     assert(fd_ready(e, POLLIN));
     assert(shim_recv(e, out, 1, MSG_DONTWAIT) == 0);
     test_pfd_free(e);
@@ -274,12 +330,12 @@ static void test_data_after_fin_fails_closed(void) {
     pfd_t *e = test_pfd();
     dmesh_event_t fin = { .qp = &fake_qp, .type = DMESH_EVENT_RECV_FIN,
                        ._rx_token = -1 };
-    assert(pfd_rx_fin(e, &fin) == 0);
+    assert(pfd_rx_fin(e, &fin, 0) == 0);
 
     static const uint8_t byte[] = "x";
     dmesh_event_t data = { .qp = &fake_qp, .type = DMESH_EVENT_RECV, .buf = byte,
                         .len = 1, ._rx_token = 23 };
-    assert(pfd_queue_rx(e, &data) == -1);
+    assert(pfd_queue_rx(e, &data, 0) == -1);
     assert(e->io_error == EPROTO);
     assert(atomic_load(&fake_release_calls) == 1);
     char out;
@@ -360,8 +416,8 @@ static void test_rx_fragments_preserve_order(void) {
                      .len = 1, ._rx_token = 1 };
     dmesh_event_t b = { .qp = &fake_qp, .type = DMESH_EVENT_RECV, .buf = second,
                      .len = 1, ._rx_token = 2 };
-    assert(pfd_queue_rx(e, &a) == 0);
-    assert(pfd_queue_rx(e, &b) == 0);
+    assert(pfd_queue_rx(e, &a, 0) == 0);
+    assert(pfd_queue_rx(e, &b, 0) == 0);
     char out[2];
     assert(shim_recv(e, out, sizeof(out), MSG_WAITALL | MSG_DONTWAIT) == 2);
     assert(memcmp(out, "ab", sizeof(out)) == 0);
@@ -369,8 +425,166 @@ static void test_rx_fragments_preserve_order(void) {
     test_pfd_free(e);
 }
 
+static void test_dispatcher_batches_rx_signal(void) {
+    fake_reset();
+    pfd_t *e = test_pfd();
+    static const uint8_t bytes[] = "abcde";
+    g_eq = (dmesh_eq_t *)(uintptr_t)1;
+    for (int i = 0; i < 5; i++) {
+        fake_events[fake_event_count++] = (dmesh_event_t){
+            .qp = &fake_qp,
+            .type = DMESH_EVENT_RECV,
+            .buf = &bytes[i],
+            .len = 1,
+            ._rx_token = i + 1,
+        };
+    }
+
+    dispatcher_drain_eq(NULL, 0);
+    uint8_t signals[16];
+    assert(real_read(e->efd, signals, sizeof(signals)) == 1);
+
+    char out[5];
+    assert(shim_recv(e, out, sizeof(out), MSG_WAITALL | MSG_DONTWAIT) == 5);
+    assert(memcmp(out, bytes, sizeof(out)) == 0);
+    assert(atomic_load(&fake_release_calls) == 5);
+    test_pfd_free(e);
+}
+
+static void test_tx_self_clocking_and_bounded_flush(void) {
+    fake_reset();
+    pfd_t *e = test_pfd();
+
+    assert(shim_send(e, "a", 1, 0) == 1);
+    assert(atomic_load(&fake_flush_calls) == 1);
+
+    assert(shim_send(e, "b", 1, 0) == 1);
+    assert(shim_send(e, "c", 1, 0) == 1);
+    assert(atomic_load(&fake_flush_calls) == 1);
+    assert(e->tx_dirty == 1);
+    assert(e->dirty_linked == 1);
+
+    flush_dirty_all();
+    assert(atomic_load(&fake_flush_calls) == 2);
+    assert(e->tx_dirty == 0);
+    assert(e->dirty_linked == 0);
+    test_pfd_free(e);
+}
+
+static void test_blocking_recv_drains_eq(void) {
+    fake_reset();
+    pfd_t *e = test_pfd();
+    static const uint8_t byte = 'x';
+    g_eq = (dmesh_eq_t *)(uintptr_t)1;
+    fake_events[fake_event_count++] = (dmesh_event_t){
+        .qp = &fake_qp,
+        .type = DMESH_EVENT_RECV,
+        .buf = &byte,
+        .len = 1,
+        ._rx_token = 1,
+    };
+
+    char out = 0;
+    assert(shim_recv(e, &out, 1, 0) == 1);
+    assert(out == 'x');
+    assert(atomic_load(&fake_suppress_depth) == 0);
+    assert(atomic_load(&fake_suppress_calls) == 2);
+    assert(atomic_load(&fake_release_calls) == 1);
+    test_pfd_free(e);
+}
+
+struct drain_thread_arg {
+    pfd_t *e;
+    int ready;
+    int drained;
+};
+
+static void *drain_thread(void *arg) {
+    struct drain_thread_arg *a = arg;
+    a->ready = shim_try_drain(a->e, DRAIN_RX, &a->drained);
+    return NULL;
+}
+
+static void wait_for_fake_poll(void) {
+    for (int i = 0; i < 1000 && atomic_load(&fake_poll_active) == 0; i++)
+        usleep(100);
+    assert(atomic_load(&fake_poll_active) == 1);
+}
+
+static void test_eq_consumers_are_serialized(void) {
+    fake_reset();
+    pfd_t *e = test_pfd();
+    static const uint8_t byte = 'q';
+    g_eq = (dmesh_eq_t *)(uintptr_t)1;
+    atomic_store(&fake_poll_delay_us, 30000);
+    fake_events[fake_event_count++] = (dmesh_event_t){
+        .qp = &fake_qp,
+        .type = DMESH_EVENT_RECV,
+        .buf = &byte,
+        .len = 1,
+        ._rx_token = 1,
+    };
+
+    struct drain_thread_arg first = { .e = e };
+    pthread_t thread;
+    assert(pthread_create(&thread, NULL, drain_thread, &first) == 0);
+    wait_for_fake_poll();
+    int second_drained = -1;
+    assert(shim_try_drain(e, DRAIN_RX, &second_drained) == 0);
+    assert(second_drained == 0);
+    assert(pthread_join(thread, NULL) == 0);
+    assert(first.ready == 1 && first.drained == 1);
+    assert(atomic_load(&fake_poll_max_active) == 1);
+
+    char out = 0;
+    assert(shim_recv(e, &out, 1, MSG_DONTWAIT) == 1);
+    assert(out == 'q');
+    test_pfd_free(e);
+}
+
+static void test_close_waits_for_eq_consumer(void) {
+    fake_reset();
+    pfd_t *e = test_pfd();
+    g_eq = (dmesh_eq_t *)(uintptr_t)1;
+    atomic_store(&fake_poll_delay_us, 30000);
+    pthread_mutex_lock(&g_tbl_mu);
+    e->active_ops = 1;
+    pthread_mutex_unlock(&g_tbl_mu);
+    pthread_mutex_lock(&e->mu);
+    e->tx_dirty = 1;
+    dirty_link_locked(e);
+    pthread_mutex_unlock(&e->mu);
+    assert(e->dirty_ref == 1);
+
+    struct drain_thread_arg arg = { .e = e };
+    pthread_t thread;
+    assert(pthread_create(&thread, NULL, drain_thread, &arg) == 0);
+    wait_for_fake_poll();
+    dispatcher_reap_pfd(e);
+    assert(pthread_join(thread, NULL) == 0);
+    assert(atomic_load(&fake_destroy_calls) == 1);
+    assert(atomic_load(&fake_destroy_during_poll) == 0);
+    assert(atomic_load(&fake_poll_max_active) == 1);
+    pfd_put(e);
+}
+
+static void test_preload_tx_stats(void) {
+    unsigned long long stats[5] = {0};
+    g_ch = NULL;
+    assert(dmesh_preload_tx_stats(stats) == 0);
+    assert(stats[0] == 0 && stats[1] == 0 && stats[2] == 0);
+    assert(stats[3] == 0 && stats[4] == 0);
+
+    g_ch = &fake_channel;
+    assert(dmesh_preload_tx_stats(stats) == 0);
+    assert(stats[0] == 1 && stats[1] == 2 && stats[2] == 3);
+    assert(stats[3] == 4 && stats[4] == 5);
+    g_ch = NULL;
+}
+
 int main(void) {
     ENSURE_REAL();
+    test_preload_tx_stats();
     test_native_chunking_and_one_flush();
     test_nonblocking_eagain_and_pollout_edge();
     test_blocking_send_waits_for_event();
@@ -378,6 +592,11 @@ int main(void) {
     test_rx_partial_peek_credit_and_fin();
     test_data_after_fin_fails_closed();
     test_rx_fragments_preserve_order();
+    test_dispatcher_batches_rx_signal();
+    test_tx_self_clocking_and_bounded_flush();
+    test_blocking_recv_drains_eq();
+    test_eq_consumers_are_serialized();
+    test_close_waits_for_eq_consumer();
     test_fcntl_getfl_without_third_argument();
     test_install_fd_preserves_cloexec();
     test_retire_waits_for_active_wrapper();

@@ -133,6 +133,12 @@ int dmesh_post_send(dmesh_qp_t *c, const void *buf, uint32_t len);
  * fault returns EBADMSG; no pending data is a no-op. */
 int dmesh_flush(dmesh_qp_t *c);
 
+/* Nonzero while a published TX unit on this QP awaits acknowledgement. A sender
+ * that retains its trailing partial batch to coalesce successors reads this to
+ * bound the delay: with nothing in flight there is no successor to wait for, so
+ * the tail publishes at once. */
+int dmesh_tx_inflight(dmesh_qp_t *c);
+
 /* ===== Diagnostics ===== */
 
 /* Cumulative TX block-pool allocation, return, reuse, wait, and padding counters. */

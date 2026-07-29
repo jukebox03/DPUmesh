@@ -32,7 +32,6 @@ TRANSPORT_FILTER="${TRANSPORT_FILTER:-}"
 TRANSPORTS=(
   "dpumesh-native|bench-dpumesh|$CTRL_PORT|native|no"
   "tcp-envoy|bench-tcp|$CTRL_PORT|sock|yes"
-  "tcp-direct|bench-direct|$CTRL_PORT|sock|yes"        # bench_sock → echo_sock, NO sidecar (isolates the Envoy tax)
   "dpumesh-preload|preload-bench|$CTRL_PORT|sock|yes"
 )
 
@@ -138,7 +137,7 @@ stage_bw() {
 stage_curve() {  # OPEN loop — only transports whose client supports it (kind=sock)
   local any=0
   for tr in "${LIVE[@]}"; do [ "${OPEN[$tr]}" = yes ] && any=1; done
-  [ "$any" -eq 0 ] && { warn "STAGE curve: no open-capable transport deployed (need dpumesh-preload / tcp-direct with bench_sock) — skipping"; return; }
+  [ "$any" -eq 0 ] && { warn "STAGE curve: no open-capable transport deployed (need dpumesh-preload with bench_sock) — skipping"; return; }
   for tr in "${LIVE[@]}"; do
     [ "${OPEN[$tr]}" = yes ] || continue
     # Open-loop over CURVE_THREADS connections so the generator is not single-conn

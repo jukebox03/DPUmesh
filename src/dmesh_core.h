@@ -76,6 +76,7 @@ struct dmesh_eq {
                                      * dmesh_eq_fd only hands it out, it never enables it). */
     /* Set when dmesh_eq_fd exposes notify_efd. Poll-only EQs skip eventfd writes. */
     atomic_int         wants_notify;
+    atomic_int         suppress_notify;
     int                reg_idx;     /* slot in ctx->eqs[], for destroy */
     atomic_int         nqp;         /* live QPs bound here. Enforces destroy_eq's EBUSY
                                      * rule instead of only documenting it: a conn outliving
@@ -128,6 +129,10 @@ dmesh_qp_t *dmesh_qp_open(dmesh_eq_t *eq, int dst_service_id);
 int dpumesh_get_slot_size(dpumesh_ctx_t *ctx);
 /* Max contiguous message = the per-conn TX block size (the reserve/alloc length cap). */
 int dpumesh_get_block_size(dpumesh_ctx_t *ctx);
+
+/* Split of grow_waits by cause: the QP's own block window, or the shared pool. */
+void dpumesh_get_wait_split(dpumesh_ctx_t *ctx, unsigned long long *window,
+                            unsigned long long *pool);
 
 /* TX pool counters: dmesh_tx_stats_t / dmesh_get_tx_stats, in <dpumesh/dmesh.h>
  * (public — grow_waits is the observable counterpart of dmesh_alloc's EAGAIN). */
@@ -224,6 +229,9 @@ dmesh_qp_t *dmesh_next_ready(dmesh_eq_t *eq);
  * newest fillable partial slot buffered. This is the post_send fast path; unlike the
  * public dmesh_flush it does not force that trailing partial. */
 int dmesh_flush_full(dmesh_qp_t *c);
+
+/* Temporarily suppress eventfd writes while an in-process EQ consumer drains work. */
+void dmesh_eq_suppress_notify(dmesh_eq_t *eq, int delta);
 
 /* Send an ordered zero-length FIN on the connection's forward ring. Ring timeout
  * returns EBADMSG without latching fin_sent. */

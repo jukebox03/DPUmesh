@@ -1,2 +1,0 @@
-[ perf record: Woken up 1 times to write data ]
-[ perf record: Captured and wrote 1.909 MB /home/jukebox/DPUmesh/bench/report/data/l4-20260728-022756/raw/perf/profile-8192-q8-plain.data (982 samples) ]

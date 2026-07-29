@@ -1,7 +1,7 @@
 #!/bin/bash
 # Measure host-container and DPU ARM CPU across one fixed load window using process
 # tick deltas. TCP accounting includes Envoy. crictl maps pods to container PIDs.
-# Usage: cpu_probe.sh <dpumesh|tcp|direct> <req> <reply> <conc> <dur> [threads] [tidy.csv]
+# Usage: cpu_probe.sh <dpumesh|tcp> <req> <reply> <conc> <dur> [threads] [tidy.csv]
 set -euo pipefail
 
 SUITE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -10,7 +10,7 @@ PROJ_ROOT="$(cd "$SUITE_DIR/../.." && pwd)"
 NS="${NS:-test-bench}"; CTRL_PORT="${CTRL_PORT:-9092}"
 CLK="$(getconf CLK_TCK)"
 
-TR="${1:?transport dpumesh|tcp|direct}"; REQ="${2:-1024}"; REPLY="${3:-8}"; CONC="${4:-32}"
+TR="${1:?transport dpumesh|tcp}"; REQ="${2:-1024}"; REPLY="${3:-8}"; CONC="${4:-32}"
 DUR="${5:-10}"; THREADS="${6:-1}"; TIDY="${7:-}"
 CPU_REP="${CPU_REP:-1}"
 CPU_RUN_ID="${CPU_RUN_ID:-$CPU_REP}"
@@ -29,8 +29,7 @@ case "$TR" in
   # the real server-side host cost.
   dpumesh) CLIENT_APP=bench-dpumesh; SERVER_APPS="echo-dpumesh echo-dpumesh-13 echo-dpumesh-14"; USE_DPU=1;;
   tcp)     CLIENT_APP=bench-tcp;     SERVER_APPS="echo-tcp";                                     USE_DPU=0;;
-  direct)  CLIENT_APP=bench-direct;  SERVER_APPS="echo-tcp";                                     USE_DPU=0;;
-  *) echo "transport must be dpumesh|tcp|direct"; exit 2;;
+  *) echo "transport must be dpumesh|tcp"; exit 2;;
 esac
 
 pod_ip()  { kubectl get pod -n "$NS" -l "app=$1" --field-selector=status.phase=Running \
@@ -53,13 +52,6 @@ field()   { awk -v k="$2" '{for(i=1;i<=NF;i++){p=k"=";if(index($i,p)==1){print s
 CIP="$(pod_ip "$CLIENT_APP")"; [ -z "$CIP" ] && { echo "no $CLIENT_APP pod"; exit 1; }
 mapfile -t CPIDS < <(pod_pids "$CLIENT_APP")
 SPIDS=(); for sapp in $SERVER_APPS; do while read -r p; do [ -n "$p" ] && SPIDS+=("$p"); done < <(pod_pids "$sapp"); done
-# The direct path shares echo-tcp's pod with an idle Envoy container but bypasses
-# it on port 9092. Exclude that unrelated process from direct-path accounting.
-if [ "$TR" = direct ]; then
-  FILTERED=()
-  for p in "${SPIDS[@]}"; do [ "$(comm_of "$p")" = envoy ] || FILTERED+=("$p"); done
-  SPIDS=("${FILTERED[@]}")
-fi
 DPID=""; DT0=0; [ "$USE_DPU" = 1 ] && DPID="$(dpu_pid)"
 
 echo "== CPU probe: $TR  ${REQ}B/${REPLY}B conc=$CONC threads=$THREADS dur=${DUR}s rep=$CPU_REP =="

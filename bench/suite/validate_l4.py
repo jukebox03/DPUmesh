@@ -4,7 +4,7 @@ import csv
 import sys
 
 
-MAIN_TRANSPORTS = {"dpumesh-native", "tcp-envoy", "tcp-direct"}
+MAIN_TRANSPORTS = {"dpumesh-native", "tcp-envoy"}
 CPU_TRANSPORTS = {"dpumesh", "tcp", "direct"}
 
 

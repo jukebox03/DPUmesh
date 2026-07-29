@@ -22,7 +22,7 @@ import matplotlib.pyplot as plt
 # Colour-blind-safe, fixed per transport so figures across the paper agree.
 COLORS = {
     "dpumesh-native":  "#0072B2", "dpumesh-preload": "#56B4E9",
-    "tcp-envoy":       "#D55E00", "tcp-direct":      "#E69F00",
+    "tcp-envoy":       "#D55E00",
     "tcp-loopback-c":  "#009E73", "tcp-loopback-go": "#CC79A7",
 }
 def color(t): return COLORS.get(t, "#444444")
@@ -154,7 +154,7 @@ def fig_goodput_vs_size(rows, out):
                 plt.annotate(f"N≈{N:.1f}", (sz, g), textcoords="offset points",
                              xytext=(dx, dy), fontsize=6, color=color(t), ha="center")
     size_axis(plt.gca(), [int(r["req_size"]) for r in sel]); plt.xlabel("request size")
-    plt.ylabel("request goodput (Gb/s)")
+    plt.ylabel("bidirectional application-frame goodput (Gb/s)")
     plt.title("Goodput vs message size  (N = achieved concurrency)")
     plt.grid(True, which="both", alpha=0.3); plt.legend(); plt.tight_layout()
     p = os.path.join(out, "fig_goodput_vs_size.png"); plt.savefig(p, dpi=160); plt.close()
@@ -245,12 +245,12 @@ def fig_cpu_accounting(cpu_rows, out):
     return p
 
 def tmap(t):  # busy/npod use short transport names; map to the fixed colour keys
-    return {"dpumesh": "dpumesh-native", "tcp": "tcp-envoy", "direct": "tcp-direct"}.get(t, t)
+    return {"dpumesh": "dpumesh-native", "tcp": "tcp-envoy"}.get(t, t)
 
 def fig_busyapp(path, out):
     """A3: throughput & latency vs injected app-work. If freeing the host core matters,
     tcp-envoy (echo shares its core with an active sidecar) should fall off faster than
-    dpumesh / tcp-direct (echo owns its core)."""
+    dpumesh."""
     rows = load(path)
     if not rows: return None
     ts = {}

@@ -21,6 +21,7 @@
 
 #include <time.h>
 #include <errno.h>
+#include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -38,6 +39,45 @@ extern __thread int dpu_worker_id;
 static int g_arm_affinity_ready = 0;
 static int g_arm_allowed_n = 0;
 static cpu_set_t g_arm_allowed;
+/* Permitted CPUs, quietest interrupt load first. */
+static int g_arm_order[CPU_SETSIZE];
+static int g_arm_order_n = 0;
+
+/* Count the interrupts each CPU has taken from device lines. A worker sharing a
+ * CPU with an active interrupt line competes with hard-IRQ and softirq work and
+ * saturates ahead of its peers, so those CPUs are used last. */
+static void
+dpu_arm_irq_load(unsigned long long *per_cpu, int ncpu)
+{
+    FILE *f = fopen("/proc/interrupts", "r");
+    if (!f)
+        return;
+    char line[4096];
+    if (!fgets(line, sizeof(line), f)) {          /* header names the CPUs */
+        fclose(f);
+        return;
+    }
+    while (fgets(line, sizeof(line), f)) {
+        char *colon = strchr(line, ':');
+        if (!colon)
+            continue;
+        *colon = '\0';
+        char *name = line;
+        while (*name == ' ') name++;
+        if (*name < '0' || *name > '9')            /* IPI/err rows, not devices */
+            continue;
+        char *p = colon + 1;
+        for (int cpu = 0; cpu < ncpu; cpu++) {
+            char *end;
+            unsigned long long v = strtoull(p, &end, 10);
+            if (end == p)
+                break;
+            per_cpu[cpu] += v;
+            p = end;
+        }
+    }
+    fclose(f);
+}
 
 static void
 dpu_arm_affinity_init(void)
@@ -50,6 +90,33 @@ dpu_arm_affinity_init(void)
         if (CPU_ISSET(cpu, &g_arm_allowed))
             g_arm_allowed_n++;
     g_arm_affinity_ready = g_arm_allowed_n > 0;
+    if (!g_arm_affinity_ready)
+        return;
+
+    int ncpu = (int)sysconf(_SC_NPROCESSORS_CONF);
+    if (ncpu <= 0 || ncpu > CPU_SETSIZE)
+        return;
+    unsigned long long *load = calloc((size_t)ncpu, sizeof(*load));
+    if (!load)
+        return;
+    dpu_arm_irq_load(load, ncpu);
+
+    /* Order the permitted CPUs by interrupt load, quietest first. Pinning walks
+     * this order, so the loaded CPUs are only reached once the quiet ones run
+     * out and the assignment stays a permutation of what was permitted. */
+    g_arm_order_n = 0;
+    for (int cpu = 0; cpu < ncpu && g_arm_order_n < CPU_SETSIZE; cpu++)
+        if (CPU_ISSET(cpu, &g_arm_allowed))
+            g_arm_order[g_arm_order_n++] = cpu;
+    for (int i = 1; i < g_arm_order_n; i++) {
+        int cpu = g_arm_order[i], j = i - 1;
+        while (j >= 0 && load[g_arm_order[j]] > load[cpu]) {
+            g_arm_order[j + 1] = g_arm_order[j];
+            j--;
+        }
+        g_arm_order[j + 1] = cpu;
+    }
+    free(load);
 }
 
 static void
@@ -59,12 +126,16 @@ dpu_arm_pin_current(const char *role, int logical_id)
         return;
     int ordinal = logical_id % g_arm_allowed_n;
     int selected = -1;
-    for (int cpu = 0; cpu < CPU_SETSIZE; cpu++) {
-        if (!CPU_ISSET(cpu, &g_arm_allowed))
-            continue;
-        if (ordinal-- == 0) {
-            selected = cpu;
-            break;
+    if (g_arm_order_n == g_arm_allowed_n) {
+        selected = g_arm_order[ordinal];
+    } else {
+        for (int cpu = 0; cpu < CPU_SETSIZE; cpu++) {
+            if (!CPU_ISSET(cpu, &g_arm_allowed))
+                continue;
+            if (ordinal-- == 0) {
+                selected = cpu;
+                break;
+            }
         }
     }
     if (selected < 0)

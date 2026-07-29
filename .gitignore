@@ -14,5 +14,7 @@
 *.a
 *.so
 *.so.*
+__pycache__/
+*.py[cod]
 # ...but keep the checked-in bench data
 !bench/*.csv

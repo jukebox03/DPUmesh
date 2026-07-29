@@ -1,1 +1,0 @@
-OK rcnt=0 scheduled=0 pending=0 fail=0 mrps=0 gbps=0 p50=0 p95=0 p99=0 p999=0 p9999=0 avg=0 min=0 max=0 durs=5 offered_mrps=0 drops=0 overflow=0 reorder=0 mode=idle arr=none

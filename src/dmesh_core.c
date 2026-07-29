@@ -242,6 +242,10 @@ struct dpumesh_ctx {
     atomic_ullong st_pool_returns;  /* shared-pool CAS pushes (shrink / close drain) */
     atomic_ullong st_recycle_hits;  /* grow served from the conn's recyc[] (no pool op) */
     atomic_ullong st_grow_waits;    /* backoff sleeps in reserve (window full / pool empty) */
+    /* The two admission failures reserve can hit, split so a stall names its own
+     * cause: the QP's own block window, or the channel-wide block pool. */
+    atomic_ullong st_wait_window;
+    atomic_ullong st_wait_pool;
     atomic_ullong st_block_pads;    /* message didn't fit the block tail → pad + next block */
     /* RX drop counters. inbox_drops should remain zero with the configured
      * reverse-credit budget. */
@@ -436,11 +440,44 @@ static inline int rxq_try_pop(dpumesh_ctx_t *ctx, sw_descriptor_t *out)
 static inline void eq_notify(struct dmesh_eq *eq)
 {
     if (eq->notify_efd >= 0 &&
-        atomic_load_explicit(&eq->wants_notify, memory_order_acquire)) {
+        atomic_load_explicit(&eq->wants_notify, memory_order_seq_cst) &&
+        atomic_load_explicit(&eq->suppress_notify, memory_order_seq_cst) == 0) {
         uint64_t one = 1;
         ssize_t w = write(eq->notify_efd, &one, sizeof(one));
         (void)w;
     }
+}
+
+static int eq_has_pending(const struct dmesh_eq *eq)
+{
+    const dpumesh_ctx_t *ctx = eq->ch->ctx;
+    if (eq->drain_cur)
+        return 1;
+    if (atomic_load_explicit(&eq->ready_head, memory_order_acquire) !=
+        atomic_load_explicit(&eq->ready_tail, memory_order_acquire))
+        return 1;
+    if (atomic_load_explicit(&eq->tx_ready_count, memory_order_acquire) != 0)
+        return 1;
+    return atomic_load_explicit(&ctx->rx_enq, memory_order_acquire) !=
+           atomic_load_explicit(&ctx->rx_deq, memory_order_acquire);
+}
+
+void dmesh_eq_suppress_notify(dmesh_eq_t *eq, int delta)
+{
+    if (!eq || (delta != 1 && delta != -1))
+        return;
+    if (delta > 0) {
+        atomic_fetch_add_explicit(&eq->suppress_notify, 1, memory_order_seq_cst);
+        return;
+    }
+    int old = atomic_fetch_sub_explicit(&eq->suppress_notify, 1,
+                                        memory_order_seq_cst);
+    if (old <= 0) {
+        atomic_fetch_add_explicit(&eq->suppress_notify, 1, memory_order_seq_cst);
+        return;
+    }
+    if (old == 1 && eq_has_pending(eq))
+        eq_notify(eq);
 }
 
 /* Wake EVERY EQ — only for the shared accept queue, whose conns have no EQ yet, so
@@ -1647,6 +1684,7 @@ uint8_t *dpumesh_tx_reserve(dpumesh_ctx_t *ctx, uint16_t port, uint32_t len) {
                    (psl->nrec > 0 || psl->nblk_owned < ctx->blocks_per_conn);
         if (!have) {
             atomic_fetch_add_explicit(&ctx->st_grow_waits, 1, memory_order_relaxed);
+            atomic_fetch_add_explicit(&ctx->st_wait_window, 1, memory_order_relaxed);
             tx_wait_arm(ctx, psl, port, DMESH_TX_WAIT_QP_RECLAIM);
             errno = EAGAIN;
             return NULL;
@@ -1658,6 +1696,8 @@ uint8_t *dpumesh_tx_reserve(dpumesh_ctx_t *ctx, uint16_t port, uint32_t len) {
             reserved_phys = block_pool_grab(ctx);
             if (reserved_phys < 0) {
                 atomic_fetch_add_explicit(&ctx->st_grow_waits, 1,
+                                          memory_order_relaxed);
+                atomic_fetch_add_explicit(&ctx->st_wait_pool, 1,
                                           memory_order_relaxed);
                 tx_wait_arm(ctx, psl, port, DMESH_TX_WAIT_SHARED_POOL);
                 errno = EAGAIN;
@@ -1989,6 +2029,16 @@ void dmesh_get_tx_stats(dmesh_channel_t *s, dmesh_tx_stats_t *out) {
     out->block_pads   = atomic_load_explicit(&ctx->st_block_pads,   memory_order_relaxed);
 }
 
+/* Split of grow_waits by cause, for attributing a transmit stall. */
+void dpumesh_get_wait_split(dpumesh_ctx_t *ctx, unsigned long long *window,
+                            unsigned long long *pool) {
+    if (!ctx) return;
+    if (window)
+        *window = atomic_load_explicit(&ctx->st_wait_window, memory_order_relaxed);
+    if (pool)
+        *pool = atomic_load_explicit(&ctx->st_wait_pool, memory_order_relaxed);
+}
+
 int dpumesh_get_pod_id(dpumesh_ctx_t *ctx) {
     return ctx->pod_id;
 }
@@ -2274,6 +2324,7 @@ dmesh_eq_t *dmesh_create_eq(dmesh_channel_t *ch) {
     atomic_init(&eq->ready_tail, (uint_fast32_t)0);
     atomic_init(&eq->nqp, 0);
     atomic_init(&eq->wants_notify, 0);   /* poll-only until dmesh_eq_fd is called */
+    atomic_init(&eq->suppress_notify, 0);
 
     dpumesh_ctx_t *ctx = ch->ctx;
     pthread_mutex_lock(&ctx->eq_lock);
@@ -2422,6 +2473,16 @@ int dmesh_flush_full(dmesh_qp_t *c) {
 
 int dmesh_flush(dmesh_qp_t *c) {
     return dmesh_drain_tx(c, 1);
+}
+
+int dmesh_tx_inflight(dmesh_qp_t *c) {
+    if (!c || !c->ep || !c->ep->ctx || c->local_port == 0) return 0;
+    struct dmesh_port_slot *psl = &c->ep->ctx->ports[c->local_port];
+    uint_fast16_t head =
+        atomic_load_explicit(&psl->su_head, memory_order_acquire);
+    uint_fast16_t tail =
+        atomic_load_explicit(&psl->su_tail, memory_order_acquire);
+    return head != tail;
 }
 
 /* Ship this conn's FIN. IDEMPOTENT: fin_sent latches, so every caller can just ask

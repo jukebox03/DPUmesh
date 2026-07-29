@@ -55,6 +55,10 @@ static void fixture_init(struct fixture *f, int pool_empty)
     for (uint32_t i = 0; i < DMESH_TX_READY_WORDS; i++)
         atomic_init(&f->eq->tx_ready[i], (uint_fast64_t)0);
     atomic_init(&f->eq->tx_ready_count, (uint_fast32_t)0);
+    atomic_init(&f->eq->ready_head, (uint_fast32_t)0);
+    atomic_init(&f->eq->ready_tail, (uint_fast32_t)0);
+    atomic_init(&f->eq->wants_notify, 0);
+    atomic_init(&f->eq->suppress_notify, 0);
 
     f->qp.ep = &f->channel;
     f->qp.eq = f->eq;
@@ -79,9 +83,32 @@ static void fixture_destroy(struct fixture *f)
     free(f->ports[TEST_PORT].su_seq);
     free(f->ports[TEST_PORT].su_end);
     free(f->ports[TEST_PORT].su_done);
+    if (f->eq->notify_efd >= 0) close(f->eq->notify_efd);
     free(f->eq);
     free(f->ports);
     free(f->ctx);
+}
+
+static void test_suppressed_notify_rechecks_pending(void)
+{
+    struct fixture f;
+    fixture_init(&f, 0);
+    f.eq->notify_efd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    assert(f.eq->notify_efd >= 0);
+    atomic_store(&f.eq->wants_notify, 1);
+
+    dmesh_eq_suppress_notify(f.eq, 1);
+    atomic_store(&f.ports[TEST_PORT].tx_wait_state, DMESH_TX_WAIT_READY);
+    eq_tx_ready_set(f.eq, TEST_PORT);
+    uint64_t value = 0;
+    assert(read(f.eq->notify_efd, &value, sizeof(value)) == -1);
+    assert(errno == EAGAIN);
+
+    dmesh_eq_suppress_notify(f.eq, -1);
+    assert(read(f.eq->notify_efd, &value, sizeof(value)) == sizeof(value));
+    assert(value == 1);
+    assert(dpumesh_next_tx_ready(f.eq) == &f.qp);
+    fixture_destroy(&f);
 }
 
 static void fill_qp_window(struct fixture *f)
@@ -295,6 +322,7 @@ int main(void)
     test_shared_pool_return_and_direct_retry();
     test_pool_eagain_does_not_commit_padding();
     test_default_four_mib_window_and_dynamic_fifo();
+    test_suppressed_notify_rechecks_pending();
     puts("native_writable_test: PASS");
     return 0;
 }
