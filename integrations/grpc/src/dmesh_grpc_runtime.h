@@ -11,7 +11,6 @@
 #include <grpcpp/security/credentials.h>
 #include <grpcpp/support/channel_arguments.h>
 
-#include "absl/functional/any_invocable.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "dmesh_runtime.h"
@@ -26,16 +25,14 @@ void SetDefaultAuthorityIfAbsent(
 
 }  // namespace internal
 
-using GrpcChannelCallback = absl::AnyInvocable<void(
-    absl::StatusOr<std::shared_ptr<::grpc::Channel>>)>;
-
-// Create a lazy gRPC channel that opens a targeted QP per connection. The
-// runtime must outlive the channel; DPUmesh owns GRPC_ARG_EVENT_ENGINE. The
-// callback runs on the runtime's callback executor.
-void ConnectDmeshGrpcChannel(
+// Create a lazy gRPC channel for a configured DPUmesh Service name; the
+// drop-in replacement for grpc::CreateCustomChannel. Each gRPC connection
+// opens one targeted QP. The runtime must outlive the channel; DPUmesh owns
+// GRPC_ARG_EVENT_ENGINE.
+absl::StatusOr<std::shared_ptr<::grpc::Channel>> CreateDmeshChannel(
     DmeshRuntime* runtime, std::string target,
     std::shared_ptr<::grpc::ChannelCredentials> credentials,
-    ::grpc::ChannelArguments args, GrpcChannelCallback callback);
+    ::grpc::ChannelArguments args = {});
 
 using MemoryAllocatorFactory = std::function<
     grpc_event_engine::experimental::MemoryAllocator()>;
@@ -71,11 +68,12 @@ class DmeshGrpcServerAttachment final {
 };
 
 // Routes subsequent native inbound QPs to a started gRPC PassiveListener.
+// An omitted allocator factory uses an unquota'd malloc-backed allocator.
 absl::StatusOr<std::unique_ptr<DmeshGrpcServerAttachment>>
 AttachDmeshGrpcServer(
     DmeshRuntime* runtime,
     ::grpc::experimental::PassiveListener* passive_listener,
-    MemoryAllocatorFactory allocator_factory,
+    MemoryAllocatorFactory allocator_factory = {},
     GrpcServerAcceptErrorCallback on_error = {});
 
 }  // namespace dpumesh::grpc

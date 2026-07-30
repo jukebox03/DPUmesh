@@ -184,10 +184,13 @@ CQ_INLINE int mpsc_comp_queue_empty(dpu_mpsc_comp_queue_t *q) {
 #define MAX_ARM_WORKERS 8
 
 /* Cache-line-isolated per-worker counter: each worker mutates only its own
- * element on the DMA hot path, so elements must not share a line. */
+ * element on the DMA hot path, so elements must not share a line. The line
+ * padding doubles as a canary field: nothing may ever write it. */
 struct dpu_worker_counter {
     _Alignas(64) uint32_t v;
+    uint32_t canary[15];
 };
+#define DPU_COUNTER_CANARY 0xC0FFEE5Au
 
 /* Per-pod state (DPU only) */
 struct pod_state {
@@ -222,6 +225,9 @@ struct pod_state {
     uint32_t dpa_del_expected_mask;
     uint32_t dpa_del_ack_mask;
     uint64_t dpa_del_last_send_ns;
+    /* EUs whose dpa_eu_rings count this pod's ring (set on ADD_ACK OK,
+     * cleared on DEL_ACK); a bit that never clears leaves the EU wake-eligible. */
+    uint32_t dpa_rings_counted_mask;
     int egress_quiesced;
     /* Pod teardown waits for every region%A owner bit. */
     uint32_t egress_quiesced_mask;
@@ -455,6 +461,10 @@ struct objects {
     struct dmesh_proxy *proxy;
     int dpa_thread_running[MAX_DPA_EU];     /* per-EU: 1 = thread k started */
     int dpa_thread_running_any;             /* 1 = at least one EU started (keepalive guard) */
+    /* Per-EU count of live forward rings, maintained on ADD_ACK/DEL_ACK
+     * transitions. Periodic WAKEs go only to EUs with at least one ring; a
+     * ringless EU parks until a control message wakes it. */
+    uint32_t dpa_eu_rings[MAX_DPA_EU];
 
     struct doca_pe *consumer_pe;   /* consumer_pes[0] */
     /* DPA channel k binds to consumer_pes[k % A]. */

@@ -54,9 +54,10 @@ absl::Status ErrnoStatus(const char* operation, int error_number) {
 }
 
 void DrainCounterFd(int fd) {
+  // One read resets an eventfd counter to zero.
   uint64_t value;
-  while (::read(fd, &value, sizeof(value)) == sizeof(value)) {
-  }
+  const ssize_t result = ::read(fd, &value, sizeof(value));
+  (void)result;
 }
 
 }  // namespace
@@ -154,6 +155,7 @@ class DmeshReactor::Impl final
       return absl::InvalidArgumentError("invalid DPUmesh reactor options");
     }
 
+    event_buffer_.resize(options_.event_batch_size);
     eq_ = ops_->CreateEq(channel_);
     if (eq_ == nullptr) {
       return ErrnoStatus("dmesh_create_eq", errno);
@@ -193,12 +195,16 @@ class DmeshReactor::Impl final
 
   bool Enqueue(absl::AnyInvocable<void()> task) {
     if (!accepting_.load(std::memory_order_acquire)) return false;
+    bool was_empty;
     {
       std::lock_guard<std::mutex> lock(command_mu_);
       if (!accepting_.load(std::memory_order_relaxed)) return false;
+      was_empty = commands_.empty();
       commands_.push_back(std::move(task));
     }
-    WakeCommandFd();
+    /* The eventfd counter stays signalled until the owner drains it, so only
+     * the empty→non-empty transition needs a wake. */
+    if (was_empty) WakeCommandFd();
     return true;
   }
 
@@ -244,10 +250,19 @@ class DmeshReactor::Impl final
 
   void AttachDriver(std::shared_ptr<Connection> connection,
                     std::weak_ptr<DmeshEndpointDriver> driver) {
-    Enqueue([self = shared_from_this(), connection = std::move(connection),
-             driver = std::move(driver)]() mutable {
-      self->AttachDriverOwner(connection, std::move(driver));
-    });
+    std::weak_ptr<DmeshEndpointDriver> driver_on_failure = driver;
+    if (!Enqueue([self = shared_from_this(), connection = std::move(connection),
+                  driver = std::move(driver)]() mutable {
+          self->AttachDriverOwner(connection, std::move(driver));
+        })) {
+      callback_executor_->Run(
+          [driver = std::move(driver_on_failure)]() mutable {
+            if (auto bound = driver.lock()) {
+              bound->OnTransportError(absl::UnavailableError(
+                  "DPUmesh reactor is shutting down"));
+            }
+          });
+    }
   }
 
   PostResult Post(const std::shared_ptr<Connection>& connection,
@@ -275,6 +290,12 @@ class DmeshReactor::Impl final
     if (destination == nullptr) {
       const int error_number = errno;
       if (error_number == EAGAIN) {
+        /* Capacity to a closed peer never recovers: its credits are gone, so
+         * the armed TX_READY would never fire and the write would park forever. */
+        if (connection->remote_eof) {
+          return PostResult::Error(absl::UnavailableError(
+              "DPUmesh peer closed while transmit was blocked"));
+        }
         /* A logical write may be larger than the bounded native batch window.
          * Publish its committed prefix so TX ACKs can make room for the rest. */
         if (connection->unflushed) {
@@ -401,6 +422,7 @@ class DmeshReactor::Impl final
     connected.transport = std::make_unique<Transport>(
         weak_from_this(), connection, static_cast<size_t>(post_max_));
     connected.work_executor = work_executor_;
+    connected.callback_executor = callback_executor_;
     DeliverConnect(std::move(callback), std::move(connected));
   }
 
@@ -469,6 +491,7 @@ class DmeshReactor::Impl final
         connected.transport = std::make_unique<Transport>(
             weak_from_this(), connection, static_cast<size_t>(post_max_));
         connected.work_executor = work_executor_;
+        connected.callback_executor = callback_executor_;
         DeliverAccept(std::move(connected));
         return;
       }
@@ -547,10 +570,21 @@ class DmeshReactor::Impl final
     if (event->type == DMESH_EVENT_RECV_FIN) {
       if (connection->closing || connection->remote_eof) return;
       connection->remote_eof = true;
+      const bool transmit_parked =
+          pending_tx_.erase(connection.get()) > 0;
       if (auto driver = connection->driver.lock()) {
         driver->OnRemoteEof();
       } else {
         connection->prebind_terminal = Connection::Terminal::kRemoteEof;
+      }
+      /* A parked write was waiting for capacity backed by the departed peer's
+       * credits; no TX_READY will ever resume it. Every accepted EventEngine
+       * Write must still complete, so fail the connection instead. */
+      if (transmit_parked) {
+        FailConnectionOwner(
+            connection,
+            absl::UnavailableError(
+                "DPUmesh peer closed while transmit was blocked"));
       }
       return;
     }
@@ -561,7 +595,7 @@ class DmeshReactor::Impl final
 
   bool DrainEq() {
     bool did_work = false;
-    std::vector<dmesh_event_t> events(options_.event_batch_size);
+    std::vector<dmesh_event_t>& events = event_buffer_;
     for (;;) {
       errno = 0;
       const int count = ops_->PollEq(
@@ -611,19 +645,30 @@ class DmeshReactor::Impl final
   }
 
   void DrainCommands() {
-    for (;;) {
-      absl::AnyInvocable<void()> task;
-      {
-        std::lock_guard<std::mutex> lock(command_mu_);
-        if (commands_.empty()) return;
-        task = std::move(commands_.front());
-        commands_.pop_front();
-      }
-      task();
+    /* One batch per loop cycle: tasks enqueued while this batch runs (e.g. a
+     * write pump yielding to EQ processing) execute on the next cycle, after
+     * their empty→non-empty wake is observed by poll(). */
+    std::deque<absl::AnyInvocable<void()>> batch;
+    {
+      std::lock_guard<std::mutex> lock(command_mu_);
+      batch.swap(commands_);
     }
+    for (auto& task : batch) task();
   }
 
   void ShutdownOwner() {
+    /* Run every command accepted before shutdown; queued lambdas hold owning
+     * references to this Impl and must not outlive the thread. */
+    for (;;) {
+      bool empty;
+      {
+        std::lock_guard<std::mutex> lock(command_mu_);
+        empty = commands_.empty();
+      }
+      if (empty) break;
+      DrainCommands();
+    }
+
     const absl::Status status =
         absl::CancelledError("DPUmesh reactor shutdown");
     std::vector<std::shared_ptr<Connection>> connections;
@@ -694,6 +739,7 @@ class DmeshReactor::Impl final
   std::mutex command_mu_;
   std::deque<absl::AnyInvocable<void()>> commands_;
 
+  std::vector<dmesh_event_t> event_buffer_;
   std::unordered_map<dmesh_qp_t*, std::shared_ptr<Connection>> connections_;
   std::unordered_set<Connection*> pending_tx_;
   std::vector<std::shared_ptr<Connection>> deferred_closes_;

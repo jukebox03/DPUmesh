@@ -2,7 +2,7 @@
 #define DPUMESH_GRPC_VERSION_H
 
 #define DPUMESH_GRPC_VERSION_MAJOR 0
-#define DPUMESH_GRPC_VERSION_MINOR 2
+#define DPUMESH_GRPC_VERSION_MINOR 3
 #define DPUMESH_GRPC_VERSION_PATCH 0
 
 // EventEngine is experimental, so the adapter intentionally has an exact

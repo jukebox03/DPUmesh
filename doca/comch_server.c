@@ -604,10 +604,13 @@ pods_add_connection(struct objects *objs, struct doca_comch_connection *conn)
 	objs->pods[idx].dpa_del_expected_mask = 0;
 	objs->pods[idx].dpa_del_ack_mask = 0;
 	objs->pods[idx].dpa_del_last_send_ns = 0;
+	objs->pods[idx].dpa_rings_counted_mask = 0;
 	objs->pods[idx].egress_quiesced = 0;
 	objs->pods[idx].egress_quiesced_mask = 0;
-	memset(objs->pods[idx].egress_inflight_worker, 0,
-	       sizeof(objs->pods[idx].egress_inflight_worker));
+	/* Reset only .v — the element padding is canary-armed. */
+	for (int w = 0; w < MAX_ARM_WORKERS; w++)
+		__atomic_store_n(&objs->pods[idx].egress_inflight_worker[w].v, 0,
+		                 __ATOMIC_RELEASE);
 	objs->pods[idx].egress_pending_emit = 0;
 	objs->pods[idx].proxy_source_refs = 0;
 	__atomic_store_n(&objs->pods[idx].registered, 0, __ATOMIC_RELEASE);

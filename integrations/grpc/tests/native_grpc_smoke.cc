@@ -1,11 +1,8 @@
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
-#include <deque>
-#include <future>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -16,9 +13,6 @@
 #include <utility>
 #include <vector>
 
-#include <grpc/event_engine/internal/memory_allocator_impl.h>
-#include <grpc/event_engine/memory_allocator.h>
-#include <grpc/event_engine/memory_request.h>
 #include <grpc/impl/channel_arg_names.h>
 #include <grpcpp/generic/async_generic_service.h>
 #include <grpcpp/generic/generic_stub.h>
@@ -27,85 +21,19 @@
 #include <grpcpp/support/byte_buffer.h>
 #include <grpcpp/support/slice.h>
 
-#include "absl/functional/any_invocable.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "dmesh_api_ops.h"
 #include "dmesh_grpc_runtime.h"
 #include "dmesh_runtime.h"
-#include "executor.h"
 
 namespace dpumesh::grpc::testing {
 namespace {
 
-using MemoryAllocator = grpc_event_engine::experimental::MemoryAllocator;
-using MemoryAllocatorImpl =
-    grpc_event_engine::experimental::internal::MemoryAllocatorImpl;
-using MemoryRequest = grpc_event_engine::experimental::MemoryRequest;
 using namespace std::chrono_literals;
 
 constexpr char kMethod[] = "/dpumesh.smoke.Echo/Unary";
 constexpr auto kTimeout = 60s;
-
-class ThreadExecutor final : public Executor {
- public:
-  ThreadExecutor() : worker_([this] { RunLoop(); }) {}
-  ~ThreadExecutor() override {
-    {
-      std::lock_guard<std::mutex> lock(mu_);
-      stopping_ = true;
-    }
-    cv_.notify_one();
-    worker_.join();
-  }
-
-  void Run(absl::AnyInvocable<void()> task) override {
-    {
-      std::lock_guard<std::mutex> lock(mu_);
-      if (stopping_) return;
-      tasks_.push_back(std::move(task));
-    }
-    cv_.notify_one();
-  }
-
- private:
-  void RunLoop() {
-    for (;;) {
-      absl::AnyInvocable<void()> task;
-      {
-        std::unique_lock<std::mutex> lock(mu_);
-        cv_.wait(lock, [this] { return stopping_ || !tasks_.empty(); });
-        if (tasks_.empty()) {
-          if (stopping_) return;
-          continue;
-        }
-        task = std::move(tasks_.front());
-        tasks_.pop_front();
-      }
-      task();
-    }
-  }
-
-  std::mutex mu_;
-  std::condition_variable cv_;
-  std::deque<absl::AnyInvocable<void()>> tasks_;
-  bool stopping_ = false;
-  std::thread worker_;
-};
-
-class SmokeMemoryAllocator final : public MemoryAllocatorImpl {
- public:
-  size_t Reserve(MemoryRequest request) override { return request.max(); }
-  grpc_slice MakeSlice(MemoryRequest request) override {
-    return grpc_slice_malloc(request.max());
-  }
-  void Release(size_t /*bytes*/) override {}
-  void Shutdown() override {}
-};
-
-MemoryAllocator MakeAllocator() {
-  return MemoryAllocator(std::make_shared<SmokeMemoryAllocator>());
-}
 
 ::grpc::ByteBuffer MakeBuffer(const std::string& value) {
   ::grpc::Slice slice(value);
@@ -144,16 +72,14 @@ absl::StatusOr<size_t> ParsePositive(const char* value, const char* name) {
   return static_cast<size_t>(parsed);
 }
 
-absl::StatusOr<std::unique_ptr<DmeshRuntime>> CreateRuntime(
-    ThreadExecutor* callbacks, size_t reactors) {
+absl::StatusOr<std::unique_ptr<DmeshRuntime>> CreateRuntime(size_t reactors) {
   DmeshRuntime::Options options;
   options.reactor_count = reactors;
-  return DmeshRuntime::Create(MakeNativeDmeshApiOps(), callbacks, options);
+  return DmeshRuntime::Create(MakeNativeDmeshApiOps(), options);
 }
 
 absl::Status RunServer(size_t calls, size_t reactors) {
-  ThreadExecutor callbacks;
-  auto runtime_result = CreateRuntime(&callbacks, reactors);
+  auto runtime_result = CreateRuntime(reactors);
   if (!runtime_result.ok()) return runtime_result.status();
   auto runtime = std::move(*runtime_result);
 
@@ -172,7 +98,7 @@ absl::Status RunServer(size_t calls, size_t reactors) {
   std::mutex accept_error_mu;
   std::optional<absl::Status> accept_error;
   auto attachment = AttachDmeshGrpcServer(
-      runtime.get(), passive_listener.get(), [] { return MakeAllocator(); },
+      runtime.get(), passive_listener.get(), {},
       [&accept_error_mu, &accept_error](const absl::Status& status) {
         std::lock_guard<std::mutex> lock(accept_error_mu);
         accept_error = status;
@@ -261,28 +187,17 @@ absl::Status RunServer(size_t calls, size_t reactors) {
 absl::Status RunClient(const std::string& target,
                        const std::string& authority, size_t calls,
                        size_t payload_size, size_t reactors) {
-  ThreadExecutor callbacks;
-  auto runtime_result = CreateRuntime(&callbacks, reactors);
+  auto runtime_result = CreateRuntime(reactors);
   if (!runtime_result.ok()) return runtime_result.status();
   auto runtime = std::move(*runtime_result);
 
-  auto promise = std::make_shared<std::promise<
-      absl::StatusOr<std::shared_ptr<::grpc::Channel>>>>();
-  auto future = promise->get_future();
   ::grpc::ChannelArguments channel_args;
   if (!authority.empty()) {
     channel_args.SetString(GRPC_ARG_DEFAULT_AUTHORITY, authority);
   }
-  ConnectDmeshGrpcChannel(
-      runtime.get(), target,
-      ::grpc::InsecureChannelCredentials(), channel_args,
-      [promise](absl::StatusOr<std::shared_ptr<::grpc::Channel>> result) {
-        promise->set_value(std::move(result));
-      });
-  if (future.wait_for(kTimeout) != std::future_status::ready) {
-    return absl::DeadlineExceededError("native gRPC channel creation timed out");
-  }
-  auto channel_result = future.get();
+  auto channel_result = CreateDmeshChannel(
+      runtime.get(), target, ::grpc::InsecureChannelCredentials(),
+      channel_args);
   if (!channel_result.ok()) return channel_result.status();
   auto channel = std::move(*channel_result);
   ::grpc::GenericStub stub(channel);

@@ -14,10 +14,12 @@
 
 namespace dpumesh::grpc {
 
-// Process-level DPUmesh ownership: one channel and N independent EQ reactors.
-// The callback executor must outlive the runtime and every endpoint created by
-// one of its reactors. The runtime itself must also outlive those endpoints,
-// because each endpoint uses its owning reactor as the work executor.
+// Process-level DPUmesh ownership: one channel and N independent EQ reactors,
+// each paired with its own dedicated callback thread by default. A custom
+// callback executor replaces every pair and must outlive the runtime and every
+// endpoint created by one of its reactors. The runtime itself must also
+// outlive those endpoints, because each endpoint uses its owning reactor as
+// the work executor.
 class DmeshRuntime final {
  public:
   struct Options {
@@ -25,6 +27,10 @@ class DmeshRuntime final {
     DmeshReactor::Options reactor;
   };
 
+  static absl::StatusOr<std::unique_ptr<DmeshRuntime>> Create(
+      std::unique_ptr<DmeshApiOps> ops);
+  static absl::StatusOr<std::unique_ptr<DmeshRuntime>> Create(
+      std::unique_ptr<DmeshApiOps> ops, Options options);
   static absl::StatusOr<std::unique_ptr<DmeshRuntime>> Create(
       std::unique_ptr<DmeshApiOps> ops, Executor* callback_executor);
   static absl::StatusOr<std::unique_ptr<DmeshRuntime>> Create(
@@ -44,11 +50,15 @@ class DmeshRuntime final {
 
  private:
   DmeshRuntime(std::unique_ptr<DmeshApiOps> ops, dmesh_channel_t* channel,
-               int post_max, Executor* callback_executor);
+               int post_max,
+               std::vector<std::unique_ptr<Executor>> owned_callback_executors,
+               Executor* callback_executor);
 
   std::unique_ptr<DmeshApiOps> ops_;
   dmesh_channel_t* channel_;
   int post_max_;
+  // Destroyed after reactors_ (declared first), which still schedule onto them.
+  std::vector<std::unique_ptr<Executor>> owned_callback_executors_;
   Executor* const callback_executor_;
   std::vector<std::unique_ptr<DmeshReactor>> reactors_;
   std::atomic<size_t> next_reactor_{0};

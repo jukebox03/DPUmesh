@@ -34,10 +34,15 @@ experimental. It uses only the public native C API.
 | native QP | one Endpoint connection | all operations on reactor owner |
 | RX event | reactor/Endpoint handoff | copy before native credit release |
 | pending write | Endpoint state | one cursor, completed exactly once |
+| callback executor | `DmeshRuntime` default or caller | default = one thread paired per reactor |
 
-Callbacks never run inline from transport operations. Cross-thread work enters a
-reactor through its command queue. A QP marked for close is freed only after the
-entire current EQ batch, because later entries can still name it.
+Callbacks never run inline from transport operations; each connection's
+completions are scheduled onto its reactor's paired callback thread, so
+callback work shards with the EQ shards and an idle runtime consumes no spin
+cycles. Cross-thread work enters a reactor through its command queue; only an
+empty→non-empty queue transition writes the command eventfd. A QP marked for
+close is freed only after the entire current EQ batch, because later entries
+can still name it.
 
 ## Write state machine
 
@@ -55,10 +60,12 @@ slice bytes
 ```
 
 Native ABI 4 batches committed posts into transport-private physical units and
-submits complete units immediately. If the bounded native window fills before the
-logical Write ends, the reactor forces any remaining partial, parks the cursor,
-and retries only after native capacity reclamation identifies that QP as ready.
-The final callback is scheduled only after the final partial flush succeeds.
+submits complete units immediately. A pump run posts a bounded number of
+fragments and reschedules itself, so one large Write cannot monopolise its
+reactor shard. If the bounded native window fills before the logical Write
+ends, the reactor forces any remaining partial, parks the cursor, and retries
+only after native capacity reclamation identifies that QP as ready. The final
+callback is scheduled only after the final partial flush succeeds.
 
 `dmesh_alloc(EAGAIN)` automatically arms a one-shot `DMESH_EVENT_TX_READY`
 event on the QP's EQ. The reactor retains the exact cursor and returns to its
@@ -66,6 +73,11 @@ two-fd event loop: one command eventfd and one native EQ eventfd. It does not ow
 timerfd or scan all pending writes. On TX-ready it resumes only the named QP and
 ignores the hint if that connection no longer has a parked write. The hint does not
 reserve shared capacity; a repeated `EAGAIN` rearms the next transition.
+
+A departed peer stops returning the credits a parked write is waiting for, so
+`DMESH_EVENT_RECV_FIN` fails a currently parked write, and backpressure after
+the FIN fails the write instead of parking it. Every accepted EventEngine
+Write therefore completes even when the peer vanishes mid-transfer.
 
 ## Read state machine
 
@@ -92,6 +104,8 @@ The maintained tests require:
 - byte-exact split writes and one final flush;
 - no callback before the flush boundary;
 - exact cursor resume only after `DMESH_EVENT_TX_READY`, with no timer retry;
+- peer FIN failing a parked write, and post-FIN backpressure failing a write;
+- byte-exact completion of writes that span multiple pump runs;
 - one EQ polling thread and no mid-batch QP destruction;
 - RX copy before release;
 - inbound QP conversion and pre-bind event replay;

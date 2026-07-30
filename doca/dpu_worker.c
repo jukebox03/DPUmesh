@@ -372,7 +372,8 @@ dpu_send_wake_worker(struct objects *objs, int id)
     trigger.type = DPA_MSG_WAKE;
     int worker_count = objs->n_data_workers;
     for (int k = id; k < objs->num_dpa_threads; k += worker_count)
-        if (objs->dpa_thread_running[k])
+        if (objs->dpa_thread_running[k] &&
+            __atomic_load_n(&objs->dpa_eu_rings[k], __ATOMIC_ACQUIRE) > 0)
             (void)dmesh_doca_dpa_msgq_send_try(&objs->dpa_comches[k]->send,
                                                 &trigger, sizeof(trigger));
 }
@@ -833,7 +834,56 @@ run_dpu_worker(struct objects *objs)
         dpu_publish_ready_and_setup_pods(objs);
         DOCA_LOG_WARN("MAIN CONTROL/DOORBELL: workers=%d, event-driven",
                       objs->n_data_workers);
+        /* Arm the counter-line canaries; nothing may ever write them. */
+        for (int p = 0; p < MAX_PODS; p++)
+            for (int w = 0; w < MAX_ARM_WORKERS; w++)
+                for (int i = 0; i < 15; i++)
+                    objs->pods[p].egress_inflight_worker[w].canary[i] =
+                        DPU_COUNTER_CANARY;
+        uint64_t canary_next_check_ns = 0;
         while (true) {
+            {
+                struct timespec cts;
+                clock_gettime(CLOCK_MONOTONIC, &cts);
+                uint64_t cnow = (uint64_t)cts.tv_sec * 1000000000ull +
+                                (uint64_t)cts.tv_nsec;
+                if (cnow >= canary_next_check_ns) {
+                    canary_next_check_ns = cnow + 1000000000ull;
+                    /* Report a send msgq only when it is unhealthy: errors, or
+                     * submits running ahead of completions. */
+                    for (int k = 0; k < objs->num_dpa_threads; k++) {
+                        struct dmesh_doca_dpa_msgq *m =
+                            &objs->dpa_comches[k]->send;
+                        int inflight = (int)(m->dbg_submits -
+                                             m->dbg_completions -
+                                             m->dbg_errors);
+                        if (m->dbg_errors == m->dbg_errors_reported &&
+                            inflight <= 8)
+                            continue;
+                        m->dbg_errors_reported = m->dbg_errors;
+                        DOCA_LOG_WARN("MSGQ EU%d unhealthy: submits=%u comps=%u "
+                                      "errs=%u inflight=%d wake=%d",
+                                      k, m->dbg_submits, m->dbg_completions,
+                                      m->dbg_errors, inflight,
+                                      m->wake_inflight);
+                    }
+                    for (int p = 0; p < MAX_PODS; p++)
+                        for (int w = 0; w < MAX_ARM_WORKERS; w++) {
+                            struct dpu_worker_counter *c =
+                                &objs->pods[p].egress_inflight_worker[w];
+                            for (int i = 0; i < 15; i++) {
+                                if (c->canary[i] == DPU_COUNTER_CANARY)
+                                    continue;
+                                DOCA_LOG_ERR("COUNTER CANARY HIT: pod=%d w=%d "
+                                             "word=%d val=0x%08x (v=%u)",
+                                             p, w, i, c->canary[i],
+                                             __atomic_load_n(&c->v,
+                                                             __ATOMIC_ACQUIRE));
+                                c->canary[i] = DPU_COUNTER_CANARY;
+                            }
+                        }
+                }
+            }
             int progressed = dpu_drain_iteration(objs);
             if (progressed)
                 continue;

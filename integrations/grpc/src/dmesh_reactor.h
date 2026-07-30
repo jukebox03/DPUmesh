@@ -27,6 +27,9 @@ class DmeshReactor final : public Executor {
   struct ConnectedTransport {
     std::unique_ptr<EndpointTransport> transport;
     Executor* work_executor = nullptr;
+    // The reactor's paired callback executor; endpoint completions for this
+    // connection stay on the owning shard's callback thread.
+    Executor* callback_executor = nullptr;
   };
 
   using ConnectCallback = absl::AnyInvocable<void(

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(grpc_dpumesh VERSION 0.2.0 LANGUAGES C CXX)
+project(grpc_dpumesh VERSION 0.3.0 LANGUAGES C CXX)
 
 include(CTest)
 
@@ -91,7 +91,9 @@ find_package(Threads REQUIRED)
 
 add_library(grpc_dpumesh_endpoint STATIC
   src/dmesh_endpoint.cc
-  src/dmesh_grpc_channel.cc)
+  src/dmesh_grpc_channel.cc
+  src/event_engine_executor.cc
+  src/thread_executor.cc)
 target_compile_features(grpc_dpumesh_endpoint PUBLIC cxx_std_17)
 target_compile_options(grpc_dpumesh_endpoint PRIVATE -Wall -Wextra)
 target_include_directories(grpc_dpumesh_endpoint
@@ -215,6 +217,18 @@ if(DPUMESH_INCLUDE_DIR AND DPUMESH_LIBRARY)
       "${CMAKE_CURRENT_LIST_DIR}/src")
     target_link_libraries(grpc_dpumesh_qps_benchmark PRIVATE
       grpc_dpumesh grpc_dpumesh_qps_proto Threads::Threads)
+    if(DPUMESH_GRPC_ENABLE_SANITIZERS)
+      target_compile_options(grpc_dpumesh_qps_benchmark PRIVATE
+        -fsanitize=address,undefined -fno-omit-frame-pointer)
+      target_link_options(grpc_dpumesh_qps_benchmark PRIVATE
+        -fsanitize=address,undefined)
+    endif()
+    if(DPUMESH_GRPC_ENABLE_TSAN)
+      target_compile_options(grpc_dpumesh_qps_benchmark PRIVATE
+        -fsanitize=thread -fno-omit-frame-pointer)
+      target_link_options(grpc_dpumesh_qps_benchmark PRIVATE
+        -fsanitize=thread)
+    endif()
   endif()
 else()
   message(STATUS

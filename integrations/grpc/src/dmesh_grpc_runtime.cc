@@ -11,7 +11,10 @@
 #include <utility>
 
 #include <grpc/event_engine/event_engine.h>
+#include <grpc/event_engine/internal/memory_allocator_impl.h>
+#include <grpc/event_engine/memory_request.h>
 #include <grpc/impl/channel_arg_names.h>
+#include <grpc/slice.h>
 #include <grpcpp/create_channel.h>
 
 #include "absl/status/status.h"
@@ -23,6 +26,26 @@ namespace {
 
 using EventEngine = grpc_event_engine::experimental::EventEngine;
 using MemoryAllocator = grpc_event_engine::experimental::MemoryAllocator;
+
+// Unquota'd default for accepted connections: exact-size malloc slices.
+class SliceMallocAllocator final
+    : public grpc_event_engine::experimental::internal::MemoryAllocatorImpl {
+ public:
+  size_t Reserve(
+      grpc_event_engine::experimental::MemoryRequest request) override {
+    return request.max();
+  }
+  grpc_slice MakeSlice(
+      grpc_event_engine::experimental::MemoryRequest request) override {
+    return grpc_slice_malloc(request.max());
+  }
+  void Release(size_t /*bytes*/) override {}
+  void Shutdown() override {}
+};
+
+MemoryAllocator MakeSliceMallocAllocator() {
+  return MemoryAllocator(std::make_shared<SliceMallocAllocator>());
+}
 
 constexpr char kSyntheticTarget[] = "ipv4:127.0.0.1:1";
 
@@ -212,9 +235,12 @@ class DmeshClientEventEngine final : public EventEngine {
       pending.on_connect(connected.status());
       return;
     }
+    Executor* callback_executor = connected->callback_executor != nullptr
+                                      ? connected->callback_executor
+                                      : runtime_->callback_executor();
     pending.on_connect(std::make_unique<DmeshEndpoint>(
         std::move(connected->transport), connected->work_executor,
-        runtime_->callback_executor(), std::move(memory_allocator),
+        callback_executor, std::move(memory_allocator),
         LogicalAddress(1), LogicalAddress(2)));
   }
 
@@ -263,9 +289,12 @@ struct DmeshGrpcServerAttachment::State {
       status = absl::ResourceExhaustedError(
           "DPUmesh gRPC allocator factory returned an invalid allocator");
     } else {
+      Executor* endpoint_callbacks = connected.callback_executor != nullptr
+                                         ? connected.callback_executor
+                                         : callback_executor;
       auto endpoint = std::make_unique<DmeshEndpoint>(
           std::move(connected.transport), connected.work_executor,
-          callback_executor, std::move(allocator), LogicalAddress(2),
+          endpoint_callbacks, std::move(allocator), LogicalAddress(2),
           LogicalAddress(1));
       status = listener->AcceptConnectedEndpoint(std::move(endpoint));
     }
@@ -311,24 +340,18 @@ void DmeshGrpcServerAttachment::Detach() {
   runtime_ = nullptr;
 }
 
-void ConnectDmeshGrpcChannel(
+absl::StatusOr<std::shared_ptr<::grpc::Channel>> CreateDmeshChannel(
     DmeshRuntime* runtime, std::string target,
     std::shared_ptr<::grpc::ChannelCredentials> credentials,
-    ::grpc::ChannelArguments args, GrpcChannelCallback callback) {
-  if (runtime == nullptr || target.empty() || credentials == nullptr ||
-      !callback) {
-    if (callback) {
-      callback(absl::InvalidArgumentError(
-          "DPUmesh gRPC connect requires runtime, target, credentials and "
-          "callback"));
-    }
-    return;
+    ::grpc::ChannelArguments args) {
+  if (runtime == nullptr || target.empty() || credentials == nullptr) {
+    return absl::InvalidArgumentError(
+        "DPUmesh gRPC channel requires runtime, target and credentials");
   }
   if (HasChannelArgument(args, GRPC_ARG_EVENT_ENGINE)) {
-    callback(absl::InvalidArgumentError(
+    return absl::InvalidArgumentError(
         "DPUmesh gRPC owns the channel EventEngine; a caller-supplied "
-        "GRPC_ARG_EVENT_ENGINE is not supported"));
-    return;
+        "GRPC_ARG_EVENT_ENGINE is not supported");
   }
 
   internal::SetDefaultAuthorityIfAbsent(target, &args);
@@ -338,15 +361,11 @@ void ConnectDmeshGrpcChannel(
       GRPC_ARG_EVENT_ENGINE, &event_engine,
       grpc_event_engine::experimental::grpc_event_engine_arg_vtable());
   auto channel = ::grpc::CreateCustomChannel(kSyntheticTarget, credentials, args);
-  runtime->callback_executor()->Run(
-      [callback = std::move(callback), channel = std::move(channel)]() mutable {
-        if (channel == nullptr) {
-          callback(absl::InternalError(
-              "gRPC rejected the reconnectable DPUmesh channel"));
-        } else {
-          callback(std::move(channel));
-        }
-      });
+  if (channel == nullptr) {
+    return absl::InternalError(
+        "gRPC rejected the reconnectable DPUmesh channel");
+  }
+  return channel;
 }
 
 absl::StatusOr<std::unique_ptr<DmeshGrpcServerAttachment>>
@@ -355,10 +374,12 @@ AttachDmeshGrpcServer(
     ::grpc::experimental::PassiveListener* passive_listener,
     MemoryAllocatorFactory allocator_factory,
     GrpcServerAcceptErrorCallback on_error) {
-  if (runtime == nullptr || passive_listener == nullptr || !allocator_factory) {
+  if (runtime == nullptr || passive_listener == nullptr) {
     return absl::InvalidArgumentError(
-        "DPUmesh gRPC server attachment requires runtime, listener and "
-        "allocator factory");
+        "DPUmesh gRPC server attachment requires runtime and listener");
+  }
+  if (!allocator_factory) {
+    allocator_factory = [] { return MakeSliceMallocAllocator(); };
   }
 
   auto state = std::make_shared<DmeshGrpcServerAttachment::State>(

@@ -128,9 +128,14 @@ void ScheduleIfPresent(Executor* executor,
 }
 
 void PumpWrite(const std::shared_ptr<DmeshEndpointState>& state) {
+  /* Cap the fragments posted per pump run so one large logical Write cannot
+   * monopolise the reactor; the pump reschedules itself for the remainder. */
+  constexpr size_t kFragmentBudget = 16;
+
   std::optional<Completion> write_completion;
   std::optional<Completion> read_completion;
   bool close_transport = false;
+  bool reschedule = false;
 
   {
     std::lock_guard<std::mutex> lock(state->mu);
@@ -156,12 +161,18 @@ void PumpWrite(const std::shared_ptr<DmeshEndpointState>& state) {
         read_completion = TakeReadFailureLocked(state.get(), state->failure);
         close_transport = true;
       } else {
+        size_t fragments = 0;
         while (write.slice_index < write.data->Count()) {
           const Slice& slice = (*write.data)[write.slice_index];
           if (write.slice_offset == slice.size()) {
             ++write.slice_index;
             write.slice_offset = 0;
             continue;
+          }
+          if (fragments == kFragmentBudget) {
+            state->write_pump_scheduled = true;
+            reschedule = true;
+            break;
           }
 
           const size_t length =
@@ -172,6 +183,7 @@ void PumpWrite(const std::shared_ptr<DmeshEndpointState>& state) {
 
           if (result.code == PostCode::kAccepted) {
             write.slice_offset += length;
+            ++fragments;
             continue;
           }
           if (result.code == PostCode::kWouldBlock) {
@@ -194,7 +206,7 @@ void PumpWrite(const std::shared_ptr<DmeshEndpointState>& state) {
           break;
         }
 
-        if (!write_completion.has_value() &&
+        if (!write_completion.has_value() && !reschedule &&
             state->pending_write.has_value() &&
             write.slice_index == write.data->Count()) {
           absl::Status flush_status = state->transport->Flush();
@@ -220,6 +232,7 @@ void PumpWrite(const std::shared_ptr<DmeshEndpointState>& state) {
   if (close_transport) CloseTransport(state);
   ScheduleIfPresent(state->callback_executor, std::move(read_completion));
   ScheduleIfPresent(state->callback_executor, std::move(write_completion));
+  if (reschedule) ScheduleWritePump(state);
 }
 
 void ScheduleWritePump(const std::shared_ptr<DmeshEndpointState>& state) {

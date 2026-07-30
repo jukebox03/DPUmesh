@@ -7,16 +7,29 @@
 
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
+#include "thread_executor.h"
 
 namespace dpumesh::grpc {
 
-DmeshRuntime::DmeshRuntime(std::unique_ptr<DmeshApiOps> ops,
-                           dmesh_channel_t* channel, int post_max,
-                           Executor* callback_executor)
+DmeshRuntime::DmeshRuntime(
+    std::unique_ptr<DmeshApiOps> ops, dmesh_channel_t* channel, int post_max,
+    std::vector<std::unique_ptr<Executor>> owned_callback_executors,
+    Executor* callback_executor)
     : ops_(std::move(ops)),
       channel_(channel),
       post_max_(post_max),
+      owned_callback_executors_(std::move(owned_callback_executors)),
       callback_executor_(callback_executor) {}
+
+absl::StatusOr<std::unique_ptr<DmeshRuntime>> DmeshRuntime::Create(
+    std::unique_ptr<DmeshApiOps> ops) {
+  return Create(std::move(ops), nullptr, Options());
+}
+
+absl::StatusOr<std::unique_ptr<DmeshRuntime>> DmeshRuntime::Create(
+    std::unique_ptr<DmeshApiOps> ops, Options options) {
+  return Create(std::move(ops), nullptr, options);
+}
 
 absl::StatusOr<std::unique_ptr<DmeshRuntime>> DmeshRuntime::Create(
     std::unique_ptr<DmeshApiOps> ops, Executor* callback_executor) {
@@ -26,13 +39,22 @@ absl::StatusOr<std::unique_ptr<DmeshRuntime>> DmeshRuntime::Create(
 absl::StatusOr<std::unique_ptr<DmeshRuntime>> DmeshRuntime::Create(
     std::unique_ptr<DmeshApiOps> ops, Executor* callback_executor,
     Options options) {
-  if (ops == nullptr || callback_executor == nullptr) {
-    return absl::InvalidArgumentError(
-        "DPUmesh runtime requires native ops and a callback executor");
+  if (ops == nullptr) {
+    return absl::InvalidArgumentError("DPUmesh runtime requires native ops");
   }
   if (options.reactor_count == 0) {
     return absl::InvalidArgumentError(
         "DPUmesh runtime requires at least one reactor");
+  }
+
+  // Default: one dedicated callback thread paired with each reactor shard.
+  std::vector<std::unique_ptr<Executor>> owned_callback_executors;
+  if (callback_executor == nullptr) {
+    owned_callback_executors.reserve(options.reactor_count);
+    for (size_t i = 0; i < options.reactor_count; ++i) {
+      owned_callback_executors.push_back(std::make_unique<ThreadExecutor>());
+    }
+    callback_executor = owned_callback_executors.front().get();
   }
 
   errno = 0;
@@ -49,12 +71,17 @@ absl::StatusOr<std::unique_ptr<DmeshRuntime>> DmeshRuntime::Create(
         "dmesh_post_max returned invalid value ", post_max));
   }
 
-  auto runtime = std::unique_ptr<DmeshRuntime>(
-      new DmeshRuntime(std::move(ops), channel, post_max, callback_executor));
+  auto runtime = std::unique_ptr<DmeshRuntime>(new DmeshRuntime(
+      std::move(ops), channel, post_max, std::move(owned_callback_executors),
+      callback_executor));
   runtime->reactors_.reserve(options.reactor_count);
   for (size_t i = 0; i < options.reactor_count; ++i) {
+    Executor* reactor_callbacks =
+        runtime->owned_callback_executors_.empty()
+            ? callback_executor
+            : runtime->owned_callback_executors_[i].get();
     auto reactor = DmeshReactor::Create(
-        runtime->ops_.get(), channel, post_max, callback_executor,
+        runtime->ops_.get(), channel, post_max, reactor_callbacks,
         options.reactor);
     if (!reactor.ok()) {
       runtime.reset();

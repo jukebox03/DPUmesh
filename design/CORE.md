@@ -96,7 +96,8 @@ An ARM data worker polls its own completion handles. One iteration:
 
 A worker stays hot while an iteration advances work. Otherwise it arms its DPA
 and SG-DMA completion handles, rechecks, and blocks on them, its cross-worker
-eventfd, and a 1 ms interval.
+eventfd, and a 1 ms interval. The 1 ms keepalive wakes only EUs serving at
+least one forward ring; a ringless EU parks until a control message arrives.
 
 Same-owner lanes use a private FIFO. Cross-owner delivery and ACK custody use
 bounded MPSC queues. L4 selects one backend for a connection. Services in

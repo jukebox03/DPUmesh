@@ -358,6 +358,78 @@ void TestCloseCancelsPermanentlyBlockedWrite() {
   CHECK_EQ(fixture.state->alloc_calls(fixture.qp), calls_after_close);
 }
 
+void TestPeerFinFailsParkedWrite() {
+  Fixture fixture;
+  fixture.state->SetAllocError(fixture.qp, EAGAIN);
+
+  SliceBuffer data;
+  data.Append(Slice::FromCopiedString("parked"));
+  std::optional<absl::Status> write_status;
+  CHECK_TRUE(!fixture.endpoint->Write(
+      [&write_status](absl::Status value) { write_status = std::move(value); },
+      &data, EventEngine::Endpoint::WriteArgs()));
+  CHECK_TRUE(fixture.state->WaitForAllocCallCount(fixture.qp, 1, 2s));
+
+  fixture.state->InjectFin(fixture.qp);
+  CHECK_TRUE(fixture.callbacks.WaitForSize(1, 2s));
+  fixture.callbacks.RunAll();
+  CHECK_TRUE(write_status.has_value());
+  CHECK_EQ(write_status->code(), absl::StatusCode::kUnavailable);
+  CHECK_TRUE(fixture.state->WaitForDestroyCount(1, 2s));
+  CHECK_EQ(fixture.state->mid_batch_destroy_count(), size_t{0});
+}
+
+void TestAllocBackpressureAfterPeerFinFailsWrite() {
+  Fixture fixture;
+
+  SliceBuffer eof_buffer;
+  std::optional<absl::Status> eof_status;
+  CHECK_TRUE(!fixture.endpoint->Read(
+      [&eof_status](absl::Status value) { eof_status = std::move(value); },
+      &eof_buffer, EventEngine::Endpoint::ReadArgs()));
+  fixture.state->InjectFin(fixture.qp);
+  CHECK_TRUE(fixture.callbacks.WaitForSize(1, 2s));
+  fixture.callbacks.RunAll();
+  CHECK_EQ(eof_status->code(), absl::StatusCode::kUnavailable);
+
+  fixture.state->SetAllocError(fixture.qp, EAGAIN);
+  SliceBuffer data;
+  data.Append(Slice::FromCopiedString("after fin"));
+  std::optional<absl::Status> write_status;
+  CHECK_TRUE(!fixture.endpoint->Write(
+      [&write_status](absl::Status value) { write_status = std::move(value); },
+      &data, EventEngine::Endpoint::WriteArgs()));
+  CHECK_TRUE(fixture.callbacks.WaitForSize(1, 2s));
+  fixture.callbacks.RunAll();
+  CHECK_TRUE(write_status.has_value());
+  CHECK_EQ(write_status->code(), absl::StatusCode::kUnavailable);
+  CHECK_TRUE(fixture.state->WaitForDestroyCount(1, 2s));
+}
+
+void TestLargeWriteCompletesAcrossPumpYields() {
+  Fixture fixture(3);
+  const std::string payload(60, 'x');
+  SliceBuffer data;
+  data.Append(Slice::FromCopiedString(payload));
+  std::optional<absl::Status> status;
+  CHECK_TRUE(!fixture.endpoint->Write(
+      [&status](absl::Status value) { status = std::move(value); }, &data,
+      EventEngine::Endpoint::WriteArgs()));
+
+  CHECK_TRUE(fixture.state->WaitForPostCount(fixture.qp, 20, 2s));
+  CHECK_TRUE(fixture.callbacks.WaitForSize(1, 2s));
+  fixture.callbacks.RunAll();
+  CHECK_TRUE(status.has_value());
+  CHECK_TRUE(status->ok());
+  CHECK_EQ(fixture.state->flush_calls(fixture.qp), size_t{1});
+
+  std::string sent;
+  for (const auto& post : fixture.state->Posts(fixture.qp)) {
+    sent.append(post.begin(), post.end());
+  }
+  CHECK_EQ(sent, payload);
+}
+
 void TestEqPollFailureFailsAndClosesConnection() {
   Fixture fixture;
   SliceBuffer buffer;
@@ -530,24 +602,11 @@ void TestGrpcClientBridgeBuildsChannelFromNativeConnect() {
   auto created = DmeshRuntime::Create(MakeFakeDmeshApiOps(state), &callbacks);
   CHECK_TRUE(created.ok());
   auto runtime = std::move(*created);
-  std::shared_ptr<::grpc::Channel> channel;
-  std::optional<absl::Status> connect_error;
-
-  ConnectDmeshGrpcChannel(
+  auto channel_result = CreateDmeshChannel(
       runtime.get(), "greeter",
-      ::grpc::InsecureChannelCredentials(), ::grpc::ChannelArguments(),
-      [&channel, &connect_error](
-          absl::StatusOr<std::shared_ptr<::grpc::Channel>> result) {
-        if (result.ok()) {
-          channel = std::move(*result);
-        } else {
-          connect_error = result.status();
-        }
-      });
-
-  CHECK_TRUE(callbacks.WaitForSize(1, 2s));
-  callbacks.RunAll();
-  CHECK_TRUE(!connect_error.has_value());
+      ::grpc::InsecureChannelCredentials(), ::grpc::ChannelArguments());
+  CHECK_TRUE(channel_result.ok());
+  std::shared_ptr<::grpc::Channel> channel = std::move(*channel_result);
   CHECK_TRUE(channel != nullptr);
   CHECK_EQ(state->ClientQps().size(), size_t{0});
 
@@ -590,15 +649,10 @@ void TestGrpcClientReconnectCreatesFreshTargetedQp() {
   args.SetInt(GRPC_ARG_INITIAL_RECONNECT_BACKOFF_MS, 10);
   args.SetInt(GRPC_ARG_MIN_RECONNECT_BACKOFF_MS, 10);
   args.SetInt(GRPC_ARG_MAX_RECONNECT_BACKOFF_MS, 10);
-  std::shared_ptr<::grpc::Channel> channel;
-  ConnectDmeshGrpcChannel(
-      runtime.get(), "greeter", ::grpc::InsecureChannelCredentials(), args,
-      [&channel](absl::StatusOr<std::shared_ptr<::grpc::Channel>> result) {
-        CHECK_TRUE(result.ok());
-        channel = std::move(*result);
-      });
-  CHECK_TRUE(callbacks.WaitForSize(1, 2s));
-  callbacks.RunAll();
+  auto channel_result = CreateDmeshChannel(
+      runtime.get(), "greeter", ::grpc::InsecureChannelCredentials(), args);
+  CHECK_TRUE(channel_result.ok());
+  std::shared_ptr<::grpc::Channel> channel = std::move(*channel_result);
   CHECK_TRUE(channel != nullptr);
 
   (void)channel->GetState(true);
@@ -755,6 +809,12 @@ int main() {
       {"post failure closes endpoint", TestPostFailureFailsEndpointAndClosesQp},
       {"close cancels permanently blocked write",
        TestCloseCancelsPermanentlyBlockedWrite},
+      {"peer FIN fails a parked write",
+       TestPeerFinFailsParkedWrite},
+      {"alloc backpressure after peer FIN fails write",
+       TestAllocBackpressureAfterPeerFinFailsWrite},
+      {"large write completes across pump yields",
+       TestLargeWriteCompletesAcrossPumpYields},
       {"EQ poll failure closes connection",
        TestEqPollFailureFailsAndClosesConnection},
       {"unknown service maps to unavailable",

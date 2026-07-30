@@ -38,34 +38,27 @@ EventEngine argument and preserves other channel arguments.
 Only channel bootstrap changes:
 
 ```cpp
+auto runtime = dpumesh::grpc::DmeshRuntime::Create(
+    dpumesh::grpc::MakeNativeDmeshApiOps());
+
 grpc::ChannelArguments args;
 args.SetString(GRPC_ARG_DEFAULT_AUTHORITY, "api.example.com");  // optional
 args.SetInt(GRPC_ARG_INITIAL_RECONNECT_BACKOFF_MS, 100);
 
-dpumesh::grpc::ConnectDmeshGrpcChannel(
-    runtime.get(),
-    "echo-dpumesh",
-    grpc::SslCredentials(ssl_options),
-    args,
-    [&](absl::StatusOr<std::shared_ptr<grpc::Channel>> result) {
-      if (!result.ok()) {
-        ReportBootstrapError(result.status());
-        return;
-      }
-      channel = *result;
-    });
+auto channel = dpumesh::grpc::CreateDmeshChannel(
+    runtime->get(), "echo-dpumesh", grpc::SslCredentials(ssl_options), args);
 
-auto stub = Echo::NewStub(channel);
+auto stub = Echo::NewStub(*channel);
 grpc::ClientContext context;
 context.set_deadline(deadline);
 context.set_wait_for_ready(true);
 grpc::Status status = stub->Call(&context, request, &response);
 ```
 
-Channel creation is lazy. Each gRPC `Connect` creates a targeted QP, and gRPC
-owns reconnect backoff, deadlines, and RPC retry policy. Link `grpc_dpumesh` and
-keep the callback executor and `DmeshRuntime` alive longer than their channels
-and endpoints.
+Channel creation is lazy, like `grpc::CreateCustomChannel`. Each gRPC
+`Connect` creates a targeted QP, and gRPC owns reconnect backoff, deadlines,
+and RPC retry policy. Link `grpc_dpumesh` and keep the `DmeshRuntime` alive
+longer than its channels and endpoints.
 
 ## Server
 
@@ -81,15 +74,14 @@ builder.experimental().AddPassiveListener(server_credentials, listener);
 std::unique_ptr<grpc::Server> server = builder.BuildAndStart();
 
 auto attachment = dpumesh::grpc::AttachDmeshGrpcServer(
-    runtime.get(), listener.get(),
-    [] { return MakeGrpcMemoryAllocator(); },
-    [](const absl::Status& error) { ReportAcceptError(error); });
+    runtime.get(), listener.get());
 ```
 
 `AttachDmeshGrpcServer` converts `DMESH_EVENT_CONN_REQ` events into endpoints
-and injects them into the listener. Shutdown stops traffic, calls `Detach()`,
-shuts down the gRPC server, destroys the server and listener, then destroys the
-runtime.
+and injects them into the listener. Optional arguments supply a per-connection
+memory-allocator factory (default: unquota'd malloc slices) and an accept-error
+callback. Shutdown stops traffic, calls `Detach()`, shuts down the gRPC server,
+destroys the server and listener, then destroys the runtime.
 
 ## Connection lifecycle
 
@@ -105,12 +97,18 @@ live set. In-flight RPCs retain normal gRPC deadline, retry, idempotency, and
 ## Data path
 
 Each runtime owns one native channel and configurable EQ reactor shards. A
-reactor is the sole consumer of its EQ and owns its QPs. RX bytes are copied
-into gRPC slices before native credit is released; TX slices are copied into
-registered native reservations.
+reactor is the sole consumer of its EQ and owns its QPs, and is paired with a
+dedicated callback thread that runs the endpoint completions (and therefore
+chttp2) for its connections, so callback work shards with the EQ shards.
+`DmeshRuntime::Create` accepts a custom executor to replace the pairs. RX
+bytes are copied into gRPC slices before native credit is released; TX slices
+are copied into registered native reservations.
 
-Writes flush at the EventEngine write boundary. On `EAGAIN`, the endpoint keeps
-its slice cursor and resumes on `DMESH_EVENT_TX_READY`. There is no busy poll,
+Writes flush at the EventEngine write boundary. A large logical Write posts a
+bounded number of fragments per reactor pass and reschedules itself, so one
+connection cannot starve its shard. On `EAGAIN`, the endpoint keeps its slice
+cursor and resumes on `DMESH_EVENT_TX_READY`; if the peer has already closed,
+the write fails with `UNAVAILABLE` instead of parking. There is no busy poll,
 retry timer, connection scan, or per-RPC wrapper dispatch.
 
 ## Build and test

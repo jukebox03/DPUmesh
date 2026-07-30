@@ -14,6 +14,7 @@ rather than replace the hardware validators below.
 | Stream/L7 | `stream_dpumesh.c` | Fragmented framed messages through the optional frame codec |
 | POSIX preload | `preload_runner.c`, `tcp_echo.c`, `tcp_client.c` | Unmodified socket connect/listen/accept/read/write behavior and TCP fallback |
 | Matched-C preload | `preload_sock.Dockerfile`, `bench_sock`, `echo_sock` | Same L4 benchmark workload over the socket facade; control TCP stays kernel, data uses DPUmesh |
+| Idle re-registration | `idle_reregister.sh` | A quiesced pod registers again after the DPU idles with no pods; loopback passes before and after |
 
 Run them through the common entry point:
 
@@ -22,6 +23,7 @@ Run them through the common entry point:
 ./bench/bench.sh verbs    1000 1024 0 32 4
 ./bench/bench.sh stream   1000 1024 1
 ./bench/bench.sh preload  1000 1024 8
+./bench/validators/idle_reregister.sh 720 10000 1024
 ```
 
 The matched-C preload transport is included in `bench/suite/run_suite.sh` as

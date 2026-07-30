@@ -19,6 +19,11 @@ struct dmesh_doca_dpa_thread {
 };
 
 struct dmesh_doca_dpa_msgq {
+	/* Diagnostic tallies (racy, log-only). */
+	uint32_t dbg_submits;
+	uint32_t dbg_completions;
+	uint32_t dbg_errors;
+	uint32_t dbg_errors_reported;
 	struct doca_pe *pe;
 	struct doca_comch_msgq *msgq;	      /**< The DOCA Comch MsgQ */
 	struct doca_comch_producer *producer; /**< The DOCA Comch Producer */

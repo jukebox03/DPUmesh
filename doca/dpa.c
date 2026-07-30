@@ -181,7 +181,15 @@ static void dmesh_doca_dpa_msgq_recv_cb(struct doca_comch_consumer_task_post_rec
             }
             if (ack->status != DPA_RING_ACK_OK)
                 __atomic_store_n(&pod->dpa_add_ack_failed, 1, __ATOMIC_RELEASE);
-            __atomic_fetch_or(&pod->dpa_add_ack_mask, bit, __ATOMIC_ACQ_REL);
+            uint32_t prev_add_mask = __atomic_fetch_or(&pod->dpa_add_ack_mask,
+                                                       bit, __ATOMIC_ACQ_REL);
+            if (!(prev_add_mask & bit) && ack->status == DPA_RING_ACK_OK &&
+                ack->eu_index < MAX_DPA_EU) {
+                __atomic_fetch_add(&objs->dpa_eu_rings[ack->eu_index], 1,
+                                   __ATOMIC_ACQ_REL);
+                __atomic_fetch_or(&pod->dpa_rings_counted_mask, bit,
+                                  __ATOMIC_ACQ_REL);
+            }
             DOCA_LOG_INFO("DPA ADD_ACK: pod=%d eu=%u gen=%u status=%u",
                           ack->pod_id, ack->eu_index, ack->generation, ack->status);
             dpu_wake_main(objs);
@@ -223,7 +231,19 @@ static void dmesh_doca_dpa_msgq_recv_cb(struct doca_comch_consumer_task_post_rec
                               ack->status, expected);
                 break;
             }
-            __atomic_fetch_or(&pod->dpa_del_ack_mask, bit, __ATOMIC_ACQ_REL);
+            uint32_t prev_del_mask = __atomic_fetch_or(&pod->dpa_del_ack_mask,
+                                                       bit, __ATOMIC_ACQ_REL);
+            if (!(prev_del_mask & bit) && ack->eu_index < MAX_DPA_EU &&
+                (__atomic_fetch_and(&pod->dpa_rings_counted_mask, ~bit,
+                                    __ATOMIC_ACQ_REL) & bit)) {
+                uint32_t cur = __atomic_load_n(&objs->dpa_eu_rings[ack->eu_index],
+                                               __ATOMIC_ACQUIRE);
+                while (cur > 0 &&
+                       !__atomic_compare_exchange_n(
+                           &objs->dpa_eu_rings[ack->eu_index], &cur, cur - 1, 0,
+                           __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+                }
+            }
             DOCA_LOG_INFO("DPA DEL_ACK: pod=%d eu=%u gen=%u",
                           ack->pod_id, ack->eu_index, ack->generation);
             dpu_wake_main(objs);
@@ -300,6 +320,8 @@ static void dmesh_doca_dpa_msgq_send_cb(struct doca_comch_producer_task_send *se
 	(void)ctx_user_data;
 
 	if (payload != NULL) {
+		if (payload->msgq != NULL)
+			payload->msgq->dbg_completions++;
 		if (payload->is_wake && payload->msgq != NULL)
 			payload->msgq->wake_inflight = 0;
 		if (payload->msgq == NULL ||
@@ -328,6 +350,8 @@ static void dmesh_doca_dpa_msgq_send_error_cb(struct doca_comch_producer_task_se
     struct doca_task *task = doca_comch_producer_task_send_as_task(send_task);
     DOCA_LOG_ERR("Failed to send msg");
 	if (payload != NULL) {
+		if (payload->msgq != NULL)
+			payload->msgq->dbg_errors++;
 		if (payload->is_wake && payload->msgq != NULL)
 			payload->msgq->wake_inflight = 0;
 		if (payload->msgq == NULL ||
@@ -965,31 +989,73 @@ dmesh_doca_dpa_msgq_send_try(struct dmesh_doca_dpa_msgq *msgq, void *msg, uint32
         doca_task_free(task);
         return result;
     }
+    msgq->dbg_submits++;
     if (is_wake)
         msgq->wake_inflight = 1;
     return DOCA_SUCCESS;
 }
 
 /* Send one message over a DPA Comch queue, retrying transient submit failures
- * with PE progress. Control-path only (thread start, RING_ADD). */
+ * with PE progress. Control-path only (thread start, RING_ADD): always
+ * transmits, with its own payload copy — never suppressed or coalesced with
+ * wake hints. */
 doca_error_t
 dmesh_doca_dpa_msgq_send(struct dmesh_doca_dpa_msgq *msgq, void *msg, uint32_t msg_size)
 {
     doca_error_t result;
+    union doca_data user_data;
+    struct dpa_send_payload *payload;
+    struct doca_comch_producer_task_send *send_task;
+    struct doca_task *task;
+
+    payload = malloc(sizeof(*payload) + msg_size);
+    if (payload == NULL) {
+        DOCA_LOG_ERR("DPA MsgQ send failed: payload copy allocation failed");
+        return DOCA_ERROR_NO_MEMORY;
+    }
+    payload->msgq = msgq;
+    payload->is_wake =
+        (msg_size >= sizeof(enum dpa_msg_type) &&
+         *(const enum dpa_msg_type *)msg == DPA_MSG_WAKE);
+    memcpy(payload->bytes, msg, msg_size);
+    result = doca_comch_producer_task_send_alloc_init(msgq->producer,
+                                                      NULL,
+                                                      payload->bytes,
+                                                      msg_size,
+                                                      msgq->target_consumer_id,
+                                                      &send_task);
+    if (result != DOCA_SUCCESS) {
+        DOCA_LOG_ERR("DPA MsgQ send failed: failed to allocate send task - %s",
+                     doca_error_get_name(result));
+        free(payload);
+        return result;
+    }
+
+    task = doca_comch_producer_task_send_as_task(send_task);
+    user_data.ptr = payload;
+    doca_task_set_user_data(task, user_data);
+
     int retry = 0;
     const int max_retry = 10000;
+    do {
+        result = doca_task_submit(task);
+        if (result == DOCA_ERROR_AGAIN) {
+            doca_pe_progress(msgq->pe);
+            retry++;
+        }
+    } while (result == DOCA_ERROR_AGAIN && retry < max_retry);
 
-    for (;;) {
-        result = dmesh_doca_dpa_msgq_send_try(msgq, msg, msg_size);
-        if (result != DOCA_ERROR_AGAIN || retry >= max_retry)
-            break;
-        doca_pe_progress(msgq->pe);
-        retry++;
-    }
-    if (result != DOCA_SUCCESS)
+    if (result != DOCA_SUCCESS) {
         DOCA_LOG_ERR("DPA MsgQ send failed: %s (retries=%d, msg_size=%u)",
                      doca_error_get_name(result), retry, msg_size);
-    return result;
+        free(payload);
+        doca_task_free(task);
+        return result;
+    }
+    if (payload->is_wake)
+        msgq->wake_inflight = 1;
+
+    return DOCA_SUCCESS;
 }
 
 /*
