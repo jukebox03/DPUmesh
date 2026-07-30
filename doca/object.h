@@ -5,6 +5,8 @@
 #include <stdint.h>
 #include <pthread.h>
 #include <stdatomic.h>
+#include <unistd.h>
+#include <errno.h>
 #include <doca_dev.h>
 #include <doca_pe.h>
 #include <doca_comch.h>
@@ -35,7 +37,6 @@ typedef uint32_t doca_dpa_dev_mmap_t;
 typedef struct {
     int32_t  src_pod_id;
     int32_t  dst_pod_id;   /* DMESH_POD_BLANK -> resolve dst_service */
-    int16_t  src_service;  /* caller service (opaque passthrough) */
     int16_t  dst_service;  /* callee service (routing input when dst_pod_id==BLANK) */
     uint16_t src_port;     /* sender port (opaque passthrough) */
     uint16_t dst_port;     /* dest port (opaque passthrough; PORT_BLANK -> accept queue on host) */
@@ -57,18 +58,6 @@ typedef struct {
 
 /* Single-producer/single-consumer queue. The producer owns tail and publishes it
  * with release ordering; the consumer owns head and acquires tail. */
-CQ_INLINE int comp_queue_full(const dpu_comp_queue_t *q) {
-    uint32_t tail = __atomic_load_n(&q->tail, __ATOMIC_RELAXED);
-    uint32_t head = __atomic_load_n(&q->head, __ATOMIC_ACQUIRE);
-    return ((tail + 1) % DPU_COMP_QUEUE_SIZE) == head;
-}
-
-CQ_INLINE int comp_queue_empty(const dpu_comp_queue_t *q) {
-    uint32_t head = __atomic_load_n(&q->head, __ATOMIC_RELAXED);
-    uint32_t tail = __atomic_load_n(&q->tail, __ATOMIC_ACQUIRE);
-    return head == tail;
-}
-
 CQ_INLINE int comp_queue_enqueue(dpu_comp_queue_t *q, const dpu_comp_entry_t *e) {
     uint32_t tail = __atomic_load_n(&q->tail, __ATOMIC_RELAXED);       /* producer owns */
     uint32_t head = __atomic_load_n(&q->head, __ATOMIC_ACQUIRE);
@@ -191,6 +180,14 @@ CQ_INLINE int mpsc_comp_queue_empty(dpu_mpsc_comp_queue_t *q) {
 /* Mirrored DOCA task counts gate submissions. */
 #define TASK_POOL_MARGIN 8
 
+/* ARM workers own completion progress, connection state, and SG-DMA. */
+#define MAX_ARM_WORKERS 8
+
+/* Cache-line-isolated per-worker counter: each worker mutates only its own
+ * element on the DMA hot path, so elements must not share a line. */
+struct dpu_worker_counter {
+    _Alignas(64) uint32_t v;
+};
 
 /* Per-pod state (DPU only) */
 struct pod_state {
@@ -228,8 +225,9 @@ struct pod_state {
     int egress_quiesced;
     /* Pod teardown waits for every region%A owner bit. */
     uint32_t egress_quiesced_mask;
-    uint32_t egress_inflight;
-    uint32_t egress_inflight_worker[MAX_EU_PER_POD];
+    /* In-flight DMA tasks naming this pod, sharded by owning worker. The total
+     * exists only on the reclaim path, as the sum over workers. */
+    struct dpu_worker_counter egress_inflight_worker[MAX_ARM_WORKERS];
     /* Retired units awaiting completion emission and custody release. */
     uint32_t egress_pending_emit;
     /* Number of proxy arrivals whose bytes still reference this slot's reusable
@@ -397,8 +395,6 @@ static inline void dpu_upstream_free(struct dpu_conntrack *ct, uint16_t uP) {
     ct->ht[hole].in_use = 0;
 }
 
-/* ARM workers own completion progress, connection state, and SG-DMA. */
-#define MAX_ARM_WORKERS 8
 struct dpu_data_worker {
     struct objects *objs;
     int id;
@@ -519,8 +515,22 @@ static inline void doca_pool_release(atomic_int *cnt) {
     atomic_fetch_sub(cnt, 1);
 }
 
-static inline void progress_control_pe(struct objects *objs) {
-    doca_pe_progress(objs->pe);
+/* Release a thread parked on its notification handles: claim its parked flag
+ * and post one eventfd tick. Safe from any thread; no-op when not parked. */
+static inline void dpu_wake_eventfd(atomic_int *parked, int wake_fd) {
+    if (wake_fd < 0)
+        return;
+    int expected = 1;
+    if (!atomic_compare_exchange_strong_explicit(parked, &expected, 0,
+                                                 memory_order_acq_rel,
+                                                 memory_order_acquire))
+        return;
+    uint64_t one = 1;
+    ssize_t n;
+    do {
+        n = write(wake_fd, &one, sizeof(one));
+    } while (n < 0 && errno == EINTR);
+    (void)n;
 }
 
 void

@@ -48,22 +48,6 @@ case "$cleanup_path" in
         ;;
 esac
 
-rev_kick_all=$(
-    awk '
-        /^px_rev_kick_all\(/ { in_function = 1 }
-        in_function { print }
-        in_function && /^}/ { exit }
-    ' "$proxy_source"
-)
-
-case "$rev_kick_all" in
-    *retry_batches*pod_data_ready*) ;;
-    *)
-        echo "dma_fault_scope_test: reverse publication must respect retry isolation and pod readiness" >&2
-        exit 1
-        ;;
-esac
-
 engine_pump=$(
     awk '
         /^static int px_engine_pump\(/ { in_function = 1 }
@@ -71,6 +55,16 @@ engine_pump=$(
         in_function && /^}/ { exit }
     ' "$proxy_source"
 )
+
+# The lane loop publishes reverse entries: only for ready pods (the dead branch
+# continues first) and never while a data retry is active.
+case "$engine_pump" in
+    *pod_data_ready*retry_batches*px_rev_kick_lane*) ;;
+    *)
+        echo "dma_fault_scope_test: reverse publication must respect retry isolation and pod readiness" >&2
+        exit 1
+        ;;
+esac
 
 case "$engine_pump" in
     *px_rev_drop_dead*) ;;

@@ -48,62 +48,6 @@ static void server_send_task_completion_err_callback(struct doca_comch_task_send
 	doca_task_free(doca_comch_task_send_as_task(task));
 }
 
-/* Send one control message from the server to its client. */
-doca_error_t
-server_send_msg(struct objects *objs, const char *msg, size_t len)
-{
-	doca_error_t result;
-	struct doca_comch_task_send *task;
-	void *msg_copy;
-	union doca_data task_user_data;
-	struct doca_task *task_obj;
-
-	/* Capacity gate on our mirror of DOCA's send pool so we never trigger
-	 * DOCA_ERROR_AGAIN. This path is init-only (mmap/handle export), so we
-	 * progress PE while waiting to make room. */
-	int acq_retry = 0;
-	while (!doca_pool_try_acquire(&objs->send_tasks_in_flight, objs->send_tasks_max)) {
-		progress_control_pe(objs);
-		if (++acq_retry > 10000) {
-			DOCA_LOG_ERR("server_send_msg: send pool full after %d PE progresses", acq_retry);
-			return DOCA_ERROR_AGAIN;
-		}
-	}
-
-	msg_copy = malloc(len);
-	if (msg_copy == NULL) {
-		DOCA_LOG_ERR("Failed to allocate server payload copy");
-		doca_pool_release(&objs->send_tasks_in_flight);
-		return DOCA_ERROR_NO_MEMORY;
-	}
-	memcpy(msg_copy, msg, len);
-
-	result = doca_comch_server_task_send_alloc_init(objs->cc_server, objs->connection,
-								msg_copy, len, &task);
-	if (result != DOCA_SUCCESS) {
-		DOCA_LOG_ERR("Failed to allocate server task with error = %s", doca_error_get_name(result));
-		doca_pool_release(&objs->send_tasks_in_flight);
-		free(msg_copy);
-		return result;
-	}
-
-	task_obj = doca_comch_task_send_as_task(task);
-	task_user_data.ptr = msg_copy;
-	doca_task_set_user_data(task_obj, task_user_data);
-
-	result = doca_task_submit(task_obj);
-	if (result != DOCA_SUCCESS) {
-		/* Capacity gated ahead of time; handle defensively. */
-		DOCA_LOG_ERR("Failed to send server task with error = %s",
-		             doca_error_get_name(result));
-		doca_pool_release(&objs->send_tasks_in_flight);
-		free(msg_copy);
-		doca_task_free(task_obj);
-		return result;
-	}
-
-	return DOCA_SUCCESS;
-}
 /* Handle a message received by the Comch server. */
 static void server_message_recv_callback(struct doca_comch_event_msg_recv *event,
 					 uint8_t *recv_buffer,
@@ -351,7 +295,7 @@ static void server_state_changed_callback(const union doca_data user_data,
 }
 
 doca_error_t
-init_comch_ctrl_path_server(const char *server_name, struct objects *objs, bool is_fast_path)
+init_comch_ctrl_path_server(const char *server_name, struct objects *objs)
 {
     doca_error_t result;
     struct doca_ctx *ctx;
@@ -416,14 +360,12 @@ init_comch_ctrl_path_server(const char *server_name, struct objects *objs, bool 
     }                                        
 
     /* Config the data_path related events */
-	if (is_fast_path) {
-		result = doca_comch_server_event_consumer_register(objs->cc_server,
-									dmesh_consumer_connected,
-									dmesh_consumer_expired);
-		if (result != DOCA_SUCCESS) {
-			DOCA_LOG_ERR("Failed adding consumer event cb with error = %s", doca_error_get_name(result));
-			goto destroy_server;
-		}
+	result = doca_comch_server_event_consumer_register(objs->cc_server,
+								dmesh_consumer_connected,
+								dmesh_consumer_expired);
+	if (result != DOCA_SUCCESS) {
+		DOCA_LOG_ERR("Failed adding consumer event cb with error = %s", doca_error_get_name(result));
+		goto destroy_server;
 	}
 
     result = doca_comch_cap_get_max_msg_size(doca_dev_as_devinfo(objs->dev), &max_msg_size);
@@ -664,7 +606,6 @@ pods_add_connection(struct objects *objs, struct doca_comch_connection *conn)
 	objs->pods[idx].dpa_del_last_send_ns = 0;
 	objs->pods[idx].egress_quiesced = 0;
 	objs->pods[idx].egress_quiesced_mask = 0;
-	objs->pods[idx].egress_inflight = 0;
 	memset(objs->pods[idx].egress_inflight_worker, 0,
 	       sizeof(objs->pods[idx].egress_inflight_worker));
 	objs->pods[idx].egress_pending_emit = 0;

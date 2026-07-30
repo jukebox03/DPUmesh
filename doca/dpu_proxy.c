@@ -135,7 +135,6 @@ struct px_op {
     int kind;                     /* 0=data, 1=credit, 2=rev entries, 4=rev ctrl */
     struct px_batch *batch;       /* kind 0 */
     int pod_idx, region;          /* kind 1 */
-    uint32_t pod_generation;      /* kind 1: pods[pod_idx].dma_generation at submit */
     struct doca_buf *src_buf, *dst_buf;   /* kind 1 (kind 0 keeps them in the batch) */
 };
 
@@ -261,11 +260,8 @@ struct px_conn {
     int16_t  pinned_cluster;
 };
 
-#define MAX_ARM_ENG 8
-_Static_assert(MAX_ARM_ENG == MAX_ARM_WORKERS,
-               "one DMA engine is required for every ARM data worker");
-
-/* A data worker owns its DOCA resources and regions where region % A == id. */
+/* A data worker owns its DOCA resources and regions where region % A == id.
+ * There is exactly one engine per data worker (both counted by n_workers). */
 struct px_engine {
     struct objects *objs;
     int      id;
@@ -297,7 +293,6 @@ struct px_worker_state {
     struct px_conn **buckets;      /* PX_CONN_HASH buckets, per-worker */
     struct dpu_conntrack *ct;
     int id;
-    int owner_stride;              /* upstream-port owner stride */
     struct px_conn *stall_head;    /* conns parked by px_stall; drained by px_drain_stalled */
 };
 
@@ -318,9 +313,8 @@ struct dmesh_proxy {
     struct px_op   refresh_ops[MAX_PODS][MAX_EU_PER_POD];
     struct px_op   rev_ops[MAX_PODS][MAX_EU_PER_POD];
 
-    /* ARM SG-DMA engines; engine/worker ownership is region % n_eng. */
-    struct px_engine engines[MAX_ARM_ENG];
-    int n_eng;
+    /* ARM SG-DMA engines, one per data worker; ownership is region % n_workers. */
+    struct px_engine engines[MAX_ARM_WORKERS];
 
     /* credit-read landing cells: one 64B cell per lane, DPU-local mmap */
     struct doca_mmap *scratch_mmap;
@@ -342,7 +336,7 @@ static inline uint64_t px_stat_inc(atomic_ullong *counter)
 static inline int px_engine_id_for_lane(const struct dmesh_proxy *px,
                                         int pod_idx, int region) {
     (void)pod_idx;
-    return region % px->n_eng;
+    return region % px->n_workers;
 }
 
 static inline int
@@ -365,21 +359,7 @@ static void px_engine_wake(struct px_engine *eng) {
         eng->id >= eng->objs->n_data_workers)
         return;
     struct dpu_data_worker *worker_state = &eng->objs->data_workers[eng->id];
-    int wake_fd = worker_state->wake_fd;
-    if (wake_fd < 0)
-        return;
-    int expected = 1;
-    if (!atomic_compare_exchange_strong_explicit(&worker_state->parked,
-                                                  &expected, 0,
-                                                  memory_order_acq_rel,
-                                                  memory_order_acquire))
-        return;
-    uint64_t one = 1;
-    ssize_t n;
-    do {
-        n = write(wake_fd, &one, sizeof(one));
-    } while (n < 0 && errno == EINTR);
-    (void)n;
+    dpu_wake_eventfd(&worker_state->parked, worker_state->wake_fd);
 }
 
 /* Routing state for the current ARM data worker. */
@@ -387,12 +367,19 @@ static __thread struct px_worker_state *px_cur_worker;
 
 /* ====== pools ====== */
 
-/* Per-thread allocation magazines hold up to PX_MAG_N nodes per type. Shared-list
- * refill uses one lock; local allocation is lock-free. */
-#define PX_MAG_N 64
+/* Per-thread magazines cache up to PX_MAG_CAP nodes per type on both the
+ * allocation and the free side, so a worker whose allocs and frees interleave
+ * touches pool_lock only to refill (a PX_MAG_N run) or to spill a full cache.
+ * Nodes are interchangeable across threads: a node freed on any thread simply
+ * joins that thread's cache. */
+#define PX_MAG_N   64
+#define PX_MAG_CAP (2 * PX_MAG_N)
 static __thread struct px_arrival *tls_arr_mag;
+static __thread int                tls_arr_mag_n;
 static __thread struct px_piece   *tls_piece_mag;
+static __thread int                tls_piece_mag_n;
 static __thread struct px_unit    *tls_unit_mag;
+static __thread int                tls_unit_mag_n;
 
 static void
 px_ack_queue_init(struct px_ack_release_queue *q)
@@ -463,82 +450,66 @@ px_emit_tx_ack(struct objects *objs, int32_t pod_id, uint16_t port, uint16_t seq
         return 1;
     if (!px_cur_worker)
         return 0;
-    int owner = dmesh_worker_for_port(port, objs->proxy->n_eng);
+    int owner = dmesh_worker_for_port(port, objs->proxy->n_workers);
     if (owner != px_cur_worker->id)
         return 0;
     return px_rev_append_ack(&objs->proxy->engines[owner], pod, port, seq);
 }
 
-static struct px_arrival *px_arrival_alloc(struct dmesh_proxy *px) {
-    struct px_arrival *a = tls_arr_mag;
-    if (a) { tls_arr_mag = a->next; return a; }
-    pthread_mutex_lock(&px->pool_lock);
-    a = px->arr_free;
-    if (a) {
-        struct px_arrival *t = a; int got = 1;
-        while (got < PX_MAG_N && t->next) { t = t->next; got++; }
-        px->arr_free = t->next; t->next = NULL;      /* detach the run [a..t] */
-    }
-    pthread_mutex_unlock(&px->pool_lock);
-    if (!a)
-        return NULL;
-    tls_arr_mag = a->next;                           /* rest of the run → magazine */
-    return a;
+/* Alloc: pop the local cache, else refill a PX_MAG_N run from the shared list
+ * under one lock. Free: push the local cache; a full cache spills entirely to
+ * the shared list under one lock. */
+#define PX_POOL_FUNCS(type, alloc_fn, free_fn, shared)                        \
+static struct type *alloc_fn(struct dmesh_proxy *px) {                        \
+    struct type *n = tls_##shared##_mag;                                      \
+    if (n) { tls_##shared##_mag = n->next; tls_##shared##_mag_n--; return n; }\
+    pthread_mutex_lock(&px->pool_lock);                                       \
+    n = px->shared##_free;                                                    \
+    int got = 0;                                                              \
+    if (n) {                                                                  \
+        struct type *t = n; got = 1;                                          \
+        while (got < PX_MAG_N && t->next) { t = t->next; got++; }             \
+        px->shared##_free = t->next; t->next = NULL;  /* detach [n..t] */     \
+    }                                                                         \
+    pthread_mutex_unlock(&px->pool_lock);                                     \
+    if (!n)                                                                   \
+        return NULL;                                                          \
+    tls_##shared##_mag = n->next;                     /* rest → cache */      \
+    tls_##shared##_mag_n = got - 1;                                           \
+    return n;                                                                 \
+}                                                                             \
+static void free_fn(struct dmesh_proxy *px, struct type *n) {                 \
+    if (tls_##shared##_mag_n >= PX_MAG_CAP) {                                 \
+        struct type *h = tls_##shared##_mag, *t = h;                          \
+        while (t->next) t = t->next;                                          \
+        pthread_mutex_lock(&px->pool_lock);                                   \
+        t->next = px->shared##_free; px->shared##_free = h;                   \
+        pthread_mutex_unlock(&px->pool_lock);                                 \
+        tls_##shared##_mag = NULL; tls_##shared##_mag_n = 0;                  \
+    }                                                                         \
+    n->next = tls_##shared##_mag; tls_##shared##_mag = n;                     \
+    tls_##shared##_mag_n++;                                                   \
 }
-static void px_arrival_free(struct dmesh_proxy *px, struct px_arrival *a) {
-    pthread_mutex_lock(&px->pool_lock);
-    a->next = px->arr_free; px->arr_free = a;
-    pthread_mutex_unlock(&px->pool_lock);
-}
-static struct px_piece *px_piece_alloc(struct dmesh_proxy *px) {
-    struct px_piece *p = tls_piece_mag;
-    if (p) { tls_piece_mag = p->next; return p; }
-    pthread_mutex_lock(&px->pool_lock);
-    p = px->piece_free;
-    if (p) {
-        struct px_piece *t = p; int got = 1;
-        while (got < PX_MAG_N && t->next) { t = t->next; got++; }
-        px->piece_free = t->next; t->next = NULL;
-    }
-    pthread_mutex_unlock(&px->pool_lock);
-    if (!p)
-        return NULL;
-    tls_piece_mag = p->next;
-    return p;
-}
-static void px_piece_free(struct dmesh_proxy *px, struct px_piece *p) {
-    pthread_mutex_lock(&px->pool_lock);
-    p->next = px->piece_free; px->piece_free = p;
-    pthread_mutex_unlock(&px->pool_lock);
-}
+
+PX_POOL_FUNCS(px_arrival, px_arrival_alloc,   px_arrival_free, arr)
+PX_POOL_FUNCS(px_piece,   px_piece_alloc,     px_piece_free,   piece)
+PX_POOL_FUNCS(px_unit,    px_unit_alloc_node, px_unit_free,    unit)
+
+/* Units start zeroed; the other node types are fully field-initialized. */
 static struct px_unit *px_unit_alloc(struct dmesh_proxy *px) {
-    struct px_unit *u = tls_unit_mag;
-    if (u) { tls_unit_mag = u->next; memset(u, 0, sizeof(*u)); return u; }
-    pthread_mutex_lock(&px->pool_lock);
-    u = px->unit_free;
-    if (u) {
-        struct px_unit *t = u; int got = 1;
-        while (got < PX_MAG_N && t->next) { t = t->next; got++; }
-        px->unit_free = t->next; t->next = NULL;
-    }
-    pthread_mutex_unlock(&px->pool_lock);
-    if (!u)
-        return NULL;
-    tls_unit_mag = u->next;
-    memset(u, 0, sizeof(*u));
+    struct px_unit *u = px_unit_alloc_node(px);
+    if (u)
+        memset(u, 0, sizeof(*u));
     return u;
 }
+/* Free the unit and its piece chain. */
 static void px_unit_free_node(struct dmesh_proxy *px, struct px_unit *u) {
-    /* Free the unit AND its pieces under one lock (inlined piece-free avoids a
-     * recursive lock). */
-    pthread_mutex_lock(&px->pool_lock);
     while (u->pieces) {
         struct px_piece *p = u->pieces;
         u->pieces = p->next;
-        p->next = px->piece_free; px->piece_free = p;
+        px_piece_free(px, p);
     }
-    u->next = px->unit_free; px->unit_free = u;
-    pthread_mutex_unlock(&px->pool_lock);
+    px_unit_free(px, u);
 }
 static struct px_batch *px_batch_alloc(struct px_engine *eng) {
     struct px_batch *b = eng->batch_free;
@@ -549,45 +520,6 @@ static void px_batch_free_node(struct px_engine *eng, struct px_batch *b) {
     b->next = eng->batch_free; eng->batch_free = b;
 }
 
-/* Batch shared-pool returns. */
-#define PX_FREE_BATCH_FLUSH  256
-struct px_free_batch {
-    struct px_unit    *u_head, *u_tail;
-    struct px_piece   *p_head, *p_tail;
-    struct px_arrival *a_head, *a_tail;
-    int                n;
-};
-static inline void px_fb_unit(struct px_free_batch *fb, struct px_unit *u) {
-    struct px_piece *ph = u->pieces;
-    if (ph) {
-        struct px_piece *pt = ph;
-        while (pt->next) pt = pt->next;          /* chain tail (usually length 1) */
-        u->pieces = NULL;
-        if (fb->p_head) pt->next = fb->p_head; else fb->p_tail = pt;
-        fb->p_head = ph;
-    }
-    u->next = fb->u_head; fb->u_head = u;
-    if (!fb->u_tail) fb->u_tail = u;
-    fb->n++;
-}
-static inline void px_fb_arr(struct px_free_batch *fb, struct px_arrival *a) {
-    a->next = fb->a_head; fb->a_head = a;
-    if (!fb->a_tail) fb->a_tail = a;
-    fb->n++;
-}
-static void px_free_batch_flush(struct dmesh_proxy *px, struct px_free_batch *fb) {
-    if (!fb->u_head && !fb->p_head && !fb->a_head) return;
-    pthread_mutex_lock(&px->pool_lock);
-    if (fb->u_head) { fb->u_tail->next = px->unit_free;  px->unit_free  = fb->u_head; }
-    if (fb->p_head) { fb->p_tail->next = px->piece_free; px->piece_free = fb->p_head; }
-    if (fb->a_head) { fb->a_tail->next = px->arr_free;   px->arr_free   = fb->a_head; }
-    pthread_mutex_unlock(&px->pool_lock);
-    fb->u_head = fb->u_tail = NULL;
-    fb->p_head = fb->p_tail = NULL;
-    fb->a_head = fb->a_tail = NULL;
-    fb->n = 0;
-}
-
 /* ====== custody ====== */
 
 static int
@@ -596,11 +528,11 @@ px_queue_arrival_release(struct objects *objs, struct px_arrival *a)
     struct dmesh_proxy *px = objs->proxy;
     struct pod_state *src = find_pod_by_id(objs, a->ack_pod);
     if (!src || !px_cur_worker || px_cur_worker->id < 0 ||
-        px_cur_worker->id >= px->n_eng)
+        px_cur_worker->id >= px->n_workers)
         return 0;
 
-    int owner = dmesh_worker_for_port(a->ack_port, px->n_eng);
-    if (owner < 0 || owner >= px->n_eng)
+    int owner = dmesh_worker_for_port(a->ack_port, px->n_workers);
+    if (owner < 0 || owner >= px->n_workers)
         return 0;
     a->ack_emit_seq = a->ack_first_seq;
     a->release_next = NULL;
@@ -634,20 +566,6 @@ static inline void px_custody_sub(struct objects *objs, struct px_arrival *a, ui
         return;
     if (atomic_fetch_sub_explicit(&a->unfreed, n, memory_order_acq_rel) == n)
         px_arrival_release(objs, a);
-}
-
-/* Emission-path custody release with batched pool reclamation. */
-static inline void px_custody_sub_fb(struct objects *objs, struct px_arrival *a,
-                                     uint32_t n, struct px_free_batch *fb) {
-    if (n == 0)
-        return;
-    if (atomic_fetch_sub_explicit(&a->unfreed, n, memory_order_acq_rel) == n) {
-        if (px_queue_arrival_release(objs, a))
-            return;
-        __atomic_fetch_sub(&objs->pods[a->pod_idx].proxy_source_refs, 1,
-                           __ATOMIC_ACQ_REL);
-        px_fb_arr(fb, a);
-    }
 }
 
 /* ====== conn table ====== */
@@ -918,38 +836,53 @@ static void px_drop_window(struct objects *objs, struct px_conn *c, const char *
     }
 }
 
-/* Queue EOF in the sender's delivery sequence. */
-static int px_fin_to_sender(struct objects *objs, struct px_conn *c) {
+/* Queue one FIN/EOF unit (total_len 0) in (dst_pod, dst_port)'s delivery
+ * sequence. Returns 1 when queued — or when there is no delivery sequence,
+ * i.e. nobody left to tell — and 0 when the unit pool was dry (nothing
+ * mutated; the caller decides between retry and loss). */
+static int px_queue_eof_unit(struct objects *objs, struct pod_state *dst_pod,
+                             int8_t src_pod_id, int8_t src_service,
+                             int8_t dst_service, uint16_t src_port,
+                             uint16_t dst_port)
+{
     struct dmesh_proxy *px = objs->proxy;
-    struct pod_state *sp = find_pod_by_id(objs, c->pub.src_pod);
-    if (!sp || !pod_data_ready(sp) || !sp->host_rx_addr)
-        return 1;                          /* the sender is gone too — nobody to tell */
-    uint16_t *seq = px_delivery_seq_counter(px, c->pub.src_pod,
-                                            c->pub.src_port);
+    uint16_t *seq = px_delivery_seq_counter(px, dst_pod->pod_id, dst_port);
     if (!seq)
         return 1;
     struct px_unit *u = px_unit_alloc(px);
-    if (!u) {
-        uint64_t stalls = px_stat_inc(&px->stat_stall_unit);
-        if (((stalls - 1u) & 0xFFFFu) == 0)
-            DOCA_LOG_WARN("proxy: unit pool dry — deferring EOF to %d:%u (total %llu)",
-                          c->pub.src_pod, c->pub.src_port,
-                          (unsigned long long)stalls);
+    if (!u)
         return 0;
-    }
-    u->src_pod_id  = (int8_t)c->pub.src_pod;
-    u->src_service = (int8_t)c->pub.dst_service;   /* "from" the service it addressed */
-    u->dst_service = (int8_t)sp->service_id;
-    u->src_port    = c->pub.src_port;
-    u->dst_port    = c->pub.src_port;      /* the demux key: the sender's own conn */
+    u->src_pod_id  = src_pod_id;
+    u->src_service = src_service;
+    u->dst_service = dst_service;
+    u->src_port    = src_port;
+    u->dst_port    = dst_port;             /* the demux key at the destination */
     u->seq         = ++*seq;
     u->total_len   = 0;                    /* 0-length == FIN == EOF */
     u->org_port    = 0;                    /* synthetic EOF: never notify about itself */
-    u->dst_pod_idx = (int8_t)(sp - objs->pods);
-    int L = px_landing_stripes(sp);
-    px_lane_enqueue(px, (int)(sp - objs->pods),
-                    (int)(c->pub.src_port % (uint16_t)L), u);
+    u->dst_pod_idx = (int8_t)(dst_pod - objs->pods);
+    int L = px_landing_stripes(dst_pod);
+    px_lane_enqueue(px, (int)(dst_pod - objs->pods),
+                    (int)(dst_port % (uint16_t)L), u);
     return 1;
+}
+
+/* Queue EOF in the sender's delivery sequence. */
+static int px_fin_to_sender(struct objects *objs, struct px_conn *c) {
+    struct pod_state *sp = find_pod_by_id(objs, c->pub.src_pod);
+    if (!sp || !pod_data_ready(sp) || !sp->host_rx_addr)
+        return 1;                          /* the sender is gone too — nobody to tell */
+    if (px_queue_eof_unit(objs, sp, (int8_t)c->pub.src_pod,
+                          (int8_t)c->pub.dst_service,   /* "from" the service it addressed */
+                          (int8_t)sp->service_id,
+                          c->pub.src_port, c->pub.src_port))
+        return 1;
+    uint64_t stalls = px_stat_inc(&objs->proxy->stat_stall_unit);
+    if (((stalls - 1u) & 0xFFFFu) == 0)
+        DOCA_LOG_WARN("proxy: unit pool dry — deferring EOF to %d:%u (total %llu)",
+                      c->pub.src_pod, c->pub.src_port,
+                      (unsigned long long)stalls);
+    return 0;
 }
 
 static void px_stall(struct px_conn *c);
@@ -1015,7 +948,7 @@ static void px_lane_enqueue(struct dmesh_proxy *px, int pod_idx, int region, str
         u->next = old;
     } while (!__atomic_compare_exchange_n(&ln->inq[producer], &old, u, 0,
                                            __ATOMIC_RELEASE, __ATOMIC_RELAXED));
-    if (px->n_eng > 1)
+    if (px->n_workers > 1)
         px_engine_wake(&px->engines[owner]);
 }
 
@@ -1058,62 +991,32 @@ static int px_lane_splice_inbox(struct dmesh_proxy *px, struct px_lane *ln) {
 static int px_queue_fin_unit(struct objects *objs, struct px_conn *c,
                              struct pod_state *dst_pod,
                              uint16_t out_src_port, uint16_t out_dst_port) {
-    struct dmesh_proxy *px = objs->proxy;
-    uint16_t *seq = px_delivery_seq_counter(px, dst_pod->pod_id, out_dst_port);
-    if (!seq)
-        return 1;
-    struct px_unit *u = px_unit_alloc(px);
-    if (!u) {
-        uint64_t stalls = px_stat_inc(&px->stat_stall_unit);
-        if (((stalls - 1u) & 0xFFFFu) == 0)
-            DOCA_LOG_WARN("proxy: unit pool dry — deferring FIN to pod %d port %u "
-                          "(total %llu)", dst_pod->pod_id, out_dst_port,
-                          (unsigned long long)stalls);
-        return 0;
-    }
     struct pod_state *sp = find_pod_by_id(objs, c->pub.src_pod);
-    u->src_pod_id = (int8_t)c->pub.src_pod;
-    u->src_service = sp ? (int8_t)sp->service_id : (int8_t)DMESH_SVC_NONE;
-    u->dst_service = (int8_t)c->pub.dst_service;
-    u->src_port = out_src_port;
-    u->dst_port = out_dst_port;
-    u->seq = ++*seq;
-    u->total_len = 0;
-    u->org_port = 0;                       /* synthetic EOF: never notify about itself */
-    u->dst_pod_idx = (int8_t)(dst_pod - objs->pods);
-    int L = px_landing_stripes(dst_pod);
-    px_lane_enqueue(px, (int)(dst_pod - objs->pods),
-                    (int)(out_dst_port % (uint16_t)L), u);
-    return 1;
+    if (px_queue_eof_unit(objs, dst_pod, (int8_t)c->pub.src_pod,
+                          sp ? (int8_t)sp->service_id : (int8_t)DMESH_SVC_NONE,
+                          (int8_t)c->pub.dst_service,
+                          out_src_port, out_dst_port))
+        return 1;
+    uint64_t stalls = px_stat_inc(&objs->proxy->stat_stall_unit);
+    if (((stalls - 1u) & 0xFFFFu) == 0)
+        DOCA_LOG_WARN("proxy: unit pool dry — deferring FIN to pod %d port %u "
+                      "(total %llu)", dst_pod->pod_id, out_dst_port,
+                      (unsigned long long)stalls);
+    return 0;
 }
 
-/* Queue EOF to the origin of an undeliverable unit. */
+/* Queue EOF to the origin of an undeliverable unit. The emit path has no conn
+ * to park, so a dry pool here loses the EOF outright. */
 static void px_eof_to_origin(struct objects *objs, const struct px_unit *fu) {
-    struct dmesh_proxy *px = objs->proxy;
     struct pod_state *sp = find_pod_by_id(objs, fu->src_pod_id);
     if (!sp || !pod_data_ready(sp) || !sp->host_rx_addr)
         return;                            /* the origin is gone too — nobody to tell */
-    uint16_t *seq = px_delivery_seq_counter(px, fu->src_pod_id, fu->org_port);
-    if (!seq)
-        return;
-    struct px_unit *u = px_unit_alloc(px);
-    if (!u) {
+    if (!px_queue_eof_unit(objs, sp, fu->src_pod_id,
+                           fu->dst_service, /* "from" the service it addressed */
+                           (int8_t)sp->service_id,
+                           fu->org_port, fu->org_port))
         DOCA_LOG_ERR("proxy: unit pool empty — EOF to %d:%u LOST (it will hang)",
                      (int)fu->src_pod_id, fu->org_port);
-        return;
-    }
-    u->src_pod_id  = fu->src_pod_id;
-    u->src_service = fu->dst_service;      /* "from" the service it addressed */
-    u->dst_service = (int8_t)sp->service_id;
-    u->src_port    = fu->org_port;
-    u->dst_port    = fu->org_port;         /* the demux key: the origin's own conn */
-    u->seq         = ++*seq;
-    u->total_len   = 0;                    /* 0-length == FIN == EOF */
-    u->org_port    = 0;
-    u->dst_pod_idx = (int8_t)(sp - objs->pods);
-    int L = px_landing_stripes(sp);
-    px_lane_enqueue(px, (int)(sp - objs->pods),
-                    (int)(fu->org_port % (uint16_t)L), u);
 }
 
 /* Route one codec-delimited L7 message. */
@@ -1220,7 +1123,7 @@ static int px_build_range(struct objects *objs, struct px_conn *c,
             uP = dpu_upstream_create(ct, c->pub.src_pod, c->pub.src_port, dst_pod,
                                      c->is_l7 ? PX_CODEC_L7 : 0,
                                      (uint16_t)px_cur_worker->id,
-                                     (uint16_t)px_cur_worker->owner_stride);
+                                     (uint16_t)px->n_workers);
             created = (uP != 0);
         }
         /* Clear reply state for a newly allocated upstream port. */
@@ -1794,17 +1697,15 @@ int px_process_forward(struct objects *objs, int worker_id, void *ventry) {
 static inline void
 px_pod_inflight_add(struct px_engine *eng, struct pod_state *pod)
 {
-    __atomic_fetch_add(&pod->egress_inflight, 1, __ATOMIC_ACQ_REL);
-    __atomic_fetch_add(&pod->egress_inflight_worker[eng->id], 1,
+    __atomic_fetch_add(&pod->egress_inflight_worker[eng->id].v, 1,
                        __ATOMIC_ACQ_REL);
 }
 
 static inline void
 px_pod_inflight_sub(struct px_engine *eng, struct pod_state *pod)
 {
-    __atomic_fetch_sub(&pod->egress_inflight_worker[eng->id], 1,
+    __atomic_fetch_sub(&pod->egress_inflight_worker[eng->id].v, 1,
                        __ATOMIC_ACQ_REL);
-    __atomic_fetch_sub(&pod->egress_inflight, 1, __ATOMIC_ACQ_REL);
 }
 
 static uint64_t
@@ -2149,7 +2050,6 @@ static void px_lane_refresh_credit(struct objects *objs, struct px_engine *eng,
     op->kind = 1;
     op->pod_idx = pod_idx;
     op->region = region;
-    op->pod_generation = __atomic_load_n(&pod->dma_generation, __ATOMIC_ACQUIRE);
     op->src_buf = src_head;
     op->dst_buf = dst;
     union doca_data ud = { .ptr = op };
@@ -2202,8 +2102,6 @@ px_rev_submit_copy(struct px_engine *eng, int pod_idx, int region, int kind,
     op->kind = kind;
     op->pod_idx = pod_idx;
     op->region = region;
-    op->pod_generation = __atomic_load_n(
-        &eng->objs->pods[pod_idx].dma_generation, __ATOMIC_ACQUIRE);
     op->src_buf = src;
     op->dst_buf = dst;
     union doca_data ud = { .ptr = op };
@@ -2288,46 +2186,37 @@ px_rev_kick_lane(struct px_engine *eng, int pod_idx, int region)
     return 0;
 }
 
-static int
-px_rev_kick_all(struct px_engine *eng)
+/* Reserve one zeroed entry in the (pod, dst_port) region's worker-owned
+ * reverse stage. NULL when the region belongs to another worker or the stage
+ * is full or mid-publication (backpressure — the caller retries later). */
+static struct dmesh_rev_ring_entry *
+px_rev_stage_append(struct px_engine *eng, struct pod_state *pod,
+                    uint16_t dst_port)
 {
-    struct objects *objs = eng->objs;
-    struct dmesh_proxy *px = objs->proxy;
-    int progressed = 0;
-    /* Data retries are exclusive with reverse publication. */
-    if (eng->retry_batches || px_engine_retry_grace_active(eng))
-        return 0;
-    int npods = __atomic_load_n(&objs->num_pods, __ATOMIC_ACQUIRE);
-    for (int p = 0; p < npods; p++) {
-        struct pod_state *pod = &objs->pods[p];
-        if (!pod_data_ready(pod))
-            continue;
-        int L = px_landing_stripes(pod);
-        for (int r = eng->id; r < L; r += px->n_eng)
-            progressed |= px_rev_kick_lane(eng, p, r);
-    }
-    return progressed;
+    struct dmesh_proxy *px = eng->objs->proxy;
+    int pod_idx = (int)(pod - eng->objs->pods);
+    int region = dst_port % px_landing_stripes(pod);
+    if (region % px->n_workers != eng->id)
+        return NULL;
+    struct px_rev_pub *pub = &px->lanes[pod_idx][region].rev;
+    if (pub->state == PX_REV_META_INFLIGHT ||
+        pub->count >= PX_REV_STAGE_ENTRIES)
+        return NULL;
+    struct dmesh_rev_ring_entry *stage =
+        (struct dmesh_rev_ring_entry *)(px->rev_scratch +
+            PX_REV_ENTRIES_OFF(pod_idx, region));
+    struct dmesh_rev_ring_entry *dst = &stage[pub->count++];
+    memset(dst, 0, sizeof(*dst));
+    return dst;
 }
 
 static int
 px_rev_append_ack(struct px_engine *eng, struct pod_state *pod,
                   uint16_t port, uint16_t seq)
 {
-    struct dmesh_proxy *px = eng->objs->proxy;
-    int pod_idx = (int)(pod - eng->objs->pods);
-    int L = px_landing_stripes(pod);
-    int region = port % L;
-    if (region % px->n_eng != eng->id)
+    struct dmesh_rev_ring_entry *dst = px_rev_stage_append(eng, pod, port);
+    if (!dst)
         return 0;
-    struct px_rev_pub *pub = &px->lanes[pod_idx][region].rev;
-    if (pub->state == PX_REV_META_INFLIGHT ||
-        pub->count >= PX_REV_STAGE_ENTRIES)
-        return 0;
-    struct dmesh_rev_ring_entry *stage =
-        (struct dmesh_rev_ring_entry *)(px->rev_scratch +
-            PX_REV_ENTRIES_OFF(pod_idx, region));
-    struct dmesh_rev_ring_entry *dst = &stage[pub->count++];
-    memset(dst, 0, sizeof(*dst));
     dst->kind = DMESH_REV_ENTRY_TX_ACK;
     dst->payload.ack.port = port;
     dst->payload.ack.seq = seq;
@@ -2341,8 +2230,8 @@ px_ack_retry_handoffs(struct px_engine *eng)
     int moved = 0;
     while (eng->ack_retry_head) {
         struct px_arrival *a = eng->ack_retry_head;
-        int owner = dmesh_worker_for_port(a->ack_port, px->n_eng);
-        if (owner < 0 || owner >= px->n_eng ||
+        int owner = dmesh_worker_for_port(a->ack_port, px->n_workers);
+        if (owner < 0 || owner >= px->n_workers ||
             !px_ack_queue_push(&px->engines[owner].ack_releases, a))
             break;
         eng->ack_retry_head = a->release_next;
@@ -2355,8 +2244,7 @@ px_ack_retry_handoffs(struct px_engine *eng)
 }
 
 static int
-px_drain_ack_releases(struct px_engine *eng, uint32_t budget,
-                      struct px_free_batch *fb)
+px_drain_ack_releases(struct px_engine *eng, uint32_t budget)
 {
     struct objects *objs = eng->objs;
     int emitted = 0;
@@ -2369,7 +2257,7 @@ px_drain_ack_releases(struct px_engine *eng, uint32_t budget,
             /* A disconnected sender has no mapping or TX state to reclaim. */
             __atomic_fetch_sub(&objs->pods[a->pod_idx].proxy_source_refs, 1,
                                __ATOMIC_ACQ_REL);
-            px_fb_arr(fb, a);
+            px_arrival_free(objs->proxy, a);
             px_ack_queue_pop(&eng->ack_releases);
             emitted++;
             continue;
@@ -2383,30 +2271,19 @@ px_drain_ack_releases(struct px_engine *eng, uint32_t budget,
         }
         __atomic_fetch_sub(&objs->pods[a->pod_idx].proxy_source_refs, 1,
                            __ATOMIC_ACQ_REL);
-        px_fb_arr(fb, a);
+        px_arrival_free(objs->proxy, a);
         px_ack_queue_pop(&eng->ack_releases);
     }
     return emitted;
 }
 
 /* Append one REV_DONE entry to the destination region's worker-owned stage. */
-static int px_emit_rev_entry(struct objects *objs, struct px_engine *eng,
-                             struct pod_state *pod,
+static int px_emit_rev_entry(struct px_engine *eng, struct pod_state *pod,
                              const struct dmesh_rev_done_entry *e) {
-    int pod_idx = (int)(pod - objs->pods);
-    int L = px_landing_stripes(pod);
-    int region = e->dst_port % L;
-    if (region % objs->proxy->n_eng != eng->id)
+    struct dmesh_rev_ring_entry *dst =
+        px_rev_stage_append(eng, pod, e->dst_port);
+    if (!dst)
         return 0;
-    struct px_rev_pub *pub = &objs->proxy->lanes[pod_idx][region].rev;
-    if (pub->state == PX_REV_META_INFLIGHT ||
-        pub->count >= PX_REV_STAGE_ENTRIES)
-        return 0;
-    struct dmesh_rev_ring_entry *stage =
-        (struct dmesh_rev_ring_entry *)(objs->proxy->rev_scratch +
-            PX_REV_ENTRIES_OFF(pod_idx, region));
-    struct dmesh_rev_ring_entry *dst = &stage[pub->count++];
-    memset(dst, 0, sizeof(*dst));
     dst->kind = DMESH_REV_ENTRY_DONE;
     dst->payload.done = *e;
     return 1;
@@ -2466,8 +2343,7 @@ static int px_lane_retire(struct px_engine *eng, struct px_lane *ln) {
 }
 
 /* Emit completed units and release custody. */
-static int px_engine_emit(struct objects *objs, struct px_engine *eng,
-                          struct px_free_batch *fb) {
+static int px_engine_emit(struct objects *objs, struct px_engine *eng) {
     struct dmesh_proxy *px = objs->proxy;
     int did = 0;
     int32_t eof_pod = -1; uint16_t eof_port = 0;   /* collapse a run of same-origin failures */
@@ -2494,8 +2370,8 @@ static int px_engine_emit(struct objects *objs, struct px_engine *eng,
                 if (!u->emit_fin_done) {
                     e.length = 0;
                     e.pos = u->landing_pos;
-                    if (!px_emit_rev_entry(objs, eng, pod, &e))
-                        return did;             /* backpressure — resume later (caller flushes fb) */
+                    if (!px_emit_rev_entry(eng, pod, &e))
+                        return did;             /* backpressure — resume later */
                     u->emit_fin_done = 1;
                     did = 1;
                 }
@@ -2506,8 +2382,8 @@ static int px_engine_emit(struct objects *objs, struct px_engine *eng,
                         elen = PX_ENTRY_BYTES_MAX;
                     e.length = (uint16_t)elen;
                     e.pos = u->landing_pos + u->emit_off;
-                    if (!px_emit_rev_entry(objs, eng, pod, &e))
-                        return did;                     /* backpressure (caller flushes fb) */
+                    if (!px_emit_rev_entry(eng, pod, &e))
+                        return did;             /* backpressure — resume later */
                     u->emit_off += elen;
                     did = 1;
                 }
@@ -2516,16 +2392,13 @@ static int px_engine_emit(struct objects *objs, struct px_engine *eng,
         /* custody: the SG op has read (or abandoned) these staging bytes */
         for (struct px_piece *p = u->pieces; p; p = p->next) {
             struct px_arrival *a = p->arr;
-            px_custody_sub_fb(objs, a, p->len, fb);   /* egressed bytes; release (batched) iff last */
+            px_custody_sub(objs, a, p->len);   /* egressed bytes; release iff last */
         }
         eng->emit_head = u->next;
         if (!eng->emit_head) eng->emit_tail = NULL;
         __atomic_fetch_sub(&pod->egress_pending_emit, 1, __ATOMIC_ACQ_REL);
-        px_fb_unit(fb, u);                     /* batched free (caller splices) */
+        px_unit_free_node(px, u);
         did = 1;
-        /* Return full free batches to the shared pools. */
-        if (fb->n >= PX_FREE_BATCH_FLUSH)
-            px_free_batch_flush(px, fb);
     }
     return did;
 }
@@ -2655,14 +2528,11 @@ static int px_engine_recover(struct px_engine *eng) {
         /* Clear refresh state only for lanes owned by this engine. */
         struct dmesh_proxy *px = eng->objs->proxy;
         for (int p = 0; p < MAX_PODS; p++) {
-            for (int r = eng->id; r < MAX_EU_PER_POD; r += px->n_eng)
+            for (int r = eng->id; r < MAX_EU_PER_POD; r += px->n_workers)
                 px->lanes[p][r].refresh_inflight = 0;
-            uint32_t lost = __atomic_exchange_n(
-                &eng->objs->pods[p].egress_inflight_worker[eng->id], 0,
+            (void)__atomic_exchange_n(
+                &eng->objs->pods[p].egress_inflight_worker[eng->id].v, 0,
                 __ATOMIC_ACQ_REL);
-            if (lost)
-                __atomic_fetch_sub(&eng->objs->pods[p].egress_inflight, lost,
-                                   __ATOMIC_ACQ_REL);
         }
         eng->retry_after_ns = px_monotonic_ns() + PX_BATCH_RETRY_GRACE_NS;
         eng->dma_stalled = 0;
@@ -2691,7 +2561,7 @@ static int px_engine_pump(struct objects *objs, struct px_engine *eng,
         int L = px_landing_stripes(pod);
         int dead = !pod_data_ready(pod);
         int quiet = dead;
-        for (int r = eng->id; r < L; r += px->n_eng) {
+        for (int r = eng->id; r < L; r += px->n_workers) {
             struct px_lane *ln = &px->lanes[i][r];
             progressed |= px_lane_splice_inbox(px, ln);
             if (ln->fhead) {
@@ -2734,9 +2604,13 @@ static int px_engine_pump(struct objects *objs, struct px_engine *eng,
                 }
             }
             if (ln->qhead) progressed |= px_lane_submit(objs, eng, i, pod, r, ln);
+            /* Publish this lane's staged reverse entries. Data retries are
+             * exclusive with reverse publication. */
+            if (!eng->retry_batches && !px_engine_retry_grace_active(eng))
+                progressed |= px_rev_kick_lane(eng, i, r);
         }
         if (dead) {
-            if (__atomic_load_n(&pod->egress_inflight_worker[eng->id],
+            if (__atomic_load_n(&pod->egress_inflight_worker[eng->id].v,
                                 __ATOMIC_ACQUIRE) != 0)
                 quiet = 0;
             uint32_t bit = 1u << eng->id;
@@ -2773,12 +2647,9 @@ px_worker_progress(struct px_engine *eng) {
     int published_done = 0;
     int progressed = doca_pe_progress(eng->pe) ? 1 : 0;
     progressed |= px_engine_pump(eng->objs, eng, &published_done);
-    struct px_free_batch fb = { 0 };
-    progressed |= px_engine_emit(eng->objs, eng, &fb);
+    progressed |= px_engine_emit(eng->objs, eng);
     progressed |= px_ack_retry_handoffs(eng);
-    progressed |= px_drain_ack_releases(eng, 256, &fb);
-    px_free_batch_flush(eng->objs->proxy, &fb);
-    progressed |= px_rev_kick_all(eng);
+    progressed |= px_drain_ack_releases(eng, 256);
     if (progressed)
         return PX_PROGRESS_PROGRESSED;
     return px_worker_has_pending(eng) ?
@@ -2788,7 +2659,7 @@ px_worker_progress(struct px_engine *eng) {
 int px_worker_notification_fd(struct objects *objs, int worker_id) {
     struct dmesh_proxy *px = objs ? objs->proxy : NULL;
     doca_notification_handle_t handle = 0;
-    if (!px || px->n_eng < 1 || worker_id < 0 || worker_id >= px->n_eng ||
+    if (!px || px->n_workers < 1 || worker_id < 0 || worker_id >= px->n_workers ||
         doca_pe_get_notification_handle(px->engines[worker_id].pe,
                                         &handle) != DOCA_SUCCESS)
         return -1;
@@ -2797,7 +2668,7 @@ int px_worker_notification_fd(struct objects *objs, int worker_id) {
 
 int px_worker_arm_notification(struct objects *objs, int worker_id) {
     struct dmesh_proxy *px = objs ? objs->proxy : NULL;
-    if (!px || px->n_eng < 1 || worker_id < 0 || worker_id >= px->n_eng)
+    if (!px || px->n_workers < 1 || worker_id < 0 || worker_id >= px->n_workers)
         return 0;
     return doca_pe_request_notification(px->engines[worker_id].pe) ==
            DOCA_SUCCESS;
@@ -2805,8 +2676,8 @@ int px_worker_arm_notification(struct objects *objs, int worker_id) {
 
 void px_worker_clear_notification(struct objects *objs, int worker_id, int fd) {
     struct dmesh_proxy *px = objs ? objs->proxy : NULL;
-    if (!px || px->n_eng < 1 || worker_id < 0 ||
-        worker_id >= px->n_eng || fd < 0)
+    if (!px || px->n_workers < 1 || worker_id < 0 ||
+        worker_id >= px->n_workers || fd < 0)
         return;
     (void)doca_pe_clear_notification(px->engines[worker_id].pe,
                                      (doca_notification_handle_t)fd);
@@ -2815,7 +2686,7 @@ void px_worker_clear_notification(struct objects *objs, int worker_id, int fd) {
 enum px_progress_state
 px_worker_drain(struct objects *objs, int worker_id) {
     struct dmesh_proxy *px = objs ? objs->proxy : NULL;
-    if (!px || px->n_eng < 1 || worker_id < 0 || worker_id >= px->n_eng)
+    if (!px || px->n_workers < 1 || worker_id < 0 || worker_id >= px->n_workers)
         return PX_PROGRESS_IDLE;
     return px_worker_progress(&px->engines[worker_id]);
 }
@@ -2977,12 +2848,16 @@ int px_pod_reclaim_ready(struct objects *objs, int pod_idx) {
     if (!px || pod_idx < 0 || pod_idx >= MAX_PODS)
         return 0;
     struct pod_state *pod = &objs->pods[pod_idx];
-    uint32_t expected_workers = px->n_eng >= 32
-        ? UINT32_MAX : ((1u << px->n_eng) - 1u);
+    uint32_t expected_workers = px->n_workers >= 32
+        ? UINT32_MAX : ((1u << px->n_workers) - 1u);
     uint32_t quiet_workers = __atomic_load_n(&pod->egress_quiesced_mask,
                                               __ATOMIC_ACQUIRE);
+    uint32_t inflight = 0;
+    for (int w = 0; w < px->n_workers; w++)
+        inflight += __atomic_load_n(&pod->egress_inflight_worker[w].v,
+                                    __ATOMIC_ACQUIRE);
     if ((quiet_workers & expected_workers) != expected_workers ||
-        __atomic_load_n(&pod->egress_inflight, __ATOMIC_ACQUIRE) != 0 ||
+        inflight != 0 ||
         __atomic_load_n(&pod->egress_pending_emit, __ATOMIC_ACQUIRE) != 0 ||
         __atomic_load_n(&pod->proxy_source_refs, __ATOMIC_ACQUIRE) != 0)
         return 0;
@@ -3036,7 +2911,6 @@ int px_init(struct objects *objs) {
         if (!worker_state->ct)
             goto oom;
         worker_state->ct->next_uport = DMESH_UPORT_BASE;
-        worker_state->owner_stride = px->n_workers;
     }
 
     px->arr_mem = (struct px_arrival *)calloc(PX_ARRIVAL_POOL, sizeof(*px->arr_mem));
@@ -3049,9 +2923,11 @@ int px_init(struct objects *objs) {
     atomic_init(&px->stat_stall_unit, 0);
     atomic_init(&px->stat_stall_piece, 0);
     atomic_init(&px->stat_stall_uport, 0);
-    for (int i = PX_ARRIVAL_POOL - 1; i >= 0; i--) px_arrival_free(px, &px->arr_mem[i]);
-    for (int i = PX_PIECE_POOL - 1; i >= 0; i--)   px_piece_free(px, &px->piece_mem[i]);
-    for (int i = PX_UNIT_POOL - 1; i >= 0; i--)    { px->unit_mem[i].next = px->unit_free; px->unit_free = &px->unit_mem[i]; }
+    /* Splice the shared free lists directly: workers are not running yet, and
+     * the init thread's per-thread caches must stay empty. */
+    for (int i = PX_ARRIVAL_POOL - 1; i >= 0; i--) { px->arr_mem[i].next   = px->arr_free;   px->arr_free   = &px->arr_mem[i]; }
+    for (int i = PX_PIECE_POOL - 1; i >= 0; i--)   { px->piece_mem[i].next = px->piece_free; px->piece_free = &px->piece_mem[i]; }
+    for (int i = PX_UNIT_POOL - 1; i >= 0; i--)    { px->unit_mem[i].next  = px->unit_free;  px->unit_free  = &px->unit_mem[i]; }
 
     /* Clamp the SG piece cap to the device capability. */
     px->sg_pieces_max = PX_SG_PIECES_MAX;
@@ -3071,14 +2947,9 @@ int px_init(struct objects *objs) {
         goto fail;
     }
 
-    /* One DMA engine and PE per data worker. */
-    int n_eng = px->n_workers;
-    if (n_eng < 1) n_eng = 1;
-    if (n_eng > MAX_ARM_ENG) n_eng = MAX_ARM_ENG;
-    px->n_eng = n_eng;
-
-    /* Per-engine DMA, PE, inventory, and batch pool. */
-    for (int e = 0; e < n_eng; e++) {
+    /* One DMA engine and PE per data worker (n_workers is already clamped
+     * to [1, MAX_ARM_WORKERS] above). */
+    for (int e = 0; e < px->n_workers; e++) {
         struct px_engine *eng = &px->engines[e];
         eng->objs = objs;
         eng->id = e;
@@ -3140,7 +3011,7 @@ fail:
     }
     free(px->arr_mem); free(px->piece_mem);
     free(px->unit_mem);
-    for (int e = 0; e < MAX_ARM_ENG; e++) {
+    for (int e = 0; e < MAX_ARM_WORKERS; e++) {
         free(px->engines[e].batch_mem);
     }
     free(px);

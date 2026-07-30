@@ -223,19 +223,7 @@ owner_worker(struct objects *objs, int here, const dpu_comp_entry_t *e)
 static void
 dpu_wake_worker(struct dpu_data_worker *worker_state)
 {
-    if (worker_state->wake_fd < 0)
-        return;
-    int expected = 1;
-    if (!atomic_compare_exchange_strong_explicit(
-            &worker_state->parked, &expected, 0,
-            memory_order_acq_rel, memory_order_acquire))
-        return;
-    uint64_t one = 1;
-    ssize_t n;
-    do {
-        n = write(worker_state->wake_fd, &one, sizeof(one));
-    } while (n < 0 && errno == EINTR);
-    (void)n;
+    dpu_wake_eventfd(&worker_state->parked, worker_state->wake_fd);
 }
 
 /* Hand a reply to its owner worker. Returns -1 when the inbox is full. */
@@ -255,19 +243,7 @@ cross_worker_handoff(struct objects *objs, int owner, const dpu_comp_entry_t *e)
 void
 dpu_wake_main(struct objects *objs)
 {
-    if (objs->main_wake_fd < 0)
-        return;
-    int expected = 1;
-    if (!atomic_compare_exchange_strong_explicit(
-            &objs->main_parked, &expected, 0,
-            memory_order_acq_rel, memory_order_acquire))
-        return;
-    uint64_t one = 1;
-    ssize_t n;
-    do {
-        n = write(objs->main_wake_fd, &one, sizeof(one));
-    } while (n < 0 && errno == EINTR);
-    (void)n;
+    dpu_wake_eventfd(&objs->main_parked, objs->main_wake_fd);
 }
 
 void
@@ -720,7 +696,7 @@ run_dpu_worker(struct objects *objs)
     DOCA_LOG_WARN("ARM DATA WORKERS = %d", objs->n_data_workers);
 
     /* 1. comch control path server (waits for first connection) */
-    result = init_comch_ctrl_path_server("DPUMesh", objs, true);
+    result = init_comch_ctrl_path_server("DPUMesh", objs);
     if (result != DOCA_SUCCESS) {
         DOCA_LOG_ERR("Failed to init comch control path server: %s",
                      doca_error_get_descr(result));

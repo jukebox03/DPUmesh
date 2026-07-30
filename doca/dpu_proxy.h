@@ -13,12 +13,6 @@ enum px_progress_state {
     PX_PROGRESS_PROGRESSED,
 };
 
-static inline enum px_progress_state
-px_progress_merge(enum px_progress_state a, enum px_progress_state b)
-{
-    return a > b ? a : b;
-}
-
 /* Return a ready pin, or -1 when the stream is terminal. */
 static inline int32_t dmesh_l4_pinned_backend(int32_t pinned_backend,
                                               int backend_ready) {

@@ -16,11 +16,8 @@ struct pod_state;
 #define SLEEP_IN_NANOS (10 * 1000)	       /* Sample tasks every 10 microseconds */
 #endif
 
-doca_error_t 
-init_comch_ctrl_path_server(const char *server_name, struct objects *objs, bool is_fast_path);							
-
-doca_error_t 
-server_send_msg(struct objects *objs, const char *msg, size_t len);
+doca_error_t
+init_comch_ctrl_path_server(const char *server_name, struct objects *objs);
 
 /* Send a raw message to a specific connection (comch control path) */
 doca_error_t

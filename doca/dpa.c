@@ -126,7 +126,6 @@ static void dmesh_doca_dpa_msgq_recv_cb(struct doca_comch_consumer_task_post_rec
             dpu_comp_entry_t entry;
             entry.src_pod_id = src_pod_id;
             entry.dst_pod_id = dst_pod_id;
-            entry.src_service = (int16_t)src_pod->service_id;  /* derived (not on the 20B wire) */
             entry.dst_service = comp_msg->dst_service;
             entry.src_port = comp_msg->src_port;
             entry.dst_port = comp_msg->dst_port;
@@ -911,70 +910,8 @@ dmesh_fill_dpa_thread_arg(struct objects *objs, int idx, struct dpa_thread_arg *
     return DOCA_SUCCESS;
 }
 
-/* Send one message over a DPA Comch queue. */
-doca_error_t 
-dmesh_doca_dpa_msgq_send(struct dmesh_doca_dpa_msgq *msgq, void *msg, uint32_t msg_size)
-{
-	doca_error_t result;
-    union doca_data user_data;
-    struct dpa_send_payload *payload;
-
-	struct doca_comch_producer_task_send *send_task;
-    struct doca_task *task;
-
-    payload = malloc(sizeof(*payload) + msg_size);
-    if (payload == NULL) {
-        DOCA_LOG_ERR("DPA MsgQ send failed: payload copy allocation failed");
-        return DOCA_ERROR_NO_MEMORY;
-    }
-	payload->msgq = msgq;
-	payload->is_wake =
-		(msg_size >= sizeof(enum dpa_msg_type) &&
-		 *(const enum dpa_msg_type *)msg == DPA_MSG_WAKE);
-    memcpy(payload->bytes, msg, msg_size);
-	result = doca_comch_producer_task_send_alloc_init(msgq->producer,
-							  NULL,
-							  payload->bytes,
-							  msg_size,
-                              msgq->target_consumer_id,
-							  &send_task);
-	if (result != DOCA_SUCCESS) {
-		DOCA_LOG_ERR("DPA MsgQ send failed: failed to allocate send task - %s",
-			     doca_error_get_name(result));
-        free(payload);
-		return result;
-	}
-
-    task = doca_comch_producer_task_send_as_task(send_task);
-
-    user_data.ptr = payload;
-    doca_task_set_user_data(task, user_data);
-
-    int retry = 0;
-    const int max_retry = 10000;
-    do {
-        result = doca_task_submit(task);
-        if (result == DOCA_ERROR_AGAIN) {
-            doca_pe_progress(msgq->pe);
-            retry++;
-        }
-    } while (result == DOCA_ERROR_AGAIN && retry < max_retry);
-
-	if (result != DOCA_SUCCESS) {
-		DOCA_LOG_ERR("DPA MsgQ send failed: %s (retries=%d, msg_size=%u)",
-			     doca_error_get_name(result), retry, msg_size);
-		free(payload);
-		doca_task_free(task);
-		return result;
-	}
-	if (payload->is_wake)
-		msgq->wake_inflight = 1;
-
-	return DOCA_SUCCESS;
-}
-
-/* Non-blocking variant: returns DOCA_ERROR_AGAIN immediately on submit
- * failure, no PE progress, no retry. For hot-path DPU→DPA wake signals where
+/* Nonblocking send: returns DOCA_ERROR_AGAIN immediately on submit failure,
+ * no PE progress, no retry. Hot-path DPU→DPA wake signals use this directly —
  * a missed trigger is recoverable by the next successful send. */
 doca_error_t
 dmesh_doca_dpa_msgq_send_try(struct dmesh_doca_dpa_msgq *msgq, void *msg, uint32_t msg_size)
@@ -1031,6 +968,28 @@ dmesh_doca_dpa_msgq_send_try(struct dmesh_doca_dpa_msgq *msgq, void *msg, uint32
     if (is_wake)
         msgq->wake_inflight = 1;
     return DOCA_SUCCESS;
+}
+
+/* Send one message over a DPA Comch queue, retrying transient submit failures
+ * with PE progress. Control-path only (thread start, RING_ADD). */
+doca_error_t
+dmesh_doca_dpa_msgq_send(struct dmesh_doca_dpa_msgq *msgq, void *msg, uint32_t msg_size)
+{
+    doca_error_t result;
+    int retry = 0;
+    const int max_retry = 10000;
+
+    for (;;) {
+        result = dmesh_doca_dpa_msgq_send_try(msgq, msg, msg_size);
+        if (result != DOCA_ERROR_AGAIN || retry >= max_retry)
+            break;
+        doca_pe_progress(msgq->pe);
+        retry++;
+    }
+    if (result != DOCA_SUCCESS)
+        DOCA_LOG_ERR("DPA MsgQ send failed: %s (retries=%d, msg_size=%u)",
+                     doca_error_get_name(result), retry, msg_size);
+    return result;
 }
 
 /*
@@ -1149,9 +1108,8 @@ setup_pod_dma(struct objects *objs, struct pod_state *pod)
     pod->landing_stripes = L;
     __atomic_store_n(&pod->egress_quiesced, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&pod->egress_quiesced_mask, 0, __ATOMIC_RELEASE);
-    __atomic_store_n(&pod->egress_inflight, 0, __ATOMIC_RELEASE);
-    for (int a = 0; a < MAX_EU_PER_POD; a++)
-        __atomic_store_n(&pod->egress_inflight_worker[a], 0,
+    for (int a = 0; a < MAX_ARM_WORKERS; a++)
+        __atomic_store_n(&pod->egress_inflight_worker[a].v, 0,
                          __ATOMIC_RELEASE);
     __atomic_store_n(&pod->egress_pending_emit, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&pod->proxy_source_refs, 0, __ATOMIC_RELEASE);

@@ -105,7 +105,7 @@ int main(void)
     assert(px_l7_unit_absorb(px, &merged, &extra));
     assert(merged.total_len == 2200 && merged.npieces == 2 && merged.seq == 7);
     assert(merged.pieces == &p1 && merged.pieces_tail == &p2 && p1.next == &p2);
-    assert(extra.pieces == NULL && px->unit_free == &extra);
+    assert(extra.pieces == NULL && tls_unit_mag == &extra);
 
     struct px_unit incompatible;
     memset(&incompatible, 0, sizeof(incompatible));
@@ -115,8 +115,9 @@ int main(void)
     incompatible.npieces = 0;
     assert(!px_l7_unit_absorb(px, &merged, &incompatible));
 
-    px->n_eng = 3;
-    px->n_workers = PRODUCERS;
+    /* Three workers with two producer threads: TEST_REGION's owner (2 % 3) is
+     * neither producer, so every publication takes the cross-owner inbox. */
+    px->n_workers = 3;
     for (int s = 0; s < PRODUCERS; s++)
         px->workers[s].id = s;
 
@@ -184,7 +185,7 @@ int main(void)
     assert(px_delivery_seq_counter(px, 8, upstream) == NULL);
 
     /* Same-owner FIFO and cross-owner inbox. */
-    px->n_eng = 2;
+    px->n_workers = 2;
     px_cur_worker = &px->workers[0];
     struct px_unit local_unit, remote_unit;
     memset(&local_unit, 0, sizeof(local_unit));
@@ -296,10 +297,6 @@ int main(void)
     retry_pod->k_rings = 8;
     retry_pod->landing_stripes = 2;
     assert(px_landing_stripes(retry_pod) == 2);
-    assert(px_progress_merge(PX_PROGRESS_IDLE, PX_PROGRESS_PENDING) ==
-           PX_PROGRESS_PENDING);
-    assert(px_progress_merge(PX_PROGRESS_PENDING, PX_PROGRESS_PROGRESSED) ==
-           PX_PROGRESS_PROGRESSED);
     __atomic_store_n(&objs->num_pods, 1, __ATOMIC_RELEASE);
     struct px_unit pending_unit;
     memset(&pending_unit, 0, sizeof(pending_unit));

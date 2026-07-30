@@ -1086,7 +1086,7 @@ static doca_error_t init_control_path(dpumesh_ctx_t *ctx) {
     doca_error_t result;
 
     fprintf(stderr, "[dpumesh] Connecting comch client...\n");
-    result = init_comch_ctrl_path_client("DPUMesh", &ctx->doca_objs, true);
+    result = init_comch_ctrl_path_client("DPUMesh", &ctx->doca_objs);
     if (result != DOCA_SUCCESS) return result;
 
     /* Register with pod_id = -1: the DPU allocates our pod_id and replies with

@@ -74,11 +74,12 @@ dmesh_doca_dpa_thread_create(struct dmesh_doca_dpa_thread *dpa_thread, int eu_id
 doca_error_t
 dmesh_doca_dpa_comch_create(struct objects *objs, int idx);
 
+/* Control-path send: retries transient submit failures with PE progress. */
 doca_error_t
 dmesh_doca_dpa_msgq_send(struct dmesh_doca_dpa_msgq *msgq, void *msg, uint32_t msg_size);
 
-/* Non-blocking variant of dmesh_doca_dpa_msgq_send: returns AGAIN on submit
- * failure, no retry, no PE progress. For hot-path TRIGGER fire-and-forget. */
+/* Nonblocking send: returns AGAIN on submit failure, no retry, no PE
+ * progress. For hot-path wake signals whose loss is recoverable. */
 doca_error_t
 dmesh_doca_dpa_msgq_send_try(struct dmesh_doca_dpa_msgq *msgq, void *msg, uint32_t msg_size);
 

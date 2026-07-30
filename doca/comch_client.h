@@ -11,7 +11,7 @@ struct objects; /* Forward declaration */
 #define CC_CLIENT_RECV_QUEUE_SIZE 8192 /* Size of CC receive queue (client side) */
 
 doca_error_t init_comch_ctrl_path_client(const char *server_name,
-                    struct objects *objs, bool is_fast_path);
+                    struct objects *objs);
 
 doca_error_t
 client_send_msg(struct objects *objs, const char *msg, size_t len);

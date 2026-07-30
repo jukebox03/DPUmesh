@@ -236,7 +236,7 @@ doca_error_t client_send_msg(struct objects *objs, const char *msg, size_t len)
 }
 
 doca_error_t init_comch_ctrl_path_client(const char *server_name,
-                    struct objects *objs, bool is_fast_path)
+                    struct objects *objs)
 {
     doca_error_t result;
 	struct doca_ctx *ctx;
@@ -287,13 +287,11 @@ doca_error_t init_comch_ctrl_path_client(const char *server_name,
     }
 
 	/* register event callback for new comsumer and expired consumer */
-	if (is_fast_path) {
-		result = doca_comch_client_event_consumer_register(objs->cc_client,
-									dmesh_consumer_connected, dmesh_consumer_expired);
-		if (result != DOCA_SUCCESS) {
-			DOCA_LOG_ERR("Failed adding consumer event cb with error = %s", doca_error_get_name(result));
-			goto destroy_client;
-		}
+	result = doca_comch_client_event_consumer_register(objs->cc_client,
+								dmesh_consumer_connected, dmesh_consumer_expired);
+	if (result != DOCA_SUCCESS) {
+		DOCA_LOG_ERR("Failed adding consumer event cb with error = %s", doca_error_get_name(result));
+		goto destroy_client;
 	}
 
     /* Set client properties */
