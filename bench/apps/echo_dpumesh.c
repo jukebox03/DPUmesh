@@ -2,7 +2,7 @@
  *
  * One EQ and epoll loop reframe bench.h requests and return the requested reply
  * size with the same sequence id. EAGAIN parks the reply until TX_READY names the
- * connection. BENCH_WORKER_ID selects the advertised service. */
+ * connection. DPUMESH_SERVICE selects the advertised service. */
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -109,7 +109,11 @@ static void on_request(uint32_t seq, uint32_t req_len, uint32_t reply_size, void
         double t0 = bench_now_sec();
         while ((bench_now_sec() - t0) * 1e6 < (double)g_app_work_us) { }
     }
-    if (gc->qn >= REPLY_Q) { gc->dead = 1; return; }   /* client outran its own window */
+    if (gc->qn >= REPLY_Q) {                           /* client outran its own window */
+        fprintf(stderr, "[greeter] reply queue full (%d) — dropping conn\n", gc->qn);
+        gc->dead = 1;
+        return;
+    }
     gc->q[(gc->qh + gc->qn) % REPLY_Q] = (reply_t){ .seq = seq, .size = reply_size };
     gc->qn++;
     reply_pump(c);

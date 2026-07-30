@@ -30,7 +30,7 @@ TRANSPORT_FILTER="${TRANSPORT_FILTER:-}"
 # `dpumesh-preload` is the matched-C workload over the socket facade; its
 # control listener remains kernel TCP while BENCH_TARGET uses DPUmesh.
 TRANSPORTS=(
-  "dpumesh-native|bench-dpumesh|$CTRL_PORT|native|no"
+  "dpumesh-native|bench-dpumesh|$CTRL_PORT|native|yes"
   "tcp-envoy|bench-tcp|$CTRL_PORT|sock|yes"
   "dpumesh-preload|preload-bench|$CTRL_PORT|sock|yes"
 )
@@ -134,10 +134,10 @@ stage_bw() {
     emit bw "$tr" "${sz}B/${BW_REPLY}B" closed const "$sz" "$BW_REPLY" "$BW_CONC" 1 "" "$rep" "$ok"
   done; done; done
 }
-stage_curve() {  # OPEN loop — only transports whose client supports it (kind=sock)
+stage_curve() {  # OPEN loop — only transports whose client supports it
   local any=0
   for tr in "${LIVE[@]}"; do [ "${OPEN[$tr]}" = yes ] && any=1; done
-  [ "$any" -eq 0 ] && { warn "STAGE curve: no open-capable transport deployed (need dpumesh-preload with bench_sock) — skipping"; return; }
+  [ "$any" -eq 0 ] && { warn "STAGE curve: no open-capable transport deployed — skipping"; return; }
   for tr in "${LIVE[@]}"; do
     [ "${OPEN[$tr]}" = yes ] || continue
     # Open-loop over CURVE_THREADS connections so the generator is not single-conn
@@ -147,7 +147,11 @@ stage_curve() {  # OPEN loop — only transports whose client supports it (kind=
       set -- $wl; local req=$1 rep8=$2
       local peak_ok peak rps
       peak_ok="$(run_line "RUN $req $rep8 32 $DUR $WARMUP $CT" "${IP[$tr]}")"
-      peak="$(field "$peak_ok" mrps)"; peak="${peak:-0.1}"
+      peak="$(field "$peak_ok" mrps)"
+      if [[ "$peak_ok" != OK* ]] || ! awk -v m="${peak:-0}" 'BEGIN{exit !(m+0>0)}'; then
+        warn "STAGE curve: $tr ${req}B peak probe failed (${peak_ok:-no-output}) — skipping workload"
+        continue
+      fi
       rps="$(awk -v m="$peak" 'BEGIN{printf "%.0f", m*1e6}')"
       log "STAGE curve: $tr ${req}B peak~${peak} Mrps ($CT conns); fracs {$CURVE_FRACS}"
       for r in $(seq 1 "$REPS"); do for fr in $CURVE_FRACS; do

@@ -113,20 +113,22 @@ static double prng_exp_gap(worker_t *w, double rate) {   /* ~ Exp(rate): -ln(U)/
     return -log(u) / rate;
 }
 
-/* Correlate complete replies by sequence. Open-loop latency uses scheduled time. */
+/* Correlate complete replies by sequence. Open-loop latency uses scheduled time.
+ * The receive stamp is taken per reply so both clients time identically. */
 static void on_reply(uint32_t seq, uint32_t plen, uint32_t aux, void *user) {
     (void)plen; (void)aux;
     worker_t *w = (worker_t *)user;
+    double now = bench_now_sec();
     uint32_t idx = seq % INFLIGHT_RING;
     if (!w->live[idx] || w->slot_seq[idx] != seq) { w->fail++; return; }
     w->live[idx] = 0;
     double t0 = w->start_ts[idx];
-    if (seq != w->prev_seq + 1) w->reorder++;
+    if ((int32_t)(seq - w->prev_seq) <= 0) w->reorder++;   /* arrival went backwards */
     w->prev_seq = seq;
     w->outstanding--;
-    if (w->rcnt >= w->warmup) bench_hist_record(&w->hist, (w->now_cache - t0) * 1e6);
+    if (w->rcnt >= w->warmup) bench_hist_record(&w->hist, (now - t0) * 1e6);
     w->rcnt++;
-    if (w->rcnt == w->warmup) w->warmup_end = w->now_cache;
+    if (w->rcnt == w->warmup) w->warmup_end = now;
 }
 
 /* Drain replies until EAGAIN. Returns -1 if the peer closed / errored. */
@@ -307,7 +309,7 @@ static void *watchdog_fn(void *arg) {
 /* ------------------------------------------------------------ one benchmark run */
 static void run_bench(int conn_fd, int mode, int req_size, int reply_size, int conc,
                       double duration, long warmup, int threads, double rate, int arrival) {
-    char reply[768];
+    char reply[1024];
     typedef int (*preload_stats_fn)(unsigned long long out[7]);
     preload_stats_fn read_preload_stats =
         (preload_stats_fn)dlsym(RTLD_DEFAULT, "dmesh_preload_tx_stats");
@@ -319,6 +321,10 @@ static void run_bench(int conn_fd, int mode, int req_size, int reply_size, int c
     }
     if (threads > MAX_THREADS) threads = MAX_THREADS;
     if (warmup < 0) warmup = 0;
+    if (mode == MODE_OPEN && rate * duration / (double)threads <= (double)warmup)
+        fprintf(stderr, "[bench_sock] WARNING: ~%.0f arrivals/thread <= warmup=%ld; "
+                        "measurement window may be empty\n",
+                rate * duration / (double)threads, warmup);
 
     char load[32];
     if (mode == MODE_OPEN) snprintf(load, sizeof load, "rate=%.0f", rate);
@@ -356,9 +362,11 @@ static void run_bench(int conn_fd, int mode, int req_size, int reply_size, int c
     double response_frame = (double)BENCH_HDR_LEN + (double)reply_size;
     long total_ok = 0, total_fail = 0, total_reorder = 0, total_drops = 0;
     long total_scheduled = 0, total_pending = 0;
+    int worker_fail = 0;
     for (int i = 0; i < threads; i++) {
         long measured = w[i].rcnt - w[i].warmup; if (measured < 0) measured = 0;
         total_fail += w[i].fail; total_reorder += w[i].reorder; total_drops += w[i].drops;
+        if (atomic_load(&w[i].broken)) { worker_fail++; total_fail++; }
         total_scheduled += (long)w[i].next_seq + w[i].drops;
         total_pending += w[i].outstanding;
         if (!atomic_load(&w[i].broken) && w[i].dura > 1e-9 && measured > 0) {
@@ -399,7 +407,7 @@ static void run_bench(int conn_fd, int mode, int req_size, int reply_size, int c
         "p50=%.2f p95=%.2f p99=%.2f p999=%.2f p9999=%.2f "
         "avg=%.2f min=%.2f max=%.2f rcnt=%ld scheduled=%ld pending=%ld fail=%ld "
         "conc=%d threads=%d reqsz=%d repsz=%d reqframe=%u respframe=%u "
-        "durs=%.3f offered_mrps=%.6f drops=%ld overflow=%llu reorder=%ld "
+        "durs=%.3f offered_mrps=%.6f drops=%ld overflow=%llu worker_fail=%d reorder=%ld "
         "mode=%s arr=%s %s\n",
         mrps, gbps, request_gbps, response_gbps,
         p50, p95, p99, p999, p9999, avg, mn, mx,
@@ -407,7 +415,7 @@ static void run_bench(int conn_fd, int mode, int req_size, int reply_size, int c
         conc, threads, req_size, reply_size,
         BENCH_HDR_LEN + (uint32_t)req_size,
         BENCH_HDR_LEN + (uint32_t)reply_size, duration,
-        offered_mrps, total_drops, (unsigned long long)overflow, total_reorder,
+        offered_mrps, total_drops, (unsigned long long)overflow, worker_fail, total_reorder,
         mode == MODE_OPEN ? "open" : "closed",
         arrival == ARR_POISSON ? "poisson" : "const", tx_stats);
     if (write(conn_fd, reply, (size_t)n) < 0) {}

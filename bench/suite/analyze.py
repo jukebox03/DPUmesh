@@ -74,8 +74,8 @@ def main():
         row = list(key) + [len(reps)]
         for m in METRICS:
             vals = [float(r[m]) for r in reps if r.get(m, "") not in ("", None, "NA")]
-            if not vals:                      # metric never emitted (e.g. native has no
-                row += ["NA", "NA", "NA"]     # p99.9) — keep NA distinct from a measured 0
+            if not vals:                      # every rep failed (NA rows) — keep NA
+                row += ["NA", "NA", "NA"]     # distinct from a measured 0
                 continue
             med = median(vals); lo, hi = bootstrap_ci(vals)
             row += [f"{med:.4f}", f"{lo:.4f}", f"{hi:.4f}"]

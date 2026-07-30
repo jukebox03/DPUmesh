@@ -129,7 +129,9 @@ static void on_reply(uint32_t seq, uint32_t plen, uint32_t aux, void *user) {
     w->outstanding--;
     if (w->draining) return;
     double t0 = w->start_ts[idx];
-    if (seq != w->prev_seq + 1) w->reorder++;   /* arrival order != send order */
+    /* Reorder = arrival going BACKWARDS vs send order. Issue may skip seqs over an
+     * occupied ring slot, so a forward gap is not evidence of reordering. */
+    if ((int32_t)(seq - w->prev_seq) <= 0) w->reorder++;
     w->prev_seq = seq;
     if (aux < BENCH_MAX_BACKENDS) w->dist[aux]++;
     if (w->rcnt >= w->warmup)
@@ -462,6 +464,10 @@ static void run_bench(int conn_fd, int mode, int req_size, int reply_size,
     if (threads > MAX_THREADS) threads = MAX_THREADS;
     if (warmup < 0) warmup = 0;
     if (reconn < 0) reconn = 0;
+    if (mode == MODE_OPEN && rate * duration / (double)threads <= (double)warmup)
+        fprintf(stderr, "[bench] WARNING: ~%.0f arrivals/thread <= warmup=%ld; "
+                        "measurement window may be empty\n",
+                rate * duration / (double)threads, warmup);
 
     (void)batch; /* wire-compatibility field; transport batching is automatic */
     char load[32];
