@@ -25,14 +25,13 @@ void SetDefaultAuthorityIfAbsent(
 
 }  // namespace internal
 
-// Create a lazy gRPC channel for a configured DPUmesh Service name; the
-// drop-in replacement for grpc::CreateCustomChannel. Each gRPC connection
-// opens one targeted QP. The runtime must outlive the channel; DPUmesh owns
-// GRPC_ARG_EVENT_ENGINE.
+// Lazy gRPC channel for a configured DPUmesh Service name. Each gRPC
+// connection opens one targeted QP. The channel shares ownership of the
+// runtime, and DPUmesh owns GRPC_ARG_EVENT_ENGINE.
 absl::StatusOr<std::shared_ptr<::grpc::Channel>> CreateDmeshChannel(
-    DmeshRuntime* runtime, std::string target,
-    std::shared_ptr<::grpc::ChannelCredentials> credentials,
-    ::grpc::ChannelArguments args = {});
+    std::shared_ptr<DmeshRuntime> runtime, const std::string& target,
+    const std::shared_ptr<::grpc::ChannelCredentials>& creds,
+    const ::grpc::ChannelArguments& args = {});
 
 using MemoryAllocatorFactory = std::function<
     grpc_event_engine::experimental::MemoryAllocator()>;
@@ -41,7 +40,8 @@ using GrpcServerAcceptErrorCallback =
 
 // Owns a native-accept attachment to a started gRPC PassiveListener. Detach()
 // disables new injection and waits for in-flight callbacks before returning.
-// The runtime and listener must outlive this object.
+// The attachment shares ownership of the runtime; the listener must outlive
+// this object.
 class DmeshGrpcServerAttachment final {
  public:
   ~DmeshGrpcServerAttachment();
@@ -52,18 +52,18 @@ class DmeshGrpcServerAttachment final {
 
   void Detach();
 
+ private:
   struct State;
 
- private:
   friend absl::StatusOr<std::unique_ptr<DmeshGrpcServerAttachment>>
   AttachDmeshGrpcServer(
-      DmeshRuntime*, ::grpc::experimental::PassiveListener*,
+      std::shared_ptr<DmeshRuntime>, ::grpc::experimental::PassiveListener*,
       MemoryAllocatorFactory, GrpcServerAcceptErrorCallback);
 
-  DmeshGrpcServerAttachment(DmeshRuntime* runtime,
+  DmeshGrpcServerAttachment(std::shared_ptr<DmeshRuntime> runtime,
                             std::shared_ptr<State> state);
 
-  DmeshRuntime* runtime_;
+  std::shared_ptr<DmeshRuntime> runtime_;
   std::shared_ptr<State> state_;
 };
 
@@ -71,7 +71,7 @@ class DmeshGrpcServerAttachment final {
 // An omitted allocator factory uses an unquota'd malloc-backed allocator.
 absl::StatusOr<std::unique_ptr<DmeshGrpcServerAttachment>>
 AttachDmeshGrpcServer(
-    DmeshRuntime* runtime,
+    std::shared_ptr<DmeshRuntime> runtime,
     ::grpc::experimental::PassiveListener* passive_listener,
     MemoryAllocatorFactory allocator_factory = {},
     GrpcServerAcceptErrorCallback on_error = {});

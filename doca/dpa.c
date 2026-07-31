@@ -320,8 +320,6 @@ static void dmesh_doca_dpa_msgq_send_cb(struct doca_comch_producer_task_send *se
 	(void)ctx_user_data;
 
 	if (payload != NULL) {
-		if (payload->msgq != NULL)
-			payload->msgq->dbg_completions++;
 		if (payload->is_wake && payload->msgq != NULL)
 			payload->msgq->wake_inflight = 0;
 		if (payload->msgq == NULL ||
@@ -350,8 +348,6 @@ static void dmesh_doca_dpa_msgq_send_error_cb(struct doca_comch_producer_task_se
     struct doca_task *task = doca_comch_producer_task_send_as_task(send_task);
     DOCA_LOG_ERR("Failed to send msg");
 	if (payload != NULL) {
-		if (payload->msgq != NULL)
-			payload->msgq->dbg_errors++;
 		if (payload->is_wake && payload->msgq != NULL)
 			payload->msgq->wake_inflight = 0;
 		if (payload->msgq == NULL ||
@@ -989,7 +985,6 @@ dmesh_doca_dpa_msgq_send_try(struct dmesh_doca_dpa_msgq *msgq, void *msg, uint32
         doca_task_free(task);
         return result;
     }
-    msgq->dbg_submits++;
     if (is_wake)
         msgq->wake_inflight = 1;
     return DOCA_SUCCESS;

@@ -8,8 +8,8 @@
 
 namespace dpumesh::grpc {
 
-// The only native-API seam used by the adapter. Keeping this interface at the
-// public dmesh.h level prevents accidental dependencies on dmesh_core.h.
+// The only native-API seam used by the adapter, held at the public dmesh.h
+// level.
 class DmeshApiOps {
  public:
   virtual ~DmeshApiOps() = default;
@@ -29,7 +29,6 @@ class DmeshApiOps {
                      int max_events) = 0;
   virtual void ReleaseRxBuffer(dmesh_channel_t* channel,
                                dmesh_event_t* event) = 0;
-  virtual int MessageMax(dmesh_channel_t* channel) = 0;
   virtual int PostMax(dmesh_channel_t* channel) = 0;
   virtual int PodId(dmesh_channel_t* channel) = 0;
 };

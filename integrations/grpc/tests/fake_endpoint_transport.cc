@@ -52,7 +52,8 @@ size_t FakeEndpointTransport::MaxPostSize() const {
   return state_->max_post_size;
 }
 
-PostResult FakeEndpointTransport::Reserve(size_t length, Reservation* out) {
+PostResult FakeEndpointTransport::Post(
+    size_t length, absl::FunctionRef<void(Reservation)> fill) {
   std::lock_guard<std::mutex> lock(state_->mu);
   if (state_->close_count != 0) {
     return PostResult::Closed(
@@ -64,21 +65,13 @@ PostResult FakeEndpointTransport::Reserve(size_t length, Reservation* out) {
     result = std::move(state_->results.front());
     state_->results.pop_front();
   }
-  if (result.code == PostCode::kAccepted) {
-    state_->reservation.assign(length, 0);
-    out->data = state_->reservation.data();
-    out->length = length;
-  }
-  return result;
-}
+  if (result.code != PostCode::kAccepted) return result;
 
-absl::Status FakeEndpointTransport::Commit(const Reservation& reservation) {
-  std::lock_guard<std::mutex> lock(state_->mu);
-  if (state_->close_count != 0)
-    return absl::UnavailableError("fake transport is closed");
-  state_->posts.emplace_back(reservation.data,
-                             reservation.data + reservation.length);
-  return absl::OkStatus();
+  state_->reservation.assign(length, 0);
+  fill(Reservation{state_->reservation.data(), length});
+  state_->posts.emplace_back(state_->reservation.begin(),
+                             state_->reservation.end());
+  return result;
 }
 
 void FakeEndpointTransport::ResumeReceive() {

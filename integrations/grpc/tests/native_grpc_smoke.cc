@@ -72,7 +72,7 @@ absl::StatusOr<size_t> ParsePositive(const char* value, const char* name) {
   return static_cast<size_t>(parsed);
 }
 
-absl::StatusOr<std::unique_ptr<DmeshRuntime>> CreateRuntime(size_t reactors) {
+absl::StatusOr<std::shared_ptr<DmeshRuntime>> CreateRuntime(size_t reactors) {
   DmeshRuntime::Options options;
   options.reactor_count = reactors;
   return DmeshRuntime::Create(MakeNativeDmeshApiOps(), options);
@@ -98,7 +98,7 @@ absl::Status RunServer(size_t calls, size_t reactors) {
   std::mutex accept_error_mu;
   std::optional<absl::Status> accept_error;
   auto attachment = AttachDmeshGrpcServer(
-      runtime.get(), passive_listener.get(), {},
+      runtime, passive_listener.get(), {},
       [&accept_error_mu, &accept_error](const absl::Status& status) {
         std::lock_guard<std::mutex> lock(accept_error_mu);
         accept_error = status;
@@ -196,7 +196,7 @@ absl::Status RunClient(const std::string& target,
     channel_args.SetString(GRPC_ARG_DEFAULT_AUTHORITY, authority);
   }
   auto channel_result = CreateDmeshChannel(
-      runtime.get(), target, ::grpc::InsecureChannelCredentials(),
+      runtime, target, ::grpc::InsecureChannelCredentials(),
       channel_args);
   if (!channel_result.ok()) return channel_result.status();
   auto channel = std::move(*channel_result);

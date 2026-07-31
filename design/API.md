@@ -284,17 +284,19 @@ target. Each EventEngine `Connect` creates a targeted QP. Established L4 streams
 remain backend-pinned and terminate when that backend is lost. TLS and HTTP/2
 remain end-to-end.
 
-The adapter commits all slices of one EventEngine Write and publishes once at the
-logical write boundary; consecutive slices share one `dmesh_alloc` reservation,
-so a frame header and its payload cost one post. It applies the retention rule
-above only when configured to, because chttp2 already merges concurrent streams
-into one write. RX is copied into gRPC slices before the native credit is
-returned, and the credit is withheld while an endpoint's queued bytes exceed its
-high-water mark, which stops the transport landing more on a connection whose
-reader has stalled. Transmit runs on the endpoint's executor under a
-per-connection lock that also orders QP destruction; the endpoint parks its
-exact slice cursor on `EAGAIN` and resumes when its reactor forwards
-`DMESH_EVENT_TX_READY`. The adapter has no retry timer.
+The adapter uses `dmesh_alloc`/`dmesh_post_send` for TX and consumes
+`DMESH_EVENT_RECV`, `DMESH_EVENT_RECV_FIN`, `DMESH_EVENT_CONN_REQ`, and
+`DMESH_EVENT_TX_READY` from `dmesh_poll_eq`. One EventEngine Write commits every
+slice and calls `dmesh_flush` once at the logical write boundary; consecutive
+slices share one reservation, so a frame header and its payload cost one post.
+It applies the retention rule above only when configured to. Receives are copied
+out before `dmesh_release_rx_buffer`, and the credit is withheld, up to a
+per-connection cap, while the endpoint's queued bytes exceed its high-water mark.
+On `EAGAIN` the adapter parks the write and resumes it from
+`DMESH_EVENT_TX_READY`; it has no retry timer.
+
+Adapter-internal ownership and threading are specified in
+[`GRPC.md`](GRPC.md).
 
 ## 7. Explicit limits
 

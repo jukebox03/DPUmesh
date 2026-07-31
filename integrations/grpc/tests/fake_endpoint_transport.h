@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "absl/functional/any_invocable.h"
+#include "absl/functional/function_ref.h"
 #include "endpoint_transport.h"
 #include "executor.h"
 
@@ -46,8 +47,8 @@ class FakeEndpointTransport final : public EndpointTransport {
 
   void BindDriver(std::weak_ptr<DmeshEndpointDriver> driver) override;
   size_t MaxPostSize() const override;
-  PostResult Reserve(size_t length, Reservation* out) override;
-  absl::Status Commit(const Reservation& reservation) override;
+  PostResult Post(size_t length,
+                  absl::FunctionRef<void(Reservation)> fill) override;
   absl::Status Flush() override;
   void ResumeReceive() override;
   void Close() override;

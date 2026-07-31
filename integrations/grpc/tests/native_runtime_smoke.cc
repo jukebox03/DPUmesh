@@ -229,7 +229,8 @@ absl::StatusOr<std::vector<uint8_t>> ReadPayload(DmeshEndpoint* endpoint,
 }
 
 absl::StatusOr<std::unique_ptr<DmeshEndpoint>> ConnectEndpoint(
-    DmeshRuntime* runtime, ThreadExecutor* callbacks, const std::string& service) {
+    DmeshRuntime* runtime, std::shared_ptr<Executor> callbacks,
+    const std::string& service) {
   using ConnectedTransport = DmeshReactor::ConnectedTransport;
   using ConnectResult = absl::StatusOr<ConnectedTransport>;
 
@@ -246,8 +247,8 @@ absl::StatusOr<std::unique_ptr<DmeshEndpoint>> ConnectEndpoint(
   ConnectedTransport connected = std::move(*connected_result);
   auto allocator = std::make_shared<SmokeMemoryAllocator>();
   return std::make_unique<DmeshEndpoint>(
-      std::move(connected.transport), connected.work_executor, callbacks,
-      MemoryAllocator(std::move(allocator)));
+      std::move(connected.transport), std::move(connected.work_executor),
+      std::move(callbacks), MemoryAllocator(std::move(allocator)));
 }
 
 absl::Status Run(const std::string& service, size_t rounds,
@@ -256,13 +257,13 @@ absl::Status Run(const std::string& service, size_t rounds,
   if (protocol != "raw" && protocol != "bench") {
     return absl::InvalidArgumentError("protocol must be raw or bench");
   }
-  ThreadExecutor callbacks;
+  auto callbacks = std::make_shared<ThreadExecutor>();
   DmeshRuntime::Options options;
   options.reactor_count = reactor_count;
-  auto runtime_result = DmeshRuntime::Create(MakeNativeDmeshApiOps(), &callbacks,
-                                            options);
+  auto runtime_result =
+      DmeshRuntime::Create(MakeNativeDmeshApiOps(), callbacks, options);
   if (!runtime_result.ok()) return runtime_result.status();
-  std::unique_ptr<DmeshRuntime> runtime = std::move(*runtime_result);
+  std::shared_ptr<DmeshRuntime> runtime = std::move(*runtime_result);
 
   constexpr size_t kPayloadSizes[] = {1,     64,    1024,  8191,
                                       8192,  8193, 65537};
@@ -270,7 +271,7 @@ absl::Status Run(const std::string& service, size_t rounds,
   size_t bytes = 0;
   uint32_t sequence = 1;
   for (size_t connection = 0; connection < connection_count; ++connection) {
-    auto endpoint_result = ConnectEndpoint(runtime.get(), &callbacks, service);
+    auto endpoint_result = ConnectEndpoint(runtime.get(), callbacks, service);
     if (!endpoint_result.ok()) return endpoint_result.status();
     std::unique_ptr<DmeshEndpoint> endpoint = std::move(*endpoint_result);
 
@@ -305,11 +306,14 @@ absl::Status Run(const std::string& service, size_t rounds,
     endpoint.reset();
   }
 
+  const DmeshReactor::Stats stats = runtime->stats();
   std::cout << "PASS: native DPUmesh runtime smoke"
             << " service=" << service << " reactors=" << reactor_count
             << " connections=" << connection_count << " messages=" << messages
             << " wire_bytes=" << bytes << " protocol=" << protocol
             << " post_max=" << runtime->post_max()
+            << " credit_hold_dropped=" << stats.receive_credit_hold_dropped
+            << " eq_budget_exhausted=" << stats.eq_drain_budget_exhausted
             << '\n';
   runtime.reset();
   return absl::OkStatus();

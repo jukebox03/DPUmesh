@@ -3,6 +3,7 @@
 
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
@@ -17,30 +18,35 @@
 namespace dpumesh::grpc {
 
 // One EQ shard and its single owner thread. The owner thread is the sole
-// consumer of dmesh_poll_eq() and owns QP lifecycle, so no QP is destroyed
-// while a returned event batch can still name it. Transmit operations run on
-// the endpoint's work executor under a per-connection lock, which the owner
-// thread also takes before destroying that connection's QP.
+// consumer of dmesh_poll_eq() and owns QP lifecycle; no QP is destroyed while
+// a returned event batch can still name it. Transmit operations run on the
+// endpoint's work executor under a per-connection lock, which the owner thread
+// also takes before destroying that connection's QP.
 class DmeshReactor final {
  public:
   struct Options {
     size_t event_batch_size = 64;
     // How long a committed transmit tail waits for a successor write to share
     // its transport unit while an earlier unit is still unacknowledged. Zero
-    // publishes every tail at its write boundary, which is what chttp2 wants:
-    // it already merges concurrent streams into one logical write, so a
-    // successor cannot arrive before the current write's completion.
+    // publishes every tail at its write boundary.
     std::chrono::microseconds tail_flush_delay{0};
+  };
+
+  // Each field is sampled independently.
+  struct Stats {
+    // Receives whose credit was returned at the per-connection retention cap
+    // while the endpoint asked to hold it.
+    uint64_t receive_credit_hold_dropped = 0;
+    // Drains that ended on the per-iteration poll budget with the EQ non-empty.
+    uint64_t eq_drain_budget_exhausted = 0;
   };
 
   struct ConnectedTransport {
     std::unique_ptr<EndpointTransport> transport;
     // Both point at the reactor's paired callback executor: endpoint
-    // completions and the write pump share that thread, so a write posts to
-    // the transport on the thread chttp2 already runs on and pays no
-    // reactor-queue handoff.
-    Executor* work_executor = nullptr;
-    Executor* callback_executor = nullptr;
+    // completions and the write pump share that thread.
+    std::shared_ptr<Executor> work_executor;
+    std::shared_ptr<Executor> callback_executor;
     // Native identity of the two ends. The peer pair stays unset on a client
     // QP: the DPU selects and pins a backend for that stream, so the host
     // learns no peer pod.
@@ -56,10 +62,7 @@ class DmeshReactor final {
 
   static absl::StatusOr<std::unique_ptr<DmeshReactor>> Create(
       DmeshApiOps* ops, dmesh_channel_t* channel, int post_max,
-      Executor* callback_executor);
-  static absl::StatusOr<std::unique_ptr<DmeshReactor>> Create(
-      DmeshApiOps* ops, dmesh_channel_t* channel, int post_max,
-      Executor* callback_executor, Options options);
+      std::shared_ptr<Executor> callback_executor, Options options);
 
   ~DmeshReactor();
 
@@ -80,6 +83,8 @@ class DmeshReactor final {
   // Idempotent. Existing connections receive a terminal error, QPs are closed
   // on the owner thread, and the EQ is destroyed after the thread joins.
   void Shutdown();
+
+  Stats stats() const;
 
  private:
   class Impl;

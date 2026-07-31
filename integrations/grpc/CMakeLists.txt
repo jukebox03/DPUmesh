@@ -91,8 +91,6 @@ find_package(Threads REQUIRED)
 
 add_library(grpc_dpumesh_endpoint STATIC
   src/dmesh_endpoint.cc
-  src/dmesh_grpc_channel.cc
-  src/event_engine_executor.cc
   src/thread_executor.cc)
 target_compile_features(grpc_dpumesh_endpoint PUBLIC cxx_std_17)
 target_compile_options(grpc_dpumesh_endpoint PRIVATE -Wall -Wextra)

@@ -343,10 +343,6 @@ class FakeDmeshApiOps final : public DmeshApiOps {
     ++impl_->releases;
   }
 
-  int MessageMax(dmesh_channel_t* /*channel*/) override {
-    return impl_->channel.slot_size;
-  }
-
   int PostMax(dmesh_channel_t* /*channel*/) override {
     std::lock_guard<std::mutex> lock(impl_->mu);
     return impl_->post_max;

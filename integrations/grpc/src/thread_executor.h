@@ -3,6 +3,7 @@
 
 #include <condition_variable>
 #include <deque>
+#include <memory>
 #include <mutex>
 #include <thread>
 
@@ -12,10 +13,8 @@
 
 namespace dpumesh::grpc {
 
-// One dedicated callback thread with a condition-variable queue. The default
-// pairing is one ThreadExecutor per reactor, so callback work shards with the
-// EQ shards and an idle runtime consumes no spin cycles. The worker claims the
-// whole queue per wake, so a burst of completions costs one lock acquisition.
+// One dedicated callback thread with a condition-variable queue, paired one
+// per reactor by default. The worker claims the whole queue per wake.
 class ThreadExecutor final : public Executor {
  public:
   ThreadExecutor();
@@ -27,20 +26,26 @@ class ThreadExecutor final : public Executor {
 
  private:
   // A queued task, or a completion callback stored next to its status. Both
-  // forms share one queue, so callbacks run in enqueue order.
+  // forms share one queue and run in enqueue order.
   struct Entry {
     absl::AnyInvocable<void()> task;
     absl::AnyInvocable<void(absl::Status)> completion;
     absl::Status status;
   };
 
-  void Push(Entry entry);
-  void ThreadMain();
+  // Co-owned by the worker, which keeps it alive across a detached shutdown.
+  struct State {
+    std::mutex mu;
+    std::condition_variable cv;
+    std::deque<Entry> queue;
+    bool stopping = false;
+  };
 
-  std::mutex mu_;
-  std::condition_variable cv_;
-  std::deque<Entry> queue_;
-  bool stopping_ = false;
+  static void ThreadMain(std::shared_ptr<State> state);
+
+  void Push(Entry entry);
+
+  std::shared_ptr<State> state_;
   std::thread worker_;
 };
 

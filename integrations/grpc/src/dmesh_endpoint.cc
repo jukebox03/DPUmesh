@@ -25,9 +25,8 @@ using MemoryRequest = grpc_event_engine::experimental::MemoryRequest;
 using Slice = grpc_event_engine::experimental::Slice;
 using SliceBuffer = grpc_event_engine::experimental::SliceBuffer;
 
-// Reservations one pump run may post before yielding its reactor shard. The
-// pump reschedules itself for the remainder, so one large logical Write cannot
-// monopolise the shard.
+// Posts one pump run may issue before yielding its thread and rescheduling
+// itself for the remainder.
 constexpr size_t kReservationBudget = 16;
 
 struct Completion {
@@ -35,7 +34,8 @@ struct Completion {
   absl::Status status;
 };
 
-void ScheduleCompletion(Executor* executor, Completion completion) {
+void ScheduleCompletion(const std::shared_ptr<Executor>& executor,
+                        Completion completion) {
   executor->RunCompletion(std::move(completion.callback),
                           std::move(completion.status));
 }
@@ -65,19 +65,20 @@ class DmeshEndpointState final
   };
 
   DmeshEndpointState(std::unique_ptr<EndpointTransport> transport,
-                     Executor* work_executor, Executor* callback_executor,
+                     std::shared_ptr<Executor> work_executor,
+                     std::shared_ptr<Executor> callback_executor,
                      grpc_event_engine::experimental::MemoryAllocator allocator)
       : transport(std::move(transport)),
-        work_executor(work_executor),
-        callback_executor(callback_executor),
+        work_executor(std::move(work_executor)),
+        callback_executor(std::move(callback_executor)),
         allocator(std::move(allocator)) {}
 
   // allocator is declared before receive_queue so queued slices are destroyed
   // first (members are destroyed in reverse declaration order).
   std::mutex mu;
   std::unique_ptr<EndpointTransport> transport;
-  Executor* const work_executor;
-  Executor* const callback_executor;
+  const std::shared_ptr<Executor> work_executor;
+  const std::shared_ptr<Executor> callback_executor;
   grpc_event_engine::experimental::MemoryAllocator allocator;
   std::deque<Slice> receive_queue;
   size_t queued_bytes = 0;
@@ -129,7 +130,7 @@ std::optional<Completion> TakeWriteFailureLocked(
   return completion;
 }
 
-void ScheduleIfPresent(Executor* executor,
+void ScheduleIfPresent(const std::shared_ptr<Executor>& executor,
                        std::optional<Completion> completion) {
   if (completion.has_value()) {
     ScheduleCompletion(executor, std::move(*completion));
@@ -145,10 +146,8 @@ void SkipConsumedSlices(DmeshEndpointState::PendingWrite* write) {
   }
 }
 
-// Bytes one reservation should carry: everything left in the logical Write,
-// capped by the largest reservation the transport accepts. Consecutive slices
-// share one reservation, so an HTTP/2 frame header and its payload cost one
-// native post rather than one each.
+// Bytes one post carries: everything left in the logical Write, spanning
+// consecutive slices, capped by the largest post the transport accepts.
 size_t ReservationLength(const DmeshEndpointState::PendingWrite& write,
                          size_t max_post_size) {
   size_t length = 0;
@@ -221,17 +220,15 @@ void PumpWrite(const std::shared_ptr<DmeshEndpointState>& state) {
             break;
           }
 
-          Reservation reservation;
-          PostResult result = state->transport->Reserve(
-              ReservationLength(write, max_post_size), &reservation);
+          PostResult result = state->transport->Post(
+              ReservationLength(write, max_post_size),
+              [&write](Reservation reservation) {
+                FillReservation(&write, reservation);
+              });
 
           if (result.code == PostCode::kAccepted) {
-            FillReservation(&write, reservation);
-            result.status = state->transport->Commit(reservation);
-            if (result.status.ok()) {
-              ++reservations;
-              continue;
-            }
+            ++reservations;
+            continue;
           } else if (result.code == PostCode::kWouldBlock) {
             state->write_parked = true;
             return;
@@ -292,7 +289,14 @@ DmeshEndpointDriver::DmeshEndpointDriver(
 
 ReceiveOutcome DmeshEndpointDriver::OnIncomingData(
     absl::Span<const uint8_t> bytes) {
-  if (bytes.empty()) return ReceiveOutcome{absl::OkStatus(), false};
+  return OnIncomingData(bytes.size(), [bytes](uint8_t* destination) {
+    std::memcpy(destination, bytes.data(), bytes.size());
+  });
+}
+
+ReceiveOutcome DmeshEndpointDriver::OnIncomingData(
+    size_t length, absl::FunctionRef<void(uint8_t*)> fill) {
+  if (length == 0) return ReceiveOutcome{absl::OkStatus(), false};
 
   std::optional<Completion> completion;
   std::optional<Completion> write_completion;
@@ -308,21 +312,21 @@ ReceiveOutcome DmeshEndpointDriver::OnIncomingData(
           false};
     }
 
-    grpc_slice raw = state_->allocator.MakeSlice(MemoryRequest(bytes.size()));
+    grpc_slice raw = state_->allocator.MakeSlice(MemoryRequest(length));
     const size_t allocated_length = GRPC_SLICE_LENGTH(raw);
-    if (allocated_length != bytes.size()) {
+    if (allocated_length != length) {
       grpc_slice_unref(raw);
       state_->life = DmeshEndpointState::Life::kFailed;
       state_->failure = absl::ResourceExhaustedError(absl::StrCat(
           "gRPC allocator returned ", allocated_length,
-          " bytes for a ", bytes.size(), " byte DPUmesh receive"));
+          " bytes for a ", length, " byte DPUmesh receive"));
       completion = TakeReadFailureLocked(state_.get(), state_->failure);
       write_completion =
           TakeWriteFailureLocked(state_.get(), state_->failure);
       outcome.status = state_->failure;
       close_transport = true;
     } else {
-      std::memcpy(GRPC_SLICE_START_PTR(raw), bytes.data(), bytes.size());
+      fill(GRPC_SLICE_START_PTR(raw));
       Slice slice(raw);
       if (state_->pending_read.has_value()) {
         state_->pending_read->buffer->Append(std::move(slice));
@@ -371,9 +375,8 @@ void DmeshEndpointDriver::OnRemoteEof() {
     if (state_->life != DmeshEndpointState::Life::kOpen) return;
     read_completion = TakeReadFailureLocked(
         state_.get(), absl::UnavailableError("DPUmesh peer closed"));
-    /* A parked write waits for capacity backed by the departed peer's credits;
-     * no TX_READY will ever resume it. Every accepted EventEngine Write must
-     * still complete, so the endpoint fails instead of waiting forever. */
+    /* A parked write waits for capacity backed by the departed peer's credits,
+     * which no TX_READY will resume, so it is failed here. */
     if (state_->write_parked && state_->pending_write.has_value()) {
       state_->life = DmeshEndpointState::Life::kFailed;
       state_->failure = absl::UnavailableError(
@@ -413,13 +416,14 @@ void DmeshEndpointDriver::OnTransportError(absl::Status status) {
 }
 
 DmeshEndpoint::DmeshEndpoint(
-    std::unique_ptr<EndpointTransport> transport, Executor* work_executor,
-    Executor* callback_executor, MemoryAllocator allocator,
+    std::unique_ptr<EndpointTransport> transport,
+    std::shared_ptr<Executor> work_executor,
+    std::shared_ptr<Executor> callback_executor, MemoryAllocator allocator,
     EventEngine::ResolvedAddress peer_address,
     EventEngine::ResolvedAddress local_address)
     : state_(std::make_shared<DmeshEndpointState>(
-          std::move(transport), work_executor, callback_executor,
-          std::move(allocator))),
+          std::move(transport), std::move(work_executor),
+          std::move(callback_executor), std::move(allocator))),
       driver_(std::make_shared<DmeshEndpointDriver>(state_)),
       peer_address_(peer_address),
       local_address_(local_address) {

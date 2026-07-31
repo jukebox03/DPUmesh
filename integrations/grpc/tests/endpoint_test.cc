@@ -77,8 +77,9 @@ struct Fixture {
   Fixture() : allocator_impl(std::make_shared<TestMemoryAllocator>()) {
     transport_state = std::make_shared<FakeTransportState>();
     endpoint = std::make_unique<DmeshEndpoint>(
-        std::make_unique<FakeEndpointTransport>(transport_state), &work,
-        &callbacks, MemoryAllocator(allocator_impl));
+        std::make_unique<FakeEndpointTransport>(transport_state),
+        UnownedExecutor(&work), UnownedExecutor(&callbacks),
+        MemoryAllocator(allocator_impl));
     driver = endpoint->driver();
   }
 

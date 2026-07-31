@@ -7,9 +7,9 @@
 
 int main() {
   using RuntimeFactory =
-      absl::StatusOr<std::unique_ptr<dpumesh::grpc::DmeshRuntime>> (*)(
+      absl::StatusOr<std::shared_ptr<dpumesh::grpc::DmeshRuntime>> (*)(
           std::unique_ptr<dpumesh::grpc::DmeshApiOps>,
-          dpumesh::grpc::Executor*);
+          std::shared_ptr<dpumesh::grpc::Executor>);
   RuntimeFactory runtime_factory =
       static_cast<RuntimeFactory>(&dpumesh::grpc::DmeshRuntime::Create);
   auto api = dpumesh::grpc::MakeNativeDmeshApiOps();

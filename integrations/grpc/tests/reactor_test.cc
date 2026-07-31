@@ -107,7 +107,7 @@ struct Fixture {
     DmeshRuntime::Options options;
     options.reactor.tail_flush_delay = tail_flush_delay;
     auto created =
-        DmeshRuntime::Create(MakeFakeDmeshApiOps(state), &callbacks, options);
+        DmeshRuntime::Create(MakeFakeDmeshApiOps(state), UnownedExecutor(&callbacks), options);
     CHECK_TRUE(created.ok());
     runtime = std::move(*created);
 
@@ -129,7 +129,7 @@ struct Fixture {
     CHECK_TRUE(connected.has_value());
 
     endpoint = std::make_unique<DmeshEndpoint>(
-        std::move(connected->transport), connected->work_executor, &callbacks,
+        std::move(connected->transport), connected->work_executor, UnownedExecutor(&callbacks),
         MemoryAllocator(allocator_impl));
   }
 
@@ -142,7 +142,7 @@ struct Fixture {
   ManualExecutor callbacks;
   std::shared_ptr<FakeDmeshState> state;
   std::shared_ptr<TestMemoryAllocator> allocator_impl;
-  std::unique_ptr<DmeshRuntime> runtime;
+  std::shared_ptr<DmeshRuntime> runtime;
   std::optional<DmeshReactor::ConnectedTransport> connected;
   std::optional<absl::Status> connect_error;
   dmesh_qp_t* qp = nullptr;
@@ -329,7 +329,7 @@ void TestPrebindDataAndFinAreReplayedInOrder() {
   ManualExecutor callbacks;
   auto state = std::make_shared<FakeDmeshState>();
   auto allocator_impl = std::make_shared<TestMemoryAllocator>();
-  auto created = DmeshRuntime::Create(MakeFakeDmeshApiOps(state), &callbacks);
+  auto created = DmeshRuntime::Create(MakeFakeDmeshApiOps(state), UnownedExecutor(&callbacks));
   CHECK_TRUE(created.ok());
   auto runtime = std::move(*created);
 
@@ -358,7 +358,7 @@ void TestPrebindDataAndFinAreReplayedInOrder() {
   CHECK_TRUE(!connect_error.has_value());
   CHECK_TRUE(connected.has_value());
   auto endpoint = std::make_unique<DmeshEndpoint>(
-      std::move(connected->transport), connected->work_executor, &callbacks,
+      std::move(connected->transport), connected->work_executor, UnownedExecutor(&callbacks),
       MemoryAllocator(allocator_impl));
 
   SliceBuffer data_buffer;
@@ -560,7 +560,7 @@ void TestUnknownServiceMapsToUnavailable() {
   ManualExecutor callbacks;
   auto state = std::make_shared<FakeDmeshState>();
   state->FailNextCreateQp(ENOENT);
-  auto created = DmeshRuntime::Create(MakeFakeDmeshApiOps(state), &callbacks);
+  auto created = DmeshRuntime::Create(MakeFakeDmeshApiOps(state), UnownedExecutor(&callbacks));
   CHECK_TRUE(created.ok());
   auto runtime = std::move(*created);
 
@@ -580,7 +580,7 @@ void TestUnknownServiceMapsToUnavailable() {
 void TestUnownedConnectionRequestIsReleasedAndRejectedPostBatch() {
   ManualExecutor callbacks;
   auto state = std::make_shared<FakeDmeshState>();
-  auto created = DmeshRuntime::Create(MakeFakeDmeshApiOps(state), &callbacks);
+  auto created = DmeshRuntime::Create(MakeFakeDmeshApiOps(state), UnownedExecutor(&callbacks));
   CHECK_TRUE(created.ok());
   auto runtime = std::move(*created);
 
@@ -597,7 +597,7 @@ void TestUnownedConnectionRequestIsReleasedAndRejectedPostBatch() {
 void TestInboundConnectionIsAcceptedAndBecomesEndpointTransport() {
   ManualExecutor callbacks;
   auto state = std::make_shared<FakeDmeshState>();
-  auto created = DmeshRuntime::Create(MakeFakeDmeshApiOps(state), &callbacks);
+  auto created = DmeshRuntime::Create(MakeFakeDmeshApiOps(state), UnownedExecutor(&callbacks));
   CHECK_TRUE(created.ok());
   auto runtime = std::move(*created);
 
@@ -619,7 +619,8 @@ void TestInboundConnectionIsAcceptedAndBecomesEndpointTransport() {
 
   auto allocator = std::make_shared<TestMemoryAllocator>();
   auto endpoint = std::make_unique<DmeshEndpoint>(
-      std::move(accepted->transport), accepted->work_executor, &callbacks,
+      std::move(accepted->transport), accepted->work_executor,
+      UnownedExecutor(&callbacks),
       MemoryAllocator(allocator));
 
   SliceBuffer received;
@@ -678,14 +679,14 @@ class CapturingPassiveListener final
 void TestGrpcServerBridgeInjectsAcceptedEndpoint() {
   ManualExecutor callbacks;
   auto state = std::make_shared<FakeDmeshState>();
-  auto created = DmeshRuntime::Create(MakeFakeDmeshApiOps(state), &callbacks);
+  auto created = DmeshRuntime::Create(MakeFakeDmeshApiOps(state), UnownedExecutor(&callbacks));
   CHECK_TRUE(created.ok());
   auto runtime = std::move(*created);
   CapturingPassiveListener listener;
   std::optional<absl::Status> accept_error;
 
   auto attachment = AttachDmeshGrpcServer(
-      runtime.get(), &listener,
+      runtime, &listener,
       [] {
         return MemoryAllocator(std::make_shared<TestMemoryAllocator>());
       },
@@ -708,11 +709,11 @@ void TestGrpcServerBridgeInjectsAcceptedEndpoint() {
 void TestGrpcClientBridgeBuildsChannelFromNativeConnect() {
   ManualExecutor callbacks;
   auto state = std::make_shared<FakeDmeshState>();
-  auto created = DmeshRuntime::Create(MakeFakeDmeshApiOps(state), &callbacks);
+  auto created = DmeshRuntime::Create(MakeFakeDmeshApiOps(state), UnownedExecutor(&callbacks));
   CHECK_TRUE(created.ok());
   auto runtime = std::move(*created);
   auto channel_result = CreateDmeshChannel(
-      runtime.get(), "greeter",
+      runtime, "greeter",
       ::grpc::InsecureChannelCredentials(), ::grpc::ChannelArguments());
   CHECK_TRUE(channel_result.ok());
   std::shared_ptr<::grpc::Channel> channel = std::move(*channel_result);
@@ -753,7 +754,7 @@ void TestGrpcAuthorityIsDefaultedButNeverOverwritten() {
 void TestGrpcClientReconnectCreatesFreshTargetedQp() {
   ManualExecutor callbacks;
   auto state = std::make_shared<FakeDmeshState>();
-  auto created = DmeshRuntime::Create(MakeFakeDmeshApiOps(state), &callbacks);
+  auto created = DmeshRuntime::Create(MakeFakeDmeshApiOps(state), UnownedExecutor(&callbacks));
   CHECK_TRUE(created.ok());
   auto runtime = std::move(*created);
 
@@ -762,7 +763,7 @@ void TestGrpcClientReconnectCreatesFreshTargetedQp() {
   args.SetInt(GRPC_ARG_MIN_RECONNECT_BACKOFF_MS, 10);
   args.SetInt(GRPC_ARG_MAX_RECONNECT_BACKOFF_MS, 10);
   auto channel_result = CreateDmeshChannel(
-      runtime.get(), "greeter", ::grpc::InsecureChannelCredentials(), args);
+      runtime, "greeter", ::grpc::InsecureChannelCredentials(), args);
   CHECK_TRUE(channel_result.ok());
   std::shared_ptr<::grpc::Channel> channel = std::move(*channel_result);
   CHECK_TRUE(channel != nullptr);
@@ -803,7 +804,7 @@ void TestGrpcClientReconnectCreatesFreshTargetedQp() {
 void TestRuntimeDestroysEqBeforeChannel() {
   ManualExecutor callbacks;
   auto state = std::make_shared<FakeDmeshState>();
-  auto created = DmeshRuntime::Create(MakeFakeDmeshApiOps(state), &callbacks);
+  auto created = DmeshRuntime::Create(MakeFakeDmeshApiOps(state), UnownedExecutor(&callbacks));
   CHECK_TRUE(created.ok());
   auto runtime = std::move(*created);
   runtime.reset();
@@ -816,7 +817,7 @@ void TestRuntimeRoundRobinsAcrossEqReactors() {
   auto state = std::make_shared<FakeDmeshState>();
   DmeshRuntime::Options options;
   options.reactor_count = 2;
-  auto created = DmeshRuntime::Create(MakeFakeDmeshApiOps(state), &callbacks,
+  auto created = DmeshRuntime::Create(MakeFakeDmeshApiOps(state), UnownedExecutor(&callbacks),
                                       options);
   CHECK_TRUE(created.ok());
   auto runtime = std::move(*created);
@@ -857,7 +858,7 @@ void TestConcurrentConnectUsesMpscCommandQueues() {
   auto state = std::make_shared<FakeDmeshState>();
   DmeshRuntime::Options options;
   options.reactor_count = 4;
-  auto created = DmeshRuntime::Create(MakeFakeDmeshApiOps(state), &callbacks,
+  auto created = DmeshRuntime::Create(MakeFakeDmeshApiOps(state), UnownedExecutor(&callbacks),
                                       options);
   CHECK_TRUE(created.ok());
   auto runtime = std::move(*created);

@@ -8,6 +8,7 @@
 #include <grpc/event_engine/event_engine.h>
 #include <grpc/event_engine/memory_allocator.h>
 
+#include "absl/functional/function_ref.h"
 #include "absl/status/status.h"
 #include "absl/types/span.h"
 #include "endpoint_transport.h"
@@ -18,20 +19,15 @@ namespace dpumesh::grpc {
 class DmeshEndpointState;
 
 // Queued receive bytes above which an endpoint asks its reactor to hold the
-// native receive credit. gRPC stops reading a connection whose HTTP/2 flow
-// control is exhausted, and this is the point at which that stall is pushed
-// back to the transport instead of being absorbed by unbounded host memory.
-// It sits well above the depth an ordinary pipeline reaches between reads, so
-// backpressure answers a stalled reader rather than a busy one.
+// native receive credit.
 inline constexpr size_t kReceiveHighWaterBytes = 1024 * 1024;
 
 // Result of handing one native receive to the endpoint.
 struct ReceiveOutcome {
   absl::Status status;
   // True while the endpoint holds more queued bytes than its high-water mark.
-  // The reactor then keeps the receive credit for that event instead of
-  // returning it, which stops the transport from landing further bytes on this
-  // connection until the application drains what has already arrived.
+  // The reactor then keeps that event's receive credit until a read drains the
+  // queue, and the transport lands no further bytes on this connection.
   bool hold_credit = false;
 };
 
@@ -42,6 +38,11 @@ class DmeshEndpointDriver final {
  public:
   explicit DmeshEndpointDriver(std::shared_ptr<DmeshEndpointState> state);
 
+  // Copies `length` bytes into one gRPC slice through `fill`, which writes
+  // exactly `length` bytes at the pointer it receives. One reactor call
+  // carries a whole batch run: one slice, one endpoint lock, one queue entry.
+  ReceiveOutcome OnIncomingData(size_t length,
+                                absl::FunctionRef<void(uint8_t*)> fill);
   ReceiveOutcome OnIncomingData(absl::Span<const uint8_t> bytes);
   void OnWritable();
   void OnRemoteEof();
@@ -58,8 +59,11 @@ class DmeshEndpoint final
   using MemoryAllocator = grpc_event_engine::experimental::MemoryAllocator;
   using SliceBuffer = grpc_event_engine::experimental::SliceBuffer;
 
+  // Shares ownership of both executors for as long as the endpoint or a
+  // retained driver can schedule on them.
   DmeshEndpoint(std::unique_ptr<EndpointTransport> transport,
-                Executor* work_executor, Executor* callback_executor,
+                std::shared_ptr<Executor> work_executor,
+                std::shared_ptr<Executor> callback_executor,
                 MemoryAllocator allocator,
                 EventEngine::ResolvedAddress peer_address = {},
                 EventEngine::ResolvedAddress local_address = {});
@@ -78,10 +82,6 @@ class DmeshEndpoint final
   std::shared_ptr<TelemetryInfo> GetTelemetryInfo() const override;
 
   std::shared_ptr<DmeshEndpointDriver> driver() const { return driver_; }
-
-  // Both executors must outlive the endpoint and every retained driver. The
-  // production runtime naturally satisfies this because it owns reactor and
-  // callback executors above all connection state.
 
  private:
   std::shared_ptr<DmeshEndpointState> state_;

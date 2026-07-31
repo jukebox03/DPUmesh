@@ -15,17 +15,19 @@
 
 #include <grpc/event_engine/internal/memory_allocator_impl.h>
 #include <grpc/event_engine/memory_request.h>
+#include <grpcpp/create_channel_posix.h>
 #include <grpcpp/generic/async_generic_service.h>
 #include <grpcpp/generic/generic_stub.h>
 #include <grpcpp/passive_listener.h>
 #include <grpcpp/security/credentials.h>
 #include <grpcpp/server_builder.h>
 #include <grpcpp/support/byte_buffer.h>
+#include <grpcpp/support/channel_arguments.h>
 #include <grpcpp/support/slice.h>
 
+#include "absl/functional/function_ref.h"
 #include "absl/status/status.h"
 #include "dmesh_endpoint.h"
-#include "dmesh_grpc_channel.h"
 #include "endpoint_transport.h"
 #include "executor.h"
 
@@ -117,39 +119,31 @@ class LinkedEndpointTransport final : public EndpointTransport {
 
   size_t MaxPostSize() const override { return 137; }
 
-  PostResult Reserve(size_t length, Reservation* out) override {
-    std::lock_guard<std::mutex> lock(state_->mu);
-    if (state_->closed[side_] || state_->closed[1 - side_]) {
-      return PostResult::Closed(absl::UnavailableError("link is closed"));
-    }
-    if (state_->drivers[1 - side_].expired()) {
-      return PostResult::Closed(
-          absl::UnavailableError("peer endpoint is not bound"));
-    }
-    reservation_.assign(length, 0);
-    out->data = reservation_.data();
-    out->length = length;
-    return PostResult::Accepted();
-  }
-
-  absl::Status Commit(const Reservation& reservation) override {
+  PostResult Post(size_t length,
+                  absl::FunctionRef<void(Reservation)> fill) override {
     std::shared_ptr<DmeshEndpointDriver> peer;
+    std::vector<uint8_t> copied;
     {
       std::lock_guard<std::mutex> lock(state_->mu);
+      if (state_->closed[side_] || state_->closed[1 - side_]) {
+        return PostResult::Closed(absl::UnavailableError("link is closed"));
+      }
       peer = state_->drivers[1 - side_].lock();
       if (peer == nullptr) {
-        return absl::UnavailableError("peer endpoint is not bound");
+        return PostResult::Closed(
+            absl::UnavailableError("peer endpoint is not bound"));
       }
-      state_->bytes[side_] += reservation.length;
+      reservation_.assign(length, 0);
+      fill(Reservation{reservation_.data(), length});
+      state_->bytes[side_] += length;
       ++state_->posts[side_];
+      copied.assign(reservation_.begin(), reservation_.end());
     }
-    std::vector<uint8_t> copied(reservation.data,
-                                reservation.data + reservation.length);
     peer_inbound_executor_->Run(
         [peer = std::move(peer), copied = std::move(copied)]() mutable {
           (void)peer->OnIncomingData(copied);
         });
-    return absl::OkStatus();
+    return PostResult::Accepted();
   }
 
   absl::Status Flush() override { return absl::OkStatus(); }
@@ -216,12 +210,12 @@ bool RunUnaryEcho() {
 
   auto client_endpoint = std::make_unique<DmeshEndpoint>(
       std::make_unique<LinkedEndpointTransport>(link, 0, &server_work),
-      &client_work, &client_callbacks,
+      UnownedExecutor(&client_work), UnownedExecutor(&client_callbacks),
       MemoryAllocator(std::make_shared<TestMemoryAllocator>()), Address(50052),
       Address(50051));
   auto server_endpoint = std::make_unique<DmeshEndpoint>(
       std::make_unique<LinkedEndpointTransport>(link, 1, &client_work),
-      &server_work, &server_callbacks,
+      UnownedExecutor(&server_work), UnownedExecutor(&server_callbacks),
       MemoryAllocator(std::make_shared<TestMemoryAllocator>()), Address(50051),
       Address(50052));
 
@@ -264,8 +258,9 @@ bool RunUnaryEcho() {
     server_ok = Next(server_cq.get(), reinterpret_cast<void*>(kFinish));
   });
 
-  auto channel = CreateDmeshGrpcChannel(
-      std::move(client_endpoint), ::grpc::InsecureChannelCredentials());
+  auto channel = ::grpc::experimental::CreateChannelFromEndpoint(
+      std::move(client_endpoint), ::grpc::InsecureChannelCredentials(),
+      ::grpc::ChannelArguments());
   if (channel == nullptr) {
     server->Shutdown();
     server_cq->Shutdown();

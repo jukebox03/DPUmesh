@@ -13,32 +13,33 @@ namespace dpumesh::grpc {
 
 DmeshRuntime::DmeshRuntime(
     std::unique_ptr<DmeshApiOps> ops, dmesh_channel_t* channel, int post_max,
-    std::vector<std::unique_ptr<Executor>> owned_callback_executors,
-    Executor* callback_executor)
+    std::vector<std::shared_ptr<Executor>> owned_callback_executors,
+    std::shared_ptr<Executor> callback_executor)
     : ops_(std::move(ops)),
       channel_(channel),
       post_max_(post_max),
       owned_callback_executors_(std::move(owned_callback_executors)),
-      callback_executor_(callback_executor) {}
+      callback_executor_(std::move(callback_executor)) {}
 
-absl::StatusOr<std::unique_ptr<DmeshRuntime>> DmeshRuntime::Create(
+absl::StatusOr<std::shared_ptr<DmeshRuntime>> DmeshRuntime::Create(
     std::unique_ptr<DmeshApiOps> ops) {
   return Create(std::move(ops), nullptr, Options());
 }
 
-absl::StatusOr<std::unique_ptr<DmeshRuntime>> DmeshRuntime::Create(
+absl::StatusOr<std::shared_ptr<DmeshRuntime>> DmeshRuntime::Create(
     std::unique_ptr<DmeshApiOps> ops, Options options) {
   return Create(std::move(ops), nullptr, options);
 }
 
-absl::StatusOr<std::unique_ptr<DmeshRuntime>> DmeshRuntime::Create(
-    std::unique_ptr<DmeshApiOps> ops, Executor* callback_executor) {
-  return Create(std::move(ops), callback_executor, Options());
+absl::StatusOr<std::shared_ptr<DmeshRuntime>> DmeshRuntime::Create(
+    std::unique_ptr<DmeshApiOps> ops,
+    std::shared_ptr<Executor> callback_executor) {
+  return Create(std::move(ops), std::move(callback_executor), Options());
 }
 
-absl::StatusOr<std::unique_ptr<DmeshRuntime>> DmeshRuntime::Create(
-    std::unique_ptr<DmeshApiOps> ops, Executor* callback_executor,
-    Options options) {
+absl::StatusOr<std::shared_ptr<DmeshRuntime>> DmeshRuntime::Create(
+    std::unique_ptr<DmeshApiOps> ops,
+    std::shared_ptr<Executor> callback_executor, Options options) {
   if (ops == nullptr) {
     return absl::InvalidArgumentError("DPUmesh runtime requires native ops");
   }
@@ -48,13 +49,13 @@ absl::StatusOr<std::unique_ptr<DmeshRuntime>> DmeshRuntime::Create(
   }
 
   // Default: one dedicated callback thread paired with each reactor shard.
-  std::vector<std::unique_ptr<Executor>> owned_callback_executors;
+  std::vector<std::shared_ptr<Executor>> owned_callback_executors;
   if (callback_executor == nullptr) {
     owned_callback_executors.reserve(options.reactor_count);
     for (size_t i = 0; i < options.reactor_count; ++i) {
-      owned_callback_executors.push_back(std::make_unique<ThreadExecutor>());
+      owned_callback_executors.push_back(std::make_shared<ThreadExecutor>());
     }
-    callback_executor = owned_callback_executors.front().get();
+    callback_executor = owned_callback_executors.front();
   }
 
   errno = 0;
@@ -71,17 +72,17 @@ absl::StatusOr<std::unique_ptr<DmeshRuntime>> DmeshRuntime::Create(
         "dmesh_post_max returned invalid value ", post_max));
   }
 
-  auto runtime = std::unique_ptr<DmeshRuntime>(new DmeshRuntime(
+  auto runtime = std::shared_ptr<DmeshRuntime>(new DmeshRuntime(
       std::move(ops), channel, post_max, std::move(owned_callback_executors),
-      callback_executor));
+      std::move(callback_executor)));
   runtime->reactors_.reserve(options.reactor_count);
   for (size_t i = 0; i < options.reactor_count; ++i) {
-    Executor* reactor_callbacks =
+    std::shared_ptr<Executor> reactor_callbacks =
         runtime->owned_callback_executors_.empty()
-            ? callback_executor
-            : runtime->owned_callback_executors_[i].get();
+            ? runtime->callback_executor_
+            : runtime->owned_callback_executors_[i];
     auto reactor = DmeshReactor::Create(
-        runtime->ops_.get(), channel, post_max, reactor_callbacks,
+        runtime->ops_.get(), channel, post_max, std::move(reactor_callbacks),
         options.reactor);
     if (!reactor.ok()) {
       runtime.reset();
@@ -105,6 +106,16 @@ void DmeshRuntime::Connect(std::string service,
   const size_t index =
       next_reactor_.fetch_add(1, std::memory_order_relaxed) % reactors_.size();
   reactors_[index]->Connect(std::move(service), std::move(callback));
+}
+
+DmeshReactor::Stats DmeshRuntime::stats() const {
+  DmeshReactor::Stats total;
+  for (const auto& reactor : reactors_) {
+    const DmeshReactor::Stats shard = reactor->stats();
+    total.receive_credit_hold_dropped += shard.receive_credit_hold_dropped;
+    total.eq_drain_budget_exhausted += shard.eq_drain_budget_exhausted;
+  }
+  return total;
 }
 
 absl::Status DmeshRuntime::SetAcceptCallback(

@@ -83,7 +83,7 @@ doca/                  BlueField ARM process and DPA kernel
 integrations/grpc/     gRPC C++ runtime, reactor, tests, benchmark
 bench/                 deployment, workloads, validators, measurement records
 tests/                 fast host-only ABI and state-machine regression tests
-design/                current API, core, and naming whitepapers
+design/                current API, core, naming, and gRPC whitepapers
 ```
 
 ## Build and test
@@ -133,9 +133,7 @@ cmake --build build/grpc -j2
 ASAN_OPTIONS=detect_leaks=0 ctest --test-dir build/grpc --output-on-failure
 ```
 
-LeakSanitizer is disabled only because gRPC's EventEngine teardown intermittently
-still holds allocations at exit; AddressSanitizer and the functional test suite
-still run.
+LeakSanitizer is disabled; AddressSanitizer and the functional test suite run.
 Clients use a Service-name target and ordinary gRPC channel arguments. Each
 connection attempt creates a QP; established L4 streams remain backend-pinned.
 
@@ -144,7 +142,8 @@ connection attempt creates a QP; established L4 streams remain backend-pinned.
 - [Native API](design/API.md): exact lifecycle, batching, EQ, and error contracts
 - [Core architecture](design/CORE.md): host/DPA/ARM custody and replay barriers
 - [Control plane](design/CONTROL.md): registry, identity, membership, and node boundary
-- [gRPC integration](integrations/grpc/README.md): build and application bootstrap
+- [gRPC integration](design/GRPC.md): endpoint ownership, threading, and state machines
+- [gRPC build and bootstrap](integrations/grpc/README.md): channel, server, and test commands
 - [Benchmark guide](bench/README.md): deployment and experiment commands
 - [Native contract tests](tests/README.md): fast host-only regression coverage
 - [Performance report](bench/report/REPORT.md): current topology evaluation

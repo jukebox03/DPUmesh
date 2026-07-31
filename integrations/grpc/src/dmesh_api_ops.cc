@@ -34,9 +34,6 @@ class NativeDmeshApiOps final : public DmeshApiOps {
                        dmesh_event_t* event) override {
     dmesh_release_rx_buffer(channel, event);
   }
-  int MessageMax(dmesh_channel_t* channel) override {
-    return dmesh_msg_max(channel);
-  }
   int PostMax(dmesh_channel_t* channel) override {
     return dmesh_post_max(channel);
   }

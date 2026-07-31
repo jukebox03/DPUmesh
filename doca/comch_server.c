@@ -607,7 +607,6 @@ pods_add_connection(struct objects *objs, struct doca_comch_connection *conn)
 	objs->pods[idx].dpa_rings_counted_mask = 0;
 	objs->pods[idx].egress_quiesced = 0;
 	objs->pods[idx].egress_quiesced_mask = 0;
-	/* Reset only .v — the element padding is canary-armed. */
 	for (int w = 0; w < MAX_ARM_WORKERS; w++)
 		__atomic_store_n(&objs->pods[idx].egress_inflight_worker[w].v, 0,
 		                 __ATOMIC_RELEASE);

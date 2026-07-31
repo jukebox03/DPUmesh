@@ -184,13 +184,10 @@ CQ_INLINE int mpsc_comp_queue_empty(dpu_mpsc_comp_queue_t *q) {
 #define MAX_ARM_WORKERS 8
 
 /* Cache-line-isolated per-worker counter: each worker mutates only its own
- * element on the DMA hot path, so elements must not share a line. The line
- * padding doubles as a canary field: nothing may ever write it. */
+ * element on the DMA hot path, so elements must not share a line. */
 struct dpu_worker_counter {
     _Alignas(64) uint32_t v;
-    uint32_t canary[15];
 };
-#define DPU_COUNTER_CANARY 0xC0FFEE5Au
 
 /* Per-pod state (DPU only) */
 struct pod_state {

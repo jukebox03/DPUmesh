@@ -205,7 +205,7 @@ absl::StatusOr<size_t> ParseSize(const char* value, const char* name,
   return static_cast<size_t>(parsed);
 }
 
-absl::StatusOr<std::unique_ptr<DmeshRuntime>> CreateRuntime(size_t reactors) {
+absl::StatusOr<std::shared_ptr<DmeshRuntime>> CreateRuntime(size_t reactors) {
   DmeshRuntime::Options options;
   options.reactor_count = reactors;
   return DmeshRuntime::Create(MakeNativeDmeshApiOps(), options);
@@ -214,7 +214,7 @@ absl::StatusOr<std::unique_ptr<DmeshRuntime>> CreateRuntime(size_t reactors) {
 absl::Status RunServer(const std::string& transport,
                        const std::string& endpoint, size_t duration_seconds,
                        size_t reactors) {
-  std::unique_ptr<DmeshRuntime> runtime;
+  std::shared_ptr<DmeshRuntime> runtime;
   if (transport == "dmesh") {
     auto runtime_result = CreateRuntime(reactors);
     if (!runtime_result.ok()) return runtime_result.status();
@@ -249,7 +249,7 @@ absl::Status RunServer(const std::string& transport,
   std::unique_ptr<DmeshGrpcServerAttachment> attachment;
   if (transport == "dmesh") {
     auto attached = AttachDmeshGrpcServer(
-        runtime.get(), passive_listener.get(), {},
+        runtime, passive_listener.get(), {},
         [&](const absl::Status& status) {
           std::lock_guard<std::mutex> lock(accept_error_mu);
           accept_error = status;
@@ -293,7 +293,7 @@ absl::Status RunClient(const std::string& transport,
     return absl::InvalidArgumentError("payload exceeds protobuf int32 limit");
   }
 
-  std::unique_ptr<DmeshRuntime> runtime;
+  std::shared_ptr<DmeshRuntime> runtime;
   std::shared_ptr<::grpc::Channel> channel;
   ::grpc::ChannelArguments channel_args;
   if (!authority.empty()) {
@@ -304,7 +304,7 @@ absl::Status RunClient(const std::string& transport,
     if (!runtime_result.ok()) return runtime_result.status();
     runtime = std::move(*runtime_result);
     auto channel_result = CreateDmeshChannel(
-        runtime.get(), target, ::grpc::InsecureChannelCredentials(),
+        runtime, target, ::grpc::InsecureChannelCredentials(),
         channel_args);
     if (!channel_result.ok()) return channel_result.status();
     channel = std::move(*channel_result);

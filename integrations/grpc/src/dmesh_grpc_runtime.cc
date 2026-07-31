@@ -19,7 +19,6 @@
 
 #include "absl/status/status.h"
 #include "dmesh_endpoint.h"
-#include "dmesh_grpc_channel.h"
 
 namespace dpumesh::grpc {
 namespace {
@@ -71,8 +70,9 @@ EventEngine::ResolvedAddress NativeAddress(int pod, uint16_t port) {
 // Delegate every EventEngine operation except DPUmesh connection creation.
 class DmeshClientEventEngine final : public EventEngine {
  public:
-  DmeshClientEventEngine(DmeshRuntime* runtime, std::string target)
-      : runtime_(runtime),
+  DmeshClientEventEngine(std::shared_ptr<DmeshRuntime> runtime,
+                         std::string target)
+      : runtime_(std::move(runtime)),
         target_(std::move(target)),
         delegate_(grpc_event_engine::experimental::GetDefaultEventEngine()) {}
 
@@ -236,17 +236,19 @@ class DmeshClientEventEngine final : public EventEngine {
       pending.on_connect(connected.status());
       return;
     }
-    Executor* callback_executor = connected->callback_executor != nullptr
-                                      ? connected->callback_executor
-                                      : runtime_->callback_executor();
+    std::shared_ptr<Executor> callback_executor =
+        std::move(connected->callback_executor);
+    if (callback_executor == nullptr) {
+      callback_executor = runtime_->callback_executor();
+    }
     pending.on_connect(std::make_unique<DmeshEndpoint>(
-        std::move(connected->transport), connected->work_executor,
-        callback_executor, std::move(memory_allocator),
+        std::move(connected->transport), std::move(connected->work_executor),
+        std::move(callback_executor), std::move(memory_allocator),
         NativeAddress(connected->peer_pod, connected->peer_port),
         NativeAddress(connected->local_pod, connected->local_port)));
   }
 
-  DmeshRuntime* const runtime_;
+  const std::shared_ptr<DmeshRuntime> runtime_;
   const std::string target_;
   const std::shared_ptr<EventEngine> delegate_;
   std::mutex mu_;
@@ -272,11 +274,12 @@ void SetDefaultAuthorityIfAbsent(
 struct DmeshGrpcServerAttachment::State {
   State(::grpc::experimental::PassiveListener* listener,
         MemoryAllocatorFactory allocator_factory,
-        GrpcServerAcceptErrorCallback on_error, Executor* callback_executor)
+        GrpcServerAcceptErrorCallback on_error,
+        std::shared_ptr<Executor> callback_executor)
       : listener(listener),
         allocator_factory(std::move(allocator_factory)),
         on_error(std::move(on_error)),
-        callback_executor(callback_executor) {}
+        callback_executor(std::move(callback_executor)) {}
 
   void Accept(DmeshReactor::ConnectedTransport connected) {
     {
@@ -291,12 +294,12 @@ struct DmeshGrpcServerAttachment::State {
       status = absl::ResourceExhaustedError(
           "DPUmesh gRPC allocator factory returned an invalid allocator");
     } else {
-      Executor* endpoint_callbacks = connected.callback_executor != nullptr
-                                         ? connected.callback_executor
-                                         : callback_executor;
+      std::shared_ptr<Executor> endpoint_callbacks =
+          std::move(connected.callback_executor);
+      if (endpoint_callbacks == nullptr) endpoint_callbacks = callback_executor;
       auto endpoint = std::make_unique<DmeshEndpoint>(
-          std::move(connected.transport), connected.work_executor,
-          endpoint_callbacks, std::move(allocator),
+          std::move(connected.transport), std::move(connected.work_executor),
+          std::move(endpoint_callbacks), std::move(allocator),
           NativeAddress(connected.peer_pod, connected.peer_port),
           NativeAddress(connected.local_pod, connected.local_port));
       status = listener->AcceptConnectedEndpoint(std::move(endpoint));
@@ -317,6 +320,7 @@ struct DmeshGrpcServerAttachment::State {
     listener = nullptr;
     allocator_factory = {};
     on_error = {};
+    callback_executor.reset();
   }
 
   std::mutex mu;
@@ -326,12 +330,12 @@ struct DmeshGrpcServerAttachment::State {
   ::grpc::experimental::PassiveListener* listener;
   MemoryAllocatorFactory allocator_factory;
   GrpcServerAcceptErrorCallback on_error;
-  Executor* callback_executor;
+  std::shared_ptr<Executor> callback_executor;
 };
 
 DmeshGrpcServerAttachment::DmeshGrpcServerAttachment(
-    DmeshRuntime* runtime, std::shared_ptr<State> state)
-    : runtime_(runtime), state_(std::move(state)) {}
+    std::shared_ptr<DmeshRuntime> runtime, std::shared_ptr<State> state)
+    : runtime_(std::move(runtime)), state_(std::move(state)) {}
 
 DmeshGrpcServerAttachment::~DmeshGrpcServerAttachment() { Detach(); }
 
@@ -340,14 +344,14 @@ void DmeshGrpcServerAttachment::Detach() {
   state_->Deactivate();
   if (runtime_ != nullptr) (void)runtime_->SetAcceptCallback({});
   state_.reset();
-  runtime_ = nullptr;
+  runtime_.reset();
 }
 
 absl::StatusOr<std::shared_ptr<::grpc::Channel>> CreateDmeshChannel(
-    DmeshRuntime* runtime, std::string target,
-    std::shared_ptr<::grpc::ChannelCredentials> credentials,
-    ::grpc::ChannelArguments args) {
-  if (runtime == nullptr || target.empty() || credentials == nullptr) {
+    std::shared_ptr<DmeshRuntime> runtime, const std::string& target,
+    const std::shared_ptr<::grpc::ChannelCredentials>& creds,
+    const ::grpc::ChannelArguments& args) {
+  if (runtime == nullptr || target.empty() || creds == nullptr) {
     return absl::InvalidArgumentError(
         "DPUmesh gRPC channel requires runtime, target and credentials");
   }
@@ -357,13 +361,15 @@ absl::StatusOr<std::shared_ptr<::grpc::Channel>> CreateDmeshChannel(
         "GRPC_ARG_EVENT_ENGINE is not supported");
   }
 
-  internal::SetDefaultAuthorityIfAbsent(target, &args);
+  ::grpc::ChannelArguments channel_args = args;
+  internal::SetDefaultAuthorityIfAbsent(target, &channel_args);
   auto event_engine =
-      std::make_shared<DmeshClientEventEngine>(runtime, std::move(target));
-  args.SetPointerWithVtable(
+      std::make_shared<DmeshClientEventEngine>(std::move(runtime), target);
+  channel_args.SetPointerWithVtable(
       GRPC_ARG_EVENT_ENGINE, &event_engine,
       grpc_event_engine::experimental::grpc_event_engine_arg_vtable());
-  auto channel = ::grpc::CreateCustomChannel(kSyntheticTarget, credentials, args);
+  auto channel =
+      ::grpc::CreateCustomChannel(kSyntheticTarget, creds, channel_args);
   if (channel == nullptr) {
     return absl::InternalError(
         "gRPC rejected the reconnectable DPUmesh channel");
@@ -373,7 +379,7 @@ absl::StatusOr<std::shared_ptr<::grpc::Channel>> CreateDmeshChannel(
 
 absl::StatusOr<std::unique_ptr<DmeshGrpcServerAttachment>>
 AttachDmeshGrpcServer(
-    DmeshRuntime* runtime,
+    std::shared_ptr<DmeshRuntime> runtime,
     ::grpc::experimental::PassiveListener* passive_listener,
     MemoryAllocatorFactory allocator_factory,
     GrpcServerAcceptErrorCallback on_error) {
@@ -397,7 +403,7 @@ AttachDmeshGrpcServer(
     return install_status;
   }
   return std::unique_ptr<DmeshGrpcServerAttachment>(
-      new DmeshGrpcServerAttachment(runtime, std::move(state)));
+      new DmeshGrpcServerAttachment(std::move(runtime), std::move(state)));
 }
 
 }  // namespace dpumesh::grpc

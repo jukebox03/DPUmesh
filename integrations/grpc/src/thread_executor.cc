@@ -4,14 +4,22 @@
 
 namespace dpumesh::grpc {
 
-ThreadExecutor::ThreadExecutor() : worker_([this] { ThreadMain(); }) {}
+ThreadExecutor::ThreadExecutor()
+    : state_(std::make_shared<State>()),
+      worker_([state = state_]() mutable { ThreadMain(std::move(state)); }) {}
 
 ThreadExecutor::~ThreadExecutor() {
   {
-    std::lock_guard<std::mutex> lock(mu_);
-    stopping_ = true;
+    std::lock_guard<std::mutex> lock(state_->mu);
+    state_->stopping = true;
   }
-  cv_.notify_one();
+  state_->cv.notify_one();
+  /* Destruction from the worker itself detaches; the worker touches only the
+   * state it co-owns. */
+  if (worker_.get_id() == std::this_thread::get_id()) {
+    worker_.detach();
+    return;
+  }
   worker_.join();
 }
 
@@ -31,21 +39,22 @@ void ThreadExecutor::RunCompletion(
 
 void ThreadExecutor::Push(Entry entry) {
   {
-    std::lock_guard<std::mutex> lock(mu_);
-    if (stopping_) return;
-    queue_.push_back(std::move(entry));
+    std::lock_guard<std::mutex> lock(state_->mu);
+    if (state_->stopping) return;
+    state_->queue.push_back(std::move(entry));
   }
-  cv_.notify_one();
+  state_->cv.notify_one();
 }
 
-void ThreadExecutor::ThreadMain() {
+void ThreadExecutor::ThreadMain(std::shared_ptr<State> state) {
   std::deque<Entry> batch;
   for (;;) {
     {
-      std::unique_lock<std::mutex> lock(mu_);
-      cv_.wait(lock, [this] { return stopping_ || !queue_.empty(); });
-      if (queue_.empty()) return;
-      batch.swap(queue_);
+      std::unique_lock<std::mutex> lock(state->mu);
+      state->cv.wait(lock,
+                     [&state] { return state->stopping || !state->queue.empty(); });
+      if (state->queue.empty()) return;
+      batch.swap(state->queue);
     }
     for (auto& entry : batch) {
       if (entry.completion) {

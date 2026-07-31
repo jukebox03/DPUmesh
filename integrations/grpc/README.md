@@ -46,7 +46,7 @@ args.SetString(GRPC_ARG_DEFAULT_AUTHORITY, "api.example.com");  // optional
 args.SetInt(GRPC_ARG_INITIAL_RECONNECT_BACKOFF_MS, 100);
 
 auto channel = dpumesh::grpc::CreateDmeshChannel(
-    runtime->get(), "echo-dpumesh", grpc::SslCredentials(ssl_options), args);
+    *runtime, "echo-dpumesh", grpc::SslCredentials(ssl_options), args);
 
 auto stub = Echo::NewStub(*channel);
 grpc::ClientContext context;
@@ -55,10 +55,12 @@ context.set_wait_for_ready(true);
 grpc::Status status = stub->Call(&context, request, &response);
 ```
 
-Channel creation is lazy, like `grpc::CreateCustomChannel`. Each gRPC
-`Connect` creates a targeted QP, and gRPC owns reconnect backoff, deadlines,
-and RPC retry policy. Link `grpc_dpumesh` and keep the `DmeshRuntime` alive
-longer than its channels and endpoints.
+`CreateDmeshChannel` takes the parameters of `grpc::CreateCustomChannel` after
+a runtime handle and returns `absl::StatusOr`. Channel creation is lazy. Each
+gRPC `Connect` creates a targeted QP, and gRPC owns reconnect backoff,
+deadlines, and RPC retry policy. `DmeshRuntime::Create` returns a
+`std::shared_ptr`, and the channel holds one, so the runtime outlives a channel
+gRPC has not yet released. Link `grpc_dpumesh`.
 
 ## Server
 
@@ -74,7 +76,7 @@ builder.experimental().AddPassiveListener(server_credentials, listener);
 std::unique_ptr<grpc::Server> server = builder.BuildAndStart();
 
 auto attachment = dpumesh::grpc::AttachDmeshGrpcServer(
-    runtime.get(), listener.get());
+    *runtime, listener.get());
 ```
 
 `AttachDmeshGrpcServer` converts `DMESH_EVENT_CONN_REQ` events into endpoints
@@ -95,40 +97,43 @@ live set. In-flight RPCs retain normal gRPC deadline, retry, idempotency, and
 `wait_for_ready` semantics. New Service names require registry updates.
 
 `GetPeerAddress` and `GetLocalAddress` report loopback addresses carrying the
-DPU-assigned pod id and the connection's native port, so gRPC peer strings
-distinguish connections and backends. A client stream has no peer pod until the
-DPU pins one, and reads as `127.0.0.0:0`.
+DPU-assigned pod id and the connection's native port. A client stream has no
+peer pod until the DPU pins one, and reads as `127.0.0.0:0`.
 
-## Data path
+## Runtime configuration
 
-Each runtime owns one native channel and configurable EQ reactor shards. A
-reactor is the sole consumer of its EQ and owns QP lifecycle, and is paired
-with a dedicated thread that runs both the endpoint completions (and therefore
-chttp2) and the write pumps for its connections, so all per-connection work
-shards with the EQ shards. That thread claims its whole queue per wake and
-carries each callback next to the status it completes with.
-`DmeshRuntime::Create` accepts a custom executor to replace the pairs.
+Each `DmeshRuntime` opens one native channel, which registers the process under
+`$DPUMESH_SERVICE` and maps its RX region. Create one runtime per process and
+share it across every channel and the server attachment; a second runtime
+registers the process a second time. The native library does not reject the
+second registration.
 
-TX slices are copied into registered native reservations on the paired thread —
-the thread a write is already running on — under a per-connection lock that the
-reactor also takes before destroying that connection's QP. Consecutive slices of
-one logical Write share a reservation, so an HTTP/2 frame header and its payload
-cost one native post rather than one each. A Write publishes at the EventEngine
-write boundary; a large one takes a bounded number of reservations per pump run
-and reschedules itself, so one connection cannot starve its shard's thread. On
-`EAGAIN`, the endpoint keeps its slice cursor and resumes when the reactor
-forwards `DMESH_EVENT_TX_READY`; if the peer has already closed, the write
-fails with `UNAVAILABLE` instead of parking.
+`DmeshRuntime::Options::reactor_count` sets the number of EQ reactor shards
+over that one channel. Each shard is one EQ, one polling thread, and one paired
+thread that runs the endpoint completions and write pumps for its connections.
+Outbound connections are assigned round-robin; an inbound connection belongs to
+whichever shard received its `DMESH_EVENT_CONN_REQ`.
 
-RX bytes are copied into gRPC slices, and the native credit returns with the
-copy while the endpoint's receive queue is below its high-water mark. Above the
-mark the reactor keeps the credit until a read drains the queue, so a reader
-that has stopped consuming stops the transport landing bytes for that connection
-instead of growing host memory without bound. Retained credits are capped per
-connection because the landing ring is shared across the shard.
+`DmeshRuntime::Create` accepts a `std::shared_ptr<Executor>` that replaces the
+paired threads for all shards. Endpoints share ownership of the executors they
+schedule on, so an executor outlives an endpoint gRPC has not yet destroyed.
 
-There is no busy poll, retry timer, connection scan, or per-RPC wrapper
-dispatch.
+`DmeshReactor::Options::tail_flush_delay` retains a trailing partial transport
+unit for a successor write. It is zero by default, which publishes every write
+at its boundary.
+
+Receive backpressure is automatic and has no tunable: a stalled reader stops the
+transport landing further bytes on that connection. There is no busy poll, retry
+timer, connection scan, or per-RPC wrapper dispatch.
+
+`DmeshRuntime::stats()` sums each shard's `DmeshReactor::Stats`. Both counters
+report a bound being reached rather than an error:
+`receive_credit_hold_dropped` rises when backpressure stops applying to a
+stalled connection, and `eq_drain_budget_exhausted` rises when a shard is
+saturated.
+
+Ownership, locking, and the transmit and receive state machines are specified in
+[the gRPC integration whitepaper](../../design/GRPC.md).
 
 ## Build and test
 
