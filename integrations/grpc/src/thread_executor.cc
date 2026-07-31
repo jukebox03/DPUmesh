@@ -37,10 +37,17 @@ void ThreadExecutor::RunCompletion(
   Push(std::move(entry));
 }
 
+uint64_t ThreadExecutor::dropped_task_count() const {
+  return state_->dropped.load(std::memory_order_relaxed);
+}
+
 void ThreadExecutor::Push(Entry entry) {
   {
     std::lock_guard<std::mutex> lock(state_->mu);
-    if (state_->stopping) return;
+    if (state_->stopping) {
+      state_->dropped.fetch_add(1, std::memory_order_relaxed);
+      return;
+    }
     state_->queue.push_back(std::move(entry));
   }
   state_->cv.notify_one();

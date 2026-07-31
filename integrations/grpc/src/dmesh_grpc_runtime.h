@@ -50,6 +50,7 @@ class DmeshGrpcServerAttachment final {
   DmeshGrpcServerAttachment& operator=(const DmeshGrpcServerAttachment&) =
       delete;
 
+  // Not callable from the accept-error callback, whose injection it waits for.
   void Detach();
 
  private:

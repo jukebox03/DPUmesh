@@ -1,7 +1,9 @@
 #ifndef DPUMESH_GRPC_THREAD_EXECUTOR_H
 #define DPUMESH_GRPC_THREAD_EXECUTOR_H
 
+#include <atomic>
 #include <condition_variable>
+#include <cstdint>
 #include <deque>
 #include <memory>
 #include <mutex>
@@ -24,6 +26,10 @@ class ThreadExecutor final : public Executor {
   void RunCompletion(absl::AnyInvocable<void(absl::Status)> callback,
                      absl::Status status) override;
 
+  // Work refused after the executor began stopping; a refused completion is
+  // never delivered.
+  uint64_t dropped_task_count() const;
+
  private:
   // A queued task, or a completion callback stored next to its status. Both
   // forms share one queue and run in enqueue order.
@@ -39,6 +45,7 @@ class ThreadExecutor final : public Executor {
     std::condition_variable cv;
     std::deque<Entry> queue;
     bool stopping = false;
+    std::atomic<uint64_t> dropped{0};
   };
 
   static void ThreadMain(std::shared_ptr<State> state);

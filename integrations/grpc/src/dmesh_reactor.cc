@@ -236,16 +236,14 @@ class DmeshReactor::Impl final
 
   bool Enqueue(absl::AnyInvocable<void()> task) {
     if (!accepting_.load(std::memory_order_acquire)) return false;
-    bool was_empty;
-    {
-      std::lock_guard<std::mutex> lock(command_mu_);
-      if (!accepting_.load(std::memory_order_relaxed)) return false;
-      was_empty = commands_.empty();
-      commands_.push_back(std::move(task));
-    }
+    std::lock_guard<std::mutex> lock(command_mu_);
+    if (!accepting_.load(std::memory_order_relaxed)) return false;
+    const bool was_empty = commands_.empty();
+    commands_.push_back(std::move(task));
     /* The eventfd counter stays signalled until the owner drains it, so only
-     * the empty→non-empty transition needs a wake. */
-    if (was_empty) WakeCommandFd();
+     * the empty→non-empty transition needs a wake. The wake and Shutdown()'s
+     * close both run under command_mu_. */
+    if (was_empty) WakeCommandFdLocked();
     return true;
   }
 
@@ -416,18 +414,21 @@ class DmeshReactor::Impl final
       return;
     }
 
+    /* Commands accepted before accepting_ fell still run: ShutdownOwner()
+     * drains the queue. */
     {
       std::lock_guard<std::mutex> lock(command_mu_);
-      commands_.push_back([self = shared_from_this()] {
-        self->stop_requested_ = true;
-      });
+      stop_requested_.store(true, std::memory_order_release);
+      WakeCommandFdLocked();
     }
-    WakeCommandFd();
     if (owner_thread_.joinable()) owner_thread_.join();
 
-    if (command_fd_ >= 0) {
-      ::close(command_fd_);
-      command_fd_ = -1;
+    {
+      std::lock_guard<std::mutex> lock(command_mu_);
+      if (command_fd_ >= 0) {
+        ::close(command_fd_);
+        command_fd_ = -1;
+      }
     }
     if (eq_ != nullptr) {
       ops_->DestroyEq(eq_);
@@ -440,6 +441,10 @@ class DmeshReactor::Impl final
   absl::Status FlushNowLocked(const std::shared_ptr<Connection>& connection) {
     connection->flush_armed = false;
     if (!connection->unflushed) return absl::OkStatus();
+    if (connection->closing || connection->qp == nullptr) {
+      connection->unflushed = false;
+      return absl::UnavailableError("DPUmesh connection is closed");
+    }
     errno = 0;
     if (ops_->Flush(connection->qp) != 0)
       return ErrnoStatus("dmesh_flush", errno);
@@ -491,7 +496,8 @@ class DmeshReactor::Impl final
     connection->held_receives.clear();
   }
 
-  void WakeCommandFd() {
+  // Requires command_mu_.
+  void WakeCommandFdLocked() {
     if (command_fd_ < 0) return;
     const uint64_t one = 1;
     const ssize_t result = ::write(command_fd_, &one, sizeof(one));
@@ -516,7 +522,8 @@ class DmeshReactor::Impl final
   }
 
   void ConnectOwner(std::string service, ConnectCallback callback) {
-    if (!accepting_.load(std::memory_order_acquire) || stop_requested_) {
+    if (!accepting_.load(std::memory_order_acquire) ||
+        stop_requested_.load(std::memory_order_acquire)) {
       DeliverConnect(
           std::move(callback),
           absl::UnavailableError("DPUmesh reactor is shutting down"));
@@ -885,7 +892,7 @@ class DmeshReactor::Impl final
     };
 
     bool eq_pending = false;
-    while (!stop_requested_) {
+    while (!stop_requested_.load(std::memory_order_acquire)) {
       /* The two fds carry every external edge. A retained transmit tail is the
        * one deadline the loop owns and bounds the wait. */
       timespec timeout;
@@ -909,7 +916,7 @@ class DmeshReactor::Impl final
       const int result = ::ppoll(descriptors, 2, wait, nullptr);
       if (result < 0) {
         if (errno == EINTR) continue;
-        stop_requested_ = true;
+        stop_requested_.store(true, std::memory_order_release);
         break;
       }
 
@@ -919,7 +926,7 @@ class DmeshReactor::Impl final
       if (eq_ready) DrainCounterFd(eq_fd_);
 
       DrainCommands();
-      if (stop_requested_) break;
+      if (stop_requested_.load(std::memory_order_acquire)) break;
 
       eq_pending = DrainEq();
       if (!tail_flushes_.empty()) SweepTailFlushes(Clock::now());
@@ -944,7 +951,8 @@ class DmeshReactor::Impl final
   int command_fd_ = -1;
   std::thread owner_thread_;
   std::atomic<bool> accepting_{false};
-  bool stop_requested_ = false;
+  // Set by Shutdown() on any thread, consumed by the owner loop.
+  std::atomic<bool> stop_requested_{false};
 
   std::mutex shutdown_mu_;
   std::mutex command_mu_;

@@ -257,6 +257,7 @@ void PumpWrite(const std::shared_ptr<DmeshEndpointState>& state) {
             write_completion = Completion{std::move(write.callback),
                                           absl::OkStatus()};
             state->pending_write.reset();
+            state->write_parked = false;
           } else {
             state->life = DmeshEndpointState::Life::kFailed;
             state->failure = std::move(flush_status);
