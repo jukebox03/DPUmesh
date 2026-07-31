@@ -52,7 +52,7 @@ size_t FakeEndpointTransport::MaxPostSize() const {
   return state_->max_post_size;
 }
 
-PostResult FakeEndpointTransport::Post(absl::Span<const uint8_t> bytes) {
+PostResult FakeEndpointTransport::Reserve(size_t length, Reservation* out) {
   std::lock_guard<std::mutex> lock(state_->mu);
   if (state_->close_count != 0) {
     return PostResult::Closed(
@@ -65,9 +65,25 @@ PostResult FakeEndpointTransport::Post(absl::Span<const uint8_t> bytes) {
     state_->results.pop_front();
   }
   if (result.code == PostCode::kAccepted) {
-    state_->posts.emplace_back(bytes.begin(), bytes.end());
+    state_->reservation.assign(length, 0);
+    out->data = state_->reservation.data();
+    out->length = length;
   }
   return result;
+}
+
+absl::Status FakeEndpointTransport::Commit(const Reservation& reservation) {
+  std::lock_guard<std::mutex> lock(state_->mu);
+  if (state_->close_count != 0)
+    return absl::UnavailableError("fake transport is closed");
+  state_->posts.emplace_back(reservation.data,
+                             reservation.data + reservation.length);
+  return absl::OkStatus();
+}
+
+void FakeEndpointTransport::ResumeReceive() {
+  std::lock_guard<std::mutex> lock(state_->mu);
+  ++state_->resume_count;
 }
 
 absl::Status FakeEndpointTransport::Flush() {

@@ -19,10 +19,12 @@ Create objects in channel → EQ → QP order and destroy them in reverse order.
 Destroying an EQ with live QPs, or a channel with live EQs, returns `EBUSY`
 without partially tearing the object down.
 
-An EQ has exactly one consumer. QP operations and EQ polling should run on that
-EQ's owner thread; create more EQs to scale across threads. The transport PE is a
-separate single producer of EQ-ready edges. `qp->user_data` belongs entirely to
-the application.
+An EQ has exactly one consumer. A QP's transmit calls form one serial stream
+that may run on a different thread than its EQ's consumer — the POSIX shim
+transmits from application threads, the gRPC adapter from endpoint executors —
+and the caller serializes that stream against itself and against the QP's
+destruction. The transport PE is a separate single producer of EQ-ready edges.
+`qp->user_data` belongs entirely to the application.
 
 The public surface consists of eighteen calls:
 
@@ -282,11 +284,17 @@ target. Each EventEngine `Connect` creates a targeted QP. Established L4 streams
 remain backend-pinned and terminate when that backend is lost. TLS and HTTP/2
 remain end-to-end.
 
-The adapter commits all slices of one EventEngine Write and flushes once at the
-logical write boundary. RX is copied into gRPC slices before the native credit
-is returned. A reactor parks its exact slice cursor on `EAGAIN` and resumes only
-that connection when its EQ produces `DMESH_EVENT_TX_READY`; the adapter has no
-retry timer.
+The adapter commits all slices of one EventEngine Write and publishes once at the
+logical write boundary; consecutive slices share one `dmesh_alloc` reservation,
+so a frame header and its payload cost one post. It applies the retention rule
+above only when configured to, because chttp2 already merges concurrent streams
+into one write. RX is copied into gRPC slices before the native credit is
+returned, and the credit is withheld while an endpoint's queued bytes exceed its
+high-water mark, which stops the transport landing more on a connection whose
+reader has stalled. Transmit runs on the endpoint's executor under a
+per-connection lock that also orders QP destruction; the endpoint parks its
+exact slice cursor on `EAGAIN` and resumes when its reactor forwards
+`DMESH_EVENT_TX_READY`. The adapter has no retry timer.
 
 ## 7. Explicit limits
 

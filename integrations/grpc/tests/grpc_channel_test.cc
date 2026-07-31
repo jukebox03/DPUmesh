@@ -117,30 +117,44 @@ class LinkedEndpointTransport final : public EndpointTransport {
 
   size_t MaxPostSize() const override { return 137; }
 
-  PostResult Post(absl::Span<const uint8_t> bytes) override {
+  PostResult Reserve(size_t length, Reservation* out) override {
+    std::lock_guard<std::mutex> lock(state_->mu);
+    if (state_->closed[side_] || state_->closed[1 - side_]) {
+      return PostResult::Closed(absl::UnavailableError("link is closed"));
+    }
+    if (state_->drivers[1 - side_].expired()) {
+      return PostResult::Closed(
+          absl::UnavailableError("peer endpoint is not bound"));
+    }
+    reservation_.assign(length, 0);
+    out->data = reservation_.data();
+    out->length = length;
+    return PostResult::Accepted();
+  }
+
+  absl::Status Commit(const Reservation& reservation) override {
     std::shared_ptr<DmeshEndpointDriver> peer;
     {
       std::lock_guard<std::mutex> lock(state_->mu);
-      if (state_->closed[side_] || state_->closed[1 - side_]) {
-        return PostResult::Closed(absl::UnavailableError("link is closed"));
-      }
       peer = state_->drivers[1 - side_].lock();
       if (peer == nullptr) {
-        return PostResult::Closed(
-            absl::UnavailableError("peer endpoint is not bound"));
+        return absl::UnavailableError("peer endpoint is not bound");
       }
-      state_->bytes[side_] += bytes.size();
+      state_->bytes[side_] += reservation.length;
       ++state_->posts[side_];
     }
-    std::vector<uint8_t> copied(bytes.begin(), bytes.end());
+    std::vector<uint8_t> copied(reservation.data,
+                                reservation.data + reservation.length);
     peer_inbound_executor_->Run(
         [peer = std::move(peer), copied = std::move(copied)]() mutable {
           (void)peer->OnIncomingData(copied);
         });
-    return PostResult::Accepted();
+    return absl::OkStatus();
   }
 
   absl::Status Flush() override { return absl::OkStatus(); }
+
+  void ResumeReceive() override {}
 
   void Close() override {
     std::shared_ptr<DmeshEndpointDriver> peer;
@@ -157,6 +171,7 @@ class LinkedEndpointTransport final : public EndpointTransport {
   std::shared_ptr<LinkState> state_;
   int side_;
   Executor* const peer_inbound_executor_;
+  std::vector<uint8_t> reservation_;
 };
 
 EventEngine::ResolvedAddress Address(uint16_t port) {

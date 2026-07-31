@@ -106,7 +106,7 @@ void TestQueuedReadCompletesSynchronously() {
   CHECK_TRUE(fixture.driver->OnIncomingData(absl::MakeConstSpan(
                  reinterpret_cast<const uint8_t*>(payload.data()),
                  payload.size()))
-                 .ok());
+                 .status.ok());
 
   SliceBuffer buffer;
   bool called = false;
@@ -132,7 +132,7 @@ void TestPendingReadCompletesAsynchronously() {
   CHECK_TRUE(fixture.driver->OnIncomingData(absl::MakeConstSpan(
                  reinterpret_cast<const uint8_t*>(payload.data()),
                  payload.size()))
-                 .ok());
+                 .status.ok());
   CHECK_TRUE(!status.has_value());
   CHECK_EQ(Flatten(buffer), payload);
   CHECK_EQ(fixture.callbacks.Size(), size_t{1});
@@ -176,7 +176,7 @@ void TestBufferedDataPrecedesRemoteEof() {
   CHECK_TRUE(fixture.driver->OnIncomingData(absl::MakeConstSpan(
                  reinterpret_cast<const uint8_t*>(payload.data()),
                  payload.size()))
-                 .ok());
+                 .status.ok());
   fixture.driver->OnRemoteEof();
 
   SliceBuffer data_buffer;
@@ -233,6 +233,91 @@ void TestWriteSplitsSlicesAndCompletesAsynchronously() {
                        fixture.transport_state->posts[2].end()),
            std::string("g"));
   CHECK_EQ(fixture.transport_state->flush_count, 1);
+}
+
+void TestWriteCoalescesSlicesIntoOneReservation() {
+  Fixture fixture;
+  const std::string first(64, 'a');
+  const std::string second(64, 'b');
+
+  SliceBuffer data;
+  data.Append(Slice::FromCopiedString(first));
+  data.Append(Slice::FromCopiedString(second));
+  CHECK_EQ(data.Count(), size_t{2});
+
+  std::optional<absl::Status> status;
+  CHECK_TRUE(!fixture.endpoint->Write(
+      [&status](absl::Status value) { status = std::move(value); }, &data,
+      EventEngine::Endpoint::WriteArgs()));
+  fixture.work.RunAll();
+  fixture.callbacks.RunAll();
+  CHECK_TRUE(status->ok());
+
+  std::lock_guard<std::mutex> lock(fixture.transport_state->mu);
+  CHECK_EQ(fixture.transport_state->posts.size(), size_t{1});
+  CHECK_EQ(std::string(fixture.transport_state->posts[0].begin(),
+                       fixture.transport_state->posts[0].end()),
+           first + second);
+  CHECK_EQ(fixture.transport_state->flush_count, 1);
+}
+
+void TestReceiveHoldsCreditAboveHighWaterUntilRead() {
+  Fixture fixture;
+  const std::string chunk(64 * 1024, 'r');
+  const auto bytes = absl::MakeConstSpan(
+      reinterpret_cast<const uint8_t*>(chunk.data()), chunk.size());
+  const size_t below_mark = kReceiveHighWaterBytes / chunk.size();
+  const size_t receives = below_mark + 4;
+
+  size_t held = 0;
+  for (size_t i = 0; i < receives; ++i) {
+    const ReceiveOutcome outcome = fixture.driver->OnIncomingData(bytes);
+    CHECK_TRUE(outcome.status.ok());
+    if (outcome.hold_credit) ++held;
+  }
+  CHECK_EQ(held, size_t{4});
+  CHECK_EQ(fixture.transport_state->resume_count, 0);
+
+  SliceBuffer buffer;
+  bool called = false;
+  CHECK_TRUE(fixture.endpoint->Read(
+      [&called](absl::Status) { called = true; }, &buffer,
+      EventEngine::Endpoint::ReadArgs()));
+  CHECK_TRUE(!called);
+  CHECK_EQ(buffer.Length(), chunk.size() * receives);
+  CHECK_EQ(fixture.transport_state->resume_count, 1);
+
+  // A read waiting on the endpoint absorbs the bytes, so nothing queues and no
+  // credit is held.
+  SliceBuffer next;
+  CHECK_TRUE(!fixture.endpoint->Read(
+      [](absl::Status) {}, &next, EventEngine::Endpoint::ReadArgs()));
+  CHECK_TRUE(!fixture.driver->OnIncomingData(bytes).hold_credit);
+  CHECK_EQ(fixture.transport_state->resume_count, 1);
+}
+
+void TestRemoteEofFailsParkedWrite() {
+  Fixture fixture;
+  fixture.transport_state->results.push_back(PostResult::WouldBlock());
+
+  SliceBuffer data;
+  data.Append(Slice::FromCopiedString("parked"));
+  std::optional<absl::Status> write_status;
+  CHECK_TRUE(!fixture.endpoint->Write(
+      [&write_status](absl::Status value) { write_status = std::move(value); },
+      &data, EventEngine::Endpoint::WriteArgs()));
+  fixture.work.RunAll();
+  CHECK_TRUE(!write_status.has_value());
+
+  /* The parked write waits for capacity backed by the departed peer's
+   * credits, so EOF must complete it with an error instead of leaving it
+   * waiting for a TX-ready that can never fire. */
+  fixture.driver->OnRemoteEof();
+  fixture.callbacks.RunAll();
+  CHECK_TRUE(write_status.has_value());
+  CHECK_EQ(write_status->code(), absl::StatusCode::kUnavailable);
+  CHECK_EQ(data.Length(), size_t{0});
+  CHECK_EQ(fixture.transport_state->close_count, 1);
 }
 
 void TestWriteWouldBlockAndResumesExactlyOnce() {
@@ -377,11 +462,11 @@ void TestAllocatorMismatchFailsBothOperations() {
 
   fixture.allocator_impl->SetNextSliceSize(1);
   const std::string payload = "too large";
-  const absl::Status receive_status = fixture.driver->OnIncomingData(
+  const ReceiveOutcome receive_outcome = fixture.driver->OnIncomingData(
       absl::MakeConstSpan(
           reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
 
-  CHECK_EQ(receive_status.code(), absl::StatusCode::kResourceExhausted);
+  CHECK_EQ(receive_outcome.status.code(), absl::StatusCode::kResourceExhausted);
   CHECK_EQ(fixture.callbacks.Size(), size_t{2});
   fixture.work.RunAll();
   fixture.callbacks.RunAll();
@@ -452,6 +537,11 @@ int main() {
       {"remote EOF fails reads", TestRemoteEofFailsPendingAndFutureReads},
       {"buffered data precedes remote EOF", TestBufferedDataPrecedesRemoteEof},
       {"write splits slices", TestWriteSplitsSlicesAndCompletesAsynchronously},
+      {"write coalesces slices into one reservation",
+       TestWriteCoalescesSlicesIntoOneReservation},
+      {"remote EOF fails a parked write", TestRemoteEofFailsParkedWrite},
+      {"receive holds credit above high water",
+       TestReceiveHoldsCreditAboveHighWaterUntilRead},
       {"write resumes after backpressure",
        TestWriteWouldBlockAndResumesExactlyOnce},
       {"transport error fails pending operations",

@@ -10,6 +10,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <functional>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -97,11 +98,16 @@ std::optional<std::string> StringChannelArgument(
 }
 
 struct Fixture {
-  explicit Fixture(int post_max = 65536)
+  explicit Fixture(int post_max = 65536,
+                   std::chrono::microseconds tail_flush_delay =
+                       DmeshReactor::Options().tail_flush_delay)
       : state(std::make_shared<FakeDmeshState>()),
         allocator_impl(std::make_shared<TestMemoryAllocator>()) {
     state->SetPostMax(post_max);
-    auto created = DmeshRuntime::Create(MakeFakeDmeshApiOps(state), &callbacks);
+    DmeshRuntime::Options options;
+    options.reactor.tail_flush_delay = tail_flush_delay;
+    auto created =
+        DmeshRuntime::Create(MakeFakeDmeshApiOps(state), &callbacks, options);
     CHECK_TRUE(created.ok());
     runtime = std::move(*created);
 
@@ -143,7 +149,34 @@ struct Fixture {
   std::unique_ptr<DmeshEndpoint> endpoint;
 };
 
-void TestTxCopiesSplitsAndPostsOnOwnerThread() {
+// The fixture's ManualExecutor is both the callback and the work executor, so
+// a test drives write pumps and completions by pumping it until the observed
+// condition holds.
+template <typename Predicate>
+bool PumpUntil(ManualExecutor* executor, Predicate predicate,
+               std::chrono::milliseconds timeout = 2s) {
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  for (;;) {
+    executor->RunAll();
+    if (predicate()) return true;
+    if (std::chrono::steady_clock::now() >= deadline) return false;
+    std::this_thread::sleep_for(100us);
+  }
+}
+
+// Polls a counter the fake exposes without a dedicated waiter.
+template <typename Value>
+bool WaitFor(const std::function<Value()>& read, Value expected,
+             std::chrono::milliseconds timeout) {
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  for (;;) {
+    if (read() == expected) return true;
+    if (std::chrono::steady_clock::now() >= deadline) return false;
+    std::this_thread::sleep_for(100us);
+  }
+}
+
+void TestTxCopiesSplitsAndPostsViaWorkExecutor() {
   Fixture fixture(3);
   SliceBuffer data;
   data.Append(Slice::FromCopiedString("abcdefg"));
@@ -152,9 +185,8 @@ void TestTxCopiesSplitsAndPostsOnOwnerThread() {
       [&status](absl::Status value) { status = std::move(value); }, &data,
       EventEngine::Endpoint::WriteArgs()));
 
-  CHECK_TRUE(fixture.state->WaitForPostCount(fixture.qp, 3, 2s));
-  CHECK_TRUE(fixture.callbacks.WaitForSize(1, 2s));
   fixture.callbacks.RunAll();
+  CHECK_TRUE(fixture.state->WaitForPostCount(fixture.qp, 3, 2s));
   CHECK_TRUE(status.has_value());
   CHECK_TRUE(status->ok());
   CHECK_EQ(data.Length(), size_t{0});
@@ -183,19 +215,97 @@ void TestTxEagainRetriesFromEvent() {
       },
       &data, EventEngine::Endpoint::WriteArgs()));
 
+  fixture.callbacks.RunAll();
   CHECK_TRUE(fixture.state->WaitForAllocCallCount(fixture.qp, 1, 2s));
   std::this_thread::sleep_for(5ms);
+  fixture.callbacks.RunAll();
   CHECK_EQ(fixture.state->alloc_calls(fixture.qp), size_t{1});
   CHECK_EQ(fixture.state->Posts(fixture.qp).size(), size_t{0});
 
   fixture.state->InjectTxReady(fixture.qp);
-  CHECK_TRUE(fixture.state->WaitForPostCount(fixture.qp, 1, 2s));
-  CHECK_TRUE(fixture.callbacks.WaitForSize(1, 2s));
+  CHECK_TRUE(PumpUntil(&fixture.callbacks, [&fixture] {
+    return fixture.state->Posts(fixture.qp).size() >= 1;
+  }));
   fixture.callbacks.RunAll();
   CHECK_EQ(callback_count, 1);
   CHECK_TRUE(status->ok());
   CHECK_TRUE(fixture.state->alloc_calls(fixture.qp) >= size_t{2});
   CHECK_EQ(fixture.state->flush_calls(fixture.qp), size_t{1});
+}
+
+void TestTransmitTailPublishesWhenTransportGoesIdle() {
+  Fixture fixture(65536, 30s);
+  fixture.state->SetTxInflight(fixture.qp, true);
+
+  SliceBuffer data;
+  data.Append(Slice::FromCopiedString("tail"));
+  std::optional<absl::Status> status;
+  CHECK_TRUE(!fixture.endpoint->Write(
+      [&status](absl::Status value) { status = std::move(value); }, &data,
+      EventEngine::Endpoint::WriteArgs()));
+
+  fixture.callbacks.RunAll();
+  CHECK_TRUE(fixture.state->WaitForPostCount(fixture.qp, 1, 2s));
+  CHECK_TRUE(status->ok());
+  /* The bytes are committed, so the Write completes; the trailing partial unit
+   * stays unpublished while an earlier unit is still unacknowledged. */
+  std::this_thread::sleep_for(5ms);
+  CHECK_EQ(fixture.state->flush_calls(fixture.qp), size_t{0});
+
+  fixture.state->SetTxInflight(fixture.qp, false);
+  fixture.state->InjectTxReady(fixture.qp);
+  const std::function<size_t()> flushes = [&fixture] {
+    return fixture.state->flush_calls(fixture.qp);
+  };
+  CHECK_TRUE(WaitFor(flushes, size_t{1}, 2s));
+}
+
+void TestTransmitTailPublishesAtItsDeadline() {
+  Fixture fixture(65536, 20ms);
+  fixture.state->SetTxInflight(fixture.qp, true);
+
+  SliceBuffer data;
+  data.Append(Slice::FromCopiedString("tail"));
+  std::optional<absl::Status> status;
+  CHECK_TRUE(!fixture.endpoint->Write(
+      [&status](absl::Status value) { status = std::move(value); }, &data,
+      EventEngine::Endpoint::WriteArgs()));
+
+  fixture.callbacks.RunAll();
+  CHECK_TRUE(fixture.state->WaitForPostCount(fixture.qp, 1, 2s));
+  /* No successor arrives and the transport stays busy, so the deadline is what
+   * publishes the tail. */
+  const std::function<size_t()> flushes = [&fixture] {
+    return fixture.state->flush_calls(fixture.qp);
+  };
+  CHECK_TRUE(WaitFor(flushes, size_t{1}, 2s));
+  fixture.callbacks.RunAll();
+  CHECK_TRUE(status->ok());
+}
+
+void TestReceiveAboveHighWaterHoldsCreditUntilRead() {
+  Fixture fixture;
+  const std::string chunk(64 * 1024, 'r');
+  const size_t below_mark = kReceiveHighWaterBytes / chunk.size();
+  const size_t receives = below_mark + 4;
+  for (size_t i = 0; i < receives; ++i) {
+    fixture.state->InjectReceive(fixture.qp, chunk);
+  }
+
+  /* The endpoint queue passes its high-water mark part way through the burst;
+   * from there the reactor keeps the credit instead of returning it. */
+  CHECK_TRUE(fixture.state->WaitForReleaseCount(below_mark, 2s));
+  std::this_thread::sleep_for(20ms);
+  CHECK_EQ(fixture.state->release_count(), below_mark);
+
+  SliceBuffer buffer;
+  bool called = false;
+  CHECK_TRUE(fixture.endpoint->Read(
+      [&called](absl::Status) { called = true; }, &buffer,
+      EventEngine::Endpoint::ReadArgs()));
+  CHECK_TRUE(!called);
+  CHECK_EQ(buffer.Length(), chunk.size() * receives);
+  CHECK_TRUE(fixture.state->WaitForReleaseCount(receives, 2s));
 }
 
 void TestRxCopiesBeforeReleasingCredit() {
@@ -345,10 +455,10 @@ void TestCloseCancelsPermanentlyBlockedWrite() {
         status = std::move(value);
       },
       &data, EventEngine::Endpoint::WriteArgs()));
+  fixture.callbacks.RunAll();
   CHECK_TRUE(fixture.state->WaitForAllocCallCount(fixture.qp, 1, 2s));
 
   fixture.endpoint.reset();
-  CHECK_TRUE(fixture.callbacks.WaitForSize(1, 2s));
   fixture.callbacks.RunAll();
   CHECK_EQ(callback_count, 1);
   CHECK_EQ(status->code(), absl::StatusCode::kCancelled);
@@ -368,12 +478,12 @@ void TestPeerFinFailsParkedWrite() {
   CHECK_TRUE(!fixture.endpoint->Write(
       [&write_status](absl::Status value) { write_status = std::move(value); },
       &data, EventEngine::Endpoint::WriteArgs()));
+  fixture.callbacks.RunAll();
   CHECK_TRUE(fixture.state->WaitForAllocCallCount(fixture.qp, 1, 2s));
 
   fixture.state->InjectFin(fixture.qp);
-  CHECK_TRUE(fixture.callbacks.WaitForSize(1, 2s));
-  fixture.callbacks.RunAll();
-  CHECK_TRUE(write_status.has_value());
+  CHECK_TRUE(PumpUntil(&fixture.callbacks,
+                       [&write_status] { return write_status.has_value(); }));
   CHECK_EQ(write_status->code(), absl::StatusCode::kUnavailable);
   CHECK_TRUE(fixture.state->WaitForDestroyCount(1, 2s));
   CHECK_EQ(fixture.state->mid_batch_destroy_count(), size_t{0});
@@ -399,9 +509,8 @@ void TestAllocBackpressureAfterPeerFinFailsWrite() {
   CHECK_TRUE(!fixture.endpoint->Write(
       [&write_status](absl::Status value) { write_status = std::move(value); },
       &data, EventEngine::Endpoint::WriteArgs()));
-  CHECK_TRUE(fixture.callbacks.WaitForSize(1, 2s));
-  fixture.callbacks.RunAll();
-  CHECK_TRUE(write_status.has_value());
+  CHECK_TRUE(PumpUntil(&fixture.callbacks,
+                       [&write_status] { return write_status.has_value(); }));
   CHECK_EQ(write_status->code(), absl::StatusCode::kUnavailable);
   CHECK_TRUE(fixture.state->WaitForDestroyCount(1, 2s));
 }
@@ -416,8 +525,9 @@ void TestLargeWriteCompletesAcrossPumpYields() {
       [&status](absl::Status value) { status = std::move(value); }, &data,
       EventEngine::Endpoint::WriteArgs()));
 
-  CHECK_TRUE(fixture.state->WaitForPostCount(fixture.qp, 20, 2s));
-  CHECK_TRUE(fixture.callbacks.WaitForSize(1, 2s));
+  CHECK_TRUE(PumpUntil(&fixture.callbacks, [&fixture] {
+    return fixture.state->Posts(fixture.qp).size() >= 20;
+  }));
   fixture.callbacks.RunAll();
   CHECK_TRUE(status.has_value());
   CHECK_TRUE(status->ok());
@@ -535,9 +645,8 @@ void TestInboundConnectionIsAcceptedAndBecomesEndpointTransport() {
         write_status = std::move(status);
       },
       &response, EventEngine::Endpoint::WriteArgs()));
-  CHECK_TRUE(state->WaitForPostCount(server_qp, 1, 2s));
-  CHECK_TRUE(callbacks.WaitForSize(1, 2s));
   callbacks.RunAll();
+  CHECK_TRUE(state->WaitForPostCount(server_qp, 1, 2s));
   CHECK_TRUE(write_status.has_value());
   CHECK_TRUE(write_status->ok());
   const auto posts = state->Posts(server_qp);
@@ -613,13 +722,16 @@ void TestGrpcClientBridgeBuildsChannelFromNativeConnect() {
   (void)channel->GetState(true);
   CHECK_TRUE(state->WaitForClientQpCount(1, 2s));
 
+  // Endpoint teardown runs on the callback executor, so keep draining it while
+  // gRPC unwinds the channel. The bound is generous because the release is
+  // paced by gRPC's own EventEngine teardown, not by the adapter.
   channel.reset();
-  for (int i = 0; i < 20; ++i) {
+  bool destroyed = false;
+  for (int i = 0; i < 3000 && !destroyed; ++i) {
     callbacks.RunAll();
-    if (state->WaitForDestroyCount(1, 10ms)) break;
+    destroyed = state->WaitForDestroyCount(1, 10ms);
   }
-  // TSan can delay the EventEngine teardown timer.
-  CHECK_TRUE(state->WaitForDestroyCount(1, 10s));
+  CHECK_TRUE(destroyed);
   runtime.reset();
 }
 
@@ -796,11 +908,17 @@ struct TestCase {
 int main() {
   using namespace dpumesh::grpc::testing;
   const TestCase tests[] = {
-      {"TX copies and splits on owner thread",
-       TestTxCopiesSplitsAndPostsOnOwnerThread},
+      {"TX copies and splits via the work executor",
+       TestTxCopiesSplitsAndPostsViaWorkExecutor},
       {"TX EAGAIN retries from event",
        TestTxEagainRetriesFromEvent},
       {"RX copies before releasing credit", TestRxCopiesBeforeReleasingCredit},
+      {"transmit tail publishes when the transport goes idle",
+       TestTransmitTailPublishesWhenTransportGoesIdle},
+      {"transmit tail publishes at its deadline",
+       TestTransmitTailPublishesAtItsDeadline},
+      {"receive above high water holds credit until read",
+       TestReceiveAboveHighWaterHoldsCreditUntilRead},
       {"pre-bind data and FIN replay in order",
        TestPrebindDataAndFinAreReplayedInOrder},
       {"batched RX preserves byte order", TestBatchedRxPreservesByteOrder},

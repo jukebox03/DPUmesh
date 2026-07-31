@@ -24,12 +24,14 @@ class DmeshApiOps {
   virtual void* Alloc(dmesh_qp_t* qp, uint32_t len) = 0;
   virtual int PostSend(dmesh_qp_t* qp, const void* buffer, uint32_t len) = 0;
   virtual int Flush(dmesh_qp_t* qp) = 0;
+  virtual int TxInflight(dmesh_qp_t* qp) = 0;
   virtual int PollEq(dmesh_eq_t* eq, dmesh_event_t* events,
                      int max_events) = 0;
   virtual void ReleaseRxBuffer(dmesh_channel_t* channel,
                                dmesh_event_t* event) = 0;
   virtual int MessageMax(dmesh_channel_t* channel) = 0;
   virtual int PostMax(dmesh_channel_t* channel) = 0;
+  virtual int PodId(dmesh_channel_t* channel) = 0;
 };
 
 std::unique_ptr<DmeshApiOps> MakeNativeDmeshApiOps();

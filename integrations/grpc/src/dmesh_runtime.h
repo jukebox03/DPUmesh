@@ -15,11 +15,12 @@
 namespace dpumesh::grpc {
 
 // Process-level DPUmesh ownership: one channel and N independent EQ reactors,
-// each paired with its own dedicated callback thread by default. A custom
-// callback executor replaces every pair and must outlive the runtime and every
-// endpoint created by one of its reactors. The runtime itself must also
-// outlive those endpoints, because each endpoint uses its owning reactor as
-// the work executor.
+// each paired with its own dedicated callback thread by default. That thread
+// is both the endpoint's callback executor and its work executor, so write
+// pumps run where chttp2 already runs and reach the transport without a
+// reactor handoff. A custom callback executor replaces every pair and must
+// outlive the runtime and every endpoint created by one of its reactors; the
+// runtime itself must also outlive those endpoints.
 class DmeshRuntime final {
  public:
   struct Options {

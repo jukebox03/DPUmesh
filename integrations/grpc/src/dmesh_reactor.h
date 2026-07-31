@@ -1,6 +1,7 @@
 #ifndef DPUMESH_GRPC_DMESH_REACTOR_H
 #define DPUMESH_GRPC_DMESH_REACTOR_H
 
+#include <chrono>
 #include <cstddef>
 #include <functional>
 #include <memory>
@@ -15,21 +16,38 @@
 
 namespace dpumesh::grpc {
 
-// One EQ shard and its single owner thread. Every QP operation is marshalled
-// through Run(), so dmesh_poll_eq() has exactly one consumer and no QP is
-// destroyed while a returned event batch can still name it.
-class DmeshReactor final : public Executor {
+// One EQ shard and its single owner thread. The owner thread is the sole
+// consumer of dmesh_poll_eq() and owns QP lifecycle, so no QP is destroyed
+// while a returned event batch can still name it. Transmit operations run on
+// the endpoint's work executor under a per-connection lock, which the owner
+// thread also takes before destroying that connection's QP.
+class DmeshReactor final {
  public:
   struct Options {
     size_t event_batch_size = 64;
+    // How long a committed transmit tail waits for a successor write to share
+    // its transport unit while an earlier unit is still unacknowledged. Zero
+    // publishes every tail at its write boundary, which is what chttp2 wants:
+    // it already merges concurrent streams into one logical write, so a
+    // successor cannot arrive before the current write's completion.
+    std::chrono::microseconds tail_flush_delay{0};
   };
 
   struct ConnectedTransport {
     std::unique_ptr<EndpointTransport> transport;
+    // Both point at the reactor's paired callback executor: endpoint
+    // completions and the write pump share that thread, so a write posts to
+    // the transport on the thread chttp2 already runs on and pays no
+    // reactor-queue handoff.
     Executor* work_executor = nullptr;
-    // The reactor's paired callback executor; endpoint completions for this
-    // connection stay on the owning shard's callback thread.
     Executor* callback_executor = nullptr;
+    // Native identity of the two ends. The peer pair stays unset on a client
+    // QP: the DPU selects and pins a backend for that stream, so the host
+    // learns no peer pod.
+    int local_pod = -1;
+    uint16_t local_port = 0;
+    int peer_pod = -1;
+    uint16_t peer_port = 0;
   };
 
   using ConnectCallback = absl::AnyInvocable<void(
@@ -43,13 +61,10 @@ class DmeshReactor final : public Executor {
       DmeshApiOps* ops, dmesh_channel_t* channel, int post_max,
       Executor* callback_executor, Options options);
 
-  ~DmeshReactor() override;
+  ~DmeshReactor();
 
   DmeshReactor(const DmeshReactor&) = delete;
   DmeshReactor& operator=(const DmeshReactor&) = delete;
-
-  // Executor contract: enqueue only, never invoke inline.
-  void Run(absl::AnyInvocable<void()> task) override;
 
   // QP creation and callback delivery are both asynchronous. The callback is
   // delivered on callback_executor, never on the EQ owner thread.

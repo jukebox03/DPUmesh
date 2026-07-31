@@ -16,28 +16,45 @@ ThreadExecutor::~ThreadExecutor() {
 }
 
 void ThreadExecutor::Run(absl::AnyInvocable<void()> task) {
+  Entry entry;
+  entry.task = std::move(task);
+  Push(std::move(entry));
+}
+
+void ThreadExecutor::RunCompletion(
+    absl::AnyInvocable<void(absl::Status)> callback, absl::Status status) {
+  Entry entry;
+  entry.completion = std::move(callback);
+  entry.status = std::move(status);
+  Push(std::move(entry));
+}
+
+void ThreadExecutor::Push(Entry entry) {
   {
     std::lock_guard<std::mutex> lock(mu_);
     if (stopping_) return;
-    tasks_.push_back(std::move(task));
+    queue_.push_back(std::move(entry));
   }
   cv_.notify_one();
 }
 
 void ThreadExecutor::ThreadMain() {
+  std::deque<Entry> batch;
   for (;;) {
-    absl::AnyInvocable<void()> task;
     {
       std::unique_lock<std::mutex> lock(mu_);
-      cv_.wait(lock, [this] { return stopping_ || !tasks_.empty(); });
-      if (tasks_.empty()) {
-        if (stopping_) return;
-        continue;
-      }
-      task = std::move(tasks_.front());
-      tasks_.pop_front();
+      cv_.wait(lock, [this] { return stopping_ || !queue_.empty(); });
+      if (queue_.empty()) return;
+      batch.swap(queue_);
     }
-    task();
+    for (auto& entry : batch) {
+      if (entry.completion) {
+        entry.completion(std::move(entry.status));
+      } else if (entry.task) {
+        entry.task();
+      }
+    }
+    batch.clear();
   }
 }
 

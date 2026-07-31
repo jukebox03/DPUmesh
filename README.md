@@ -133,8 +133,9 @@ cmake --build build/grpc -j2
 ASAN_OPTIONS=detect_leaks=0 ctest --test-dir build/grpc --output-on-failure
 ```
 
-LeakSanitizer is disabled only because ptrace/sandboxed test execution makes its
-process probe fail; AddressSanitizer and the functional test suite still run.
+LeakSanitizer is disabled only because gRPC's EventEngine teardown intermittently
+still holds allocations at exit; AddressSanitizer and the functional test suite
+still run.
 Clients use a Service-name target and ordinary gRPC channel arguments. Each
 connection attempt creates a QP; established L4 streams remain backend-pinned.
 

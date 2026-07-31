@@ -30,6 +30,7 @@ class FakeDmeshState final {
   void FailNextCreateQp(int error_number);
   void FailNextAlloc(dmesh_qp_t* qp, int error_number);
   void SetAllocError(dmesh_qp_t* qp, int error_number);
+  void SetTxInflight(dmesh_qp_t* qp, bool inflight);
   void FailNextPost(dmesh_qp_t* qp, int error_number);
   void FailNextPoll(int error_number);
 

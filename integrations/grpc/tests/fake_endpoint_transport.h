@@ -33,7 +33,9 @@ struct FakeTransportState {
   size_t max_post_size = 4096;
   std::deque<PostResult> results;
   std::vector<std::vector<uint8_t>> posts;
+  std::vector<uint8_t> reservation;
   int flush_count = 0;
+  int resume_count = 0;
   int close_count = 0;
 };
 
@@ -44,8 +46,10 @@ class FakeEndpointTransport final : public EndpointTransport {
 
   void BindDriver(std::weak_ptr<DmeshEndpointDriver> driver) override;
   size_t MaxPostSize() const override;
-  PostResult Post(absl::Span<const uint8_t> bytes) override;
+  PostResult Reserve(size_t length, Reservation* out) override;
+  absl::Status Commit(const Reservation& reservation) override;
   absl::Status Flush() override;
+  void ResumeReceive() override;
   void Close() override;
 
  private:

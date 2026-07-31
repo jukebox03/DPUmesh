@@ -55,6 +55,7 @@ class FakeDmeshState::Impl final {
     dmesh_qp_t value{};
     Eq* eq = nullptr;
     bool alive = true;
+    bool tx_inflight = false;
     size_t alloc_calls = 0;
     size_t flush_calls = 0;
     std::deque<int> alloc_failures;
@@ -292,6 +293,12 @@ class FakeDmeshApiOps final : public DmeshApiOps {
     return 0;
   }
 
+  int TxInflight(dmesh_qp_t* qp) override {
+    std::lock_guard<std::mutex> lock(impl_->mu);
+    auto* fake = impl_->FindQp(qp);
+    return fake != nullptr && fake->alive && fake->tx_inflight ? 1 : 0;
+  }
+
   int PollEq(dmesh_eq_t* eq, dmesh_event_t* events,
              int max_events) override {
     std::lock_guard<std::mutex> lock(impl_->mu);
@@ -345,6 +352,10 @@ class FakeDmeshApiOps final : public DmeshApiOps {
     return impl_->post_max;
   }
 
+  int PodId(dmesh_channel_t* /*channel*/) override {
+    return impl_->channel.pod_id;
+  }
+
  private:
   std::shared_ptr<FakeDmeshState> state_;
   FakeDmeshState::Impl* const impl_;
@@ -376,6 +387,13 @@ void FakeDmeshState::SetAllocError(dmesh_qp_t* qp, int error_number) {
   std::lock_guard<std::mutex> lock(impl_->mu);
   if (auto* fake = impl_->FindQp(qp)) {
     fake->sticky_alloc_error = error_number;
+  }
+}
+
+void FakeDmeshState::SetTxInflight(dmesh_qp_t* qp, bool inflight) {
+  std::lock_guard<std::mutex> lock(impl_->mu);
+  if (auto* fake = impl_->FindQp(qp)) {
+    fake->tx_inflight = inflight;
   }
 }
 

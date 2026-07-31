@@ -94,22 +94,41 @@ that stream; a later gRPC connection creates a QP and selects from the current
 live set. In-flight RPCs retain normal gRPC deadline, retry, idempotency, and
 `wait_for_ready` semantics. New Service names require registry updates.
 
+`GetPeerAddress` and `GetLocalAddress` report loopback addresses carrying the
+DPU-assigned pod id and the connection's native port, so gRPC peer strings
+distinguish connections and backends. A client stream has no peer pod until the
+DPU pins one, and reads as `127.0.0.0:0`.
+
 ## Data path
 
 Each runtime owns one native channel and configurable EQ reactor shards. A
-reactor is the sole consumer of its EQ and owns its QPs, and is paired with a
-dedicated callback thread that runs the endpoint completions (and therefore
-chttp2) for its connections, so callback work shards with the EQ shards.
-`DmeshRuntime::Create` accepts a custom executor to replace the pairs. RX
-bytes are copied into gRPC slices before native credit is released; TX slices
-are copied into registered native reservations.
+reactor is the sole consumer of its EQ and owns QP lifecycle, and is paired
+with a dedicated thread that runs both the endpoint completions (and therefore
+chttp2) and the write pumps for its connections, so all per-connection work
+shards with the EQ shards. That thread claims its whole queue per wake and
+carries each callback next to the status it completes with.
+`DmeshRuntime::Create` accepts a custom executor to replace the pairs.
 
-Writes flush at the EventEngine write boundary. A large logical Write posts a
-bounded number of fragments per reactor pass and reschedules itself, so one
-connection cannot starve its shard. On `EAGAIN`, the endpoint keeps its slice
-cursor and resumes on `DMESH_EVENT_TX_READY`; if the peer has already closed,
-the write fails with `UNAVAILABLE` instead of parking. There is no busy poll,
-retry timer, connection scan, or per-RPC wrapper dispatch.
+TX slices are copied into registered native reservations on the paired thread —
+the thread a write is already running on — under a per-connection lock that the
+reactor also takes before destroying that connection's QP. Consecutive slices of
+one logical Write share a reservation, so an HTTP/2 frame header and its payload
+cost one native post rather than one each. A Write publishes at the EventEngine
+write boundary; a large one takes a bounded number of reservations per pump run
+and reschedules itself, so one connection cannot starve its shard's thread. On
+`EAGAIN`, the endpoint keeps its slice cursor and resumes when the reactor
+forwards `DMESH_EVENT_TX_READY`; if the peer has already closed, the write
+fails with `UNAVAILABLE` instead of parking.
+
+RX bytes are copied into gRPC slices, and the native credit returns with the
+copy while the endpoint's receive queue is below its high-water mark. Above the
+mark the reactor keeps the credit until a read drains the queue, so a reader
+that has stopped consuming stops the transport landing bytes for that connection
+instead of growing host memory without bound. Retained credits are capped per
+connection because the landing ring is shared across the shard.
+
+There is no busy poll, retry timer, connection scan, or per-RPC wrapper
+dispatch.
 
 ## Build and test
 

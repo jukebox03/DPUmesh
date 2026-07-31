@@ -25,17 +25,19 @@ using MemoryRequest = grpc_event_engine::experimental::MemoryRequest;
 using Slice = grpc_event_engine::experimental::Slice;
 using SliceBuffer = grpc_event_engine::experimental::SliceBuffer;
 
+// Reservations one pump run may post before yielding its reactor shard. The
+// pump reschedules itself for the remainder, so one large logical Write cannot
+// monopolise the shard.
+constexpr size_t kReservationBudget = 16;
+
 struct Completion {
   Callback callback;
   absl::Status status;
 };
 
 void ScheduleCompletion(Executor* executor, Completion completion) {
-  executor->Run(
-      [callback = std::move(completion.callback),
-       status = std::move(completion.status)]() mutable {
-        callback(std::move(status));
-      });
+  executor->RunCompletion(std::move(completion.callback),
+                          std::move(completion.status));
 }
 
 }  // namespace
@@ -78,11 +80,17 @@ class DmeshEndpointState final
   Executor* const callback_executor;
   grpc_event_engine::experimental::MemoryAllocator allocator;
   std::deque<Slice> receive_queue;
+  size_t queued_bytes = 0;
   std::optional<PendingRead> pending_read;
   std::optional<PendingWrite> pending_write;
   Life life = Life::kOpen;
   absl::Status failure = absl::OkStatus();
   bool write_pump_scheduled = false;
+  // True while the pending write waits for DMESH_EVENT_TX_READY. A peer FIN
+  // must fail such a write: the capacity it waits for was backed by the
+  // departed peer's credits, so the event can never fire.
+  bool write_parked = false;
+  bool receive_paused = false;
   bool transport_closed = false;
 };
 
@@ -117,6 +125,7 @@ std::optional<Completion> TakeWriteFailureLocked(
   Completion completion{std::move(state->pending_write->callback), status};
   state->pending_write.reset();
   state->write_pump_scheduled = false;
+  state->write_parked = false;
   return completion;
 }
 
@@ -127,11 +136,52 @@ void ScheduleIfPresent(Executor* executor,
   }
 }
 
-void PumpWrite(const std::shared_ptr<DmeshEndpointState>& state) {
-  /* Cap the fragments posted per pump run so one large logical Write cannot
-   * monopolise the reactor; the pump reschedules itself for the remainder. */
-  constexpr size_t kFragmentBudget = 16;
+// Advance the cursor past slices the pump has already consumed.
+void SkipConsumedSlices(DmeshEndpointState::PendingWrite* write) {
+  while (write->slice_index < write->data->Count() &&
+         write->slice_offset == (*write->data)[write->slice_index].size()) {
+    ++write->slice_index;
+    write->slice_offset = 0;
+  }
+}
 
+// Bytes one reservation should carry: everything left in the logical Write,
+// capped by the largest reservation the transport accepts. Consecutive slices
+// share one reservation, so an HTTP/2 frame header and its payload cost one
+// native post rather than one each.
+size_t ReservationLength(const DmeshEndpointState::PendingWrite& write,
+                         size_t max_post_size) {
+  size_t length = 0;
+  size_t offset = write.slice_offset;
+  for (size_t index = write.slice_index;
+       index < write.data->Count() && length < max_post_size; ++index) {
+    length += (*write.data)[index].size() - offset;
+    offset = 0;
+  }
+  return std::min(length, max_post_size);
+}
+
+// Copy `length` bytes from the cursor into the reservation and advance the
+// cursor past exactly those bytes.
+void FillReservation(DmeshEndpointState::PendingWrite* write,
+                     const Reservation& reservation) {
+  size_t filled = 0;
+  while (filled < reservation.length) {
+    const Slice& slice = (*write->data)[write->slice_index];
+    const size_t take =
+        std::min(reservation.length - filled, slice.size() - write->slice_offset);
+    std::memcpy(reservation.data + filled, slice.data() + write->slice_offset,
+                take);
+    filled += take;
+    write->slice_offset += take;
+    if (write->slice_offset == slice.size()) {
+      ++write->slice_index;
+      write->slice_offset = 0;
+    }
+  }
+}
+
+void PumpWrite(const std::shared_ptr<DmeshEndpointState>& state) {
   std::optional<Completion> write_completion;
   std::optional<Completion> read_completion;
   bool close_transport = false;
@@ -161,36 +211,31 @@ void PumpWrite(const std::shared_ptr<DmeshEndpointState>& state) {
         read_completion = TakeReadFailureLocked(state.get(), state->failure);
         close_transport = true;
       } else {
-        size_t fragments = 0;
-        while (write.slice_index < write.data->Count()) {
-          const Slice& slice = (*write.data)[write.slice_index];
-          if (write.slice_offset == slice.size()) {
-            ++write.slice_index;
-            write.slice_offset = 0;
-            continue;
-          }
-          if (fragments == kFragmentBudget) {
+        size_t reservations = 0;
+        for (;;) {
+          SkipConsumedSlices(&write);
+          if (write.slice_index == write.data->Count()) break;
+          if (reservations == kReservationBudget) {
             state->write_pump_scheduled = true;
             reschedule = true;
             break;
           }
 
-          const size_t length =
-              std::min(max_post_size, slice.size() - write.slice_offset);
-          const auto bytes = absl::MakeConstSpan(
-              slice.data() + write.slice_offset, length);
-          PostResult result = state->transport->Post(bytes);
+          Reservation reservation;
+          PostResult result = state->transport->Reserve(
+              ReservationLength(write, max_post_size), &reservation);
 
           if (result.code == PostCode::kAccepted) {
-            write.slice_offset += length;
-            ++fragments;
-            continue;
-          }
-          if (result.code == PostCode::kWouldBlock) {
+            FillReservation(&write, reservation);
+            result.status = state->transport->Commit(reservation);
+            if (result.status.ok()) {
+              ++reservations;
+              continue;
+            }
+          } else if (result.code == PostCode::kWouldBlock) {
+            state->write_parked = true;
             return;
-          }
-
-          if (result.status.ok()) {
+          } else if (result.status.ok()) {
             result.status = result.code == PostCode::kClosed
                                 ? absl::UnavailableError(
                                       "DPUmesh transport is closed")
@@ -245,20 +290,22 @@ DmeshEndpointDriver::DmeshEndpointDriver(
     std::shared_ptr<DmeshEndpointState> state)
     : state_(std::move(state)) {}
 
-absl::Status DmeshEndpointDriver::OnIncomingData(
+ReceiveOutcome DmeshEndpointDriver::OnIncomingData(
     absl::Span<const uint8_t> bytes) {
-  if (bytes.empty()) return absl::OkStatus();
+  if (bytes.empty()) return ReceiveOutcome{absl::OkStatus(), false};
 
   std::optional<Completion> completion;
   std::optional<Completion> write_completion;
-  absl::Status result = absl::OkStatus();
+  ReceiveOutcome outcome{absl::OkStatus(), false};
   bool close_transport = false;
 
   {
     std::lock_guard<std::mutex> lock(state_->mu);
     if (state_->life != DmeshEndpointState::Life::kOpen) {
-      return absl::FailedPreconditionError(
-          "received DPUmesh data after endpoint input closed");
+      return ReceiveOutcome{
+          absl::FailedPreconditionError(
+              "received DPUmesh data after endpoint input closed"),
+          false};
     }
 
     grpc_slice raw = state_->allocator.MakeSlice(MemoryRequest(bytes.size()));
@@ -272,7 +319,7 @@ absl::Status DmeshEndpointDriver::OnIncomingData(
       completion = TakeReadFailureLocked(state_.get(), state_->failure);
       write_completion =
           TakeWriteFailureLocked(state_.get(), state_->failure);
-      result = state_->failure;
+      outcome.status = state_->failure;
       close_transport = true;
     } else {
       std::memcpy(GRPC_SLICE_START_PTR(raw), bytes.data(), bytes.size());
@@ -283,7 +330,12 @@ absl::Status DmeshEndpointDriver::OnIncomingData(
                                 absl::OkStatus()};
         state_->pending_read.reset();
       } else {
+        state_->queued_bytes += slice.size();
         state_->receive_queue.push_back(std::move(slice));
+        if (state_->queued_bytes > kReceiveHighWaterBytes) {
+          state_->receive_paused = true;
+          outcome.hold_credit = true;
+        }
       }
     }
   }
@@ -291,7 +343,7 @@ absl::Status DmeshEndpointDriver::OnIncomingData(
   if (close_transport) CloseTransport(state_);
   ScheduleIfPresent(state_->callback_executor, std::move(completion));
   ScheduleIfPresent(state_->callback_executor, std::move(write_completion));
-  return result;
+  return outcome;
 }
 
 void DmeshEndpointDriver::OnWritable() {
@@ -303,6 +355,7 @@ void DmeshEndpointDriver::OnWritable() {
         state_->life != DmeshEndpointState::Life::kFailed &&
         state_->life != DmeshEndpointState::Life::kClosing) {
       state_->write_pump_scheduled = true;
+      state_->write_parked = false;
       schedule = true;
     }
   }
@@ -310,15 +363,30 @@ void DmeshEndpointDriver::OnWritable() {
 }
 
 void DmeshEndpointDriver::OnRemoteEof() {
-  std::optional<Completion> completion;
+  std::optional<Completion> read_completion;
+  std::optional<Completion> write_completion;
+  bool close_transport = false;
   {
     std::lock_guard<std::mutex> lock(state_->mu);
     if (state_->life != DmeshEndpointState::Life::kOpen) return;
-    state_->life = DmeshEndpointState::Life::kRemoteEof;
-    completion = TakeReadFailureLocked(
+    read_completion = TakeReadFailureLocked(
         state_.get(), absl::UnavailableError("DPUmesh peer closed"));
+    /* A parked write waits for capacity backed by the departed peer's credits;
+     * no TX_READY will ever resume it. Every accepted EventEngine Write must
+     * still complete, so the endpoint fails instead of waiting forever. */
+    if (state_->write_parked && state_->pending_write.has_value()) {
+      state_->life = DmeshEndpointState::Life::kFailed;
+      state_->failure = absl::UnavailableError(
+          "DPUmesh peer closed while transmit was blocked");
+      write_completion = TakeWriteFailureLocked(state_.get(), state_->failure);
+      close_transport = true;
+    } else {
+      state_->life = DmeshEndpointState::Life::kRemoteEof;
+    }
   }
-  ScheduleIfPresent(state_->callback_executor, std::move(completion));
+  if (close_transport) CloseTransport(state_);
+  ScheduleIfPresent(state_->callback_executor, std::move(read_completion));
+  ScheduleIfPresent(state_->callback_executor, std::move(write_completion));
 }
 
 void DmeshEndpointDriver::OnTransportError(absl::Status status) {
@@ -383,6 +451,8 @@ DmeshEndpoint::~DmeshEndpoint() {
 bool DmeshEndpoint::Read(Callback on_read, SliceBuffer* buffer,
                          ReadArgs /*args*/) {
   std::optional<Completion> completion;
+  bool resume_receive = false;
+  bool queue_consumed = false;
   {
     std::lock_guard<std::mutex> lock(state_->mu);
     if (state_->pending_read.has_value()) std::abort();
@@ -392,32 +462,33 @@ bool DmeshEndpoint::Read(Callback on_read, SliceBuffer* buffer,
         buffer->Append(std::move(state_->receive_queue.front()));
         state_->receive_queue.pop_front();
       }
-      return true;
-    }
-
-    if (state_->life == DmeshEndpointState::Life::kOpen) {
+      state_->queued_bytes = 0;
+      resume_receive = std::exchange(state_->receive_paused, false);
+      queue_consumed = true;
+    } else if (state_->life == DmeshEndpointState::Life::kOpen) {
       state_->pending_read.emplace(
           DmeshEndpointState::PendingRead{std::move(on_read), buffer});
-      return false;
+    } else {
+      absl::Status status;
+      switch (state_->life) {
+        case DmeshEndpointState::Life::kRemoteEof:
+          status = absl::UnavailableError("DPUmesh peer closed");
+          break;
+        case DmeshEndpointState::Life::kFailed:
+          status = state_->failure;
+          break;
+        case DmeshEndpointState::Life::kClosing:
+          status = absl::CancelledError("DPUmesh endpoint is closing");
+          break;
+        case DmeshEndpointState::Life::kOpen:
+          std::abort();
+      }
+      completion = Completion{std::move(on_read), std::move(status)};
     }
-
-    absl::Status status;
-    switch (state_->life) {
-      case DmeshEndpointState::Life::kRemoteEof:
-        status = absl::UnavailableError("DPUmesh peer closed");
-        break;
-      case DmeshEndpointState::Life::kFailed:
-        status = state_->failure;
-        break;
-      case DmeshEndpointState::Life::kClosing:
-        status = absl::CancelledError("DPUmesh endpoint is closing");
-        break;
-      case DmeshEndpointState::Life::kOpen:
-        std::abort();
-    }
-    completion = Completion{std::move(on_read), std::move(status)};
   }
-  ScheduleCompletion(state_->callback_executor, std::move(*completion));
+  if (resume_receive) state_->transport->ResumeReceive();
+  if (queue_consumed) return true;
+  ScheduleIfPresent(state_->callback_executor, std::move(completion));
   return false;
 }
 

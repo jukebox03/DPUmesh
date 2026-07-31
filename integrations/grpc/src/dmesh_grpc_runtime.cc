@@ -58,11 +58,12 @@ bool HasChannelArgument(const ::grpc::ChannelArguments& args,
   return false;
 }
 
-EventEngine::ResolvedAddress LogicalAddress(uint16_t port) {
+EventEngine::ResolvedAddress NativeAddress(int pod, uint16_t port) {
   sockaddr_in address{};
   address.sin_family = AF_INET;
   address.sin_port = htons(port);
-  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  const uint32_t host = (pod > 0 && pod <= 255) ? static_cast<uint32_t>(pod) : 0;
+  address.sin_addr.s_addr = htonl(0x7f000000u | host);
   return EventEngine::ResolvedAddress(
       reinterpret_cast<const sockaddr*>(&address), sizeof(address));
 }
@@ -241,7 +242,8 @@ class DmeshClientEventEngine final : public EventEngine {
     pending.on_connect(std::make_unique<DmeshEndpoint>(
         std::move(connected->transport), connected->work_executor,
         callback_executor, std::move(memory_allocator),
-        LogicalAddress(1), LogicalAddress(2)));
+        NativeAddress(connected->peer_pod, connected->peer_port),
+        NativeAddress(connected->local_pod, connected->local_port)));
   }
 
   DmeshRuntime* const runtime_;
@@ -294,8 +296,9 @@ struct DmeshGrpcServerAttachment::State {
                                          : callback_executor;
       auto endpoint = std::make_unique<DmeshEndpoint>(
           std::move(connected.transport), connected.work_executor,
-          endpoint_callbacks, std::move(allocator), LogicalAddress(2),
-          LogicalAddress(1));
+          endpoint_callbacks, std::move(allocator),
+          NativeAddress(connected.peer_pod, connected.peer_port),
+          NativeAddress(connected.local_pod, connected.local_port));
       status = listener->AcceptConnectedEndpoint(std::move(endpoint));
     }
     if (!status.ok() && on_error) on_error(status);
