@@ -287,15 +287,22 @@ void TestReceiveAboveHighWaterHoldsCreditUntilRead() {
   Fixture fixture;
   const std::string chunk(64 * 1024, 'r');
   const size_t below_mark = kReceiveHighWaterBytes / chunk.size();
-  const size_t receives = below_mark + 4;
-  for (size_t i = 0; i < receives; ++i) {
+
+  /* Below the high-water mark every receive returns its credit. Each chunk is
+   * awaited on its own because the credit decision covers a whole coalesced
+   * run: chunks that arrive together share one decision. */
+  for (size_t i = 0; i < below_mark; ++i) {
     fixture.state->InjectReceive(fixture.qp, chunk);
+    CHECK_TRUE(fixture.state->WaitForReleaseCount(i + 1, 2s));
   }
 
-  /* The endpoint queue passes its high-water mark part way through the burst;
-   * from there the reactor keeps the credit instead of returning it. */
-  CHECK_TRUE(fixture.state->WaitForReleaseCount(below_mark, 2s));
-  std::this_thread::sleep_for(20ms);
+  /* These take the queue past the mark, so the reactor keeps their credit
+   * instead of returning it. */
+  const size_t receives = below_mark + 4;
+  for (size_t i = below_mark; i < receives; ++i) {
+    fixture.state->InjectReceive(fixture.qp, chunk);
+  }
+  std::this_thread::sleep_for(50ms);
   CHECK_EQ(fixture.state->release_count(), below_mark);
 
   SliceBuffer buffer;
