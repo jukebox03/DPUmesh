@@ -67,7 +67,15 @@ static void fixture_init(struct fixture *f, int pool_empty)
     psl->role = DMESH_ROLE_CLIENT;
     psl->user = &f->qp;
     psl->eq = f->eq;
-    for (int i = 0; i < TX_BLOCKS_PER_CONN; i++) psl->pblk[i] = -1;
+    atomic_init(&psl->tx_c, 0);
+    atomic_init(&psl->tx_s, 0);
+    atomic_init(&psl->tx_batch_state, TX_BATCH_IDLE);
+    atomic_init(&psl->tx_generation, 0);
+    atomic_init(&psl->tx_batch_epoch, 0);
+    for (int i = 0; i < TX_BLOCKS_PER_CONN; i++) {
+        psl->pblk[i] = -1;
+        atomic_init(&psl->blk_used[i], 0);
+    }
     atomic_init(&psl->tx_f, (uint_fast64_t)0);
     atomic_init(&psl->su_head, (uint_fast16_t)0);
     atomic_init(&psl->su_tail, (uint_fast16_t)0);
@@ -114,7 +122,9 @@ static void test_suppressed_notify_rechecks_pending(void)
 static void fill_qp_window(struct fixture *f)
 {
     struct dmesh_port_slot *psl = &f->ports[TEST_PORT];
-    psl->tx_w = psl->tx_c = psl->tx_s = 128;
+    psl->tx_w = 128;
+    atomic_store_explicit(&psl->tx_c, 128, memory_order_relaxed);
+    atomic_store_explicit(&psl->tx_s, 128, memory_order_relaxed);
     psl->tail_blk = 0;
     psl->head_blk_next = 2;
     psl->nblk_owned = 2;
@@ -168,9 +178,9 @@ static void test_out_of_order_ack_waits_for_contiguous_prefix(void)
     size_t moff;
     uint32_t len;
     assert(dpumesh_tx_next_send(f.ctx, TEST_PORT, 0, &moff, &len) == 1 && len == 16);
-    dpumesh_tx_sent(f.ctx, TEST_PORT, 100, len);
+    dpumesh_tx_track(f.ctx, TEST_PORT, 100, len);
     assert(dpumesh_tx_next_send(f.ctx, TEST_PORT, 0, &moff, &len) == 1 && len == 16);
-    dpumesh_tx_sent(f.ctx, TEST_PORT, 101, len);
+    dpumesh_tx_track(f.ctx, TEST_PORT, 101, len);
 
     tx_reclaim_ack(f.ctx, TEST_PORT, 101);       /* later engine finishes first */
     assert(atomic_load(&psl->tx_f) == 0);
@@ -180,6 +190,45 @@ static void test_out_of_order_ack_waits_for_contiguous_prefix(void)
     assert(atomic_load(&psl->su_tail) == 2);
     tx_reclaim_ack(f.ctx, TEST_PORT, 101);       /* stale duplicate */
     assert(atomic_load(&psl->tx_f) == 32);
+    fixture_destroy(&f);
+}
+
+static void test_ack_tracking_precedes_forward_publication(void)
+{
+    struct fixture f;
+    fixture_init(&f, 0);
+    struct dmesh_port_slot *psl = &f.ports[TEST_PORT];
+    uint8_t *buf = dpumesh_tx_reserve(f.ctx, TEST_PORT, 16);
+    assert(buf != NULL);
+    assert(dpumesh_tx_commit(f.ctx, TEST_PORT, buf, 16) == 0);
+    size_t moff;
+    uint32_t len;
+    assert(dpumesh_tx_next_send(f.ctx, TEST_PORT, 0, &moff, &len) == 1);
+
+    dpumesh_tx_track(f.ctx, TEST_PORT, 700, len);
+    tx_reclaim_ack(f.ctx, TEST_PORT, 700);
+    assert(atomic_load(&psl->tx_f) == 16);
+    assert(atomic_load(&psl->su_head) == atomic_load(&psl->su_tail));
+    fixture_destroy(&f);
+}
+
+static void test_failed_forward_publication_rolls_back_tracking(void)
+{
+    struct fixture f;
+    fixture_init(&f, 0);
+    struct dmesh_port_slot *psl = &f.ports[TEST_PORT];
+    uint8_t *buf = dpumesh_tx_reserve(f.ctx, TEST_PORT, 16);
+    assert(buf != NULL);
+    assert(dpumesh_tx_commit(f.ctx, TEST_PORT, buf, 16) == 0);
+    size_t first_moff, retry_moff;
+    uint32_t len;
+    assert(dpumesh_tx_next_send(f.ctx, TEST_PORT, 0, &first_moff, &len) == 1);
+    dpumesh_tx_track(f.ctx, TEST_PORT, 701, len);
+    assert(dpumesh_tx_untrack(f.ctx, TEST_PORT, 701, len) == 0);
+    assert(atomic_load(&psl->tx_s) == 0);
+    assert(atomic_load(&psl->su_head) == atomic_load(&psl->su_tail));
+    assert(dpumesh_tx_next_send(f.ctx, TEST_PORT, 0, &retry_moff, &len) == 1);
+    assert(retry_moff == first_moff);
     fixture_destroy(&f);
 }
 
@@ -229,18 +278,22 @@ static void test_pool_eagain_does_not_commit_padding(void)
     struct fixture f;
     fixture_init(&f, 1);
     struct dmesh_port_slot *psl = &f.ports[TEST_PORT];
-    psl->tx_w = psl->tx_c = psl->tx_s = 60;
+    psl->tx_w = 60;
+    atomic_store_explicit(&psl->tx_c, 60, memory_order_relaxed);
+    atomic_store_explicit(&psl->tx_s, 60, memory_order_relaxed);
     psl->head_blk_next = 1;
     psl->nblk_owned = 1;
     psl->pblk[0] = 0;
-    psl->blk_used[0] = 60;
+    atomic_store_explicit(&psl->blk_used[0], 60, memory_order_relaxed);
 
     /* The 8-byte message needs padding into a new block, but the pool is empty.
      * EAGAIN must leave the logical write head untouched so retry is a no-op. */
     errno = 0;
     assert(dpumesh_tx_reserve(f.ctx, TEST_PORT, 8) == NULL);
     assert(errno == EAGAIN);
-    assert(psl->tx_w == 60 && psl->tx_c == 60 && psl->tx_s == 60);
+    assert(psl->tx_w == 60 &&
+           atomic_load_explicit(&psl->tx_c, memory_order_relaxed) == 60 &&
+           atomic_load_explicit(&psl->tx_s, memory_order_relaxed) == 60);
     assert(psl->head_blk_next == 1 && psl->pblk[0] == 0);
     fixture_destroy(&f);
 }
@@ -270,7 +323,15 @@ static void test_default_four_mib_window_and_dynamic_fifo(void)
 
     struct dmesh_port_slot *psl = &ports[TEST_PORT];
     psl->role = DMESH_ROLE_CLIENT;
-    for (int i = 0; i < TX_BLOCKS_PER_CONN; i++) psl->pblk[i] = -1;
+    atomic_init(&psl->tx_c, 0);
+    atomic_init(&psl->tx_s, 0);
+    atomic_init(&psl->tx_batch_state, TX_BATCH_IDLE);
+    atomic_init(&psl->tx_generation, 0);
+    atomic_init(&psl->tx_batch_epoch, 0);
+    for (int i = 0; i < TX_BLOCKS_PER_CONN; i++) {
+        psl->pblk[i] = -1;
+        atomic_init(&psl->blk_used[i], 0);
+    }
     atomic_init(&psl->tx_f, (uint_fast64_t)0);
     atomic_init(&psl->su_head, (uint_fast16_t)0);
     atomic_init(&psl->su_tail, (uint_fast16_t)0);
@@ -292,7 +353,7 @@ static void test_default_four_mib_window_and_dynamic_fifo(void)
     for (uint16_t seq = 1; seq <= 512; seq++) {
         assert(dpumesh_tx_next_send(ctx, TEST_PORT, 0, &moff, &len) == 1);
         assert(len == 8192);
-        dpumesh_tx_sent(ctx, TEST_PORT, seq, len);
+        dpumesh_tx_track(ctx, TEST_PORT, seq, len);
     }
     assert(dpumesh_tx_next_send(ctx, TEST_PORT, 0, &moff, &len) == 0);
     assert(atomic_load(&psl->su_head) == 512);
@@ -318,6 +379,8 @@ int main(void)
 {
     test_qp_window_wakes_at_block_reclaim();
     test_out_of_order_ack_waits_for_contiguous_prefix();
+    test_ack_tracking_precedes_forward_publication();
+    test_failed_forward_publication_rolls_back_tracking();
     test_arm_recheck_closes_lost_wakeup();
     test_shared_pool_return_and_direct_retry();
     test_pool_eagain_does_not_commit_padding();

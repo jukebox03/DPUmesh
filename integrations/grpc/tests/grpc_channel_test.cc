@@ -210,12 +210,12 @@ bool RunUnaryEcho() {
 
   auto client_endpoint = std::make_unique<DmeshEndpoint>(
       std::make_unique<LinkedEndpointTransport>(link, 0, &server_work),
-      UnownedExecutor(&client_work), UnownedExecutor(&client_callbacks),
+      UnownedExecutor(&client_callbacks),
       MemoryAllocator(std::make_shared<TestMemoryAllocator>()), Address(50052),
       Address(50051));
   auto server_endpoint = std::make_unique<DmeshEndpoint>(
       std::make_unique<LinkedEndpointTransport>(link, 1, &client_work),
-      UnownedExecutor(&server_work), UnownedExecutor(&server_callbacks),
+      UnownedExecutor(&server_callbacks),
       MemoryAllocator(std::make_shared<TestMemoryAllocator>()), Address(50051),
       Address(50052));
 

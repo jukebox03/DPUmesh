@@ -78,12 +78,10 @@ struct Fixture {
     transport_state = std::make_shared<FakeTransportState>();
     endpoint = std::make_unique<DmeshEndpoint>(
         std::make_unique<FakeEndpointTransport>(transport_state),
-        UnownedExecutor(&work), UnownedExecutor(&callbacks),
-        MemoryAllocator(allocator_impl));
+        UnownedExecutor(&callbacks), MemoryAllocator(allocator_impl));
     driver = endpoint->driver();
   }
 
-  ManualExecutor work;
   ManualExecutor callbacks;
   std::shared_ptr<TestMemoryAllocator> allocator_impl;
   std::shared_ptr<FakeTransportState> transport_state;
@@ -121,7 +119,7 @@ void TestQueuedReadCompletesSynchronously() {
   CHECK_EQ(fixture.callbacks.Size(), size_t{0});
 }
 
-void TestPendingReadCompletesAsynchronously() {
+void TestPendingReadCompletesOnDelivery() {
   Fixture fixture;
   SliceBuffer buffer;
   std::optional<absl::Status> status;
@@ -134,13 +132,10 @@ void TestPendingReadCompletesAsynchronously() {
                  reinterpret_cast<const uint8_t*>(payload.data()),
                  payload.size()))
                  .status.ok());
-  CHECK_TRUE(!status.has_value());
-  CHECK_EQ(Flatten(buffer), payload);
-  CHECK_EQ(fixture.callbacks.Size(), size_t{1});
-
-  fixture.callbacks.RunAll();
   CHECK_TRUE(status.has_value());
   CHECK_TRUE(status->ok());
+  CHECK_EQ(Flatten(buffer), payload);
+  CHECK_EQ(fixture.callbacks.Size(), size_t{0});
 }
 
 void TestRemoteEofFailsPendingAndFutureReads() {
@@ -201,7 +196,7 @@ void TestBufferedDataPrecedesRemoteEof() {
   CHECK_EQ(eof_status->code(), absl::StatusCode::kUnavailable);
 }
 
-void TestWriteSplitsSlicesAndCompletesAsynchronously() {
+void TestWriteSplitsSlicesAcrossPosts() {
   Fixture fixture;
   fixture.transport_state->max_post_size = 3;
 
@@ -209,18 +204,12 @@ void TestWriteSplitsSlicesAndCompletesAsynchronously() {
   data.Append(Slice::FromCopiedString("abcde"));
   data.Append(Slice::FromCopiedString("fg"));
   std::optional<absl::Status> status;
-  CHECK_TRUE(!fixture.endpoint->Write(
+  CHECK_TRUE(fixture.endpoint->Write(
       [&status](absl::Status value) { status = std::move(value); }, &data,
       EventEngine::Endpoint::WriteArgs()));
   CHECK_TRUE(!status.has_value());
-  CHECK_EQ(fixture.work.Size(), size_t{1});
-
-  fixture.work.RunAll();
   CHECK_EQ(data.Length(), size_t{0});
-  CHECK_TRUE(!status.has_value());
-  CHECK_EQ(fixture.callbacks.Size(), size_t{1});
-  fixture.callbacks.RunAll();
-  CHECK_TRUE(status->ok());
+  CHECK_EQ(fixture.callbacks.Size(), size_t{0});
 
   std::lock_guard<std::mutex> lock(fixture.transport_state->mu);
   CHECK_EQ(fixture.transport_state->posts.size(), size_t{3});
@@ -247,12 +236,10 @@ void TestWriteCoalescesSlicesIntoOneReservation() {
   CHECK_EQ(data.Count(), size_t{2});
 
   std::optional<absl::Status> status;
-  CHECK_TRUE(!fixture.endpoint->Write(
+  CHECK_TRUE(fixture.endpoint->Write(
       [&status](absl::Status value) { status = std::move(value); }, &data,
       EventEngine::Endpoint::WriteArgs()));
-  fixture.work.RunAll();
-  fixture.callbacks.RunAll();
-  CHECK_TRUE(status->ok());
+  CHECK_TRUE(!status.has_value());
 
   std::lock_guard<std::mutex> lock(fixture.transport_state->mu);
   CHECK_EQ(fixture.transport_state->posts.size(), size_t{1});
@@ -307,12 +294,10 @@ void TestRemoteEofFailsParkedWrite() {
   CHECK_TRUE(!fixture.endpoint->Write(
       [&write_status](absl::Status value) { write_status = std::move(value); },
       &data, EventEngine::Endpoint::WriteArgs()));
-  fixture.work.RunAll();
   CHECK_TRUE(!write_status.has_value());
 
-  /* The parked write waits for capacity backed by the departed peer's
-   * credits, so EOF must complete it with an error instead of leaving it
-   * waiting for a TX-ready that can never fire. */
+  // The parked write waits for capacity backed by the departed peer's credits,
+  // so EOF completes it with an error.
   fixture.driver->OnRemoteEof();
   fixture.callbacks.RunAll();
   CHECK_TRUE(write_status.has_value());
@@ -337,15 +322,11 @@ void TestWriteWouldBlockAndResumesExactlyOnce() {
       },
       &data, EventEngine::Endpoint::WriteArgs()));
 
-  fixture.work.RunAll();
   CHECK_EQ(fixture.transport_state->posts.size(), size_t{0});
   CHECK_EQ(fixture.callbacks.Size(), size_t{0});
 
   fixture.driver->OnWritable();
   fixture.driver->OnWritable();
-  CHECK_EQ(fixture.work.Size(), size_t{1});
-  fixture.work.RunAll();
-  fixture.callbacks.RunAll();
 
   CHECK_EQ(callback_count, 1);
   CHECK_TRUE(status->ok());
@@ -355,6 +336,7 @@ void TestWriteWouldBlockAndResumesExactlyOnce() {
 
 void TestTransportErrorFailsReadAndWrite() {
   Fixture fixture;
+  fixture.transport_state->results.push_back(PostResult::WouldBlock());
   SliceBuffer read_buffer;
   SliceBuffer write_buffer;
   write_buffer.Append(Slice::FromCopiedString("pending"));
@@ -373,8 +355,6 @@ void TestTransportErrorFailsReadAndWrite() {
       &write_buffer, EventEngine::Endpoint::WriteArgs()));
 
   fixture.driver->OnTransportError(absl::InternalError("injected failure"));
-  fixture.callbacks.RunAll();
-  fixture.work.RunAll();
   fixture.callbacks.RunAll();
 
   CHECK_EQ(read_status->code(), absl::StatusCode::kInternal);
@@ -404,11 +384,6 @@ void TestPostFailureFailsReadAndWrite() {
       },
       &write_buffer, EventEngine::Endpoint::WriteArgs()));
 
-  fixture.work.RunAll();
-  CHECK_TRUE(!read_status.has_value());
-  CHECK_TRUE(!write_status.has_value());
-  fixture.callbacks.RunAll();
-
   CHECK_EQ(read_status->code(), absl::StatusCode::kInternal);
   CHECK_EQ(write_status->code(), absl::StatusCode::kInternal);
   CHECK_EQ(write_buffer.Length(), size_t{0});
@@ -435,8 +410,6 @@ void TestZeroMaxPostSizeFailsEndpoint() {
       },
       &write_buffer, EventEngine::Endpoint::WriteArgs()));
 
-  fixture.work.RunAll();
-  fixture.callbacks.RunAll();
   CHECK_EQ(read_status->code(), absl::StatusCode::kInternal);
   CHECK_EQ(write_status->code(), absl::StatusCode::kInternal);
   CHECK_EQ(fixture.transport_state->close_count, 1);
@@ -444,6 +417,7 @@ void TestZeroMaxPostSizeFailsEndpoint() {
 
 void TestAllocatorMismatchFailsBothOperations() {
   Fixture fixture;
+  fixture.transport_state->results.push_back(PostResult::WouldBlock());
   SliceBuffer read_buffer;
   SliceBuffer write_buffer;
   write_buffer.Append(Slice::FromCopiedString("pending"));
@@ -468,9 +442,6 @@ void TestAllocatorMismatchFailsBothOperations() {
           reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
 
   CHECK_EQ(receive_outcome.status.code(), absl::StatusCode::kResourceExhausted);
-  CHECK_EQ(fixture.callbacks.Size(), size_t{2});
-  fixture.work.RunAll();
-  fixture.callbacks.RunAll();
   CHECK_EQ(read_status->code(), absl::StatusCode::kResourceExhausted);
   CHECK_EQ(write_status->code(), absl::StatusCode::kResourceExhausted);
   CHECK_EQ(write_buffer.Length(), size_t{0});
@@ -479,6 +450,7 @@ void TestAllocatorMismatchFailsBothOperations() {
 
 void TestDestructionCancelsPendingOperations() {
   Fixture fixture;
+  fixture.transport_state->results.push_back(PostResult::WouldBlock());
   SliceBuffer read_buffer;
   SliceBuffer write_buffer;
   write_buffer.Append(Slice::FromCopiedString("pending"));
@@ -501,7 +473,6 @@ void TestDestructionCancelsPendingOperations() {
   CHECK_TRUE(!read_status.has_value());
   CHECK_TRUE(!write_status.has_value());
 
-  fixture.work.RunAll();
   fixture.callbacks.RunAll();
   CHECK_EQ(read_status->code(), absl::StatusCode::kCancelled);
   CHECK_EQ(write_status->code(), absl::StatusCode::kCancelled);
@@ -516,7 +487,6 @@ void TestEmptyWriteIsSynchronous() {
       [&called](absl::Status) { called = true; }, &data,
       EventEngine::Endpoint::WriteArgs()));
   CHECK_TRUE(!called);
-  CHECK_EQ(fixture.work.Size(), size_t{0});
   CHECK_EQ(fixture.callbacks.Size(), size_t{0});
 }
 
@@ -533,11 +503,11 @@ int main() {
   const TestCase tests[] = {
       {"queued read completes synchronously",
        TestQueuedReadCompletesSynchronously},
-      {"pending read completes asynchronously",
-       TestPendingReadCompletesAsynchronously},
+      {"pending read completes on delivery",
+       TestPendingReadCompletesOnDelivery},
       {"remote EOF fails reads", TestRemoteEofFailsPendingAndFutureReads},
       {"buffered data precedes remote EOF", TestBufferedDataPrecedesRemoteEof},
-      {"write splits slices", TestWriteSplitsSlicesAndCompletesAsynchronously},
+      {"write splits slices across posts", TestWriteSplitsSlicesAcrossPosts},
       {"write coalesces slices into one reservation",
        TestWriteCoalescesSlicesIntoOneReservation},
       {"remote EOF fails a parked write", TestRemoteEofFailsParkedWrite},

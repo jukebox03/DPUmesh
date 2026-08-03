@@ -59,10 +59,9 @@ class DmeshEndpoint final
   using MemoryAllocator = grpc_event_engine::experimental::MemoryAllocator;
   using SliceBuffer = grpc_event_engine::experimental::SliceBuffer;
 
-  // Shares ownership of both executors for as long as the endpoint or a
-  // retained driver can schedule on them.
+  // Shares ownership of the executor for as long as the endpoint or a retained
+  // driver can schedule on it.
   DmeshEndpoint(std::unique_ptr<EndpointTransport> transport,
-                std::shared_ptr<Executor> work_executor,
                 std::shared_ptr<Executor> callback_executor,
                 MemoryAllocator allocator,
                 EventEngine::ResolvedAddress peer_address = {},

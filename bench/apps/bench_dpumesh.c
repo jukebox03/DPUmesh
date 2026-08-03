@@ -29,7 +29,6 @@
 #define BENCH_MAX_BACKENDS 32         /* pod_id space we tally replies over (>= MAX_PODS) */
 #define INFLIGHT_RING      (1u << 16) /* seq-indexed outstanding requests */
 #define OPEN_CAP           (INFLIGHT_RING / 2)
-#define TX_TAIL_DELAY_SEC  0.001      /* how long a committed tail waits for a successor */
 /* Ceiling on a backpressure park. TX_READY wakes the worker as soon as capacity
  * returns; this only caps a one-shot that was consumed or raced. An open-loop
  * worker forfeits every arrival it sleeps through, so the ceiling stays an order
@@ -73,8 +72,6 @@ typedef struct {
     uint32_t         prev_seq;  /* seq of the previous event — only to count reordering */
     uint32_t         tx_done;   /* bytes of the in-flight request frame already posted */
     int              tx_active; /* a frame is mid-carve (must finish before the next) */
-    int              tx_dirty;  /* committed tail may still need dmesh_flush */
-    double           tx_flush_at; /* deadline at which that tail publishes regardless */
     int              tx_blocked; /* dmesh_alloc hit EAGAIN; wait for DMESH_EVENT_TX_READY */
     long             outstanding;
     long             credits;   /* events observed -> requests to reissue */
@@ -187,11 +184,11 @@ static int eq_wait(int epoll_fd, int eq_fd, double deadline) {
     return ready;
 }
 
-/* Ship one request frame: [hdr | payload], carved into <= post_max posts. Complete
- * transport units publish as posts commit; the coalescing window governs the tail. The
- * payload is constant filler, so it is written straight into the TX ring — no
- * staging buffer. start_ts is stamped when the frame STARTS: actual issue time
- * for RUN, intended arrival time for OPEN.
+/* Ship one request frame: [hdr | payload], carved into <= post_max posts. The
+ * transport decides how those posts pack into wire units; this loop only hands it
+ * bytes. The payload is constant filler, so it is written straight into the TX
+ * ring — no staging buffer. start_ts is stamped when the frame STARTS: actual
+ * issue time for RUN, intended arrival time for OPEN.
  * Returns 1 = frame posted, 0 = SQ full (resume from tx_done), -1 = hard fault. */
 static int issue(worker_t *w, double stamp) {
     uint32_t total = BENCH_HDR_LEN + (uint32_t)w->req_size;
@@ -216,7 +213,6 @@ static int issue(worker_t *w, double stamp) {
         }
         memset(b + off, REQ_FILL, want - off);
         if (dmesh_post_send(w->c, b, want) != 0) return -1;
-        w->tx_dirty = 1;
         w->tx_done += want;
     }
     w->tx_active = 0;
@@ -226,14 +222,6 @@ static int issue(worker_t *w, double stamp) {
     w->next_seq++;
     w->outstanding++;
     return 1;
-}
-
-static int flush_tail(worker_t *w) {
-    if (!w->tx_dirty) return 0;
-    if (dmesh_flush(w->c) != 0) return -1;
-    w->tx_dirty = 0;
-    w->tx_flush_at = 0.0;
-    return 0;
 }
 
 static void *worker_fn(void *arg) {
@@ -295,13 +283,6 @@ static void *worker_fn(void *arg) {
         double now = bench_now_sec();
         if (now - start > w->duration && !w->tx_active) break;
 
-        if (w->tx_dirty && w->tx_flush_at > 0.0 && now >= w->tx_flush_at) {
-            if (flush_tail(w) != 0) {
-                atomic_store(&w->broken, 1);
-                break;
-            }
-        }
-
         int did = eq_pump(w) > 0;
 
         /* Connection churn: once `reconn` events landed on this conn, STOP
@@ -320,8 +301,6 @@ static void *worker_fn(void *arg) {
             w->reconn_sec += bench_now_sec() - t0;
             w->reconns++;
             w->credits = w->W;                    /* window re-primed fresh */
-            w->tx_dirty = 0;
-            w->tx_flush_at = 0.0;
             w->tx_blocked = 0;                    /* the old conn's one-shot is gone */
             churn = 0;
             did = 1;
@@ -374,30 +353,15 @@ static void *worker_fn(void *arg) {
                 }
             }
         }
-        /* Complete transport units publish inside post_send. The trailing
-         * partial is retained only while a published unit is still outstanding:
-         * its completion is what a successor would share a descriptor with.
-         * With the transport idle there is nothing to coalesce against, so the
-         * tail ships at once and an isolated request pays no delay. */
-        if (w->tx_dirty) {
-            if (!dmesh_tx_inflight(w->c)) {
-                if (flush_tail(w) != 0) { atomic_store(&w->broken, 1); break; }
-            } else if (w->tx_flush_at == 0.0) {
-                w->tx_flush_at = bench_now_sec() + TX_TAIL_DELAY_SEC;
-            }
-        }
         if (!did) {
-            /* Sleep to the next arrival, or to a retained tail's publication
-             * deadline when that falls first. A blocked reservation has no
-             * arrival it can serve, so it parks on TX_READY instead: reservations
-             * fail until the transport reclaims capacity, and re-attempting at
-             * the arrival rate spends the core on failures that also delay the
-             * publication releasing them. */
+            /* Sleep to the next arrival. A blocked reservation has no arrival it
+             * can serve, so it parks on TX_READY instead: reservations fail until
+             * the transport reclaims capacity, and re-attempting at the arrival
+             * rate spends the core on failures that also delay the publication
+             * releasing them. */
             double deadline = w->tx_blocked ? bench_now_sec() + TX_PARK_MAX_SEC
                             : w->mode == MODE_CLOSED ? bench_now_sec() + 0.020
                             : w->sched_next;
-            if (w->tx_dirty && w->tx_flush_at > 0.0 && w->tx_flush_at < deadline)
-                deadline = w->tx_flush_at;
             int ready = eq_wait(epoll_fd, eq_fd, deadline);
             if (ready < 0) atomic_store(&w->broken, 1);
             /* A silent deadline means no one-shot is coming; one retry restores
@@ -406,8 +370,6 @@ static void *worker_fn(void *arg) {
         }
     }
     end = bench_now_sec();
-    if (!atomic_load(&w->broken) && flush_tail(w) != 0)
-        atomic_store(&w->broken, 1);
     w->pending = w->outstanding;
 
     /* Retire replies issued before the measurement boundary. This keeps FIN behind

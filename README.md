@@ -27,13 +27,17 @@ The host exposes three integration surfaces:
 | `libdmesh_preload.so` | POSIX socket compatibility for libc-based C/C++ binaries |
 | `integrations/grpc` | gRPC C++ v1.80 Endpoint and PassiveListener integration |
 
-The native send path batches by default. `dmesh_alloc()` reserves registered
-bytes and `dmesh_post_send()` commits them into one ordered stream. A post
-automatically submits every newly complete transport batch; `dmesh_flush()`
-forces only the newest partial batch. The physical unit is an internal data-plane
-choice, not an application tuning parameter. Graceful close flushes the trailing
-partial unit; abort discards it. Native publication writes the shared descriptor
-ring polled by the DPA.
+The shared libdpumesh send core batches all three surfaces. `dmesh_alloc()`
+reserves registered bytes and `dmesh_post_send()` commits them into one ordered
+stream. A post automatically submits every newly complete transport batch;
+`dmesh_flush()`
+forces only the newest partial batch. An idle tail publishes immediately; a busy
+tail is combined briefly and published by the channel's bounded deadline. The
+physical unit and timing are internal data-plane choices, not application tuning
+parameters. Graceful close flushes the trailing partial unit; abort discards it.
+Native publication writes the shared descriptor ring polled by the DPA.
+The preload and gRPC layers only adapt POSIX and EventEngine semantics; neither
+keeps a physical batch queue or batching timer.
 
 Every public QP is one full-duplex byte stream. Optional DPU L7 framing is an
 internal routing policy and does not expose backend or stream ids through native

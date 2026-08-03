@@ -90,6 +90,12 @@ struct dmesh_eq {
     atomic_uint_fast64_t tx_ready[DMESH_TX_READY_WORDS];
     atomic_uint_fast32_t tx_ready_count;
     uint32_t             tx_ready_cursor; /* EQ-consumer round-robin word cursor */
+    /* A background tail publisher can fail after post_send returned. One sticky
+     * bit per QP turns that failure into an ordinary EQ edge without retaining
+     * a raw QP pointer in the scheduler. */
+    atomic_uint_fast64_t tx_error[DMESH_TX_READY_WORDS];
+    atomic_uint_fast32_t tx_error_count;
+    uint32_t             tx_error_cursor;
     /* PE-published READY LIST for this EQ's conns. The PE pushes a conn's port the
      * moment its inbox goes empty->non-empty; the EQ thread drains it via
      * dmesh_next_ready instead of scanning conns or holding a per-conn fd. SPSC: PE =
@@ -154,17 +160,18 @@ uint8_t *dpumesh_rx_buf(dpumesh_ctx_t *ctx, int slot);
 /* Free an RX buffer slot after reading. */
 void dpumesh_rx_free(dpumesh_ctx_t *ctx, int slot);
 
-/* Per-connection TX byte-ring lifecycle: reserve, fill, commit, select, enqueue,
- * and mark sent. Reserve is nonblocking and arms TX_READY on EAGAIN. Selection
+/* Per-connection TX byte-ring lifecycle: reserve, fill, commit, select, track,
+ * and enqueue. Reserve is nonblocking and arms TX_READY on EAGAIN. Selection
  * returns full units unless flush_partial is set or block-ordering requires a
- * sealed tail. TX_ACK reclaims sent units by sequence. */
+ * sealed tail. Track before ring publication so an immediate TX_ACK cannot
+ * precede its reclaim record. */
 uint8_t *dpumesh_tx_reserve(dpumesh_ctx_t *ctx, uint16_t port, uint32_t len);
 int      dpumesh_tx_commit(dpumesh_ctx_t *ctx, uint16_t port,
                            const void *buf, uint32_t len);
 void     dpumesh_tx_discard_unsent(dpumesh_ctx_t *ctx, uint16_t port);
 int      dpumesh_tx_next_send(dpumesh_ctx_t *ctx, uint16_t port, int flush_partial,
                               size_t *out_moff, uint32_t *out_len);
-void     dpumesh_tx_sent(dpumesh_ctx_t *ctx, uint16_t port, uint16_t seq, uint32_t len);
+void     dpumesh_tx_track(dpumesh_ctx_t *ctx, uint16_t port, uint16_t seq, uint32_t len);
 
 /* Enqueue a descriptor to TX SQ. Returns 0 on success, -1 on failure. */
 int dpumesh_enqueue(dpumesh_ctx_t *ctx, const sw_descriptor_t *desc);
@@ -202,6 +209,8 @@ int dpumesh_conn_recv(dpumesh_ctx_t *ctx, uint16_t port, sw_descriptor_t *out);
 void *dpumesh_next_ready(struct dmesh_eq *eq);
 /* Pop one QP whose automatically armed dmesh_alloc(EAGAIN) became retryable. */
 void *dpumesh_next_tx_ready(struct dmesh_eq *eq);
+/* Pop one QP whose background tail submission failed. The failure remains sticky. */
+void *dpumesh_next_tx_error(struct dmesh_eq *eq);
 
 /* ====== Connection lifecycle — INTERNAL, shared by both surfaces ======
  *
@@ -225,10 +234,14 @@ dmesh_qp_t *dmesh_accept(dmesh_eq_t *eq);
  * created at accept/connect, or NULL when drained. Single-consumer. */
 dmesh_qp_t *dmesh_next_ready(dmesh_eq_t *eq);
 
-/* Submit every complete wire slot currently committed on this QP, leaving only the
- * newest fillable partial slot buffered. This is the post_send fast path; unlike the
- * public dmesh_flush it does not force that trailing partial. */
-int dmesh_flush_full(dmesh_qp_t *c);
+/* Serialize one public TX call against the automatic tail publisher and QP
+ * destruction. dmesh_tx_after_commit() submits complete units and applies the
+ * internal idle/deadline tail policy; dmesh_tx_pressure() expedites a retained
+ * tail after alloc reports EAGAIN. */
+int  dmesh_tx_call_begin(dmesh_qp_t *c);
+void dmesh_tx_call_end(dmesh_qp_t *c);
+int  dmesh_tx_after_commit(dmesh_qp_t *c);
+void dmesh_tx_pressure(dmesh_qp_t *c);
 
 /* Temporarily suppress eventfd writes while an in-process EQ consumer drains work. */
 void dmesh_eq_suppress_notify(dmesh_eq_t *eq, int delta);

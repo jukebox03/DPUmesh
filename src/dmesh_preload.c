@@ -126,9 +126,6 @@ typedef struct pfd {
     int  active_ops;           /* wrappers that acquired this entry from g_fds */
     int  retired;              /* dispatcher closed resources; last op frees it */
     int  closing;              /* queued for dispatcher dmesh_destroy_qp */
-    int  tx_dirty;
-    int  dirty_linked;
-    int  dirty_ref;
     long rcv_timeout_ms;       /* SO_RCVTIMEO; 0 = block forever */
     long snd_timeout_ms;       /* SO_SNDTIMEO; 0 = block forever */
     uint16_t lport;            /* synthesized getsockname port */
@@ -140,7 +137,6 @@ typedef struct pfd {
     pthread_mutex_t tx_mu;      /* serialize bytes from concurrent POSIX send calls */
     preload_rx_t *rx_head, *rx_tail;
     struct pfd *q_next;        /* accept- / close-queue linkage */
-    struct pfd *dirty_next;
 } pfd_t;
 
 static pfd_t *g_fds[PRELOAD_MAX_FDS];
@@ -165,7 +161,7 @@ static void pfd_put(pfd_t *e) {
     if (!e) return;
     int free_now = 0;
     pthread_mutex_lock(&g_tbl_mu);
-    if (--e->active_ops == 0 && e->retired == 1 && !e->dirty_ref) {
+    if (--e->active_ops == 0 && e->retired == 1) {
         e->retired = 2;                  /* this thread owns the final free */
         free_now = 1;
     }
@@ -177,7 +173,7 @@ static void pfd_retire(pfd_t *e) {
     int free_now = 0;
     pthread_mutex_lock(&g_tbl_mu);
     e->retired = 1;
-    if (e->active_ops == 0 && !e->dirty_ref) {
+    if (e->active_ops == 0) {
         e->retired = 2;
         free_now = 1;
     }
@@ -265,50 +261,7 @@ static pthread_mutex_t g_q_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t g_poll_mu = PTHREAD_MUTEX_INITIALIZER;
 static pfd_t *g_accept_head, *g_accept_tail;   /* dispatcher → accept() */
 static pfd_t *g_close_head;                    /* close() → dispatcher */
-static pthread_mutex_t g_dirty_mu = PTHREAD_MUTEX_INITIALIZER;
-static pfd_t *g_dirty_head;
-
-/* Nested order: g_poll_mu -> g_q_mu/e->mu -> g_dirty_mu -> g_tbl_mu. */
-
-static void dirty_ref_release(pfd_t *e) {
-    int free_now = 0;
-    pthread_mutex_lock(&g_tbl_mu);
-    e->dirty_ref = 0;
-    if (e->active_ops == 0 && e->retired == 1) {
-        e->retired = 2;
-        free_now = 1;
-    }
-    pthread_mutex_unlock(&g_tbl_mu);
-    if (free_now) pfd_storage_free(e);
-}
-
-static void dirty_link_locked(pfd_t *e) {
-    pthread_mutex_lock(&g_dirty_mu);
-    if (!e->dirty_linked && !e->dirty_ref) {
-        pthread_mutex_lock(&g_tbl_mu);
-        e->dirty_ref = 1;
-        pthread_mutex_unlock(&g_tbl_mu);
-        e->dirty_linked = 1;
-        e->dirty_next = g_dirty_head;
-        g_dirty_head = e;
-    }
-    pthread_mutex_unlock(&g_dirty_mu);
-}
-
-static void dirty_unlink(pfd_t *e) {
-    int release = 0;
-    pthread_mutex_lock(&g_dirty_mu);
-    pfd_t **link = &g_dirty_head;
-    while (*link && *link != e) link = &(*link)->dirty_next;
-    if (*link == e) {
-        *link = e->dirty_next;
-        e->dirty_next = NULL;
-        e->dirty_linked = 0;
-        release = 1;
-    }
-    pthread_mutex_unlock(&g_dirty_mu);
-    if (release) dirty_ref_release(e);
-}
+/* Nested order: g_poll_mu -> g_q_mu/e->mu -> g_tbl_mu. */
 
 static void accept_q_push(pfd_t *e) {
     pthread_mutex_lock(&g_q_mu);
@@ -399,6 +352,14 @@ static void pfd_tx_ready(pfd_t *e) {
     pthread_mutex_unlock(&e->mu);
 }
 
+static void pfd_tx_error(pfd_t *e) {
+    pthread_mutex_lock(&e->mu);
+    if (!e->io_error) e->io_error = EIO;
+    fd_unblock_tx_locked(e);
+    efd_signal(e);
+    pthread_mutex_unlock(&e->mu);
+}
+
 static void defer_qp_once(dmesh_qp_t **qps, int *nqps, int cap, dmesh_qp_t *qp) {
     if (!qp) return;
     for (int i = 0; i < *nqps; i++) if (qps[i] == qp) return;
@@ -411,71 +372,6 @@ static int defer_pfd_once(pfd_t **pfds, int *npfds, int cap, pfd_t *pfd) {
     if (*npfds >= cap) return 0;
     pfds[(*npfds)++] = pfd;
     return 1;
-}
-
-/* Caller holds e->mu. */
-static int tx_publish_locked(pfd_t *e, int force) {
-    if (!e->tx_dirty) return 0;
-    if (!e->conn) {
-        e->io_error = e->io_error ? e->io_error : ECONNRESET;
-        return -1;
-    }
-    if (!force && dmesh_tx_inflight(e->conn)) {
-        dirty_link_locked(e);
-        return 0;
-    }
-    if (dmesh_flush(e->conn) != 0) {
-        e->io_error = errno ? errno : EIO;
-        efd_signal(e);
-        return -1;
-    }
-    e->tx_dirty = 0;
-    dirty_unlink(e);
-    return 0;
-}
-
-static void dirty_requeue_owned(pfd_t *e) {
-    pthread_mutex_lock(&g_dirty_mu);
-    if (!e->dirty_linked) {
-        e->dirty_linked = 1;
-        e->dirty_next = g_dirty_head;
-        g_dirty_head = e;
-    }
-    pthread_mutex_unlock(&g_dirty_mu);
-}
-
-static void flush_dirty_all(void) {
-    pthread_mutex_lock(&g_dirty_mu);
-    pfd_t *list = g_dirty_head;
-    g_dirty_head = NULL;
-    for (pfd_t *e = list; e; e = e->dirty_next) e->dirty_linked = 0;
-    pthread_mutex_unlock(&g_dirty_mu);
-
-    while (list) {
-        pfd_t *e = list;
-        list = e->dirty_next;
-        e->dirty_next = NULL;
-        if (pthread_mutex_trylock(&e->mu) != 0) {
-            dirty_requeue_owned(e);
-            continue;
-        }
-        if (e->tx_dirty && e->conn) {
-            if (dmesh_flush(e->conn) == 0) {
-                e->tx_dirty = 0;
-            } else {
-                e->io_error = errno ? errno : EIO;
-                efd_signal(e);
-            }
-        } else {
-            e->tx_dirty = 0;
-        }
-        pthread_mutex_lock(&g_tbl_mu);
-        e->active_ops++;
-        pthread_mutex_unlock(&g_tbl_mu);
-        dirty_ref_release(e);
-        pthread_mutex_unlock(&e->mu);
-        pfd_put(e);
-    }
 }
 
 static long now_ms(void);
@@ -545,6 +441,10 @@ static int dispatcher_drain_eq(pfd_t *self, int max_batches) {
                 if (e) pfd_tx_ready(e);
                 break;
 
+            case DMESH_EVENT_TX_ERROR:
+                if (e) pfd_tx_error(e);
+                break;
+
             default:
                 dmesh_release_rx_buffer(g_ch, &events[i]);
                 if (e) {
@@ -592,7 +492,6 @@ static void dispatcher_reap_pfd(pfd_t *e) {
     e->rx_head = e->rx_tail = NULL;
     fd_unblock_tx_locked(e);
     pthread_mutex_unlock(&e->mu);
-    dirty_unlink(e);
     release_rx_list(rx);
     if (c) dmesh_destroy_qp(c);
     real_close(e->sigfd);
@@ -609,11 +508,8 @@ static void *dispatcher_main(void *arg) {
         { .fd = g_wake_fd, .events = POLLIN },
     };
     DBG("dispatcher up (eq_fd=%d wake_fd=%d)", eq_fd, g_wake_fd);
-    long next_flush_ms = now_ms() + 1;
     for (;;) {
-        long now = now_ms();
-        int timeout_ms = next_flush_ms > now ? (int)(next_flush_ms - now) : 0;
-        (void)poll(pfds, 2, timeout_ms);
+        (void)poll(pfds, 2, -1);
 
         if (pfds[0].revents & POLLIN) {
             uint64_t v;
@@ -634,11 +530,6 @@ static void *dispatcher_main(void *arg) {
                 if (!e) break;
                 dispatcher_reap_pfd(e);
             }
-        }
-        now = now_ms();
-        if (now >= next_flush_ms) {
-            flush_dirty_all();
-            next_flush_ms = now + 1;
         }
     }
     return NULL;
@@ -863,7 +754,6 @@ static ssize_t shim_recv(pfd_t *e, void *buf, size_t len, int flags) {
         if (saved_errno != EAGAIN)
             return got ? (ssize_t)got : -1;
         if (got > 0 && !waitall) return (ssize_t)got;
-        if (!block) { errno = EAGAIN; return -1; }
         int recovered = 0;
         while (drain_budget > 0) {
             int drained = 0;
@@ -876,12 +766,12 @@ static ssize_t shim_recv(pfd_t *e, void *buf, size_t len, int flags) {
             if (drained == 0) break;
         }
         if (recovered) continue;
+        if (!block) { errno = EAGAIN; return -1; }
         long left = 0;                             /* 0 = forever */
         if (deadline) {
             left = deadline - now_ms();
             if (left <= 0) left = -1;              /* already expired */
         }
-        flush_dirty_all();
         if (left < 0 || wait_ready(e, left) < 0) {
             if (got > 0) return (ssize_t)got;
             errno = EAGAIN;                        /* SO_RCVTIMEO expiry */
@@ -908,9 +798,6 @@ static ssize_t stream_write_locked(pfd_t *e, const void *buf, size_t len) {
         uint8_t *dst = dmesh_alloc(c, chunk);
         if (!dst) {
             if (errno == EAGAIN) {
-                if (done > 0 && tx_publish_locked(e, 1) != 0) {
-                    return (ssize_t)done;
-                }
                 if (fd_block_tx_locked(e) != 0)
                     return done ? (ssize_t)done : -1;
                 errno = EAGAIN;
@@ -925,7 +812,6 @@ static ssize_t stream_write_locked(pfd_t *e, const void *buf, size_t len) {
             e->io_error = errno ? errno : EIO;
             return done ? (ssize_t)done : -1;
         }
-        e->tx_dirty = 1;
         done += chunk;
     }
     return (ssize_t)len;
@@ -970,16 +856,6 @@ static ssize_t shim_send_iov(pfd_t *e, const struct iovec *iov, int cnt, int fla
                 errno = saved_errno ? saved_errno : ECONNRESET;
                 return sent ? (ssize_t)sent : -1;
             }
-            pthread_mutex_lock(&e->mu);
-            int publish_result = tx_publish_locked(e, 1);
-            int publish_errno = errno;
-            pthread_mutex_unlock(&e->mu);
-            flush_dirty_all();
-            if (publish_result != 0) {
-                pthread_mutex_unlock(&e->tx_mu);
-                errno = publish_errno ? publish_errno : ECONNRESET;
-                return sent ? (ssize_t)sent : -1;
-            }
             if (!block) {
                 pthread_mutex_unlock(&e->tx_mu);
                 errno = EAGAIN;
@@ -1003,12 +879,7 @@ static ssize_t shim_send_iov(pfd_t *e, const struct iovec *iov, int cnt, int fla
         }
     }
 
-    pthread_mutex_lock(&e->mu);
-    int fr = tx_publish_locked(e, 0);
-    int saved_errno = errno;
-    pthread_mutex_unlock(&e->mu);
     pthread_mutex_unlock(&e->tx_mu);
-    if (fr < 0) { errno = saved_errno ? saved_errno : ECONNRESET; return -1; }
     return (ssize_t)total;
 }
 
@@ -1366,12 +1237,10 @@ int shutdown(int fd, int how) {
                 errno = ECONNRESET;
                 return -1;
             }
-            e->tx_dirty = 0;
         }
     }
     if (how == SHUT_RD || how == SHUT_RDWR) e->rd_closed = 1;
     pthread_mutex_unlock(&e->mu);
-    if (how == SHUT_WR || how == SHUT_RDWR) dirty_unlink(e);
     if (how == SHUT_RD || how == SHUT_RDWR) efd_signal(e);   /* unblock readers → EOF */
     pfd_put(e);
     return 0;

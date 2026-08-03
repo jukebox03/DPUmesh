@@ -65,7 +65,7 @@ static int           g_nlive = 0;
 
 /* Post as much of c's reply FIFO as its SQ accepts. A frame is carved into
  * <= post_max chunks (dmesh_alloc reserves one contiguous block); complete transport
- * units publish immediately and the post-batch flush submits the tail. On EAGAIN it
+ * units and tails are published by the library policy. On EAGAIN it
  * returns keeping its exact place — the frame resumes from `done`. */
 static void reply_pump(dmesh_qp_t *c) {
     greeter_conn_t *gc = (greeter_conn_t *)c->user_data;
@@ -211,12 +211,6 @@ int main(void) {
         for (int i = g_nlive - 1; i >= 0; i--) {
             if (((greeter_conn_t *)g_live[i]->user_data)->dead) reclaim(g_live[i]);
         }
-        /* post_send commits and submits every newly complete transport unit. One
-         * explicit flush per event-loop pass forces each connection's trailing tail. */
-        for (int i = 0; i < g_nlive; i++)
-            if (dmesh_flush(g_live[i]) != 0)
-                ((greeter_conn_t *)g_live[i]->user_data)->dead = 1;
-
         /* Report each 200k milestone once. */
         if (g_served - g_reported >= 200000) {
             g_reported = g_served;

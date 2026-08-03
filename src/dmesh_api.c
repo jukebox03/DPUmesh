@@ -8,18 +8,28 @@
 
 void *dmesh_alloc(dmesh_qp_t *c, uint32_t len) {
     if (!c) { errno = EINVAL; return NULL; }
-    return dpumesh_tx_reserve(c->ep->ctx, c->local_port, len);
+    if (dmesh_tx_call_begin(c) != 0) return NULL;
+    void *buf = dpumesh_tx_reserve(c->ep->ctx, c->local_port, len);
+    if (!buf) {
+        int saved_errno = errno;
+        dmesh_tx_call_end(c);
+        errno = saved_errno;
+        if (errno == EAGAIN) dmesh_tx_pressure(c);
+    }
+    return buf;
 }
 
 int dmesh_post_send(dmesh_qp_t *c, const void *buf, uint32_t len) {
     if (!c || len == 0) { errno = EINVAL; return -1; }
     /* Commit first, then publish every newly complete transport slot. The newest
-     * partial stays buffered until more posts fill it or dmesh_flush forces it. */
+     * partial follows the library-owned idle/deadline policy. */
     if (dpumesh_tx_commit(c->ep->ctx, c->local_port, buf, len) != 0) {
-        errno = EINVAL;
+        dmesh_tx_call_end(c);
         return -1;
     }
-    return dmesh_flush_full(c);
+    int result = dmesh_tx_after_commit(c);
+    dmesh_tx_call_end(c);
+    return result;
 }
 
 /* ===== Event queue ===== */
@@ -102,7 +112,20 @@ int dmesh_poll_eq(dmesh_eq_t *eq, dmesh_event_t *events, int max_events) {
         if (!drained) { eq->drain_cur = c; return n; }
     }
 
-    /* 3. QPs whose automatically armed alloc(EAGAIN) became retryable. TX readiness
+    /* 3. Background tail faults are terminal for the QP and take precedence over
+     * ordinary readiness, so an application never spins retrying a failed stream. */
+    while (n < max_events) {
+        dmesh_qp_t *c = (dmesh_qp_t *)dpumesh_next_tx_error(eq);
+        if (!c) break;
+        events[n].qp        = c;
+        events[n].type      = DMESH_EVENT_TX_ERROR;
+        events[n].buf       = NULL;
+        events[n].len       = 0;
+        events[n]._rx_token = -1;
+        n++;
+    }
+
+    /* 4. QPs whose automatically armed alloc(EAGAIN) became retryable. TX readiness
      * is deliberately emitted before bulk RX so a read-heavy EQ cannot starve writes.
      * It is a hint, not a reservation; the application retries only the named QP. */
     while (n < max_events) {
@@ -116,7 +139,7 @@ int dmesh_poll_eq(dmesh_eq_t *eq, dmesh_event_t *events, int max_events) {
         n++;
     }
 
-    /* 4. This EQ's established conns with inbound (edge-armed by the PE). A spurious
+    /* 5. This EQ's established conns with inbound (edge-armed by the PE). A spurious
      * entry (inbox already drained via 1/2) emits nothing — harmless. */
     while (n < max_events) {
         dmesh_qp_t *c = dmesh_next_ready(eq);

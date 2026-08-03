@@ -7,8 +7,65 @@
 
 #include <dpumesh/dmesh_common.h>
 
+#define DPA_DMA_COPY_ALIGN 128u
+#define DPA_DMA_COPY_MAX   DPUMESH_SLOT_SIZE
+
+static inline uint32_t
+dpa_dma_copy_prefix(uint64_t offset)
+{
+	return (uint32_t)(offset & (DPA_DMA_COPY_ALIGN - 1u));
+}
+
+static inline uint32_t
+dpa_dma_payload_cap(uint64_t offset, uint32_t logical_cap)
+{
+	uint32_t cap = DPA_DMA_COPY_MAX - dpa_dma_copy_prefix(offset);
+	return logical_cap < cap ? logical_cap : cap;
+}
+
+static inline uint32_t
+dpa_dma_aligned_copy_len(uint64_t offset, uint32_t payload_len)
+{
+	uint32_t covered = dpa_dma_copy_prefix(offset) + payload_len;
+	return (covered + DPA_DMA_COPY_ALIGN - 1u) &
+	       ~(DPA_DMA_COPY_ALIGN - 1u);
+}
+
 typedef uint64_t doca_dpa_dev_uintptr_t;
 typedef uint64_t doca_dpa_dev_buf_arr_t;
+
+/* Emit one producer completion report per forward-DMA batch. */
+#define DPA_PRODUCER_REPORT_BATCH 512u
+#define DPA_RESCHEDULE_DMA_QUANTUM 65536u
+
+static inline int
+dpa_producer_report_due(uint32_t *deferred)
+{
+	(*deferred)++;
+	if (*deferred < DPA_PRODUCER_REPORT_BATCH)
+		return 0;
+	*deferred = 0;
+	return 1;
+}
+
+static inline int
+dpa_reschedule_due(uint32_t *completed, uint32_t delta,
+			  uint32_t producer_deferred)
+{
+	*completed += delta;
+	if (*completed < DPA_RESCHEDULE_DMA_QUANTUM || producer_deferred != 0)
+		return 0;
+	*completed = 0;
+	return 1;
+}
+
+static inline uint32_t
+dpa_reschedule_budget(uint32_t completed, uint32_t producer_deferred)
+{
+	if (completed < DPA_RESCHEDULE_DMA_QUANTUM)
+		return DPA_RESCHEDULE_DMA_QUANTUM - completed;
+	return DPA_PRODUCER_REPORT_BATCH - producer_deferred;
+}
 
 /* ====== Multi-ring DPA thread arg ====== */
 
@@ -45,7 +102,9 @@ struct dpa_thread_arg {
 	 * Forward staging mirrors the host TX byte offset, so there is no per-ring
 	 * landing cursor either (the completion pos == host offset). */
 	volatile uint32_t num_rings;
-	uint32_t _pad2;
+	uint32_t producer_deferred;
+	uint32_t producer_reports_submitted;
+	uint32_t producer_reports_completed;
 	struct dpa_ring_info rings[MAX_DPA_RINGS];
 	uint64_t consumer_head[MAX_DPA_RINGS];
 	/* Incarnation paired with rings[] and echoed by FWD_DONE. */

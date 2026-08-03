@@ -45,6 +45,8 @@ class DmeshRuntime final {
   void Connect(std::string service, DmeshReactor::ConnectCallback callback);
   absl::Status SetAcceptCallback(DmeshReactor::AcceptCallback callback);
   int post_max() const { return post_max_; }
+  // Diagnostics only: lets a benchmark read native transmit counters.
+  dmesh_channel_t* channel() const { return channel_; }
   const std::shared_ptr<Executor>& callback_executor() const {
     return callback_executor_;
   }
@@ -54,14 +56,12 @@ class DmeshRuntime final {
  private:
   DmeshRuntime(std::unique_ptr<DmeshApiOps> ops, dmesh_channel_t* channel,
                int post_max,
-               std::vector<std::shared_ptr<Executor>> owned_callback_executors,
                std::shared_ptr<Executor> callback_executor);
 
   std::unique_ptr<DmeshApiOps> ops_;
   dmesh_channel_t* channel_;
   int post_max_;
-  // Released after reactors_ (declared first), which still schedule onto them.
-  std::vector<std::shared_ptr<Executor>> owned_callback_executors_;
+  // Released after reactors_ (declared first), which still schedule onto it.
   const std::shared_ptr<Executor> callback_executor_;
   std::vector<std::unique_ptr<DmeshReactor>> reactors_;
   std::atomic<size_t> next_reactor_{0};

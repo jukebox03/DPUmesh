@@ -69,6 +69,7 @@ DOCA_LOG_REGISTER(DPU_PROXY);
 /* Refresh the (DMA-read) host credit cache when headroom drops below this
  * many entries — same lazy scheme as the DPA reverse admission. */
 #define PX_CREDIT_REFRESH_MARGIN 64
+#define PX_CREDIT_REFRESH_RETRY_NS (100u * 1000u)
 
 /* Pool sizes. Arrivals are bounded by total in-flight sender slots
  * (MAX_PODS x DPU_BUFFER_SIZE/slot); units/pieces match pass-through 1:1. */
@@ -214,6 +215,7 @@ struct px_lane {
     uint32_t cursor;                  /* next landing byte offset within the region */
     uint64_t sent_entries;            /* credits consumed (cumulative) */
     uint64_t cached_freed;            /* host freed counter, DMA-read cache */
+    uint64_t refresh_after_ns;
     int      refresh_inflight;
     int      warned_no_credit_addr;
     /* Pod generation associated with this lane's credit counters. */
@@ -1852,7 +1854,16 @@ static void px_dma_done_cb(struct doca_dma_task_memcpy *t, union doca_data tud,
         uint64_t total = 0;
         for (int i = 0; i < nshards; i++)
             total += freed[i];
+        uint64_t previous = ln->cached_freed;
+        if (total > ln->sent_entries)
+            DOCA_LOG_ERR("proxy: reverse credit exceeds submissions "
+                         "pod=%d region=%d freed=%llu sent=%llu",
+                         pod->pod_id, op->region,
+                         (unsigned long long)total,
+                         (unsigned long long)ln->sent_entries);
         ln->cached_freed = total;
+        ln->refresh_after_ns = total == previous
+            ? px_monotonic_ns() + PX_CREDIT_REFRESH_RETRY_NS : 0;
         ln->refresh_inflight = 0;
         if (op->src_buf) { doca_buf_dec_refcount(op->src_buf, NULL); op->src_buf = NULL; }
         if (op->dst_buf) { doca_buf_dec_refcount(op->dst_buf, NULL); op->dst_buf = NULL; }
@@ -1903,7 +1914,11 @@ static void px_dma_err_cb(struct doca_dma_task_memcpy *t, union doca_data tud,
     if (op->kind == 1) {
         px_pod_inflight_sub(eng, &objs->pods[op->pod_idx]);
         DOCA_LOG_ERR("proxy: credit refresh DMA failed: %s", doca_error_get_descr(st));
-        objs->proxy->lanes[op->pod_idx][op->region].refresh_inflight = 0;
+        struct px_lane *ln =
+            &objs->proxy->lanes[op->pod_idx][op->region];
+        ln->refresh_inflight = 0;
+        ln->refresh_after_ns = px_monotonic_ns() +
+            PX_CREDIT_REFRESH_RETRY_NS;
         if (op->src_buf) { doca_buf_dec_refcount(op->src_buf, NULL); op->src_buf = NULL; }
         if (op->dst_buf) { doca_buf_dec_refcount(op->dst_buf, NULL); op->dst_buf = NULL; }
         return;
@@ -1934,22 +1949,22 @@ px_batch_submit_dma(struct objects *objs, struct px_engine *eng,
         for (struct px_piece *p = u->pieces; p; p = p->next) {
             struct pod_state *src_pod = &objs->pods[p->pod_idx];
             void *addr = (uint8_t *)src_pod->dma_buffer + p->staging_off;
-            struct doca_buf *buf = NULL;
+            struct doca_buf *src = NULL;
             ret = doca_buf_inventory_buf_get_by_addr(
-                eng->inv, src_pod->local_mmap, addr, p->len, &buf);
+                eng->inv, src_pod->local_mmap, addr, p->len, &src);
             if (ret != DOCA_SUCCESS)
                 break;
-            ret = doca_buf_set_data(buf, addr, p->len);
+            ret = doca_buf_set_data(src, addr, p->len);
             if (ret != DOCA_SUCCESS) {
-                doca_buf_dec_refcount(buf, NULL);
+                doca_buf_dec_refcount(src, NULL);
                 break;
             }
             if (!src_head) {
-                src_head = buf;
+                src_head = src;
             } else {
-                ret = doca_buf_chain_list(src_head, buf);
+                ret = doca_buf_chain_list(src_head, src);
                 if (ret != DOCA_SUCCESS) {
-                    doca_buf_dec_refcount(buf, NULL);
+                    doca_buf_dec_refcount(src, NULL);
                     break;
                 }
             }
@@ -1995,7 +2010,9 @@ static void px_lane_refresh_credit(struct objects *objs, struct px_engine *eng,
                                    int pod_idx, struct pod_state *pod, int region,
                                    struct px_lane *ln) {
     struct dmesh_proxy *px = objs->proxy;
-    if (ln->refresh_inflight || eng->dma_tasks_inflight >= PX_DMA_TASKS)
+    uint64_t now = px_monotonic_ns();
+    if (ln->refresh_inflight || eng->dma_tasks_inflight >= PX_DMA_TASKS ||
+        now < ln->refresh_after_ns)
         return;
     int K = pod->k_rings > 0 ? pod->k_rings : 1;
     int L = px_landing_stripes(pod);
@@ -2039,11 +2056,9 @@ static void px_lane_refresh_credit(struct objects *objs, struct px_engine *eng,
             }
         }
     }
-    ret = doca_buf_inventory_buf_get_by_addr(eng->inv, px->scratch_mmap,
-                                             cell,
-                                             (size_t)nshards *
-                                                 sizeof(uint64_t),
-                                             &dst);
+    ret = doca_buf_inventory_buf_get_by_addr(
+        eng->inv, px->scratch_mmap, cell,
+        (size_t)nshards * sizeof(uint64_t), &dst);
     if (ret != DOCA_SUCCESS)
         goto fail;
 
@@ -2075,6 +2090,7 @@ fail:
     if (src_head) doca_buf_dec_refcount(src_head, NULL);
     if (dst) doca_buf_dec_refcount(dst, NULL);
     op->src_buf = op->dst_buf = NULL;
+    ln->refresh_after_ns = now + PX_CREDIT_REFRESH_RETRY_NS;
 }
 
 static int
@@ -2504,6 +2520,7 @@ static void px_lane_rearm(struct px_lane *ln, uint32_t gen) {
     ln->cursor = 0;
     ln->sent_entries = 0;
     ln->cached_freed = 0;
+    ln->refresh_after_ns = 0;
     ln->refresh_inflight = 0;
     ln->warned_no_credit_addr = 0;
     ln->pod_generation = gen;
@@ -2744,8 +2761,9 @@ static int px_lane_submit(struct objects *objs, struct px_engine *eng, int pod_i
             px_lane_refresh_credit(objs, eng, pod_idx, pod, region, ln);
             break;
         }
-        if (wrap == PX_LANE_WRAP_RESET)
+        if (wrap == PX_LANE_WRAP_RESET) {
             ln->cursor = 0;
+        }
 
         struct px_batch *b = px_batch_alloc(eng);
         if (!b)
@@ -2965,6 +2983,9 @@ int px_init(struct objects *objs) {
         if (ret != DOCA_SUCCESS) goto fail;
         ret = doca_pe_create(&eng->pe);
         if (ret != DOCA_SUCCESS) goto fail;
+        ret = doca_pe_set_event_mode(eng->pe,
+                                     DOCA_PE_EVENT_MODE_PROGRESS_ALL);
+        if (ret != DOCA_SUCCESS) goto fail;
         ret = doca_pe_connect_ctx(eng->pe, eng->dma_ctx);
         if (ret != DOCA_SUCCESS) goto fail;
         { union doca_data ud = { .ptr = eng };
@@ -2972,7 +2993,8 @@ int px_init(struct objects *objs) {
           if (ret != DOCA_SUCCESS) goto fail; }
         ret = doca_ctx_start(eng->dma_ctx);
         if (ret != DOCA_SUCCESS) goto fail;
-        ret = doca_buf_inventory_create((size_t)PX_DMA_TASKS * (px->sg_pieces_max + 1) + 128,
+        ret = doca_buf_inventory_create((size_t)PX_DMA_TASKS *
+                                        (px->sg_pieces_max + 1u) + 128,
                                         &eng->inv);
         if (ret != DOCA_SUCCESS) goto fail;
         ret = doca_buf_inventory_start(eng->inv);

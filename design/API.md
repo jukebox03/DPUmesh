@@ -112,12 +112,13 @@ exact pointer returned by that allocation and rejects an oversized or repeated
 post. After a successful post, the application must no longer access the committed
 bytes until the transport makes that storage available through a later allocation.
 
-The transport may combine adjacent posts before submitting them. This does not
-create message boundaries: a QP remains an ordered byte stream. Complete
-transport units are submitted as posts commit; only the newest partial unit
-stays buffered. `dmesh_flush()` submits that remainder, so callers flush at
-latency-sensitive or protocol-defined write boundaries. Applications must not
-depend on a particular batching size, and there is no `SEND_MORE` mode.
+The transport combines adjacent posts without creating message boundaries: a
+QP remains an ordered byte stream. Complete transport units submit immediately.
+An idle stream also submits its first partial unit immediately; while an earlier
+unit is in flight, only the newest partial may be retained, and a channel-owned
+worker submits it by a bounded internal deadline. `dmesh_flush()` forces that
+remainder earlier. Applications do not drive this policy, must not depend on a
+particular physical unit size, and have no `SEND_MORE` mode.
 
 Each QP has bounded outstanding-send capacity, and QPs also share the channel's
 overall transmit capacity. The transport recovers capacity as previously
@@ -137,8 +138,8 @@ fault, `dmesh_post_send()` or `dmesh_flush()` returns `-1/EBADMSG`.
 | `NULL/EINVAL` | Invalid length, QP, or outstanding-allocation state |
 | `NULL/ENOMEM` | Transport bookkeeping memory could not be allocated |
 
-If allocation reaches backpressure while committed bytes remain buffered, flush
-them before waiting for more space. For multi-QP reactors, park the write and
+If allocation reaches backpressure while committed bytes remain buffered, the
+library expedites their publication. For multi-QP reactors, park the write and
 continue servicing other QPs rather than spinning on one connection.
 
 `EAGAIN` may mean that the QP has reached its own outstanding-send limit or that
@@ -163,21 +164,28 @@ delays the very publication that releases them. An event loop parks the blocked
 QP, keeps servicing the others, and resumes it on `DMESH_EVENT_TX_READY` — no
 timer, and no scan of every QP.
 
-DPUmesh does not flush buffered data on a timer. A sender that wants successive
-writes to share one descriptor chooses how long to retain the partial unit, and
-`dmesh_tx_inflight()` is the signal for that choice: it is nonzero while a
-published unit on the QP still awaits acknowledgement. An idle QP has no
-completion for a successor to arrive behind, so retaining its tail buys no
-batching and only adds delay. A QP with work outstanding will usually accept
-more bytes before that work completes, so retention there costs latency bounded
-by the sender's own deadline and saves a descriptor. Code that needs bounded
-latency calls `dmesh_flush()` at its logical write boundary; graceful close also
-flushes, while `dmesh_abort_qp()` discards buffered data that has not been
-submitted.
+Tail scheduling belongs to the channel, not to native, preload, or gRPC callers.
+The single channel worker tracks only QPs with retained tails and therefore does
+not scan the port table. `dmesh_tx_inflight()` remains available for diagnostics
+and ABI compatibility but is not an input to application batching policy.
+`dmesh_flush()` is an explicit force operation, graceful close flushes before
+FIN, and `dmesh_abort_qp()` discards bytes that have not been submitted.
+
+The current scheduler checks a newly retained tail on the next 500 µs worker
+tick. Continued commits classify the stream as busy and move the fallback to a
+5 ms quiet interval, rounded to the same tick. Full units still publish during
+that interval. A full-unit drain also publishes the remaining tail after its
+300 µs coalescing window. ACK processing reclaims capacity but does not force a
+tail. Explicit flush, allocation pressure, and graceful close force it.
+
+A synchronous submission fault is returned by `dmesh_post_send()` or
+`dmesh_flush()`. If the bounded-deadline worker encounters the fault later, it
+latches a sticky error on the QP and emits one `DMESH_EVENT_TX_ERROR`; subsequent
+TX calls fail with that error until the QP is destroyed.
 
 ## 5. RX and EQ notification
 
-`dmesh_poll_eq()` is nonblocking and returns four event types:
+`dmesh_poll_eq()` is nonblocking and returns five event types:
 
 | Type | Meaning | Credit |
 |---|---|---|
@@ -185,6 +193,7 @@ submitted.
 | `DMESH_EVENT_RECV` | One RX fragment | held until `dmesh_release_rx_buffer()` |
 | `DMESH_EVENT_RECV_FIN` | Peer EOF | none |
 | `DMESH_EVENT_TX_READY` | An `EAGAIN`-blocked QP should retry allocation | none |
+| `DMESH_EVENT_TX_ERROR` | Background tail submission failed; QP TX is terminal | none |
 
 `event.buf` points directly into the channel RX mmap. An event is a transport
 fragment, not an application message boundary; parsers must retain framing state
@@ -241,32 +250,34 @@ while ((n = dmesh_poll_eq(eq, events, 64)) > 0) {
         case DMESH_EVENT_TX_READY:
             retry_parked_write(events[i].qp);
             break;
+        case DMESH_EVENT_TX_ERROR:
+            mark_transport_failed(events[i].qp);
+            break;
         }
     }
     destroy_qps_marked_during_this_batch();
 }
 ```
 
-For `DMESH_EVENT_TX_READY`, `event.qp` is the retry target, `buf == NULL`,
-`len == 0`, and `_rx_token == -1`. Calling `dmesh_release_rx_buffer()` on it is
-a harmless no-op.
+For `DMESH_EVENT_TX_READY` and `DMESH_EVENT_TX_ERROR`, `event.qp` is the affected
+QP, `buf == NULL`, `len == 0`, and `_rx_token == -1`. Calling
+`dmesh_release_rx_buffer()` on either is a harmless no-op.
 The application should ignore a stale hint if that QP no longer has a parked
 write.
 
 ## 6. POSIX and gRPC facades
 
 `libdmesh_preload.so` is a POSIX adapter over the native data/event contract.
-It uses `dmesh_alloc`/`dmesh_post_send`/`dmesh_flush` for TX and consumes
-`DMESH_EVENT_RECV`, `DMESH_EVENT_RECV_FIN`, and `DMESH_EVENT_TX_READY` from
+It uses `dmesh_alloc`/`dmesh_post_send` for TX and consumes
+`DMESH_EVENT_RECV`, `DMESH_EVENT_RECV_FIN`, `DMESH_EVENT_TX_READY`, and
+`DMESH_EVENT_TX_ERROR` from
 `dmesh_poll_eq`. Internal hooks provide ClusterIP resolution, numeric QP
 creation, transport FIN, and temporary EQ notification suppression.
 
-The preload path copies POSIX `read`/`write` application buffers and applies the
-retention rule above on the application's behalf: a write on a QP with
-`dmesh_tx_inflight()` clear is published immediately, and writes committed while
-a unit is in flight are coalesced and published by a 1 ms dirty-QP pass.
-Backpressure and blocking receive publish pending bytes before parking; shutdown
-and close publish pending bytes before FIN.
+The preload path copies POSIX `read`/`write` application buffers but owns no
+batching list, scan, or timer. Backpressure maps to kernel descriptor
+non-writability; shutdown forces pending bytes before FIN, and graceful close
+uses the native close contract.
 
 One process-wide EQ serves the mapped descriptors. Dispatcher and waiter drains
 are serialized. A blocking receive may consume two EQ batches before parking.
@@ -274,8 +285,9 @@ Receive readiness is signalled once per descriptor per drained batch. EQ eventfd
 writes are suppressed during waiter drains and restored when pending work remains.
 
 On `EAGAIN`, the kernel descriptor suppresses `EPOLLOUT` until
-`DMESH_EVENT_TX_READY`. Blocking writes park on that descriptor. The POSIX
-application does not select or observe the physical batch size.
+`DMESH_EVENT_TX_READY`. Blocking writes park on that descriptor. A
+`DMESH_EVENT_TX_ERROR` becomes a sticky socket I/O error. The POSIX application
+does not select or observe the physical batch size.
 
 The gRPC C++ adapter maps one runtime to channels, reactor shards to EQs, and
 EventEngine endpoints to QPs. Client bootstrap accepts a Service-name target,
@@ -284,16 +296,19 @@ target. Each EventEngine `Connect` creates a targeted QP. Established L4 streams
 remain backend-pinned and terminate when that backend is lost. TLS and HTTP/2
 remain end-to-end.
 
-The adapter uses `dmesh_alloc`/`dmesh_post_send` for TX and consumes
-`DMESH_EVENT_RECV`, `DMESH_EVENT_RECV_FIN`, `DMESH_EVENT_CONN_REQ`, and
-`DMESH_EVENT_TX_READY` from `dmesh_poll_eq`. One EventEngine Write commits every
-slice and calls `dmesh_flush` once at the logical write boundary; consecutive
-slices share one reservation, so a frame header and its payload cost one post.
-It applies the retention rule above only when configured to. Receives are copied
+The adapter uses `dmesh_alloc`/`dmesh_post_send` for TX, calls `dmesh_flush`
+once at each EventEngine Write boundary, and consumes
+`DMESH_EVENT_RECV`, `DMESH_EVENT_RECV_FIN`, `DMESH_EVENT_CONN_REQ`,
+`DMESH_EVENT_TX_READY`, and `DMESH_EVENT_TX_ERROR` from `dmesh_poll_eq`. One
+EventEngine Write commits every slice; consecutive slices share one reservation.
+The flush is a logical force operation; physical batch state and deadlines remain
+in libdpumesh. Receives are copied
 out before `dmesh_release_rx_buffer`, and the credit is withheld, up to a
 per-connection cap, while the endpoint's queued bytes exceed its high-water mark.
 On `EAGAIN` the adapter parks the write and resumes it from
-`DMESH_EVENT_TX_READY`; it has no retry timer.
+`DMESH_EVENT_TX_READY`; it has no retry or batching timer.
+`DMESH_EVENT_TX_ERROR` fails the endpoint and closes the QP after the current
+event batch.
 
 Adapter-internal ownership and threading are specified in
 [`GRPC.md`](GRPC.md).
@@ -303,7 +318,6 @@ Adapter-internal ownership and threading are specified in
 - No arbitrary memory registration, rkey, one-sided READ, or one-sided WRITE.
 - No application-visible send completion; protocol ACKs reclaim internal TX
   capacity.
-- No automatic deadline for an unflushed partial batch yet.
 - The registry is loaded once and is not live-reloaded.
 - Dynamic instances require a Service already present in the registry.
 - L4 passthrough is the supported gRPC mode. The in-tree L7 validator uses a

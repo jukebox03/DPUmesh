@@ -55,7 +55,6 @@ class FakeDmeshState::Impl final {
     dmesh_qp_t value{};
     Eq* eq = nullptr;
     bool alive = true;
-    bool tx_inflight = false;
     size_t alloc_calls = 0;
     size_t flush_calls = 0;
     std::deque<int> alloc_failures;
@@ -293,12 +292,6 @@ class FakeDmeshApiOps final : public DmeshApiOps {
     return 0;
   }
 
-  int TxInflight(dmesh_qp_t* qp) override {
-    std::lock_guard<std::mutex> lock(impl_->mu);
-    auto* fake = impl_->FindQp(qp);
-    return fake != nullptr && fake->alive && fake->tx_inflight ? 1 : 0;
-  }
-
   int PollEq(dmesh_eq_t* eq, dmesh_event_t* events,
              int max_events) override {
     std::lock_guard<std::mutex> lock(impl_->mu);
@@ -386,13 +379,6 @@ void FakeDmeshState::SetAllocError(dmesh_qp_t* qp, int error_number) {
   }
 }
 
-void FakeDmeshState::SetTxInflight(dmesh_qp_t* qp, bool inflight) {
-  std::lock_guard<std::mutex> lock(impl_->mu);
-  if (auto* fake = impl_->FindQp(qp)) {
-    fake->tx_inflight = inflight;
-  }
-}
-
 void FakeDmeshState::FailNextPost(dmesh_qp_t* qp, int error_number) {
   std::lock_guard<std::mutex> lock(impl_->mu);
   if (auto* fake = impl_->FindQp(qp)) {
@@ -436,6 +422,14 @@ bool FakeDmeshState::WaitForPostCount(dmesh_qp_t* qp, size_t count,
   return WaitUntil(&impl_->mu, timeout, [this, qp, count] {
     auto* fake = impl_->FindQp(qp);
     return fake != nullptr && fake->posts.size() >= count;
+  });
+}
+
+bool FakeDmeshState::WaitForFlushCount(dmesh_qp_t* qp, size_t count,
+                                       std::chrono::milliseconds timeout) {
+  return WaitUntil(&impl_->mu, timeout, [this, qp, count] {
+    auto* fake = impl_->FindQp(qp);
+    return fake != nullptr && fake->flush_calls >= count;
   });
 }
 
@@ -496,6 +490,18 @@ void FakeDmeshState::InjectTxReady(dmesh_qp_t* qp) {
   Impl::Event event;
   event.value.qp = qp;
   event.value.type = DMESH_EVENT_TX_READY;
+  event.value._rx_token = -1;
+  fake->eq->events.push_back(event);
+  impl_->Signal(fake->eq);
+}
+
+void FakeDmeshState::InjectTxError(dmesh_qp_t* qp) {
+  std::lock_guard<std::mutex> lock(impl_->mu);
+  auto* fake = impl_->FindQp(qp);
+  if (fake == nullptr || !fake->alive) return;
+  Impl::Event event;
+  event.value.qp = qp;
+  event.value.type = DMESH_EVENT_TX_ERROR;
   event.value._rx_token = -1;
   fake->eq->events.push_back(event);
   impl_->Signal(fake->eq);

@@ -29,6 +29,7 @@
 #define MAX_THREADS        64
 #define WORKER_STACK_BYTES (256 * 1024)
 #define STOP_GRACE_SEC     15
+#define DRAIN_GRACE_SEC    1.0
 #define REQ_FILL           42
 #define RD_CHUNK           (64 * 1024)
 #define INFLIGHT_RING      (1u << 16)    /* outstanding slots, indexed by seq % RING */
@@ -97,6 +98,8 @@ typedef struct {
     uint32_t    *slot_seq;
     uint32_t     next_seq;
     long         outstanding;
+    long         pending;
+    int          draining;
     double       sched_next;   /* open: next scheduled send time */
     uint64_t     prng;         /* open/poisson: per-thread xorshift state */
 
@@ -122,10 +125,11 @@ static void on_reply(uint32_t seq, uint32_t plen, uint32_t aux, void *user) {
     uint32_t idx = seq % INFLIGHT_RING;
     if (!w->live[idx] || w->slot_seq[idx] != seq) { w->fail++; return; }
     w->live[idx] = 0;
+    w->outstanding--;
+    if (w->draining) return;
     double t0 = w->start_ts[idx];
     if ((int32_t)(seq - w->prev_seq) <= 0) w->reorder++;   /* arrival went backwards */
     w->prev_seq = seq;
-    w->outstanding--;
     if (w->rcnt >= w->warmup) bench_hist_record(&w->hist, (now - t0) * 1e6);
     w->rcnt++;
     if (w->rcnt == w->warmup) w->warmup_end = now;
@@ -285,6 +289,29 @@ static void *worker_fn(void *arg) {
         }
     }
     end = bench_now_sec();
+    w->pending = w->outstanding;
+
+    /* Finish requests accepted before the measurement boundary. This leaves the
+     * peer with no unread request or blocked reply when close sends FIN. */
+    w->draining = 1;
+    double drain_deadline = end + DRAIN_GRACE_SEC;
+    while ((w->tx.len > 0 || w->outstanding > 0) &&
+           bench_now_sec() < drain_deadline && !atomic_load(w->stop)) {
+        if (reap(w, &rf, rd) < 0) break;
+        if (txq_flush(&w->tx, w->fd, &tx_blocked) < 0) break;
+
+        uint32_t want = EPOLLIN | (tx_blocked && w->tx.len ? EPOLLOUT : 0);
+        if (want != cur_events) {
+            ev.events = want;
+            epoll_ctl(ep, EPOLL_CTL_MOD, w->fd, &ev);
+            cur_events = want;
+        }
+        if (w->tx.len == 0 && w->outstanding == 0) break;
+
+        double left = drain_deadline - bench_now_sec();
+        int timeout_ms = left > 0.020 ? 20 : (left > 0 ? (int)(left * 1000.0) : 0);
+        epoll_wait(ep, &ev, 1, timeout_ms);
+    }
 done_ep:
     close(ep);
 done:
@@ -368,7 +395,7 @@ static void run_bench(int conn_fd, int mode, int req_size, int reply_size, int c
         total_fail += w[i].fail; total_reorder += w[i].reorder; total_drops += w[i].drops;
         if (atomic_load(&w[i].broken)) { worker_fail++; total_fail++; }
         total_scheduled += (long)w[i].next_seq + w[i].drops;
-        total_pending += w[i].outstanding;
+        total_pending += w[i].pending;
         if (!atomic_load(&w[i].broken) && w[i].dura > 1e-9 && measured > 0) {
             mrps += (double)measured / w[i].dura * 1e-6;
             double rps = (double)measured / w[i].dura;

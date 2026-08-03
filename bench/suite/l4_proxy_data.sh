@@ -70,6 +70,10 @@ TARGET_CONFIRM_RATES="${TARGET_CONFIRM_RATES:-1536816 1852228 2021585 2122664}"
 TARGET_GROWTH="${TARGET_GROWTH:-1.10}"
 TARGET_BRACKET_RATIO="${TARGET_BRACKET_RATIO:-1.03}"
 TARGET_MAX_ROUNDS="${TARGET_MAX_ROUNDS:-12}"
+# Deployment scope and pin profile follow the selected paths: the gRPC configs
+# have their own pods and their own two-cores-per-config layout.
+DEPLOY_SCOPE_DEFAULT=l4
+PIN_PROFILE_DEFAULT=l4
 ENABLE_PERF="${ENABLE_PERF:-1}"
 DEPLOY="${DEPLOY:-1}"
 RECOVERY_REDEPLOYS=0
@@ -86,14 +90,19 @@ DPU_CONFIG_SELECTED=0
 for config in "${CONFIGS[@]}"; do
   case "$config" in
     envoy-permissive|envoy-strict|dpumesh-preload|dpumesh-native) ;;
+    grpc-envoy-permissive|grpc-envoy-strict|grpc-tcp|grpc-dpumesh) ;;
     *) echo "unknown CONFIGS entry: $config" >&2; exit 2 ;;
   esac
   [ -z "${CONFIG_SEEN[$config]:-}" ] ||
     { echo "duplicate CONFIGS entry: $config" >&2; exit 2; }
   CONFIG_SEEN[$config]=1
-  case "$config" in dpumesh-preload|dpumesh-native) DPU_CONFIG_SELECTED=1 ;; esac
+  case "$config" in dpumesh-preload|dpumesh-native|grpc-dpumesh) DPU_CONFIG_SELECTED=1 ;; esac
 done
 [ "${#CONFIGS[@]}" -gt 0 ] || { echo "CONFIGS must not be empty" >&2; exit 2; }
+GRPC_ONLY=1
+for config in "${CONFIGS[@]}"; do
+  case "$config" in grpc-*) ;; *) GRPC_ONLY=0 ;; esac
+done
 
 usage() {
   cat <<EOF
@@ -156,6 +165,10 @@ while [ "$#" -gt 0 ]; do
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
+
+if [ "$GRPC_ONLY" = 1 ]; then DEPLOY_SCOPE_DEFAULT=grpc; PIN_PROFILE_DEFAULT=grpc; fi
+DEPLOY_SCOPE="${DEPLOY_SCOPE:-$DEPLOY_SCOPE_DEFAULT}"
+PIN_PROFILE="${PIN_PROFILE:-$PIN_PROFILE_DEFAULT}"
 
 if [ "$QUICK" = 1 ]; then
   REPS=1; DUR=2; PILOT_DUR=1; SCOUT_DUR=2; SCOUT_REFINE_STEPS=1
@@ -449,6 +462,34 @@ set_config() {
       CLIENT_BINARY=/usr/local/bin/bench_dpumesh
       SERVER_BINARY=/usr/local/bin/echo_dpumesh
       BINARY_CLASS=native-api ;;
+    grpc-envoy-permissive)
+      CLIENT_APP=bench-grpc-envoy; CLIENT_CONTAINER=bench-grpc-envoy
+      SERVER_APP=echo-grpc-envoy; SERVER_CONTAINER=echo-grpc-envoy
+      CLIENT_SIDECAR=sidecar1; SERVER_SIDECAR=sidecar2
+      CLIENT_BINARY=/usr/local/bin/bench_grpc
+      SERVER_BINARY=/usr/local/bin/echo_grpc
+      BINARY_CLASS=grpc ;;
+    grpc-envoy-strict)
+      CLIENT_APP=bench-grpc-envoy-strict; CLIENT_CONTAINER=bench-grpc-envoy-strict
+      SERVER_APP=echo-grpc-envoy-strict; SERVER_CONTAINER=echo-grpc-envoy-strict
+      CLIENT_SIDECAR=sidecar1; SERVER_SIDECAR=sidecar2
+      CLIENT_BINARY=/usr/local/bin/bench_grpc
+      SERVER_BINARY=/usr/local/bin/echo_grpc
+      BINARY_CLASS=grpc ;;
+    grpc-tcp)
+      CLIENT_APP=bench-grpc-tcp; CLIENT_CONTAINER=bench-grpc-tcp
+      SERVER_APP=echo-grpc-tcp; SERVER_CONTAINER=echo-grpc-tcp
+      CLIENT_SIDECAR=""; SERVER_SIDECAR=""
+      CLIENT_BINARY=/usr/local/bin/bench_grpc
+      SERVER_BINARY=/usr/local/bin/echo_grpc
+      BINARY_CLASS=grpc ;;
+    grpc-dpumesh)
+      CLIENT_APP=bench-grpc-dpumesh; CLIENT_CONTAINER=bench-grpc-dpumesh
+      SERVER_APP=echo-grpc-dpumesh; SERVER_CONTAINER=echo-grpc-dpumesh
+      CLIENT_SIDECAR=""; SERVER_SIDECAR=""
+      CLIENT_BINARY=/usr/local/bin/bench_grpc
+      SERVER_BINARY=/usr/local/bin/echo_grpc
+      BINARY_CLASS=grpc ;;
     *) die "unknown config: $1" ;;
   esac
 }
@@ -462,7 +503,7 @@ config_selected() {
 }
 
 is_dpu_config() {
-  [ "$1" = dpumesh-preload ] || [ "$1" = dpumesh-native ]
+  [ "$1" = dpumesh-preload ] || [ "$1" = dpumesh-native ] || [ "$1" = grpc-dpumesh ]
 }
 
 native_backend_ok() {
@@ -503,12 +544,12 @@ deploy_stack() {
       DPUMESH_RINGS_PER_POD="$DPU_RINGS_PER_POD" \
       DPUMESH_ARM_WORKERS="$DPU_ARM_WORKERS" \
       DPUMESH_PROXY_L7_SVC= DPUMESH_LOG_LEVEL=40 \
-      BENCH_NUMA_POLICY=local BENCH_DEPLOY_SCOPE=l4 "$BENCH" deploy
+      BENCH_NUMA_POLICY=local BENCH_DEPLOY_SCOPE="$DEPLOY_SCOPE" "$BENCH" deploy
   else
     log "using existing deployment (--no-deploy)"
   fi
   enforce_single_native_backend
-  BENCH_NUMA_POLICY=local "$BENCH" pin l4
+  BENCH_NUMA_POLICY=local "$BENCH" pin "$PIN_PROFILE"
   local dpu_log dpu_topology
   dpu_log=$("$BENCH" dpulog 240)
   dpu_topology=$(ssh -n -o ConnectTimeout=8 "$DPU_HOST" \
@@ -550,7 +591,11 @@ verify_binaries() {
     die "POSIX client binaries differ across configs; see $hashes"
   [ "$(awk -F, 'NR>1 && $2=="posix" && $3=="server"{h[$7]=1} END{print length(h)}' "$hashes")" -le 1 ] ||
     die "POSIX server binaries differ across configs; see $hashes"
-  log "binary audit PASS: selected POSIX paths are byte-identical; native API binaries recorded separately"
+  [ "$(awk -F, 'NR>1 && $2=="grpc" && $3=="client"{h[$7]=1} END{print length(h)}' "$hashes")" -le 1 ] ||
+    die "gRPC client binaries differ across configs; see $hashes"
+  [ "$(awk -F, 'NR>1 && $2=="grpc" && $3=="server"{h[$7]=1} END{print length(h)}' "$hashes")" -le 1 ] ||
+    die "gRPC server binaries differ across configs; see $hashes"
+  log "binary audit PASS: selected POSIX and gRPC paths are each byte-identical; native API binaries recorded separately"
 }
 
 verify_single_backends() {
@@ -567,7 +612,10 @@ verify_single_backends() {
   for config_service in \
     "envoy-permissive:echo-tcp" \
     "envoy-strict:echo-tcp-strict" \
-    "dpumesh-preload:preload-sock"; do
+    "dpumesh-preload:preload-sock" \
+    "grpc-envoy-permissive:echo-grpc-envoy" \
+    "grpc-envoy-strict:echo-grpc-envoy-strict" \
+    "grpc-tcp:echo-grpc-tcp"; do
     IFS=: read -r config service <<<"$config_service"
     config_selected "$config" || continue
     count=$(kubectl get endpoints -n "$NS" "$service" -o json 2>/dev/null |
@@ -576,6 +624,13 @@ verify_single_backends() {
       die "$config service $service has $count ready backend addresses; exactly one is required"
     csv_row "$observed" "$config" service "$service" 1 "$count" >>"$out"
   done
+  if config_selected grpc-dpumesh; then
+    read -r desired ready < <(kubectl get deployment -n "$NS" echo-grpc-dpumesh -o json |
+      jq -r '[.spec.replicas // 0, .status.readyReplicas // 0] | @tsv')
+    [ "$desired" = 1 ] && [ "$ready" = 1 ] ||
+      die "grpc backend echo-grpc-dpumesh desired=$desired ready=$ready; expected=1"
+    csv_row "$observed" grpc-dpumesh deployment echo-grpc-dpumesh 1 "$ready" >>"$out"
+  fi
   if config_selected dpumesh-native; then
     for app_expected in \
       "echo-dpumesh:1" "echo-dpumesh-13:0" "echo-dpumesh-14:0"; do
@@ -632,13 +687,17 @@ run_generator_selftests() {
     printf '%s\n' "$header" >"$GENERATOR_SELFTEST"
   fi
   for config in "${CONFIGS[@]}"; do
-    [ "$config" = dpumesh-native ] && kind=native || kind=posix
+    case "$config" in
+      dpumesh-native) kind=native ;;
+      grpc-*)         kind=grpc ;;
+      *)              kind=posix ;;
+    esac
     [ -n "${representative[$kind]:-}" ] || representative[$kind]="$config"
   done
 
   echo "generator,config,frame_bytes,highest_clean_rps,lowest_bad_rps,status,reps,duration_s" \
     >"$limits_tmp"
-  for kind in posix native; do
+  for kind in posix native grpc; do
     config="${representative[$kind]:-}"
     [ -n "$config" ] || continue
     set_config "$config"
@@ -715,7 +774,11 @@ validate_generator_headroom() {
   printf '%s\n' "$header" >"$tmp"
   while IFS=, read -r config payload knee _rest; do
     [ "$config" != config ] || continue
-    [ "$config" = dpumesh-native ] && generator=native || generator=posix
+    case "$config" in
+      dpumesh-native) generator=native ;;
+      grpc-*)         generator=grpc ;;
+      *)              generator=posix ;;
+    esac
     ceiling=$(awk -F, -v g="$generator" -v p="$payload" \
       'NR>1 && $1==g && $3==p{print $4; exit}' "$GENERATOR_LIMITS")
     [ -n "$ceiling" ] || die "missing generator ceiling for $generator/$payload"

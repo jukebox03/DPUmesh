@@ -242,8 +242,8 @@ class DmeshClientEventEngine final : public EventEngine {
       callback_executor = runtime_->callback_executor();
     }
     pending.on_connect(std::make_unique<DmeshEndpoint>(
-        std::move(connected->transport), std::move(connected->work_executor),
-        std::move(callback_executor), std::move(memory_allocator),
+        std::move(connected->transport), std::move(callback_executor),
+        std::move(memory_allocator),
         NativeAddress(connected->peer_pod, connected->peer_port),
         NativeAddress(connected->local_pod, connected->local_port)));
   }
@@ -298,8 +298,8 @@ struct DmeshGrpcServerAttachment::State {
           std::move(connected.callback_executor);
       if (endpoint_callbacks == nullptr) endpoint_callbacks = callback_executor;
       auto endpoint = std::make_unique<DmeshEndpoint>(
-          std::move(connected.transport), std::move(connected.work_executor),
-          std::move(endpoint_callbacks), std::move(allocator),
+          std::move(connected.transport), std::move(endpoint_callbacks),
+          std::move(allocator),
           NativeAddress(connected.peer_pod, connected.peer_port),
           NativeAddress(connected.local_pod, connected.local_port));
       status = listener->AcceptConnectedEndpoint(std::move(endpoint));

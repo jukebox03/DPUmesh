@@ -10,7 +10,6 @@
 
 /* Max DMA size for doca_dpa_dev_comch_producer_dma_copy.
  * HW supports up to 8KB per single call with 128B-aligned addresses. */
-#define DPA_DMA_COPY_MAX  8192
 /* The DPU staging slot is DPUMESH_SLOT_SIZE bytes; each FORWARD dma_copy (host →
  * DPU staging) is capped at DPA_DMA_COPY_MAX. If the cap exceeded the canonical slot
  * size a copy could overflow the staging slot, so couple them at compile time.
@@ -23,9 +22,6 @@ _Static_assert(DPA_DMA_COPY_MAX <= DPUMESH_SLOT_SIZE,
  * - Source and destination addresses: 64B aligned
  *   (ensured by CACHE_ALIGN=128 buffer allocation + 128B-aligned offsets)
  * - Transfer size per call: 128B aligned, max 8KB */
-#define DMA_COPY_SIZE_ALIGN  128
-#define ALIGN_UP_128(x)  (((x) + (DMA_COPY_SIZE_ALIGN - 1)) & ~(uint32_t)(DMA_COPY_SIZE_ALIGN - 1))
-
 /* Max consecutive descriptors drained from one ring per process_*_desc call.
  * Bounds per-ring work so a busy ring can't starve the others within a single
  * drain_all_rings inner iter. */
@@ -74,6 +70,8 @@ static int send_ring_ack(struct dpa_thread_arg *thread_arg, uint8_t type,
     doca_dpa_dev_comch_producer_post_send_imm_only(
         thread_arg->dpa_producer, thread_arg->dpu_consumer_id,
         (const uint8_t *)&ack, sizeof(ack), DOCA_DPA_DEV_SUBMIT_FLAG_FLUSH);
+    thread_arg->producer_deferred = 0;
+    thread_arg->producer_reports_submitted++;
     return 1;
 }
 
@@ -200,9 +198,27 @@ static uint32_t drain_producer_completions(struct dpa_thread_arg *thread_arg)
         count++;
     }
 
-    if (count > 0)
+    if (count > 0) {
         doca_dpa_dev_completion_ack(producer_comp, count);
+        thread_arg->producer_reports_completed += count;
+        doca_dpa_dev_completion_request_notification(producer_comp);
+    }
     return count;
+}
+
+/* A report-generating producer operation completes after every older DMA on
+ * this ordered producer. Drain that report before releasing the EU. */
+#define PRODUCER_FENCE_WAIT_LOOPS  0x800000u
+static int wait_for_producer_fence(struct dpa_thread_arg *thread_arg)
+{
+    for (uint32_t wait = 0; wait < PRODUCER_FENCE_WAIT_LOOPS; wait++) {
+        if (thread_arg->producer_reports_completed ==
+            thread_arg->producer_reports_submitted)
+            return 1;
+        drain_producer_completions(thread_arg);
+    }
+    DOCA_DPA_DEV_LOG_INFO("producer fence timeout before reschedule\n");
+    return 0;
 }
 
 static struct dma_ring_ctrl *fwd_ring_ctrl(const struct dpa_ring_info *ring)
@@ -215,7 +231,8 @@ static struct dma_ring_ctrl *fwd_ring_ctrl(const struct dpa_ring_info *ring)
 
 /* Drain one fair-share quantum from ring r. A descriptor is visible only when
  * its generation matches the next consumer ticket. */
-static int process_fwd_ring(struct dpa_thread_arg *thread_arg, uint32_t r)
+static int process_fwd_ring(struct dpa_thread_arg *thread_arg, uint32_t r,
+                            uint32_t budget)
 {
     doca_dpa_dev_comch_producer_t producer = thread_arg->dpa_producer;
     uint32_t dpu_consumer_id = thread_arg->dpu_consumer_id;
@@ -225,7 +242,7 @@ static int process_fwd_ring(struct dpa_thread_arg *thread_arg, uint32_t r)
     uint32_t desc_idx =
         (uint32_t)(thread_arg->consumer_head[r] % ring->buf_arr_size);
 
-    for (int b = 0; b < RING_BATCH_CAP; b++) {
+    for (uint32_t b = 0; b < RING_BATCH_CAP && b < budget; b++) {
         doca_dpa_dev_buf_t buf =
             doca_dpa_dev_buf_array_get_buf(ring->buf_arr, desc_idx);
         volatile struct dma_desc *desc =
@@ -263,14 +280,24 @@ static int process_fwd_ring(struct dpa_thread_arg *thread_arg, uint32_t r)
         /* dma_copy requires 128B-aligned size. A FIN carries desc->size==0
          * (comp.length stays 0 → receiver reads EOF); still issue one min 128B
          * transfer so the DMA engine never sees a zero-length descriptor. */
-        uint32_t chunk = ALIGN_UP_128(desc->size);
-        if (chunk == 0) chunk = DMA_COPY_SIZE_ALIGN;
-
         /* Mirror each connection's host TX offset into contiguous DPU staging.
          * The host ring bounds occupancy, and staging tail slack covers DMA size
          * alignment. */
         uint32_t moff = (uint32_t)(desc->addr - ring->host_addr);
         uint64_t staging_base = ring->dpu_addr - (uint64_t)ring->region_off;
+        uint32_t prefix = dpa_dma_copy_prefix(moff);
+        uint32_t chunk = dpa_dma_aligned_copy_len(moff, desc->size);
+        if (chunk == 0)
+            chunk = DPA_DMA_COPY_ALIGN;
+        if (chunk > DPA_DMA_COPY_MAX) {
+            DOCA_DPA_DEV_LOG_INFO("FWD: aligned window %u > %u (offset=%u size=%u); dropping\n",
+                                  chunk, DPA_DMA_COPY_MAX, moff, desc->size);
+            thread_arg->consumer_head[r]++;
+            if (++desc_idx == ring->buf_arr_size)
+                desc_idx = 0;
+            total_chunks += 1;
+            continue;
+        }
 
         comp.type = DPA_MSG_FWD_DONE;
         comp.pos = moff;                         /* staging offset == host TX offset */
@@ -285,17 +312,23 @@ static int process_fwd_ring(struct dpa_thread_arg *thread_arg, uint32_t r)
         comp.dst_pod_id = desc->dst_pod_id;      /* may be DMESH_POD_BLANK → DPU resolves */
         comp.generation = thread_arg->ring_generation[r];
 
+        uint32_t submit_flags = DOCA_DPA_DEV_SUBMIT_FLAG_FLUSH;
+        if (!dpa_producer_report_due(&thread_arg->producer_deferred)) {
+            submit_flags |= DOCA_DPA_DEV_SUBMIT_FLAG_OPTIMIZE_REPORTS;
+        } else {
+            thread_arg->producer_reports_submitted++;
+        }
+
         doca_dpa_dev_comch_producer_dma_copy(producer,
                                     dpu_consumer_id,
                                     ring->dpu_mmap,
-                                    staging_base + moff,
+                                    staging_base + moff - prefix,
                                     ring->host_mmap,
-                                    desc->addr,
+                                    desc->addr - prefix,
                                     chunk,
                                     (uint8_t *)&comp,
                                     sizeof(struct comch_dma_comp_msg),
-                                    DOCA_DPA_DEV_SUBMIT_FLAG_FLUSH |
-                                    DOCA_DPA_DEV_SUBMIT_FLAG_OPTIMIZE_REPORTS);
+                                    submit_flags);
         /* no pos[r] advance — the staging offset is host-driven (mirror) */
 
         thread_arg->consumer_head[r]++;
@@ -309,11 +342,11 @@ static int process_fwd_ring(struct dpa_thread_arg *thread_arg, uint32_t r)
 
 /* Drain each ring in round-robin quanta. */
 #define HANDLE_MSGS_EVERY 32
-#define DRAIN_COMPLETIONS_EVERY 8
 
 /* poll_msgs is clear for the pre-park rescan: its caller drains and counts
  * consumer completions explicitly so a racing one-shot wake is not lost. */
-static int drain_all_rings(struct dpa_thread_arg *thread_arg, int poll_msgs)
+static int drain_all_rings(struct dpa_thread_arg *thread_arg, int poll_msgs,
+                           uint32_t budget)
 {
     int total_dma_calls = 0;
     uint32_t iter = 0;
@@ -323,14 +356,16 @@ static int drain_all_rings(struct dpa_thread_arg *thread_arg, int poll_msgs)
 
         if (poll_msgs && (iter & (HANDLE_MSGS_EVERY - 1)) == 0)
             handle_msgs(thread_arg);
-        if ((iter & (DRAIN_COMPLETIONS_EVERY - 1)) == 0)
-            drain_producer_completions(thread_arg);
+        drain_producer_completions(thread_arg);
         iter++;
         __dpa_thread_window_read_inv();
 
         uint32_t nr = thread_arg->num_rings;
         for (uint32_t r = 0; r < nr; r++) {
-            int chunks = process_fwd_ring(thread_arg, r);
+            uint32_t remaining = budget - (uint32_t)total_dma_calls;
+            if (remaining == 0)
+                break;
+            int chunks = process_fwd_ring(thread_arg, r, remaining);
             if (chunks > 0) {
                 struct dma_ring_ctrl *ctrl =
                     fwd_ring_ctrl(&thread_arg->rings[r]);
@@ -338,6 +373,10 @@ static int drain_all_rings(struct dpa_thread_arg *thread_arg, int poll_msgs)
                 total_dma_calls += chunks;
                 found++;
             }
+        }
+        if ((uint32_t)total_dma_calls >= budget) {
+            __dpa_thread_window_writeback();
+            break;
         }
         if (found == 0)
             break;
@@ -354,6 +393,7 @@ __dpa_global__ void run_dma_manager(uint64_t arg)
 {
     struct dpa_thread_arg *thread_arg = (struct dpa_thread_arg *)arg;
     uint32_t idle_spins = 0;
+    uint32_t completed_since_reschedule = 0;
 
     /* rings[0] was installed synchronously by ARM h2d_memcpy before thread_run.
      * ACK from inside the EU proves that the thread began executing that exact
@@ -373,10 +413,22 @@ __dpa_global__ void run_dma_manager(uint64_t arg)
      * restarts the loop. */
     while (1) {
         handle_msgs(thread_arg);
-        int chunks = drain_all_rings(thread_arg, 1);
-        drain_producer_completions(thread_arg);
+        uint32_t budget = dpa_reschedule_budget(
+            completed_since_reschedule, thread_arg->producer_deferred);
+        int chunks = drain_all_rings(thread_arg, 1, budget);
         if (chunks > 0) {
             idle_spins = 0;                       /* work found → keep polling HOT */
+            if (dpa_reschedule_due(&completed_since_reschedule,
+                                   (uint32_t)chunks,
+                                   thread_arg->producer_deferred) &&
+                wait_for_producer_fence(thread_arg)) {
+                doca_dpa_dev_comch_consumer_completion_request_notification(
+                    thread_arg->dpa_consumer_comp);
+                doca_dpa_dev_completion_request_notification(
+                    thread_arg->dpa_producer_comp);
+                doca_dpa_dev_thread_reschedule();
+            }
+            drain_producer_completions(thread_arg);
         } else if (++idle_spins >= IDLE_SPINS_BEFORE_PARK) {
             doca_dpa_dev_comch_consumer_completion_request_notification(thread_arg->dpa_consumer_comp);
             doca_dpa_dev_completion_request_notification(thread_arg->dpa_producer_comp);
@@ -384,7 +436,16 @@ __dpa_global__ void run_dma_manager(uint64_t arg)
              * queue so a control message in the arm window prevents parking. */
             uint32_t msgs = handle_msgs(thread_arg);
             uint32_t producer_comps = drain_producer_completions(thread_arg);
-            int rescan = drain_all_rings(thread_arg, 0);
+            budget = dpa_reschedule_budget(
+                completed_since_reschedule, thread_arg->producer_deferred);
+            int rescan = drain_all_rings(thread_arg, 0, budget);
+            if (rescan > 0 &&
+                dpa_reschedule_due(&completed_since_reschedule,
+                                   (uint32_t)rescan,
+                                   thread_arg->producer_deferred) &&
+                wait_for_producer_fence(thread_arg)) {
+                doca_dpa_dev_thread_reschedule();
+            }
             if (msgs == 0 && producer_comps == 0 && rescan == 0)
                 doca_dpa_dev_thread_reschedule();   /* park; woken by WAKE completion */
             idle_spins = 0;                       /* reset after wake */

@@ -30,7 +30,6 @@ class FakeDmeshState final {
   void FailNextCreateQp(int error_number);
   void FailNextAlloc(dmesh_qp_t* qp, int error_number);
   void SetAllocError(dmesh_qp_t* qp, int error_number);
-  void SetTxInflight(dmesh_qp_t* qp, bool inflight);
   void FailNextPost(dmesh_qp_t* qp, int error_number);
   void FailNextPoll(int error_number);
 
@@ -40,6 +39,8 @@ class FakeDmeshState final {
   std::vector<std::string> ClientTargets() const;
   bool WaitForPostCount(dmesh_qp_t* qp, size_t count,
                         std::chrono::milliseconds timeout);
+  bool WaitForFlushCount(dmesh_qp_t* qp, size_t count,
+                         std::chrono::milliseconds timeout);
   bool WaitForAllocCallCount(dmesh_qp_t* qp, size_t count,
                              std::chrono::milliseconds timeout);
   bool WaitForReleaseCount(size_t count, std::chrono::milliseconds timeout);
@@ -50,6 +51,7 @@ class FakeDmeshState final {
                           const std::vector<std::string>& receives);
   void InjectFin(dmesh_qp_t* qp);
   void InjectTxReady(dmesh_qp_t* qp);
+  void InjectTxError(dmesh_qp_t* qp);
   dmesh_qp_t* InjectConnectionRequest(const std::string& first_bytes);
 
   std::vector<std::vector<uint8_t>> Posts(dmesh_qp_t* qp) const;

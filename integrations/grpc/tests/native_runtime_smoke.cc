@@ -247,8 +247,8 @@ absl::StatusOr<std::unique_ptr<DmeshEndpoint>> ConnectEndpoint(
   ConnectedTransport connected = std::move(*connected_result);
   auto allocator = std::make_shared<SmokeMemoryAllocator>();
   return std::make_unique<DmeshEndpoint>(
-      std::move(connected.transport), std::move(connected.work_executor),
-      std::move(callbacks), MemoryAllocator(std::move(allocator)));
+      std::move(connected.transport), std::move(callbacks),
+      MemoryAllocator(std::move(allocator)));
 }
 
 absl::Status Run(const std::string& service, size_t rounds,

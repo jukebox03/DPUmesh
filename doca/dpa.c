@@ -291,7 +291,6 @@ static void dmesh_doca_dpa_msgq_recv_error_cb(struct doca_comch_consumer_task_po
 					     union doca_data ctx_user_data)
 {
 	(void)task_user_data;
-	(void)ctx_user_data;
 
 	struct doca_task *task = doca_comch_consumer_task_post_recv_as_task(recv_task);
 	doca_error_t status = doca_task_get_status(task);
@@ -302,7 +301,16 @@ static void dmesh_doca_dpa_msgq_recv_error_cb(struct doca_comch_consumer_task_po
 	/* Resubmit to keep the recv task alive — do not free. */
 	doca_error_t resubmit = doca_task_submit(task);
 	if (resubmit != DOCA_SUCCESS) {
-		DOCA_LOG_ERR("DPA MsgQ recv resubmit after error failed: %s", doca_error_get_name(resubmit));
+		struct objects *objs = ctx_user_data.ptr;
+		struct dpu_data_worker *worker_state =
+			&objs->data_workers[dpu_worker_id];
+		if (worker_state->num_deferred_recv < MAX_DEFERRED_RECV) {
+			worker_state->deferred_recv[worker_state->num_deferred_recv++] = task;
+			DOCA_LOG_WARN("DPA MsgQ recv resubmit after error deferred: %s",
+			              doca_error_get_name(resubmit));
+		} else {
+			DOCA_LOG_ERR("DPA MsgQ recv error task lost: deferred list full");
+		}
 	}
 }
 /*

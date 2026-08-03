@@ -1,7 +1,6 @@
 #ifndef DPUMESH_GRPC_DMESH_REACTOR_H
 #define DPUMESH_GRPC_DMESH_REACTOR_H
 
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -26,10 +25,6 @@ class DmeshReactor final {
  public:
   struct Options {
     size_t event_batch_size = 64;
-    // How long a committed transmit tail waits for a successor write to share
-    // its transport unit while an earlier unit is still unacknowledged. Zero
-    // publishes every tail at its write boundary.
-    std::chrono::microseconds tail_flush_delay{0};
   };
 
   // Each field is sampled independently.
@@ -43,9 +38,7 @@ class DmeshReactor final {
 
   struct ConnectedTransport {
     std::unique_ptr<EndpointTransport> transport;
-    // Both point at the reactor's paired callback executor: endpoint
-    // completions and the write pump share that thread.
-    std::shared_ptr<Executor> work_executor;
+    // Carries the completions a gRPC call raises itself.
     std::shared_ptr<Executor> callback_executor;
     // Native identity of the two ends. The peer pair stays unset on a client
     // QP: the DPU selects and pins a backend for that stream, so the host

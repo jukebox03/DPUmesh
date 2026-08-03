@@ -7,7 +7,6 @@
 
 #include <algorithm>
 #include <atomic>
-#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <deque>
@@ -33,8 +32,6 @@
 
 namespace dpumesh::grpc {
 namespace {
-
-using Clock = std::chrono::steady_clock;
 
 // Receive events one connection may hold credit for. The credits belong to a
 // landing ring shared with the other connections on this shard, so a stalled
@@ -91,7 +88,7 @@ class DmeshReactor::Impl final
     };
 
     // Serializes transmit (work executor thread) against QP lifecycle (EQ
-    // thread). Guards qp, closing, remote_eof, unflushed and flush_armed; the
+    // thread). Guards qp, closing and remote_eof; the
     // EQ thread is the only writer of qp and closing, so its own unlocked
     // reads of them stay consistent. Never held across a driver call: the
     // endpoint takes its own state lock first, so the reverse order deadlocks.
@@ -107,11 +104,6 @@ class DmeshReactor::Impl final
     std::atomic<bool> close_enqueued{false};
     bool closing = false;
     bool remote_eof = false;
-    bool unflushed = false;
-    bool flush_armed = false;
-    // Written by the EQ thread when the arm command runs; read only by the EQ
-    // thread's wait computation and sweep.
-    Clock::time_point flush_deadline;
   };
 
   class Transport final : public EndpointTransport {
@@ -172,10 +164,6 @@ class DmeshReactor::Impl final
 
   ~Impl() { Shutdown(); }
 
-  void SetWorkExecutor(std::shared_ptr<Executor> work_executor) {
-    work_executor_ = std::move(work_executor);
-  }
-
   Stats stats() const {
     Stats snapshot;
     snapshot.receive_credit_hold_dropped =
@@ -187,9 +175,9 @@ class DmeshReactor::Impl final
 
   absl::Status Start() {
     if (ops_ == nullptr || channel_ == nullptr ||
-        callback_executor_ == nullptr || work_executor_ == nullptr) {
+        callback_executor_ == nullptr) {
       return absl::InvalidArgumentError(
-          "DPUmesh reactor requires ops, channel and executors");
+          "DPUmesh reactor requires ops, channel and an executor");
     }
     if (post_max_ <= 0 || options_.event_batch_size == 0 ||
         options_.event_batch_size > static_cast<size_t>(std::numeric_limits<int>::max())) {
@@ -336,12 +324,6 @@ class DmeshReactor::Impl final
           return PostResult::Error(absl::UnavailableError(
               "DPUmesh peer closed while transmit was blocked"));
         }
-        /* A logical write may exceed the bounded native batch window. Publish
-         * its committed prefix so TX ACKs can make room for the rest. */
-        if (connection->unflushed) {
-          const absl::Status status = FlushNowLocked(connection);
-          if (!status.ok()) return PostResult::Error(status);
-        }
         return PostResult::WouldBlock();
       }
       return PostResult::Error(ErrnoStatus("dmesh_alloc", error_number));
@@ -354,36 +336,18 @@ class DmeshReactor::Impl final
                        static_cast<uint32_t>(length)) != 0) {
       return PostResult::Error(ErrnoStatus("dmesh_post_send", errno));
     }
-    connection->unflushed = true;
     return PostResult::Accepted();
   }
 
+  /* A gRPC write boundary is explicit transport progress. libdpumesh owns the
+   * physical batch and publishes its retained tail here. */
   absl::Status Flush(const std::shared_ptr<Connection>& connection) {
-    Clock::duration delay;
-    {
-      std::lock_guard<std::mutex> lock(connection->tx_mu);
-      if (connection->closing || connection->qp == nullptr) {
-        return absl::UnavailableError("DPUmesh connection is closed");
-      }
-      if (!connection->unflushed) return absl::OkStatus();
-      /* Complete units publish inside the post. This boundary decides the
-       * trailing partial: retain it only while an earlier unit is still
-       * outstanding for a successor write to share. */
-      if (options_.tail_flush_delay.count() == 0 ||
-          ops_->TxInflight(connection->qp) == 0) {
-        return FlushNowLocked(connection);
-      }
-      if (connection->flush_armed) return absl::OkStatus();
-      connection->flush_armed = true;
-      delay = options_.tail_flush_delay;
-    }
-    /* The EQ thread owns the loop wait that enforces the deadline. */
-    if (!Enqueue([self = shared_from_this(), connection, delay] {
-          self->ArmTailFlushOwner(connection, delay);
-        })) {
-      std::lock_guard<std::mutex> lock(connection->tx_mu);
-      return FlushNowLocked(connection);
-    }
+    std::lock_guard<std::mutex> lock(connection->tx_mu);
+    if (connection->closing || connection->qp == nullptr)
+      return absl::UnavailableError("DPUmesh connection is closed");
+    errno = 0;
+    if (ops_->Flush(connection->qp) != 0)
+      return ErrnoStatus("dmesh_flush", errno);
     return absl::OkStatus();
   }
 
@@ -437,58 +401,6 @@ class DmeshReactor::Impl final
   }
 
  private:
-  // Requires connection->tx_mu.
-  absl::Status FlushNowLocked(const std::shared_ptr<Connection>& connection) {
-    connection->flush_armed = false;
-    if (!connection->unflushed) return absl::OkStatus();
-    if (connection->closing || connection->qp == nullptr) {
-      connection->unflushed = false;
-      return absl::UnavailableError("DPUmesh connection is closed");
-    }
-    errno = 0;
-    if (ops_->Flush(connection->qp) != 0)
-      return ErrnoStatus("dmesh_flush", errno);
-    connection->unflushed = false;
-    return absl::OkStatus();
-  }
-
-  void ArmTailFlushOwner(const std::shared_ptr<Connection>& connection,
-                         Clock::duration delay) {
-    {
-      std::lock_guard<std::mutex> lock(connection->tx_mu);
-      if (!connection->flush_armed) return;
-    }
-    connection->flush_deadline = Clock::now() + delay;
-    tail_flushes_.push_back(connection);
-  }
-
-  // Publish retained tails whose successor never arrived, and those whose
-  // outstanding unit has since been acknowledged. Entries are queued in
-  // deadline order, and one whose connection is no longer armed is stale.
-  void SweepTailFlushes(Clock::time_point now) {
-    size_t kept = 0;
-    for (size_t i = 0; i < tail_flushes_.size(); ++i) {
-      const std::shared_ptr<Connection> connection = tail_flushes_[i];
-      absl::Status status = absl::OkStatus();
-      {
-        std::lock_guard<std::mutex> lock(connection->tx_mu);
-        if (!connection->flush_armed) continue;
-        if (connection->closing || connection->qp == nullptr) {
-          connection->flush_armed = false;
-          continue;
-        }
-        if (connection->flush_deadline > now &&
-            ops_->TxInflight(connection->qp) != 0) {
-          tail_flushes_[kept++] = connection;
-          continue;
-        }
-        status = FlushNowLocked(connection);
-      }
-      if (!status.ok()) FailConnectionOwner(connection, status);
-    }
-    tail_flushes_.resize(kept);
-  }
-
   void ReleaseHeldReceives(const std::shared_ptr<Connection>& connection) {
     for (dmesh_event_t& event : connection->held_receives) {
       ops_->ReleaseRxBuffer(channel_, &event);
@@ -550,7 +462,6 @@ class DmeshReactor::Impl final
     ConnectedTransport connected;
     connected.transport = std::make_unique<Transport>(
         weak_from_this(), connection, static_cast<size_t>(post_max_));
-    connected.work_executor = work_executor_;
     connected.callback_executor = callback_executor_;
     connected.local_pod = ops_->PodId(channel_);
     connected.local_port = connection->qp->local_port;
@@ -750,6 +661,13 @@ class DmeshReactor::Impl final
       return;
     }
 
+    if (event->type == DMESH_EVENT_TX_ERROR) {
+      FailConnectionOwner(
+          connection,
+          absl::UnavailableError("DPUmesh background transmit failed"));
+      return;
+    }
+
 
     if (event->type == DMESH_EVENT_RECV_FIN) {
       if (connection->closing || connection->remote_eof) return;
@@ -826,7 +744,6 @@ class DmeshReactor::Impl final
         /* tx_mu spans the destroy, so a transmit racing the close either
          * completes in full against a live QP or observes qp == nullptr. */
         std::lock_guard<std::mutex> lock(connection->tx_mu);
-        connection->flush_armed = false;
         connection->qp = nullptr;
         ops_->DestroyQp(qp);
       }
@@ -893,23 +810,14 @@ class DmeshReactor::Impl final
 
     bool eq_pending = false;
     while (!stop_requested_.load(std::memory_order_acquire)) {
-      /* The two fds carry every external edge. A retained transmit tail is the
-       * one deadline the loop owns and bounds the wait. */
+      /* The two fds carry every external edge. Tail deadlines are owned by
+       * libdpumesh and arrive here only as readiness or error events. */
       timespec timeout;
       const timespec* wait = nullptr;
       if (eq_pending) {
         /* The EQ still holds events; take the pending commands and resume. */
         timeout.tv_sec = 0;
         timeout.tv_nsec = 0;
-        wait = &timeout;
-      } else if (!tail_flushes_.empty()) {
-        const auto remaining =
-            tail_flushes_.front()->flush_deadline - Clock::now();
-        const auto nanoseconds = std::max<int64_t>(
-            0, std::chrono::duration_cast<std::chrono::nanoseconds>(remaining)
-                   .count());
-        timeout.tv_sec = static_cast<time_t>(nanoseconds / 1000000000);
-        timeout.tv_nsec = static_cast<long>(nanoseconds % 1000000000);
         wait = &timeout;
       }
 
@@ -929,7 +837,6 @@ class DmeshReactor::Impl final
       if (stop_requested_.load(std::memory_order_acquire)) break;
 
       eq_pending = DrainEq();
-      if (!tail_flushes_.empty()) SweepTailFlushes(Clock::now());
       SweepDeferredCloses();
     }
 
@@ -941,7 +848,6 @@ class DmeshReactor::Impl final
   const int post_max_;
   const std::shared_ptr<Executor> callback_executor_;
   const Options options_;
-  std::shared_ptr<Executor> work_executor_;
 
   std::atomic<uint64_t> receive_credit_hold_dropped_{0};
   std::atomic<uint64_t> eq_drain_budget_exhausted_{0};
@@ -960,7 +866,6 @@ class DmeshReactor::Impl final
 
   std::vector<dmesh_event_t> event_buffer_;
   std::unordered_map<dmesh_qp_t*, std::shared_ptr<Connection>> connections_;
-  std::vector<std::shared_ptr<Connection>> tail_flushes_;
   std::vector<std::shared_ptr<Connection>> deferred_closes_;
   std::unordered_set<dmesh_qp_t*> deferred_unowned_qps_;
   AcceptCallback accept_callback_;
@@ -969,10 +874,9 @@ class DmeshReactor::Impl final
 absl::StatusOr<std::unique_ptr<DmeshReactor>> DmeshReactor::Create(
     DmeshApiOps* ops, dmesh_channel_t* channel, int post_max,
     std::shared_ptr<Executor> callback_executor, Options options) {
-  auto impl = std::make_shared<Impl>(ops, channel, post_max, callback_executor,
-                                     options);
+  auto impl = std::make_shared<Impl>(ops, channel, post_max,
+                                     std::move(callback_executor), options);
   auto reactor = std::unique_ptr<DmeshReactor>(new DmeshReactor(impl));
-  impl->SetWorkExecutor(std::move(callback_executor));
   const absl::Status status = impl->Start();
   if (!status.ok()) return status;
   return reactor;

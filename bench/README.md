@@ -17,31 +17,48 @@ suite/                   evaluation matrix and status
 report/                  deployment record and interpreted measurements
 ```
 
-The gRPC C++ workload is built from `integrations/grpc`. It uses the generated
-gRPC v1.80 `grpc.testing.BenchmarkService` protocol and can select direct TCP or
-DPUmesh without changing RPC messages or service code.
+This tree holds what the L4 and L7 evaluations share. Everything specific to the
+gRPC workload — its programs, images, pods, figures, and report — lives in
+[`integrations/grpc/bench/`](../integrations/grpc/bench/README.md), which mirrors
+this layout. `bench.sh` applies `k8s/pods.yaml` from both trees as one stream,
+and `suite/l4_proxy_data.sh` drives configurations from both.
 
 ## 2. Compared transports
 
-| Name | Client/server program | Data path |
+L4, raw framed bytes:
+
+| Config | Client/server program | Data path |
 |---|---|---|
-| `tcp-envoy` | `bench_sock` / `echo_sock` | kernel TCP through Envoy `tcp_proxy` |
-| `dpumesh-native` | `bench_dpumesh` / `echo_dpumesh` | native C API |
+| `envoy-permissive` | `bench_sock` / `echo_sock` | kernel TCP through Envoy `tcp_proxy` |
+| `envoy-strict` | same POSIX programs | the same, with mTLS on the inter-pod leg |
 | `dpumesh-preload` | same POSIX programs | socket facade over DPUmesh |
-| `grpc-tcp` | `grpc_dpumesh_qps_benchmark` | gRPC C++ over kernel TCP |
-| `grpc-dpumesh` | same gRPC program | gRPC C++ over injected DPUmesh Endpoint |
+| `dpumesh-native` | `bench_dpumesh` / `echo_dpumesh` | native C API |
+
+L7, gRPC unary over the same transports:
+
+| Config | Client/server program | Data path |
+|---|---|---|
+| `grpc-envoy-permissive` | `bench_grpc` / `echo_grpc` | gRPC through Envoy `tcp_proxy` |
+| `grpc-envoy-strict` | same gRPC programs | the same, with mTLS on the inter-pod leg |
+| `grpc-tcp` | same gRPC programs | gRPC over kernel TCP, no mesh |
+| `grpc-dpumesh` | same gRPC programs | gRPC over injected DPUmesh Endpoints |
 
 `bench_sock` and `echo_sock` are the matched L4 baseline. Their frame contains
 request id, request length, response length, and body. The response preserves the
 id and requested size. Large bodies are transported as a byte sequence and may
 span multiple DPUmesh receive events.
 
-The gRPC benchmark is a closed-loop synchronous unary workload with one channel
-and a configurable number of client threads/outstanding RPCs. Warmup samples are
-discarded. It reports successful QPS, failures, p50/p90/p99/p99.9 latency, and
-client process CPU. It is protocol-compatible with the official service schema;
-it is a focused transport harness rather than the upstream multi-scenario
-`qps_worker` driver.
+`bench_grpc` and `echo_grpc` are the matched L7 pair. They speak the generated
+gRPC v1.80 `grpc.testing.BenchmarkService` unary protocol and select their
+transport from the environment, so the four gRPC configurations differ in no
+application code. They share this tree's control protocol, result line, frame
+convention, and `apps/bench.h` latency histogram, so the collector drives L4 and
+L7 paths unchanged and percentiles mean the same thing across all eight.
+
+The two evaluations are not a single comparison. An L4 config and an L7 config
+measure different applications even over the same transport, and the DPUmesh
+paths differ further: `dpumesh-native` calls the C API directly while
+`grpc-dpumesh` goes through the gRPC EventEngine adapter.
 
 ## 3. Reproducible deployment
 
@@ -113,39 +130,37 @@ construction. Every path knee requires at least 1.25× generator headroom.
 The complete metric and analysis contract is in
 [REPORT.md](report/REPORT.md).
 
-## 5. gRPC QPS measurements
+## 5. gRPC measurements
 
-Build a Release binary against the pinned gRPC source tree:
+The gRPC campaign uses the same collector, deployed with the `grpc` scope so
+only the four L7 paths register:
 
 ```sh
-cmake -S integrations/grpc -B build/grpc-release \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DDPUMESH_GRPC_SOURCE_DIR=/path/to/grpc-v1.80.0 \
-  -DDPUMESH_GRPC_ENABLE_SANITIZERS=OFF \
-  -DDPUMESH_GRPC_BUILD_QPS_BENCHMARK=ON \
-  -DBUILD_TESTING=OFF
-cmake --build build/grpc-release -j2 --target grpc_dpumesh_qps_benchmark
+DPUMESH_DPA_THREADS=32 DPUMESH_RINGS_PER_POD=8 DPUMESH_ARM_WORKERS=8 \
+DPUMESH_PROXY_L7_SVC= BENCH_NUMA_POLICY=local BENCH_DEPLOY_SCOPE=grpc \
+./bench/bench.sh deploy
+
+CONFIGS="grpc-dpumesh grpc-envoy-permissive grpc-envoy-strict grpc-tcp" \
+  ./bench/suite/l4_proxy_data.sh --no-deploy --no-perf \
+  --out bench/report/data/grpc-$(date +%Y%m%d-%H%M%S)
+
+python3 bench/suite/distill.py <dataset> measurements.csv
+python3 integrations/grpc/bench/suite/plot_grpc.py measurements.csv \
+    integrations/grpc/bench/report/figures
 ```
 
-The binary syntax is:
+The deployment scope and pin profile follow the selected configurations, so a
+gRPC-only `CONFIGS` list needs neither flag. Each path owns one client core and
+one server core; Envoy sidecars share the endpoint cores, as at L4. `--no-perf`
+is required on this host because `perf` collects no samples inside the benchmark
+containers.
 
-```text
-grpc_dpumesh_qps_benchmark server <tcp|dmesh> ENDPOINT DURATION_S [REACTORS]
-grpc_dpumesh_qps_benchmark client <tcp|dmesh> TARGET WARMUP_S DURATION_S \
-    CONCURRENCY REQUEST_BYTES RESPONSE_BYTES [REACTORS] [AUTHORITY=TARGET] \
-    [WAIT_FOR_READY=0]
-```
-
-For a transport comparison, copy the identical binary to the same client and
-server pods. Run `server tcp 0.0.0.0:PORT ...` with a client target of the server
-pod IP, then run `server dmesh SERVICE ...` and target the same Service name.
-Use one channel and the same concurrency/frame-size matrix for both paths. Record
-the binary hash, pod/node identity, DPU knobs, success/failure counts, process CPU,
-and DPU logs with the output.
-
-`TARGET` is a TCP address or a DPUmesh Service name. `AUTHORITY` maps to
-`GRPC_ARG_DEFAULT_AUTHORITY` and defaults to `TARGET`; `WAIT_FOR_READY` applies
-to each RPC. The result JSON records all three values.
+`./bench/bench.sh grpcbuild` builds the gRPC programs alone; `deploy` runs it
+before building the images. Program syntax, control protocol, environment, and
+the instrument's design constraints are documented in
+[integrations/grpc/bench/README.md](../integrations/grpc/bench/README.md).
+A standalone `grpc_dpumesh_qps_benchmark` is available there for closed-loop
+single-machine checks that need no pods or collector.
 
 ## 6. Correctness validators
 
@@ -180,7 +195,12 @@ test, native symbol linkage, and an optional BlueField client/server smoke binar
    invalidating latency comparison.
 5. Capture host application CPU, Envoy CPU when present, DPU ARM CPU, and active
    `N/K/A/L` topology. Host-only CPU is not total system cost.
-6. Compare only matched semantics. The current gRPC comparison is DPUmesh versus
-   direct TCP, not DPUmesh versus Envoy HTTP connection management.
+6. Compare only matched semantics. Both evaluations compare DPUmesh against
+   Envoy `tcp_proxy` sidecars, plaintext and mTLS; neither compares against
+   Envoy HTTP connection management. L4 and L7 numbers are not interchangeable.
+7. Report p50 with the tail. On the gRPC paths they move independently: p50 can
+   stay flat across a range where p99 changes by an order of magnitude, so a
+   capacity set by a p99 bound is a latency result, not a throughput result.
 
-The current evaluation is in [REPORT.md](report/REPORT.md).
+The L4 evaluation is in [REPORT.md](report/REPORT.md); the gRPC evaluation is in
+[integrations/grpc/bench/report/REPORT_GRPC.md](../integrations/grpc/bench/report/REPORT_GRPC.md).

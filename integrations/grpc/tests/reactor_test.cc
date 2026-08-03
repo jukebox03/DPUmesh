@@ -1,5 +1,6 @@
 #include <errno.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -75,6 +76,45 @@ struct TestFailure {
     }                                                                       \
   } while (false)
 
+class AsyncStatus {
+ public:
+  void Set(absl::Status value) {
+    state_->status = std::move(value);
+    state_->count.fetch_add(1, std::memory_order_release);
+  }
+
+  bool WaitForCount(size_t count,
+                    std::chrono::milliseconds timeout = 2s) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (state_->count.load(std::memory_order_acquire) < count) {
+      if (std::chrono::steady_clock::now() >= deadline) return false;
+      std::this_thread::sleep_for(100us);
+    }
+    return true;
+  }
+
+  bool HasValue() const {
+    return state_->count.load(std::memory_order_acquire) != 0;
+  }
+
+  size_t Count() const {
+    return state_->count.load(std::memory_order_acquire);
+  }
+
+  absl::Status Get() const {
+    CHECK_TRUE(state_->count.load(std::memory_order_acquire) != 0);
+    return state_->status;
+  }
+
+ private:
+  struct State {
+    absl::Status status;
+    std::atomic<size_t> count{0};
+  };
+
+  std::shared_ptr<State> state_ = std::make_shared<State>();
+};
+
 std::string Flatten(SliceBuffer& buffer) {
   std::string output;
   output.reserve(buffer.Length());
@@ -98,16 +138,12 @@ std::optional<std::string> StringChannelArgument(
 }
 
 struct Fixture {
-  explicit Fixture(int post_max = 65536,
-                   std::chrono::microseconds tail_flush_delay =
-                       DmeshReactor::Options().tail_flush_delay)
+  explicit Fixture(int post_max = 65536)
       : state(std::make_shared<FakeDmeshState>()),
         allocator_impl(std::make_shared<TestMemoryAllocator>()) {
     state->SetPostMax(post_max);
-    DmeshRuntime::Options options;
-    options.reactor.tail_flush_delay = tail_flush_delay;
     auto created =
-        DmeshRuntime::Create(MakeFakeDmeshApiOps(state), UnownedExecutor(&callbacks), options);
+        DmeshRuntime::Create(MakeFakeDmeshApiOps(state), UnownedExecutor(&callbacks));
     CHECK_TRUE(created.ok());
     runtime = std::move(*created);
 
@@ -129,7 +165,7 @@ struct Fixture {
     CHECK_TRUE(connected.has_value());
 
     endpoint = std::make_unique<DmeshEndpoint>(
-        std::move(connected->transport), connected->work_executor, UnownedExecutor(&callbacks),
+        std::move(connected->transport), UnownedExecutor(&callbacks),
         MemoryAllocator(allocator_impl));
   }
 
@@ -176,19 +212,18 @@ bool WaitFor(const std::function<Value()>& read, Value expected,
   }
 }
 
-void TestTxCopiesSplitsAndPostsViaWorkExecutor() {
+void TestTxCopiesAndSplitsAcrossPosts() {
   Fixture fixture(3);
   SliceBuffer data;
   data.Append(Slice::FromCopiedString("abcdefg"));
-  std::optional<absl::Status> status;
-  CHECK_TRUE(!fixture.endpoint->Write(
-      [&status](absl::Status value) { status = std::move(value); }, &data,
+  AsyncStatus status;
+  CHECK_TRUE(fixture.endpoint->Write(
+      [status](absl::Status value) mutable { status.Set(std::move(value)); },
+      &data,
       EventEngine::Endpoint::WriteArgs()));
 
-  fixture.callbacks.RunAll();
   CHECK_TRUE(fixture.state->WaitForPostCount(fixture.qp, 3, 2s));
-  CHECK_TRUE(status.has_value());
-  CHECK_TRUE(status->ok());
+  CHECK_TRUE(!status.HasValue());
   CHECK_EQ(data.Length(), size_t{0});
 
   const auto posts = fixture.state->Posts(fixture.qp);
@@ -196,7 +231,6 @@ void TestTxCopiesSplitsAndPostsViaWorkExecutor() {
   CHECK_EQ(std::string(posts[0].begin(), posts[0].end()), std::string("abc"));
   CHECK_EQ(std::string(posts[1].begin(), posts[1].end()), std::string("def"));
   CHECK_EQ(std::string(posts[2].begin(), posts[2].end()), std::string("g"));
-  CHECK_EQ(fixture.state->flush_calls(fixture.qp), size_t{1});
   CHECK_EQ(fixture.state->poll_thread_violation_count(), size_t{0});
 }
 
@@ -206,13 +240,9 @@ void TestTxEagainRetriesFromEvent() {
 
   SliceBuffer data;
   data.Append(Slice::FromCopiedString("retry"));
-  int callback_count = 0;
-  std::optional<absl::Status> status;
+  AsyncStatus status;
   CHECK_TRUE(!fixture.endpoint->Write(
-      [&callback_count, &status](absl::Status value) {
-        ++callback_count;
-        status = std::move(value);
-      },
+      [status](absl::Status value) mutable { status.Set(std::move(value)); },
       &data, EventEngine::Endpoint::WriteArgs()));
 
   fixture.callbacks.RunAll();
@@ -223,64 +253,44 @@ void TestTxEagainRetriesFromEvent() {
   CHECK_EQ(fixture.state->Posts(fixture.qp).size(), size_t{0});
 
   fixture.state->InjectTxReady(fixture.qp);
-  CHECK_TRUE(PumpUntil(&fixture.callbacks, [&fixture] {
-    return fixture.state->Posts(fixture.qp).size() >= 1;
-  }));
-  fixture.callbacks.RunAll();
-  CHECK_EQ(callback_count, 1);
-  CHECK_TRUE(status->ok());
+  CHECK_TRUE(status.WaitForCount(1));
+  CHECK_TRUE(status.Get().ok());
+  CHECK_EQ(status.Count(), size_t{1});
+  CHECK_EQ(fixture.state->Posts(fixture.qp).size(), size_t{1});
   CHECK_TRUE(fixture.state->alloc_calls(fixture.qp) >= size_t{2});
+}
+
+void TestWriteBoundaryFlushesLibraryBatch() {
+  Fixture fixture;
+
+  SliceBuffer data;
+  data.Append(Slice::FromCopiedString("tail"));
+  AsyncStatus status;
+  CHECK_TRUE(fixture.endpoint->Write(
+      [status](absl::Status value) mutable { status.Set(std::move(value)); },
+      &data,
+      EventEngine::Endpoint::WriteArgs()));
+
+  CHECK_TRUE(fixture.state->WaitForPostCount(fixture.qp, 1, 2s));
+  CHECK_TRUE(fixture.state->WaitForFlushCount(fixture.qp, 1, 2s));
   CHECK_EQ(fixture.state->flush_calls(fixture.qp), size_t{1});
+  CHECK_TRUE(!status.HasValue());  // synchronous completion withholds callback
+  CHECK_EQ(data.Length(), size_t{0});
 }
 
-void TestTransmitTailPublishesWhenTransportGoesIdle() {
-  Fixture fixture(65536, 30s);
-  fixture.state->SetTxInflight(fixture.qp, true);
-
-  SliceBuffer data;
-  data.Append(Slice::FromCopiedString("tail"));
-  std::optional<absl::Status> status;
-  CHECK_TRUE(!fixture.endpoint->Write(
-      [&status](absl::Status value) { status = std::move(value); }, &data,
-      EventEngine::Endpoint::WriteArgs()));
-
-  fixture.callbacks.RunAll();
-  CHECK_TRUE(fixture.state->WaitForPostCount(fixture.qp, 1, 2s));
-  CHECK_TRUE(status->ok());
-  /* The bytes are committed, so the Write completes; the trailing partial unit
-   * stays unpublished while an earlier unit is still unacknowledged. */
-  std::this_thread::sleep_for(5ms);
-  CHECK_EQ(fixture.state->flush_calls(fixture.qp), size_t{0});
-
-  fixture.state->SetTxInflight(fixture.qp, false);
-  fixture.state->InjectTxReady(fixture.qp);
-  const std::function<size_t()> flushes = [&fixture] {
-    return fixture.state->flush_calls(fixture.qp);
-  };
-  CHECK_TRUE(WaitFor(flushes, size_t{1}, 2s));
-}
-
-void TestTransmitTailPublishesAtItsDeadline() {
-  Fixture fixture(65536, 20ms);
-  fixture.state->SetTxInflight(fixture.qp, true);
-
-  SliceBuffer data;
-  data.Append(Slice::FromCopiedString("tail"));
-  std::optional<absl::Status> status;
-  CHECK_TRUE(!fixture.endpoint->Write(
-      [&status](absl::Status value) { status = std::move(value); }, &data,
-      EventEngine::Endpoint::WriteArgs()));
-
-  fixture.callbacks.RunAll();
-  CHECK_TRUE(fixture.state->WaitForPostCount(fixture.qp, 1, 2s));
-  /* No successor arrives and the transport stays busy, so the deadline is what
-   * publishes the tail. */
-  const std::function<size_t()> flushes = [&fixture] {
-    return fixture.state->flush_calls(fixture.qp);
-  };
-  CHECK_TRUE(WaitFor(flushes, size_t{1}, 2s));
-  fixture.callbacks.RunAll();
-  CHECK_TRUE(status->ok());
+void TestAsyncTxErrorFailsAndClosesEndpoint() {
+  Fixture fixture;
+  SliceBuffer read;
+  AsyncStatus status;
+  CHECK_TRUE(!fixture.endpoint->Read(
+      [status](absl::Status value) mutable { status.Set(std::move(value)); },
+      &read,
+      EventEngine::Endpoint::ReadArgs()));
+  fixture.state->InjectTxError(fixture.qp);
+  CHECK_TRUE(PumpUntil(&fixture.callbacks,
+                       [&status] { return status.HasValue(); }));
+  CHECK_EQ(status.Get().code(), absl::StatusCode::kUnavailable);
+  CHECK_TRUE(fixture.state->WaitForDestroyCount(1, 2s));
 }
 
 void TestReceiveAboveHighWaterHoldsCreditUntilRead() {
@@ -315,20 +325,37 @@ void TestReceiveAboveHighWaterHoldsCreditUntilRead() {
   CHECK_TRUE(fixture.state->WaitForReleaseCount(receives, 2s));
 }
 
+// A write the transport accepts in full finishes inside Write(), which returns
+// true and withholds the callback.
+void TestWriteCompletesSynchronously() {
+  Fixture fixture;
+
+  SliceBuffer data;
+  data.Append(Slice::FromCopiedString("inline"));
+  bool called = false;
+  CHECK_TRUE(fixture.endpoint->Write(
+      [&called](absl::Status) { called = true; }, &data,
+      EventEngine::Endpoint::WriteArgs()));
+  CHECK_TRUE(!called);
+  CHECK_TRUE(fixture.state->WaitForPostCount(fixture.qp, 1, 2s));
+  CHECK_EQ(fixture.state->Posts(fixture.qp).size(), size_t{1});
+}
+
 void TestRxCopiesBeforeReleasingCredit() {
   Fixture fixture;
   SliceBuffer buffer;
-  std::optional<absl::Status> status;
+  AsyncStatus status;
   CHECK_TRUE(!fixture.endpoint->Read(
-      [&status](absl::Status value) { status = std::move(value); }, &buffer,
+      [status](absl::Status value) mutable { status.Set(std::move(value)); },
+      &buffer,
       EventEngine::Endpoint::ReadArgs()));
 
   fixture.state->InjectReceive(fixture.qp, "incoming bytes");
   CHECK_TRUE(fixture.state->WaitForReleaseCount(1, 2s));
-  CHECK_TRUE(fixture.callbacks.WaitForSize(1, 2s));
+  CHECK_TRUE(status.WaitForCount(1));
+  CHECK_TRUE(status.Get().ok());
   CHECK_EQ(Flatten(buffer), std::string("incoming bytes"));
-  fixture.callbacks.RunAll();
-  CHECK_TRUE(status->ok());
+  CHECK_EQ(fixture.callbacks.Size(), size_t{0});
   CHECK_EQ(fixture.state->release_count(), size_t{1});
 }
 
@@ -365,29 +392,32 @@ void TestPrebindDataAndFinAreReplayedInOrder() {
   CHECK_TRUE(!connect_error.has_value());
   CHECK_TRUE(connected.has_value());
   auto endpoint = std::make_unique<DmeshEndpoint>(
-      std::move(connected->transport), connected->work_executor, UnownedExecutor(&callbacks),
+      std::move(connected->transport), UnownedExecutor(&callbacks),
       MemoryAllocator(allocator_impl));
 
   SliceBuffer data_buffer;
-  std::optional<absl::Status> data_status;
+  AsyncStatus data_status;
   const bool synchronous = endpoint->Read(
-      [&data_status](absl::Status value) { data_status = std::move(value); },
+      [data_status](absl::Status value) mutable {
+        data_status.Set(std::move(value));
+      },
       &data_buffer, EventEngine::Endpoint::ReadArgs());
   if (!synchronous) {
-    CHECK_TRUE(callbacks.WaitForSize(1, 2s));
-    callbacks.RunAll();
-    CHECK_TRUE(data_status->ok());
+    CHECK_TRUE(data_status.WaitForCount(1));
+    CHECK_TRUE(data_status.Get().ok());
   }
   CHECK_EQ(Flatten(data_buffer), std::string("early data"));
 
   SliceBuffer eof_buffer;
-  std::optional<absl::Status> eof_status;
+  AsyncStatus eof_status;
   CHECK_TRUE(!endpoint->Read(
-      [&eof_status](absl::Status value) { eof_status = std::move(value); },
+      [eof_status](absl::Status value) mutable {
+        eof_status.Set(std::move(value));
+      },
       &eof_buffer, EventEngine::Endpoint::ReadArgs()));
   CHECK_TRUE(callbacks.WaitForSize(1, 2s));
   callbacks.RunAll();
-  CHECK_EQ(eof_status->code(), absl::StatusCode::kUnavailable);
+  CHECK_EQ(eof_status.Get().code(), absl::StatusCode::kUnavailable);
 
   endpoint.reset();
   CHECK_TRUE(state->WaitForDestroyCount(1, 2s));
@@ -414,15 +444,16 @@ void TestBatchedRxPreservesByteOrder() {
 void TestRemoteFinFailsPendingReadThenCloseIsDeferred() {
   Fixture fixture;
   SliceBuffer buffer;
-  std::optional<absl::Status> status;
+  AsyncStatus status;
   CHECK_TRUE(!fixture.endpoint->Read(
-      [&status](absl::Status value) { status = std::move(value); }, &buffer,
+      [status](absl::Status value) mutable { status.Set(std::move(value)); },
+      &buffer,
       EventEngine::Endpoint::ReadArgs()));
 
   fixture.state->InjectFin(fixture.qp);
   CHECK_TRUE(fixture.callbacks.WaitForSize(1, 2s));
   fixture.callbacks.RunAll();
-  CHECK_EQ(status->code(), absl::StatusCode::kUnavailable);
+  CHECK_EQ(status.Get().code(), absl::StatusCode::kUnavailable);
   CHECK_EQ(fixture.state->destroy_count(), size_t{0});
 
   fixture.endpoint.reset();
@@ -436,14 +467,13 @@ void TestPostFailureFailsEndpointAndClosesQp() {
 
   SliceBuffer data;
   data.Append(Slice::FromCopiedString("will fail"));
-  std::optional<absl::Status> status;
+  AsyncStatus status;
   CHECK_TRUE(!fixture.endpoint->Write(
-      [&status](absl::Status value) { status = std::move(value); }, &data,
+      [status](absl::Status value) mutable { status.Set(std::move(value)); },
+      &data,
       EventEngine::Endpoint::WriteArgs()));
 
-  CHECK_TRUE(fixture.callbacks.WaitForSize(1, 2s));
-  fixture.callbacks.RunAll();
-  CHECK_EQ(status->code(), absl::StatusCode::kUnavailable);
+  CHECK_EQ(status.Get().code(), absl::StatusCode::kUnavailable);
   CHECK_TRUE(fixture.state->WaitForDestroyCount(1, 2s));
   CHECK_EQ(fixture.state->mid_batch_destroy_count(), size_t{0});
 }
@@ -454,21 +484,17 @@ void TestCloseCancelsPermanentlyBlockedWrite() {
 
   SliceBuffer data;
   data.Append(Slice::FromCopiedString("blocked"));
-  int callback_count = 0;
-  std::optional<absl::Status> status;
+  AsyncStatus status;
   CHECK_TRUE(!fixture.endpoint->Write(
-      [&callback_count, &status](absl::Status value) {
-        ++callback_count;
-        status = std::move(value);
-      },
+      [status](absl::Status value) mutable { status.Set(std::move(value)); },
       &data, EventEngine::Endpoint::WriteArgs()));
   fixture.callbacks.RunAll();
   CHECK_TRUE(fixture.state->WaitForAllocCallCount(fixture.qp, 1, 2s));
 
   fixture.endpoint.reset();
   fixture.callbacks.RunAll();
-  CHECK_EQ(callback_count, 1);
-  CHECK_EQ(status->code(), absl::StatusCode::kCancelled);
+  CHECK_EQ(status.Count(), size_t{1});
+  CHECK_EQ(status.Get().code(), absl::StatusCode::kCancelled);
   CHECK_TRUE(fixture.state->WaitForDestroyCount(1, 2s));
   const size_t calls_after_close = fixture.state->alloc_calls(fixture.qp);
   std::this_thread::sleep_for(5ms);
@@ -481,17 +507,19 @@ void TestPeerFinFailsParkedWrite() {
 
   SliceBuffer data;
   data.Append(Slice::FromCopiedString("parked"));
-  std::optional<absl::Status> write_status;
+  AsyncStatus write_status;
   CHECK_TRUE(!fixture.endpoint->Write(
-      [&write_status](absl::Status value) { write_status = std::move(value); },
+      [write_status](absl::Status value) mutable {
+        write_status.Set(std::move(value));
+      },
       &data, EventEngine::Endpoint::WriteArgs()));
   fixture.callbacks.RunAll();
   CHECK_TRUE(fixture.state->WaitForAllocCallCount(fixture.qp, 1, 2s));
 
   fixture.state->InjectFin(fixture.qp);
   CHECK_TRUE(PumpUntil(&fixture.callbacks,
-                       [&write_status] { return write_status.has_value(); }));
-  CHECK_EQ(write_status->code(), absl::StatusCode::kUnavailable);
+                       [&write_status] { return write_status.HasValue(); }));
+  CHECK_EQ(write_status.Get().code(), absl::StatusCode::kUnavailable);
   CHECK_TRUE(fixture.state->WaitForDestroyCount(1, 2s));
   CHECK_EQ(fixture.state->mid_batch_destroy_count(), size_t{0});
 }
@@ -500,25 +528,29 @@ void TestAllocBackpressureAfterPeerFinFailsWrite() {
   Fixture fixture;
 
   SliceBuffer eof_buffer;
-  std::optional<absl::Status> eof_status;
+  AsyncStatus eof_status;
   CHECK_TRUE(!fixture.endpoint->Read(
-      [&eof_status](absl::Status value) { eof_status = std::move(value); },
+      [eof_status](absl::Status value) mutable {
+        eof_status.Set(std::move(value));
+      },
       &eof_buffer, EventEngine::Endpoint::ReadArgs()));
   fixture.state->InjectFin(fixture.qp);
   CHECK_TRUE(fixture.callbacks.WaitForSize(1, 2s));
   fixture.callbacks.RunAll();
-  CHECK_EQ(eof_status->code(), absl::StatusCode::kUnavailable);
+  CHECK_EQ(eof_status.Get().code(), absl::StatusCode::kUnavailable);
 
   fixture.state->SetAllocError(fixture.qp, EAGAIN);
   SliceBuffer data;
   data.Append(Slice::FromCopiedString("after fin"));
-  std::optional<absl::Status> write_status;
+  AsyncStatus write_status;
   CHECK_TRUE(!fixture.endpoint->Write(
-      [&write_status](absl::Status value) { write_status = std::move(value); },
+      [write_status](absl::Status value) mutable {
+        write_status.Set(std::move(value));
+      },
       &data, EventEngine::Endpoint::WriteArgs()));
   CHECK_TRUE(PumpUntil(&fixture.callbacks,
-                       [&write_status] { return write_status.has_value(); }));
-  CHECK_EQ(write_status->code(), absl::StatusCode::kUnavailable);
+                       [&write_status] { return write_status.HasValue(); }));
+  CHECK_EQ(write_status.Get().code(), absl::StatusCode::kUnavailable);
   CHECK_TRUE(fixture.state->WaitForDestroyCount(1, 2s));
 }
 
@@ -527,18 +559,14 @@ void TestLargeWriteCompletesAcrossPumpYields() {
   const std::string payload(60, 'x');
   SliceBuffer data;
   data.Append(Slice::FromCopiedString(payload));
-  std::optional<absl::Status> status;
-  CHECK_TRUE(!fixture.endpoint->Write(
-      [&status](absl::Status value) { status = std::move(value); }, &data,
+  AsyncStatus status;
+  CHECK_TRUE(fixture.endpoint->Write(
+      [status](absl::Status value) mutable { status.Set(std::move(value)); },
+      &data,
       EventEngine::Endpoint::WriteArgs()));
 
-  CHECK_TRUE(PumpUntil(&fixture.callbacks, [&fixture] {
-    return fixture.state->Posts(fixture.qp).size() >= 20;
-  }));
-  fixture.callbacks.RunAll();
-  CHECK_TRUE(status.has_value());
-  CHECK_TRUE(status->ok());
-  CHECK_EQ(fixture.state->flush_calls(fixture.qp), size_t{1});
+  CHECK_EQ(fixture.state->Posts(fixture.qp).size(), size_t{20});
+  CHECK_TRUE(!status.HasValue());
 
   std::string sent;
   for (const auto& post : fixture.state->Posts(fixture.qp)) {
@@ -550,15 +578,16 @@ void TestLargeWriteCompletesAcrossPumpYields() {
 void TestEqPollFailureFailsAndClosesConnection() {
   Fixture fixture;
   SliceBuffer buffer;
-  std::optional<absl::Status> status;
+  AsyncStatus status;
   CHECK_TRUE(!fixture.endpoint->Read(
-      [&status](absl::Status value) { status = std::move(value); }, &buffer,
+      [status](absl::Status value) mutable { status.Set(std::move(value)); },
+      &buffer,
       EventEngine::Endpoint::ReadArgs()));
 
   fixture.state->FailNextPoll(EIO);
   CHECK_TRUE(fixture.callbacks.WaitForSize(1, 2s));
   fixture.callbacks.RunAll();
-  CHECK_EQ(status->code(), absl::StatusCode::kUnavailable);
+  CHECK_EQ(status.Get().code(), absl::StatusCode::kUnavailable);
   CHECK_TRUE(fixture.state->WaitForDestroyCount(1, 2s));
   CHECK_EQ(fixture.state->mid_batch_destroy_count(), size_t{0});
 }
@@ -626,37 +655,32 @@ void TestInboundConnectionIsAcceptedAndBecomesEndpointTransport() {
 
   auto allocator = std::make_shared<TestMemoryAllocator>();
   auto endpoint = std::make_unique<DmeshEndpoint>(
-      std::move(accepted->transport), accepted->work_executor,
-      UnownedExecutor(&callbacks),
+      std::move(accepted->transport), UnownedExecutor(&callbacks),
       MemoryAllocator(allocator));
 
   SliceBuffer received;
-  std::optional<absl::Status> read_status;
+  AsyncStatus read_status;
   const bool read_sync = endpoint->Read(
-      [&read_status](absl::Status status) {
-        read_status = std::move(status);
+      [read_status](absl::Status status) mutable {
+        read_status.Set(std::move(status));
       },
       &received, EventEngine::Endpoint::ReadArgs());
   if (!read_sync) {
-    CHECK_TRUE(callbacks.WaitForSize(1, 2s));
-    callbacks.RunAll();
-    CHECK_TRUE(read_status.has_value());
-    CHECK_TRUE(read_status->ok());
+    CHECK_TRUE(read_status.WaitForCount(1));
+    CHECK_TRUE(read_status.Get().ok());
   }
   CHECK_EQ(Flatten(received), std::string("gRPC client preface"));
 
   SliceBuffer response;
   response.Append(Slice::FromCopiedString("gRPC server settings"));
-  std::optional<absl::Status> write_status;
-  CHECK_TRUE(!endpoint->Write(
-      [&write_status](absl::Status status) {
-        write_status = std::move(status);
+  AsyncStatus write_status;
+  CHECK_TRUE(endpoint->Write(
+      [write_status](absl::Status status) mutable {
+        write_status.Set(std::move(status));
       },
       &response, EventEngine::Endpoint::WriteArgs()));
-  callbacks.RunAll();
   CHECK_TRUE(state->WaitForPostCount(server_qp, 1, 2s));
-  CHECK_TRUE(write_status.has_value());
-  CHECK_TRUE(write_status->ok());
+  CHECK_TRUE(!write_status.HasValue());
   const auto posts = state->Posts(server_qp);
   CHECK_EQ(posts.size(), size_t{1});
   CHECK_EQ(std::string(posts[0].begin(), posts[0].end()),
@@ -916,15 +940,16 @@ struct TestCase {
 int main() {
   using namespace dpumesh::grpc::testing;
   const TestCase tests[] = {
-      {"TX copies and splits via the work executor",
-       TestTxCopiesSplitsAndPostsViaWorkExecutor},
+      {"TX copies and splits across posts",
+       TestTxCopiesAndSplitsAcrossPosts},
       {"TX EAGAIN retries from event",
        TestTxEagainRetriesFromEvent},
       {"RX copies before releasing credit", TestRxCopiesBeforeReleasingCredit},
-      {"transmit tail publishes when the transport goes idle",
-       TestTransmitTailPublishesWhenTransportGoesIdle},
-      {"transmit tail publishes at its deadline",
-       TestTransmitTailPublishesAtItsDeadline},
+      {"write completes synchronously", TestWriteCompletesSynchronously},
+      {"write boundary flushes library batch",
+       TestWriteBoundaryFlushesLibraryBatch},
+      {"async TX error fails and closes endpoint",
+       TestAsyncTxErrorFailsAndClosesEndpoint},
       {"receive above high water holds credit until read",
        TestReceiveAboveHighWaterHoldsCreditUntilRead},
       {"pre-bind data and FIN replay in order",

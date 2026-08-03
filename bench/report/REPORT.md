@@ -90,6 +90,35 @@ places more messages in each read and each event. Nothing configures this:
 `TCP_NODELAY` is set on both endpoints, and socket buffers and Envoy buffer
 limits are left at their defaults. Native is close to flat across the same range.
 
+## Library batching validation
+
+The current native and preload paths were deployed and measured on 2026-08-04
+with the report topology, `l4` pin profile, offered rates, and frame sizes. Each
+current value below is the median of three runs.
+
+| Path | Frame | Reference achieved/s | Current achieved/s | Delta | Reference p99 | Current p99 | Current p99 range |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Native | 64 B | 8,553,806 | 8,541,252 | -0.15% | 1,506 µs | 1,929 µs | 1,572–6,720 µs |
+| Native | 1 KiB | 1,109,843 | 1,109,990 | +0.01% | 1,454 µs | 710 µs | 544–912 µs |
+| Native | 8 KiB | 169,999 | 169,860 | -0.08% | 753 µs | 834 µs | 691–3,190 µs |
+| Preload | 64 B | 5,097,004 | 5,076,405 | -0.40% | 488 µs | 618 µs | 611–623 µs |
+| Preload | 1 KiB | 550,010 | 549,998 | -0.002% | 363 µs | 398 µs | 377–406 µs |
+| Preload | 8 KiB | 144,990 | 144,996 | +0.004% | 386 µs | 397 µs | 397–397 µs |
+
+Achieved throughput remains within 0.5% of the reference in every row. All runs
+had `fail=0` and `reorder=0`, and every p99 remained below the report's 10 ms
+limit. The admission-drop limit of 0.1% was exceeded by native 64 B repetition
+2, native 8 KiB repetition 3, and all three preload 64 B repetitions. Thus the
+throughput and latency comparison shows no material regression, while the exact
+all-repetitions clean criterion is not satisfied at those offered-rate points.
+
+Run-level histogram output is stored in
+[`data/batching-20260804/latency_runs.csv`](data/batching-20260804/latency_runs.csv).
+It contains p50, p95, p99, p99.9, and p99.99. The reference
+[`measurements.csv`](data/l4-final-20260729/measurements.csv) contains p99 but no
+per-request samples or other latency percentiles, so only p99 can be compared
+directly.
+
 ## Contract
 
 | Axis | Value |

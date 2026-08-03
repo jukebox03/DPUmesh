@@ -25,7 +25,6 @@ class NativeDmeshApiOps final : public DmeshApiOps {
     return dmesh_post_send(qp, buffer, len);
   }
   int Flush(dmesh_qp_t* qp) override { return dmesh_flush(qp); }
-  int TxInflight(dmesh_qp_t* qp) override { return dmesh_tx_inflight(qp); }
   int PollEq(dmesh_eq_t* eq, dmesh_event_t* events,
              int max_events) override {
     return dmesh_poll_eq(eq, events, max_events);

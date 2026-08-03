@@ -23,6 +23,9 @@ NS="${NS:-test-bench}"                 # k8s namespace
 CTRL_PORT="${CTRL_PORT:-9092}"
 TCP_PORT="${TCP_PORT:-9091}"
 MANIFEST="$BENCH_DIR/k8s/pods.yaml"
+# gRPC pods live with the integration that builds them.
+GRPC_BENCH_DIR="$PROJ_ROOT/integrations/grpc/bench"
+GRPC_MANIFEST="$GRPC_BENCH_DIR/k8s/pods.yaml"
 
 INCLUDE_SRC="$PROJ_ROOT/include"
 DOCA_SRC="$PROJ_ROOT/doca"
@@ -43,6 +46,8 @@ IMG_PRELOAD_DPU="bench/preload-dpumesh:latest"
 IMG_PRELOAD_SOCK="bench/preload-sock:latest"
 IMG_STREAM_DPU="bench/stream-dpumesh:latest"
 IMG_VERBS_DPU="bench/verbs-dpumesh:latest"
+IMG_BENCH_GRPC="bench/bench-grpc:latest"
+IMG_ECHO_GRPC="bench/echo-grpc:latest"
 IMG_BENCH_TCP="bench/bench-tcp:latest"
 IMG_ECHO_TCP="bench/echo-tcp:latest"
 IMG_ENVOY_BASE="envoyproxy/envoy:v1.30-latest"
@@ -217,20 +222,50 @@ build_image() {  # $1 = Dockerfile, $2 = tag, $3 = build context
     docker image prune -f >/dev/null 2>&1 || true
 }
 
+# The gRPC apps live in their own CMake tree and link gRPC statically.
+build_grpc_apps() {
+    local src="$PROJ_ROOT/integrations/grpc" out="$PROJ_ROOT/build/grpc-release"
+    local grpc_src="${DPUMESH_GRPC_SOURCE_DIR:-/home/jukebox/deps/grpc-v1.80.0}"
+    [ -d "$grpc_src" ] || { warn "gRPC source $grpc_src not found; skipping gRPC apps"; return 0; }
+    step "=== Building gRPC bench apps (bench_grpc, echo_grpc) ==="
+    cmake -S "$src" -B "$out" -DCMAKE_BUILD_TYPE=Release \
+        -DDPUMESH_GRPC_SOURCE_DIR="$grpc_src" \
+        -DDPUMESH_GRPC_ENABLE_SANITIZERS=OFF \
+        -DDPUMESH_GRPC_BUILD_QPS_BENCHMARK=ON -DBUILD_TESTING=OFF >/dev/null ||
+        { err "gRPC cmake configure failed"; exit 1; }
+    cmake --build "$out" --target bench_grpc echo_grpc -j"$(nproc)" >/dev/null ||
+        { err "gRPC app build failed"; exit 1; }
+    info "gRPC apps built ($out/bench_grpc, $out/echo_grpc)"
+}
+
 build_images() {
-    step "=== Building Docker images ==="
+    local scope="$BENCH_DEPLOY_SCOPE"
+    step "=== Building Docker images (scope=$scope) ==="
     collect_doca_libs
     echo "$HOST_PASS" | sudo -S true 2>/dev/null
-    build_image "$BENCH_DIR/docker/bench_dpumesh.Dockerfile"        "$IMG_BENCH_DPU"    "$PROJ_ROOT"
-    build_image "$BENCH_DIR/docker/echo_dpumesh.Dockerfile"         "$IMG_ECHO_DPU"     "$PROJ_ROOT"
-    build_image "$BENCH_DIR/validators/loopback_dpumesh.Dockerfile" "$IMG_LOOPBACK_DPU" "$PROJ_ROOT"
-    build_image "$BENCH_DIR/validators/stream_dpumesh.Dockerfile"   "$IMG_STREAM_DPU"   "$PROJ_ROOT"
-    build_image "$BENCH_DIR/validators/verbs_dpumesh.Dockerfile"    "$IMG_VERBS_DPU"    "$PROJ_ROOT"
-    build_image "$BENCH_DIR/validators/preload_dpumesh.Dockerfile"  "$IMG_PRELOAD_DPU"  "$PROJ_ROOT"
-    build_image "$BENCH_DIR/validators/preload_sock.Dockerfile"     "$IMG_PRELOAD_SOCK" "$PROJ_ROOT"
-    build_image "$BENCH_DIR/docker/bench_sock.Dockerfile"          "$IMG_BENCH_TCP"    "$PROJ_ROOT"
-    build_image "$BENCH_DIR/docker/echo_sock.Dockerfile"           "$IMG_ECHO_TCP"     "$PROJ_ROOT"
-    info "All images built and imported to containerd"
+    if [ "$scope" != grpc ]; then
+        build_image "$BENCH_DIR/docker/bench_dpumesh.Dockerfile" "$IMG_BENCH_DPU" "$PROJ_ROOT"
+        build_image "$BENCH_DIR/docker/echo_dpumesh.Dockerfile"  "$IMG_ECHO_DPU"  "$PROJ_ROOT"
+    fi
+    if [ "$scope" = all ]; then
+        build_image "$BENCH_DIR/validators/loopback_dpumesh.Dockerfile" "$IMG_LOOPBACK_DPU" "$PROJ_ROOT"
+        build_image "$BENCH_DIR/validators/stream_dpumesh.Dockerfile"   "$IMG_STREAM_DPU"   "$PROJ_ROOT"
+        build_image "$BENCH_DIR/validators/verbs_dpumesh.Dockerfile"    "$IMG_VERBS_DPU"    "$PROJ_ROOT"
+        build_image "$BENCH_DIR/validators/preload_dpumesh.Dockerfile"  "$IMG_PRELOAD_DPU"  "$PROJ_ROOT"
+    fi
+    if [ "$scope" = all ] || [ "$scope" = l4 ]; then
+        build_image "$BENCH_DIR/validators/preload_sock.Dockerfile" "$IMG_PRELOAD_SOCK" "$PROJ_ROOT"
+        build_image "$BENCH_DIR/docker/bench_sock.Dockerfile"       "$IMG_BENCH_TCP"    "$PROJ_ROOT"
+        build_image "$BENCH_DIR/docker/echo_sock.Dockerfile"        "$IMG_ECHO_TCP"     "$PROJ_ROOT"
+    fi
+    if { [ "$scope" = all ] || [ "$scope" = grpc ]; } &&
+       [ -x "$PROJ_ROOT/build/grpc-release/bench_grpc" ]; then
+        build_image "$GRPC_BENCH_DIR/docker/bench_grpc.Dockerfile" "$IMG_BENCH_GRPC"   "$PROJ_ROOT"
+        build_image "$GRPC_BENCH_DIR/docker/echo_grpc.Dockerfile"  "$IMG_ECHO_GRPC"    "$PROJ_ROOT"
+    elif [ "$scope" = all ] || [ "$scope" = grpc ]; then
+        warn "gRPC bench binaries missing; skipping grpc images (run: $0 grpcbuild)"
+    fi
+    info "Scope images built and imported to containerd"
 }
 
 ensure_envoy_image() {
@@ -306,6 +341,15 @@ get_pod_cores() {
                 loopback-dpumesh) rel="12";; stream-dpumesh) rel="13";;
                 verbs-dpumesh) rel="14";; preload-dpumesh) rel="15";;
             esac ;;
+        grpc)
+            # Four measured L7 paths, two exclusive cores each. An Envoy
+            # sidecar shares its application's core: the budget is per pod.
+            case "$app" in
+                bench-grpc-dpumesh) rel="0";; echo-grpc-dpumesh) rel="1";;
+                bench-grpc-envoy)   rel="2";; echo-grpc-envoy)   rel="3";;
+                bench-grpc-tcp)     rel="4";; echo-grpc-tcp)     rel="5";;
+                bench-grpc-envoy-strict) rel="6";; echo-grpc-envoy-strict) rel="7";;
+            esac ;;
         fair|*)
             case "$app" in
                 bench-dpumesh) rel="0";; echo-dpumesh) rel="1";;
@@ -332,13 +376,20 @@ pin_pods() {
     else
         warn "cpupower not found; skipping DVFS lock"
     fi
-    for app in bench-dpumesh bench-dpumesh-2 bench-dpumesh-3 echo-dpumesh echo-dpumesh-13 echo-dpumesh-14 loopback-dpumesh stream-dpumesh verbs-dpumesh preload-dpumesh preload-echo preload-bench bench-tcp echo-tcp bench-tcp-strict echo-tcp-strict; do
-        local cores pod_id; cores=$(get_pod_cores "$app" "$profile"); [ -z "$cores" ] && continue
+    for app in bench-dpumesh bench-dpumesh-2 bench-dpumesh-3 echo-dpumesh echo-dpumesh-13 echo-dpumesh-14 loopback-dpumesh stream-dpumesh verbs-dpumesh preload-dpumesh preload-echo preload-bench bench-tcp echo-tcp bench-tcp-strict echo-tcp-strict bench-grpc-dpumesh echo-grpc-dpumesh bench-grpc-envoy echo-grpc-envoy bench-grpc-tcp echo-grpc-tcp bench-grpc-envoy-strict echo-grpc-envoy-strict; do
+        local cores pod_id desired
+        cores=$(get_pod_cores "$app" "$profile"); [ -z "$cores" ] && continue
         # sed consumes the full stream. `head` can close early and make crictl
         # exit with SIGPIPE under this script's `set -o pipefail`.
         pod_id=$(echo "$HOST_PASS" | sudo -S crictl pods --label "app=$app" -q 2>/dev/null |
             sed -n '1p')
-        if [ -z "$pod_id" ]; then warn "$app: pod not found, skipping"; continue; fi
+        if [ -z "$pod_id" ]; then
+            desired=$(kubectl get deployment "$app" -n "$NS" \
+                -o jsonpath='{.spec.replicas}' 2>/dev/null || true)
+            [ "${desired:-0}" = 0 ] && continue
+            warn "$app: desired=$desired but pod not found, skipping"
+            continue
+        fi
         info "$app → core(s) $cores (pod=$pod_id)"
         for cid in $(echo "$HOST_PASS" | sudo -S crictl ps --pod "$pod_id" -q 2>/dev/null); do
             local cname pid
@@ -425,14 +476,16 @@ apply_manifest() {
     configure_host_numa
     step "=== Applying K8s manifest (replicas=0) ==="
     command -v envsubst >/dev/null 2>&1 || { err "envsubst not found (apt install gettext-base)"; exit 1; }
-    export IMG_BENCH_DPU IMG_ECHO_DPU IMG_LOOPBACK_DPU IMG_STREAM_DPU IMG_VERBS_DPU IMG_PRELOAD_DPU IMG_PRELOAD_SOCK IMG_BENCH_TCP IMG_ECHO_TCP IMG_ENVOY
+    export IMG_BENCH_DPU IMG_ECHO_DPU IMG_LOOPBACK_DPU IMG_STREAM_DPU IMG_VERBS_DPU IMG_PRELOAD_DPU IMG_PRELOAD_SOCK IMG_BENCH_TCP IMG_ECHO_TCP IMG_ENVOY IMG_BENCH_GRPC IMG_ECHO_GRPC
     export CTRL_PORT TCP_PORT HOST_PCI LIB_OUT BENCH_NUMA_NODE
     export DPUMESH_RINGS_PER_POD="${DPUMESH_RINGS_PER_POD:-2}" \
            ASYNC_THREADS="${ASYNC_THREADS:-4}" \
            BENCH_PIPELINE="${BENCH_PIPELINE:-8}" BENCH_COALESCE="${BENCH_COALESCE:-0}" \
            ECHO_THREADS="${ECHO_THREADS:-3}" \
-           DMESH_PRELOAD_DEBUG="${DMESH_PRELOAD_DEBUG:-0}"
-    envsubst < "$MANIFEST" | kubectl apply -n "$NS" -f -
+           DMESH_PRELOAD_DEBUG="${DMESH_PRELOAD_DEBUG:-0}" \
+           BENCH_REACTORS="${BENCH_REACTORS:-8}"
+    { cat "$MANIFEST"; echo ---; cat "$GRPC_MANIFEST"; } |
+        envsubst | kubectl apply -n "$NS" -f -
     info "K8s resources applied"
 }
 
@@ -479,11 +532,24 @@ scale_up_with_wait() {
 # scope starts the complete benchmark and validator set.
 start_pods() {
     local scope="$BENCH_DEPLOY_SCOPE"
-    case "$scope" in all|core|l4) ;;
-        *) err "BENCH_DEPLOY_SCOPE must be all|core|l4 (got $scope)"; exit 1;;
+    case "$scope" in all|core|l4|grpc) ;;
+        *) err "BENCH_DEPLOY_SCOPE must be all|core|l4|grpc (got $scope)"; exit 1;;
     esac
     step "=== Starting pods (innermost first, scope=$scope) ==="
     local ready="DPU pod is data-ready"
+    # `grpc` starts only the four L7 paths, so no other backend can enter the
+    # DPU registry while the gRPC campaign runs.
+    if [ "$scope" = grpc ]; then
+        scale_up_with_wait "echo-grpc-dpumesh"  "$ready"
+        scale_up_with_wait "bench-grpc-dpumesh" "$ready"
+        scale_up_with_wait "echo-grpc-envoy"    ""
+        scale_up_with_wait "bench-grpc-envoy"   ""
+        scale_up_with_wait "echo-grpc-tcp"      ""
+        scale_up_with_wait "bench-grpc-tcp"     ""
+        scale_up_with_wait "echo-grpc-envoy-strict"  ""
+        scale_up_with_wait "bench-grpc-envoy-strict" ""
+        return 0
+    fi
     scale_up_with_wait "echo-dpumesh"     "$ready"
     if [ "$scope" != l4 ]; then
         scale_up_with_wait "echo-dpumesh-13"  "$ready"
@@ -520,8 +586,11 @@ deploy() {
     build_dpu
     build_host
     build_bench_binaries
+    if [ "$BENCH_DEPLOY_SCOPE" = all ] || [ "$BENCH_DEPLOY_SCOPE" = grpc ]; then
+        build_grpc_apps
+    fi
     build_images
-    ensure_envoy_image
+    [ "$BENCH_DEPLOY_SCOPE" = core ] || ensure_envoy_image
     start_dpu
     start_pods
     pin_pods fair
@@ -765,6 +834,7 @@ CMD="${1:-help}"; shift || true
 case "$CMD" in
     deploy)    deploy ;;
     build)     need_env; sync_sources; build_dpu ;;
+    grpcbuild) build_grpc_apps ;;
     # NOTE: there is deliberately NO `restart` (DPU-only restart) command, and no
     # per-pod start. Restarting the DPU under live pods — or starting a pod against
     # an already-running DPU — leaves the two sides' registration state inconsistent.
@@ -794,7 +864,7 @@ Usage: $0 <command> [args]
   point <sol> <req> <reply> <conc> <dur> <warmup> <threads> [reconn]   one raw RUN (reconn = conn-churn period)
   loopback|stream|preload [args]             feature validators
   verbs <N> <size> <zc> <window> <pipeline>  native-API loopback validator: window conns x pipeline outstanding
-  pin [fair|l4|hw|hw3|hw6]                    (re)pin pods to cores
+  pin [fair|l4|grpc|hw|hw3|hw6]                    (re)pin pods to cores
   armbalance [req reply conc dur threads [csv]]   DPU main/worker per-core CPU during one point
   status | logs | cleanup | dpulog [n] | dpucpu
 

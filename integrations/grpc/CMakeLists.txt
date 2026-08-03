@@ -227,6 +227,29 @@ if(DPUMESH_INCLUDE_DIR AND DPUMESH_LIBRARY)
       target_link_options(grpc_dpumesh_qps_benchmark PRIVATE
         -fsanitize=thread)
     endif()
+
+    # L4-harness peers: same control protocol and result line as bench_sock and
+    # bench_dpumesh, so bench/suite/l4_proxy_data.sh drives gRPC unchanged.
+    foreach(app bench_grpc echo_grpc)
+      add_executable(${app} "bench/${app}.cc")
+      target_compile_features(${app} PRIVATE cxx_std_17)
+      target_compile_options(${app} PRIVATE -Wall -Wextra)
+      target_include_directories(${app} PRIVATE
+        "${CMAKE_CURRENT_LIST_DIR}/src"
+        "${CMAKE_CURRENT_LIST_DIR}/../../bench/apps")
+      target_link_libraries(${app} PRIVATE
+        grpc_dpumesh grpc_dpumesh_qps_proto Threads::Threads)
+      if(DPUMESH_GRPC_ENABLE_SANITIZERS)
+        target_compile_options(${app} PRIVATE
+          -fsanitize=address,undefined -fno-omit-frame-pointer)
+        target_link_options(${app} PRIVATE -fsanitize=address,undefined)
+      endif()
+      if(DPUMESH_GRPC_ENABLE_TSAN)
+        target_compile_options(${app} PRIVATE
+          -fsanitize=thread -fno-omit-frame-pointer)
+        target_link_options(${app} PRIVATE -fsanitize=thread)
+      endif()
+    endforeach()
   endif()
 else()
   message(STATUS

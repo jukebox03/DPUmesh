@@ -58,8 +58,8 @@ class EndpointTransport {
   // transport untouched and `fill` uncalled.
   virtual PostResult Post(size_t length,
                           absl::FunctionRef<void(Reservation)> fill) = 0;
-  // Publish every post submitted since the previous Flush. A trailing partial
-  // unit may be retained for a successor write.
+  // Mark the logical write boundary. DPUmesh transports pass the boundary to
+  // libdpumesh; physical batching remains inside the library.
   virtual absl::Status Flush() = 0;
   // Return the receive credit withheld above the endpoint's high-water mark.
   virtual void ResumeReceive() = 0;

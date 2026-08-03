@@ -1,0 +1,369 @@
+---
+# gRPC L7 benchmark pods: DPUmesh, plaintext Envoy sidecars, mTLS Envoy
+# sidecars, and no mesh. bench.sh applies this alongside bench/k8s/pods.yaml
+# and substitutes the same image, port, PCI, library, and runtime variables.
+# Deployments start with zero replicas.
+# ---------------------------------------------------------------- gRPC L7 configs
+# Same bench_grpc/echo_grpc images throughout; BENCH_TRANSPORT picks the path.
+# grpc-dpumesh: gRPC chttp2 over DPUmesh endpoints, no sidecar.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bench-grpc-dpumesh
+spec:
+  replicas: 0
+  selector: { matchLabels: { app: bench-grpc-dpumesh } }
+  template:
+    metadata: { labels: { app: bench-grpc-dpumesh } }
+    spec:
+      hostname: bench-grpc-dpumesh
+      containers:
+      - name: bench-grpc-dpumesh
+        image: docker.io/${IMG_BENCH_GRPC}
+        imagePullPolicy: Never
+        ports: [{ containerPort: ${CTRL_PORT} }]
+        env:
+        - { name: BENCH_NUMA_NODE, value: "${BENCH_NUMA_NODE}" }
+        - { name: BENCH_TRANSPORT, value: "dmesh" }
+        - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
+        - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
+        - { name: BENCH_DST_SERVICE, value: "echo-grpc-dpumesh" }
+        - { name: BENCH_REACTORS, value: "${BENCH_REACTORS}" }
+        securityContext: { privileged: true }
+        volumeMounts:
+        - { mountPath: /dev/infiniband, name: infiniband }
+        - { mountPath: /usr/local/lib/libdpumesh.so.4, name: libdpumesh-so, subPath: libdpumesh.so.4 }
+      volumes:
+      - { name: infiniband, hostPath: { path: /dev/infiniband } }
+      - { name: libdpumesh-so, hostPath: { path: ${LIB_OUT}, type: Directory } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: bench-grpc-dpumesh }
+spec:
+  selector: { app: bench-grpc-dpumesh }
+  ports: [{ port: ${CTRL_PORT}, targetPort: ${CTRL_PORT} }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-grpc-dpumesh
+spec:
+  replicas: 0
+  selector: { matchLabels: { app: echo-grpc-dpumesh } }
+  template:
+    metadata: { labels: { app: echo-grpc-dpumesh } }
+    spec:
+      hostname: echo-grpc-dpumesh
+      containers:
+      - name: echo-grpc-dpumesh
+        image: docker.io/${IMG_ECHO_GRPC}
+        imagePullPolicy: Never
+        env:
+        - { name: BENCH_NUMA_NODE, value: "${BENCH_NUMA_NODE}" }
+        - { name: BENCH_TRANSPORT, value: "dmesh" }
+        - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
+        - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
+        - { name: DPUMESH_SERVICE, value: "echo-grpc-dpumesh" }
+        - { name: BENCH_REACTORS, value: "${BENCH_REACTORS}" }
+        securityContext: { privileged: true }
+        volumeMounts:
+        - { mountPath: /dev/infiniband, name: infiniband }
+        - { mountPath: /usr/local/lib/libdpumesh.so.4, name: libdpumesh-so, subPath: libdpumesh.so.4 }
+      volumes:
+      - { name: infiniband, hostPath: { path: /dev/infiniband } }
+      - { name: libdpumesh-so, hostPath: { path: ${LIB_OUT}, type: Directory } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: echo-grpc-dpumesh }
+spec:
+  selector: { app: echo-grpc-dpumesh }
+  ports: [{ port: ${CTRL_PORT}, targetPort: ${CTRL_PORT} }]
+---
+# grpc-envoy-permissive: identical gRPC binaries reaching each other through a
+# pair of plaintext TCP-proxy sidecars — the service-mesh baseline for L7.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bench-grpc-envoy
+spec:
+  replicas: 0
+  selector: { matchLabels: { app: bench-grpc-envoy } }
+  template:
+    metadata: { labels: { app: bench-grpc-envoy } }
+    spec:
+      containers:
+      - name: bench-grpc-envoy
+        image: docker.io/${IMG_BENCH_GRPC}
+        imagePullPolicy: Never
+        ports: [{ containerPort: ${CTRL_PORT} }]
+        env:
+        - { name: BENCH_NUMA_NODE, value: "${BENCH_NUMA_NODE}" }
+        - { name: BENCH_TRANSPORT, value: "tcp" }
+        - { name: BENCH_TARGET, value: "127.0.0.1:${TCP_PORT}" }
+      - name: sidecar1
+        image: docker.io/${IMG_ENVOY}
+        imagePullPolicy: IfNotPresent
+        env:
+        - { name: BENCH_NUMA_NODE, value: "${BENCH_NUMA_NODE}" }
+        args: ["-c", "/etc/envoy/envoy.yaml", "--log-level", "warn"]
+        ports: [{ containerPort: ${TCP_PORT} }]
+        volumeMounts:
+        - { mountPath: /etc/envoy, name: grpc-sidecar1-config, readOnly: true }
+      volumes:
+      - { name: grpc-sidecar1-config, configMap: { name: grpc-sidecar1-config } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: bench-grpc-envoy }
+spec:
+  selector: { app: bench-grpc-envoy }
+  ports: [{ port: ${CTRL_PORT}, targetPort: ${CTRL_PORT} }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-grpc-envoy
+spec:
+  replicas: 0
+  selector: { matchLabels: { app: echo-grpc-envoy } }
+  template:
+    metadata: { labels: { app: echo-grpc-envoy } }
+    spec:
+      containers:
+      - name: echo-grpc-envoy
+        image: docker.io/${IMG_ECHO_GRPC}
+        imagePullPolicy: Never
+        env:
+        - { name: BENCH_NUMA_NODE, value: "${BENCH_NUMA_NODE}" }
+        - { name: BENCH_TRANSPORT, value: "tcp" }
+        - { name: ECHO_PORT, value: "9092" }
+      - name: sidecar2
+        image: docker.io/${IMG_ENVOY}
+        imagePullPolicy: IfNotPresent
+        env:
+        - { name: BENCH_NUMA_NODE, value: "${BENCH_NUMA_NODE}" }
+        args: ["-c", "/etc/envoy/envoy.yaml", "--log-level", "warn"]
+        ports: [{ containerPort: ${TCP_PORT} }]
+        volumeMounts:
+        - { mountPath: /etc/envoy, name: sidecar2-config, readOnly: true }
+      volumes:
+      - { name: sidecar2-config, configMap: { name: sidecar2-config } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: echo-grpc-envoy }
+spec:
+  selector: { app: echo-grpc-envoy }
+  ports: [{ port: ${TCP_PORT}, targetPort: ${TCP_PORT} }]
+---
+# grpc-tcp: no mesh at all — the floor the other two are measured against.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bench-grpc-tcp
+spec:
+  replicas: 0
+  selector: { matchLabels: { app: bench-grpc-tcp } }
+  template:
+    metadata: { labels: { app: bench-grpc-tcp } }
+    spec:
+      containers:
+      - name: bench-grpc-tcp
+        image: docker.io/${IMG_BENCH_GRPC}
+        imagePullPolicy: Never
+        ports: [{ containerPort: ${CTRL_PORT} }]
+        env:
+        - { name: BENCH_NUMA_NODE, value: "${BENCH_NUMA_NODE}" }
+        - { name: BENCH_TRANSPORT, value: "tcp" }
+        - { name: BENCH_TARGET, value: "echo-grpc-tcp:9092" }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: bench-grpc-tcp }
+spec:
+  selector: { app: bench-grpc-tcp }
+  ports: [{ port: ${CTRL_PORT}, targetPort: ${CTRL_PORT} }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-grpc-tcp
+spec:
+  replicas: 0
+  selector: { matchLabels: { app: echo-grpc-tcp } }
+  template:
+    metadata: { labels: { app: echo-grpc-tcp } }
+    spec:
+      containers:
+      - name: echo-grpc-tcp
+        image: docker.io/${IMG_ECHO_GRPC}
+        imagePullPolicy: Never
+        ports: [{ containerPort: 9092 }]
+        env:
+        - { name: BENCH_NUMA_NODE, value: "${BENCH_NUMA_NODE}" }
+        - { name: BENCH_TRANSPORT, value: "tcp" }
+        - { name: ECHO_PORT, value: "9092" }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: echo-grpc-tcp }
+spec:
+  selector: { app: echo-grpc-tcp }
+  ports: [{ port: 9092, targetPort: 9092 }]
+---
+# Client-side sidecar for grpc-envoy-permissive: same tcp_proxy filter as
+# sidecar1-config, pointed at the gRPC echo Service.
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: grpc-sidecar1-config }
+data:
+  envoy.yaml: |
+    static_resources:
+      listeners:
+      - name: tcp_listener
+        address:
+          socket_address: { address: 0.0.0.0, port_value: ${TCP_PORT} }
+        filter_chains:
+        - filters:
+          - name: envoy.filters.network.tcp_proxy
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
+              stat_prefix: tcp
+              cluster: upstream
+      clusters:
+      - name: upstream
+        type: STRICT_DNS
+        connect_timeout: 5s
+        load_assignment:
+          cluster_name: upstream
+          endpoints:
+          - lb_endpoints:
+            - endpoint:
+                address:
+                  socket_address: { address: echo-grpc-envoy, port_value: ${TCP_PORT} }
+---
+# grpc-envoy-strict: the mTLS counterpart of grpc-envoy-permissive. Same gRPC
+# binaries; the inter-pod sidecar leg authenticates and encrypts.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bench-grpc-envoy-strict
+spec:
+  replicas: 0
+  selector: { matchLabels: { app: bench-grpc-envoy-strict } }
+  template:
+    metadata: { labels: { app: bench-grpc-envoy-strict } }
+    spec:
+      containers:
+      - name: bench-grpc-envoy-strict
+        image: docker.io/${IMG_BENCH_GRPC}
+        imagePullPolicy: Never
+        ports: [{ containerPort: ${CTRL_PORT} }]
+        env:
+        - { name: BENCH_NUMA_NODE, value: "${BENCH_NUMA_NODE}" }
+        - { name: BENCH_TRANSPORT, value: "tcp" }
+        - { name: BENCH_TARGET, value: "127.0.0.1:${TCP_PORT}" }
+      - name: sidecar1
+        image: docker.io/${IMG_ENVOY}
+        imagePullPolicy: IfNotPresent
+        env:
+        - { name: BENCH_NUMA_NODE, value: "${BENCH_NUMA_NODE}" }
+        args: ["-c", "/etc/envoy/envoy.yaml", "--log-level", "warn"]
+        ports: [{ containerPort: ${TCP_PORT} }]
+        volumeMounts:
+        - { mountPath: /etc/envoy, name: grpc-strict-client-config, readOnly: true }
+        - { mountPath: /etc/envoy/tls, name: envoy-mtls, readOnly: true }
+      volumes:
+      - { name: grpc-strict-client-config, configMap: { name: grpc-strict-client-config } }
+      - { name: envoy-mtls, secret: { secretName: envoy-mtls } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: bench-grpc-envoy-strict }
+spec:
+  selector: { app: bench-grpc-envoy-strict }
+  ports: [{ port: ${CTRL_PORT}, targetPort: ${CTRL_PORT} }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-grpc-envoy-strict
+spec:
+  replicas: 0
+  selector: { matchLabels: { app: echo-grpc-envoy-strict } }
+  template:
+    metadata: { labels: { app: echo-grpc-envoy-strict } }
+    spec:
+      containers:
+      - name: echo-grpc-envoy-strict
+        image: docker.io/${IMG_ECHO_GRPC}
+        imagePullPolicy: Never
+        ports: [{ containerPort: 9092 }]
+        env:
+        - { name: BENCH_NUMA_NODE, value: "${BENCH_NUMA_NODE}" }
+        - { name: BENCH_TRANSPORT, value: "tcp" }
+        - { name: ECHO_PORT, value: "9092" }
+      - name: sidecar2
+        image: docker.io/${IMG_ENVOY}
+        imagePullPolicy: IfNotPresent
+        env:
+        - { name: BENCH_NUMA_NODE, value: "${BENCH_NUMA_NODE}" }
+        args: ["-c", "/etc/envoy/envoy.yaml", "--log-level", "warn"]
+        ports: [{ containerPort: ${TCP_PORT} }]
+        volumeMounts:
+        - { mountPath: /etc/envoy, name: strict-server-config, readOnly: true }
+        - { mountPath: /etc/envoy/tls, name: envoy-mtls, readOnly: true }
+      volumes:
+      - { name: strict-server-config, configMap: { name: strict-server-config } }
+      - { name: envoy-mtls, secret: { secretName: envoy-mtls } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: echo-grpc-envoy-strict }
+spec:
+  selector: { app: echo-grpc-envoy-strict }
+  ports: [{ port: ${TCP_PORT}, targetPort: ${TCP_PORT} }]
+---
+# Client sidecar for grpc-envoy-strict: strict-client-config with the gRPC
+# Service as upstream and SNI.
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: grpc-strict-client-config }
+data:
+  envoy.yaml: |
+    static_resources:
+      listeners:
+      - name: tcp_listener
+        address:
+          socket_address: { address: 0.0.0.0, port_value: ${TCP_PORT} }
+        filter_chains:
+        - filters:
+          - name: envoy.filters.network.tcp_proxy
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
+              stat_prefix: tcp_strict
+              cluster: strict_upstream
+      clusters:
+      - name: strict_upstream
+        type: STRICT_DNS
+        connect_timeout: 5s
+        load_assignment:
+          cluster_name: strict_upstream
+          endpoints:
+          - lb_endpoints:
+            - endpoint:
+                address:
+                  socket_address: { address: echo-grpc-envoy-strict, port_value: ${TCP_PORT} }
+        transport_socket:
+          name: envoy.transport_sockets.tls
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+            sni: echo-grpc-envoy-strict
+            common_tls_context:
+              tls_certificates:
+              - certificate_chain: { filename: /etc/envoy/tls/client.crt }
+                private_key: { filename: /etc/envoy/tls/client.key }
+              validation_context:
+                trusted_ca: { filename: /etc/envoy/tls/ca.crt }

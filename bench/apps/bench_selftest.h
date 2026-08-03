@@ -69,7 +69,7 @@ static int bench_epoll_wait_until(int epoll_fd, struct epoll_event *event,
 
 static void *bench_selftest_worker(void *arg) {
     bench_selftest_worker_t *worker = (bench_selftest_worker_t *)arg;
-    uint8_t *frame = malloc(BENCH_HDR_LEN + (size_t)worker->payload);
+    uint8_t *frame = (uint8_t *)malloc(BENCH_HDR_LEN + (size_t)worker->payload);
     if (!frame) {
         worker->failed = 1;
         return NULL;

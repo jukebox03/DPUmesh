@@ -60,17 +60,17 @@ callback and returns after in-flight injections finish.
 |---|---|---|---|---|
 | application | the application | application | — | `Endpoint::Write`, which records a cursor and returns |
 | gRPC default engine pool | gRPC | gRPC | its own poller | deadlines, DNS, and every delegated `Run`/`RunAfter` |
-| reactor owner | `DmeshReactor` | one per shard | `ppoll` on two fds | `dmesh_poll_eq`, QP lifecycle, event delivery to endpoints |
-| executor worker | `DmeshRuntime` | one per shard | condition variable | write pumps and chttp2 callbacks |
+| reactor owner | `DmeshReactor` | one per shard | `ppoll` on two fds | `dmesh_poll_eq`, QP lifecycle, endpoint completions and chttp2 |
+| executor worker | `DmeshRuntime` | one per process | condition variable | the completions a gRPC Endpoint call raises |
 
 `DmeshEndpoint` and `DmeshClientEventEngine` own no thread. A further host
 thread belongs to the native channel and drains DOCA completions and the
 reverse rings; it and the DPU-side workers are specified in
 [`CORE.md`](CORE.md).
 
-An accepted Write is queued on the caller's thread, posted on the executor
-worker, and resumed from an event the reactor owner delivers. A receive is
-copied on the reactor owner and parsed on the executor worker.
+An accepted Write is posted on the caller's thread and, if native capacity
+stops it, resumed from an event the reactor owner delivers. A receive is copied
+and parsed on the reactor owner.
 
 ## Ownership
 
@@ -79,27 +79,29 @@ copied on the reactor owner and parsed on the executor worker.
 | native channel | `DmeshRuntime` | destroyed after all reactors |
 | native EQ | one `DmeshReactor` | exactly one polling thread |
 | native QP lifecycle | reactor owner thread | destroyed under the connection's transmit lock |
-| native QP transmit | Endpoint work executor | serialized by the connection's transmit lock |
+| native QP transmit | the thread that pumps the write | serialized by the connection's transmit lock |
 | RX batch run | reactor/Endpoint handoff | one slice per run, copied before credit release; credit held above the queue mark |
 | pending write | Endpoint state | one cursor, completed exactly once |
-| callback executor | `DmeshRuntime` and its endpoints | shared; default = one thread paired per reactor |
+| callback executor | `DmeshRuntime` and its endpoints | shared; default = one thread per process |
 | runtime | application, channel and server attachment | shared; outlives what gRPC still holds |
 
-Each reactor is paired with one dedicated thread that runs its connections'
-endpoint completions (and therefore chttp2) and their write pumps. That thread
-claims its whole queue per wake, and a completion is queued as a callback beside
-the status it completes with. Callbacks never run inline from transport
-operations. An endpoint holds a shared reference to both its executors, so
-neither is destroyed while the endpoint can still schedule on it; a
-`ThreadExecutor` released by a task on its own worker detaches that worker.
+A completion the transport raises runs on the thread that raised it: the
+reactor owner for a receive, EOF or error, and the calling thread for a write
+the transport accepts in full. A completion a gRPC Endpoint call raises itself
+goes to the callback executor and never runs before that call returns. The
+executor claims its whole queue per wake, and a completion is queued as a
+callback beside the status it completes with. An endpoint holds a shared
+reference to the executor, so it is not destroyed while the endpoint can still
+schedule on it; a `ThreadExecutor` released by a task on its own worker
+detaches that worker.
 `DmeshRuntime::Create` returns a shared pointer, and the client EventEngine and
 the server attachment each hold one, so the reactors and their threads outlive
 every channel and listener gRPC has not yet released.
 
 Transmit is serialized by a per-connection lock. One post — reserve, fill and
-submit — holds it on the work executor, as does flush, and the reactor takes
-the same lock before destroying that connection's QP. Lock order is Endpoint
-state then transmit lock; the transmit lock is never held across a driver call.
+submit — holds it, as does flush, and the reactor takes the same lock before
+destroying that connection's QP. Lock order is Endpoint state then transmit
+lock; the transmit lock is never held across a driver call.
 Cross-thread work enters a reactor through its command queue; only an
 empty→non-empty queue transition writes the command eventfd. One loop iteration
 consumes a bounded number of poll batches and then returns to that queue without
@@ -118,35 +120,32 @@ cursor bytes, capped at dmesh_post_max
   → copy each slice fragment into it
   → dmesh_post_send (commit + complete-unit submission)
   → next post
-  → publish the trailing partial at the logical Write boundary
+  → dmesh_flush at the logical Write boundary
 ```
 
-The pump runs on the connection's paired thread and holds the connection's
-transmit lock from `dmesh_alloc` through `dmesh_post_send`, matching the one
-live reservation a QP holds. One post spans every remaining byte of the logical
-Write that fits, so an HTTP/2 frame header and its payload cost one native
-post. Native ABI 4 batches
-committed posts into transport-private physical units and submits complete
-units immediately. A pump run takes a bounded number of posts and reschedules
-itself. If the bounded native window fills before the logical Write ends, the
-pump forces any remaining partial and parks the cursor, resuming only after
-native capacity reclamation identifies that QP as ready. The final callback is
-scheduled only after the final partial flush succeeds.
-
-`DmeshReactor::Options::tail_flush_delay` retains the trailing partial unit
-while `dmesh_tx_inflight()` reports an outstanding unit, and the reactor bounds
-its loop wait with the nearest tail deadline. The delay is zero by default and
-the tail publishes at every write boundary.
+The pump runs on the thread that entered it — the caller of `Write` or the
+reactor owner delivering TX-ready — and holds the connection's transmit lock
+from `dmesh_alloc` through `dmesh_post_send`, matching the one live reservation
+a QP holds. One post spans every remaining byte of the logical Write that fits,
+so an HTTP/2 frame header and its payload cost one native post. Native ABI 4
+batches committed posts into transport-private physical units, submits complete
+and idle units immediately, and owns the bounded deadline for a busy trailing
+partial. After the last post, the Endpoint calls `dmesh_flush()` under the same
+transmit lock. A pump run takes a bounded number of posts and re-enters on the
+same thread for the remainder. If the bounded native window fills before the
+logical Write ends, it parks the cursor and resumes only after native capacity
+reclamation identifies that QP as ready. A `Write` the pump finishes before
+returning reports success by returning true and withholds the callback;
+otherwise the callback runs after the final flush succeeds.
 
 `dmesh_alloc(EAGAIN)` automatically arms a one-shot `DMESH_EVENT_TX_READY`
 event on the QP's EQ. The Endpoint retains the exact cursor and marks the write
 parked; the reactor returns to its two-fd event loop — one command eventfd and
-one native EQ eventfd, bounded by the nearest retained tail's deadline and not
-waiting at all while a poll budget is outstanding — and owns no timerfd and no
-scan of pending writes. On TX-ready it forwards the
-hint to the named connection's Endpoint, which resumes its parked write and
-drops a stale hint. The hint does not reserve shared capacity; a repeated
-`EAGAIN` rearms the next transition.
+one native EQ eventfd, not waiting at all while a poll budget is outstanding —
+and owns no batching timer, timerfd, or pending-write scan. On TX-ready it
+forwards the hint to the named connection's Endpoint, which resumes its parked
+write and drops a stale hint. The hint does not reserve shared capacity; a
+repeated `EAGAIN` rearms the next transition.
 
 The Endpoint fails a parked write when peer EOF arrives, and a post that blocks
 after the FIN flag is set fails instead of parking. Every accepted EventEngine
@@ -185,13 +184,13 @@ native listen-port call or application-level HTTP/2 parser is introduced.
 
 The maintained tests require:
 
-- byte-exact split writes and one final flush;
+- byte-exact split writes and one logical-boundary flush;
 - consecutive slices coalesced into one post;
-- no callback before the flush boundary;
+- no callback before the logical-boundary flush completes;
 - exact cursor resume only after `DMESH_EVENT_TX_READY`, with no timer retry;
 - peer FIN failing a parked write, and post-FIN backpressure failing a write;
 - byte-exact completion of writes that span multiple pump runs;
-- a retained tail publishing both on an idle transport and at its deadline;
+- an asynchronous native TX error failing and closing the endpoint;
 - one EQ polling thread and no mid-batch QP destruction;
 - a batch run coalesced into one slice, ended by any other event for that QP;
 - RX copy before release, credit held above the queue mark and released on read;
@@ -206,15 +205,3 @@ the exercised graceful path; they do not prove forced-death DMA isolation.
 The bounded poll budget, shared executor ownership, and shared runtime
 ownership are not covered by the maintained tests. `DmeshReactor::Stats` is
 reported only by the hardware runtime smoke.
-
-## Remaining work
-
-1. Exercise streaming, cancellation/deadline, and TLS/mTLS on BlueField.
-2. Integrate allocator/resource-quota policy suitable for production servers.
-3. Run long-duration connection churn and memory/handle plateau tests.
-4. Define platform-backed containment for host death during in-flight DMA.
-
-Go is not addressed through LD_PRELOAD; its runtime may bypass libc network
-calls. A future Go integration binds the native API directly and provides a
-`net.Conn`-compatible transport with transport-private automatic batching,
-logical-write flush boundaries, and a native writable-readiness contract.

@@ -109,18 +109,21 @@ registers the process a second time. The native library does not reject the
 second registration.
 
 `DmeshRuntime::Options::reactor_count` sets the number of EQ reactor shards
-over that one channel. Each shard is one EQ, one polling thread, and one paired
-thread that runs the endpoint completions and write pumps for its connections.
-Outbound connections are assigned round-robin; an inbound connection belongs to
-whichever shard received its `DMESH_EVENT_CONN_REQ`.
+over that one channel. Each shard is one EQ and one polling thread, which also
+runs the endpoint completions for its connections. Outbound connections are
+assigned round-robin; an inbound connection belongs to whichever shard received
+its `DMESH_EVENT_CONN_REQ`.
 
-`DmeshRuntime::Create` accepts a `std::shared_ptr<Executor>` that replaces the
-paired threads for all shards. Endpoints share ownership of the executors they
-schedule on, so an executor outlives an endpoint gRPC has not yet destroyed.
+One further thread per runtime carries the completions a gRPC Endpoint call
+raises itself, which never run before that call returns.
+`DmeshRuntime::Create` accepts a `std::shared_ptr<Executor>` that replaces it.
+Endpoints share ownership of the executor they schedule on, so it outlives an
+endpoint gRPC has not yet destroyed.
 
-`DmeshReactor::Options::tail_flush_delay` retains a trailing partial transport
-unit for a successor write. It is zero by default, which publishes every write
-at its boundary.
+Transmit batching has no gRPC-specific option. `PostSend` transfers ownership
+to libdpumesh, and `Flush` marks the end of one EventEngine Write. Physical
+batch state and deadlines remain in the library. The reactor maps `TX_READY`
+and `TX_ERROR` events into endpoint progress and failure.
 
 Receive backpressure is automatic and has no tunable: a stalled reader stops the
 transport landing further bytes on that connection. There is no busy poll, retry

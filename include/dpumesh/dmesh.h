@@ -68,6 +68,7 @@ typedef enum {
     DMESH_EVENT_RECV_FIN = 2, /* peer closed the conn (EOF); no credit held */
     DMESH_EVENT_CONN_REQ = 3, /* new inbound conn (server side); no credit held */
     DMESH_EVENT_TX_READY = 4, /* an EAGAIN-blocked QP should retry dmesh_alloc */
+    DMESH_EVENT_TX_ERROR = 5, /* asynchronous buffered-tail submission failed */
 } dmesh_event_type_t;
 
 typedef struct dmesh_event {
@@ -123,20 +124,22 @@ int dmesh_abort_qp(dmesh_qp_t *c);
  *   EINVAL   invalid length or unestablished connection. */
 void *dmesh_alloc(dmesh_qp_t *c, uint32_t len);
 
-/* Commit bytes from the current dmesh_alloc() reservation and submit complete
- * transport batches. `buf` must match the reservation and `len` must fit it.
- * Returns EINVAL for invalid input or EBADMSG for a submission fault. Ownership
- * transfers to the transport on success. */
+/* Commit bytes from the current dmesh_alloc() reservation. Complete transport
+ * batches submit immediately. An idle tail submits immediately; while earlier
+ * data is in flight, the newest partial tail may be retained briefly to combine
+ * successor posts and is published by the library's bounded deadline. `buf` must
+ * match the reservation and `len` must fit it. Returns EINVAL for invalid input
+ * or EBADMSG for a synchronous submission fault. Ownership transfers to the
+ * transport on success. A later asynchronous tail fault is reported once as
+ * DMESH_EVENT_TX_ERROR and becomes sticky on the QP. */
 int dmesh_post_send(dmesh_qp_t *c, const void *buf, uint32_t len);
 
 /* Submit all committed bytes, including the trailing partial batch. A descriptor
  * fault returns EBADMSG; no pending data is a no-op. */
 int dmesh_flush(dmesh_qp_t *c);
 
-/* Nonzero while a published TX unit on this QP awaits acknowledgement. A sender
- * that retains its trailing partial batch to coalesce successors reads this to
- * bound the delay: with nothing in flight there is no successor to wait for, so
- * the tail publishes at once. */
+/* Nonzero while a published TX unit on this QP awaits acknowledgement. Retained
+ * for diagnostics and ABI compatibility; batching policy is library-owned. */
 int dmesh_tx_inflight(dmesh_qp_t *c);
 
 /* ===== Diagnostics ===== */
@@ -154,7 +157,9 @@ void dmesh_get_tx_stats(dmesh_channel_t *s, dmesh_tx_stats_t *out);
 /* ===== Event polling ===== */
 
 /* Nonblocking single-consumer poll. Returns up to max_events events, 0 when empty,
- * or EINVAL. Per-connection order is preserved across partial batches. */
+ * or EINVAL. Per-connection order is preserved across partial batches. A
+ * TX_ERROR event has no RX buffer and makes later TX calls fail with the
+ * latched transport error. */
 int dmesh_poll_eq(dmesh_eq_t *eq, dmesh_event_t *events, int max_events);
 
 /* Release the zero-copy RX buffer held by a RECV event and invalidate event->buf.

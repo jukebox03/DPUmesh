@@ -53,6 +53,38 @@ test_out_of_order_prefix(void)
     free(s);
 }
 
+/* A producer that gives up on a full ring must leave the published sequence
+ * gapless: the DPA consumer steps strictly in ticket order and can never pass a
+ * ticket that was claimed and never published. */
+static void
+test_refused_claim_leaves_no_gap(void)
+{
+    struct test_state *s = calloc(1, sizeof(*s));
+    uint64_t ticket = 0;
+    assert(s != NULL);
+    test_state_init(s);
+
+    for (uint32_t i = 0; i < s->ring.size; i++) {
+        assert(dma_ring_try_claim(&s->ring, &ticket));
+        assert(ticket == i);
+        dma_ring_publish_desc(&s->ring, ticket);
+    }
+
+    /* Full: the claim is refused and the ticket counter does not move. */
+    const uint64_t enq_pos_when_full = s->ring.enq_pos;
+    assert(!dma_ring_try_claim(&s->ring, &ticket));
+    assert(!dma_ring_try_claim(&s->ring, &ticket));
+    assert(s->ring.enq_pos == enq_pos_when_full);
+
+    /* One slot released: the next claim resumes at the very next ticket. */
+    __atomic_store_n(&s->ring.ctrl->consumer_head, 1, __ATOMIC_RELEASE);
+    assert(dma_ring_try_claim(&s->ring, &ticket));
+    assert(ticket == enq_pos_when_full);
+    dma_ring_publish_desc(&s->ring, ticket);
+    assert(descriptor_ready(&s->ring, ticket));
+    free(s);
+}
+
 struct producer_arg {
     struct test_state *state;
 };
@@ -64,12 +96,8 @@ producer_main(void *opaque)
     struct dma_ring *ring = &arg->state->ring;
 
     for (uint32_t i = 0; i < TEST_ITEMS_PER_PRODUCER; i++) {
-        uint64_t ticket =
-            __atomic_fetch_add(&ring->enq_pos, 1, __ATOMIC_RELAXED);
-        while (ticket -
-                   __atomic_load_n(&ring->ctrl->consumer_head,
-                                   __ATOMIC_ACQUIRE) >=
-               ring->size)
+        uint64_t ticket;
+        while (!dma_ring_try_claim(ring, &ticket))
             sched_yield();
 
         uint32_t slot = (uint32_t)(ticket % ring->size);
@@ -146,12 +174,53 @@ test_reverse_generation_wrap(void)
     assert(entries[0].payload.ack.seq == SIZE);
 }
 
+static void
+test_dpa_producer_completion_reports(void)
+{
+    uint32_t deferred = 0;
+    uint32_t reports = 0;
+
+    for (uint32_t i = 1; i <= 4 * DPA_PRODUCER_REPORT_BATCH; i++) {
+        int report = dpa_producer_report_due(&deferred);
+        assert(report == (i % DPA_PRODUCER_REPORT_BATCH == 0));
+        reports += (uint32_t)report;
+        assert(deferred < DPA_PRODUCER_REPORT_BATCH);
+    }
+
+    assert(reports == 4);
+    assert(deferred == 0);
+}
+
+static void
+test_dpa_reschedule_quantum(void)
+{
+    uint32_t completed = 0;
+
+    assert(!dpa_reschedule_due(&completed,
+                               DPA_RESCHEDULE_DMA_QUANTUM - 1, 0));
+    assert(completed == DPA_RESCHEDULE_DMA_QUANTUM - 1);
+    assert(dpa_reschedule_due(&completed, 1, 0));
+    assert(completed == 0);
+
+    assert(!dpa_reschedule_due(&completed,
+                               DPA_RESCHEDULE_DMA_QUANTUM, 1));
+    assert(completed == DPA_RESCHEDULE_DMA_QUANTUM);
+    assert(dpa_reschedule_budget(completed, 1) ==
+           DPA_PRODUCER_REPORT_BATCH - 1);
+    assert(dpa_reschedule_due(&completed,
+                              DPA_PRODUCER_REPORT_BATCH - 1, 0));
+    assert(completed == 0);
+}
+
 int
 main(void)
 {
     test_out_of_order_prefix();
+    test_refused_claim_leaves_no_gap();
     test_concurrent_wrap();
     test_reverse_generation_wrap();
+    test_dpa_producer_completion_reports();
+    test_dpa_reschedule_quantum();
     puts("ring_counter_test: PASS");
     return 0;
 }

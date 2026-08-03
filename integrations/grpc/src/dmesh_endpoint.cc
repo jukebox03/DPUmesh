@@ -65,11 +65,9 @@ class DmeshEndpointState final
   };
 
   DmeshEndpointState(std::unique_ptr<EndpointTransport> transport,
-                     std::shared_ptr<Executor> work_executor,
                      std::shared_ptr<Executor> callback_executor,
                      grpc_event_engine::experimental::MemoryAllocator allocator)
       : transport(std::move(transport)),
-        work_executor(std::move(work_executor)),
         callback_executor(std::move(callback_executor)),
         allocator(std::move(allocator)) {}
 
@@ -77,7 +75,8 @@ class DmeshEndpointState final
   // first (members are destroyed in reverse declaration order).
   std::mutex mu;
   std::unique_ptr<EndpointTransport> transport;
-  const std::shared_ptr<Executor> work_executor;
+  // Carries the completions a gRPC Endpoint call raises itself, which must not
+  // run before that call returns.
   const std::shared_ptr<Executor> callback_executor;
   grpc_event_engine::experimental::MemoryAllocator allocator;
   std::deque<Slice> receive_queue;
@@ -96,8 +95,6 @@ class DmeshEndpointState final
 };
 
 namespace {
-
-void ScheduleWritePump(const std::shared_ptr<DmeshEndpointState>& state);
 
 void CloseTransport(const std::shared_ptr<DmeshEndpointState>& state) {
   bool close = false;
@@ -135,6 +132,13 @@ void ScheduleIfPresent(const std::shared_ptr<Executor>& executor,
   if (completion.has_value()) {
     ScheduleCompletion(executor, std::move(*completion));
   }
+}
+
+// Runs a completion the transport raised on the thread that raised it.
+void DeliverIfPresent(std::optional<Completion> completion) {
+  if (!completion.has_value()) return;
+  Completion done = std::move(*completion);
+  done.callback(std::move(done.status));
 }
 
 // Advance the cursor past slices the pump has already consumed.
@@ -180,7 +184,18 @@ void FillReservation(DmeshEndpointState::PendingWrite* write,
   }
 }
 
-void PumpWrite(const std::shared_ptr<DmeshEndpointState>& state) {
+struct PumpOutcome {
+  // The pending write finished cleanly and its callback was withheld, so the
+  // caller reports a synchronous Write() instead of completing it later.
+  bool completed_ok = false;
+  // The pump stopped on its reservation budget and has more to send.
+  bool yielded = false;
+};
+
+// `withhold_ok` serves a caller inside Endpoint::Write(), which reports a
+// clean finish by returning true rather than by invoking the callback.
+PumpOutcome PumpWrite(const std::shared_ptr<DmeshEndpointState>& state,
+                      bool withhold_ok = false) {
   std::optional<Completion> write_completion;
   std::optional<Completion> read_completion;
   bool close_transport = false;
@@ -189,7 +204,7 @@ void PumpWrite(const std::shared_ptr<DmeshEndpointState>& state) {
   {
     std::lock_guard<std::mutex> lock(state->mu);
     state->write_pump_scheduled = false;
-    if (!state->pending_write.has_value()) return;
+    if (!state->pending_write.has_value()) return PumpOutcome{};
 
     if (state->life == DmeshEndpointState::Life::kFailed ||
         state->life == DmeshEndpointState::Life::kClosing) {
@@ -230,8 +245,9 @@ void PumpWrite(const std::shared_ptr<DmeshEndpointState>& state) {
             ++reservations;
             continue;
           } else if (result.code == PostCode::kWouldBlock) {
+            /* Parked: the transport's TX_READY event resumes the pump. */
             state->write_parked = true;
-            return;
+            return PumpOutcome{};
           } else if (result.status.ok()) {
             result.status = result.code == PostCode::kClosed
                                 ? absl::UnavailableError(
@@ -273,13 +289,26 @@ void PumpWrite(const std::shared_ptr<DmeshEndpointState>& state) {
   }
 
   if (close_transport) CloseTransport(state);
-  ScheduleIfPresent(state->callback_executor, std::move(read_completion));
-  ScheduleIfPresent(state->callback_executor, std::move(write_completion));
-  if (reschedule) ScheduleWritePump(state);
+  DeliverIfPresent(std::move(read_completion));
+
+  PumpOutcome outcome;
+  outcome.yielded = reschedule;
+  if (withhold_ok && write_completion.has_value() &&
+      write_completion->status.ok()) {
+    outcome.completed_ok = true;
+  } else {
+    DeliverIfPresent(std::move(write_completion));
+  }
+  return outcome;
 }
 
-void ScheduleWritePump(const std::shared_ptr<DmeshEndpointState>& state) {
-  state->work_executor->Run([state]() { PumpWrite(state); });
+// Drives the pump on the calling thread until it stops yielding.
+PumpOutcome RunPumpLoop(const std::shared_ptr<DmeshEndpointState>& state,
+                        bool withhold_ok) {
+  for (;;) {
+    const PumpOutcome outcome = PumpWrite(state, withhold_ok);
+    if (!outcome.yielded) return outcome;
+  }
 }
 
 }  // namespace
@@ -346,8 +375,8 @@ ReceiveOutcome DmeshEndpointDriver::OnIncomingData(
   }
 
   if (close_transport) CloseTransport(state_);
-  ScheduleIfPresent(state_->callback_executor, std::move(completion));
-  ScheduleIfPresent(state_->callback_executor, std::move(write_completion));
+  DeliverIfPresent(std::move(completion));
+  DeliverIfPresent(std::move(write_completion));
   return outcome;
 }
 
@@ -364,7 +393,7 @@ void DmeshEndpointDriver::OnWritable() {
       schedule = true;
     }
   }
-  if (schedule) ScheduleWritePump(state_);
+  if (schedule) RunPumpLoop(state_, /*withhold_ok=*/false);
 }
 
 void DmeshEndpointDriver::OnRemoteEof() {
@@ -418,17 +447,16 @@ void DmeshEndpointDriver::OnTransportError(absl::Status status) {
 
 DmeshEndpoint::DmeshEndpoint(
     std::unique_ptr<EndpointTransport> transport,
-    std::shared_ptr<Executor> work_executor,
     std::shared_ptr<Executor> callback_executor, MemoryAllocator allocator,
     EventEngine::ResolvedAddress peer_address,
     EventEngine::ResolvedAddress local_address)
     : state_(std::make_shared<DmeshEndpointState>(
-          std::move(transport), std::move(work_executor),
-          std::move(callback_executor), std::move(allocator))),
+          std::move(transport), std::move(callback_executor),
+          std::move(allocator))),
       driver_(std::make_shared<DmeshEndpointDriver>(state_)),
       peer_address_(peer_address),
       local_address_(local_address) {
-  if (state_->transport == nullptr || state_->work_executor == nullptr ||
+  if (state_->transport == nullptr ||
       state_->callback_executor == nullptr || !state_->allocator.IsValid()) {
     std::abort();
   }
@@ -528,7 +556,8 @@ bool DmeshEndpoint::Write(Callback on_writable, SliceBuffer* data,
     ScheduleCompletion(state_->callback_executor,
                        std::move(*immediate_failure));
   } else if (schedule) {
-    ScheduleWritePump(state_);
+    // Pumping here keeps the write on the calling thread.
+    if (RunPumpLoop(state_, /*withhold_ok=*/true).completed_ok) return true;
   }
   return false;
 }

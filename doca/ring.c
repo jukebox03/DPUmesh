@@ -25,7 +25,7 @@ int setup_dma_ring(struct objects *objs, size_t size, struct dma_ring **out_ring
     ring->descs = NULL;
     ring->ctrl = NULL;
     ring->busy_probes = 0;
-    ring->dead = 0;             /* fail-safe latch; see dpumesh_enqueue */
+    ring->dead = 0;
 
     /* Slots [0,size) are descriptors, followed by the RX-credit and
      * consumer-head cache lines. */
