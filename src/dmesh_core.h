@@ -90,12 +90,22 @@ struct dmesh_eq {
     atomic_uint_fast64_t tx_ready[DMESH_TX_READY_WORDS];
     atomic_uint_fast32_t tx_ready_count;
     uint32_t             tx_ready_cursor; /* EQ-consumer round-robin word cursor */
-    /* A background tail publisher can fail after post_send returned. One sticky
-     * bit per QP turns that failure into an ordinary EQ edge without retaining
-     * a raw QP pointer in the scheduler. */
+    /* One sticky bit per QP whose deferred tail publication failed, delivered
+     * as an ordinary EQ edge. */
     atomic_uint_fast64_t tx_error[DMESH_TX_READY_WORDS];
     atomic_uint_fast32_t tx_error_count;
     uint32_t             tx_error_cursor;
+    /* QPs on this EQ holding a retained transmit tail. The owner arms a bit;
+     * this EQ's thread publishes it. The timer reads only the count. */
+    atomic_uint_fast64_t tx_armed[DMESH_TX_READY_WORDS];
+    atomic_uint_fast32_t tx_armed_count;
+    uint32_t             tx_armed_cursor;
+    /* Earliest deadline among the armed bits; zero when nothing is
+     * retained. */
+    atomic_uint_fast64_t tx_earliest_ns;
+    /* Set by the timer when a retained tail may have come due. dmesh_poll_eq
+     * consults the clock only after seeing it. */
+    atomic_int           tx_due_hint;
     /* PE-published READY LIST for this EQ's conns. The PE pushes a conn's port the
      * moment its inbox goes empty->non-empty; the EQ thread drains it via
      * dmesh_next_ready instead of scanning conns or holding a per-conn fd. SPSC: PE =
@@ -163,8 +173,7 @@ void dpumesh_rx_free(dpumesh_ctx_t *ctx, int slot);
 /* Per-connection TX byte-ring lifecycle: reserve, fill, commit, select, track,
  * and enqueue. Reserve is nonblocking and arms TX_READY on EAGAIN. Selection
  * returns full units unless flush_partial is set or block-ordering requires a
- * sealed tail. Track before ring publication so an immediate TX_ACK cannot
- * precede its reclaim record. */
+ * sealed tail. Tracking precedes ring publication. */
 uint8_t *dpumesh_tx_reserve(dpumesh_ctx_t *ctx, uint16_t port, uint32_t len);
 int      dpumesh_tx_commit(dpumesh_ctx_t *ctx, uint16_t port,
                            const void *buf, uint32_t len);
@@ -209,8 +218,12 @@ int dpumesh_conn_recv(dpumesh_ctx_t *ctx, uint16_t port, sw_descriptor_t *out);
 void *dpumesh_next_ready(struct dmesh_eq *eq);
 /* Pop one QP whose automatically armed dmesh_alloc(EAGAIN) became retryable. */
 void *dpumesh_next_tx_ready(struct dmesh_eq *eq);
-/* Pop one QP whose background tail submission failed. The failure remains sticky. */
+/* Pop one QP whose deferred tail submission failed. The failure remains sticky. */
 void *dpumesh_next_tx_error(struct dmesh_eq *eq);
+
+/* Publish every retained tail on this EQ whose deadline has expired. Runs on
+ * the EQ's own thread, which owns these QPs. */
+void dpumesh_publish_due_tails(struct dmesh_eq *eq);
 
 /* ====== Connection lifecycle — INTERNAL, shared by both surfaces ======
  *
@@ -234,12 +247,12 @@ dmesh_qp_t *dmesh_accept(dmesh_eq_t *eq);
  * created at accept/connect, or NULL when drained. Single-consumer. */
 dmesh_qp_t *dmesh_next_ready(dmesh_eq_t *eq);
 
-/* Serialize one public TX call against the automatic tail publisher and QP
- * destruction. dmesh_tx_after_commit() submits complete units and applies the
- * internal idle/deadline tail policy; dmesh_tx_pressure() expedites a retained
- * tail after alloc reports EAGAIN. */
-int  dmesh_tx_call_begin(dmesh_qp_t *c);
-void dmesh_tx_call_end(dmesh_qp_t *c);
+/* dmesh_tx_qp_valid() validates the handle and takes the QP's transmit gate;
+ * dmesh_tx_call_done() releases it. dmesh_tx_after_commit() submits
+ * complete units and applies the internal idle/deadline tail policy;
+ * dmesh_tx_pressure() expedites a retained tail after alloc reports EAGAIN. */
+int  dmesh_tx_qp_valid(dmesh_qp_t *c);
+void dmesh_tx_call_done(dmesh_qp_t *c);
 int  dmesh_tx_after_commit(dmesh_qp_t *c);
 void dmesh_tx_pressure(dmesh_qp_t *c);
 

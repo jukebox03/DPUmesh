@@ -141,8 +141,9 @@ otherwise the callback runs after the final flush succeeds.
 `dmesh_alloc(EAGAIN)` automatically arms a one-shot `DMESH_EVENT_TX_READY`
 event on the QP's EQ. The Endpoint retains the exact cursor and marks the write
 parked; the reactor returns to its two-fd event loop — one command eventfd and
-one native EQ eventfd, not waiting at all while a poll budget is outstanding —
-and owns no batching timer, timerfd, or pending-write scan. On TX-ready it
+one native EQ eventfd, not waiting at all while a poll budget is outstanding and
+otherwise bounded by `dmesh_eq_next_deadline_ns()` — and owns no batching state,
+timerfd, or pending-write scan. On TX-ready it
 forwards the hint to the named connection's Endpoint, which resumes its parked
 write and drops a stale hint. The hint does not reserve shared capacity; a
 repeated `EAGAIN` rearms the next transition.

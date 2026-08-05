@@ -242,7 +242,7 @@ def main():
         clean_reasons_text = ";".join(
             f"{reason}:{count}" for reason, count in sorted(clean_reasons.items())
         )
-        clean_count = sum(row["sla_clean"] == "1" for row in rows)
+        clean_count = sum(row["served_clean"] == "1" for row in rows)
         point = [
             key[0],
             key[1],
@@ -334,8 +334,8 @@ def main():
         ["fail_sum", summed(load_rows, "fail")],
         ["overflow_sum", summed(load_rows, "overflow")],
         ["reorder_sum", summed(load_rows, "reorder")],
-        ["clean_load_rows", sum(row["sla_clean"] == "1" for row in load_rows)],
-        ["unclean_load_rows", sum(row["sla_clean"] == "0" for row in load_rows)],
+        ["clean_load_rows", sum(row["served_clean"] == "1" for row in load_rows)],
+        ["unclean_load_rows", sum(row["served_clean"] == "0" for row in load_rows)],
         [
             "expected_perf_profiles",
             (

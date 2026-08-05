@@ -15,25 +15,24 @@ configuration serves cleanly:
 
 | Frame | Offered/s | Envoy permissive | Envoy strict | DPUmesh preload | DPUmesh native |
 |---|---:|---:|---:|---:|---:|
-| 64 B | 435,986 | 1.784 | 1.933 | 1.737 | **0.968** |
-| 64 B | 871,973 | 1.893 | 1.962 | 1.544 | **1.003** |
-| 64 B | 1,307,959 | 1.662 | 1.900 | 1.747 | **1.051** |
-| 1 KiB | 88,741 | 1.976 | 1.975 | 1.414 | **0.835** |
-| 1 KiB | 177,483 | 1.970 | 1.975 | 1.670 | **0.922** |
-| 1 KiB | 266,224 | 1.967 | 1.871 | 1.740 | **0.896** |
-| 8 KiB | 13,853 | 1.043 | 1.171 | 0.273 | **0.175** |
-| 8 KiB | 27,707 | 1.893 | 1.955 | 0.563 | **0.342** |
-| 8 KiB | 41,560 | 1.956 | 1.976 | 0.860 | **0.515** |
+| 64 B | 477,743 | 1.937 | 1.854 | 0.495 | **0.298** |
+| 64 B | 1,433,229 | 1.768 | 1.759 | 0.691 | **0.465** |
+| 64 B | 1,719,875 | 1.714 | 1.726 | 0.883 | **0.514** |
+| 1 KiB | 108,561 | 1.954 | 1.925 | 0.413 | **0.195** |
+| 1 KiB | 325,682 | 1.941 | 1.886 | 1.003 | **0.542** |
+| 1 KiB | 390,818 | 1.800 | 1.919 | 1.124 | **0.612** |
+| 8 KiB | 16,953 | 1.201 | 1.358 | 0.377 | **0.207** |
+| 8 KiB | 50,858 | 1.951 | 1.950 | 0.994 | **0.541** |
+| 8 KiB | 61,029 | 1.955 | 1.946 | 1.148 | **0.642** |
 
 Both Envoy paths sit against the two-core budget from the lowest load measured
 and stay there, so the remaining budget cannot absorb more traffic. Native serves
-the same loads on 0.18–1.05 core, leaving 1.0–1.8 core free.
+the same loads on 0.20–0.64 core, leaving 1.3–1.8 core free.
 
 The gap at any single load is not a fixed efficiency ratio. Envoy's host cost per
-message falls steeply with load — 75.3 µs at 13.9 k, 68.3 µs at 27.7 k, 47.1 µs
-at 41.6 k, 12.5 µs at its 157 k ceiling — while native holds 12.4 µs across the
-whole range. The ratio at a matched load therefore measures how far Envoy is from
-its own efficient operating point, and it closes as load rises.
+message falls steeply with load, while native holds a flat cost across the same
+range. The ratio at a matched load therefore measures how far Envoy is from its
+own efficient operating point, and it closes as load rises.
 
 ## Throughput at host-core saturation
 
@@ -44,29 +43,29 @@ cores observed there:
 
 | Frame | Configuration | Sustained RPC/s | vs permissive | Client | Server | p99 |
 |---|---|---:|---:|---:|---:|---:|
-| 64 B | Envoy permissive | 2,059,736 | 1.00× | 0.991 | 0.666 | 1.29 ms |
-| 64 B | Envoy strict | 2,048,601 | 0.99× | 0.990 | 0.686 | 1.58 ms |
-| 64 B | DPUmesh preload | 5,097,004 | 2.47× | 0.991 | 0.743 | 0.49 ms |
-| 64 B | DPUmesh native | **8,553,806** | **4.15×** | 0.991 | 0.721 | 1.51 ms |
-| 1 KiB | Envoy permissive | 756,875 | 1.00× | 0.990 | 0.888 | 1.74 ms |
-| 1 KiB | Envoy strict | 441,916 | 0.58× | 0.989 | 0.964 | 2.70 ms |
-| 1 KiB | DPUmesh preload | 550,010 | 0.73× | 0.990 | 0.777 | 0.36 ms |
-| 1 KiB | DPUmesh native | **1,109,843** | **1.47×** | 0.984 | 0.381 | 1.45 ms |
-| 8 KiB | Envoy permissive | 157,050 | 1.00× | 0.987 | 0.981 | 8.09 ms |
-| 8 KiB | Envoy strict | 70,027 | 0.45× | 0.986 | 0.978 | 6.91 ms |
-| 8 KiB | DPUmesh preload | 144,990 | 0.92× | 0.991 | 0.958 | 0.39 ms |
-| 8 KiB | DPUmesh native | **169,999** | **1.08×** | 0.944 | 0.438 | 0.75 ms |
+| 64 B | Envoy permissive | 1,719,897 | 1.00× | 0.977 | 0.738 | 1.11 ms |
+| 64 B | Envoy strict | 1,719,837 | 1.00× | 0.981 | 0.745 | 1.26 ms |
+| 64 B | DPUmesh preload | 1,806,362 | 1.05× | 0.602 | 0.295 | 1.03 ms |
+| 64 B | DPUmesh native | **8,950,968** | **5.20×** | 0.892 | 0.557 | 1.31 ms |
+| 1 KiB | Envoy permissive | 635,767 | 1.00× | 0.978 | 0.767 | 1.87 ms |
+| 1 KiB | Envoy strict | 434,048 | 0.68× | 0.978 | 0.930 | 3.01 ms |
+| 1 KiB | DPUmesh preload | 504,299 | 0.79× | 0.795 | 0.536 | 0.43 ms |
+| 1 KiB | DPUmesh native | **997,430** | **1.57×** | 0.771 | 0.334 | 0.52 ms |
+| 8 KiB | Envoy permissive | 134,102 | 1.00× | 0.977 | 0.963 | 3.44 ms |
+| 8 KiB | Envoy strict | 67,824 | 0.51× | 0.974 | 0.962 | 6.86 ms |
+| 8 KiB | DPUmesh preload | **161,718** | **1.21×** | 0.979 | 0.953 | 0.47 ms |
+| 8 KiB | DPUmesh native | 144,496 | 1.08× | 0.766 | 0.413 | 0.56 ms |
 
-Every configuration reaches its ceiling with the client core at 0.94–0.99, so
-each number is a host-core capacity under the fixed budget. Native leads at every
-frame size and by the widest margin at 64 B, where per-message overhead dominates
-and Envoy spends a full core on 2.06 M messages while native spends the same core
-on 8.55 M.
+Native leads at every frame size and by the widest margin at 64 B, where
+per-message overhead dominates: Envoy spends a full client core on 1.72 M
+messages while native spends 0.89 core on 8.95 M. At 8 KiB the preload shim
+leads instead, because the native ceiling there is bound by the DPU rather than
+by the host core, which stays at 0.77.
 
-The two Envoy paths are indistinguishable at 64 B — 2.06 M against 2.05 M —
-because the sidecar's per-connection TCP work, not the cipher, sets the limit
-there. They separate as frames grow and encryption cost follows the byte count:
-strict falls to 0.58× of permissive at 1 KiB and 0.45× at 8 KiB.
+The two Envoy paths are identical at 64 B — 1.72 M each — because the sidecar's
+per-connection TCP work, not the cipher, sets the limit there. They separate as
+frames grow and encryption cost follows the byte count: strict falls to 0.68× of
+permissive at 1 KiB and 0.51× at 8 KiB.
 
 ## Why the advantage narrows with frame size
 
@@ -74,14 +73,14 @@ Host cost per message at each configuration's own ceiling:
 
 | Frame | Envoy permissive | DPUmesh native | Ratio |
 |---|---:|---:|---:|
-| 64 B | 962 ns | 232 ns | 4.15× |
-| 1 KiB | 2,616 ns | 1,774 ns | 1.47× |
-| 8 KiB | 12,530 ns | 12,400 ns | 1.08× |
+| 64 B | 997 ns | 162 ns | 6.15× |
+| 1 KiB | 2,745 ns | 1,108 ns | 2.48× |
+| 8 KiB | 14,467 ns | 8,159 ns | 1.77× |
 
 What DPUmesh removes from the host — the sidecar hop, the socket calls, the
 stack traversal — is per-message work of roughly fixed size. What remains is
 per-byte work the application performs on its own payload, and that grows with
-the frame. At 8 KiB both paths converge on about 1.3–1.5 GB/s per client core,
+the frame. At 8 KiB both paths converge on a similar per-client-core bandwidth,
 so the fixed saving is a small share of a much larger total.
 
 Envoy's own cost per message is strongly load-dependent, because a byte-stream
@@ -90,34 +89,29 @@ places more messages in each read and each event. Nothing configures this:
 `TCP_NODELAY` is set on both endpoints, and socket buffers and Envoy buffer
 limits are left at their defaults. Native is close to flat across the same range.
 
-## Library batching validation
+## Transmit ownership
 
-The current native and preload paths were deployed and measured on 2026-08-04
-with the report topology, `l4` pin profile, offered rates, and frame sizes. Each
-current value below is the median of three runs.
+A QP's transmit state has one mutator: the thread that owns the QP. Retention is
+one bit on that QP's EQ plus a deadline stamp, and the tail is published by the
+owner, from a later transmit call or from `dmesh_poll_eq`. A per-QP gate
+serializes the two, and a QP whose owner is inside a transmit call keeps its
+retention for a later pass. The channel timer wakes an EQ whose earliest tail
+has come due and touches no transmit state.
 
-| Path | Frame | Reference achieved/s | Current achieved/s | Delta | Reference p99 | Current p99 | Current p99 range |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| Native | 64 B | 8,553,806 | 8,541,252 | -0.15% | 1,506 µs | 1,929 µs | 1,572–6,720 µs |
-| Native | 1 KiB | 1,109,843 | 1,109,990 | +0.01% | 1,454 µs | 710 µs | 544–912 µs |
-| Native | 8 KiB | 169,999 | 169,860 | -0.08% | 753 µs | 834 µs | 691–3,190 µs |
-| Preload | 64 B | 5,097,004 | 5,076,405 | -0.40% | 488 µs | 618 µs | 611–623 µs |
-| Preload | 1 KiB | 550,010 | 549,998 | -0.002% | 363 µs | 398 µs | 377–406 µs |
-| Preload | 8 KiB | 144,990 | 144,996 | +0.004% | 386 µs | 397 µs | 397–397 µs |
+Host cost tracks how often a partial unit reaches the ring. A stream that fills
+its transport unit publishes one descriptor per unit; one that publishes short
+tails pays far more than their own share, because the progress thread drains the
+reverse rings until they are empty and then arms and sleeps, so an irregular
+descriptor splits one drain into several.
 
-Achieved throughput remains within 0.5% of the reference in every row. All runs
-had `fail=0` and `reorder=0`, and every p99 remained below the report's 10 ms
-limit. The admission-drop limit of 0.1% was exceeded by native 64 B repetition
-2, native 8 KiB repetition 3, and all three preload 64 B repetitions. Thus the
-throughput and latency comparison shows no material regression, while the exact
-all-repetitions clean criterion is not satisfied at those offered-rate points.
+Correctness, `fair` pin profile:
 
-Run-level histogram output is stored in
-[`data/batching-20260804/latency_runs.csv`](data/batching-20260804/latency_runs.csv).
-It contains p50, p95, p99, p99.9, and p99.99. The reference
-[`measurements.csv`](data/l4-final-20260729/measurements.csv) contains p99 but no
-per-request samples or other latency percentiles, so only p99 can be compared
-directly.
+| Workload | Requests | fail | p50 |
+|---|---:|---:|---:|
+| loopback 8 KiB | 50,000 | 0 | 231 µs |
+| stream 1 KiB (L7 framing) | 20,000 | 0 | 230 µs |
+| verbs 8 KiB | 50,000 | 0 | 177 µs |
+| preload 1 KiB, 8 connections | 5,000 | 0 | 163 µs |
 
 ## Contract
 
@@ -146,6 +140,10 @@ measurement: each configuration holds two exclusive cores, eight in total.
 DPUmesh spends DPU ARM cores that Envoy does not. The comparison above is of
 host CPU under a fixed host budget.
 
+Across the 321 measured runs `fail`, `reorder` and `overflow` are zero; the
+native path alone carried 1,398,051,390 requests. Per-point medians are in
+[`data/l4-final-20260805/measurements.csv`](data/l4-final-20260805/measurements.csv).
+
 ## Reproduction
 
 Create `.env` with `HOST_PASS`, `DPU_HOST` and `DPU_PASS`, then from the
@@ -156,11 +154,11 @@ sudo swapoff -a
 
 env DPUMESH_DPA_THREADS=32 DPUMESH_RINGS_PER_POD=8 DPUMESH_ARM_WORKERS=8 \
     DPUMESH_PROXY_L7_SVC= BENCH_NUMA_POLICY=local BENCH_DEPLOY_SCOPE=l4 \
-    ./bench/bench.sh deploy
+    ./bench/suite/l4_proxy_data.sh --out /tmp/l4run
 
-./bench/suite/l4_proxy_data.sh --no-deploy --preflight-only --out /tmp/preflight
+python3 bench/suite/distill.py /tmp/l4run measurements.csv
 python3 bench/suite/plot_final.py measurements.csv bench/report/figures
 ```
 
-The preflight validates the deployment, pinning and core budget and records the
-per-configuration endpoint cores that the measurement reads.
+The collector deploys, validates pinning and the core budget, discovers each
+path's knee, and retains three repetitions per rate.

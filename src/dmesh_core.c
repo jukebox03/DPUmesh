@@ -41,8 +41,8 @@ static int drain_rev_rings(struct dpumesh_ctx *ctx, uint32_t budget);
 static int dmesh_drain_tx_locked(dmesh_qp_t *c, int flush_partial);
 static int dmesh_drain_tx_upto_locked(dmesh_qp_t *c, int flush_partial,
                                       uint64_t commit_limit);
-static int tx_batcher_start(struct dpumesh_ctx *ctx);
-static void tx_batcher_stop(struct dpumesh_ctx *ctx);
+static int tx_timer_start(struct dpumesh_ctx *ctx);
+static void tx_timer_stop(struct dpumesh_ctx *ctx);
 
 /* ====================================================================
  * dpumesh_ctx — internal state
@@ -63,12 +63,11 @@ static void tx_batcher_stop(struct dpumesh_ctx *ctx);
 #define TX_BLOCK_SIZE          (512 * 1024)
 #define TX_BLOCKS_PER_CONN     8
 #define TX_RECYCLED_CUSHION    1
-/* A busy stream retains only its newest partial unit. The first idle partial is
- * published immediately, so this bound is paid only when it can coalesce with
- * successor traffic. */
-#define TX_TAIL_DELAY_NS        300000ull
-#define TX_TAIL_FALLBACK_NS     500000ull
-#define TX_TAIL_BUSY_FALLBACK_NS 5000000ull
+/* A busy stream retains only its newest partial unit until this deadline. The
+ * timer tick bounds how late an owner that is not otherwise woken observes
+ * it. */
+#define TX_TAIL_DELAY_NS        500000ull
+#define TX_TIMER_TICK_NS       1000000ull
 
 enum dmesh_tx_wait_state {
     DMESH_TX_WAIT_IDLE = 0,
@@ -137,16 +136,15 @@ struct dmesh_port_slot {
     uint64_t        *su_end;                /* [ctx->su_depth] shipped end cursor */
     uint8_t         *su_done;               /* [ctx->su_depth] exact ACK reorder marks */
 
-    /* Public TX calls are caller-serialized. The internal worker claims an armed
-     * tail only after its deadline and waits for an active owner publication.
-     * Atomic tx_c/blk_used expose the immutable committed prefix to the worker. */
-    atomic_int       tx_batch_state;
-    atomic_int       tx_batch_owner_active;
-    atomic_uint_fast64_t tx_generation;
-    atomic_uint_fast64_t tx_batch_epoch;
-    atomic_uint_fast64_t tx_tail_deadline_ns;
-    atomic_uint_fast64_t tx_fallback_deadline_ns;
-    atomic_int       tx_error;              /* sticky errno; 0 while healthy */
+    /* Deadline of a retained partial unit, stamped once per retention. Zero
+     * while nothing is retained. Written under tx_gate; the timer reads it. */
+    atomic_uint_fast64_t tx_deadline_ns;
+    /* Transmit gate. A public TX call holds it from reserve through post; the
+     * EQ's deadline pass takes it only when uncontended and skips otherwise. */
+    atomic_int       tx_gate;
+    /* Sticky errno for a failed tail publication, mirrored by the EQ's tx_error
+     * bit. Zero while healthy. */
+    atomic_int       tx_error;
 
     /* One-shot TX writable notification. The owner records the EAGAIN snapshot, then
      * release-publishes ARMED. Reclaim producers acquire that state before reading the
@@ -210,14 +208,6 @@ static inline int inbox_pop(struct dmesh_port_slot *psl, sw_descriptor_t *out) {
 struct rxq_cell {
     sw_descriptor_t desc;
     atomic_uint_fast32_t seq;
-};
-
-struct tx_batch_task {
-    uint64_t deadline_ns;
-    uint64_t generation;
-    uint64_t epoch;
-    uint64_t commit_cursor;
-    uint16_t port;
 };
 
 struct dpumesh_ctx {
@@ -285,19 +275,17 @@ struct dpumesh_ctx {
     atomic_ullong st_rx_inbox_drops;   /* established/pending conn inbox full → message dropped */
     atomic_ullong st_rx_accept_drops;  /* accept queue full → NEW conn dropped */
 
-    /* One channel-level deadline worker publishes retained tails. A min-heap
-     * contains only armed QPs; cancelled/reused entries are harmlessly stale and
-     * rejected by the atomic (state,generation,epoch) publication claim. */
-    pthread_t tx_batch_tid;
-    pthread_mutex_t tx_batch_lock;
-    pthread_cond_t tx_batch_cv;
-    int tx_batch_lock_initialized;
-    int tx_batch_cv_initialized;
-    int tx_batch_running;
-    int tx_batch_thread_started;
-    struct tx_batch_task *tx_batch_heap;
-    size_t tx_batch_heap_len;
-    size_t tx_batch_heap_cap;
+    /* One channel-level timer writes the readiness fd of each EQ holding a
+     * retained tail. It touches no port slot and publishes nothing. It parks
+     * while tx_armed_total is zero. */
+    pthread_t tx_timer_tid;
+    pthread_mutex_t tx_timer_lock;
+    pthread_cond_t tx_timer_cv;
+    int tx_timer_lock_initialized;
+    int tx_timer_cv_initialized;
+    int tx_timer_running;
+    int tx_timer_thread_started;
+    atomic_uint_fast32_t tx_armed_total;
 
     /* RX descriptor queue — lock-free bounded SPMC ring (1 producer = PE
      * thread, N consumers = server workers). dpumesh_dequeue spin-polls it
@@ -342,11 +330,17 @@ struct dpumesh_ctx {
 };
 
 /* ====================================================================
- * Automatic TX tail batching
+ * Retained-tail scheduling
+ *
+ * A QP's transmit state has one mutator: the thread that owns the QP. A post
+ * leaving a fillable partial unit arms a bit on that QP's EQ and stamps a
+ * deadline. The owner publishes the tail from its next transmit call or from
+ * dmesh_poll_eq. The timer wakes an EQ that still holds armed bits.
  * ==================================================================== */
 
 static void tx_error_publish(dpumesh_ctx_t *ctx, struct dmesh_port_slot *psl,
                              uint16_t port, int error_number);
+static inline void eq_notify(struct dmesh_eq *eq);
 
 static uint64_t monotonic_ns(void)
 {
@@ -355,355 +349,279 @@ static uint64_t monotonic_ns(void)
     return (uint64_t)now.tv_sec * 1000000000ull + (uint64_t)now.tv_nsec;
 }
 
-static inline uint64_t tx_fallback_deadline_after(uint64_t now,
-                                                  uint64_t delay)
+static inline void eq_tx_armed_set(struct dmesh_eq *eq, uint16_t port,
+                                   uint64_t deadline)
 {
-    uint64_t target = now + delay;
-    return ((target + TX_TAIL_FALLBACK_NS - 1u) /
-            TX_TAIL_FALLBACK_NS) * TX_TAIL_FALLBACK_NS;
-}
-
-enum tx_batch_state {
-    TX_BATCH_IDLE = 0,
-    TX_BATCH_ARMED = 1,
-    TX_BATCH_WORKER = 2,
-    TX_BATCH_WORKER_DIRTY = 3,
-};
-
-static inline void tx_batch_wait_worker(struct dmesh_port_slot *psl)
-{
-    int state;
-    while ((state = atomic_load_explicit(&psl->tx_batch_state,
-                                         memory_order_acquire)) ==
-               TX_BATCH_WORKER ||
-           state == TX_BATCH_WORKER_DIRTY)
-        sched_yield();
-}
-
-static int tx_batch_task_before(const struct tx_batch_task *a,
-                                const struct tx_batch_task *b)
-{
-    if (a->deadline_ns != b->deadline_ns)
-        return a->deadline_ns < b->deadline_ns;
-    if (a->port != b->port)
-        return a->port < b->port;
-    return a->epoch < b->epoch;
-}
-
-/* Requires ctx->tx_batch_lock. */
-static int tx_batch_heap_push(dpumesh_ctx_t *ctx, struct tx_batch_task task)
-{
-    if (ctx->tx_batch_heap_len == ctx->tx_batch_heap_cap) {
-        size_t cap = ctx->tx_batch_heap_cap ? ctx->tx_batch_heap_cap * 2 : 256;
-        struct tx_batch_task *grown = realloc(
-            ctx->tx_batch_heap, cap * sizeof(*ctx->tx_batch_heap));
-        if (!grown) return -1;
-        ctx->tx_batch_heap = grown;
-        ctx->tx_batch_heap_cap = cap;
+    dpumesh_ctx_t *ctx = eq->ch->ctx;
+    uint64_t seen = atomic_load_explicit(&eq->tx_earliest_ns,
+                                         memory_order_relaxed);
+    if (seen == 0 || deadline < seen)
+        atomic_store_explicit(&eq->tx_earliest_ns, deadline,
+                              memory_order_relaxed);
+    size_t word = (size_t)port >> 6;
+    uint_fast64_t mask = (uint_fast64_t)1u << (port & 63u);
+    uint_fast64_t old = atomic_fetch_or_explicit(&eq->tx_armed[word], mask,
+                                                 memory_order_release);
+    if ((old & mask) != 0)
+        return;
+    atomic_fetch_add_explicit(&eq->tx_armed_count, 1, memory_order_release);
+    uint_fast32_t before = atomic_fetch_add_explicit(&ctx->tx_armed_total, 1,
+                                                     memory_order_release);
+    /* Only a zero-to-one transition of the channel total wakes the timer. */
+    if (before == 0 && ctx->tx_timer_lock_initialized) {
+        pthread_mutex_lock(&ctx->tx_timer_lock);
+        if (ctx->tx_timer_cv_initialized)
+            pthread_cond_signal(&ctx->tx_timer_cv);
+        pthread_mutex_unlock(&ctx->tx_timer_lock);
     }
-    size_t i = ctx->tx_batch_heap_len++;
-    while (i > 0) {
-        size_t parent = (i - 1) / 2;
-        if (!tx_batch_task_before(&task, &ctx->tx_batch_heap[parent])) break;
-        ctx->tx_batch_heap[i] = ctx->tx_batch_heap[parent];
-        i = parent;
+}
+
+static inline void eq_tx_armed_clear(struct dmesh_eq *eq, uint16_t port)
+{
+    size_t word = (size_t)port >> 6;
+    uint_fast64_t mask = (uint_fast64_t)1u << (port & 63u);
+    uint_fast64_t old = atomic_fetch_and_explicit(&eq->tx_armed[word], ~mask,
+                                                  memory_order_acq_rel);
+    if (old & mask) {
+        if (atomic_fetch_sub_explicit(&eq->tx_armed_count, 1,
+                                      memory_order_relaxed) == 1)
+            atomic_store_explicit(&eq->tx_earliest_ns, 0,
+                                  memory_order_relaxed);
+        atomic_fetch_sub_explicit(&eq->ch->ctx->tx_armed_total, 1,
+                                  memory_order_relaxed);
     }
-    ctx->tx_batch_heap[i] = task;
+}
+
+/* The transmit gate serializes a QP's public TX calls against the deadline pass
+ * that dmesh_poll_eq runs on the EQ thread. Callers already serialize their own
+ * transmit stream, so the gate is uncontended except against that pass. */
+static inline int tx_gate_try(struct dmesh_port_slot *psl)
+{
+    int expected = 0;
+    return atomic_compare_exchange_strong_explicit(&psl->tx_gate, &expected, 1,
+                                                   memory_order_acq_rel,
+                                                   memory_order_acquire);
+}
+
+/* The holder is one bounded drain: spin briefly, then yield. */
+#if defined(__x86_64__) || defined(__i386__)
+#  define TX_GATE_RELAX() __builtin_ia32_pause()
+#elif defined(__aarch64__)
+#  define TX_GATE_RELAX() __asm__ __volatile__("yield" ::: "memory")
+#else
+#  define TX_GATE_RELAX() ((void)0)
+#endif
+#define TX_GATE_SPINS 256u
+
+static inline void tx_gate_acquire(struct dmesh_port_slot *psl)
+{
+    for (unsigned spins = 0; !tx_gate_try(psl); spins++) {
+        if (spins < TX_GATE_SPINS) TX_GATE_RELAX();
+        else sched_yield();
+    }
+}
+
+static inline void tx_gate_release(struct dmesh_port_slot *psl)
+{
+    atomic_store_explicit(&psl->tx_gate, 0, memory_order_release);
+}
+
+/* Retain this QP's tail until its deadline. A repeat arm leaves the existing
+ * stamp in place. Held under tx_gate. */
+static void tx_arm_tail(struct dmesh_port_slot *psl, uint16_t port)
+{
+    struct dmesh_eq *eq = __atomic_load_n(&psl->eq, __ATOMIC_ACQUIRE);
+    if (!eq)
+        return;
+    size_t word = (size_t)port >> 6;
+    uint_fast64_t mask = (uint_fast64_t)1u << (port & 63u);
+    if (atomic_load_explicit(&eq->tx_armed[word], memory_order_acquire) & mask)
+        return;                                   /* already retained */
+    uint64_t deadline = monotonic_ns() + TX_TAIL_DELAY_NS;
+    atomic_store_explicit(&psl->tx_deadline_ns, deadline, memory_order_relaxed);
+    eq_tx_armed_set(eq, port, deadline);
+}
+
+/* Release the retention: the bit and its stamp clear together, so a nonzero
+ * deadline always means retained. */
+static void tx_disarm_tail(struct dmesh_port_slot *psl, uint16_t port)
+{
+    struct dmesh_eq *eq = __atomic_load_n(&psl->eq, __ATOMIC_ACQUIRE);
+    if (eq)
+        eq_tx_armed_clear(eq, port);
+    atomic_store_explicit(&psl->tx_deadline_ns, 0, memory_order_relaxed);
+}
+
+/* Pop one armed port whose deadline has expired and whose transmit gate is
+ * free, clearing its bit and returning with that gate held for the caller. A
+ * port still coalescing, and one whose owner is inside a transmit call, keeps
+ * its retention for a later pass. */
+static int eq_tx_armed_pop_due(struct dmesh_eq *eq, uint64_t now, uint16_t *port)
+{
+    dpumesh_ctx_t *ctx = eq->ch->ctx;
+    /* The armed count bounds the scan. */
+    uint_fast32_t remaining =
+        atomic_load_explicit(&eq->tx_armed_count, memory_order_acquire);
+    if (remaining == 0)
+        return 0;
+    uint32_t start = eq->tx_armed_cursor;
+    for (uint32_t n = 0; n < DMESH_TX_READY_WORDS && remaining; n++) {
+        uint32_t word = (start + n) & (DMESH_TX_READY_WORDS - 1);
+        uint_fast64_t bits = atomic_load_explicit(&eq->tx_armed[word],
+                                                  memory_order_acquire);
+        while (bits && remaining) {
+            unsigned bit = (unsigned)__builtin_ctzll((unsigned long long)bits);
+            bits &= bits - 1;
+            remaining--;
+            uint16_t candidate = (uint16_t)(word * 64u + bit);
+            struct dmesh_port_slot *psl = &ctx->ports[candidate];
+            if (atomic_load_explicit(&psl->tx_deadline_ns,
+                                     memory_order_relaxed) > now)
+                continue;                          /* still coalescing */
+            if (!tx_gate_try(psl))
+                continue;                          /* owner is transmitting */
+            uint_fast64_t mask = (uint_fast64_t)1u << bit;
+            uint_fast64_t old = atomic_fetch_and_explicit(&eq->tx_armed[word],
+                                                          ~mask,
+                                                          memory_order_acq_rel);
+            if ((old & mask) == 0) {
+                tx_gate_release(psl);
+                continue;
+            }
+            atomic_fetch_sub_explicit(&eq->tx_armed_count, 1,
+                                      memory_order_relaxed);
+            atomic_fetch_sub_explicit(&ctx->tx_armed_total, 1,
+                                      memory_order_relaxed);
+            atomic_store_explicit(&ctx->ports[candidate].tx_deadline_ns, 0,
+                                  memory_order_relaxed);
+            eq->tx_armed_cursor = word;
+            *port = candidate;
+            return 1;
+        }
+    }
     return 0;
 }
 
-/* Requires ctx->tx_batch_lock and a nonempty heap. */
-static struct tx_batch_task tx_batch_heap_pop(dpumesh_ctx_t *ctx)
+/* Recompute the cached earliest deadline from the armed bits. Bounded by the
+ * armed count and run only after a publication pass. */
+static void eq_tx_armed_refresh(struct dmesh_eq *eq)
 {
-    struct tx_batch_task result = ctx->tx_batch_heap[0];
-    struct tx_batch_task last = ctx->tx_batch_heap[--ctx->tx_batch_heap_len];
-    if (ctx->tx_batch_heap_len == 0) return result;
-    size_t i = 0;
-    for (;;) {
-        size_t left = i * 2 + 1;
-        if (left >= ctx->tx_batch_heap_len) break;
-        size_t child = left;
-        size_t right = left + 1;
-        if (right < ctx->tx_batch_heap_len &&
-            tx_batch_task_before(&ctx->tx_batch_heap[right],
-                                 &ctx->tx_batch_heap[left]))
-            child = right;
-        if (!tx_batch_task_before(&ctx->tx_batch_heap[child], &last)) break;
-        ctx->tx_batch_heap[i] = ctx->tx_batch_heap[child];
-        i = child;
+    dpumesh_ctx_t *ctx = eq->ch->ctx;
+    uint_fast32_t remaining =
+        atomic_load_explicit(&eq->tx_armed_count, memory_order_acquire);
+    if (remaining == 0) {
+        atomic_store_explicit(&eq->tx_earliest_ns, 0, memory_order_relaxed);
+        return;
     }
-    ctx->tx_batch_heap[i] = last;
-    return result;
-}
-
-/* Arm one currently-idle tail. Heap entries are immutable; state + epoch make
- * cancelled/reused entries harmless when they eventually reach the root. */
-static int tx_batch_arm(dpumesh_ctx_t *ctx,
-                        struct dmesh_port_slot *psl, uint16_t port,
-                        int expedite)
-{
-    uint64_t committed = atomic_load_explicit(&psl->tx_c,
-                                               memory_order_acquire);
-    if (atomic_load_explicit(&psl->tx_s, memory_order_acquire) >= committed)
-        return 0;
-    tx_batch_wait_worker(psl);
-    if (atomic_load_explicit(&psl->tx_batch_state,
-                             memory_order_acquire) == TX_BATCH_ARMED)
-        return 0;
-
-    uint64_t now = monotonic_ns();
-    uint64_t tail_deadline = now + (expedite ? 0 : TX_TAIL_DELAY_NS);
-    uint64_t fallback_deadline = expedite ? now :
-        tx_fallback_deadline_after(now, TX_TAIL_FALLBACK_NS);
-    uint64_t epoch = atomic_load_explicit(&psl->tx_batch_epoch,
-                                           memory_order_relaxed) + 1;
-    struct tx_batch_task task = {
-        .deadline_ns = fallback_deadline,
-        .generation = atomic_load_explicit(&psl->tx_generation,
-                                            memory_order_relaxed),
-        .epoch = epoch,
-        .commit_cursor = committed,
-        .port = port,
-    };
-
-    pthread_mutex_lock(&ctx->tx_batch_lock);
-    int result = -1;
-    if (ctx->tx_batch_running &&
-        atomic_load_explicit(&psl->tx_batch_state,
-                             memory_order_relaxed) == TX_BATCH_IDLE &&
-        tx_batch_heap_push(ctx, task) == 0) {
-        atomic_store_explicit(&psl->tx_batch_epoch, epoch,
-                              memory_order_relaxed);
-        atomic_store_explicit(&psl->tx_tail_deadline_ns, tail_deadline,
-                              memory_order_relaxed);
-        atomic_store_explicit(&psl->tx_fallback_deadline_ns,
-                              fallback_deadline, memory_order_relaxed);
-        atomic_store_explicit(&psl->tx_batch_state, TX_BATCH_ARMED,
-                              memory_order_release);
-        pthread_cond_signal(&ctx->tx_batch_cv);
-        result = 0;
-    } else {
-        errno = ctx->tx_batch_running ? ENOMEM : ECANCELED;
-    }
-    pthread_mutex_unlock(&ctx->tx_batch_lock);
-    return result;
-}
-
-/* Cancel an armed deadline, or wait for a claimed worker pass to finish. */
-static void tx_batch_cancel(struct dmesh_port_slot *psl)
-{
-    for (;;) {
-        int state = atomic_load_explicit(&psl->tx_batch_state,
-                                         memory_order_acquire);
-        if (state == TX_BATCH_IDLE) break;
-        if (state == TX_BATCH_WORKER || state == TX_BATCH_WORKER_DIRTY) {
-            tx_batch_wait_worker(psl);
-            continue;
-        }
-        int expected = state;
-        if (atomic_compare_exchange_weak_explicit(
-                &psl->tx_batch_state, &expected, TX_BATCH_IDLE,
-                memory_order_acq_rel, memory_order_acquire)) {
-            uint64_t epoch = atomic_load_explicit(&psl->tx_batch_epoch,
-                                                   memory_order_relaxed);
-            atomic_store_explicit(&psl->tx_batch_epoch, epoch + 1,
-                                  memory_order_release);
-            break;
+    uint64_t earliest = UINT64_MAX;
+    for (uint32_t word = 0; word < DMESH_TX_READY_WORDS && remaining; word++) {
+        uint_fast64_t bits = atomic_load_explicit(&eq->tx_armed[word],
+                                                  memory_order_acquire);
+        while (bits && remaining) {
+            unsigned bit = (unsigned)__builtin_ctzll((unsigned long long)bits);
+            bits &= bits - 1;
+            remaining--;
+            uint64_t deadline = atomic_load_explicit(
+                &ctx->ports[word * 64u + bit].tx_deadline_ns,
+                memory_order_relaxed);
+            if (deadline < earliest) earliest = deadline;
         }
     }
+    atomic_store_explicit(&eq->tx_earliest_ns,
+                          earliest == UINT64_MAX ? 0 : earliest,
+                          memory_order_relaxed);
 }
 
-/* Complete one claimed publication pass. Commits racing this pass mark the
- * state DIRTY; each retry drains only the committed snapshot it acquired. */
-static int tx_batch_drain_claimed(dpumesh_ctx_t *ctx,
-                                  struct dmesh_port_slot *psl,
-                                  uint16_t port, uint64_t generation,
-                                  uint64_t epoch)
+/* Nanoseconds until this EQ's earliest retained tail must be published, or -1
+ * when none is retained. */
+static int64_t eq_tx_armed_wait_ns(struct dmesh_eq *eq, uint64_t now)
 {
-    int result = 0;
-    int flush_partial = 1;
-    for (;;) {
-        uint8_t role = __atomic_load_n(&psl->role, __ATOMIC_ACQUIRE);
-        dmesh_qp_t *c = (dmesh_qp_t *)psl->user;
-        uint64_t commit_limit = atomic_load_explicit(&psl->tx_c,
-                                                      memory_order_acquire);
-        if ((role == DMESH_ROLE_CLIENT || role == DMESH_ROLE_SERVER) && c &&
-            atomic_load_explicit(&psl->tx_generation,
-                                 memory_order_acquire) == generation &&
-            atomic_load_explicit(&psl->tx_batch_epoch,
-                                 memory_order_acquire) == epoch &&
-            dmesh_drain_tx_upto_locked(c, flush_partial, commit_limit) != 0) {
-            int error_number = errno;
-            if (error_number != ENOMEM) error_number = EBADMSG;
-            tx_error_publish(ctx, psl, port, error_number);
-            atomic_store_explicit(&psl->tx_batch_state, TX_BATCH_IDLE,
-                                  memory_order_release);
-            result = -1;
-            break;
-        }
-        flush_partial = 0;
-
-        int expected = TX_BATCH_WORKER;
-        if (atomic_compare_exchange_strong_explicit(
-                &psl->tx_batch_state, &expected, TX_BATCH_IDLE,
-                memory_order_acq_rel, memory_order_acquire))
-            break;
-        if (expected != TX_BATCH_WORKER_DIRTY) {
-            atomic_store_explicit(&psl->tx_batch_state, TX_BATCH_IDLE,
-                                  memory_order_release);
-            break;
-        }
-        expected = TX_BATCH_WORKER_DIRTY;
-        if (!atomic_compare_exchange_strong_explicit(
-                &psl->tx_batch_state, &expected, TX_BATCH_WORKER,
-                memory_order_acq_rel, memory_order_acquire))
-            continue;
-    }
-
-    uint8_t role = __atomic_load_n(&psl->role, __ATOMIC_ACQUIRE);
-    if (result == 0 &&
-        (role == DMESH_ROLE_CLIENT || role == DMESH_ROLE_SERVER) &&
-        atomic_load_explicit(&psl->tx_s, memory_order_acquire) <
-            atomic_load_explicit(&psl->tx_c, memory_order_acquire))
-        (void)tx_batch_arm(ctx, psl, port, 0);
-    return result;
+    uint64_t earliest = atomic_load_explicit(&eq->tx_earliest_ns,
+                                             memory_order_relaxed);
+    if (earliest == 0)
+        return -1;
+    return earliest <= now ? 0 : (int64_t)(earliest - now);
 }
 
-static void *tx_batcher_fn(void *arg)
+/* Wake owners blocked in poll while holding a retained tail. Publishes nothing
+ * and reads no port slot. */
+static void *tx_timer_fn(void *arg)
 {
     dpumesh_ctx_t *ctx = arg;
     for (;;) {
-        struct tx_batch_task task;
-        int have_task = 0;
-
-        pthread_mutex_lock(&ctx->tx_batch_lock);
-        while (ctx->tx_batch_running) {
-            if (ctx->tx_batch_heap_len == 0) {
-                pthread_cond_wait(&ctx->tx_batch_cv, &ctx->tx_batch_lock);
-                continue;
-            }
-            uint64_t now = monotonic_ns();
-            uint64_t deadline = ctx->tx_batch_heap[0].deadline_ns;
-            if (deadline > now) {
-                struct timespec wake = {
-                    .tv_sec = (time_t)(deadline / 1000000000ull),
-                    .tv_nsec = (long)(deadline % 1000000000ull),
-                };
-                pthread_cond_timedwait(&ctx->tx_batch_cv, &ctx->tx_batch_lock,
-                                       &wake);
-                continue;
-            }
-            task = tx_batch_heap_pop(ctx);
-            have_task = 1;
+        pthread_mutex_lock(&ctx->tx_timer_lock);
+        while (ctx->tx_timer_running &&
+               atomic_load_explicit(&ctx->tx_armed_total,
+                                    memory_order_acquire) == 0)
+            pthread_cond_wait(&ctx->tx_timer_cv, &ctx->tx_timer_lock);
+        int running = ctx->tx_timer_running;
+        if (running) {
+            uint64_t wake_ns = monotonic_ns() + TX_TIMER_TICK_NS;
+            struct timespec wake = {
+                .tv_sec = (time_t)(wake_ns / 1000000000ull),
+                .tv_nsec = (long)(wake_ns % 1000000000ull),
+            };
+            pthread_cond_timedwait(&ctx->tx_timer_cv, &ctx->tx_timer_lock,
+                                   &wake);
+            running = ctx->tx_timer_running;
+        }
+        pthread_mutex_unlock(&ctx->tx_timer_lock);
+        if (!running)
             break;
-        }
-        int running = ctx->tx_batch_running;
-        pthread_mutex_unlock(&ctx->tx_batch_lock);
-        if (!running) break;
-        if (!have_task || task.port == 0 || task.port >= DMESH_PORT_SPACE)
-            continue;
 
-        struct dmesh_port_slot *psl = &ctx->ports[task.port];
-        uint64_t generation = atomic_load_explicit(&psl->tx_generation,
-                                                    memory_order_acquire);
-        uint64_t epoch = atomic_load_explicit(&psl->tx_batch_epoch,
-                                               memory_order_acquire);
-        int claimed = 0;
-        if (generation == task.generation && epoch == task.epoch) {
-            uint64_t now = monotonic_ns();
-            uint64_t committed = atomic_load_explicit(&psl->tx_c,
-                                                       memory_order_acquire);
-            if (committed != task.commit_cursor &&
-                atomic_load_explicit(&psl->tx_batch_state,
-                                     memory_order_acquire) == TX_BATCH_ARMED) {
-                task.commit_cursor = committed;
-                task.deadline_ns = tx_fallback_deadline_after(
-                    now, TX_TAIL_BUSY_FALLBACK_NS);
-                atomic_store_explicit(&psl->tx_fallback_deadline_ns,
-                                      task.deadline_ns, memory_order_release);
-                pthread_mutex_lock(&ctx->tx_batch_lock);
-                int deferred = ctx->tx_batch_running &&
-                    atomic_load_explicit(&psl->tx_generation,
-                                         memory_order_relaxed) == task.generation &&
-                    atomic_load_explicit(&psl->tx_batch_epoch,
-                                         memory_order_relaxed) == task.epoch &&
-                    atomic_load_explicit(&psl->tx_batch_state,
-                                         memory_order_relaxed) == TX_BATCH_ARMED &&
-                    tx_batch_heap_push(ctx, task) == 0;
-                pthread_mutex_unlock(&ctx->tx_batch_lock);
-                if (deferred) continue;
+        /* Wake only an EQ whose earliest tail has come due, once per EQ: its
+         * owner drains every expired tail in one pass. */
+        uint64_t now = monotonic_ns();
+        pthread_mutex_lock(&ctx->eq_lock);
+        for (int i = 0; i < ctx->n_eqs; i++) {
+            struct dmesh_eq *eq = ctx->eqs[i];
+            if (eq && eq_tx_armed_wait_ns(eq, now) == 0) {
+                atomic_store_explicit(&eq->tx_due_hint, 1,
+                                      memory_order_release);
+                eq_notify(eq);
             }
-            uint64_t deadline = atomic_load_explicit(
-                &psl->tx_fallback_deadline_ns, memory_order_acquire);
-            if (deadline > now &&
-                atomic_load_explicit(&psl->tx_batch_state,
-                                     memory_order_acquire) == TX_BATCH_ARMED) {
-                task.deadline_ns = deadline;
-                pthread_mutex_lock(&ctx->tx_batch_lock);
-                int deferred = ctx->tx_batch_running &&
-                    atomic_load_explicit(&psl->tx_generation,
-                                         memory_order_relaxed) == task.generation &&
-                    atomic_load_explicit(&psl->tx_batch_epoch,
-                                         memory_order_relaxed) == task.epoch &&
-                    atomic_load_explicit(&psl->tx_batch_state,
-                                         memory_order_relaxed) == TX_BATCH_ARMED &&
-                    tx_batch_heap_push(ctx, task) == 0;
-                pthread_mutex_unlock(&ctx->tx_batch_lock);
-                if (deferred) continue;
-            }
-            int expected = TX_BATCH_ARMED;
-            if (atomic_compare_exchange_strong_explicit(
-                    &psl->tx_batch_state, &expected, TX_BATCH_WORKER,
-                    memory_order_acq_rel, memory_order_acquire))
-                claimed = 1;
         }
-        if (claimed) {
-            while (atomic_load_explicit(&psl->tx_batch_owner_active,
-                                        memory_order_acquire))
-                sched_yield();
-            tx_batch_drain_claimed(ctx, psl, task.port,
-                                   task.generation, task.epoch);
-        }
+        pthread_mutex_unlock(&ctx->eq_lock);
     }
     return NULL;
 }
 
-static int tx_batcher_start(dpumesh_ctx_t *ctx)
+static int tx_timer_start(dpumesh_ctx_t *ctx)
 {
-    int rc = pthread_mutex_init(&ctx->tx_batch_lock, NULL);
+    int rc = pthread_mutex_init(&ctx->tx_timer_lock, NULL);
     if (rc != 0) { errno = rc; return -1; }
-    ctx->tx_batch_lock_initialized = 1;
+    ctx->tx_timer_lock_initialized = 1;
 
     pthread_condattr_t attr;
     rc = pthread_condattr_init(&attr);
     if (rc != 0) { errno = rc; return -1; }
     rc = pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
-    if (rc == 0) rc = pthread_cond_init(&ctx->tx_batch_cv, &attr);
+    if (rc == 0) rc = pthread_cond_init(&ctx->tx_timer_cv, &attr);
     pthread_condattr_destroy(&attr);
     if (rc != 0) { errno = rc; return -1; }
-    ctx->tx_batch_cv_initialized = 1;
+    ctx->tx_timer_cv_initialized = 1;
 
-    ctx->tx_batch_running = 1;
-    rc = pthread_create(&ctx->tx_batch_tid, NULL, tx_batcher_fn, ctx);
+    ctx->tx_timer_running = 1;
+    rc = pthread_create(&ctx->tx_timer_tid, NULL, tx_timer_fn, ctx);
     if (rc != 0) {
-        ctx->tx_batch_running = 0;
+        ctx->tx_timer_running = 0;
         errno = rc;
         return -1;
     }
-    ctx->tx_batch_thread_started = 1;
+    ctx->tx_timer_thread_started = 1;
     return 0;
 }
 
-static void tx_batcher_stop(dpumesh_ctx_t *ctx)
+static void tx_timer_stop(dpumesh_ctx_t *ctx)
 {
-    if (!ctx || !ctx->tx_batch_lock_initialized) return;
-    pthread_mutex_lock(&ctx->tx_batch_lock);
-    ctx->tx_batch_running = 0;
-    if (ctx->tx_batch_cv_initialized) pthread_cond_broadcast(&ctx->tx_batch_cv);
-    pthread_mutex_unlock(&ctx->tx_batch_lock);
-    if (ctx->tx_batch_thread_started) {
-        pthread_join(ctx->tx_batch_tid, NULL);
-        ctx->tx_batch_thread_started = 0;
+    if (!ctx || !ctx->tx_timer_lock_initialized) return;
+    pthread_mutex_lock(&ctx->tx_timer_lock);
+    ctx->tx_timer_running = 0;
+    if (ctx->tx_timer_cv_initialized) pthread_cond_broadcast(&ctx->tx_timer_cv);
+    pthread_mutex_unlock(&ctx->tx_timer_lock);
+    if (ctx->tx_timer_thread_started) {
+        pthread_join(ctx->tx_timer_tid, NULL);
+        ctx->tx_timer_thread_started = 0;
     }
 }
 
@@ -717,6 +635,7 @@ static void tx_batcher_stop(dpumesh_ctx_t *ctx)
  * sustained idle). */
 #define PE_IDLE_SPIN     2048
 #define PE_BACKOFF_NS    20000   /* 20 us */
+#define PE_BLOCK_MS      200     /* backstop so a missed wake cannot strand a drain */
 
 static void *pe_progress_fn(void *arg) {
     dpumesh_ctx_t *ctx = (dpumesh_ctx_t *)arg;
@@ -759,10 +678,11 @@ static void *pe_progress_fn(void *arg) {
                 (void)doca_pe_clear_notification(pe, pfd);
                 continue;
             }
-            /* Block until a completion raises the fd, or 200 ms so a pe_running=0
-             * shutdown is observed promptly (vs a busy spin). */
+            /* Block until a completion raises the fd. The bound caps how long a
+             * missed wake can hold an already-published reverse entry, and lets
+             * a pe_running=0 shutdown be observed promptly. */
             struct epoll_event evs[1];
-            (void)epoll_wait(ep, evs, 1, 200);
+            (void)epoll_wait(ep, evs, 1, PE_BLOCK_MS);
             (void)doca_pe_clear_notification(pe, pfd);
         }
         close(ep);
@@ -1111,6 +1031,10 @@ static int tx_wait_make_ready(dpumesh_ctx_t *ctx, uint16_t port) {
 
 static void tx_wait_cancel(dpumesh_ctx_t *ctx, struct dmesh_port_slot *psl,
                            uint16_t port) {
+    /* Only this QP's owner arms, so IDLE means there is nothing to clear. */
+    if (atomic_load_explicit(&psl->tx_wait_state, memory_order_acquire) ==
+        (uint_fast32_t)DMESH_TX_WAIT_IDLE)
+        return;
     atomic_exchange_explicit(&psl->tx_wait_state, DMESH_TX_WAIT_IDLE,
                              memory_order_acq_rel);
     pool_waiter_clear(ctx, port);
@@ -1783,12 +1707,6 @@ int dpumesh_init(dpumesh_ctx_t **out, int service_id,
     for (uint32_t p = 0; p < DMESH_PORT_SPACE; p++) {
         atomic_init(&ctx->ports[p].tx_c, 0);
         atomic_init(&ctx->ports[p].tx_s, 0);
-        atomic_init(&ctx->ports[p].tx_batch_state, TX_BATCH_IDLE);
-        atomic_init(&ctx->ports[p].tx_batch_owner_active, 0);
-        atomic_init(&ctx->ports[p].tx_generation, 0);
-        atomic_init(&ctx->ports[p].tx_batch_epoch, 0);
-        atomic_init(&ctx->ports[p].tx_tail_deadline_ns, 0);
-        atomic_init(&ctx->ports[p].tx_fallback_deadline_ns, 0);
         atomic_init(&ctx->ports[p].tx_error, 0);
         atomic_init(&ctx->ports[p].tx_wait_state,
                     (uint_fast32_t)DMESH_TX_WAIT_IDLE);
@@ -1808,7 +1726,7 @@ int dpumesh_init(dpumesh_ctx_t **out, int service_id,
     ctx->next_port = 1;
     ctx->port_span = DMESH_PORT_SPAN_MIN;
 
-    if (tx_batcher_start(ctx) != 0)
+    if (tx_timer_start(ctx) != 0)
         goto fail;
 
     ctx->pe_running = 1;
@@ -1898,7 +1816,7 @@ static void cleanup_ctx(dpumesh_ctx_t *ctx) {
     if (!ctx) return;
 
     /* No publisher may race remote quiesce or destruction of per-port state. */
-    tx_batcher_stop(ctx);
+    tx_timer_stop(ctx);
 
     /* QPs/channels are already gone, so no new application traffic can appear.
      * Receive the remote teardown ACK on the same notification/progress thread
@@ -1949,16 +1867,13 @@ static void cleanup_ctx(dpumesh_ctx_t *ctx) {
         }
     }
 
-    free(ctx->tx_batch_heap);
-    ctx->tx_batch_heap = NULL;
-    ctx->tx_batch_heap_len = ctx->tx_batch_heap_cap = 0;
-    if (ctx->tx_batch_cv_initialized) {
-        pthread_cond_destroy(&ctx->tx_batch_cv);
-        ctx->tx_batch_cv_initialized = 0;
+    if (ctx->tx_timer_cv_initialized) {
+        pthread_cond_destroy(&ctx->tx_timer_cv);
+        ctx->tx_timer_cv_initialized = 0;
     }
-    if (ctx->tx_batch_lock_initialized) {
-        pthread_mutex_destroy(&ctx->tx_batch_lock);
-        ctx->tx_batch_lock_initialized = 0;
+    if (ctx->tx_timer_lock_initialized) {
+        pthread_mutex_destroy(&ctx->tx_timer_lock);
+        ctx->tx_timer_lock_initialized = 0;
     }
 
     /* Destroy host mmaps while the DOCA device remains open. Failed mmap
@@ -2071,17 +1986,9 @@ static void block_pool_return(dpumesh_ctx_t *ctx, int32_t id) {
  * NO block is grabbed here — the first block is taken LAZILY on the first tx_reserve.
  * su_seq/su_end/su_done (if already malloc'd for this slot) are kept and reused. */
 static void port_reset_tx(struct dmesh_port_slot *psl) {
-    tx_batch_cancel(psl);
-    uint64_t generation = atomic_load_explicit(&psl->tx_generation,
-                                                memory_order_relaxed);
-    atomic_store_explicit(&psl->tx_generation, generation + 1,
-                          memory_order_release);
-    atomic_store_explicit(&psl->tx_batch_owner_active, 0,
-                          memory_order_relaxed);
-    atomic_store_explicit(&psl->tx_tail_deadline_ns, 0,
-                          memory_order_relaxed);
-    atomic_store_explicit(&psl->tx_fallback_deadline_ns, 0,
-                          memory_order_relaxed);
+    /* The previous conn's armed bit is cleared by dpumesh_free_port, which also
+     * unbinds the EQ that owns it. */
+    atomic_store_explicit(&psl->tx_deadline_ns, 0, memory_order_relaxed);
     atomic_store_explicit(&psl->tx_error, 0, memory_order_relaxed);
     psl->tx_w = 0;
     atomic_store_explicit(&psl->tx_s, 0, memory_order_relaxed);
@@ -2197,8 +2104,6 @@ uint8_t *dpumesh_tx_reserve(dpumesh_ctx_t *ctx, uint16_t port, uint32_t len) {
         psl->su_done = done;
     }
 
-    tx_refresh_blocks(ctx, psl);                           /* recycle / compact / shrink first */
-
     /* Probe the block window BEFORE mutating tx_w: on EAGAIN the conn's write head must
      * be exactly where it was, so the caller's retry is a clean no-op. (Padding first and
      * failing after would strand the padded tail.) */
@@ -2207,6 +2112,15 @@ uint8_t *dpumesh_tx_reserve(dpumesh_ctx_t *ctx, uint16_t port, uint32_t len) {
     int      pad = ((uint64_t)off + len > bs);             /* won't fit → needs a fresh block */
     uint64_t need_k = pad ? k + 1 : k;
     int32_t reserved_phys = -1;
+    if (psl->head_blk_next <= need_k) {
+        /* Recycling reads cursors the PE thread owns. It may rewind the
+         * chain, so re-probe after. */
+        tx_refresh_blocks(ctx, psl);
+        k      = psl->tx_w / bs;
+        off    = (uint32_t)(psl->tx_w % bs);
+        pad    = ((uint64_t)off + len > bs);
+        need_k = pad ? k + 1 : k;
+    }
     if (psl->head_blk_next <= need_k) {                    /* a new block must be backed */
         uint64_t b = psl->head_blk_next;
         /* A logical block may reuse its slot after the previous occupant drains. */
@@ -2508,26 +2422,21 @@ int dpumesh_enqueue(dpumesh_ctx_t *ctx, const sw_descriptor_t *desc) {
         return -1;
     }
 
-    uint64_t t = __atomic_fetch_add(&ring->enq_pos, 1, __ATOMIC_RELAXED);
-    ring_slot = (uint32_t)(t % ring->size);
-    dma = &ring->descs[ring_slot];
+    /* A refused claim withdraws its ticket, keeping the published sequence
+     * gapless. */
+    uint64_t t;
     {
         struct timespec backoff = {0, 1000}; /* 1µs initial */
         struct timespec deadline; int have_dl = 0;
-        for (;;) {
-            uint64_t consumer_head =
-                __atomic_load_n(&ring->ctrl->consumer_head, __ATOMIC_ACQUIRE);
-            if (t - consumer_head < ring->size)
-                break;
+        while (!dma_ring_try_claim(ring, &t)) {
             if (__atomic_load_n(&ring->dead, __ATOMIC_ACQUIRE)) {
                 errno = EIO;
                 return -1;
             }
             uint64_t pr = __atomic_fetch_add(&ring->busy_probes, 1, __ATOMIC_RELAXED);
             if ((pr & 4095u) == 0)
-                DOCA_LOG_WARN("DMA ring %d busy at slot=%u (size=%u) [stuck x%llu]",
-                              ridx, ring_slot, ring->size,
-                              (unsigned long long)(pr + 1));
+                DOCA_LOG_WARN("DMA ring %d full (size=%u) [stuck x%llu]",
+                              ridx, ring->size, (unsigned long long)(pr + 1));
             /* Armed lazily, so the uncontended path never pays a clock_gettime. */
             if (!have_dl) {
                 clock_gettime(CLOCK_MONOTONIC, &deadline);
@@ -2538,9 +2447,8 @@ int dpumesh_enqueue(dpumesh_ctx_t *ctx, const sw_descriptor_t *desc) {
                 if (now.tv_sec > deadline.tv_sec ||
                     (now.tv_sec == deadline.tv_sec && now.tv_nsec >= deadline.tv_nsec)) {
                     __atomic_store_n(&ring->dead, 1, __ATOMIC_RELEASE);
-                    DOCA_LOG_ERR("DMA ring %d stalled >%ds at slot=%u (size=%u)",
-                                 ridx, RING_STALL_DEADLINE_SEC,
-                                 ring_slot, ring->size);
+                    DOCA_LOG_ERR("DMA ring %d stalled >%ds (size=%u)",
+                                 ridx, RING_STALL_DEADLINE_SEC, ring->size);
                     errno = EIO;
                     return -1;
                 }
@@ -2549,6 +2457,8 @@ int dpumesh_enqueue(dpumesh_ctx_t *ctx, const sw_descriptor_t *desc) {
             if (backoff.tv_nsec < 50000) backoff.tv_nsec *= 2;
         }
     }
+    ring_slot = (uint32_t)(t % ring->size);
+    dma = &ring->descs[ring_slot];
 
     /* The send-unit FIFO retains TX bytes until the reverse ring returns TX_ACK. */
 
@@ -2723,10 +2633,8 @@ void dpumesh_free_port(dpumesh_ctx_t *ctx, uint16_t port) {
     if (port == 0 || port >= DMESH_PORT_SPACE) return;
     struct dmesh_port_slot *psl = &ctx->ports[port];
     /* Lifecycle changes also take port_lock, matching both client allocation and
-     * PE-side SERVER_PENDING creation. Claim/cancel any scheduled publisher before
-     * invalidating the QP pointer and generation. */
+     * PE-side SERVER_PENDING creation. */
     pthread_mutex_lock(&ctx->port_lock);
-    tx_batch_cancel(psl);
     /* Mark FREE first, then try to return the TX blocks — NON-BLOCKING. If sends are
      * still un-ACKed the blocks are NOT returned here; the PE's reclaim returns them
      * on the last ACK (try_return_blocks). Until then the port is FREE-but-draining
@@ -2734,8 +2642,13 @@ void dpumesh_free_port(dpumesh_ctx_t *ctx, uint16_t port) {
      * mid-DMA. Close never blocks the app thread. */
     __atomic_store_n(&psl->role, DMESH_ROLE_FREE, __ATOMIC_RELEASE);
     tx_wait_cancel(ctx, psl, port);
+    /* Drop both EQ-side records while the binding is still valid. */
     struct dmesh_eq *old_eq = __atomic_load_n(&psl->eq, __ATOMIC_ACQUIRE);
-    if (old_eq) eq_tx_error_clear(old_eq, port);
+    if (old_eq) {
+        eq_tx_error_clear(old_eq, port);
+        eq_tx_armed_clear(old_eq, port);
+    }
+    atomic_store_explicit(&psl->tx_deadline_ns, 0, memory_order_relaxed);
     atomic_store_explicit(&psl->tx_error, 0, memory_order_release);
     psl->user = NULL;
     /* Unbind the EQ (RELEASE) too: arm_ready_after_push skips a NULL eq, so the PE
@@ -2944,6 +2857,12 @@ dmesh_eq_t *dmesh_create_eq(dmesh_channel_t *ch) {
         atomic_init(&eq->tx_error[i], (uint_fast64_t)0);
     atomic_init(&eq->tx_error_count, (uint_fast32_t)0);
     eq->tx_error_cursor = 0;
+    for (uint32_t i = 0; i < DMESH_TX_READY_WORDS; i++)
+        atomic_init(&eq->tx_armed[i], (uint_fast64_t)0);
+    atomic_init(&eq->tx_armed_count, (uint_fast32_t)0);
+    eq->tx_armed_cursor = 0;
+    atomic_init(&eq->tx_earliest_ns, (uint_fast64_t)0);
+    atomic_init(&eq->tx_due_hint, 0);
     atomic_init(&eq->ready_head, (uint_fast32_t)0);
     atomic_init(&eq->ready_tail, (uint_fast32_t)0);
     atomic_init(&eq->nqp, 0);
@@ -3145,7 +3064,10 @@ static int dmesh_tx_inflight_locked(const struct dmesh_port_slot *psl) {
     return head != tail;
 }
 
-int dmesh_tx_call_begin(dmesh_qp_t *c) {
+/* Entry check for every public TX call: the port slot must still belong to this
+ * handle and carry no latched fault. Takes the transmit gate on success; the
+ * caller releases it. */
+int dmesh_tx_qp_valid(dmesh_qp_t *c) {
     if (!c || !c->ep || !c->ep->ctx || c->local_port == 0 ||
         c->local_port >= DMESH_PORT_SPACE) {
         errno = EINVAL;
@@ -3158,108 +3080,69 @@ int dmesh_tx_call_begin(dmesh_qp_t *c) {
         errno = EINVAL;
         return -1;
     }
-    for (;;) {
-        int error_number = atomic_load_explicit(&psl->tx_error,
-                                                memory_order_acquire);
-        if (error_number != 0) {
-            errno = error_number;
-            return -1;
-        }
-        atomic_store_explicit(&psl->tx_batch_owner_active, 1,
-                              memory_order_release);
-        int state = atomic_load_explicit(&psl->tx_batch_state,
-                                         memory_order_acquire);
-        if (state != TX_BATCH_WORKER && state != TX_BATCH_WORKER_DIRTY)
-            return 0;
-        atomic_store_explicit(&psl->tx_batch_owner_active, 0,
-                              memory_order_release);
-        tx_batch_wait_worker(psl);
+    int error_number = atomic_load_explicit(&psl->tx_error,
+                                            memory_order_acquire);
+    if (error_number != 0) {
+        errno = error_number;
+        return -1;
     }
+    tx_gate_acquire(psl);
+    return 0;
 }
 
-void dmesh_tx_call_end(dmesh_qp_t *c) {
+/* Release the transmit gate taken by dmesh_tx_qp_valid(). */
+void dmesh_tx_call_done(dmesh_qp_t *c) {
     if (!c || !c->ep || !c->ep->ctx || c->local_port == 0 ||
         c->local_port >= DMESH_PORT_SPACE)
         return;
-    atomic_store_explicit(
-        &c->ep->ctx->ports[c->local_port].tx_batch_owner_active, 0,
-        memory_order_release);
+    tx_gate_release(&c->ep->ctx->ports[c->local_port]);
 }
 
-/* Called by the caller-serialized owner after an atomic commit publication. */
+/* Publish the units this commit completed, then place the newest partial.
+ * Held under tx_gate. */
 int dmesh_tx_after_commit(dmesh_qp_t *c) {
     dpumesh_ctx_t *ctx = c->ep->ctx;
     struct dmesh_port_slot *psl = &ctx->ports[c->local_port];
-    for (;;) {
-        int state = atomic_load_explicit(&psl->tx_batch_state,
-                                         memory_order_acquire);
-        if (state == TX_BATCH_WORKER) {
-            int expected = TX_BATCH_WORKER;
-            if (atomic_compare_exchange_strong_explicit(
-                    &psl->tx_batch_state, &expected, TX_BATCH_WORKER_DIRTY,
-                    memory_order_acq_rel, memory_order_acquire))
-                return 0;
-            continue;
-        }
-        if (state == TX_BATCH_WORKER_DIRTY) return 0;
-        uint64_t committed = psl->tx_w;
-        uint64_t sent = atomic_load_explicit(&psl->tx_s,
-                                              memory_order_relaxed);
-        if (state == TX_BATCH_ARMED) {
-            if (sent >= committed) return 0;
-            if (committed - sent < (uint64_t)ctx->slot_size) return 0;
-            atomic_store_explicit(&psl->tx_batch_owner_active, 1,
-                                  memory_order_release);
-            if (atomic_load_explicit(&psl->tx_batch_state,
-                                     memory_order_acquire) != TX_BATCH_ARMED) {
-                atomic_store_explicit(&psl->tx_batch_owner_active, 0,
-                                      memory_order_release);
-                continue;
-            }
-            int result = dmesh_drain_tx_locked(c, 0);
-            uint64_t now = monotonic_ns();
-            uint64_t deadline = atomic_load_explicit(
-                &psl->tx_tail_deadline_ns, memory_order_acquire);
-            if (result == 0 && now >= deadline) {
-                sent = atomic_load_explicit(&psl->tx_s,
-                                             memory_order_relaxed);
-                committed = psl->tx_w;
-                if (sent < committed)
-                    result = dmesh_drain_tx_locked(c, 1);
-                if (result == 0) {
-                    atomic_store_explicit(&psl->tx_tail_deadline_ns,
-                                          now + TX_TAIL_DELAY_NS,
-                                          memory_order_release);
-                    atomic_store_explicit(&psl->tx_fallback_deadline_ns,
-                                          tx_fallback_deadline_after(
-                                              now, TX_TAIL_BUSY_FALLBACK_NS),
-                                          memory_order_release);
-                }
-            }
-            atomic_store_explicit(&psl->tx_batch_owner_active, 0,
-                                  memory_order_release);
-            if (result != 0) tx_batch_cancel(psl);
-            return result;
-        }
-        break;
-    }
+    uint64_t sent = atomic_load_explicit(&psl->tx_s, memory_order_relaxed);
 
-    if (dmesh_drain_tx_locked(c, 0) != 0)
+    /* A retained tail accumulates until it can fill a transport unit. It is
+     * released by its deadline, an explicit flush, allocation pressure, or
+     * close. */
+    if (atomic_load_explicit(&psl->tx_deadline_ns, memory_order_relaxed) != 0 &&
+        psl->tx_w - sent < (uint64_t)ctx->slot_size)
+        return 0;
+
+    if (dmesh_drain_tx_locked(c, 0) != 0) {
+        tx_disarm_tail(psl, c->local_port);
         return -1;
-    uint64_t committed = psl->tx_w;
-    if (atomic_load_explicit(&psl->tx_s, memory_order_acquire) >= committed) {
-        tx_batch_cancel(psl);
+    }
+    if (atomic_load_explicit(&psl->tx_s, memory_order_relaxed) >= psl->tx_w) {
+        /* The armed bit means "a tail is waiting"; the deadline stamp means
+         * "this stream is coalescing". Units still in flight keep the stamp,
+         * so the retention rule stays in force. */
+        struct dmesh_eq *eq = __atomic_load_n(&psl->eq, __ATOMIC_ACQUIRE);
+        if (eq) eq_tx_armed_clear(eq, c->local_port);
+        if (!dmesh_tx_inflight_locked(psl))
+            atomic_store_explicit(&psl->tx_deadline_ns, 0,
+                                  memory_order_relaxed);
         return 0;
     }
-    if (!dmesh_tx_inflight_locked(psl)) {
-        tx_batch_cancel(psl);
+    uint64_t deadline = atomic_load_explicit(&psl->tx_deadline_ns,
+                                             memory_order_relaxed);
+    if (deadline == 0) {
+        /* An idle stream has no outstanding unit for a successor to arrive
+         * behind, so its first partial goes now. */
+        if (!dmesh_tx_inflight_locked(psl))
+            return dmesh_drain_tx_locked(c, 1);
+    } else if (monotonic_ns() >= deadline) {
+        /* A retained tail is released by its deadline alone. */
+        tx_disarm_tail(psl, c->local_port);
         return dmesh_drain_tx_locked(c, 1);
+    } else {
+        return 0;                                /* keep coalescing */
     }
-    if (tx_batch_arm(ctx, psl, c->local_port, 0) == 0)
-        return 0;
-
-    /* Scheduler allocation failure must not strand application-owned bytes. */
-    return dmesh_drain_tx_locked(c, 1);
+    tx_arm_tail(psl, c->local_port);
+    return 0;
 }
 
 /* Publish a retained tail before returning capacity pressure to the caller. */
@@ -3267,10 +3150,9 @@ void dmesh_tx_pressure(dmesh_qp_t *c) {
     int saved_errno = errno;
     dpumesh_ctx_t *ctx = c->ep->ctx;
     struct dmesh_port_slot *psl = &ctx->ports[c->local_port];
-    tx_batch_cancel(psl);
-    uint64_t committed = atomic_load_explicit(&psl->tx_c,
-                                               memory_order_acquire);
-    if (atomic_load_explicit(&psl->tx_s, memory_order_acquire) >= committed) {
+    tx_disarm_tail(psl, c->local_port);
+    if (atomic_load_explicit(&psl->tx_s, memory_order_relaxed) >=
+        atomic_load_explicit(&psl->tx_c, memory_order_acquire)) {
         errno = saved_errno;
         return;
     }
@@ -3279,12 +3161,50 @@ void dmesh_tx_pressure(dmesh_qp_t *c) {
     errno = saved_errno;
 }
 
+/* Publish every retained tail on this EQ whose deadline expired. Runs on the
+ * EQ's thread, which owns these QPs. */
+void dpumesh_publish_due_tails(struct dmesh_eq *eq) {
+    dpumesh_ctx_t *ctx = eq->ch->ctx;
+    if (atomic_load_explicit(&eq->tx_armed_count, memory_order_acquire) == 0)
+        return;
+    /* The timer marks the EQ when a deadline may have passed. */
+    if (!atomic_load_explicit(&eq->tx_due_hint, memory_order_acquire))
+        return;
+    atomic_store_explicit(&eq->tx_due_hint, 0, memory_order_release);
+    uint64_t now = monotonic_ns();
+    uint16_t port;
+    while (eq_tx_armed_pop_due(eq, now, &port)) {
+        struct dmesh_port_slot *psl = &ctx->ports[port];
+        uint8_t role = __atomic_load_n(&psl->role, __ATOMIC_ACQUIRE);
+        if (role != DMESH_ROLE_CLIENT && role != DMESH_ROLE_SERVER) {
+            tx_gate_release(psl);
+            continue;
+        }
+        dmesh_qp_t *c = (dmesh_qp_t *)psl->user;
+        if (c && __atomic_load_n(&psl->eq, __ATOMIC_ACQUIRE) == eq &&
+            atomic_load_explicit(&psl->tx_error, memory_order_acquire) == 0 &&
+            atomic_load_explicit(&psl->tx_s, memory_order_relaxed) <
+                atomic_load_explicit(&psl->tx_c, memory_order_acquire) &&
+            dmesh_drain_tx_locked(c, 1) != 0)
+            tx_error_publish(ctx, psl, port, EBADMSG);
+        tx_gate_release(psl);
+    }
+    eq_tx_armed_refresh(eq);
+}
+
+/* Nanoseconds until a retained tail on this EQ comes due, -1 when none is
+ * retained. Bounds an event loop's own poll timeout. */
+int64_t dmesh_eq_next_deadline_ns(dmesh_eq_t *eq) {
+    if (!eq) return -1;
+    return eq_tx_armed_wait_ns(eq, monotonic_ns());
+}
+
 int dmesh_flush(dmesh_qp_t *c) {
-    if (dmesh_tx_call_begin(c) != 0) return -1;
+    if (dmesh_tx_qp_valid(c) != 0) return -1;
     struct dmesh_port_slot *psl = &c->ep->ctx->ports[c->local_port];
-    tx_batch_cancel(psl);
+    tx_disarm_tail(psl, c->local_port);
     int result = dmesh_drain_tx_locked(c, 1);
-    dmesh_tx_call_end(c);
+    tx_gate_release(psl);
     return result;
 }
 
@@ -3324,12 +3244,12 @@ static int dmesh_send_fin_locked(dmesh_qp_t *c) {
 }
 
 int dmesh_send_fin(dmesh_qp_t *c) {
-    if (dmesh_tx_call_begin(c) != 0) return -1;
+    if (dmesh_tx_qp_valid(c) != 0) return -1;
     struct dmesh_port_slot *psl = &c->ep->ctx->ports[c->local_port];
-    tx_batch_cancel(psl);
+    tx_disarm_tail(psl, c->local_port);
     int result = dmesh_drain_tx_locked(c, 1);
     if (result == 0) result = dmesh_send_fin_locked(c);
-    dmesh_tx_call_end(c);
+    tx_gate_release(psl);
     return result;
 }
 
@@ -3339,8 +3259,8 @@ static int dmesh_release_qp(dmesh_qp_t *c, int graceful) {
     dpumesh_ctx_t *ctx = c->ep->ctx;
     struct dmesh_port_slot *psl = &ctx->ports[c->local_port];
     if (c->eq && c->eq->drain_cur == c) c->eq->drain_cur = NULL; /* poll_eq resume cursor */
-    dmesh_tx_call_end(c);
-    tx_batch_cancel(psl);
+    tx_gate_acquire(psl);
+    tx_disarm_tail(psl, c->local_port);
     if (graceful && dmesh_drain_tx_locked(c, 1) != 0) {
         close_result = -1;
         close_errno = errno;
@@ -3359,6 +3279,7 @@ static int dmesh_release_qp(dmesh_qp_t *c, int graceful) {
         }
     }
     conn_free_rx(c);                                       /* return the held RX credit */
+    tx_gate_release(psl);
     if (c->local_port) dpumesh_free_port(ctx, c->local_port);
     if (c->eq) atomic_fetch_sub_explicit(&c->eq->nqp, 1, memory_order_release);
     free(c);

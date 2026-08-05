@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Render the host-CPU and fixed-budget throughput figures for the gRPC paths.
 
-Same layout and metric definitions as plot_final.py; the configuration set and
-the bar centring differ because three L7 paths are compared rather than four.
+Same layout and metric definitions as plot_final.py, over the L7 configurations.
 """
 
 import csv
 import sys
+from collections import defaultdict
 from pathlib import Path
 
 import matplotlib
@@ -15,20 +15,23 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-CONFIGS = ["grpc-envoy-permissive", "grpc-tcp", "grpc-dpumesh"]
+CONFIGS = ["grpc-envoy-permissive", "grpc-envoy-strict", "grpc-tcp", "grpc-dpumesh"]
 LABELS = {
-    "grpc-envoy-permissive": "gRPC via Envoy",
+    "grpc-envoy-permissive": "gRPC via Envoy permissive",
+    "grpc-envoy-strict": "gRPC via Envoy strict",
     "grpc-tcp": "gRPC direct TCP",
     "grpc-dpumesh": "gRPC via DPUmesh",
 }
 SHORT = {
-    "grpc-envoy-permissive": "gRPC\nvia Envoy",
-    "grpc-tcp": "gRPC\ndirect TCP",
-    "grpc-dpumesh": "gRPC\nvia DPUmesh",
+    "grpc-envoy-permissive": "Envoy\npermissive",
+    "grpc-envoy-strict": "Envoy\nstrict",
+    "grpc-tcp": "direct\nTCP",
+    "grpc-dpumesh": "via\nDPUmesh",
 }
 COLORS = {
     "grpc-envoy-permissive": "#5B6573",
-    "grpc-tcp": "#D55E00",
+    "grpc-envoy-strict": "#D55E00",
+    "grpc-tcp": "#0072B2",
     "grpc-dpumesh": "#009E73",
 }
 FRAMES = [64, 1024, 8192]
@@ -67,13 +70,21 @@ def save(fig, out, stem):
     plt.close(fig)
 
 
+def common_loads(rows, frame):
+    """Offered rates every configuration reached, so no bar is a missing point."""
+    seen = defaultdict(set)
+    for r in rows:
+        if r["frame"] == frame and r["kind"] == "common":
+            seen[r["offered"]].add(r["config"])
+    return sorted(k for k, v in seen.items() if v.issuperset(CONFIGS))
+
+
 def figure_cpu(rows, out):
     fig, axes = plt.subplots(1, 3, figsize=(13.0, 4.2), sharey=True)
-    width = 0.26
+    width = 0.2
     centre = (len(CONFIGS) - 1) / 2.0
     for ax, frame in zip(axes, FRAMES):
-        loads = sorted({r["offered"] for r in rows
-                        if r["frame"] == frame and r["kind"] == "common"})
+        loads = common_loads(rows, frame)
         idx = np.arange(len(loads))
         for off, config in enumerate(CONFIGS):
             y = []
@@ -90,7 +101,7 @@ def figure_cpu(rows, out):
         ax.set_xlabel("Offered load")
     axes[0].set_ylabel("Host cores consumed\n(client + server)")
     h, l = axes[0].get_legend_handles_labels()
-    fig.legend(h, l, ncol=3, frameon=False, loc="upper center", bbox_to_anchor=(0.5, 1.04))
+    fig.legend(h, l, ncol=4, frameon=False, loc="upper center", bbox_to_anchor=(0.5, 1.04))
     fig.tight_layout(rect=(0, 0, 1, 0.93))
     save(fig, out, "01_grpc_host_cpu_by_load")
 
@@ -149,8 +160,7 @@ def main():
                   f"  cli={r['client']:.3f} srv={r['server']:.3f} p99={r['p99']/1000:5.2f}ms")
     print("\n=== host cores at matched loads ===")
     for frame in FRAMES:
-        for load_rate in sorted({r["offered"] for r in rows
-                                 if r["frame"] == frame and r["kind"] == "common"}):
+        for load_rate in common_loads(rows, frame):
             cells = []
             for config in CONFIGS:
                 m = [r for r in rows if r["frame"] == frame and r["config"] == config

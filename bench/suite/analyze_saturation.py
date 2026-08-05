@@ -160,7 +160,7 @@ def aggregate_load_points(results):
                 "client_core_busy": field("client_core_busy_cores"),
                 "server_core_busy": field("server_core_busy_cores"),
                 "dpu_arm_cores": field("dpu_arm_cores"),
-                "clean_reps": sum(row.get("sla_clean") == "1" for row in rows),
+                "clean_reps": sum(row.get("served_clean") == "1" for row in rows),
                 "total_reps": len(rows),
             }
         )
@@ -372,7 +372,7 @@ def retained_capacity_rows(results, rates_path, saturation_threshold=0.95):
         clean_rows = [
             row
             for row in rows
-            if row.get("validation_status") == "ok" and row.get("sla_clean") == "1"
+            if row.get("validation_status") == "ok" and row.get("served_clean") == "1"
         ]
         valid_rows = [row for row in rows if row.get("validation_status") == "ok"]
         majority = len(rows) // 2 + 1
@@ -476,7 +476,7 @@ def knee_stability_rows(results, knee_path, generator_limits=None):
         config = knee_row["config"]
         payload = int(knee_row["frame_bytes"])
         rows = load.get((config, payload, int(knee)), [])
-        clean = sum(row.get("sla_clean") == "1" for row in rows)
+        clean = sum(row.get("served_clean") == "1" for row in rows)
         ratios = [number(row.get("achieved_ratio")) for row in rows]
         p99s = [number(row.get("p99_us")) for row in rows]
         generator = "native" if config == "dpumesh-native" else "posix"

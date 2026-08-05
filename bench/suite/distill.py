@@ -50,7 +50,7 @@ def main():
         def med(column):
             values = [float(r[column]) for r in reps if r[column] not in ("", "NA")]
             return statistics.median(values) if values else 0.0
-        clean = 1 if all(r["sla_clean"] == "1" for r in reps) else 0
+        clean = 1 if all(r["served_clean"] == "1" for r in reps) else 0
         rows.append([config, frame, kind, offered,
                      med("achieved_rps"),
                      med("client_core_busy_cores"),

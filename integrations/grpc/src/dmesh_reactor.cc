@@ -810,8 +810,8 @@ class DmeshReactor::Impl final
 
     bool eq_pending = false;
     while (!stop_requested_.load(std::memory_order_acquire)) {
-      /* The two fds carry every external edge. Tail deadlines are owned by
-       * libdpumesh and arrive here only as readiness or error events. */
+      /* The two fds carry every external edge. The wait is bounded by the next
+       * buffered tail this reactor's QPs must publish. */
       timespec timeout;
       const timespec* wait = nullptr;
       if (eq_pending) {
@@ -819,6 +819,13 @@ class DmeshReactor::Impl final
         timeout.tv_sec = 0;
         timeout.tv_nsec = 0;
         wait = &timeout;
+      } else {
+        const int64_t due_ns = ops_->EqNextDeadlineNs(eq_);
+        if (due_ns >= 0) {
+          timeout.tv_sec = static_cast<time_t>(due_ns / 1000000000);
+          timeout.tv_nsec = static_cast<long>(due_ns % 1000000000);
+          wait = &timeout;
+        }
       }
 
       const int result = ::ppoll(descriptors, 2, wait, nullptr);

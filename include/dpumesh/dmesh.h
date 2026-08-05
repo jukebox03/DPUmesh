@@ -68,7 +68,7 @@ typedef enum {
     DMESH_EVENT_RECV_FIN = 2, /* peer closed the conn (EOF); no credit held */
     DMESH_EVENT_CONN_REQ = 3, /* new inbound conn (server side); no credit held */
     DMESH_EVENT_TX_READY = 4, /* an EAGAIN-blocked QP should retry dmesh_alloc */
-    DMESH_EVENT_TX_ERROR = 5, /* asynchronous buffered-tail submission failed */
+    DMESH_EVENT_TX_ERROR = 5, /* deferred buffered-tail submission failed */
 } dmesh_event_type_t;
 
 typedef struct dmesh_event {
@@ -105,6 +105,11 @@ int dmesh_destroy_eq(dmesh_eq_t *eq);
 /* Optional eventfd. Drain it on wake, then call dmesh_poll_eq() until empty. */
 int dmesh_eq_fd(dmesh_eq_t *eq);
 
+/* Nanoseconds this EQ may wait before a QP's buffered transmit tail comes due,
+ * or -1 when nothing is buffered. Bounds an event loop's own timeout. The tail
+ * policy itself is internal. */
+int64_t dmesh_eq_next_deadline_ns(dmesh_eq_t *eq);
+
 /* ===== Connection setup (rdma_cm) ===== */
 
 /* Create a client QP for a registered service name. Returns ENOENT or ENOMEM. */
@@ -125,21 +130,20 @@ int dmesh_abort_qp(dmesh_qp_t *c);
 void *dmesh_alloc(dmesh_qp_t *c, uint32_t len);
 
 /* Commit bytes from the current dmesh_alloc() reservation. Complete transport
- * batches submit immediately. An idle tail submits immediately; while earlier
- * data is in flight, the newest partial tail may be retained briefly to combine
- * successor posts and is published by the library's bounded deadline. `buf` must
- * match the reservation and `len` must fit it. Returns EINVAL for invalid input
- * or EBADMSG for a synchronous submission fault. Ownership transfers to the
- * transport on success. A later asynchronous tail fault is reported once as
- * DMESH_EVENT_TX_ERROR and becomes sticky on the QP. */
+ * batches submit immediately, as does an idle tail. While earlier data is in
+ * flight the newest partial tail is retained and published at the library's
+ * bounded deadline. `buf` must match the reservation and `len` must fit it.
+ * Returns EINVAL for invalid input or EBADMSG for a synchronous submission
+ * fault. Ownership transfers to the transport on success. A deferred tail fault
+ * is reported once as DMESH_EVENT_TX_ERROR and is sticky on the QP. */
 int dmesh_post_send(dmesh_qp_t *c, const void *buf, uint32_t len);
 
 /* Submit all committed bytes, including the trailing partial batch. A descriptor
  * fault returns EBADMSG; no pending data is a no-op. */
 int dmesh_flush(dmesh_qp_t *c);
 
-/* Nonzero while a published TX unit on this QP awaits acknowledgement. Retained
- * for diagnostics and ABI compatibility; batching policy is library-owned. */
+/* Nonzero while a published TX unit on this QP awaits acknowledgement.
+ * Diagnostic only; batching policy is library-owned. */
 int dmesh_tx_inflight(dmesh_qp_t *c);
 
 /* ===== Diagnostics ===== */

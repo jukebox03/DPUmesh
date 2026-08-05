@@ -19,12 +19,6 @@ seed(struct dpumesh_ctx *ctx, struct dmesh_port_slot *ports, uint8_t *dma)
     ctx->ports = ports;
     atomic_init(&ctx->ports[17].tx_c, 0);
     atomic_init(&ctx->ports[17].tx_s, 0);
-    atomic_init(&ctx->ports[17].tx_batch_state, TX_BATCH_IDLE);
-    atomic_init(&ctx->ports[17].tx_batch_owner_active, 0);
-    atomic_init(&ctx->ports[17].tx_generation, 0);
-    atomic_init(&ctx->ports[17].tx_batch_epoch, 0);
-    atomic_init(&ctx->ports[17].tx_tail_deadline_ns, 0);
-    atomic_init(&ctx->ports[17].tx_fallback_deadline_ns, 0);
     for (int b = 0; b < TX_BLOCKS_PER_CONN; b++)
         atomic_init(&ctx->ports[17].blk_used[b], 0);
 
@@ -34,330 +28,340 @@ seed(struct dpumesh_ctx *ctx, struct dmesh_port_slot *ports, uint8_t *dma)
     psl->pblk[1] = 1;
 }
 
-static void
-test_automatic_tail_batcher(void)
+/* One CLIENT QP on port 17 over a single block, wired to a private ring and EQ.
+ * Enough production state to drive the real cursor and publication paths. */
+struct fixture {
+    struct dpumesh_ctx *ctx;
+    struct dmesh_port_slot *ports;
+    struct dma_desc *descs;
+    struct dma_ring_ctrl *ctrl;
+    struct dma_ring ring;
+    uint8_t *dma;
+    uint16_t *su_seq;
+    uint64_t *su_end;
+    uint8_t *su_done;
+    dmesh_channel_t channel;
+    struct dmesh_eq eq;
+    dmesh_qp_t qp;
+    struct dmesh_port_slot *psl;
+};
+
+static struct fixture *
+fixture_new(uint32_t ring_size, uint32_t su_depth, int notify_efd)
 {
-    struct dpumesh_ctx *ctx = calloc(1, sizeof(*ctx));
-    struct dmesh_port_slot *ports = calloc(18, sizeof(*ports));
-    struct dma_desc *descs = calloc(8, sizeof(*descs));
-    struct dma_ring_ctrl *ctrl = calloc(1, sizeof(*ctrl));
-    uint8_t *dma = calloc(1, 65536);
-    uint16_t *su_seq = calloc(16, sizeof(*su_seq));
-    uint64_t *su_end = calloc(16, sizeof(*su_end));
-    uint8_t *su_done = calloc(16, sizeof(*su_done));
-    assert(ctx && ports && descs && ctrl && dma && su_seq && su_end && su_done);
+    struct fixture *f = calloc(1, sizeof(*f));
+    assert(f != NULL);
+    f->ctx = calloc(1, sizeof(*f->ctx));
+    f->ports = calloc(18, sizeof(*f->ports));
+    f->descs = calloc(ring_size, sizeof(*f->descs));
+    f->ctrl = calloc(1, sizeof(*f->ctrl));
+    f->dma = calloc(1, 65536);
+    f->su_seq = calloc(su_depth, sizeof(*f->su_seq));
+    f->su_end = calloc(su_depth, sizeof(*f->su_end));
+    f->su_done = calloc(su_depth, sizeof(*f->su_done));
+    assert(f->ctx && f->ports && f->descs && f->ctrl && f->dma &&
+           f->su_seq && f->su_end && f->su_done);
 
-    struct dma_ring ring = {
-        .size = 8,
-        .descs = descs,
-        .ctrl = ctrl,
-    };
-    ctx->ports = ports;
-    ctx->slot_size = 8192;
-    ctx->block_size = 65536;
-    ctx->blocks_per_conn = 1;
-    ctx->num_slots = 8;
-    ctx->k_rings = 1;
-    ctx->su_depth = 16;
-    ctx->dma_buffer = dma;
-    ctx->dma_rings[0] = &ring;
+    f->ring.size = ring_size;
+    f->ring.descs = f->descs;
+    f->ring.ctrl = f->ctrl;
 
-    dmesh_channel_t channel = { .ctx = ctx };
-    struct dmesh_eq eq = { .ch = &channel, .notify_efd = -1 };
+    f->ctx->ports = f->ports;
+    f->ctx->slot_size = 8192;
+    f->ctx->block_size = 65536;
+    f->ctx->blocks_per_conn = 1;
+    f->ctx->num_slots = 8;
+    f->ctx->k_rings = 1;
+    f->ctx->su_depth = su_depth;
+    f->ctx->dma_buffer = f->dma;
+    f->ctx->dma_rings[0] = &f->ring;
+    atomic_init(&f->ctx->tx_armed_total, 0);
+
+    f->channel.ctx = f->ctx;
+    f->eq.ch = &f->channel;
+    f->eq.notify_efd = notify_efd;
     for (uint32_t i = 0; i < DMESH_TX_READY_WORDS; i++) {
-        atomic_init(&eq.tx_error[i], 0);
-        atomic_init(&eq.tx_ready[i], 0);
+        atomic_init(&f->eq.tx_error[i], 0);
+        atomic_init(&f->eq.tx_ready[i], 0);
+        atomic_init(&f->eq.tx_armed[i], 0);
     }
-    atomic_init(&eq.tx_error_count, 0);
-    atomic_init(&eq.tx_ready_count, 0);
-    atomic_init(&eq.wants_notify, 0);
-    atomic_init(&eq.suppress_notify, 0);
+    atomic_init(&f->eq.tx_error_count, 0);
+    atomic_init(&f->eq.tx_ready_count, 0);
+    atomic_init(&f->eq.tx_armed_count, 0);
+    atomic_init(&f->eq.wants_notify, notify_efd >= 0 ? 1 : 0);
+    atomic_init(&f->eq.suppress_notify, 0);
 
-    dmesh_qp_t qp = {
-        .ep = &channel,
-        .eq = &eq,
-        .role = DMESH_ROLE_CLIENT,
-        .local_port = 17,
-        .dst_service = 3,
-    };
-    struct dmesh_port_slot *psl = &ports[17];
-    atomic_init(&psl->tx_c, 0);
-    atomic_init(&psl->tx_s, 0);
-    atomic_init(&psl->tx_batch_state, TX_BATCH_IDLE);
-    atomic_init(&psl->tx_batch_owner_active, 0);
-    atomic_init(&psl->tx_generation, 1);
-    atomic_init(&psl->tx_batch_epoch, 0);
-    atomic_init(&psl->tx_tail_deadline_ns, 0);
-    atomic_init(&psl->tx_fallback_deadline_ns, 0);
+    f->qp.ep = &f->channel;
+    f->qp.eq = &f->eq;
+    f->qp.role = DMESH_ROLE_CLIENT;
+    f->qp.local_port = 17;
+    f->qp.dst_service = 3;
+
+    f->psl = &f->ports[17];
+    atomic_init(&f->psl->tx_c, 0);
+    atomic_init(&f->psl->tx_s, 0);
+    atomic_init(&f->psl->tx_f, 0);
+    atomic_init(&f->psl->tx_error, 0);
+    atomic_init(&f->psl->su_head, 0);
+    atomic_init(&f->psl->su_tail, 0);
     for (int b = 0; b < TX_BLOCKS_PER_CONN; b++)
-        atomic_init(&psl->blk_used[b], 0);
-    atomic_init(&psl->tx_error, 0);
-    atomic_init(&psl->su_head, 0);
-    atomic_init(&psl->su_tail, 0);
-    atomic_init(&psl->tx_f, 0);
-    psl->user = &qp;
-    psl->eq = &eq;
-    psl->nblk_owned = 1;
-    psl->head_blk_next = 1;
-    psl->pblk[0] = 0;
-    psl->su_seq = su_seq;
-    psl->su_end = su_end;
-    psl->su_done = su_done;
-    __atomic_store_n(&psl->role, DMESH_ROLE_CLIENT, __ATOMIC_RELEASE);
-    assert(tx_batcher_start(ctx) == 0);
+        atomic_init(&f->psl->blk_used[b], 0);
+    f->psl->tx_deadline_ns = 0;
+    f->psl->user = &f->qp;
+    f->psl->eq = &f->eq;
+    f->psl->nblk_owned = 1;
+    f->psl->head_blk_next = 1;
+    f->psl->pblk[0] = 0;
+    f->psl->su_seq = f->su_seq;
+    f->psl->su_end = f->su_end;
+    f->psl->su_done = f->su_done;
+    __atomic_store_n(&f->psl->role, DMESH_ROLE_CLIENT, __ATOMIC_RELEASE);
 
-    /* An idle stream does not pay the deadline: its first partial publishes now. */
-    psl->tx_w = 64;
-    atomic_store_explicit(&psl->blk_used[0], 64, memory_order_release);
-    atomic_store_explicit(&psl->tx_c, 64, memory_order_release);
-    assert(dmesh_tx_call_begin(&qp) == 0);
-    assert(dmesh_tx_after_commit(&qp) == 0);
-    dmesh_tx_call_end(&qp);
-    assert(__atomic_load_n(&ring.enq_pos, __ATOMIC_ACQUIRE) == 1);
-    assert(descs[0].size == 64);
+    /* Registered so the timer thread can find this EQ by count alone. */
+    f->ctx->eqs[0] = &f->eq;
+    f->ctx->n_eqs = 1;
+    assert(pthread_mutex_init(&f->ctx->eq_lock, NULL) == 0);
+    f->ctx->eq_lock_initialized = 1;
+    return f;
+}
+
+static void
+fixture_free(struct fixture *f)
+{
+    if (f->ctx->eq_lock_initialized) pthread_mutex_destroy(&f->ctx->eq_lock);
+    free(f->su_done);
+    free(f->su_end);
+    free(f->su_seq);
+    free(f->dma);
+    free(f->ctrl);
+    free(f->descs);
+    free(f->ports);
+    free(f->ctx);
+    free(f);
+}
+
+/* Commit `bytes` more application bytes and run the post_send publication path. */
+static int
+fixture_commit(struct fixture *f, uint64_t bytes)
+{
+    f->psl->tx_w += bytes;
+    atomic_store_explicit(&f->psl->blk_used[0], (uint32_t)f->psl->tx_w,
+                          memory_order_release);
+    atomic_store_explicit(&f->psl->tx_c, f->psl->tx_w, memory_order_release);
+    return dmesh_tx_after_commit(&f->qp);
+}
+
+/* The timer marks the EQ when a deadline may have passed; the poll path only
+ * consults the clock after seeing that mark. */
+static void
+mark_due(struct fixture *f)
+{
+    atomic_store_explicit(&f->eq.tx_due_hint, 1, memory_order_release);
+}
+
+static uint_fast32_t
+armed_count(struct fixture *f)
+{
+    return atomic_load_explicit(&f->eq.tx_armed_count, memory_order_acquire);
+}
+
+static void
+test_tail_publication_policy(void)
+{
+    struct fixture *f = fixture_new(8, 16, -1);
+    struct dmesh_port_slot *psl = f->psl;
+
+    /* An idle stream has no outstanding unit for a successor to arrive behind,
+     * so its first partial publishes immediately and nothing is retained. */
+    assert(fixture_commit(f, 64) == 0);
+    assert(__atomic_load_n(&f->ring.enq_pos, __ATOMIC_ACQUIRE) == 1);
+    assert(f->descs[0].size == 64);
     assert(atomic_load_explicit(&psl->tx_s, memory_order_acquire) == 128);
     assert(psl->tx_w == 128);
-    assert(atomic_load_explicit(&psl->tx_batch_state,
-                                memory_order_acquire) == TX_BATCH_IDLE);
+    assert(armed_count(f) == 0);
+    assert(dmesh_eq_next_deadline_ns(&f->eq) == -1);
 
-    /* With an earlier unit in flight, a new partial is retained and the channel
-     * worker publishes it within the bounded deadline without facade help. */
-    psl->tx_w = 192;
-    atomic_store_explicit(&psl->blk_used[0], 192, memory_order_release);
-    atomic_store_explicit(&psl->tx_c, 192, memory_order_release);
-    uint64_t tail_committed_at = monotonic_ns();
-    assert(dmesh_tx_call_begin(&qp) == 0);
-    assert(dmesh_tx_after_commit(&qp) == 0);
-    assert(atomic_load_explicit(&psl->tx_batch_state,
-                                memory_order_acquire) == TX_BATCH_ARMED);
-    assert(__atomic_load_n(&ring.enq_pos, __ATOMIC_ACQUIRE) == 1);
-    assert(__atomic_load_n(&descs[1].publish_seq, __ATOMIC_ACQUIRE) == 0);
-    dmesh_tx_call_end(&qp);
-    for (int i = 0; i < 200 &&
-         __atomic_load_n(&descs[1].publish_seq, __ATOMIC_ACQUIRE) != 2; i++)
-        usleep(1000);
-    uint64_t tail_published_at = monotonic_ns();
-    assert(__atomic_load_n(&descs[1].publish_seq, __ATOMIC_ACQUIRE) == 2);
-    assert(tail_published_at - tail_committed_at >= TX_TAIL_FALLBACK_NS);
-    assert(tail_published_at - tail_committed_at < 200000000ull);
-    tx_batch_wait_worker(psl);
-    assert(__atomic_load_n(&ring.enq_pos, __ATOMIC_ACQUIRE) == 2);
-    assert(descs[1].size == 64);
-    assert(atomic_load_explicit(&psl->tx_s, memory_order_acquire) == 256);
-    assert(psl->tx_w == 256);
-    assert(atomic_load_explicit(&psl->tx_batch_state,
-                                memory_order_acquire) == TX_BATCH_IDLE);
+    /* That unit is now in flight, so the next partial is retained instead. */
+    assert(fixture_commit(f, 64) == 0);
+    assert(__atomic_load_n(&f->ring.enq_pos, __ATOMIC_ACQUIRE) == 1);
+    assert(armed_count(f) == 1);
+    uint64_t deadline = psl->tx_deadline_ns;
+    assert(deadline > monotonic_ns());
+    int64_t wait_ns = dmesh_eq_next_deadline_ns(&f->eq);
+    assert(wait_ns > 0 && wait_ns <= (int64_t)TX_TAIL_DELAY_NS);
 
-    /* A deadline pass publishes exactly the committed prefix it claimed. */
-    psl->tx_w = 384;
-    atomic_store_explicit(&psl->blk_used[0], 384, memory_order_release);
-    atomic_store_explicit(&psl->tx_c, 384, memory_order_release);
-    assert(dmesh_drain_tx_upto_locked(&qp, 1, 320) == 0);
-    assert(__atomic_load_n(&ring.enq_pos, __ATOMIC_ACQUIRE) == 3);
-    assert(descs[2].size == 64);
-    assert(atomic_load_explicit(&psl->tx_s, memory_order_acquire) == 320);
-    assert(dmesh_flush(&qp) == 0);
-    assert(__atomic_load_n(&ring.enq_pos, __ATOMIC_ACQUIRE) == 4);
-    assert(descs[3].size == 64);
-    assert(atomic_load_explicit(&psl->tx_s, memory_order_acquire) == 384);
+    /* Continued commits neither publish the tail early nor push its deadline
+     * out: the stamp is taken once per retention. */
+    assert(fixture_commit(f, 64) == 0);
+    assert(psl->tx_deadline_ns == deadline);
+    assert(armed_count(f) == 1);
+    assert(__atomic_load_n(&f->ring.enq_pos, __ATOMIC_ACQUIRE) == 1);
 
-    /* ACK retirement does not shorten the batching deadline. */
-    tx_reclaim_ack(ctx, 17, 1);
-    tx_reclaim_ack(ctx, 17, 2);
-    tx_reclaim_ack(ctx, 17, 3);
-    tx_reclaim_ack(ctx, 17, 4);
-    psl->tx_w = 384 + 8192 + 64;
-    atomic_store_explicit(&psl->blk_used[0], (uint32_t)psl->tx_w,
-                          memory_order_release);
-    atomic_store_explicit(&psl->tx_c, psl->tx_w, memory_order_release);
-    assert(dmesh_tx_after_commit(&qp) == 0);
-    assert(__atomic_load_n(&ring.enq_pos, __ATOMIC_ACQUIRE) == 5);
-    assert(descs[4].size == 8192);
-    assert(atomic_load_explicit(&psl->tx_batch_state,
-                                memory_order_acquire) == TX_BATCH_ARMED);
-    uint64_t old_fallback = atomic_load_explicit(
-        &psl->tx_fallback_deadline_ns, memory_order_acquire);
-    tx_reclaim_ack(ctx, 17, 5);
-    assert(atomic_load_explicit(&psl->tx_fallback_deadline_ns,
-                                memory_order_acquire) == old_fallback);
-    for (int i = 0; i < 200 &&
-         __atomic_load_n(&descs[5].publish_seq, __ATOMIC_ACQUIRE) != 6; i++)
-        usleep(1000);
-    assert(__atomic_load_n(&descs[5].publish_seq, __ATOMIC_ACQUIRE) == 6);
-    assert(descs[5].size == 64);
+    /* Without the timer's mark the poll pass does not even read the clock. */
+    dpumesh_publish_due_tails(&f->eq);
+    assert(__atomic_load_n(&f->ring.enq_pos, __ATOMIC_ACQUIRE) == 1);
+    assert(armed_count(f) == 1);
 
-    /* Async failures are one-shot EQ notifications but remain sticky on the QP. */
-    tx_error_publish(ctx, psl, 17, EIO);
-    assert(dpumesh_next_tx_error(&eq) == &qp);
-    assert(dpumesh_next_tx_error(&eq) == NULL);
+    /* Marked, but before the deadline, the tail is still left alone. */
+    mark_due(f);
+    dpumesh_publish_due_tails(&f->eq);
+    assert(__atomic_load_n(&f->ring.enq_pos, __ATOMIC_ACQUIRE) == 1);
+    assert(armed_count(f) == 1);
+
+    /* Once it expires, the owner publishes it from its own poll pass. */
+    psl->tx_deadline_ns = monotonic_ns() - 1;
+    mark_due(f);
+    dpumesh_publish_due_tails(&f->eq);
+    assert(__atomic_load_n(&f->ring.enq_pos, __ATOMIC_ACQUIRE) == 2);
+    assert(f->descs[1].size == 128);          /* both retained commits, coalesced */
+    assert(armed_count(f) == 0);
+    assert(dmesh_eq_next_deadline_ns(&f->eq) == -1);
+
+    /* An explicit flush forces a retained tail without waiting. */
+    assert(fixture_commit(f, 64) == 0);
+    assert(armed_count(f) == 1);
+    assert(dmesh_flush(&f->qp) == 0);
+    assert(armed_count(f) == 0);
+    assert(__atomic_load_n(&f->ring.enq_pos, __ATOMIC_ACQUIRE) == 3);
+    assert(atomic_load_explicit(&psl->tx_s, memory_order_acquire) == psl->tx_w);
+
+    /* A deferred failure is a one-shot EQ event but stays sticky on the QP. */
+    tx_error_publish(f->ctx, psl, 17, EIO);
+    assert(dpumesh_next_tx_error(&f->eq) == &f->qp);
+    assert(dpumesh_next_tx_error(&f->eq) == NULL);
     errno = 0;
-    assert(dmesh_tx_call_begin(&qp) == -1 && errno == EIO);
+    assert(dmesh_tx_qp_valid(&f->qp) == -1 && errno == EIO);
 
-    tx_batcher_stop(ctx);
-    free(ctx->tx_batch_heap);
-    pthread_cond_destroy(&ctx->tx_batch_cv);
-    pthread_mutex_destroy(&ctx->tx_batch_lock);
-    free(su_done);
-    free(su_end);
-    free(su_seq);
-    free(dma);
-    free(ctrl);
-    free(descs);
-    free(ports);
-    free(ctx);
+    fixture_free(f);
+}
+
+/* The deadline pass and a public TX call can land on the same QP from different
+ * threads; the gate keeps exactly one of them in the transmit state. */
+static void
+test_deadline_pass_yields_to_an_active_tx_call(void)
+{
+    struct fixture *f = fixture_new(8, 16, -1);
+
+    assert(fixture_commit(f, 64) == 0);      /* idle -> published */
+    assert(fixture_commit(f, 64) == 0);      /* in flight -> retained */
+    assert(armed_count(f) == 1);
+    f->psl->tx_deadline_ns = monotonic_ns() - 1;
+
+    /* Gate held, as it is between dmesh_alloc and dmesh_post_send. */
+    assert(dmesh_tx_qp_valid(&f->qp) == 0);
+    mark_due(f);
+    dpumesh_publish_due_tails(&f->eq);
+    assert(__atomic_load_n(&f->ring.enq_pos, __ATOMIC_ACQUIRE) == 1);
+    assert(armed_count(f) == 1);             /* retention survives the pass */
+
+    /* The owner's own call publishes it instead. */
+    dmesh_tx_call_done(&f->qp);
+    assert(dmesh_flush(&f->qp) == 0);
+    assert(__atomic_load_n(&f->ring.enq_pos, __ATOMIC_ACQUIRE) == 2);
+    assert(armed_count(f) == 0);
+
+    fixture_free(f);
 }
 
 static void
-test_commit_races_deadline_claim(void)
+test_close_paths_release_the_armed_bit(void)
+{
+    struct fixture *f = fixture_new(8, 16, -1);
+
+    assert(fixture_commit(f, 64) == 0);      /* idle → published */
+    assert(fixture_commit(f, 64) == 0);      /* in flight → retained */
+    assert(armed_count(f) == 1);
+    assert(atomic_load_explicit(&f->ctx->tx_armed_total,
+                                memory_order_acquire) == 1);
+
+    /* Freeing the port drops the EQ-side record while the binding is still
+     * valid, so a later timer pass cannot see a slot that no longer exists. */
+    assert(pthread_mutex_init(&f->ctx->port_lock, NULL) == 0);
+    f->ctx->port_lock_initialized = 1;
+    dpumesh_free_port(f->ctx, 17);
+    assert(armed_count(f) == 0);
+    assert(atomic_load_explicit(&f->ctx->tx_armed_total,
+                                memory_order_acquire) == 0);
+    assert(__atomic_load_n(&f->psl->eq, __ATOMIC_ACQUIRE) == NULL);
+    pthread_mutex_destroy(&f->ctx->port_lock);
+    f->ctx->port_lock_initialized = 0;
+
+    fixture_free(f);
+}
+
+static void
+test_timer_wakes_only_armed_eqs(void)
+{
+    int efd = eventfd(0, EFD_NONBLOCK);
+    assert(efd >= 0);
+    struct fixture *f = fixture_new(8, 16, efd);
+
+    assert(tx_timer_start(f->ctx) == 0);
+
+    /* Nothing retained: the timer stays parked and writes no readiness. */
+    usleep(4 * TX_TIMER_TICK_NS / 1000);
+    uint64_t drained = 0;
+    assert(read(efd, &drained, sizeof drained) < 0 && errno == EAGAIN);
+
+    assert(fixture_commit(f, 64) == 0);      /* idle → published */
+    assert(fixture_commit(f, 64) == 0);      /* in flight → retained */
+    assert(armed_count(f) == 1);
+
+    /* Retained: the owner's EQ is woken so it can publish its own tail. The
+     * timer never submits and never touches the port slot itself. */
+    int woken = 0;
+    for (int i = 0; i < 200 && !woken; i++) {
+        if (read(efd, &drained, sizeof drained) > 0) woken = 1;
+        else usleep(1000);
+    }
+    assert(woken);
+    assert(armed_count(f) == 1);
+    assert(__atomic_load_n(&f->ring.enq_pos, __ATOMIC_ACQUIRE) == 1);
+
+    /* The wake is what lets the owner run its publication path. */
+    f->psl->tx_deadline_ns = monotonic_ns() - 1;
+    mark_due(f);
+    dpumesh_publish_due_tails(&f->eq);
+    assert(__atomic_load_n(&f->ring.enq_pos, __ATOMIC_ACQUIRE) == 2);
+    assert(armed_count(f) == 0);
+
+    tx_timer_stop(f->ctx);
+    fixture_free(f);
+    close(efd);
+}
+
+static void
+test_sustained_commits_preserve_stream_bytes(void)
 {
     enum { messages = 200, ring_size = 512 };
-    struct dpumesh_ctx *ctx = calloc(1, sizeof(*ctx));
-    struct dmesh_port_slot *ports = calloc(18, sizeof(*ports));
-    struct dma_desc *descs = calloc(ring_size, sizeof(*descs));
-    struct dma_ring_ctrl *ctrl = calloc(1, sizeof(*ctrl));
-    uint8_t *dma = calloc(1, 65536);
-    uint16_t *su_seq = calloc(ring_size, sizeof(*su_seq));
-    uint64_t *su_end = calloc(ring_size, sizeof(*su_end));
-    uint8_t *su_done = calloc(ring_size, sizeof(*su_done));
-    assert(ctx && ports && descs && ctrl && dma && su_seq && su_end && su_done);
+    struct fixture *f = fixture_new(ring_size, ring_size, -1);
+    assert(tx_timer_start(f->ctx) == 0);
 
-    struct dma_ring ring = {
-        .size = ring_size,
-        .descs = descs,
-        .ctrl = ctrl,
-    };
-    ctx->ports = ports;
-    ctx->slot_size = 8192;
-    ctx->block_size = 65536;
-    ctx->blocks_per_conn = 1;
-    ctx->num_slots = 8;
-    ctx->k_rings = 1;
-    ctx->su_depth = ring_size;
-    ctx->dma_buffer = dma;
-    ctx->dma_rings[0] = &ring;
-
-    dmesh_channel_t channel = { .ctx = ctx };
-    struct dmesh_eq eq = { .ch = &channel, .notify_efd = -1 };
-    atomic_init(&eq.wants_notify, 0);
-    atomic_init(&eq.suppress_notify, 0);
-    dmesh_qp_t qp = {
-        .ep = &channel,
-        .eq = &eq,
-        .role = DMESH_ROLE_CLIENT,
-        .local_port = 17,
-        .dst_service = 3,
-    };
-    struct dmesh_port_slot *psl = &ports[17];
-    atomic_init(&psl->tx_c, 0);
-    atomic_init(&psl->tx_s, 0);
-    atomic_init(&psl->tx_batch_state, TX_BATCH_IDLE);
-    atomic_init(&psl->tx_batch_owner_active, 0);
-    atomic_init(&psl->tx_generation, 1);
-    atomic_init(&psl->tx_batch_epoch, 0);
-    atomic_init(&psl->tx_tail_deadline_ns, 0);
-    atomic_init(&psl->tx_fallback_deadline_ns, 0);
-    atomic_init(&psl->tx_error, 0);
-    atomic_init(&psl->su_head, 0);
-    atomic_init(&psl->su_tail, 0);
-    atomic_init(&psl->tx_f, 0);
-    for (int b = 0; b < TX_BLOCKS_PER_CONN; b++)
-        atomic_init(&psl->blk_used[b], 0);
-    psl->user = &qp;
-    psl->eq = &eq;
-    psl->nblk_owned = 1;
-    psl->head_blk_next = 1;
-    psl->pblk[0] = 0;
-    psl->su_seq = su_seq;
-    psl->su_end = su_end;
-    psl->su_done = su_done;
-    __atomic_store_n(&psl->role, DMESH_ROLE_CLIENT, __ATOMIC_RELEASE);
-    assert(tx_batcher_start(ctx) == 0);
-
-    /* Commits continue across several 1 ms deadlines. The owner either keeps an
-     * incomplete ARMED tail or claims a full unit; the worker may claim only the
-     * atomically published prefix. TSan covers the actual overlap. */
+    /* Commits continue across many deadlines while the timer runs. Publication
+     * stays on this thread, either from post_send or from the poll pass. */
     for (int i = 0; i < messages; i++) {
-        psl->tx_w += 64;
-        atomic_store_explicit(&psl->blk_used[0], (uint32_t)psl->tx_w,
-                              memory_order_release);
-        atomic_store_explicit(&psl->tx_c, psl->tx_w, memory_order_release);
-        assert(dmesh_tx_call_begin(&qp) == 0);
-        assert(dmesh_tx_after_commit(&qp) == 0);
-        dmesh_tx_call_end(&qp);
+        assert(fixture_commit(f, 64) == 0);
+        mark_due(f);
+        dpumesh_publish_due_tails(&f->eq);
         usleep(50);
     }
-    assert(dmesh_flush(&qp) == 0);
-    tx_batcher_stop(ctx);
+    assert(dmesh_flush(&f->qp) == 0);
+    tx_timer_stop(f->ctx);
 
-    uint64_t tickets = __atomic_load_n(&ring.enq_pos, __ATOMIC_ACQUIRE);
+    uint64_t tickets = __atomic_load_n(&f->ring.enq_pos, __ATOMIC_ACQUIRE);
     uint64_t bytes = 0;
     for (uint64_t i = 0; i < tickets; i++) {
-        assert(__atomic_load_n(&descs[i].publish_seq, __ATOMIC_ACQUIRE) == i + 1);
-        bytes += descs[i].size;
+        assert(__atomic_load_n(&f->descs[i].publish_seq, __ATOMIC_ACQUIRE) ==
+               i + 1);
+        bytes += f->descs[i].size;
     }
     assert(bytes == (uint64_t)messages * 64);
-    assert(atomic_load_explicit(&psl->tx_s, memory_order_acquire) == psl->tx_w);
-    assert((psl->tx_w & (DPA_DMA_COPY_ALIGN - 1u)) == 0);
-    assert(atomic_load_explicit(&psl->tx_batch_state,
-                                memory_order_acquire) == TX_BATCH_IDLE);
+    assert(atomic_load_explicit(&f->psl->tx_s, memory_order_acquire) ==
+           f->psl->tx_w);
+    assert((f->psl->tx_w & (DPA_DMA_COPY_ALIGN - 1u)) == 0);
+    assert(armed_count(f) == 0);
 
-    free(ctx->tx_batch_heap);
-    pthread_cond_destroy(&ctx->tx_batch_cv);
-    pthread_mutex_destroy(&ctx->tx_batch_lock);
-    free(su_done);
-    free(su_end);
-    free(su_seq);
-    free(dma);
-    free(ctrl);
-    free(descs);
-    free(ports);
-    free(ctx);
-}
-
-static void
-test_fallback_waits_for_active_owner(void)
-{
-    struct dmesh_port_slot psl = {0};
-    atomic_init(&psl.tx_batch_state, TX_BATCH_ARMED);
-    atomic_init(&psl.tx_batch_owner_active, 1);
-
-    int expected = TX_BATCH_ARMED;
-    assert(atomic_compare_exchange_strong_explicit(
-        &psl.tx_batch_state, &expected, TX_BATCH_WORKER,
-        memory_order_acq_rel, memory_order_acquire));
-    assert(atomic_load_explicit(&psl.tx_batch_owner_active,
-                                memory_order_acquire) == 1);
-    atomic_store_explicit(&psl.tx_batch_owner_active, 0,
-                          memory_order_release);
-}
-
-static void
-test_commit_handoffs_to_deadline_worker(void)
-{
-    struct dpumesh_ctx *ctx = calloc(1, sizeof(*ctx));
-    struct dmesh_port_slot *ports = calloc(18, sizeof(*ports));
-    assert(ctx && ports);
-    dmesh_channel_t channel = { .ctx = ctx };
-    dmesh_qp_t qp = { .ep = &channel, .local_port = 17 };
-    ctx->ports = ports;
-    atomic_init(&ports[17].tx_batch_state, TX_BATCH_WORKER);
-    atomic_init(&ports[17].tx_batch_owner_active, 0);
-
-    assert(dmesh_tx_after_commit(&qp) == 0);
-    assert(atomic_load_explicit(&ports[17].tx_batch_state,
-                                memory_order_acquire) ==
-           TX_BATCH_WORKER_DIRTY);
-
-    int expected = TX_BATCH_WORKER_DIRTY;
-    assert(atomic_compare_exchange_strong_explicit(
-        &ports[17].tx_batch_state, &expected, TX_BATCH_WORKER,
-        memory_order_acq_rel, memory_order_acquire));
-    expected = TX_BATCH_WORKER;
-    assert(atomic_compare_exchange_strong_explicit(
-        &ports[17].tx_batch_state, &expected, TX_BATCH_IDLE,
-        memory_order_acq_rel, memory_order_acquire));
-    free(ports);
-    free(ctx);
+    fixture_free(f);
 }
 
 static uint8_t
@@ -427,8 +431,12 @@ test_large_commits_preserve_stream_bytes(void)
         atomic_init(&eq.tx_error[i], 0);
         atomic_init(&eq.tx_ready[i], 0);
     }
+    for (uint32_t i = 0; i < DMESH_TX_READY_WORDS; i++)
+        atomic_init(&eq.tx_armed[i], 0);
     atomic_init(&eq.tx_error_count, 0);
     atomic_init(&eq.tx_ready_count, 0);
+    atomic_init(&eq.tx_armed_count, 0);
+    atomic_init(&eq.tx_due_hint, 0);
     atomic_init(&eq.wants_notify, 0);
     atomic_init(&eq.suppress_notify, 0);
 
@@ -443,12 +451,6 @@ test_large_commits_preserve_stream_bytes(void)
     atomic_init(&psl->tx_c, 0);
     atomic_init(&psl->tx_s, 0);
     atomic_init(&psl->tx_f, 0);
-    atomic_init(&psl->tx_batch_state, TX_BATCH_IDLE);
-    atomic_init(&psl->tx_batch_owner_active, 0);
-    atomic_init(&psl->tx_generation, 1);
-    atomic_init(&psl->tx_batch_epoch, 0);
-    atomic_init(&psl->tx_tail_deadline_ns, 0);
-    atomic_init(&psl->tx_fallback_deadline_ns, 0);
     atomic_init(&psl->tx_error, 0);
     atomic_init(&psl->tx_wait_state, DMESH_TX_WAIT_IDLE);
     atomic_init(&psl->tx_wait_reason, DMESH_TX_WAIT_NONE);
@@ -467,7 +469,12 @@ test_large_commits_preserve_stream_bytes(void)
     psl->su_end = su_end;
     psl->su_done = su_done;
     __atomic_store_n(&psl->role, DMESH_ROLE_CLIENT, __ATOMIC_RELEASE);
-    assert(tx_batcher_start(ctx) == 0);
+    atomic_init(&ctx->tx_armed_total, 0);
+    ctx->eqs[0] = &eq;
+    ctx->n_eqs = 1;
+    assert(pthread_mutex_init(&ctx->eq_lock, NULL) == 0);
+    ctx->eq_lock_initialized = 1;
+    assert(tx_timer_start(ctx) == 0);
 
     uint64_t source_offset = 0;
     uint64_t copied_offset = 0;
@@ -500,11 +507,9 @@ test_large_commits_preserve_stream_bytes(void)
     for (int i = 0; i < commits; i++) {
         uint8_t *dst;
         for (;;) {
-            assert(dmesh_tx_call_begin(&qp) == 0);
             dst = dpumesh_tx_reserve(ctx, port, commit_size);
             if (dst != NULL) break;
             assert(errno == EAGAIN);
-            dmesh_tx_call_end(&qp);
             dmesh_tx_pressure(&qp);
             CONSUME_PUBLISHED();
             while (ack_tail != ack_head)
@@ -515,12 +520,12 @@ test_large_commits_preserve_stream_bytes(void)
             dst[j] = stream_pattern(source_offset + j);
         assert(dpumesh_tx_commit(ctx, port, dst, commit_size) == 0);
         assert(dmesh_tx_after_commit(&qp) == 0);
-        dmesh_tx_call_end(&qp);
+        atomic_store_explicit(&eq.tx_due_hint, 1, memory_order_release);
+        dpumesh_publish_due_tails(&eq);
         source_offset += commit_size;
         CONSUME_PUBLISHED();
     }
     assert(dmesh_flush(&qp) == 0);
-    tx_batch_wait_worker(psl);
     for (int wait = 0; copied_offset != source_offset && wait < 1000; wait++) {
         CONSUME_PUBLISHED();
         if (copied_offset != source_offset)
@@ -533,10 +538,8 @@ test_large_commits_preserve_stream_bytes(void)
     assert(atomic_load_explicit(&psl->tx_f, memory_order_acquire) == psl->tx_w);
 
 #undef CONSUME_PUBLISHED
-    tx_batcher_stop(ctx);
-    free(ctx->tx_batch_heap);
-    pthread_cond_destroy(&ctx->tx_batch_cv);
-    pthread_mutex_destroy(&ctx->tx_batch_lock);
+    tx_timer_stop(ctx);
+    pthread_mutex_destroy(&ctx->eq_lock);
     free(su_done);
     free(su_end);
     free(su_seq);
@@ -715,10 +718,11 @@ main(void)
 
     free(ports);
     free(ctx);
-    test_automatic_tail_batcher();
-    test_commit_races_deadline_claim();
-    test_fallback_waits_for_active_owner();
-    test_commit_handoffs_to_deadline_worker();
+    test_tail_publication_policy();
+    test_deadline_pass_yields_to_an_active_tx_call();
+    test_close_paths_release_the_armed_bit();
+    test_timer_wakes_only_armed_eqs();
+    test_sustained_commits_preserve_stream_bytes();
     test_large_commits_preserve_stream_bytes();
     puts("native_tx_batch_policy_test: PASS");
     return 0;

@@ -69,9 +69,6 @@ static void fixture_init(struct fixture *f, int pool_empty)
     psl->eq = f->eq;
     atomic_init(&psl->tx_c, 0);
     atomic_init(&psl->tx_s, 0);
-    atomic_init(&psl->tx_batch_state, TX_BATCH_IDLE);
-    atomic_init(&psl->tx_generation, 0);
-    atomic_init(&psl->tx_batch_epoch, 0);
     for (int i = 0; i < TX_BLOCKS_PER_CONN; i++) {
         psl->pblk[i] = -1;
         atomic_init(&psl->blk_used[i], 0);
@@ -325,9 +322,6 @@ static void test_default_four_mib_window_and_dynamic_fifo(void)
     psl->role = DMESH_ROLE_CLIENT;
     atomic_init(&psl->tx_c, 0);
     atomic_init(&psl->tx_s, 0);
-    atomic_init(&psl->tx_batch_state, TX_BATCH_IDLE);
-    atomic_init(&psl->tx_generation, 0);
-    atomic_init(&psl->tx_batch_epoch, 0);
     for (int i = 0; i < TX_BLOCKS_PER_CONN; i++) {
         psl->pblk[i] = -1;
         atomic_init(&psl->blk_used[i], 0);

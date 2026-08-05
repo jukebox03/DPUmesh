@@ -6,15 +6,16 @@
 
 /* ===== Send ===== */
 
+/* Holds the transmit gate across the reservation so the committing post_send
+ * runs against the same transmit state. */
 void *dmesh_alloc(dmesh_qp_t *c, uint32_t len) {
-    if (!c) { errno = EINVAL; return NULL; }
-    if (dmesh_tx_call_begin(c) != 0) return NULL;
+    if (dmesh_tx_qp_valid(c) != 0) return NULL;
     void *buf = dpumesh_tx_reserve(c->ep->ctx, c->local_port, len);
     if (!buf) {
         int saved_errno = errno;
-        dmesh_tx_call_end(c);
+        if (saved_errno == EAGAIN) dmesh_tx_pressure(c);
+        dmesh_tx_call_done(c);
         errno = saved_errno;
-        if (errno == EAGAIN) dmesh_tx_pressure(c);
     }
     return buf;
 }
@@ -24,11 +25,13 @@ int dmesh_post_send(dmesh_qp_t *c, const void *buf, uint32_t len) {
     /* Commit first, then publish every newly complete transport slot. The newest
      * partial follows the library-owned idle/deadline policy. */
     if (dpumesh_tx_commit(c->ep->ctx, c->local_port, buf, len) != 0) {
-        dmesh_tx_call_end(c);
+        int saved_errno = errno;
+        dmesh_tx_call_done(c);
+        errno = saved_errno;
         return -1;
     }
     int result = dmesh_tx_after_commit(c);
-    dmesh_tx_call_end(c);
+    dmesh_tx_call_done(c);
     return result;
 }
 
@@ -82,6 +85,10 @@ int dmesh_poll_eq(dmesh_eq_t *eq, dmesh_event_t *events, int max_events) {
     if (!eq || !events || max_events <= 0) { errno = EINVAL; return -1; }
     dmesh_channel_t *s = eq->ch;
     int n = 0, drained;
+
+    /* 0. This thread owns every QP bound to this EQ: publish any tail whose
+     * deadline expired. */
+    dpumesh_publish_due_tails(eq);
 
     /* 1. Resume the conn cut off by events[] filling up last call. Its inbox never went
      * empty, so the ready list holds no fresh edge for it — this cursor is the only

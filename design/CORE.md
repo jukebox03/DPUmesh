@@ -57,8 +57,13 @@ DPU main thread: registration, teardown, and host doorbells
 ## Host memory and rings
 
 One `dpumesh_ctx` owns K forward rings, K reverse rings, registered TX/RX
-mappings, the TX block pool, EQ registry, and PE progress thread. The 64 MiB RX
-mapping is divided into L equal landing stripes.
+mappings, the TX block pool, EQ registry, PE progress thread, and a tail timer
+thread. The 64 MiB RX mapping is divided into L equal landing stripes.
+
+The timer holds no transmit state. It writes the readiness fd of an EQ whose
+earliest retained tail has come due, and parks while no tail is retained on the
+channel. Each QP carries a transmit gate that serializes its public TX calls
+against the deadline pass `dmesh_poll_eq` runs.
 
 Each QP is a full-duplex ordered byte stream bound to one EQ. Its TX cursors
 maintain:
@@ -125,8 +130,9 @@ publish_seq = consumer ticket + 1
 ```
 
 The host drains visible entries and writes one monotonic `consumer_head`. Before
-blocking, it increments `arm_epoch` and rechecks the rings. A newly observed
-epoch produces one Comch doorbell through the DPU main thread.
+blocking, it increments `arm_epoch` and rechecks the rings. After a publication
+the producing worker reads that control block and, on a new epoch, requests a
+doorbell that the DPU main thread sends as one Comch message.
 
 ## Registration and teardown
 

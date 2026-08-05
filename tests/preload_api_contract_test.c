@@ -90,6 +90,7 @@ dmesh_eq_t *dmesh_create_eq(dmesh_channel_t *channel) {
 }
 int dmesh_destroy_eq(dmesh_eq_t *eq) { (void)eq; return 0; }
 int dmesh_eq_fd(dmesh_eq_t *eq) { (void)eq; return -1; }
+int64_t dmesh_eq_next_deadline_ns(dmesh_eq_t *eq) { (void)eq; return -1; }
 void dmesh_eq_suppress_notify(dmesh_eq_t *eq, int delta) {
     (void)eq;
     atomic_fetch_add(&fake_suppress_depth, delta);

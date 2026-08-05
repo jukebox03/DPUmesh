@@ -96,7 +96,7 @@ def point(rows):
     client = sum(number(r["client_core_busy_cores"]) for r in rows) / n
     server = sum(number(r["server_core_busy_cores"]) for r in rows) / n
     achieved = sum(number(r["achieved_rps"]) for r in rows) / n
-    clean = sum(int(r["sla_clean"]) for r in rows)
+    clean = sum(int(r["served_clean"]) for r in rows)
     dpu = [number(r["dpu_arm_cores"]) for r in rows if r["dpu_arm_cores"] not in ("NA", "")]
     return {
         "client": client,

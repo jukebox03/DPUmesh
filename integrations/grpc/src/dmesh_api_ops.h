@@ -30,6 +30,9 @@ class DmeshApiOps {
                                dmesh_event_t* event) = 0;
   virtual int PostMax(dmesh_channel_t* channel) = 0;
   virtual int PodId(dmesh_channel_t* channel) = 0;
+  // Nanoseconds until a buffered transmit tail on this EQ comes due, or -1
+  // when nothing is buffered.
+  virtual int64_t EqNextDeadlineNs(dmesh_eq_t* eq) = 0;
 };
 
 std::unique_ptr<DmeshApiOps> MakeNativeDmeshApiOps();

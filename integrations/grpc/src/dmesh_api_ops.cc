@@ -37,6 +37,9 @@ class NativeDmeshApiOps final : public DmeshApiOps {
     return dmesh_post_max(channel);
   }
   int PodId(dmesh_channel_t* channel) override { return dmesh_pod_id(channel); }
+  int64_t EqNextDeadlineNs(dmesh_eq_t* eq) override {
+    return dmesh_eq_next_deadline_ns(eq);
+  }
 };
 
 }  // namespace

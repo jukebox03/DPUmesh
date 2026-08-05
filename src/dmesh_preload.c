@@ -509,6 +509,7 @@ static void *dispatcher_main(void *arg) {
     };
     DBG("dispatcher up (eq_fd=%d wake_fd=%d)", eq_fd, g_wake_fd);
     for (;;) {
+        /* The channel timer raises this fd for a buffered transmit tail. */
         (void)poll(pfds, 2, -1);
 
         if (pfds[0].revents & POLLIN) {

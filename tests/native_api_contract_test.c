@@ -10,7 +10,9 @@ static int reserve_calls;
 static int reserve_error;
 static int commit_calls;
 static int after_commit_calls;
-static int tx_call_depth;
+static int qp_valid_calls;
+static int gate_depth;
+static int publish_due_calls;
 static int pressure_calls;
 static int rx_free_calls;
 static int last_rx_slot = -1;
@@ -41,10 +43,11 @@ dpumesh_tx_commit(dpumesh_ctx_t *ctx, uint16_t port,
     return -1;
 }
 
-int dmesh_tx_call_begin(dmesh_qp_t *qp) { assert(qp != NULL); tx_call_depth++; return 0; }
-void dmesh_tx_call_end(dmesh_qp_t *qp) { assert(qp != NULL); assert(tx_call_depth == 1); tx_call_depth--; }
+int dmesh_tx_qp_valid(dmesh_qp_t *qp) { assert(qp != NULL); qp_valid_calls++; gate_depth++; return 0; }
+void dmesh_tx_call_done(dmesh_qp_t *qp) { assert(qp != NULL); assert(gate_depth == 1); gate_depth--; }
 int dmesh_tx_after_commit(dmesh_qp_t *qp) { assert(qp != NULL); after_commit_calls++; return 0; }
 void dmesh_tx_pressure(dmesh_qp_t *qp) { assert(qp != NULL); pressure_calls++; }
+void dpumesh_publish_due_tails(struct dmesh_eq *eq) { assert(eq != NULL); publish_due_calls++; }
 
 dmesh_qp_t *dmesh_accept(dmesh_eq_t *eq)
 {
@@ -106,27 +109,28 @@ main(void)
     qp.ep = &channel;
     qp.local_port = 17;
 
+    /* Every reservation validates the handle and takes the transmit gate; the
+     * committing post_send releases it. */
     assert(dmesh_alloc(&qp, 32) == reservation);
     assert(reserve_calls == 1);
-    assert(tx_call_depth == 1 && pressure_calls == 0);
+    assert(qp_valid_calls == 1 && pressure_calls == 0);
+    assert(gate_depth == 1);              /* held across the reservation */
     assert(dmesh_post_send(&qp, reservation, 32) == 0);
     assert(commit_calls == 1);
     assert(after_commit_calls == 1);
-    assert(tx_call_depth == 0);
+    assert(gate_depth == 0);
 
     reserve_error = EAGAIN;
     assert(dmesh_alloc(&qp, 32) == NULL && errno == EAGAIN);
-    assert(pressure_calls == 1 && tx_call_depth == 0);
+    assert(pressure_calls == 1 && gate_depth == 0);
     reserve_error = 0;
 
     /* post_send commits and asks the core to publish complete transport batches;
      * it does not force the trailing partial through the public dmesh_flush. */
     assert(dmesh_alloc(&qp, 32) == reservation);
-    assert(tx_call_depth == 1);
     assert(dmesh_post_send(&qp, reservation, 32) == 0);
     assert(commit_calls == 2);
     assert(after_commit_calls == 2);
-    assert(tx_call_depth == 0);
 
     errno = 0;
     assert(dmesh_alloc(&qp, 32) == reservation);
@@ -134,7 +138,7 @@ main(void)
     assert(errno == EINVAL);
     assert(commit_calls == 3);
     assert(after_commit_calls == 2);
-    assert(tx_call_depth == 0);
+    assert(gate_depth == 0);              /* a rejected commit still releases */
 
     /* poll_eq exposes the core one-shot as a payload-free API event. */
     struct dmesh_eq eq = {0};
@@ -144,6 +148,9 @@ main(void)
     accept_calls = 0;
     assert(dmesh_poll_eq(&eq, &event, 1) == 0);
     assert(accept_calls == 1);
+    /* Entering the loop is a publication point for tails whose deadline
+     * expired. */
+    assert(publish_due_calls == 1);
     accept_errno = EAGAIN;
     tx_error_qp = &qp;
     assert(dmesh_poll_eq(&eq, &event, 1) == 1);

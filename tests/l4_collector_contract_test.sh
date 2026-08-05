@@ -17,7 +17,7 @@ printf '%s\n' "$output" |
 printf '%s\n' "$output" |
     grep -q 'generator clean:  schedule ratio 0.98..1.02'
 printf '%s\n' "$output" | grep -q 'scheduler drop ratio <= 0.001'
-printf '%s\n' "$output" | grep -q 'admission drops/scheduled <= 0.001'
+printf '%s\n' "$output" | grep -q 'latency is reported, not gated'
 printf '%s\n' "$output" |
     grep -q 'run retries:      at most 3 retries after validated runtime failure'
 

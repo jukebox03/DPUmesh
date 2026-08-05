@@ -5,8 +5,8 @@ DMA. Applications address a Kubernetes Service; the DPU owns backend selection,
 connection tracking, host-to-DPU forwarding, and reverse DMA. The default mode
 is an ordered L4 byte stream. DPUmesh does not terminate TLS or interpret HTTP/2.
 
-This repository is a research prototype. The evaluation contract and current
-dataset status are in the [performance report](bench/report/REPORT.md).
+This repository is a research prototype. The evaluation contract and
+measurements are in the [performance report](bench/report/REPORT.md).
 
 ## Architecture
 
@@ -32,12 +32,12 @@ reserves registered bytes and `dmesh_post_send()` commits them into one ordered
 stream. A post automatically submits every newly complete transport batch;
 `dmesh_flush()`
 forces only the newest partial batch. An idle tail publishes immediately; a busy
-tail is combined briefly and published by the channel's bounded deadline. The
-physical unit and timing are internal data-plane choices, not application tuning
-parameters. Graceful close flushes the trailing partial unit; abort discards it.
-Native publication writes the shared descriptor ring polled by the DPA.
-The preload and gRPC layers only adapt POSIX and EventEngine semantics; neither
-keeps a physical batch queue or batching timer.
+tail is combined and published at a bounded deadline. The physical unit and
+timing are internal data-plane choices, not application tuning parameters.
+Graceful close flushes the trailing partial unit; abort discards it. Native
+publication writes the shared descriptor ring polled by the DPA. The preload and
+gRPC layers only adapt POSIX and EventEngine semantics; neither keeps a physical
+batch queue or batching timer.
 
 Every public QP is one full-duplex byte stream. Optional DPU L7 framing is an
 internal routing policy and does not expose backend or stream ids through native
@@ -48,10 +48,9 @@ Backpressure remains nonblocking. If `dmesh_alloc()` returns `NULL/EAGAIN`, it
 also arms that QP internally. Capacity returned by a QP ACK or by the channel's
 shared registered-block pool produces one `DMESH_EVENT_TX_READY` event on the
 QP's EQ and wakes the same optional EQ fd used for receive events. Applications
-park only the named write and retry it from the event; they need no explicit
-arm call, per-QP fd, retry timer, busy-poll, or scan of all QPs. Readiness is a
-one-shot retry hint rather than a capacity reservation, so another `EAGAIN`
-simply arms the next transition.
+park only the named write and retry it from the event; there is no separate arm
+call and no per-QP fd. Readiness is a one-shot retry hint rather than a capacity
+reservation, so another `EAGAIN` arms the next transition.
 
 ## Lifecycle
 

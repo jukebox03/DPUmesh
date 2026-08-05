@@ -345,6 +345,9 @@ class FakeDmeshApiOps final : public DmeshApiOps {
     return impl_->channel.pod_id;
   }
 
+  // The fake publishes on commit and retains no tail.
+  int64_t EqNextDeadlineNs(dmesh_eq_t* /*eq*/) override { return -1; }
+
  private:
   std::shared_ptr<FakeDmeshState> state_;
   FakeDmeshState::Impl* const impl_;

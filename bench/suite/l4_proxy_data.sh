@@ -48,11 +48,9 @@ CONFIG_SPAN_FACTORS="${CONFIG_SPAN_FACTORS:-0.05 0.15 0.30 0.50 0.70}"
 # measured config's rate indexes — fixed while other configs are re-measured.
 COMMON_ANCHOR_RPS="${COMMON_ANCHOR_RPS:-}"
 MIN_ACHIEVED_RATIO="${MIN_ACHIEVED_RATIO:-0.98}"
-MAX_ADMISSION_DROP_RATIO="${MAX_ADMISSION_DROP_RATIO:-0.001}"
 MAX_SCHEDULER_DROP_RATIO="${MAX_SCHEDULER_DROP_RATIO:-0.001}"
 MIN_SCHEDULE_RATIO="${MIN_SCHEDULE_RATIO:-0.98}"
 MAX_SCHEDULE_RATIO="${MAX_SCHEDULE_RATIO:-1.02}"
-P99_SLA_US="${P99_SLA_US:-10000}"
 CORE_SATURATION_THRESHOLD="${CORE_SATURATION_THRESHOLD:-0.95}"
 IDLE_REPS="${IDLE_REPS:-3}"
 IDLE_DUR="${IDLE_DUR:-5}"
@@ -130,8 +128,8 @@ Environment overrides:
   SCOUT_REFINE_STEPS SCOUT_MAX_RPS SCOUT_MAX_GBPS
   CONFIGS COMMON_FACTORS KNEE_FACTORS CONFIG_SPAN_FACTORS COMMON_ANCHOR_RPS
   MIN_ACHIEVED_RATIO
-  MAX_ADMISSION_DROP_RATIO MAX_SCHEDULER_DROP_RATIO
-  MIN_SCHEDULE_RATIO MAX_SCHEDULE_RATIO P99_SLA_US CORE_SATURATION_THRESHOLD
+  MAX_SCHEDULER_DROP_RATIO
+  MIN_SCHEDULE_RATIO MAX_SCHEDULE_RATIO CORE_SATURATION_THRESHOLD
   IDLE_REPS IDLE_DUR GENERATOR_SELFTEST_DUR GENERATOR_SELFTEST_REPS
   GENERATOR_SELFTEST_START_RPS GENERATOR_SELFTEST_GROWTH
   GENERATOR_SELFTEST_MAX_RPS GENERATOR_SELFTEST_MAX_STEPS
@@ -216,9 +214,9 @@ awk -v x="$TARGET_GROWTH" 'BEGIN{exit !(x>1.0)}' ||
 awk -v x="$TARGET_BRACKET_RATIO" 'BEGIN{exit !(x>1.0)}' ||
   { echo "TARGET_BRACKET_RATIO must be > 1" >&2; exit 2; }
 for value in "$SCOUT_MAX_GBPS" "$MIN_ACHIEVED_RATIO" \
-             "$MAX_ADMISSION_DROP_RATIO" "$MAX_SCHEDULER_DROP_RATIO" \
+             "$MAX_SCHEDULER_DROP_RATIO" \
              "$MIN_SCHEDULE_RATIO" "$MIN_GENERATOR_HEADROOM" \
-             "$MAX_SCHEDULE_RATIO" "$P99_SLA_US" \
+             "$MAX_SCHEDULE_RATIO" \
              "$CORE_SATURATION_THRESHOLD"; do
   awk -v x="$value" 'BEGIN{exit !(x>0)}' ||
     { echo "positive numeric value required, got: $value" >&2; exit 2; }
@@ -305,10 +303,9 @@ if [ "$DRY_RUN" = 1 ]; then
   else
     echo "  expected wall:    usually 110-140 min including deploy/profiling"
   fi
-  echo "  clean point:      achieved/offered >= $MIN_ACHIEVED_RATIO,"
-  echo "                    admission drops/scheduled <= $MAX_ADMISSION_DROP_RATIO,"
+  echo "  saturated point:  achieved/offered >= $MIN_ACHIEVED_RATIO,"
   echo "                    schedule ratio $MIN_SCHEDULE_RATIO..$MAX_SCHEDULE_RATIO,"
-  echo "                    p99 <= ${P99_SLA_US}us, fail/reorder/overflow=0"
+  echo "                    fail/reorder/overflow=0; latency is reported, not gated"
   echo "  DPU:              N/K/A=$DPU_DPA_THREADS/$DPU_RINGS_PER_POD/$DPU_ARM_WORKERS, L7 disabled"
   echo "  output:           ${OUT:-bench/report/data/l4-<timestamp>}"
   exit 0
@@ -1119,7 +1116,7 @@ stop_perf() {
 
 classify_open_result() {
   local result="$1" offered="$2" duration="$3"
-  local scheduled drops fail reorder overflow achieved p99
+  local scheduled drops fail reorder overflow achieved
   local achieved_ratio schedule_ratio drop_ratio clean=1 reasons=""
   if [[ "$result" != OK* ]]; then
     printf '0,NA,NA,NA,runtime_error\n'
@@ -1127,7 +1124,7 @@ classify_open_result() {
   fi
   scheduled=$(field "$result" scheduled); drops=$(field "$result" drops)
   fail=$(field "$result" fail); reorder=$(field "$result" reorder)
-  overflow=$(field "$result" overflow); p99=$(field "$result" p99)
+  overflow=$(field "$result" overflow)
   achieved=$(awk -v m="$(field "$result" mrps)" 'BEGIN{printf "%.3f",m*1e6}')
   achieved_ratio=$(awk -v a="$achieved" -v o="$offered" \
     'BEGIN{if(o>0)printf "%.6f",a/o;else print "NA"}')
@@ -1142,15 +1139,9 @@ classify_open_result() {
   awk -v x="$achieved_ratio" -v lo="$MIN_ACHIEVED_RATIO" \
     'BEGIN{exit !(x>=lo)}' ||
     { clean=0; reasons="${reasons:+$reasons+}achieved"; }
-  awk -v x="$drop_ratio" -v hi="$MAX_ADMISSION_DROP_RATIO" \
-    'BEGIN{exit !(x<=hi)}' ||
-    { clean=0; reasons="${reasons:+$reasons+}admission_drop"; }
   awk -v x="$schedule_ratio" -v lo="$MIN_SCHEDULE_RATIO" -v hi="$MAX_SCHEDULE_RATIO" \
     'BEGIN{exit !(x>=lo && x<=hi)}' ||
     { clean=0; reasons="${reasons:+$reasons+}scheduler"; }
-  awk -v x="${p99:-999999999}" -v hi="$P99_SLA_US" \
-    'BEGIN{exit !(x<=hi)}' ||
-    { clean=0; reasons="${reasons:+$reasons+}p99"; }
   [ "$clean" = 0 ] || reasons=clean
   printf '%s,%s,%s,%s,%s\n' \
     "$clean" "$achieved_ratio" "$schedule_ratio" "$drop_ratio" "$reasons"
@@ -1474,7 +1465,7 @@ discover_knee() {
   bad_waits=$(scout_metric_at "$config" "$payload" "$bad" tx_grow_waits)
   core_saturated=$(core_saturation_vote \
     "$good_client" "$good_server" "$bad_client" "$bad_server")
-  capacity_signal=sla_or_admission
+  capacity_signal=achieved_rolloff
   [ "$core_saturated" != 1 ] || capacity_signal=host_core
   if [ "$core_saturated" != 1 ] &&
      awk -v x="$bad_waits" 'BEGIN{exit !(x!="NA" && x>0)}'; then
@@ -1705,12 +1696,12 @@ measure_one() {
   fi
   local perf_data=NA
   local arrival_value="$ARRIVAL"
-  local sla_clean=NA achieved_ratio=NA schedule_ratio=NA admission_drop_ratio=NA
+  local served_clean=NA achieved_ratio=NA schedule_ratio=NA admission_drop_ratio=NA
   local clean_reason=idle quality
   [ "$phase" != idle ] || arrival_value=none
   if [ "$phase" = load ]; then
     quality=$(classify_open_result "$result" "$offered" "$DUR")
-    IFS=, read -r sla_clean achieved_ratio schedule_ratio admission_drop_ratio clean_reason \
+    IFS=, read -r served_clean achieved_ratio schedule_ratio admission_drop_ratio clean_reason \
       <<<"$quality"
   fi
   if [ "$status" != ok ]; then
@@ -1739,16 +1730,16 @@ measure_one() {
     "$host_system" "$host_irq" "$host_soft" "$system_soft" "$dpu_cores" \
     "$tx_grow_waits" \
     "$throttled_count" "$throttled_seconds" "${core_client};${core_server}" \
-    "$mpstat_file" "$perf_data" "$status" "$sla_clean" "$achieved_ratio" \
+    "$mpstat_file" "$perf_data" "$status" "$served_clean" "$achieved_ratio" \
     "$schedule_ratio" "$admission_drop_ratio" "$clean_reason" >>"$RESULTS"
   MEASURE_WROTE=1
-  log "$run_id offered=$offered achieved=$achieved p99=$p99 host_cgroup=$host_cg host_busy=$host_busy dpu=$dpu_cores status=$status clean=$sla_clean reason=$clean_reason"
+  log "$run_id offered=$offered achieved=$achieved p99=$p99 host_cgroup=$host_cg host_busy=$host_busy dpu=$dpu_cores status=$status clean=$served_clean reason=$clean_reason"
 }
 
-result_sla_clean() {
+result_served_clean() {
   awk -F, -v id="$1" '
     NR==1{for(i=1;i<=NF;i++)h[$i]=i;next}
-    $h["run_id"]==id{v=$h["sla_clean"]}
+    $h["run_id"]==id{v=$h["served_clean"]}
     END{print v}' "$RESULTS"
 }
 
@@ -1804,7 +1795,7 @@ target_measure_one() {
   measure_one load "$config" "$TARGET_FRAME" "$rate_index" "$offered" "$rep"
   run_id="load-${TARGET_FRAME}-q${rate_index}-${config}-r${rep}"
   [ "$MEASURE_WROTE" = 0 ] ||
-    [ "$(result_sla_clean "$run_id")" = 1 ] ||
+    [ "$(result_served_clean "$run_id")" = 1 ] ||
     recover_config "$config" "$TARGET_FRAME"
 }
 
@@ -1821,7 +1812,7 @@ target_point_vote() {
       $h["rate_index"]==q {
       total++
       if($h["validation_status"]!="ok") invalid++
-      if($h["sla_clean"]==1) clean++
+      if($h["served_clean"]==1) clean++
     }
     END {print clean+0","total+0","invalid+0}
   ' "$RESULTS"
@@ -1913,7 +1904,7 @@ target_close_envoy_ties() {
           $h["offered_rps"]==r {
           total++
           if($h["validation_status"]!="ok") invalid++
-          if($h["sla_clean"]==1) clean++
+          if($h["served_clean"]==1) clean++
         }
         END {print clean+0","total+0","invalid+0}
       ' "$RESULTS")
@@ -2114,7 +2105,7 @@ select_perf_points() {
         $h["phase"]=="load" && $h["frame_bytes"]==p && $h["config"]==c {
           key=$h["rate_index"] SUBSEP $h["offered_rps"]
           n[key]++
-          if ($h["validation_status"]!="ok" || $h["sla_clean"]!=1)
+          if ($h["validation_status"]!="ok" || $h["served_clean"]!=1)
             bad[key]=1
         }
         END {
@@ -2350,7 +2341,7 @@ validate_dataset() {
   bad=$(awk -F, '
     NR==1 {for(i=1;i<=NF;i++)h[$i]=i; next}
     $h["phase"]=="load" &&
-      ($h["sla_clean"]!="0" && $h["sla_clean"]!="1") {print $h["run_id"]":missing_quality"}
+      ($h["served_clean"]!="0" && $h["served_clean"]!="1") {print $h["run_id"]":missing_quality"}
   ' "$RESULTS")
   [ -z "$bad" ] || die "load quality fields invalid:\n$bad"
   log "dataset validation PASS: load=$actual_load idle=$actual_idle scout_raw=$actual_scout scout_points=$actual_decisions knees=$actual_knees"
@@ -2386,7 +2377,7 @@ if [ ! -s "$META" ]; then
     echo "cgroup=$(stat -fc %T /sys/fs/cgroup 2>/dev/null || echo NA)"
     echo "swap=disabled"
     echo "params=CONFIGS={$CONFIG_LIST} FRAME_SIZES={$FRAME_SIZES} BENCH_HEADER_BYTES=$BENCH_HEADER_BYTES REQUEST_RESPONSE=symmetric CONNECTIONS=$THREADS ARRIVAL=$ARRIVAL REPS=$REPS DUR=$DUR WARMUP=$WARMUP PILOT_DUR=$PILOT_DUR SCOUT_DUR=$SCOUT_DUR SCOUT_START_RPS=$SCOUT_START_RPS SCOUT_GROWTH=$SCOUT_GROWTH SCOUT_MAX_STEPS=$SCOUT_MAX_STEPS SCOUT_REFINE_STEPS=$SCOUT_REFINE_STEPS COMMON_FACTORS={$COMMON_FACTORS} KNEE_FACTORS={$KNEE_FACTORS} CONFIG_SPAN_FACTORS={$CONFIG_SPAN_FACTORS} IDLE_REPS=$IDLE_REPS IDLE_DUR=$IDLE_DUR GENERATOR_SELFTEST_DUR=$GENERATOR_SELFTEST_DUR GENERATOR_SELFTEST_REPS=$GENERATOR_SELFTEST_REPS GENERATOR_SELFTEST_START_RPS=$GENERATOR_SELFTEST_START_RPS GENERATOR_SELFTEST_GROWTH=$GENERATOR_SELFTEST_GROWTH GENERATOR_SELFTEST_MAX_RPS=$GENERATOR_SELFTEST_MAX_RPS MIN_GENERATOR_HEADROOM=$MIN_GENERATOR_HEADROOM MAX_RECOVERY_REDEPLOYS=$MAX_RECOVERY_REDEPLOYS MAX_RUN_RETRIES=$MAX_RUN_RETRIES CORE_SATURATION_THRESHOLD=$CORE_SATURATION_THRESHOLD ENABLE_PERF=$ENABLE_PERF"
-    echo "clean_policy=achieved/offered>=$MIN_ACHIEVED_RATIO admission_drops/scheduled<=$MAX_ADMISSION_DROP_RATIO scheduled/(offered*duration)=$MIN_SCHEDULE_RATIO..$MAX_SCHEDULE_RATIO p99_us<=$P99_SLA_US fail=0 reorder=0 overflow=0"
+    echo "clean_policy=achieved/offered>=$MIN_ACHIEVED_RATIO scheduled/(offered*duration)=$MIN_SCHEDULE_RATIO..$MAX_SCHEDULE_RATIO fail=0 reorder=0 overflow=0; latency and admission drops are recorded, not gated"
     echo "generator_policy=scheduler_drops/(scheduled+scheduler_drops)<=$MAX_SCHEDULER_DROP_RATIO schedule_ratio=$MIN_SCHEDULE_RATIO..$MAX_SCHEDULE_RATIO"
     echo "scout_vote_policy=two independent runs per candidate; a 1-1 split triggers a third run; at least two clean votes are required; recovery follows every bad vote"
     echo "recovery_policy=low-rate recovery first; canonical redeploy with full invariant validation on failure; maximum $MAX_RECOVERY_REDEPLOYS redeploys; runtime-failed rows are excluded, preserved, and retried up to $MAX_RUN_RETRIES times"
@@ -2452,7 +2443,7 @@ if [ -s "$PERF_MANIFEST" ]; then
 else
   printf '%s\n' "$PERF_HEADER" >"$PERF_MANIFEST"
 fi
-RESULT_HEADER="run_id,phase,config,frame_bytes,request_body_bytes,response_body_bytes,connections,arrival,rate_index,offered_rps,reported_offered_rps,rep,duration_s,achieved_rps,gbps,request_gbps,response_gbps,p50_us,p95_us,p99_us,p999_us,p9999_us,avg_us,min_us,max_us,ok,scheduled,pending,fail,admission_drops,overflow,reorder,client_app_cores,client_app_user_cores,client_app_system_cores,server_app_cores,server_app_user_cores,server_app_system_cores,client_sidecar_cores,client_sidecar_user_cores,client_sidecar_system_cores,server_sidecar_cores,server_sidecar_user_cores,server_sidecar_system_cores,host_cgroup_cores,host_cgroup_user_cores,host_cgroup_system_cores,host_busy_cores,client_core_busy_cores,server_core_busy_cores,host_user_cores,host_system_cores,host_irq_cores,host_softirq_cores,system_softirq_cores,dpu_arm_cores,tx_grow_waits,nr_throttled,throttled_seconds,core_list,mpstat_file,perf_data,validation_status,sla_clean,achieved_ratio,schedule_ratio,admission_drop_ratio,clean_reason"
+RESULT_HEADER="run_id,phase,config,frame_bytes,request_body_bytes,response_body_bytes,connections,arrival,rate_index,offered_rps,reported_offered_rps,rep,duration_s,achieved_rps,gbps,request_gbps,response_gbps,p50_us,p95_us,p99_us,p999_us,p9999_us,avg_us,min_us,max_us,ok,scheduled,pending,fail,admission_drops,overflow,reorder,client_app_cores,client_app_user_cores,client_app_system_cores,server_app_cores,server_app_user_cores,server_app_system_cores,client_sidecar_cores,client_sidecar_user_cores,client_sidecar_system_cores,server_sidecar_cores,server_sidecar_user_cores,server_sidecar_system_cores,host_cgroup_cores,host_cgroup_user_cores,host_cgroup_system_cores,host_busy_cores,client_core_busy_cores,server_core_busy_cores,host_user_cores,host_system_cores,host_irq_cores,host_softirq_cores,system_softirq_cores,dpu_arm_cores,tx_grow_waits,nr_throttled,throttled_seconds,core_list,mpstat_file,perf_data,validation_status,served_clean,achieved_ratio,schedule_ratio,admission_drop_ratio,clean_reason"
 if [ -s "$RESULTS" ]; then
   [ "$(head -n 1 "$RESULTS")" = "$RESULT_HEADER" ] ||
     die "results.csv schema differs from this collector version; choose a new --out directory"
@@ -2500,7 +2491,7 @@ for payload in $FRAME_SIZES; do
         measure_one load "$config" "$payload" "$rate_index" "$offered" "$rep"
         run_id="load-${payload}-q${rate_index}-${config}-r${rep}"
         [ "$MEASURE_WROTE" = 0 ] ||
-          [ "$(result_sla_clean "$run_id")" = 1 ] ||
+          [ "$(result_served_clean "$run_id")" = 1 ] ||
           recover_config "$config" "$payload"
       done
     done

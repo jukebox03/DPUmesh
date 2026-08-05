@@ -22,6 +22,8 @@ struct dma_ring {
     /* "ring full" WARN rate-limit state (best-effort under lock-free contention;
      * a racy probe count only mis-throttles a diagnostic, never corrupts). */
     uint64_t busy_probes;
+    /* Set when no consumer drained a slot within the stall deadline; later
+     * enqueues then fail without waiting. */
     int dead;
 };
 
@@ -33,8 +35,8 @@ struct rev_ring {
     uint64_t head;
 };
 
-/* Claim the next free ticket. Full-ring speculative tickets withdraw in reverse
- * order, so a refused claim leaves the published sequence gapless. */
+/* Claim the next free ticket. A full ring withdraws the speculative ticket in
+ * reverse order, leaving the published sequence gapless. */
 static inline int
 dma_ring_try_claim(struct dma_ring *ring, uint64_t *out_ticket)
 {

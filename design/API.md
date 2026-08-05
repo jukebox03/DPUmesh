@@ -23,15 +23,17 @@ An EQ has exactly one consumer. A QP's transmit calls form one serial stream
 that may run on a different thread than its EQ's consumer — the POSIX shim
 transmits from application threads, the gRPC adapter from endpoint executors —
 and the caller serializes that stream against itself and against the QP's
-destruction. The transport PE is a separate single producer of EQ-ready edges.
-`qp->user_data` belongs entirely to the application.
+destruction. The library serializes that stream against the buffered-tail
+publication `dmesh_poll_eq()` performs. The transport PE is a separate single
+producer of EQ-ready edges. `qp->user_data` belongs entirely to the
+application.
 
-The public surface consists of eighteen calls:
+The public surface consists of nineteen calls:
 
 | Group | Calls |
 |---|---|
 | Channel | `create_channel`, `destroy_channel`, `pod_id`, `msg_max`, `post_max` |
-| EQ | `create_eq`, `destroy_eq`, `eq_fd` |
+| EQ | `create_eq`, `destroy_eq`, `eq_fd`, `eq_next_deadline_ns` |
 | QP | `create_qp`, `destroy_qp`, `abort_qp` |
 | TX | `alloc`, `post_send`, `flush`, `tx_inflight` |
 | Events | `poll_eq`, `release_rx_buffer` |
@@ -115,10 +117,15 @@ bytes until the transport makes that storage available through a later allocatio
 The transport combines adjacent posts without creating message boundaries: a
 QP remains an ordered byte stream. Complete transport units submit immediately.
 An idle stream also submits its first partial unit immediately; while an earlier
-unit is in flight, only the newest partial may be retained, and a channel-owned
-worker submits it by a bounded internal deadline. `dmesh_flush()` forces that
-remainder earlier. Applications do not drive this policy, must not depend on a
-particular physical unit size, and have no `SEND_MORE` mode.
+unit is in flight, only the newest partial may be retained, and it is submitted
+by a bounded internal deadline. `dmesh_flush()` forces that remainder earlier.
+Applications do not drive this policy, must not depend on a particular physical
+unit size, and have no `SEND_MORE` mode.
+
+A retained tail is submitted either by a later transmit call on that QP or by
+`dmesh_poll_eq()` on its EQ. The two are serialized inside the library, so the
+caller's existing obligation is unchanged: serialize a QP's transmit calls
+against themselves and against its destruction.
 
 Each QP has bounded outstanding-send capacity, and QPs also share the channel's
 overall transmit capacity. The transport recovers capacity as previously
@@ -157,31 +164,33 @@ allocation will succeed. The event names the QP whose parked write should
 retry, but shared capacity may be consumed before that retry. If it returns
 `EAGAIN` again, that call has already requested the next notification.
 
-Retry on that notification rather than on an application clock. Reservations
-fail while the transport is still reclaiming capacity, so a caller that
-re-attempts at its own arrival rate spends its core on failing reservations and
-delays the very publication that releases them. An event loop parks the blocked
-QP, keeps servicing the others, and resumes it on `DMESH_EVENT_TX_READY` — no
-timer, and no scan of every QP.
+Retry on that notification rather than on an application clock: park the blocked
+QP, keep servicing the others, and resume it on `DMESH_EVENT_TX_READY`.
 
-Tail scheduling belongs to the channel, not to native, preload, or gRPC callers.
-The single channel worker tracks only QPs with retained tails and therefore does
-not scan the port table. `dmesh_tx_inflight()` remains available for diagnostics
-and ABI compatibility but is not an input to application batching policy.
-`dmesh_flush()` is an explicit force operation, graceful close flushes before
-FIN, and `dmesh_abort_qp()` discards bytes that have not been submitted.
+Tail policy belongs to the channel, not to native, preload, or gRPC callers.
+Retention is one bit on the QP's own EQ. `dmesh_tx_inflight()` is diagnostic and
+is not an input to application batching policy. `dmesh_flush()` is an explicit
+force operation, graceful close flushes before FIN, and `dmesh_abort_qp()`
+discards bytes that have not been submitted.
 
-The current scheduler checks a newly retained tail on the next 500 µs worker
-tick. Continued commits classify the stream as busy and move the fallback to a
-5 ms quiet interval, rounded to the same tick. Full units still publish during
-that interval. A full-unit drain also publishes the remaining tail after its
-300 µs coalescing window. ACK processing reclaims capacity but does not force a
-tail. Explicit flush, allocation pressure, and graceful close force it.
+Retention stamps a deadline once and never moves it, and it holds until the
+stream has nothing in flight. Full units still publish during that interval.
+`dmesh_post_send()` publishes an overdue tail before retaining a new one, and
+`dmesh_poll_eq()` publishes every overdue tail on its EQ on entry; a QP whose
+owner is inside a transmit call keeps its retention for a later pass. ACK
+processing reclaims capacity but
+does not force a tail. Explicit flush, allocation pressure, and graceful close
+force it.
+
+`dmesh_eq_next_deadline_ns()` reports when the loop must next run. A channel
+timer writes the readiness fd of an EQ whose earliest tail has come due, at most
+once per tick per EQ; it touches no transmit state and parks while no tail is
+retained.
 
 A synchronous submission fault is returned by `dmesh_post_send()` or
-`dmesh_flush()`. If the bounded-deadline worker encounters the fault later, it
-latches a sticky error on the QP and emits one `DMESH_EVENT_TX_ERROR`; subsequent
-TX calls fail with that error until the QP is destroyed.
+`dmesh_flush()`. A deferred tail fault latches a sticky error on the QP and
+emits one `DMESH_EVENT_TX_ERROR`; subsequent TX calls fail with that error until
+the QP is destroyed.
 
 ## 5. RX and EQ notification
 
@@ -193,7 +202,7 @@ TX calls fail with that error until the QP is destroyed.
 | `DMESH_EVENT_RECV` | One RX fragment | held until `dmesh_release_rx_buffer()` |
 | `DMESH_EVENT_RECV_FIN` | Peer EOF | none |
 | `DMESH_EVENT_TX_READY` | An `EAGAIN`-blocked QP should retry allocation | none |
-| `DMESH_EVENT_TX_ERROR` | Background tail submission failed; QP TX is terminal | none |
+| `DMESH_EVENT_TX_ERROR` | Deferred tail submission failed; QP TX is terminal | none |
 
 `event.buf` points directly into the channel RX mmap. An event is a transport
 fragment, not an application message boundary; parsers must retain framing state
@@ -275,9 +284,9 @@ It uses `dmesh_alloc`/`dmesh_post_send` for TX and consumes
 creation, transport FIN, and temporary EQ notification suppression.
 
 The preload path copies POSIX `read`/`write` application buffers but owns no
-batching list, scan, or timer. Backpressure maps to kernel descriptor
-non-writability; shutdown forces pending bytes before FIN, and graceful close
-uses the native close contract.
+batching list, scan, or timer. Its dispatcher waits on readiness edges alone.
+Backpressure maps to kernel descriptor non-writability; shutdown forces pending
+bytes before FIN, and graceful close uses the native close contract.
 
 One process-wide EQ serves the mapped descriptors. Dispatcher and waiter drains
 are serialized. A blocking receive may consume two EQ batches before parking.
@@ -302,7 +311,8 @@ once at each EventEngine Write boundary, and consumes
 `DMESH_EVENT_TX_READY`, and `DMESH_EVENT_TX_ERROR` from `dmesh_poll_eq`. One
 EventEngine Write commits every slice; consecutive slices share one reservation.
 The flush is a logical force operation; physical batch state and deadlines remain
-in libdpumesh. Receives are copied
+in libdpumesh, and the reactor bounds its poll wait with
+`dmesh_eq_next_deadline_ns()`. Receives are copied
 out before `dmesh_release_rx_buffer`, and the credit is withheld, up to a
 per-connection cap, while the endpoint's queued bytes exceed its high-water mark.
 On `EAGAIN` the adapter parks the write and resumes it from
