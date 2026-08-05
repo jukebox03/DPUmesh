@@ -341,6 +341,16 @@ get_pod_cores() {
                 loopback-dpumesh) rel="12";; stream-dpumesh) rel="13";;
                 verbs-dpumesh) rel="14";; preload-dpumesh) rel="15";;
             esac ;;
+        l4cap)
+            # Capacity profile: the server endpoint keeps one exclusive core and
+            # the client gets three, so the load generator cannot be the limit
+            # and the ceiling is the server core's.
+            case "$app" in
+                preload-bench) rel="0,1,2";;   preload-echo) rel="3";;
+                bench-tcp) rel="4,5,6";;       echo-tcp) rel="7";;
+                bench-tcp-strict) rel="8,9,10";; echo-tcp-strict) rel="11";;
+                bench-dpumesh) rel="12,13,14";;  echo-dpumesh) rel="15";;
+            esac ;;
         grpc)
             # Four measured L7 paths, two exclusive cores each. An Envoy
             # sidecar shares its application's core: the budget is per pod.

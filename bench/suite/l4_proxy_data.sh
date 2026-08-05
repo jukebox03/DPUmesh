@@ -41,7 +41,7 @@ SCOUT_MAX_GBPS="${SCOUT_MAX_GBPS:-100}"
 # Four common rates give same-x comparisons. Three per-config rates resolve the
 # local knee. Duplicate integer rates are removed when rates.csv is built.
 COMMON_FACTORS="${COMMON_FACTORS:-0.25 0.50 0.75 0.90}"
-KNEE_FACTORS="${KNEE_FACTORS:-0.85 1.00 1.05}"
+KNEE_FACTORS="${KNEE_FACTORS:-0.85 0.95 1.00 1.05 1.15 1.30}"
 CONFIG_SPAN_FACTORS="${CONFIG_SPAN_FACTORS:-0.05 0.15 0.30 0.50 0.70}"
 # The common rates scale the lowest discovered knee. "frame:rps ..." pins that
 # anchor instead, which holds the common grid — and therefore every already
@@ -52,6 +52,8 @@ MAX_SCHEDULER_DROP_RATIO="${MAX_SCHEDULER_DROP_RATIO:-0.001}"
 MIN_SCHEDULE_RATIO="${MIN_SCHEDULE_RATIO:-0.98}"
 MAX_SCHEDULE_RATIO="${MAX_SCHEDULE_RATIO:-1.02}"
 CORE_SATURATION_THRESHOLD="${CORE_SATURATION_THRESHOLD:-0.95}"
+# Cores the collector and its samplers run on; disjoint from the endpoint cores.
+MEASURE_CORES="${MEASURE_CORES:-0-15}"
 IDLE_REPS="${IDLE_REPS:-3}"
 IDLE_DUR="${IDLE_DUR:-5}"
 GENERATOR_SELFTEST_DUR="${GENERATOR_SELFTEST_DUR:-1}"
@@ -338,6 +340,11 @@ META="$OUT/meta.txt"
 LOG="$OUT/run.log"
 mkdir -p "$MPSTAT_DIR" "$SNAP_DIR" "$PERF_DIR"
 exec > >(tee -a "$LOG") 2>&1
+# The collector, and every helper it forks — mpstat, ssh, awk — must stay off
+# the cores the endpoints are pinned to, or the sampler perturbs what it reads.
+taskset -pc "$MEASURE_CORES" $$ >/dev/null 2>&1 ||
+  printf '\033[1;33m[l4]\033[0m could not confine the collector to cores %s\n' \
+    "$MEASURE_CORES" >&2
 MPSTAT_PID=0
 PERF_PID=0
 MEASURE_WROTE=0
@@ -851,12 +858,13 @@ validate_one_core_pid() {
 }
 
 validate_resolved_pinning() {
-  local config="$1" context="$2" cc sc budget
+  local config="$1" context="$2" cc sc budget ncc
   cc=$(allowed_core "$CLIENT_APP_PID")
   sc=$(allowed_core "$SERVER_APP_PID")
   budget=$(recorded_host_core_budget "$config")
-  [[ "$cc" =~ ^[0-9]+$ ]] && [[ "$sc" =~ ^[0-9]+$ ]] &&
-    [ "$cc" != "$sc" ] && [ "$budget" -eq 2 ] ||
+  ncc=$(expand_cores "$cc" | wc -w)
+  [[ "$sc" =~ ^[0-9]+$ ]] && [ "$ncc" -ge 1 ] && [ "$cc" != "$sc" ] &&
+    [ "$budget" -eq $((ncc + 1)) ] ||
     die "$context has an invalid fixed-core budget: client=$cc server=$sc recorded=$budget"
   validate_one_core_pid "$context/client_app" "$CLIENT_APP_PID" "$cc"
   validate_one_core_pid "$context/server_app" "$SERVER_APP_PID" "$sc"
@@ -877,8 +885,8 @@ record_and_validate_core_budget() {
     ca="$CLIENT_APP_PID"; sa="$SERVER_APP_PID"
     cs="$CLIENT_SIDECAR_PID"; ss="$SERVER_SIDECAR_PID"
     cc=$(allowed_core "$ca"); sc=$(allowed_core "$sa")
-    [[ "$cc" =~ ^[0-9]+$ ]] && [[ "$sc" =~ ^[0-9]+$ ]] && [ "$cc" != "$sc" ] ||
-      die "$config does not have two distinct single-core endpoints: client=$cc server=$sc"
+    [[ "$sc" =~ ^[0-9]+$ ]] && [ -n "$cc" ] && [ "$cc" != "$sc" ] ||
+      die "$config does not have a single-core server and a distinct client: client=$cc server=$sc"
     validate_one_core_pid "$config/client_app" "$ca" "$cc"
     validate_one_core_pid "$config/server_app" "$sa" "$sc"
     validate_one_core_pid "$config/client_sidecar" "$cs" "$cc"
@@ -886,14 +894,18 @@ record_and_validate_core_budget() {
     for role_pid_core in \
       "client_app:$ca:$cc" "server_app:$sa:$sc" \
       "client_sidecar:$cs:$cc" "server_sidecar:$ss:$sc"; do
-      IFS=: read -r role pid core <<<"$role_pid_core"
+      IFS=: read -r role pid core_spec <<<"$role_pid_core"
       [ "$pid" -gt 0 ] || continue
-      node=$(find "/sys/devices/system/cpu/cpu$core" -maxdepth 1 -type l \
-        -name 'node*' -printf '%f\n' 2>/dev/null | sed -n 's/^node//p' | sed -n '1p')
-      csv_row "$observed" "$config" "$role" "$pid" "$core" "${node:-NA}" >>"$current"
+      for core in $(expand_cores "$core_spec"); do
+        node=$(find "/sys/devices/system/cpu/cpu$core" -maxdepth 1 -type l \
+          -name 'node*' -printf '%f\n' 2>/dev/null | sed -n 's/^node//p' | sed -n '1p')
+        csv_row "$observed" "$config" "$role" "$pid" "$core" "${node:-NA}" >>"$current"
+      done
     done
   done
-  local expected_cores=$((${#CONFIGS[@]} * 2))
+  local per_config expected_cores
+  per_config=$(( $(expand_cores "$(allowed_core "$CLIENT_APP_PID")" | wc -w) + 1 ))
+  expected_cores=$(( ${#CONFIGS[@]} * per_config ))
   [ "$(awk -F, 'NR>1 && ($3=="client_app" || $3=="server_app"){c[$5]=1} END{print length(c)}' "$current")" = "$expected_cores" ] ||
     die "the configurations do not own $expected_cores exclusive endpoint cores; see $current"
   [ "$(awk -F, 'NR>1 && ($3=="client_app" || $3=="server_app"){n[$6]=1} END{print length(n)}' "$current")" = 1 ] &&
@@ -907,7 +919,7 @@ record_and_validate_core_budget() {
     cp "$current" "$out"
   fi
   rm -f -- "$current"
-  log "fixed host-core budget PASS: 2 exclusive cores/config, $expected_cores endpoint cores total"
+  log "fixed host-core budget PASS: $per_config exclusive cores/config, $expected_cores endpoint cores total"
 }
 
 cgroup_path() {
@@ -953,6 +965,14 @@ cg_delta() {
     $1==r {print $c-x; found=1}
     END {if(!found) print 0}' "$before" "$after"
 }
+# The window a run's CPU is attributed to: the generator's own measured
+# duration, not the wall clock, which also spans connection setup and teardown.
+load_window() {
+  local result="$1" fallback="$2" durs
+  durs=$(field "$result" durs)
+  awk -v d="${durs:-0}" -v f="$fallback" 'BEGIN{printf "%.9f", (d>0 ? d : f)}'
+}
+
 to_cores_usec() {
   awk -v d="$1" -v dt="$2" 'BEGIN{if(dt>0) printf "%.6f",d/1e6/dt; else print "NA"}'
 }
@@ -964,10 +984,25 @@ allowed_core() {
   awk '$1=="Cpus_allowed_list:"{print $2; exit}' "/proc/$1/status"
 }
 
+# "30-32,35" -> "30 31 32 35". An endpoint may own more than one core: the
+# capacity profile gives the client several so the server core is the limit.
+expand_cores() {
+  awk -v spec="$1" 'BEGIN{
+    n=split(spec, part, ",")
+    for(i=1;i<=n;i++) {
+      if (split(part[i], r, "-")==2) { for(c=r[1];c<=r[2];c++) printf "%s ", c }
+      else if (part[i]!="") printf "%s ", part[i]
+    }
+  }'
+}
+
 snapshot_proc() {
-  local out="$1" c1="$2" c2="$3"
-  awk -v a="cpu$c1" -v b="cpu$c2" '
-    $1=="cpu" || $1==a || $1==b {
+  local out="$1" want=""
+  shift
+  local spec c
+  for spec in "$@"; do for c in $(expand_cores "$spec"); do want="$want cpu$c "; done; done
+  awk -v want=" $want " '
+    $1=="cpu" || index(want, " " $1 " ") {
       printf "%s,%s,%s,%s,%s,%s,%s,%s,%s\n",
              $1,$2,$3,$4,$5,$6,$7,$8,$9
     }' /proc/stat >"$out"
@@ -982,40 +1017,36 @@ proc_delta() {
     }
     END{print sum+0}' "$before" "$after"
 }
+# Cores an endpoint consumed over `dt`, summed across every core it owns.
 proc_core_busy() {
-  local core="$1" before="$2" after="$3" dt="$4"
-  awk -F, -v want="cpu$core" -v elapsed="$dt" -v hz="$CLK_TCK" '
-    NR==FNR {
-      if($1==want) {
-        old=$2+$3+$4+$7+$8+$9
-        found_old=1
-      }
-      next
-    }
-    $1==want {
-      current=$2+$3+$4+$7+$8+$9
-      found_new=1
-    }
+  local core_spec="$1" before="$2" after="$3" dt="$4" want="" c
+  for c in $(expand_cores "$core_spec"); do want="$want cpu$c "; done
+  awk -F, -v want=" $want " -v elapsed="$dt" -v hz="$CLK_TCK" '
+    NR==FNR { if(index(want, " " $1 " ")) { old[$1]=$2+$3+$4+$7+$8+$9; seen++ } ; next }
+    index(want, " " $1 " ") { if($1 in old) { sum += ($2+$3+$4+$7+$8+$9) - old[$1]; found++ } }
     END {
-      if(found_old && found_new && elapsed>0)
-        printf "%.6f",(current-old)/hz/elapsed
-      else
-        print "NA"
+      if(seen && found && elapsed>0) printf "%.6f", sum/hz/elapsed
+      else print "NA"
     }
   ' "$before" "$after"
 }
+
 validate_core_busy_sample() {
-  local context="$1" client="$2" server="$3"
-  awk -v a="$client" -v b="$server" '
+  local context="$1" client="$2" server="$3" ncc="${4:-1}"
+  awk -v a="$client" -v b="$server" -v n="$ncc" '
     BEGIN {
-      exit !(a!="NA" && b!="NA" && a>=0 && b>=0 && a<=1.10 && b<=1.10)
+      exit !(a!="NA" && b!="NA" && a>=0 && b>=0 && a<=1.10*n && b<=1.10)
     }
   ' || die "$context has an invalid physical-core sample: client=$client server=$server"
 }
+# Whether either endpoint's cores were saturated at a bracket end. A client
+# owning several cores is normalised by that count so the threshold means the
+# same thing on both sides.
 core_saturation_vote() {
   local good_client="$1" good_server="$2" bad_client="$3" bad_server="$4"
+  local ncc="${5:-1}"
   awk -v gc="$good_client" -v gs="$good_server" \
-      -v bc="$bad_client" -v bs="$bad_server" \
+      -v bc="$bad_client" -v bs="$bad_server" -v n="$ncc" \
       -v threshold="$CORE_SATURATION_THRESHOLD" '
     BEGIN {
       seen=0
@@ -1023,7 +1054,8 @@ core_saturation_vote() {
       for(i=1;i<=4;i++) {
         if(values[i]!="" && values[i]!="NA") {
           seen=1
-          if(values[i]+0>=threshold) saturated=1
+          scale=(i==1 || i==3) ? n : 1
+          if(values[i]/scale>=threshold) saturated=1
         }
       }
       if(!seen) print "NA"
@@ -1036,33 +1068,36 @@ to_cores_ticks() {
     'BEGIN{if(dt>0) printf "%.6f",d/hz/dt; else print "NA"}'
 }
 
+
+# Sample the DPU process's CPU once a second over one ssh session, stamping each
+# reply with the host clock so the load window trims the same way the endpoint
+# cores do. Writes "<host_epoch> <hz> <ticks>" lines.
 dpu_snapshot() {
   # -n prevents ssh from consuming a caller's loop input.
   ssh -n -o ConnectTimeout=8 "$DPU_HOST" \
     "echo '$DPU_PASS' | sudo -S sh -c 'p=\$(pgrep -x dpumesh_dpu | head -1); \
-      [ -n \"\$p\" ] || exit 1; hz=\$(getconf CLK_TCK); up=\$(cut -d\" \" -f1 /proc/uptime); \
+      [ -n \"\$p\" ] || exit 1; hz=\$(getconf CLK_TCK); \
       stat=\$(cat /proc/\$p/stat); rest=\${stat#*) }; set -- \$rest; \
-      echo \$p \$hz \$((\${12}+\${13})) \$up'" 2>/dev/null
+      echo \$p \$hz \$((\${12}+\${13}))'" 2>/dev/null
 }
 
-dpu_delta_cores() {
-  local before="$1" after="$2"
-  local pid0 hz0 tick0 up0 pid1 hz1 tick1 up1
+# ARM cores the DPU process used, over the generator's own measured window.
+# The snapshots bracket the whole run, so dividing by the wall clock would
+# spread the load's CPU across the connection setup and teardown around it.
+dpu_snapshot_cores() {
+  local before="$1" after="$2" window="$3"
+  local pid0 hz0 tick0 pid1 hz1 tick1
   [ -n "$before" ] && [ -n "$after" ] || { echo NA; return; }
-  read -r pid0 hz0 tick0 up0 <<<"$before"
-  read -r pid1 hz1 tick1 up1 <<<"$after"
+  read -r pid0 hz0 tick0 <<<"$before"
+  read -r pid1 hz1 tick1 <<<"$after"
   if [ "$pid0" != "$pid1" ] || [ -z "$hz1" ]; then
     echo NA
     return
   fi
-  awk -v a="$tick0" -v b="$tick1" -v hz="$hz1" -v t0="$up0" -v t1="$up1" '
-    BEGIN {
-      dt=t1-t0
-      if(dt>0 && hz>0) printf "%.6f",(b-a)/hz/dt
-      else print "NA"
-    }
-  '
+  awk -v a="$tick0" -v b="$tick1" -v hz="$hz1" -v d="$window" \
+    'BEGIN{if(d>0 && hz>0) printf "%.6f",(b-a)/hz/d; else print "NA"}'
 }
+
 
 recorded_host_core_budget() {
   local config="$1"
@@ -1185,8 +1220,9 @@ scout_one() {
   body=$(frame_body "$payload")
   local run_id result quality clean achieved_ratio schedule_ratio drop_ratio reason
   local attempt attempt_raw attempt_reason before_proc after_proc
-  local host_t0 host_t1 host_dt core_client core_server host_core_budget
-  local client_busy server_busy host_busy dpu0 dpu1 dpu_cores tx_grow_waits
+  local host_t0 host_t1 host_dt load_dt core_client core_server host_core_budget
+  local client_busy server_busy host_busy dpu_cores tx_grow_waits
+  local dpu0 dpu1
   local raw_base="$RAW/scout-${payload}-${config}-${stage}${seq}-v${visit}.result"
   local raw_result
   run_id="scout-${payload}-${config}-${stage}${seq}-v${visit}"
@@ -1215,13 +1251,15 @@ scout_one() {
       dpu1=$(dpu_snapshot || true)
     fi
     host_dt=$(awk -v a="$host_t0" -v b="$host_t1" 'BEGIN{printf "%.9f",b-a}')
-    client_busy=$(proc_core_busy "$core_client" "$before_proc" "$after_proc" "$host_dt")
-    server_busy=$(proc_core_busy "$core_server" "$before_proc" "$after_proc" "$host_dt")
-    validate_core_busy_sample "$run_id-attempt$attempt" "$client_busy" "$server_busy"
+    load_dt=$(load_window "$result" "$host_dt")
+    client_busy=$(proc_core_busy "$core_client" "$before_proc" "$after_proc" "$load_dt")
+    server_busy=$(proc_core_busy "$core_server" "$before_proc" "$after_proc" "$load_dt")
+    validate_core_busy_sample "$run_id-attempt$attempt" "$client_busy" "$server_busy" \
+      "$(expand_cores "$core_client" | wc -w)"
     host_busy=$(awk -v a="$client_busy" -v b="$server_busy" '
       BEGIN{if(a=="NA" || b=="NA")print "NA";else printf "%.6f",a+b}
     ')
-    dpu_cores=$(dpu_delta_cores "$dpu0" "$dpu1")
+    dpu_cores=$(dpu_snapshot_cores "$dpu0" "$dpu1" "$(field "$result" durs)")
     printf '%s\n' "$result" >"$attempt_raw"
     raw_result="$attempt_raw"
     if [[ "$result" == OK* ]] && frame_result_ok "$result" "$payload" &&
@@ -1434,7 +1472,8 @@ discover_knee() {
   good_waits=$(scout_metric_at "$config" "$payload" "$good" tx_grow_waits)
   host_budget=$(recorded_host_core_budget "$config")
   if [ "$bad" -eq 0 ]; then
-    core_saturated=$(core_saturation_vote "$good_client" "$good_server" NA NA)
+    core_saturated=$(core_saturation_vote "$good_client" "$good_server" NA NA \
+      "$(expand_cores "$PIN_CLIENT_CORE" | wc -w)")
     status=right_censored
     csv_row "$config" "$payload" "$good" NA NA "$status" "$SCOUT_DUR" \
       "$good_client" "$good_server" NA NA "$host_budget" "$core_saturated" \
@@ -1464,7 +1503,8 @@ discover_knee() {
   bad_dpu=$(scout_metric_at "$config" "$payload" "$bad" dpu_arm_cores)
   bad_waits=$(scout_metric_at "$config" "$payload" "$bad" tx_grow_waits)
   core_saturated=$(core_saturation_vote \
-    "$good_client" "$good_server" "$bad_client" "$bad_server")
+    "$good_client" "$good_server" "$bad_client" "$bad_server" \
+    "$(expand_cores "$PIN_CLIENT_CORE" | wc -w)")
   capacity_signal=achieved_rolloff
   [ "$core_saturated" != 1 ] || capacity_signal=host_core
   if [ "$core_saturated" != 1 ] &&
@@ -1548,7 +1588,8 @@ measure_one() {
   local body
   if [ "$phase" = idle ]; then body=0; else body=$(frame_body "$payload"); fi
   local run_id before_cg after_cg before_proc after_proc raw_result mpstat_file
-  local dpu0="" dpu1="" result host_t0 host_t1 host_dt core_client core_server core_csv
+  local result host_t0 host_t1 host_dt load_dt core_client core_server core_csv
+  local dpu0 dpu1
   local status=ok
 
   MEASURE_WROTE=0
@@ -1597,6 +1638,7 @@ measure_one() {
   MPSTAT_PID=0
 
   host_dt=$(awk -v a="$host_t0" -v b="$host_t1" 'BEGIN{printf "%.9f",b-a}')
+  load_dt=$(load_window "$result" "$host_dt")
 
   local ca_u ca_usr ca_sys sa_u sa_usr sa_sys cs_u cs_usr cs_sys ss_u ss_usr ss_sys
   local ca_c ca_usr_c ca_sys_c sa_c sa_usr_c sa_sys_c cs_c cs_usr_c cs_sys_c ss_c ss_usr_c ss_sys_c
@@ -1612,10 +1654,10 @@ measure_one() {
   ss_u=$(cg_delta server_sidecar 4 "$before_cg" "$after_cg")
   ss_usr=$(cg_delta server_sidecar 5 "$before_cg" "$after_cg")
   ss_sys=$(cg_delta server_sidecar 6 "$before_cg" "$after_cg")
-  ca_c=$(to_cores_usec "$ca_u" "$host_dt"); ca_usr_c=$(to_cores_usec "$ca_usr" "$host_dt"); ca_sys_c=$(to_cores_usec "$ca_sys" "$host_dt")
-  sa_c=$(to_cores_usec "$sa_u" "$host_dt"); sa_usr_c=$(to_cores_usec "$sa_usr" "$host_dt"); sa_sys_c=$(to_cores_usec "$sa_sys" "$host_dt")
-  cs_c=$(to_cores_usec "$cs_u" "$host_dt"); cs_usr_c=$(to_cores_usec "$cs_usr" "$host_dt"); cs_sys_c=$(to_cores_usec "$cs_sys" "$host_dt")
-  ss_c=$(to_cores_usec "$ss_u" "$host_dt"); ss_usr_c=$(to_cores_usec "$ss_usr" "$host_dt"); ss_sys_c=$(to_cores_usec "$ss_sys" "$host_dt")
+  ca_c=$(to_cores_usec "$ca_u" "$load_dt"); ca_usr_c=$(to_cores_usec "$ca_usr" "$load_dt"); ca_sys_c=$(to_cores_usec "$ca_sys" "$load_dt")
+  sa_c=$(to_cores_usec "$sa_u" "$load_dt"); sa_usr_c=$(to_cores_usec "$sa_usr" "$load_dt"); sa_sys_c=$(to_cores_usec "$sa_sys" "$load_dt")
+  cs_c=$(to_cores_usec "$cs_u" "$load_dt"); cs_usr_c=$(to_cores_usec "$cs_usr" "$load_dt"); cs_sys_c=$(to_cores_usec "$cs_sys" "$load_dt")
+  ss_c=$(to_cores_usec "$ss_u" "$load_dt"); ss_usr_c=$(to_cores_usec "$ss_usr" "$load_dt"); ss_sys_c=$(to_cores_usec "$ss_sys" "$load_dt")
 
   local host_cg host_cg_user host_cg_system throttled_count throttled_usec throttled_seconds
   host_cg=$(sum_values <<<"$ca_c $sa_c $cs_c $ss_c")
@@ -1635,29 +1677,23 @@ measure_one() {
   p_soft=$(proc_delta selected 8 "$before_proc" "$after_proc")
   p_steal=$(proc_delta selected 9 "$before_proc" "$after_proc")
   p_busy=$((p_user + p_nice + p_system + p_irq + p_soft + p_steal))
-  host_user=$(to_cores_ticks "$((p_user+p_nice))" "$host_dt")
-  host_system=$(to_cores_ticks "$p_system" "$host_dt")
-  host_irq=$(to_cores_ticks "$p_irq" "$host_dt")
-  host_soft=$(to_cores_ticks "$p_soft" "$host_dt")
-  host_busy=$(to_cores_ticks "$p_busy" "$host_dt")
-  client_core_busy=$(proc_core_busy "$core_client" "$before_proc" "$after_proc" "$host_dt")
-  server_core_busy=$(proc_core_busy "$core_server" "$before_proc" "$after_proc" "$host_dt")
-  validate_core_busy_sample "$run_id" "$client_core_busy" "$server_core_busy"
-  system_soft=$(to_cores_ticks "$(proc_delta all 8 "$before_proc" "$after_proc")" "$host_dt")
+  host_user=$(to_cores_ticks "$((p_user+p_nice))" "$load_dt")
+  host_system=$(to_cores_ticks "$p_system" "$load_dt")
+  host_irq=$(to_cores_ticks "$p_irq" "$load_dt")
+  host_soft=$(to_cores_ticks "$p_soft" "$load_dt")
+  host_busy=$(to_cores_ticks "$p_busy" "$load_dt")
+  client_core_busy=$(proc_core_busy "$core_client" "$before_proc" "$after_proc" "$load_dt")
+  server_core_busy=$(proc_core_busy "$core_server" "$before_proc" "$after_proc" "$load_dt")
+  validate_core_busy_sample "$run_id" "$client_core_busy" "$server_core_busy" \
+    "$(expand_cores "$core_client" | wc -w)"
+  system_soft=$(to_cores_ticks "$(proc_delta all 8 "$before_proc" "$after_proc")" "$load_dt")
 
-  local dpu_cores=NA dpu_dt
-  if is_dpu_config "$config" && [ -n "$dpu0" ] && [ -n "$dpu1" ]; then
-    read -r dpid0 dhz0 dtick0 dup0 <<<"$dpu0"
-    read -r dpid1 dhz1 dtick1 dup1 <<<"$dpu1"
-    if [ "$dpid0" = "$dpid1" ]; then
-      dpu_dt=$(awk -v a="$dup0" -v b="$dup1" 'BEGIN{print b-a}')
-      dpu_cores=$(awk -v a="$dtick0" -v b="$dtick1" -v h="$dhz1" -v d="$dpu_dt" \
-        'BEGIN{if(d>0)printf "%.6f",(b-a)/h/d;else print "NA"}')
-    else
-      status=dpu_restarted
-    fi
-  elif is_dpu_config "$config"; then
-    status=dpu_snapshot_error
+  local dpu_cores=NA
+  if is_dpu_config "$config"; then
+    dpu_cores=$(dpu_snapshot_cores "$dpu0" "$dpu1" "$(field "$result" durs)")
+    # DPU CPU is reported, never gating, so a missed sample must not discard
+    # an otherwise valid run.
+    [ "$dpu_cores" = NA ] && warn "$run_id: DPU CPU not sampled"
   fi
 
   local ok scheduled pending fail drops overflow reorder reported_offered achieved
@@ -1691,7 +1727,7 @@ measure_one() {
     tx_grow_waits=NA
     reported_offered=NA; achieved=NA; gbps=NA; request_gbps=NA; response_gbps=NA
     p50=NA; p95=NA; p99=NA; p999=NA; p9999=NA
-    avg=NA; min=NA; max=NA; measured_dur="$host_dt"
+    avg=NA; min=NA; max=NA; measured_dur="$load_dt"
     status=runtime_error
   fi
   local perf_data=NA
