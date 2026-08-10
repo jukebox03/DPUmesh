@@ -1,4 +1,5 @@
-FROM envoyproxy/envoy:v1.30-latest
+ARG ENVOY_BASE=envoyproxy/envoy:v1.30-latest
+FROM ${ENVOY_BASE}
 
 USER root
 RUN apt-get update && \

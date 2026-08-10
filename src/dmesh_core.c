@@ -64,10 +64,11 @@ static void tx_timer_stop(struct dpumesh_ctx *ctx);
 #define TX_BLOCKS_PER_CONN     8
 #define TX_RECYCLED_CUSHION    1
 /* A busy stream retains only its newest partial unit until this deadline. The
- * timer tick bounds how late an owner that is not otherwise woken observes
- * it. */
+ * timer sleeps until the earliest deadline in the context, clamped to the wait
+ * range below. */
 #define TX_TAIL_DELAY_NS        500000ull
 #define TX_TIMER_TICK_NS       1000000ull
+#define TX_TIMER_MIN_WAIT_NS     50000ull
 
 enum dmesh_tx_wait_state {
     DMESH_TX_WAIT_IDLE = 0,
@@ -543,6 +544,22 @@ static int64_t eq_tx_armed_wait_ns(struct dmesh_eq *eq, uint64_t now)
     return earliest <= now ? 0 : (int64_t)(earliest - now);
 }
 
+/* Nanoseconds until the earliest retained tail in the context comes due,
+ * clamped to [TX_TIMER_MIN_WAIT_NS, TX_TIMER_TICK_NS]. */
+static uint64_t tx_timer_wait_ns(dpumesh_ctx_t *ctx, uint64_t now)
+{
+    uint64_t wait = TX_TIMER_TICK_NS;
+    pthread_mutex_lock(&ctx->eq_lock);
+    for (int i = 0; i < ctx->n_eqs; i++) {
+        struct dmesh_eq *eq = ctx->eqs[i];
+        if (!eq) continue;
+        int64_t due = eq_tx_armed_wait_ns(eq, now);
+        if (due >= 0 && (uint64_t)due < wait) wait = (uint64_t)due;
+    }
+    pthread_mutex_unlock(&ctx->eq_lock);
+    return wait < TX_TIMER_MIN_WAIT_NS ? TX_TIMER_MIN_WAIT_NS : wait;
+}
+
 /* Wake owners blocked in poll while holding a retained tail. Publishes nothing
  * and reads no port slot. */
 static void *tx_timer_fn(void *arg)
@@ -555,23 +572,28 @@ static void *tx_timer_fn(void *arg)
                                     memory_order_acquire) == 0)
             pthread_cond_wait(&ctx->tx_timer_cv, &ctx->tx_timer_lock);
         int running = ctx->tx_timer_running;
-        if (running) {
-            uint64_t wake_ns = monotonic_ns() + TX_TIMER_TICK_NS;
-            struct timespec wake = {
-                .tv_sec = (time_t)(wake_ns / 1000000000ull),
-                .tv_nsec = (long)(wake_ns % 1000000000ull),
-            };
+        pthread_mutex_unlock(&ctx->tx_timer_lock);
+        if (!running)
+            break;
+
+        uint64_t now = monotonic_ns();
+        uint64_t wake_ns = now + tx_timer_wait_ns(ctx, now);
+        struct timespec wake = {
+            .tv_sec = (time_t)(wake_ns / 1000000000ull),
+            .tv_nsec = (long)(wake_ns % 1000000000ull),
+        };
+        pthread_mutex_lock(&ctx->tx_timer_lock);
+        if (ctx->tx_timer_running)
             pthread_cond_timedwait(&ctx->tx_timer_cv, &ctx->tx_timer_lock,
                                    &wake);
-            running = ctx->tx_timer_running;
-        }
+        running = ctx->tx_timer_running;
         pthread_mutex_unlock(&ctx->tx_timer_lock);
         if (!running)
             break;
 
         /* Wake only an EQ whose earliest tail has come due, once per EQ: its
          * owner drains every expired tail in one pass. */
-        uint64_t now = monotonic_ns();
+        now = monotonic_ns();
         pthread_mutex_lock(&ctx->eq_lock);
         for (int i = 0; i < ctx->n_eqs; i++) {
             struct dmesh_eq *eq = ctx->eqs[i];

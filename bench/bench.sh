@@ -50,8 +50,15 @@ IMG_BENCH_GRPC="bench/bench-grpc:latest"
 IMG_ECHO_GRPC="bench/echo-grpc:latest"
 IMG_BENCH_TCP="bench/bench-tcp:latest"
 IMG_ECHO_TCP="bench/echo-tcp:latest"
-IMG_ENVOY_BASE="envoyproxy/envoy:v1.30-latest"
-IMG_ENVOY="bench/envoy-numa:v1.30-latest"
+# BENCH_ENVOY_DEBUG=1 selects the unstripped build of the same release, which
+# resolves sidecar symbols in a profile.
+if [ "${BENCH_ENVOY_DEBUG:-0}" = 1 ]; then
+    IMG_ENVOY_BASE="envoyproxy/envoy:debug-v1.30-latest"
+    IMG_ENVOY="bench/envoy-numa:debug-v1.30-latest"
+else
+    IMG_ENVOY_BASE="envoyproxy/envoy:v1.30-latest"
+    IMG_ENVOY="bench/envoy-numa:v1.30-latest"
+fi
 
 # benchmark sweep knobs
 OUT="${OUT:-/tmp/dpumesh-bench}"
@@ -215,10 +222,11 @@ build_bench_binaries() {
 }
 
 ### ------------------------------------------------------------ container images
-build_image() {  # $1 = Dockerfile, $2 = tag, $3 = build context
-    docker build -f "$1" -t "$2" "$3"
-    sudo ctr -n k8s.io images rm "docker.io/$2" 2>/dev/null || true
-    docker save "$2" | sudo ctr -n k8s.io images import -
+build_image() {  # $1 = Dockerfile, $2 = tag, $3 = build context, $4.. = --build-arg
+    local df="$1" tag="$2" ctx="$3"; shift 3
+    docker build -f "$df" -t "$tag" "$@" "$ctx"
+    sudo ctr -n k8s.io images rm "docker.io/$tag" 2>/dev/null || true
+    docker save "$tag" | sudo ctr -n k8s.io images import -
     docker image prune -f >/dev/null 2>&1 || true
 }
 
@@ -278,7 +286,8 @@ ensure_envoy_image() {
     fi
     info "Building NUMA-aware Envoy image"
     echo "$HOST_PASS" | sudo -S true 2>/dev/null
-    build_image "$BENCH_DIR/docker/envoy_numa.Dockerfile" "$IMG_ENVOY" "$PROJ_ROOT"
+    build_image "$BENCH_DIR/docker/envoy_numa.Dockerfile" "$IMG_ENVOY" "$PROJ_ROOT" \
+        --build-arg "ENVOY_BASE=$IMG_ENVOY_BASE"
 }
 
 ### ------------------------------------------------------------ DPU process

@@ -130,6 +130,22 @@ construction. Every path knee requires at least 1.25× generator headroom.
 The complete metric and analysis contract is in
 [REPORT.md](report/REPORT.md).
 
+`REPORT.md` reports how much host CPU each path costs. What that CPU is — the
+share of an endpoint core spent in application code, the transport library, the
+gRPC runtime, an Envoy sidecar, the kernel network stack, or being woken up — is
+collected by a separate campaign:
+
+```sh
+./bench/suite/core_isolate.sh on
+./bench/suite/core_campaign.sh --family l4 --out /tmp/core-l4
+./bench/suite/core_report.sh /tmp/core-l4/*/ --out bench/report/core --stem l4
+```
+
+`core_campaign.sh` drives one configuration at a time over three offered rates
+and three repetitions; `core_report.sh` writes the per-layer CSVs, the flame
+graphs and the figures. Results, method and contract are in
+[CORE.md](report/CORE.md).
+
 ## 5. gRPC measurements
 
 The gRPC campaign uses the same collector, deployed with the `grpc` scope so
@@ -152,8 +168,9 @@ python3 integrations/grpc/bench/suite/plot_grpc.py measurements.csv \
 The deployment scope and pin profile follow the selected configurations, so a
 gRPC-only `CONFIGS` list needs neither flag. Each path owns one client core and
 one server core; Envoy sidecars share the endpoint cores, as at L4. `--no-perf`
-is required on this host because `perf` collects no samples inside the benchmark
-containers.
+is required because the collector's per-process perf mode collects no samples
+inside the benchmark containers; the core-wide profile in
+[`suite/core_profile.sh`](suite/core_profile.sh) does.
 
 `./bench/bench.sh grpcbuild` builds the gRPC programs alone; `deploy` runs it
 before building the images. Program syntax, control protocol, environment, and
