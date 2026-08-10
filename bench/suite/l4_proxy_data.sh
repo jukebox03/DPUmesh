@@ -27,6 +27,14 @@ ARRIVAL="${ARRIVAL:-const}"
 REPS="${REPS:-3}"
 DUR="${DUR:-10}"
 WARMUP="${WARMUP:-200}"
+# The CPU bracket opens once the connections are up and the rate is steady, and
+# closes before the generator starts tearing down. Connection setup costs about
+# two seconds regardless of how long the load then runs, so the opening delay has
+# a floor and a run too short to clear it reports no CPU at all.
+CPU_SETTLE="${CPU_SETTLE:-$(awk -v d="${DUR:-10}" \
+  'BEGIN{s=d*0.25; if(s<2.5) s=2.5; printf "%.2f", s}')}"
+CPU_SAMPLE="${CPU_SAMPLE:-$(awk -v d="${DUR:-10}" \
+  'BEGIN{printf "%.2f", d*0.60}')}"
 # Capacity discovery uses the exact same OPEN workload as the retained runs.
 # A short pilot locates the neighborhood; the accepted bracket uses the same
 # 10-second window as retained runs. No closed-loop result is used as an anchor.
@@ -319,6 +327,16 @@ done
 [ -f "$PROJ_ROOT/.env" ] || { echo "missing $PROJ_ROOT/.env" >&2; exit 1; }
 : "${HOST_PASS:?.env missing HOST_PASS}" "${DPU_HOST:?.env missing DPU_HOST}" \
   "${DPU_PASS:?.env missing DPU_PASS}"
+
+# Two campaigns under load contend for the DPU and the memory system even on
+# disjoint cores, and each one's traffic lands in the other's CPU window. The
+# lock is shared with the other sweeps so any pair of them refuses to overlap.
+LOCK="${BENCH_LOCK:-/tmp/dpumesh-bench.lock}"
+exec 9>"$LOCK"
+flock -n 9 || {
+  echo "another bench campaign holds $LOCK; run them one at a time" >&2
+  exit 1
+}
 
 OUT="${OUT:-$PROJ_ROOT/bench/report/data/l4-$(date +%Y%m%d-%H%M%S)}"
 RAW="$OUT/raw"
@@ -1006,12 +1024,23 @@ snapshot_proc() {
       printf "%s,%s,%s,%s,%s,%s,%s,%s,%s\n",
              $1,$2,$3,$4,$5,$6,$7,$8,$9
     }' /proc/stat >"$out"
+  # `/proc/stat` charges a whole tick to whoever holds the CPU at a jiffie
+  # boundary, so a core woken and re-parked between boundaries is miscounted in
+  # either direction. Field 8 of a `cpuN` line of `/proc/schedstat` is
+  # `rq_cpu_time`: the nanosecond-exact runtime of every task that ran on that
+  # runqueue, which covers the application, its sidecar and the kernel threads
+  # working on their behalf.
+  awk -v want=" $want " '
+    $1 ~ /^cpu[0-9]+$/ && index(want, " " $1 " ") {
+      printf "sched_%s,%s\n", $1, $8
+    }' /proc/schedstat >>"$out"
 }
 
 proc_delta() {
   local scope="$1" column="$2" before="$3" after="$4"
   awk -F, -v scope="$scope" -v c="$column" '
     NR==FNR {old[$1]=$c; next}
+    $1 ~ /^sched_/ {next}
     (scope=="all" && $1=="cpu") || (scope=="selected" && $1!="cpu") {
       sum += $c-old[$1]
     }
@@ -1026,6 +1055,21 @@ proc_core_busy() {
     index(want, " " $1 " ") { if($1 in old) { sum += ($2+$3+$4+$7+$8+$9) - old[$1]; found++ } }
     END {
       if(seen && found && elapsed>0) printf "%.6f", sum/hz/elapsed
+      else print "NA"
+    }
+  ' "$before" "$after"
+}
+
+# The same quantity from runqueue runtime rather than tick samples. This is the
+# reported host cost; `proc_core_busy` is kept as a reference column.
+sched_core_busy() {
+  local core_spec="$1" before="$2" after="$3" dt="$4" want="" c
+  for c in $(expand_cores "$core_spec"); do want="$want sched_cpu$c "; done
+  awk -F, -v want=" $want " -v elapsed="$dt" '
+    NR==FNR { if(index(want, " " $1 " ")) { old[$1]=$2; seen++ } ; next }
+    index(want, " " $1 " ") { if($1 in old) { sum += $2-old[$1]; found++ } }
+    END {
+      if(seen && found && elapsed>0) printf "%.6f", sum/1e9/elapsed
       else print "NA"
     }
   ' "$before" "$after"
@@ -1238,28 +1282,39 @@ scout_one() {
     before_proc="$SNAP_DIR/$run_id-attempt$attempt.proc.before.csv"
     after_proc="$SNAP_DIR/$run_id-attempt$attempt.proc.after.csv"
     dpu0=""; dpu1=""
+    scout_settle=$(awk -v d="$duration" 'BEGIN{printf "%.2f", d*0.25}')
+    scout_sample=$(awk -v d="$duration" 'BEGIN{printf "%.2f", d*0.60}')
+    scout_out=$(mktemp)
+    ( run_control "$CLIENT_APP" \
+        "OPEN $body $body $THREADS $duration $WARMUP $offered $ARRIVAL" \
+        "$duration" >"$scout_out" 2>/dev/null ) &
+    scout_pid=$!
+    sleep "$scout_settle"
     if [ "$stage" != pilot ] && is_dpu_config "$config"; then
       dpu0=$(dpu_snapshot || true)
     fi
     host_t0=$(date +%s.%N)
     snapshot_proc "$before_proc" "$core_client" "$core_server"
-    result=$(run_control "$CLIENT_APP" \
-      "OPEN $body $body $THREADS $duration $WARMUP $offered $ARRIVAL" "$duration")
+    sleep "$scout_sample"
     snapshot_proc "$after_proc" "$core_client" "$core_server"
     host_t1=$(date +%s.%N)
     if [ "$stage" != pilot ] && is_dpu_config "$config"; then
       dpu1=$(dpu_snapshot || true)
     fi
+    wait "$scout_pid" 2>/dev/null || true
+    result=$(cat "$scout_out" 2>/dev/null || true)
+    [ -n "$result" ] || result="ERR control"
+    rm -f "$scout_out"
     host_dt=$(awk -v a="$host_t0" -v b="$host_t1" 'BEGIN{printf "%.9f",b-a}')
-    load_dt=$(load_window "$result" "$host_dt")
-    client_busy=$(proc_core_busy "$core_client" "$before_proc" "$after_proc" "$load_dt")
-    server_busy=$(proc_core_busy "$core_server" "$before_proc" "$after_proc" "$load_dt")
+    load_dt="$host_dt"
+    client_busy=$(sched_core_busy "$core_client" "$before_proc" "$after_proc" "$load_dt")
+    server_busy=$(sched_core_busy "$core_server" "$before_proc" "$after_proc" "$load_dt")
     validate_core_busy_sample "$run_id-attempt$attempt" "$client_busy" "$server_busy" \
       "$(expand_cores "$core_client" | wc -w)"
     host_busy=$(awk -v a="$client_busy" -v b="$server_busy" '
       BEGIN{if(a=="NA" || b=="NA")print "NA";else printf "%.6f",a+b}
     ')
-    dpu_cores=$(dpu_snapshot_cores "$dpu0" "$dpu1" "$(field "$result" durs)")
+    dpu_cores=$(dpu_snapshot_cores "$dpu0" "$dpu1" "$load_dt")
     printf '%s\n' "$result" >"$attempt_raw"
     raw_result="$attempt_raw"
     if [[ "$result" == OK* ]] && frame_result_ok "$result" "$payload" &&
@@ -1615,22 +1670,43 @@ measure_one() {
 
   mpstat -P ALL 1 >"$mpstat_file" 2>&1 &
   MPSTAT_PID=$!
-  is_dpu_config "$config" && dpu0=$(dpu_snapshot)
-  host_t0=$(date +%s.%N)
-  snapshot_cgroups "$before_cg"
-  snapshot_proc "$before_proc" "$core_client" "$core_server"
 
   if [ "$phase" = idle ]; then
+    is_dpu_config "$config" && dpu0=$(dpu_snapshot)
+    host_t0=$(date +%s.%N)
+    snapshot_cgroups "$before_cg"
+    snapshot_proc "$before_proc" "$core_client" "$core_server"
     sleep "$IDLE_DUR"
     result="OK rcnt=0 scheduled=0 pending=0 fail=0 mrps=0 gbps=0 req_gbps=0 resp_gbps=0 p50=0 p95=0 p99=0 p999=0 p9999=0 avg=0 min=0 max=0 durs=$IDLE_DUR offered_mrps=0 drops=0 overflow=0 reorder=0 mode=idle arr=none"
+    snapshot_proc "$after_proc" "$core_client" "$core_server"
+    snapshot_cgroups "$after_cg"
+    host_t1=$(date +%s.%N)
+    is_dpu_config "$config" && dpu1=$(dpu_snapshot)
   else
-    result=$(run_control "$CLIENT_APP" \
-      "OPEN $body $body $THREADS $DUR $WARMUP $offered $ARRIVAL" "$DUR")
+    # Connection setup and teardown burn CPU that belongs to no offered rate, so
+    # the load runs in the background and every counter is bracketed strictly
+    # inside it. Numerator and denominator then cover the same interval.
+    local ctrl_out ctrl_pid
+    ctrl_out=$(mktemp)
+    ( run_control "$CLIENT_APP" \
+        "OPEN $body $body $THREADS $DUR $WARMUP $offered $ARRIVAL" "$DUR" \
+        >"$ctrl_out" 2>/dev/null ) &
+    ctrl_pid=$!
+    sleep "$CPU_SETTLE"
+    is_dpu_config "$config" && dpu0=$(dpu_snapshot)
+    host_t0=$(date +%s.%N)
+    snapshot_cgroups "$before_cg"
+    snapshot_proc "$before_proc" "$core_client" "$core_server"
+    sleep "$CPU_SAMPLE"
+    snapshot_proc "$after_proc" "$core_client" "$core_server"
+    snapshot_cgroups "$after_cg"
+    host_t1=$(date +%s.%N)
+    is_dpu_config "$config" && dpu1=$(dpu_snapshot)
+    wait "$ctrl_pid" 2>/dev/null || true
+    result=$(cat "$ctrl_out" 2>/dev/null || true)
+    [ -n "$result" ] || result="ERR control"
+    rm -f "$ctrl_out"
   fi
-  snapshot_proc "$after_proc" "$core_client" "$core_server"
-  snapshot_cgroups "$after_cg"
-  host_t1=$(date +%s.%N)
-  is_dpu_config "$config" && dpu1=$(dpu_snapshot)
   printf '%s\n' "$result" >"$raw_result"
 
   kill -INT "$MPSTAT_PID" 2>/dev/null || true
@@ -1638,7 +1714,9 @@ measure_one() {
   MPSTAT_PID=0
 
   host_dt=$(awk -v a="$host_t0" -v b="$host_t1" 'BEGIN{printf "%.9f",b-a}')
-  load_dt=$(load_window "$result" "$host_dt")
+  # The bracket is the measurement window; the generator's own duration only
+  # bounds it.
+  load_dt="$host_dt"
 
   local ca_u ca_usr ca_sys sa_u sa_usr sa_sys cs_u cs_usr cs_sys ss_u ss_usr ss_sys
   local ca_c ca_usr_c ca_sys_c sa_c sa_usr_c sa_sys_c cs_c cs_usr_c cs_sys_c ss_c ss_usr_c ss_sys_c
@@ -1682,15 +1760,18 @@ measure_one() {
   host_irq=$(to_cores_ticks "$p_irq" "$load_dt")
   host_soft=$(to_cores_ticks "$p_soft" "$load_dt")
   host_busy=$(to_cores_ticks "$p_busy" "$load_dt")
-  client_core_busy=$(proc_core_busy "$core_client" "$before_proc" "$after_proc" "$load_dt")
-  server_core_busy=$(proc_core_busy "$core_server" "$before_proc" "$after_proc" "$load_dt")
+  client_core_busy=$(sched_core_busy "$core_client" "$before_proc" "$after_proc" "$load_dt")
+  server_core_busy=$(sched_core_busy "$core_server" "$before_proc" "$after_proc" "$load_dt")
+  local client_tick_busy server_tick_busy
+  client_tick_busy=$(proc_core_busy "$core_client" "$before_proc" "$after_proc" "$load_dt")
+  server_tick_busy=$(proc_core_busy "$core_server" "$before_proc" "$after_proc" "$load_dt")
   validate_core_busy_sample "$run_id" "$client_core_busy" "$server_core_busy" \
     "$(expand_cores "$core_client" | wc -w)"
   system_soft=$(to_cores_ticks "$(proc_delta all 8 "$before_proc" "$after_proc")" "$load_dt")
 
   local dpu_cores=NA
   if is_dpu_config "$config"; then
-    dpu_cores=$(dpu_snapshot_cores "$dpu0" "$dpu1" "$(field "$result" durs)")
+    dpu_cores=$(dpu_snapshot_cores "$dpu0" "$dpu1" "$load_dt")
     # DPU CPU is reported, never gating, so a missed sample must not discard
     # an otherwise valid run.
     [ "$dpu_cores" = NA ] && warn "$run_id: DPU CPU not sampled"
@@ -1762,7 +1843,8 @@ measure_one() {
     "$ca_c" "$ca_usr_c" "$ca_sys_c" "$sa_c" "$sa_usr_c" "$sa_sys_c" \
     "$cs_c" "$cs_usr_c" "$cs_sys_c" "$ss_c" "$ss_usr_c" "$ss_sys_c" \
     "$host_cg" "$host_cg_user" "$host_cg_system" "$host_busy" \
-    "$client_core_busy" "$server_core_busy" "$host_user" \
+    "$client_core_busy" "$server_core_busy" \
+    "$client_tick_busy" "$server_tick_busy" "$host_user" \
     "$host_system" "$host_irq" "$host_soft" "$system_soft" "$dpu_cores" \
     "$tx_grow_waits" \
     "$throttled_count" "$throttled_seconds" "${core_client};${core_server}" \
@@ -2419,7 +2501,7 @@ if [ ! -s "$META" ]; then
     echo "recovery_policy=low-rate recovery first; canonical redeploy with full invariant validation on failure; maximum $MAX_RECOVERY_REDEPLOYS redeploys; runtime-failed rows are excluded, preserved, and retried up to $MAX_RUN_RETRIES times"
     echo "topology=N/K/A=$DPU_DPA_THREADS/$DPU_RINGS_PER_POD/$DPU_ARM_WORKERS L7=disabled NUMA=PCI-local pin=l4"
     echo "host_budget=2 exclusive host cores per config: client endpoint=1 server endpoint=1; Envoy app+sidecar share the endpoint core"
-    echo "host_saturation=physical endpoint /proc/stat busy >=$CORE_SATURATION_THRESHOLD at either accepted bracket endpoint; cgroup CPU is attribution only"
+    echo "host_saturation=physical endpoint runqueue runtime (/proc/schedstat rq_cpu_time) >=$CORE_SATURATION_THRESHOLD at either accepted bracket endpoint; cgroup CPU is attribution only, /proc/stat tick busy is reference only"
     echo "semantics=open-loop only for capacity discovery and retained load; $THREADS persistent data connections within each timed run; at least one connection per connection-affine DPU shard; no configured closed-loop in-flight count; control listener excluded from data path"
     echo "aggregation=one client endpoint and one active server backend for every config; throughput is single-backend end-to-end, not a multi-backend aggregate"
     echo "binary_equivalence=envoy-permissive,envoy-strict,dpumesh-preload use byte-identical bench_sock/echo_sock; dpumesh-native uses bench_dpumesh/echo_dpumesh"
@@ -2479,7 +2561,7 @@ if [ -s "$PERF_MANIFEST" ]; then
 else
   printf '%s\n' "$PERF_HEADER" >"$PERF_MANIFEST"
 fi
-RESULT_HEADER="run_id,phase,config,frame_bytes,request_body_bytes,response_body_bytes,connections,arrival,rate_index,offered_rps,reported_offered_rps,rep,duration_s,achieved_rps,gbps,request_gbps,response_gbps,p50_us,p95_us,p99_us,p999_us,p9999_us,avg_us,min_us,max_us,ok,scheduled,pending,fail,admission_drops,overflow,reorder,client_app_cores,client_app_user_cores,client_app_system_cores,server_app_cores,server_app_user_cores,server_app_system_cores,client_sidecar_cores,client_sidecar_user_cores,client_sidecar_system_cores,server_sidecar_cores,server_sidecar_user_cores,server_sidecar_system_cores,host_cgroup_cores,host_cgroup_user_cores,host_cgroup_system_cores,host_busy_cores,client_core_busy_cores,server_core_busy_cores,host_user_cores,host_system_cores,host_irq_cores,host_softirq_cores,system_softirq_cores,dpu_arm_cores,tx_grow_waits,nr_throttled,throttled_seconds,core_list,mpstat_file,perf_data,validation_status,served_clean,achieved_ratio,schedule_ratio,admission_drop_ratio,clean_reason"
+RESULT_HEADER="run_id,phase,config,frame_bytes,request_body_bytes,response_body_bytes,connections,arrival,rate_index,offered_rps,reported_offered_rps,rep,duration_s,achieved_rps,gbps,request_gbps,response_gbps,p50_us,p95_us,p99_us,p999_us,p9999_us,avg_us,min_us,max_us,ok,scheduled,pending,fail,admission_drops,overflow,reorder,client_app_cores,client_app_user_cores,client_app_system_cores,server_app_cores,server_app_user_cores,server_app_system_cores,client_sidecar_cores,client_sidecar_user_cores,client_sidecar_system_cores,server_sidecar_cores,server_sidecar_user_cores,server_sidecar_system_cores,host_cgroup_cores,host_cgroup_user_cores,host_cgroup_system_cores,host_busy_cores,client_core_busy_cores,server_core_busy_cores,client_tick_busy_cores,server_tick_busy_cores,host_user_cores,host_system_cores,host_irq_cores,host_softirq_cores,system_softirq_cores,dpu_arm_cores,tx_grow_waits,nr_throttled,throttled_seconds,core_list,mpstat_file,perf_data,validation_status,served_clean,achieved_ratio,schedule_ratio,admission_drop_ratio,clean_reason"
 if [ -s "$RESULTS" ]; then
   [ "$(head -n 1 "$RESULTS")" = "$RESULT_HEADER" ] ||
     die "results.csv schema differs from this collector version; choose a new --out directory"

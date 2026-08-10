@@ -66,13 +66,19 @@ spec:
         - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
         - { name: DPUMESH_SERVICE, value: "echo-grpc-dpumesh" }
         - { name: BENCH_REACTORS, value: "${BENCH_REACTORS}" }
+        # Ignored by a release build. Under the ASan image the report goes to the
+        # host, because a container that dies takes its log with it.
+        - { name: ASAN_OPTIONS, value: "log_path=/var/log/dpumesh-asan/echo,detect_leaks=0,print_stacktrace=1" }
+        - { name: UBSAN_OPTIONS, value: "log_path=/var/log/dpumesh-asan/echo-ubsan,print_stacktrace=1" }
         securityContext: { privileged: true }
         volumeMounts:
         - { mountPath: /dev/infiniband, name: infiniband }
         - { mountPath: /usr/local/lib/libdpumesh.so.4, name: libdpumesh-so, subPath: libdpumesh.so.4 }
+        - { mountPath: /var/log/dpumesh-asan, name: sanitizer-logs }
       volumes:
       - { name: infiniband, hostPath: { path: /dev/infiniband } }
       - { name: libdpumesh-so, hostPath: { path: ${LIB_OUT}, type: Directory } }
+      - { name: sanitizer-logs, hostPath: { path: ${ASAN_LOG_DIR}, type: DirectoryOrCreate } }
 ---
 apiVersion: v1
 kind: Service

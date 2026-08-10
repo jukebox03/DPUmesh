@@ -1,0 +1,13 @@
+config,frame_bytes,highest_clean_rps,lowest_bad_rps,bracket_ratio,status,validation_duration_s,highest_clean_client_busy,highest_clean_server_busy,lowest_bad_client_busy,lowest_bad_server_busy,host_core_budget,core_saturated,core_saturation_threshold,highest_clean_dpu_arm_cores,lowest_bad_dpu_arm_cores,highest_clean_tx_grow_waits,lowest_bad_tx_grow_waits,capacity_signal
+grpc-envoy-permissive,64,47481,55168,1.161896,bracketed,8,0.995312,0.911332,0.995723,0.931931,2,1,0.95,NA,NA,0.000000,0.000000,host_core
+grpc-envoy-strict,64,47481,55168,1.161896,bracketed,8,0.995233,0.914775,0.995105,0.946547,2,1,0.95,NA,NA,0.000000,0.000000,host_core
+grpc-tcp,64,30270,35171,1.161909,bracketed,8,0.972996,0.933826,0.994611,0.995286,2,1,0.95,NA,NA,0.000000,0.000000,host_core
+grpc-dpumesh,64,30270,35171,1.161909,bracketed,8,0.930791,0.896601,0.995482,0.995340,2,1,0.95,2.409995,1.542067,0.000000,0.000000,host_core
+grpc-envoy-permissive,1024,47481,55168,1.161896,bracketed,8,0.995295,0.934733,0.995453,0.893668,2,1,0.95,NA,NA,0.000000,0.000000,host_core
+grpc-envoy-strict,1024,40865,47481,1.161899,bracketed,8,0.995321,0.938028,0.995643,0.893383,2,1,0.95,NA,NA,0.000000,0.000000,host_core
+grpc-tcp,1024,30270,35171,1.161909,bracketed,8,0.995350,0.994537,0.995444,0.995283,2,1,0.95,NA,NA,0.000000,0.000000,host_core
+grpc-dpumesh,1024,26052,30270,1.161907,bracketed,8,0.815113,0.788553,0.963970,0.910799,2,1,0.95,2.266453,2.408568,0.000000,0.000000,host_core
+grpc-envoy-permissive,8192,35171,40865,1.161895,bracketed,8,0.995360,0.921866,0.995089,0.874460,2,1,0.95,NA,NA,0.000000,0.000000,host_core
+grpc-envoy-strict,8192,26052,30270,1.161907,bracketed,8,0.995311,0.970835,0.995262,0.902253,2,1,0.95,NA,NA,0.000000,0.000000,host_core
+grpc-tcp,8192,26052,30270,1.161907,bracketed,8,0.995320,0.994501,0.995622,0.988992,2,1,0.95,NA,NA,0.000000,0.000000,host_core
+grpc-dpumesh,8192,22422,26052,1.161895,bracketed,8,0.885159,0.911587,0.978017,0.976967,2,1,0.95,2.535921,1.379874,0.000000,55.500000,host_core

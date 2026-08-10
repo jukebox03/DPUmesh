@@ -3,9 +3,10 @@
 
 Joins results.csv with rates.csv so every retained load point carries the rate
 family it came from, then takes the median across repetitions. Host CPU is the
-physical endpoint cores' /proc/stat busy fraction, which includes softirq
-serviced on those cores; the cgroup columns are attribution only and are not
-used here.
+runqueue runtime of the physical endpoint cores, which counts the application,
+its sidecar and the kernel threads working on their behalf. The cgroup sum of
+application and sidecar is carried alongside as the attribution figure; the
+difference between the two is kernel work owned by no pod.
 
   usage: distill.py RUN_DIR OUT_CSV
 """
@@ -17,7 +18,8 @@ from collections import defaultdict
 from pathlib import Path
 
 OUT_HEADER = ["config", "frame", "kind", "offered", "achieved", "client",
-              "server", "p99", "drop", "clean"]
+              "server", "client_cgroup", "server_cgroup", "p99", "drop",
+              "clean"]
 
 
 def read_csv(path):
@@ -50,11 +52,23 @@ def main():
         def med(column):
             values = [float(r[column]) for r in reps if r[column] not in ("", "NA")]
             return statistics.median(values) if values else 0.0
+
+        def med_sum(*columns):
+            """Sum the columns within a repetition, then take the median."""
+            values = []
+            for r in reps:
+                parts = [r[c] for c in columns if c in r]
+                if parts and all(p not in ("", "NA") for p in parts):
+                    values.append(sum(float(p) for p in parts))
+            return statistics.median(values) if values else 0.0
+
         clean = 1 if all(r["served_clean"] == "1" for r in reps) else 0
         rows.append([config, frame, kind, offered,
                      med("achieved_rps"),
                      med("client_core_busy_cores"),
                      med("server_core_busy_cores"),
+                     med_sum("client_app_cores", "client_sidecar_cores"),
+                     med_sum("server_app_cores", "server_sidecar_cores"),
                      med("p99_us"),
                      med("admission_drop_ratio"),
                      clean])

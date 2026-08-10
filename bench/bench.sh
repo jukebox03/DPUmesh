@@ -73,6 +73,18 @@ BENCH_NUMA_POLICY="${BENCH_NUMA_POLICY:-local}"
 BENCH_DEPLOY_SCOPE="${BENCH_DEPLOY_SCOPE:-all}"
 BENCH_NUMA_CONFIGURED=0
 
+# Which build the gRPC server image carries. `asan` instruments echo_grpc and
+# keeps debug info, turning a fault the release binary reports only as a signal
+# into a symbolized report. The client stays on the release build either way: an
+# instrumented generator cannot offer the load that provokes the fault.
+BENCH_GRPC_BUILD="${BENCH_GRPC_BUILD:-release}"
+GRPC_BENCH_BUILD_DIR="build/grpc-release"
+case "$BENCH_GRPC_BUILD" in
+    release) GRPC_ECHO_BUILD_DIR="build/grpc-release" ;;
+    asan)    GRPC_ECHO_BUILD_DIR="build/grpc-asan" ;;
+    *) echo "BENCH_GRPC_BUILD must be release or asan (got $BENCH_GRPC_BUILD)" >&2; exit 1 ;;
+esac
+
 need_env() { : "${DPU_HOST:?.env missing DPU_HOST}" "${HOST_PASS:?.env missing HOST_PASS}" \
                 "${DPU_PASS:?.env missing DPU_PASS}" "${HOST_PCI:?.env missing HOST_PCI}" \
                 "${DPU_PCI:?.env missing DPU_PCI}"; }
@@ -163,18 +175,41 @@ configure_host_numa() {
     info "Host NUMA: PCI $HOST_PCI -> node $BENCH_NUMA_NODE, benchmark cores ${BENCH_CORE_BASE}-$((BENCH_CORE_BASE + 17))"
 }
 
+### ------------------------------------------------------------ remote shell
+# A campaign spans tens of minutes and opens a new connection for every DPU round
+# trip, so a link that blips takes the run with it. Keepalives turn a silent drop
+# into a prompt failure and BatchMode refuses to wait at a prompt.
+SSH_OPTS=(-o ServerAliveInterval=15 -o ServerAliveCountMax=4
+          -o ConnectTimeout=10 -o BatchMode=yes)
+
+# Retries connection-level failures only (255). A command that reached the DPU
+# and failed there is reported as-is, because rerunning it is not always safe.
+ssh_dpu() {
+    local attempt status
+    for attempt in 1 2 3; do
+        ssh "${SSH_OPTS[@]}" -n "$DPU_HOST" "$@" && return 0
+        status=$?
+        [ "$status" -eq 255 ] || return "$status"
+        [ "$attempt" -lt 3 ] || return "$status"
+        info "ssh $DPU_HOST unreachable (attempt $attempt/3), retrying"
+        sleep $((attempt * 2))
+    done
+}
+
 dpu_sudo() {
-    ssh "$DPU_HOST" "echo '$DPU_PASS' | sudo -S bash -c '$1'" 2>&1 | sed 's/^\[sudo\][^:]*: *//'
+    ssh_dpu "echo '$DPU_PASS' | sudo -S bash -c '$1'" 2>&1 | sed 's/^\[sudo\][^:]*: *//'
 }
 
 ### ------------------------------------------------------------ build
 sync_sources() {
     step "=== Syncing sources to DPU ($DPU_HOST:~/$DPU_PROJ) ==="
-    ssh "$DPU_HOST" "mkdir -p ~/$DPU_DOCA ~/$DPU_INCLUDE"
-    rsync -avz --delete --exclude='build/' --exclude='builddir/' --exclude='*.o' --exclude='*.a' \
+    ssh_dpu "mkdir -p ~/$DPU_DOCA ~/$DPU_INCLUDE"
+    rsync -avz --delete --timeout=60 -e "ssh ${SSH_OPTS[*]}" \
+        --exclude='build/' --exclude='builddir/' --exclude='*.o' --exclude='*.a' \
         "$DOCA_SRC/" "$DPU_HOST:~/$DPU_DOCA/"
-    rsync -avz --delete "$INCLUDE_SRC/" "$DPU_HOST:~/$DPU_INCLUDE/"
-    ssh "$DPU_HOST" "find ~/$DPU_DOCA ~/$DPU_INCLUDE -type f -exec touch {} +" 2>/dev/null || true
+    rsync -avz --delete --timeout=60 -e "ssh ${SSH_OPTS[*]}" \
+        "$INCLUDE_SRC/" "$DPU_HOST:~/$DPU_INCLUDE/"
+    ssh_dpu "find ~/$DPU_DOCA ~/$DPU_INCLUDE -type f -exec touch {} +" 2>/dev/null || true
     info "Source sync complete"
 }
 
@@ -182,14 +217,14 @@ build_dpu() {
     step "=== Building on DPU (ninja) ==="
     local bt="${DPU_BUILDTYPE:-debugoptimized}"
     local out
-    if ! out=$(ssh "$DPU_HOST" "[ -d ~/$DPU_BUILD ] || (cd ~/$DPU_DOCA && meson setup build --buildtype=$bt)" 2>&1); then
+    if ! out=$(ssh_dpu "[ -d ~/$DPU_BUILD ] || (cd ~/$DPU_DOCA && meson setup build --buildtype=$bt)" 2>&1); then
         err "DPU build setup failed:"
         printf '%s\n' "$out"
         exit 1
     fi
     if [ -n "$out" ]; then printf '%s\n' "$out" | grep -vE '^\s*$' || true; fi
-    ssh "$DPU_HOST" "rm -f ~/$DPU_BUILD/dpa_kernel.a" 2>/dev/null || true
-    if ! out=$(ssh "$DPU_HOST" "cd ~/$DPU_BUILD && meson configure -Dbuildtype=$bt && ninja" 2>&1); then
+    ssh_dpu "rm -f ~/$DPU_BUILD/dpa_kernel.a" 2>/dev/null || true
+    if ! out=$(ssh_dpu "cd ~/$DPU_BUILD && meson configure -Dbuildtype=$bt && ninja" 2>&1); then
         err "DPU build failed:"
         printf '%s\n' "$out"
         exit 1
@@ -231,19 +266,29 @@ build_image() {  # $1 = Dockerfile, $2 = tag, $3 = build context, $4.. = --build
 }
 
 # The gRPC apps live in their own CMake tree and link gRPC statically.
+grpc_cmake_build() {  # $1 = build dir, $2 = sanitizers ON|OFF, $3 = targets...
+    local out="$PROJ_ROOT/$1" sanitize="$2"; shift 2
+    local grpc_src="${DPUMESH_GRPC_SOURCE_DIR:-/home/jukebox/deps/grpc-v1.80.0}"
+    local buildtype=Release
+    [ "$sanitize" = ON ] && buildtype=RelWithDebInfo
+    cmake -S "$PROJ_ROOT/integrations/grpc" -B "$out" -DCMAKE_BUILD_TYPE="$buildtype" \
+        -DDPUMESH_GRPC_SOURCE_DIR="$grpc_src" \
+        -DDPUMESH_GRPC_ENABLE_SANITIZERS="$sanitize" \
+        -DDPUMESH_GRPC_BUILD_QPS_BENCHMARK=ON -DBUILD_TESTING=OFF >/dev/null ||
+        { err "gRPC cmake configure failed ($out)"; exit 1; }
+    cmake --build "$out" --target "$@" -j"$(nproc)" >/dev/null ||
+        { err "gRPC app build failed ($out)"; exit 1; }
+}
+
 build_grpc_apps() {
-    local src="$PROJ_ROOT/integrations/grpc" out="$PROJ_ROOT/build/grpc-release"
     local grpc_src="${DPUMESH_GRPC_SOURCE_DIR:-/home/jukebox/deps/grpc-v1.80.0}"
     [ -d "$grpc_src" ] || { warn "gRPC source $grpc_src not found; skipping gRPC apps"; return 0; }
-    step "=== Building gRPC bench apps (bench_grpc, echo_grpc) ==="
-    cmake -S "$src" -B "$out" -DCMAKE_BUILD_TYPE=Release \
-        -DDPUMESH_GRPC_SOURCE_DIR="$grpc_src" \
-        -DDPUMESH_GRPC_ENABLE_SANITIZERS=OFF \
-        -DDPUMESH_GRPC_BUILD_QPS_BENCHMARK=ON -DBUILD_TESTING=OFF >/dev/null ||
-        { err "gRPC cmake configure failed"; exit 1; }
-    cmake --build "$out" --target bench_grpc echo_grpc -j"$(nproc)" >/dev/null ||
-        { err "gRPC app build failed"; exit 1; }
-    info "gRPC apps built ($out/bench_grpc, $out/echo_grpc)"
+    step "=== Building gRPC bench apps (bench_grpc, echo_grpc; server=$BENCH_GRPC_BUILD) ==="
+    grpc_cmake_build "$GRPC_BENCH_BUILD_DIR" OFF bench_grpc echo_grpc
+    if [ "$BENCH_GRPC_BUILD" = asan ]; then
+        grpc_cmake_build "$GRPC_ECHO_BUILD_DIR" ON echo_grpc
+    fi
+    info "gRPC apps built ($GRPC_BENCH_BUILD_DIR/bench_grpc, $GRPC_ECHO_BUILD_DIR/echo_grpc)"
 }
 
 build_images() {
@@ -267,9 +312,11 @@ build_images() {
         build_image "$BENCH_DIR/docker/echo_sock.Dockerfile"        "$IMG_ECHO_TCP"     "$PROJ_ROOT"
     fi
     if { [ "$scope" = all ] || [ "$scope" = grpc ]; } &&
-       [ -x "$PROJ_ROOT/build/grpc-release/bench_grpc" ]; then
-        build_image "$GRPC_BENCH_DIR/docker/bench_grpc.Dockerfile" "$IMG_BENCH_GRPC"   "$PROJ_ROOT"
-        build_image "$GRPC_BENCH_DIR/docker/echo_grpc.Dockerfile"  "$IMG_ECHO_GRPC"    "$PROJ_ROOT"
+       [ -x "$PROJ_ROOT/$GRPC_BENCH_BUILD_DIR/bench_grpc" ]; then
+        build_image "$GRPC_BENCH_DIR/docker/bench_grpc.Dockerfile" "$IMG_BENCH_GRPC"   "$PROJ_ROOT" \
+            --build-arg "GRPC_BUILD_DIR=$GRPC_BENCH_BUILD_DIR"
+        build_image "$GRPC_BENCH_DIR/docker/echo_grpc.Dockerfile"  "$IMG_ECHO_GRPC"    "$PROJ_ROOT" \
+            --build-arg "GRPC_BUILD_DIR=$GRPC_ECHO_BUILD_DIR"
     elif [ "$scope" = all ] || [ "$scope" = grpc ]; then
         warn "gRPC bench binaries missing; skipping grpc images (run: $0 grpcbuild)"
     fi
@@ -294,7 +341,7 @@ ensure_envoy_image() {
 stop_dpu() {
     info "Stopping dpumesh_dpu..."
     # Match process command lines even when the main thread has been renamed.
-    ssh "$DPU_HOST" "echo '$DPU_PASS' | sudo -S bash -c \"pids=\\\$(pgrep -f '[d]pumesh_dpu'); [ -z \\\"\\\$pids\\\" ] || kill -9 \\\$pids\" 2>/dev/null; true" 2>&1 | sed 's/^\[sudo\][^:]*: *//' || true
+    ssh_dpu "echo '$DPU_PASS' | sudo -S bash -c \"pids=\\\$(pgrep -f '[d]pumesh_dpu'); [ -z \\\"\\\$pids\\\" ] || kill -9 \\\$pids\" 2>/dev/null; true" 2>&1 | sed 's/^\[sudo\][^:]*: *//' || true
     sleep 5
 }
 
@@ -306,15 +353,19 @@ start_dpu() {
     local workers="${DPUMESH_ARM_WORKERS:-}"
     step "=== Starting dpumesh_dpu (l7_svc='$l7_svc' dpa_threads='$dpa_threads' rings_per_pod='$rings' arm_workers='$workers') ==="
     stop_dpu
-    local dpu_home; dpu_home=$(ssh "$DPU_HOST" 'echo $HOME')
-    ssh "$DPU_HOST" "cat > /tmp/start_dpu_bench.sh << 'LAUNCHER'
+    local dpu_home; dpu_home=$(ssh_dpu 'echo $HOME')
+    # Reports an instance that is already up instead of starting a second one, so
+    # a launch whose ssh dropped mid-flight is safe to retry.
+    ssh_dpu "cat > /tmp/start_dpu_bench.sh << 'LAUNCHER'
 #!/bin/bash
+running=\$(pgrep -x dpumesh_dpu | head -1)
+if [ -n \"\$running\" ]; then echo \"\$running\"; exit 0; fi
 screen -dmS dpumesh-bench bash -c \"cd $dpu_home/$DPU_BUILD && DPUMESH_PROXY_L7_SVC=$l7_svc DPUMESH_DPA_THREADS=$dpa_threads DPUMESH_RINGS_PER_POD=$rings DPUMESH_ARM_WORKERS=$workers ./dpumesh_dpu $DPU_PCI -l $log_level > $DPU_LOG 2>&1\"
 sleep 2
 pgrep -x dpumesh_dpu | head -1 || echo NO_PID
 LAUNCHER
 chmod +x /tmp/start_dpu_bench.sh"
-    local pid; pid=$(ssh "$DPU_HOST" "echo '$DPU_PASS' | sudo -S bash /tmp/start_dpu_bench.sh" 2>&1 | sed 's/^\[sudo\][^:]*: *//')
+    local pid; pid=$(ssh_dpu "echo '$DPU_PASS' | sudo -S bash /tmp/start_dpu_bench.sh" 2>&1 | sed 's/^\[sudo\][^:]*: *//')
     if [ "$pid" = "NO_PID" ] || [ -z "$pid" ]; then err "dpumesh_dpu failed to start"; exit 1; fi
     info "dpumesh_dpu running (PID: $pid)"
 }
@@ -368,6 +419,26 @@ get_pod_cores() {
                 bench-grpc-envoy)   rel="2";; echo-grpc-envoy)   rel="3";;
                 bench-grpc-tcp)     rel="4";; echo-grpc-tcp)     rel="5";;
                 bench-grpc-envoy-strict) rel="6";; echo-grpc-envoy-strict) rel="7";;
+            esac ;;
+        grpccap)
+            # Capacity profile: both DPUmesh endpoints get six cores, so neither
+            # host side is the limit and what remains is the transport's. The
+            # other L7 paths keep one core each, only to confine them.
+            case "$app" in
+                bench-grpc-dpumesh) rel="0,1,2,3,4,5";;
+                echo-grpc-dpumesh)  rel="6,7,8,9,10,11";;
+                bench-grpc-tcp)     rel="12";; echo-grpc-tcp)  rel="13";;
+                bench-grpc-envoy)   rel="14";; echo-grpc-envoy) rel="15";;
+                bench-grpc-envoy-strict) rel="16";; echo-grpc-envoy-strict) rel="17";;
+            esac ;;
+        grpcmax)
+            # Channel-scaling profile: the two DPUmesh endpoints split node 1
+            # between them, so the host stops bounding the sweep before the
+            # transport does. The other L7 paths are not pinned here and must be
+            # confined separately.
+            case "$app" in
+                bench-grpc-dpumesh) rel="0,1,2,3,4,5,6,7,8";;
+                echo-grpc-dpumesh)  rel="9,10,11,12,13,14,15,16,17";;
             esac ;;
         fair|*)
             case "$app" in
@@ -503,6 +574,10 @@ apply_manifest() {
            ECHO_THREADS="${ECHO_THREADS:-3}" \
            DMESH_PRELOAD_DEBUG="${DMESH_PRELOAD_DEBUG:-0}" \
            BENCH_REACTORS="${BENCH_REACTORS:-8}"
+    # A killed container keeps no log, so a sanitizer report has to land on the
+    # host to survive the process it describes. The mount is DirectoryOrCreate,
+    # so kubelet creates the directory and the privileged container can write it.
+    export ASAN_LOG_DIR="${ASAN_LOG_DIR:-/var/log/dpumesh-asan}"
     { cat "$MANIFEST"; echo ---; cat "$GRPC_MANIFEST"; } |
         envsubst | kubectl apply -n "$NS" -f -
     info "K8s resources applied"
@@ -871,7 +946,7 @@ case "$CMD" in
     status)    show_status ;;
     logs)      show_logs ;;
     cleanup)   cleanup ;;
-    dpulog)    ssh "$DPU_HOST" "echo '$DPU_PASS' | sudo -S tail -${1:-40} $DPU_LOG" 2>&1 | sed 's/^\[sudo\][^:]*: *//' ;;
+    dpulog)    ssh_dpu "echo '$DPU_PASS' | sudo -S tail -${1:-40} $DPU_LOG" 2>&1 | sed 's/^\[sudo\][^:]*: *//' ;;
     dpucpu)    dpu_sudo 'pid=$(pgrep -x dpumesh_dpu | head -1); [ -z "$pid" ] && { echo "dpumesh_dpu not running"; exit 0; }; echo "=== dpumesh_dpu pid=$pid per-thread %CPU ==="; top -bH -d 1 -n 2 -p "$pid" | awk "/ PID +USER/{n++} n==2{print}"' ;;
     armbalance) arm_balance "$@" ;;
     *)
@@ -883,11 +958,13 @@ Usage: $0 <command> [args]
   point <sol> <req> <reply> <conc> <dur> <warmup> <threads> [reconn]   one raw RUN (reconn = conn-churn period)
   loopback|stream|preload [args]             feature validators
   verbs <N> <size> <zc> <window> <pipeline>  native-API loopback validator: window conns x pipeline outstanding
-  pin [fair|l4|grpc|hw|hw3|hw6]                    (re)pin pods to cores
+  pin [fair|l4|grpc|grpccap|grpcmax|hw|hw3|hw6]            (re)pin pods to cores
   armbalance [req reply conc dur threads [csv]]   DPU main/worker per-core CPU during one point
   status | logs | cleanup | dpulog [n] | dpucpu
 
 Deploy knobs (env): BENCH_NUMA_POLICY=local|auto BENCH_DEPLOY_SCOPE=all|core|l4
+                    BENCH_GRPC_BUILD=release|asan (asan instruments echo_grpc only;
+                    reports land in ASAN_LOG_DIR, default /var/log/dpumesh-asan)
 Sweep knobs (env): OUT LAT_DUR BW_DUR RATE_DUR WARMUP BW_CONC RATE_CONC RATE_THREADS LAT_SIZES BW_SIZES
 EOF
         ;;

@@ -9,13 +9,18 @@ RUN apt-get update && \
       libyaml-0-2 \
       libsasl2-2 \
       numactl \
-      openssl && \
+      openssl \
+      libasan6 \
+      libubsan1 && \
     rm -rf /var/lib/apt/lists/*
 
 # gRPC is linked statically, so only libdpumesh and DOCA are needed at runtime.
 # BENCH_TRANSPORT selects dmesh (BENCH_DST_SERVICE) or tcp (BENCH_TARGET), so
 # one image serves both the DPUmesh and the Envoy/TCP configurations.
-COPY build/grpc-release/bench_grpc /usr/local/bin/bench_grpc
+# GRPC_BUILD_DIR selects the app build: build/grpc-release measures,
+# build/grpc-asan reproduces a fault under ASan/UBSan.
+ARG GRPC_BUILD_DIR=build/grpc-release
+COPY ${GRPC_BUILD_DIR}/bench_grpc /usr/local/bin/bench_grpc
 COPY doca-libs/ /usr/local/lib/
 COPY build/lib/libdpumesh.so.4 /usr/local/lib/
 COPY bench/k8s/registry /etc/dpumesh/registry

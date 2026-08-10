@@ -176,7 +176,8 @@ void CompleterMain(Worker* w) {
 }
 
 /* ------------------------------------------------------------ issuer */
-uint64_t g_prng = 0x9e3779b97f4a7c15ull;
+/* Each issuer draws its own gaps, so the generator state is per thread. */
+thread_local uint64_t g_prng = 0x9e3779b97f4a7c15ull;
 
 double PrngExpGap(double rate) {
   g_prng ^= g_prng << 13; g_prng ^= g_prng >> 7; g_prng ^= g_prng << 17;
@@ -195,17 +196,26 @@ void SleepUntil(double deadline) {
   nanosleep(&delay, nullptr);
 }
 
-/* One process-wide arrival timeline, round-robin across workers. */
+/* One arrival timeline per issuer. Issuer `index` owns the workers at
+   index, index + count, ... and its own 1/count share of the rate, and starts
+   index/rate into the first interval, so the merged timeline keeps the
+   requested spacing. Issuing from a single thread caps the offered rate at
+   whatever one core can push through `Issue`, which is a property of the
+   generator rather than of the transport under test. */
 void IssuerMain(std::vector<std::unique_ptr<Worker>>* workers, double rate,
                 int arrival, double start_at, double duration,
-                std::atomic<long>* drops) {
+                std::atomic<long>* drops, size_t index, size_t count) {
   while (bench_now_sec() < start_at) {
     if (g_stop.load()) return;
     SleepUntil(start_at);
   }
-  const double start = bench_now_sec();
-  double sched_next = start;
-  size_t rr = 0;
+  g_prng ^= 0x9e3779b97f4a7c15ull * (index + 1);
+  if (g_prng == 0) g_prng = 0x9e3779b97f4a7c15ull;
+
+  const double start = start_at;
+  const double share = rate / static_cast<double>(count);
+  double sched_next = start + static_cast<double>(index) / rate;
+  size_t rr = index;
   const size_t n = workers->size();
 
   for (;;) {
@@ -213,8 +223,9 @@ void IssuerMain(std::vector<std::unique_ptr<Worker>>* workers, double rate,
     if (now - start > duration || g_stop.load()) break;
     while (now >= sched_next) {
       const double scheduled = sched_next;
-      sched_next += (arrival == kArrPoisson) ? PrngExpGap(rate) : 1.0 / rate;
-      Worker* w = (*workers)[rr++ % n].get();
+      sched_next += (arrival == kArrPoisson) ? PrngExpGap(share) : 1.0 / share;
+      Worker* w = (*workers)[rr % n].get();
+      rr += count;
       if (w->outstanding.load(std::memory_order_acquire) >= kOpenCap) {
         drops->fetch_add(1, std::memory_order_relaxed);
         continue;
@@ -292,7 +303,7 @@ int SelfTest(char* reply, size_t reply_size, int payload, int threads,
 /* ------------------------------------------------------------ one run */
 void RunBench(int conn_fd, int mode, int req_size, int reply_size, int window,
               double duration, long warmup, int threads, double rate,
-              int arrival) {
+              int arrival, int channels) {
   char reply[2048];
 
   if (req_size < 0 || reply_size < 1 || duration <= 0 || threads < 1 ||
@@ -304,26 +315,36 @@ void RunBench(int conn_fd, int mode, int req_size, int reply_size, int window,
   }
   if (threads > kMaxThreads) threads = kMaxThreads;
   if (warmup < 0) warmup = 0;
+  /* Workers share the channel pool round-robin, so the load the client offers
+   * is held fixed while the transport connection count varies. */
+  if (channels < 1 || channels > threads) channels = threads;
 
   std::fprintf(stderr,
                "[bench_grpc] %s req=%d reply=%d dur=%.1fs warmup=%ld conns=%d "
-               "transport=%s target=%s\n",
+               "channels=%d transport=%s target=%s\n",
                mode == kModeOpen ? "OPEN" : "RUN", req_size, reply_size,
-               duration, warmup, threads, g_transport.c_str(),
+               duration, warmup, threads, channels, g_transport.c_str(),
                g_transport == "dmesh" ? g_service.c_str() : g_host.c_str());
+
+  std::vector<std::shared_ptr<::grpc::Channel>> channel_pool;
+  channel_pool.reserve(channels);
+  for (int i = 0; i < channels; ++i) {
+    auto channel = MakeChannel(i);
+    if (channel == nullptr ||
+        !channel->WaitForConnected(std::chrono::system_clock::now() +
+                                   std::chrono::seconds(20))) {
+      std::snprintf(reply, sizeof reply, "ERR connect failed on channel %d\n", i);
+      if (write(conn_fd, reply, std::strlen(reply)) < 0) {}
+      return;
+    }
+    channel_pool.push_back(std::move(channel));
+  }
 
   std::vector<std::unique_ptr<Worker>> workers;
   workers.reserve(threads);
   for (int i = 0; i < threads; ++i) {
     auto w = std::make_unique<Worker>();
-    w->channel = MakeChannel(i);
-    if (w->channel == nullptr ||
-        !w->channel->WaitForConnected(std::chrono::system_clock::now() +
-                                      std::chrono::seconds(20))) {
-      std::snprintf(reply, sizeof reply, "ERR connect failed on channel %d\n", i);
-      if (write(conn_fd, reply, std::strlen(reply)) < 0) {}
-      return;
-    }
+    w->channel = channel_pool[i % channels];
     w->stub = BenchmarkService::NewStub(w->channel);
     w->mode = mode;
     w->window = window;
@@ -358,11 +379,16 @@ void RunBench(int conn_fd, int mode, int req_size, int reply_size, int window,
   completers.reserve(threads);
   for (auto& w : workers) completers.emplace_back([&w] { CompleterMain(w.get()); });
 
-  std::thread issuer;
+  std::vector<std::thread> issuers;
   if (mode == kModeOpen) {
-    issuer = std::thread([&] {
-      IssuerMain(&workers, rate, arrival, start_at, duration, &drops);
-    });
+    const size_t n_issuers = workers.size();
+    issuers.reserve(n_issuers);
+    for (size_t i = 0; i < n_issuers; ++i) {
+      issuers.emplace_back([&, i] {
+        IssuerMain(&workers, rate, arrival, start_at, duration, &drops,
+                   i, n_issuers);
+      });
+    }
   } else {
     while (bench_now_sec() < start_at && !g_stop.load()) SleepUntil(start_at);
   }
@@ -375,7 +401,9 @@ void RunBench(int conn_fd, int mode, int req_size, int reply_size, int window,
     dmesh_get_tx_stats(g_runtime->channel(), &tx1);
   }
   g_stop.store(1);
-  if (issuer.joinable()) issuer.join();
+  for (auto& t : issuers) {
+    if (t.joinable()) t.join();
+  }
 
   for (auto& w : workers) {
     w->end = end;
@@ -438,14 +466,14 @@ void RunBench(int conn_fd, int mode, int req_size, int reply_size, int window,
       "OK mrps=%.6f gbps=%.4f req_gbps=%.4f resp_gbps=%.4f "
       "p50=%.2f p95=%.2f p99=%.2f p999=%.2f p9999=%.2f "
       "avg=%.2f min=%.2f max=%.2f rcnt=%ld scheduled=%ld pending=%ld fail=%ld "
-      "conc=%d threads=%d reqsz=%d repsz=%d reqframe=%u respframe=%u "
+      "conc=%d threads=%d channels=%d reqsz=%d repsz=%d reqframe=%u respframe=%u "
       "durs=%.3f offered_mrps=%.6f drops=%ld overflow=%llu worker_fail=%d "
       "reorder=0 mode=%s arr=%s batch=0 reconns=0 reconn_us=0.00 "
       "grabs=%llu rets=%llu recyc=%llu waits=%llu pads=%llu "
       "credit_hold_dropped=%llu eq_budget_exhausted=%llu dist=NA\n",
       mrps, gbps, request_gbps, response_gbps, p50, p95, p99, p999, p9999, avg,
       mn, mx, total_ok, total_scheduled, total_pending, total_fail, window,
-      threads, req_size, reply_size,
+      threads, channels, req_size, reply_size,
       BENCH_HDR_LEN + static_cast<uint32_t>(req_size),
       BENCH_HDR_LEN + static_cast<uint32_t>(reply_size), duration, offered_mrps,
       drops.load(std::memory_order_relaxed), overflow, worker_fail,
@@ -500,7 +528,8 @@ void HandleControl(int fd) {
     long warm = 1000, reconn = 0;
     std::sscanf(buf, "%*s %d %d %d %lf %ld %d %ld %d", &req, &rep, &conc, &dur,
                 &warm, &threads, &reconn, &batch);
-    RunBench(fd, kModeClosed, req, rep, conc, dur, warm, threads, 0.0, kArrConst);
+    RunBench(fd, kModeClosed, req, rep, conc, dur, warm, threads, 0.0, kArrConst,
+             0);
     ::close(fd);
     return;
   }
@@ -509,10 +538,13 @@ void HandleControl(int fd) {
     double dur = 10.0, rate = 100000.0;
     long warm = 1000;
     char arr[16] = "const";
-    std::sscanf(buf, "%*s %d %d %d %lf %ld %lf %15s", &req, &rep, &threads,
-                &dur, &warm, &rate, arr);
+    /* Omitted or non-positive: one channel per worker. */
+    int channels = 0;
+    std::sscanf(buf, "%*s %d %d %d %lf %ld %lf %15s %d", &req, &rep, &threads,
+                &dur, &warm, &rate, arr, &channels);
     const int arrival = std::strcmp(arr, "poisson") == 0 ? kArrPoisson : kArrConst;
-    RunBench(fd, kModeOpen, req, rep, 0, dur, warm, threads, rate, arrival);
+    RunBench(fd, kModeOpen, req, rep, 0, dur, warm, threads, rate, arrival,
+             channels);
     ::close(fd);
     return;
   }
@@ -540,7 +572,8 @@ void HandleControl(int fd) {
 
   const char* usage =
       "ERR use: RUN <req> <reply> <conc> <dur> <warmup> <threads> | "
-      "OPEN <req> <reply> <threads> <dur> <warmup> <rate> [const|poisson] | "
+      "OPEN <req> <reply> <threads> <dur> <warmup> <rate> [const|poisson] "
+      "[channels] | "
       "SELFTEST <payload> <threads> <dur> <rate> <const|poisson> | PING\n";
   if (write(fd, usage, std::strlen(usage)) < 0) {}
   ::close(fd);

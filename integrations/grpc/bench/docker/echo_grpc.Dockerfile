@@ -9,12 +9,17 @@ RUN apt-get update && \
       libyaml-0-2 \
       libsasl2-2 \
       numactl \
-      openssl && \
+      openssl \
+      libasan6 \
+      libubsan1 && \
     rm -rf /var/lib/apt/lists/*
 
 # Serves grpc.testing.BenchmarkService. BENCH_TRANSPORT selects the listener:
 # dmesh accepts through the DPUmesh passive listener, tcp binds ECHO_PORT.
-COPY build/grpc-release/echo_grpc /usr/local/bin/echo_grpc
+# GRPC_BUILD_DIR selects the app build: build/grpc-release measures,
+# build/grpc-asan reproduces a fault under ASan/UBSan.
+ARG GRPC_BUILD_DIR=build/grpc-release
+COPY ${GRPC_BUILD_DIR}/echo_grpc /usr/local/bin/echo_grpc
 COPY doca-libs/ /usr/local/lib/
 COPY build/lib/libdpumesh.so.4 /usr/local/lib/
 COPY bench/k8s/registry /etc/dpumesh/registry
