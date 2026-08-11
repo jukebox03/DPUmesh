@@ -34,12 +34,14 @@ COLORS = {
     "envoy-strict": "#D55E00", "grpc-envoy-strict": "#D55E00",
     "dpumesh-preload": "#0072B2", "grpc-tcp": "#0072B2",
     "dpumesh-native": "#009E73", "grpc-dpumesh": "#009E73",
+    "grpc-linkerd": "#CC79A7", "grpc-linkerd-opaque": "#E69F00",
 }
 LABELS = {
     "envoy-permissive": "Envoy permissive", "grpc-envoy-permissive": "Envoy permissive",
     "envoy-strict": "Envoy strict", "grpc-envoy-strict": "Envoy strict",
     "dpumesh-preload": "DPUmesh preload", "grpc-tcp": "direct TCP",
     "dpumesh-native": "DPUmesh native", "grpc-dpumesh": "DPUmesh",
+    "grpc-linkerd": "linkerd L7", "grpc-linkerd-opaque": "linkerd opaque",
 }
 FRAME_LABEL = {"64": "64 B", "1024": "1 KiB", "8192": "8 KiB"}
 # Budgets span the range the data actually covers; log-spaced because latency is.
@@ -98,6 +100,7 @@ def main():
               if any(k[1] == f for k in points)]
     configs = [c for c in ("envoy-permissive", "grpc-envoy-permissive",
                            "envoy-strict", "grpc-envoy-strict",
+                           "grpc-linkerd", "grpc-linkerd-opaque",
                            "dpumesh-preload", "grpc-tcp",
                            "dpumesh-native", "grpc-dpumesh")
                if any(k[0] == c for k in points)]

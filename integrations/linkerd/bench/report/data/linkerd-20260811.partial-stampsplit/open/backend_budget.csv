@@ -1,0 +1,7 @@
+observed_utc,config,kind,locator,expected_ready,observed_ready
+2026-08-10T15:41:02Z,grpc-envoy-permissive,service,echo-grpc-envoy,1,1
+2026-08-10T15:41:02Z,grpc-envoy-strict,service,echo-grpc-envoy-strict,1,1
+2026-08-10T15:41:02Z,grpc-tcp,service,echo-grpc-tcp,1,1
+2026-08-10T15:41:02Z,grpc-linkerd,service,echo-grpc-linkerd,1,1
+2026-08-10T15:41:02Z,grpc-linkerd-opaque,service,echo-grpc-linkerd-opaque,1,1
+2026-08-10T15:41:02Z,grpc-dpumesh,deployment,echo-grpc-dpumesh,1,1

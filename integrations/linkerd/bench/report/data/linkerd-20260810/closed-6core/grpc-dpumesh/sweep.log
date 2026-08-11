@@ -1,0 +1,21 @@
+[03:04:23] closed-loop sweep: configs=[grpc-dpumesh] frames=[64 1024 8192] concs=[1 2 4 8 16 32] reps=1 threads=8
+[03:04:24] grpc-dpumesh: client=bench-grpc-dpumesh(19473) server=echo-grpc-dpumesh(18859) restarts=0/0
+[03:04:35] [1/18] grpc-dpumesh 64B conc=1 -> ach=30264.0 p50=232.00 p99=626.00 cli=1.8154 srv=1.6400 arm=2.3183
+[03:04:48] [2/18] grpc-dpumesh 64B conc=2 -> ach=72567.0 p50=215.00 p99=341.00 cli=3.1955 srv=3.6527 arm=3.7768
+[03:05:02] [3/18] grpc-dpumesh 64B conc=4 -> ach=108125.0 p50=283.00 p99=502.00 cli=3.9774 srv=4.9255 arm=4.2236
+[03:05:16] [4/18] grpc-dpumesh 64B conc=8 -> ach=119193.0 p50=471.00 p99=1941.00 cli=3.9215 srv=5.1133 arm=3.7987
+[03:05:29] [5/18] grpc-dpumesh 64B conc=16 -> ach=126060.0 p50=917.00 p99=3020.00 cli=3.8384 srv=5.1412 arm=3.2756
+[03:05:43] [6/18] grpc-dpumesh 64B conc=32 -> ach=128739.0 p50=1837.00 p99=5148.00 cli=3.6338 srv=5.0519 arm=2.7582
+[03:05:57] [7/18] grpc-dpumesh 1024B conc=1 -> ach=29974.0 p50=233.00 p99=638.00 cli=1.8238 srv=1.6556 arm=2.3183
+[03:06:11] [8/18] grpc-dpumesh 1024B conc=2 -> ach=70996.0 p50=220.00 p99=350.00 cli=3.2106 srv=3.6595 arm=3.7629
+[03:06:24] [9/18] grpc-dpumesh 1024B conc=4 -> ach=107547.0 p50=285.00 p99=501.00 cli=4.0519 srv=4.9427 arm=4.2740
+[03:06:38] [10/18] grpc-dpumesh 1024B conc=8 -> ach=117719.0 p50=484.00 p99=1755.00 cli=3.9650 srv=5.1351 arm=3.8203
+[03:06:52] [11/18] grpc-dpumesh 1024B conc=16 -> ach=124884.0 p50=932.00 p99=2837.00 cli=3.8914 srv=5.1876 arm=3.3420
+[03:07:05] [12/18] grpc-dpumesh 1024B conc=32 -> ach=128680.0 p50=1856.00 p99=4624.00 cli=3.7289 srv=5.0984 arm=2.8029
+[03:07:19] [13/18] grpc-dpumesh 8192B conc=1 -> ach=31818.0 p50=238.00 p99=487.00 cli=2.0620 srv=2.0588 arm=3.3443
+[03:07:33] [14/18] grpc-dpumesh 8192B conc=2 -> ach=63804.0 p50=245.00 p99=378.00 cli=3.1460 srv=3.7793 arm=3.5533
+[03:07:46] [15/18] grpc-dpumesh 8192B conc=4 -> ach=94148.0 p50=325.00 p99=580.00 cli=4.0234 srv=4.9540 arm=4.3565
+[03:08:00] [16/18] grpc-dpumesh 8192B conc=8 -> ach=106986.0 p50=539.00 p99=1738.00 cli=4.0488 srv=5.1386 arm=4.0784
+[03:08:14] [17/18] grpc-dpumesh 8192B conc=16 -> ach=116297.0 p50=1018.00 p99=2629.00 cli=4.0636 srv=5.2684 arm=3.7245
+[03:08:27] [18/18] grpc-dpumesh 8192B conc=32 -> ach=119016.0 p50=2020.00 p99=4787.00 cli=3.9099 srv=5.1992 arm=3.2368
+[03:08:30] closed-loop sweep complete: /home/jukebox/DPUmesh/integrations/linkerd/bench/report/data/linkerd-20260810/closed-6core/grpc-dpumesh/points.csv

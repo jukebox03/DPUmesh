@@ -72,6 +72,9 @@ GENERATOR_SELFTEST_MAX_RPS="${GENERATOR_SELFTEST_MAX_RPS:-0}"
 GENERATOR_SELFTEST_MAX_STEPS="${GENERATOR_SELFTEST_MAX_STEPS:-16}"
 MIN_GENERATOR_HEADROOM="${MIN_GENERATOR_HEADROOM:-1.25}"
 MAX_RECOVERY_REDEPLOYS="${MAX_RECOVERY_REDEPLOYS:-12}"
+# Seconds a rejected run is given to drain before the health probe that decides
+# whether the path needs a redeploy.
+RECOVERY_DRAIN="${RECOVERY_DRAIN:-4}"
 MAX_RUN_RETRIES="${MAX_RUN_RETRIES:-3}"
 TARGET_FRAME="${TARGET_FRAME:-64}"
 TARGET_CONFIRM_RATES="${TARGET_CONFIRM_RATES:-1536816 1852228 2021585 2122664}"
@@ -99,6 +102,7 @@ for config in "${CONFIGS[@]}"; do
   case "$config" in
     envoy-permissive|envoy-strict|dpumesh-preload|dpumesh-native) ;;
     grpc-envoy-permissive|grpc-envoy-strict|grpc-tcp|grpc-dpumesh) ;;
+    grpc-linkerd|grpc-linkerd-opaque) ;;
     *) echo "unknown CONFIGS entry: $config" >&2; exit 2 ;;
   esac
   [ -z "${CONFIG_SEEN[$config]:-}" ] ||
@@ -512,6 +516,20 @@ set_config() {
       CLIENT_BINARY=/usr/local/bin/bench_grpc
       SERVER_BINARY=/usr/local/bin/echo_grpc
       BINARY_CLASS=grpc ;;
+    grpc-linkerd)
+      CLIENT_APP=bench-grpc-linkerd; CLIENT_CONTAINER=bench-grpc-linkerd
+      SERVER_APP=echo-grpc-linkerd; SERVER_CONTAINER=echo-grpc-linkerd
+      CLIENT_SIDECAR=linkerd-proxy; SERVER_SIDECAR=linkerd-proxy
+      CLIENT_BINARY=/usr/local/bin/bench_grpc
+      SERVER_BINARY=/usr/local/bin/echo_grpc
+      BINARY_CLASS=grpc ;;
+    grpc-linkerd-opaque)
+      CLIENT_APP=bench-grpc-linkerd-opaque; CLIENT_CONTAINER=bench-grpc-linkerd-opaque
+      SERVER_APP=echo-grpc-linkerd-opaque; SERVER_CONTAINER=echo-grpc-linkerd-opaque
+      CLIENT_SIDECAR=linkerd-proxy; SERVER_SIDECAR=linkerd-proxy
+      CLIENT_BINARY=/usr/local/bin/bench_grpc
+      SERVER_BINARY=/usr/local/bin/echo_grpc
+      BINARY_CLASS=grpc ;;
     *) die "unknown config: $1" ;;
   esac
 }
@@ -566,7 +584,8 @@ deploy_stack() {
       DPUMESH_RINGS_PER_POD="$DPU_RINGS_PER_POD" \
       DPUMESH_ARM_WORKERS="$DPU_ARM_WORKERS" \
       DPUMESH_PROXY_L7_SVC= DPUMESH_LOG_LEVEL=40 \
-      BENCH_NUMA_POLICY=local BENCH_DEPLOY_SCOPE="$DEPLOY_SCOPE" "$BENCH" deploy
+      BENCH_NUMA_POLICY=local BENCH_DEPLOY_SCOPE="$DEPLOY_SCOPE" \
+      BENCH_LINKERD="${BENCH_LINKERD:-0}" "$BENCH" deploy
   else
     log "using existing deployment (--no-deploy)"
   fi
@@ -637,7 +656,9 @@ verify_single_backends() {
     "dpumesh-preload:preload-sock" \
     "grpc-envoy-permissive:echo-grpc-envoy" \
     "grpc-envoy-strict:echo-grpc-envoy-strict" \
-    "grpc-tcp:echo-grpc-tcp"; do
+    "grpc-tcp:echo-grpc-tcp" \
+    "grpc-linkerd:echo-grpc-linkerd" \
+    "grpc-linkerd-opaque:echo-grpc-linkerd-opaque"; do
     IFS=: read -r config service <<<"$config_service"
     config_selected "$config" || continue
     count=$(kubectl get endpoints -n "$NS" "$service" -o json 2>/dev/null |
@@ -825,9 +846,12 @@ validate_generator_headroom() {
 container_pid() {
   local app="$1" container="$2" pod cid
   pod=$(pod_name "$app"); [ -n "$pod" ] || return
+  # A linkerd proxy is injected as a native sidecar, so it is reported under
+  # initContainerStatuses even though it runs for the pod's whole life.
   cid=$(kubectl get pod -n "$NS" "$pod" -o json |
     jq -r --arg c "$container" \
-      '.status.containerStatuses[] | select(.name==$c) | .containerID' | sed -n '1p')
+      '[.status.containerStatuses[]?, .status.initContainerStatuses[]?][]
+       | select(.name==$c) | .containerID' | sed -n '1p')
   cid="${cid#*://}"
   [ -n "$cid" ] && [ "$cid" != null ] || return
   # Feed the password on every inspect instead of relying on sudo's tty-scoped
@@ -1193,6 +1217,20 @@ stop_perf() {
   PERF_PID=0
 }
 
+# True when the offered rate is above the capacity boundary already discovered
+# for this path and frame. Unknown knee answers false, so a point measured
+# before discovery is still held to the strict rule.
+past_knee() {
+  local config="$1" payload="$2" offered="$3" knee
+  [ -s "$KNEES" ] || return 1
+  knee=$(awk -F, -v c="$config" -v f="$payload" '
+    NR==1 {for(i=1;i<=NF;i++)h[$i]=i; next}
+    $h["config"]==c && $h["frame_bytes"]==f {print $h["highest_clean_rps"]; exit}
+  ' "$KNEES")
+  [ -n "$knee" ] || return 1
+  awk -v o="$offered" -v k="$knee" 'BEGIN{exit !(o>k)}'
+}
+
 classify_open_result() {
   local result="$1" offered="$2" duration="$3"
   local scheduled drops fail reorder overflow achieved
@@ -1406,19 +1444,27 @@ pilot_point() {
 }
 
 recover_config() {
-  local config="$1" payload="$2" result quality clean recovery_rate body
+  local config="$1" payload="$2" result quality clean recovery_rate body attempt
   body=$(frame_body "$payload")
   recovery_rate="$SCOUT_START_RPS"
   set_config "$config"
-  result=$(run_control "$CLIENT_APP" \
-    "OPEN $body $body $THREADS $PILOT_DUR $WARMUP $recovery_rate $ARRIVAL" "$PILOT_DUR")
-  quality=$(classify_open_result "$result" "$recovery_rate" "$PILOT_DUR")
-  IFS=, read -r clean _ <<<"$quality"
-  if [ "$clean" = 1 ] && frame_result_ok "$result" "$payload" &&
-     native_backend_ok "$config" "$result"; then
-    log "recovery PASS: $config/$payload at $recovery_rate rps"
-    return
-  fi
+  # The probe follows a run that was rejected, often for overload. A proxy that
+  # queued during it is still draining, so probing immediately measures the tail
+  # of the previous run and reports a healthy path as broken. Let it drain, and
+  # take the probe more than once before spending a redeploy on it.
+  for attempt in 1 2 3; do
+    sleep "$RECOVERY_DRAIN"
+    result=$(run_control "$CLIENT_APP" \
+      "OPEN $body $body $THREADS $PILOT_DUR $WARMUP $recovery_rate $ARRIVAL" "$PILOT_DUR")
+    quality=$(classify_open_result "$result" "$recovery_rate" "$PILOT_DUR")
+    IFS=, read -r clean _ <<<"$quality"
+    if [ "$clean" = 1 ] && frame_result_ok "$result" "$payload" &&
+       native_backend_ok "$config" "$result"; then
+      log "recovery PASS: $config/$payload at $recovery_rate rps (attempt $attempt)"
+      return
+    fi
+    log "recovery probe $attempt/3 failed for $config/$payload"
+  done
   warn "recovery failed for $config/$payload; forcing a canonical full redeploy"
   RECOVERY_REDEPLOYS=$((RECOVERY_REDEPLOYS + 1))
   [ "$RECOVERY_REDEPLOYS" -le "$MAX_RECOVERY_REDEPLOYS" ] ||
@@ -1821,7 +1867,18 @@ measure_one() {
     IFS=, read -r served_clean achieved_ratio schedule_ratio admission_drop_ratio clean_reason \
       <<<"$quality"
   fi
-  if [ "$status" != ok ]; then
+  # A rate the collector already bracketed as past this path's knee is a rate it
+  # established the path cannot serve, and the retained grid deliberately probes
+  # beyond it. How a path answers there is a property of the path: a byte proxy
+  # queues, so the point comes back late; a mesh proxy with a bounded request
+  # queue sheds, so the point comes back with RPC failures. Both are the far
+  # side of the same boundary. Retrying the shedding one and then aborting would
+  # read a measured overload response as a broken rig, so record it unclean —
+  # `classify_open_result` has already marked it — and carry on.
+  if [ "$phase" = load ] && [ "$status" = fail ] && past_knee "$config" "$payload" "$offered"; then
+    status=overload_shed
+  fi
+  if [ "$status" != ok ] && [ "$status" != overload_shed ]; then
     local retry_count preserved_raw
     retry_count=$(( ${RUN_RETRY_COUNTS[$run_id]:-0} + 1 ))
     RUN_RETRY_COUNTS[$run_id]="$retry_count"
@@ -1929,7 +1986,7 @@ target_point_vote() {
       $h["config"]==c &&
       $h["rate_index"]==q {
       total++
-      if($h["validation_status"]!="ok") invalid++
+      if($h["validation_status"]!="ok" && $h["validation_status"]!="overload_shed") invalid++
       if($h["served_clean"]==1) clean++
     }
     END {print clean+0","total+0","invalid+0}
@@ -2021,7 +2078,7 @@ target_close_envoy_ties() {
           $h["config"]==c &&
           $h["offered_rps"]==r {
           total++
-          if($h["validation_status"]!="ok") invalid++
+          if($h["validation_status"]!="ok" && $h["validation_status"]!="overload_shed") invalid++
           if($h["served_clean"]==1) clean++
         }
         END {print clean+0","total+0","invalid+0}
@@ -2223,7 +2280,7 @@ select_perf_points() {
         $h["phase"]=="load" && $h["frame_bytes"]==p && $h["config"]==c {
           key=$h["rate_index"] SUBSEP $h["offered_rps"]
           n[key]++
-          if ($h["validation_status"]!="ok" || $h["served_clean"]!=1)
+          if (($h["validation_status"]!="ok" && $h["validation_status"]!="overload_shed") || $h["served_clean"]!=1)
             bad[key]=1
         }
         END {
@@ -2453,7 +2510,7 @@ validate_dataset() {
   [ -z "$bad" ] || die "result/rate-plan mismatch:\n$bad"
   bad=$(awk -F, '
     NR==1 {for(i=1;i<=NF;i++)h[$i]=i; next}
-    $h["validation_status"]!="ok" {print $h["run_id"]":"$h["validation_status"]}
+    $h["validation_status"]!="ok" && $h["validation_status"]!="overload_shed" {print $h["run_id"]":"$h["validation_status"]}
   ' "$RESULTS")
   [ -z "$bad" ] || die "invalid rows:\n$bad"
   bad=$(awk -F, '

@@ -1,0 +1,617 @@
+#
+# POD bench-grpc-linkerd-opaque-6c6b945bcc-9g99v (1 of 1)
+#
+# HELP inbound_http_authz_allow_total The total number of inbound HTTP requests that were authorized
+# TYPE inbound_http_authz_allow_total counter
+inbound_http_authz_allow_total{target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",tls="no_identity",no_tls_reason="no_tls_from_remote"} 2
+inbound_http_authz_allow_total{target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="probe",authz_group="",authz_kind="default",authz_name="probe",tls="no_identity",no_tls_reason="no_tls_from_remote"} 1545
+# HELP request_total Total count of HTTP requests.
+# TYPE request_total counter
+request_total{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="probe",authz_group="",authz_kind="default",authz_name="probe"} 1545
+request_total{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated"} 2
+# HELP response_latency_ms Elapsed times between a request's headers being received and its response stream completing
+# TYPE response_latency_ms histogram
+response_latency_ms_bucket{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="probe",authz_group="",authz_kind="default",authz_name="probe",status_code="200",le="1"} 1545
+response_latency_ms_bucket{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="probe",authz_group="",authz_kind="default",authz_name="probe",status_code="200",le="2"} 1545
+response_latency_ms_bucket{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="probe",authz_group="",authz_kind="default",authz_name="probe",status_code="200",le="3"} 1545
+response_latency_ms_bucket{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="probe",authz_group="",authz_kind="default",authz_name="probe",status_code="200",le="4"} 1545
+response_latency_ms_bucket{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="probe",authz_group="",authz_kind="default",authz_name="probe",status_code="200",le="5"} 1545
+response_latency_ms_bucket{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="probe",authz_group="",authz_kind="default",authz_name="probe",status_code="200",le="10"} 1545
+response_latency_ms_bucket{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="probe",authz_group="",authz_kind="default",authz_name="probe",status_code="200",le="20"} 1545
+response_latency_ms_bucket{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="probe",authz_group="",authz_kind="default",authz_name="probe",status_code="200",le="30"} 1545
+response_latency_ms_bucket{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="probe",authz_group="",authz_kind="default",authz_name="probe",status_code="200",le="40"} 1545
+response_latency_ms_bucket{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="probe",authz_group="",authz_kind="default",authz_name="probe",status_code="200",le="50"} 1545
+response_latency_ms_bucket{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="probe",authz_group="",authz_kind="default",authz_name="probe",status_code="200",le="100"} 1545
+response_latency_ms_bucket{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="probe",authz_group="",authz_kind="default",authz_name="probe",status_code="200",le="200"} 1545
+response_latency_ms_bucket{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="probe",authz_group="",authz_kind="default",authz_name="probe",status_code="200",le="300"} 1545
+response_latency_ms_bucket{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="probe",authz_group="",authz_kind="default",authz_name="probe",status_code="200",le="400"} 1545
+response_latency_ms_bucket{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="probe",authz_group="",authz_kind="default",authz_name="probe",status_code="200",le="500"} 1545
+response_latency_ms_bucket{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="probe",authz_group="",authz_kind="default",authz_name="probe",status_code="200",le="1000"} 1545
+response_latency_ms_bucket{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="probe",authz_group="",authz_kind="default",authz_name="probe",status_code="200",le="2000"} 1545
+response_latency_ms_bucket{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="probe",authz_group="",authz_kind="default",authz_name="probe",status_code="200",le="3000"} 1545
+response_latency_ms_bucket{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="probe",authz_group="",authz_kind="default",authz_name="probe",status_code="200",le="4000"} 1545
+response_latency_ms_bucket{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="probe",authz_group="",authz_kind="default",authz_name="probe",status_code="200",le="5000"} 1545
+response_latency_ms_bucket{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="probe",authz_group="",authz_kind="default",authz_name="probe",status_code="200",le="10000"} 1545
+response_latency_ms_bucket{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="probe",authz_group="",authz_kind="default",authz_name="probe",status_code="200",le="20000"} 1545
+response_latency_ms_bucket{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="probe",authz_group="",authz_kind="default",authz_name="probe",status_code="200",le="30000"} 1545
+response_latency_ms_bucket{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="probe",authz_group="",authz_kind="default",authz_name="probe",status_code="200",le="40000"} 1545
+response_latency_ms_bucket{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="probe",authz_group="",authz_kind="default",authz_name="probe",status_code="200",le="50000"} 1545
+response_latency_ms_bucket{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="probe",authz_group="",authz_kind="default",authz_name="probe",status_code="200",le="+Inf"} 1545
+response_latency_ms_count{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="probe",authz_group="",authz_kind="default",authz_name="probe",status_code="200"} 1545
+response_latency_ms_sum{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="probe",authz_group="",authz_kind="default",authz_name="probe",status_code="200"} 0
+response_latency_ms_bucket{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200",le="1"} 1
+response_latency_ms_bucket{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200",le="2"} 1
+response_latency_ms_bucket{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200",le="3"} 1
+response_latency_ms_bucket{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200",le="4"} 1
+response_latency_ms_bucket{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200",le="5"} 1
+response_latency_ms_bucket{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200",le="10"} 1
+response_latency_ms_bucket{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200",le="20"} 1
+response_latency_ms_bucket{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200",le="30"} 1
+response_latency_ms_bucket{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200",le="40"} 1
+response_latency_ms_bucket{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200",le="50"} 1
+response_latency_ms_bucket{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200",le="100"} 1
+response_latency_ms_bucket{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200",le="200"} 1
+response_latency_ms_bucket{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200",le="300"} 1
+response_latency_ms_bucket{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200",le="400"} 1
+response_latency_ms_bucket{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200",le="500"} 1
+response_latency_ms_bucket{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200",le="1000"} 1
+response_latency_ms_bucket{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200",le="2000"} 1
+response_latency_ms_bucket{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200",le="3000"} 1
+response_latency_ms_bucket{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200",le="4000"} 1
+response_latency_ms_bucket{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200",le="5000"} 1
+response_latency_ms_bucket{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200",le="10000"} 1
+response_latency_ms_bucket{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200",le="20000"} 1
+response_latency_ms_bucket{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200",le="30000"} 1
+response_latency_ms_bucket{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200",le="40000"} 1
+response_latency_ms_bucket{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200",le="50000"} 1
+response_latency_ms_bucket{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200",le="+Inf"} 1
+response_latency_ms_count{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200"} 1
+response_latency_ms_sum{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200"} 1
+# HELP response_total Total count of HTTP responses.
+# TYPE response_total counter
+response_total{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="probe",authz_group="",authz_kind="default",authz_name="probe",status_code="200",classification="success",grpc_status="",error=""} 1545
+response_total{direction="inbound",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200",classification="success",grpc_status="",error=""} 1
+# HELP control_request_total Total count of HTTP requests.
+# TYPE control_request_total counter
+control_request_total{addr="linkerd-identity-headless.linkerd.svc.cluster.local:8080",tls="true",server_id="linkerd-identity.linkerd.serviceaccount.identity.linkerd.cluster.local"} 1
+control_request_total{addr="linkerd-dst-headless.linkerd.svc.cluster.local:8086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local"} 36
+control_request_total{addr="linkerd-policy.linkerd.svc.cluster.local:8090",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local"} 70
+# HELP control_response_latency_ms Elapsed times between a request's headers being received and its response stream completing
+# TYPE control_response_latency_ms histogram
+control_response_latency_ms_bucket{addr="linkerd-identity-headless.linkerd.svc.cluster.local:8080",tls="true",server_id="linkerd-identity.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="1"} 0
+control_response_latency_ms_bucket{addr="linkerd-identity-headless.linkerd.svc.cluster.local:8080",tls="true",server_id="linkerd-identity.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="2"} 0
+control_response_latency_ms_bucket{addr="linkerd-identity-headless.linkerd.svc.cluster.local:8080",tls="true",server_id="linkerd-identity.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="3"} 0
+control_response_latency_ms_bucket{addr="linkerd-identity-headless.linkerd.svc.cluster.local:8080",tls="true",server_id="linkerd-identity.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="4"} 0
+control_response_latency_ms_bucket{addr="linkerd-identity-headless.linkerd.svc.cluster.local:8080",tls="true",server_id="linkerd-identity.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="5"} 0
+control_response_latency_ms_bucket{addr="linkerd-identity-headless.linkerd.svc.cluster.local:8080",tls="true",server_id="linkerd-identity.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="10"} 0
+control_response_latency_ms_bucket{addr="linkerd-identity-headless.linkerd.svc.cluster.local:8080",tls="true",server_id="linkerd-identity.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="20"} 0
+control_response_latency_ms_bucket{addr="linkerd-identity-headless.linkerd.svc.cluster.local:8080",tls="true",server_id="linkerd-identity.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="30"} 0
+control_response_latency_ms_bucket{addr="linkerd-identity-headless.linkerd.svc.cluster.local:8080",tls="true",server_id="linkerd-identity.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="40"} 0
+control_response_latency_ms_bucket{addr="linkerd-identity-headless.linkerd.svc.cluster.local:8080",tls="true",server_id="linkerd-identity.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="50"} 0
+control_response_latency_ms_bucket{addr="linkerd-identity-headless.linkerd.svc.cluster.local:8080",tls="true",server_id="linkerd-identity.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="100"} 1
+control_response_latency_ms_bucket{addr="linkerd-identity-headless.linkerd.svc.cluster.local:8080",tls="true",server_id="linkerd-identity.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="200"} 1
+control_response_latency_ms_bucket{addr="linkerd-identity-headless.linkerd.svc.cluster.local:8080",tls="true",server_id="linkerd-identity.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="300"} 1
+control_response_latency_ms_bucket{addr="linkerd-identity-headless.linkerd.svc.cluster.local:8080",tls="true",server_id="linkerd-identity.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="400"} 1
+control_response_latency_ms_bucket{addr="linkerd-identity-headless.linkerd.svc.cluster.local:8080",tls="true",server_id="linkerd-identity.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="500"} 1
+control_response_latency_ms_bucket{addr="linkerd-identity-headless.linkerd.svc.cluster.local:8080",tls="true",server_id="linkerd-identity.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="1000"} 1
+control_response_latency_ms_bucket{addr="linkerd-identity-headless.linkerd.svc.cluster.local:8080",tls="true",server_id="linkerd-identity.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="2000"} 1
+control_response_latency_ms_bucket{addr="linkerd-identity-headless.linkerd.svc.cluster.local:8080",tls="true",server_id="linkerd-identity.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="3000"} 1
+control_response_latency_ms_bucket{addr="linkerd-identity-headless.linkerd.svc.cluster.local:8080",tls="true",server_id="linkerd-identity.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="4000"} 1
+control_response_latency_ms_bucket{addr="linkerd-identity-headless.linkerd.svc.cluster.local:8080",tls="true",server_id="linkerd-identity.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="5000"} 1
+control_response_latency_ms_bucket{addr="linkerd-identity-headless.linkerd.svc.cluster.local:8080",tls="true",server_id="linkerd-identity.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="10000"} 1
+control_response_latency_ms_bucket{addr="linkerd-identity-headless.linkerd.svc.cluster.local:8080",tls="true",server_id="linkerd-identity.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="20000"} 1
+control_response_latency_ms_bucket{addr="linkerd-identity-headless.linkerd.svc.cluster.local:8080",tls="true",server_id="linkerd-identity.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="30000"} 1
+control_response_latency_ms_bucket{addr="linkerd-identity-headless.linkerd.svc.cluster.local:8080",tls="true",server_id="linkerd-identity.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="40000"} 1
+control_response_latency_ms_bucket{addr="linkerd-identity-headless.linkerd.svc.cluster.local:8080",tls="true",server_id="linkerd-identity.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="50000"} 1
+control_response_latency_ms_bucket{addr="linkerd-identity-headless.linkerd.svc.cluster.local:8080",tls="true",server_id="linkerd-identity.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="+Inf"} 1
+control_response_latency_ms_count{addr="linkerd-identity-headless.linkerd.svc.cluster.local:8080",tls="true",server_id="linkerd-identity.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200"} 1
+control_response_latency_ms_sum{addr="linkerd-identity-headless.linkerd.svc.cluster.local:8080",tls="true",server_id="linkerd-identity.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200"} 65
+control_response_latency_ms_bucket{addr="linkerd-dst-headless.linkerd.svc.cluster.local:8086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="1"} 36
+control_response_latency_ms_bucket{addr="linkerd-dst-headless.linkerd.svc.cluster.local:8086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="2"} 36
+control_response_latency_ms_bucket{addr="linkerd-dst-headless.linkerd.svc.cluster.local:8086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="3"} 36
+control_response_latency_ms_bucket{addr="linkerd-dst-headless.linkerd.svc.cluster.local:8086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="4"} 36
+control_response_latency_ms_bucket{addr="linkerd-dst-headless.linkerd.svc.cluster.local:8086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="5"} 36
+control_response_latency_ms_bucket{addr="linkerd-dst-headless.linkerd.svc.cluster.local:8086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="10"} 36
+control_response_latency_ms_bucket{addr="linkerd-dst-headless.linkerd.svc.cluster.local:8086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="20"} 36
+control_response_latency_ms_bucket{addr="linkerd-dst-headless.linkerd.svc.cluster.local:8086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="30"} 36
+control_response_latency_ms_bucket{addr="linkerd-dst-headless.linkerd.svc.cluster.local:8086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="40"} 36
+control_response_latency_ms_bucket{addr="linkerd-dst-headless.linkerd.svc.cluster.local:8086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="50"} 36
+control_response_latency_ms_bucket{addr="linkerd-dst-headless.linkerd.svc.cluster.local:8086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="100"} 36
+control_response_latency_ms_bucket{addr="linkerd-dst-headless.linkerd.svc.cluster.local:8086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="200"} 36
+control_response_latency_ms_bucket{addr="linkerd-dst-headless.linkerd.svc.cluster.local:8086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="300"} 36
+control_response_latency_ms_bucket{addr="linkerd-dst-headless.linkerd.svc.cluster.local:8086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="400"} 36
+control_response_latency_ms_bucket{addr="linkerd-dst-headless.linkerd.svc.cluster.local:8086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="500"} 36
+control_response_latency_ms_bucket{addr="linkerd-dst-headless.linkerd.svc.cluster.local:8086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="1000"} 36
+control_response_latency_ms_bucket{addr="linkerd-dst-headless.linkerd.svc.cluster.local:8086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="2000"} 36
+control_response_latency_ms_bucket{addr="linkerd-dst-headless.linkerd.svc.cluster.local:8086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="3000"} 36
+control_response_latency_ms_bucket{addr="linkerd-dst-headless.linkerd.svc.cluster.local:8086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="4000"} 36
+control_response_latency_ms_bucket{addr="linkerd-dst-headless.linkerd.svc.cluster.local:8086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="5000"} 36
+control_response_latency_ms_bucket{addr="linkerd-dst-headless.linkerd.svc.cluster.local:8086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="10000"} 36
+control_response_latency_ms_bucket{addr="linkerd-dst-headless.linkerd.svc.cluster.local:8086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="20000"} 36
+control_response_latency_ms_bucket{addr="linkerd-dst-headless.linkerd.svc.cluster.local:8086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="30000"} 36
+control_response_latency_ms_bucket{addr="linkerd-dst-headless.linkerd.svc.cluster.local:8086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="40000"} 36
+control_response_latency_ms_bucket{addr="linkerd-dst-headless.linkerd.svc.cluster.local:8086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="50000"} 36
+control_response_latency_ms_bucket{addr="linkerd-dst-headless.linkerd.svc.cluster.local:8086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="+Inf"} 36
+control_response_latency_ms_count{addr="linkerd-dst-headless.linkerd.svc.cluster.local:8086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200"} 36
+control_response_latency_ms_sum{addr="linkerd-dst-headless.linkerd.svc.cluster.local:8086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200"} 36
+control_response_latency_ms_bucket{addr="linkerd-policy.linkerd.svc.cluster.local:8090",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="1"} 61
+control_response_latency_ms_bucket{addr="linkerd-policy.linkerd.svc.cluster.local:8090",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="2"} 62
+control_response_latency_ms_bucket{addr="linkerd-policy.linkerd.svc.cluster.local:8090",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="3"} 62
+control_response_latency_ms_bucket{addr="linkerd-policy.linkerd.svc.cluster.local:8090",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="4"} 62
+control_response_latency_ms_bucket{addr="linkerd-policy.linkerd.svc.cluster.local:8090",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="5"} 64
+control_response_latency_ms_bucket{addr="linkerd-policy.linkerd.svc.cluster.local:8090",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="10"} 68
+control_response_latency_ms_bucket{addr="linkerd-policy.linkerd.svc.cluster.local:8090",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="20"} 68
+control_response_latency_ms_bucket{addr="linkerd-policy.linkerd.svc.cluster.local:8090",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="30"} 68
+control_response_latency_ms_bucket{addr="linkerd-policy.linkerd.svc.cluster.local:8090",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="40"} 68
+control_response_latency_ms_bucket{addr="linkerd-policy.linkerd.svc.cluster.local:8090",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="50"} 68
+control_response_latency_ms_bucket{addr="linkerd-policy.linkerd.svc.cluster.local:8090",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="100"} 70
+control_response_latency_ms_bucket{addr="linkerd-policy.linkerd.svc.cluster.local:8090",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="200"} 70
+control_response_latency_ms_bucket{addr="linkerd-policy.linkerd.svc.cluster.local:8090",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="300"} 70
+control_response_latency_ms_bucket{addr="linkerd-policy.linkerd.svc.cluster.local:8090",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="400"} 70
+control_response_latency_ms_bucket{addr="linkerd-policy.linkerd.svc.cluster.local:8090",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="500"} 70
+control_response_latency_ms_bucket{addr="linkerd-policy.linkerd.svc.cluster.local:8090",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="1000"} 70
+control_response_latency_ms_bucket{addr="linkerd-policy.linkerd.svc.cluster.local:8090",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="2000"} 70
+control_response_latency_ms_bucket{addr="linkerd-policy.linkerd.svc.cluster.local:8090",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="3000"} 70
+control_response_latency_ms_bucket{addr="linkerd-policy.linkerd.svc.cluster.local:8090",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="4000"} 70
+control_response_latency_ms_bucket{addr="linkerd-policy.linkerd.svc.cluster.local:8090",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="5000"} 70
+control_response_latency_ms_bucket{addr="linkerd-policy.linkerd.svc.cluster.local:8090",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="10000"} 70
+control_response_latency_ms_bucket{addr="linkerd-policy.linkerd.svc.cluster.local:8090",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="20000"} 70
+control_response_latency_ms_bucket{addr="linkerd-policy.linkerd.svc.cluster.local:8090",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="30000"} 70
+control_response_latency_ms_bucket{addr="linkerd-policy.linkerd.svc.cluster.local:8090",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="40000"} 70
+control_response_latency_ms_bucket{addr="linkerd-policy.linkerd.svc.cluster.local:8090",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="50000"} 70
+control_response_latency_ms_bucket{addr="linkerd-policy.linkerd.svc.cluster.local:8090",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="+Inf"} 70
+control_response_latency_ms_count{addr="linkerd-policy.linkerd.svc.cluster.local:8090",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200"} 70
+control_response_latency_ms_sum{addr="linkerd-policy.linkerd.svc.cluster.local:8090",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200"} 221
+# HELP control_response_total Total count of HTTP responses.
+# TYPE control_response_total counter
+control_response_total{addr="linkerd-identity-headless.linkerd.svc.cluster.local:8080",tls="true",server_id="linkerd-identity.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",classification="success",grpc_status="0",error=""} 1
+control_response_total{addr="linkerd-dst-headless.linkerd.svc.cluster.local:8086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",classification="success",grpc_status="2",error=""} 34
+control_response_total{addr="linkerd-policy.linkerd.svc.cluster.local:8090",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",classification="success",grpc_status="2",error=""} 67
+# HELP tcp_open_total Total count of opened connections
+# TYPE tcp_open_total counter
+tcp_open_total{direction="inbound",peer="src",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191"} 1547
+tcp_open_total{direction="outbound",peer="dst",authority="echo-grpc-linkerd-opaque.test-bench.svc.cluster.local:9092",target_addr="10.244.0.230:9092",target_ip="10.244.0.230",target_port="9092",tls="true",server_id="default.test-bench.serviceaccount.identity.linkerd.cluster.local",dst_control_plane_ns="linkerd",dst_deployment="echo-grpc-linkerd-opaque",dst_namespace="test-bench",dst_pod="echo-grpc-linkerd-opaque-7c9cc95f5f-dtjs8",dst_pod_template_hash="7c9cc95f5f",dst_service="echo-grpc-linkerd-opaque",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown"} 760
+tcp_open_total{direction="outbound",peer="src",target_addr="10.100.141.247:9092",target_ip="10.100.141.247",target_port="9092",tls="no_identity",no_tls_reason="loopback"} 760
+# HELP tcp_open_connections Number of currently-open connections
+# TYPE tcp_open_connections gauge
+tcp_open_connections{direction="inbound",peer="src",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191"} 1
+tcp_open_connections{direction="outbound",peer="dst",authority="echo-grpc-linkerd-opaque.test-bench.svc.cluster.local:9092",target_addr="10.244.0.230:9092",target_ip="10.244.0.230",target_port="9092",tls="true",server_id="default.test-bench.serviceaccount.identity.linkerd.cluster.local",dst_control_plane_ns="linkerd",dst_deployment="echo-grpc-linkerd-opaque",dst_namespace="test-bench",dst_pod="echo-grpc-linkerd-opaque-7c9cc95f5f-dtjs8",dst_pod_template_hash="7c9cc95f5f",dst_service="echo-grpc-linkerd-opaque",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown"} 0
+tcp_open_connections{direction="outbound",peer="src",target_addr="10.100.141.247:9092",target_ip="10.100.141.247",target_port="9092",tls="no_identity",no_tls_reason="loopback"} 0
+# HELP tcp_read_bytes_total Total count of bytes read from peers
+# TYPE tcp_read_bytes_total counter
+tcp_read_bytes_total{direction="inbound",peer="src",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191"} 167840
+tcp_read_bytes_total{direction="outbound",peer="dst",authority="echo-grpc-linkerd-opaque.test-bench.svc.cluster.local:9092",target_addr="10.244.0.230:9092",target_ip="10.244.0.230",target_port="9092",tls="true",server_id="default.test-bench.serviceaccount.identity.linkerd.cluster.local",dst_control_plane_ns="linkerd",dst_deployment="echo-grpc-linkerd-opaque",dst_namespace="test-bench",dst_pod="echo-grpc-linkerd-opaque-7c9cc95f5f-dtjs8",dst_pod_template_hash="7c9cc95f5f",dst_service="echo-grpc-linkerd-opaque",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown"} 33453564853
+tcp_read_bytes_total{direction="outbound",peer="src",target_addr="10.100.141.247:9092",target_ip="10.100.141.247",target_port="9092",tls="no_identity",no_tls_reason="loopback"} 33848086397
+# HELP tcp_write_bytes_total Total count of bytes written to peers
+# TYPE tcp_write_bytes_total counter
+tcp_write_bytes_total{direction="inbound",peer="src",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191"} 202425
+tcp_write_bytes_total{direction="outbound",peer="dst",authority="echo-grpc-linkerd-opaque.test-bench.svc.cluster.local:9092",target_addr="10.244.0.230:9092",target_ip="10.244.0.230",target_port="9092",tls="true",server_id="default.test-bench.serviceaccount.identity.linkerd.cluster.local",dst_control_plane_ns="linkerd",dst_deployment="echo-grpc-linkerd-opaque",dst_namespace="test-bench",dst_pod="echo-grpc-linkerd-opaque-7c9cc95f5f-dtjs8",dst_pod_template_hash="7c9cc95f5f",dst_service="echo-grpc-linkerd-opaque",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown"} 33848086397
+tcp_write_bytes_total{direction="outbound",peer="src",target_addr="10.100.141.247:9092",target_ip="10.100.141.247",target_port="9092",tls="no_identity",no_tls_reason="loopback"} 33453564853
+# HELP tcp_close_total Total count of closed connections
+# TYPE tcp_close_total counter
+tcp_close_total{direction="inbound",peer="src",target_addr="0.0.0.0:4191",target_ip="0.0.0.0",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",errno=""} 1546
+tcp_close_total{direction="outbound",peer="dst",authority="echo-grpc-linkerd-opaque.test-bench.svc.cluster.local:9092",target_addr="10.244.0.230:9092",target_ip="10.244.0.230",target_port="9092",tls="true",server_id="default.test-bench.serviceaccount.identity.linkerd.cluster.local",dst_control_plane_ns="linkerd",dst_deployment="echo-grpc-linkerd-opaque",dst_namespace="test-bench",dst_pod="echo-grpc-linkerd-opaque-7c9cc95f5f-dtjs8",dst_pod_template_hash="7c9cc95f5f",dst_service="echo-grpc-linkerd-opaque",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown",errno=""} 760
+tcp_close_total{direction="outbound",peer="src",target_addr="10.100.141.247:9092",target_ip="10.100.141.247",target_port="9092",tls="no_identity",no_tls_reason="loopback",errno=""} 760
+# HELP opentelemetry_span_export_streams Total count of opened span export streams
+# TYPE opentelemetry_span_export_streams counter
+opentelemetry_span_export_streams 0
+# HELP opentelemetry_span_export_requests Total count of span export request messages
+# TYPE opentelemetry_span_export_requests counter
+opentelemetry_span_export_requests 0
+# HELP opentelemetry_span_exports Total count of spans exported
+# TYPE opentelemetry_span_exports counter
+opentelemetry_span_exports 0
+# HELP stack_create_total Total number of services created
+# TYPE stack_create_total counter
+stack_create_total{direction="outbound",protocol="http",name="endpoint"} 0
+stack_create_total{direction="inbound",protocol="http",name="logical"} 0
+stack_create_total{direction="outbound",protocol="tls",name="balance"} 0
+stack_create_total{direction="outbound",protocol="opaq",name="balance"} 18
+stack_create_total{direction="outbound",protocol="http",name="balance"} 0
+stack_create_total{direction="outbound",protocol="tls",name="endpoint"} 0
+stack_create_total{direction="outbound",protocol="http",name="forward"} 0
+stack_create_total{direction="outbound",protocol="opaq",name="forward"} 0
+stack_create_total{direction="outbound",protocol="opaq",name="endpoint"} 18
+stack_create_total{direction="outbound",protocol="tls",name="forward"} 0
+# HELP stack_drop_total Total number of services dropped
+# TYPE stack_drop_total counter
+stack_drop_total{direction="outbound",protocol="http",name="endpoint"} 0
+stack_drop_total{direction="inbound",protocol="http",name="logical"} 0
+stack_drop_total{direction="outbound",protocol="tls",name="balance"} 0
+stack_drop_total{direction="outbound",protocol="opaq",name="balance"} 17
+stack_drop_total{direction="outbound",protocol="http",name="balance"} 0
+stack_drop_total{direction="outbound",protocol="tls",name="endpoint"} 0
+stack_drop_total{direction="outbound",protocol="http",name="forward"} 0
+stack_drop_total{direction="outbound",protocol="opaq",name="forward"} 0
+stack_drop_total{direction="outbound",protocol="opaq",name="endpoint"} 17
+stack_drop_total{direction="outbound",protocol="tls",name="forward"} 0
+# HELP stack_poll_total Total number of stack polls
+# TYPE stack_poll_total counter
+stack_poll_total{direction="outbound",protocol="http",name="endpoint",ready="true"} 0
+stack_poll_total{direction="inbound",protocol="http",name="logical",ready="true"} 0
+stack_poll_total{direction="outbound",protocol="tls",name="balance",ready="true"} 0
+stack_poll_total{direction="outbound",protocol="opaq",name="balance",ready="true"} 760
+stack_poll_total{direction="outbound",protocol="http",name="balance",ready="true"} 0
+stack_poll_total{direction="outbound",protocol="tls",name="endpoint",ready="true"} 0
+stack_poll_total{direction="outbound",protocol="http",name="forward",ready="true"} 0
+stack_poll_total{direction="outbound",protocol="opaq",name="forward",ready="true"} 0
+stack_poll_total{direction="outbound",protocol="opaq",name="endpoint",ready="true"} 1538
+stack_poll_total{direction="outbound",protocol="tls",name="forward",ready="true"} 0
+stack_poll_total{direction="outbound",protocol="http",name="endpoint",ready="false"} 0
+stack_poll_total{direction="inbound",protocol="http",name="logical",ready="false"} 0
+stack_poll_total{direction="outbound",protocol="tls",name="balance",ready="false"} 0
+stack_poll_total{direction="outbound",protocol="opaq",name="balance",ready="false"} 0
+stack_poll_total{direction="outbound",protocol="http",name="balance",ready="false"} 0
+stack_poll_total{direction="outbound",protocol="tls",name="endpoint",ready="false"} 0
+stack_poll_total{direction="outbound",protocol="http",name="forward",ready="false"} 0
+stack_poll_total{direction="outbound",protocol="opaq",name="forward",ready="false"} 0
+stack_poll_total{direction="outbound",protocol="opaq",name="endpoint",ready="false"} 0
+stack_poll_total{direction="outbound",protocol="tls",name="forward",ready="false"} 0
+stack_poll_total{direction="outbound",protocol="http",name="endpoint",ready="error"} 0
+stack_poll_total{direction="inbound",protocol="http",name="logical",ready="error"} 0
+stack_poll_total{direction="outbound",protocol="tls",name="balance",ready="error"} 0
+stack_poll_total{direction="outbound",protocol="opaq",name="balance",ready="error"} 0
+stack_poll_total{direction="outbound",protocol="http",name="balance",ready="error"} 0
+stack_poll_total{direction="outbound",protocol="tls",name="endpoint",ready="error"} 0
+stack_poll_total{direction="outbound",protocol="http",name="forward",ready="error"} 0
+stack_poll_total{direction="outbound",protocol="opaq",name="forward",ready="error"} 0
+stack_poll_total{direction="outbound",protocol="opaq",name="endpoint",ready="error"} 0
+stack_poll_total{direction="outbound",protocol="tls",name="forward",ready="error"} 0
+# HELP stack_poll_total_ms Total number of milliseconds this service has spent awaiting readiness
+# TYPE stack_poll_total_ms counter
+stack_poll_total_ms{direction="outbound",protocol="http",name="endpoint"} 0
+stack_poll_total_ms{direction="inbound",protocol="http",name="logical"} 0
+stack_poll_total_ms{direction="outbound",protocol="tls",name="balance"} 0
+stack_poll_total_ms{direction="outbound",protocol="opaq",name="balance"} 0
+stack_poll_total_ms{direction="outbound",protocol="http",name="balance"} 0
+stack_poll_total_ms{direction="outbound",protocol="tls",name="endpoint"} 0
+stack_poll_total_ms{direction="outbound",protocol="http",name="forward"} 0
+stack_poll_total_ms{direction="outbound",protocol="opaq",name="forward"} 0
+stack_poll_total_ms{direction="outbound",protocol="opaq",name="endpoint"} 0
+stack_poll_total_ms{direction="outbound",protocol="tls",name="forward"} 0
+# HELP proxy_build_info Proxy build info.
+# TYPE proxy_build_info gauge
+proxy_build_info{date="2026-07-29T06:18:25Z",git_sha="e5de317",profile="release",vendor="linkerd",version="2.364.0"} 1
+# HELP rustls_info Proxy TLS info.
+# TYPE rustls_info gauge
+rustls_info{tls_suites="TLS13_AES_128_GCM_SHA256,TLS13_AES_256_GCM_SHA384,TLS13_CHACHA20_POLY1305_SHA256,",tls_kx_groups="X25519MLKEM768,X25519,secp256r1,secp384r1,",tls_rand="AwsLcRs",tls_key_provider="AwsLcRs",tls_fips="false"} 1
+# HELP tokio_rt_workers The number of worker threads used by the runtime.
+# TYPE tokio_rt_workers gauge
+tokio_rt_workers 1
+# HELP tokio_rt_park Total number of times worker threads parked.
+# TYPE tokio_rt_park counter
+tokio_rt_park_total 2113144
+# HELP tokio_rt_noop Number of times workers unparked but found no new work.
+# TYPE tokio_rt_noop counter
+tokio_rt_noop_total 62734
+# HELP tokio_rt_steal Number of tasks stolen by workers from others.
+# TYPE tokio_rt_steal counter
+tokio_rt_steal_total 0
+# HELP tokio_rt_steal_operations Number of times workers stole tasks from other.
+# TYPE tokio_rt_steal_operations counter
+tokio_rt_steal_operations_total 0
+# HELP tokio_rt_remote_schedule Total number of remote schedule operations.
+# TYPE tokio_rt_remote_schedule counter
+tokio_rt_remote_schedule_total 4
+# HELP tokio_rt_local_schedule Total number of local schedule operations.
+# TYPE tokio_rt_local_schedule counter
+tokio_rt_local_schedule_total 3490793
+# HELP tokio_rt_overflow Total number of overflow operations.
+# TYPE tokio_rt_overflow counter
+tokio_rt_overflow_total 0
+# HELP tokio_rt_polls The number of tasks that have been polled across all worker threads.
+# TYPE tokio_rt_polls counter
+tokio_rt_polls_total 3490788
+# HELP tokio_rt_busy_seconds Total duration of time when worker threads were busy processing tasks.
+# TYPE tokio_rt_busy_seconds counter
+# UNIT tokio_rt_busy_seconds seconds
+tokio_rt_busy_seconds_total 103.9437803400003
+# HELP tokio_rt_injection_queue_depth The number of tasks currently scheduled in the runtime's injection queue.
+# TYPE tokio_rt_injection_queue_depth gauge
+tokio_rt_injection_queue_depth 0
+# HELP tokio_rt_local_queue_depth The total number of tasks currently scheduled in workers' local queues.
+# TYPE tokio_rt_local_queue_depth gauge
+tokio_rt_local_queue_depth 0
+# HELP tokio_rt_budget_forced_yield Number of times a worker thread was forced to yield due to budget exhaustion.
+# TYPE tokio_rt_budget_forced_yield counter
+tokio_rt_budget_forced_yield_total 650
+# HELP tokio_rt_io_driver_ready Number of times the IO driver was woken up.
+# TYPE tokio_rt_io_driver_ready counter
+tokio_rt_io_driver_ready_total 4209251
+# HELP control_dns_resolutions Counts the number of DNS records that have been resolved..
+# TYPE control_dns_resolutions counter
+control_dns_resolutions_total{client="destination",record_type="SRV",result="ok"} 304
+control_dns_resolutions_total{client="identity",record_type="SRV",result="not_found"} 0
+control_dns_resolutions_total{client="destination",record_type="A/AAAA",result="ok"} 0
+control_dns_resolutions_total{client="trace_collector",record_type="SRV",result="not_found"} 0
+control_dns_resolutions_total{client="policy",record_type="SRV",result="ok"} 312
+control_dns_resolutions_total{client="trace_collector",record_type="A/AAAA",result="ok"} 0
+control_dns_resolutions_total{client="policy",record_type="A/AAAA",result="ok"} 0
+control_dns_resolutions_total{client="destination",record_type="A/AAAA",result="not_found"} 0
+control_dns_resolutions_total{client="identity",record_type="SRV",result="ok"} 2
+control_dns_resolutions_total{client="identity",record_type="A/AAAA",result="not_found"} 0
+control_dns_resolutions_total{client="destination",record_type="SRV",result="not_found"} 0
+control_dns_resolutions_total{client="policy",record_type="A/AAAA",result="not_found"} 0
+control_dns_resolutions_total{client="trace_collector",record_type="A/AAAA",result="not_found"} 0
+control_dns_resolutions_total{client="trace_collector",record_type="SRV",result="ok"} 0
+control_dns_resolutions_total{client="identity",record_type="A/AAAA",result="ok"} 0
+control_dns_resolutions_total{client="policy",record_type="SRV",result="not_found"} 0
+# HELP control_identity_cert_expiration_timestamp_seconds Time when this proxy's current mTLS identity certificate will expire (in seconds since the UNIX epoch).
+# TYPE control_identity_cert_expiration_timestamp_seconds gauge
+# UNIT control_identity_cert_expiration_timestamp_seconds seconds
+control_identity_cert_expiration_timestamp_seconds 1786456867.0
+# HELP control_identity_cert_refresh_timestamp_seconds Time when this proxy's current mTLS identity certificate was last updated.
+# TYPE control_identity_cert_refresh_timestamp_seconds gauge
+# UNIT control_identity_cert_refresh_timestamp_seconds seconds
+control_identity_cert_refresh_timestamp_seconds 1786370447.0196837
+# HELP control_identity_cert_refreshes The total number of times this proxy's mTLS identity certificate has been refreshed by the Identity provider.
+# TYPE control_identity_cert_refreshes counter
+control_identity_cert_refreshes_total{result="ok"} 1
+control_identity_cert_refreshes_total{result="error"} 0
+# HELP control_identity_balancer_endpoints The number of endpoints currently in a HTTP request balancer.
+# TYPE control_identity_balancer_endpoints gauge
+control_identity_balancer_endpoints{endpoint_state="pending",addr="linkerd-identity-headless.linkerd.svc.cluster.local:8080"} 0
+control_identity_balancer_endpoints{endpoint_state="ready",addr="linkerd-identity-headless.linkerd.svc.cluster.local:8080"} 0
+# HELP control_identity_balancer_p2c_endpoints The number of endpoints currently in the balancer.
+# TYPE control_identity_balancer_p2c_endpoints gauge
+control_identity_balancer_p2c_endpoints{addr="linkerd-identity-headless.linkerd.svc.cluster.local:8080"} 0
+# HELP control_identity_balancer_p2c_updates The total number of service discovery updates received by a balancer.
+# TYPE control_identity_balancer_p2c_updates counter
+control_identity_balancer_p2c_updates_total{op="Remove",addr="linkerd-identity-headless.linkerd.svc.cluster.local:8080"} 0
+control_identity_balancer_p2c_updates_total{op="Reset",addr="linkerd-identity-headless.linkerd.svc.cluster.local:8080"} 1
+control_identity_balancer_p2c_updates_total{op="Add",addr="linkerd-identity-headless.linkerd.svc.cluster.local:8080"} 0
+# HELP control_identity_balancer_queue_length The current count of requests waiting in the queue.
+# TYPE control_identity_balancer_queue_length gauge
+control_identity_balancer_queue_length{addr="linkerd-identity-headless.linkerd.svc.cluster.local:8080"} 0
+# HELP control_identity_balancer_queue_requests The total number of requests that have entered the queue.
+# TYPE control_identity_balancer_queue_requests counter
+control_identity_balancer_queue_requests_total{addr="linkerd-identity-headless.linkerd.svc.cluster.local:8080"} 1
+# HELP control_identity_balancer_queue_latency_seconds The distribution of durations that requests have spent in the queue.
+# TYPE control_identity_balancer_queue_latency_seconds histogram
+# UNIT control_identity_balancer_queue_latency_seconds seconds
+control_identity_balancer_queue_latency_seconds_sum{addr="linkerd-identity-headless.linkerd.svc.cluster.local:8080"} 0.061675354
+control_identity_balancer_queue_latency_seconds_count{addr="linkerd-identity-headless.linkerd.svc.cluster.local:8080"} 1
+control_identity_balancer_queue_latency_seconds_bucket{le="0.0005",addr="linkerd-identity-headless.linkerd.svc.cluster.local:8080"} 0
+control_identity_balancer_queue_latency_seconds_bucket{le="0.005",addr="linkerd-identity-headless.linkerd.svc.cluster.local:8080"} 0
+control_identity_balancer_queue_latency_seconds_bucket{le="0.05",addr="linkerd-identity-headless.linkerd.svc.cluster.local:8080"} 0
+control_identity_balancer_queue_latency_seconds_bucket{le="0.5",addr="linkerd-identity-headless.linkerd.svc.cluster.local:8080"} 1
+control_identity_balancer_queue_latency_seconds_bucket{le="1.0",addr="linkerd-identity-headless.linkerd.svc.cluster.local:8080"} 1
+control_identity_balancer_queue_latency_seconds_bucket{le="3.0",addr="linkerd-identity-headless.linkerd.svc.cluster.local:8080"} 1
+control_identity_balancer_queue_latency_seconds_bucket{le="+Inf",addr="linkerd-identity-headless.linkerd.svc.cluster.local:8080"} 1
+# HELP control_identity_balancer_queue_gate_open The total number of gate state changes to open.
+# TYPE control_identity_balancer_queue_gate_open counter
+control_identity_balancer_queue_gate_open_total{addr="linkerd-identity-headless.linkerd.svc.cluster.local:8080"} 1
+# HELP control_identity_balancer_queue_gate_shut The total number of gate state changes from open to shut.
+# TYPE control_identity_balancer_queue_gate_shut counter
+control_identity_balancer_queue_gate_shut_total{addr="linkerd-identity-headless.linkerd.svc.cluster.local:8080"} 0
+# HELP control_identity_balancer_queue_gate_open_time_seconds The time at which the gate was opened.
+# TYPE control_identity_balancer_queue_gate_open_time_seconds gauge
+# UNIT control_identity_balancer_queue_gate_open_time_seconds seconds
+control_identity_balancer_queue_gate_open_time_seconds{addr="linkerd-identity-headless.linkerd.svc.cluster.local:8080"} 1786370446.9537743
+# HELP control_identity_balancer_queue_gate_shut_time_seconds The time at which the gate was shut.
+# TYPE control_identity_balancer_queue_gate_shut_time_seconds gauge
+# UNIT control_identity_balancer_queue_gate_shut_time_seconds seconds
+control_identity_balancer_queue_gate_shut_time_seconds{addr="linkerd-identity-headless.linkerd.svc.cluster.local:8080"} 0.0
+# HELP control_identity_balancer_queue_gate_timeout_seconds Indicates the request timeout after which the gate will shut and enter failfast.
+# TYPE control_identity_balancer_queue_gate_timeout_seconds gauge
+# UNIT control_identity_balancer_queue_gate_timeout_seconds seconds
+control_identity_balancer_queue_gate_timeout_seconds{addr="linkerd-identity-headless.linkerd.svc.cluster.local:8080"} 30.0
+# HELP control_destination_balancer_endpoints The number of endpoints currently in a HTTP request balancer.
+# TYPE control_destination_balancer_endpoints gauge
+control_destination_balancer_endpoints{endpoint_state="ready",addr="linkerd-dst-headless.linkerd.svc.cluster.local:8086"} 1
+control_destination_balancer_endpoints{endpoint_state="pending",addr="linkerd-dst-headless.linkerd.svc.cluster.local:8086"} 0
+# HELP control_destination_balancer_p2c_endpoints The number of endpoints currently in the balancer.
+# TYPE control_destination_balancer_p2c_endpoints gauge
+control_destination_balancer_p2c_endpoints{addr="linkerd-dst-headless.linkerd.svc.cluster.local:8086"} 1
+# HELP control_destination_balancer_p2c_updates The total number of service discovery updates received by a balancer.
+# TYPE control_destination_balancer_p2c_updates counter
+control_destination_balancer_p2c_updates_total{op="Remove",addr="linkerd-dst-headless.linkerd.svc.cluster.local:8086"} 0
+control_destination_balancer_p2c_updates_total{op="Reset",addr="linkerd-dst-headless.linkerd.svc.cluster.local:8086"} 1
+control_destination_balancer_p2c_updates_total{op="Add",addr="linkerd-dst-headless.linkerd.svc.cluster.local:8086"} 0
+# HELP control_destination_balancer_queue_length The current count of requests waiting in the queue.
+# TYPE control_destination_balancer_queue_length gauge
+control_destination_balancer_queue_length{addr="linkerd-dst-headless.linkerd.svc.cluster.local:8086"} 0
+# HELP control_destination_balancer_queue_requests The total number of requests that have entered the queue.
+# TYPE control_destination_balancer_queue_requests counter
+control_destination_balancer_queue_requests_total{addr="linkerd-dst-headless.linkerd.svc.cluster.local:8086"} 36
+# HELP control_destination_balancer_queue_latency_seconds The distribution of durations that requests have spent in the queue.
+# TYPE control_destination_balancer_queue_latency_seconds histogram
+# UNIT control_destination_balancer_queue_latency_seconds seconds
+control_destination_balancer_queue_latency_seconds_sum{addr="linkerd-dst-headless.linkerd.svc.cluster.local:8086"} 0.0006831229999999999
+control_destination_balancer_queue_latency_seconds_count{addr="linkerd-dst-headless.linkerd.svc.cluster.local:8086"} 36
+control_destination_balancer_queue_latency_seconds_bucket{le="0.0005",addr="linkerd-dst-headless.linkerd.svc.cluster.local:8086"} 36
+control_destination_balancer_queue_latency_seconds_bucket{le="0.005",addr="linkerd-dst-headless.linkerd.svc.cluster.local:8086"} 36
+control_destination_balancer_queue_latency_seconds_bucket{le="0.05",addr="linkerd-dst-headless.linkerd.svc.cluster.local:8086"} 36
+control_destination_balancer_queue_latency_seconds_bucket{le="0.5",addr="linkerd-dst-headless.linkerd.svc.cluster.local:8086"} 36
+control_destination_balancer_queue_latency_seconds_bucket{le="1.0",addr="linkerd-dst-headless.linkerd.svc.cluster.local:8086"} 36
+control_destination_balancer_queue_latency_seconds_bucket{le="3.0",addr="linkerd-dst-headless.linkerd.svc.cluster.local:8086"} 36
+control_destination_balancer_queue_latency_seconds_bucket{le="+Inf",addr="linkerd-dst-headless.linkerd.svc.cluster.local:8086"} 36
+# HELP control_destination_balancer_queue_gate_open The total number of gate state changes to open.
+# TYPE control_destination_balancer_queue_gate_open counter
+control_destination_balancer_queue_gate_open_total{addr="linkerd-dst-headless.linkerd.svc.cluster.local:8086"} 1
+# HELP control_destination_balancer_queue_gate_shut The total number of gate state changes from open to shut.
+# TYPE control_destination_balancer_queue_gate_shut counter
+control_destination_balancer_queue_gate_shut_total{addr="linkerd-dst-headless.linkerd.svc.cluster.local:8086"} 0
+# HELP control_destination_balancer_queue_gate_open_time_seconds The time at which the gate was opened.
+# TYPE control_destination_balancer_queue_gate_open_time_seconds gauge
+# UNIT control_destination_balancer_queue_gate_open_time_seconds seconds
+control_destination_balancer_queue_gate_open_time_seconds{addr="linkerd-dst-headless.linkerd.svc.cluster.local:8086"} 1786370446.953451
+# HELP control_destination_balancer_queue_gate_shut_time_seconds The time at which the gate was shut.
+# TYPE control_destination_balancer_queue_gate_shut_time_seconds gauge
+# UNIT control_destination_balancer_queue_gate_shut_time_seconds seconds
+control_destination_balancer_queue_gate_shut_time_seconds{addr="linkerd-dst-headless.linkerd.svc.cluster.local:8086"} 0.0
+# HELP control_destination_balancer_queue_gate_timeout_seconds Indicates the request timeout after which the gate will shut and enter failfast.
+# TYPE control_destination_balancer_queue_gate_timeout_seconds gauge
+# UNIT control_destination_balancer_queue_gate_timeout_seconds seconds
+control_destination_balancer_queue_gate_timeout_seconds{addr="linkerd-dst-headless.linkerd.svc.cluster.local:8086"} 30.0
+# HELP control_policy_balancer_endpoints The number of endpoints currently in a HTTP request balancer.
+# TYPE control_policy_balancer_endpoints gauge
+control_policy_balancer_endpoints{endpoint_state="ready",addr="linkerd-policy.linkerd.svc.cluster.local:8090"} 1
+control_policy_balancer_endpoints{endpoint_state="pending",addr="linkerd-policy.linkerd.svc.cluster.local:8090"} 0
+# HELP control_policy_balancer_p2c_endpoints The number of endpoints currently in the balancer.
+# TYPE control_policy_balancer_p2c_endpoints gauge
+control_policy_balancer_p2c_endpoints{addr="linkerd-policy.linkerd.svc.cluster.local:8090"} 1
+# HELP control_policy_balancer_p2c_updates The total number of service discovery updates received by a balancer.
+# TYPE control_policy_balancer_p2c_updates counter
+control_policy_balancer_p2c_updates_total{op="Remove",addr="linkerd-policy.linkerd.svc.cluster.local:8090"} 0
+control_policy_balancer_p2c_updates_total{op="Add",addr="linkerd-policy.linkerd.svc.cluster.local:8090"} 0
+control_policy_balancer_p2c_updates_total{op="Reset",addr="linkerd-policy.linkerd.svc.cluster.local:8090"} 1
+# HELP control_policy_balancer_queue_length The current count of requests waiting in the queue.
+# TYPE control_policy_balancer_queue_length gauge
+control_policy_balancer_queue_length{addr="linkerd-policy.linkerd.svc.cluster.local:8090"} 0
+# HELP control_policy_balancer_queue_requests The total number of requests that have entered the queue.
+# TYPE control_policy_balancer_queue_requests counter
+control_policy_balancer_queue_requests_total{addr="linkerd-policy.linkerd.svc.cluster.local:8090"} 70
+# HELP control_policy_balancer_queue_latency_seconds The distribution of durations that requests have spent in the queue.
+# TYPE control_policy_balancer_queue_latency_seconds histogram
+# UNIT control_policy_balancer_queue_latency_seconds seconds
+control_policy_balancer_queue_latency_seconds_sum{addr="linkerd-policy.linkerd.svc.cluster.local:8090"} 0.12725204099999996
+control_policy_balancer_queue_latency_seconds_count{addr="linkerd-policy.linkerd.svc.cluster.local:8090"} 70
+control_policy_balancer_queue_latency_seconds_bucket{le="0.0005",addr="linkerd-policy.linkerd.svc.cluster.local:8090"} 68
+control_policy_balancer_queue_latency_seconds_bucket{le="0.005",addr="linkerd-policy.linkerd.svc.cluster.local:8090"} 68
+control_policy_balancer_queue_latency_seconds_bucket{le="0.05",addr="linkerd-policy.linkerd.svc.cluster.local:8090"} 68
+control_policy_balancer_queue_latency_seconds_bucket{le="0.5",addr="linkerd-policy.linkerd.svc.cluster.local:8090"} 70
+control_policy_balancer_queue_latency_seconds_bucket{le="1.0",addr="linkerd-policy.linkerd.svc.cluster.local:8090"} 70
+control_policy_balancer_queue_latency_seconds_bucket{le="3.0",addr="linkerd-policy.linkerd.svc.cluster.local:8090"} 70
+control_policy_balancer_queue_latency_seconds_bucket{le="+Inf",addr="linkerd-policy.linkerd.svc.cluster.local:8090"} 70
+# HELP control_policy_balancer_queue_gate_open The total number of gate state changes to open.
+# TYPE control_policy_balancer_queue_gate_open counter
+control_policy_balancer_queue_gate_open_total{addr="linkerd-policy.linkerd.svc.cluster.local:8090"} 1
+# HELP control_policy_balancer_queue_gate_shut The total number of gate state changes from open to shut.
+# TYPE control_policy_balancer_queue_gate_shut counter
+control_policy_balancer_queue_gate_shut_total{addr="linkerd-policy.linkerd.svc.cluster.local:8090"} 0
+# HELP control_policy_balancer_queue_gate_open_time_seconds The time at which the gate was opened.
+# TYPE control_policy_balancer_queue_gate_open_time_seconds gauge
+# UNIT control_policy_balancer_queue_gate_open_time_seconds seconds
+control_policy_balancer_queue_gate_open_time_seconds{addr="linkerd-policy.linkerd.svc.cluster.local:8090"} 1786370446.9534946
+# HELP control_policy_balancer_queue_gate_shut_time_seconds The time at which the gate was shut.
+# TYPE control_policy_balancer_queue_gate_shut_time_seconds gauge
+# UNIT control_policy_balancer_queue_gate_shut_time_seconds seconds
+control_policy_balancer_queue_gate_shut_time_seconds{addr="linkerd-policy.linkerd.svc.cluster.local:8090"} 0.0
+# HELP control_policy_balancer_queue_gate_timeout_seconds Indicates the request timeout after which the gate will shut and enter failfast.
+# TYPE control_policy_balancer_queue_gate_timeout_seconds gauge
+# UNIT control_policy_balancer_queue_gate_timeout_seconds seconds
+control_policy_balancer_queue_gate_timeout_seconds{addr="linkerd-policy.linkerd.svc.cluster.local:8090"} 30.0
+# HELP inbound_tcp_detect_http_duration_seconds Time taken for protocol detection.
+# TYPE inbound_tcp_detect_http_duration_seconds histogram
+# UNIT inbound_tcp_detect_http_duration_seconds seconds
+inbound_tcp_detect_http_duration_seconds_sum{srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191"} 0.0026491940000000016
+inbound_tcp_detect_http_duration_seconds_count{srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191"} 1547
+inbound_tcp_detect_http_duration_seconds_bucket{le="0.001",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191"} 1547
+inbound_tcp_detect_http_duration_seconds_bucket{le="0.1",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191"} 1547
+inbound_tcp_detect_http_duration_seconds_bucket{le="+Inf",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191"} 1547
+# HELP inbound_tcp_detect_http_results Protocol detection results.
+# TYPE inbound_tcp_detect_http_results counter
+inbound_tcp_detect_http_results_total{result="read_timeout",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191"} 0
+inbound_tcp_detect_http_results_total{result="http/2",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191"} 0
+inbound_tcp_detect_http_results_total{result="http/1",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191"} 1547
+inbound_tcp_detect_http_results_total{result="error",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191"} 0
+inbound_tcp_detect_http_results_total{result="not_http",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191"} 0
+# HELP outbound_tcp_protocol_connections Outbound TCP connections by protocol configuration.
+# TYPE outbound_tcp_protocol_connections counter
+outbound_tcp_protocol_connections_total{protocol="opaq",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-linkerd-opaque",parent_port="9092",parent_section_name=""} 760
+# HELP outbound_tcp_balancer_endpoints The number of endpoints currently in a HTTP request balancer.
+# TYPE outbound_tcp_balancer_endpoints gauge
+outbound_tcp_balancer_endpoints{endpoint_state="ready",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-linkerd-opaque",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-linkerd-opaque",backend_port="9092",backend_section_name="",logical="echo-grpc-linkerd-opaque.test-bench.svc.cluster.local:9092",concrete="echo-grpc-linkerd-opaque.test-bench.svc.cluster.local:9092"} 1
+outbound_tcp_balancer_endpoints{endpoint_state="pending",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-linkerd-opaque",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-linkerd-opaque",backend_port="9092",backend_section_name="",logical="echo-grpc-linkerd-opaque.test-bench.svc.cluster.local:9092",concrete="echo-grpc-linkerd-opaque.test-bench.svc.cluster.local:9092"} 0
+# HELP outbound_tcp_balancer_p2c_endpoints The number of endpoints currently in the balancer.
+# TYPE outbound_tcp_balancer_p2c_endpoints gauge
+outbound_tcp_balancer_p2c_endpoints{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-linkerd-opaque",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-linkerd-opaque",backend_port="9092",backend_section_name="",logical="echo-grpc-linkerd-opaque.test-bench.svc.cluster.local:9092",concrete="echo-grpc-linkerd-opaque.test-bench.svc.cluster.local:9092"} 1
+# HELP outbound_tcp_balancer_p2c_updates The total number of service discovery updates received by a balancer.
+# TYPE outbound_tcp_balancer_p2c_updates counter
+outbound_tcp_balancer_p2c_updates_total{op="Reset",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-linkerd-opaque",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-linkerd-opaque",backend_port="9092",backend_section_name="",logical="echo-grpc-linkerd-opaque.test-bench.svc.cluster.local:9092",concrete="echo-grpc-linkerd-opaque.test-bench.svc.cluster.local:9092"} 18
+outbound_tcp_balancer_p2c_updates_total{op="Remove",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-linkerd-opaque",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-linkerd-opaque",backend_port="9092",backend_section_name="",logical="echo-grpc-linkerd-opaque.test-bench.svc.cluster.local:9092",concrete="echo-grpc-linkerd-opaque.test-bench.svc.cluster.local:9092"} 0
+outbound_tcp_balancer_p2c_updates_total{op="Add",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-linkerd-opaque",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-linkerd-opaque",backend_port="9092",backend_section_name="",logical="echo-grpc-linkerd-opaque.test-bench.svc.cluster.local:9092",concrete="echo-grpc-linkerd-opaque.test-bench.svc.cluster.local:9092"} 0
+# HELP outbound_tcp_balancer_queue_length The current count of requests waiting in the queue.
+# TYPE outbound_tcp_balancer_queue_length gauge
+outbound_tcp_balancer_queue_length{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-linkerd-opaque",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-linkerd-opaque",backend_port="9092",backend_section_name="",logical="echo-grpc-linkerd-opaque.test-bench.svc.cluster.local:9092",concrete="echo-grpc-linkerd-opaque.test-bench.svc.cluster.local:9092"} 0
+# HELP outbound_tcp_balancer_queue_requests The total number of requests that have entered the queue.
+# TYPE outbound_tcp_balancer_queue_requests counter
+outbound_tcp_balancer_queue_requests_total{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-linkerd-opaque",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-linkerd-opaque",backend_port="9092",backend_section_name="",logical="echo-grpc-linkerd-opaque.test-bench.svc.cluster.local:9092",concrete="echo-grpc-linkerd-opaque.test-bench.svc.cluster.local:9092"} 760
+# HELP outbound_tcp_balancer_queue_latency_seconds The distribution of durations that requests have spent in the queue.
+# TYPE outbound_tcp_balancer_queue_latency_seconds histogram
+# UNIT outbound_tcp_balancer_queue_latency_seconds seconds
+outbound_tcp_balancer_queue_latency_seconds_sum{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-linkerd-opaque",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-linkerd-opaque",backend_port="9092",backend_section_name="",logical="echo-grpc-linkerd-opaque.test-bench.svc.cluster.local:9092",concrete="echo-grpc-linkerd-opaque.test-bench.svc.cluster.local:9092"} 0.03419721000000002
+outbound_tcp_balancer_queue_latency_seconds_count{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-linkerd-opaque",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-linkerd-opaque",backend_port="9092",backend_section_name="",logical="echo-grpc-linkerd-opaque.test-bench.svc.cluster.local:9092",concrete="echo-grpc-linkerd-opaque.test-bench.svc.cluster.local:9092"} 760
+outbound_tcp_balancer_queue_latency_seconds_bucket{le="0.0005",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-linkerd-opaque",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-linkerd-opaque",backend_port="9092",backend_section_name="",logical="echo-grpc-linkerd-opaque.test-bench.svc.cluster.local:9092",concrete="echo-grpc-linkerd-opaque.test-bench.svc.cluster.local:9092"} 742
+outbound_tcp_balancer_queue_latency_seconds_bucket{le="0.005",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-linkerd-opaque",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-linkerd-opaque",backend_port="9092",backend_section_name="",logical="echo-grpc-linkerd-opaque.test-bench.svc.cluster.local:9092",concrete="echo-grpc-linkerd-opaque.test-bench.svc.cluster.local:9092"} 760
+outbound_tcp_balancer_queue_latency_seconds_bucket{le="0.05",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-linkerd-opaque",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-linkerd-opaque",backend_port="9092",backend_section_name="",logical="echo-grpc-linkerd-opaque.test-bench.svc.cluster.local:9092",concrete="echo-grpc-linkerd-opaque.test-bench.svc.cluster.local:9092"} 760
+outbound_tcp_balancer_queue_latency_seconds_bucket{le="0.5",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-linkerd-opaque",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-linkerd-opaque",backend_port="9092",backend_section_name="",logical="echo-grpc-linkerd-opaque.test-bench.svc.cluster.local:9092",concrete="echo-grpc-linkerd-opaque.test-bench.svc.cluster.local:9092"} 760
+outbound_tcp_balancer_queue_latency_seconds_bucket{le="1.0",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-linkerd-opaque",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-linkerd-opaque",backend_port="9092",backend_section_name="",logical="echo-grpc-linkerd-opaque.test-bench.svc.cluster.local:9092",concrete="echo-grpc-linkerd-opaque.test-bench.svc.cluster.local:9092"} 760
+outbound_tcp_balancer_queue_latency_seconds_bucket{le="3.0",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-linkerd-opaque",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-linkerd-opaque",backend_port="9092",backend_section_name="",logical="echo-grpc-linkerd-opaque.test-bench.svc.cluster.local:9092",concrete="echo-grpc-linkerd-opaque.test-bench.svc.cluster.local:9092"} 760
+outbound_tcp_balancer_queue_latency_seconds_bucket{le="+Inf",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-linkerd-opaque",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-linkerd-opaque",backend_port="9092",backend_section_name="",logical="echo-grpc-linkerd-opaque.test-bench.svc.cluster.local:9092",concrete="echo-grpc-linkerd-opaque.test-bench.svc.cluster.local:9092"} 760
+# HELP outbound_tcp_balancer_queue_gate_open The total number of gate state changes to open.
+# TYPE outbound_tcp_balancer_queue_gate_open counter
+outbound_tcp_balancer_queue_gate_open_total{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-linkerd-opaque",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-linkerd-opaque",backend_port="9092",backend_section_name="",logical="echo-grpc-linkerd-opaque.test-bench.svc.cluster.local:9092",concrete="echo-grpc-linkerd-opaque.test-bench.svc.cluster.local:9092"} 18
+# HELP outbound_tcp_balancer_queue_gate_shut The total number of gate state changes from open to shut.
+# TYPE outbound_tcp_balancer_queue_gate_shut counter
+outbound_tcp_balancer_queue_gate_shut_total{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-linkerd-opaque",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-linkerd-opaque",backend_port="9092",backend_section_name="",logical="echo-grpc-linkerd-opaque.test-bench.svc.cluster.local:9092",concrete="echo-grpc-linkerd-opaque.test-bench.svc.cluster.local:9092"} 0
+# HELP outbound_tcp_balancer_queue_gate_open_time_seconds The time at which the gate was opened.
+# TYPE outbound_tcp_balancer_queue_gate_open_time_seconds gauge
+# UNIT outbound_tcp_balancer_queue_gate_open_time_seconds seconds
+outbound_tcp_balancer_queue_gate_open_time_seconds{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-linkerd-opaque",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-linkerd-opaque",backend_port="9092",backend_section_name="",logical="echo-grpc-linkerd-opaque.test-bench.svc.cluster.local:9092",concrete="echo-grpc-linkerd-opaque.test-bench.svc.cluster.local:9092"} 1786378167.156983
+# HELP outbound_tcp_balancer_queue_gate_shut_time_seconds The time at which the gate was shut.
+# TYPE outbound_tcp_balancer_queue_gate_shut_time_seconds gauge
+# UNIT outbound_tcp_balancer_queue_gate_shut_time_seconds seconds
+outbound_tcp_balancer_queue_gate_shut_time_seconds{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-linkerd-opaque",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-linkerd-opaque",backend_port="9092",backend_section_name="",logical="echo-grpc-linkerd-opaque.test-bench.svc.cluster.local:9092",concrete="echo-grpc-linkerd-opaque.test-bench.svc.cluster.local:9092"} 0.0
+# HELP outbound_tcp_balancer_queue_gate_timeout_seconds Indicates the request timeout after which the gate will shut and enter failfast.
+# TYPE outbound_tcp_balancer_queue_gate_timeout_seconds gauge
+# UNIT outbound_tcp_balancer_queue_gate_timeout_seconds seconds
+outbound_tcp_balancer_queue_gate_timeout_seconds{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-linkerd-opaque",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-linkerd-opaque",backend_port="9092",backend_section_name="",logical="echo-grpc-linkerd-opaque.test-bench.svc.cluster.local:9092",concrete="echo-grpc-linkerd-opaque.test-bench.svc.cluster.local:9092"} 3.0
+# HELP outbound_tcp_route_open The number of connections opened.
+# TYPE outbound_tcp_route_open counter
+outbound_tcp_route_open_total{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-linkerd-opaque",parent_port="9092",parent_section_name="",route_group="",route_kind="default",route_namespace="",route_name="opaq",target_ip="",target_port="9092"} 760
+# HELP outbound_tcp_route_close The number of connections closed.
+# TYPE outbound_tcp_route_close counter
+outbound_tcp_route_close_total{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-linkerd-opaque",parent_port="9092",parent_section_name="",route_group="",route_kind="default",route_namespace="",route_name="opaq",target_ip="",target_port="9092",error="unexpected"} 0
+outbound_tcp_route_close_total{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-linkerd-opaque",parent_port="9092",parent_section_name="",route_group="",route_kind="default",route_namespace="",route_name="opaq",target_ip="",target_port="9092",error="forbidden"} 0
+outbound_tcp_route_close_total{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-linkerd-opaque",parent_port="9092",parent_section_name="",route_group="",route_kind="default",route_namespace="",route_name="opaq",target_ip="",target_port="9092",error=""} 760
+outbound_tcp_route_close_total{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-linkerd-opaque",parent_port="9092",parent_section_name="",route_group="",route_kind="default",route_namespace="",route_name="opaq",target_ip="",target_port="9092",error="invalid_backend"} 0
+outbound_tcp_route_close_total{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-linkerd-opaque",parent_port="9092",parent_section_name="",route_group="",route_kind="default",route_namespace="",route_name="opaq",target_ip="",target_port="9092",error="invalid_policy"} 0
+# HELP outbound_tcp_transfer_cost_bytes The total amount of data transferred in and out of this proxy, by cost zone.
+# TYPE outbound_tcp_transfer_cost_bytes counter
+# UNIT outbound_tcp_transfer_cost_bytes bytes
+outbound_tcp_transfer_cost_bytes_total{op="Recv",zone_locality="Unknown"} 33453564853
+outbound_tcp_transfer_cost_bytes_total{op="Send",zone_locality="Unknown"} 33848086397
+# HELP process_start_time_seconds Time that the process started (in seconds since the UNIX epoch).
+# TYPE process_start_time_seconds gauge
+# UNIT process_start_time_seconds seconds
+process_start_time_seconds 1786370446.9532889
+# HELP process_clock_time_seconds Current system time for this process.
+# TYPE process_clock_time_seconds gauge
+# UNIT process_clock_time_seconds seconds
+process_clock_time_seconds 1786378172.0
+# HELP process_uptime_seconds Total time since the process started (in seconds)
+# TYPE process_uptime_seconds counter
+# UNIT process_uptime_seconds seconds
+process_uptime_seconds_total 7725.932663062
+# HELP process_cpu_seconds Total user and system CPU time spent in seconds
+# TYPE process_cpu_seconds counter
+# UNIT process_cpu_seconds seconds
+process_cpu_seconds_total 108.22
+# HELP process_virtual_memory_bytes Virtual memory size in bytes
+# TYPE process_virtual_memory_bytes gauge
+# UNIT process_virtual_memory_bytes bytes
+process_virtual_memory_bytes 111091712
+# HELP process_resident_memory_bytes Resident memory size in bytes
+# TYPE process_resident_memory_bytes gauge
+# UNIT process_resident_memory_bytes bytes
+process_resident_memory_bytes 23879680
+# HELP process_open_fds Number of open file descriptors
+# TYPE process_open_fds gauge
+process_open_fds 20
+# HELP process_max_fds Maximum number of open file descriptors
+# TYPE process_max_fds gauge
+process_max_fds 1024
+# HELP process_network_receive_bytes Number of bytes received by the process over the network
+# TYPE process_network_receive_bytes counter
+# UNIT process_network_receive_bytes bytes
+process_network_receive_bytes_total 102642330131.0
+# HELP process_network_transmit_bytes Number of bytes sent by the process over the network
+# TYPE process_network_transmit_bytes counter
+# UNIT process_network_transmit_bytes bytes
+process_network_transmit_bytes_total 103009768905.0
+# HELP process_threads Number of OS threads in the process.
+# TYPE process_threads gauge
+process_threads 2
+# EOF

@@ -1,0 +1,5 @@
+observed_utc,run_id,phase,config,frame_bytes,offered_rps,reason,raw_result
+2026-08-10T15:35:23Z,load-64-q12-grpc-linkerd-r1,load,grpc-linkerd,64,16486,fail,/home/jukebox/DPUmesh/integrations/linkerd/bench/report/data/linkerd-20260810/open/raw/failed/load-64-q12-grpc-linkerd-r1-attempt1/load-64-q12-grpc-linkerd-r1.result.txt
+2026-08-10T15:35:42Z,load-64-q12-grpc-linkerd-r1,load,grpc-linkerd,64,16486,fail,/home/jukebox/DPUmesh/integrations/linkerd/bench/report/data/linkerd-20260810/open/raw/failed/load-64-q12-grpc-linkerd-r1-attempt2/load-64-q12-grpc-linkerd-r1.result.txt
+2026-08-10T15:36:02Z,load-64-q12-grpc-linkerd-r1,load,grpc-linkerd,64,16486,fail,/home/jukebox/DPUmesh/integrations/linkerd/bench/report/data/linkerd-20260810/open/raw/failed/load-64-q12-grpc-linkerd-r1-attempt3/load-64-q12-grpc-linkerd-r1.result.txt
+2026-08-10T15:36:22Z,load-64-q12-grpc-linkerd-r1,load,grpc-linkerd,64,16486,fail,/home/jukebox/DPUmesh/integrations/linkerd/bench/report/data/linkerd-20260810/open/raw/failed/load-64-q12-grpc-linkerd-r1-attempt4/load-64-q12-grpc-linkerd-r1.result.txt

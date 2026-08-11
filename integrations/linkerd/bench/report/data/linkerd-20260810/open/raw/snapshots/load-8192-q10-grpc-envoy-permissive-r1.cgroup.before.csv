@@ -1,0 +1,5 @@
+role,pid,cgroup,usage_usec,user_usec,system_usec,nr_throttled,throttled_usec
+client_app,20187,/sys/fs/cgroup/kubepods.slice/kubepods-besteffort.slice/kubepods-besteffort-pod32e7aef6_0282_4b08_87bc_532d42a34ff4.slice/cri-containerd-0d341c114d82df5157bdb02b30d0414520bb0b20e405f142ebf8cfe4e3f8e6af.scope,891047012,701385097,189661914,0,0
+server_app,19775,/sys/fs/cgroup/kubepods.slice/kubepods-besteffort.slice/kubepods-besteffort-pod28047f24_b971_45a9_99e5_2346d60ef44a.slice/cri-containerd-a5cae2be6da81fcd8c573dea327434121bd2dcc44a5d41ea8cd797dbb7b27589.scope,757385841,588367108,169018733,0,0
+client_sidecar,20211,/sys/fs/cgroup/kubepods.slice/kubepods-besteffort.slice/kubepods-besteffort-pod32e7aef6_0282_4b08_87bc_532d42a34ff4.slice/cri-containerd-41662c10f457eae3549214edf1c0b6400fb6c779837721d5f2c04d147e2bf7a3.scope,207136054,46519154,160616900,0,0
+server_sidecar,19826,/sys/fs/cgroup/kubepods.slice/kubepods-besteffort.slice/kubepods-besteffort-pod28047f24_b971_45a9_99e5_2346d60ef44a.slice/cri-containerd-a594a529da24e59d792dcf9a8e4d1145278eb6ee6fb243b0a780d0013138ef16.scope,211120587,44823974,166296613,0,0

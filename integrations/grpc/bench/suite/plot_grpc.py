@@ -15,22 +15,34 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-CONFIGS = ["grpc-envoy-permissive", "grpc-envoy-strict", "grpc-tcp", "grpc-dpumesh"]
+# Every path this renderer knows, in plotting order. The ones a given CSV
+# actually contains become CONFIGS, so a campaign that adds a service mesh does
+# not need a second renderer and one that omits it draws the same figure as before.
+KNOWN_CONFIGS = ["grpc-envoy-permissive", "grpc-envoy-strict",
+                 "grpc-linkerd", "grpc-linkerd-opaque",
+                 "grpc-tcp", "grpc-dpumesh"]
+CONFIGS = list(KNOWN_CONFIGS)
 LABELS = {
     "grpc-envoy-permissive": "gRPC via Envoy permissive",
     "grpc-envoy-strict": "gRPC via Envoy strict",
+    "grpc-linkerd": "gRPC via linkerd L7",
+    "grpc-linkerd-opaque": "gRPC via linkerd opaque",
     "grpc-tcp": "gRPC direct TCP",
     "grpc-dpumesh": "gRPC via DPUmesh",
 }
 SHORT = {
     "grpc-envoy-permissive": "Envoy\npermissive",
     "grpc-envoy-strict": "Envoy\nstrict",
+    "grpc-linkerd": "linkerd\nL7",
+    "grpc-linkerd-opaque": "linkerd\nopaque",
     "grpc-tcp": "direct\nTCP",
     "grpc-dpumesh": "via\nDPUmesh",
 }
 COLORS = {
     "grpc-envoy-permissive": "#5B6573",
     "grpc-envoy-strict": "#D55E00",
+    "grpc-linkerd": "#CC79A7",
+    "grpc-linkerd-opaque": "#E69F00",
     "grpc-tcp": "#0072B2",
     "grpc-dpumesh": "#009E73",
 }
@@ -81,7 +93,7 @@ def common_loads(rows, frame):
 
 def figure_cpu(rows, out):
     fig, axes = plt.subplots(1, 3, figsize=(13.0, 4.2), sharey=True)
-    width = 0.2
+    width = 0.8 / len(CONFIGS)
     centre = (len(CONFIGS) - 1) / 2.0
     for ax, frame in zip(axes, FRAMES):
         loads = common_loads(rows, frame)
@@ -101,7 +113,8 @@ def figure_cpu(rows, out):
         ax.set_xlabel("Offered load")
     axes[0].set_ylabel("Host cores consumed\n(client + server)")
     h, l = axes[0].get_legend_handles_labels()
-    fig.legend(h, l, ncol=4, frameon=False, loc="upper center", bbox_to_anchor=(0.5, 1.04))
+    fig.legend(h, l, ncol=min(4, len(l)), frameon=False, loc="upper center",
+               bbox_to_anchor=(0.5, 1.04))
     fig.tight_layout(rect=(0, 0, 1, 0.93))
     save(fig, out, "01_grpc_host_cpu_by_load")
 
@@ -142,7 +155,13 @@ def figure_capacity(rows, out):
 
 
 def main():
+    global CONFIGS
     rows = load(sys.argv[1])
+    present = {r["config"] for r in rows}
+    CONFIGS = [c for c in KNOWN_CONFIGS if c in present]
+    unknown = present - set(KNOWN_CONFIGS)
+    if unknown:
+        raise SystemExit(f"unstyled configurations in the input: {sorted(unknown)}")
     out = Path(sys.argv[2] if len(sys.argv) > 2 else "bench/report/figures")
     figure_cpu(rows, out)
     figure_capacity(rows, out)

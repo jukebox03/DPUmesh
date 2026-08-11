@@ -26,6 +26,12 @@ MANIFEST="$BENCH_DIR/k8s/pods.yaml"
 # gRPC pods live with the integration that builds them.
 GRPC_BENCH_DIR="$PROJ_ROOT/integrations/grpc/bench"
 GRPC_MANIFEST="$GRPC_BENCH_DIR/k8s/pods.yaml"
+# linkerd reuses the gRPC images and adds injected sidecars, so its pods live
+# with the linkerd integration. BENCH_LINKERD=1 admits them; without it the
+# manifest is not applied and the deployment is what it was before.
+LINKERD_BENCH_DIR="$PROJ_ROOT/integrations/linkerd/bench"
+LINKERD_MANIFEST="$LINKERD_BENCH_DIR/k8s/pods.yaml"
+BENCH_LINKERD="${BENCH_LINKERD:-0}"
 
 INCLUDE_SRC="$PROJ_ROOT/include"
 DOCA_SRC="$PROJ_ROOT/doca"
@@ -382,6 +388,27 @@ core_list() {
     for c in ${1//,/ }; do out="${out:+$out,}$((BENCH_CORE_BASE + c))"; done
     echo "$out"
 }
+# The gRPC/L7 configuration names the collectors use, mapped to their pods.
+grpc_client_app() {
+    case "$1" in
+        grpc-envoy-permissive)  echo bench-grpc-envoy ;;
+        grpc-envoy-strict)      echo bench-grpc-envoy-strict ;;
+        grpc-tcp)               echo bench-grpc-tcp ;;
+        grpc-dpumesh)           echo bench-grpc-dpumesh ;;
+        grpc-linkerd)           echo bench-grpc-linkerd ;;
+        grpc-linkerd-opaque)    echo bench-grpc-linkerd-opaque ;;
+    esac
+}
+grpc_server_app() {
+    case "$1" in
+        grpc-envoy-permissive)  echo echo-grpc-envoy ;;
+        grpc-envoy-strict)      echo echo-grpc-envoy-strict ;;
+        grpc-tcp)               echo echo-grpc-tcp ;;
+        grpc-dpumesh)           echo echo-grpc-dpumesh ;;
+        grpc-linkerd)           echo echo-grpc-linkerd ;;
+        grpc-linkerd-opaque)    echo echo-grpc-linkerd-opaque ;;
+    esac
+}
 get_pod_cores() {
     local app="$1" profile="${2:-fair}" rel=""
     case "$profile" in
@@ -412,14 +439,34 @@ get_pod_cores() {
                 bench-dpumesh) rel="12,13,14";;  echo-dpumesh) rel="15";;
             esac ;;
         grpc)
-            # Four measured L7 paths, two exclusive cores each. An Envoy
-            # sidecar shares its application's core: the budget is per pod.
+            # Measured L7 paths, two exclusive cores each. A sidecar — Envoy or
+            # linkerd-proxy — shares its application's core: the budget is per
+            # pod, so a meshed path pays for its proxy out of the same core.
             case "$app" in
                 bench-grpc-dpumesh) rel="0";; echo-grpc-dpumesh) rel="1";;
                 bench-grpc-envoy)   rel="2";; echo-grpc-envoy)   rel="3";;
                 bench-grpc-tcp)     rel="4";; echo-grpc-tcp)     rel="5";;
                 bench-grpc-envoy-strict) rel="6";; echo-grpc-envoy-strict) rel="7";;
+                bench-grpc-linkerd) rel="8";; echo-grpc-linkerd) rel="9";;
+                bench-grpc-linkerd-opaque) rel="10";; echo-grpc-linkerd-opaque) rel="11";;
             esac ;;
+        grpcl7cap)
+            # Capacity profile for one L7 path at a time: the path named in
+            # BENCH_CAP_CONFIG gets six client and six server cores, and every
+            # other gRPC pod is confined to the six cores outside that budget,
+            # so each path is measured against the same allocation.
+            local cap_client cap_server
+            cap_client=$(grpc_client_app "${BENCH_CAP_CONFIG:-}")
+            cap_server=$(grpc_server_app "${BENCH_CAP_CONFIG:-}")
+            if [ -n "$cap_client" ] && [ "$app" = "$cap_client" ]; then
+                rel="0,1,2,3,4,5"
+            elif [ -n "$cap_server" ] && [ "$app" = "$cap_server" ]; then
+                rel="6,7,8,9,10,11"
+            else
+                case "$app" in
+                    bench-grpc-*|echo-grpc-*) rel="12,13,14,15,16,17";;
+                esac
+            fi ;;
         grpccap)
             # Capacity profile: both DPUmesh endpoints get six cores, so neither
             # host side is the limit and what remains is the transport's. The
@@ -466,7 +513,7 @@ pin_pods() {
     else
         warn "cpupower not found; skipping DVFS lock"
     fi
-    for app in bench-dpumesh bench-dpumesh-2 bench-dpumesh-3 echo-dpumesh echo-dpumesh-13 echo-dpumesh-14 loopback-dpumesh stream-dpumesh verbs-dpumesh preload-dpumesh preload-echo preload-bench bench-tcp echo-tcp bench-tcp-strict echo-tcp-strict bench-grpc-dpumesh echo-grpc-dpumesh bench-grpc-envoy echo-grpc-envoy bench-grpc-tcp echo-grpc-tcp bench-grpc-envoy-strict echo-grpc-envoy-strict; do
+    for app in bench-dpumesh bench-dpumesh-2 bench-dpumesh-3 echo-dpumesh echo-dpumesh-13 echo-dpumesh-14 loopback-dpumesh stream-dpumesh verbs-dpumesh preload-dpumesh preload-echo preload-bench bench-tcp echo-tcp bench-tcp-strict echo-tcp-strict bench-grpc-dpumesh echo-grpc-dpumesh bench-grpc-envoy echo-grpc-envoy bench-grpc-tcp echo-grpc-tcp bench-grpc-envoy-strict echo-grpc-envoy-strict bench-grpc-linkerd echo-grpc-linkerd bench-grpc-linkerd-opaque echo-grpc-linkerd-opaque; do
         local cores pod_id desired
         cores=$(get_pod_cores "$app" "$profile"); [ -z "$cores" ] && continue
         # sed consumes the full stream. `head` can close early and make crictl
@@ -491,6 +538,21 @@ pin_pods() {
             for child in $(pgrep -P "$pid" 2>/dev/null); do
                 echo "$HOST_PASS" | sudo -S taskset -apc "$cores" "$child" >/dev/null 2>&1 || true
             done
+            # Benchmark images start under numactl, so their pages are already
+            # on the benchmark node. An injected linkerd-proxy is not ours to
+            # wrap, and it allocates before this pinning runs, so move what it
+            # allocated onto the node it now runs on. Without this the proxy
+            # reads its own memory across the interconnect and the linkerd
+            # columns carry a penalty no other path pays.
+            if [ "$cname" = linkerd-proxy ] && [ -n "$BENCH_NUMA_NODE" ]; then
+                local other
+                for other in $(seq 0 7); do
+                    [ "$other" = "$BENCH_NUMA_NODE" ] && continue
+                    [ -d "/sys/devices/system/node/node$other" ] || continue
+                    echo "$HOST_PASS" | sudo -S migratepages "$pid" "$other" "$BENCH_NUMA_NODE" \
+                        >/dev/null 2>&1 || true
+                done
+            fi
         done
     done
     info "Pinning done"
@@ -578,9 +640,11 @@ apply_manifest() {
     # host to survive the process it describes. The mount is DirectoryOrCreate,
     # so kubelet creates the directory and the privileged container can write it.
     export ASAN_LOG_DIR="${ASAN_LOG_DIR:-/var/log/dpumesh-asan}"
-    { cat "$MANIFEST"; echo ---; cat "$GRPC_MANIFEST"; } |
-        envsubst | kubectl apply -n "$NS" -f -
-    info "K8s resources applied"
+    {
+        cat "$MANIFEST"; echo ---; cat "$GRPC_MANIFEST"
+        if [ "$BENCH_LINKERD" = 1 ]; then echo ---; cat "$LINKERD_MANIFEST"; fi
+    } | envsubst | kubectl apply -n "$NS" -f -
+    info "K8s resources applied (linkerd=$BENCH_LINKERD)"
 }
 
 scale_up_with_wait() {
@@ -642,6 +706,12 @@ start_pods() {
         scale_up_with_wait "bench-grpc-tcp"     ""
         scale_up_with_wait "echo-grpc-envoy-strict"  ""
         scale_up_with_wait "bench-grpc-envoy-strict" ""
+        if [ "$BENCH_LINKERD" = 1 ]; then
+            scale_up_with_wait "echo-grpc-linkerd"         ""
+            scale_up_with_wait "bench-grpc-linkerd"        ""
+            scale_up_with_wait "echo-grpc-linkerd-opaque"  ""
+            scale_up_with_wait "bench-grpc-linkerd-opaque" ""
+        fi
         return 0
     fi
     scale_up_with_wait "echo-dpumesh"     "$ready"
@@ -958,11 +1028,13 @@ Usage: $0 <command> [args]
   point <sol> <req> <reply> <conc> <dur> <warmup> <threads> [reconn]   one raw RUN (reconn = conn-churn period)
   loopback|stream|preload [args]             feature validators
   verbs <N> <size> <zc> <window> <pipeline>  native-API loopback validator: window conns x pipeline outstanding
-  pin [fair|l4|grpc|grpccap|grpcmax|hw|hw3|hw6]            (re)pin pods to cores
+  pin [fair|l4|grpc|grpccap|grpcl7cap|grpcmax|hw|hw3|hw6]  (re)pin pods to cores
+                                             grpcl7cap reads BENCH_CAP_CONFIG for the 6+6 path
   armbalance [req reply conc dur threads [csv]]   DPU main/worker per-core CPU during one point
   status | logs | cleanup | dpulog [n] | dpucpu
 
-Deploy knobs (env): BENCH_NUMA_POLICY=local|auto BENCH_DEPLOY_SCOPE=all|core|l4
+Deploy knobs (env): BENCH_NUMA_POLICY=local|auto BENCH_DEPLOY_SCOPE=all|core|l4|grpc
+                    BENCH_LINKERD=1 adds the injected linkerd L7 pods (grpc scope)
                     BENCH_GRPC_BUILD=release|asan (asan instruments echo_grpc only;
                     reports land in ASAN_LOG_DIR, default /var/log/dpumesh-asan)
 Sweep knobs (env): OUT LAT_DUR BW_DUR RATE_DUR WARMUP BW_CONC RATE_CONC RATE_THREADS LAT_SIZES BW_SIZES

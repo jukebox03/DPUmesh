@@ -1,0 +1,4 @@
+config,frame_bytes,highest_clean_rps,lowest_bad_rps,bracket_ratio,status,validation_duration_s,highest_clean_client_busy,highest_clean_server_busy,lowest_bad_client_busy,lowest_bad_server_busy,host_core_budget,core_saturated,core_saturation_threshold,highest_clean_dpu_arm_cores,lowest_bad_dpu_arm_cores,highest_clean_tx_grow_waits,lowest_bad_tx_grow_waits,capacity_signal
+grpc-tcp,64,33876,34517,1.018922,bracketed,10,0.993354,0.990976,0.996147,0.996583,2,1,0.95,NA,NA,0.000000,0.000000,host_core
+grpc-dpumesh,64,29707,30270,1.018952,bracketed,10,0.925428,0.891001,0.950452,0.933631,2,1,0.95,2.330554,2.086089,0.000000,0.000000,host_core
+grpc-envoy-permissive,64,52149,53137,1.018946,bracketed,10,0.996122,0.955995,0.996098,0.935072,2,1,0.95,NA,NA,0.000000,0.000000,host_core

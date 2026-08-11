@@ -1,0 +1,28 @@
+wrote integrations/linkerd/bench/report/figures/slo_linkerd_closed.png and .pdf
+
+64 B:
+  p99<=   0.5 ms | Envoy permissive=        -  Envoy strict=        -  linkerd L7=        -  linkerd opaque=   20,818  direct TCP=   22,740  DPUmesh=   33,584  
+  p99<=     1 ms | Envoy permissive=   26,065  Envoy strict=   24,162  linkerd L7=        -  linkerd opaque=   28,892  direct TCP=   26,533  DPUmesh=   34,373  
+  p99<=     2 ms | Envoy permissive=   41,691  Envoy strict=   40,160  linkerd L7=        -  linkerd opaque=   42,972  direct TCP=   29,219  DPUmesh=   36,403  
+  p99<=     5 ms | Envoy permissive=   46,667  Envoy strict=   46,032  linkerd L7=    8,061  linkerd opaque=   46,519  direct TCP=   30,189  DPUmesh=   36,403  
+  p99<=    10 ms | Envoy permissive=   50,202  Envoy strict=   49,633  linkerd L7=    8,121  linkerd opaque=   49,749  direct TCP=   30,189  DPUmesh=   36,403  
+  p99<=    30 ms | Envoy permissive=   50,202  Envoy strict=   49,633  linkerd L7=   15,544  linkerd opaque=   49,749  direct TCP=   30,305  DPUmesh=   36,403  
+  p99<=   100 ms | Envoy permissive=   50,202  Envoy strict=   49,633  linkerd L7=   15,544  linkerd opaque=   49,749  direct TCP=   30,305  DPUmesh=   36,403  
+
+1 KiB:
+  p99<=   0.5 ms | Envoy permissive=        -  Envoy strict=        -  linkerd L7=        -  linkerd opaque=   20,072  direct TCP=        -  DPUmesh=        -  
+  p99<=     1 ms | Envoy permissive=   23,277  Envoy strict=   22,721  linkerd L7=        -  linkerd opaque=   26,287  direct TCP=   22,615  DPUmesh=   34,253  
+  p99<=     2 ms | Envoy permissive=   39,861  Envoy strict=   30,690  linkerd L7=        -  linkerd opaque=   33,639  direct TCP=   23,229  DPUmesh=   36,392  
+  p99<=     5 ms | Envoy permissive=   45,382  Envoy strict=   42,600  linkerd L7=    5,832  linkerd opaque=   41,974  direct TCP=   23,229  DPUmesh=   36,392  
+  p99<=    10 ms | Envoy permissive=   48,445  Envoy strict=   45,762  linkerd L7=    8,306  linkerd opaque=   44,411  direct TCP=   29,742  DPUmesh=   36,392  
+  p99<=    30 ms | Envoy permissive=   48,445  Envoy strict=   45,762  linkerd L7=    8,306  linkerd opaque=   44,411  direct TCP=   29,742  DPUmesh=   36,392  
+  p99<=   100 ms | Envoy permissive=   48,445  Envoy strict=   45,762  linkerd L7=   11,683  linkerd opaque=   44,411  direct TCP=   29,742  DPUmesh=   36,392  
+
+8 KiB:
+  p99<=   0.5 ms | Envoy permissive=        -  Envoy strict=        -  linkerd L7=        -  linkerd opaque=        -  direct TCP=        -  DPUmesh=        -  
+  p99<=     1 ms | Envoy permissive=   20,517  Envoy strict=   12,997  linkerd L7=        -  linkerd opaque=   12,958  direct TCP=        -  DPUmesh=   24,639  
+  p99<=     2 ms | Envoy permissive=   26,832  Envoy strict=   21,089  linkerd L7=        -  linkerd opaque=   16,955  direct TCP=   25,253  DPUmesh=   24,639  
+  p99<=     5 ms | Envoy permissive=   35,452  Envoy strict=   25,032  linkerd L7=    5,300  linkerd opaque=   23,420  direct TCP=   25,253  DPUmesh=   24,639  
+  p99<=    10 ms | Envoy permissive=   37,380  Envoy strict=   27,859  linkerd L7=    7,158  linkerd opaque=   25,426  direct TCP=   25,253  DPUmesh=   24,639  
+  p99<=    30 ms | Envoy permissive=   37,380  Envoy strict=   29,679  linkerd L7=    8,362  linkerd opaque=   26,527  direct TCP=   25,263  DPUmesh=   27,966  
+  p99<=   100 ms | Envoy permissive=   37,380  Envoy strict=   29,679  linkerd L7=   11,215  linkerd opaque=   26,527  direct TCP=   25,263  DPUmesh=   27,966  

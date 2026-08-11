@@ -74,6 +74,8 @@ client_app() {
     grpc-envoy-strict)     echo bench-grpc-envoy-strict ;;
     grpc-tcp)              echo bench-grpc-tcp ;;
     grpc-dpumesh)          echo bench-grpc-dpumesh ;;
+    grpc-linkerd)          echo bench-grpc-linkerd ;;
+    grpc-linkerd-opaque)   echo bench-grpc-linkerd-opaque ;;
   esac
 }
 server_app() {
@@ -82,6 +84,8 @@ server_app() {
     grpc-envoy-strict)     echo echo-grpc-envoy-strict ;;
     grpc-tcp)              echo echo-grpc-tcp ;;
     grpc-dpumesh)          echo echo-grpc-dpumesh ;;
+    grpc-linkerd)          echo echo-grpc-linkerd ;;
+    grpc-linkerd-opaque)   echo echo-grpc-linkerd-opaque ;;
   esac
 }
 is_dpu() { [ "$1" = grpc-dpumesh ]; }

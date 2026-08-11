@@ -1,0 +1,173 @@
+[0;34m[l4][0m output=/home/jukebox/DPUmesh/integrations/linkerd/bench/report/data/linkerd-20260811/open
+[0;34m[l4][0m planned workload: load_max=270 idle=18 pilot_max=720 knee_vote_runs_typical=216 perf_replays=0 expected_timed~111.3min
+[sudo] password for jukebox: [0;34m[l4][0m using existing deployment (--no-deploy)
+[0;32m[INFO][0m Host NUMA: PCI 94:00.0 -> node 1, benchmark cores 18-35
+[0;34m[STEP][0m === Pinning pods to dedicated cores (taskset, profile=grpc) ===
+[0;32m[INFO][0m CPU governor=performance, fixed 2.5 GHz on cores 18-35
+[0;32m[INFO][0m bench-grpc-dpumesh → core(s) 18 (pod=7b1e266893c48af851a3a41f9f3112248ec2cf4ffadb331fda9ebf9b38729164)
+[0;32m[INFO][0m   bench-grpc-dpumesh (PID 19473) → 18
+[0;32m[INFO][0m echo-grpc-dpumesh → core(s) 19 (pod=1b5e07e9e40a4d3b0a7f962fa5d7342ff0a1c942d81d32ebd409f547cdcafabf)
+[0;32m[INFO][0m   echo-grpc-dpumesh (PID 18859) → 19
+[0;32m[INFO][0m bench-grpc-envoy → core(s) 20 (pod=adba01839a27ca4d8b8011b9724558abac3530b0b6f852a79406e80d2814af0c)
+[0;32m[INFO][0m   sidecar1 (PID 20211) → 20
+[0;32m[INFO][0m   bench-grpc-envoy (PID 20187) → 20
+[0;32m[INFO][0m echo-grpc-envoy → core(s) 21 (pod=bd4029f7d4102eb3ee9b59803f596054597d04048bb0f9672b8e01f6401aa9db)
+[0;32m[INFO][0m   sidecar2 (PID 19826) → 21
+[0;32m[INFO][0m   echo-grpc-envoy (PID 19775) → 21
+[0;32m[INFO][0m bench-grpc-tcp → core(s) 22 (pod=c1d628d5cf55b67aa3ac2a6ccb28aad692dd97cae66e8ead2f2fe78a1c6e699c)
+[0;32m[INFO][0m   bench-grpc-tcp (PID 20866) → 22
+[0;32m[INFO][0m echo-grpc-tcp → core(s) 23 (pod=2931e3aac93c71526cfbd769669470d59c43267558d63a8755312241717c73ac)
+[0;32m[INFO][0m   echo-grpc-tcp (PID 20523) → 23
+[0;32m[INFO][0m bench-grpc-envoy-strict → core(s) 24 (pod=682f2314ea5f0c91e5399a0ae746fd63664d5ed289fd9223709f84582d6186e7)
+[0;32m[INFO][0m   sidecar1 (PID 21572) → 24
+[0;32m[INFO][0m   bench-grpc-envoy-strict (PID 21527) → 24
+[0;32m[INFO][0m echo-grpc-envoy-strict → core(s) 25 (pod=3ceb30b7b55b5ed172ed49aeb282892d86d0ce2846318c219267de37bd462c8b)
+[0;32m[INFO][0m   sidecar2 (PID 21189) → 25
+[0;32m[INFO][0m   echo-grpc-envoy-strict (PID 21144) → 25
+[0;32m[INFO][0m bench-grpc-linkerd → core(s) 26 (pod=815c1d4603801bba4d68c447820710c9e56347f47b06c19a752fab6db0f862f7)
+[0;32m[INFO][0m   bench-grpc-linkerd (PID 22605) → 26
+[0;32m[INFO][0m   linkerd-proxy (PID 22536) → 26
+[0;32m[INFO][0m echo-grpc-linkerd → core(s) 27 (pod=300dfa003271e82b6e56a548bada57dd41a3ce690750e49fe2ebde16db6b2686)
+[0;32m[INFO][0m   echo-grpc-linkerd (PID 22077) → 27
+[0;32m[INFO][0m   linkerd-proxy (PID 22005) → 27
+[0;32m[INFO][0m bench-grpc-linkerd-opaque → core(s) 28 (pod=6dce96d870ca2083a30d7b7c82b4e2a86cd0862d10ae3101c424027c38434abe)
+[0;32m[INFO][0m   bench-grpc-linkerd-opaque (PID 23664) → 28
+[0;32m[INFO][0m   linkerd-proxy (PID 23577) → 28
+[0;32m[INFO][0m echo-grpc-linkerd-opaque → core(s) 29 (pod=a91cfa0fcbde896cd75a30500f7dc6110edb28048821c11bf01fe736ce8d1cd7)
+[0;32m[INFO][0m   echo-grpc-linkerd-opaque (PID 23156) → 29
+[0;32m[INFO][0m   linkerd-proxy (PID 23073) → 29
+[0;32m[INFO][0m Pinning done
+[0;34m[l4][0m binary audit PASS: selected POSIX and gRPC paths are each byte-identical; native API binaries recorded separately
+[0;34m[l4][0m smoke grpc-envoy-permissive attempt=1 clean=1: OK mrps=0.004998 gbps=0.0051 req_gbps=0.0026 resp_gbps=0.0026 p50=179.00 p95=186.00 p99=206.00 p999=330.00 p9999=531.00 avg=180.57 min=131.81 max=563.43 rcnt=9840 scheduled=10000 pending=0 fail=0 conc=0 threads=8 channels=8 reqsz=48 repsz=48 reqframe=64 respframe=64 durs=2.000 offered_mrps=0.005000 drops=0 overflow=0 worker_fail=0 reorder=0 mode=open arr=const batch=0 reconns=0 reconn_us=0.00 grabs=0 rets=0 recyc=0 waits=0 pads=0 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA
+[0;34m[l4][0m smoke grpc-envoy-strict attempt=1 clean=1: OK mrps=0.004999 gbps=0.0051 req_gbps=0.0026 resp_gbps=0.0026 p50=192.00 p95=587.00 p99=675.00 p999=761.00 p9999=786.00 avg=263.08 min=145.39 max=804.20 rcnt=9840 scheduled=10000 pending=0 fail=0 conc=0 threads=8 channels=8 reqsz=48 repsz=48 reqframe=64 respframe=64 durs=2.000 offered_mrps=0.005000 drops=0 overflow=0 worker_fail=0 reorder=0 mode=open arr=const batch=0 reconns=0 reconn_us=0.00 grabs=0 rets=0 recyc=0 waits=0 pads=0 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA
+[0;34m[l4][0m smoke grpc-linkerd attempt=1 clean=1: OK mrps=0.004998 gbps=0.0051 req_gbps=0.0026 resp_gbps=0.0026 p50=404.00 p95=413.00 p99=447.00 p999=1023.00 p9999=1429.00 avg=402.55 min=284.86 max=1432.55 rcnt=9838 scheduled=10000 pending=0 fail=0 conc=0 threads=8 channels=8 reqsz=48 repsz=48 reqframe=64 respframe=64 durs=2.000 offered_mrps=0.005000 drops=0 overflow=0 worker_fail=0 reorder=0 mode=open arr=const batch=0 reconns=0 reconn_us=0.00 grabs=0 rets=0 recyc=0 waits=0 pads=0 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA
+[0;34m[l4][0m smoke grpc-linkerd-opaque attempt=1 clean=1: OK mrps=0.004998 gbps=0.0051 req_gbps=0.0026 resp_gbps=0.0026 p50=177.00 p95=186.00 p99=442.00 p999=566.00 p9999=650.00 avg=184.26 min=137.91 max=652.71 rcnt=9840 scheduled=10000 pending=0 fail=0 conc=0 threads=8 channels=8 reqsz=48 repsz=48 reqframe=64 respframe=64 durs=2.000 offered_mrps=0.005000 drops=0 overflow=0 worker_fail=0 reorder=0 mode=open arr=const batch=0 reconns=0 reconn_us=0.00 grabs=0 rets=0 recyc=0 waits=0 pads=0 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA
+[0;34m[l4][0m smoke grpc-tcp attempt=1 clean=1: OK mrps=0.004997 gbps=0.0051 req_gbps=0.0026 resp_gbps=0.0026 p50=134.00 p95=139.00 p99=321.00 p999=504.00 p9999=530.00 avg=139.44 min=98.79 max=551.17 rcnt=9839 scheduled=10000 pending=0 fail=0 conc=0 threads=8 channels=8 reqsz=48 repsz=48 reqframe=64 respframe=64 durs=2.000 offered_mrps=0.005000 drops=0 overflow=0 worker_fail=0 reorder=0 mode=open arr=const batch=0 reconns=0 reconn_us=0.00 grabs=0 rets=0 recyc=0 waits=0 pads=0 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA
+[0;34m[l4][0m smoke grpc-dpumesh attempt=1 clean=1: OK mrps=0.004998 gbps=0.0051 req_gbps=0.0026 resp_gbps=0.0026 p50=244.00 p95=274.00 p99=436.00 p999=618.00 p9999=2111.00 avg=250.87 min=171.27 max=2281.84 rcnt=9839 scheduled=10000 pending=0 fail=0 conc=0 threads=8 channels=8 reqsz=48 repsz=48 reqframe=64 respframe=64 durs=2.000 offered_mrps=0.005000 drops=0 overflow=0 worker_fail=0 reorder=0 mode=open arr=const batch=0 reconns=0 reconn_us=0.00 grabs=0 rets=0 recyc=0 waits=0 pads=0 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA
+[0;34m[l4][0m backend budget PASS: exactly one ready server backend/config
+[0;34m[l4][0m fixed host-core budget PASS: 2 exclusive cores/config, 12 endpoint cores total
+[0;34m[l4][0m generator selftest grpc/64 clean_ceiling=28832525 first_bad=43248788 status=bracketed
+[0;34m[l4][0m generator selftest grpc/1024 clean_ceiling=28832525 first_bad=43248788 status=bracketed
+[0;34m[l4][0m generator selftest grpc/8192 clean_ceiling=12814455 first_bad=19221683 status=bracketed
+[0;34m[l4][0m discovering per-config OPEN-loop SLA knees
+[0;34m[l4][0m scout-64-grpc-tcp-pilot1-v1 offered=5000 host_busy=0.417419 dpu=NA clean=1 reason=clean
+[0;34m[l4][0m scout-64-grpc-tcp-pilot2-v1 offered=6750 host_busy=0.697220 dpu=NA clean=1 reason=clean
+[0;34m[l4][0m scout-64-grpc-tcp-pilot3-v1 offered=9113 host_busy=0.790053 dpu=NA clean=1 reason=clean
+[0;34m[l4][0m scout-64-grpc-tcp-pilot4-v1 offered=12303 host_busy=1.049207 dpu=NA clean=1 reason=clean
+[0;34m[l4][0m scout-64-grpc-tcp-pilot5-v1 offered=16609 host_busy=1.449028 dpu=NA clean=1 reason=clean
+[0;34m[l4][0m scout-64-grpc-tcp-pilot6-v1 offered=22422 host_busy=1.677503 dpu=NA clean=1 reason=clean
+[0;34m[l4][0m scout-64-grpc-tcp-pilot7-v1 offered=30270 host_busy=1.888914 dpu=NA clean=1 reason=clean
+[0;34m[l4][0m scout-64-grpc-tcp-pilot8-v1 offered=40865 host_busy=1.960239 dpu=NA clean=0 reason=achieved+scheduler
+[0;34m[l4][0m recovery PASS: grpc-tcp/64 at 5000 rps (attempt 1)
+[0;34m[l4][0m scout-64-grpc-tcp-validate8-v1 offered=40865 host_busy=1.882423 dpu=NA clean=0 reason=overflow+achieved+scheduler
+[0;34m[l4][0m recovery PASS: grpc-tcp/64 at 5000 rps (attempt 1)
+[0;34m[l4][0m scout-64-grpc-tcp-validate8-v2 offered=40865 host_busy=1.992813 dpu=NA clean=0 reason=overflow+achieved+scheduler
+[0;34m[l4][0m recovery PASS: grpc-tcp/64 at 5000 rps (attempt 1)
+[0;34m[l4][0m point-64-grpc-tcp-r40865 decision=0 votes=0-2
+[0;34m[l4][0m scout-64-grpc-tcp-backtrack7-v1 offered=30270 host_busy=1.914329 dpu=NA clean=1 reason=clean
+[0;34m[l4][0m scout-64-grpc-tcp-backtrack7-v2 offered=30270 host_busy=1.913454 dpu=NA clean=1 reason=clean
+[0;34m[l4][0m point-64-grpc-tcp-r30270 decision=1 votes=2-0
+[0;34m[l4][0m scout-64-grpc-tcp-refine1-v1 offered=35171 host_busy=1.992035 dpu=NA clean=0 reason=overflow+achieved
+[0;34m[l4][0m recovery PASS: grpc-tcp/64 at 5000 rps (attempt 1)
+[0;34m[l4][0m scout-64-grpc-tcp-refine1-v2 offered=35171 host_busy=1.992444 dpu=NA clean=0 reason=overflow+achieved
+[0;34m[l4][0m recovery PASS: grpc-tcp/64 at 5000 rps (attempt 1)
+[0;34m[l4][0m point-64-grpc-tcp-r35171 decision=0 votes=0-2
+[0;34m[l4][0m scout-64-grpc-tcp-refine2-v1 offered=32629 host_busy=1.965194 dpu=NA clean=1 reason=clean
+[0;34m[l4][0m scout-64-grpc-tcp-refine2-v2 offered=32629 host_busy=1.965351 dpu=NA clean=1 reason=clean
+[0;34m[l4][0m point-64-grpc-tcp-r32629 decision=1 votes=2-0
+[0;34m[l4][0m scout-64-grpc-tcp-refine3-v1 offered=33876 host_busy=1.983460 dpu=NA clean=1 reason=clean
+[0;34m[l4][0m scout-64-grpc-tcp-refine3-v2 offered=33876 host_busy=1.985199 dpu=NA clean=1 reason=clean
+[0;34m[l4][0m point-64-grpc-tcp-r33876 decision=1 votes=2-0
+[0;34m[l4][0m scout-64-grpc-tcp-refine4-v1 offered=34517 host_busy=1.992083 dpu=NA clean=0 reason=overflow+achieved
+[0;34m[l4][0m recovery PASS: grpc-tcp/64 at 5000 rps (attempt 1)
+[0;34m[l4][0m scout-64-grpc-tcp-refine4-v2 offered=34517 host_busy=1.993375 dpu=NA clean=0 reason=overflow+achieved
+[0;34m[l4][0m recovery PASS: grpc-tcp/64 at 5000 rps (attempt 1)
+[0;34m[l4][0m point-64-grpc-tcp-r34517 decision=0 votes=0-2
+[0;34m[l4][0m knee grpc-tcp/64 clean=33876 first_bad=34517 bracket=1.019x
+[0;34m[l4][0m scout-64-grpc-dpumesh-pilot1-v1 offered=5000 host_busy=0.343957 dpu=NA clean=1 reason=clean
+[0;34m[l4][0m scout-64-grpc-dpumesh-pilot2-v1 offered=6750 host_busy=0.466927 dpu=NA clean=1 reason=clean
+[0;34m[l4][0m scout-64-grpc-dpumesh-pilot3-v1 offered=9113 host_busy=0.578623 dpu=NA clean=1 reason=clean
+[0;34m[l4][0m scout-64-grpc-dpumesh-pilot4-v1 offered=12303 host_busy=0.730679 dpu=NA clean=1 reason=clean
+[0;34m[l4][0m scout-64-grpc-dpumesh-pilot5-v1 offered=16609 host_busy=1.020728 dpu=NA clean=1 reason=clean
+[0;34m[l4][0m scout-64-grpc-dpumesh-pilot6-v1 offered=22422 host_busy=1.307903 dpu=NA clean=1 reason=clean
+[0;34m[l4][0m scout-64-grpc-dpumesh-pilot7-v1 offered=30270 host_busy=1.795082 dpu=NA clean=0 reason=achieved
+[0;34m[l4][0m recovery PASS: grpc-dpumesh/64 at 5000 rps (attempt 1)
+[0;34m[l4][0m scout-64-grpc-dpumesh-validate7-v1 offered=30270 host_busy=1.907542 dpu=1.928968 clean=0 reason=achieved
+[0;34m[l4][0m recovery PASS: grpc-dpumesh/64 at 5000 rps (attempt 1)
+[0;34m[l4][0m scout-64-grpc-dpumesh-validate7-v2 offered=30270 host_busy=1.860626 dpu=2.243211 clean=0 reason=achieved
+[0;34m[l4][0m recovery PASS: grpc-dpumesh/64 at 5000 rps (attempt 1)
+[0;34m[l4][0m point-64-grpc-dpumesh-r30270 decision=0 votes=0-2
+[0;34m[l4][0m scout-64-grpc-dpumesh-backtrack6-v1 offered=22422 host_busy=1.337485 dpu=1.960752 clean=1 reason=clean
+[0;34m[l4][0m scout-64-grpc-dpumesh-backtrack6-v2 offered=22422 host_busy=1.339378 dpu=1.943128 clean=1 reason=clean
+[0;34m[l4][0m point-64-grpc-dpumesh-r22422 decision=1 votes=2-0
+[0;34m[l4][0m scout-64-grpc-dpumesh-refine1-v1 offered=26052 host_busy=1.573170 dpu=2.224990 clean=1 reason=clean
+[0;34m[l4][0m scout-64-grpc-dpumesh-refine1-v2 offered=26052 host_busy=1.568685 dpu=2.228358 clean=0 reason=achieved
+[0;34m[l4][0m recovery PASS: grpc-dpumesh/64 at 5000 rps (attempt 1)
+[0;34m[l4][0m scout-64-grpc-dpumesh-refine1-v3 offered=26052 host_busy=1.577026 dpu=2.218475 clean=1 reason=clean
+[0;34m[l4][0m point-64-grpc-dpumesh-r26052 decision=1 votes=2-1
+[0;34m[l4][0m scout-64-grpc-dpumesh-refine2-v1 offered=28082 host_busy=1.697841 dpu=2.347454 clean=1 reason=clean
+[0;34m[l4][0m scout-64-grpc-dpumesh-refine2-v2 offered=28082 host_busy=1.770714 dpu=2.057964 clean=0 reason=achieved
+[0;34m[l4][0m recovery PASS: grpc-dpumesh/64 at 5000 rps (attempt 1)
+[0;34m[l4][0m scout-64-grpc-dpumesh-refine2-v3 offered=28082 host_busy=1.692986 dpu=2.360644 clean=1 reason=clean
+[0;34m[l4][0m point-64-grpc-dpumesh-r28082 decision=1 votes=2-1
+[0;34m[l4][0m scout-64-grpc-dpumesh-refine3-v1 offered=29155 host_busy=1.804158 dpu=2.103231 clean=1 reason=clean
+[0;34m[l4][0m scout-64-grpc-dpumesh-refine3-v2 offered=29155 host_busy=1.768414 dpu=2.385360 clean=1 reason=clean
+[0;34m[l4][0m point-64-grpc-dpumesh-r29155 decision=1 votes=2-0
+[0;34m[l4][0m scout-64-grpc-dpumesh-refine4-v1 offered=29707 host_busy=1.829704 dpu=2.239507 clean=1 reason=clean
+[0;34m[l4][0m scout-64-grpc-dpumesh-refine4-v2 offered=29707 host_busy=1.803155 dpu=2.421602 clean=1 reason=clean
+[0;34m[l4][0m point-64-grpc-dpumesh-r29707 decision=1 votes=2-0
+[0;34m[l4][0m knee grpc-dpumesh/64 clean=29707 first_bad=30270 bracket=1.019x
+[0;34m[l4][0m scout-64-grpc-envoy-permissive-pilot1-v1 offered=5000 host_busy=0.647916 dpu=NA clean=1 reason=clean
+[0;34m[l4][0m scout-64-grpc-envoy-permissive-pilot2-v1 offered=6750 host_busy=0.862690 dpu=NA clean=1 reason=clean
+[0;34m[l4][0m scout-64-grpc-envoy-permissive-pilot3-v1 offered=9113 host_busy=1.174945 dpu=NA clean=1 reason=clean
+[0;34m[l4][0m scout-64-grpc-envoy-permissive-pilot4-v1 offered=12303 host_busy=1.564387 dpu=NA clean=1 reason=clean
+[0;34m[l4][0m scout-64-grpc-envoy-permissive-pilot5-v1 offered=16609 host_busy=1.893067 dpu=NA clean=1 reason=clean
+[0;34m[l4][0m scout-64-grpc-envoy-permissive-pilot6-v1 offered=22422 host_busy=1.916549 dpu=NA clean=1 reason=clean
+[0;34m[l4][0m scout-64-grpc-envoy-permissive-pilot7-v1 offered=30270 host_busy=1.877608 dpu=NA clean=1 reason=clean
+[0;34m[l4][0m scout-64-grpc-envoy-permissive-pilot8-v1 offered=40865 host_busy=1.866460 dpu=NA clean=1 reason=clean
+[0;34m[l4][0m scout-64-grpc-envoy-permissive-pilot9-v1 offered=55168 host_busy=1.906380 dpu=NA clean=0 reason=achieved+scheduler
+[0;34m[l4][0m recovery PASS: grpc-envoy-permissive/64 at 5000 rps (attempt 1)
+[0;34m[l4][0m scout-64-grpc-envoy-permissive-validate9-v1 offered=55168 host_busy=1.929339 dpu=NA clean=0 reason=overflow+achieved+scheduler
+[0;34m[l4][0m recovery PASS: grpc-envoy-permissive/64 at 5000 rps (attempt 1)
+[0;34m[l4][0m scout-64-grpc-envoy-permissive-validate9-v2 offered=55168 host_busy=1.932257 dpu=NA clean=0 reason=overflow+achieved+scheduler
+[0;34m[l4][0m recovery PASS: grpc-envoy-permissive/64 at 5000 rps (attempt 1)
+[0;34m[l4][0m point-64-grpc-envoy-permissive-r55168 decision=0 votes=0-2
+[0;34m[l4][0m scout-64-grpc-envoy-permissive-backtrack8-v1 offered=40865 host_busy=1.899641 dpu=NA clean=1 reason=clean
+[0;34m[l4][0m scout-64-grpc-envoy-permissive-backtrack8-v2 offered=40865 host_busy=1.890904 dpu=NA clean=1 reason=clean
+[0;34m[l4][0m point-64-grpc-envoy-permissive-r40865 decision=1 votes=2-0
+[0;34m[l4][0m scout-64-grpc-envoy-permissive-refine1-v1 offered=47481 host_busy=1.903339 dpu=NA clean=1 reason=clean
+[0;34m[l4][0m scout-64-grpc-envoy-permissive-refine1-v2 offered=47481 host_busy=1.904337 dpu=NA clean=1 reason=clean
+[0;34m[l4][0m point-64-grpc-envoy-permissive-r47481 decision=1 votes=2-0
+[0;34m[l4][0m scout-64-grpc-envoy-permissive-refine2-v1 offered=51180 host_busy=1.941429 dpu=NA clean=1 reason=clean
+[0;34m[l4][0m scout-64-grpc-envoy-permissive-refine2-v2 offered=51180 host_busy=1.943499 dpu=NA clean=1 reason=clean
+[0;34m[l4][0m point-64-grpc-envoy-permissive-r51180 decision=1 votes=2-0
+[0;34m[l4][0m scout-64-grpc-envoy-permissive-refine3-v1 offered=53137 host_busy=1.931041 dpu=NA clean=0 reason=achieved+scheduler
+[0;34m[l4][0m recovery PASS: grpc-envoy-permissive/64 at 5000 rps (attempt 1)
+[0;34m[l4][0m scout-64-grpc-envoy-permissive-refine3-v2 offered=53137 host_busy=1.931299 dpu=NA clean=0 reason=achieved+scheduler
+[0;34m[l4][0m recovery PASS: grpc-envoy-permissive/64 at 5000 rps (attempt 1)
+[0;34m[l4][0m point-64-grpc-envoy-permissive-r53137 decision=0 votes=0-2
+[0;34m[l4][0m scout-64-grpc-envoy-permissive-refine4-v1 offered=52149 host_busy=1.951179 dpu=NA clean=0 reason=achieved
+[0;34m[l4][0m recovery PASS: grpc-envoy-permissive/64 at 5000 rps (attempt 1)
+[0;34m[l4][0m scout-64-grpc-envoy-permissive-refine4-v2 offered=52149 host_busy=1.952117 dpu=NA clean=1 reason=clean
+[0;34m[l4][0m scout-64-grpc-envoy-permissive-refine4-v3 offered=52149 host_busy=1.952292 dpu=NA clean=1 reason=clean
+[0;34m[l4][0m point-64-grpc-envoy-permissive-r52149 decision=1 votes=2-1
+[0;34m[l4][0m knee grpc-envoy-permissive/64 clean=52149 first_bad=53137 bracket=1.019x
+[0;34m[l4][0m scout-64-grpc-envoy-strict-pilot1-v1 offered=5000 host_busy=0.688687 dpu=NA clean=1 reason=clean
+[0;34m[l4][0m scout-64-grpc-envoy-strict-pilot2-v1 offered=6750 host_busy=0.922556 dpu=NA clean=1 reason=clean
+[0;34m[l4][0m scout-64-grpc-envoy-strict-pilot3-v1 offered=9113 host_busy=1.247523 dpu=NA clean=1 reason=clean
+[0;34m[l4][0m scout-64-grpc-envoy-strict-pilot4-v1 offered=12303 host_busy=1.623618 dpu=NA clean=1 reason=clean
+[0;34m[l4][0m scout-64-grpc-envoy-strict-pilot5-v1 offered=16609 host_busy=1.916507 dpu=NA clean=1 reason=clean
+[0;34m[l4][0m scout-64-grpc-envoy-strict-pilot6-v1 offered=22422 host_busy=1.910175 dpu=NA clean=1 reason=clean
+[0;34m[l4][0m scout-64-grpc-envoy-strict-pilot7-v1 offered=30270 host_busy=1.869931 dpu=NA clean=1 reason=clean
+[0;34m[l4][0m scout-64-grpc-envoy-strict-pilot8-v1 offered=40865 host_busy=1.874834 dpu=NA clean=1 reason=clean
+[0;34m[l4][0m scout-64-grpc-envoy-strict-pilot9-v1 offered=55168 host_busy=1.899963 dpu=NA clean=0 reason=achieved+scheduler
+[0;34m[l4][0m recovery PASS: grpc-envoy-strict/64 at 5000 rps (attempt 1)
+[0;34m[l4][0m scout-64-grpc-envoy-strict-validate9-v1 offered=55168 host_busy=1.939765 dpu=NA clean=0 reason=overflow+achieved+scheduler
+[0;34m[l4][0m recovery PASS: grpc-envoy-strict/64 at 5000 rps (attempt 1)
+[0;34m[l4][0m scout-64-grpc-envoy-strict-validate9-v2 offered=55168 host_busy=1.936656 dpu=NA clean=0 reason=overflow+achieved+scheduler
+[0;34m[l4][0m recovery PASS: grpc-envoy-strict/64 at 5000 rps (attempt 1)
+[0;34m[l4][0m point-64-grpc-envoy-strict-r55168 decision=0 votes=0-2
+[0;34m[l4][0m scout-64-grpc-envoy-strict-backtrack8-v1 offered=40865 host_busy=1.896868 dpu=NA clean=1 reason=clean
+[0;34m[l4][0m scout-64-grpc-envoy-strict-backtrack8-v2 offered=40865 host_busy=1.897105 dpu=NA clean=1 reason=clean
+[0;34m[l4][0m point-64-grpc-envoy-strict-r40865 decision=1 votes=2-0
+[0;34m[l4][0m scout-64-grpc-envoy-strict-refine1-v1 offered=47481 host_busy=1.913113 dpu=NA clean=1 reason=clean
