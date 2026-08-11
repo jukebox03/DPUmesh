@@ -74,7 +74,9 @@ free ≤ sent ≤ committed ≤ write
 
 `dmesh_alloc` reserves registered bytes. `dmesh_post_send` commits complete
 8 KiB transport units, and `dmesh_flush` publishes a trailing partial unit.
-`TX_ACK` advances `free`; `REV_DONE` creates RX, FIN, and accept events.
+`TX_ACK` advances `free`, and the one that leaves the QP with nothing in flight
+arms a still-retained tail for its EQ. `REV_DONE` creates RX, FIN, and accept
+events.
 
 Each landing stripe aggregates `K/L` credit counters. The host shards returned
 credits by landing position. The DPU reads the counters with one SG-DMA and uses

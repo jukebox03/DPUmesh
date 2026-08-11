@@ -812,7 +812,6 @@ dmesh_doca_dpa_comch_create(struct objects *objs, int idx)
     if (result != DOCA_SUCCESS) {
         DOCA_LOG_ERR("Failed to create consumer completion - %s",
                 doca_error_get_name(result));
-        assert(0);
         return result;
     }
     

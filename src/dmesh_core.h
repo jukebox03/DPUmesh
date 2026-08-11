@@ -247,12 +247,15 @@ dmesh_qp_t *dmesh_accept(dmesh_eq_t *eq);
  * created at accept/connect, or NULL when drained. Single-consumer. */
 dmesh_qp_t *dmesh_next_ready(dmesh_eq_t *eq);
 
-/* dmesh_tx_qp_valid() validates the handle and takes the QP's transmit gate;
- * dmesh_tx_call_done() releases it. dmesh_tx_after_commit() submits
- * complete units and applies the internal idle/deadline tail policy;
- * dmesh_tx_pressure() expedites a retained tail after alloc reports EAGAIN. */
+/* dmesh_tx_qp_valid() validates the handle and takes the QP's transmit gate,
+ * reporting EDEADLK when a transmit call is already open; dmesh_tx_call_done()
+ * releases it. dmesh_tx_call_active() reports whether a transmit call is open.
+ * dmesh_tx_after_commit() submits complete units and applies the internal
+ * idle/deadline tail policy; dmesh_tx_pressure() expedites a retained tail
+ * after alloc reports EAGAIN. */
 int  dmesh_tx_qp_valid(dmesh_qp_t *c);
 void dmesh_tx_call_done(dmesh_qp_t *c);
+int  dmesh_tx_call_active(dmesh_qp_t *c);
 int  dmesh_tx_after_commit(dmesh_qp_t *c);
 void dmesh_tx_pressure(dmesh_qp_t *c);
 
@@ -260,7 +263,8 @@ void dmesh_tx_pressure(dmesh_qp_t *c);
 void dmesh_eq_suppress_notify(dmesh_eq_t *eq, int delta);
 
 /* Send an ordered zero-length FIN on the connection's forward ring. Ring timeout
- * returns EBADMSG without latching fin_sent. */
+ * returns EBADMSG without latching fin_sent; an open transmit call returns
+ * EDEADLK. */
 int dmesh_send_fin(dmesh_qp_t *c);
 
 #ifdef __cplusplus

@@ -235,6 +235,54 @@ test_tail_publication_policy(void)
     fixture_free(f);
 }
 
+/* A commit that publishes every committed byte clears the armed bit while the
+ * stamp holds the stream in coalescing mode. A partial committed after that is
+ * retained by the stamp alone; once the stream falls quiet, the acknowledgement
+ * that empties the QP arms it. */
+static void
+test_tail_retained_when_the_stream_falls_quiet(void)
+{
+    struct fixture *f = fixture_new(8, 16, -1);
+    struct dmesh_port_slot *psl = f->psl;
+
+    assert(fixture_commit(f, 64) == 0);       /* idle → published, tx_s = 128 */
+    assert(fixture_commit(f, 64) == 0);       /* in flight → retained + armed */
+    assert(armed_count(f) == 1);
+
+    /* Commit exactly one transport unit past the send cursor: the drain ships
+     * all of it, so tx_s catches tx_w with earlier units still un-ACKed. */
+    assert(fixture_commit(f, 8128) == 0);
+    assert(__atomic_load_n(&f->ring.enq_pos, __ATOMIC_ACQUIRE) == 2);
+    assert(f->descs[1].size == 8192);
+    assert(atomic_load_explicit(&psl->tx_s, memory_order_acquire) == psl->tx_w);
+    assert(armed_count(f) == 0);              /* nothing retained right now ... */
+    assert(psl->tx_deadline_ns != 0);         /* ... but still coalescing */
+
+    /* One more partial, then the writer stops. It is retained, unarmed. */
+    assert(fixture_commit(f, 64) == 0);
+    assert(__atomic_load_n(&f->ring.enq_pos, __ATOMIC_ACQUIRE) == 2);
+    assert(atomic_load_explicit(&psl->tx_s, memory_order_relaxed) <
+           atomic_load_explicit(&psl->tx_c, memory_order_acquire));
+
+    /* The two shipped units are acknowledged; the QP goes fully idle. */
+    tx_reclaim_ack(f->ctx, 17, 1);
+    assert(armed_count(f) == 0);              /* one unit still outstanding */
+    tx_reclaim_ack(f->ctx, 17, 2);
+    assert(armed_count(f) == 1);              /* idle with a tail → armed */
+
+    /* Reachable: once its deadline passes, the deadline pass alone publishes
+     * it, with no further commit, flush or allocation pressure. */
+    psl->tx_deadline_ns = monotonic_ns() - 1;
+    mark_due(f);
+    dpumesh_publish_due_tails(&f->eq);
+    assert(__atomic_load_n(&f->ring.enq_pos, __ATOMIC_ACQUIRE) == 3);
+    assert(f->descs[2].size == 64);
+    assert(armed_count(f) == 0);
+    assert(psl->tx_deadline_ns == 0);
+
+    fixture_free(f);
+}
+
 /* The deadline pass and a public TX call can land on the same QP from different
  * threads; the gate keeps exactly one of them in the transmit state. */
 static void
@@ -596,7 +644,11 @@ main(void)
     };
     credit_ctx->ports = credit_ports;
     credit_ctx->k_rings = 1;
+    /* Full landing geometry: the credit mapping rejects an offset outside it. */
+    credit_ctx->landing_stripes = 1;
+    credit_ctx->rx_credit_shards = 1;
     credit_ctx->rx_region_size = 8192;
+    credit_ctx->rx_dma_buf_size = 8192;
     credit_ctx->dma_rings[0] = &credit_ring;
     atomic_init(&credit_ports[17].role, DMESH_ROLE_CLIENT);
     credit_ports[17].rx_seq_valid = 1;
@@ -719,6 +771,7 @@ main(void)
     free(ports);
     free(ctx);
     test_tail_publication_policy();
+    test_tail_retained_when_the_stream_falls_quiet();
     test_deadline_pass_yields_to_an_active_tx_call();
     test_close_paths_release_the_armed_bit();
     test_timer_wakes_only_armed_eqs();

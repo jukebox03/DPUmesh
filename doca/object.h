@@ -334,17 +334,23 @@ static inline uint16_t dpu_upstream_find(struct dpu_conntrack *ct, int32_t cp,
     return 0;
 }
 
-/* Allocate an upstream port that encodes the return-path worker. */
+/* Allocate an upstream port that encodes the return-path worker as p % A. The
+ * search walks that residue class from the round-robin cursor. */
 static inline uint16_t dpu_upstream_create(struct dpu_conntrack *ct, int32_t cp,
                                            uint16_t cport, int32_t bpod, uint8_t codec_id,
                                            uint16_t owner, uint16_t stride) {
-    uint32_t span = 65536u - DMESH_UPORT_BASE;
     uint16_t uP = 0;
     if (stride < 1) stride = 1;
-    for (uint32_t k = 0; k < span; k++) {
-        uint32_t p = DMESH_UPORT_BASE + ((ct->next_uport - DMESH_UPORT_BASE + k) % span);
-        /* Encode the return-path worker as p % A. */
-        if (stride > 1 && (p % stride) != owner) continue;
+    /* Lowest upstream port in this worker's residue class. */
+    uint32_t first = DMESH_UPORT_BASE +
+        ((owner + stride - (DMESH_UPORT_BASE % stride)) % stride);
+    if (first >= 65536u) return 0;
+    uint32_t candidates = (65536u - first + stride - 1u) / stride;
+    uint32_t cursor = ct->next_uport;
+    uint32_t start = (cursor > first && cursor < 65536u)
+        ? (((cursor - first + stride - 1u) / stride) % candidates) : 0;
+    for (uint32_t k = 0; k < candidates; k++) {
+        uint32_t p = first + ((start + k) % candidates) * stride;
         if (!ct->upstream[p].in_use) { uP = (uint16_t)p; break; }
     }
     if (uP == 0) return 0;

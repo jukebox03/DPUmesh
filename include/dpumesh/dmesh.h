@@ -124,22 +124,27 @@ int dmesh_abort_qp(dmesh_qp_t *c);
 
 /* ===== Send (ibv_post_send) ===== */
 
-/* Reserve `len` contiguous bytes in registered TX memory. Returns NULL with:
+/* Reserve `len` contiguous bytes in registered TX memory. A successful
+ * reservation opens a transmit call that dmesh_post_send closes; the QP admits
+ * no other transmit until then. Returns NULL with:
  *   EAGAIN   QP window or shared block pool exhausted. DMESH_EVENT_TX_READY is armed.
- *   EINVAL   invalid length or unestablished connection. */
+ *   EINVAL   invalid length or unestablished connection.
+ *   EDEADLK  a transmit call is already open on this QP. */
 void *dmesh_alloc(dmesh_qp_t *c, uint32_t len);
 
-/* Commit bytes from the current dmesh_alloc() reservation. Complete transport
- * batches submit immediately, as does an idle tail. While earlier data is in
- * flight the newest partial tail is retained and published at the library's
- * bounded deadline. `buf` must match the reservation and `len` must fit it.
- * Returns EINVAL for invalid input or EBADMSG for a synchronous submission
- * fault. Ownership transfers to the transport on success. A deferred tail fault
- * is reported once as DMESH_EVENT_TX_ERROR and is sticky on the QP. */
+/* Commit bytes from the current dmesh_alloc() reservation and close the
+ * transmit call. Complete transport batches submit immediately, as does an idle
+ * tail. While earlier data is in flight the newest partial tail is retained and
+ * published at the library's bounded deadline. `buf` must match the reservation
+ * and `len` must fit it. Returns EINVAL for invalid input or no open transmit
+ * call, or EBADMSG for a synchronous submission fault. Ownership transfers to
+ * the transport on success. A deferred tail fault is reported once as
+ * DMESH_EVENT_TX_ERROR and is sticky on the QP. */
 int dmesh_post_send(dmesh_qp_t *c, const void *buf, uint32_t len);
 
-/* Submit all committed bytes, including the trailing partial batch. A descriptor
- * fault returns EBADMSG; no pending data is a no-op. */
+/* Submit all committed bytes, including the trailing partial batch. A
+ * descriptor fault returns EBADMSG, an open transmit call returns EDEADLK; no
+ * pending data is a no-op. */
 int dmesh_flush(dmesh_qp_t *c);
 
 /* Nonzero while a published TX unit on this QP awaits acknowledgement.

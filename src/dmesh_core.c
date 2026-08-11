@@ -218,6 +218,7 @@ struct dpumesh_ctx {
     int  slot_size;
     int  k_rings;              /* K = forward rings per pod; 1 selects one ring */
     int  landing_stripes;      /* L = host RX buffer partitions */
+    int  rx_credit_shards;     /* K/L = credit counters per landing stripe */
     int  inbox_ring;           /* per-conn inbound descriptor ring depth (pow2), sized to the
                                 * DPU per-region reverse-credit budget so the inbox-full drop
                                 * (rx_deliver_desc) is unreachable in steady use. */
@@ -275,6 +276,7 @@ struct dpumesh_ctx {
      * reverse-credit budget. */
     atomic_ullong st_rx_inbox_drops;   /* established/pending conn inbox full → message dropped */
     atomic_ullong st_rx_accept_drops;  /* accept queue full → NEW conn dropped */
+    atomic_ullong st_rx_credit_drops;  /* landing offset outside the RX mapping */
 
     /* One channel-level timer writes the readiness fd of each EQ holding a
      * retained tail. It touches no port slot and publishes nothing. It parks
@@ -402,6 +404,13 @@ static inline int tx_gate_try(struct dmesh_port_slot *psl)
     return atomic_compare_exchange_strong_explicit(&psl->tx_gate, &expected, 1,
                                                    memory_order_acq_rel,
                                                    memory_order_acquire);
+}
+
+/* True while a transmit call is open on this QP: dmesh_alloc holds the gate and
+ * left a reservation that dmesh_post_send or a close consumes. */
+static inline int tx_call_open(const struct dmesh_port_slot *psl)
+{
+    return psl->resv_len != 0;
 }
 
 /* The holder is one bounded drain: spin briefly, then yield. */
@@ -732,27 +741,33 @@ static void *pe_progress_fn(void *arg) {
  * RX data hook — called from PE progress thread via comch callback
  * ==================================================================== */
 
+/* Map a landing byte offset to the forward ring holding its admission credit:
+ * L stripes of rx_region_size, each aggregating K/L credit shards. Returns -1
+ * for an offset outside the RX mapping. */
 static inline int
 rx_credit_shard_index(const dpumesh_ctx_t *ctx, int pos)
 {
-    int K = ctx->k_rings > 0 ? ctx->k_rings : 1;
-    int L = ctx->landing_stripes > 0 ? ctx->landing_stripes : 1;
-    if (L > K || K % L != 0 || ctx->rx_region_size == 0 || pos < 0)
-        return 0;
+    if (pos < 0 || (size_t)pos >= ctx->rx_dma_buf_size)
+        return -1;
     size_t absolute = (size_t)pos;
     int stripe = (int)(absolute / ctx->rx_region_size);
-    if (stripe >= L)
-        stripe = L - 1;
-    int shards = K / L;
     size_t stripe_pos = absolute - (size_t)stripe * ctx->rx_region_size;
-    int shard = (int)((stripe_pos / DPUMESH_SLOT_SIZE) % (size_t)shards);
-    return stripe + shard * L;
+    int shard = (int)((stripe_pos / DPUMESH_SLOT_SIZE) %
+                      (size_t)ctx->rx_credit_shards);
+    return stripe + shard * ctx->landing_stripes;
 }
 
 /* Return one unit of reverse-DMA admission credit. */
 static inline void rx_credit_return(dpumesh_ctx_t *ctx, int pos)
 {
     int idx = rx_credit_shard_index(ctx, pos);
+    if (idx < 0) {
+        if (atomic_fetch_add_explicit(&ctx->st_rx_credit_drops, 1,
+                                      memory_order_relaxed) == 0)
+            DOCA_LOG_ERR("RX credit: landing offset %d outside the %zu-byte RX "
+                         "mapping; credit dropped", pos, ctx->rx_dma_buf_size);
+        return;
+    }
     struct dma_ring *r = ctx->dma_rings[idx];
     if (r && r->descs) {
         volatile uint64_t *credit =
@@ -1431,6 +1446,7 @@ configure_landing_geometry(dpumesh_ctx_t *ctx, int landing_stripes)
         return DOCA_ERROR_INVALID_VALUE;
 
     ctx->landing_stripes = landing_stripes;
+    ctx->rx_credit_shards = K / landing_stripes;
     ctx->rx_region_size =
         ctx->rx_dma_buf_size / (size_t)landing_stripes;
 
@@ -1582,6 +1598,7 @@ static doca_error_t init_control_path(dpumesh_ctx_t *ctx) {
         return DOCA_ERROR_INVALID_VALUE;
     }
     ctx->landing_stripes = L;
+    ctx->rx_credit_shards = K / L;
     DOCA_LOG_INFO("DPU assigned pod_id=%d (service_id=%d K=%d L=%d)",
                   ctx->pod_id, ctx->service_id, K, L);
     return DOCA_SUCCESS;
@@ -1850,8 +1867,9 @@ static void cleanup_ctx(dpumesh_ctx_t *ctx) {
         pthread_join(ctx->pe_tid, NULL);
     }
 
-    /* PE thread joined → no more eq_notify() writers. Surviving EQs (an app that
-     * dropped the channel without destroying them) are reaped here. */
+    /* PE thread joined → no more eq_notify() writers. dmesh_destroy_channel
+     * refuses to reach here with a live EQ, so this loop normally reaps
+     * nothing. */
     for (int i = 0; i < ctx->n_eqs; i++) {
         struct dmesh_eq *eq = ctx->eqs[i];
         if (!eq) continue;
@@ -1954,13 +1972,15 @@ static void cleanup_ctx(dpumesh_ctx_t *ctx) {
 void dpumesh_destroy(dpumesh_ctx_t *ctx) {
     if (!ctx) return;
     DOCA_LOG_INFO("Destroying DPUmesh context: worker=%s", ctx->worker_id);
-    {   /* RX-drop summary (should be 0/0 — inbox sized to the reverse-credit budget) */
+    {   /* RX-drop summary (should be all zero — inbox sized to the reverse-credit budget) */
         unsigned long long idr = atomic_load_explicit(&ctx->st_rx_inbox_drops, memory_order_relaxed);
         unsigned long long adr = atomic_load_explicit(&ctx->st_rx_accept_drops, memory_order_relaxed);
-        if (idr || adr)
-            DOCA_LOG_WARN("RX drops at teardown: inbox_full=%llu accept_full=%llu (MESSAGES LOST)", idr, adr);
+        unsigned long long cdr = atomic_load_explicit(&ctx->st_rx_credit_drops, memory_order_relaxed);
+        if (idr || adr || cdr)
+            DOCA_LOG_WARN("RX drops at teardown: inbox_full=%llu accept_full=%llu bad_offset=%llu (MESSAGES LOST)",
+                          idr, adr, cdr);
         else
-            DOCA_LOG_INFO("RX drops at teardown: inbox_full=0 accept_full=0");
+            DOCA_LOG_INFO("RX drops at teardown: inbox_full=0 accept_full=0 bad_offset=0");
     }
     cleanup_ctx(ctx);
 }
@@ -2348,6 +2368,33 @@ static int dpumesh_tx_untrack(dpumesh_ctx_t *ctx, uint16_t port,
     return 0;
 }
 
+/* Arm a tail retained under a coalescing stamp but carrying no armed bit, once
+ * the acknowledgement leaves the QP with nothing in flight. Runs on the PE
+ * thread: it sets the multi-producer EQ bit and only reads the owner's cursors
+ * and stamp. */
+static void tx_arm_idle_tail(struct dmesh_port_slot *psl, uint16_t port,
+                             uint16_t su_tail, uint16_t su_head)
+{
+    if (su_tail != su_head)
+        return;                                    /* still in flight */
+    uint64_t deadline = atomic_load_explicit(&psl->tx_deadline_ns,
+                                             memory_order_relaxed);
+    if (deadline == 0)
+        return;                                    /* not coalescing: no tail */
+    if (atomic_load_explicit(&psl->tx_s, memory_order_relaxed) >=
+        atomic_load_explicit(&psl->tx_c, memory_order_acquire))
+        return;                                    /* nothing retained */
+    struct dmesh_eq *eq = __atomic_load_n(&psl->eq, __ATOMIC_ACQUIRE);
+    uint8_t role = __atomic_load_n(&psl->role, __ATOMIC_ACQUIRE);
+    if (!eq || (role != DMESH_ROLE_CLIENT && role != DMESH_ROLE_SERVER))
+        return;
+    size_t word = (size_t)port >> 6;
+    uint_fast64_t mask = (uint_fast64_t)1u << (port & 63u);
+    if (atomic_load_explicit(&eq->tx_armed[word], memory_order_acquire) & mask)
+        return;                                    /* the owner already armed it */
+    eq_tx_armed_set(eq, port, deadline);
+}
+
 /* Apply one exact forward ACK. DMA completions can reorder when successive L7
  * messages choose different backend pods/egress engines. Mark the matching unit,
  * then advance tx_f only across the contiguous completed FIFO prefix; a later ACK
@@ -2392,6 +2439,7 @@ static inline void tx_reclaim_ack(dpumesh_ctx_t *ctx, uint16_t port, uint16_t se
                 DMESH_TX_WAIT_QP_RECLAIM &&
             tx_wait_qp_retryable(ctx, psl))
             (void)tx_wait_make_ready(ctx, port);
+        tx_arm_idle_tail(psl, port, tail, head);
         try_return_blocks(ctx, psl);                       /* return blocks if this drained a CLOSED conn */
     }
 }
@@ -2967,7 +3015,14 @@ dmesh_qp_t *dmesh_accept(dmesh_eq_t *eq) {
      * inbox). Promote it to a live SERVER conn, attach THIS handle, and bind it to the
      * EQ that won it — dmesh_next_ready then returns it on this EQ only. */
     uint16_t ps = dpumesh_accept_port(s->ctx, req.dst_port, c, eq);
-    if (ps == 0) { dpumesh_rx_free(s->ctx, req.body_buf_slot); free(c); errno = ENOMEM; return NULL; }
+    if (ps == 0) {
+        /* The slot stopped being pending between the queue push and this pop.
+         * The QP object is untouched, so it stays the preallocated spare. */
+        dpumesh_rx_free(s->ctx, req.body_buf_slot);
+        eq->accept_spare = c;
+        errno = EAGAIN;
+        return NULL;
+    }
 
     c->ep          = s;
     c->eq          = eq;
@@ -3108,8 +3163,22 @@ int dmesh_tx_qp_valid(dmesh_qp_t *c) {
         errno = error_number;
         return -1;
     }
+    /* An un-posted dmesh_alloc still holds the gate for this caller's own
+     * transmit call. */
+    if (tx_call_open(psl)) {
+        errno = EDEADLK;
+        return -1;
+    }
     tx_gate_acquire(psl);
     return 0;
+}
+
+/* True between a successful dmesh_alloc and its dmesh_post_send. */
+int dmesh_tx_call_active(dmesh_qp_t *c) {
+    if (!c || !c->ep || !c->ep->ctx || c->local_port == 0 ||
+        c->local_port >= DMESH_PORT_SPACE)
+        return 0;
+    return tx_call_open(&c->ep->ctx->ports[c->local_port]);
 }
 
 /* Release the transmit gate taken by dmesh_tx_qp_valid(). */
@@ -3129,7 +3198,8 @@ int dmesh_tx_after_commit(dmesh_qp_t *c) {
 
     /* A retained tail accumulates until it can fill a transport unit. It is
      * released by its deadline, an explicit flush, allocation pressure, or
-     * close. */
+     * close. A tail it retains without an armed bit is armed by
+     * tx_arm_idle_tail when the last acknowledgement leaves the QP idle. */
     if (atomic_load_explicit(&psl->tx_deadline_ns, memory_order_relaxed) != 0 &&
         psl->tx_w - sent < (uint64_t)ctx->slot_size)
         return 0;
@@ -3281,7 +3351,10 @@ static int dmesh_release_qp(dmesh_qp_t *c, int graceful) {
     dpumesh_ctx_t *ctx = c->ep->ctx;
     struct dmesh_port_slot *psl = &ctx->ports[c->local_port];
     if (c->eq && c->eq->drain_cur == c) c->eq->drain_cur = NULL; /* poll_eq resume cursor */
-    tx_gate_acquire(psl);
+    /* An open transmit call already holds the gate; its reservation is
+     * discarded below. */
+    if (!tx_call_open(psl))
+        tx_gate_acquire(psl);
     tx_disarm_tail(psl, c->local_port);
     if (graceful && dmesh_drain_tx_locked(c, 1) != 0) {
         close_result = -1;

@@ -5,9 +5,9 @@ analysis contracts without Kubernetes or BlueField hardware.
 
 | Test | Coverage |
 |---|---|
-| `native_api_contract_test.c` | public allocation, post, library-owned batching, async TX error, event, and RX-credit contracts |
+| `native_api_contract_test.c` | public allocation, post, the open-transmit-call pairing, library-owned batching, async TX error, event, and RX-credit contracts |
 | `native_control_state_test.c` | registration, unregister replay, and slot cleanup |
-| `native_tx_batch_policy_test.c` | idle/immediate and busy/deadline tail publication, deadlines that never move once stamped, the transmit gate excluding the deadline pass with retention surviving it, timer wakes without submitting, armed-bit release on close, deferred TX error, TX units, block ordering, landing geometry, and credit sharding |
+| `native_tx_batch_policy_test.c` | idle/immediate and busy/deadline tail publication, deadlines that never move once stamped, arming a tail retained when the stream falls quiet, the transmit gate excluding the deadline pass with retention surviving it, timer wakes without submitting, armed-bit release on close, deferred TX error, TX units, block ordering, landing geometry, and credit sharding |
 | `native_writable_test.c` | TX-ready arm/recheck, shared-pool readiness, EQ notification suppression, and cursor rollback |
 | `preload_api_contract_test.c` | POSIX blocking, `POLLOUT`, EQ drain serialization, library-owned TX batching/error signalling, RX ordering, FIN, close, and fd lifetime |
 | `l4_pin_policy_test.c` | connection pinning and backend loss |

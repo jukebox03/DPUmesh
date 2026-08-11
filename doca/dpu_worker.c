@@ -384,6 +384,7 @@ dpu_progress_worker_pe(struct objects *objs, struct dpu_data_worker *worker_stat
 {
     enum px_progress_state state = doca_pe_progress(worker_state->pe) ?
         PX_PROGRESS_PROGRESSED : PX_PROGRESS_IDLE;
+    (void)objs;
     if (worker_state->num_deferred_recv > 0 &&
         comp_queue_usage(&worker_state->queue) < COMP_QUEUE_BP_LOW) {
         int remaining = 0, original = worker_state->num_deferred_recv;
@@ -397,7 +398,6 @@ dpu_progress_worker_pe(struct objects *objs, struct dpu_data_worker *worker_stat
         }
         worker_state->num_deferred_recv = remaining;
     }
-    (void)objs;
     return state;
 }
 
@@ -832,8 +832,10 @@ run_dpu_worker(struct objects *objs)
         }
 
         dpu_publish_ready_and_setup_pods(objs);
-        DOCA_LOG_WARN("MAIN CONTROL/DOORBELL: workers=%d, event-driven",
-                      objs->n_data_workers);
+        /* The 1 ms backstop tick also drives the DPA EU wake and ringless-EU
+         * gating, so an idle DPU still wakes once per millisecond. */
+        DOCA_LOG_WARN("MAIN CONTROL/DOORBELL: workers=%d, notification-driven "
+                      "(1 ms backstop tick)", objs->n_data_workers);
         while (true) {
             int progressed = dpu_drain_iteration(objs);
             if (progressed)
@@ -854,6 +856,5 @@ run_dpu_worker(struct objects *objs)
             (void)rn;
             (void)doca_pe_clear_notification(objs->pe, pfd);
         }
-        return;
     }
 }

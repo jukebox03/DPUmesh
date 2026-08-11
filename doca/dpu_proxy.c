@@ -25,7 +25,6 @@
 #include <doca_buf_inventory.h>
 #include <doca_dma.h>
 
-#include <assert.h>
 #include <errno.h>
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -341,12 +340,23 @@ static inline int px_engine_id_for_lane(const struct dmesh_proxy *px,
     return region % px->n_workers;
 }
 
+/* Landing stripes of a pod. A data-ready pod carries L == A; the clamp covers a
+ * slot whose geometry is zeroed because it is not ready. */
 static inline int
 px_landing_stripes(const struct pod_state *pod)
 {
     int K = pod->k_rings > 0 ? pod->k_rings : 1;
     int L = pod->landing_stripes > 0 ? pod->landing_stripes : 1;
     return L <= K && K % L == 0 ? L : 1;
+}
+
+/* The worker that stages reverse entries for (pod, port). Every reverse
+ * producer — TX_ACK, arrival-release handoff, REV_DONE — routes through it. */
+static inline int
+px_rev_owner(const struct dmesh_proxy *px, const struct pod_state *pod,
+             uint16_t port)
+{
+    return (port % (uint16_t)px_landing_stripes(pod)) % px->n_workers;
 }
 
 /* One cell holds every credit shard of a landing stripe (at most K counters). */
@@ -452,7 +462,7 @@ px_emit_tx_ack(struct objects *objs, int32_t pod_id, uint16_t port, uint16_t seq
         return 1;
     if (!px_cur_worker)
         return 0;
-    int owner = dmesh_worker_for_port(port, objs->proxy->n_workers);
+    int owner = px_rev_owner(objs->proxy, pod, port);
     if (owner != px_cur_worker->id)
         return 0;
     return px_rev_append_ack(&objs->proxy->engines[owner], pod, port, seq);
@@ -533,7 +543,7 @@ px_queue_arrival_release(struct objects *objs, struct px_arrival *a)
         px_cur_worker->id >= px->n_workers)
         return 0;
 
-    int owner = dmesh_worker_for_port(a->ack_port, px->n_workers);
+    int owner = px_rev_owner(px, src, a->ack_port);
     if (owner < 0 || owner >= px->n_workers)
         return 0;
     a->ack_emit_seq = a->ack_first_seq;
@@ -942,9 +952,7 @@ static void px_lane_enqueue(struct dmesh_proxy *px, int pod_idx, int region, str
         ln->qtail = u;
         return;
     }
-    assert(px_cur_worker && px_cur_worker->id >= 0 &&
-           px_cur_worker->id < px->n_workers);
-    int producer = px_cur_worker->id;
+    int producer = px_cur_worker ? px_cur_worker->id : owner;
     struct px_unit *old = __atomic_load_n(&ln->inq[producer], __ATOMIC_RELAXED);
     do {
         u->next = old;
@@ -1433,10 +1441,12 @@ static void px_parse_l7(struct objects *objs, struct px_conn *c) {
             px_poison(objs, c, "l7 frame cannot be delivered");
             return;
         }
-        if (aggregate) {
+        if (aggregate && (u->dst_pod_idx < 0 || u->dst_pod_idx >= MAX_PODS)) {
+            DOCA_LOG_ERR("proxy: l7 frame has pod slot %d out of range — direct enqueue",
+                         (int)u->dst_pod_idx);
+            px_enqueue_unit(objs, u);
+        } else if (aggregate) {
             int group_idx = (int)u->dst_pod_idx;
-            /* build_range derives this index from an element of objs->pods. */
-            assert(group_idx >= 0 && group_idx < MAX_PODS);
             int g = 0;
             while (g < ngroups && groups[g].pod_idx != group_idx)
                 g++;
@@ -1750,8 +1760,8 @@ px_batch_leave_retry(struct px_engine *eng, struct px_batch *b)
         return;
     if (eng->retry_probe == b)
         eng->retry_probe = NULL;
-    assert(eng->retry_batches > 0);
-    eng->retry_batches--;
+    if (eng->retry_batches > 0)
+        eng->retry_batches--;
 }
 
 static void
@@ -1941,8 +1951,15 @@ px_batch_submit_dma(struct objects *objs, struct px_engine *eng,
     struct doca_buf *dst = NULL;
     doca_error_t ret = DOCA_SUCCESS;
 
-    assert(b->units != NULL && b->bytes != 0);
-    assert(b->src_head == NULL && b->dst_buf == NULL);
+    /* A batch reaches submit with units, bytes, and no attached buffers. */
+    if (b->units == NULL || b->bytes == 0 ||
+        b->src_head != NULL || b->dst_buf != NULL) {
+        DOCA_LOG_ERR("proxy: refusing malformed SG-DMA batch (pod slot %d region %d, "
+                     "%u bytes, units=%p src=%p dst=%p)",
+                     b->pod_idx, b->region, b->bytes, (void *)b->units,
+                     (void *)b->src_head, (void *)b->dst_buf);
+        return DOCA_ERROR_INVALID_VALUE;
+    }
 
     for (struct px_unit *u = b->units;
          u && ret == DOCA_SUCCESS; u = u->next) {
@@ -2246,7 +2263,9 @@ px_ack_retry_handoffs(struct px_engine *eng)
     int moved = 0;
     while (eng->ack_retry_head) {
         struct px_arrival *a = eng->ack_retry_head;
-        int owner = dmesh_worker_for_port(a->ack_port, px->n_workers);
+        /* A vanished sender has no staging owner; this engine's drain frees it. */
+        struct pod_state *src = find_pod_by_id(eng->objs, a->ack_pod);
+        int owner = src ? px_rev_owner(px, src, a->ack_port) : eng->id;
         if (owner < 0 || owner >= px->n_workers ||
             !px_ack_queue_push(&px->engines[owner].ack_releases, a))
             break;

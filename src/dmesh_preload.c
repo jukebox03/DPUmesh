@@ -11,6 +11,7 @@
 #include <limits.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <poll.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -251,8 +252,12 @@ static dmesh_eq_t *g_eq;                 /* the ONE EQ: the dispatcher is the si
                                           * consumer for every shim conn (see THREAD
                                           * MODEL), so one is exactly right here. */
 static int  g_wake_fd = -1;              /* wakes the dispatcher for the close queue */
-static pfd_t *g_listener;                /* the (single) dmesh listener entry */
-static int  g_listener_closed;           /* a listener existed and was closed: inbound
+/* The (single) dmesh listener entry and whether one was ever closed. Written by
+ * listen()/close() on app threads and read by the dispatcher. Reading the pair
+ * is not one atomic step: a conn arriving exactly as the listener closes is
+ * re-drained by the dispatcher's reap of that entry. */
+static pfd_t *_Atomic g_listener;
+static _Atomic int g_listener_closed;    /* a listener existed and was closed: inbound
                                           * conns can never be accepted → close them at
                                           * wrap instead of queueing forever. Distinct
                                           * from "not listening YET" (NULL + flag 0),
@@ -399,9 +404,13 @@ static int dispatcher_drain_eq(pfd_t *self, int max_batches) {
             dmesh_qp_t *c = events[i].qp;
             pfd_t *e = c ? (pfd_t *)c->user_data : NULL;
             switch (events[i].type) {
-            case DMESH_EVENT_CONN_REQ:
+            case DMESH_EVENT_CONN_REQ: {
                 if (!c) break;
-                if (g_listener == NULL && g_listener_closed) {
+                pfd_t *listener = atomic_load_explicit(&g_listener,
+                                                       memory_order_acquire);
+                if (listener == NULL &&
+                    atomic_load_explicit(&g_listener_closed,
+                                         memory_order_acquire)) {
                     defer_qp_once(deferred, &ndeferred, 64, c);
                     break;
                 }
@@ -414,10 +423,11 @@ static int dispatcher_drain_eq(pfd_t *self, int max_batches) {
                 e->lport = c->local_port;
                 c->user_data = e;
                 accept_q_push(e);
-                if (g_listener && g_listener != self) efd_signal(g_listener);
+                if (listener && listener != self) efd_signal(listener);
                 DBG("accepted conn (peer pod=%d port=%u)", c->remote_pod,
                     c->remote_port);
                 break;
+            }
 
             case DMESH_EVENT_RECV:
                 if (!e || pfd_queue_rx(e, &events[i], 1) != 0) {
@@ -509,8 +519,10 @@ static void *dispatcher_main(void *arg) {
     };
     DBG("dispatcher up (eq_fd=%d wake_fd=%d)", eq_fd, g_wake_fd);
     for (;;) {
-        /* The channel timer raises this fd for a buffered transmit tail. */
-        (void)poll(pfds, 2, -1);
+        /* The channel timer raises this fd for a buffered transmit tail. A
+         * failed poll leaves stale revents, so the round is skipped. */
+        if (poll(pfds, 2, -1) < 0)
+            continue;
 
         if (pfds[0].revents & POLLIN) {
             uint64_t v;
@@ -963,8 +975,9 @@ int listen(int fd, int backlog) {
                 errno = ENOMEM;
                 return -1;
             }
-            g_listener = e;
-            g_listener_closed = 0;                /* re-listen resumes queueing */
+            atomic_store_explicit(&g_listener_closed, 0,
+                                  memory_order_release);   /* re-listen resumes queueing */
+            atomic_store_explicit(&g_listener, e, memory_order_release);
             pthread_mutex_lock(&g_q_mu);          /* conns that arrived pre-listen */
             int pending = g_accept_head != NULL;
             pthread_mutex_unlock(&g_q_mu);
@@ -1002,7 +1015,9 @@ static int shim_accept(int fd, struct sockaddr *addr, socklen_t *alen, int flags
     if (newfd >= PRELOAD_MAX_FDS) {
         real_close(newfd); close_q_push(e); pfd_put(l); errno = EMFILE; return -1;
     }
+    pthread_mutex_lock(&e->mu);
     e->nonblock = (flags & SOCK_NONBLOCK) ? 1 : 0;
+    pthread_mutex_unlock(&e->mu);
     if (flags & SOCK_CLOEXEC) real_fcntl(newfd, F_SETFD, FD_CLOEXEC);
     pthread_mutex_lock(&g_tbl_mu);
     g_fds[newfd] = e;
@@ -1204,9 +1219,9 @@ int close(int fd) {
     pthread_mutex_unlock(&g_tbl_mu);
     real_close(fd);                               /* the kernel dup */
     if (last) {
-        if (e == g_listener) {
-            g_listener = NULL;
-            g_listener_closed = 1;
+        if (atomic_load_explicit(&g_listener, memory_order_acquire) == e) {
+            atomic_store_explicit(&g_listener, NULL, memory_order_release);
+            atomic_store_explicit(&g_listener_closed, 1, memory_order_release);
             /* Orphan the pending accept queue: nobody can accept these conns now.
              * Queue them for dmesh_destroy_qp (FIN) — the dispatcher's reap of `e`
              * re-drains, closing the race with a concurrent accept-wrap. */

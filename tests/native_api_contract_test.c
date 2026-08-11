@@ -45,6 +45,7 @@ dpumesh_tx_commit(dpumesh_ctx_t *ctx, uint16_t port,
 
 int dmesh_tx_qp_valid(dmesh_qp_t *qp) { assert(qp != NULL); qp_valid_calls++; gate_depth++; return 0; }
 void dmesh_tx_call_done(dmesh_qp_t *qp) { assert(qp != NULL); assert(gate_depth == 1); gate_depth--; }
+int dmesh_tx_call_active(dmesh_qp_t *qp) { return qp != NULL && gate_depth > 0; }
 int dmesh_tx_after_commit(dmesh_qp_t *qp) { assert(qp != NULL); after_commit_calls++; return 0; }
 void dmesh_tx_pressure(dmesh_qp_t *qp) { assert(qp != NULL); pressure_calls++; }
 void dpumesh_publish_due_tails(struct dmesh_eq *eq) { assert(eq != NULL); publish_due_calls++; }
@@ -139,6 +140,14 @@ main(void)
     assert(commit_calls == 3);
     assert(after_commit_calls == 2);
     assert(gate_depth == 0);              /* a rejected commit still releases */
+
+    /* Without an open transmit call, post_send rejects before committing or
+     * releasing the gate. */
+    errno = 0;
+    assert(dmesh_post_send(&qp, reservation, 32) == -1);
+    assert(errno == EINVAL);
+    assert(commit_calls == 3);            /* no commit attempted */
+    assert(gate_depth == 0);              /* and no gate released */
 
     /* poll_eq exposes the core one-shot as a payload-free API event. */
     struct dmesh_eq eq = {0};

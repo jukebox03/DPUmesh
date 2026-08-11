@@ -8,6 +8,7 @@
 #include <string.h>
 #include <errno.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <arpa/inet.h>
 
 #define RESOLVE_MAX_ENTRIES 256
@@ -23,8 +24,15 @@ struct resolve_ent {
 
 static struct resolve_ent g_ent[RESOLVE_MAX_ENTRIES];
 static int                g_ent_n;
-static int                g_loaded;      /* load-once guard */
+/* Load-once guard. Released after the table is filled; a lookup either takes
+ * the mutex path or acquires a complete table. */
+static _Atomic int        g_loaded;
 static pthread_mutex_t    g_load_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static inline int resolve_ready(void)
+{
+    return atomic_load_explicit(&g_loaded, memory_order_acquire);
+}
 
 static void add_entry(uint32_t addr, uint16_t port, const char *name, int svc) {
     if (g_ent_n >= RESOLVE_MAX_ENTRIES) return;
@@ -57,7 +65,7 @@ static int load_file(const char *path) {
 
 int dmesh_config_load(const char *path) {
     pthread_mutex_lock(&g_load_mu);
-    if (!g_loaded) {
+    if (!atomic_load_explicit(&g_loaded, memory_order_relaxed)) {
         const char *p = path;
         if (!p) p = getenv("DPUMESH_CONFIG");
         if (!p || !*p) p = RESOLVE_DEFAULT_PATH;
@@ -65,7 +73,8 @@ int dmesh_config_load(const char *path) {
             fprintf(stderr, "[dpumesh] WARNING: registry file not found at '%s' (set "
                     "$DPUMESH_CONFIG or mount the ConfigMap at /etc/dpumesh/registry) — "
                     "name/addr resolution will return ENOENT for every peer.\n", p);
-        g_loaded = 1;                    /* idempotent: even an absent file counts as loaded */
+        /* Idempotent: even an absent file counts as loaded. */
+        atomic_store_explicit(&g_loaded, 1, memory_order_release);
     }
     pthread_mutex_unlock(&g_load_mu);
     return g_ent_n;
@@ -73,7 +82,7 @@ int dmesh_config_load(const char *path) {
 
 int dmesh_resolve_name(const char *name) {
     if (!name || !*name) { errno = ENOENT; return -1; }
-    if (!g_loaded) dmesh_config_load(NULL);
+    if (!resolve_ready()) dmesh_config_load(NULL);
     for (int i = 0; i < g_ent_n; i++)
         if (strcmp(g_ent[i].name, name) == 0)
             return g_ent[i].svc;
@@ -82,7 +91,7 @@ int dmesh_resolve_name(const char *name) {
 }
 
 int dmesh_resolve_addr(uint32_t ip_net, uint16_t port_host) {
-    if (!g_loaded) dmesh_config_load(NULL);
+    if (!resolve_ready()) dmesh_config_load(NULL);
     for (int i = 0; i < g_ent_n; i++)
         if (g_ent[i].port == port_host && g_ent[i].addr == ip_net && g_ent[i].addr != 0)
             return g_ent[i].svc;

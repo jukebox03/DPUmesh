@@ -14,7 +14,11 @@ BINDIR  := $(BUILD)/bin
 TESTDIR := $(BUILD)/test
 
 # -Iinclude → <dpumesh/...> ; -I. → the "doca/..." includes from src/dmesh_core.c
-CFLAGS  := -O2 -g -Wall -fPIC -DDOCA_ALLOW_EXPERIMENTAL_API -Iinclude -I. $(DOCA_CFLAGS)
+# -Wextra minus the categories that only fire on deliberate patterns: callback
+# parameters fixed by DOCA's signatures, ring index arithmetic, and port-table
+# bound checks a uint16_t index already satisfies.
+WARNFLAGS := -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare -Wno-type-limits
+CFLAGS  := -O2 -g $(WARNFLAGS) -fPIC -DDOCA_ALLOW_EXPERIMENTAL_API -Iinclude -I. $(DOCA_CFLAGS)
 
 # Runtime search paths. In a container everything is copied to /usr/local/lib;
 # for a local build we also point at the in-tree lib dir and the DOCA libs.

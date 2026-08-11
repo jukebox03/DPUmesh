@@ -108,11 +108,15 @@ dmesh_post_send(qp, p, len);                 /* commit the bytes */
 dmesh_flush(qp);                              /* submit all buffered bytes now */
 ```
 
-`dmesh_alloc()` reserves one contiguous region of at most `dmesh_post_max()`.
-Only one unposted allocation may exist per QP. `dmesh_post_send()` requires the
-exact pointer returned by that allocation and rejects an oversized or repeated
-post. After a successful post, the application must no longer access the committed
-bytes until the transport makes that storage available through a later allocation.
+`dmesh_alloc()` reserves one contiguous region of at most `dmesh_post_max()`
+and opens a transmit call that `dmesh_post_send()` closes. Only one may be open
+per QP: a second `dmesh_alloc()` or a `dmesh_flush()` while one is open returns
+`EDEADLK`, and otherwise only `dmesh_destroy_qp()` or `dmesh_abort_qp()` ends
+it. `dmesh_post_send()` requires the exact pointer returned by that allocation
+and rejects an oversized post, a repeated post, or one with no open transmit
+call. After a successful post, the application must no longer access the
+committed bytes until the transport makes that storage available through a
+later allocation.
 
 The transport combines adjacent posts without creating message boundaries: a
 QP remains an ordered byte stream. Complete transport units submit immediately.
@@ -142,7 +146,8 @@ fault, `dmesh_post_send()` or `dmesh_flush()` returns `-1/EBADMSG`.
 |---|---|
 | pointer | Reservation succeeded |
 | `NULL/EAGAIN` | QP or channel transmit capacity is temporarily exhausted |
-| `NULL/EINVAL` | Invalid length, QP, or outstanding-allocation state |
+| `NULL/EINVAL` | Invalid length or QP |
+| `NULL/EDEADLK` | A transmit call is already open on this QP |
 | `NULL/ENOMEM` | Transport bookkeeping memory could not be allocated |
 
 If allocation reaches backpressure while committed bytes remain buffered, the
@@ -177,10 +182,11 @@ Retention stamps a deadline once and never moves it, and it holds until the
 stream has nothing in flight. Full units still publish during that interval.
 `dmesh_post_send()` publishes an overdue tail before retaining a new one, and
 `dmesh_poll_eq()` publishes every overdue tail on its EQ on entry; a QP whose
-owner is inside a transmit call keeps its retention for a later pass. ACK
-processing reclaims capacity but
-does not force a tail. Explicit flush, allocation pressure, and graceful close
-force it.
+owner is inside a transmit call keeps its retention for a later pass.
+Acknowledgement reclaims capacity, and the one that leaves a QP with nothing in
+flight also arms a tail that is still retained, so a stream that stops writing
+still reaches its deadline. Explicit flush, allocation pressure, and graceful
+close force it.
 
 `dmesh_eq_next_deadline_ns()` reports when the loop must next run. A channel
 timer writes the readiness fd of an EQ whose earliest tail has come due, at most
