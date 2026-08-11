@@ -358,11 +358,11 @@ verification.
 ## Reproduction
 
 ```sh
-integrations/linkerd/bench/suite/linkerd_campaign.sh all
-python3 integrations/linkerd/bench/suite/check_campaign.py \
-    integrations/linkerd/bench/report/data/linkerd-20260810/open \
-    integrations/linkerd/bench/report/data/linkerd-20260810/closed_1core.csv \
-    integrations/linkerd/bench/report/data/linkerd-20260810/closed_6core.csv
+linkerd/bench/suite/linkerd_campaign.sh all
+python3 linkerd/bench/suite/check_campaign.py \
+    linkerd/bench/report/data/linkerd-20260810/open \
+    linkerd/bench/report/data/linkerd-20260810/closed_1core.csv \
+    linkerd/bench/report/data/linkerd-20260810/closed_6core.csv
 ```
 
 The campaign takes `/tmp/dpumesh-bench.lock`: two campaigns under load contend

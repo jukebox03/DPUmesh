@@ -1,0 +1,4 @@
+[submodule "linkerd/port"]
+	path = linkerd/port
+	url = https://github.com/youngmin-kaist/DPUMesh.git
+	branch = main

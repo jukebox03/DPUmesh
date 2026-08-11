@@ -29,7 +29,7 @@ GRPC_MANIFEST="$GRPC_BENCH_DIR/k8s/pods.yaml"
 # linkerd reuses the gRPC images and adds injected sidecars, so its pods live
 # with the linkerd integration. BENCH_LINKERD=1 admits them; without it the
 # manifest is not applied and the deployment is what it was before.
-LINKERD_BENCH_DIR="$PROJ_ROOT/integrations/linkerd/bench"
+LINKERD_BENCH_DIR="$PROJ_ROOT/linkerd/bench"
 LINKERD_MANIFEST="$LINKERD_BENCH_DIR/k8s/pods.yaml"
 BENCH_LINKERD="${BENCH_LINKERD:-0}"
 

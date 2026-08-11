@@ -62,7 +62,7 @@ linkerd 포팅 자체를 완성하는 일은 이 문서의 범위가 아니며, 
 ## 3. 통합 계약 — DPUmesh가 제공해야 할 FFI
 
 `driver.rs`가 `extern "C"`로 선언한 함수 전부. 왼쪽이 계약, 오른쪽이 DPUmesh에서의 구현
-근거다. 새 파일 `integrations/linkerd/src/dmesh_shim.c`에 구현한다.
+근거다. 새 파일 `linkerd/src/dmesh_shim.c`에 구현한다.
 
 | FFI | 의미 | DPUmesh 대응 | 상태 |
 |---|---|---|---|
@@ -387,13 +387,17 @@ DPUMESH_PROXY_LINKERD_SVC=<service ids>     # 기본 비어 있음 = 완전 off
 ## 10. 파일 배치 (예정)
 
 ```
-integrations/linkerd/
-  PLAN.md                  ← 이 문서
-  src/dmesh_shim.c         ← §3 FFI 어댑터 (DPUmesh objects ↔ linkerd-doca 계약)
-  src/dmesh_shim.h
-  src/px_linkerd.c         ← §5.1 px_parse_linkerd, §5.2 px_ship_arm_bytes
-  crate/                   ← staticlib 래퍼 (linkerd2-proxy를 라이브러리로 감쌈)
-  bench/                   ← M4 측정 하네스 (integrations/grpc/bench 구조를 따름)
+linkerd/                   ← 코어 구현. integrations/ 아래가 아니다
+  README.md                ← 디렉터리 안내, 협업자 코드 pull 방법
+  PLAN.md                  ← 이 문서 (통합 설계)
+  CONTRACT.md              ← 협업자와의 인터페이스 계약 (wire ABI + 8함수)
+  port/                    ← 서브모듈: youngmin-kaist/DPUMesh
+                             └ linkerd2-proxy/  (중첩 서브모듈, 브랜치 dpumesh)
+  include/dmesh_l7.h       ← (예정) §4 8함수 계약 헤더
+  src/dmesh_shim.c         ← (예정) FFI 어댑터 (DPUmesh objects ↔ linkerd-doca)
+  src/px_linkerd.c         ← (예정) §5.1 px_parse_linkerd, §5.2 px_ship_arm_bytes
+  crate/                   ← (예정) staticlib 래퍼
+  bench/                   ← 6열 캠페인 코드 + 데이터 (호스트 사이드카 baseline)
 ```
 
 `doca/` 안에서 바뀌는 것은 다음 3곳뿐이다.

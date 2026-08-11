@@ -18,11 +18,11 @@
 # Stages run in order and each is separately invocable, because a campaign this
 # long is worth resuming rather than restarting.
 #
-#   setsid nohup integrations/linkerd/bench/suite/linkerd_campaign.sh all \
+#   setsid nohup linkerd/bench/suite/linkerd_campaign.sh all \
 #       >/tmp/linkerd-campaign.log 2>&1 </dev/null &
 set -euo pipefail
 
-PROJ_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+PROJ_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 [ -f "$PROJ_ROOT/.env" ] && { set -a; source "$PROJ_ROOT/.env"; set +a; }
 : "${HOST_PASS:?.env missing HOST_PASS}" "${DPU_HOST:?.env missing DPU_HOST}"
 
@@ -36,7 +36,7 @@ LINKERD="${LINKERD_BIN:-$HOME/.linkerd2/bin/linkerd}"
 
 NS="${NS:-test-bench}"
 CTRL_PORT="${CTRL_PORT:-9092}"
-DATA_ROOT="$PROJ_ROOT/integrations/linkerd/bench/report/data"
+DATA_ROOT="$PROJ_ROOT/linkerd/bench/report/data"
 # A campaign is one unit of work, not one calendar day. It runs for hours and
 # its stages resume each other, so the output directory is resolved once and
 # remembered: deriving it from the clock on every stage splits a single campaign
@@ -53,7 +53,7 @@ else
 fi
 mkdir -p "$DATA_ROOT"
 printf '%s\n' "$OUT" >"$CAMPAIGN_POINTER"
-FIGS="${FIGS:-$PROJ_ROOT/integrations/linkerd/bench/report/figures}"
+FIGS="${FIGS:-$PROJ_ROOT/linkerd/bench/report/figures}"
 CONFIGS="${CONFIGS:-grpc-envoy-permissive grpc-envoy-strict grpc-linkerd grpc-linkerd-opaque grpc-tcp grpc-dpumesh}"
 LINKERD_CONFIGS="${LINKERD_CONFIGS:-grpc-linkerd grpc-linkerd-opaque}"
 # The DPU topology the gRPC evaluation is defined at. The collector re-checks it

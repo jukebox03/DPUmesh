@@ -41,7 +41,7 @@ sidecar CPU to a channel that is not under test.
 ## 3. Running it
 
 ```sh
-integrations/linkerd/bench/suite/linkerd_campaign.sh all
+linkerd/bench/suite/linkerd_campaign.sh all
 ```
 
 Stages are separately invocable, because a campaign of this length is worth
