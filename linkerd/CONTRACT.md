@@ -1,270 +1,264 @@
-# DPUmesh ↔ linkerd 포팅 — 인터페이스 계약 (제안)
+# Interface Contract
 
-두 코드를 하나로 합치기 위한 합의안. **DPUmesh의 기존 구현이 정본(normative)이고 포팅
-쪽이 여기에 맞춘다**는 전제로 쓴다(포팅 담당자 제안에 따름).
+Between the DPUmesh datapath and the linkerd port. The DPUmesh implementation is
+normative: `doca/comch_common.h`, `doca/dpa_common.h`, `doca/ring.h`,
+`doca/dpu_worker.c`, `doca/dpu_proxy.c`. The port conforms.
 
-- DPUmesh 쪽 근거 파일: `doca/comch_common.h`, `doca/dpa_common.h`, `doca/ring.h`,
-  `doca/dpu_worker.c`, `doca/dpu_proxy.c`
-- 포팅 쪽 현재 상태: `linkerd/port/DPUMesh/*.{c,h}`,
-  `linkerd/port/linkerd2-proxy/linkerd/doca/src/{shim.c,driver.rs,io.rs}` @ `4f926826`
+The port's own datapath (`port/DPUMesh/*.c`) is replaced by the DPUmesh
+datapath. It remains in tree as the reference point for convergence.
 
-차이는 세 축이다: **① 스레드 모델 ② 프로토콜/파라미터 ③ 연산 처리 방식.**
+## 1. Operating modes
 
----
+One data plane carries every mode: payload lands in pod staging and is forwarded
+by scatter-gather DMA, with no copy on the ARM. Modes differ in how far the L7
+layer is involved, and are selected per service.
 
-## 0. 역할 분담
-
-| | 담당 | 소유물 |
+| Mode | L7 contribution | Bytes traverse the L7 layer |
 |---|---|---|
-| 데이터패스 | DPUmesh (이쪽) | 호스트↔DPU 링크, 포워드/리버스 링, 크레딧, DPA EU, ARM 워커, SG-DMA |
-| L7 프록시 | 포팅 (그쪽) | linkerd2-proxy, `linkerd/doca` crate, DOCA 어댑터 |
-| 접합면 | 합의 대상 | 본 문서 §2의 wire ABI + §4의 함수 계약 |
+| `decision` | authorization, discovery, endpoint choice, identity, telemetry | no |
+| `opaque` | the above, plus mTLS | yes |
+| `l7` | the above, plus HTTP routing, retries, timeouts | yes |
 
-`linkerd/port/DPUMesh/*.c`(포팅 쪽 자체 데이터패스)는 **최종적으로 DPUmesh 데이터패스로
-대체**된다. 그 전까지는 ABI 정합의 기준점으로만 참조한다.
+In `decision` mode the L7 layer answers one question per connection and receives
+one report per close; payload never reaches it. §8 defines both calls. When the
+L7 layer is unavailable the data plane falls open to its own load balancing,
+without policy.
 
----
+## 2. Thread model
 
-## ① 스레드 모델
+DPUmesh runs N DPA execution units, K forward rings per pod, and A ARM worker
+threads. A worker owns its connection table, conntrack, SG-DMA engine and
+progress engine; nothing is shared across workers and no lock is taken between
+them. Worker-local state is reached through `__thread px_cur_worker`.
 
-### 현재 차이
+The port therefore runs one tokio `current_thread` runtime per ARM worker. A
+`multi_thread` runtime is excluded: work stealing moves a task across threads,
+and worker-local state is not thread-safe.
 
-| | DPUmesh (정본) | 포팅 현재 |
-|---|---|---|
-| 병렬 단위 | N DPA EU / K 포워드 링 / **A ARM 워커** (shared-nothing) | 워커 1개 (comch 서버 `DPUMesh0`) |
-| 워커 소유물 | `px_conn` 해시 · `dpu_conntrack` · `px_engine`(doca_dma) · consumer PE | 단일 `struct objects` |
-| 커넥션 상한 | 워커당 동적, `MAX_PODS` 기반 | `MAX_CONNS = 8` **컴파일 상수** |
-| 루프 | epoll{PE fd, cross-worker eventfd, DMA notify} + 1 ms, park/wake 회계 | tokio `select!` + 1 ms safety tick |
-| 동기화 | 워커 간 락 0, 크로스 워커는 bounded MPSC | 단일 태스크 `&mut objects` 독점 |
-| 금지 사항 | busy-spin 금지, event-driven 유지 | — |
+The DPUmesh worker loop owns the iteration. It calls the L7 layer once per
+revolution and folds the result into its own progress test, which governs
+arming, parking and the 1 ms backstop:
 
-### 제안
-
-1. **워커당 tokio `current_thread` 런타임 1개.** ARM 워커 스레드 위에서 돌린다.
-   `multi_thread` 런타임은 금지 — `px_conn`/`ct`/`px_engine`이 `__thread px_cur_worker`에
-   묶여 있어 work-stealing이 곧 데이터 레이스다.
-2. **루프 주인은 DPUmesh 워커 루프.** 그러려면 `Driver::run()`의 `loop { … select! }`를
-   **`Driver::step() -> bool`(진전 여부)로 분해**해야 한다. 워커 루프가 매 회전에 한 번
-   호출하고, 반환값을 hot/park 판정에 합산한다.
-   → 이 패치는 이쪽에서 만들어 보낼 수 있음. **누가 할지 결정 요청(§5-3).**
-3. **`MAX_CONNS`를 런타임 파라미터로.** 슬롯 배열은 `attach` 시점에 크기를 받는다.
-4. **tokio 자체 타이머 최소화.** 런타임이 독립적으로 깨어나면 워커가 park하지 못한다.
-   1 ms 백스톱은 DPUmesh 워커 루프가 이미 갖고 있으므로 드라이버 쪽 `sleep(1ms)` arm은
-   제거 대상이다.
-
-```
-ARM worker thread i  (i = 0 … A-1)
-  ├ DPA 완료 소비 → px_parse → L4 / mock-L7            (기존)
-  └ tokio current_thread RT ─ Driver::step() ─ linkerd outbound stack
+```c
+did = dpu_progress_worker_pe(...);
+run = dpu_worker_run(...);
+lnk = l7_worker_step(worker_id);
+if (did || run || lnk) continue;
+/* arm -> recheck -> epoll_wait(1 ms) */
 ```
 
----
+The L7 layer exposes a single-step entry point rather than owning a loop of its
+own. Connection slots are sized at attach time, not by a compile-time constant.
+The L7 layer does not arm its own timer; the worker loop provides the backstop.
 
-## ② 프로토콜 / 파라미터 — 호스트↔DPU 연결고리
+## 3. Control protocol
 
-**여기가 포팅 담당자가 말한 "전에 구현했던 것들이랑 맞게 바꿀" 부분이다.**
-정본은 전부 DPUmesh 쪽이고, `_Static_assert`로 오프셋이 고정되어 있다.
+Host↔DPU control messages. Values are wire ABI below 256, and the type byte is
+at offset 0: the host dispatches on `recv_buffer[0]`.
 
-### 2.1 제어 메시지 집합
-
-DPUmesh (`doca/comch_common.h`, 값은 wire ABI):
-
-| 값 | 메시지 | 방향 | 의미 |
+| Value | Message | Direction | Payload |
 |---|---|---|---|
-| 1 | `POD_REGISTER` | H→D | `{pod_id(-1이면 DPU 할당), service_id}` |
-| 2 | `MMAP_EXPORT` | H→D | 영역 1개 export (`mmap_type`으로 구분) |
-| 5 | `POD_ASSIGNED` | D→H | 할당된 `pod_id`, `landing_stripes` |
-| 6 | `POD_INIT_RESULT` | D→H | READY / 실패 사유 (터미널) |
-| 7 | `POD_UNREGISTER` | H→D | 라우팅 중지 + 원격 참조 quiesce 요청 |
-| 8 | `POD_QUIESCED` | D→H | 원격 매핑 회수 완료, 호스트가 export 파괴해도 됨 |
-| 9 | `REV_DOORBELL` | D→H | 리버스 링 wake |
+| 1 | `POD_REGISTER` | H→D | `pod_id` (−1 requests assignment), `service_id` |
+| 2 | `MMAP_EXPORT` | H→D | one region, tagged by `mmap_type` |
+| 5 | `POD_ASSIGNED` | D→H | `pod_id`, `landing_stripes` |
+| 6 | `POD_INIT_RESULT` | D→H | terminal: ready, or failure cause |
+| 7 | `POD_UNREGISTER` | H→D | stop routing, quiesce remote references |
+| 8 | `POD_QUIESCED` | D→H | remote mappings reclaimed |
+| 9 | `REV_DOORBELL` | D→H | reverse-ring wake |
 
-포팅 현재는 3종뿐(`EXPORT_METADATA`, `EXPORT_DPA_COMP`, `EXPORT_RCV_RING`)이고, 등록·할당·
-READY·teardown 배리어가 없다.
+`mmap_type`: `DMA_BUFFER=1`, `DMA_RING=2`, `DMA_HOST_RX_BUFFER=3`,
+`DMA_REV_RING=4`. One message per region.
 
-**조치(포팅):**
-- 단일 `dmesh_export_metadata_msg`(ring+snd+rcv 디스크립터 512B×3을 한 메시지에 몰아넣음)를
-  **`MMAP_EXPORT` 4회로 분할**한다. `mmap_type ∈ {DMA_BUFFER=1, DMA_RING=2,
-  DMA_HOST_RX_BUFFER=3, DMA_REV_RING=4}`.
-- 핸드셰이크 순서를 다음으로 맞춘다:
+Sequence:
 
 ```
-H→D  POD_REGISTER{pod_id=-1, service_id}
-D→H  POD_ASSIGNED{pod_id, landing_stripes}
-H→D  MMAP_EXPORT × (DMA_RING, DMA_BUFFER, DMA_HOST_RX_BUFFER, DMA_REV_RING×stripes)
-D→H  POD_INIT_RESULT{READY}          ← 이 시점 전에 트래픽 금지
-     ── 데이터 경로 ──
+H→D  POD_REGISTER
+D→H  POD_ASSIGNED
+H→D  MMAP_EXPORT x { DMA_RING, DMA_BUFFER, DMA_HOST_RX_BUFFER, DMA_REV_RING x stripes }
+D→H  POD_INIT_RESULT (ready)      traffic is admitted only after this
+     ...
 H→D  POD_UNREGISTER
-D→H  POD_QUIESCED                    ← 이 시점 전에 호스트 mmap 파괴 금지
+D→H  POD_QUIESCED                 host exports are destroyed only after this
 ```
 
-- `POD_INIT_RESULT=READY`는 **K개 포워드 링 + 호스트 TX/RX mmap + 모든 대상 DPA EU의 설치
-  ACK + ARM egress 엔진이 전부 준비된 뒤**에만 나간다. 포팅의 "consumer 준비되면 바로 시작"과
-  다르다.
-- 메시지 첫 바이트가 타입이어야 한다(호스트가 `recv_buffer[0]`으로 디스패치).
-  포팅은 `enum`(4B)을 첫 필드로 쓰는데 값이 256 미만이라 LE에서는 우연히 호환되지만,
-  **명시적으로 `uint8_t type`으로 바꿀 것.**
+`POD_INIT_RESULT` reports ready only once all K forward rings, the host TX and RX
+mappings, an installation acknowledgement from every target DPA execution unit,
+and the ARM egress engine are in place. Teardown is a barrier, not a comch
+disconnect: the host holds its exports until `POD_QUIESCED`.
 
-### 2.2 포워드 디스크립터 (호스트 → DPU)
+## 4. Forward descriptor
 
-DPUmesh `struct dma_desc` — **64 B 고정, 오프셋 assert 있음**(`doca/dpa_common.h:218`):
+Host→DPU. 64 bytes, one cache line, offsets fixed by static assertion.
 
-| off | 필드 | 폭 | 비고 |
+| Offset | Field | Width | Note |
 |---|---|---|---|
-| 0 | `mmap` | 4 | `doca_dpa_dev_mmap_t` |
+| 0 | `mmap` | 4 | DPA mmap handle |
 | 4 | `addr` | 8 | |
-| 12 | `size` | 4 | **고정폭.** 포팅의 `size_t`(8B) 아님 |
-| 16 | `seq` | 2 | per-conn 시퀀스 |
-| 18 | `src_port` / 20 `dst_port` | 2+2 | `PORT_BLANK=0` → accept 큐 |
-| 22 | `src_service` / 23 `dst_service` | 1+1 | `SVC_NONE` 가능 |
-| 24 | `dst_pod_id` | 4 | `DMESH_POD_BLANK(-1)` → DPU가 `dst_service`로 라우팅 |
+| 12 | `size` | 4 | fixed width |
+| 16 | `seq` | 2 | per-connection sequence |
+| 18 | `src_port` | 2 | |
+| 20 | `dst_port` | 2 | `PORT_BLANK` (0) selects the accept queue |
+| 22 | `src_service` | 1 | |
+| 23 | `dst_service` | 1 | routing input when the pod is blank |
+| 24 | `dst_pod_id` | 4 | `POD_BLANK` (−1) defers to `dst_service` |
 | 32 | `src_pod_id` | 4 | |
-| 56 | `publish_seq` | 8 | **ticket+1. 발행 규약의 핵심** |
+| 56 | `publish_seq` | 8 | ticket + 1 |
 
-- 발행: MPSC. `dma_ring_try_claim()`이 티켓을 받고(가득 차면 역순 반납으로 gap 방지),
-  페이로드를 쓴 뒤 `publish_seq = ticket+1`을 **release 스토어**로 publish.
-- 링 컨트롤: `struct dma_ring_ctrl { volatile uint64_t consumer_head; }` 64 B 정렬.
+The ring is multi-producer. A producer claims a ticket, withdrawing it in reverse
+order when the ring is full so that the published sequence stays gapless; it
+writes the payload, then publishes `publish_seq = ticket + 1` with a release
+store. The consumer position lives in a separate 64-byte control structure.
+There is no producer tail and no validity flag.
 
-포팅 현재: `{mmap, addr, size_t size, idx, reserved[35], volatile uint8_t valid}` +
-`dma_ring_ctrl{producer_tail, consumer_head}`, SPSC, `valid` 플래그 방식.
+## 5. Reverse completion ring
 
-**조치(포팅):** 64 B `dma_desc`로 교체, `valid` 플래그 → `publish_seq` 세대 발행으로 교체,
-`producer_tail` 제거(MPSC 티켓이 대체), 라우팅 필드(`dst_service`/`dst_pod_id`/포트/서비스)를
-채운다. `size`는 `uint32_t`.
-
-### 2.3 리버스 완료 링 (DPU → 호스트)
-
-DPUmesh `struct dmesh_rev_ring_entry` — **32 B, `publish_seq` 오프셋 24 고정**:
+DPU→host. 32 bytes per entry, `publish_seq` at offset 24, ring size 8192.
 
 ```
 kind(1) reserved(7) payload(16) publish_seq(8)
-kind ∈ { DONE=1, TX_ACK=2 }
-  DONE   : {src_pod_id, src_service, dst_service, _pad, src_port, dst_port, seq, length, pos}  = 16B
-  TX_ACK : {port, seq}                                                                          =  4B
-ctrl(별도 캐시라인 128B): consumer_head(호스트가 배치 드레인 후 발행), arm_epoch(호스트가 블록 전 증가)
-DMA_REV_RING_SIZE = 8192
+
+kind = DONE(1)    src_pod_id, src_service, dst_service, src_port, dst_port,
+                  seq, length, pos                                    16 B
+kind = TX_ACK(2)  port, seq                                            4 B
 ```
 
-포팅 현재: 역방향이 **두 가지 설계로 갈라져 있다.**
-- 안 1: DPU가 `rcv_ring`+`tx_staging`을 export → **호스트가 두 번째 PCI function(94:00.0)에
-  자체 DPA 스레드**를 띄워 당겨감
-- 안 2 (backend): DPU의 `doca_dma`가 데이터 + 16 B `dmesh_push_desc{seq,pos,len}`를 push
+A 128-byte control structure on its own cache lines carries `consumer_head`,
+which the host publishes after a drain batch, and `arm_epoch`, which the host
+increments before blocking. `REV_DOORBELL` wakes a blocked host.
 
-**조치(포팅): 두 안 모두 폐기하고 DPUmesh 리버스 링을 쓴다.** 이유는 셋:
-1. 호스트 측 **두 번째 PCI function + flexio 프로세스 요구가 사라진다**(안 1의 가장 큰 제약).
-2. 크레딧 회수(`TX_ACK`)와 완료 통지(`DONE`)가 **이미 같은 링에 실려 있다** — 포팅 쪽에는
-   크레딧 개념 자체가 없다.
-3. `arm_epoch` + `REV_DOORBELL`로 호스트가 블록/웨이크할 수 있다(안 2는 busy-poll 전제).
+Completion notification and transmit-credit return share this ring. There is no
+second reverse mechanism: a host-side DPA thread over a second PCI function and a
+descriptor-push channel are both superseded.
 
-### 2.4 플로우 아이덴티티
+## 6. Flow identity
 
-포팅 `struct dmesh_flow_id { src_ip, dst_ip, src_port, dst_port, mode, char src_workload[64] }`
-는 linkerd가 `OrigDstAddr` / `Remote(ClientAddr)` / workload를 얻는 유일한 출처다.
-DPUmesh는 `pod_id` / `service_id`로 라우팅하고 **IP:port 아이덴티티를 아직 안 싣는다.**
+The proxy requires the original destination, the peer address and the source
+workload; DPUmesh routes on pod and service identifiers.
 
-**조치(DPUmesh, 이쪽 몫):** 등록 경로에 아이덴티티를 확장한다.
-- `POD_REGISTER`에 `src_workload[64]` 추가(또는 신규 `POD_IDENTITY` 메시지)
-- 제어 평면에 `service_id ↔ ClusterIP:port` 표를 싣는다
-- 포팅 쪽은 `conn_flow_get()`으로 **읽기만** 한다. `dmesh_flow_id`를 호스트 shim이 직접
-  채우는 현재 방식은 폐기.
+Workload identity arrives on its own control message, sent on the registration
+connection before `POD_REGISTER`. The registration message is a fixed 12-byte
+struct checked by exact length on the DPU and by static assertion on both sides;
+growing it for a variable-length field would make every identity change a
+lockstep deployment. A separate message preserves both properties and is
+idempotent on replay. Identity binds to the slot's DMA generation, so a reused
+slot never inherits the previous tenant's identity. The registry supplies the
+mapping from service identifier to cluster address.
 
-`mode`(CLIENT/BACKEND)는 DPUmesh에 대응 개념이 없다 → 항상 CLIENT로 고정하고 필드는 유지.
+The L7 layer reads identity and never asserts it. In modes that omit mTLS this is
+also the authorization input: the DPU binds it to the comch connection and the
+registered memory region rather than accepting a claim from the pod.
 
-### 2.5 폭 / 패킹 규칙 (전역)
+## 7. Width and packing
 
-- wire 구조체에 `size_t`, `enum`, 포인터를 **그대로 싣지 않는다**. 전부 고정폭
-  (`uint32_t`/`uint64_t`/`int32_t`).
-- 모든 wire 구조체에 `_Static_assert(sizeof(...) == N)`와 핵심 오프셋 assert를 붙인다
-  (DPUmesh가 이미 하는 방식). ABI 드리프트를 컴파일 타임에 잡는 유일한 장치다.
-- 엔디안: 양쪽 다 LE 고정. 변환 없음.
+Wire structures carry fixed-width integers only: no `size_t`, no enumerations, no
+pointers. Every wire structure asserts its size and the offsets of its published
+fields at compile time. Both endpoints are little-endian; no conversion is
+performed.
 
-### 2.6 상수 합의표
+| Constant | Value |
+|---|---|
+| Forward descriptor | 64 B |
+| Reverse entry | 32 B |
+| Reverse ring | 8192 entries |
+| Control-path send tasks | 8192 |
+| Pods per node | 32 |
 
-| 상수 | 정본 값 | 위치 |
-|---|---|---|
-| `DMA_REV_RING_SIZE` | 8192 | `comch_common.h:79` |
-| `CC_SEND_TASK_NUM` | 8192 | `comch_common.h:26` |
-| 포워드 디스크립터 | 64 B | `dpa_common.h` assert |
-| 리버스 엔트리 | 32 B | `comch_common.h` assert |
-| `MAX_PODS` | 16 | `object.h` |
-| 슬롯/크레딧 | RX credit 프로토콜 | `dpu_proxy.c` |
+## 8. Adapter API
 
----
-
-## ③ 연산 처리 방식
-
-| | DPUmesh (정본) | 포팅 현재 |
-|---|---|---|
-| 수신 버퍼 | pod 공유 staging 링, 도착 = extent, **custody로 회수** | 커넥션 전용 단일 staging + `recv_seg` 링 |
-| 소비 확정 | SG-DMA 제출 시점 | 없음 (`conn_recv_release`가 no-op TODO) |
-| 전달 | zero-copy SG gather, unit/lane 순서 보존 | `push_segment`로 포인터 전달 (동일 철학) |
-| 송신 | 도착 staging만 소스 | `memcpy` → `tx_staging` → 128 B 정렬 8064 B 청킹 |
-| 백프레셔 | RX credit + `px_stall` | `DmeshIo` 256 KiB tx 캡 |
-| 에러 | `px_poison` / FIN 규칙 / 미소비 tail 드롭 | 슬롯 파킹 |
-
-**조치:**
-
-1. **`conn_recv_release()`를 실제로 구현해야 한다(양쪽 합의).** DPUmesh staging은 pod 공유
-   링이라 custody를 반납하지 않으면 **linkerd가 읽는 중인 바이트가 재사용된다.** 포팅 쪽
-   staging이 커넥션 전용이라 no-op으로 둔 것이 여기서는 곧 데이터 손상이다.
-   → 계약: `l7`은 세그먼트를 다 읽으면 반드시 release한다. release 전까지 DPUmesh는 그
-   바이트를 살려둔다.
-2. **128 B 정렬 8064 B 청킹은 제거.** 그건 `producer_dma_copy`의 완료 규칙 때문에 생긴
-   제약인데, DPUmesh egress는 SG-DMA라 임의 길이를 다룬다. 청킹은 오히려 디스크립터 수를
-   늘린다.
-3. **응답 바이트의 소스는 DPUmesh가 제공하는 ARM TX 아레나.** 포팅이 자기 `tx_staging`을
-   들고 있을 필요가 없다 — `dmesh_l7_send(buf, len)` 한 번이면 된다.
-4. **백프레셔 권위는 DPUmesh.** `DmeshIo` tx 캡은 아레나 잔량에 연동하거나 사실상 무력화한다.
-
----
-
-## ④ 이쪽이 제공하는 함수 계약
-
-포팅 쪽 `shim.c`는 아래 8개만 상대하면 된다. DOCA 리소스·PE·DMA·링은 전부 DPUmesh가 소유한다.
+The L7 layer sees these entry points and nothing else. DOCA resources, progress
+engines, DMA engines and rings stay with DPUmesh.
 
 ```c
-/* DPUmesh → L7 (그쪽이 구현) */
+/* DPUmesh calls into the L7 layer */
 int  l7_worker_attach(int worker_id, void *worker_ctx);
-int  l7_worker_step(int worker_id);                       /* 진전 있으면 1 */
+int  l7_worker_step(int worker_id);                      /* 1 if progress was made */
 int  l7_conn_open(int worker_id, uint64_t conn, const struct dmesh_l7_flow *);
 int  l7_conn_segment(int worker_id, uint64_t conn,
-                     const uint8_t *base, uint32_t pos, uint32_t len);  /* zero-copy */
+                     const uint8_t *base, uint32_t pos, uint32_t len);
 void l7_conn_eof(int worker_id, uint64_t conn);
 void l7_conn_close(int worker_id, uint64_t conn);
+void l7_worker_detach(int worker_id);
 
-/* L7 → DPUmesh (이쪽이 구현) */
+/* The L7 layer calls into DPUmesh */
 int  dmesh_l7_send(int worker_id, uint64_t conn, const uint8_t *buf, size_t len);
 void dmesh_l7_release(int worker_id, uint64_t conn, uint32_t pos, uint32_t len);
+
+/* `decision` mode */
+int  l7_resolve(int worker_id, const struct dmesh_l7_flow *flow,
+                struct dmesh_l7_decision *out);   /* { allow, backend_pod } */
+void l7_report (int worker_id, uint64_t conn, uint64_t bytes_in,
+                uint64_t bytes_out, uint64_t duration_ns, int reason);
 ```
 
-`driver.rs`의 기존 15개 FFI(`conn_recv_pop`, `conn_send`, `ctrl_advance`, …)는 이 8개 위에
-얇은 어댑터로 매핑된다(pop 모델 ↔ push 모델 변환).
+`l7_conn_segment` hands over a pointer into shared staging. The region stays
+valid until the corresponding `dmesh_l7_release`; the L7 layer must not retain it
+past that call and must not copy on the assumption that it may.
 
----
+`l7_resolve` answers from the outbound stack's discovery, policy and balancer
+without consuming payload. `l7_report` returns per-connection load so that
+balancer state remains accurate for connections whose bytes never traversed the
+proxy.
 
-## ⑤ 결정 요청 (포팅 담당자에게)
+The port's existing foreign-function surface maps onto these as a translation
+between a pull model and a push model.
 
-1. **리버스 경로를 DPUmesh 리버스 링으로 통일해도 되는가?** (§2.3) — 그쪽 안 1(호스트 DPA)과
-   안 2(push desc)를 둘 다 버리는 제안이라 가장 큰 변경이다.
-2. **`MAX_CONNS = 8` 상수를 런타임 파라미터로 바꿀 수 있는가?** (§①-3)
-3. **`Driver::run()` → `step()` 분해는 누가 하는가?** 이쪽에서 패치를 만들어 보낼 수 있다.
-4. **인바운드(서버 사이드) 계획이 있는가?** 현재 아웃바운드 전용. 없으면 이번 통합은
-   아웃바운드만으로 진행한다.
-5. **플로우 아이덴티티를 DPUmesh 등록 경로에서 받는 것에 동의하는가?** (§2.4) — 동의 시
-   호스트 shim의 `dmesh_flow_id` 생성 코드는 삭제 대상이 된다.
+## 9. Processing model
 
----
+Arriving payload lands in a pod-shared staging region and is forwarded by
+scatter-gather DMA from where it lands; the ARM does not copy it. Extents are
+handed to the L7 layer by pointer. Because the region is shared and reclaimed by
+custody, the L7 layer must release each extent after consuming it; until release,
+the bytes remain valid. Failure to release corrupts data, so release is mandatory
+rather than advisory.
 
-## ⑥ 작업 분담 제안
+Bytes the L7 layer produces are written into an ARM-side arena that the egress
+engine can source. Scatter-gather admits arbitrary lengths, so no alignment or
+maximum-multiple chunking is imposed on writes.
 
-| | 담당 | 내용 |
+Backpressure is DPUmesh's: receive credit and worker stall govern both
+directions. A buffer limit inside the L7 layer tracks arena availability rather
+than acting as an independent bound.
+
+## 10. Port divergences
+
+What the port carries today, against what this contract requires.
+
+| Area | Port | Contract |
 |---|---|---|
-| A | 포팅 | §2.1 핸드셰이크 7메시지 + `MMAP_EXPORT` 분할 |
-| B | 포팅 | §2.2 64 B `dma_desc` + `publish_seq` 발행 전환 |
-| C | 포팅 | §2.3 리버스 링 채택 (안 1/2 폐기) |
-| D | DPUmesh | §2.4 아이덴티티 확장 (등록 메시지 + service↔ClusterIP 표) |
-| E | DPUmesh | §④ 8함수 계약 구현 + ARM TX 아레나 + custody |
-| F | 합의 후 | §①-2 `step()` 분해, `MAX_CONNS` 파라미터화 |
+| Control messages | three, no registration or teardown barrier | §3 |
+| Metadata | one message carrying every export descriptor | one `MMAP_EXPORT` per region |
+| Descriptor | validity flag, producer tail, `size_t` size, no routing fields | §4 |
+| Reverse path | host-side DPA over a second PCI function, or descriptor push | §5 |
+| Credits | absent | carried on the reverse ring |
+| Identity | asserted by the host shim | carried on registration, read-only |
+| Slots | compile-time constant of eight | sized at attach |
+| Driver | owns a loop | single-step entry point |
+| Release | no-op | mandatory |
+| Writes | 128-byte aligned chunking | arbitrary length |
+| Query interface | absent | `l7_resolve` / `l7_report` |
+| Build | `linkerd/doca/build.rs` compiles the port's twelve datapath sources and requires its DPA kernel archive | the datapath is DPUmesh's; the crate compiles its own sources only |
+| Backend channel | `backend::take` removes the entry, so an address yields one channel and later connections fall back to a TCP dial | an address yields a channel per connection for as long as it is meshed |
 
-A~C와 D~E는 **서로를 기다리지 않는다.** 접점은 본 문서의 ABI뿐이므로 병렬로 진행한 뒤
-`linkerd/port` 서브모듈을 pull해서 맞춘다.
+## 11. Open decisions
+
+1. Adopting the reverse ring, retiring both of the port's reverse designs.
+2. Making the connection-slot count a runtime parameter.
+3. Which side produces the single-step driver patch.
+4. Whether inbound proxying is planned; the contract covers outbound only.
+5. Moving flow identity onto the registration path, retiring the host shim's
+   identity construction.
+6. Adding `l7_resolve` / `l7_report`. Without them, `decision` mode can only be
+   approximated by observing the connector's endpoint choice, which distorts the
+   balancer's load view.
+7. **One proxy, many workloads.** `LINKERD2_PROXY_IDENTITY_LOCAL_NAME` and
+   `LINKERD2_PROXY_POLICY_WORKLOAD` hold a single value: the proxy is built on the
+   assumption that it represents one workload. Here one proxy serves every meshed
+   pod on the node, so the caller's identity has to arrive per connection —
+   `dmesh_l7_flow.workload` in §8 — rather than being derived from the proxy's own
+   certificate. Whether the policy layer accepts an identity supplied that way is
+   unsettled, and it is the precondition for authorization in every mode.
+8. **Proxy credentials on the DPU.** The proxy authenticates to the certificate
+   authority with a Kubernetes ServiceAccount token projected into its pod. The
+   DPU's proxy is not a pod and has no such token. Either the DPU joins the
+   cluster as a node whose proxy runs as a workload, or a credential is
+   provisioned for it out of band.

@@ -1,0 +1,5 @@
+observed_utc,config,role,pid,allowed_core,numa_node
+2026-08-11T04:12:42Z,dpumesh-native,client_app,3200081,24,1
+2026-08-11T04:12:42Z,dpumesh-native,server_app,3199554,25,1
+2026-08-11T04:12:42Z,dpumesh-preload,client_app,3200626,18,1
+2026-08-11T04:12:42Z,dpumesh-preload,server_app,3200362,19,1

@@ -1,0 +1,5 @@
+config,binary_class,role,app,container,path,sha256
+dpumesh-native,native-api,client,bench-dpumesh,bench-dpumesh,/usr/local/bin/bench_dpumesh,973c9ae333d5f5076ce1ed78952055b1371131cbf6a6174a666ee69d74643933
+dpumesh-native,native-api,server,echo-dpumesh,echo-dpumesh,/usr/local/bin/echo_dpumesh,897c82be8089a2d69c8decf6a2d5de65fe79412c486aac355b05fb97a18d8488
+dpumesh-preload,posix,client,preload-bench,preload-bench,/usr/local/bin/bench_sock,7ed981b469adb6dd9457cc860f5ca1cb479e11222078e4dfdaca1e3619382cf6
+dpumesh-preload,posix,server,preload-echo,preload-echo,/usr/local/bin/echo_sock,011885d4793cf213e9ab5aa4b9af8d2fa9d83492ac5af50219f32e9214a4593e

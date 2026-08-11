@@ -141,17 +141,15 @@ a stale generation is refused rather than repaired.
 ```text
 struct dmesh_config_snapshot {
     uint64_t generation;
-    cluster[]   : service id -> lb policy, locality weights, ejection thresholds
-    endpoints[] : cluster    -> endpoint ids, origin (local or remote),
-                                ready bit, ejection bit
+    endpoints[] : cluster    -> local endpoint ids, ready bit
     links[]     : peer node  -> address, lane queue pairs, lane count
     identity[]  : slot       -> SPIFFE ID, bound to the slot's DMA generation
-    policy[]    : (peer identity, service id) -> allow or deny
 };
 ```
 
-`endpoints[]` fills `dmesh_l7_ctx.hosts` and `n_hosts` directly, so the frame
-decoder signature does not change.
+Load-balancing policy, remote endpoints and authorization are not snapshot
+contents. Section 8 obtains them per connection from the L7 layer, so nothing
+that a control plane pushes needs a versioned table here.
 
 The configuration thread publishes the pointer itself. The main thread is not
 involved: a single writer already serializes swaps, and routing the swap through
@@ -172,25 +170,28 @@ framed service performs at each frame boundary. The default L4 path resolves
 once per connection and is unaffected, so no throughput claim attaches to this
 change.
 
-## 8. Control-plane client (planned)
+## 8. Control-plane consultation (planned)
 
-DPUmesh implements a client, not a server. The control plane is an ordinary
-cluster process; with Istio, `istiod` serves xDS and acts as CA. The DPU ARM runs
-its own Linux with its own address and connects to it directly, so the host is
-not on that path. Only the endpoint of the connection moves relative to a
-sidecar deployment.
+DPUmesh does not implement a control-plane client. The L7 layer is one:
+linkerd2-proxy runs on the DPU ARM and already holds sessions with the mesh
+control plane for discovery, authorization and certificates. The DPU ARM has its
+own address and reaches those services directly, so the host is not on that path.
+Relative to a sidecar deployment only the endpoint of that connection moves.
 
-Scope is CDS and EDS over one aggregated stream, incremental in preference to
-state-of-the-world, because a full resend forces a full snapshot rebuild. LDS and
-RDS stay out of scope until L7 routing policy is introduced.
+DPUmesh consults it once per connection instead. Given a caller identity and a
+target service, the L7 layer answers allow-or-deny and an endpoint; at close,
+DPUmesh reports the connection's byte counts and duration so the balancer's load
+view stays accurate for connections whose payload never traversed it. Per-request
+cost is zero and no second subscription exists to keep consistent. The interface
+is stated in `linkerd/CONTRACT.md`.
 
-Cluster ids are drawn from the identifier space of section 5. A configuration
-naming more clusters than that space holds is not silently truncated: the excess
-is logged and left unroutable, matching the discipline section 2 applies to an
-unknown `$DPUMESH_SERVICE`.
+The control plane's protocol is therefore the L7 layer's concern. An xDS client,
+CDS and EDS are not implemented here.
 
-Endpoint metadata distinguishes local from remote and carries, for a remote
-endpoint, its node, that node's DPU address, its slot on that node, and its
+Cluster ids are drawn from the identifier space of section 5. An answer naming a
+service outside that space is logged and left unroutable, matching the discipline
+section 2 applies to an unknown `$DPUMESH_SERVICE`. A remote endpoint in an
+answer carries its node, that node's DPU address, its slot on that node, and its
 locality.
 
 ## 9. Node boundary (planned)
@@ -309,6 +310,11 @@ queue pair; QP remains the public API term only.
 
 ## 10. Identity, policy, and selection (planned)
 
+The split follows section 8. DPUmesh asserts *who the caller is* and enforces the
+answer; the L7 layer decides *what is allowed and where it goes*. Local
+membership stays with self-registration because only it knows which pods hold a
+DMA attachment on this node.
+
 ### 10.1 Workload identity
 
 A workload identity is a SPIFFE ID string of the form
@@ -336,40 +342,42 @@ mTLS and is stated rather than implied.
 
 ### 10.3 Authorization
 
-L4 authorization is evaluated once per connection, at the point where a
-connection's service and codec are resolved — the one-time resolution that
-already happens on a connection's first data. Input is the peer identity and the
-target service id; output is allow or deny. A denial terminates the stream
+Authorization is evaluated once per connection, at the point where a connection's
+service and mode are resolved — the one-time resolution that already happens on a
+connection's first data. DPUmesh supplies the caller identity and target service
+and enforces the answer; the L7 layer decides. A denial terminates the stream
 through the existing terminal-stream path. Per-request cost is zero.
+
+When the L7 layer is unreachable the connection falls open to the data plane's
+own selection and runs without authorization. The fallback is counted.
 
 ### 10.4 Health checking
 
-The asymmetry follows from where membership comes from.
-
 | | Local backend | Remote backend |
 |---|---|---|
-| membership | self-registration | EDS |
-| liveness | Comch disconnect, exact and immediate | link completion error or timeout |
-| active probe | not needed | needed |
-| passive ejection | supplementary | required |
+| membership | self-registration | L7 layer |
+| liveness | Comch disconnect, exact and immediate | L7 layer |
+| failure accrual | L7 layer, from reported connection outcomes | L7 layer |
 
-Passive ejection belongs to the data worker, which already observes DMA
-completions and failures: it counts failures and sets an ejection bit consulted
-at selection, adding one counter increment. Active probing belongs to the
-configuration thread and applies to remote backends only. Answering Kubernetes
-readiness probes on a workload's behalf is out of scope.
+Local liveness is exact and immediate and needs no probe: a Comch disconnect is
+the fact itself. Everything else — readiness, failure accrual, ejection — comes
+from the L7 layer, which already derives it from cluster state and from the
+outcomes DPUmesh reports at connection close. DPUmesh runs no probes of its own,
+and answering Kubernetes readiness probes on a workload's behalf stays out of
+scope.
 
 ### 10.5 Membership
 
 ```text
-routable(service) = live registered local pods  U  ready remote endpoints
+routable(service) = live registered local pods  U  endpoints the L7 layer returns
 ```
 
-The two sources do not compete: only self-registration knows local pods, only EDS
-knows remote ones. Where they overlap — a locally registered pod that EDS has not
-yet marked ready — the ready bit gates new backend selection while transport
-liveness governs existing pins. A readiness gate therefore delays new traffic
-without importing propagation delay into established streams.
+The two sources do not compete: only self-registration knows which local pods
+hold a DMA attachment, only the L7 layer knows cluster-wide readiness. Where they
+overlap — a locally registered pod the L7 layer has not yet marked ready — the
+answer gates new selection while transport liveness governs existing pins. A
+readiness gate therefore delays new traffic without importing propagation delay
+into established streams.
 
 ### 10.6 Selection
 
@@ -378,8 +386,10 @@ remote backend, a network and a remote ARM hop away, as equivalent. Average
 latency then degrades as nodes are added, so locality awareness becomes required
 rather than optional once the mesh spans nodes.
 
-Cluster policy carries locality weights. Local endpoints are preferred; remote
-endpoints are selected when the local set is saturated, ejected, or empty.
+Selection is the L7 layer's answer, and locality is one of the inputs it already
+weighs. DPUmesh contributes what only it knows: which endpoints are local, and
+therefore one DMA away. Local endpoints are preferred; remote endpoints are
+selected when the local set is saturated, ejected, or empty.
 
 ### 10.7 Telemetry
 
@@ -387,6 +397,10 @@ A worker only increments its own counters, so there is nothing shared to contend
 on. Counters cover requests, bytes, latency distribution, per-backend failures,
 and the local-to-remote ratio. The configuration thread reads all workers'
 counters periodically and exports them. No host CPU is consumed.
+
+The same counters are reported per connection to the L7 layer at close, which is
+how a connection whose payload never traversed the proxy still appears in mesh
+telemetry and in the balancer's load view.
 
 ## 11. Thread placement (planned)
 
@@ -398,17 +412,18 @@ dominated by it.
 
 Configuration work does not go there. A snapshot rebuild would delay doorbells
 for its whole duration regardless of how little CPU it averages, and the delay is
-worst exactly where the transport's latency figure is most exposed. Active health
-checks, whose syscall rate scales with backend count, are excluded for the same
-reason. A separate configuration thread exists to hold that work.
+worst exactly where the transport's latency figure is most exposed. A separate
+configuration thread exists to hold that work. Its scope is what section 7 leaves
+in the snapshot — links, local membership, identity — together with counter
+export; discovery, policy and probing belong to the L7 layer.
 
 | Thread | Now | Planned |
 |---|---|---|
 | host app x M | alloc, post_send, flush, EQ events | unchanged |
 | host PE progress x 1 | reverse drain, `REV_DONE` / `TX_ACK`, epoch increment | unchanged |
 | ARM main x 1 | control messages, teardown, doorbells | unchanged |
-| ARM data worker x A | DPA completions, routing, SG-DMA, reverse publication | adds link completions, per-connection authorization, ejection checks, local counters |
-| ARM config x 1 | none | new: xDS, snapshot build and publish, certificate rotation, active probes, link establishment, counter export |
+| ARM data worker x A | DPA completions, routing, SG-DMA, reverse publication | adds link completions, per-connection consultation and enforcement, local counters, the L7 layer's single-step call |
+| ARM config x 1 | none | new: snapshot build and publish, link establishment, counter export |
 | DPA EU x N | forwarding, completion metadata | unchanged |
 
 No data-path thread is added, and A and N do not change.
@@ -436,9 +451,13 @@ and never folded into the ARM total.
 - **Cluster and endpoint capacity.** Section 5's identifier space holds fewer
   entries than a large mesh declares, and remote-backed slots consume the same
   space. Exceeding it requires widening the wire format.
-- **Retry, timeout, and circuit breaking** are deferred. Retry requires buffering
-  a request body, which contradicts the zero-copy custody model; that tension is a
+- **Retry, timeout, and circuit breaking** exist only where payload traverses the
+  L7 layer. On the paths where it does not, retry would require buffering a
+  request body, which contradicts the zero-copy custody model; that tension is a
   separate subject.
+- **Consultation latency.** Connection setup now waits on an answer from the L7
+  layer. The bound, and whether a short-lived connection should skip the wait and
+  fall open, are unmeasured.
 
 ## 13. Status
 
@@ -451,13 +470,13 @@ and never folded into the ARM total.
 | gRPC endpoint injection | implemented |
 | Identifier spaces and reverse-ring widths | implemented |
 | Generation snapshot and configuration thread | planned |
-| xDS client, CDS and EDS | planned |
+| Control-plane consultation through the L7 layer | planned |
 | Two-sided link, remote-backed slots, three-tier credit | planned |
 | Link IPsec | planned |
 | Workload identity delivery and generation binding | planned |
-| L4 authorization | planned |
-| Asymmetric health checking and passive ejection | planned |
-| Locality-aware selection | planned |
+| Authorization: identity assertion and enforcement | planned |
+| Health checking and ejection | L7 layer |
+| Locality-aware selection | L7 layer, with local-endpoint input |
 | Telemetry export | planned |
 | Registry reload for the static-file mode | not planned |
 | Application TLS termination, JWT, global rate limiting, DNS proxy | not planned |
@@ -466,11 +485,12 @@ and never folded into the ARM total.
 
 1. **Configuration plane** — snapshot, configuration thread, epoch reclamation,
    static-file mode retained.
-2. **Control-plane client** — CDS and EDS onto `cluster[]` and `endpoints[]`.
+2. **Control-plane consultation** — query interface to the L7 layer, and the
+   fallback that runs when it does not answer.
 3. **Node boundary** — link and lanes, remote-backed slots, three-tier credit,
    locality-aware selection, IPsec, remote failure handling.
 4. **Identity and policy** — identity message and generation binding,
-   per-connection authorization, asymmetric health checking, counter export.
+   per-connection enforcement, counter export and per-connection reporting.
 
 Steps 1 and 2 leave the data path node-local and are verifiable against the
 existing single-node configuration. Step 3 is the first to require a second DPU.

@@ -1,0 +1,5 @@
+observed_utc,config,kind,locator,expected_ready,observed_ready
+2026-08-11T04:12:42Z,dpumesh-preload,service,preload-sock,1,1
+2026-08-11T04:12:42Z,dpumesh-native,deployment,echo-dpumesh,1,1
+2026-08-11T04:12:42Z,dpumesh-native,deployment,echo-dpumesh-13,0,0
+2026-08-11T04:12:42Z,dpumesh-native,deployment,echo-dpumesh-14,0,0
