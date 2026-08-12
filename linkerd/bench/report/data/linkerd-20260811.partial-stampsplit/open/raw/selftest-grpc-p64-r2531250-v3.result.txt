@@ -1,1 +1,0 @@
-OK selftest=1 frame=64 payload=48 threads=8 durs=1.000000 elapsed=1.000003 offered_rps=2531250.000 scheduled=2530786 drops=464 schedule_ratio=0.999817 drop_ratio=0.000183 checksum=0 arr=const

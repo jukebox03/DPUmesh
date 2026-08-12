@@ -52,7 +52,7 @@ struct l7_worker {
     uint64_t conns_opened, conns_closed;
     uint64_t bytes_in, bytes_out, messages;
     uint64_t send_retries, send_errors;
-    uint64_t resolved, drain_drops;
+    uint64_t resolved;
 };
 
 static __thread struct l7_worker tls_worker;
@@ -137,10 +137,10 @@ l7_drain_add(uint64_t conn)
     for (int i = 0; i < tls_worker.drain_n; i++)
         if (tls_worker.drain[i] == conn)
             return;
+    /* When the set is full the connection is left out: the next segment to
+     * arrive on it retries the flush. */
     if (tls_worker.drain_n < L7_DRAIN_MAX)
         tls_worker.drain[tls_worker.drain_n++] = conn;
-    else
-        tls_worker.drain_drops++;   /* the next segment on that conn retries it */
 }
 
 static void

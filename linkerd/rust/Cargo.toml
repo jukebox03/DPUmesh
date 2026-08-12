@@ -21,7 +21,6 @@ linkerd-rustls = { path = "../port/linkerd2-proxy/linkerd/rustls" }
 # DPUmesh is the datapath here.
 dmesh-doca = { path = "../port/linkerd2-proxy/linkerd/doca", default-features = false }
 tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
-tracing = "0.1"
 
 [profile.release]
 opt-level = 3

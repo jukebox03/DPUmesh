@@ -332,7 +332,7 @@ struct px_worker_state {
     struct objects *objs;          /* the L7 entry points reach the proxy through this */
     int id;
     struct px_conn *stall_head;    /* conns parked by px_stall; drained by px_drain_stalled */
-    /* Set while px_parse_linkerd walks the window. A release reported from inside
+    /* Set while px_parse_l7 walks the window. A release reported from inside
      * that walk is applied at its end instead of parking the conn, because
      * applying it there would unlink arrivals the walk still holds. */
     int in_l7_parse;
@@ -1335,7 +1335,7 @@ static int px_resolve_reply_peer(struct objects *objs, struct px_conn *c) {
     return have;
 }
 
-static void px_parse_linkerd(struct objects *objs, struct px_conn *c);
+static void px_parse_l7(struct objects *objs, struct px_conn *c);
 static int  px_l7_decide(struct objects *objs, struct px_conn *c);
 
 static void px_parse(struct objects *objs, struct px_conn *c) {
@@ -1347,7 +1347,7 @@ static void px_parse(struct objects *objs, struct px_conn *c) {
     switch (c->l7_mode) {
     case PX_L7_OPAQUE:
     case PX_L7_FULL:
-        px_parse_linkerd(objs, c);
+        px_parse_l7(objs, c);
         return;
     case PX_L7_DECISION:
         /* Asked once, on the request side; the reply inherits the pin through
@@ -1419,12 +1419,9 @@ static void px_l7_close(struct objects *objs, struct px_conn *c, int eof) {
     c->l7_closed = 1;
 }
 
-/* Present this connection to the L7 layer. A refusal is not fatal: nothing has
- * been handed over yet, so the data plane's own forwarding remains correct. */
 /* The identity DPUmesh can state about a connection. */
 static void px_l7_fill_flow(struct objects *objs, const struct px_conn *c,
                             struct dmesh_l7_flow *flow) {
-    (void)objs;
     memset(flow, 0, sizeof(*flow));
     flow->src_pod     = c->pub.src_pod;
     flow->dst_service = c->pub.dst_service;
@@ -1445,6 +1442,8 @@ _Static_assert(PX_L7_DECISION == DMESH_L7_MODE_DECISION &&
                PX_L7_FULL     == DMESH_L7_MODE_FULL,
                "mode values are shared with the L7 layer");
 
+/* Present this connection to the L7 layer. A refusal is not fatal: nothing has
+ * been handed over yet, so the data plane's own forwarding remains correct. */
 static int px_l7_open_conn(struct objects *objs, struct px_conn *c) {
     struct dmesh_l7_flow flow;
     px_l7_fill_flow(objs, c, &flow);
@@ -1539,7 +1538,7 @@ static int px_l7_decide(struct objects *objs, struct px_conn *c) {
  * in the window, and their custody is released only when the layer reports having
  * read them. That is what makes this a terminating proxy rather than a decoder —
  * the layer holds the bytes across worker revolutions while it produces its own. */
-static void px_parse_linkerd(struct objects *objs, struct px_conn *c) {
+static void px_parse_l7(struct objects *objs, struct px_conn *c) {
     px_l7_apply_release(objs, c);
     if (c->l7_closed)
         return;
