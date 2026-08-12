@@ -70,6 +70,13 @@ cargo build --release            # in linkerd/rust
 binaries, which is what lets the proxy obtain a certificate without the DPU
 holding cluster credentials.
 
+Service and pod identifiers reach the proxy as addresses under `10.96.0.0/16`
+and `10.97.0.0/16`, outside the loopback range an outbound proxy refuses to
+dial. `LINKERD_BACKEND_ADDR` must be the address the layer publishes for the
+service under test, `10.96.0.<service id>:9092`. `LINKERD_ADMIN_ADDR` (default
+`127.0.0.1:4191`) serves the proxy's metrics: protocol detection and per-route
+request counts.
+
 ## Division of ownership
 
 | Layer | Owner |

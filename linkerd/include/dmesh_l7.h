@@ -49,6 +49,11 @@ struct dmesh_l7_flow {
  * direction is always routed by conntrack and ignores any choice. */
 #define DMESH_L7_BACKEND_ANY (-1)
 
+/* Return the bytes to where this connection came from instead of forwarding
+ * them onward. Both directions carry the connection's own delivery sequence,
+ * so one connection may mix them. */
+#define DMESH_L7_ORIGIN (-2)
+
 /* ---- DPUmesh calls, the L7 layer implements ---- */
 
 /* Build this worker's runtime. Negative on failure. */

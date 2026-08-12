@@ -42,7 +42,8 @@ batch queue or batching timer.
 Every public QP is one full-duplex byte stream. Optional DPU L7 framing is an
 internal routing policy and does not expose backend or stream ids through native
 events. The in-tree L7 validator uses a simple length-prefixed benchmark
-frame; gRPC continues to use backend-pinned L4 passthrough so chttp2 owns HTTP/2.
+frame; gRPC uses backend-pinned L4 passthrough unless its service is assigned to
+the L7 layer, which terminates HTTP/2 on the DPU.
 
 Backpressure remains nonblocking. If `dmesh_alloc()` returns `NULL/EAGAIN`, it
 also arms that QP internally. Capacity returned by a QP ACK or by the channel's

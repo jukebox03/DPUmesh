@@ -1038,7 +1038,7 @@ struct px_unit_slot {
 };
 
 static int px_unit_prepare(struct objects *objs, struct px_conn *c,
-                           uint32_t len, int32_t route_dst,
+                           uint32_t len, int32_t route_dst, int reverse,
                            struct px_unit_slot *out) {
     struct dmesh_proxy *px = objs->proxy;
     struct dpu_conntrack *ct = px_cur_worker->ct;   /* private or locked shared state */
@@ -1049,7 +1049,14 @@ static int px_unit_prepare(struct objects *objs, struct px_conn *c,
     out->u = NULL;
     out->seq_counter = NULL;
 
-    if (c->pub.is_reply) {
+    if (reverse) {
+        /* Back to the connection's own sender: no conntrack entry, no upstream
+         * port, and the sequence a reply serializes against. */
+        dst_pod = c->pub.src_pod;
+        out_dst_port = c->pub.src_port;
+        out_src_port = c->pub.src_port;
+        seq_counter = &c->return_seq;
+    } else if (c->pub.is_reply) {
         /* dst comes from the conntrack table; the proxy only confirms. */
         dst_pod = c->pub.peer_pod;
         out_dst_port = c->pub.peer_port;
@@ -1084,7 +1091,7 @@ static int px_unit_prepare(struct objects *objs, struct px_conn *c,
         return -1;
     }
 
-    if (!c->pub.is_reply) {
+    if (!reverse && !c->pub.is_reply) {
         uint16_t uP = dpu_upstream_find(ct, c->pub.src_pod, c->pub.src_port, dst_pod);
         int created = 0;
         if (uP == 0) {
@@ -1147,7 +1154,7 @@ static int px_build_range(struct objects *objs, struct px_conn *c,
     struct px_unit_slot slot;
 
     *out_unit = NULL;
-    int prepared = px_unit_prepare(objs, c, len, route_dst, &slot);
+    int prepared = px_unit_prepare(objs, c, len, route_dst, 0, &slot);
     if (prepared <= 0)
         return prepared;
     struct px_unit *u = slot.u;
@@ -1241,7 +1248,8 @@ static int px_unit_attach_chunk(struct dmesh_proxy *px, struct px_unit *u,
  * Returns the bytes published, 0 when a pool is momentarily empty, or -1 when
  * undeliverable. */
 static int px_ship_arm_bytes(struct objects *objs, struct px_conn *c,
-                             int32_t backend, const uint8_t *buf, uint32_t len) {
+                             int32_t backend, int reverse,
+                             const uint8_t *buf, uint32_t len) {
     struct dmesh_proxy *px = objs->proxy;
     struct px_chunk *chunks[PX_L7_SEND_CHUNKS];
     uint32_t want = (len + PX_ARENA_CHUNK - 1u) / PX_ARENA_CHUNK;
@@ -1267,7 +1275,7 @@ static int px_ship_arm_bytes(struct objects *objs, struct px_conn *c,
     struct px_unit_slot slot;
     int32_t route_dst = c->pub.is_reply ? c->pub.peer_pod :
                         (backend >= 0 ? backend : PX_DST_DEFER);
-    int prepared = px_unit_prepare(objs, c, len, route_dst, &slot);
+    int prepared = px_unit_prepare(objs, c, len, route_dst, reverse, &slot);
     if (prepared <= 0) {
         for (uint32_t i = 0; i < got; i++)
             px_chunk_free(px, chunks[i]);
@@ -1610,7 +1618,8 @@ int dmesh_l7_send(int worker_id, uint64_t conn, int32_t backend_pod,
     if (!c || !buf || len == 0)
         return -1;
     uint32_t take = len > PX_L7_SEND_MAX ? PX_L7_SEND_MAX : (uint32_t)len;
-    return px_ship_arm_bytes(objs, c, backend_pod, buf, take);
+    return px_ship_arm_bytes(objs, c, backend_pod,
+                             backend_pod == DMESH_L7_ORIGIN, buf, take);
 }
 
 uint8_t *dmesh_l7_tx_reserve(int worker_id, uint64_t conn, uint32_t *cap) {
@@ -1650,7 +1659,8 @@ int dmesh_l7_tx_commit(int worker_id, uint64_t conn, int32_t backend_pod,
     struct px_unit_slot slot;
     int32_t route_dst = c->pub.is_reply ? c->pub.peer_pod :
                         (backend_pod >= 0 ? backend_pod : PX_DST_DEFER);
-    int prepared = px_unit_prepare(objs, c, len, route_dst, &slot);
+    int prepared = px_unit_prepare(objs, c, len, route_dst,
+                                   backend_pod == DMESH_L7_ORIGIN, &slot);
     if (prepared <= 0) {
         px_chunk_free(px, ch);
         return prepared;

@@ -225,6 +225,12 @@ argument. Granularity is the layer's to choose: routing per message reorders
 responses on a protocol that matches them positionally, and is correct only where
 responses carry their own correlation.
 
+**Direction.** `DMESH_L7_ORIGIN` names no backend: it returns the bytes to the
+sender of the connection they were published on, without a conntrack entry or
+an upstream port. Both directions carry the connection's own delivery sequence,
+so one connection may mix them, and the layer may send to a client before the
+backend has spoken.
+
 **Re-entrancy.** Calls are never re-entrant for one connection, but a *different*
 connection may be closed while a segment is being delivered: issuing an upstream
 port reclaims the connection state of its previous tenant. Per-connection state

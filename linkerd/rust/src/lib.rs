@@ -44,6 +44,9 @@ pub struct DmeshL7Verdict {
 const MODE_OPAQUE: u8 = 2;
 const MODE_FULL: u8 = 3;
 const BACKEND_ANY: i32 = -1;
+/// Mirrors `DMESH_L7_ORIGIN`: return the bytes to the connection's sender
+/// rather than forwarding them onward.
+const BACKEND_ORIGIN: i32 = -2;
 
 /// The pod staging region a segment points into. DPUmesh hands the region base
 /// with every segment, so the span only has to cover the largest pod buffer.
@@ -78,10 +81,11 @@ struct Side {
 
 /// A client connection and the backend channel the proxy reaches through it.
 ///
-/// The two cross over. Bytes arriving on the client connection are read by the
-/// proxy from the *client* endpoint; what the proxy writes towards the backend
-/// leaves on the *client* connection, because that is the DPUmesh connection
-/// whose upstream reaches the backend. The reply connection is the mirror.
+/// One DPUmesh connection carries both directions. Bytes arriving on it are
+/// read by the proxy from the *client* endpoint; what the proxy writes towards
+/// the backend travels onward on that same connection, and what it writes back
+/// to the client returns along it. The reply connection, when the backend
+/// opens one, feeds the *backend* endpoint and publishes nothing.
 struct Session {
     slot: usize,
     /// The endpoint the acceptor built: the proxy's view of the client.
@@ -125,9 +129,15 @@ fn pump(rt: &tokio::runtime::Runtime) {
 }
 
 /// Move one endpoint's output onto the DPUmesh connection that carries it, and
-/// give back custody for what it has finished reading. `out_conn` is the other
-/// direction's connection: see `Session`.
-fn pump_side(worker_id: c_int, side: &mut Side, out_conn: Option<u64>) -> Result<bool, ()> {
+/// give back custody for what it has finished reading. Both endpoints publish
+/// on the request connection; `backend` is what picks the direction it travels
+/// — see `Session`.
+fn pump_side(
+    worker_id: c_int,
+    side: &mut Side,
+    out_conn: Option<u64>,
+    backend: i32,
+) -> Result<bool, ()> {
     let Some(handle) = side.handle.as_ref() else {
         return Ok(false);
     };
@@ -136,7 +146,7 @@ fn pump_side(worker_id: c_int, side: &mut Side, out_conn: Option<u64>) -> Result
         let tx = handle.take_tx(TX_DRAIN_MAX);
         if !tx.is_empty() {
             let accepted =
-                unsafe { dmesh_l7_send(worker_id, out, BACKEND_ANY, tx.as_ptr(), tx.len()) };
+                unsafe { dmesh_l7_send(worker_id, out, backend, tx.as_ptr(), tx.len()) };
             if accepted < 0 {
                 return Err(());
             }
@@ -182,16 +192,15 @@ impl Worker {
         let worker_id = self.id;
         let mut failed = Vec::new();
         for (&key, s) in self.sessions.iter_mut() {
-            // What the proxy writes to the client leaves on the reply
-            // connection; what it writes to the backend leaves on the request
-            // connection. Each side's output rides the other's connection.
-            let reply = s.backend.conn;
+            // Both endpoints publish on the request connection: what the proxy
+            // writes to the backend travels onward on it, what it writes to the
+            // client returns along it.
             let request = s.client.conn;
-            match pump_side(worker_id, &mut s.client, reply) {
+            match pump_side(worker_id, &mut s.client, request, BACKEND_ORIGIN) {
                 Ok(d) => did |= d,
                 Err(()) => failed.push(key),
             }
-            match pump_side(worker_id, &mut s.backend, request) {
+            match pump_side(worker_id, &mut s.backend, request, BACKEND_ANY) {
                 Ok(d) => did |= d,
                 Err(()) => failed.push(key),
             }
@@ -363,12 +372,14 @@ pub unsafe extern "C" fn l7_conn_open(
         // The proxy routes on socket addresses. DPUmesh routes on pod and
         // service identifiers, so the identifiers stand in for the addresses
         // one-for-one; the registry mapping belongs here once it is wired.
+        // The range is not loopback: an outbound proxy refuses to originate a
+        // connection there.
         let src = SocketAddrV4::new(
-            Ipv4Addr::new(127, 0, 0, (flow.src_pod & 0xff) as u8),
+            Ipv4Addr::new(10, 97, 0, (flow.src_pod & 0xff) as u8),
             if flow.src_port == 0 { 1 } else { flow.src_port },
         );
         let dst = SocketAddrV4::new(
-            Ipv4Addr::new(127, 1, 0, (flow.dst_service & 0xff) as u8),
+            Ipv4Addr::new(10, 96, 0, (flow.dst_service & 0xff) as u8),
             9092,
         );
         let slot_idx = w.next_slot;

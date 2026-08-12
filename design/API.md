@@ -309,7 +309,7 @@ EventEngine endpoints to QPs. Client bootstrap accepts a Service-name target,
 credentials, and `grpc::ChannelArguments`; absent authority defaults to the
 target. Each EventEngine `Connect` creates a targeted QP. Established L4 streams
 remain backend-pinned and terminate when that backend is lost. TLS and HTTP/2
-remain end-to-end.
+remain end-to-end unless the Service is assigned to the DPU's L7 layer.
 
 The adapter uses `dmesh_alloc`/`dmesh_post_send` for TX, calls `dmesh_flush`
 once at each EventEngine Write boundary, and consumes
@@ -336,5 +336,6 @@ Adapter-internal ownership and threading are specified in
   capacity.
 - The registry is loaded once and is not live-reloaded.
 - Dynamic instances require a Service already present in the registry.
-- L4 passthrough is the supported gRPC mode. The in-tree L7 validator uses a
-  bounded 16-byte length-prefixed benchmark frame, not HTTP/2.
+- L4 passthrough is the default gRPC mode; a Service assigned to the L7 layer is
+  terminated there. The in-tree L7 validator uses a bounded 16-byte
+  length-prefixed benchmark frame, not HTTP/2.

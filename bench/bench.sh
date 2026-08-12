@@ -379,13 +379,13 @@ linkerd_data_dir() {
     printf '%s' "${LINKERD_DATA_DIR:-$(dpu_home)/dpumesh-linkerd/linkerd/app/integration/src/data}"
 }
 LINKERD_FIXTURE="${LINKERD_FIXTURE:-default-default}"
-LINKERD_BACKEND_ADDR="${LINKERD_BACKEND_ADDR:-127.1.0.11:9092}"
+# The address the layer publishes a backend channel on: 10.96.0.<service id>.
+LINKERD_BACKEND_ADDR="${LINKERD_BACKEND_ADDR:-10.96.0.11:9092}"
 
 start_mocks() {
     step "=== Starting mock control plane (identity/destination/policy) ==="
     ssh_dpu "cat > /tmp/start_mocks.sh << 'MOCKS'
 #!/bin/bash
-pkill -f 'l7build/mock/mock-' 2>/dev/null
 sleep 1
 cd /tmp
 MOCK_IDENTITY_ADDR=127.0.0.1:8088 MOCK_IDENTITY_DATA_DIR=$(linkerd_data_dir) \
@@ -396,10 +396,13 @@ MOCK_DESTINATION_ADDR=127.0.0.1:8089 MOCK_DESTINATION_BACKEND=$LINKERD_BACKEND_A
 MOCK_POLICY_ADDR=127.0.0.1:8087 MOCK_POLICY_BACKEND=$LINKERD_BACKEND_ADDR \
   setsid nohup $(linkerd_mock_dir)/mock-policy > /tmp/mock-policy.log 2>&1 < /dev/null &
 sleep 2
-pgrep -c -f 'l7build/mock/mock-'
+pgrep -c -f 'l7build/mock/mock-' || true
 MOCKS
 chmod +x /tmp/start_mocks.sh"
-    local n; n=$(ssh_dpu "bash /tmp/start_mocks.sh" 2>&1 | tail -1)
+    # Clear whatever holds the ports, whoever started it; count only this
+    # tree's binaries.
+    local n; n=$(ssh_dpu "echo '$DPU_PASS' | sudo -S pkill -f 'mock-(identity|destination|policy)\$' 2>/dev/null; \
+                          bash /tmp/start_mocks.sh" 2>&1 | tail -1)
     if [ "$n" != 3 ]; then
         err "mock control plane did not start (got '$n' of 3); see /tmp/mock-*.log on the DPU"
         ssh_dpu "tail -3 /tmp/mock-identity.log /tmp/mock-destination.log /tmp/mock-policy.log" || true
@@ -420,7 +423,8 @@ start_dpu() {
     # exactly as the standalone proxy binary does. It is written as a file on
     # the DPU and sourced by the launcher: the trust anchors are a multi-line
     # PEM, which does not survive being quoted through ssh into a `bash -c`
-    # string. Ephemeral listen ports keep the proxy off anything else's port.
+    # string. The admin port is fixed and serves the proxy's metrics; the other
+    # listeners are ephemeral.
     local l7_env=""
     if [ "${L7_BACKEND:-null}" = linkerd ]; then
         local id_name="${LINKERD_LOCAL_NAME:-default.default.serviceaccount.identity.linkerd.cluster.local}"
@@ -440,7 +444,7 @@ LINKERD2_PROXY_CLUSTER_NETWORKS=0.0.0.0/0
 LINKERD2_PROXY_INBOUND_LISTEN_ADDR=127.0.0.1:0
 LINKERD2_PROXY_OUTBOUND_LISTEN_ADDR=127.0.0.1:0
 LINKERD2_PROXY_CONTROL_LISTEN_ADDR=127.0.0.1:0
-LINKERD2_PROXY_ADMIN_LISTEN_ADDR=127.0.0.1:0
+LINKERD2_PROXY_ADMIN_LISTEN_ADDR=${LINKERD_ADMIN_ADDR:-127.0.0.1:4191}
 LINKERD2_PROXY_LOG=${LINKERD_LOG:-warn,linkerd=info}
 DPUMESH_L7_LINKERD_WORKER=${DPUMESH_L7_LINKERD_WORKER:-0}
 L7ENV
@@ -1080,11 +1084,13 @@ CMD="${1:-help}"; shift || true
 case "$CMD" in
     deploy)    deploy ;;
     build)     need_env; sync_sources; build_dpu ;;
+    restart)   need_env; start_dpu ;;
     grpcbuild) build_grpc_apps ;;
-    # NOTE: there is deliberately NO `restart` (DPU-only restart) command, and no
+    # NOTE: `restart` is valid only while no pod is meshed, and there is no
     # per-pod start. Restarting the DPU under live pods — or starting a pod against
     # an already-running DPU — leaves the two sides' registration state inconsistent.
-    # `deploy` is the only supported path: it brings up the DPU and every pod together.
+    # `deploy` is the path for anything with pods: it brings up the DPU and every
+    # pod together.
     latency)   for s in $(targets_of "${1:-both}"); do bench_latency   "$s"; done ;;
     bandwidth) for s in $(targets_of "${1:-both}"); do bench_bandwidth "$s"; done ;;
     rate)      for s in $(targets_of "${1:-both}"); do bench_rate      "$s"; done ;;
@@ -1105,6 +1111,7 @@ case "$CMD" in
 Usage: $0 <command> [args]
 
   deploy                                     build + DPU + images + pods + pin (the ONLY bring-up path)
+  build | restart                            rebuild the DPU binary | restart the DPU alone (no pod may be meshed)
   latency|bandwidth|rate|all [dpumesh|tcp|both]   benchmark families -> CSVs under $OUT
   point <sol> <req> <reply> <conc> <dur> <warmup> <threads> [reconn]   one raw RUN (reconn = conn-churn period)
   loopback|preload [args]                    feature validators
