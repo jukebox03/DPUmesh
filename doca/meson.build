@@ -11,7 +11,8 @@ add_project_arguments('-DDOCA_ALLOW_EXPERIMENTAL_API', language: 'c')
 
 inc_dirs = []
 inc_dirs += include_directories('/opt/mellanox/doca/include/')
-inc_dirs += include_directories('../include')   # for dmesh_common.h (shared host/DPU constants)
+inc_dirs += include_directories('../include')          # dmesh_common.h (shared host/DPU constants)
+inc_dirs += include_directories('../linkerd/include')  # dmesh_l7.h (adapter contract)
 
 deps = []
 deps += dependency('doca-common')
@@ -35,8 +36,23 @@ srcs = [
     'comch_msgq.c',
     'dpa.c',
     'dpu_proxy.c',
-    'dpu_l7.c',
 ]
+
+# The L7 consumer behind dmesh_l7.h: either the reference consumer in this tree
+# or the Rust staticlib carrying linkerd2-proxy. The datapath compiles against
+# the contract and does not change between them.
+l7_backend = get_option('l7_backend')
+l7_link_args = []
+if l7_backend == 'linkerd'
+  l7_lib_path = get_option('l7_lib_path')
+  if l7_lib_path == ''
+    error('l7_backend=linkerd requires -Dl7_lib_path=<libdmesh_l7.a>')
+  endif
+  # A Rust staticlib brings its own std; these are what it leaves undefined.
+  l7_link_args += [l7_lib_path, '-lpthread', '-ldl', '-lm', '-lrt', '-lgcc_s']
+else
+  srcs += ['../linkerd/shim/l7_null.c']
+endif
 
 # Build DPA kernel via DPACC
 dpacc_build_script = files('build_dpacc.sh')
@@ -67,7 +83,7 @@ dpa_program_lib_path = meson.current_build_dir() / (program_name + '.a')
 
 executable('dpumesh_dpu', srcs,
   dependencies : deps,
-  link_args : [dpa_program_lib_path],
+  link_args : [dpa_program_lib_path] + l7_link_args,
   include_directories : inc_dirs,
   link_depends : [dpacc_lib],
   install : false,

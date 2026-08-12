@@ -6,8 +6,9 @@ deployment convention, not a transport requirement. A process-local registry
 translates names and optional socket destinations to compact service ids, while
 the DPU assigns ephemeral backend slots at registration.
 
-Sections 1-6 describe implemented behavior. Sections 7-12 describe planned
-design that no code implements. Section 13 summarizes the split.
+Sections 1-6 and the DPUmesh half of section 8 describe implemented behavior.
+The rest of sections 7-12 describe planned design. Section 13 summarizes the
+split.
 
 ## 1. One registry, two facades
 
@@ -111,8 +112,14 @@ widening it is a wire-ABI change requiring lockstep host and DPU deployment.
 
 The repository includes a static registry and deployment tooling, not an
 orchestrator controller. It does not implement admission identity, EndpointSlice
-watching, registry reload, or workload identity. Registry consistency and
-`$DPUMESH_SERVICE` injection are deployment invariants. Dynamic instances of a
+watching, or registry reload. Registry consistency and `$DPUMESH_SERVICE`
+injection are deployment invariants.
+
+Workload identity is delivered: `POD_IDENTITY` carries a workload name on the
+registration connection before `POD_REGISTER`, and the DPU binds it to the slot
+that connection owns, clearing it when the slot takes a new tenant. The identity
+is granted by the DPU rather than claimed by the pod, and reaches the L7 layer
+on every connection it opens. Dynamic instances of a
 configured Service are supported; new Service names require registry updates.
 DPUmesh readiness is established by its initialization barrier.
 
@@ -170,9 +177,9 @@ framed service performs at each frame boundary. The default L4 path resolves
 once per connection and is unaffected, so no throughput claim attaches to this
 change.
 
-## 8. Control-plane consultation (planned)
+## 8. Control-plane consultation
 
-DPUmesh does not implement a control-plane client. The L7 layer is one:
+DPUmesh implements no control-plane client. The L7 layer is one:
 linkerd2-proxy runs on the DPU ARM and already holds sessions with the mesh
 control plane for discovery, authorization and certificates. The DPU ARM has its
 own address and reaches those services directly, so the host is not on that path.
@@ -182,8 +189,13 @@ DPUmesh consults it once per connection instead. Given a caller identity and a
 target service, the L7 layer answers allow-or-deny and an endpoint; at close,
 DPUmesh reports the connection's byte counts and duration so the balancer's load
 view stays accurate for connections whose payload never traversed it. Per-request
-cost is zero and no second subscription exists to keep consistent. The interface
-is stated in `linkerd/CONTRACT.md`.
+cost is zero and no second subscription exists to keep consistent.
+
+DPUmesh's half of this is implemented: a service in `DPUMESH_L7_DECISION_SVC`
+is resolved once at establishment, the answer pins the stream, a denial poisons
+it, and the close reports load. The interface is `l7_resolve` / `l7_report` in
+`linkerd/CONTRACT.md`; what remains is an L7 layer that answers from cluster
+state rather than from local candidates.
 
 The control plane's protocol is therefore the L7 layer's concern. An xDS client,
 CDS and EDS are not implemented here.
@@ -467,13 +479,15 @@ and never folded into the ARM total.
 | `$DPUMESH_SERVICE` local identity, DPU slot assignment | implemented |
 | Self-registration membership, round-robin selection, L4 pinning | implemented |
 | Framed L7 per-frame backend selection | implemented |
+| L7 layer: modes, custody, egress arena, backend selection | implemented |
 | gRPC endpoint injection | implemented |
 | Identifier spaces and reverse-ring widths | implemented |
 | Generation snapshot and configuration thread | planned |
-| Control-plane consultation through the L7 layer | planned |
+| Control-plane consultation: DPUmesh side | implemented |
+| Control-plane consultation: answers from cluster state | planned |
 | Two-sided link, remote-backed slots, three-tier credit | planned |
 | Link IPsec | planned |
-| Workload identity delivery and generation binding | planned |
+| Workload identity delivery and slot binding | implemented |
 | Authorization: identity assertion and enforcement | planned |
 | Health checking and ejection | L7 layer |
 | Locality-aware selection | L7 layer, with local-endpoint input |

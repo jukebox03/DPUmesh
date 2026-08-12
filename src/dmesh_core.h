@@ -155,7 +155,6 @@ void dpumesh_get_wait_split(dpumesh_ctx_t *ctx, unsigned long long *window,
 
 /* ====== Info ====== */
 int         dpumesh_get_pod_id(dpumesh_ctx_t *ctx);
-const char *dpumesh_get_worker_id(dpumesh_ctx_t *ctx);
 
 /* ====== Raw Buffer API ====== */
 

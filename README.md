@@ -84,9 +84,10 @@ include/dpumesh/       public C API
 src/                   host core, native facade, resolver, preload facade
 doca/                  BlueField ARM process and DPA kernel
 integrations/grpc/     gRPC C++ runtime, reactor, tests, benchmark
+linkerd/               DPU-side L7 layer: contract, consumers, port submodule
 bench/                 deployment, workloads, validators, measurement records
 tests/                 fast host-only ABI and state-machine regression tests
-design/                current API, core, naming, and gRPC whitepapers
+design/                current API, core, naming, L7, and gRPC whitepapers
 ```
 
 ## Build and test
@@ -142,11 +143,43 @@ connection attempt creates a QP; established L4 streams remain backend-pinned.
 
 ## Documentation
 
-- [Native API](design/API.md): exact lifecycle, batching, EQ, and error contracts
-- [Core architecture](design/CORE.md): host/DPA/ARM custody and replay barriers
-- [Control plane](design/CONTROL.md): registry, identity, membership, and node boundary
-- [gRPC integration](design/GRPC.md): endpoint ownership, threading, and state machines
-- [gRPC build and bootstrap](integrations/grpc/README.md): channel, server, and test commands
-- [Benchmark guide](bench/README.md): deployment and experiment commands
-- [Native contract tests](tests/README.md): fast host-only regression coverage
-- [Performance report](bench/report/REPORT.md): current topology evaluation
+Design documents define the current contracts; benchmark documents say how a
+number was produced; reports carry the numbers.
+
+**Design**
+
+| Document | Defines |
+|---|---|
+| [design/API.md](design/API.md) | the native `<dpumesh/dmesh.h>` contract: lifecycle, batching, EQ, errors |
+| [design/CORE.md](design/CORE.md) | host/DPA/ARM custody, rings, and replay barriers |
+| [design/CONTROL.md](design/CONTROL.md) | naming, identity, registry, and the node boundary |
+| [design/L7.md](design/L7.md) | the L7 layer: modes, custody, egress arena, backend selection |
+| [design/GRPC.md](design/GRPC.md) | how the gRPC adapter maps chttp2 onto the transport |
+
+**Integrations**
+
+| Document | Covers |
+|---|---|
+| [integrations/grpc/README.md](integrations/grpc/README.md) | building and running gRPC over DPUmesh |
+| [linkerd/README.md](linkerd/README.md) | the DPU-side L7 layer: layout, modes, consumers |
+| [linkerd/CONTRACT.md](linkerd/CONTRACT.md) | the normative datapath/port interface and its ABI |
+
+**Measurement**
+
+| Document | Covers |
+|---|---|
+| [bench/README.md](bench/README.md) | deployment, the experiment commands, and the measurement rules |
+| [bench/validators/README.md](bench/validators/README.md) | hardware validators and what each one exercises |
+| [tests/README.md](tests/README.md) | host-only contract tests, no hardware needed |
+| [integrations/grpc/bench/README.md](integrations/grpc/bench/README.md) | the gRPC workloads and collectors |
+| [linkerd/bench/README.md](linkerd/bench/README.md) | the linkerd sidecar columns of the gRPC evaluation |
+
+**Reports**
+
+| Report | Question it answers |
+|---|---|
+| [bench/report/REPORT.md](bench/report/REPORT.md) | what DPUmesh costs at L4 against Envoy sidecars |
+| [bench/report/REPORT_L7.md](bench/report/REPORT_L7.md) | what backend-selection granularity costs on the DPU |
+| [bench/report/REPORT_CORE.md](bench/report/REPORT_CORE.md) | where the cores go, attributed per component |
+| [integrations/grpc/bench/report/REPORT_GRPC.md](integrations/grpc/bench/report/REPORT_GRPC.md) | whether the L4 win carries to gRPC, and how it scales with cores and channels |
+| [linkerd/bench/report/REPORT_LINKERD.md](linkerd/bench/report/REPORT_LINKERD.md) | linkerd as a sidecar, against Envoy and DPUmesh |

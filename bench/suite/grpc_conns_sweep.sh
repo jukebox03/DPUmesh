@@ -186,7 +186,7 @@ recover_deploy() {
   (
     cd "$PROJ_ROOT" &&
     DPUMESH_DPA_THREADS=32 DPUMESH_RINGS_PER_POD=8 DPUMESH_ARM_WORKERS=8 \
-    DPUMESH_PROXY_L7_SVC= BENCH_NUMA_POLICY=local BENCH_DEPLOY_SCOPE=grpc \
+    BENCH_NUMA_POLICY=local BENCH_DEPLOY_SCOPE=grpc \
       bash bench/bench.sh deploy
   ) >>"$OUT/recover.log" 2>&1 || { log "redeploy failed"; return 1; }
   ( cd "$PROJ_ROOT" && bash bench/bench.sh pin "$PIN_PROFILE" ) \

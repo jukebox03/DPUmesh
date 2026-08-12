@@ -186,7 +186,7 @@ and the table reports both rather than summing them into a verdict.
 | Core placement | cores 18–35, NUMA node 1, SMT disabled, 2.5 GHz performance governor |
 | Host CPU | runqueue runtime of the endpoint cores (`/proc/schedstat`), which counts the application, its sidecar and the kernel threads working on their behalf |
 | CPU window | 6 s, opened 2.5 s into each run so connection setup and teardown fall outside it |
-| DPU | `N/K/A=32/8/8`; L7 disabled; ARM cores from per-tid ticks of the data-path process, 0.14 core at idle |
+| DPU | `N/K/A=32/8/8`; no service assigned to the L7 layer; ARM cores from per-tid ticks of the data-path process, 0.14 core at idle |
 | Backend | exactly one ready server per configuration |
 | Platform | `rapids4`, Intel Xeon Gold 6554S, Linux 5.15.0-186-generic |
 | Software | Envoy `v1.30-latest`; swap disabled |
@@ -223,7 +223,7 @@ repository root:
 sudo swapoff -a
 
 env DPUMESH_DPA_THREADS=32 DPUMESH_RINGS_PER_POD=8 DPUMESH_ARM_WORKERS=8 \
-    DPUMESH_PROXY_L7_SVC= BENCH_NUMA_POLICY=local BENCH_DEPLOY_SCOPE=l4 \
+    BENCH_NUMA_POLICY=local BENCH_DEPLOY_SCOPE=l4 \
     REPS=1 ./bench/suite/l4_proxy_data.sh --no-perf --out /tmp/l4run
 
 python3 bench/suite/distill.py /tmp/l4run measurements.csv

@@ -41,8 +41,8 @@ DPA EUs
   ▼
 A ARM workers
   ├─ connection and conntrack state
-  ├─ L4 routing or framed L7 load balancing
-  ├─ payload SG-DMA
+  ├─ routing: L4, or the L7 layer
+  ├─ payload SG-DMA, from arrival staging or the egress arena
   └─ reverse publication
           │
           ▼
@@ -107,8 +107,11 @@ eventfd, and a 1 ms interval. The 1 ms keepalive wakes only EUs serving at
 least one forward ring; a ringless EU parks until a control message arrives.
 
 Same-owner lanes use a private FIFO. Cross-owner delivery and ACK custody use
-bounded MPSC queues. L4 selects one backend for a connection. Services in
-`DPUMESH_PROXY_L7_SVC` use 16-byte frames and select a ready backend per frame.
+bounded MPSC queues.
+
+A connection's routing is resolved once. At L4 the connection keeps one backend
+for its life. A service assigned to the L7 layer hands its extents to that layer
+and lets it name the backend per delivery; `design/L7.md` describes that path.
 
 ## DMA fault handling
 
@@ -175,7 +178,8 @@ exports until `POD_QUIESCED`.
 | Rings per pod | default 2, maximum 8 |
 | ARM data workers | default 1, maximum 8 |
 | Payload DMA retries | 1 |
-| L7 frame | 128 KiB |
+| Egress arena | 1,024 chunks of 16 KiB |
+| L7 custody per connection | 256 KiB |
 
 The implementation preserves per-connection order, exact TX/RX custody,
 single-producer reverse rings, generation-safe teardown, and bounded

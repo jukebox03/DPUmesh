@@ -1,0 +1,45 @@
+collector_version=1
+stamp=20260812-062044
+host=rapids4  dpu=jukebox@192.168.100.2
+stack=N/K/A=32/8/8 threads=8
+frames=64 1024 8192 (including 16B header)
+reps=2 dur=5s warmup=200 arrival=const conc=32
+modes=l7-message l7-pass l7-conn opaque decision dataplane
+git=bb4485d
+dirty=41 files
+collector_version=1
+stamp=20260812-085336
+host=rapids4  dpu=jukebox@192.168.100.2
+stack=N/K/A=32/8/8 threads=8
+frames=64 1024 8192 (including 16B header)
+reps=2 dur=5s warmup=200 arrival=const conc=32
+modes=l7-message l7-pass l7-conn opaque decision dataplane
+git=bb4485d
+dirty=41 files
+collector_version=1
+stamp=20260812-094308
+host=rapids4  dpu=jukebox@192.168.100.2
+stack=N/K/A=32/8/8 threads=8
+frames=64 1024 8192 (including 16B header)
+reps=2 dur=5s warmup=200 arrival=const conc=32
+modes=instrument
+git=bb4485d
+dirty=42 files
+collector_version=2
+stamp=20260812-104851
+host=rapids4  dpu=jukebox@192.168.100.2
+stack=N/K/A=32/8/8 threads=8
+frames=64 1024 8192 (including 16B header)
+reps=2 dur=5s warmup=200 arrival=const conc=32
+modes=l7-message l7-conn opaque decision dataplane
+git=bb4485d
+dirty=54 files
+collector_version=2
+stamp=20260812-110236
+host=rapids4  dpu=jukebox@192.168.100.2
+stack=N/K/A=32/8/8 threads=8
+frames=64 1024 8192 (including 16B header)
+reps=3 dur=5s warmup=200 arrival=const conc=32
+modes=l7-message l7-conn opaque decision dataplane
+git=bb4485d
+dirty=54 files

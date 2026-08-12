@@ -11,7 +11,6 @@ rather than replace the hardware validators below.
 |---|---|---|
 | Loopback | `loopback_dpumesh.c` | One process registers, connects to its own Service, exchanges data, and closes |
 | Verbs-shaped | `verbs_dpumesh.c` | Channel/EQ/QP lifecycle, windowed commit/flush sends, event polling, and RX buffer release |
-| Stream/L7 | `stream_dpumesh.c` | Fragmented framed messages through the optional frame codec |
 | POSIX preload | `preload_runner.c`, `tcp_echo.c`, `tcp_client.c` | Unmodified socket connect/listen/accept/read/write behavior and TCP fallback |
 | Matched-C preload | `preload_sock.Dockerfile`, `bench_sock`, `echo_sock` | Same L4 benchmark workload over the socket facade; control TCP stays kernel, data uses DPUmesh |
 | Idle re-registration | `idle_reregister.sh` | A quiesced pod registers again after the DPU idles with no pods; loopback passes before and after |
@@ -21,7 +20,6 @@ Run them through the common entry point:
 ```sh
 ./bench/bench.sh loopback 1000 1024 0
 ./bench/bench.sh verbs    1000 1024 0 32 4
-./bench/bench.sh stream   1000 1024 1
 ./bench/bench.sh preload  1000 1024 8
 ./bench/validators/idle_reregister.sh 720 10000 1024
 ```
@@ -40,12 +38,6 @@ All native validators use ABI-4 semantics: `post_send` commits and automatically
 submits complete transport units, while explicit `flush` forces each logical
 request, response batch, or large-write tail. A pass exercises both automatic
 full-unit submission and byte correctness.
-
-The L7 stream validator is not a gRPC validator. Its 16-byte length-prefixed
-frame is bounded to 128 KiB and must not be enabled for HTTP/2. Run deployment
-with service 16 in `DPUMESH_PROXY_L7_SVC`. gRPC uses L4 passthrough and is tested
-by the C++ tests and
-`grpc_dpumesh_qps_benchmark` under `integrations/grpc`.
 
 Sanitizer validation and performance validation are separate. Use ASAN/UBSAN
 builds for memory correctness, and use optimized non-sanitized binaries for QPS

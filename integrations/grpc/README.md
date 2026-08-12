@@ -152,8 +152,8 @@ ASAN_OPTIONS=detect_leaks=0 \
 ```
 
 Use a separate build with `-DDPUMESH_GRPC_ENABLE_TSAN=ON`. The QPS benchmark
-syntax is documented in [the benchmark guide](../../bench/README.md). Evaluation
-coverage is indexed in [STAGES.md](../../bench/suite/STAGES.md).
+syntax, the rules a retained point must satisfy, and the index of every
+evaluation are in [the benchmark guide](../../bench/README.md).
 
 The integration uses L4 passthrough. It does not provide a `dpumesh:///`
 resolver, HTTP/2 routing, registry reload, EndpointSlice watching, admission

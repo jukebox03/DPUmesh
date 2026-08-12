@@ -204,6 +204,64 @@ The DPU moves the other way. Its ARM cores rise only from 1.90 to 2.75 while the
 rate rises 3.4×, so the cost per request on the DPU falls from 49 µs to 21 µs:
 more load per worker means deeper batching there too.
 
+## Channel count
+
+The core budget is one of two things the headline sweep holds fixed. The other is
+the channel count, and it binds for a structural reason: the adapter maps one
+EventEngine endpoint to one native QP, and `dmesh_topology.h` pins that QP to one
+forward ring, one DPA execution unit and one ARM worker. A gRPC channel therefore
+reaches exactly one of the DPU's eight data workers.
+
+![How the ARM workers share the load](figures/conns_workers.png)
+
+Varying only the channel count, with nine cores per endpoint and thirty-two
+client threads throughout, the busy worker count equals the channel count up to
+eight and stays at eight beyond it. Idle workers draw 0.011–0.015 core. Which
+worker is busy changes run to run: port allocation walks a bump cursor and the
+worker is `port % 8`, so each new channel lands on the next one. The figure ranks
+workers by load rather than by index for that reason.
+
+![Capacity and DPU cost](figures/conns_scaling.png)
+
+The highest rate each channel count serves with its median under 1 ms, and what
+it costs there:
+
+| Channels | Healthy rate | p50 | ARM cores | Busiest worker | Host cores |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 32,000/s | 349 µs | 0.84 | 0.749 | 4.06 |
+| 2 | 64,000/s | 335 µs | 1.58 | 0.753 | 7.76 |
+| 4 | 64,000/s | 254 µs | 2.67 | 0.668 | 7.43 |
+| 8 | **140,000/s** | 397 µs | 4.73 | 0.599 | 13.51 |
+| 16 | **140,000/s** | 272 µs | 5.09 | 0.645 | 12.85 |
+| 32 | 100,000/s | 257 µs | 4.58 | 0.559 | 9.87 |
+
+One channel is worth 32,000/s and eight are worth 140,000/s, a factor of 4.4. The
+second channel doubles the first; beyond eight nothing more is bought, because
+there are only eight workers to spread across. Sixteen and thirty-two channels
+deliver the same 140,000/s at the same worker load — the extra QPs share workers
+without adding capacity.
+
+The 1, 2 and 4 channel rows are lower bounds rather than ceilings. Each of those
+sweeps ended when an endpoint died, and the rates above it were never measured:
+at 1 channel driven to 48,000/s, at 2 channels to 100,000/s, at 4 channels to
+100,000/s. The section below covers that fault.
+
+![Median latency and host cores](figures/conns_latency.png)
+
+Nothing in this sweep is short of cycles. No worker reaches a full core anywhere
+— the busiest is 0.753, at two channels. At the eight-channel knee the workers
+hold 4.73 of eight ARM cores and the endpoints 13.5 of eighteen host cores. Both
+sides have room.
+
+What ends each curve is visible in what happens past it. At 8 channels and
+180,000/s the delivered fraction falls to 0.43 and the worker cores fall with it,
+from 4.73 to 0.22 — the DPU does less work per second while the backlog it is
+draining gets deeper. A saturated core would show the opposite. The queue grows,
+batches grow with it, the per-request cost drops as they do, and delivery
+collapses anyway.
+
+![Delivered fraction against offered rate](figures/conns_delivery.png)
+
 ## Delivered rate, with the latency it costs
 
 The highest rate each path delivered at 98% or better under an open loop, and
@@ -250,7 +308,11 @@ the signature of a call through a corrupted function pointer. A container that
 dies takes its log with it, so the images carry an ASan build selectable with
 `BENCH_GRPC_BUILD=asan` and write the report to a host path. This is an open
 defect; the sweeps record each occurrence, redeploy, and re-pin rather than
-collect through it.
+collect through it. The channel sweep hit it three times, each above the healthy
+rate for its channel count: 1 channel at 48,000/s, 2 channels at 100,000/s, 4
+channels at 100,000/s. A crash there leaves the DPU unable to reclaim the pod's
+RX mmap, which corrupts every later run until a full redeploy, and the restarted
+container comes back without its core pinning.
 
 ## Contract
 
@@ -261,6 +323,7 @@ collect through it.
 | Frames | 64 B, 1 KiB, 8 KiB (16 B header plus body) |
 | Open loop | constant rate, 8 persistent channels, 8 worker threads, 10 s per rate, one repetition |
 | Fixed window | 1–32 in-flight per worker over 8 workers, 10 s per point, one repetition; run at one core and at six cores per endpoint |
+| Channel sweep | 1, 2, 4, 8, 16, 32 channels shared round-robin by 32 client threads, 8 reactors each side; 16K–220K/s, 10 s per rate, one repetition; nine exclusive cores per endpoint (18–26 and 27–35), host CPU from cgroup `usage_usec`; healthy means achieved/offered ≥ 0.98 with the median at or below 1 ms |
 | Host budget | one exclusive client core and one exclusive server core per configuration; the six-core comparison gives one path 18–23/24–29 at a time and confines the other three to cores outside the benchmark range |
 | Core placement | NUMA node 1, SMT disabled, 2.5 GHz performance governor |
 | Host CPU | runqueue runtime of the endpoint cores (`/proc/schedstat`) for the open loop; pod cgroup `usage_usec` for the fixed window, which includes the sidecar |
@@ -280,14 +343,18 @@ the two are not security-equivalent. DPUmesh spends DPU ARM cores that the other
 three do not.
 
 Per-point data is in [`data/grpc-20260810/`](data/grpc-20260810/):
-`measurements.csv` and `knees.csv` for the open loop, `closed_1core.csv` and `closed_6core.csv` for the fixed window at each budget. Host-CPU figures for the L4 paths are in
+`measurements.csv` and `knees.csv` for the open loop, `closed_1core.csv` and
+`closed_6core.csv` for the fixed window at each budget. The channel sweep is in
+[`data/conns-20260810/points.csv`](data/conns-20260810/points.csv), with each
+crash in [`data/conns-20260810/crashes.csv`](data/conns-20260810/crashes.csv).
+Host-CPU figures for the L4 paths are in
 [the L4 report](../../../../bench/report/REPORT.md).
 
 ## Reproduction
 
 ```sh
 env DPUMESH_DPA_THREADS=32 DPUMESH_RINGS_PER_POD=8 DPUMESH_ARM_WORKERS=8 \
-    DPUMESH_PROXY_L7_SVC= BENCH_NUMA_POLICY=local BENCH_DEPLOY_SCOPE=grpc \
+    BENCH_NUMA_POLICY=local BENCH_DEPLOY_SCOPE=grpc \
     ./bench/bench.sh deploy
 ./bench/bench.sh pin grpc
 
@@ -304,6 +371,22 @@ python3 bench/suite/plot_slo.py integrations/grpc/bench/report/figures \
     slo_grpc_closed /tmp/grpc-closed/points.csv
 ```
 
-Both sweeps take `/tmp/dpumesh-bench.lock`: two campaigns under load contend for
+The channel sweep runs on its own pinning profile; `bench_grpc`'s `OPEN` command
+takes the channel count as its last argument, so no redeploy is needed between
+points:
+
+```sh
+./bench/bench.sh pin grpcmax
+
+setsid nohup env PIN_PROFILE=grpcmax ./bench/suite/grpc_conns_sweep.sh \
+    --channels "1 2 4 8 16 32" \
+    --rates "16000 32000 48000 64000 100000 140000 180000 220000" \
+    --reps 1 --threads 32 --out /tmp/conns >/tmp/conns.log 2>&1 </dev/null &
+
+python3 bench/suite/plot_conns.py /tmp/conns/points.csv \
+    integrations/grpc/bench/report/figures --stem conns
+```
+
+Every sweep takes `/tmp/dpumesh-bench.lock`: two campaigns under load contend for
 the DPU and the memory system even on disjoint cores, and each one's traffic
 lands in the other's CPU window.

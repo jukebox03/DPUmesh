@@ -273,44 +273,6 @@ spec:
   selector: { app: verbs-dpumesh }
   ports: [{ port: ${CTRL_PORT}, targetPort: ${CTRL_PORT} }]
 ---
-# stream-dpumesh (pod_id=16): byte-stream / L7 frame validator.
-# Stream execution requires service 16 in DPUMESH_PROXY_L7_SVC.
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: stream-dpumesh
-spec:
-  replicas: 0
-  selector: { matchLabels: { app: stream-dpumesh } }
-  template:
-    metadata: { labels: { app: stream-dpumesh } }
-    spec:
-      hostname: stream-dpumesh
-      containers:
-      - name: stream-dpumesh
-        image: docker.io/${IMG_STREAM_DPU}
-        imagePullPolicy: Never
-        ports: [{ containerPort: ${CTRL_PORT} }]
-        env:
-        - { name: BENCH_NUMA_NODE, value: "${BENCH_NUMA_NODE}" }
-        - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
-        - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
-        - { name: DPUMESH_SERVICE, value: "stream-dpumesh" }
-        securityContext: { privileged: true }
-        volumeMounts:
-        - { mountPath: /dev/infiniband, name: infiniband }
-        - { mountPath: /usr/local/lib/libdpumesh.so.4, name: libdpumesh-so, subPath: libdpumesh.so.4 }
-      volumes:
-      - { name: infiniband, hostPath: { path: /dev/infiniband } }
-      - { name: libdpumesh-so, hostPath: { path: ${LIB_OUT}, type: Directory } }
----
-apiVersion: v1
-kind: Service
-metadata: { name: stream-dpumesh }
-spec:
-  selector: { app: stream-dpumesh }
-  ports: [{ port: ${CTRL_PORT}, targetPort: ${CTRL_PORT} }]
----
 # preload-dpumesh (service_id=15): LD_PRELOAD shim validator. Runs vanilla TCP
 # binaries (tcp_echo + tcp_client) under LD_PRELOAD=libdmesh_preload.so.
 apiVersion: apps/v1

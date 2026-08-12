@@ -76,45 +76,6 @@ int main(void)
     assert(px != NULL);
     assert(pthread_mutex_init(&px->pool_lock, NULL) == 0);
 
-    /* Complete L7 frames with identical delivery metadata collapse into one
-     * unit, keeping piece order/custody and the first delivery sequence. */
-    struct px_piece p1, p2;
-    memset(&p1, 0, sizeof(p1));
-    memset(&p2, 0, sizeof(p2));
-    p1.len = 1000;
-    p2.len = 1200;
-    struct px_unit merged, extra;
-    memset(&merged, 0, sizeof(merged));
-    memset(&extra, 0, sizeof(extra));
-    merged.src_pod_id = extra.src_pod_id = 1;
-    merged.src_service = extra.src_service = 11;
-    merged.dst_service = extra.dst_service = 16;
-    merged.src_port = extra.src_port = 30000;
-    merged.dst_port = extra.dst_port = 30000;
-    merged.org_port = extra.org_port = 1234;
-    merged.dst_pod_idx = extra.dst_pod_idx = 2;
-    merged.dma_isolated = extra.dma_isolated = 1;
-    merged.seq = 7;
-    extra.seq = 8;
-    merged.total_len = p1.len;
-    extra.total_len = p2.len;
-    merged.pieces = merged.pieces_tail = &p1;
-    extra.pieces = extra.pieces_tail = &p2;
-    merged.npieces = extra.npieces = 1;
-    px->sg_pieces_max = 8;
-    assert(px_l7_unit_absorb(px, &merged, &extra));
-    assert(merged.total_len == 2200 && merged.npieces == 2 && merged.seq == 7);
-    assert(merged.pieces == &p1 && merged.pieces_tail == &p2 && p1.next == &p2);
-    assert(extra.pieces == NULL && tls_unit_mag == &extra);
-
-    struct px_unit incompatible;
-    memset(&incompatible, 0, sizeof(incompatible));
-    incompatible = merged;
-    incompatible.dst_port++;
-    incompatible.pieces = incompatible.pieces_tail = NULL;
-    incompatible.npieces = 0;
-    assert(!px_l7_unit_absorb(px, &merged, &incompatible));
-
     /* Three workers with two producer threads: TEST_REGION's owner (2 % 3) is
      * neither producer, so every publication takes the cross-owner inbox. */
     px->n_workers = 3;

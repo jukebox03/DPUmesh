@@ -1,13 +1,15 @@
 # linkerd Benchmark
 
 The linkerd columns of the gRPC L7 evaluation. They use the gRPC workloads and
-the collectors of [`integrations/grpc/bench`](../../grpc/bench/) unchanged; what
+the collectors of [`integrations/grpc/bench`](../../integrations/grpc/bench/) unchanged; what
 lives here is the pod topology that puts a linkerd2-proxy sidecar in the path
 and the campaign driver that runs all six L7 paths as one session.
 
-This is a measurement of stock linkerd against stock Envoy and against DPUmesh.
-It is not the linkerd-on-DPUmesh integration; that is [`../PLAN.md`](../PLAN.md),
-and its M4 milestone is what this dataset becomes the baseline for.
+This is a measurement of stock linkerd against stock Envoy and against DPUmesh,
+with the proxy in a host sidecar. It is not the linkerd-on-DPUmesh integration,
+which runs the proxy on the DPU ARM: `../../design/L7.md` describes that layer
+and `../README.md` how to build it. This dataset is the baseline it is measured
+against.
 
 ## 1. Layout
 
@@ -91,5 +93,5 @@ core its application runs on.
 
 ## 6. Measurement rules
 
-Those of [the gRPC benchmark](../../grpc/bench/README.md#7-measurement-rules),
+Those of [the gRPC benchmark](../../integrations/grpc/bench/README.md#7-measurement-rules),
 unchanged. The evaluation is in [report/REPORT_LINKERD.md](report/REPORT_LINKERD.md).

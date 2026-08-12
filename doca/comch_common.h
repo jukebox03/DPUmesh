@@ -35,6 +35,7 @@ enum dmesh_msg_type {
     DMESH_MSG_POD_UNREGISTER=7, /* Host→DPU: stop routing and quiesce every remote DMA reference */
     DMESH_MSG_POD_QUIESCED=8,  /* DPU→Host: remote mappings reclaimed; host may destroy exports */
     DMESH_MSG_REV_DOORBELL=9,  /* DPU→Host: reverse-ring wake notification */
+    DMESH_MSG_POD_IDENTITY=10, /* Host→DPU: this pod's workload name, for the L7 layer */
 };
 
 /* POD_ASSIGNED only reserves an address. A channel is usable only after the DPU
@@ -138,6 +139,22 @@ struct dmesh_register_msg {
 };
 _Static_assert(sizeof(struct dmesh_register_msg) == 12,
                "dmesh_register_msg ABI drift");
+
+/* Host→DPU: the workload this pod runs as, which the L7 layer needs and the
+ * registration message cannot carry — that struct is checked by exact length on
+ * both sides, so growing it would force host and DPU to be deployed in
+ * lockstep. Sent on the registration connection before POD_REGISTER, so it is
+ * in place before any byte flows, and bound to the slot the connection owns:
+ * the DPU grants the identity rather than accepting a claim from the pod. A
+ * replay is idempotent, and a host that does not send it simply leaves the
+ * workload empty. */
+#define DMESH_WORKLOAD_MAX 64
+struct dmesh_identity_msg {
+    enum dmesh_msg_type type;   /* = DMESH_MSG_POD_IDENTITY */
+    char workload[DMESH_WORKLOAD_MAX];   /* NUL-terminated */
+};
+_Static_assert(sizeof(struct dmesh_identity_msg) == 68,
+               "dmesh_identity_msg ABI drift");
 
 /* DPU→Host: the pod_id the DPU allocated for a pod_id==-1 registration. Byte
  * `type` at offset 0 (the host dispatches DPU→host messages by recv_buffer[0]). */

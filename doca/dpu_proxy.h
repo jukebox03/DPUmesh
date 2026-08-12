@@ -1,7 +1,9 @@
 #ifndef DPU_PROXY_H
 #define DPU_PROXY_H
 
-/* ARM byte-stream proxy with optional service-selected L7 framing. */
+/* ARM byte-stream proxy. A service selects, per connection, whether its payload
+ * is forwarded at L4 or handed to the L7 layer behind
+ * linkerd/include/dmesh_l7.h. */
 
 #include <stdint.h>
 
@@ -48,6 +50,19 @@ enum px_progress_state px_worker_drain(struct objects *objs, int worker_id);
 int px_worker_notification_fd(struct objects *objs, int worker_id);
 int px_worker_arm_notification(struct objects *objs, int worker_id);
 void px_worker_clear_notification(struct objects *objs, int worker_id, int fd);
+
+/* ---- L7 layer, driven from the worker loop ----
+ *
+ * All three are no-ops unless a service selects a mode that needs the L7 layer,
+ * so an empty gate leaves the transport's own path. */
+
+/* Build this worker's L7 runtime. Negative on failure. */
+int px_l7_attach_worker(struct objects *objs, int worker_id);
+
+/* Advance it by one step. 1 if it made progress, which keeps the worker hot. */
+int px_l7_step_worker(struct objects *objs, int worker_id);
+
+void px_l7_detach_worker(struct objects *objs, int worker_id);
 
 /* True only after the egress owner has stopped submitting for this dead pod,
  * every destination DMA/credit read has completed, all lane queues are empty,

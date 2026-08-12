@@ -195,6 +195,10 @@ struct pod_state {
     int32_t pod_id;
     int32_t service_id;     /* this pod's service id (an LB backend of that service; the live
                              * set is derived from pods[] by service_id); SVC_NONE if none */
+    /* Workload this pod runs as, from DMESH_MSG_POD_IDENTITY. Bound to the slot
+     * rather than asserted per message, so a reused slot cannot inherit the
+     * previous tenant's identity. Empty when the host did not send one. */
+    char workload[DMESH_WORKLOAD_MAX];
     int registered;         /* 1 = DMESH_MSG_POD_REGISTER received */
     int dma_ready;          /* 1 = all mmaps + worker barrier + DPA ADD ACKs complete */
     int init_result;        /* enum dmesh_pod_init_result; terminal once non-PENDING */
@@ -292,7 +296,7 @@ struct dpu_upstream {
     int32_t  client_pod;
     uint16_t client_port;   /* the downstream client's REAL port */
     int32_t  backend_pod;
-    uint8_t  codec_id;
+    uint8_t  l7_mode;      /* enum px_l7_mode, inherited by the reply */
     uint16_t delivery_seq;
 };
 
@@ -337,7 +341,7 @@ static inline uint16_t dpu_upstream_find(struct dpu_conntrack *ct, int32_t cp,
 /* Allocate an upstream port that encodes the return-path worker as p % A. The
  * search walks that residue class from the round-robin cursor. */
 static inline uint16_t dpu_upstream_create(struct dpu_conntrack *ct, int32_t cp,
-                                           uint16_t cport, int32_t bpod, uint8_t codec_id,
+                                           uint16_t cport, int32_t bpod, uint8_t l7_mode,
                                            uint16_t owner, uint16_t stride) {
     uint16_t uP = 0;
     if (stride < 1) stride = 1;
@@ -359,7 +363,7 @@ static inline uint16_t dpu_upstream_create(struct dpu_conntrack *ct, int32_t cp,
     ct->upstream[uP].client_pod  = cp;
     ct->upstream[uP].client_port = cport;
     ct->upstream[uP].backend_pod = bpod;
-    ct->upstream[uP].codec_id    = codec_id;
+    ct->upstream[uP].l7_mode     = l7_mode;
     ct->upstream[uP].delivery_seq = 0;
     uint32_t mask = DPU_CONN_HT_SIZE - 1u, i = dpu_ct_hash(cp, cport, bpod);
     for (uint32_t n = 0; n < DPU_CONN_HT_SIZE; n++) {

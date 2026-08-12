@@ -14,11 +14,12 @@ BINDIR  := $(BUILD)/bin
 TESTDIR := $(BUILD)/test
 
 # -Iinclude → <dpumesh/...> ; -I. → the "doca/..." includes from src/dmesh_core.c
+# -Ilinkerd/include → <dmesh_l7.h>, the L7 adapter contract the proxy compiles against
 # -Wextra minus the categories that only fire on deliberate patterns: callback
 # parameters fixed by DOCA's signatures, ring index arithmetic, and port-table
 # bound checks a uint16_t index already satisfies.
 WARNFLAGS := -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare -Wno-type-limits
-CFLAGS  := -O2 -g $(WARNFLAGS) -fPIC -DDOCA_ALLOW_EXPERIMENTAL_API -Iinclude -I. $(DOCA_CFLAGS)
+CFLAGS  := -O2 -g $(WARNFLAGS) -fPIC -DDOCA_ALLOW_EXPERIMENTAL_API -Iinclude -I. -Ilinkerd/include $(DOCA_CFLAGS)
 
 # Runtime search paths. In a container everything is copied to /usr/local/lib;
 # for a local build we also point at the in-tree lib dir and the DOCA libs.
@@ -52,12 +53,11 @@ LIB_LINK := $(LIBDIR)/libdpumesh.so
 
 # ---- consumers of the library ------------------------------------------------
 # dmesh_* API clients (socket/epoll façade over dmesh.h)
-DMESH_BINS := bench_dpumesh echo_dpumesh loopback_dpumesh stream_dpumesh verbs_dpumesh
+DMESH_BINS := bench_dpumesh echo_dpumesh loopback_dpumesh verbs_dpumesh
 bench_dpumesh_SRC    := bench/apps/bench_dpumesh.c
 bench_dpumesh_LIBS   := -lm
 echo_dpumesh_SRC     := bench/apps/echo_dpumesh.c
 loopback_dpumesh_SRC := bench/validators/loopback_dpumesh.c
-stream_dpumesh_SRC   := bench/validators/stream_dpumesh.c
 verbs_dpumesh_SRC    := bench/validators/verbs_dpumesh.c
 
 # LD_PRELOAD shim (interposes libc sockets → dmesh) + its vanilla-TCP validators

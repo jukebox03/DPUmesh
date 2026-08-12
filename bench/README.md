@@ -71,7 +71,6 @@ sudo swapoff -a
 DPUMESH_DPA_THREADS=32 \
 DPUMESH_RINGS_PER_POD=8 \
 DPUMESH_ARM_WORKERS=8 \
-DPUMESH_PROXY_L7_SVC= \
 DPUMESH_LOG_LEVEL=40 \
 BENCH_NUMA_POLICY=local \
 BENCH_DEPLOY_SCOPE=l4 \
@@ -144,7 +143,7 @@ collected by a separate campaign:
 `core_campaign.sh` drives one configuration at a time over three offered rates
 and three repetitions; `core_report.sh` writes the per-layer CSVs, the flame
 graphs and the figures. Results, method and contract are in
-[CORE.md](report/CORE.md).
+[REPORT_CORE.md](report/REPORT_CORE.md).
 
 ## 5. gRPC measurements
 
@@ -153,7 +152,7 @@ only the four L7 paths register:
 
 ```sh
 DPUMESH_DPA_THREADS=32 DPUMESH_RINGS_PER_POD=8 DPUMESH_ARM_WORKERS=8 \
-DPUMESH_PROXY_L7_SVC= BENCH_NUMA_POLICY=local BENCH_DEPLOY_SCOPE=grpc \
+BENCH_NUMA_POLICY=local BENCH_DEPLOY_SCOPE=grpc \
 ./bench/bench.sh deploy
 
 CONFIGS="grpc-dpumesh grpc-envoy-permissive grpc-envoy-strict grpc-tcp" \
@@ -193,7 +192,6 @@ the real registration, DMA, byte-transfer, FIN, and cleanup paths on BlueField:
 ```sh
 ./bench/bench.sh loopback 1000 1024 0
 ./bench/bench.sh verbs    1000 1024 0 32 4
-./bench/bench.sh stream   1000 1024 1
 ./bench/bench.sh preload  1000 1024 8
 ```
 
@@ -218,6 +216,25 @@ test, native symbol linkage, and an optional BlueField client/server smoke binar
 7. Report p50 with the tail. On the gRPC paths they move independently: p50 can
    stay flat across a range where p99 changes by an order of magnitude, so a
    capacity set by a p99 bound is a latency result, not a throughput result.
+8. Record what the point was taken on: binary hashes, core affinity, NUMA
+   placement, backend count, and the active topology. Request and response
+   frames must match, and the generator's own schedule must have held.
+9. Treat a capacity as a lower bound. The rate a ramp stops at is the first
+   failure, and a path can refuse a rate and deliver a higher one; establish
+   whether it recovers before quoting the number as a ceiling.
+10. Measure the instrument. A load generator has its own ceiling, and a
+    configuration that reports the generator's number is not being measured at
+    all. The matched TCP path serves as that reference.
+11. Compare cost per request only at equal load. Batching depth follows queue
+    occupancy, so the offered rate moves the very thing being measured; two
+    configurations compared at their own operating points are not comparable.
 
-The L4 evaluation is in [REPORT.md](report/REPORT.md); the gRPC evaluation is in
-[integrations/grpc/bench/report/REPORT_GRPC.md](../integrations/grpc/bench/report/REPORT_GRPC.md).
+The evaluations are:
+
+| Report | Covers |
+|---|---|
+| [report/REPORT.md](report/REPORT.md) | L4: DPUmesh against Envoy sidecars, host and ARM cost |
+| [report/REPORT_L7.md](report/REPORT_L7.md) | L7: what backend-selection granularity costs |
+| [report/REPORT_CORE.md](report/REPORT_CORE.md) | where the cores go, attributed per component |
+| [../integrations/grpc/bench/report/REPORT_GRPC.md](../integrations/grpc/bench/report/REPORT_GRPC.md) | gRPC over DPUmesh against Envoy and TCP, across core and channel budgets |
+| [../linkerd/bench/report/REPORT_LINKERD.md](../linkerd/bench/report/REPORT_LINKERD.md) | linkerd sidecar columns of the gRPC evaluation |

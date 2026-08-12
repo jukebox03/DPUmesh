@@ -449,6 +449,9 @@ dpu_worker_run(struct objects *objs, struct dpu_data_worker *worker_state)
 
     /* Resume connections stalled by egress backpressure. */
     did += px_drain_stalled(objs, worker_state->id);
+    /* Advance the L7 layer before egress, so bytes it produced this revolution
+     * are submitted in the same one. */
+    did += px_l7_step_worker(objs, worker_state->id);
     /* Submit DMA, progress completions, and retire owned lanes. */
     enum px_progress_state proxy_state =
         px_worker_drain(objs, worker_state->id);
@@ -522,6 +525,13 @@ dpu_data_worker_main(void *arg)
         return NULL;
     }
 
+    if (px_l7_attach_worker(objs, worker_state->id) < 0) {
+        DOCA_LOG_ERR("ARM worker %d: L7 layer attach failed", worker_state->id);
+        atomic_store_explicit(&worker_state->init_state, -1, memory_order_release);
+        close(ep);
+        return NULL;
+    }
+
     atomic_store_explicit(&worker_state->init_state, 1, memory_order_release);
 
     uint64_t wake_period = dpu_wake_clock_hz() / 1000u;
@@ -558,6 +568,7 @@ dpu_data_worker_main(void *arg)
         (void)doca_pe_clear_notification(worker_state->pe, cfd);
         px_worker_clear_notification(objs, worker_state->id, dfd);
     }
+    px_l7_detach_worker(objs, worker_state->id);
     close(ep);
     return NULL;
 }

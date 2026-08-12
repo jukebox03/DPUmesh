@@ -1539,6 +1539,22 @@ static doca_error_t init_control_path(dpumesh_ctx_t *ctx) {
     __atomic_store_n(&ctx->doca_objs.landing_stripes, 0,
                      __ATOMIC_RELAXED);
     __atomic_store_n(&ctx->doca_objs.pod_quiesced, 0, __ATOMIC_RELEASE);
+    /* State the workload before registering. It is a separate message because
+     * the registration struct is checked by exact length on both sides; the DPU
+     * binds what arrives here to this connection's slot. */
+    {
+        const char *workload = getenv("DPUMESH_SERVICE");
+        if (workload && *workload) {
+            struct dmesh_identity_msg idm;
+            memset(&idm, 0, sizeof(idm));
+            idm.type = DMESH_MSG_POD_IDENTITY;
+            snprintf(idm.workload, sizeof(idm.workload), "%s", workload);
+            if (client_send_msg(&ctx->doca_objs, (const char *)&idm,
+                                sizeof(idm)) != DOCA_SUCCESS)
+                DOCA_LOG_WARN("IDENTITY send failed; the L7 layer sees no workload");
+        }
+    }
+
     ctx->reg_msg.type = DMESH_MSG_POD_REGISTER;
     ctx->reg_msg.pod_id = -1;                    /* DPU assigns this node's address */
     ctx->reg_msg.service_id = ctx->service_id;   /* DPU: pods[our slot].service_id = this (the LB set is derived from it) */
@@ -2609,10 +2625,6 @@ void dpumesh_get_wait_split(dpumesh_ctx_t *ctx, unsigned long long *window,
 
 int dpumesh_get_pod_id(dpumesh_ctx_t *ctx) {
     return ctx->pod_id;
-}
-
-const char *dpumesh_get_worker_id(dpumesh_ctx_t *ctx) {
-    return ctx->worker_id;
 }
 
 /* ====================================================================

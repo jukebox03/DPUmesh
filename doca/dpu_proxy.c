@@ -1,4 +1,6 @@
-/* Ordered L4 forwarding with optional service-selected L7 framing. */
+/* Ordered forwarding. A connection's routing is resolved once from its service:
+ * L4 passthrough, or the L7 layer behind linkerd/include/dmesh_l7.h, which is
+ * handed staging extents and names its own backend. See design/L7.md. */
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
@@ -6,7 +8,7 @@
 
 #include "dpu_proxy.h"
 #include <pthread.h>
-#include "dpu_l7.h"
+#include <dmesh_l7.h>
 
 #include "object.h"
 #include "dpu_worker.h"
@@ -46,24 +48,47 @@ DOCA_LOG_REGISTER(DPU_PROXY);
 /* Source pieces per SG task, clamped by the device capability at init. */
 #define PX_SG_PIECES_MAX    64
 
-/* The codec receives a bounded contiguous head. Complete frames remain in staging
- * and are gathered directly into one egress unit. */
-#define PX_HEAD_MAX         (4u * 1024u)
-#define PX_L7_FRAME_MAX     (128u * 1024u)
 /* Bound ACK delay while collapsing physically adjacent 8 KiB DPA completions
- * into one ARM window extent. A 128 KiB L7 frame then needs at most two pieces. */
+ * into one ARM window extent. */
 #define PX_ARRIVAL_COALESCE_MAX (64u * 1024u)
-/* Coalesce only complete frames already present in one parser pass. There is no
- * timer/dwell: this caps one receiver notification while preserving low-load
- * latency and bounds the SG width of the resulting DMA task. */
-#define PX_L7_EGRESS_COALESCE_MAX (64u * 1024u)
-/* With the normal 8 KiB forward completion, larger frames cannot contribute
- * two complete messages to one parser pass. Keep them on the original direct
- * enqueue path instead of paying aggregation bookkeeping for no possible gain. */
-#define PX_L7_EGRESS_COALESCE_FRAME_MAX (PX_ENTRY_BYTES_MAX / 2u)
 
 #define PX_DST_DEFER        (-2)
-#define PX_CODEC_L7         1u
+
+/* How far the L7 layer is involved in one connection, selected per service.
+ * Recorded in conntrack when the upstream port is issued, so a reply inherits
+ * its request's mode. */
+enum px_l7_mode {
+    PX_L7_NONE = 0,      /* fallback: the data plane alone */
+    PX_L7_DECISION,      /* one query per connection; payload does not traverse */
+    PX_L7_OPAQUE,        /* payload traverses the L7 layer */
+    PX_L7_FULL,          /* the above, plus request-level routing */
+};
+
+/* Modes whose payload is handed to the L7 layer. */
+static inline int px_l7_carries_bytes(uint8_t mode) {
+    return mode == PX_L7_OPAQUE || mode == PX_L7_FULL;
+}
+
+/* Bytes handed to the L7 layer and not yet released. The sender's TX credit is
+ * the real bound; this caps how far one connection runs ahead of a slow
+ * consumer, and how much staging a single stream can hold hostage. */
+#define PX_L7_CUSTODY_MAX       (256u * 1024u)
+/* Hand-overs per parse pass, so a layer that takes one byte at a time cannot
+ * monopolize the worker. What is left re-enters through the stall list. */
+#define PX_L7_SEGMENTS_PER_PASS 16
+
+/* Egress arena for bytes the L7 layer produced rather than forwarded.
+ *
+ * A chunk is wider than one reverse entry on purpose. Quantizing deliveries at
+ * the entry width splits any message that carries a header on top of a full
+ * payload, and each extra delivery is an extra host-side publication. Emission
+ * still cuts entries at PX_ENTRY_BYTES_MAX, so credit accounting is unchanged. */
+#define PX_ARENA_CHUNK      (2u * PX_ENTRY_BYTES_MAX)
+#define PX_ARENA_CHUNKS     1024u
+/* One send becomes one delivery, so a caller handing a whole message gets it
+ * delivered whole: chunks are chained rather than the message being cut. */
+#define PX_L7_SEND_MAX      (4u * PX_ARENA_CHUNK)
+#define PX_L7_SEND_CHUNKS   (PX_L7_SEND_MAX / PX_ARENA_CHUNK)
 
 /* Refresh the (DMA-read) host credit cache when headroom drops below this
  * many entries — same lazy scheme as the DPA reverse admission. */
@@ -99,12 +124,22 @@ struct px_arrival {
     uint16_t ack_emit_seq;
 };
 
-/* One contiguous staging extent of a unit (an SG source piece). */
+/* One egress arena chunk: DPU-local bytes the SG engine can source. Interchangeable
+ * across workers, like the other pool nodes, so it is freed wherever its unit
+ * retires. */
+struct px_chunk {
+    struct px_chunk *next;
+    uint32_t off;                 /* byte offset into dmesh_proxy.arena */
+};
+
+/* One contiguous SG source piece: either an extent of arrival staging (arr set,
+ * custody attached) or an arena chunk the L7 layer wrote (chunk set). */
 struct px_piece {
     struct px_piece   *next;
-    struct px_arrival *arr;       /* custody countdown target */
-    int32_t  pod_idx;
-    uint32_t staging_off, len;
+    struct px_arrival *arr;       /* custody countdown target; NULL for arena */
+    struct px_chunk   *chunk;     /* arena source; NULL for arrival staging */
+    int32_t  pod_idx;             /* staging owner; -1 for arena */
+    uint32_t staging_off, len;    /* offset into the pod buffer, or into the arena */
 };
 
 /* One delivery to one receiving conn: one seg (or a FIN marker, total_len 0).
@@ -125,7 +160,6 @@ struct px_unit {
     uint8_t  emit_fin_done;
     int8_t   dst_pod_idx;         /* receiver pod slot (REV_DONE target; set at ship) */
     uint8_t  err;                 /* batch errored; skip REV_DONE */
-    uint8_t  dma_isolated;        /* keep this complete L7 group in one DMA task */
     struct px_piece *pieces, *pieces_tail;
     int npieces;
 };
@@ -228,13 +262,6 @@ struct px_conn {
     struct px_arrival *whead, *wtail; /* input window (unparsed tail kept) */
     uint64_t stream_end;              /* total bytes arrived */
     uint64_t parse_pos;               /* window cursor (consumed boundary) */
-    /* seam: a contiguous copy of stream bytes [seam_base, seam_base+seam_len),
-     * built only when a parse stalls across extent boundaries ("tail aligned
-     * on demand"). Parser-view only — SG always gathers from staging. */
-    uint8_t *seam;
-    uint32_t seam_cap, seam_len;
-    uint64_t seam_base;
-    int      seam_on;
     int      fin_pending, dead;
     int      eof_pending;             /* poisoned, but its sender has not been told yet
                                        * (unit pool was dry) — px_drain_stalled retries */
@@ -249,13 +276,22 @@ struct px_conn {
     uint8_t  forward_seq_valid;
     uint16_t return_seq;              /* units serialized back to this downstream QP */
     int      dst_service_set;
-    int      is_l7;
-    uint32_t frame_len;               /* complete L7 frame length latched from its head */
-    int32_t  frame_dst;               /* request backend or reply client, selected once */
+    uint8_t  l7_mode;                 /* enum px_l7_mode, resolved once per conn */
+    uint8_t  l7_open;                 /* the L7 layer holds this conn */
+    uint8_t  l7_closed;               /* closed once; never reopened */
+    /* Bytes handed to the L7 layer, ahead of parse_pos. The window keeps them
+     * until dmesh_l7_release reports consumption, so custody outlives the parse
+     * pass that handed them over. */
+    uint64_t l7_handed;
+    uint32_t l7_release_pending;      /* released but not yet applied (see px_l7_apply_release) */
+    struct px_chunk *l7_tx_chunk;     /* egress memory lent out by dmesh_l7_tx_reserve */
+    uint8_t  l7_resolved;             /* answered once by l7_resolve; owes a report */
+    uint64_t l7_open_ns;              /* when that answer was given */
+    uint64_t l7_shipped;              /* bytes forwarded, reported back as load */
     /* Connection-scoped LB stickiness (Envoy TCP-proxy / session-affinity): the
-     * backend this byte-stream conn was pinned to. Only the passthru (no-codec) path
-     * uses it: with no message boundaries the stream cannot be split, so it stays on
-     * one backend for life. A codec'd service routes per message and never comes here.
+     * backend this byte-stream conn was pinned to. The L4 path uses it: with no
+     * message boundaries the stream cannot be split, so it stays on one backend for
+     * life. `decision` mode pins it from the L7 layer's answer instead.
      * Cluster-scoped, so a message to a different service re-picks. -1 = unpinned. */
     int32_t  pinned_backend;
     int16_t  pinned_cluster;
@@ -293,12 +329,18 @@ struct px_engine {
 struct px_worker_state {
     struct px_conn **buckets;      /* PX_CONN_HASH buckets, per-worker */
     struct dpu_conntrack *ct;
+    struct objects *objs;          /* the L7 entry points reach the proxy through this */
     int id;
     struct px_conn *stall_head;    /* conns parked by px_stall; drained by px_drain_stalled */
+    /* Set while px_parse_linkerd walks the window. A release reported from inside
+     * that walk is applied at its end instead of parking the conn, because
+     * applying it there would unlink arrivals the walk still holds. */
+    int in_l7_parse;
 };
 
 struct dmesh_proxy {
-    uint8_t  svc_l7[POD_ID_SPACE];       /* DPUMESH_PROXY_L7_SVC csv → route via the L7 author hook */
+    uint8_t  svc_mode[POD_ID_SPACE];     /* service id → enum px_l7_mode */
+    int      l7_attached;                /* some service selects a mode with an L7 layer */
     uint32_t sg_pieces_max;
 
     /* Per-worker connection and routing tables. */
@@ -309,6 +351,11 @@ struct dmesh_proxy {
     struct px_arrival *arr_mem,  *arr_free;
     struct px_piece   *piece_mem, *piece_free;
     struct px_unit    *unit_mem, *unit_free;
+    /* Egress arena: one DPU-local mmap carved into fixed chunks, allocated only
+     * when a service selects a mode whose payload the L7 layer rewrites. */
+    struct doca_mmap  *arena_mmap;
+    uint8_t           *arena;
+    struct px_chunk   *chunk_mem, *chunk_free;
     pthread_mutex_t    pool_lock;
     struct px_lane lanes[MAX_PODS][MAX_EU_PER_POD];
     struct px_op   refresh_ops[MAX_PODS][MAX_EU_PER_POD];
@@ -326,6 +373,8 @@ struct dmesh_proxy {
     atomic_ullong stat_stall_unit;
     atomic_ullong stat_stall_piece;
     atomic_ullong stat_stall_uport;
+    atomic_ullong stat_stall_arena;
+    atomic_ullong stat_l7_fallback;      /* conns the L7 layer declined */
 };
 
 static inline uint64_t px_stat_inc(atomic_ullong *counter)
@@ -392,6 +441,8 @@ static __thread struct px_piece   *tls_piece_mag;
 static __thread int                tls_piece_mag_n;
 static __thread struct px_unit    *tls_unit_mag;
 static __thread int                tls_unit_mag_n;
+static __thread struct px_chunk   *tls_chunk_mag;
+static __thread int                tls_chunk_mag_n;
 
 static void
 px_ack_queue_init(struct px_ack_release_queue *q)
@@ -506,6 +557,7 @@ static void free_fn(struct dmesh_proxy *px, struct type *n) {                 \
 PX_POOL_FUNCS(px_arrival, px_arrival_alloc,   px_arrival_free, arr)
 PX_POOL_FUNCS(px_piece,   px_piece_alloc,     px_piece_free,   piece)
 PX_POOL_FUNCS(px_unit,    px_unit_alloc_node, px_unit_free,    unit)
+PX_POOL_FUNCS(px_chunk,   px_chunk_alloc,     px_chunk_free,   chunk)
 
 /* Units start zeroed; the other node types are fully field-initialized. */
 static struct px_unit *px_unit_alloc(struct dmesh_proxy *px) {
@@ -514,11 +566,15 @@ static struct px_unit *px_unit_alloc(struct dmesh_proxy *px) {
         memset(u, 0, sizeof(*u));
     return u;
 }
-/* Free the unit and its piece chain. */
+/* Free the unit and its piece chain. Arena chunks return here — the single
+ * place every unit passes through, whether it was delivered, dropped, or
+ * abandoned before submit — so a chunk cannot be leaked on an error path. */
 static void px_unit_free_node(struct dmesh_proxy *px, struct px_unit *u) {
     while (u->pieces) {
         struct px_piece *p = u->pieces;
         u->pieces = p->next;
+        if (p->chunk)
+            px_chunk_free(px, p->chunk);
         px_piece_free(px, p);
     }
     px_unit_free(px, u);
@@ -580,6 +636,13 @@ static inline void px_custody_sub(struct objects *objs, struct px_arrival *a, ui
         px_arrival_release(objs, a);
 }
 
+/* Release one source piece's hold once the egress path is done reading it. An
+ * arena piece holds no arrival; its chunk returns with the unit. */
+static inline void px_piece_release(struct objects *objs, struct px_piece *p) {
+    if (p->arr)
+        px_custody_sub(objs, p->arr, p->len);
+}
+
 /* ====== conn table ====== */
 
 static inline uint32_t px_conn_hash(int32_t pod, uint16_t port) {
@@ -632,26 +695,31 @@ static void px_drop_window(struct objects *objs, struct px_conn *c, const char *
 /* Defined below with the lanes; px_fin_to_sender (above them) queues the EOF unit. */
 static void px_lane_enqueue(struct dmesh_proxy *px, int pod_idx, int region, struct px_unit *u);
 
-/* L7 frame loop defined with the connection parser. */
-static void px_parse_l7(struct objects *objs, struct px_conn *c);
+static void px_l7_close(struct objects *objs, struct px_conn *c, int eof);
+static uint64_t px_monotonic_ns(void);
 
-/* Resolve the codec once for each request or upstream reply connection. */
+/* Resolve the mode once for each request or upstream reply connection. A request
+ * reads the service table; a reply cannot see a service id, so it inherits the
+ * mode conntrack recorded when its upstream port was issued. */
 static void px_resolve_route(struct objects *objs, struct px_conn *c,
                              int is_reply, int16_t svc) {
     struct dmesh_proxy *px = objs->proxy;
-    c->is_l7 = 0;
-    if (!is_reply && svc >= 0 && svc < POD_ID_SPACE && px->svc_l7[svc]) {
-        c->is_l7 = 1;
+    c->l7_mode = PX_L7_NONE;
+    if (!is_reply) {
+        if (svc >= 0 && svc < POD_ID_SPACE)
+            c->l7_mode = px->svc_mode[svc];
         return;
     }
-    if (is_reply && c->pub.src_port >= DMESH_UPORT_BASE) {
+    if (c->pub.src_port >= DMESH_UPORT_BASE) {
         struct dpu_upstream *u = &px_cur_worker->ct->upstream[c->pub.src_port];
-        if (u->in_use && u->codec_id == PX_CODEC_L7)
-            c->is_l7 = 1;
+        if (u->in_use)
+            c->l7_mode = u->l7_mode;
     }
 }
 
 static void px_conn_del(struct objects *objs, struct px_conn *c) {
+    px_l7_close(objs, c, 0);                   /* before the window goes: the L7
+                                                * layer may still point into it */
     if (c->parse_pos < c->stream_end)
         px_drop_window(objs, c, "conn teardown");
     /* remaining window arrivals are fully parsed; any with pending egress
@@ -663,7 +731,6 @@ static void px_conn_del(struct objects *objs, struct px_conn *c) {
         px_custody_sub(objs, a, 1);            /* remove window ref; release iff bytes done */
     }
     c->wtail = NULL;
-    free(c->seam);
     if (c->stalled) {                          /* unlink before the free — px_drain_stalled
                                                 * would otherwise walk into freed memory */
         struct px_conn **sl = &px_cur_worker->stall_head;
@@ -687,25 +754,15 @@ static void px_conn_del_key(struct objects *objs, int32_t pod, uint16_t port) {
         px_conn_del(objs, c);
 }
 
-/* ====== window: view / seam / advance ====== */
+/* ====== window: view / advance ====== */
 
-/* The parser's contiguous view at parse_pos: the seam if active, else the
- * remainder of the single staging extent containing the cursor (zero-copy). */
+/* The parser's contiguous view at parse_pos: the remainder of the staging run
+ * containing the cursor (zero-copy). */
 static void px_view(struct objects *objs, struct px_conn *c,
                     const uint8_t **buf, uint32_t *avail) {
     *buf = NULL; *avail = 0;
     if (c->parse_pos >= c->stream_end)
         return;
-    if (c->seam_on) {
-        uint64_t seam_end = c->seam_base + c->seam_len;
-        if (c->parse_pos < seam_end) {
-            *buf = c->seam + (uint32_t)(c->parse_pos - c->seam_base);
-            *avail = (uint32_t)(seam_end - c->parse_pos);
-            return;
-        }
-        c->seam_on = 0;
-        c->seam_len = 0;
-    }
     struct px_arrival *a = c->whead;
     while (a && a->stream_base + a->len <= c->parse_pos)
         a = a->next;
@@ -716,8 +773,8 @@ static void px_view(struct objects *objs, struct px_conn *c,
            (uint32_t)(c->parse_pos - a->stream_base);
     /* Per-conn contiguous staging (mirror of host TX): extend the view across
      * arrivals whose staging bytes PHYSICALLY abut in the SAME pod buffer, so a
-     * message spanning arrivals is parsed with NO seam. Stops at a physical
-     * discontinuity (the host TX byte-ring wrap) — the seam still bridges that. */
+     * run spanning arrivals is handed over whole. Stops at a physical
+     * discontinuity (the host TX byte-ring wrap). */
     uint64_t run_end  = a->stream_base + a->len;
     uint32_t phys_end = a->staging_off + a->len;
     for (struct px_arrival *n = a->next;
@@ -727,81 +784,6 @@ static void px_view(struct objects *objs, struct px_conn *c,
         phys_end += n->len;
     }
     *avail = (uint32_t)(run_end - c->parse_pos);
-}
-
-/* Head window for the L7 path: the same view as px_view but capped at
- * PX_HEAD_MAX. The parser reads only the message HEAD here; the body ships from
- * staging via SG and is never linearized. */
-static void px_head_view(struct objects *objs, struct px_conn *c,
-                         const uint8_t **buf, uint32_t *avail) {
-    px_view(objs, c, buf, avail);
-    if (*avail > PX_HEAD_MAX)
-        *avail = PX_HEAD_MAX;
-}
-
-/* Copy stream bytes [from, to) out of the window's staging extents. */
-static void px_copy_stream(struct objects *objs, struct px_conn *c,
-                           uint8_t *dst, uint64_t from, uint64_t to) {
-    struct px_arrival *a = c->whead;
-    while (a && a->stream_base + a->len <= from)
-        a = a->next;
-    while (a && from < to) {
-        uint64_t aend = a->stream_base + a->len;
-        uint64_t take = (to < aend ? to : aend) - from;
-        const uint8_t *src = (const uint8_t *)objs->pods[a->pod_idx].dma_buffer +
-                             a->staging_off + (uint32_t)(from - a->stream_base);
-        memcpy(dst, src, (size_t)take);
-        dst += take;
-        from += take;
-        a = a->next;
-    }
-}
-
-/* Grow the parser's contiguous view past the current extent boundary by
- * aligning the unconsumed tail (+ later bytes) into the seam buffer.
- * Returns 1 if the view got bigger, 0 if nothing more can be shown. */
-static int px_seam_grow(struct objects *objs, struct px_conn *c) {
-    uint64_t base, view_end;
-
-    if (c->seam_on) {
-        base = c->seam_base;
-        view_end = c->seam_base + c->seam_len;
-    } else {
-        base = c->parse_pos;
-        struct px_arrival *a = c->whead;
-        while (a && a->stream_base + a->len <= c->parse_pos)
-            a = a->next;
-        view_end = a ? a->stream_base + a->len : c->parse_pos;
-    }
-    if (c->stream_end <= view_end)
-        return 0;                              /* nothing beyond the view yet */
-
-    uint32_t win = PX_HEAD_MAX;
-    uint64_t want_end = base + win;
-    if (want_end > c->stream_end)
-        want_end = c->stream_end;
-    if (want_end <= view_end)
-        return 0;                              /* window cap reached */
-
-    uint32_t need = (uint32_t)(want_end - base);
-    if (need > c->seam_cap) {
-        uint32_t cap = c->seam_cap ? c->seam_cap : 8192;
-        while (cap < need)
-            cap *= 2;
-        if (cap > PX_HEAD_MAX)
-            cap = PX_HEAD_MAX;
-        uint8_t *nb = (uint8_t *)realloc(c->seam, cap);
-        if (!nb)
-            return 0;                          /* OOM: behave as "can't grow" */
-        c->seam = nb;
-        c->seam_cap = cap;
-    }
-    uint32_t have = c->seam_on ? c->seam_len : 0;
-    px_copy_stream(objs, c, c->seam + have, base + have, want_end);
-    c->seam_base = base;
-    c->seam_len = need;
-    c->seam_on = 1;
-    return 1;
 }
 
 /* Advance the window cursor by `consumed`. Consumed bytes NOT claimed by any
@@ -823,10 +805,6 @@ static void px_advance(struct objects *objs, struct px_conn *c, uint32_t consume
         a = a->next;
     }
     c->parse_pos = to;
-    if (c->seam_on && c->parse_pos >= c->seam_base + c->seam_len) {
-        c->seam_on = 0;
-        c->seam_len = 0;
-    }
     while (c->whead && c->whead->stream_base + c->whead->len <= c->parse_pos) {
         struct px_arrival *h = c->whead;
         c->whead = h->next;
@@ -835,6 +813,10 @@ static void px_advance(struct objects *objs, struct px_conn *c, uint32_t consume
         h->next = NULL;
         px_custody_sub(objs, h, 1);            /* remove window ref; release iff bytes done */
     }
+    /* A drop can consume past what the L7 layer was handed. Keep the hand-over
+     * cursor at or ahead of the window cursor so nothing is offered twice. */
+    if (c->l7_handed < c->parse_pos)
+        c->l7_handed = c->parse_pos;
 }
 
 /* Drop every unparsed byte of the window (no segs). Sender slots come back
@@ -909,6 +891,7 @@ static void px_poison(struct objects *objs, struct px_conn *c, const char *why) 
     if (c->dead)
         return;
     DOCA_LOG_ERR("proxy: poisoning conn (%d:%u): %s", c->pub.src_pod, c->pub.src_port, why);
+    px_l7_close(objs, c, 0);                   /* the window is about to go */
     px_drop_window(objs, c, why);
     c->dead = 1;
     if (!px_fin_to_sender(objs, c)) {
@@ -1029,36 +1012,6 @@ static void px_eof_to_origin(struct objects *objs, const struct px_unit *fu) {
                      (int)fu->src_pod_id, fu->org_port);
 }
 
-/* Route one codec-delimited L7 message. */
-static int32_t px_route_message(struct objects *objs, int32_t addressed_cluster,
-                                const int32_t *addressed_hosts, int n_addressed,
-                                int32_t cluster, int32_t host) {
-    if (cluster < 0 || cluster >= POD_ID_SPACE)
-        return -1;
-    if (cluster == addressed_cluster) {
-        if (host >= 0) {
-            for (int i = 0; i < n_addressed; i++)
-                if (addressed_hosts[i] == host)
-                    return host;
-            return -1;
-        }
-        if (n_addressed <= 0)
-            return -1;
-        uint32_t i = __atomic_fetch_add(&objs->svc_rr[cluster], 1,
-                                        __ATOMIC_RELAXED);
-        return addressed_hosts[i % (uint32_t)n_addressed];
-    }
-    if (host >= 0) {
-        int32_t hosts[MAX_PODS];
-        int n = collect_live_hosts(objs, (int16_t)cluster, hosts);
-        for (int i = 0; i < n; i++)
-            if (hosts[i] == host)
-                return host;
-        return -1;
-    }
-    return dpu_route_l4(objs, (int16_t)cluster);
-}
-
 /* Resolve a byte stream to its pinned backend. A dead pin is terminal. */
 static int32_t px_resolve_backend(struct objects *objs, struct px_conn *c,
                                   int16_t cluster) {
@@ -1075,20 +1028,26 @@ static int32_t px_resolve_backend(struct objects *objs, struct px_conn *c,
     return b;
 }
 
-/* Gather the front stream range into one egress unit without publishing it.
- * This separation lets the L7 parser collapse complete, already-arrived frames
- * before the egress worker can observe them; L4 publishes immediately below. */
-static int px_build_range(struct objects *objs, struct px_conn *c,
-                          uint32_t len, int32_t route_dst,
-                          struct px_unit **out_unit) {
+/* A unit with everything but its source bytes: the destination resolved, the
+ * upstream port issued, the delivery-sequence counter located. Its own bytes
+ * come from staging (px_build_range) or from the egress arena
+ * (px_ship_arm_bytes), which is the only difference between the two. */
+struct px_unit_slot {
+    struct px_unit *u;
+    uint16_t       *seq_counter;   /* bumped once the pieces are attached */
+};
+
+static int px_unit_prepare(struct objects *objs, struct px_conn *c,
+                           uint32_t len, int32_t route_dst,
+                           struct px_unit_slot *out) {
     struct dmesh_proxy *px = objs->proxy;
     struct dpu_conntrack *ct = px_cur_worker->ct;   /* private or locked shared state */
-    uint64_t sbeg = c->parse_pos, send_ = sbeg + len;
     int32_t dst_pod;
     uint16_t out_src_port = 0, out_dst_port = 0;
     uint16_t *seq_counter = NULL;
 
-    *out_unit = NULL;
+    out->u = NULL;
+    out->seq_counter = NULL;
 
     if (c->pub.is_reply) {
         /* dst comes from the conntrack table; the proxy only confirms. */
@@ -1131,7 +1090,7 @@ static int px_build_range(struct objects *objs, struct px_conn *c,
         if (uP == 0) {
             /* Encode this worker in the upstream port for reply dispatch. */
             uP = dpu_upstream_create(ct, c->pub.src_pod, c->pub.src_port, dst_pod,
-                                     c->is_l7 ? PX_CODEC_L7 : 0,
+                                     c->l7_mode,
                                      (uint16_t)px_cur_worker->id,
                                      (uint16_t)px->n_workers);
             created = (uP != 0);
@@ -1172,7 +1131,26 @@ static int px_build_range(struct objects *objs, struct px_conn *c,
     u->org_port = c->pub.src_port;         /* un-rewritten: who to EOF if this unit dies */
     u->total_len = len;
     u->dst_pod_idx = (int8_t)(tp - objs->pods);
-    u->dma_isolated = (uint8_t)c->is_l7;
+    out->u = u;
+    out->seq_counter = seq_counter;
+    return 1;
+}
+
+/* Gather the front stream range into one egress unit without publishing it.
+ * This separation lets the L7 parser collapse complete, already-arrived frames
+ * before the egress worker can observe them; L4 publishes immediately below. */
+static int px_build_range(struct objects *objs, struct px_conn *c,
+                          uint32_t len, int32_t route_dst,
+                          struct px_unit **out_unit) {
+    struct dmesh_proxy *px = objs->proxy;
+    uint64_t sbeg = c->parse_pos, send_ = sbeg + len;
+    struct px_unit_slot slot;
+
+    *out_unit = NULL;
+    int prepared = px_unit_prepare(objs, c, len, route_dst, &slot);
+    if (prepared <= 0)
+        return prepared;
+    struct px_unit *u = slot.u;
 
     /* map the stream range onto staging extents (zero-copy SG sources) */
     struct px_arrival *a = c->whead;
@@ -1192,6 +1170,7 @@ static int px_build_range(struct objects *objs, struct px_conn *c,
             return 0;                          /* EAGAIN: nothing claimed yet */
         }
         p->arr = a;
+        p->chunk = NULL;
         p->pod_idx = a->pod_idx;
         p->staging_off = a->staging_off + (uint32_t)(pos - a->stream_base);
         p->len = (uint32_t)(take_end - pos);
@@ -1214,7 +1193,7 @@ static int px_build_range(struct objects *objs, struct px_conn *c,
     for (struct px_piece *p = u->pieces; p; p = p->next)
         p->arr->claimed_round += p->len;
 
-    u->seq = ++*seq_counter;
+    u->seq = ++*slot.seq_counter;
     *out_unit = u;
     return 1;
 }
@@ -1233,6 +1212,86 @@ static int px_ship_range(struct objects *objs, struct px_conn *c,
     if (r > 0)
         px_enqueue_unit(objs, u);
     return r;
+}
+
+/* Attach one arena chunk to a unit as its next SG source piece. */
+static int px_unit_attach_chunk(struct dmesh_proxy *px, struct px_unit *u,
+                                struct px_chunk *ch, uint32_t len) {
+    struct px_piece *p = px_piece_alloc(px);
+    if (!p)
+        return 0;
+    p->next = NULL;
+    p->arr = NULL;
+    p->chunk = ch;
+    p->pod_idx = -1;
+    p->staging_off = ch->off;
+    p->len = len;
+    if (u->pieces_tail)
+        u->pieces_tail->next = p;
+    else
+        u->pieces = p;
+    u->pieces_tail = p;
+    u->npieces++;
+    return 1;
+}
+
+/* Publish bytes the L7 layer produced. They are not in any pod's staging, so the
+ * unit sources arena chunks and carries no arrival custody. One call is one
+ * delivery: a payload longer than a chunk chains several rather than splitting.
+ * Returns the bytes published, 0 when a pool is momentarily empty, or -1 when
+ * undeliverable. */
+static int px_ship_arm_bytes(struct objects *objs, struct px_conn *c,
+                             int32_t backend, const uint8_t *buf, uint32_t len) {
+    struct dmesh_proxy *px = objs->proxy;
+    struct px_chunk *chunks[PX_L7_SEND_CHUNKS];
+    uint32_t want = (len + PX_ARENA_CHUNK - 1u) / PX_ARENA_CHUNK;
+    uint32_t got = 0;
+
+    while (got < want) {
+        struct px_chunk *ch = px_chunk_alloc(px);
+        if (!ch)
+            break;
+        chunks[got++] = ch;
+    }
+    if (got < want) {
+        /* Publish whole chunks only, so what does go out keeps its own extent. */
+        len = got * PX_ARENA_CHUNK;
+        uint64_t stalls = px_stat_inc(&px->stat_stall_arena);
+        if (((stalls - 1u) & 0xFFFFu) == 0)
+            DOCA_LOG_WARN("proxy: egress arena dry — %u of %u chunks (total %llu)",
+                          got, want, (unsigned long long)stalls);
+        if (got == 0)
+            return 0;
+    }
+
+    struct px_unit_slot slot;
+    int32_t route_dst = c->pub.is_reply ? c->pub.peer_pod :
+                        (backend >= 0 ? backend : PX_DST_DEFER);
+    int prepared = px_unit_prepare(objs, c, len, route_dst, &slot);
+    if (prepared <= 0) {
+        for (uint32_t i = 0; i < got; i++)
+            px_chunk_free(px, chunks[i]);
+        return prepared;
+    }
+    uint32_t off = 0;
+    for (uint32_t i = 0; i < got; i++) {
+        uint32_t n = len - off < PX_ARENA_CHUNK ? len - off : PX_ARENA_CHUNK;
+        memcpy(px->arena + chunks[i]->off, buf + off, n);
+        if (!px_unit_attach_chunk(px, slot.u, chunks[i], n)) {
+            uint64_t stalls = px_stat_inc(&px->stat_stall_piece);
+            if (((stalls - 1u) & 0xFFFFu) == 0)
+                DOCA_LOG_WARN("proxy: piece pool dry — stalling %u L7 bytes (total %llu)",
+                              len, (unsigned long long)stalls);
+            for (uint32_t j = i; j < got; j++)   /* the attached ones go with the unit */
+                px_chunk_free(px, chunks[j]);
+            px_unit_free_node(px, slot.u);
+            return 0;
+        }
+        off += n;
+    }
+    slot.u->seq = ++*slot.seq_counter;
+    px_enqueue_unit(objs, slot.u);
+    return (int)len;
 }
 
 /* Park a connection whose pool allocation failed. Its parse position remains in
@@ -1268,15 +1327,29 @@ static int px_resolve_reply_peer(struct objects *objs, struct px_conn *c) {
     return have;
 }
 
+static void px_parse_linkerd(struct objects *objs, struct px_conn *c);
+static int  px_l7_decide(struct objects *objs, struct px_conn *c);
+
 static void px_parse(struct objects *objs, struct px_conn *c) {
     if (!px_resolve_reply_peer(objs, c)) {
         px_drop_window(objs, c, "stale upstream (client closed)");
         c->dead = 1;
         return;
     }
-    if (c->is_l7) {
-        px_parse_l7(objs, c);
+    switch (c->l7_mode) {
+    case PX_L7_OPAQUE:
+    case PX_L7_FULL:
+        px_parse_linkerd(objs, c);
         return;
+    case PX_L7_DECISION:
+        /* Asked once, on the request side; the reply inherits the pin through
+         * conntrack. The payload then takes the path below, untouched. */
+        if (!c->pub.is_reply && !c->l7_resolved && !c->l7_closed &&
+            !px_l7_decide(objs, c))
+            return;
+        break;
+    default:
+        break;              /* the data plane forwards these itself */
     }
 
     while (c->parse_pos < c->stream_end) {
@@ -1297,171 +1370,339 @@ static void px_parse(struct objects *objs, struct px_conn *c) {
             return;
         }
         px_advance(objs, c, avail);
+        if (c->l7_resolved)
+            c->l7_shipped += avail;
     }
 }
 
-static int px_l7_units_compatible(const struct px_unit *a,
-                                  const struct px_unit *b) {
-    return a->dst_pod_idx == b->dst_pod_idx &&
-           a->src_pod_id == b->src_pod_id &&
-           a->src_service == b->src_service &&
-           a->dst_service == b->dst_service &&
-           a->src_port == b->src_port &&
-           a->dst_port == b->dst_port &&
-           a->org_port == b->org_port &&
-           a->dma_isolated == b->dma_isolated;
+/* ====== L7 layer: hand-over, custody, egress ====== */
+
+/* Opaque connection handle. Not a pointer: px_conn objects are recycled, and a
+ * late call from the L7 layer must not land on a different connection. The key
+ * is the same (pod, port) pair the connection table is indexed by. */
+static inline uint64_t px_conn_handle(const struct px_conn *c) {
+    return ((uint64_t)(uint8_t)c->pub.src_pod << 16) | c->pub.src_port;
 }
 
-/* Append a complete frame to a same-backend delivery unit. Its pieces retain
- * their original arrival custody, so exact sender ACKs are unchanged. The first
- * sequence labels the merged unit; skipped sequence values are legal because the
- * receiver rejects only duplicates/stale values and accepts forward gaps. */
-static int px_l7_unit_absorb(struct dmesh_proxy *px, struct px_unit *dst,
-                             struct px_unit *src) {
-    if (!px_l7_units_compatible(dst, src) ||
-        dst->total_len + src->total_len > PX_L7_EGRESS_COALESCE_MAX ||
-        (uint32_t)(dst->npieces + src->npieces) > px->sg_pieces_max)
-        return 0;
+static struct px_conn *px_conn_by_handle(struct dmesh_proxy *px, uint64_t conn) {
+    return px_conn_find(px, (int8_t)(conn >> 16), (uint16_t)conn);
+}
 
-    if (dst->pieces_tail)
-        dst->pieces_tail->next = src->pieces;
-    else
-        dst->pieces = src->pieces;
-    if (src->pieces_tail)
-        dst->pieces_tail = src->pieces_tail;
-    dst->total_len += src->total_len;
-    dst->npieces += src->npieces;
-    src->pieces = src->pieces_tail = NULL;
-    src->npieces = 0;
-    px_unit_free_node(px, src);
+/* Tell the L7 layer to drop every reference into this connection's staging, and
+ * return the load a `decision` connection placed on the backend it named — its
+ * bytes never traversed the layer, so nothing else would account for them. */
+static void px_l7_close(struct objects *objs, struct px_conn *c, int eof) {
+    if (c->l7_tx_chunk) {                      /* reservation the layer never committed */
+        px_chunk_free(objs->proxy, c->l7_tx_chunk);
+        c->l7_tx_chunk = NULL;
+    }
+    uint64_t handle = px_conn_handle(c);
+    if (c->l7_resolved) {
+        l7_report(px_cur_worker->id, handle, c->stream_end, c->l7_shipped,
+                  px_monotonic_ns() - c->l7_open_ns, eof ? 0 : 1);
+        c->l7_resolved = 0;
+    }
+    if (c->l7_open) {
+        if (eof)
+            l7_conn_eof(px_cur_worker->id, handle);
+        l7_conn_close(px_cur_worker->id, handle);
+        c->l7_open = 0;
+    }
+    c->l7_closed = 1;
+}
+
+/* Present this connection to the L7 layer. A refusal is not fatal: nothing has
+ * been handed over yet, so the data plane's own forwarding remains correct. */
+/* The identity DPUmesh can state about a connection. */
+static void px_l7_fill_flow(struct objects *objs, const struct px_conn *c,
+                            struct dmesh_l7_flow *flow) {
+    (void)objs;
+    memset(flow, 0, sizeof(*flow));
+    flow->src_pod     = c->pub.src_pod;
+    flow->dst_service = c->pub.dst_service;
+    flow->src_port    = c->pub.src_port;
+    flow->dst_port    = c->pub.is_reply ? c->pub.peer_port : c->pub.src_port;
+    flow->peer_pod    = c->pub.is_reply ? c->pub.peer_pod : c->pub.src_pod;
+    flow->mode        = c->l7_mode;
+    flow->is_reply    = (uint8_t)(c->pub.is_reply != 0);
+    /* Identity as the DPU granted it at registration, not as the pod claims it. */
+    struct pod_state *sp = find_pod_by_id(objs, c->pub.src_pod);
+    if (sp)
+        memcpy(flow->workload, sp->workload, sizeof(flow->workload));
+    flow->workload[sizeof(flow->workload) - 1] = '\0';
+}
+
+_Static_assert(PX_L7_DECISION == DMESH_L7_MODE_DECISION &&
+               PX_L7_OPAQUE   == DMESH_L7_MODE_OPAQUE &&
+               PX_L7_FULL     == DMESH_L7_MODE_FULL,
+               "mode values are shared with the L7 layer");
+
+static int px_l7_open_conn(struct objects *objs, struct px_conn *c) {
+    struct dmesh_l7_flow flow;
+    px_l7_fill_flow(objs, c, &flow);
+    if (l7_conn_open(px_cur_worker->id, px_conn_handle(c), &flow) < 0) {
+        uint64_t n = px_stat_inc(&objs->proxy->stat_l7_fallback);
+        if (((n - 1u) & 0xFFFu) == 0)
+            DOCA_LOG_WARN("proxy: L7 layer declined conn (%d:%u) — forwarding at L4 "
+                          "without policy (total %llu)",
+                          c->pub.src_pod, c->pub.src_port, (unsigned long long)n);
+        return 0;
+    }
+    c->l7_open = 1;
     return 1;
 }
 
-struct px_l7_group {
-    int pod_idx;
-    struct px_unit *unit;
-};
-
-static void px_l7_flush_groups(struct objects *objs,
-                               struct px_l7_group *groups, int ngroups) {
-    for (int i = 0; i < ngroups; i++) {
-        if (!groups[i].unit)
-            continue;
-        px_enqueue_unit(objs, groups[i].unit);
-        groups[i].unit = NULL;
-    }
+/* Apply consumption the L7 layer reported. Deferred out of the hand-over walk:
+ * px_advance unlinks fully-consumed arrivals, which the walk is still holding. */
+static void px_l7_apply_release(struct objects *objs, struct px_conn *c) {
+    uint32_t n = c->l7_release_pending;
+    if (n == 0)
+        return;
+    uint64_t outstanding = c->l7_handed - c->parse_pos;
+    if ((uint64_t)n > outstanding)
+        n = (uint32_t)outstanding;             /* over-release: consume what exists */
+    c->l7_release_pending = 0;
+    if (n)
+        px_advance(objs, c, n);
 }
 
-/* Decode complete frames. Frames already available in this parser pass are
- * grouped per backend without waiting for more input. */
-static void px_parse_l7(struct objects *objs, struct px_conn *c) {
-    struct dmesh_proxy *px = objs->proxy;
-    struct px_l7_group groups[MAX_PODS];
-    int ngroups = 0;
-    struct dmesh_l7_ctx ctx;
-    ctx.service     = c->pub.dst_service;
-    ctx.client_pod  = c->pub.src_pod;
-    ctx.client_port = c->pub.src_port;
+/* The staging extent holding a stream offset. Unlike px_view this never uses the
+ * seam: the L7 layer takes a segment list, so extents go over as they lie and
+ * nothing is linearized. Returns the pod's staging base, with the offset in
+ * *pos — the (base, pos, len) triple the contract passes. */
+static const uint8_t *px_stage_view(struct objects *objs, struct px_conn *c,
+                                    uint64_t from, uint32_t *pos, uint32_t *avail) {
+    *pos = 0;
+    *avail = 0;
+    struct px_arrival *a = c->whead;
+    while (a && a->stream_base + a->len <= from)
+        a = a->next;
+    if (!a)
+        return NULL;
+    /* Extend across arrivals whose staging physically abuts, exactly as px_view
+     * does, so one hand-over covers a run the host wrote contiguously. */
+    uint64_t run_end = a->stream_base + a->len;
+    uint32_t phys_end = a->staging_off + a->len;
+    for (struct px_arrival *n = a->next;
+         n && n->pod_idx == a->pod_idx && n->staging_off == phys_end;
+         n = n->next) {
+        run_end += n->len;
+        phys_end += n->len;
+    }
+    *pos = a->staging_off + (uint32_t)(from - a->stream_base);
+    *avail = (uint32_t)(run_end - from);
+    return (const uint8_t *)objs->pods[a->pod_idx].dma_buffer;
+}
 
-    while (c->parse_pos < c->stream_end) {
-        if (c->frame_len == 0) {
-            if (c->seam_on && c->parse_pos > c->seam_base) {
-                c->seam_on = 0;
-                c->seam_len = 0;
-            }
-            const uint8_t *buf;
-            uint32_t avail;
-            px_head_view(objs, c, &buf, &avail);   /* <= PX_HEAD_MAX contiguous */
-            if (avail == 0)
-                break;
-            int32_t hostbuf[MAX_PODS];
-            ctx.hosts = hostbuf;
-            ctx.n_hosts = c->pub.is_reply ? 0 :
-                collect_live_hosts(objs, c->pub.dst_service, hostbuf);
-            struct dmesh_l7_decision dec;
-            memset(&dec, 0, sizeof(dec));
-            dec.cluster = c->pub.dst_service;      /* default cluster = addressed service */
-            dec.host    = DMESH_LB_DEFER;          /* default: engine load-balances */
-            enum dmesh_l7_direction direction = c->pub.is_reply ?
-                DMESH_L7_RESPONSE : DMESH_L7_REQUEST;
-            int r = dmesh_l7_decode(direction, buf, avail, &ctx, &dec);
-            if (r < 0) {
-                px_l7_flush_groups(objs, groups, ngroups);
-                px_poison(objs, c, "l7 route error");
-                return;
-            }
-            if (r == 0) {                      /* head not fully seen yet */
-                if (avail >= PX_HEAD_MAX) {    /* head bigger than the window → poison */
-                    px_l7_flush_groups(objs, groups, ngroups);
-                    px_poison(objs, c, "l7 head exceeds PX_HEAD_MAX");
-                    return;
-                }
-                if (!px_seam_grow(objs, c))    /* assemble more head bytes (bounded), or wait */
-                    break;
-                continue;
-            }
-            if (dec.total_len == 0 || dec.total_len > PX_L7_FRAME_MAX) {
-                px_l7_flush_groups(objs, groups, ngroups);
-                px_poison(objs, c, "l7 total_len out of range");
-                return;
-            }
-            c->frame_len = dec.total_len;
-            c->frame_dst = c->pub.is_reply ? c->pub.peer_pod :
-                px_route_message(objs, c->pub.dst_service,
-                                 hostbuf, ctx.n_hosts,
-                                 dec.cluster, dec.host);
-            if (c->frame_dst < 0) {
-                px_l7_flush_groups(objs, groups, ngroups);
-                px_poison(objs, c, "l7 frame has no destination");
-                return;
-            }
-        }
+/* `decision` mode: one question at connection establishment, and no payload.
+ * The answer admits the connection and names the backend the stream is pinned
+ * to, after which the bytes take the data plane's own path and the L7 layer
+ * costs nothing per byte. Returns 0 when the connection was denied and
+ * poisoned. */
+static int px_l7_decide(struct objects *objs, struct px_conn *c) {
+    struct dmesh_l7_flow flow;
+    px_l7_fill_flow(objs, c, &flow);
+    struct dmesh_l7_verdict verdict;
+    verdict.allow = 1;
+    verdict.backend_pod = -1;
 
-        uint64_t arrived = c->stream_end - c->parse_pos;
-        if (arrived < c->frame_len)
+    c->l7_resolved = 1;                        /* owes a report either way */
+    c->l7_open_ns = px_monotonic_ns();
+    if (l7_resolve(px_cur_worker->id, &flow, &verdict) < 0) {
+        uint64_t n = px_stat_inc(&objs->proxy->stat_l7_fallback);
+        if (((n - 1u) & 0xFFFu) == 0)
+            DOCA_LOG_WARN("proxy: L7 layer gave no verdict for conn (%d:%u) — "
+                          "forwarding without policy (total %llu)",
+                          c->pub.src_pod, c->pub.src_port, (unsigned long long)n);
+        return 1;                              /* fall open */
+    }
+    if (!verdict.allow) {
+        px_poison(objs, c, "l7 policy denied the connection");
+        return 0;
+    }
+    if (verdict.backend_pod >= 0) {
+        c->pinned_backend = verdict.backend_pod;
+        c->pinned_cluster = c->pub.dst_service;
+    }
+    return 1;
+}
+
+/* Hand arrival extents to the L7 layer. Nothing is consumed here: the bytes stay
+ * in the window, and their custody is released only when the layer reports having
+ * read them. That is what makes this a terminating proxy rather than a decoder —
+ * the layer holds the bytes across worker revolutions while it produces its own. */
+static void px_parse_linkerd(struct objects *objs, struct px_conn *c) {
+    px_l7_apply_release(objs, c);
+    if (c->l7_closed)
+        return;
+    if (!c->l7_open && !px_l7_open_conn(objs, c)) {
+        c->l7_mode = PX_L7_NONE;               /* nothing handed over yet */
+        c->l7_closed = 1;
+        px_parse(objs, c);
+        return;
+    }
+
+    px_cur_worker->in_l7_parse = 1;
+    int budget = PX_L7_SEGMENTS_PER_PASS;
+    while (c->l7_handed < c->stream_end && budget > 0) {
+        uint64_t outstanding = c->l7_handed - c->parse_pos;
+        if (outstanding >= PX_L7_CUSTODY_MAX)
+            break;                             /* the layer is behind; let it drain */
+        uint32_t pos, avail;
+        const uint8_t *base = px_stage_view(objs, c, c->l7_handed, &pos, &avail);
+        if (!base || avail == 0)
             break;
-
-        int aggregate = c->frame_len <= PX_L7_EGRESS_COALESCE_FRAME_MAX;
-        if (!aggregate && ngroups > 0) {
-            /* Publish earlier small frames before a direct unit so per-backend
-             * lane order remains the original stream order. */
-            px_l7_flush_groups(objs, groups, ngroups);
-            ngroups = 0;
-        }
-        struct px_unit *u = NULL;
-        int r = aggregate ?
-            px_build_range(objs, c, c->frame_len, c->frame_dst, &u) :
-            px_ship_range(objs, c, c->frame_len, c->frame_dst);
-        if (r == 0) {
-            px_stall(c);
-            break;
-        }
-        if (r < 0) {
-            px_l7_flush_groups(objs, groups, ngroups);
-            px_poison(objs, c, "l7 frame cannot be delivered");
+        uint32_t room = (uint32_t)(PX_L7_CUSTODY_MAX - outstanding);
+        if (avail > room)
+            avail = room;
+        int took = l7_conn_segment(px_cur_worker->id, px_conn_handle(c),
+                                   base, pos, avail);
+        if (took < 0) {
+            px_cur_worker->in_l7_parse = 0;
+            px_l7_apply_release(objs, c);
+            px_poison(objs, c, "l7 layer rejected a segment");
             return;
         }
-        if (aggregate && (u->dst_pod_idx < 0 || u->dst_pod_idx >= MAX_PODS)) {
-            DOCA_LOG_ERR("proxy: l7 frame has pod slot %d out of range — direct enqueue",
-                         (int)u->dst_pod_idx);
-            px_enqueue_unit(objs, u);
-        } else if (aggregate) {
-            int group_idx = (int)u->dst_pod_idx;
-            int g = 0;
-            while (g < ngroups && groups[g].pod_idx != group_idx)
-                g++;
-            if (g == ngroups) {
-                groups[ngroups++] = (struct px_l7_group){ .pod_idx = group_idx, .unit = u };
-            } else if (!px_l7_unit_absorb(px, groups[g].unit, u)) {
-                px_enqueue_unit(objs, groups[g].unit);
-                groups[g].unit = u;
-            }
-        }
-        px_advance(objs, c, c->frame_len);
-        c->frame_len = 0;
-        c->frame_dst = -1;
+        if (took == 0)
+            break;                             /* egress full — retry next pass */
+        c->l7_handed += (uint32_t)took;
+        budget--;
     }
-    px_l7_flush_groups(objs, groups, ngroups);
+    px_cur_worker->in_l7_parse = 0;
+    px_l7_apply_release(objs, c);
+    if (c->l7_handed < c->stream_end)
+        px_stall(c);
+}
+
+/* ---- entry points the L7 layer calls ---- */
+
+/* Resolve the caller's handle to a live connection on this worker. */
+static struct px_conn *px_l7_caller_conn(int worker_id, uint64_t conn,
+                                         struct objects **out_objs) {
+    struct px_worker_state *worker_state = px_cur_worker;
+    if (!worker_state || worker_state->id != worker_id)
+        return NULL;
+    struct px_conn *c = px_conn_by_handle(worker_state->objs->proxy, conn);
+    if (!c || c->dead)
+        return NULL;
+    *out_objs = worker_state->objs;
+    return c;
+}
+
+int dmesh_l7_backends(int worker_id, int32_t service, int32_t *out, int max) {
+    struct px_worker_state *worker_state = px_cur_worker;
+    if (!worker_state || worker_state->id != worker_id || !out || max <= 0 ||
+        service < 0 || service >= POD_ID_SPACE)
+        return 0;
+    int32_t hosts[MAX_PODS];
+    int n = collect_live_hosts(worker_state->objs, (int16_t)service, hosts);
+    if (n > max)
+        n = max;
+    for (int i = 0; i < n; i++)
+        out[i] = hosts[i];
+    return n;
+}
+
+int dmesh_l7_send(int worker_id, uint64_t conn, int32_t backend_pod,
+                  const uint8_t *buf, size_t len) {
+    struct objects *objs;
+    struct px_conn *c = px_l7_caller_conn(worker_id, conn, &objs);
+    if (!c || !buf || len == 0)
+        return -1;
+    uint32_t take = len > PX_L7_SEND_MAX ? PX_L7_SEND_MAX : (uint32_t)len;
+    return px_ship_arm_bytes(objs, c, backend_pod, buf, take);
+}
+
+uint8_t *dmesh_l7_tx_reserve(int worker_id, uint64_t conn, uint32_t *cap) {
+    struct objects *objs;
+    struct px_conn *c = px_l7_caller_conn(worker_id, conn, &objs);
+    if (!c || !cap)
+        return NULL;
+    *cap = 0;
+    if (c->l7_tx_chunk)                        /* one reservation at a time */
+        return NULL;
+    struct dmesh_proxy *px = objs->proxy;
+    struct px_chunk *ch = px_chunk_alloc(px);
+    if (!ch) {
+        px_stat_inc(&px->stat_stall_arena);
+        return NULL;
+    }
+    c->l7_tx_chunk = ch;
+    *cap = PX_ARENA_CHUNK;
+    return px->arena + ch->off;                /* already DMA-able: no second copy */
+}
+
+int dmesh_l7_tx_commit(int worker_id, uint64_t conn, int32_t backend_pod,
+                       uint32_t len) {
+    struct objects *objs;
+    struct px_conn *c = px_l7_caller_conn(worker_id, conn, &objs);
+    if (!c)
+        return -1;
+    struct dmesh_proxy *px = objs->proxy;
+    struct px_chunk *ch = c->l7_tx_chunk;
+    if (!ch)
+        return -1;
+    c->l7_tx_chunk = NULL;
+    if (len == 0 || len > PX_ARENA_CHUNK) {
+        px_chunk_free(px, ch);
+        return len == 0 ? 0 : -1;
+    }
+    struct px_unit_slot slot;
+    int32_t route_dst = c->pub.is_reply ? c->pub.peer_pod :
+                        (backend_pod >= 0 ? backend_pod : PX_DST_DEFER);
+    int prepared = px_unit_prepare(objs, c, len, route_dst, &slot);
+    if (prepared <= 0) {
+        px_chunk_free(px, ch);
+        return prepared;
+    }
+    if (!px_unit_attach_chunk(px, slot.u, ch, len)) {
+        px_stat_inc(&px->stat_stall_piece);
+        px_unit_free_node(px, slot.u);
+        px_chunk_free(px, ch);
+        return 0;
+    }
+    slot.u->seq = ++*slot.seq_counter;
+    px_enqueue_unit(objs, slot.u);
+    return (int)len;
+}
+
+void dmesh_l7_release(int worker_id, uint64_t conn, uint32_t pos, uint32_t len) {
+    (void)pos;                                 /* releases are reported in order */
+    struct px_worker_state *worker_state = px_cur_worker;
+    if (!worker_state || worker_state->id != worker_id || len == 0)
+        return;
+    struct px_conn *c = px_conn_by_handle(worker_state->objs->proxy, conn);
+    if (!c)
+        return;
+    c->l7_release_pending += len;
+    if (!worker_state->in_l7_parse)
+        px_stall(c);                           /* reported outside a parse: schedule one */
+}
+
+/* ---- worker lifecycle, called from dpu_worker.c ---- */
+
+int px_l7_attach_worker(struct objects *objs, int worker_id) {
+    struct dmesh_proxy *px = objs->proxy;
+    if (!px || !px->l7_attached || worker_id < 0 || worker_id >= px->n_workers)
+        return 0;
+    px_cur_worker = &px->workers[worker_id];
+    return l7_worker_attach(worker_id) < 0 ? -1 : 0;
+}
+
+int px_l7_step_worker(struct objects *objs, int worker_id) {
+    struct dmesh_proxy *px = objs->proxy;
+    if (!px || !px->l7_attached || worker_id < 0 || worker_id >= px->n_workers)
+        return 0;
+    px_cur_worker = &px->workers[worker_id];
+    return l7_worker_step(worker_id) ? 1 : 0;
+}
+
+void px_l7_detach_worker(struct objects *objs, int worker_id) {
+    struct dmesh_proxy *px = objs->proxy;
+    if (!px || !px->l7_attached || worker_id < 0 || worker_id >= px->n_workers)
+        return;
+    px_cur_worker = &px->workers[worker_id];
+    l7_worker_detach(worker_id);
 }
 
 /* ====== FIN ====== */
@@ -1472,21 +1713,23 @@ static int px_try_fin(struct objects *objs, struct px_conn *c) {
     struct dpu_conntrack *ct = px_cur_worker->ct;
     if (!c->fin_pending)
         return 0;
+    /* A tail sitting in the L7 layer is not truncation — it is payload the layer
+     * has not finished with. Give it the remaining passes before the window goes,
+     * then close so it stops pointing into staging. */
+    if (px_l7_carries_bytes(c->l7_mode) && !c->l7_closed && !c->dead) {
+        if (c->parse_pos < c->stream_end) {
+            px_parse(objs, c);
+            if (!c->dead && c->parse_pos < c->stream_end) {
+                px_stall(c);
+                return 0;
+            }
+        }
+        px_l7_close(objs, c, 1);
+    }
     /* FIN = no more input: an unconsumed tail is a truncated unit — drop it
      * (the parser could never complete it). Idempotent across retries. */
     if (c->parse_pos < c->stream_end)
         px_drop_window(objs, c, "FIN with unconsumed tail");
-
-    if (c->pub.is_reply && c->is_l7) {
-        dpu_upstream_free(ct, c->pub.src_port);
-        if (!px_emit_tx_ack(objs, c->fin_ack_pod,
-                            c->fin_ack_port, c->fin_ack_seq)) {
-            px_stall(c);
-            return 0;
-        }
-        px_conn_del(objs, c);
-        return 1;
-    }
 
     if (!c->pub.is_reply) {
         /* Fan out client FIN behind each upstream's queued data. */
@@ -1964,11 +2207,21 @@ px_batch_submit_dma(struct objects *objs, struct px_engine *eng,
     for (struct px_unit *u = b->units;
          u && ret == DOCA_SUCCESS; u = u->next) {
         for (struct px_piece *p = u->pieces; p; p = p->next) {
-            struct pod_state *src_pod = &objs->pods[p->pod_idx];
-            void *addr = (uint8_t *)src_pod->dma_buffer + p->staging_off;
+            /* Two source kinds: arrival staging (forwarded bytes) and the egress
+             * arena (bytes the L7 layer produced). One SG list may hold both. */
+            struct doca_mmap *src_mmap;
+            void *addr;
+            if (p->chunk) {
+                src_mmap = objs->proxy->arena_mmap;
+                addr = objs->proxy->arena + p->staging_off;
+            } else {
+                struct pod_state *src_pod = &objs->pods[p->pod_idx];
+                src_mmap = src_pod->local_mmap;
+                addr = (uint8_t *)src_pod->dma_buffer + p->staging_off;
+            }
             struct doca_buf *src = NULL;
             ret = doca_buf_inventory_buf_get_by_addr(
-                eng->inv, src_pod->local_mmap, addr, p->len, &src);
+                eng->inv, src_mmap, addr, p->len, &src);
             if (ret != DOCA_SUCCESS)
                 break;
             ret = doca_buf_set_data(src, addr, p->len);
@@ -2425,10 +2678,8 @@ static int px_engine_emit(struct objects *objs, struct px_engine *eng) {
             }
         }
         /* custody: the SG op has read (or abandoned) these staging bytes */
-        for (struct px_piece *p = u->pieces; p; p = p->next) {
-            struct px_arrival *a = p->arr;
-            px_custody_sub(objs, a, p->len);   /* egressed bytes; release iff last */
-        }
+        for (struct px_piece *p = u->pieces; p; p = p->next)
+            px_piece_release(objs, p);         /* egressed bytes; release iff last */
         eng->emit_head = u->next;
         if (!eng->emit_head) eng->emit_tail = NULL;
         __atomic_fetch_sub(&pod->egress_pending_emit, 1, __ATOMIC_ACQ_REL);
@@ -2768,7 +3019,7 @@ static int px_lane_submit(struct objects *objs, struct px_engine *eng, int pod_i
             ln->qhead = u->next;
             if (!ln->qhead) ln->qtail = NULL;
             for (struct px_piece *p = u->pieces; p; p = p->next)
-                px_custody_sub(objs, p->arr, p->len);   /* over-region drop: release iff last */
+                px_piece_release(objs, p);     /* over-region drop: release iff last */
             px_unit_free_node(px, u);
             did = 1;
             continue;
@@ -2796,8 +3047,7 @@ static int px_lane_submit(struct objects *objs, struct px_engine *eng, int pod_i
             struct px_unit *u = ln->qhead;
             uint32_t ue = px_unit_entries(u);
             if (nunits > 0 &&
-                (take_tail->dma_isolated || u->dma_isolated ||
-                 pieces + (uint32_t)u->npieces > px->sg_pieces_max ||
+                (pieces + (uint32_t)u->npieces > px->sg_pieces_max ||
                  entries + ue > avail_entries ||
                  ln->cursor + bytes + u->total_len > region_size))
                 break;
@@ -2809,9 +3059,8 @@ static int px_lane_submit(struct objects *objs, struct px_engine *eng, int pod_i
                              u->npieces, px->sg_pieces_max);
                 ln->qhead = u->next;
                 if (!ln->qhead) ln->qtail = NULL;
-                for (struct px_piece *p = u->pieces; p; p = p->next) {
-                    px_custody_sub(objs, p->arr, p->len);   /* drop path: release iff last */
-                }
+                for (struct px_piece *p = u->pieces; p; p = p->next)
+                    px_piece_release(objs, p); /* drop path: release iff last */
                 px_unit_free_node(px, u);
                 did = 1;
                 continue;
@@ -2933,7 +3182,33 @@ int px_init(struct objects *objs) {
     struct dmesh_proxy *px = (struct dmesh_proxy *)calloc(1, sizeof(*px));
     if (!px)
         return DOCA_ERROR_NO_MEMORY;
-    int n_l7_svc = px_parse_svc_csv(getenv("DPUMESH_PROXY_L7_SVC"), px->svc_l7);
+    /* Each list names the services that select one mode. A service named twice
+     * is a configuration error rather than a silent precedence rule. */
+    static const struct { const char *env; uint8_t mode; } l7_gates[] = {
+        { "DPUMESH_L7_DECISION_SVC", PX_L7_DECISION },
+        { "DPUMESH_L7_OPAQUE_SVC",   PX_L7_OPAQUE },
+        { "DPUMESH_L7_SVC",          PX_L7_FULL },
+    };
+    int n_l7_svc = 0;
+    for (size_t g = 0; g < sizeof(l7_gates) / sizeof(l7_gates[0]); g++) {
+        uint8_t named[POD_ID_SPACE];
+        memset(named, 0, sizeof(named));
+        int n = px_parse_svc_csv(getenv(l7_gates[g].env), named);
+        for (int s = 0; s < POD_ID_SPACE; s++) {
+            if (!named[s])
+                continue;
+            if (px->svc_mode[s] != PX_L7_NONE) {
+                DOCA_LOG_ERR("proxy: service %d is named by two L7 mode lists "
+                             "(second is %s)", s, l7_gates[g].env);
+                ret = DOCA_ERROR_INVALID_VALUE;
+                goto fail;
+            }
+            px->svc_mode[s] = l7_gates[g].mode;
+        }
+        n_l7_svc += n;
+        if (n)
+            px->l7_attached = 1;
+    }
 
     /* Each ARM data worker owns its connection and routing tables. */
     px->n_workers = objs->n_data_workers >= 1 ? objs->n_data_workers : 1;
@@ -2941,6 +3216,7 @@ int px_init(struct objects *objs) {
     for (int s = 0; s < px->n_workers; s++) {
         struct px_worker_state *worker_state = &px->workers[s];
         worker_state->id = s;
+        worker_state->objs = objs;
         worker_state->buckets = (struct px_conn **)calloc(PX_CONN_HASH, sizeof(*worker_state->buckets));
         if (!worker_state->buckets)
             goto oom;
@@ -2960,6 +3236,8 @@ int px_init(struct objects *objs) {
     atomic_init(&px->stat_stall_unit, 0);
     atomic_init(&px->stat_stall_piece, 0);
     atomic_init(&px->stat_stall_uport, 0);
+    atomic_init(&px->stat_stall_arena, 0);
+    atomic_init(&px->stat_l7_fallback, 0);
     /* Splice the shared free lists directly: workers are not running yet, and
      * the init thread's per-thread caches must stay empty. */
     for (int i = PX_ARRIVAL_POOL - 1; i >= 0; i--) { px->arr_mem[i].next   = px->arr_free;   px->arr_free   = &px->arr_mem[i]; }
@@ -3032,13 +3310,32 @@ int px_init(struct objects *objs) {
         DOCA_ACCESS_FLAG_LOCAL_READ_WRITE);
     if (ret != DOCA_SUCCESS) goto fail;
 
+    /* Egress arena, only for modes that rewrite payload on the ARM. */
+    if (px->l7_attached) {
+        ret = alloc_buffer_and_set_mmap(
+            &px->arena_mmap, objs->dev, (void **)&px->arena,
+            (size_t)PX_ARENA_CHUNKS * PX_ARENA_CHUNK,
+            DOCA_ACCESS_FLAG_LOCAL_READ_WRITE);
+        if (ret != DOCA_SUCCESS) goto fail;
+        px->chunk_mem = (struct px_chunk *)calloc(PX_ARENA_CHUNKS,
+                                                  sizeof(*px->chunk_mem));
+        if (!px->chunk_mem)
+            goto oom;
+        for (int i = (int)PX_ARENA_CHUNKS - 1; i >= 0; i--) {
+            px->chunk_mem[i].off = (uint32_t)i * PX_ARENA_CHUNK;
+            px->chunk_mem[i].next = px->chunk_free;
+            px->chunk_free = &px->chunk_mem[i];
+        }
+    }
+
     objs->proxy = px;
 
     DOCA_LOG_WARN("DPU PROXY MODE ON (run-to-completion SG-DMA, N/K/A=%d/%d/%d; "
-                  "l7-services=%d, lb=round-robin; passthru=conn-pinned, "
-                  "l7=frame-serialized, sg_pieces=%u)",
+                  "l7-services=%d, l7-layer=%s, lb=round-robin; passthru=conn-pinned, "
+                  "sg_pieces=%u)",
                   objs->num_dpa_threads, objs->k_rings, objs->n_data_workers,
-                  n_l7_svc, px->sg_pieces_max);
+                  n_l7_svc, px->l7_attached ? "attached" : "off",
+                  px->sg_pieces_max);
     return DOCA_SUCCESS;
 
 oom:
@@ -3051,7 +3348,7 @@ fail:
         free(px->workers[s].ct);
     }
     free(px->arr_mem); free(px->piece_mem);
-    free(px->unit_mem);
+    free(px->unit_mem); free(px->chunk_mem);
     for (int e = 0; e < MAX_ARM_WORKERS; e++) {
         free(px->engines[e].batch_mem);
     }

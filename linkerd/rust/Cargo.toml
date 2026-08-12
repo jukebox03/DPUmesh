@@ -1,0 +1,31 @@
+[package]
+name = "dmesh-l7"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "linkerd2-proxy behind the DPUmesh L7 adapter contract"
+
+# Own workspace: the port's workspace stays the port's.
+[workspace]
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+# The proxy itself. `doca` brings in the dmesh acceptor that feeds DMA-received
+# connections through the outbound stack.
+linkerd-app = { path = "../port/linkerd2-proxy/linkerd/app", features = ["doca"] }
+linkerd-metrics = { path = "../port/linkerd2-proxy/linkerd/metrics" }
+linkerd-rustls = { path = "../port/linkerd2-proxy/linkerd/rustls" }
+# The IO endpoint and the acceptor's types, without the datapath the port ships:
+# DPUmesh is the datapath here.
+dmesh-doca = { path = "../port/linkerd2-proxy/linkerd/doca", default-features = false }
+tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
+tracing = "0.1"
+
+[profile.release]
+opt-level = 3
+# No debug info: the archive carries the whole proxy, and the DPU's root
+# filesystem does not have room for a second copy of it in the linked binary.
+debug = 0
+strip = "debuginfo"

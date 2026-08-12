@@ -112,6 +112,27 @@ static void server_message_recv_callback(struct doca_comch_event_msg_recv *event
 		}
 		break;
 
+	case DMESH_MSG_POD_IDENTITY: {
+		const struct dmesh_identity_msg *idm =
+			(const struct dmesh_identity_msg *)recv_buffer;
+		if (msg_len != sizeof(struct dmesh_identity_msg)) {
+			DOCA_LOG_ERR("Received invalid IDENTITY message");
+			return;
+		}
+		struct pod_state *pod = find_pod_by_connection(objs, comch_connection);
+		if (pod == NULL) {
+			DOCA_LOG_ERR("IDENTITY for an unknown connection");
+			return;
+		}
+		/* The DPU binds identity to the connection that carried it, so a pod
+		 * cannot name itself as another workload. */
+		memcpy(pod->workload, idm->workload, sizeof(pod->workload));
+		pod->workload[sizeof(pod->workload) - 1] = '\0';
+		DOCA_LOG_INFO("pod identity: slot %d workload '%s'",
+		              (int)(pod - objs->pods), pod->workload);
+		break;
+	}
+
 	case DMESH_MSG_POD_REGISTER: {
 		struct dmesh_register_msg *reg = (struct dmesh_register_msg *)recv_buffer;
 		if (msg_len != sizeof(struct dmesh_register_msg)) {
@@ -587,6 +608,7 @@ pods_add_connection(struct objects *objs, struct doca_comch_connection *conn)
 	objs->pods[idx].connection = conn;
 	objs->pods[idx].pod_id = -1;  /* not yet registered */
 	objs->pods[idx].service_id = DMESH_SVC_NONE;
+	objs->pods[idx].workload[0] = '\0';   /* the new tenant states its own */
 	objs->pods[idx].landing_stripes = objs->n_data_workers;
 	objs->pods[idx].rev_ring_mmap_count = 0;
 	objs->pods[idx].rev_doorbell_pending_epoch = 0;

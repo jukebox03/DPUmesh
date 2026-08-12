@@ -110,7 +110,6 @@ deploy_config() {
     DPUMESH_DPA_THREADS="$n" \
     DPUMESH_RINGS_PER_POD="$k" \
     DPUMESH_ARM_WORKERS="$a" \
-    DPUMESH_PROXY_L7_SVC= \
     DPUMESH_LOG_LEVEL=40 \
     BENCH_NUMA_POLICY="$policy" \
     BENCH_DEPLOY_SCOPE="$scope" \

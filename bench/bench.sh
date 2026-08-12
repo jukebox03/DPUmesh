@@ -35,11 +35,16 @@ BENCH_LINKERD="${BENCH_LINKERD:-0}"
 
 INCLUDE_SRC="$PROJ_ROOT/include"
 DOCA_SRC="$PROJ_ROOT/doca"
+# The DPU binary also compiles the L7 adapter contract and its consumer.
+LINKERD_INCLUDE_SRC="$PROJ_ROOT/linkerd/include"
+LINKERD_SHIM_SRC="$PROJ_ROOT/linkerd/shim"
 LIB_OUT="$PROJ_ROOT/build/lib"
 BIN_OUT="$PROJ_ROOT/build/bin"
 DPU_PROJ="${DPU_PROJ:-DPUmesh}"        # project directory name on the DPU
 DPU_DOCA="$DPU_PROJ/doca"
 DPU_INCLUDE="$DPU_PROJ/include"
+DPU_LINKERD_INCLUDE="$DPU_PROJ/linkerd/include"
+DPU_LINKERD_SHIM="$DPU_PROJ/linkerd/shim"
 DPU_BUILD="$DPU_DOCA/build"
 DPU_LOG="/tmp/dpumesh_dpu_bench.log"
 DOCA_LIB_DIR="/opt/mellanox/doca/lib/x86_64-linux-gnu"
@@ -50,7 +55,6 @@ IMG_ECHO_DPU="bench/echo-dpumesh:latest"
 IMG_LOOPBACK_DPU="bench/loopback-dpumesh:latest"
 IMG_PRELOAD_DPU="bench/preload-dpumesh:latest"
 IMG_PRELOAD_SOCK="bench/preload-sock:latest"
-IMG_STREAM_DPU="bench/stream-dpumesh:latest"
 IMG_VERBS_DPU="bench/verbs-dpumesh:latest"
 IMG_BENCH_GRPC="bench/bench-grpc:latest"
 IMG_ECHO_GRPC="bench/echo-grpc:latest"
@@ -209,13 +213,17 @@ dpu_sudo() {
 ### ------------------------------------------------------------ build
 sync_sources() {
     step "=== Syncing sources to DPU ($DPU_HOST:~/$DPU_PROJ) ==="
-    ssh_dpu "mkdir -p ~/$DPU_DOCA ~/$DPU_INCLUDE"
+    ssh_dpu "mkdir -p ~/$DPU_DOCA ~/$DPU_INCLUDE ~/$DPU_LINKERD_INCLUDE ~/$DPU_LINKERD_SHIM"
     rsync -avz --delete --timeout=60 -e "ssh ${SSH_OPTS[*]}" \
         --exclude='build/' --exclude='builddir/' --exclude='*.o' --exclude='*.a' \
         "$DOCA_SRC/" "$DPU_HOST:~/$DPU_DOCA/"
     rsync -avz --delete --timeout=60 -e "ssh ${SSH_OPTS[*]}" \
         "$INCLUDE_SRC/" "$DPU_HOST:~/$DPU_INCLUDE/"
-    ssh_dpu "find ~/$DPU_DOCA ~/$DPU_INCLUDE -type f -exec touch {} +" 2>/dev/null || true
+    rsync -avz --delete --timeout=60 -e "ssh ${SSH_OPTS[*]}" \
+        "$LINKERD_INCLUDE_SRC/" "$DPU_HOST:~/$DPU_LINKERD_INCLUDE/"
+    rsync -avz --delete --timeout=60 -e "ssh ${SSH_OPTS[*]}" \
+        "$LINKERD_SHIM_SRC/" "$DPU_HOST:~/$DPU_LINKERD_SHIM/"
+    ssh_dpu "find ~/$DPU_DOCA ~/$DPU_INCLUDE ~/$DPU_LINKERD_INCLUDE ~/$DPU_LINKERD_SHIM -type f -exec touch {} +" 2>/dev/null || true
     info "Source sync complete"
 }
 
@@ -230,7 +238,13 @@ build_dpu() {
     fi
     if [ -n "$out" ]; then printf '%s\n' "$out" | grep -vE '^\s*$' || true; fi
     ssh_dpu "rm -f ~/$DPU_BUILD/dpa_kernel.a" 2>/dev/null || true
-    if ! out=$(ssh_dpu "cd ~/$DPU_BUILD && meson configure -Dbuildtype=$bt && ninja" 2>&1); then
+    # L7_BACKEND=linkerd links the Rust staticlib carrying linkerd2-proxy in
+    # place of the reference consumer. L7_LIB_PATH names it on the DPU.
+    local l7_opts="-Dl7_backend=${L7_BACKEND:-null}"
+    if [ "${L7_BACKEND:-null}" = linkerd ]; then
+        l7_opts="$l7_opts -Dl7_lib_path=${L7_LIB_PATH:-\$HOME/l7build/rust/target/release/libdmesh_l7.a}"
+    fi
+    if ! out=$(ssh_dpu "cd ~/$DPU_BUILD && meson configure -Dbuildtype=$bt $l7_opts && ninja" 2>&1); then
         err "DPU build failed:"
         printf '%s\n' "$out"
         exit 1
@@ -308,7 +322,6 @@ build_images() {
     fi
     if [ "$scope" = all ]; then
         build_image "$BENCH_DIR/validators/loopback_dpumesh.Dockerfile" "$IMG_LOOPBACK_DPU" "$PROJ_ROOT"
-        build_image "$BENCH_DIR/validators/stream_dpumesh.Dockerfile"   "$IMG_STREAM_DPU"   "$PROJ_ROOT"
         build_image "$BENCH_DIR/validators/verbs_dpumesh.Dockerfile"    "$IMG_VERBS_DPU"    "$PROJ_ROOT"
         build_image "$BENCH_DIR/validators/preload_dpumesh.Dockerfile"  "$IMG_PRELOAD_DPU"  "$PROJ_ROOT"
     fi
@@ -351,14 +364,95 @@ stop_dpu() {
     sleep 5
 }
 
+# The proxy needs a control plane before it will serve. These are the port's
+# own mock destination/identity/policy binaries, which is what makes a bring-up
+# possible without the DPU holding cluster credentials.
+# Resolved against the DPU's login home, not $HOME: the proxy runs under sudo,
+# where $HOME is root's.
+dpu_home_cached=""
+dpu_home() {
+    [ -n "$dpu_home_cached" ] || dpu_home_cached=$(ssh_dpu 'echo $HOME')
+    printf '%s' "$dpu_home_cached"
+}
+linkerd_mock_dir() { printf '%s' "${LINKERD_MOCK_DIR:-$(dpu_home)/l7build/mock}"; }
+linkerd_data_dir() {
+    printf '%s' "${LINKERD_DATA_DIR:-$(dpu_home)/dpumesh-linkerd/linkerd/app/integration/src/data}"
+}
+LINKERD_FIXTURE="${LINKERD_FIXTURE:-default-default}"
+LINKERD_BACKEND_ADDR="${LINKERD_BACKEND_ADDR:-127.1.0.11:9092}"
+
+start_mocks() {
+    step "=== Starting mock control plane (identity/destination/policy) ==="
+    ssh_dpu "cat > /tmp/start_mocks.sh << 'MOCKS'
+#!/bin/bash
+pkill -f 'l7build/mock/mock-' 2>/dev/null
+sleep 1
+cd /tmp
+MOCK_IDENTITY_ADDR=127.0.0.1:8088 MOCK_IDENTITY_DATA_DIR=$(linkerd_data_dir) \
+  MOCK_IDENTITY_FIXTURE=$LINKERD_FIXTURE \
+  setsid nohup $(linkerd_mock_dir)/mock-identity > /tmp/mock-identity.log 2>&1 < /dev/null &
+MOCK_DESTINATION_ADDR=127.0.0.1:8089 MOCK_DESTINATION_BACKEND=$LINKERD_BACKEND_ADDR \
+  setsid nohup $(linkerd_mock_dir)/mock-destination > /tmp/mock-destination.log 2>&1 < /dev/null &
+MOCK_POLICY_ADDR=127.0.0.1:8087 MOCK_POLICY_BACKEND=$LINKERD_BACKEND_ADDR \
+  setsid nohup $(linkerd_mock_dir)/mock-policy > /tmp/mock-policy.log 2>&1 < /dev/null &
+sleep 2
+pgrep -c -f 'l7build/mock/mock-'
+MOCKS
+chmod +x /tmp/start_mocks.sh"
+    local n; n=$(ssh_dpu "bash /tmp/start_mocks.sh" 2>&1 | tail -1)
+    if [ "$n" != 3 ]; then
+        err "mock control plane did not start (got '$n' of 3); see /tmp/mock-*.log on the DPU"
+        ssh_dpu "tail -3 /tmp/mock-identity.log /tmp/mock-destination.log /tmp/mock-policy.log" || true
+        exit 1
+    fi
+    info "mock control plane up (identity :8088, destination :8089, policy :8087)"
+}
+
 start_dpu() {
     local log_level="${DPUMESH_LOG_LEVEL:-40}"
-    local l7_svc="${DPUMESH_PROXY_L7_SVC:-}"
+    # Services routed through the DPU-side L7 layer, one list per mode.
+    local l7_decision="${DPUMESH_L7_DECISION_SVC:-}"
+    local l7_opaque="${DPUMESH_L7_OPAQUE_SVC:-}"
+    local l7_full="${DPUMESH_L7_SVC:-}"
+    local l7_trace="${DPUMESH_L7_NULL_TRACE:-}"
+    local l7_rr="${DPUMESH_L7_FRAMED_RR:-}"
+    # The linkerd staticlib reads its whole configuration from the environment,
+    # exactly as the standalone proxy binary does. It is written as a file on
+    # the DPU and sourced by the launcher: the trust anchors are a multi-line
+    # PEM, which does not survive being quoted through ssh into a `bash -c`
+    # string. Ephemeral listen ports keep the proxy off anything else's port.
+    local l7_env=""
+    if [ "${L7_BACKEND:-null}" = linkerd ]; then
+        local id_name="${LINKERD_LOCAL_NAME:-default.default.serviceaccount.identity.linkerd.cluster.local}"
+        ssh_dpu "cat > /tmp/dpumesh-l7.env << 'L7ENV'
+LINKERD2_PROXY_DESTINATION_SVC_ADDR=${LINKERD_DST_ADDR:-127.0.0.1:8089}
+LINKERD2_PROXY_DESTINATION_SVC_NAME=$id_name
+LINKERD2_PROXY_POLICY_SVC_ADDR=${LINKERD_POLICY_ADDR:-127.0.0.1:8087}
+LINKERD2_PROXY_POLICY_SVC_NAME=$id_name
+LINKERD2_PROXY_POLICY_WORKLOAD=${LINKERD_WORKLOAD:-default:dpumesh}
+LINKERD2_PROXY_IDENTITY_SVC_ADDR=${LINKERD_IDENTITY_ADDR:-127.0.0.1:8088}
+LINKERD2_PROXY_IDENTITY_SVC_NAME=$id_name
+LINKERD2_PROXY_IDENTITY_LOCAL_NAME=$id_name
+LINKERD2_PROXY_IDENTITY_DIR=$(linkerd_data_dir)/$LINKERD_FIXTURE
+LINKERD2_PROXY_IDENTITY_TOKEN_FILE=$(linkerd_data_dir)/$LINKERD_FIXTURE/token.txt
+LINKERD2_PROXY_DESTINATION_PROFILE_NETWORKS=0.0.0.0/0
+LINKERD2_PROXY_CLUSTER_NETWORKS=0.0.0.0/0
+LINKERD2_PROXY_INBOUND_LISTEN_ADDR=127.0.0.1:0
+LINKERD2_PROXY_OUTBOUND_LISTEN_ADDR=127.0.0.1:0
+LINKERD2_PROXY_CONTROL_LISTEN_ADDR=127.0.0.1:0
+LINKERD2_PROXY_ADMIN_LISTEN_ADDR=127.0.0.1:0
+LINKERD2_PROXY_LOG=${LINKERD_LOG:-warn,linkerd=info}
+DPUMESH_L7_LINKERD_WORKER=${DPUMESH_L7_LINKERD_WORKER:-0}
+L7ENV
+{ printf 'LINKERD2_PROXY_IDENTITY_TRUST_ANCHORS=\"'; cat $(linkerd_data_dir)/ca1.pem; printf '\"\n'; } >> /tmp/dpumesh-l7.env"
+        l7_env='set -a; . /tmp/dpumesh-l7.env; set +a;'
+    fi
     local dpa_threads="${DPUMESH_DPA_THREADS:-}"
     local rings="${DPUMESH_RINGS_PER_POD:-}"
     local workers="${DPUMESH_ARM_WORKERS:-}"
-    step "=== Starting dpumesh_dpu (l7_svc='$l7_svc' dpa_threads='$dpa_threads' rings_per_pod='$rings' arm_workers='$workers') ==="
+    step "=== Starting dpumesh_dpu (l7_decision='$l7_decision' l7_opaque='$l7_opaque' l7_full='$l7_full' dpa_threads='$dpa_threads' rings_per_pod='$rings' arm_workers='$workers') ==="
     stop_dpu
+    [ "${L7_BACKEND:-null}" = linkerd ] && start_mocks
     local dpu_home; dpu_home=$(ssh_dpu 'echo $HOME')
     # Reports an instance that is already up instead of starting a second one, so
     # a launch whose ssh dropped mid-flight is safe to retry.
@@ -366,7 +460,8 @@ start_dpu() {
 #!/bin/bash
 running=\$(pgrep -x dpumesh_dpu | head -1)
 if [ -n \"\$running\" ]; then echo \"\$running\"; exit 0; fi
-screen -dmS dpumesh-bench bash -c \"cd $dpu_home/$DPU_BUILD && DPUMESH_PROXY_L7_SVC=$l7_svc DPUMESH_DPA_THREADS=$dpa_threads DPUMESH_RINGS_PER_POD=$rings DPUMESH_ARM_WORKERS=$workers ./dpumesh_dpu $DPU_PCI -l $log_level > $DPU_LOG 2>&1\"
+ulimit -c unlimited
+screen -dmS dpumesh-bench bash -c \"ulimit -c unlimited; cd $dpu_home/$DPU_BUILD && $l7_env DPUMESH_L7_DECISION_SVC=$l7_decision DPUMESH_L7_OPAQUE_SVC=$l7_opaque DPUMESH_L7_SVC=$l7_full DPUMESH_L7_NULL_TRACE=$l7_trace DPUMESH_L7_FRAMED_RR=$l7_rr DPUMESH_DPA_THREADS=$dpa_threads DPUMESH_RINGS_PER_POD=$rings DPUMESH_ARM_WORKERS=$workers ./dpumesh_dpu $DPU_PCI -l $log_level > $DPU_LOG 2>&1\"
 sleep 2
 pgrep -x dpumesh_dpu | head -1 || echo NO_PID
 LAUNCHER
@@ -425,7 +520,7 @@ get_pod_cores() {
                 bench-dpumesh) rel="6";; echo-dpumesh) rel="7";;
                 bench-dpumesh-2) rel="8";; bench-dpumesh-3) rel="9";;
                 echo-dpumesh-13) rel="10";; echo-dpumesh-14) rel="11";;
-                loopback-dpumesh) rel="12";; stream-dpumesh) rel="13";;
+                loopback-dpumesh) rel="12";;
                 verbs-dpumesh) rel="14";; preload-dpumesh) rel="15";;
             esac ;;
         l4cap)
@@ -491,7 +586,7 @@ get_pod_cores() {
             case "$app" in
                 bench-dpumesh) rel="0";; echo-dpumesh) rel="1";;
                 bench-tcp) rel="2";; echo-tcp) rel="3";;
-                loopback-dpumesh) rel="4,5";; preload-dpumesh|preload-echo|preload-bench) rel="4,5";; stream-dpumesh) rel="4,5";; verbs-dpumesh) rel="4,5";;
+                loopback-dpumesh) rel="4,5";; preload-dpumesh|preload-echo|preload-bench) rel="4,5";; verbs-dpumesh) rel="4,5";;
                 echo-dpumesh-13) rel="6";; echo-dpumesh-14) rel="7";;
                 bench-dpumesh-2) rel="9";; bench-dpumesh-3) rel="10";;
             esac ;;
@@ -513,7 +608,7 @@ pin_pods() {
     else
         warn "cpupower not found; skipping DVFS lock"
     fi
-    for app in bench-dpumesh bench-dpumesh-2 bench-dpumesh-3 echo-dpumesh echo-dpumesh-13 echo-dpumesh-14 loopback-dpumesh stream-dpumesh verbs-dpumesh preload-dpumesh preload-echo preload-bench bench-tcp echo-tcp bench-tcp-strict echo-tcp-strict bench-grpc-dpumesh echo-grpc-dpumesh bench-grpc-envoy echo-grpc-envoy bench-grpc-tcp echo-grpc-tcp bench-grpc-envoy-strict echo-grpc-envoy-strict bench-grpc-linkerd echo-grpc-linkerd bench-grpc-linkerd-opaque echo-grpc-linkerd-opaque; do
+    for app in bench-dpumesh bench-dpumesh-2 bench-dpumesh-3 echo-dpumesh echo-dpumesh-13 echo-dpumesh-14 loopback-dpumesh verbs-dpumesh preload-dpumesh preload-echo preload-bench bench-tcp echo-tcp bench-tcp-strict echo-tcp-strict bench-grpc-dpumesh echo-grpc-dpumesh bench-grpc-envoy echo-grpc-envoy bench-grpc-tcp echo-grpc-tcp bench-grpc-envoy-strict echo-grpc-envoy-strict bench-grpc-linkerd echo-grpc-linkerd bench-grpc-linkerd-opaque echo-grpc-linkerd-opaque; do
         local cores pod_id desired
         cores=$(get_pod_cores "$app" "$profile"); [ -z "$cores" ] && continue
         # sed consumes the full stream. `head` can close early and make crictl
@@ -628,7 +723,7 @@ apply_manifest() {
     configure_host_numa
     step "=== Applying K8s manifest (replicas=0) ==="
     command -v envsubst >/dev/null 2>&1 || { err "envsubst not found (apt install gettext-base)"; exit 1; }
-    export IMG_BENCH_DPU IMG_ECHO_DPU IMG_LOOPBACK_DPU IMG_STREAM_DPU IMG_VERBS_DPU IMG_PRELOAD_DPU IMG_PRELOAD_SOCK IMG_BENCH_TCP IMG_ECHO_TCP IMG_ENVOY IMG_BENCH_GRPC IMG_ECHO_GRPC
+    export IMG_BENCH_DPU IMG_ECHO_DPU IMG_LOOPBACK_DPU IMG_VERBS_DPU IMG_PRELOAD_DPU IMG_PRELOAD_SOCK IMG_BENCH_TCP IMG_ECHO_TCP IMG_ENVOY IMG_BENCH_GRPC IMG_ECHO_GRPC
     export CTRL_PORT TCP_PORT HOST_PCI LIB_OUT BENCH_NUMA_NODE
     export DPUMESH_RINGS_PER_POD="${DPUMESH_RINGS_PER_POD:-2}" \
            ASYNC_THREADS="${ASYNC_THREADS:-4}" \
@@ -731,7 +826,6 @@ start_pods() {
     scale_up_with_wait "preload-bench"    ""
     if [ "$scope" = all ]; then
         scale_up_with_wait "verbs-dpumesh"    "$ready"
-        scale_up_with_wait "stream-dpumesh"   "$ready"
     fi
     scale_up_with_wait "echo-tcp-strict"  ""
     scale_up_with_wait "bench-tcp-strict" ""
@@ -760,14 +854,14 @@ deploy() {
     pin_pods fair
     info "=== Deploy complete ==="
     echo "  Run:  $0 latency|bandwidth|rate|all [dpumesh|tcp|both]"
-    echo "        $0 loopback|verbs|stream|preload ...   (validators)"
+    echo "        $0 loopback|verbs|preload ...   (validators)"
     echo "  Re-pin:  $0 pin [fair|l4|hw|hw3|hw6]"
 }
 
 cleanup() { info "Deleting namespace $NS"; kubectl delete ns "$NS" --ignore-not-found=true 2>/dev/null || true; stop_dpu; }
 
 show_logs() {
-    for app in bench-dpumesh echo-dpumesh echo-dpumesh-13 echo-dpumesh-14 loopback-dpumesh stream-dpumesh verbs-dpumesh preload-dpumesh preload-echo preload-bench bench-tcp echo-tcp bench-tcp-strict echo-tcp-strict; do
+    for app in bench-dpumesh echo-dpumesh echo-dpumesh-13 echo-dpumesh-14 loopback-dpumesh verbs-dpumesh preload-dpumesh preload-echo preload-bench bench-tcp echo-tcp bench-tcp-strict echo-tcp-strict; do
         echo "=== $app ==="
         kubectl logs -n "$NS" -l "app=$app" --all-containers=true --prefix=true --tail=20 2>/dev/null || true
         echo
@@ -981,18 +1075,6 @@ run_preload() {  # LD_PRELOAD shim: vanilla TCP apps over DPUmesh
     printf "  OK/Fail: %s/%s  p50: %s us  p99: %s us  rps: %s\n" "$ok" "$fail" "$p50" "$p99" "${rps:-n/a}"
 }
 
-run_stream() {  # L7 framing validator (service 16 in DPUMESH_PROXY_L7_SVC)
-    local N="${1:-20000}" size="${2:-1024}" fpw="${3:-1}" ip resp
-    ip=$(running_pod_ip stream-dpumesh || true)
-    [ -z "$ip" ] && { err "stream-dpumesh pod not running — run '$0 deploy' (validators no longer self-start)"; return 1; }
-    step "=== stream (L7 framing): N=$N size=${size}B frames/write=$fpw ==="
-    resp=$(printf 'RUN %s %s %s\n' "$N" "$size" "$fpw" | timeout 180s nc "$ip" "$CTRL_PORT" || true)
-    [ -z "$resp" ] && { err "no response (timeout or pod down)"; return 1; }
-    [[ "$resp" == ERR* ]] && { err "stream replied: $resp"; return 1; }
-    read -r _ ok fail served p50 <<<"$resp"
-    printf "  OK/Fail: %s/%s  served_bytes: %s  p50: %s us\n" "$ok" "$fail" "$served" "$p50"
-}
-
 ### ------------------------------------------------------------ dispatch
 CMD="${1:-help}"; shift || true
 case "$CMD" in
@@ -1010,7 +1092,6 @@ case "$CMD" in
     point)     [ $# -eq 7 ] || [ $# -eq 8 ] || { err "point <sol> <req> <reply> <conc> <dur> <warmup> <threads> [reconn]"; exit 1; }; run_point "$@" ;;
     loopback)  run_loopback "${1:-50000}" "${2:-8192}" "${3:-0}" ;;
     verbs)     run_verbs    "${1:-50000}" "${2:-8192}" "${3:-0}" "${4:-1}" "${5:-1}" ;;
-    stream)    run_stream   "${1:-20000}" "${2:-1024}" "${3:-1}" ;;
     preload)   run_preload  "${1:-5000}"  "${2:-1024}" "${3:-8}" ;;
     pin)       need_env; pin_pods "${1:-fair}" ;;
     status)    show_status ;;
@@ -1026,7 +1107,7 @@ Usage: $0 <command> [args]
   deploy                                     build + DPU + images + pods + pin (the ONLY bring-up path)
   latency|bandwidth|rate|all [dpumesh|tcp|both]   benchmark families -> CSVs under $OUT
   point <sol> <req> <reply> <conc> <dur> <warmup> <threads> [reconn]   one raw RUN (reconn = conn-churn period)
-  loopback|stream|preload [args]             feature validators
+  loopback|preload [args]                    feature validators
   verbs <N> <size> <zc> <window> <pipeline>  native-API loopback validator: window conns x pipeline outstanding
   pin [fair|l4|grpc|grpccap|grpcl7cap|grpcmax|hw|hw3|hw6]  (re)pin pods to cores
                                              grpcl7cap reads BENCH_CAP_CONFIG for the 6+6 path

@@ -1,0 +1,830 @@
+[0;32m[INFO][0m Host NUMA: PCI 94:00.0 -> node 1, benchmark cores 18-35
+secret/envoy-mtls configured
+[0;32m[INFO][0m Envoy benchmark mTLS Secret ready
+[0;34m[STEP][0m === Applying K8s manifest (replicas=0) ===
+deployment.apps/bench-dpumesh configured
+service/bench-dpumesh unchanged
+deployment.apps/bench-dpumesh-2 configured
+deployment.apps/bench-dpumesh-3 configured
+deployment.apps/echo-dpumesh configured
+deployment.apps/echo-dpumesh-13 configured
+deployment.apps/echo-dpumesh-14 configured
+deployment.apps/loopback-dpumesh configured
+service/loopback-dpumesh unchanged
+deployment.apps/verbs-dpumesh configured
+service/verbs-dpumesh unchanged
+deployment.apps/preload-dpumesh configured
+service/preload-dpumesh unchanged
+deployment.apps/preload-echo configured
+deployment.apps/preload-bench configured
+service/preload-bench unchanged
+service/preload-sock unchanged
+deployment.apps/bench-tcp configured
+service/bench-tcp unchanged
+deployment.apps/echo-tcp configured
+service/echo-tcp unchanged
+deployment.apps/bench-tcp-strict configured
+service/bench-tcp-strict unchanged
+deployment.apps/echo-tcp-strict configured
+service/echo-tcp-strict unchanged
+configmap/sidecar1-config unchanged
+configmap/sidecar2-config unchanged
+configmap/strict-client-config unchanged
+configmap/strict-server-config unchanged
+deployment.apps/bench-grpc-dpumesh unchanged
+service/bench-grpc-dpumesh unchanged
+deployment.apps/echo-grpc-dpumesh unchanged
+service/echo-grpc-dpumesh unchanged
+deployment.apps/bench-grpc-envoy unchanged
+service/bench-grpc-envoy unchanged
+deployment.apps/echo-grpc-envoy unchanged
+service/echo-grpc-envoy unchanged
+deployment.apps/bench-grpc-tcp unchanged
+service/bench-grpc-tcp unchanged
+deployment.apps/echo-grpc-tcp unchanged
+service/echo-grpc-tcp unchanged
+configmap/grpc-sidecar1-config unchanged
+deployment.apps/bench-grpc-envoy-strict unchanged
+service/bench-grpc-envoy-strict unchanged
+deployment.apps/echo-grpc-envoy-strict unchanged
+service/echo-grpc-envoy-strict unchanged
+configmap/grpc-strict-client-config unchanged
+[0;32m[INFO][0m K8s resources applied (linkerd=0)
+[0;34m[STEP][0m === Syncing sources to DPU (jukebox@192.168.100.2:~/DPUmesh) ===
+sending incremental file list
+buffer.c
+buffer.h
+build_dpacc.sh
+comch_client.c
+comch_client.h
+comch_common.c
+comch_common.h
+comch_msgq.c
+comch_msgq.h
+comch_server.c
+comch_server.h
+common.c
+common.h
+config.c
+config.h
+dpa.c
+dpa.h
+dpa_common.h
+dpa_resource_config.yaml
+dpu_main.c
+dpu_proxy.c
+dpu_proxy.h
+dpu_worker.c
+dpu_worker.h
+meson.build
+meson_options.txt
+object.c
+object.h
+ring.c
+ring.h
+device/dpa_kernel.c
+
+sent 2,145 bytes  received 4,106 bytes  12,502.00 bytes/sec
+total size is 395,991  speedup is 63.35
+sending incremental file list
+dpumesh/dmesh.h
+dpumesh/dmesh_common.h
+dpumesh/dmesh_topology.h
+
+sent 296 bytes  received 186 bytes  964.00 bytes/sec
+total size is 11,720  speedup is 24.32
+sending incremental file list
+dmesh_l7.h
+
+sent 135 bytes  received 93 bytes  152.00 bytes/sec
+total size is 5,623  speedup is 24.66
+sending incremental file list
+l7_null.c
+
+sent 133 bytes  received 189 bytes  644.00 bytes/sec
+total size is 17,319  speedup is 53.79
+[0;32m[INFO][0m Source sync complete
+[0;34m[STEP][0m === Building on DPU (ninja) ===
+[0;32m[INFO][0m DPU build OK (buildtype=debugoptimized, recompiled 14 C objects)
+[0;34m[STEP][0m === Building host libdpumesh.so (make lib) ===
+make: Entering directory '/home/jukebox/DPUmesh'
+make: Leaving directory '/home/jukebox/DPUmesh'
+[0;32m[INFO][0m Host build OK (/home/jukebox/DPUmesh/build/lib/libdpumesh.so)
+[0;34m[STEP][0m === Building bench/validator binaries (make bench) ===
+make: Entering directory '/home/jukebox/DPUmesh'
+make: Leaving directory '/home/jukebox/DPUmesh'
+[0;32m[INFO][0m Bench binaries built (/home/jukebox/DPUmesh/build/bin + /home/jukebox/DPUmesh/build/lib/libdmesh_preload.so)
+[0;34m[STEP][0m === Building gRPC bench apps (bench_grpc, echo_grpc; server=release) ===
+[0;32m[INFO][0m gRPC apps built (build/grpc-release/bench_grpc, build/grpc-release/echo_grpc)
+[0;34m[STEP][0m === Building Docker images (scope=all) ===
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from bench_dpumesh.Dockerfile
+#1 transferring dockerfile: 747B done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/ubuntu:22.04
+#2 DONE 1.1s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [1/8] FROM docker.io/library/ubuntu:22.04@sha256:3b06811b2afd352be909dd088a004166d665dc76d38b13eada33522a9d915c6f
+#4 resolve docker.io/library/ubuntu:22.04@sha256:3b06811b2afd352be909dd088a004166d665dc76d38b13eada33522a9d915c6f done
+#4 DONE 0.0s
+
+#5 [internal] load build context
+#5 transferring context: 3.76MB 0.0s done
+#5 DONE 0.0s
+
+#6 [5/8] COPY build/lib/libdpumesh.so.4 /usr/local/lib/
+#6 CACHED
+
+#7 [4/8] COPY doca-libs/ /usr/local/lib/
+#7 CACHED
+
+#8 [6/8] COPY bench/k8s/registry /etc/dpumesh/registry
+#8 CACHED
+
+#9 [7/8] COPY bench/docker/numa-entrypoint.sh /usr/local/bin/numa-entrypoint.sh
+#9 CACHED
+
+#10 [2/8] RUN apt-get update &&     DEBIAN_FRONTEND=noninteractive apt-get install -y       ca-certificates       libibverbs1       libnl-3-200       libnl-route-3-200       libyaml-0-2       libsasl2-2       numactl       openssl &&     rm -rf /var/lib/apt/lists/*
+#10 CACHED
+
+#11 [3/8] COPY build/bin/bench_dpumesh /usr/local/bin/bench_dpumesh
+#11 CACHED
+
+#12 [8/8] RUN ldconfig
+#12 CACHED
+
+#13 exporting to image
+#13 exporting layers done
+#13 exporting manifest sha256:ecb8999de77d4831cba440d3f8beb5046b27caba19f9298869404d1055d5b3a6 done
+#13 exporting config sha256:461619a53efe661b6a50441a1200d74fb0ec8d07b0b6b7138e1d23adea0e68f2 done
+#13 exporting attestation manifest sha256:ec1d002c62a848c02299283e09be7212f1def8b53780776f6041c5111da50255 0.0s done
+#13 exporting manifest list sha256:d8710c081f1cfa4a5b08742e3078b25a17cd9b083351bac3180b1c726c5c381b done
+#13 naming to docker.io/bench/bench-dpumesh:latest done
+#13 unpacking to docker.io/bench/bench-dpumesh:latest done
+#13 DONE 0.0s
+docker.io/bench/bench-dpumesh:latest
+docker.io/bench/bench dpumesh:latest    	saved	
+application/vnd.oci.image.index.v1+json sha256:d8710c081f1cfa4a5b08742e3078b25a17cd9b083351bac3180b1c726c5c381b
+Importing	elapsed: 0.5 s	total:   0.0 B	(0.0 B/s)	
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from echo_dpumesh.Dockerfile
+#1 transferring dockerfile: 731B done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/ubuntu:22.04
+#2 DONE 0.3s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [1/8] FROM docker.io/library/ubuntu:22.04@sha256:3b06811b2afd352be909dd088a004166d665dc76d38b13eada33522a9d915c6f
+#4 resolve docker.io/library/ubuntu:22.04@sha256:3b06811b2afd352be909dd088a004166d665dc76d38b13eada33522a9d915c6f done
+#4 DONE 0.0s
+
+#5 [internal] load build context
+#5 transferring context: 37.98kB done
+#5 DONE 0.0s
+
+#6 [7/8] COPY bench/docker/numa-entrypoint.sh /usr/local/bin/numa-entrypoint.sh
+#6 CACHED
+
+#7 [2/8] RUN apt-get update &&     DEBIAN_FRONTEND=noninteractive apt-get install -y       ca-certificates       libibverbs1       libnl-3-200       libnl-route-3-200       libyaml-0-2       libsasl2-2       numactl       openssl &&     rm -rf /var/lib/apt/lists/*
+#7 CACHED
+
+#8 [3/8] COPY build/bin/echo_dpumesh /usr/local/bin/echo_dpumesh
+#8 CACHED
+
+#9 [5/8] COPY build/lib/libdpumesh.so.4 /usr/local/lib/
+#9 CACHED
+
+#10 [6/8] COPY bench/k8s/registry /etc/dpumesh/registry
+#10 CACHED
+
+#11 [4/8] COPY doca-libs/ /usr/local/lib/
+#11 CACHED
+
+#12 [8/8] RUN ldconfig
+#12 CACHED
+
+#13 exporting to image
+#13 exporting layers done
+#13 exporting manifest sha256:e8e5d0a651a1167dccdbcb07cd48c27d4c13b200c27d237f44b9624989b4fdb0 done
+#13 exporting config sha256:2c959b97e814272bd09933bb0faae63f5e703e85c139eefa68df311a1edadefa done
+#13 exporting attestation manifest sha256:0ad0cd1ea6171f526fc31ddd0a7bfce3de1d9da712ef2f65a9b93eec3c690020 0.0s done
+#13 exporting manifest list sha256:380cccc4c6ee6da7630be55c69805b9090d4838d0c5952f26cdabcf0ce3d34ef
+#13 exporting manifest list sha256:380cccc4c6ee6da7630be55c69805b9090d4838d0c5952f26cdabcf0ce3d34ef done
+#13 naming to docker.io/bench/echo-dpumesh:latest done
+#13 unpacking to docker.io/bench/echo-dpumesh:latest done
+#13 DONE 0.0s
+docker.io/bench/echo-dpumesh:latest
+docker.io/bench/echo dpumesh:latest     	saved	
+application/vnd.oci.image.index.v1+json sha256:380cccc4c6ee6da7630be55c69805b9090d4838d0c5952f26cdabcf0ce3d34ef
+Importing	elapsed: 0.5 s	total:   0.0 B	(0.0 B/s)	
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from loopback_dpumesh.Dockerfile
+#1 transferring dockerfile: 747B done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/ubuntu:22.04
+#2 DONE 0.3s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [1/8] FROM docker.io/library/ubuntu:22.04@sha256:3b06811b2afd352be909dd088a004166d665dc76d38b13eada33522a9d915c6f
+#4 resolve docker.io/library/ubuntu:22.04@sha256:3b06811b2afd352be909dd088a004166d665dc76d38b13eada33522a9d915c6f done
+#4 DONE 0.0s
+
+#5 [internal] load build context
+#5 transferring context: 51.39kB done
+#5 DONE 0.0s
+
+#6 [7/8] COPY bench/docker/numa-entrypoint.sh /usr/local/bin/numa-entrypoint.sh
+#6 CACHED
+
+#7 [4/8] COPY doca-libs/ /usr/local/lib/
+#7 CACHED
+
+#8 [5/8] COPY build/lib/libdpumesh.so.4 /usr/local/lib/
+#8 CACHED
+
+#9 [6/8] COPY bench/k8s/registry /etc/dpumesh/registry
+#9 CACHED
+
+#10 [2/8] RUN apt-get update &&     DEBIAN_FRONTEND=noninteractive apt-get install -y       ca-certificates       libibverbs1       libnl-3-200       libnl-route-3-200       libyaml-0-2       libsasl2-2       numactl       openssl &&     rm -rf /var/lib/apt/lists/*
+#10 CACHED
+
+#11 [3/8] COPY build/bin/loopback_dpumesh /usr/local/bin/loopback_dpumesh
+#11 CACHED
+
+#12 [8/8] RUN ldconfig
+#12 CACHED
+
+#13 exporting to image
+#13 exporting layers done
+#13 exporting manifest sha256:d25b1e68584928cbd5b8dbba6a63d158ac917c703b2bac9d17c71d522b68291a done
+#13 exporting config sha256:9d22822b2e25d4077ac49033e4828eb71aba74ce649af69ef4ef5b3e71d245e1 done
+#13 exporting attestation manifest sha256:6f68a34149f847ccb42bfdeae0f81534c6a6e5a2ad6b1f96b8ec9687824a44bb 0.0s done
+#13 exporting manifest list sha256:4003225589cd35b96d89bec751922501af7fa00ebb56f91883fe646f559cfeb5
+#13 exporting manifest list sha256:4003225589cd35b96d89bec751922501af7fa00ebb56f91883fe646f559cfeb5 done
+#13 naming to docker.io/bench/loopback-dpumesh:latest done
+#13 unpacking to docker.io/bench/loopback-dpumesh:latest done
+#13 DONE 0.0s
+docker.io/bench/loopback-dpumesh:latest
+docker.io/bench/loopback dpumesh:latest 	saved	
+application/vnd.oci.image.index.v1+json sha256:4003225589cd35b96d89bec751922501af7fa00ebb56f91883fe646f559cfeb5
+Importing	elapsed: 0.5 s	total:   0.0 B	(0.0 B/s)	
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from verbs_dpumesh.Dockerfile
+#1 transferring dockerfile: 735B done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/ubuntu:22.04
+#2 DONE 0.3s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [1/8] FROM docker.io/library/ubuntu:22.04@sha256:3b06811b2afd352be909dd088a004166d665dc76d38b13eada33522a9d915c6f
+#4 resolve docker.io/library/ubuntu:22.04@sha256:3b06811b2afd352be909dd088a004166d665dc76d38b13eada33522a9d915c6f done
+#4 DONE 0.0s
+
+#5 [internal] load build context
+#5 transferring context: 56.72kB done
+#5 DONE 0.0s
+
+#6 [4/8] COPY doca-libs/ /usr/local/lib/
+#6 CACHED
+
+#7 [6/8] COPY bench/k8s/registry /etc/dpumesh/registry
+#7 CACHED
+
+#8 [3/8] COPY build/bin/verbs_dpumesh /usr/local/bin/verbs_dpumesh
+#8 CACHED
+
+#9 [5/8] COPY build/lib/libdpumesh.so.4 /usr/local/lib/
+#9 CACHED
+
+#10 [7/8] COPY bench/docker/numa-entrypoint.sh /usr/local/bin/numa-entrypoint.sh
+#10 CACHED
+
+#11 [2/8] RUN apt-get update &&     DEBIAN_FRONTEND=noninteractive apt-get install -y       ca-certificates       libibverbs1       libnl-3-200       libnl-route-3-200       libyaml-0-2       libsasl2-2       numactl       openssl &&     rm -rf /var/lib/apt/lists/*
+#11 CACHED
+
+#12 [8/8] RUN ldconfig
+#12 CACHED
+
+#13 exporting to image
+#13 exporting layers done
+#13 exporting manifest sha256:c797ae174b50a954b422a2f7ab5c42601fdee8e1a954d5f0ce208b7324ec9966 done
+#13 exporting config sha256:ca104d70eea65d2a888e7045964d53402029eb7abae9eed52673311b299500d9 done
+#13 exporting attestation manifest sha256:ae16407797f9006c22ef4db511a7606f4bcca8a362a3f24da0997b53e4ea500f 0.0s done
+#13 exporting manifest list sha256:b33f76d26cc7d8ef4853ac845224043443a0bf318d3494c7baab8761cb4d82fd done
+#13 naming to docker.io/bench/verbs-dpumesh:latest
+#13 naming to docker.io/bench/verbs-dpumesh:latest done
+#13 unpacking to docker.io/bench/verbs-dpumesh:latest done
+#13 DONE 0.0s
+docker.io/bench/verbs-dpumesh:latest
+docker.io/bench/verbs dpumesh:latest    	saved	
+application/vnd.oci.image.index.v1+json sha256:b33f76d26cc7d8ef4853ac845224043443a0bf318d3494c7baab8761cb4d82fd
+Importing	elapsed: 0.5 s	total:   0.0 B	(0.0 B/s)	
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from preload_dpumesh.Dockerfile
+#1 transferring dockerfile: 876B done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/ubuntu:22.04
+#2 DONE 0.3s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [ 1/10] FROM docker.io/library/ubuntu:22.04@sha256:3b06811b2afd352be909dd088a004166d665dc76d38b13eada33522a9d915c6f
+#4 resolve docker.io/library/ubuntu:22.04@sha256:3b06811b2afd352be909dd088a004166d665dc76d38b13eada33522a9d915c6f done
+#4 DONE 0.0s
+
+#5 [internal] load build context
+#5 transferring context: 269.15kB done
+#5 DONE 0.0s
+
+#6 [ 5/10] COPY build/bin/tcp_client /usr/local/bin/tcp_client
+#6 CACHED
+
+#7 [ 8/10] COPY build/lib/libdpumesh.so.4 /usr/local/lib/
+#7 CACHED
+
+#8 [ 4/10] COPY build/bin/tcp_echo /usr/local/bin/tcp_echo
+#8 CACHED
+
+#9 [ 6/10] COPY build/lib/libdmesh_preload.so /usr/local/lib/libdmesh_preload.so
+#9 CACHED
+
+#10 [ 7/10] COPY doca-libs/ /usr/local/lib/
+#10 CACHED
+
+#11 [ 9/10] COPY bench/docker/numa-entrypoint.sh /usr/local/bin/numa-entrypoint.sh
+#11 CACHED
+
+#12 [ 3/10] COPY build/bin/preload_runner /usr/local/bin/preload_runner
+#12 CACHED
+
+#13 [ 2/10] RUN apt-get update &&     DEBIAN_FRONTEND=noninteractive apt-get install -y       ca-certificates       libibverbs1       libnl-3-200       libnl-route-3-200       libyaml-0-2       libsasl2-2       numactl       openssl &&     rm -rf /var/lib/apt/lists/*
+#13 CACHED
+
+#14 [10/10] RUN ldconfig
+#14 CACHED
+
+#15 exporting to image
+#15 exporting layers done
+#15 exporting manifest sha256:ce065e010ab5afa2fde540eb783aca7ed60e85c7ba0c991542ae2ddfaa2a11c7 done
+#15 exporting config sha256:9886e7f0427dd02474f16b47e877a057fa43aef145d9af6ec2f47315847d925e done
+#15 exporting attestation manifest sha256:efc539a447e2e896975dffd0e7172a37a49deaf97dc15bf2ec55180f829bf8ee 0.0s done
+#15 exporting manifest list sha256:0a57e01a00842a2ec34797bec948a0cdf33d9c59ce4ee60f40325d128bec8a10
+#15 exporting manifest list sha256:0a57e01a00842a2ec34797bec948a0cdf33d9c59ce4ee60f40325d128bec8a10 done
+#15 naming to docker.io/bench/preload-dpumesh:latest done
+#15 unpacking to docker.io/bench/preload-dpumesh:latest done
+#15 DONE 0.0s
+docker.io/bench/preload-dpumesh:latest
+docker.io/bench/preload dpumesh:latest  	saved	
+application/vnd.oci.image.index.v1+json sha256:0a57e01a00842a2ec34797bec948a0cdf33d9c59ce4ee60f40325d128bec8a10
+Importing	elapsed: 0.5 s	total:   0.0 B	(0.0 B/s)	
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from preload_sock.Dockerfile
+#1 transferring dockerfile: 734B done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/ubuntu:22.04
+#2 DONE 0.3s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [ 1/10] FROM docker.io/library/ubuntu:22.04@sha256:3b06811b2afd352be909dd088a004166d665dc76d38b13eada33522a9d915c6f
+#4 resolve docker.io/library/ubuntu:22.04@sha256:3b06811b2afd352be909dd088a004166d665dc76d38b13eada33522a9d915c6f done
+#4 DONE 0.0s
+
+#5 [internal] load build context
+#5 transferring context: 135.93kB done
+#5 DONE 0.0s
+
+#6 [ 2/10] RUN apt-get update &&     DEBIAN_FRONTEND=noninteractive apt-get install -y       ca-certificates libibverbs1 libnl-3-200 libnl-route-3-200       libyaml-0-2 libsasl2-2 numactl openssl &&     rm -rf /var/lib/apt/lists/*
+#6 CACHED
+
+#7 [ 4/10] COPY build/bin/echo_sock /usr/local/bin/echo_sock
+#7 CACHED
+
+#8 [ 5/10] COPY build/lib/libdmesh_preload.so /usr/local/lib/libdmesh_preload.so
+#8 CACHED
+
+#9 [ 6/10] COPY doca-libs/ /usr/local/lib/
+#9 CACHED
+
+#10 [ 7/10] COPY build/lib/libdpumesh.so.4 /usr/local/lib/
+#10 CACHED
+
+#11 [ 3/10] COPY build/bin/bench_sock /usr/local/bin/bench_sock
+#11 CACHED
+
+#12 [ 8/10] COPY bench/k8s/registry /etc/dpumesh/registry
+#12 CACHED
+
+#13 [ 9/10] COPY bench/docker/numa-entrypoint.sh /usr/local/bin/numa-entrypoint.sh
+#13 CACHED
+
+#14 [10/10] RUN ldconfig
+#14 CACHED
+
+#15 exporting to image
+#15 exporting layers done
+#15 exporting manifest sha256:8a6c9b57ca0bb1c183dff075d4cd86a144ecfc62e05489efa799361bc061e541 done
+#15 exporting config sha256:a3271b10fc22d298835c42a908048942fb7fd2f407a6cbf364dea9dd8431e676 done
+#15 exporting attestation manifest sha256:563335081c6ada0c2181df08fea1e3b2c6f9552d3d3c9f56de7c3900c620d04b 0.0s done
+#15 exporting manifest list sha256:f5ed0d7f18ba5c0e125ccfe3a59d02334068e22843f2f3f5d4c6d1ddd7e3e519
+#15 exporting manifest list sha256:f5ed0d7f18ba5c0e125ccfe3a59d02334068e22843f2f3f5d4c6d1ddd7e3e519 done
+#15 naming to docker.io/bench/preload-sock:latest done
+#15 unpacking to docker.io/bench/preload-sock:latest done
+#15 DONE 0.0s
+docker.io/bench/preload-sock:latest
+docker.io/bench/preload sock:latest     	saved	
+application/vnd.oci.image.index.v1+json sha256:f5ed0d7f18ba5c0e125ccfe3a59d02334068e22843f2f3f5d4c6d1ddd7e3e519
+Importing	elapsed: 0.5 s	total:   0.0 B	(0.0 B/s)	
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from bench_sock.Dockerfile
+#1 DONE 0.0s
+
+#1 [internal] load build definition from bench_sock.Dockerfile
+#1 transferring dockerfile: 527B done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/ubuntu:22.04
+#2 DONE 0.3s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [internal] load build context
+#4 transferring context: 205B done
+#4 DONE 0.0s
+
+#5 [1/4] FROM docker.io/library/ubuntu:22.04@sha256:3b06811b2afd352be909dd088a004166d665dc76d38b13eada33522a9d915c6f
+#5 resolve docker.io/library/ubuntu:22.04@sha256:3b06811b2afd352be909dd088a004166d665dc76d38b13eada33522a9d915c6f done
+#5 DONE 0.0s
+
+#6 [3/4] COPY build/bin/bench_sock /usr/local/bin/bench_sock
+#6 CACHED
+
+#7 [2/4] RUN apt-get update &&     DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates numactl &&     rm -rf /var/lib/apt/lists/*
+#7 CACHED
+
+#8 [4/4] COPY bench/docker/numa-entrypoint.sh /usr/local/bin/numa-entrypoint.sh
+#8 CACHED
+
+#9 exporting to image
+#9 exporting layers done
+#9 exporting manifest sha256:43ad72cd81fa99367f167571f8008ca92d7a02b21be71a8ba585197496e13698 done
+#9 exporting config sha256:dd63f955544ea904afeb990dbf55cc4e2d9c9258ea4fdcab1a409b95ab906168 done
+#9 exporting attestation manifest sha256:4cd2498f0e237dec6c84f74788464766d45cbd65c9a05f79e369288b468af41f 0.0s done
+#9 exporting manifest list sha256:641cca7383bfb0bb616680c4fdc7045e09ca4976b41f66e522b5b78548a6edf1 done
+#9 naming to docker.io/bench/bench-tcp:latest done
+#9 unpacking to docker.io/bench/bench-tcp:latest done
+#9 DONE 0.0s
+docker.io/bench/bench-tcp:latest
+docker.io/bench/bench tcp:latest        	saved	
+application/vnd.oci.image.index.v1+json sha256:641cca7383bfb0bb616680c4fdc7045e09ca4976b41f66e522b5b78548a6edf1
+Importing	elapsed: 0.5 s	total:   0.0 B	(0.0 B/s)	
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from echo_sock.Dockerfile
+#1 DONE 0.0s
+
+#1 [internal] load build definition from echo_sock.Dockerfile
+#1 transferring dockerfile: 535B done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/ubuntu:22.04
+#2 DONE 0.3s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [internal] load build context
+#4 transferring context: 37.09kB done
+#4 DONE 0.0s
+
+#5 [1/4] FROM docker.io/library/ubuntu:22.04@sha256:3b06811b2afd352be909dd088a004166d665dc76d38b13eada33522a9d915c6f
+#5 resolve docker.io/library/ubuntu:22.04@sha256:3b06811b2afd352be909dd088a004166d665dc76d38b13eada33522a9d915c6f 0.0s done
+#5 DONE 0.0s
+
+#6 [2/4] RUN apt-get update &&     DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates numactl &&     rm -rf /var/lib/apt/lists/*
+#6 CACHED
+
+#7 [3/4] COPY build/bin/echo_sock /usr/local/bin/echo_sock
+#7 CACHED
+
+#8 [4/4] COPY bench/docker/numa-entrypoint.sh /usr/local/bin/numa-entrypoint.sh
+#8 CACHED
+
+#9 exporting to image
+#9 exporting layers done
+#9 exporting manifest sha256:2214c7dd8dbf588c5c7b130ca747161a1e8812e4f94e0bddc2150b488cb6254d done
+#9 exporting config sha256:61226f330945e19603175e8542edfa19676a06a0f5b322ce925a2d1db702beea done
+#9 exporting attestation manifest sha256:4b97c72dd71e932aab72068a27d3cf4f395cb1e24fd7be760c52f54516759fb1 0.0s done
+#9 exporting manifest list sha256:f3af8c7e94d05fad1910a5fed1033ca9bdeb17624fc6e9219511c60ce1553a71 done
+#9 naming to docker.io/bench/echo-tcp:latest done
+#9 unpacking to docker.io/bench/echo-tcp:latest done
+#9 DONE 0.0s
+docker.io/bench/echo-tcp:latest
+docker.io/bench/echo tcp:latest         	saved	
+application/vnd.oci.image.index.v1+json sha256:f3af8c7e94d05fad1910a5fed1033ca9bdeb17624fc6e9219511c60ce1553a71
+Importing	elapsed: 0.5 s	total:   0.0 B	(0.0 B/s)	
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from bench_grpc.Dockerfile
+#1 transferring dockerfile: 1.17kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/ubuntu:22.04
+#2 DONE 0.3s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [1/8] FROM docker.io/library/ubuntu:22.04@sha256:3b06811b2afd352be909dd088a004166d665dc76d38b13eada33522a9d915c6f
+#4 resolve docker.io/library/ubuntu:22.04@sha256:3b06811b2afd352be909dd088a004166d665dc76d38b13eada33522a9d915c6f done
+#4 DONE 0.0s
+
+#5 [internal] load build context
+#5 transferring context: 25.12MB 0.1s done
+#5 DONE 0.1s
+
+#6 [2/8] RUN apt-get update &&     DEBIAN_FRONTEND=noninteractive apt-get install -y       ca-certificates       libibverbs1       libnl-3-200       libnl-route-3-200       libyaml-0-2       libsasl2-2       numactl       openssl       libasan6       libubsan1 &&     rm -rf /var/lib/apt/lists/*
+#6 CACHED
+
+#7 [4/8] COPY doca-libs/ /usr/local/lib/
+#7 CACHED
+
+#8 [3/8] COPY build/grpc-release/bench_grpc /usr/local/bin/bench_grpc
+#8 CACHED
+
+#9 [6/8] COPY bench/k8s/registry /etc/dpumesh/registry
+#9 CACHED
+
+#10 [5/8] COPY build/lib/libdpumesh.so.4 /usr/local/lib/
+#10 CACHED
+
+#11 [7/8] COPY bench/docker/numa-entrypoint.sh /usr/local/bin/numa-entrypoint.sh
+#11 CACHED
+
+#12 [8/8] RUN ldconfig
+#12 CACHED
+
+#13 exporting to image
+#13 exporting layers done
+#13 exporting manifest sha256:1fe120a58f2242fe77c32fabf55bad368174a9c0f177e24564ff5d765465d6a6 done
+#13 exporting config sha256:acbdb882135c2e42b50779847e7ec139d1903512058775040560f1c007127e3c done
+#13 exporting attestation manifest sha256:f061e644a113665814783103ce3fa5b8647c5dd747013dedd8899dade83caa80 0.0s done
+#13 exporting manifest list sha256:ad9721441cd9b7f14abeb6434e8726ebd99aabd72cedca1855beb307af48e73b done
+#13 naming to docker.io/bench/bench-grpc:latest done
+#13 unpacking to docker.io/bench/bench-grpc:latest done
+#13 DONE 0.0s
+docker.io/bench/bench-grpc:latest
+docker.io/bench/bench grpc:latest       	saved	
+application/vnd.oci.image.index.v1+json sha256:ad9721441cd9b7f14abeb6434e8726ebd99aabd72cedca1855beb307af48e73b
+Importing	elapsed: 0.7 s	total:   0.0 B	(0.0 B/s)	
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from echo_grpc.Dockerfile
+#1 transferring dockerfile: 1.09kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/ubuntu:22.04
+#2 DONE 0.3s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [1/8] FROM docker.io/library/ubuntu:22.04@sha256:3b06811b2afd352be909dd088a004166d665dc76d38b13eada33522a9d915c6f
+#4 resolve docker.io/library/ubuntu:22.04@sha256:3b06811b2afd352be909dd088a004166d665dc76d38b13eada33522a9d915c6f done
+#4 DONE 0.0s
+
+#5 [internal] load build context
+#5 transferring context: 21.97MB 0.1s done
+#5 DONE 0.1s
+
+#6 [7/8] COPY bench/docker/numa-entrypoint.sh /usr/local/bin/numa-entrypoint.sh
+#6 CACHED
+
+#7 [4/8] COPY doca-libs/ /usr/local/lib/
+#7 CACHED
+
+#8 [3/8] COPY build/grpc-release/echo_grpc /usr/local/bin/echo_grpc
+#8 CACHED
+
+#9 [5/8] COPY build/lib/libdpumesh.so.4 /usr/local/lib/
+#9 CACHED
+
+#10 [2/8] RUN apt-get update &&     DEBIAN_FRONTEND=noninteractive apt-get install -y       ca-certificates       libibverbs1       libnl-3-200       libnl-route-3-200       libyaml-0-2       libsasl2-2       numactl       openssl       libasan6       libubsan1 &&     rm -rf /var/lib/apt/lists/*
+#10 CACHED
+
+#11 [6/8] COPY bench/k8s/registry /etc/dpumesh/registry
+#11 CACHED
+
+#12 [8/8] RUN ldconfig
+#12 CACHED
+
+#13 exporting to image
+#13 exporting layers done
+#13 exporting manifest sha256:5f18b956bf3f6b52e873c92a6d12e9d4e48abd56996cbaa3f259217f8d522bb4 done
+#13 exporting config sha256:19b8262fc0b6a5dd5e5ed424c7b25fae53b348c3e1d3693fedfb9465d71b4a50 done
+#13 exporting attestation manifest sha256:e7df8a1798a6b2d21f2c0f77285e68bdbc101021cc63ff6d04551e39ab7e3da8 0.0s done
+#13 exporting manifest list sha256:cf2f929c979a8d82e72f0e4e2d2f6f4fe2358cfd28c8fd5b4bfe0ebc84b42856 done
+#13 naming to docker.io/bench/echo-grpc:latest done
+#13 unpacking to docker.io/bench/echo-grpc:latest done
+#13 DONE 0.0s
+docker.io/bench/echo-grpc:latest
+docker.io/bench/echo grpc:latest        	saved	
+application/vnd.oci.image.index.v1+json sha256:cf2f929c979a8d82e72f0e4e2d2f6f4fe2358cfd28c8fd5b4bfe0ebc84b42856
+Importing	elapsed: 0.7 s	total:   0.0 B	(0.0 B/s)	
+[0;32m[INFO][0m Scope images built and imported to containerd
+[0;32m[INFO][0m Building NUMA-aware Envoy image
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from envoy_numa.Dockerfile
+#1 transferring dockerfile: 427B done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/envoyproxy/envoy:v1.30-latest
+#2 DONE 0.0s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [internal] load build context
+#4 transferring context: 110B done
+#4 DONE 0.0s
+
+#5 [1/3] FROM docker.io/envoyproxy/envoy:v1.30-latest@sha256:b5cc70f5fe5503858817e897ae1da5d873dc32cbc493790b4e330b8a42c4af9d
+#5 resolve docker.io/envoyproxy/envoy:v1.30-latest@sha256:b5cc70f5fe5503858817e897ae1da5d873dc32cbc493790b4e330b8a42c4af9d done
+#5 DONE 0.0s
+
+#6 [2/3] RUN apt-get update &&     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends       numactl &&     rm -rf /var/lib/apt/lists/*
+#6 CACHED
+
+#7 [3/3] COPY bench/docker/numa-entrypoint.sh /usr/local/bin/numa-entrypoint.sh
+#7 CACHED
+
+#8 exporting to image
+#8 exporting layers done
+#8 exporting manifest sha256:f6bddf6a9d57969cb9330370db238078225f3def4fd65097b80090082ff9429e done
+#8 exporting config sha256:9c0bc83bcd7c4875f04c4d8cf951a15efeff8ffe464aab576f89d37a38397097 done
+#8 exporting attestation manifest sha256:7b4a61d5db7339f36100787d9e63e353b7f09af4f78815c25d2a1dbe3ba8560a 0.0s done
+#8 exporting manifest list sha256:b1935f82ecd0ed455c81180df0719a6f09d812ae203b110425fb1cba2c8b5d37 done
+#8 naming to docker.io/bench/envoy-numa:v1.30-latest
+#8 naming to docker.io/bench/envoy-numa:v1.30-latest done
+#8 unpacking to docker.io/bench/envoy-numa:v1.30-latest done
+#8 DONE 0.1s
+docker.io/bench/envoy-numa:v1.30-latest
+docker.io/bench/envoy numa:v1.30 latest 	saved	
+application/vnd.oci.image.index.v1+json sha256:b1935f82ecd0ed455c81180df0719a6f09d812ae203b110425fb1cba2c8b5d37
+Importing	elapsed: 1.0 s	total:   0.0 B	(0.0 B/s)	
+[0;34m[STEP][0m === Starting dpumesh_dpu (l7_decision='' l7_opaque='11' l7_full='' dpa_threads='32' rings_per_pod='8' arm_workers='8') ===
+[0;32m[INFO][0m Stopping dpumesh_dpu...
+[0;32m[INFO][0m dpumesh_dpu running (PID: 2142636)
+[0;34m[STEP][0m === Starting pods (innermost first, scope=all) ===
+deployment.apps/echo-dpumesh scaled
+deployment.apps/echo-dpumesh scaled
+pod/echo-dpumesh-6fbb47b695-7vm4v condition met
+[0;32m[INFO][0m echo-dpumesh pod Ready
+[0;32m[INFO][0m Waiting for DPUmesh init: echo-dpumesh (DPU pod is data-ready)
+[0;32m[INFO][0m echo-dpumesh DPUmesh data-ready
+deployment.apps/echo-dpumesh-13 scaled
+deployment.apps/echo-dpumesh-13 scaled
+pod/echo-dpumesh-13-86c6f8f97b-scsz2 condition met
+[0;32m[INFO][0m echo-dpumesh-13 pod Ready
+[0;32m[INFO][0m Waiting for DPUmesh init: echo-dpumesh-13 (DPU pod is data-ready)
+[0;32m[INFO][0m echo-dpumesh-13 DPUmesh data-ready
+deployment.apps/echo-dpumesh-14 scaled
+deployment.apps/echo-dpumesh-14 scaled
+pod/echo-dpumesh-14-789dcf897f-8mbmh condition met
+[0;32m[INFO][0m echo-dpumesh-14 pod Ready
+[0;32m[INFO][0m Waiting for DPUmesh init: echo-dpumesh-14 (DPU pod is data-ready)
+[0;32m[INFO][0m echo-dpumesh-14 DPUmesh data-ready
+deployment.apps/bench-dpumesh scaled
+deployment.apps/bench-dpumesh scaled
+pod/bench-dpumesh-9dfc6ddf7-mpvcp condition met
+[0;32m[INFO][0m bench-dpumesh pod Ready
+[0;32m[INFO][0m Waiting for DPUmesh init: bench-dpumesh (DPU pod is data-ready)
+[0;32m[INFO][0m bench-dpumesh DPUmesh data-ready
+deployment.apps/bench-dpumesh-2 scaled
+deployment.apps/bench-dpumesh-2 scaled
+pod/bench-dpumesh-2-76f5485ccb-rsttd condition met
+[0;32m[INFO][0m bench-dpumesh-2 pod Ready
+[0;32m[INFO][0m Waiting for DPUmesh init: bench-dpumesh-2 (DPU pod is data-ready)
+[0;32m[INFO][0m bench-dpumesh-2 DPUmesh data-ready
+deployment.apps/bench-dpumesh-3 scaled
+deployment.apps/bench-dpumesh-3 scaled
+pod/bench-dpumesh-3-7d8c6ddb5c-wd4nx condition met
+[0;32m[INFO][0m bench-dpumesh-3 pod Ready
+[0;32m[INFO][0m Waiting for DPUmesh init: bench-dpumesh-3 (DPU pod is data-ready)
+[0;32m[INFO][0m bench-dpumesh-3 DPUmesh data-ready
+deployment.apps/loopback-dpumesh scaled
+deployment.apps/loopback-dpumesh scaled
+pod/loopback-dpumesh-69d9db7f45-48bwl condition met
+[0;32m[INFO][0m loopback-dpumesh pod Ready
+[0;32m[INFO][0m Waiting for DPUmesh init: loopback-dpumesh (DPU pod is data-ready)
+[0;32m[INFO][0m loopback-dpumesh DPUmesh data-ready
+deployment.apps/preload-dpumesh scaled
+deployment.apps/preload-dpumesh scaled
+pod/preload-dpumesh-58d44ff4d7-gb5v6 condition met
+[0;32m[INFO][0m preload-dpumesh pod Ready
+[0;32m[INFO][0m Waiting for DPUmesh init: preload-dpumesh (DPU pod is data-ready)
+[0;32m[INFO][0m preload-dpumesh DPUmesh data-ready
+deployment.apps/preload-echo scaled
+deployment.apps/preload-echo scaled
+pod/preload-echo-ffd6ffccd-ql9m8 condition met
+[0;32m[INFO][0m preload-echo pod Ready
+[0;32m[INFO][0m Waiting for DPUmesh init: preload-echo (DPU pod is data-ready)
+[0;32m[INFO][0m preload-echo DPUmesh data-ready
+deployment.apps/preload-bench scaled
+deployment.apps/preload-bench scaled
+pod/preload-bench-665cc5c884-z2sp9 condition met
+[0;32m[INFO][0m preload-bench pod Ready
+deployment.apps/verbs-dpumesh scaled
+deployment.apps/verbs-dpumesh scaled
+pod/verbs-dpumesh-6564d99f74-jfxgt condition met
+[0;32m[INFO][0m verbs-dpumesh pod Ready
+[0;32m[INFO][0m Waiting for DPUmesh init: verbs-dpumesh (DPU pod is data-ready)
+[0;32m[INFO][0m verbs-dpumesh DPUmesh data-ready
+deployment.apps/echo-tcp-strict scaled
+deployment.apps/echo-tcp-strict scaled
+pod/echo-tcp-strict-7d69765b5b-9qpcs condition met
+[0;32m[INFO][0m echo-tcp-strict pod Ready
+deployment.apps/bench-tcp-strict scaled
+deployment.apps/bench-tcp-strict scaled
+pod/bench-tcp-strict-b678c66b7-mvcrr condition met
+[0;32m[INFO][0m bench-tcp-strict pod Ready
+deployment.apps/echo-tcp scaled
+deployment.apps/echo-tcp scaled
+pod/echo-tcp-6b7d6d46f6-fvvvz condition met
+[0;32m[INFO][0m echo-tcp pod Ready
+deployment.apps/bench-tcp scaled
+deployment.apps/bench-tcp scaled
+pod/bench-tcp-7b8dc7b6f7-2kxh8 condition met
+[0;32m[INFO][0m bench-tcp pod Ready
+[0;34m[STEP][0m === Pinning pods to dedicated cores (taskset, profile=fair) ===
+[0;32m[INFO][0m CPU governor=performance, fixed 2.5 GHz on cores 18-35
+[0;32m[INFO][0m bench-dpumesh → core(s) 18 (pod=e8b4699ac574092d749bdac86f5908b03ae3be50cc676b0c6a198b4573131f01)
+[0;32m[INFO][0m   bench-dpumesh (PID 2069972) → 18
+[0;32m[INFO][0m bench-dpumesh-2 → core(s) 27 (pod=e6be6d5eb473da6e1305b6dc6583380881bba412b007e7843c989d128ea02d18)
+[0;32m[INFO][0m   bench-dpumesh-2 (PID 2070215) → 27
+[0;32m[INFO][0m bench-dpumesh-3 → core(s) 28 (pod=aa957d4dfba1f193f032a8a6257717c399198aee5601b2e8699fa8553dee8c62)
+[0;32m[INFO][0m   bench-dpumesh-3 (PID 2070484) → 28
+[0;32m[INFO][0m echo-dpumesh → core(s) 19 (pod=b85bc4d81a51d64d13c5e9a5d6e6eccdcd62bf60a873fffc054221def39d97e3)
+[0;32m[INFO][0m   echo-dpumesh (PID 2068894) → 19
+[0;32m[INFO][0m echo-dpumesh-13 → core(s) 24 (pod=3b2d68c291359a362d007d57f5e5f2f6ce1ac3f63a18f2c256f0e5f268b03346)
+[0;32m[INFO][0m   echo-dpumesh-13 (PID 2069405) → 24
+[0;32m[INFO][0m echo-dpumesh-14 → core(s) 25 (pod=648c5d60b160668e7cdea33ac6655105c764451cf7499089e537d9e27c146f1b)
+[0;32m[INFO][0m   echo-dpumesh-14 (PID 2069688) → 25
+[0;32m[INFO][0m loopback-dpumesh → core(s) 22,23 (pod=feb44205242650b68706edcf5d39db7f455e292b0fd5ec68f929b012da07f2bb)
+[0;32m[INFO][0m   loopback-dpumesh (PID 2070711) → 22,23
+[0;32m[INFO][0m verbs-dpumesh → core(s) 22,23 (pod=ed9b453907d82ec95ab7ec02f945b77ab572e6a5034ed9a02410b79c86d6f247)
+[0;32m[INFO][0m   verbs-dpumesh (PID 2071748) → 22,23
+[0;32m[INFO][0m preload-dpumesh → core(s) 22,23 (pod=cbcfc766008a93809acaf09e630d0dafd15d655b6d4eda1afe4667350664e0a1)
+[0;32m[INFO][0m   preload-dpumesh (PID 2070971) → 22,23
+[0;32m[INFO][0m preload-echo → core(s) 22,23 (pod=e6a3f8ed7cf76dd29ac36b39483a599c06920ce340601e0b482587edef2b92cf)
+[0;32m[INFO][0m   preload-echo (PID 2071275) → 22,23
+[0;32m[INFO][0m preload-bench → core(s) 22,23 (pod=36547eff40b6dcd7659bf9b00c0638de1bc0f3cc106f01a786908f92be0c4622)
+[0;32m[INFO][0m   preload-bench (PID 2071546) → 22,23
+[0;32m[INFO][0m bench-tcp → core(s) 20 (pod=4909d4a25472483365a341c2ffc90cf24b143d5275d5c0f0d581a8c0ec1ca12a)
+[0;32m[INFO][0m   sidecar1 (PID 2073158) → 20
+[0;32m[INFO][0m   bench-tcp (PID 2073114) → 20
+[0;32m[INFO][0m echo-tcp → core(s) 21 (pod=be660e92bd721f6f9af945e340416a9dec6f3774972384eb82507b2e2d8cbec5)
+[0;32m[INFO][0m   sidecar2 (PID 2072740) → 21
+[0;32m[INFO][0m   echo-tcp (PID 2072716) → 21
+[0;32m[INFO][0m Pinning done
+[0;32m[INFO][0m === Deploy complete ===
+  Run:  /home/jukebox/DPUmesh/bench/bench.sh latency|bandwidth|rate|all [dpumesh|tcp|both]
+        /home/jukebox/DPUmesh/bench/bench.sh loopback|verbs|preload ...   (validators)
+  Re-pin:  /home/jukebox/DPUmesh/bench/bench.sh pin [fair|l4|hw|hw3|hw6]
