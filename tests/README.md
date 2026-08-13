@@ -16,6 +16,7 @@ analysis contracts without Kubernetes or BlueField hardware.
 | `worker_mpsc_queue_test.c` | cross-worker MPSC FIFO |
 | `topology_test.c` | port, ring, DPA EU, and ARM-worker mapping |
 | `ring_counter_test.c` | descriptor generation, wraparound, and admission |
+| `l7_abi_contract_test.c` | L7 adapter flow/verdict layout, mode and decline constants, and the connection handle both sides form |
 | `analyze_saturation_test.py` | saturation, CPU slopes, knee stability, and generator headroom |
 | `summarize_l4_test.py` | collector metadata and selected-matrix repetition counts |
 | `generator_selftest_test.sh` | native and POSIX transport-free arrival schedulers |

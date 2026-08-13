@@ -38,6 +38,16 @@ DOCA_SRC="$PROJ_ROOT/doca"
 # The DPU binary also compiles the L7 adapter contract and its consumer.
 LINKERD_INCLUDE_SRC="$PROJ_ROOT/linkerd/include"
 LINKERD_SHIM_SRC="$PROJ_ROOT/linkerd/shim"
+# What L7_BACKEND=linkerd needs built on the DPU: the staticlib and the mock
+# control plane. `rust` and `port` are siblings there because
+# linkerd/rust/Cargo.toml resolves the port by relative path.
+LINKERD_RUST_SRC="$PROJ_ROOT/linkerd/rust"
+LINKERD_PORT_SRC="$PROJ_ROOT/linkerd/port/linkerd2-proxy"
+DPU_L7_BUILD="l7build"
+LINKERD_TOOLCHAIN="${LINKERD_TOOLCHAIN:-1.90.0}"
+# rustup's shims are not on a non-interactive ssh PATH, and the distribution
+# cargo that is there is older than the toolchain the port pins.
+LINKERD_CARGO="${LINKERD_CARGO:-\$HOME/.cargo/bin/cargo}"
 LIB_OUT="$PROJ_ROOT/build/lib"
 BIN_OUT="$PROJ_ROOT/build/bin"
 DPU_PROJ="${DPU_PROJ:-DPUmesh}"        # project directory name on the DPU
@@ -229,6 +239,9 @@ sync_sources() {
 
 build_dpu() {
     step "=== Building on DPU (ninja) ==="
+    # Before meson: linking against an artifact that is not there fails deep in
+    # the link, where the message names a symbol rather than a missing build.
+    [ "${L7_BACKEND:-null}" = linkerd ] && preflight_linkerd
     local bt="${DPU_BUILDTYPE:-debugoptimized}"
     local out
     if ! out=$(ssh_dpu "[ -d ~/$DPU_BUILD ] || (cd ~/$DPU_DOCA && meson setup build --buildtype=$bt)" 2>&1); then
@@ -242,7 +255,7 @@ build_dpu() {
     # place of the reference consumer. L7_LIB_PATH names it on the DPU.
     local l7_opts="-Dl7_backend=${L7_BACKEND:-null}"
     if [ "${L7_BACKEND:-null}" = linkerd ]; then
-        l7_opts="$l7_opts -Dl7_lib_path=${L7_LIB_PATH:-\$HOME/l7build/rust/target/release/libdmesh_l7.a}"
+        l7_opts="$l7_opts -Dl7_lib_path=$(linkerd_staticlib)"
     fi
     if ! out=$(ssh_dpu "cd ~/$DPU_BUILD && meson configure -Dbuildtype=$bt $l7_opts && ninja" 2>&1); then
         err "DPU build failed:"
@@ -374,13 +387,121 @@ dpu_home() {
     [ -n "$dpu_home_cached" ] || dpu_home_cached=$(ssh_dpu 'echo $HOME')
     printf '%s' "$dpu_home_cached"
 }
-linkerd_mock_dir() { printf '%s' "${LINKERD_MOCK_DIR:-$(dpu_home)/l7build/mock}"; }
+linkerd_build_dir() { printf '%s' "$(dpu_home)/$DPU_L7_BUILD"; }
+linkerd_mock_dir()  { printf '%s' "${LINKERD_MOCK_DIR:-$(linkerd_build_dir)/mock}"; }
+linkerd_staticlib() {
+    printf '%s' "${L7_LIB_PATH:-$(linkerd_build_dir)/rust/target/release/libdmesh_l7.a}"
+}
+# The fixtures the mock control plane and the proxy's identity both read. They
+# are the port's own, so they live where the port is synced.
 linkerd_data_dir() {
-    printf '%s' "${LINKERD_DATA_DIR:-$(dpu_home)/dpumesh-linkerd/linkerd/app/integration/src/data}"
+    printf '%s' "${LINKERD_DATA_DIR:-$(linkerd_build_dir)/port/linkerd2-proxy/linkerd/app/integration/src/data}"
 }
 LINKERD_FIXTURE="${LINKERD_FIXTURE:-default-default}"
 # The address the layer publishes a backend channel on: 10.96.0.<service id>.
 LINKERD_BACKEND_ADDR="${LINKERD_BACKEND_ADDR:-10.96.0.11:9092}"
+
+# The staticlib and the mocks are built from the sources in this repository
+# rather than from whatever the DPU happens to hold, so a deploy carries the
+# tree it was run from.
+sync_linkerd_sources() {
+    local dest; dest=$(linkerd_build_dir)
+    step "=== Syncing linkerd sources to DPU ($DPU_HOST:$dest) ==="
+    ssh_dpu "mkdir -p '$dest/rust' '$dest/port/linkerd2-proxy' '$dest/mock'"
+    # Build outputs stay: the port is a large tree and its target directory is
+    # what makes a redeploy minutes instead of an hour. Excluded paths are also
+    # protected from deletion, which is why --delete is safe on `rust`.
+    local ex=(--exclude='.git' --exclude='.git/' --exclude='target/'
+              --exclude='build/' --exclude='*.o' --exclude='*.a')
+    rsync -az --delete --timeout=120 -e "ssh ${SSH_OPTS[*]}" "${ex[@]}" \
+        "$LINKERD_RUST_SRC/" "$DPU_HOST:$dest/rust/" ||
+        { err "linkerd/rust sync failed"; exit 1; }
+    rsync -az --timeout=300 -e "ssh ${SSH_OPTS[*]}" "${ex[@]}" \
+        "$LINKERD_PORT_SRC/" "$DPU_HOST:$dest/port/linkerd2-proxy/" ||
+        { err "linkerd port sync failed"; exit 1; }
+    info "linkerd source sync complete"
+}
+
+build_linkerd_artifacts() {
+    local dest; dest=$(linkerd_build_dir)
+    local cargo="$LINKERD_CARGO +$LINKERD_TOOLCHAIN"
+    step "=== Building linkerd artifacts on DPU (libdmesh_l7.a + mock control plane) ==="
+    # --locked everywhere: the lock files are the reproducible part of the build.
+    if ! ssh_dpu "test -f '$dest/rust/Cargo.lock'"; then
+        err "missing $dest/rust/Cargo.lock — a reproducible build needs it"
+        err "  generate:  ssh $DPU_HOST \"cd $dest/rust && $cargo generate-lockfile\""
+        err "  then copy it to $PROJ_ROOT/linkerd/rust/Cargo.lock and redeploy"
+        exit 1
+    fi
+    local out
+    if ! out=$(ssh_dpu "cd '$dest/rust' && $cargo build --release --locked" 2>&1); then
+        err "libdmesh_l7.a build failed:"; printf '%s\n' "$out" | tail -40; exit 1
+    fi
+    info "libdmesh_l7.a built ($(linkerd_staticlib))"
+    if ! out=$(ssh_dpu "cd '$dest/port/linkerd2-proxy' && $cargo build --release --locked \
+                        -p linkerd-app-integration \
+                        --bin mock-identity --bin mock-destination --bin mock-policy" 2>&1); then
+        err "mock control plane build failed:"; printf '%s\n' "$out" | tail -40; exit 1
+    fi
+    if ! out=$(ssh_dpu "install -D -m 0755 -t '$(linkerd_mock_dir)' \
+                        '$dest/port/linkerd2-proxy/target/release/mock-identity' \
+                        '$dest/port/linkerd2-proxy/target/release/mock-destination' \
+                        '$dest/port/linkerd2-proxy/target/release/mock-policy'" 2>&1); then
+        err "staging the mock binaries failed:"; printf '%s\n' "$out"; exit 1
+    fi
+    info "mock control plane staged ($(linkerd_mock_dir))"
+}
+
+# Everything the linked binary and the launcher will reach for, named by its
+# exact path. A missing artifact is a build step that did not run, so the
+# message says which one to run.
+preflight_linkerd() {
+    local lib; lib=$(linkerd_staticlib)
+    local mocks; mocks=$(linkerd_mock_dir)
+    local data; data=$(linkerd_data_dir)/$LINKERD_FIXTURE
+    local anchors; anchors=$(linkerd_data_dir)/ca1.pem
+    local missing
+    missing=$(ssh_dpu "for f in '$lib' '$data/token.txt' '$anchors'; do
+                           [ -r \"\$f\" ] || echo \"unreadable: \$f\"
+                       done
+                       for m in mock-identity mock-destination mock-policy; do
+                           [ -x '$mocks'/\$m ] || echo \"not executable: $mocks/\$m\"
+                       done")
+    if [ -n "$missing" ]; then
+        err "linkerd preflight failed:"
+        printf '  %s\n' $missing
+        err "build them with: L7_BACKEND=linkerd $0 linkerdbuild"
+        exit 1
+    fi
+
+    # The archive has to carry the whole contract, and nothing of the port's own
+    # datapath: a DOCA initialization symbol left undefined in here would mean
+    # two owners for one device, and the link would resolve it against DPUmesh.
+    # The archive defines ~75k symbols, so both lists are narrowed on the DPU.
+    local defined undefined absent="" s
+    defined=$(ssh_dpu "nm -g --defined-only '$lib' 2>/dev/null | awk '\$3 ~ /^l7_/ {print \$3}' | sort -u")
+    for s in l7_worker_attach l7_worker_step l7_conn_open l7_conn_segment \
+             l7_conn_eof l7_conn_close l7_worker_detach l7_resolve l7_report; do
+        # Matched with `case`, not `grep -q`: a pipeline into a command that
+        # exits on its first match leaves the writer with SIGPIPE, which
+        # `pipefail` then reports as a failed check.
+        case $'\n'"$defined"$'\n' in
+            *$'\n'"$s"$'\n'*) ;;
+            *) absent="$absent $s" ;;
+        esac
+    done
+    if [ -n "$absent" ]; then
+        err "libdmesh_l7.a does not export:$absent"
+        exit 1
+    fi
+    undefined=$(ssh_dpu "nm -u '$lib' 2>/dev/null | awk '\$NF ~ /^dmesh_doca_/ {print \$NF}' | sort -u")
+    if [ -n "$undefined" ]; then
+        err "libdmesh_l7.a requires the port's own datapath — own-datapath leaked in:"
+        printf '  %s\n' $undefined
+        exit 1
+    fi
+    info "linkerd preflight OK (staticlib exports the contract and needs no port datapath, 3 mocks, fixtures)"
+}
 
 start_mocks() {
     step "=== Starting mock control plane (identity/destination/policy) ==="
@@ -445,7 +566,7 @@ LINKERD2_PROXY_INBOUND_LISTEN_ADDR=127.0.0.1:0
 LINKERD2_PROXY_OUTBOUND_LISTEN_ADDR=127.0.0.1:0
 LINKERD2_PROXY_CONTROL_LISTEN_ADDR=127.0.0.1:0
 LINKERD2_PROXY_ADMIN_LISTEN_ADDR=${LINKERD_ADMIN_ADDR:-127.0.0.1:4191}
-LINKERD2_PROXY_LOG=${LINKERD_LOG:-warn,linkerd=info}
+LINKERD2_PROXY_LOG=${LINKERD_LOG:-warn,linkerd=info,dmesh_l7=info}
 DPUMESH_L7_LINKERD_WORKER=${DPUMESH_L7_LINKERD_WORKER:-0}
 L7ENV
 { printf 'LINKERD2_PROXY_IDENTITY_TRUST_ANCHORS=\"'; cat $(linkerd_data_dir)/ca1.pem; printf '\"\n'; } >> /tmp/dpumesh-l7.env"
@@ -845,6 +966,13 @@ deploy() {
     clean_failed_pods
     apply_manifest
     sync_sources
+    # The staticlib the DPU binary links has to exist before it is linked, and
+    # the mocks before the proxy inside it asks for a certificate. Both are
+    # built from this tree, so the deploy carries what it was run from.
+    if [ "${L7_BACKEND:-null}" = linkerd ]; then
+        sync_linkerd_sources
+        build_linkerd_artifacts
+    fi
     build_dpu
     build_host
     build_bench_binaries
@@ -856,10 +984,26 @@ deploy() {
     start_dpu
     start_pods
     pin_pods fair
+    [ "${L7_BACKEND:-null}" = linkerd ] && validate_linkerd_session
     info "=== Deploy complete ==="
     echo "  Run:  $0 latency|bandwidth|rate|all [dpumesh|tcp|both]"
     echo "        $0 loopback|verbs|preload ...   (validators)"
     echo "  Re-pin:  $0 pin [fair|l4|hw|hw3|hw6]"
+}
+
+# One connection through the L7 layer, which is the whole of what the linkerd
+# consumer supports. A pass here is not "linkerd is fast"; it is "a request and
+# its response crossed the proxy and came back intact".
+validate_linkerd_session() {
+    step "=== Validating one connection through the L7 layer ==="
+    local reply; reply=$(run_point dpumesh 1024 8 1 5 100 1)
+    printf '  %s\n' "$reply"
+    case "$reply" in
+        OK*) info "single-connection L7 validation passed" ;;
+        *)   err "single-connection L7 validation failed: $reply"
+             err "  see: $0 dpulog 200, and /tmp/mock-*.log on the DPU"
+             return 1 ;;
+    esac
 }
 
 cleanup() { info "Deleting namespace $NS"; kubectl delete ns "$NS" --ignore-not-found=true 2>/dev/null || true; stop_dpu; }
@@ -1086,6 +1230,7 @@ case "$CMD" in
     build)     need_env; sync_sources; build_dpu ;;
     restart)   need_env; start_dpu ;;
     grpcbuild) build_grpc_apps ;;
+    linkerdbuild) need_env; sync_linkerd_sources; build_linkerd_artifacts; preflight_linkerd ;;
     # NOTE: `restart` is valid only while no pod is meshed, and there is no
     # per-pod start. Restarting the DPU under live pods — or starting a pod against
     # an already-running DPU — leaves the two sides' registration state inconsistent.
@@ -1112,6 +1257,8 @@ Usage: $0 <command> [args]
 
   deploy                                     build + DPU + images + pods + pin (the ONLY bring-up path)
   build | restart                            rebuild the DPU binary | restart the DPU alone (no pod may be meshed)
+  linkerdbuild                               sync + build libdmesh_l7.a and the mock control plane on the DPU
+                                             (deploy does this itself when L7_BACKEND=linkerd)
   latency|bandwidth|rate|all [dpumesh|tcp|both]   benchmark families -> CSVs under $OUT
   point <sol> <req> <reply> <conc> <dur> <warmup> <threads> [reconn]   one raw RUN (reconn = conn-churn period)
   loopback|preload [args]                    feature validators
@@ -1123,6 +1270,8 @@ Usage: $0 <command> [args]
 
 Deploy knobs (env): BENCH_NUMA_POLICY=local|auto BENCH_DEPLOY_SCOPE=all|core|l4|grpc
                     BENCH_LINKERD=1 adds the injected linkerd L7 pods (grpc scope)
+                    L7_BACKEND=null|linkerd selects the L7 consumer; linkerd builds
+                    libdmesh_l7.a and the mocks on the DPU and starts the mock CP
                     BENCH_GRPC_BUILD=release|asan (asan instruments echo_grpc only;
                     reports land in ASAN_LOG_DIR, default /var/log/dpumesh-asan)
 Sweep knobs (env): OUT LAT_DUR BW_DUR RATE_DUR WARMUP BW_CONC RATE_CONC RATE_THREADS LAT_SIZES BW_SIZES

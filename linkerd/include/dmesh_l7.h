@@ -28,6 +28,16 @@ extern "C" {
 #define DMESH_L7_MODE_OPAQUE   2
 #define DMESH_L7_MODE_FULL     3
 
+/* Why l7_conn_open declined. Any negative value declines and the data plane
+ * forwards at L4; these name the cause, so a fallback is counted by reason
+ * rather than as one total. A layer that has no reason to give returns
+ * DMESH_L7_DECLINE_ERROR. */
+#define DMESH_L7_DECLINE_ERROR          (-1)  /* the layer could not take it */
+#define DMESH_L7_DECLINE_NOT_ATTACHED   (-2)  /* no runtime on this worker */
+#define DMESH_L7_DECLINE_MODE           (-3)  /* the mode carries nothing for it */
+#define DMESH_L7_DECLINE_SESSION_LIMIT  (-4)  /* the layer already holds this session */
+#define DMESH_L7_DECLINE_UNKNOWN_REPLY  (-5)  /* no open session this reply belongs to */
+
 /* One connection's identity. The L7 layer routes on socket addresses; DPUmesh
  * routes on pod and service identifiers, so both are carried. */
 struct dmesh_l7_flow {
@@ -44,6 +54,21 @@ struct dmesh_l7_flow {
     uint8_t  is_reply;              /* the backend-to-client direction */
     char     workload[64];          /* NUL-terminated; fixed array, never a pointer */
 };
+
+/* The `conn` handle, as DPUmesh forms it: the sending pod in the high bits, its
+ * port in the low. A reply names the same pair through `peer_pod` and
+ * `dst_port`, which is how the L7 layer recognises the session it already
+ * opened. Both sides compute the handle, so the formula lives here rather than
+ * in either one of them. */
+static inline uint64_t dmesh_l7_conn_handle(int32_t pod, uint16_t port) {
+    return ((uint64_t)(uint8_t)pod << 16) | (uint64_t)port;
+}
+static inline int32_t dmesh_l7_handle_pod(uint64_t conn) {
+    return (int32_t)(int8_t)(conn >> 16);
+}
+static inline uint16_t dmesh_l7_handle_port(uint64_t conn) {
+    return (uint16_t)conn;
+}
 
 /* Leave the choice of backend to the data plane's own balancer. A reply
  * direction is always routed by conntrack and ignores any choice. */
@@ -65,7 +90,7 @@ int  l7_worker_attach(int worker_id);
 int  l7_worker_step(int worker_id);
 
 /* Open a connection. Negative rejects it, and the datapath falls back to L4
- * forwarding for that connection. */
+ * forwarding for that connection; DMESH_L7_DECLINE_* names the cause. */
 int  l7_conn_open(int worker_id, uint64_t conn, const struct dmesh_l7_flow *flow);
 
 /* Arrived payload at `base + pos`, `len` bytes. The region is shared staging:

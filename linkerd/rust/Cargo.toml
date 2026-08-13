@@ -21,6 +21,13 @@ linkerd-rustls = { path = "../port/linkerd2-proxy/linkerd/rustls" }
 # DPUmesh is the datapath here.
 dmesh-doca = { path = "../port/linkerd2-proxy/linkerd/doca", default-features = false }
 tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
+# Session events go through the proxy's own subscriber, so `LINKERD2_PROXY_LOG`
+# selects them: the target is `dmesh_l7`.
+tracing = "0.1"
+
+[dev-dependencies]
+# The tests drive the endpoints the way the stack does.
+tokio = { version = "1", features = ["rt", "sync", "time", "macros", "io-util"] }
 
 [profile.release]
 opt-level = 3

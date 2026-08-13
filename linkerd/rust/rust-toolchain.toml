@@ -1,0 +1,5 @@
+# The toolchain the port pins, so the staticlib and the crates it is built from
+# are compiled by one compiler. `linkerd/port/linkerd2-proxy/rust-toolchain.toml`
+# carries the same channel; the two move together.
+[toolchain]
+channel = "1.90.0"

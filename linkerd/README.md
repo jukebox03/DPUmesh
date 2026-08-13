@@ -58,17 +58,41 @@ streams pass through, framed streams are reassembled and routed per message, and
 balancer per message instead of once per connection.
 
 `rust/` builds `libdmesh_l7.a` from linkerd2-proxy against the port's crates.
-Building it needs the toolchain the port pins and a checkout whose path the
-manifest resolves:
+It is an aarch64 archive linked into the DPU binary, so it is built on the DPU:
+`rust-toolchain.toml` pins 1.90.0 and `Cargo.lock` fixes the dependency graph,
+and both builds use `--locked`.
 
-```sh
-rustup toolchain install 1.90.0
-cargo build --release            # in linkerd/rust
+`L7_BACKEND=linkerd bash bench/bench.sh deploy` does the whole of it, and
+nothing here has to be prepared by hand:
+
+```text
+1  rsync linkerd/rust/ and linkerd/port/linkerd2-proxy/ to ~/l7build on the DPU
+2  cargo build --release --locked                     -> libdmesh_l7.a
+   cargo build --release --locked -p linkerd-app-integration
+       --bin mock-identity --bin mock-destination --bin mock-policy
+   install the three binaries into ~/l7build/mock/
+3  preflight: staticlib readable, three mocks executable, fixtures readable
+4  meson -Dl7_backend=linkerd -Dl7_lib_path=~/l7build/rust/target/release/libdmesh_l7.a
+5  start the mock control plane, then dpumesh_dpu, then the pods
+6  one connection through the layer, as a validation
 ```
 
-`L7_BACKEND=linkerd` also starts the port's mock destination, identity and policy
-binaries, which is what lets the proxy obtain a certificate without the DPU
-holding cluster credentials.
+`bash bench/bench.sh linkerdbuild` runs steps 1–3 alone. `L7_BACKEND=null`
+performs none of them: no Rust build, no mocks.
+
+The mock destination, identity and policy binaries are the port's own, and are
+what lets the proxy obtain a certificate without the DPU holding cluster
+credentials. The DPU layout is one tree:
+
+```text
+~/l7build/
+  rust/                    linkerd/rust, with Cargo.lock and rust-toolchain.toml
+  port/linkerd2-proxy/     the port; sibling of rust/, which its manifest resolves
+  mock/                    mock-identity, mock-destination, mock-policy
+```
+
+Fixtures — the trust anchors and the identity token — are read from
+`~/l7build/port/linkerd2-proxy/linkerd/app/integration/src/data`.
 
 Service and pod identifiers reach the proxy as addresses under `10.96.0.0/16`
 and `10.97.0.0/16`, outside the loopback range an outbound proxy refuses to
@@ -120,3 +144,44 @@ Absent: inbound proxying, more than one worker, runtime-sized connection slots,
 staging flow control, a reusable backend channel registry, and the query
 interface `decision` mode uses. `CONTRACT.md` §10 states which of these the
 contract requires and which one bounds the integration today.
+
+### Build split
+
+`linkerd/doca` carries an `own-datapath` feature, on by default. With it on the
+crate compiles the port's C datapath and links its DPA kernel, which is the
+standalone binary's build; with it off `build.rs` compiles nothing and the crate
+contributes the IO endpoint, the backend registry and the acceptor's types, over
+a datapath the embedder supplies. `linkerd-app` and `linkerd-app-outbound` take
+it with `default-features = false`, and feature unification restores the
+datapath for the port's own binary.
+
+This split lives in the checkout under `port/` and is not committed upstream, so
+a clean recursive clone does not yet reproduce it. Verified on the DPU:
+
+```text
+cd ~/l7build/rust               cargo tree -e features   ->  dmesh-doca, no own-datapath
+cd ~/l7build/port/linkerd2-proxy cargo tree -p linkerd2-proxy -e features
+                                                         ->  dmesh-doca/own-datapath
+```
+
+Checking the standalone side needs two things this integration does not: the
+port's own C datapath beside the proxy, and the toolchain flag linkerd2-proxy
+builds itself with.
+
+```sh
+rsync -a linkerd/port/DPUMesh/ $DPU:~/DPUMesh/   # build.rs resolves ../../../DPUMesh
+ssh $DPU 'cd ~/DPUMesh && meson setup build'     # writes build/device/dpa_kernel.a
+ssh $DPU 'cd ~/l7build/port/linkerd2-proxy && \
+          RUSTFLAGS="--cfg tokio_unstable" cargo +1.90.0 check -p linkerd2-proxy'
+```
+
+Without `tokio_unstable` the check stops in `kubert-prometheus-tokio`, which is
+the proxy's own requirement and not something the split introduces.
+
+### What the linkerd consumer supports
+
+One worker (`DPUMESH_L7_LINKERD_WORKER`, default 0) carries the proxy and the
+others forward at L4; one active session per service address; outbound only;
+`opaque` and `l7` modes; the mock control plane; the data plane's own balancer.
+A connection past that is declined with a reason and counted as a fallback.
+`CONTRACT.md` §12 is the full list, with the return codes.

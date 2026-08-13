@@ -29,6 +29,7 @@
 
 #include <errno.h>
 #include <stdatomic.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -63,6 +64,36 @@ enum px_l7_mode {
     PX_L7_OPAQUE,        /* payload traverses the L7 layer */
     PX_L7_FULL,          /* the above, plus request-level routing */
 };
+
+/* Why a connection is being forwarded at L4 instead of through the L7 layer.
+ * The layer names the cause with a DMESH_L7_DECLINE_* return; the rest are
+ * conditions the data plane sees on its own. */
+enum px_l7_fallback_reason {
+    PX_L7_FB_ADAPTER_ERROR = 0,
+    PX_L7_FB_NOT_ATTACHED,
+    PX_L7_FB_UNSUPPORTED_MODE,
+    PX_L7_FB_SESSION_LIMIT,
+    PX_L7_FB_UNKNOWN_REPLY,
+    PX_L7_FB_NO_VERDICT,
+    PX_L7_FB_KINDS
+};
+
+static const char *const px_l7_fallback_name[PX_L7_FB_KINDS] = {
+    "adapter-error", "worker-not-attached", "unsupported-mode",
+    "single-session-limit", "unknown-reply", "no-verdict",
+};
+
+/* The decline codes are wire ABI with the layer: a value it returns is looked
+ * up here, so an unknown one is counted rather than mistaken for a known one. */
+static inline enum px_l7_fallback_reason px_l7_reason_of(int rc) {
+    switch (rc) {
+    case DMESH_L7_DECLINE_NOT_ATTACHED:  return PX_L7_FB_NOT_ATTACHED;
+    case DMESH_L7_DECLINE_MODE:          return PX_L7_FB_UNSUPPORTED_MODE;
+    case DMESH_L7_DECLINE_SESSION_LIMIT: return PX_L7_FB_SESSION_LIMIT;
+    case DMESH_L7_DECLINE_UNKNOWN_REPLY: return PX_L7_FB_UNKNOWN_REPLY;
+    default:                             return PX_L7_FB_ADAPTER_ERROR;
+    }
+}
 
 /* Modes whose payload is handed to the L7 layer. */
 static inline int px_l7_carries_bytes(uint8_t mode) {
@@ -375,6 +406,12 @@ struct dmesh_proxy {
     atomic_ullong stat_stall_uport;
     atomic_ullong stat_stall_arena;
     atomic_ullong stat_l7_fallback;      /* conns the L7 layer declined */
+    /* The same total, split by the reason the layer gave. A fallback is only
+     * an availability path, so which one is being taken is what says whether
+     * the layer is carrying the traffic it was configured to carry. */
+    atomic_ullong stat_l7_fallback_by[PX_L7_FB_KINDS];
+    atomic_ullong stat_l7_over_release;  /* releases naming more than is outstanding */
+    atomic_ullong stat_l7_stray_release; /* releases against a conn holding nothing */
 };
 
 static inline uint64_t px_stat_inc(atomic_ullong *counter)
@@ -1389,12 +1426,46 @@ static void px_parse(struct objects *objs, struct px_conn *c) {
  * late call from the L7 layer must not land on a different connection. The key
  * is the same (pod, port) pair the connection table is indexed by. */
 static inline uint64_t px_conn_handle(const struct px_conn *c) {
-    return ((uint64_t)(uint8_t)c->pub.src_pod << 16) | c->pub.src_port;
+    return dmesh_l7_conn_handle(c->pub.src_pod, c->pub.src_port);
 }
 
 static struct px_conn *px_conn_by_handle(struct dmesh_proxy *px, uint64_t conn) {
-    return px_conn_find(px, (int8_t)(conn >> 16), (uint16_t)conn);
+    return px_conn_find(px, dmesh_l7_handle_pod(conn), dmesh_l7_handle_port(conn));
 }
+
+/* Count a connection the L7 layer is not carrying, by cause and in total. */
+static uint64_t px_l7_fallback(struct dmesh_proxy *px, enum px_l7_fallback_reason why) {
+    px_stat_inc(&px->stat_l7_fallback_by[why]);
+    return px_stat_inc(&px->stat_l7_fallback);
+}
+
+static inline uint64_t px_stat_get(atomic_ullong *counter) {
+    return atomic_load_explicit(counter, memory_order_relaxed);
+}
+
+/* What the L7 layer did not carry, by cause. A service configured for the layer
+ * whose traffic shows up here was forwarded without policy, which is the one
+ * thing a successful run must not contain. The counters are the process's; the
+ * worker id names who is reporting them. */
+static void px_l7_log_fallbacks(struct dmesh_proxy *px, int worker_id) {
+    char by[192];
+    int n = 0;
+    for (int i = 0; i < PX_L7_FB_KINDS && n >= 0 && (size_t)n < sizeof(by); i++) {
+        int w = snprintf(by + n, sizeof(by) - (size_t)n, "%s%s=%llu", i ? " " : "",
+                         px_l7_fallback_name[i],
+                         (unsigned long long)px_stat_get(&px->stat_l7_fallback_by[i]));
+        if (w < 0)
+            break;
+        n += w;
+    }
+    DOCA_LOG_INFO("proxy: worker %d L7 fallbacks total=%llu (%s) over_release=%llu "
+                  "stray_release=%llu",
+                  worker_id, (unsigned long long)px_stat_get(&px->stat_l7_fallback), by,
+                  (unsigned long long)px_stat_get(&px->stat_l7_over_release),
+                  (unsigned long long)px_stat_get(&px->stat_l7_stray_release));
+}
+
+static void px_l7_apply_release(struct objects *objs, struct px_conn *c);
 
 /* Tell the L7 layer to drop every reference into this connection's staging, and
  * return the load a `decision` connection placed on the backend it named — its
@@ -1411,10 +1482,24 @@ static void px_l7_close(struct objects *objs, struct px_conn *c, int eof) {
         c->l7_resolved = 0;
     }
     if (c->l7_open) {
+        uint64_t outstanding = c->l7_handed - c->parse_pos;
         if (eof)
             l7_conn_eof(px_cur_worker->id, handle);
         l7_conn_close(px_cur_worker->id, handle);
         c->l7_open = 0;
+        /* Closing is where the layer gives back what it still holds. Apply it
+         * while the window is still standing: the release names arrivals that
+         * the caller is about to reclaim, and applied afterwards it would name
+         * nothing. What is still held after this never came back. */
+        if (outstanding) {
+            px_l7_apply_release(objs, c);
+            if (c->l7_handed > c->parse_pos)
+                DOCA_LOG_DBG("proxy: L7 close left %llu of %llu bytes in custody on "
+                             "conn (%d:%u)",
+                             (unsigned long long)(c->l7_handed - c->parse_pos),
+                             (unsigned long long)outstanding,
+                             c->pub.src_pod, c->pub.src_port);
+        }
     }
     c->l7_closed = 1;
 }
@@ -1447,12 +1532,15 @@ _Static_assert(PX_L7_DECISION == DMESH_L7_MODE_DECISION &&
 static int px_l7_open_conn(struct objects *objs, struct px_conn *c) {
     struct dmesh_l7_flow flow;
     px_l7_fill_flow(objs, c, &flow);
-    if (l7_conn_open(px_cur_worker->id, px_conn_handle(c), &flow) < 0) {
-        uint64_t n = px_stat_inc(&objs->proxy->stat_l7_fallback);
+    int rc = l7_conn_open(px_cur_worker->id, px_conn_handle(c), &flow);
+    if (rc < 0) {
+        enum px_l7_fallback_reason why = px_l7_reason_of(rc);
+        uint64_t n = px_l7_fallback(objs->proxy, why);
         if (((n - 1u) & 0xFFFu) == 0)
-            DOCA_LOG_WARN("proxy: L7 layer declined conn (%d:%u) — forwarding at L4 "
-                          "without policy (total %llu)",
-                          c->pub.src_pod, c->pub.src_port, (unsigned long long)n);
+            DOCA_LOG_WARN("proxy: L7 layer declined conn (%d:%u) svc %d reason=%s — "
+                          "forwarding at L4 without policy (total %llu)",
+                          c->pub.src_pod, c->pub.src_port, c->pub.dst_service,
+                          px_l7_fallback_name[why], (unsigned long long)n);
         return 0;
     }
     c->l7_open = 1;
@@ -1466,8 +1554,17 @@ static void px_l7_apply_release(struct objects *objs, struct px_conn *c) {
     if (n == 0)
         return;
     uint64_t outstanding = c->l7_handed - c->parse_pos;
-    if ((uint64_t)n > outstanding)
-        n = (uint32_t)outstanding;             /* over-release: consume what exists */
+    if ((uint64_t)n > outstanding) {
+        /* The layer named more than it was ever handed. Clamping keeps the
+         * window consistent, but the surplus is a custody bug on the other
+         * side of the contract, so it is counted rather than absorbed. */
+        uint64_t bad = px_stat_inc(&objs->proxy->stat_l7_over_release);
+        DOCA_LOG_DBG("proxy: L7 over-release worker %d conn (%d:%u) asked %u of %llu "
+                     "outstanding (total %llu)",
+                     px_cur_worker->id, c->pub.src_pod, c->pub.src_port, n,
+                     (unsigned long long)outstanding, (unsigned long long)bad);
+        n = (uint32_t)outstanding;
+    }
     c->l7_release_pending = 0;
     if (n)
         px_advance(objs, c, n);
@@ -1516,7 +1613,7 @@ static int px_l7_decide(struct objects *objs, struct px_conn *c) {
     c->l7_resolved = 1;                        /* owes a report either way */
     c->l7_open_ns = px_monotonic_ns();
     if (l7_resolve(px_cur_worker->id, &flow, &verdict) < 0) {
-        uint64_t n = px_stat_inc(&objs->proxy->stat_l7_fallback);
+        uint64_t n = px_l7_fallback(objs->proxy, PX_L7_FB_NO_VERDICT);
         if (((n - 1u) & 0xFFFu) == 0)
             DOCA_LOG_WARN("proxy: L7 layer gave no verdict for conn (%d:%u) — "
                           "forwarding without policy (total %llu)",
@@ -1564,10 +1661,14 @@ static void px_parse_l7(struct objects *objs, struct px_conn *c) {
             avail = room;
         int took = l7_conn_segment(px_cur_worker->id, px_conn_handle(c),
                                    base, pos, avail);
-        if (took < 0) {
+        /* The answer is bytes taken, in [0, avail]. Above it names bytes that
+         * were never offered, and the hand-over would skip payload that has
+         * arrived; below zero is terminal. Neither is recoverable here. */
+        if (took < 0 || (uint32_t)took > avail) {
             px_cur_worker->in_l7_parse = 0;
             px_l7_apply_release(objs, c);
-            px_poison(objs, c, "l7 layer rejected a segment");
+            px_poison(objs, c, took < 0 ? "l7 layer rejected a segment"
+                                        : "l7 layer took more than was offered");
             return;
         }
         if (took == 0)
@@ -1680,9 +1781,27 @@ void dmesh_l7_release(int worker_id, uint64_t conn, uint32_t pos, uint32_t len) 
     struct px_worker_state *worker_state = px_cur_worker;
     if (!worker_state || worker_state->id != worker_id || len == 0)
         return;
-    struct px_conn *c = px_conn_by_handle(worker_state->objs->proxy, conn);
+    struct dmesh_proxy *px = worker_state->objs->proxy;
+    struct px_conn *c = px_conn_by_handle(px, conn);
     if (!c)
         return;
+    /* Everything outstanding is already spoken for, so this release names an
+     * extent that was returned once. Applying it would advance the window past
+     * bytes the layer has not read, so it is counted instead.
+     *
+     * Only outside a hand-over walk: a layer that consumes a segment inside
+     * l7_conn_segment releases it before the walk books the hand-over, and
+     * there the two are legitimately out of step. What that path over-releases
+     * is caught by px_l7_apply_release instead. */
+    if (!worker_state->in_l7_parse &&
+        c->l7_handed - c->parse_pos <= (uint64_t)c->l7_release_pending) {
+        uint64_t n = px_stat_inc(&px->stat_l7_stray_release);
+        DOCA_LOG_DBG("proxy: L7 released %u bytes on conn (%d:%u) holding none "
+                     "(pending %u, total %llu)",
+                     len, c->pub.src_pod, c->pub.src_port, c->l7_release_pending,
+                     (unsigned long long)n);
+        return;
+    }
     c->l7_release_pending += len;
     if (!worker_state->in_l7_parse)
         px_stall(c);                           /* reported outside a parse: schedule one */
@@ -1712,6 +1831,7 @@ void px_l7_detach_worker(struct objects *objs, int worker_id) {
         return;
     px_cur_worker = &px->workers[worker_id];
     l7_worker_detach(worker_id);
+    px_l7_log_fallbacks(px, worker_id);
 }
 
 /* ====== FIN ====== */
@@ -3247,6 +3367,10 @@ int px_init(struct objects *objs) {
     atomic_init(&px->stat_stall_uport, 0);
     atomic_init(&px->stat_stall_arena, 0);
     atomic_init(&px->stat_l7_fallback, 0);
+    for (int i = 0; i < PX_L7_FB_KINDS; i++)
+        atomic_init(&px->stat_l7_fallback_by[i], 0);
+    atomic_init(&px->stat_l7_over_release, 0);
+    atomic_init(&px->stat_l7_stray_release, 0);
     /* Splice the shared free lists directly: workers are not running yet, and
      * the init thread's per-thread caches must stay empty. */
     for (int i = PX_ARRIVAL_POOL - 1; i >= 0; i--) { px->arr_mem[i].next   = px->arr_free;   px->arr_free   = &px->arr_mem[i]; }

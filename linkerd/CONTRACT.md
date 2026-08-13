@@ -2,13 +2,38 @@
 
 Between the DPUmesh datapath and the linkerd port. DPUmesh is normative:
 `doca/comch_common.h`, `doca/dpa_common.h`, `doca/ring.h`, `doca/dpu_worker.c`,
-`doca/dpu_proxy.c`. The port conforms.
+`doca/dpu_proxy.c`.
+
+**This document is the target, not a description of what is built.** The
+adapter conforms in part: §12 states what it supports today, §10 what the port
+diverges on. Where the two disagree, this document says what the port is moving
+towards and §12 says what a run will actually do.
 
 The datapath is DPUmesh's. The port's own is not compiled into this
 integration; it stays in tree as the reference point for convergence.
 
 `design/L7.md` describes the layer this contract joins. This document states
 what the two sides owe each other.
+
+## 0. Acceptance criteria
+
+What the current bring-up has to satisfy to count as working. These are
+narrower than the contract on purpose; §12 says why.
+
+- `linkerd/rust` builds `libdmesh_l7.a` reproducibly with the pinned toolchain
+  and a lock file, from a tree that carries no port C datapath, no DOCA
+  initialization and no standalone `Driver`.
+- `dpumesh_dpu` links it with `-Dl7_backend=linkerd` and starts.
+- The mock identity, destination and policy processes start on the DPU.
+- Worker 0 attaches the proxy and the log says so; no other worker does.
+- One `opaque` connection to one service carries its request and its response
+  through the proxy, with `fail=0`, `drops=0` and `reorder=0`.
+- The same run repeated after the first one closes succeeds again, which is
+  what shows the registry and the custody were given back.
+- No `L7 layer declined` warning and no unexpected L4 fallback on that service.
+- Every staging extent the layer held is released on the close and error paths.
+- A second concurrent session for one service is refused explicitly rather than
+  overwriting the registry.
 
 ## 1. Operating modes
 
@@ -242,6 +267,15 @@ availability rather than acting as an independent bound.
 
 ## 9. Build integration
 
+```text
+Target   one `own-datapath` feature separates the standalone binary's build
+         from the embedded one, and neither needs a change to the other
+
+Current  the split exists in this checkout and is what the DPU builds from;
+         a clean recursive clone does not yet reproduce it, because the port's
+         changes are not committed upstream
+```
+
 `linkerd/doca` compiles under a feature that selects which datapath backs the
 foreign-function surface.
 
@@ -285,7 +319,7 @@ What the port carries, against what this contract requires.
 | Identity | asserted by the host shim | carried on `POD_IDENTITY`, read-only |
 | Backend choice | the connector dials what it is given | named per delivery from `dmesh_l7_backends` |
 | Backend channel | `backend::take` removes the entry, so an address yields one channel and later connections fall back to a TCP dial | an address yields a channel per connection for as long as it is meshed |
-| Slots | compile-time constant of eight | sized at attach |
+| Slots | compile-time constant of eight, which sizes the port's own driver and bounds nothing the adapter issues | sized at attach |
 | Driver | owns a loop | single-step entry point |
 | Release | no-op | mandatory |
 | Writes | 128-byte aligned chunking | arbitrary length |
@@ -321,3 +355,43 @@ a time is sound, and beyond that an address has already been handed out.
    sidesteps this for bring-up; production needs either the DPU joining the
    cluster as a node whose proxy runs as a workload, or a credential provisioned
    out of band.
+
+## 12. Current implementation status
+
+What `linkerd/rust` does today, against §1–§9 above.
+
+| | |
+|---|---|
+| Supported | worker 0 only; outbound only; `opaque` and `l7` modes; one active session per service address; the mock control plane; `DMESH_L7_BACKEND_ANY` |
+| Not supported | concurrent sessions on one service; more than one worker carrying the proxy; naming a concrete backend pod; `decision` mode; real workload identity and production mTLS; inbound |
+
+### Backend connector
+
+How a connection reaches its backend today, which is what bounds the rest.
+
+```text
+one service address holds one active session
+the wrapper publishes backend_io into the registry before the acceptor runs
+the connector takes it once, and the entry is gone
+every delivery names BACKEND_ANY, so the data plane's balancer chooses
+```
+
+A second concurrent session for the same address would publish over the first
+one's entry, and the first would then be waiting on a channel nobody holds. The
+adapter refuses it instead: `l7_conn_open` returns
+`DMESH_L7_DECLINE_SESSION_LIMIT`, the data plane counts a
+`single-session-limit` fallback and forwards that connection at L4. The guard
+is temporary and exists only because the registry hands an address out once;
+§10's backend-channel row states what replaces it.
+
+### Declining
+
+Every refusal names its cause, and the data plane counts fallbacks by it.
+
+| Return | Counted as | When |
+|---|---|---|
+| `DMESH_L7_DECLINE_ERROR` | `adapter-error` | malformed flow, a pod id outside one byte, or the acceptor being gone |
+| `DMESH_L7_DECLINE_NOT_ATTACHED` | `worker-not-attached` | the worker carries no proxy, or the call named another worker |
+| `DMESH_L7_DECLINE_MODE` | `unsupported-mode` | `decision`, which hands over no payload |
+| `DMESH_L7_DECLINE_SESSION_LIMIT` | `single-session-limit` | a second session, or a second reply direction, for one already open |
+| `DMESH_L7_DECLINE_UNKNOWN_REPLY` | `unknown-reply` | a reply naming no session the layer opened |
