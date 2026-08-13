@@ -110,12 +110,15 @@ second registration.
 
 `DmeshRuntime::Options::reactor_count` sets the number of EQ reactor shards
 over that one channel. Each shard is one EQ and one polling thread, which also
-runs the endpoint completions for its connections. Outbound connections are
-assigned round-robin; an inbound connection belongs to whichever shard received
-its `DMESH_EVENT_CONN_REQ`.
+runs normal receive and TX-ready Endpoint progress for its connections.
+Outbound connections are assigned round-robin; an inbound connection belongs
+to whichever shard received its `DMESH_EVENT_CONN_REQ`.
 
-One further thread per runtime carries the completions a gRPC Endpoint call
-raises itself, which never run before that call returns.
+One further adapter-owned thread per runtime is the default callback executor
+shared by every shard and Endpoint. It delivers connect/accept results and
+deferred Endpoint callbacks, including immediate terminal failures and pending
+operations failed by EOF, transport error or destruction. Normal receive and
+TX-ready completions do not take this hop.
 `DmeshRuntime::Create` accepts a `std::shared_ptr<Executor>` that replaces it.
 Endpoints share ownership of the executor they schedule on, so it outlives an
 endpoint gRPC has not yet destroyed.
@@ -154,6 +157,15 @@ ASAN_OPTIONS=detect_leaks=0 \
 Use a separate build with `-DDPUMESH_GRPC_ENABLE_TSAN=ON`. The QPS benchmark
 syntax, the rules a retained point must satisfy, and the index of every
 evaluation are in [the benchmark guide](../../bench/README.md).
+
+The reactor suite also keeps one runtime alive while ten gRPC channels churn,
+and holds four channels for the same Service concurrently. It requires every
+channel to receive a distinct native QP, verifies that dropping one does not
+close the others, and waits for the native runtime statistics to return to
+zero. The endpoint integration suite additionally runs four concurrent unary
+RPCs over independent channels to one service and exercises both client and
+server FIN plus graceful server GOAWAY. Reconnect testing separately requires
+a fresh targeted QP.
 
 The integration uses L4 passthrough. It does not provide a `dpumesh:///`
 resolver, HTTP/2 routing, registry reload, EndpointSlice watching, admission

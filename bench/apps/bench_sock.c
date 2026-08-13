@@ -23,6 +23,7 @@
 #include <netinet/tcp.h>
 
 #include "bench.h"
+#include "bench_result.h"
 #include "bench_selftest.h"
 
 #define CTRL_PORT_DEFAULT  9092
@@ -312,6 +313,12 @@ static void *worker_fn(void *arg) {
         int timeout_ms = left > 0.020 ? 20 : (left > 0 ? (int)(left * 1000.0) : 0);
         epoll_wait(ep, &ev, 1, timeout_ms);
     }
+    if (w->tx.len > 0 || w->outstanding > 0) {
+        fprintf(stderr,
+                "[bench_sock] drain timeout: queued=%zu outstanding=%ld\n",
+                w->tx.len, w->outstanding);
+        atomic_store(&w->broken, 1);
+    }
 done_ep:
     close(ep);
 done:
@@ -430,12 +437,13 @@ static void run_bench(int conn_fd, int mode, int req_size, int reply_size, int c
                  "wwin=NA wpool=NA");
     }
     int n = snprintf(reply, sizeof reply,
-        "OK mrps=%.6f gbps=%.4f req_gbps=%.4f resp_gbps=%.4f "
+        "%s mrps=%.6f gbps=%.4f req_gbps=%.4f resp_gbps=%.4f "
         "p50=%.2f p95=%.2f p99=%.2f p999=%.2f p9999=%.2f "
         "avg=%.2f min=%.2f max=%.2f rcnt=%ld scheduled=%ld pending=%ld fail=%ld "
         "conc=%d threads=%d reqsz=%d repsz=%d reqframe=%u respframe=%u "
         "durs=%.3f offered_mrps=%.6f drops=%ld overflow=%llu worker_fail=%d reorder=%ld "
         "mode=%s arr=%s %s\n",
+        bench_result_status(total_ok, total_fail, worker_fail),
         mrps, gbps, request_gbps, response_gbps,
         p50, p95, p99, p999, p9999, avg, mn, mx,
         total_ok, total_scheduled, total_pending, total_fail,

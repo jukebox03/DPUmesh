@@ -15,8 +15,9 @@
 
 namespace dpumesh::grpc {
 
-// One dedicated callback thread with a condition-variable queue, paired one
-// per reactor by default. The worker claims the whole queue per wake.
+// The default adapter callback executor: one dedicated worker and one
+// condition-variable queue per DmeshRuntime, shared by all of that runtime's
+// reactor shards and endpoints. The worker claims the whole queue per wake.
 class ThreadExecutor final : public Executor {
  public:
   ThreadExecutor();

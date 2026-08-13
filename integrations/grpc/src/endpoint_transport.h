@@ -43,9 +43,10 @@ struct Reservation {
 };
 
 // Seam between the EventEngine endpoint state machine and the EQ reactor.
-// Post() and Flush() run on the work executor thread. Post(), Close() and
-// BindDriver() must not invoke DmeshEndpointDriver inline; reactor events are
-// delivered separately.
+// Post() and Flush() run on whichever thread pumps the write: initially the
+// Endpoint::Write() caller and, after native backpressure, the EQ owner that
+// delivers TX_READY. Post(), Close() and BindDriver() must not invoke
+// DmeshEndpointDriver inline; reactor events are delivered separately.
 class EndpointTransport {
  public:
   virtual ~EndpointTransport() = default;

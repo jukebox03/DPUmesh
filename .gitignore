@@ -9,6 +9,9 @@
 /doca/build/
 /doca/builddir/
 
+# Rust build outputs (linkerd proxy)
+/linkerd/rust/target/
+
 # object / archive artifacts
 *.o
 *.a

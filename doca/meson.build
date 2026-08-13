@@ -44,6 +44,7 @@ srcs = [
 l7_backend = get_option('l7_backend')
 l7_link_args = []
 if l7_backend == 'linkerd'
+  add_project_arguments('-DDMESH_L7_RUNTIME_OWNER=1', language: 'c')
   l7_lib_path = get_option('l7_lib_path')
   if l7_lib_path == ''
     error('l7_backend=linkerd requires -Dl7_lib_path=<libdmesh_l7.a>')

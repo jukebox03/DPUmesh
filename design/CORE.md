@@ -92,7 +92,7 @@ ticket, writes one descriptor, and publishes `publish_seq = ticket + 1`. The DPA
 consumes consecutive tickets, copies request bytes into DPU staging, and sends
 completion metadata to the connection owner.
 
-An ARM data worker polls its own completion handles. One iteration:
+An ARM data worker owns its completion and DMA progress. One drain pass:
 
 1. consumes up to 64 DPA completions;
 2. parses and routes connection data;
@@ -101,10 +101,15 @@ An ARM data worker polls its own completion handles. One iteration:
 5. emits `REV_DONE` and exact per-sequence `TX_ACK` entries;
 6. publishes reverse-ring entries.
 
-A worker stays hot while an iteration advances work. Otherwise it arms its DPA
-and SG-DMA completion handles, rechecks, and blocks on them, its cross-worker
-eventfd, and a 1 ms interval. The 1 ms keepalive wakes only EUs serving at
-least one forward ring; a ringless EU parks until a control message arrives.
+A worker stays hot while a drain pass advances work. Otherwise it arms its DPA
+and SG-DMA completion handles, rechecks, and waits on them, its cross-worker
+eventfd, and a 1 ms maintenance deadline. The 1 ms keepalive wakes only EUs
+serving at least one forward ring; a ringless EU parks until a control message
+arrives.
+
+With the Linkerd backend, the pinned ARM thread hosts a Tokio `current_thread`
+runtime. Its persistent driver invokes the same DPUmesh drain path and also
+polls Linkerd output wakers. The null backend uses the C-owned event loop.
 
 Same-owner lanes use a private FIFO. Cross-owner delivery and ACK custody use
 bounded MPSC queues.
@@ -121,7 +126,10 @@ whose destination generation is still current is retried once at the head of
 its lane FIFO. The exclusive retry preserves lane order.
 
 Pod readiness is controlled by the registration connection. Disconnect cleanup
-removes the pod from routing, clears DMA readiness, drains worker custody, and
+removes the pod from routing and clears DMA readiness. Connection state remains
+worker-owned during teardown: every worker closes its sessions and conntrack
+edges, then destination workers drain all lanes. A second worker progress pass
+fences DOCA buffer release after completion callbacks before the main thread
 destroys imported mappings.
 
 ## Reverse publication
@@ -152,7 +160,9 @@ Host                                      BlueField ARM / DPA
  |-- POD_UNREGISTER ------------------------>|
  |                              stop routing
  |                              RING_DEL to EUs
+ |                              close worker-owned sessions/conntrack
  |                              drain DMA and reverse publishers
+ |                              post-callback PE release fence
  |                              destroy imported mappings
  |<---------------- POD_QUIESCED -------------|
 ```

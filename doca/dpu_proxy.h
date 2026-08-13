@@ -46,23 +46,31 @@ int px_drain_stalled(struct objects *objs, int worker_id);
 /* Progress one ARM worker's SG-DMA engine. */
 enum px_progress_state px_worker_drain(struct objects *objs, int worker_id);
 
+/* Bind the calling ARM thread to one proxy worker. */
+void px_bind_worker(struct objects *objs, int worker_id);
+
+/* The ARM worker an L7 request must be processed on, or -1 when the completion
+ * is not one the L7 layer carries. The layer's session state lives on one
+ * worker, so its requests are routed there rather than by port. */
+int px_l7_request_owner(struct objects *objs, int32_t dst_pod_id,
+                        int16_t dst_service);
+
+/* Report the L7 audit counters: fallbacks by cause, custody violations and
+ * shared-pool lock traffic. Rate-limited internally, and silent while nothing
+ * has changed. */
+void px_l7_stats_report(struct objects *objs, int worker_id);
+
 /* SG-DMA completion notification handle, armed while a worker is parked. */
 int px_worker_notification_fd(struct objects *objs, int worker_id);
 int px_worker_arm_notification(struct objects *objs, int worker_id);
 void px_worker_clear_notification(struct objects *objs, int worker_id, int fd);
 
-/* ---- L7 layer, driven from the worker loop ----
- *
- * All three are no-ops unless a service selects a mode that needs the L7 layer,
- * so an empty gate leaves the transport's own path. */
-
-/* Build this worker's L7 runtime. Negative on failure. */
+#ifndef DMESH_L7_RUNTIME_OWNER
+/* C-driven L7 lifecycle used by the null backend. */
 int px_l7_attach_worker(struct objects *objs, int worker_id);
-
-/* Advance it by one step. 1 if it made progress, which keeps the worker hot. */
 int px_l7_step_worker(struct objects *objs, int worker_id);
-
 void px_l7_detach_worker(struct objects *objs, int worker_id);
+#endif
 
 /* True only after the egress owner has stopped submitting for this dead pod,
  * every destination DMA/credit read has completed, all lane queues are empty,

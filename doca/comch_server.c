@@ -627,7 +627,9 @@ pods_add_connection(struct objects *objs, struct doca_comch_connection *conn)
 	objs->pods[idx].dpa_del_last_send_ns = 0;
 	objs->pods[idx].dpa_rings_counted_mask = 0;
 	objs->pods[idx].egress_quiesced = 0;
+	objs->pods[idx].proxy_producers_quiesced_mask = 0;
 	objs->pods[idx].egress_quiesced_mask = 0;
+	objs->pods[idx].egress_reclaim_fenced_mask = 0;
 	for (int w = 0; w < MAX_ARM_WORKERS; w++)
 		__atomic_store_n(&objs->pods[idx].egress_inflight_worker[w].v, 0,
 		                 __ATOMIC_RELEASE);
@@ -662,7 +664,11 @@ pod_begin_cleanup(struct objects *objs, struct pod_state *pod)
 	/* Stop every producer before asking either DMA engine to quiesce. Keep all
 	 * imported handles published in the private slot until both barriers pass. */
 	__atomic_store_n(&pod->egress_quiesced, 0, __ATOMIC_RELEASE);
+	__atomic_store_n(&pod->proxy_producers_quiesced_mask, 0,
+	                 __ATOMIC_RELEASE);
 	__atomic_store_n(&pod->egress_quiesced_mask, 0, __ATOMIC_RELEASE);
+	__atomic_store_n(&pod->egress_reclaim_fenced_mask, 0,
+	                 __ATOMIC_RELEASE);
 	__atomic_store_n(&pod->dma_ready, 0, __ATOMIC_RELEASE);
 	__atomic_store_n(&pod->registered, 0, __ATOMIC_RELEASE);
 	if (pod->pod_id >= 0 && pod->pod_id < POD_ID_SPACE)

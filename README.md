@@ -112,7 +112,7 @@ DPUMESH_RINGS_PER_POD=8 \
 ./bench/bench.sh latency both
 ```
 
-A bare deploy selects one ARM data worker. Each polling worker owns its DPA
+A bare deploy selects one ARM data worker. Each data worker owns its DPA
 consumer PE, connection state, SG-DMA context, completion callbacks, and
 reverse-ring producers. `K` controls rings, `A` controls ARM workers, and the
 64 MiB RX mapping uses `L=A` landing stripes. `K` and `N` must be multiples of
@@ -146,8 +146,8 @@ number was produced; reports carry the numbers.
 |---|---|
 | [design/API.md](design/API.md) | the native `<dpumesh/dmesh.h>` contract: lifecycle, batching, EQ, errors |
 | [design/CORE.md](design/CORE.md) | host/DPA/ARM custody, rings, and replay barriers |
-| [design/CONTROL.md](design/CONTROL.md) | naming, identity, registry, and the node boundary |
-| [design/L7.md](design/L7.md) | the L7 layer: modes, custody, egress arena, backend selection |
+| [design/CONTROL.md](design/CONTROL.md) | naming, identity, registry, control channels, and node scope |
+| [design/L7.md](design/L7.md) | the DPU-side Linkerd runtime, ownership, custody, and limits |
 | [design/GRPC.md](design/GRPC.md) | how the gRPC adapter maps chttp2 onto the transport |
 
 **Integrations**
@@ -155,8 +155,8 @@ number was produced; reports carry the numbers.
 | Document | Covers |
 |---|---|
 | [integrations/grpc/README.md](integrations/grpc/README.md) | building and running gRPC over DPUmesh |
-| [linkerd/README.md](linkerd/README.md) | the DPU-side L7 layer: layout, modes, consumers |
-| [linkerd/CONTRACT.md](linkerd/CONTRACT.md) | the normative datapath/port interface and its ABI |
+| [linkerd/README.md](linkerd/README.md) | building and deploying the embedded Linkerd consumer |
+| [linkerd/CONTRACT.md](linkerd/CONTRACT.md) | the implemented DPUmesh/Linkerd runtime and data ABI |
 
 **Measurement**
 

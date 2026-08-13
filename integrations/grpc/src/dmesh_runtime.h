@@ -14,11 +14,13 @@
 
 namespace dpumesh::grpc {
 
-// Process-level DPUmesh ownership: one channel and N independent EQ reactors,
-// each paired with its own dedicated callback thread by default. That thread
-// is both the endpoint's callback executor and its work executor. A custom
-// callback executor replaces every pair. Executors are shared with the
-// endpoints they serve, and the runtime outlives those endpoints.
+// Process-level DPUmesh ownership: one channel, N independent EQ reactors and
+// one runtime-wide callback executor. By default the executor owns one worker
+// thread shared by every reactor and endpoint; a custom executor replaces that
+// single runtime-wide instance. Normal receive and TX-ready progress stays on
+// the EQ owner, while connect/accept delivery and deliberately deferred
+// endpoint completions use the callback executor. Endpoints share ownership of
+// the executor, and the runtime outlives those endpoints.
 class DmeshRuntime final {
  public:
   struct Options {

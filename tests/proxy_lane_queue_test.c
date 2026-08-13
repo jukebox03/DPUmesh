@@ -10,6 +10,50 @@
 /* White-box stress coverage for worker lane publication. */
 #include "../doca/dpu_proxy.c"
 
+static int l7_close_calls;
+
+/* This white-box test links only dpu_proxy.c. Keep the production lookup and
+ * routing dependencies deterministic for the reserve/commit cases below. */
+struct pod_state *find_pod_by_id(struct objects *objs, int32_t pod_id)
+{
+    int n = __atomic_load_n(&objs->num_pods, __ATOMIC_ACQUIRE);
+    for (int i = 0; i < n; i++)
+        if (objs->pods[i].registered && objs->pods[i].pod_id == pod_id)
+            return &objs->pods[i];
+    return NULL;
+}
+
+int32_t dpu_route_l4(struct objects *objs, int16_t svc)
+{
+    (void)objs;
+    (void)svc;
+    return -1;
+}
+
+void l7_conn_eof(int worker_id, uint64_t conn)
+{
+    (void)worker_id;
+    (void)conn;
+}
+
+void l7_conn_close(int worker_id, uint64_t conn)
+{
+    (void)worker_id;
+    (void)conn;
+    l7_close_calls++;
+}
+
+void l7_report(int worker_id, uint64_t conn, uint64_t bytes_in,
+               uint64_t bytes_out, uint64_t duration_ns, int reason)
+{
+    (void)worker_id;
+    (void)conn;
+    (void)bytes_in;
+    (void)bytes_out;
+    (void)duration_ns;
+    (void)reason;
+}
+
 #define PRODUCERS 2
 #define PER_PRODUCER 20000
 #define TEST_REGION 2
@@ -167,8 +211,54 @@ int main(void)
     struct objects *objs = calloc(1, sizeof(*objs));
     assert(objs != NULL);
     objs->proxy = px;
+
+    /* Selected L7 requests bypass the normal port hash and are handed to the
+     * configured Linkerd owner. Ordinary L4 and already-resolved flows do not. */
+    px->l7_attached = 1;
+    px->l7_worker = 1;
+    px->svc_mode[11] = PX_L7_OPAQUE;
+    px->svc_mode[12] = PX_L7_FULL;
+    assert(px_l7_request_owner(objs, DMESH_POD_BLANK, 11) == 1);
+    assert(px_l7_request_owner(objs, DMESH_POD_BLANK, 12) == 1);
+    assert(px_l7_request_owner(objs, DMESH_POD_BLANK, 13) == -1);
+    assert(px_l7_request_owner(objs, 7, 11) == -1);
+    assert(px_l7_request_owner(objs, DMESH_POD_BLANK, -1) == -1);
+    assert(px_l7_request_owner(objs, DMESH_POD_BLANK, POD_ID_SPACE) == -1);
+
     struct px_engine *eng = &px->engines[0];
     eng->objs = objs;
+
+    /* A disconnected client is purged by its connection-owning worker before
+     * that worker reports pod quiescence. This closes the long-lived L7
+     * session, drops the reply/conntrack edge, and releases the last source
+     * staging reference without trying to ACK a vanished pod. */
+    px->n_workers = 1;
+    px->workers[0].id = 0;
+    px->workers[0].objs = objs;
+    struct px_conn *reply = px_conn_get(px, 7, upstream, 1, 1);
+    assert(reply != NULL);
+    downstream->l7_open = 1;
+    struct px_arrival *held = calloc(1, sizeof(*held));
+    assert(held != NULL);
+    held->pod_idx = 0;
+    held->ack_pod = 5;
+    atomic_init(&held->unfreed, 1);
+    downstream->whead = downstream->wtail = held;
+    objs->pods[0].pod_id = 5;
+    objs->pods[0].registered = 0;
+    objs->pods[0].proxy_source_refs = 1;
+    __atomic_store_n(&objs->num_pods, 1, __ATOMIC_RELEASE);
+    assert(px_worker_quiesce_pod_connections(objs, 5) >= 2);
+    assert(px_conn_find(px, 5, 1234) == NULL);
+    assert(px_conn_find(px, 7, upstream) == NULL);
+    assert(!px->workers[0].ct->upstream[upstream].in_use);
+    assert(objs->pods[0].proxy_source_refs == 0);
+    assert(l7_close_calls == 1);
+    tls_arr_mag = NULL;
+    tls_arr_mag_n = 0;
+    free(held);
+    downstream = px_conn_get(px, 5, 1234, 0, 1);
+    assert(downstream != NULL);
 
     /* Current batches retry once; stale or repeated failures are terminal. */
     struct pod_state *retry_pod = &objs->pods[0];
@@ -268,6 +358,106 @@ int main(void)
     eng->dma_tasks_inflight = 0;
     px->lanes[0][0].qhead = px->lanes[0][0].qtail = NULL;
     __atomic_store_n(&objs->num_pods, 0, __ATOMIC_RELEASE);
+
+    /* The L7 reserve/commit ABI owns exactly one arena chunk per connection.
+     * Exercise the real C implementation, including cancellation, invalid
+     * length, successful publication, and close-time reclamation. */
+    tls_chunk_mag = NULL;
+    tls_chunk_mag_n = 0;
+    tls_piece_mag = NULL;
+    tls_piece_mag_n = 0;
+    tls_unit_mag = NULL;
+    tls_unit_mag_n = 0;
+
+    struct px_chunk *tx_chunks = calloc(2, sizeof(*tx_chunks));
+    struct px_piece *tx_pieces = calloc(2, sizeof(*tx_pieces));
+    struct px_unit *tx_units = calloc(2, sizeof(*tx_units));
+    px->arena = calloc(2, PX_ARENA_CHUNK);
+    assert(tx_chunks && tx_pieces && tx_units && px->arena);
+    tx_chunks[0].off = 0;
+    tx_chunks[0].next = &tx_chunks[1];
+    tx_chunks[1].off = PX_ARENA_CHUNK;
+    tx_pieces[0].next = &tx_pieces[1];
+    tx_units[0].next = &tx_units[1];
+    px->chunk_free = tx_chunks;
+    px->piece_free = tx_pieces;
+    px->unit_free = tx_units;
+
+    struct pod_state *tx_pod = &objs->pods[0];
+    memset(tx_pod, 0, sizeof(*tx_pod));
+    tx_pod->pod_id = 5;
+    tx_pod->service_id = 9;
+    tx_pod->registered = 1;
+    tx_pod->dma_ready = 1;
+    tx_pod->host_rx_mmap = (struct doca_mmap *)(uintptr_t)1;
+    tx_pod->host_rx_addr = (void *)(uintptr_t)1;
+    tx_pod->k_rings = 1;
+    tx_pod->landing_stripes = 1;
+    __atomic_store_n(&objs->num_pods, 1, __ATOMIC_RELEASE);
+    px->n_workers = 1;
+    px->workers[0].id = 0;
+    px->workers[0].objs = objs;
+    px_cur_worker = &px->workers[0];
+
+    uint64_t tx_handle = dmesh_l7_conn_handle(5, 1234);
+    uint32_t cap = 123;
+    assert(dmesh_l7_tx_reserve(1, tx_handle, &cap) == NULL);
+    assert(dmesh_l7_tx_reserve(0, UINT64_C(0x001f0001), &cap) == NULL);
+
+    uint8_t *reserved = dmesh_l7_tx_reserve(0, tx_handle, &cap);
+    assert(reserved != NULL && cap == PX_ARENA_CHUNK);
+    assert(downstream->l7_tx_chunk != NULL);
+    assert(dmesh_l7_tx_reserve(0, tx_handle, &cap) == NULL);
+    assert(dmesh_l7_tx_commit(0, tx_handle, DMESH_L7_ORIGIN, 0) == 0);
+    assert(downstream->l7_tx_chunk == NULL);
+
+    reserved = dmesh_l7_tx_reserve(0, tx_handle, &cap);
+    assert(reserved != NULL);
+    assert(dmesh_l7_tx_commit(0, tx_handle, DMESH_L7_ORIGIN,
+                              PX_ARENA_CHUNK + 1u) == -1);
+    assert(downstream->l7_tx_chunk == NULL);
+
+    static const uint8_t payload[] = "reserved-output";
+    reserved = dmesh_l7_tx_reserve(0, tx_handle, &cap);
+    assert(reserved != NULL && cap >= sizeof(payload));
+    memcpy(reserved, payload, sizeof(payload));
+    assert(dmesh_l7_tx_commit(0, tx_handle, DMESH_L7_ORIGIN,
+                              sizeof(payload)) == (int)sizeof(payload));
+    assert(downstream->l7_tx_chunk == NULL);
+    struct px_lane *tx_lane = &px->lanes[0][0];
+    assert(tx_lane->qhead != NULL && tx_lane->qhead == tx_lane->qtail);
+    struct px_unit *tx_unit = tx_lane->qhead;
+    assert(tx_unit->total_len == sizeof(payload));
+    assert(tx_unit->pieces && tx_unit->pieces->chunk);
+    assert(tx_unit->pieces->len == sizeof(payload));
+    assert(memcmp(px->arena + tx_unit->pieces->staging_off,
+                  payload, sizeof(payload)) == 0);
+    tx_lane->qhead = tx_lane->qtail = NULL;
+    px_unit_free_node(px, tx_unit);
+    assert(dmesh_l7_tx_commit(0, tx_handle, DMESH_L7_ORIGIN, 1) == -1);
+
+    reserved = dmesh_l7_tx_reserve(0, tx_handle, &cap);
+    assert(reserved != NULL);
+    px_l7_close(objs, downstream, 0);
+    assert(downstream->l7_tx_chunk == NULL);
+    reserved = dmesh_l7_tx_reserve(0, tx_handle, &cap);
+    assert(reserved != NULL);
+    assert(dmesh_l7_tx_commit(0, tx_handle, DMESH_L7_ORIGIN, 0) == 0);
+
+    tls_chunk_mag = NULL;
+    tls_chunk_mag_n = 0;
+    tls_piece_mag = NULL;
+    tls_piece_mag_n = 0;
+    tls_unit_mag = NULL;
+    tls_unit_mag_n = 0;
+    px->chunk_free = NULL;
+    px->piece_free = NULL;
+    px->unit_free = NULL;
+    free(px->arena);
+    px->arena = NULL;
+    free(tx_chunks);
+    free(tx_pieces);
+    free(tx_units);
 
     pthread_mutex_destroy(&px->pool_lock);
     free(downstream);

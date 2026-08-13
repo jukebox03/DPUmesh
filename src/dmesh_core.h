@@ -261,9 +261,10 @@ void dmesh_tx_pressure(dmesh_qp_t *c);
 /* Temporarily suppress eventfd writes while an in-process EQ consumer drains work. */
 void dmesh_eq_suppress_notify(dmesh_eq_t *eq, int delta);
 
-/* Send an ordered zero-length FIN on the connection's forward ring. Ring timeout
- * returns EBADMSG without latching fin_sent; an open transmit call returns
- * EDEADLK. */
+/* Send an ordered zero-length FIN on the connection's forward ring. The call
+ * first waits (bounded) for submitted data to leave DPU proxy custody. A drain
+ * or ring timeout returns EBADMSG without latching fin_sent; an open transmit
+ * call returns EDEADLK. */
 int dmesh_send_fin(dmesh_qp_t *c);
 
 #ifdef __cplusplus

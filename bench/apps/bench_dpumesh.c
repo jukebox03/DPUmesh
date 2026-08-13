@@ -17,6 +17,7 @@
 
 #include <dpumesh/dmesh.h>
 #include "bench.h"
+#include "bench_result.h"
 #include "bench_selftest.h"
 
 #define CTRL_PORT          9092
@@ -293,7 +294,13 @@ static void *worker_fn(void *arg) {
                      w->reconn > 0 && w->since_conn >= w->reconn);
         if (churn && w->outstanding == 0 && !w->tx_active) {
             double t0 = bench_now_sec();
-            dmesh_destroy_qp(w->c);                    /* drain cursor is this EQ's, i.e. ours */
+            int close_rc = dmesh_destroy_qp(w->c);     /* frees the pointer on every return */
+            w->c = NULL;
+            if (close_rc != 0) {
+                fprintf(stderr, "[bench] churn close failed: errno=%d\n", errno);
+                atomic_store(&w->broken, 1);
+                break;
+            }
             w->c = dmesh_create_qp(w->eq, g_dst_service);
             if (!w->c) { atomic_store(&w->broken, 1); break; }
             bench_reframe_reset(&w->rf);
@@ -386,11 +393,22 @@ static void *worker_fn(void *arg) {
             }
         }
     }
+    if (w->outstanding > 0) {
+        fprintf(stderr, "[bench] drain timeout: %ld requests still outstanding\n",
+                w->outstanding);
+        atomic_store(&w->broken, 1);
+    }
 
 done:
     /* Conn first, then its EQ (a conn outliving its EQ has nowhere to report). */
     if (epoll_fd >= 0) close(epoll_fd);
-    if (w->c) { dmesh_destroy_qp(w->c); w->c = NULL; }
+    if (w->c) {
+        if (dmesh_destroy_qp(w->c) != 0) {
+            fprintf(stderr, "[bench] final close failed: errno=%d\n", errno);
+            atomic_store(&w->broken, 1);
+        }
+        w->c = NULL;
+    }
     if (w->eq) { dmesh_destroy_eq(w->eq); w->eq = NULL; }
     w->dura = (end > 0.0 && w->rcnt > w->warmup) ? (end - w->warmup_end) : 0.0;
     free(w->start_ts);
@@ -532,7 +550,7 @@ static void run_bench(int conn_fd, int mode, int req_size, int reply_size,
     double gbps = request_gbps + response_gbps;
 
     int n = snprintf(reply, sizeof reply,
-        "OK mrps=%.6f gbps=%.4f req_gbps=%.4f resp_gbps=%.4f "
+        "%s mrps=%.6f gbps=%.4f req_gbps=%.4f resp_gbps=%.4f "
         "p50=%.2f p95=%.2f p99=%.2f p999=%.2f p9999=%.2f "
         "avg=%.2f min=%.2f max=%.2f rcnt=%ld scheduled=%ld pending=%ld fail=%ld "
         "conc=%d threads=%d reqsz=%d repsz=%d reqframe=%u respframe=%u "
@@ -540,6 +558,7 @@ static void run_bench(int conn_fd, int mode, int req_size, int reply_size,
         "drops=%ld overflow=%llu worker_fail=%d mode=%s arr=%s batch=%d "
         "reconns=%ld reconn_us=%.2f grabs=%llu rets=%llu recyc=%llu waits=%llu pads=%llu "
         "reorder=%ld",
+        bench_result_status(total_ok, total_fail, worker_fail),
         mrps, gbps, request_gbps, response_gbps,
         p50, p95, p99, p999, p9999, avg, mn, mx,
         total_ok, total_scheduled, total_pending, total_fail,

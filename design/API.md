@@ -86,13 +86,16 @@ public stream identifier: the application still receives one ordered sequence of
 byte fragments and performs its own framing and request correlation. DPUmesh does
 not expose numeric service, backend, or upstream ids in this API.
 
-`dmesh_destroy_qp()` is graceful close: it submits the buffered tail before FIN,
-returns any held RX credit, and always frees the local QP. `dmesh_abort_qp()`
-instead discards bytes that have not yet been submitted, then sends FIN when a
-peer exists so remote state can be reclaimed. Already-submitted bytes cannot be
-recalled. Either call may return `-1/EBADMSG`, and the pointer is invalid on every
-return. Because one EQ poll can return several entries that name the same QP,
-defer destruction until the whole returned batch has been processed.
+`dmesh_destroy_qp()` is graceful close: it submits the buffered tail, waits until
+all submitted data has left DPU proxy custody, and only then sends FIN. It returns
+any held RX credit and always frees the local QP. `dmesh_abort_qp()` instead
+discards bytes that have not yet been submitted, waits for already-submitted bytes
+to leave proxy custody, then sends FIN when a peer exists so remote state can be
+reclaimed. Already-submitted bytes cannot be recalled. The custody wait is bounded;
+on a broken transport the close returns `-1/EBADMSG` without sending an overtaking
+FIN. Either call may return `-1/EBADMSG`, and the pointer is invalid on every return.
+Because one EQ poll can return several entries that name the same QP, defer
+destruction until the whole returned batch has been processed.
 
 ## 4. TX: buffered sending and backpressure
 

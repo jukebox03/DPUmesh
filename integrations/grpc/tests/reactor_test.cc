@@ -185,9 +185,9 @@ struct Fixture {
   std::unique_ptr<DmeshEndpoint> endpoint;
 };
 
-// The fixture's ManualExecutor is both the callback and the work executor, so
-// a test drives write pumps and completions by pumping it until the observed
-// condition holds.
+// The fixture's ManualExecutor carries connect delivery and deferred endpoint
+// callbacks, so a test pumps it until the observed condition holds. Write
+// pumps themselves run on their caller or on the reactor's TX_READY path.
 template <typename Predicate>
 bool PumpUntil(ManualExecutor* executor, Predicate predicate,
                std::chrono::milliseconds timeout = 2s) {
@@ -832,6 +832,97 @@ void TestGrpcClientReconnectCreatesFreshTargetedQp() {
   runtime.reset();
 }
 
+void TestGrpcChannelChurnKeepsOneRuntime() {
+  ManualExecutor callbacks;
+  auto state = std::make_shared<FakeDmeshState>();
+  auto created = DmeshRuntime::Create(MakeFakeDmeshApiOps(state),
+                                      UnownedExecutor(&callbacks));
+  CHECK_TRUE(created.ok());
+  auto runtime = std::move(*created);
+
+  constexpr size_t kCycles = 10;
+  for (size_t cycle = 0; cycle < kCycles; ++cycle) {
+    auto channel_result = CreateDmeshChannel(
+        runtime, "greeter", ::grpc::InsecureChannelCredentials(),
+        ::grpc::ChannelArguments());
+    CHECK_TRUE(channel_result.ok());
+    std::shared_ptr<::grpc::Channel> channel = std::move(*channel_result);
+    (void)channel->GetState(true);
+    CHECK_TRUE(state->WaitForClientQpCount(cycle + 1, 2s));
+    dmesh_qp_t* qp = state->ClientQps().back();
+    CHECK_TRUE(PumpUntil(&callbacks, [state, qp] {
+      return state->WaitForPostCount(qp, 1, 0ms);
+    }));
+
+    channel.reset();
+    callbacks.RunAll();
+    CHECK_EQ(runtime->stats().receive_credit_hold_dropped, uint64_t{0});
+    CHECK_EQ(runtime->stats().eq_drain_budget_exhausted, uint64_t{0});
+  }
+
+  // gRPC releases a channel EventEngine on its own asynchronous cleanup
+  // schedule. Wait once for every dropped channel rather than serializing the
+  // churn loop on that implementation detail.
+  CHECK_TRUE(PumpUntil(
+      &callbacks,
+      [state] { return state->destroy_count() >= kCycles; }, 45s));
+  CHECK_EQ(state->destroy_count(), kCycles);
+
+  const auto targets = state->ClientTargets();
+  CHECK_EQ(targets.size(), kCycles);
+  for (const auto& target : targets) CHECK_EQ(target, std::string("greeter"));
+  runtime.reset();
+  CHECK_TRUE(PumpUntil(
+      &callbacks,
+      [state] { return state->channel_destroy_count() >= 1; }, 45s));
+  CHECK_EQ(state->eq_destroy_count(), size_t{1});
+  CHECK_EQ(state->channel_destroy_count(), size_t{1});
+}
+
+void TestConcurrentGrpcChannelsSameServiceCloseIndependently() {
+  ManualExecutor callbacks;
+  auto state = std::make_shared<FakeDmeshState>();
+  auto created = DmeshRuntime::Create(MakeFakeDmeshApiOps(state),
+                                      UnownedExecutor(&callbacks));
+  CHECK_TRUE(created.ok());
+  auto runtime = std::move(*created);
+
+  constexpr size_t kChannels = 4;
+  std::vector<std::shared_ptr<::grpc::Channel>> channels;
+  channels.reserve(kChannels);
+  for (size_t i = 0; i < kChannels; ++i) {
+    auto channel_result = CreateDmeshChannel(
+        runtime, "greeter", ::grpc::InsecureChannelCredentials(),
+        ::grpc::ChannelArguments());
+    CHECK_TRUE(channel_result.ok());
+    channels.push_back(std::move(*channel_result));
+    (void)channels.back()->GetState(true);
+  }
+  CHECK_TRUE(state->WaitForClientQpCount(kChannels, 2s));
+  const auto qps = state->ClientQps();
+  CHECK_EQ(qps.size(), kChannels);
+  for (dmesh_qp_t* qp : qps) {
+    CHECK_TRUE(PumpUntil(&callbacks, [state, qp] {
+      return state->WaitForPostCount(qp, 1, 0ms);
+    }));
+  }
+
+  channels[1].reset();
+  callbacks.RunAll();
+  for (size_t i = 0; i < channels.size(); ++i) {
+    if (i != 1) CHECK_TRUE(channels[i] != nullptr);
+  }
+
+  channels.clear();
+  CHECK_TRUE(PumpUntil(
+      &callbacks,
+      [state] { return state->destroy_count() >= kChannels; }, 45s));
+  CHECK_EQ(state->destroy_count(), kChannels);
+  CHECK_EQ(runtime->stats().receive_credit_hold_dropped, uint64_t{0});
+  CHECK_EQ(runtime->stats().eq_drain_budget_exhausted, uint64_t{0});
+  runtime.reset();
+}
+
 void TestRuntimeDestroysEqBeforeChannel() {
   ManualExecutor callbacks;
   auto state = std::make_shared<FakeDmeshState>();
@@ -982,6 +1073,10 @@ int main() {
        TestGrpcAuthorityIsDefaultedButNeverOverwritten},
       {"gRPC reconnect creates a fresh targeted QP",
        TestGrpcClientReconnectCreatesFreshTargetedQp},
+      {"gRPC channel churn keeps one runtime",
+       TestGrpcChannelChurnKeepsOneRuntime},
+      {"concurrent same-service gRPC channels close independently",
+       TestConcurrentGrpcChannelsSameServiceCloseIndependently},
       {"runtime destroys EQ before channel", TestRuntimeDestroysEqBeforeChannel},
       {"runtime round-robins EQ reactors",
        TestRuntimeRoundRobinsAcrossEqReactors},

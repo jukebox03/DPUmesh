@@ -87,8 +87,8 @@ class DmeshReactor::Impl final
       kError,
     };
 
-    // Serializes transmit (work executor thread) against QP lifecycle (EQ
-    // thread). Guards qp, closing and remote_eof; the
+    // Serializes transmit (Endpoint::Write caller or TX_READY EQ owner)
+    // against QP lifecycle (EQ owner). Guards qp, closing and remote_eof; the
     // EQ thread is the only writer of qp and closing, so its own unlocked
     // reads of them stay consistent. Never held across a driver call: the
     // endpoint takes its own state lock first, so the reverse order deadlocks.

@@ -377,11 +377,7 @@ stop_dpu() {
     sleep 5
 }
 
-# The proxy needs a control plane before it will serve. These are the port's
-# own mock destination/identity/policy binaries, which is what makes a bring-up
-# possible without the DPU holding cluster credentials.
-# Resolved against the DPU's login home, not $HOME: the proxy runs under sudo,
-# where $HOME is root's.
+# DPU paths for the static library, mock control plane and fixtures.
 dpu_home_cached=""
 dpu_home() {
     [ -n "$dpu_home_cached" ] || dpu_home_cached=$(ssh_dpu 'echo $HOME')
@@ -392,25 +388,41 @@ linkerd_mock_dir()  { printf '%s' "${LINKERD_MOCK_DIR:-$(linkerd_build_dir)/mock
 linkerd_staticlib() {
     printf '%s' "${L7_LIB_PATH:-$(linkerd_build_dir)/rust/target/release/libdmesh_l7.a}"
 }
-# The fixtures the mock control plane and the proxy's identity both read. They
-# are the port's own, so they live where the port is synced.
 linkerd_data_dir() {
     printf '%s' "${LINKERD_DATA_DIR:-$(linkerd_build_dir)/port/linkerd2-proxy/linkerd/app/integration/src/data}"
 }
+# The DPU's workload identity material: the directory holding its key, its
+# service-account token and the trust anchors it validates the control plane
+# with. The defaults are the port's test fixture; a deployment overrides them
+# with the material provisioned for the DPU.
+linkerd_identity_dir() {
+    printf '%s' "${LINKERD_IDENTITY_DIR:-$(linkerd_data_dir)/$LINKERD_FIXTURE}"
+}
+linkerd_trust_anchors() {
+    printf '%s' "${LINKERD_TRUST_ANCHORS:-$(linkerd_data_dir)/ca1.pem}"
+}
 LINKERD_FIXTURE="${LINKERD_FIXTURE:-default-default}"
-# The address the layer publishes a backend channel on: 10.96.0.<service id>.
+# Linkerd backend address for the selected DPUmesh service.
 LINKERD_BACKEND_ADDR="${LINKERD_BACKEND_ADDR:-10.96.0.11:9092}"
 
-# The staticlib and the mocks are built from the sources in this repository
-# rather than from whatever the DPU happens to hold, so a deploy carries the
-# tree it was run from.
+# Which control plane the DPU proxy talks to. The mock identity, destination
+# and policy servers are test fixtures: they run only for a benchmark, and
+# LINKERD_MOCK_CONTROL_PLANE=0 points the proxy at a deployed control plane
+# instead. Everything the proxy needs is then deploy-time configuration, and a
+# missing piece is a startup failure rather than a silent fixture.
+LINKERD_MOCK_CONTROL_PLANE="${LINKERD_MOCK_CONTROL_PLANE:-1}"
+if [ "$LINKERD_MOCK_CONTROL_PLANE" = 1 ]; then
+    LINKERD_DST_ADDR="${LINKERD_DST_ADDR:-127.0.0.1:8089}"
+    LINKERD_POLICY_ADDR="${LINKERD_POLICY_ADDR:-127.0.0.1:8087}"
+    LINKERD_IDENTITY_ADDR="${LINKERD_IDENTITY_ADDR:-127.0.0.1:8088}"
+fi
+
+# Synchronize the embedded adapter and port sources.
 sync_linkerd_sources() {
     local dest; dest=$(linkerd_build_dir)
     step "=== Syncing linkerd sources to DPU ($DPU_HOST:$dest) ==="
     ssh_dpu "mkdir -p '$dest/rust' '$dest/port/linkerd2-proxy' '$dest/mock'"
-    # Build outputs stay: the port is a large tree and its target directory is
-    # what makes a redeploy minutes instead of an hour. Excluded paths are also
-    # protected from deletion, which is why --delete is safe on `rust`.
+    # Preserve remote build outputs.
     local ex=(--exclude='.git' --exclude='.git/' --exclude='target/'
               --exclude='build/' --exclude='*.o' --exclude='*.a')
     rsync -az --delete --timeout=120 -e "ssh ${SSH_OPTS[*]}" "${ex[@]}" \
@@ -426,7 +438,7 @@ build_linkerd_artifacts() {
     local dest; dest=$(linkerd_build_dir)
     local cargo="$LINKERD_CARGO +$LINKERD_TOOLCHAIN"
     step "=== Building linkerd artifacts on DPU (libdmesh_l7.a + mock control plane) ==="
-    # --locked everywhere: the lock files are the reproducible part of the build.
+    # Use pinned dependency graphs.
     if ! ssh_dpu "test -f '$dest/rust/Cargo.lock'"; then
         err "missing $dest/rust/Cargo.lock — a reproducible build needs it"
         err "  generate:  ssh $DPU_HOST \"cd $dest/rust && $cargo generate-lockfile\""
@@ -452,21 +464,34 @@ build_linkerd_artifacts() {
     info "mock control plane staged ($(linkerd_mock_dir))"
 }
 
-# Everything the linked binary and the launcher will reach for, named by its
-# exact path. A missing artifact is a build step that did not run, so the
-# message says which one to run.
+# Validate Linkerd artifacts and adapter symbols.
 preflight_linkerd() {
     local lib; lib=$(linkerd_staticlib)
     local mocks; mocks=$(linkerd_mock_dir)
-    local data; data=$(linkerd_data_dir)/$LINKERD_FIXTURE
-    local anchors; anchors=$(linkerd_data_dir)/ca1.pem
+    local data; data=$(linkerd_identity_dir)
+    local anchors; anchors=$(linkerd_trust_anchors)
+    if [ "$LINKERD_MOCK_CONTROL_PLANE" != 1 ]; then
+        local unset_vars=""
+        for v in LINKERD_DST_ADDR LINKERD_POLICY_ADDR LINKERD_IDENTITY_ADDR; do
+            [ -n "${!v:-}" ] || unset_vars="$unset_vars $v"
+        done
+        if [ -n "$unset_vars" ]; then
+            err "LINKERD_MOCK_CONTROL_PLANE=0 needs the deployed control plane's"
+            err "addresses:$unset_vars"
+            exit 1
+        fi
+        info "control plane: deployed (dst=$LINKERD_DST_ADDR policy=$LINKERD_POLICY_ADDR" \
+             "identity=$LINKERD_IDENTITY_ADDR)"
+    fi
     local missing
     missing=$(ssh_dpu "for f in '$lib' '$data/token.txt' '$anchors'; do
                            [ -r \"\$f\" ] || echo \"unreadable: \$f\"
                        done
-                       for m in mock-identity mock-destination mock-policy; do
-                           [ -x '$mocks'/\$m ] || echo \"not executable: $mocks/\$m\"
-                       done")
+                       if [ '$LINKERD_MOCK_CONTROL_PLANE' = 1 ]; then
+                           for m in mock-identity mock-destination mock-policy; do
+                               [ -x '$mocks'/\$m ] || echo \"not executable: $mocks/\$m\"
+                           done
+                       fi")
     if [ -n "$missing" ]; then
         err "linkerd preflight failed:"
         printf '  %s\n' $missing
@@ -474,17 +499,11 @@ preflight_linkerd() {
         exit 1
     fi
 
-    # The archive has to carry the whole contract, and nothing of the port's own
-    # datapath: a DOCA initialization symbol left undefined in here would mean
-    # two owners for one device, and the link would resolve it against DPUmesh.
-    # The archive defines ~75k symbols, so both lists are narrowed on the DPU.
+    # Check the exported adapter and external runtime backend boundary.
     local defined undefined absent="" s
     defined=$(ssh_dpu "nm -g --defined-only '$lib' 2>/dev/null | awk '\$3 ~ /^l7_/ {print \$3}' | sort -u")
-    for s in l7_worker_attach l7_worker_step l7_conn_open l7_conn_segment \
-             l7_conn_eof l7_conn_close l7_worker_detach l7_resolve l7_report; do
-        # Matched with `case`, not `grep -q`: a pipeline into a command that
-        # exits on its first match leaves the writer with SIGPIPE, which
-        # `pipefail` then reports as a failed check.
+    for s in l7_worker_run l7_conn_open l7_conn_segment l7_conn_eof \
+             l7_conn_close l7_resolve l7_report; do
         case $'\n'"$defined"$'\n' in
             *$'\n'"$s"$'\n'*) ;;
             *) absent="$absent $s" ;;
@@ -500,7 +519,19 @@ preflight_linkerd() {
         printf '  %s\n' $undefined
         exit 1
     fi
-    info "linkerd preflight OK (staticlib exports the contract and needs no port datapath, 3 mocks, fixtures)"
+    undefined=$(ssh_dpu "nm -u '$lib' 2>/dev/null | awk '\$NF ~ /^dmesh_l7_driver_/ {print \$NF}' | sort -u")
+    for s in dmesh_l7_driver_notification_fds dmesh_l7_driver_arm \
+             dmesh_l7_driver_drain dmesh_l7_driver_clear_notifications \
+             dmesh_l7_driver_maintenance dmesh_l7_driver_stopped \
+             dmesh_l7_driver_ready dmesh_l7_driver_failed; do
+        case $'\n'"$undefined"$'\n' in
+            *$'\n'"$s"$'\n'*) ;;
+            *) err "libdmesh_l7.a does not require runtime backend symbol: $s"; exit 1 ;;
+        esac
+    done
+    info "linkerd preflight OK (staticlib exports the contract and needs no port datapath," \
+         "identity material readable, control plane=$([ "$LINKERD_MOCK_CONTROL_PLANE" = 1 ] &&
+         echo mock || echo deployed))"
 }
 
 start_mocks() {
@@ -520,8 +551,7 @@ sleep 2
 pgrep -c -f 'l7build/mock/mock-' || true
 MOCKS
 chmod +x /tmp/start_mocks.sh"
-    # Clear whatever holds the ports, whoever started it; count only this
-    # tree's binaries.
+    # Restart the three mock processes.
     local n; n=$(ssh_dpu "echo '$DPU_PASS' | sudo -S pkill -f 'mock-(identity|destination|policy)\$' 2>/dev/null; \
                           bash /tmp/start_mocks.sh" 2>&1 | tail -1)
     if [ "$n" != 3 ]; then
@@ -534,18 +564,13 @@ chmod +x /tmp/start_mocks.sh"
 
 start_dpu() {
     local log_level="${DPUMESH_LOG_LEVEL:-40}"
-    # Services routed through the DPU-side L7 layer, one list per mode.
+    # Services routed through each L7 mode.
     local l7_decision="${DPUMESH_L7_DECISION_SVC:-}"
     local l7_opaque="${DPUMESH_L7_OPAQUE_SVC:-}"
     local l7_full="${DPUMESH_L7_SVC:-}"
     local l7_trace="${DPUMESH_L7_NULL_TRACE:-}"
     local l7_rr="${DPUMESH_L7_FRAMED_RR:-}"
-    # The linkerd staticlib reads its whole configuration from the environment,
-    # exactly as the standalone proxy binary does. It is written as a file on
-    # the DPU and sourced by the launcher: the trust anchors are a multi-line
-    # PEM, which does not survive being quoted through ssh into a `bash -c`
-    # string. The admin port is fixed and serves the proxy's metrics; the other
-    # listeners are ephemeral.
+    # Linkerd environment and identity material.
     local l7_env=""
     if [ "${L7_BACKEND:-null}" = linkerd ]; then
         local id_name="${LINKERD_LOCAL_NAME:-default.default.serviceaccount.identity.linkerd.cluster.local}"
@@ -558,8 +583,8 @@ LINKERD2_PROXY_POLICY_WORKLOAD=${LINKERD_WORKLOAD:-default:dpumesh}
 LINKERD2_PROXY_IDENTITY_SVC_ADDR=${LINKERD_IDENTITY_ADDR:-127.0.0.1:8088}
 LINKERD2_PROXY_IDENTITY_SVC_NAME=$id_name
 LINKERD2_PROXY_IDENTITY_LOCAL_NAME=$id_name
-LINKERD2_PROXY_IDENTITY_DIR=$(linkerd_data_dir)/$LINKERD_FIXTURE
-LINKERD2_PROXY_IDENTITY_TOKEN_FILE=$(linkerd_data_dir)/$LINKERD_FIXTURE/token.txt
+LINKERD2_PROXY_IDENTITY_DIR=$(linkerd_identity_dir)
+LINKERD2_PROXY_IDENTITY_TOKEN_FILE=$(linkerd_identity_dir)/token.txt
 LINKERD2_PROXY_DESTINATION_PROFILE_NETWORKS=0.0.0.0/0
 LINKERD2_PROXY_CLUSTER_NETWORKS=0.0.0.0/0
 LINKERD2_PROXY_INBOUND_LISTEN_ADDR=127.0.0.1:0
@@ -568,8 +593,10 @@ LINKERD2_PROXY_CONTROL_LISTEN_ADDR=127.0.0.1:0
 LINKERD2_PROXY_ADMIN_LISTEN_ADDR=${LINKERD_ADMIN_ADDR:-127.0.0.1:4191}
 LINKERD2_PROXY_LOG=${LINKERD_LOG:-warn,linkerd=info,dmesh_l7=info}
 DPUMESH_L7_LINKERD_WORKER=${DPUMESH_L7_LINKERD_WORKER:-0}
+DPUMESH_L7_FAIL_CLOSED=${DPUMESH_L7_FAIL_CLOSED:-0}
+DMESH_L7_TX_RESERVE=${DMESH_L7_TX_RESERVE:-1}
 L7ENV
-{ printf 'LINKERD2_PROXY_IDENTITY_TRUST_ANCHORS=\"'; cat $(linkerd_data_dir)/ca1.pem; printf '\"\n'; } >> /tmp/dpumesh-l7.env"
+{ printf 'LINKERD2_PROXY_IDENTITY_TRUST_ANCHORS=\"'; cat $(linkerd_trust_anchors); printf '\"\n'; } >> /tmp/dpumesh-l7.env"
         l7_env='set -a; . /tmp/dpumesh-l7.env; set +a;'
     fi
     local dpa_threads="${DPUMESH_DPA_THREADS:-}"
@@ -577,10 +604,11 @@ L7ENV
     local workers="${DPUMESH_ARM_WORKERS:-}"
     step "=== Starting dpumesh_dpu (l7_decision='$l7_decision' l7_opaque='$l7_opaque' l7_full='$l7_full' dpa_threads='$dpa_threads' rings_per_pod='$rings' arm_workers='$workers') ==="
     stop_dpu
-    [ "${L7_BACKEND:-null}" = linkerd ] && start_mocks
+    if [ "${L7_BACKEND:-null}" = linkerd ] && [ "$LINKERD_MOCK_CONTROL_PLANE" = 1 ]; then
+        start_mocks
+    fi
     local dpu_home; dpu_home=$(ssh_dpu 'echo $HOME')
-    # Reports an instance that is already up instead of starting a second one, so
-    # a launch whose ssh dropped mid-flight is safe to retry.
+    # Start one DPU process.
     ssh_dpu "cat > /tmp/start_dpu_bench.sh << 'LAUNCHER'
 #!/bin/bash
 running=\$(pgrep -x dpumesh_dpu | head -1)
@@ -987,12 +1015,17 @@ deploy() {
     echo "  Re-pin:  $0 pin [fair|l4|hw|hw3|hw6]"
 }
 
-# One connection through the L7 layer, which is the whole of what the linkerd
-# consumer supports. A pass here is not "linkerd is fast"; it is "a request and
-# its response crossed the proxy and came back intact".
 validate_linkerd_session() {
     step "=== Validating one connection through the L7 layer ==="
-    local reply; reply=$(run_point dpumesh 1024 8 1 5 100 1)
+    local reply
+    if [ "$BENCH_DEPLOY_SCOPE" = grpc ]; then
+        local ip; ip=$(running_pod_ip bench-grpc-dpumesh || true)
+        [ -n "$ip" ] || { err "bench-grpc-dpumesh pod not found"; return 1; }
+        reply=$(printf 'RUN 1024 8 1 5 100 1\n' |
+            timeout 90s nc -N "$ip" "$CTRL_PORT" 2>/dev/null || true)
+    else
+        reply=$(run_point dpumesh 1024 8 1 5 100 1)
+    fi
     printf '  %s\n' "$reply"
     case "$reply" in
         OK*) info "single-connection L7 validation passed" ;;
@@ -1219,6 +1252,135 @@ run_preload() {  # LD_PRELOAD shim: vanilla TCP apps over DPUmesh
     printf "  OK/Fail: %s/%s  p50: %s us  p99: %s us  rps: %s\n" "$ok" "$fail" "$p50" "$p99" "${rps:-n/a}"
 }
 
+# Value of one unlabelled Prometheus sample in a metrics snapshot.
+metric_value() {
+    awk -v name="$2" '$1 == name { print $2; exit }' <<<"$1"
+}
+
+# Real-DPU lifecycle gate: kill a process while one HTTP/2 channel is active,
+# require the DPU-owned Linkerd task and imported mappings to quiesce, then
+# re-register the recycled pod slot and pass a four-channel smoke point.
+run_grpc_shutdown() {
+    need_env
+    local app=bench-grpc-dpumesh ip pod load_pid="" load_out
+    local metrics active opened closed pending tasks mmap_before mmap_after
+    load_out=$(mktemp /tmp/dpumesh-grpc-shutdown.XXXXXX)
+
+    restore_grpc_client() {
+        [ -z "${load_pid:-}" ] || kill "$load_pid" 2>/dev/null || true
+        kubectl scale deployment/"${app:-bench-grpc-dpumesh}" -n "$NS" --replicas=1 >/dev/null 2>&1 || true
+        [ -z "${load_out:-}" ] || rm -f "$load_out"
+    }
+    trap restore_grpc_client EXIT
+
+    ip=$(running_pod_ip "$app" || true)
+    [ -n "$ip" ] || { err "$app pod not running — deploy the grpc scope first"; return 1; }
+    metrics=$(ssh_dpu "curl -sf http://127.0.0.1:4191/metrics" || true)
+    [ -n "$metrics" ] || { err "DPU Linkerd metrics endpoint is unavailable"; return 1; }
+    active=$(metric_value "$metrics" dmesh_sessions_active)
+    pending=$(metric_value "$metrics" dmesh_registrations_pending)
+    tasks=$(metric_value "$metrics" dmesh_tasks_live)
+    [ "${active:-x}" = 0 ] && [ "${pending:-x}" = 0 ] && [ "${tasks:-x}" = 0 ] || {
+        err "precondition is not quiescent: active=${active:-NA} pending=${pending:-NA} tasks=${tasks:-NA}"
+        return 1
+    }
+    mmap_before=$(ssh_dpu "grep -c 'RX mmap reclaim failed' '$DPU_LOG' || true")
+
+    step "=== gRPC process shutdown with one live HTTP/2 channel ==="
+    (printf 'RUN 1024 8 4 60 100 1\n' |
+        timeout 90s nc -N "$ip" "$CTRL_PORT" >"$load_out" 2>&1) &
+    load_pid=$!
+    for _ in $(seq 1 30); do
+        metrics=$(ssh_dpu "curl -sf http://127.0.0.1:4191/metrics" || true)
+        active=$(metric_value "$metrics" dmesh_sessions_active)
+        [ "${active:-0}" -gt 0 ] 2>/dev/null && break
+        sleep 1
+    done
+    [ "${active:-0}" -gt 0 ] 2>/dev/null || {
+        err "the long-lived channel did not become active"
+        return 1
+    }
+
+    kubectl scale deployment/"$app" -n "$NS" --replicas=0 >/dev/null
+    kubectl wait --for=delete pod -n "$NS" -l "app=$app" --timeout=90s >/dev/null
+    wait "$load_pid" 2>/dev/null || true
+    load_pid=""
+
+    for _ in $(seq 1 30); do
+        metrics=$(ssh_dpu "curl -sf http://127.0.0.1:4191/metrics" || true)
+        active=$(metric_value "$metrics" dmesh_sessions_active)
+        pending=$(metric_value "$metrics" dmesh_registrations_pending)
+        tasks=$(metric_value "$metrics" dmesh_tasks_live)
+        opened=$(metric_value "$metrics" dmesh_sessions_opened_total)
+        closed=$(metric_value "$metrics" dmesh_sessions_closed_total)
+        [ "${active:-x}" = 0 ] && [ "${pending:-x}" = 0 ] &&
+            [ "${tasks:-x}" = 0 ] && [ -n "$opened" ] &&
+            [ "$opened" = "$closed" ] && break
+        sleep 1
+    done
+    [ "${active:-x}" = 0 ] && [ "${pending:-x}" = 0 ] &&
+        [ "${tasks:-x}" = 0 ] && [ -n "$opened" ] && [ "$opened" = "$closed" ] || {
+        err "shutdown leaked state: opened=${opened:-NA} closed=${closed:-NA} active=${active:-NA} pending=${pending:-NA} tasks=${tasks:-NA}"
+        return 1
+    }
+    mmap_after=$(ssh_dpu "grep -c 'RX mmap reclaim failed' '$DPU_LOG' || true")
+    [ "$mmap_after" = "$mmap_before" ] || {
+        err "shutdown added RX mmap reclaim errors: $mmap_before -> $mmap_after"
+        return 1
+    }
+
+    step "=== Re-registering the recycled pod slot ==="
+    kubectl scale deployment/"$app" -n "$NS" --replicas=1 >/dev/null
+    kubectl wait --for=condition=Ready pod -n "$NS" -l "app=$app" --timeout=120s >/dev/null
+    pod=$(kubectl get pod -n "$NS" -l "app=$app" -o jsonpath='{.items[0].metadata.name}')
+    local ready=0 logs reply
+    for _ in $(seq 1 60); do
+        logs=$(kubectl logs -n "$NS" "$pod" 2>&1 || true)
+        if rg -q 'DPUmesh DOCA initialized' <<<"$logs"; then ready=1; break; fi
+        sleep 1
+    done
+    [ "$ready" = 1 ] || { err "$app did not become DPUmesh data-ready after reuse"; return 1; }
+    ip=$(running_pod_ip "$app")
+    reply=$(printf 'RUN 1024 8 4 10 1000 4\n' |
+        timeout 120s nc -N "$ip" "$CTRL_PORT" 2>/dev/null || true)
+    # The first point after process creation also warms Linkerd's outbound
+    # stack. If that cold start produces >1.05 s latency samples (the fixed
+    # histogram's overflow bucket), require a clean repeat before accepting
+    # the lifecycle gate.
+    if [[ "$reply" == OK* ]] && [ "$(field "$reply" overflow)" != 0 ]; then
+        reply=$(printf 'RUN 1024 8 4 10 1000 4\n' |
+            timeout 120s nc -N "$ip" "$CTRL_PORT" 2>/dev/null || true)
+    fi
+    [[ "$reply" == OK* ]] &&
+        [ "$(field "$reply" fail)" = 0 ] &&
+        [ "$(field "$reply" pending)" = 0 ] &&
+        [ "$(field "$reply" drops)" = 0 ] &&
+        [ "$(field "$reply" overflow)" = 0 ] &&
+        [ "$(field "$reply" reorder)" = 0 ] &&
+        [ "$(field "$reply" worker_fail)" = 0 ] &&
+        [ "$(field "$reply" credit_hold_dropped)" = 0 ] &&
+        [ "$(field "$reply" eq_budget_exhausted)" = 0 ] || {
+        err "post-reuse gRPC smoke failed: $reply"
+        return 1
+    }
+
+    metrics=$(ssh_dpu "curl -sf http://127.0.0.1:4191/metrics" || true)
+    active=$(metric_value "$metrics" dmesh_sessions_active)
+    pending=$(metric_value "$metrics" dmesh_registrations_pending)
+    tasks=$(metric_value "$metrics" dmesh_tasks_live)
+    opened=$(metric_value "$metrics" dmesh_sessions_opened_total)
+    closed=$(metric_value "$metrics" dmesh_sessions_closed_total)
+    [ "$active" = 0 ] && [ "$pending" = 0 ] && [ "$tasks" = 0 ] &&
+        [ "$opened" = "$closed" ] || {
+        err "post-reuse sessions did not quiesce: opened=$opened closed=$closed active=$active pending=$pending tasks=$tasks"
+        return 1
+    }
+
+    trap - EXIT
+    rm -f "$load_out"
+    info "gRPC shutdown/re-register gate passed: opened=$opened closed=$closed; $reply"
+}
+
 ### ------------------------------------------------------------ dispatch
 CMD="${1:-help}"; shift || true
 case "$CMD" in
@@ -1240,6 +1402,7 @@ case "$CMD" in
     loopback)  run_loopback "${1:-50000}" "${2:-8192}" "${3:-0}" ;;
     verbs)     run_verbs    "${1:-50000}" "${2:-8192}" "${3:-0}" "${4:-1}" "${5:-1}" ;;
     preload)   run_preload  "${1:-5000}"  "${2:-1024}" "${3:-8}" ;;
+    grpcshutdown) run_grpc_shutdown ;;
     pin)       need_env; pin_pods "${1:-fair}" ;;
     status)    show_status ;;
     logs)      show_logs ;;
@@ -1258,6 +1421,7 @@ Usage: $0 <command> [args]
   latency|bandwidth|rate|all [dpumesh|tcp|both]   benchmark families -> CSVs under $OUT
   point <sol> <req> <reply> <conc> <dur> <warmup> <threads> [reconn]   one raw RUN (reconn = conn-churn period)
   loopback|preload [args]                    feature validators
+  grpcshutdown                              real-DPU HTTP/2 process-stop + slot-reuse gate
   verbs <N> <size> <zc> <window> <pipeline>  native-API loopback validator: window conns x pipeline outstanding
   pin [fair|l4|grpc|grpccap|grpcl7cap|grpcmax|hw|hw3|hw6]  (re)pin pods to cores
                                              grpcl7cap reads BENCH_CAP_CONFIG for the 6+6 path

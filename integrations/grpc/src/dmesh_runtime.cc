@@ -46,9 +46,9 @@ absl::StatusOr<std::shared_ptr<DmeshRuntime>> DmeshRuntime::Create(
         "DPUmesh runtime requires at least one reactor");
   }
 
-  // The data path never reaches an executor: each EQ owner runs the
-  // completions it raises. One thread, shared by every shard, carries the
-  // completions a gRPC call raises itself.
+  // Normal receive and TX_READY progress stays on the EQ owner. One callback
+  // executor, shared by every shard, carries connect/accept delivery and the
+  // endpoint completions deliberately deferred by DmeshEndpoint.
   if (callback_executor == nullptr) {
     callback_executor = std::make_shared<ThreadExecutor>();
   }

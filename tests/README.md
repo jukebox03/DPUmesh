@@ -7,10 +7,11 @@ analysis contracts without Kubernetes or BlueField hardware.
 |---|---|
 | `native_api_contract_test.c` | public allocation, post, the open-transmit-call pairing, library-owned batching, async TX error, event, and RX-credit contracts |
 | `native_control_state_test.c` | registration, unregister replay, and slot cleanup |
-| `native_tx_batch_policy_test.c` | idle/immediate and busy/deadline tail publication, deadlines that never move once stamped, arming a tail retained when the stream falls quiet, the transmit gate excluding the deadline pass with retention surviving it, timer wakes without submitting, armed-bit release on close, deferred TX error, TX units, block ordering, landing geometry, and credit sharding |
+| `native_tx_batch_policy_test.c` | idle/immediate and busy/deadline tail publication, deadlines that never move once stamped, arming a tail retained when the stream falls quiet, the transmit gate excluding the deadline pass with retention surviving it, data-custody fencing before FIN, timer wakes without submitting, armed-bit release on close, deferred TX error, TX units, block ordering, landing geometry, and credit sharding |
 | `native_writable_test.c` | TX-ready arm/recheck, shared-pool readiness, EQ notification suppression, and cursor rollback |
 | `preload_api_contract_test.c` | POSIX blocking, `POLLOUT`, EQ drain serialization, library-owned TX batching/error signalling, RX ordering, FIN, close, and fd lifetime |
 | `l4_pin_policy_test.c` | connection pinning and backend loss |
+| `benchmark_result_contract_test.c` | rejects zero-progress, failed-request and failed-worker benchmark points instead of labelling them `OK` |
 | `lb_policy_test.c` | ready-backend filtering and service round robin |
 | `proxy_lane_queue_test.c` | lane FIFO, ordered retry, landing geometry, and DMA progress |
 | `worker_mpsc_queue_test.c` | cross-worker MPSC FIFO |
@@ -30,3 +31,8 @@ make -j4 test
 
 Executables are written under `build/test`. Hardware validation uses the
 programs in [bench/validators](../bench/validators/README.md).
+
+The deployed gRPC lifecycle gate is `./bench/bench.sh grpcshutdown`. It stops a
+client process with a live HTTP/2 channel, requires balanced Linkerd
+session/task metrics and no new RX-mmap reclaim error, re-registers the recycled
+pod slot, and finishes with a four-channel smoke point.

@@ -14,6 +14,7 @@
 #include "dpu_proxy.h"
 #include <dpumesh/dmesh_common.h>
 #include <dpumesh/dmesh_topology.h>
+#include <dmesh_l7.h>
 
 #include <doca_log.h>
 #include <doca_dev.h>
@@ -211,11 +212,17 @@ dpu_route_l4(struct objects *objs, int16_t svc)
     return lb_pick(objs, svc);
 }
 
-/* Select the connection owner. */
+/* Select the connection owner.
+ *
+ * An L7 request goes to the worker that owns the L7 layer; everything else,
+ * including every reply, is owned by the worker its port names. */
 static inline int
 owner_worker(struct objects *objs, int here, const dpu_comp_entry_t *e)
 {
     (void)here;
+    int l7 = px_l7_request_owner(objs, e->dst_pod_id, e->dst_service);
+    if (l7 >= 0)
+        return l7;
     return dmesh_worker_for_port(e->src_port, objs->n_data_workers);
 }
 
@@ -406,12 +413,13 @@ dpu_progress_worker_pe(struct objects *objs, struct dpu_data_worker *worker_stat
 
 /* Drain local and cross-worker completions. */
 static enum px_progress_state
-dpu_worker_run(struct objects *objs, struct dpu_data_worker *worker_state)
+dpu_worker_run_budget(struct objects *objs, struct dpu_data_worker *worker_state,
+                      int budget)
 {
     int did = 0;
 
     /* Completions received through this worker's consumer PE. */
-    for (int n = 0; n < DPU_WORKER_COMPLETION_BUDGET; n++) {
+    for (int n = 0; n < budget; n++) {
         dpu_comp_entry_t *e = comp_queue_peek(&worker_state->queue);
         if (!e)
             break;
@@ -434,7 +442,7 @@ dpu_worker_run(struct objects *objs, struct dpu_data_worker *worker_state)
     }
 
     /* Cross-worker reply inbox. */
-    for (int n = 0; n < DPU_WORKER_COMPLETION_BUDGET; n++) {
+    for (int n = 0; n < budget; n++) {
         dpu_comp_entry_t *xe = mpsc_comp_queue_peek(&worker_state->cross_worker);
         if (!xe)
             break;
@@ -449,9 +457,9 @@ dpu_worker_run(struct objects *objs, struct dpu_data_worker *worker_state)
 
     /* Resume connections stalled by egress backpressure. */
     did += px_drain_stalled(objs, worker_state->id);
-    /* Advance the L7 layer before egress, so bytes it produced this revolution
-     * are submitted in the same one. */
+#ifndef DMESH_L7_RUNTIME_OWNER
     did += px_l7_step_worker(objs, worker_state->id);
+#endif
     /* Submit DMA, progress completions, and retire owned lanes. */
     enum px_progress_state proxy_state =
         px_worker_drain(objs, worker_state->id);
@@ -459,6 +467,14 @@ dpu_worker_run(struct objects *objs, struct dpu_data_worker *worker_state)
     if (did)
         return PX_PROGRESS_PROGRESSED;
     return proxy_state;
+}
+
+#ifndef DMESH_L7_RUNTIME_OWNER
+static enum px_progress_state
+dpu_worker_run(struct objects *objs, struct dpu_data_worker *worker_state)
+{
+    return dpu_worker_run_budget(objs, worker_state,
+                                 DPU_WORKER_COMPLETION_BUDGET);
 }
 
 #if defined(__aarch64__)
@@ -489,15 +505,24 @@ static inline uint64_t dpu_wake_clock_hz(void)
 }
 #endif
 
-/* ARM data worker polling loop. */
+/* C-owned ARM data-worker loop. */
+#endif
 static void *
 dpu_data_worker_main(void *arg)
 {
     struct dpu_data_worker *worker_state = (struct dpu_data_worker *)arg;
-    struct objects *objs = worker_state->objs;
     dpu_worker_id = worker_state->id;
     dpu_arm_name_current("worker", worker_state->id);
     dpu_arm_pin_current("worker", worker_state->id);
+
+#ifdef DMESH_L7_RUNTIME_OWNER
+    if (l7_worker_run(worker_state->id, worker_state) < 0) {
+        DOCA_LOG_ERR("ARM worker %d runtime failed", worker_state->id);
+        atomic_store_explicit(&worker_state->init_state, -1, memory_order_release);
+    }
+    return NULL;
+#else
+    struct objects *objs = worker_state->objs;
 
     doca_notification_handle_t cfd = 0;
     int dfd = px_worker_notification_fd(objs, worker_state->id);
@@ -571,7 +596,109 @@ dpu_data_worker_main(void *arg)
     px_l7_detach_worker(objs, worker_state->id);
     close(ep);
     return NULL;
+#endif
 }
+
+#ifdef DMESH_L7_RUNTIME_OWNER
+int
+dmesh_l7_driver_notification_fds(void *driver, int *completion_fd,
+                                 int *dma_fd, int *wake_fd)
+{
+    struct dpu_data_worker *worker_state = driver;
+    doca_notification_handle_t completion = 0;
+    if (!worker_state || !completion_fd || !dma_fd || !wake_fd ||
+        doca_pe_get_notification_handle(worker_state->pe, &completion) != DOCA_SUCCESS)
+        return -1;
+    px_bind_worker(worker_state->objs, worker_state->id);
+    *completion_fd = (int)completion;
+    *dma_fd = px_worker_notification_fd(worker_state->objs, worker_state->id);
+    *wake_fd = worker_state->wake_fd;
+    return *wake_fd >= 0 ? 0 : -1;
+}
+
+int
+dmesh_l7_driver_arm(void *driver)
+{
+    struct dpu_data_worker *worker_state = driver;
+    if (!worker_state ||
+        doca_pe_request_notification(worker_state->pe) != DOCA_SUCCESS)
+        return -1;
+    (void)px_worker_arm_notification(worker_state->objs, worker_state->id);
+    atomic_store_explicit(&worker_state->parked, 1, memory_order_release);
+    return 0;
+}
+
+int
+dmesh_l7_driver_drain(void *driver, int budget)
+{
+    struct dpu_data_worker *worker_state = driver;
+    if (!worker_state || budget <= 0)
+        return -1;
+    px_bind_worker(worker_state->objs, worker_state->id);
+    enum px_progress_state pe = dpu_progress_worker_pe(worker_state->objs,
+                                                       worker_state);
+    enum px_progress_state run = dpu_worker_run_budget(worker_state->objs,
+                                                       worker_state, budget);
+    if (pe == PX_PROGRESS_PROGRESSED || run == PX_PROGRESS_PROGRESSED)
+        return PX_PROGRESS_PROGRESSED;
+    if (run == PX_PROGRESS_PENDING ||
+        !mpsc_comp_queue_empty(&worker_state->cross_worker))
+        return PX_PROGRESS_PENDING;
+    return PX_PROGRESS_IDLE;
+}
+
+int
+dmesh_l7_driver_clear_notifications(void *driver)
+{
+    struct dpu_data_worker *worker_state = driver;
+    doca_notification_handle_t completion = 0;
+    if (!worker_state ||
+        doca_pe_get_notification_handle(worker_state->pe, &completion) != DOCA_SUCCESS)
+        return -1;
+    atomic_store_explicit(&worker_state->parked, 0, memory_order_release);
+    uint64_t value;
+    while (read(worker_state->wake_fd, &value, sizeof(value)) == sizeof(value)) {}
+    (void)doca_pe_clear_notification(worker_state->pe, completion);
+    int dma_fd = px_worker_notification_fd(worker_state->objs, worker_state->id);
+    if (dma_fd >= 0)
+        px_worker_clear_notification(worker_state->objs, worker_state->id, dma_fd);
+    return 0;
+}
+
+int
+dmesh_l7_driver_maintenance(void *driver)
+{
+    struct dpu_data_worker *worker_state = driver;
+    if (!worker_state)
+        return -1;
+    dpu_send_wake_worker(worker_state->objs, worker_state->id);
+    px_l7_stats_report(worker_state->objs, worker_state->id);
+    return 0;
+}
+
+int
+dmesh_l7_driver_stopped(void *driver)
+{
+    struct dpu_data_worker *worker_state = driver;
+    return !worker_state || worker_state->stop;
+}
+
+void
+dmesh_l7_driver_ready(void *driver)
+{
+    struct dpu_data_worker *worker_state = driver;
+    if (worker_state)
+        atomic_store_explicit(&worker_state->init_state, 1, memory_order_release);
+}
+
+void
+dmesh_l7_driver_failed(void *driver)
+{
+    struct dpu_data_worker *worker_state = driver;
+    if (worker_state)
+        atomic_store_explicit(&worker_state->init_state, -1, memory_order_release);
+}
+#endif
 
 static void
 stop_data_workers(struct objects *objs)

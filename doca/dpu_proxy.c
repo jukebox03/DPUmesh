@@ -296,6 +296,8 @@ struct px_conn {
     int      fin_pending, dead;
     int      eof_pending;             /* poisoned, but its sender has not been told yet
                                        * (unit pool was dry) — px_drain_stalled retries */
+    int      disconnect_pending;      /* peer pod vanished; delete after the deferred
+                                       * EOF has been queued to the surviving sender */
     /* Backpressure park (px_stall): 1 = this conn has window bytes it could not ship
      * because a pool was momentarily empty. parse_pos did NOT advance, so the bytes are
      * still in the window; px_drain_stalled re-parses from exactly where it stopped. */
@@ -372,6 +374,8 @@ struct px_worker_state {
 struct dmesh_proxy {
     uint8_t  svc_mode[POD_ID_SPACE];     /* service id → enum px_l7_mode */
     int      l7_attached;                /* some service selects a mode with an L7 layer */
+    int      l7_worker;                  /* ARM worker owning the L7 layer's session state */
+    int      l7_fail_closed;             /* a declined L7 connection is refused, not forwarded */
     uint32_t sg_pieces_max;
 
     /* Per-worker connection and routing tables. */
@@ -412,6 +416,10 @@ struct dmesh_proxy {
     atomic_ullong stat_l7_fallback_by[PX_L7_FB_KINDS];
     atomic_ullong stat_l7_over_release;  /* releases naming more than is outstanding */
     atomic_ullong stat_l7_stray_release; /* releases against a conn holding nothing */
+    atomic_ullong stat_pool_lock;        /* shared free-list acquisitions */
+    atomic_ullong stat_pool_lock_contended; /* of those, the ones that waited */
+    atomic_ullong l7_report_ns;          /* when the L7 counters were last reported */
+    atomic_ullong l7_report_mark;        /* what they summed to then */
 };
 
 static inline uint64_t px_stat_inc(atomic_ullong *counter)
@@ -556,6 +564,19 @@ px_emit_tx_ack(struct objects *objs, int32_t pod_id, uint16_t port, uint16_t seq
     return px_rev_append_ack(&objs->proxy->engines[owner], pod, port, seq);
 }
 
+/* Take the shared free-list lock, counting the acquisitions that had to wait.
+ * The per-worker magazines are meant to keep this off the hot path; the
+ * contended count is what shows whether they do. */
+static inline void px_pool_lock(struct dmesh_proxy *px) {
+    if (pthread_mutex_trylock(&px->pool_lock) == 0) {
+        px_stat_inc(&px->stat_pool_lock);
+        return;
+    }
+    px_stat_inc(&px->stat_pool_lock);
+    px_stat_inc(&px->stat_pool_lock_contended);
+    pthread_mutex_lock(&px->pool_lock);
+}
+
 /* Alloc: pop the local cache, else refill a PX_MAG_N run from the shared list
  * under one lock. Free: push the local cache; a full cache spills entirely to
  * the shared list under one lock. */
@@ -563,7 +584,7 @@ px_emit_tx_ack(struct objects *objs, int32_t pod_id, uint16_t port, uint16_t seq
 static struct type *alloc_fn(struct dmesh_proxy *px) {                        \
     struct type *n = tls_##shared##_mag;                                      \
     if (n) { tls_##shared##_mag = n->next; tls_##shared##_mag_n--; return n; }\
-    pthread_mutex_lock(&px->pool_lock);                                       \
+    px_pool_lock(px);                                                         \
     n = px->shared##_free;                                                    \
     int got = 0;                                                              \
     if (n) {                                                                  \
@@ -582,7 +603,7 @@ static void free_fn(struct dmesh_proxy *px, struct type *n) {                 \
     if (tls_##shared##_mag_n >= PX_MAG_CAP) {                                 \
         struct type *h = tls_##shared##_mag, *t = h;                          \
         while (t->next) t = t->next;                                          \
-        pthread_mutex_lock(&px->pool_lock);                                   \
+        px_pool_lock(px);                                                     \
         t->next = px->shared##_free; px->shared##_free = h;                   \
         pthread_mutex_unlock(&px->pool_lock);                                 \
         tls_##shared##_mag = NULL; tls_##shared##_mag_n = 0;                  \
@@ -917,6 +938,88 @@ static int px_fin_to_sender(struct objects *objs, struct px_conn *c) {
 }
 
 static void px_stall(struct px_conn *c);
+
+/* Terminate a connection whose other pod disappeared. The surviving sender is
+ * owed an EOF; if the unit pool is temporarily empty, retain only the small
+ * connection object on the worker-local stall list and finish there later.
+ * Input windows are dropped now so a disconnected pod's staging can be
+ * reclaimed independently of that retry. */
+static void
+px_conn_peer_disconnected(struct objects *objs, struct px_conn *c)
+{
+    if (c->disconnect_pending)
+        return;
+    px_l7_close(objs, c, 0);
+    if (c->parse_pos < c->stream_end)
+        px_drop_window(objs, c, "peer pod disconnected");
+    c->dead = 1;
+    c->disconnect_pending = 1;
+    if (px_fin_to_sender(objs, c)) {
+        px_conn_del(objs, c);
+        return;
+    }
+    c->eof_pending = 1;
+    px_stall(c);
+}
+
+/* Worker-owned pod teardown. No control thread walks these tables: each ARM
+ * worker closes its own L7 sessions, drops its own windows, and removes every
+ * conntrack edge that names the disappearing pod. This must run before that
+ * worker publishes its egress-quiesced bit, otherwise an idle long-lived L7
+ * session can keep a source staging reference after the control path starts
+ * destroying imported mappings. */
+static int
+px_worker_quiesce_pod_connections(struct objects *objs, int32_t pod_id)
+{
+    struct px_worker_state *worker_state = px_cur_worker;
+    struct dpu_conntrack *ct = worker_state->ct;
+    int closed = 0;
+
+    for (uint32_t p = DMESH_UPORT_BASE; p < 65536u; p++) {
+        struct dpu_upstream *u = &ct->upstream[p];
+        if (!u->in_use ||
+            (u->client_pod != pod_id && u->backend_pod != pod_id))
+            continue;
+
+        int32_t client_pod = u->client_pod;
+        uint16_t client_port = u->client_port;
+        int32_t backend_pod = u->backend_pod;
+        px_conn_del_key(objs, backend_pod, (uint16_t)p);
+        dpu_upstream_free(ct, (uint16_t)p);
+        closed++;
+
+        if (client_pod != pod_id) {
+            struct px_conn *client =
+                px_conn_find(objs->proxy, client_pod, client_port);
+            if (client && !client->disconnect_pending) {
+                px_conn_peer_disconnected(objs, client);
+                closed++;
+            }
+        }
+    }
+
+    for (uint32_t h = 0; h < PX_CONN_HASH; h++) {
+        struct px_conn *c = worker_state->buckets[h];
+        while (c) {
+            struct px_conn *next = c->hnext;
+            if (c->pub.src_pod == pod_id) {
+                px_conn_del(objs, c);
+                closed++;
+            } else if (!c->disconnect_pending &&
+                       (c->pub.peer_pod == pod_id ||
+                        c->pinned_backend == pod_id)) {
+                px_conn_peer_disconnected(objs, c);
+                closed++;
+            }
+            c = next;
+        }
+    }
+
+    if (closed)
+        DOCA_LOG_INFO("proxy: worker %d closed %d connection states for pod %d",
+                      worker_state->id, closed, pod_id);
+    return closed;
+}
 
 /* Kill a conn whose stream can no longer be delivered intact, and TELL its sender
  * rather than leaving it to block forever. Idempotent.
@@ -1433,6 +1536,23 @@ static struct px_conn *px_conn_by_handle(struct dmesh_proxy *px, uint64_t conn) 
     return px_conn_find(px, dmesh_l7_handle_pod(conn), dmesh_l7_handle_port(conn));
 }
 
+/* Requests for a service the L7 layer carries belong to the worker that owns
+ * the layer: its session state is thread-local to one Tokio runtime, and any
+ * other worker would decline the connection. Replies are not routed here — an
+ * upstream port is allocated in its owner's residue class (see
+ * dpu_upstream_create), so the return path already lands on the same worker. */
+int px_l7_request_owner(struct objects *objs, int32_t dst_pod_id,
+                        int16_t dst_service) {
+    struct dmesh_proxy *px = objs->proxy;
+    if (!px || !px->l7_attached || dst_pod_id != DMESH_POD_BLANK)
+        return -1;
+    if (dst_service < 0 || dst_service >= POD_ID_SPACE)
+        return -1;
+    if (!px_l7_carries_bytes(px->svc_mode[dst_service]))
+        return -1;
+    return px->l7_worker;
+}
+
 /* Count a connection the L7 layer is not carrying, by cause and in total. */
 static uint64_t px_l7_fallback(struct dmesh_proxy *px, enum px_l7_fallback_reason why) {
     px_stat_inc(&px->stat_l7_fallback_by[why]);
@@ -1458,11 +1578,44 @@ static void px_l7_log_fallbacks(struct dmesh_proxy *px, int worker_id) {
             break;
         n += w;
     }
-    DOCA_LOG_INFO("proxy: worker %d L7 fallbacks total=%llu (%s) over_release=%llu "
-                  "stray_release=%llu",
+    DOCA_LOG_WARN("proxy: worker %d L7 fallbacks total=%llu (%s) over_release=%llu "
+                  "stray_release=%llu pool_lock=%llu contended=%llu",
                   worker_id, (unsigned long long)px_stat_get(&px->stat_l7_fallback), by,
                   (unsigned long long)px_stat_get(&px->stat_l7_over_release),
-                  (unsigned long long)px_stat_get(&px->stat_l7_stray_release));
+                  (unsigned long long)px_stat_get(&px->stat_l7_stray_release),
+                  (unsigned long long)px_stat_get(&px->stat_pool_lock),
+                  (unsigned long long)px_stat_get(&px->stat_pool_lock_contended));
+}
+
+/* Report the L7 audit and lock counters when they move, at most every 10 s.
+ *
+ * A run is valid only if nothing the L7 layer refused was forwarded without
+ * policy, so these counters are the run's verdict. The linkerd backend owns the
+ * worker thread for the process's lifetime and never reaches a detach point, so
+ * the maintenance tick is where a deployed run reports them. The shared-pool
+ * lock counters ride along: they move only while traffic flows, which is
+ * exactly when their cost is worth attributing. */
+#define PX_L7_REPORT_NS (10ull * 1000000000ull)
+
+void px_l7_stats_report(struct objects *objs, int worker_id)
+{
+    struct dmesh_proxy *px = objs ? objs->proxy : NULL;
+    if (!px || !px->l7_attached)
+        return;
+    uint64_t now = px_monotonic_ns();
+    uint64_t last = atomic_load_explicit(&px->l7_report_ns, memory_order_relaxed);
+    if (last && now - last < PX_L7_REPORT_NS)
+        return;
+    uint64_t mark = px_stat_get(&px->stat_l7_fallback) +
+                    px_stat_get(&px->stat_l7_over_release) +
+                    px_stat_get(&px->stat_l7_stray_release) +
+                    px_stat_get(&px->stat_pool_lock);
+    uint64_t seen = atomic_load_explicit(&px->l7_report_mark, memory_order_relaxed);
+    atomic_store_explicit(&px->l7_report_ns, now, memory_order_relaxed);
+    if (last && mark == seen)
+        return;                                /* nothing new to audit */
+    atomic_store_explicit(&px->l7_report_mark, mark, memory_order_relaxed);
+    px_l7_log_fallbacks(px, worker_id);
 }
 
 static void px_l7_apply_release(struct objects *objs, struct px_conn *c);
@@ -1642,6 +1795,13 @@ static void px_parse_l7(struct objects *objs, struct px_conn *c) {
     if (!c->l7_open && !px_l7_open_conn(objs, c)) {
         c->l7_mode = PX_L7_NONE;               /* nothing handed over yet */
         c->l7_closed = 1;
+        if (objs->proxy->l7_fail_closed) {
+            /* The service selected a policy layer that did not take the
+             * connection. Forwarding it here would carry the stream without
+             * that policy, so the stream ends instead. */
+            px_poison(objs, c, "l7 layer declined a protected service");
+            return;
+        }
         px_parse(objs, c);
         return;
     }
@@ -1809,6 +1969,7 @@ void dmesh_l7_release(int worker_id, uint64_t conn, uint32_t pos, uint32_t len) 
 
 /* ---- worker lifecycle, called from dpu_worker.c ---- */
 
+#ifndef DMESH_L7_RUNTIME_OWNER
 int px_l7_attach_worker(struct objects *objs, int worker_id) {
     struct dmesh_proxy *px = objs->proxy;
     if (!px || !px->l7_attached || worker_id < 0 || worker_id >= px->n_workers)
@@ -1833,6 +1994,7 @@ void px_l7_detach_worker(struct objects *objs, int worker_id) {
     l7_worker_detach(worker_id);
     px_l7_log_fallbacks(px, worker_id);
 }
+#endif
 
 /* ====== FIN ====== */
 
@@ -1923,6 +2085,12 @@ int px_drain_stalled(struct objects *objs, int worker_id) {
             if (!px_fin_to_sender(objs, c)) { px_stall(c); c = next; continue; }
             c->eof_pending = 0;
             did = 1;
+        }
+        if (c->disconnect_pending) {
+            px_conn_del(objs, c);
+            did = 1;
+            c = next;
+            continue;
         }
         if (!c->dead) {
             uint64_t before = c->parse_pos;
@@ -2180,7 +2348,6 @@ px_rev_complete(struct px_engine *eng, struct px_op *op)
     struct px_lane *ln = &px->lanes[op->pod_idx][op->region];
     struct px_rev_pub *pub = &ln->rev;
 
-    px_pod_inflight_sub(eng, pod);
     px_rev_release_bufs(op);
 
     if (op->kind == 2) {
@@ -2196,6 +2363,10 @@ px_rev_complete(struct px_engine *eng, struct px_op *op)
         pub->publish_count = 0;
         pub->ctrl_after_publish = 1;
         pub->state = PX_REV_CTRL_PENDING;
+        /* This is the reclaim publication fence: the control thread may
+         * destroy the remote mmap as soon as the count reaches zero. Publish
+         * it only after every DOCA buffer referring to that mmap is returned. */
+        px_pod_inflight_sub(eng, pod);
         return;
     }
 
@@ -2210,6 +2381,7 @@ px_rev_complete(struct px_engine *eng, struct px_op *op)
     }
     pub->ctrl_after_publish = 0;
     pub->state = PX_REV_IDLE;
+    px_pod_inflight_sub(eng, pod);
 }
 
 static void px_dma_done_cb(struct doca_dma_task_memcpy *t, union doca_data tud,
@@ -2225,7 +2397,6 @@ static void px_dma_done_cb(struct doca_dma_task_memcpy *t, union doca_data tud,
     }
     if (op->kind == 1) {                       /* credit refresh landed */
         struct pod_state *pod = &objs->pods[op->pod_idx];
-        px_pod_inflight_sub(eng, pod);
         struct px_lane *ln = &objs->proxy->lanes[op->pod_idx][op->region];
         int K = pod->k_rings > 0 ? pod->k_rings : 1;
         int L = px_landing_stripes(pod);
@@ -2249,14 +2420,15 @@ static void px_dma_done_cb(struct doca_dma_task_memcpy *t, union doca_data tud,
         ln->refresh_inflight = 0;
         if (op->src_buf) { doca_buf_dec_refcount(op->src_buf, NULL); op->src_buf = NULL; }
         if (op->dst_buf) { doca_buf_dec_refcount(op->dst_buf, NULL); op->dst_buf = NULL; }
+        px_pod_inflight_sub(eng, pod);
         return;
     }
     struct px_batch *b = op->batch;
-    px_pod_inflight_sub(eng, &objs->pods[b->pod_idx]);
     if (b->src_head) { doca_buf_dec_refcount(b->src_head, NULL); b->src_head = NULL; }
     if (b->dst_buf)  { doca_buf_dec_refcount(b->dst_buf, NULL);  b->dst_buf = NULL; }
     px_batch_leave_retry(eng, b);
     b->state = PX_BATCH_DONE;                  /* retired in px_drain (in order) */
+    px_pod_inflight_sub(eng, &objs->pods[b->pod_idx]);
 }
 
 static void px_dma_err_cb(struct doca_dma_task_memcpy *t, union doca_data tud,
@@ -2276,7 +2448,6 @@ static void px_dma_err_cb(struct doca_dma_task_memcpy *t, union doca_data tud,
         struct pod_state *pod = &objs->pods[op->pod_idx];
         struct px_rev_pub *pub =
             &objs->proxy->lanes[op->pod_idx][op->region].rev;
-        px_pod_inflight_sub(eng, pod);
         px_rev_release_bufs(op);
         if (op->kind == 2)
             pub->state = PX_REV_IDLE;
@@ -2290,11 +2461,11 @@ static void px_dma_err_cb(struct doca_dma_task_memcpy *t, union doca_data tud,
                      "(pod slot %d region %d): %s",
                      op->kind, op->pod_idx, op->region,
                      doca_error_get_descr(st));
+        px_pod_inflight_sub(eng, pod);
         return;
     }
 
     if (op->kind == 1) {
-        px_pod_inflight_sub(eng, &objs->pods[op->pod_idx]);
         DOCA_LOG_ERR("proxy: credit refresh DMA failed: %s", doca_error_get_descr(st));
         struct px_lane *ln =
             &objs->proxy->lanes[op->pod_idx][op->region];
@@ -2303,15 +2474,16 @@ static void px_dma_err_cb(struct doca_dma_task_memcpy *t, union doca_data tud,
             PX_CREDIT_REFRESH_RETRY_NS;
         if (op->src_buf) { doca_buf_dec_refcount(op->src_buf, NULL); op->src_buf = NULL; }
         if (op->dst_buf) { doca_buf_dec_refcount(op->dst_buf, NULL); op->dst_buf = NULL; }
+        px_pod_inflight_sub(eng, &objs->pods[op->pod_idx]);
         return;
     }
     struct px_batch *b = op->batch;
-    px_pod_inflight_sub(eng, &objs->pods[b->pod_idx]);
     DOCA_LOG_ERR("proxy: SG-DMA batch failed (pod slot %d region %d, %u bytes): %s",
                  b->pod_idx, b->region, b->bytes, doca_error_get_descr(st));
     if (b->src_head) { doca_buf_dec_refcount(b->src_head, NULL); b->src_head = NULL; }
     if (b->dst_buf)  { doca_buf_dec_refcount(b->dst_buf, NULL);  b->dst_buf = NULL; }
     px_batch_record_error(eng, b, st);
+    px_pod_inflight_sub(eng, &objs->pods[b->pod_idx]);
 }
 
 /* Submit a batch at its recorded landing position. */
@@ -2977,6 +3149,15 @@ static int px_engine_pump(struct objects *objs, struct px_engine *eng,
         int L = px_landing_stripes(pod);
         int dead = !pod_data_ready(pod);
         int quiet = dead;
+        uint32_t expected_workers = px->n_workers >= 32
+            ? UINT32_MAX : ((1u << px->n_workers) - 1u);
+        /* Sample before lane draining. If the last connection producer joins
+         * during this pass, wait for the next pass so every cross-worker inbox
+         * is spliced after that producer's release publication. */
+        uint32_t producers_at_start = __atomic_load_n(
+            &pod->proxy_producers_quiesced_mask, __ATOMIC_ACQUIRE);
+        uint32_t quiesced_at_start = __atomic_load_n(
+            &pod->egress_quiesced_mask, __ATOMIC_ACQUIRE);
         for (int r = eng->id; r < L; r += px->n_workers) {
             struct px_lane *ln = &px->lanes[i][r];
             progressed |= px_lane_splice_inbox(px, ln);
@@ -3026,23 +3207,53 @@ static int px_engine_pump(struct objects *objs, struct px_engine *eng,
                 progressed |= px_rev_kick_lane(eng, i, r);
         }
         if (dead) {
+            uint32_t bit = 1u << eng->id;
+            uint32_t mask = __atomic_load_n(&pod->egress_quiesced_mask,
+                                            __ATOMIC_ACQUIRE);
+            if (__atomic_load_n(&pod->cleanup_pending, __ATOMIC_ACQUIRE)) {
+                uint32_t producer_mask = __atomic_load_n(
+                    &pod->proxy_producers_quiesced_mask, __ATOMIC_ACQUIRE);
+                if ((producer_mask & bit) == 0) {
+                    progressed |= px_worker_quiesce_pod_connections(objs,
+                                                                     pod->pod_id);
+                    __atomic_fetch_or(&pod->proxy_producers_quiesced_mask,
+                                      bit, __ATOMIC_ACQ_REL);
+                    dpu_wake_main(eng->objs);
+                }
+                if ((producers_at_start & expected_workers) != expected_workers)
+                    quiet = 0;
+            }
             if (__atomic_load_n(&pod->egress_inflight_worker[eng->id].v,
                                 __ATOMIC_ACQUIRE) != 0)
                 quiet = 0;
-            uint32_t bit = 1u << eng->id;
             /* Read first: an unchanged bit must not steal the line from the
              * peers that publish their own quiesce state in the same word. */
-            uint32_t mask = __atomic_load_n(&pod->egress_quiesced_mask,
-                                            __ATOMIC_ACQUIRE);
+            mask = __atomic_load_n(&pod->egress_quiesced_mask,
+                                   __ATOMIC_ACQUIRE);
             if (quiet) {
                 if ((mask & bit) == 0) {
                     uint32_t previous = __atomic_fetch_or(
                         &pod->egress_quiesced_mask, bit, __ATOMIC_ACQ_REL);
+                    if ((previous & bit) == 0) {
+                        __atomic_fetch_and(&pod->egress_reclaim_fenced_mask,
+                                           ~bit, __ATOMIC_ACQ_REL);
+                        dpu_wake_main(eng->objs);
+                    }
+                } else if ((quiesced_at_start & bit) != 0) {
+                    /* px_worker_progress called doca_pe_progress before this
+                     * pump. A bit already present at entry therefore fences
+                     * completion-callback return and any SDK-deferred task
+                     * buffer release from the preceding quiet pass. */
+                    uint32_t previous = __atomic_fetch_or(
+                        &pod->egress_reclaim_fenced_mask, bit,
+                        __ATOMIC_ACQ_REL);
                     if ((previous & bit) == 0)
                         dpu_wake_main(eng->objs);
                 }
             } else if (mask & bit) {
                 __atomic_fetch_and(&pod->egress_quiesced_mask, ~bit,
+                                   __ATOMIC_ACQ_REL);
+                __atomic_fetch_and(&pod->egress_reclaim_fenced_mask, ~bit,
                                    __ATOMIC_ACQ_REL);
             }
         }
@@ -3105,6 +3316,13 @@ px_worker_drain(struct objects *objs, int worker_id) {
     if (!px || px->n_workers < 1 || worker_id < 0 || worker_id >= px->n_workers)
         return PX_PROGRESS_IDLE;
     return px_worker_progress(&px->engines[worker_id]);
+}
+
+void px_bind_worker(struct objects *objs, int worker_id) {
+    struct dmesh_proxy *px = objs ? objs->proxy : NULL;
+    if (!px || worker_id < 0 || worker_id >= px->n_workers)
+        return;
+    px_cur_worker = &px->workers[worker_id];
 }
 
 /* Submit queued units of one lane as SG batches while credits, region space,
@@ -3267,11 +3485,17 @@ int px_pod_reclaim_ready(struct objects *objs, int pod_idx) {
         ? UINT32_MAX : ((1u << px->n_workers) - 1u);
     uint32_t quiet_workers = __atomic_load_n(&pod->egress_quiesced_mask,
                                               __ATOMIC_ACQUIRE);
+    uint32_t quiet_producers = __atomic_load_n(
+        &pod->proxy_producers_quiesced_mask, __ATOMIC_ACQUIRE);
+    uint32_t fenced_workers = __atomic_load_n(
+        &pod->egress_reclaim_fenced_mask, __ATOMIC_ACQUIRE);
     uint32_t inflight = 0;
     for (int w = 0; w < px->n_workers; w++)
         inflight += __atomic_load_n(&pod->egress_inflight_worker[w].v,
                                     __ATOMIC_ACQUIRE);
-    if ((quiet_workers & expected_workers) != expected_workers ||
+    if ((quiet_producers & expected_workers) != expected_workers ||
+        (quiet_workers & expected_workers) != expected_workers ||
+        (fenced_workers & expected_workers) != expected_workers ||
         inflight != 0 ||
         __atomic_load_n(&pod->egress_pending_emit, __ATOMIC_ACQUIRE) != 0 ||
         __atomic_load_n(&pod->proxy_source_refs, __ATOMIC_ACQUIRE) != 0)
@@ -3339,6 +3563,25 @@ int px_init(struct objects *objs) {
             px->l7_attached = 1;
     }
 
+    /* One worker owns the L7 layer's session state; the adapter reads the same
+     * variable to decide which worker builds the proxy. */
+    px->l7_worker = 0;
+    { const char *w = getenv("DPUMESH_L7_LINKERD_WORKER");
+      if (w && *w) {
+          char *end;
+          long v = strtol(w, &end, 10);
+          if (end == w || *end != '\0' || v < 0 ||
+              v >= (objs->n_data_workers >= 1 ? objs->n_data_workers : 1)) {
+              DOCA_LOG_ERR("proxy: DPUMESH_L7_LINKERD_WORKER=%s is not one of the "
+                           "%d ARM data workers", w, objs->n_data_workers);
+              ret = DOCA_ERROR_INVALID_VALUE;
+              goto fail;
+          }
+          px->l7_worker = (int)v;
+      } }
+    { const char *fc = getenv("DPUMESH_L7_FAIL_CLOSED");
+      px->l7_fail_closed = (fc && *fc && *fc != '0'); }
+
     /* Each ARM data worker owns its connection and routing tables. */
     px->n_workers = objs->n_data_workers >= 1 ? objs->n_data_workers : 1;
     if (px->n_workers > MAX_ARM_WORKERS) px->n_workers = MAX_ARM_WORKERS;
@@ -3371,6 +3614,10 @@ int px_init(struct objects *objs) {
         atomic_init(&px->stat_l7_fallback_by[i], 0);
     atomic_init(&px->stat_l7_over_release, 0);
     atomic_init(&px->stat_l7_stray_release, 0);
+    atomic_init(&px->stat_pool_lock, 0);
+    atomic_init(&px->stat_pool_lock_contended, 0);
+    atomic_init(&px->l7_report_ns, 0);
+    atomic_init(&px->l7_report_mark, 0);
     /* Splice the shared free lists directly: workers are not running yet, and
      * the init thread's per-thread caches must stay empty. */
     for (int i = PX_ARRIVAL_POOL - 1; i >= 0; i--) { px->arr_mem[i].next   = px->arr_free;   px->arr_free   = &px->arr_mem[i]; }
@@ -3464,10 +3711,11 @@ int px_init(struct objects *objs) {
     objs->proxy = px;
 
     DOCA_LOG_WARN("DPU PROXY MODE ON (run-to-completion SG-DMA, N/K/A=%d/%d/%d; "
-                  "l7-services=%d, l7-layer=%s, lb=round-robin; passthru=conn-pinned, "
-                  "sg_pieces=%u)",
+                  "l7-services=%d, l7-layer=%s, l7-worker=%d, l7-policy=%s, "
+                  "lb=round-robin; passthru=conn-pinned, sg_pieces=%u)",
                   objs->num_dpa_threads, objs->k_rings, objs->n_data_workers,
-                  n_l7_svc, px->l7_attached ? "attached" : "off",
+                  n_l7_svc, px->l7_attached ? "attached" : "off", px->l7_worker,
+                  px->l7_fail_closed ? "fail-closed" : "fallback-to-l4",
                   px->sg_pieces_max);
     return DOCA_SUCCESS;
 

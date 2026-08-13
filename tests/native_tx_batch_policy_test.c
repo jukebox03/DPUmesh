@@ -165,6 +165,49 @@ armed_count(struct fixture *f)
     return atomic_load_explicit(&f->eq.tx_armed_count, memory_order_acquire);
 }
 
+struct delayed_ack {
+    struct fixture *fixture;
+    uint16_t seq;
+};
+
+static void *
+publish_delayed_ack(void *opaque)
+{
+    struct delayed_ack *ack = opaque;
+    struct timespec delay = { .tv_sec = 0, .tv_nsec = 10000000L };
+    (void)nanosleep(&delay, NULL);
+    tx_reclaim_ack(ack->fixture->ctx, 17, ack->seq);
+    return NULL;
+}
+
+/* A FIN needs no source DMA, so merely enqueueing it behind data is not an
+ * ordering fence. The production close path waits for the data custody ACK
+ * before it publishes the FIN descriptor. */
+static void
+test_fin_waits_for_submitted_data(void)
+{
+    struct fixture *f = fixture_new(8, 16, -1);
+    assert(fixture_commit(f, 64) == 0);
+    assert(__atomic_load_n(&f->ring.enq_pos, __ATOMIC_ACQUIRE) == 1);
+    assert(dmesh_tx_inflight(&f->qp));
+
+    struct delayed_ack ack = { .fixture = f, .seq = 1 };
+    pthread_t thread;
+    assert(pthread_create(&thread, NULL, publish_delayed_ack, &ack) == 0);
+    uint64_t started = monotonic_ns();
+    assert(dmesh_send_fin(&f->qp) == 0);
+    uint64_t elapsed = monotonic_ns() - started;
+    assert(pthread_join(thread, NULL) == 0);
+
+    assert(elapsed >= 5000000ull);
+    assert(!dmesh_tx_inflight(&f->qp));
+    assert(__atomic_load_n(&f->ring.enq_pos, __ATOMIC_ACQUIRE) == 2);
+    assert(f->descs[1].size == 0);
+    assert(f->descs[1].seq == 2);
+    assert(f->qp.fin_sent == 1);
+    fixture_free(f);
+}
+
 static void
 test_tail_publication_policy(void)
 {
@@ -773,6 +816,7 @@ main(void)
     test_tail_publication_policy();
     test_tail_retained_when_the_stream_falls_quiet();
     test_deadline_pass_yields_to_an_active_tx_call();
+    test_fin_waits_for_submitted_data();
     test_close_paths_release_the_armed_bit();
     test_timer_wakes_only_armed_eqs();
     test_sustained_commits_preserve_stream_bytes();

@@ -19,7 +19,8 @@ namespace dpumesh::grpc {
 // One EQ shard and its single owner thread. The owner thread is the sole
 // consumer of dmesh_poll_eq() and owns QP lifecycle; no QP is destroyed while
 // a returned event batch can still name it. Transmit operations run on the
-// endpoint's work executor under a per-connection lock, which the owner thread
+// thread pumping the endpoint write -- the Endpoint::Write() caller or the EQ
+// owner delivering TX_READY -- under a per-connection lock, which the owner
 // also takes before destroying that connection's QP.
 class DmeshReactor final {
  public:

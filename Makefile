@@ -138,13 +138,17 @@ $(TESTDIR)/ring_counter_test: tests/ring_counter_test.c doca/ring.h doca/dpa_com
 $(TESTDIR)/l7_abi_contract_test: tests/l7_abi_contract_test.c linkerd/include/dmesh_l7.h | dirs
 	$(CC) $(CFLAGS) -o $@ tests/l7_abi_contract_test.c
 
+$(TESTDIR)/benchmark_result_contract_test: tests/benchmark_result_contract_test.c \
+		bench/apps/bench_result.h | dirs
+	$(CC) $(CFLAGS) -o $@ tests/benchmark_result_contract_test.c
+
 test: $(TESTDIR)/native_api_contract_test $(TESTDIR)/native_control_state_test \
 	$(TESTDIR)/native_tx_batch_policy_test $(TESTDIR)/native_writable_test \
 	$(TESTDIR)/preload_api_contract_test $(TESTDIR)/l4_pin_policy_test \
 	$(TESTDIR)/lb_policy_test \
 	$(TESTDIR)/proxy_lane_queue_test $(TESTDIR)/worker_mpsc_queue_test \
 	$(TESTDIR)/topology_test $(TESTDIR)/ring_counter_test \
-	$(TESTDIR)/l7_abi_contract_test $(PRELOAD) \
+	$(TESTDIR)/l7_abi_contract_test $(TESTDIR)/benchmark_result_contract_test $(PRELOAD) \
 	$(BINDIR)/bench_dpumesh $(BINDIR)/bench_sock
 	$(TESTDIR)/native_api_contract_test
 	$(TESTDIR)/native_control_state_test
@@ -158,6 +162,7 @@ test: $(TESTDIR)/native_api_contract_test $(TESTDIR)/native_control_state_test \
 	$(TESTDIR)/topology_test
 	$(TESTDIR)/ring_counter_test
 	$(TESTDIR)/l7_abi_contract_test
+	$(TESTDIR)/benchmark_result_contract_test
 	sh tests/dma_fault_scope_test.sh
 	sh tests/abi_contract_test.sh $(LIB) $(PRELOAD) $(ABI_MAJOR)
 	sh tests/generator_selftest_test.sh $(BINDIR)/bench_dpumesh $(BINDIR)/bench_sock

@@ -1,380 +1,303 @@
-# Interface Contract
+# DPUmesh–Linkerd Interface Contract
 
-Between the DPUmesh datapath and the linkerd port. DPUmesh is normative:
-`doca/comch_common.h`, `doca/dpa_common.h`, `doca/ring.h`, `doca/dpu_worker.c`,
-`doca/dpu_proxy.c`.
+This document describes the interface implemented by the current DPUmesh and
+embedded Linkerd build. The normative definitions are
+`linkerd/include/dmesh_l7.h`, `doca/dpu_worker.c`, `doca/dpu_proxy.c` and
+`linkerd/rust/src/lib.rs`.
 
-**This document is the target, not a description of what is built.** §10 states
-where the port diverges from it and §12 what a run will actually do.
+## Component boundary
 
-The datapath is DPUmesh's. The port's own is not compiled into this
-integration; it stays in tree as the reference point for convergence.
+DPUmesh owns all transport and hardware state. The Linkerd static library owns
+the per-worker Rust runtime, `DmeshIo` endpoints and outbound proxy tasks.
 
-`design/L7.md` describes the layer this contract joins. This document states
-what the two sides owe each other.
-
-## 0. Acceptance criteria
-
-What a bring-up has to satisfy to count as working, within the boundaries §12
-draws.
-
-- `linkerd/rust` builds `libdmesh_l7.a` reproducibly with the pinned toolchain
-  and a lock file, from a tree that carries no port C datapath, no DOCA
-  initialization and no standalone `Driver`.
-- `dpumesh_dpu` links it with `-Dl7_backend=linkerd` and starts.
-- Exactly one worker attaches the proxy, and the log says which.
-- One `opaque` connection to one service carries its request and its response
-  through the proxy, with `fail=0`, `drops=0` and `reorder=0`.
-- The same run repeated after the first one closes succeeds again, which is
-  what shows the registry and the custody were given back.
-- No `L7 layer declined` warning and no unexpected L4 fallback on that service.
-- Every staging extent the layer held is released on the close and error paths.
-- A second concurrent session for one service is refused explicitly rather than
-  overwriting the registry.
-
-## 1. Operating modes
-
-What the modes mean and how a service is assigned to one is defined in
-[`design/L7.md`](../design/L7.md). This section states only what each mode
-implies for the ABI in §8.
-
-| Mode | What the layer is called with |
+| DPUmesh | Linkerd static library |
 |---|---|
-| `decision` | `l7_resolve` once per connection and `l7_report` at close; no payload is handed over |
-| `opaque` | the above, plus `l7_conn_segment` for every arriving byte, as one unframed stream |
-| `l7` | the above; the layer finds its own message boundaries and emits each message itself |
+| DOCA device and progress engines | Tokio `current_thread` runtime |
+| DPA and DMA rings | persistent async driver |
+| ARM worker threads and affinity | `DmeshIo` endpoint pairs |
+| connection routing and conntrack | Linkerd outbound stack |
+| staging custody and sender credits | adapter session state |
+| egress arena and SG-DMA | control-plane clients |
 
-The mode constants are shared with the data plane and asserted equal at compile
-time, so a renumbering on either side fails the build rather than the link. When
-the layer declines a connection, or is not attached, the data plane forwards at
-L4 without policy.
+The Linkerd build uses `dmesh-doca` with `default-features = false`. Its C
+datapath, DOCA initialization and standalone `Driver` are not linked into
+`libdmesh_l7.a`.
 
-## 2. Thread model
+## Thread contract
 
-[`design/L7.md`](../design/L7.md) §2 defines the worker loop and why nothing is
-shared across the A ARM workers. This section states what that costs the ABI in
-§8.
-
-Every entry point runs on the thread named by its `worker_id` and reaches only
-that worker's state. The port therefore runs one tokio `current_thread` runtime
-per worker, created on that worker's thread; a `multi_thread` runtime is
-excluded, because work stealing would move a task onto another worker's state.
-
-The worker loop owns the iteration, so the layer exposes `l7_worker_step` rather
-than a loop of its own, arms no timer, and sizes its connection slots at attach
-time.
-
-## 3. Control protocol
-
-Host↔DPU control messages. Values are wire ABI below 256, and the type byte is
-at offset 0: the host dispatches on `recv_buffer[0]`.
-
-| Value | Message | Direction | Payload |
-|---|---|---|---|
-| 1 | `POD_REGISTER` | H→D | `pod_id` (−1 requests assignment), `service_id` |
-| 2 | `MMAP_EXPORT` | H→D | one region, tagged by `mmap_type` |
-| 5 | `POD_ASSIGNED` | D→H | `pod_id`, `landing_stripes` |
-| 6 | `POD_INIT_RESULT` | D→H | terminal: ready, or failure cause |
-| 7 | `POD_UNREGISTER` | H→D | stop routing, quiesce remote references |
-| 8 | `POD_QUIESCED` | D→H | remote mappings reclaimed |
-| 9 | `REV_DOORBELL` | D→H | reverse-ring wake |
-| 10 | `POD_IDENTITY` | H→D | `workload[64]`, the name this pod runs as |
-
-`mmap_type`: `DMA_BUFFER=1`, `DMA_RING=2`, `DMA_HOST_RX_BUFFER=3`,
-`DMA_REV_RING=4`. One message per region.
-
-```text
-H→D  POD_IDENTITY                 omitted by a pure client
-H→D  POD_REGISTER
-D→H  POD_ASSIGNED
-H→D  MMAP_EXPORT x { DMA_RING, DMA_BUFFER, DMA_HOST_RX_BUFFER, DMA_REV_RING x stripes }
-D→H  POD_INIT_RESULT (ready)      traffic is admitted only after this
-     ...
-H→D  POD_UNREGISTER
-D→H  POD_QUIESCED                 host exports are destroyed only after this
-```
-
-`POD_INIT_RESULT` reports ready only once all K forward rings, the host TX and RX
-mappings, an installation acknowledgement from every target DPA execution unit,
-and the ARM egress engine are in place. Teardown is a barrier, not a comch
-disconnect: the host holds its exports until `POD_QUIESCED`.
-
-## 4. Forward descriptor
-
-Host→DPU. 64 bytes, one cache line, offsets fixed by static assertion.
-
-| Offset | Field | Width | Note |
-|---|---|---|---|
-| 0 | `mmap` | 4 | DPA mmap handle |
-| 4 | `addr` | 8 | |
-| 12 | `size` | 4 | fixed width |
-| 16 | `seq` | 2 | per-connection sequence |
-| 18 | `src_port` | 2 | |
-| 20 | `dst_port` | 2 | `PORT_BLANK` (0) selects the accept queue |
-| 22 | `src_service` | 1 | |
-| 23 | `dst_service` | 1 | routing input when the pod is blank |
-| 24 | `dst_pod_id` | 4 | `POD_BLANK` (−1) defers to `dst_service` |
-| 32 | `src_pod_id` | 4 | |
-| 56 | `publish_seq` | 8 | ticket + 1 |
-
-The ring is multi-producer. A producer claims a ticket, withdrawing it in reverse
-order when the ring is full so that the published sequence stays gapless; it
-writes the payload, then publishes `publish_seq = ticket + 1` with a release
-store. The consumer position lives in a separate 64-byte control structure.
-There is no producer tail and no validity flag.
-
-## 5. Reverse completion ring
-
-DPU→host. 32 bytes per entry, `publish_seq` at offset 24, ring size 8192.
-
-```text
-kind(1) reserved(7) payload(16) publish_seq(8)
-
-kind = DONE(1)    src_pod_id, src_service, dst_service, src_port, dst_port,
-                  seq, length, pos                                    16 B
-kind = TX_ACK(2)  port, seq                                            4 B
-```
-
-A 128-byte control structure on its own cache lines carries `consumer_head`,
-which the host publishes after a drain batch, and `arm_epoch`, which the host
-increments before blocking. `REV_DOORBELL` wakes a blocked host.
-
-Completion notification and transmit-credit return share this ring. It is the
-sole DPU→host reverse mechanism.
-
-## 6. Flow identity
-
-The proxy routes on socket addresses and needs the source workload; DPUmesh
-routes on pod and service identifiers. `dmesh_l7_flow` carries both, plus the
-connection's mode, its direction, and `peer_pod` — the other end of the session,
-which is what lets the layer recognise a reply as belonging to a connection it
-already opened.
-
-Workload identity arrives on `POD_IDENTITY`, before `POD_REGISTER`. The
-registration message is a fixed 12-byte struct checked by exact length on the DPU
-and by static assertion on both sides; growing it for a variable-length field
-would make every identity change a lockstep deployment. A separate message
-preserves both properties and is idempotent on replay. Identity binds to the slot
-the connection owns and is cleared when the slot takes a new tenant, so a reused
-slot never inherits the previous one's identity.
-
-The layer reads identity and never asserts it. Where mTLS is absent this is also
-the authorization input: the DPU binds it to the comch connection and the
-registered memory region rather than accepting a claim from the pod.
-
-## 7. Width and packing
-
-Wire structures carry fixed-width integers only: no `size_t`, no enumerations, no
-pointers. Every wire structure asserts its size and the offsets of its published
-fields at compile time. Both endpoints are little-endian; no conversion is
-performed.
-
-| Constant | Value |
-|---|---|
-| Forward descriptor | 64 B |
-| Reverse entry | 32 B |
-| Reverse ring | 8192 entries |
-| Control-path send tasks | 8192 |
-| Pods per node | 32 |
-| Identity message | 68 B |
-
-## 8. Adapter API
-
-The layer sees these entry points and nothing else. DOCA resources, progress
-engines, DMA engines and rings stay with DPUmesh. The header is
-`linkerd/include/dmesh_l7.h`.
+Each DPUmesh data-worker thread calls:
 
 ```c
-/* DPUmesh calls into the L7 layer */
-int  l7_worker_attach(int worker_id);
-int  l7_worker_step(int worker_id);                      /* 1 if progress was made */
-int  l7_conn_open(int worker_id, uint64_t conn, const struct dmesh_l7_flow *);
-int  l7_conn_segment(int worker_id, uint64_t conn,
-                     const uint8_t *base, uint32_t pos, uint32_t len);
-void l7_conn_eof(int worker_id, uint64_t conn);
-void l7_conn_close(int worker_id, uint64_t conn);
-void l7_worker_detach(int worker_id);
-
-/* The L7 layer calls into DPUmesh */
-int  dmesh_l7_backends(int worker_id, int32_t service, int32_t *out, int max);
-int  dmesh_l7_send(int worker_id, uint64_t conn, int32_t backend_pod,
-                   const uint8_t *buf, size_t len);
-uint8_t *dmesh_l7_tx_reserve(int worker_id, uint64_t conn, uint32_t *cap);
-int  dmesh_l7_tx_commit(int worker_id, uint64_t conn, int32_t backend_pod,
-                        uint32_t len);
-void dmesh_l7_release(int worker_id, uint64_t conn, uint32_t pos, uint32_t len);
-
-/* `decision` mode */
-int  l7_resolve(int worker_id, const struct dmesh_l7_flow *flow,
-                struct dmesh_l7_verdict *out);    /* { allow, backend_pod } */
-void l7_report (int worker_id, uint64_t conn, uint64_t bytes_in,
-                uint64_t bytes_out, uint64_t duration_ns, int reason);
+int l7_worker_run(int worker_id, void *driver);
 ```
 
-**Custody.** `l7_conn_segment` hands over a pointer into shared staging. The
-region stays valid until the matching `dmesh_l7_release`; the layer must not
-retain it past that call and must not copy on the assumption that it may. Failure
-to release corrupts data, so release is mandatory rather than advisory. Segments
-arrive in stream order and releases are reported in the same order.
+`driver` remains valid until the worker stop flag is set. The call is blocking
+and returns after the persistent runtime exits. Adapter state is thread-local;
+all connection calls for a worker execute on that same worker thread.
 
-**Partial transfer.** `l7_conn_segment` returns the bytes taken, in `[0, len]`,
-and the remainder is offered again. `dmesh_l7_send` returns the bytes accepted,
-where zero means the egress arena is momentarily full. Negative is terminal for
-the connection in both directions.
+`DPUMESH_L7_LINKERD_WORKER`, default `0`, selects the worker that owns Linkerd
+session state. Other workers run the DPUmesh runtime backend and return
+`DMESH_L7_DECLINE_NOT_ATTACHED` for Linkerd session opens. DPUmesh validates the
+value against the ARM worker count at initialization and routes the completion
+of every L7-carrying request service to that worker; a reply is routed by its
+upstream port, which is allocated in its owner's residue class. Traffic for
+services the L7 layer does not carry keeps the port policy.
 
-**Egress.** `dmesh_l7_tx_reserve` lends DMA-able memory so an encoder writes its
-output once, with no second copy on publication; `dmesh_l7_tx_commit` publishes a
-prefix of it, or returns it unused when the length is zero. One reservation per
-connection is outstanding at a time. A delivery that fits one reservation is one
-scatter-gather source. `dmesh_l7_send` is for a caller that hands over a whole
-message and needs it delivered whole, and chains as many sources as that takes.
+## Session identity
 
-**Backend choice.** The layer names the backend, not the data plane.
-`dmesh_l7_backends` lists a service's live candidates and both publishing calls
-take the chosen pod; `DMESH_L7_BACKEND_ANY` returns the choice to the data
-plane's balancer. The reply direction is routed by conntrack and ignores the
-argument. Granularity is the layer's to choose: routing per message reorders
-responses on a protocol that matches them positionally, and is correct only where
-responses carry their own correlation.
+A session is named by a token, internal to the Rust side and not part of the C
+ABI:
 
-**Direction.** `DMESH_L7_ORIGIN` names no backend: it returns the bytes to the
-sender of the connection they were published on, without a conntrack entry or
-an upstream port. Both directions carry the connection's own delivery sequence,
-so one connection may mix them, and the layer may send to a client before the
-backend has spoken.
-
-**Re-entrancy.** Calls are never re-entrant for one connection, but a *different*
-connection may be closed while a segment is being delivered: issuing an upstream
-port reclaims the connection state of its previous tenant. Per-connection state
-must therefore not sit behind one shared borrow.
-
-**Backpressure** is DPUmesh's. Receive credit, custody limit and worker stall
-govern both directions; a buffer limit inside the layer tracks arena
-availability rather than acting as an independent bound.
-
-## 9. Build integration
-
-```text
-Target   one `own-datapath` feature separates the standalone binary's build
-         from the embedded one, and neither needs a change to the other
-
-Current  the split exists in this checkout and is what the DPU builds from;
-         a clean recursive clone does not yet reproduce it, because the port's
-         changes are not committed upstream
+```rust
+pub struct SessionToken { worker: u16, slot: u32, generation: u32 }
 ```
 
-`linkerd/doca` compiles under a feature that selects which datapath backs the
-foreign-function surface.
+A slot is reused; its generation is not. Registrations, lifecycle events, task
+ownership and backend-registry keys all carry the token, so an event from a
+closed session cannot bind to the session now holding its slot. A slot whose
+generation space is exhausted is retired rather than issued again.
 
-```toml
-[features]
-default = ["own-datapath"]
-own-datapath = []
-```
+The acceptor owns one task per session. `ConnClosed` and `ConnError` cancel
+exactly the task their token names and are awaited outside event dispatch; when
+the event stream or the drain signal ends, every task is cancelled and joined
+before the acceptor returns.
 
-With the feature on, the crate compiles its own C datapath and links its DPA
-kernel archive — the port's standalone binary. With it off, `build.rs` compiles
-nothing and the crate contributes Rust only: the IO endpoint, the backend
-registry, and the acceptor's types. The DOCA handle, the probe, the error type
-and the driver are gated with it, since an embedder that supplies the datapath
-supplies those symbols too.
+## Persistent runtime backend
 
-`src/api.rs` holds what both configurations need — `FlowId`, `DmeshEvent`,
-`Registrar`, `Registration`, `MAX_CONNS` — so gating the driver does not gate the
-acceptor's interface. `linkerd-app` and `linkerd-app-outbound` take the crate
-with `default-features = false`; feature unification restores the datapath for
-the port's own binary, which therefore builds unchanged.
+DPUmesh implements the backend consumed by `dmesh_doca::runtime::run`.
 
-DPUmesh selects the consumer at build time:
-
-```text
--Dl7_backend=null                     the reference consumer in linkerd/shim/
--Dl7_backend=linkerd -Dl7_lib_path=…  the Rust staticlib
-```
-
-## 10. Port divergences
-
-What the port carries, against what this contract requires.
-
-| Area | Port | Contract |
-|---|---|---|
-| Control messages | three, no registration or teardown barrier | §3 |
-| Metadata | one message carrying every export descriptor | one `MMAP_EXPORT` per region |
-| Descriptor | validity flag, producer tail, `size_t` size, no routing fields | §4 |
-| Reverse path | host-side DPA over a second PCI function, or descriptor push | §5 |
-| Credits | absent | carried on the reverse ring |
-| Identity | asserted by the host shim | carried on `POD_IDENTITY`, read-only |
-| Backend choice | the connector dials what it is given | named per delivery from `dmesh_l7_backends` |
-| Backend channel | `backend::take` removes the entry, so an address yields one channel and later connections fall back to a TCP dial | an address yields a channel per connection for as long as it is meshed |
-| Slots | compile-time constant of eight, which sizes the port's own driver and bounds nothing the adapter issues | sized at attach |
-| Driver | owns a loop | single-step entry point |
-| Release | no-op | mandatory |
-| Writes | 128-byte aligned chunking | arbitrary length |
-| Query interface | absent | `l7_resolve` / `l7_report` |
-
-The backend-channel row is what bounds the integration today: one connection at
-a time is sound, and beyond that an address has already been handed out.
-
-## 11. Open decisions
-
-1. Adopting the reverse ring, retiring both of the port's reverse designs.
-2. Making the connection-slot count a runtime parameter.
-3. Which side carries the single-step driver decomposition.
-4. Whether inbound proxying is planned; this contract covers outbound only.
-5. Retiring the host shim's identity construction in favour of `POD_IDENTITY`.
-6. **Balancing without shared state**, the limit `design/L7.md` §9 states: what
-   a per-worker balancer derives its spread from, when it cannot share a
-   sequence with the other workers'.
-7. **One proxy, many workloads.** `LINKERD2_PROXY_IDENTITY_LOCAL_NAME` and
-   `LINKERD2_PROXY_POLICY_WORKLOAD` hold a single value: the proxy is built on
-   the assumption that it represents one workload. Here one proxy serves every
-   meshed pod on the node, so the caller's identity arrives per connection —
-   `dmesh_l7_flow.workload` — rather than from the proxy's own certificate.
-   Whether the policy layer accepts an identity supplied that way is unsettled,
-   and it is the precondition for authorization in every mode.
-8. **Proxy credentials on the DPU.** The proxy authenticates to the certificate
-   authority with a Kubernetes ServiceAccount token projected into its pod. The
-   DPU's proxy is not a pod and has no such token. The mock control plane
-   sidesteps this for bring-up; production needs either the DPU joining the
-   cluster as a node whose proxy runs as a workload, or a credential provisioned
-   out of band.
-
-## 12. Current implementation status
-
-What `linkerd/rust` does today, against §1–§9 above.
-
-| | |
+| Entry point | Contract |
 |---|---|
-| Supported | worker 0 only; outbound only; `opaque` and `l7` modes; one active session per service address; the mock control plane; `DMESH_L7_BACKEND_ANY` |
-| Not supported | concurrent sessions on one service; more than one worker carrying the proxy; naming a concrete backend pod; `decision` mode; real workload identity and production mTLS; inbound |
+| `dmesh_l7_driver_notification_fds` | return completion, optional DMA and wake fds |
+| `dmesh_l7_driver_arm` | arm progress-engine notifications and mark the worker parked |
+| `dmesh_l7_driver_drain` | perform bounded DPUmesh progress and return `Idle`, `Pending` or `Progressed` |
+| `dmesh_l7_driver_clear_notifications` | clear PE notifications, drain the wake fd and mark the worker active |
+| `dmesh_l7_driver_maintenance` | run the 1 ms worker maintenance action |
+| `dmesh_l7_driver_stopped` | expose the DPUmesh worker stop state |
+| `dmesh_l7_driver_ready` | publish successful worker initialization |
+| `dmesh_l7_driver_failed` | publish failed worker initialization |
 
-### Backend connector
+The runtime drains before arming and drains again after arming. It waits on the
+backend fds, Linkerd output wakers and the maintenance deadline. It supplies a
+per-queue drain budget of 64.
 
-How a connection reaches its backend today, which is what bounds the rest.
+## Connection ABI
 
-```text
-one service address holds one active session
-the wrapper publishes backend_io into the registry before the acceptor runs
-the connector takes it once, and the entry is gone
-every delivery names BACKEND_ANY, so the data plane's balancer chooses
+### Flow identity
+
+```c
+struct dmesh_l7_flow {
+    uint32_t src_ip, dst_ip;
+    uint16_t src_port, dst_port;
+    int32_t  src_pod;
+    int32_t  dst_service;
+    int32_t  peer_pod;
+    uint8_t  mode;
+    uint8_t  is_reply;
+    char     workload[64];
+};
 ```
 
-A second concurrent session for the same address would publish over the first
-one's entry, and the first would then be waiting on a channel nobody holds. The
-adapter refuses it instead: `l7_conn_open` returns
-`DMESH_L7_DECLINE_SESSION_LIMIT`, the data plane counts a
-`single-session-limit` fallback and forwards that connection at L4. The guard
-is temporary and exists only because the registry hands an address out once;
-§10's backend-channel row states what replaces it.
+Addresses use host byte order. `workload` is NUL-terminated. The C and Rust
+layouts are checked by unit and ABI tests.
 
-### Declining
+The connection handle is:
 
-Every refusal names its cause, and the data plane counts fallbacks by it.
+```text
+((uint64_t)(uint8_t)pod << 16) | port
+```
 
-| Return | Counted as | When |
+It is an identifier, not a pointer.
+
+### DPUmesh calls Linkerd
+
+| Entry point | Result |
+|---|---|
+| `l7_conn_open` | `0` accepts; a negative decline code selects L4 fallback |
+| `l7_conn_segment` | accepted prefix in `[0, len]`; negative closes the adapter session |
+| `l7_conn_eof` | closes the input half for the named direction |
+| `l7_conn_close` | drops the session and releases all held extents |
+| `l7_resolve` | decision verdict; the Linkerd consumer currently declines |
+| `l7_report` | terminal accounting for decision mode |
+
+`l7_conn_segment` may retain the accepted prefix after the call. The staging
+memory remains valid until the matching release.
+
+### Linkerd calls DPUmesh
+
+| Entry point | Result |
+|---|---|
+| `dmesh_l7_backends` | live backend pod identifiers for a service |
+| `dmesh_l7_send` | accepted output prefix; `0` is retryable backpressure |
+| `dmesh_l7_tx_reserve` | writable egress-arena region or `NULL` |
+| `dmesh_l7_tx_commit` | publishes a reservation or returns it unused |
+| `dmesh_l7_release` | returns staging custody and sender credit |
+
+`DMESH_L7_BACKEND_ANY` delegates backend selection to the DPUmesh balancer.
+`DMESH_L7_ORIGIN` sends bytes to the source of the request connection.
+
+Output takes the reservation path: the adapter copies queued bytes straight from
+the endpoint into the chunk `dmesh_l7_tx_reserve` lends and publishes it with
+`dmesh_l7_tx_commit`. A commit of `0` cancels the reservation and leaves the
+bytes queued; a negative result closes the session. `DMESH_L7_TX_RESERVE=0`
+selects the `dmesh_l7_send` path, which copies through a temporary buffer, and
+exists so the two can be compared on hardware.
+
+## Backend channels
+
+A session publishes the endpoint that provides its service into its worker's
+registry, keyed by
+
+```rust
+struct BackendKey { worker: u16, service: SocketAddr, session: SessionToken }
+```
+
+The registry is owned by the worker, not global: the adapter, the acceptor and
+the outbound connector of one worker share one instance, and no lock is shared
+between workers. `publish` refuses a duplicate live key. `take` answers
+`NotPublished`, `AlreadyTaken` or `Stale`. A close evicts its own key before the
+next generation publishes.
+
+The normal Linkerd stack continues to key discovery, protocol, balancer and
+transport caches by destination. DMesh does not change those stock keys.
+Instead, the DMA acceptor builds one complete outbound stack per
+`SessionToken`; its connector is bound to that token and calls `take` with the
+exact `BackendKey`. All caches and reconnect state in that stack are therefore
+session-local. Two sessions to the same service use distinct backend channels,
+and closing generation N drops its stack and removes only its registry key
+before a reused slot publishes generation N+1.
+
+This is the session-isolated model. Sharing one backend HTTP/2 transport across
+several frontend sessions would still require a DPU-side transport identity,
+an independent upstream-port lifetime and response routing by Linkerd stream;
+that is a separate ABI design.
+
+The cache boundary is the same for detected HTTP/2 and opaque traffic:
+
+```text
+DmeshTarget(SessionToken)
+  -> per-session Outbound::mk
+       -> discovery cache (private to the stack)
+       -> protocol cache (private to the stack)
+       -> logical/concrete endpoint caches (private to the stack)
+       -> reconnect service (private to the stack)
+       -> DmeshOrTcp(session)
+            -> Backends::take(BackendKey(service, session))
+```
+
+Two targets with the same `OrigDstAddr` never enter the same cache instance.
+The connector tests publish two same-service keys and take them in the opposite
+order, proving that publication order cannot determine the selected channel.
+
+A service DPUmesh has provided is never dialed over TCP. When its channel is
+missing the connector fails the connection and counts it, because a stream on
+the TCP path would run without the policy the mesh applied.
+
+## Modes and decline codes
+
+| Value | Mode |
+|---|---|
+| `1` | decision |
+| `2` | opaque stream |
+| `3` | protocol-aware stream |
+
+The Linkerd consumer accepts modes 2 and 3.
+
+| Code | Meaning |
+|---|---|
+| `-1` | adapter error |
+| `-2` | no Linkerd state on this worker |
+| `-3` | unsupported mode |
+| `-4` | active session already occupies the service address |
+| `-5` | reply has no matching request session |
+
+DPUmesh counts each decline by cause and reports the totals in the DPU log
+whenever they move. `DPUMESH_L7_FAIL_CLOSED=1` refuses a declined connection
+instead of forwarding it; the default forwards it through the L4 path, which is
+auditable but carries no policy.
+
+## Custody and ordering
+
+An accepted arrival segment is owned by the adapter until
+`dmesh_l7_release(worker_id, conn, pos, len)`. Releases are in handoff order and
+cover each accepted byte once. DPUmesh keeps the source staging mapping and
+sender slot valid during this interval.
+
+`dmesh_l7_send` accepts a prefix. The adapter restores an unaccepted suffix to
+the front of its tx queue. Output for each connection is published in order.
+Closing either transport direction closes the paired session. Teardown aborts
+both endpoints, discards their queued input and output, releases all outstanding
+input, then removes session and backend-registry state. A late endpoint
+registration for a closed session is aborted.
+
+On pod disconnect, session close is executed by the ARM worker that owns the
+connection, not by the control thread. All workers publish producer quiescence
+before egress lanes may become reclaimable. A second PE-progress fence after
+lane quiescence covers DOCA task buffer references released after completion
+callbacks return; `POD_QUIESCED` cannot precede that fence.
+
+## Host transport ABI
+
+The L7 runtime does not alter the Host↔DPU protocol.
+
+| Control message | Direction | Function |
 |---|---|---|
-| `DMESH_L7_DECLINE_ERROR` | `adapter-error` | malformed flow, a pod id outside one byte, or the acceptor being gone |
-| `DMESH_L7_DECLINE_NOT_ATTACHED` | `worker-not-attached` | the worker carries no proxy, or the call named another worker |
-| `DMESH_L7_DECLINE_MODE` | `unsupported-mode` | `decision`, which hands over no payload |
-| `DMESH_L7_DECLINE_SESSION_LIMIT` | `single-session-limit` | a second session, or a second reply direction, for one already open |
-| `DMESH_L7_DECLINE_UNKNOWN_REPLY` | `unknown-reply` | a reply naming no session the layer opened |
+| `POD_IDENTITY` | Host→DPU | workload identity |
+| `POD_REGISTER` | Host→DPU | pod and service registration |
+| `POD_ASSIGNED` | DPU→Host | assigned pod and landing stripes |
+| `MMAP_EXPORT` | Host→DPU | ring and buffer mappings |
+| `POD_INIT_RESULT` | DPU→Host | data-path readiness |
+| `POD_UNREGISTER` | Host→DPU | stop admission and begin quiescence |
+| `POD_QUIESCED` | DPU→Host | remote mapping references are gone |
+| `REV_DOORBELL` | DPU→Host | reverse-ring wake |
+
+The forward descriptor is 64 bytes. The reverse completion entry is 32 bytes
+and carries `DONE` and `TX_ACK` records. Published fields and structure offsets
+are guarded by static assertions.
+
+## Build contract
+
+The Linkerd archive must:
+
+- export `l7_worker_run`, the connection API, `l7_resolve` and `l7_report`;
+- leave every `dmesh_l7_driver_*` symbol undefined for DPUmesh to provide;
+- contain no undefined `dmesh_doca_*` datapath symbol;
+- build with the pinned Rust toolchain and lock files.
+
+Meson links the archive with `-Dl7_backend=linkerd` and defines
+`DMESH_L7_RUNTIME_OWNER`. The null consumer uses the C attach/step/detach loop
+and does not define this macro.
+
+## Control plane and identity
+
+Destination, policy and identity addresses, the identity directory, the token
+file and the trust anchors are deploy-time configuration
+(`LINKERD_DST_ADDR`, `LINKERD_POLICY_ADDR`, `LINKERD_IDENTITY_ADDR`,
+`LINKERD_IDENTITY_DIR`, `LINKERD_TRUST_ANCHORS`). `LINKERD_MOCK_CONTROL_PLANE=1`
+starts the mock servers for a benchmark; `0` requires a deployed control plane
+and fails startup if its addresses are absent. The mock binaries are fixtures
+and are never a fallback for a missing address.
+
+The workload identity in `struct dmesh_l7_flow` is the one the DPU granted at
+pod registration. A payload never supplies identity.
+
+While identity is unavailable the proxy does not serve: sessions are opened,
+their outbound connections fail, and each failure is counted. Nothing is
+forwarded without the policy the service selected.
+
+## Observability
+
+The proxy's own metrics registry carries the `dmesh` counters: sessions opened,
+closed and active, registrations pending and orphaned, endpoints aborted, tasks
+live and cancelled, backend take errors and retired slots. After traffic
+quiesces, active sessions, pending registrations and live tasks are zero.
+
+## Current behavior
+
+- outbound Linkerd proxying;
+- one selected Linkerd worker, which every L7 request is routed to;
+- concurrent session-isolated connections to the same service address;
+- opaque and protocol-aware stream modes;
+- DPUmesh backend selection through `DMESH_L7_BACKEND_ANY`;
+- deploy-time control-plane configuration, with mock servers as fixtures;
+- L4 fallback with per-cause counters, or fail-closed refusal.

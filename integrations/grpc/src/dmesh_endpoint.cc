@@ -75,8 +75,9 @@ class DmeshEndpointState final
   // first (members are destroyed in reverse declaration order).
   std::mutex mu;
   std::unique_ptr<EndpointTransport> transport;
-  // Carries the completions a gRPC Endpoint call raises itself, which must not
-  // run before that call returns.
+  // Carries callbacks that this endpoint deliberately defers: immediate
+  // terminal failures observed by Read/Write, pending operations failed by
+  // EOF/transport error, and cancellation during destruction.
   const std::shared_ptr<Executor> callback_executor;
   grpc_event_engine::experimental::MemoryAllocator allocator;
   std::deque<Slice> receive_queue;

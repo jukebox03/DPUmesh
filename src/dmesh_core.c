@@ -69,6 +69,12 @@ static void tx_timer_stop(struct dpumesh_ctx *ctx);
 #define TX_TAIL_DELAY_NS        500000ull
 #define TX_TIMER_TICK_NS       1000000ull
 #define TX_TIMER_MIN_WAIT_NS     50000ull
+/* Closing is a cold path, but its ordering is part of the byte-stream contract.
+ * A zero-length FIN does not need a DPA source DMA and can otherwise overtake
+ * earlier data descriptors whose custody is still held by the DPU proxy. */
+#define TX_CLOSE_DRAIN_DEADLINE_NS 5000000000ull
+#define TX_CLOSE_DRAIN_MIN_WAIT_NS       1000L
+#define TX_CLOSE_DRAIN_MAX_WAIT_NS      50000L
 
 enum dmesh_tx_wait_state {
     DMESH_TX_WAIT_IDLE = 0,
@@ -3153,6 +3159,33 @@ static int dmesh_tx_inflight_locked(const struct dmesh_port_slot *psl) {
     return head != tail;
 }
 
+/* Wait until every previously submitted unit has left DPU proxy custody before
+ * publishing FIN. tx_reclaim_ack() runs on the independent PE thread and only
+ * advances su_tail across the contiguous completed prefix, so an empty FIFO is
+ * the exact data-before-FIN fence. Held under tx_gate to exclude another TX call.
+ *
+ * A broken transport must not block close forever. On timeout the caller frees
+ * the local handle but deliberately does not enqueue an overtaking FIN. */
+static int dmesh_wait_tx_reclaimed_locked(const struct dmesh_port_slot *psl) {
+    uint64_t deadline = monotonic_ns() + TX_CLOSE_DRAIN_DEADLINE_NS;
+    long wait_ns = TX_CLOSE_DRAIN_MIN_WAIT_NS;
+
+    while (dmesh_tx_inflight_locked(psl)) {
+        if (monotonic_ns() >= deadline) {
+            errno = EBADMSG;
+            return -1;
+        }
+        struct timespec wait = { .tv_sec = 0, .tv_nsec = wait_ns };
+        (void)nanosleep(&wait, NULL);
+        if (wait_ns < TX_CLOSE_DRAIN_MAX_WAIT_NS) {
+            wait_ns *= 2;
+            if (wait_ns > TX_CLOSE_DRAIN_MAX_WAIT_NS)
+                wait_ns = TX_CLOSE_DRAIN_MAX_WAIT_NS;
+        }
+    }
+    return 0;
+}
+
 /* Entry check for every public TX call: the port slot must still belong to this
  * handle and carry no latched fault. Takes the transmit gate on success; the
  * caller releases it. */
@@ -3352,6 +3385,7 @@ int dmesh_send_fin(dmesh_qp_t *c) {
     struct dmesh_port_slot *psl = &c->ep->ctx->ports[c->local_port];
     tx_disarm_tail(psl, c->local_port);
     int result = dmesh_drain_tx_locked(c, 1);
+    if (result == 0) result = dmesh_wait_tx_reclaimed_locked(psl);
     if (result == 0) result = dmesh_send_fin_locked(c);
     tx_gate_release(psl);
     return result;
@@ -3360,6 +3394,7 @@ int dmesh_send_fin(dmesh_qp_t *c) {
 static int dmesh_release_qp(dmesh_qp_t *c, int graceful) {
     if (!c) return 0;
     int close_result = 0, close_errno = 0;
+    int fin_ordered = 1;
     dpumesh_ctx_t *ctx = c->ep->ctx;
     struct dmesh_port_slot *psl = &ctx->ports[c->local_port];
     if (c->eq && c->eq->drain_cur == c) c->eq->drain_cur = NULL; /* poll_eq resume cursor */
@@ -3376,10 +3411,20 @@ static int dmesh_release_qp(dmesh_qp_t *c, int graceful) {
      * unsent committed bytes unless its flush failed; a live, un-posted reservation
      * is never application data owned by the transport and is discarded either way. */
     dpumesh_tx_discard_unsent(ctx, c->local_port);
+    /* Data ACKs are proxy-custody releases, not merely DMA-copy completions.
+     * Waiting for the submitted FIFO to empty is therefore the stream-order
+     * fence that prevents the zero-copy FIN from overtaking payload. */
+    if (dmesh_wait_tx_reclaimed_locked(psl) != 0) {
+        fin_ordered = 0;
+        if (close_result == 0) {
+            close_result = -1;
+            close_errno = errno;
+        }
+    }
     /* Established conns ALWAYS close their half (dmesh_send_fin self-guards against a
      * second one). A CLIENT that never sent has no peer and no DPU-side conn — nothing
      * to tear down, so seq==0 skips. */
-    if (c->role == DMESH_ROLE_SERVER || c->seq > 0) {
+    if (fin_ordered && (c->role == DMESH_ROLE_SERVER || c->seq > 0)) {
         if (dmesh_send_fin_locked(c) != 0 && close_result == 0) {
             close_result = -1;
             close_errno = errno;

@@ -56,6 +56,49 @@ _Static_assert(DMESH_L7_DECLINE_MODE == -3, "decline mode");
 _Static_assert(DMESH_L7_DECLINE_SESSION_LIMIT == -4, "decline session limit");
 _Static_assert(DMESH_L7_DECLINE_UNKNOWN_REPLY == -5, "decline unknown reply");
 
+/* Function declarations are ABI too. These expressions are unevaluated, so
+ * this compile-time coverage does not require the Rust static archive to be
+ * linked into this small contract test. */
+#define CHECK_FN(name, type)                                                   \
+    _Static_assert(_Generic(&(name), type: 1, default: 0),                     \
+                   "function signature: " #name)
+
+CHECK_FN(l7_worker_run, int (*)(int, void *));
+#ifndef DMESH_L7_RUNTIME_OWNER
+CHECK_FN(l7_worker_attach, int (*)(int));
+CHECK_FN(l7_worker_step, int (*)(int));
+CHECK_FN(l7_worker_detach, void (*)(int));
+#endif
+CHECK_FN(l7_conn_open,
+         int (*)(int, uint64_t, const struct dmesh_l7_flow *));
+CHECK_FN(l7_conn_segment,
+         int (*)(int, uint64_t, const uint8_t *, uint32_t, uint32_t));
+CHECK_FN(l7_conn_eof, void (*)(int, uint64_t));
+CHECK_FN(l7_conn_close, void (*)(int, uint64_t));
+CHECK_FN(l7_resolve,
+         int (*)(int, const struct dmesh_l7_flow *, struct dmesh_l7_verdict *));
+CHECK_FN(l7_report,
+         void (*)(int, uint64_t, uint64_t, uint64_t, uint64_t, int));
+CHECK_FN(dmesh_l7_backends, int (*)(int, int32_t, int32_t *, int));
+CHECK_FN(dmesh_l7_send,
+         int (*)(int, uint64_t, int32_t, const uint8_t *, size_t));
+CHECK_FN(dmesh_l7_tx_reserve,
+         uint8_t *(*)(int, uint64_t, uint32_t *));
+CHECK_FN(dmesh_l7_tx_commit, int (*)(int, uint64_t, int32_t, uint32_t));
+CHECK_FN(dmesh_l7_release,
+         void (*)(int, uint64_t, uint32_t, uint32_t));
+CHECK_FN(dmesh_l7_driver_notification_fds,
+         int (*)(void *, int *, int *, int *));
+CHECK_FN(dmesh_l7_driver_arm, int (*)(void *));
+CHECK_FN(dmesh_l7_driver_drain, int (*)(void *, int));
+CHECK_FN(dmesh_l7_driver_clear_notifications, int (*)(void *));
+CHECK_FN(dmesh_l7_driver_maintenance, int (*)(void *));
+CHECK_FN(dmesh_l7_driver_stopped, int (*)(void *));
+CHECK_FN(dmesh_l7_driver_ready, void (*)(void *));
+CHECK_FN(dmesh_l7_driver_failed, void (*)(void *));
+
+#undef CHECK_FN
+
 /* The decline codes are what the data plane counts a fallback by, so no two of
  * them may name the same reason. `DMESH_L7_ORIGIN` shares a value with one of
  * them and does not collide: it is an argument to dmesh_l7_send, never a

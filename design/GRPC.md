@@ -58,10 +58,18 @@ callback and returns after in-flight injections finish.
 
 | Thread | Owner | Count | Waits on | Runs |
 |---|---|---|---|---|
-| application | the application | application | — | `Endpoint::Write`, which records a cursor and returns |
+| Endpoint caller | gRPC or the application | gRPC/application managed | — | `Endpoint::Read` and the initial `Endpoint::Write` pump |
 | gRPC default engine pool | gRPC | gRPC | its own poller | deadlines, DNS, and every delegated `Run`/`RunAfter` |
-| reactor owner | `DmeshReactor` | one per shard | `ppoll` on two fds | `dmesh_poll_eq`, QP lifecycle, endpoint completions and chttp2 |
-| executor worker | `DmeshRuntime` | one per process | condition variable | the completions a gRPC Endpoint call raises |
+| EQ owner thread | `DmeshReactor` | one per shard | `ppoll` on two fds | `dmesh_poll_eq`, QP lifecycle, receive delivery and TX-ready write resumption |
+| callback dispatcher thread | `DmeshRuntime` | one per runtime by default | condition variable | connect/accept delivery and deliberately deferred Endpoint callbacks |
+
+`EQ owner thread` and `callback dispatcher thread` are names local to this
+adapter, not gRPC thread-role names. `DmeshReactor` is an EQ poller and is
+unrelated to gRPC C++ callback-API classes such as `ServerUnaryReactor`. The
+adapter's `Executor` is likewise its own small queueing interface; it is not a
+gRPC `EventEngine` or a gRPC-owned executor. A caller may replace the default
+single-thread `ThreadExecutor`, in which case there need not be exactly one
+executor OS thread.
 
 `DmeshEndpoint` and `DmeshClientEventEngine` own no thread. A further host
 thread belongs to the native channel and drains DOCA completions and the
@@ -69,8 +77,28 @@ reverse rings; it and the DPU-side workers are specified in
 [`CORE.md`](CORE.md).
 
 An accepted Write is posted on the caller's thread and, if native capacity
-stops it, resumed from an event the reactor owner delivers. A receive is copied
-and parsed on the reactor owner.
+stops it, resumed from an event the EQ owner thread delivers. A receive is
+copied and handed to chttp2 on the EQ owner thread.
+
+The callback executor receives work from several threads:
+
+- a `DmeshRuntime::Connect` caller can enqueue an immediate validation or
+  shutdown failure, while an EQ owner thread enqueues the eventual native connect
+  result;
+- an EQ owner thread enqueues each accepted transport for server injection;
+- an EQ owner thread enqueues pending Endpoint callbacks failed by peer EOF or a
+  transport error, and an Endpoint destructor can enqueue cancellation from
+  whichever thread destroys it;
+- an `Endpoint::Read` or `Endpoint::Write` caller enqueues a terminal failure
+  already present when that call begins; failure to attach a driver during
+  shutdown is also bounced through the executor.
+
+On the default implementation all such tasks from every shard and endpoint of
+one runtime share one FIFO and execute serially. The worker can call into
+gRPC's connect callback, passive listener or chttp2 Endpoint completion. Those
+callbacks may in turn call the Endpoint again, so the worker can indirectly
+pump a write or enqueue a reactor command, but it never polls an EQ or owns QP
+lifecycle.
 
 ## Ownership
 
@@ -78,17 +106,20 @@ and parsed on the reactor owner.
 |---|---|---|
 | native channel | `DmeshRuntime` | destroyed after all reactors |
 | native EQ | one `DmeshReactor` | exactly one polling thread |
-| native QP lifecycle | reactor owner thread | destroyed under the connection's transmit lock |
+| native QP lifecycle | EQ owner thread | destroyed under the connection's transmit lock |
 | native QP transmit | the thread that pumps the write | serialized by the connection's transmit lock |
 | RX batch run | reactor/Endpoint handoff | one slice per run, copied before credit release; credit held above the queue mark |
 | pending write | Endpoint state | one cursor, completed exactly once |
-| callback executor | `DmeshRuntime` and its endpoints | shared; default = one thread per process |
+| callback executor | `DmeshRuntime` and its endpoints | one shared instance per runtime; default = one worker thread |
 | runtime | application, channel and server attachment | shared; outlives what gRPC still holds |
 
-A completion the transport raises runs on the thread that raised it: the
-reactor owner for a receive, EOF or error, and the calling thread for a write
-the transport accepts in full. A completion a gRPC Endpoint call raises itself
-goes to the callback executor and never runs before that call returns. The
+A pending read completed by received bytes and a parked write resumed by
+TX_READY run their completions on the EQ owner thread that delivered the event.
+A write accepted completely by its initial pump returns `true` to its caller
+and does not invoke its callback. Peer EOF, transport error and Endpoint
+destruction instead enqueue affected pending callbacks on the callback
+executor. A future read or write that encounters an already-terminal Endpoint
+also enqueues its callback so it does not run inside that Endpoint call. The
 executor claims its whole queue per wake, and a completion is queued as a
 callback beside the status it completes with. An endpoint holds a shared
 reference to the executor, so it is not destroyed while the endpoint can still
@@ -123,8 +154,8 @@ cursor bytes, capped at dmesh_post_max
   → dmesh_flush at the logical Write boundary
 ```
 
-The pump runs on the thread that entered it — the caller of `Write` or the
-reactor owner delivering TX-ready — and holds the connection's transmit lock
+The pump runs on the thread that entered it — the caller of `Write` or the EQ
+owner thread delivering TX-ready — and holds the connection's transmit lock
 from `dmesh_alloc` through `dmesh_post_send`, matching the one live reservation
 a QP holds. One post spans every remaining byte of the logical Write that fits,
 so an HTTP/2 frame header and its payload cost one native post. Physical units
@@ -194,13 +225,21 @@ The maintained tests require:
 - a batch run coalesced into one slice, ended by any other event for that QP;
 - RX copy before release, credit held above the queue mark and released on read;
 - inbound QP conversion and pre-bind event replay;
-- real chttp2 unary exchange over paired Endpoints;
+- real chttp2 unary exchange over paired Endpoints, including four concurrent
+  same-service channels;
+- ten gRPC channel create/drop cycles sharing one runtime, with all QPs
+  reclaimed and runtime statistics returning to zero;
+- four concurrent channels for one Service using distinct QPs and closing
+  independently;
+- graceful server GOAWAY retiring the existing HTTP/2 channel;
+- reconnect creating a fresh targeted QP;
 - public-symbol linkage against `libdpumesh.so.4`.
 
 Hardware validation additionally checks the native register/readiness barrier,
 real byte exchange, FIN, `POD_QUIESCED`, and slot reuse. Those observations show
 the exercised graceful path; they do not prove forced-death DMA isolation.
 
-The bounded poll budget, shared executor ownership, and shared runtime
-ownership are not covered by the maintained tests. `DmeshReactor::Stats` is
-reported only by the hardware runtime smoke.
+The bounded poll budget and shared executor ownership are not covered by the
+maintained tests. Shared runtime ownership and the return of
+`DmeshReactor::Stats` to zero are covered by the channel churn tests; the
+hardware runtime smoke additionally reports those statistics with real QPs.

@@ -230,8 +230,19 @@ struct pod_state {
      * cleared on DEL_ACK); a bit that never clears leaves the EU wake-eligible. */
     uint32_t dpa_rings_counted_mask;
     int egress_quiesced;
+    /* Each worker closes its own connections and Linkerd sessions before the
+     * egress owners may declare their destination lanes empty. This producer
+     * barrier prevents a late worker close from publishing into a lane after
+     * its owner has already reported quiescence. */
+    uint32_t proxy_producers_quiesced_mask;
     /* Pod teardown waits for every region%A owner bit. */
     uint32_t egress_quiesced_mask;
+    /* A second worker pass after egress_quiesced. DOCA may release a task's
+     * internal buffer reference only after its completion callback returns;
+     * the first quiet bit can be published from the pump immediately following
+     * that callback. The control thread destroys imported mmaps only after this
+     * post-callback PE-progress fence is also complete on every worker. */
+    uint32_t egress_reclaim_fenced_mask;
     /* In-flight DMA tasks naming this pod, sharded by owning worker. The total
      * exists only on the reclaim path, as the sum over workers. */
     struct dpu_worker_counter egress_inflight_worker[MAX_ARM_WORKERS];
