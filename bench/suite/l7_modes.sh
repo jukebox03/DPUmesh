@@ -59,7 +59,6 @@ MATCHED_RATES="${MATCHED_RATES:-50000 100000 150000}"
 
 # The service the client addresses. Each mode assigns it to a different gate.
 TARGET_SVC=11
-LOOPBACK_SVC=12
 
 # The matched TCP path. Measured as a mode of its own, it records what the load
 # generator can sustain without any data path under it: a mode whose knee equals

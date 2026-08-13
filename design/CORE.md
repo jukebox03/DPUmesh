@@ -174,7 +174,7 @@ exports until `POD_QUIESCED`.
 | Forward ring | 4,096 descriptors |
 | Reverse ring | 8,192 entries |
 | Reverse entry | 32 B |
-| DPA EUs | automatic 16, maximum 32 |
+| DPA EUs | automatic 32, maximum 32 |
 | Rings per pod | default 2, maximum 8 |
 | ARM data workers | default 1, maximum 8 |
 | Payload DMA retries | 1 |

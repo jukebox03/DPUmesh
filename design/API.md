@@ -124,12 +124,9 @@ An idle stream also submits its first partial unit immediately; while an earlier
 unit is in flight, only the newest partial may be retained, and it is submitted
 by a bounded internal deadline. `dmesh_flush()` forces that remainder earlier.
 Applications do not drive this policy, must not depend on a particular physical
-unit size, and have no `SEND_MORE` mode.
-
-A retained tail is submitted either by a later transmit call on that QP or by
-`dmesh_poll_eq()` on its EQ. The two are serialized inside the library, so the
-caller's existing obligation is unchanged: serialize a QP's transmit calls
-against themselves and against its destruction.
+unit size, and have no `SEND_MORE` mode. `dmesh_tx_inflight()` reports the
+stream's outstanding bytes for diagnostics and is not an input to application
+batching policy.
 
 Each QP has bounded outstanding-send capacity, and QPs also share the channel's
 overall transmit capacity. The transport recovers capacity as previously
@@ -171,12 +168,6 @@ retry, but shared capacity may be consumed before that retry. If it returns
 
 Retry on that notification rather than on an application clock: park the blocked
 QP, keep servicing the others, and resume it on `DMESH_EVENT_TX_READY`.
-
-Tail policy belongs to the channel, not to native, preload, or gRPC callers.
-Retention is one bit on the QP's own EQ. `dmesh_tx_inflight()` is diagnostic and
-is not an input to application batching policy. `dmesh_flush()` is an explicit
-force operation, graceful close flushes before FIN, and `dmesh_abort_qp()`
-discards bytes that have not been submitted.
 
 Retention stamps a deadline once and never moves it, and it holds until the
 stream has nothing in flight. Full units still publish during that interval.

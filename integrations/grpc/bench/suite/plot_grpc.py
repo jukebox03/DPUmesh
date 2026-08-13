@@ -16,8 +16,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 # Every path this renderer knows, in plotting order. The ones a given CSV
-# actually contains become CONFIGS, so a campaign that adds a service mesh does
-# not need a second renderer and one that omits it draws the same figure as before.
+# actually contains become CONFIGS, so one renderer serves a campaign whichever
+# subset of the paths it measured.
 KNOWN_CONFIGS = ["grpc-envoy-permissive", "grpc-envoy-strict",
                  "grpc-linkerd", "grpc-linkerd-opaque",
                  "grpc-tcp", "grpc-dpumesh"]

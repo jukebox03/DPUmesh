@@ -346,7 +346,7 @@ security-equivalent. DPUmesh spends DPU ARM cores that the others do not.
 
 The rate grid is anchored on the lowest knee among the selected paths. linkerd L7
 holds that knee, so the matched loads on this page are lower than those in the
-four-path [gRPC evaluation](../../grpc/bench/report/REPORT_GRPC.md); the two
+four-path [gRPC evaluation](../../../integrations/grpc/bench/report/REPORT_GRPC.md); the two
 tables are not row-comparable, which is why all six paths were re-measured here
 in one session rather than four of them being carried over.
 

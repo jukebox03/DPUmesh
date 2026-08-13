@@ -29,15 +29,11 @@ The host exposes three integration surfaces:
 
 The shared libdpumesh send core batches all three surfaces. `dmesh_alloc()`
 reserves registered bytes and `dmesh_post_send()` commits them into one ordered
-stream. A post automatically submits every newly complete transport batch;
-`dmesh_flush()`
-forces only the newest partial batch. An idle tail publishes immediately; a busy
-tail is combined and published at a bounded deadline. The physical unit and
-timing are internal data-plane choices, not application tuning parameters.
-Graceful close flushes the trailing partial unit; abort discards it. Native
-publication writes the shared descriptor ring polled by the DPA. The preload and
-gRPC layers only adapt POSIX and EventEngine semantics; neither keeps a physical
-batch queue or batching timer.
+stream: complete transport units submit at once, and a partial tail is published
+at a bounded deadline unless `dmesh_flush()` forces it earlier. The physical unit
+and its timing are internal data-plane choices, not application tuning
+parameters, and the preload and gRPC layers keep no batch queue or timer of their
+own.
 
 Every public QP is one full-duplex byte stream. Optional DPU L7 framing is an
 internal routing policy and does not expose backend or stream ids through native
@@ -45,13 +41,10 @@ events. The in-tree L7 validator uses a simple length-prefixed benchmark
 frame; gRPC uses backend-pinned L4 passthrough unless its service is assigned to
 the L7 layer, which terminates HTTP/2 on the DPU.
 
-Backpressure remains nonblocking. If `dmesh_alloc()` returns `NULL/EAGAIN`, it
-also arms that QP internally. Capacity returned by a QP ACK or by the channel's
-shared registered-block pool produces one `DMESH_EVENT_TX_READY` event on the
-QP's EQ and wakes the same optional EQ fd used for receive events. Applications
-park only the named write and retry it from the event; there is no separate arm
-call and no per-QP fd. Readiness is a one-shot retry hint rather than a capacity
-reservation, so another `EAGAIN` arms the next transition.
+Backpressure is nonblocking. `dmesh_alloc()` returning `NULL/EAGAIN` arms that QP
+itself, and returned capacity produces one `DMESH_EVENT_TX_READY` on its EQ:
+applications park the named write and retry it from the event. Readiness is a
+one-shot hint, not a reservation. [design/API.md](design/API.md) is the contract.
 
 ## Lifecycle
 
@@ -126,8 +119,8 @@ reverse-ring producers. `K` controls rings, `A` controls ARM workers, and the
 `A`; an incompatible worker count is reduced at startup and reported in the DPU
 log.
 
-`DPUMESH_DPA_THREADS` accepts up to 32 EUs; automatic selection uses up to 32.
-`DPUMESH_ARM_WORKERS` sets the number of ARM data workers.
+`DPUMESH_DPA_THREADS` sets `N` and `DPUMESH_ARM_WORKERS` sets `A`; both are
+clamped at startup, `N` to 32 EUs and `A` to 8 workers.
 
 The gRPC adapter has an independent CMake build:
 

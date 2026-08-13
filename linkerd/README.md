@@ -143,20 +143,13 @@ DMA-provided backends, and the mock control-plane binaries.
 Absent: inbound proxying, more than one worker, runtime-sized connection slots,
 staging flow control, a reusable backend channel registry, and the query
 interface `decision` mode uses. `CONTRACT.md` §10 states which of these the
-contract requires and which one bounds the integration today.
+contract requires and which one bounds the integration today; §12 is what a run
+will actually do, with the decline codes.
 
-### Build split
-
-`linkerd/doca` carries an `own-datapath` feature, on by default. With it on the
-crate compiles the port's C datapath and links its DPA kernel, which is the
-standalone binary's build; with it off `build.rs` compiles nothing and the crate
-contributes the IO endpoint, the backend registry and the acceptor's types, over
-a datapath the embedder supplies. `linkerd-app` and `linkerd-app-outbound` take
-it with `default-features = false`, and feature unification restores the
-datapath for the port's own binary.
-
-This split lives in the checkout under `port/` and is not committed upstream, so
-a clean recursive clone does not yet reproduce it. Verified on the DPU:
+`CONTRACT.md` §9 defines the `own-datapath` feature that separates the
+standalone binary's build from the embedded one. That split lives in the
+checkout under `port/` and is not committed upstream, so a clean recursive clone
+does not yet reproduce it. What it resolves to is read off the DPU:
 
 ```text
 cd ~/l7build/rust               cargo tree -e features   ->  dmesh-doca, no own-datapath
@@ -177,11 +170,3 @@ ssh $DPU 'cd ~/l7build/port/linkerd2-proxy && \
 
 Without `tokio_unstable` the check stops in `kubert-prometheus-tokio`, which is
 the proxy's own requirement and not something the split introduces.
-
-### What the linkerd consumer supports
-
-One worker (`DPUMESH_L7_LINKERD_WORKER`, default 0) carries the proxy and the
-others forward at L4; one active session per service address; outbound only;
-`opaque` and `l7` modes; the mock control plane; the data plane's own balancer.
-A connection past that is declined with a reason and counted as a fallback.
-`CONTRACT.md` §12 is the full list, with the return codes.

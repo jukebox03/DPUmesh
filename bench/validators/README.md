@@ -24,10 +24,9 @@ Run them through the common entry point:
 ./bench/validators/idle_reregister.sh 720 10000 1024
 ```
 
-The matched-C preload transport is included in `bench/suite/run_suite.sh` as
-`dpumesh-preload` after `bench.sh deploy`; its control endpoint is the
-`preload-bench` service. The ordinary `preload` command remains the focused
-correctness/churn validator.
+The matched-C preload transport runs as the `dpumesh-preload` configuration of
+the measurement collector, on the `preload-bench` control endpoint. The
+`preload` command above is the focused correctness and churn validator.
 
 A passing data test requires exact byte and request-id agreement, zero failed
 operations, correct EOF delivery, and successful reverse-order destruction. A

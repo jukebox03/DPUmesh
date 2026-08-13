@@ -6,9 +6,8 @@ deployment convention, not a transport requirement. A process-local registry
 translates names and optional socket destinations to compact service ids, while
 the DPU assigns ephemeral backend slots at registration.
 
-Sections 1-6 and the DPUmesh half of section 8 describe implemented behavior.
-The rest of sections 7-12 describe planned design. Section 13 summarizes the
-split.
+Sections 1-6 and the DPUmesh half of section 8 are implemented; the rest of
+7-12 is planned design, and section 13 is the item-by-item split.
 
 ## 1. One registry, two facades
 
@@ -329,20 +328,10 @@ DMA attachment on this node.
 
 ### 10.1 Workload identity
 
-A workload identity is a SPIFFE ID string of the form
-`spiffe://cluster.local/ns/<ns>/sa/<sa>`.
-
-It reaches the DPU on a distinct control message rather than a wider
-`POD_REGISTER`. The registration message is a fixed 12-byte struct checked by
-exact length on the DPU and by static assertion on both sides, and growing it is
-a lockstep ABI change for a field that is variable-length. A separate identity
-message sent on the same connection before registration preserves both
-properties and stays idempotent on replay.
-
-An unknown identity follows section 2: it is logged, and no identity is invented.
-
-Identity binds to the slot's DMA generation, so a reused slot never inherits the
-previous tenant's identity.
+Delivery and slot binding are section 6's, and already carry a name. What
+remains is its content: a production identity is a SPIFFE ID of the form
+`spiffe://cluster.local/ns/<ns>/sa/<sa>`, and an unrecognised one follows
+section 2 — it is logged, and no identity is invented.
 
 ### 10.2 Trust boundary
 

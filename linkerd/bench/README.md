@@ -62,7 +62,7 @@ Environment: `OUT` `FIGS` `CONFIGS` `REPS` `STAMP` `LINKERD_BIN`.
 
 The prerequisite is a healthy linkerd control plane in the cluster; the driver
 refuses to deploy without one. `BENCH_LINKERD` defaults to 0, so a deployment
-that does not ask for linkerd is byte-identical to what it was before.
+that does not ask for linkerd admits no injected pod at all.
 
 ## 4. What `verify` establishes
 

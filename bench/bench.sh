@@ -28,7 +28,7 @@ GRPC_BENCH_DIR="$PROJ_ROOT/integrations/grpc/bench"
 GRPC_MANIFEST="$GRPC_BENCH_DIR/k8s/pods.yaml"
 # linkerd reuses the gRPC images and adds injected sidecars, so its pods live
 # with the linkerd integration. BENCH_LINKERD=1 admits them; without it the
-# manifest is not applied and the deployment is what it was before.
+# manifest is not applied and no linkerd pod reaches the cluster.
 LINKERD_BENCH_DIR="$PROJ_ROOT/linkerd/bench"
 LINKERD_MANIFEST="$LINKERD_BENCH_DIR/k8s/pods.yaml"
 BENCH_LINKERD="${BENCH_LINKERD:-0}"
@@ -643,7 +643,6 @@ get_pod_cores() {
                 bench-tcp) rel="2";; echo-tcp) rel="3";;
                 bench-tcp-strict) rel="4";; echo-tcp-strict) rel="5";;
                 bench-dpumesh) rel="6";; echo-dpumesh) rel="7";;
-                bench-dpumesh-2) rel="8";; bench-dpumesh-3) rel="9";;
                 echo-dpumesh-13) rel="10";; echo-dpumesh-14) rel="11";;
                 loopback-dpumesh) rel="12";;
                 verbs-dpumesh) rel="14";; preload-dpumesh) rel="15";;
@@ -713,7 +712,6 @@ get_pod_cores() {
                 bench-tcp) rel="2";; echo-tcp) rel="3";;
                 loopback-dpumesh) rel="4,5";; preload-dpumesh|preload-echo|preload-bench) rel="4,5";; verbs-dpumesh) rel="4,5";;
                 echo-dpumesh-13) rel="6";; echo-dpumesh-14) rel="7";;
-                bench-dpumesh-2) rel="9";; bench-dpumesh-3) rel="10";;
             esac ;;
     esac
     [ -z "$rel" ] && { echo ""; return; }
@@ -733,7 +731,7 @@ pin_pods() {
     else
         warn "cpupower not found; skipping DVFS lock"
     fi
-    for app in bench-dpumesh bench-dpumesh-2 bench-dpumesh-3 echo-dpumesh echo-dpumesh-13 echo-dpumesh-14 loopback-dpumesh verbs-dpumesh preload-dpumesh preload-echo preload-bench bench-tcp echo-tcp bench-tcp-strict echo-tcp-strict bench-grpc-dpumesh echo-grpc-dpumesh bench-grpc-envoy echo-grpc-envoy bench-grpc-tcp echo-grpc-tcp bench-grpc-envoy-strict echo-grpc-envoy-strict bench-grpc-linkerd echo-grpc-linkerd bench-grpc-linkerd-opaque echo-grpc-linkerd-opaque; do
+    for app in bench-dpumesh echo-dpumesh echo-dpumesh-13 echo-dpumesh-14 loopback-dpumesh verbs-dpumesh preload-dpumesh preload-echo preload-bench bench-tcp echo-tcp bench-tcp-strict echo-tcp-strict bench-grpc-dpumesh echo-grpc-dpumesh bench-grpc-envoy echo-grpc-envoy bench-grpc-tcp echo-grpc-tcp bench-grpc-envoy-strict echo-grpc-envoy-strict bench-grpc-linkerd echo-grpc-linkerd bench-grpc-linkerd-opaque echo-grpc-linkerd-opaque; do
         local cores pod_id desired
         cores=$(get_pod_cores "$app" "$profile"); [ -z "$cores" ] && continue
         # sed consumes the full stream. `head` can close early and make crictl
@@ -942,8 +940,6 @@ start_pods() {
     scale_up_with_wait "bench-dpumesh"    "$ready"
     [ "$scope" = core ] && return 0
     if [ "$scope" = all ]; then
-        scale_up_with_wait "bench-dpumesh-2"  "$ready"  # extra meshed clients for N-pod amortization
-        scale_up_with_wait "bench-dpumesh-3"  "$ready"
         scale_up_with_wait "loopback-dpumesh" "$ready"
         scale_up_with_wait "preload-dpumesh"  "$ready"
     fi

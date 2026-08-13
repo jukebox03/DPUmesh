@@ -1009,12 +1009,6 @@ cg_delta() {
 }
 # The window a run's CPU is attributed to: the generator's own measured
 # duration, not the wall clock, which also spans connection setup and teardown.
-load_window() {
-  local result="$1" fallback="$2" durs
-  durs=$(field "$result" durs)
-  awk -v d="${durs:-0}" -v f="$fallback" 'BEGIN{printf "%.9f", (d>0 ? d : f)}'
-}
-
 to_cores_usec() {
   awk -v d="$1" -v dt="$2" 'BEGIN{if(dt>0) printf "%.6f",d/1e6/dt; else print "NA"}'
 }

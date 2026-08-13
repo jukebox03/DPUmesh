@@ -4,10 +4,8 @@ Between the DPUmesh datapath and the linkerd port. DPUmesh is normative:
 `doca/comch_common.h`, `doca/dpa_common.h`, `doca/ring.h`, `doca/dpu_worker.c`,
 `doca/dpu_proxy.c`.
 
-**This document is the target, not a description of what is built.** The
-adapter conforms in part: §12 states what it supports today, §10 what the port
-diverges on. Where the two disagree, this document says what the port is moving
-towards and §12 says what a run will actually do.
+**This document is the target, not a description of what is built.** §10 states
+where the port diverges from it and §12 what a run will actually do.
 
 The datapath is DPUmesh's. The port's own is not compiled into this
 integration; it stays in tree as the reference point for convergence.
@@ -17,15 +15,14 @@ what the two sides owe each other.
 
 ## 0. Acceptance criteria
 
-What the current bring-up has to satisfy to count as working. These are
-narrower than the contract on purpose; §12 says why.
+What a bring-up has to satisfy to count as working, within the boundaries §12
+draws.
 
 - `linkerd/rust` builds `libdmesh_l7.a` reproducibly with the pinned toolchain
   and a lock file, from a tree that carries no port C datapath, no DOCA
   initialization and no standalone `Driver`.
 - `dpumesh_dpu` links it with `-Dl7_backend=linkerd` and starts.
-- The mock identity, destination and policy processes start on the DPU.
-- Worker 0 attaches the proxy and the log says so; no other worker does.
+- Exactly one worker attaches the proxy, and the log says which.
 - One `opaque` connection to one service carries its request and its response
   through the proxy, with `fail=0`, `drops=0` and `reorder=0`.
 - The same run repeated after the first one closes succeeds again, which is
@@ -54,28 +51,18 @@ L4 without policy.
 
 ## 2. Thread model
 
-DPUmesh runs N DPA execution units, K forward rings per pod, and A ARM worker
-threads. A worker owns its connection table, conntrack, SG-DMA engine and
-progress engine; nothing is shared across workers and no lock is taken between
-them. Worker-local state is reached through `__thread px_cur_worker`.
+[`design/L7.md`](../design/L7.md) §2 defines the worker loop and why nothing is
+shared across the A ARM workers. This section states what that costs the ABI in
+§8.
 
-The port therefore runs one tokio `current_thread` runtime per ARM worker,
-created on that worker's thread. A `multi_thread` runtime is excluded: work
-stealing moves a task across threads, and worker-local state is not thread-safe.
+Every entry point runs on the thread named by its `worker_id` and reaches only
+that worker's state. The port therefore runs one tokio `current_thread` runtime
+per worker, created on that worker's thread; a `multi_thread` runtime is
+excluded, because work stealing would move a task onto another worker's state.
 
-The DPUmesh worker loop owns the iteration. It calls the layer once per
-revolution and folds the result into its own progress test, which governs
-arming, parking and the 1 ms backstop:
-
-```c
-did = dpu_progress_worker_pe(...);
-run = dpu_worker_run(...);          /* includes l7_worker_step() */
-if (did || run) continue;
-/* arm -> recheck -> epoll_wait(1 ms) */
-```
-
-The layer exposes a single-step entry point rather than owning a loop, arms no
-timer of its own, and sizes its connection slots at attach time.
+The worker loop owns the iteration, so the layer exposes `l7_worker_step` rather
+than a loop of its own, arms no timer, and sizes its connection slots at attach
+time.
 
 ## 3. Control protocol
 
@@ -335,13 +322,9 @@ a time is sound, and beyond that an address has already been handed out.
 3. Which side carries the single-step driver decomposition.
 4. Whether inbound proxying is planned; this contract covers outbound only.
 5. Retiring the host shim's identity construction in favour of `POD_IDENTITY`.
-6. **Balancing without shared state.** Each ARM worker holds its own instance and
-   sees only its share of the connections, so their balancers cannot share a
-   sequence. Independent sequences all start at the same backend: with four
-   connections over three backends, every one chose the same backend, where the
-   data plane's single global counter covered all three. A shared-nothing
-   balancer has to derive its spread from the flow, and even then covers the
-   backends only in proportion to the connections it sees.
+6. **Balancing without shared state**, the limit `design/L7.md` §9 states: what
+   a per-worker balancer derives its spread from, when it cannot share a
+   sequence with the other workers'.
 7. **One proxy, many workloads.** `LINKERD2_PROXY_IDENTITY_LOCAL_NAME` and
    `LINKERD2_PROXY_POLICY_WORKLOAD` hold a single value: the proxy is built on
    the assumption that it represents one workload. Here one proxy serves every

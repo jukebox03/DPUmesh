@@ -127,12 +127,11 @@ The pump runs on the thread that entered it — the caller of `Write` or the
 reactor owner delivering TX-ready — and holds the connection's transmit lock
 from `dmesh_alloc` through `dmesh_post_send`, matching the one live reservation
 a QP holds. One post spans every remaining byte of the logical Write that fits,
-so an HTTP/2 frame header and its payload cost one native post. Native ABI 4
-batches committed posts into transport-private physical units, submits complete
-and idle units immediately, and owns the bounded deadline for a busy trailing
-partial. After the last post, the Endpoint calls `dmesh_flush()` under the same
-transmit lock. A pump run takes a bounded number of posts and re-enters on the
-same thread for the remainder. If the bounded native window fills before the
+so an HTTP/2 frame header and its payload cost one native post. Physical units
+and the trailing tail's deadline stay with the native core, as `API.md` §4
+defines them. After the last post, the Endpoint calls `dmesh_flush()` under the
+same transmit lock. A pump run takes a bounded number of posts and re-enters on
+the same thread for the remainder. If the bounded native window fills before the
 logical Write ends, it parks the cursor and resumes only after native capacity
 reclamation identifies that QP as ready. A `Write` the pump finishes before
 returning reports success by returning true and withholds the callback;
@@ -145,8 +144,7 @@ one native EQ eventfd, not waiting at all while a poll budget is outstanding and
 otherwise bounded by `dmesh_eq_next_deadline_ns()` — and owns no batching state,
 timerfd, or pending-write scan. On TX-ready it
 forwards the hint to the named connection's Endpoint, which resumes its parked
-write and drops a stale hint. The hint does not reserve shared capacity; a
-repeated `EAGAIN` rearms the next transition.
+write and drops a stale hint.
 
 The Endpoint fails a parked write when peer EOF arrives, and a post that blocks
 after the FIN flag is set fails instead of parking. Every accepted EventEngine
