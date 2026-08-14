@@ -91,6 +91,9 @@ BENCH_NUMA_NODE="${BENCH_NUMA_NODE:-}"
 BENCH_CORE_BASE="${BENCH_CORE_BASE:-}"
 BENCH_NUMA_POLICY="${BENCH_NUMA_POLICY:-local}"
 BENCH_DEPLOY_SCOPE="${BENCH_DEPLOY_SCOPE:-all}"
+BENCH_DST_SERVICES="${BENCH_DST_SERVICES:-}"
+ECHO_13_SERVICE="${ECHO_13_SERVICE:-echo-dpumesh}"
+ECHO_14_SERVICE="${ECHO_14_SERVICE:-echo-dpumesh}"
 BENCH_NUMA_CONFIGURED=0
 
 # Which build the gRPC server image carries. `asan` instruments echo_grpc and
@@ -293,8 +296,16 @@ build_bench_binaries() {
 build_image() {  # $1 = Dockerfile, $2 = tag, $3 = build context, $4.. = --build-arg
     local df="$1" tag="$2" ctx="$3"; shift 3
     docker build -f "$df" -t "$tag" "$@" "$ctx"
+    # The old image is removed so the import replaces it, which leaves the tag
+    # absent until the import lands. Treat a failed import as fatal: the pods
+    # run with imagePullPolicy=Never, so continuing would deploy a scope whose
+    # images no longer exist and report success while every pod fails to start.
+    echo "$HOST_PASS" | sudo -S true 2>/dev/null
     sudo ctr -n k8s.io images rm "docker.io/$tag" 2>/dev/null || true
-    docker save "$tag" | sudo ctr -n k8s.io images import -
+    if ! docker save "$tag" | sudo ctr -n k8s.io images import -; then
+        err "containerd import failed for $tag — the tag is now absent"
+        exit 1
+    fi
     docker image prune -f >/dev/null 2>&1 || true
 }
 
@@ -878,6 +889,7 @@ apply_manifest() {
     export CTRL_PORT TCP_PORT HOST_PCI LIB_OUT BENCH_NUMA_NODE
     export DPUMESH_RINGS_PER_POD="${DPUMESH_RINGS_PER_POD:-2}" \
            ASYNC_THREADS="${ASYNC_THREADS:-4}" \
+           BENCH_DST_SERVICES ECHO_13_SERVICE ECHO_14_SERVICE \
            BENCH_PIPELINE="${BENCH_PIPELINE:-8}" BENCH_COALESCE="${BENCH_COALESCE:-0}" \
            ECHO_THREADS="${ECHO_THREADS:-3}" \
            DMESH_PRELOAD_DEBUG="${DMESH_PRELOAD_DEBUG:-0}" \
@@ -1061,10 +1073,13 @@ arm_balance() {
     need_env
     local req="${1:-1024}" reply="${2:-8}" conc="${3:-32}"
     local dur="${4:-10}" threads="${5:-2}" csv="${6:-}"
-    local snap0 snap1 result w0 w1 dt hz dpid
+    local snap0 snap1 result w0 w1 dt hz dpid l7_before="" l7_after=""
     declare -A tick0 comm0
 
     snap0=$(dpu_thread_snapshot) || { err "dpumesh_dpu is not running on the DPU"; return 1; }
+    if [ "${L7_BACKEND:-null}" = linkerd ]; then
+        l7_before=$(linkerd_metrics_snapshot || true)
+    fi
     read -r _ hz _ dpid <<<"$(head -n1 <<<"$snap0")"
     while read -r tag tid comm cpu allowed ticks; do
         [ "$tag" = T ] || continue
@@ -1083,6 +1098,9 @@ arm_balance() {
         { err "invalid load: fail=${fail:-NA} drops=${drops:-NA} reorder=${reorder:-NA}"; return 1; }
 
     snap1=$(dpu_thread_snapshot)
+    if [ "${L7_BACKEND:-null}" = linkerd ]; then
+        l7_after=$(linkerd_metrics_snapshot || true)
+    fi
     dt=$(field "$result" durs)
     [ -n "$dt" ] || dt=$(awk -v a="$w0" -v b="$w1" 'BEGIN{print b-a}')
     echo "   $result"
@@ -1144,6 +1162,32 @@ arm_balance() {
             }' <<<"$worker_rows")
         printf "   worker balance: n=%d avg=%s%% min=%s%% max=%s%% CV=%s%%\n" \
                "$worker_count" "$avg" "$worker_min" "$worker_max" "$cv"
+    fi
+    if [ -n "$l7_before" ] && [ -n "$l7_after" ]; then
+        local worker opened0 opened1 closed1 active pending tasks delta balance_bad=0
+        printf "   %-8s %12s %12s %8s %8s %8s\n" \
+               L7_WORKER OPENED_DELTA CLOSED_TOTAL ACTIVE PENDING TASKS
+        for worker in $(linkerd_worker_ids); do
+            opened0=$(metric_worker_value "$l7_before" "$worker" dmesh_sessions_opened_total)
+            opened1=$(metric_worker_value "$l7_after" "$worker" dmesh_sessions_opened_total)
+            closed1=$(metric_worker_value "$l7_after" "$worker" dmesh_sessions_closed_total)
+            active=$(metric_worker_value "$l7_after" "$worker" dmesh_sessions_active)
+            pending=$(metric_worker_value "$l7_after" "$worker" dmesh_registrations_pending)
+            tasks=$(metric_worker_value "$l7_after" "$worker" dmesh_tasks_live)
+            delta=$(( ${opened1:-0} - ${opened0:-0} ))
+            printf "   %-8s %12s %12s %8s %8s %8s\n" \
+                   "$worker" "$delta" "${closed1:-NA}" "${active:-NA}" \
+                   "${pending:-NA}" "${tasks:-NA}"
+            if linkerd_all_workers && [ "$delta" -le 0 ]; then
+                balance_bad=1
+            fi
+        done
+        [ "$balance_bad" = 0 ] || {
+            err "L7 session placement did not reach every configured worker"
+            return 1
+        }
+    elif [ "${L7_BACKEND:-null}" = linkerd ]; then
+        warn "Linkerd metrics unavailable; session placement was not validated"
     fi
     [ -z "$csv" ] || info "-> $csv"
 }
@@ -1252,9 +1296,92 @@ run_preload() {  # LD_PRELOAD shim: vanilla TCP apps over DPUmesh
     printf "  OK/Fail: %s/%s  p50: %s us  p99: %s us  rps: %s\n" "$ok" "$fail" "$p50" "$p99" "${rps:-n/a}"
 }
 
-# Value of one unlabelled Prometheus sample in a metrics snapshot.
+# Sum one unlabelled Prometheus sample across worker snapshots.
 metric_value() {
-    awk -v name="$2" '$1 == name { print $2; exit }' <<<"$1"
+    awk -v name="$2" '$1 == name { value += $2; found = 1 }
+        END { if (found) print value + 0 }' <<<"$1"
+}
+
+# Effective worker geometry, matching dpu_worker.c's K/A normalization.
+linkerd_all_workers() {
+    [[ "${DPUMESH_L7_LINKERD_WORKER:-0}" == [aA][lL][lL] ]]
+}
+
+linkerd_worker_count() {
+    if ! linkerd_all_workers; then
+        echo 1
+        return
+    fi
+    local workers="${DPUMESH_ARM_WORKERS:-1}" rings="${DPUMESH_RINGS_PER_POD:-2}"
+    [[ "$workers" =~ ^[0-9]+$ ]] || workers=1
+    [[ "$rings" =~ ^[0-9]+$ ]] || rings=2
+    [ "$workers" -ge 1 ] || workers=1
+    [ "$workers" -le 8 ] || workers=8
+    while [ "$workers" -gt 1 ] &&
+          { [ "$workers" -gt "$rings" ] || [ $((rings % workers)) -ne 0 ]; }; do
+        workers=$((workers - 1))
+    done
+    echo "$workers"
+}
+
+linkerd_worker_ids() {
+    if linkerd_all_workers; then
+        seq 0 $(( $(linkerd_worker_count) - 1 ))
+    else
+        echo "${DPUMESH_L7_LINKERD_WORKER:-0}"
+    fi
+}
+
+# Fetch every worker's existing Linkerd metrics registry. Marker lines retain
+# worker identity while metric_value can still aggregate the snapshots.
+linkerd_metrics_snapshot() {
+    local addr="${LINKERD_ADMIN_ADDR:-127.0.0.1:4191}"
+    local host="${addr%:*}" base_port="${addr##*:}" count worker port metrics
+    [ "$host" != "$addr" ] && [[ "$base_port" =~ ^[0-9]+$ ]] || return 1
+    count=$(linkerd_worker_count)
+    for ((worker = 0; worker < count; worker++)); do
+        port="$base_port"
+        if linkerd_all_workers; then
+            port=$((base_port + worker))
+        fi
+        [ "$port" -le 65535 ] || return 1
+        metrics=$(ssh_dpu "curl -g -sf --max-time 3 'http://${host}:${port}/metrics'" \
+                  2>/dev/null) || return 1
+        if linkerd_all_workers; then
+            printf '# dmesh_worker %d admin_port %d\n%s\n' "$worker" "$port" "$metrics"
+        else
+            printf '# dmesh_worker %s admin_port %d\n%s\n' \
+                   "${DPUMESH_L7_LINKERD_WORKER:-0}" "$port" "$metrics"
+        fi
+    done
+}
+
+metric_worker_value() {
+    awk -v wanted_worker="$2" -v name="$3" '
+        $1 == "#" && $2 == "dmesh_worker" { worker = $3; next }
+        worker == wanted_worker && $1 == name { print $2; exit }
+    ' <<<"$1"
+}
+
+show_linkerd_metrics() {
+    need_env
+    local metrics worker
+    metrics=$(linkerd_metrics_snapshot) || {
+        err "one or more DPU Linkerd metrics endpoints are unavailable"
+        return 1
+    }
+    printf "%-8s %10s %10s %8s %8s %8s %10s\n" \
+           WORKER OPENED CLOSED ACTIVE PENDING TASKS ORPHANED
+    for worker in $(linkerd_worker_ids); do
+        printf "%-8s %10s %10s %8s %8s %8s %10s\n" \
+            "$worker" \
+            "$(metric_worker_value "$metrics" "$worker" dmesh_sessions_opened_total)" \
+            "$(metric_worker_value "$metrics" "$worker" dmesh_sessions_closed_total)" \
+            "$(metric_worker_value "$metrics" "$worker" dmesh_sessions_active)" \
+            "$(metric_worker_value "$metrics" "$worker" dmesh_registrations_pending)" \
+            "$(metric_worker_value "$metrics" "$worker" dmesh_tasks_live)" \
+            "$(metric_worker_value "$metrics" "$worker" dmesh_registrations_orphaned_total)"
+    done
 }
 
 # Real-DPU lifecycle gate: kill a process while one HTTP/2 channel is active,
@@ -1275,7 +1402,7 @@ run_grpc_shutdown() {
 
     ip=$(running_pod_ip "$app" || true)
     [ -n "$ip" ] || { err "$app pod not running — deploy the grpc scope first"; return 1; }
-    metrics=$(ssh_dpu "curl -sf http://127.0.0.1:4191/metrics" || true)
+    metrics=$(linkerd_metrics_snapshot || true)
     [ -n "$metrics" ] || { err "DPU Linkerd metrics endpoint is unavailable"; return 1; }
     active=$(metric_value "$metrics" dmesh_sessions_active)
     pending=$(metric_value "$metrics" dmesh_registrations_pending)
@@ -1291,7 +1418,7 @@ run_grpc_shutdown() {
         timeout 90s nc -N "$ip" "$CTRL_PORT" >"$load_out" 2>&1) &
     load_pid=$!
     for _ in $(seq 1 30); do
-        metrics=$(ssh_dpu "curl -sf http://127.0.0.1:4191/metrics" || true)
+        metrics=$(linkerd_metrics_snapshot || true)
         active=$(metric_value "$metrics" dmesh_sessions_active)
         [ "${active:-0}" -gt 0 ] 2>/dev/null && break
         sleep 1
@@ -1307,7 +1434,7 @@ run_grpc_shutdown() {
     load_pid=""
 
     for _ in $(seq 1 30); do
-        metrics=$(ssh_dpu "curl -sf http://127.0.0.1:4191/metrics" || true)
+        metrics=$(linkerd_metrics_snapshot || true)
         active=$(metric_value "$metrics" dmesh_sessions_active)
         pending=$(metric_value "$metrics" dmesh_registrations_pending)
         tasks=$(metric_value "$metrics" dmesh_tasks_live)
@@ -1364,7 +1491,7 @@ run_grpc_shutdown() {
         return 1
     }
 
-    metrics=$(ssh_dpu "curl -sf http://127.0.0.1:4191/metrics" || true)
+    metrics=$(linkerd_metrics_snapshot || true)
     active=$(metric_value "$metrics" dmesh_sessions_active)
     pending=$(metric_value "$metrics" dmesh_registrations_pending)
     tasks=$(metric_value "$metrics" dmesh_tasks_live)
@@ -1410,6 +1537,7 @@ case "$CMD" in
     dpulog)    ssh_dpu "echo '$DPU_PASS' | sudo -S tail -${1:-40} $DPU_LOG" 2>&1 | sed 's/^\[sudo\][^:]*: *//' ;;
     dpucpu)    dpu_sudo 'pid=$(pgrep -x dpumesh_dpu | head -1); [ -z "$pid" ] && { echo "dpumesh_dpu not running"; exit 0; }; echo "=== dpumesh_dpu pid=$pid per-thread %CPU ==="; top -bH -d 1 -n 2 -p "$pid" | awk "/ PID +USER/{n++} n==2{print}"' ;;
     armbalance) arm_balance "$@" ;;
+    l7metrics)  show_linkerd_metrics ;;
     *)
         cat <<EOF
 Usage: $0 <command> [args]
@@ -1426,10 +1554,12 @@ Usage: $0 <command> [args]
   pin [fair|l4|grpc|grpccap|grpcl7cap|grpcmax|hw|hw3|hw6]  (re)pin pods to cores
                                              grpcl7cap reads BENCH_CAP_CONFIG for the 6+6 path
   armbalance [req reply conc dur threads [csv]]   DPU main/worker per-core CPU during one point
-  status | logs | cleanup | dpulog [n] | dpucpu
+  status | logs | cleanup | dpulog [n] | dpucpu | l7metrics
 
 Deploy knobs (env): BENCH_NUMA_POLICY=local|auto BENCH_DEPLOY_SCOPE=all|core|l4|grpc
                     BENCH_LINKERD=1 adds the injected linkerd L7 pods (grpc scope)
+                    BENCH_DST_SERVICES=a,b,... assigns native client threads round-robin
+                    ECHO_13_SERVICE/ECHO_14_SERVICE split the extra echo pods into services
                     L7_BACKEND=null|linkerd selects the L7 consumer; linkerd builds
                     libdmesh_l7.a and the mocks on the DPU and starts the mock CP
                     BENCH_GRPC_BUILD=release|asan (asan instruments echo_grpc only;

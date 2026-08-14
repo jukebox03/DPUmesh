@@ -167,6 +167,17 @@ static int pump(rstate_t *st) {
             if (c->role != DMESH_ROLE_SERVER) st->eof = 1;
             else if (c->user_data) ((sstate_t *)c->user_data)->dead = 1;
             break;
+
+        case DMESH_EVENT_TX_READY:
+            /* Consumed here only to retire the one-shot. Both sides already retry
+             * on their own: the sweep below re-drains every server backlog each
+             * pump, and send_req re-enters pump from its own EAGAIN loop. */
+            break;
+
+        case DMESH_EVENT_TX_ERROR:                     /* transmit is terminal on this conn */
+            if (c->role != DMESH_ROLE_SERVER) st->bad = 1;   /* fail the round-trip loudly */
+            else if (c->user_data) ((sstate_t *)c->user_data)->dead = 1;
+            break;
         }
     }
     for (int i = 0; i < st->nserv; ) {              /* ship echoes the SQ refused, retire the dead */

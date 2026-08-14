@@ -16,8 +16,9 @@ The following behavior is the starting point and is not a TODO:
   worker and runs `dmesh_doca::runtime::run` until the worker stops.
 - DPUmesh owns DOCA progress, DPA/DMA rings, conntrack, staging custody,
   routing and egress. The Linkerd archive is built without `own-datapath`.
-- One selected worker, `DPUMESH_L7_LINKERD_WORKER=0` by default, owns Linkerd
-  session state. Other workers decline L7 sessions.
+- `DPUMESH_L7_LINKERD_WORKER=0` selects one Linkerd owner by default. The
+  current working tree also supports `all`, which gives every ARM data worker
+  local Linkerd state. Target-hardware scaling has passed with 2 and 4 workers.
 - The adapter accepts opaque and full-stream modes, isolates one outbound stack
   and backend channel per session, and delegates backend selection to DPUmesh.
 - Closing either request or reply direction aborts both `DmeshIo` endpoints,
@@ -219,6 +220,10 @@ change.
 - [x] Make `take` return a typed `NotPublished`, `AlreadyTaken` or `Stale`
   error. Do not fall through to TCP for a DMesh target when its registered
   backend is missing; that would bypass DPUmesh policy.
+- [x] Bind the physical connector's take to `SessionToken`, not to the
+  discovery-selected endpoint address. Discovery may rewrite synthetic service
+  13/14 to a concrete endpoint for service 11; it must still take only that
+  session's published DMA channel.
 - [x] Closing generation N must evict its exact DMesh transport cache entry
   before generation N+1 is admitted. A normal close must not wait for the
   Linkerd reconnect backoff to discover `channel closed`.
@@ -257,18 +262,34 @@ change.
 
 ### P3.2 Multiple Linkerd workers
 
-- [ ] Start only after P1 and P2. Remove the selected-worker gate from
+- [x] Start only after P1 and P2. Remove the selected-worker gate from
   `build_worker` only after all registries and session keys include worker ID.
-- [ ] Decide how Linkerd admin/listener ports are handled per worker. Either
+- [x] Decide how Linkerd admin/listener ports are handled per worker. Either
   disable duplicate listeners for data-only worker stacks or build one shared
-  control-plane component with worker-local outbound stacks.
-- [ ] Keep the Tokio runtime and all session tasks on the owning worker. Do not
+  control-plane component with worker-local outbound stacks. The first
+  implementation keeps ephemeral data listeners and assigns admin port
+  `base + worker_id` under `all`.
+- [x] Keep the Tokio runtime and all session tasks on the owning worker. Do not
   use `tokio::runtime::Runtime::spawn` to move a `DmeshIo` between workers.
-- [ ] Partition C conntrack, Rust session maps, backend registry entries and
+- [x] Partition C conntrack, Rust session maps, backend registry entries and
   metrics by worker. Cross-worker messages may contain owned bytes or stable
   IDs, never `DmeshIo`, `DmeshIoHandle` or staging pointers.
-- [ ] Accept the change only when worker CPU balance and per-worker session
-  counts scale under same-service and multi-service traffic.
+- [x] Add strict selector/admin-port unit tests, an `all` owner-routing C test,
+  and shutdown coverage that withdraws backend-only registry entries and joins
+  completed service tasks.
+- [x] Make `bench.sh l7metrics` inspect every worker registry and make
+  `armbalance` report per-worker session deltas in addition to CPU balance.
+- [x] Add `BENCH_DST_SERVICES` so one native client can distribute its worker
+  threads over several service IDs during the multi-service acceptance run.
+- [x] Accept the change only when worker CPU balance and per-worker session
+  counts scale under same-service and multi-service traffic. Deploy the exact
+  `all` working tree with 2 and 4 workers, require every worker's opened delta
+  to increase, and retain the no-fallback/quiescence gates.
+  - 2026-08-14 hardware gate: 2-worker same-service CPU CV 0.5%, 4-worker
+    same-service CV 2.5%, and 4-worker service 11/13/14 CV 0.9%. Multi-service
+    load opened three sessions on every worker; 2,448 reconnects completed with
+    fail/drop/reorder zero, opened=closed, and no missing-backend, poison,
+    fallback, over-release, stray-release or orphan report.
 
 ## P4 — remove hot locks only after profiling
 
@@ -277,13 +298,24 @@ change.
 - [x] Add counters or spans around `DmeshIo` lock acquisition in
   `linkerd/doca/src/io.rs`, the backend registry mutex in `linkerd/doca/src/lib.rs`
   and `pool_lock` in `doca/dpu_proxy.c`.
-- [ ] Collect ARM `perf record` and `perf stat` for concurrency 1, 32 and 128.
+- [x] Collect ARM `perf record` and `perf stat` for concurrency 1, 32 and 128.
   Attribute samples to `Mutex::lock`, atomic instructions, allocator calls,
   `DmeshIo::poll_read`, `poll_write`, `take_tx`, `pump_side` and Tokio wakeups.
+  The 2026-08-14 attribution and its single-sample limitations are recorded in
+  `bench/report/REPORT_L7_ARM_PROFILE.md`.
 - [ ] Build the same Rust revision on x86 and ARM. Compare normalized cycles per
   request, not only requests per second.
-- [ ] Save compiler output around hot atomics with `objdump -dr` or
+  - The same working tree now builds on both architectures, but an equivalent
+    x86 full-stack request harness does not exist yet. Keep the comparison open
+    with P8 rather than comparing unlike workloads.
+- [x] Save compiler output around hot atomics with `objdump -dr` or
   `cargo-asm`; classify `LDAR/STLR`, exclusive RMW loops and full barriers.
+  AArch64 uses LSE or acquire/release exclusive loops with no explicit full
+  barrier; x86-64 uses locked compare-exchange on the mutex fast path.
+- [x] Remove the profiler's observer effect: make endpoint lock counters local
+  to the owning worker instead of adding a process-global atomic RMW to every
+  `DmeshIo` operation. Post-fix c128 reduced the corresponding relaxed atomic
+  sample from 1.42% to 0.26% and retained zero-contention accounting.
 
 ### P4.2 Worker-local I/O state
 
@@ -310,12 +342,13 @@ change.
 
 ### P4.4 C pool lock
 
-- [ ] Profile before modifying `pool_lock`. If it is hot, partition arena chunk,
-  unit, piece and batch free lists by `px_worker_state`/`px_engine`.
-- [ ] Give each worker a bounded local cache and use the shared pool only to
+- [x] Profile before modifying `pool_lock`. It reached 16 shared acquisitions
+  and zero contention and had no attributed samples, so do not partition it
+  further without new evidence.
+- [x] Give each worker a bounded local cache and use the shared pool only to
   refill or return batches. Keep ownership metadata so teardown can reclaim all
   caches.
-- [ ] Run `worker_mpsc_queue_test`, `proxy_lane_queue_test`, DMA fault tests and
+- [x] Run `worker_mpsc_queue_test`, `proxy_lane_queue_test`, DMA fault tests and
   TSAN before performance comparison.
 
 ## P5 — remove avoidable output copies
@@ -421,17 +454,23 @@ P0.2 and the final hardware gate.
 
 - [x] Keep generated PNG/PDF diagrams reproducible through the checked-in
   generator scripts. Regenerate only when the implemented model changes.
-- [x] Run format checks, Rust tests, `make test` and local gRPC ASAN/TSAN tests
-  after the implementation stage.
-- [x] Run DPU deployment and P0 reconnect/churn validation on the target
-  hardware.
+- [x] Run format checks, Rust tests and `make test` after the implementation
+  stage.
+- [x] Re-run local gRPC ASAN/TSAN tests after the multi-worker stage.
+- [x] Run DPU deployment and P0 reconnect/churn validation for the selected
+  worker implementation on the target hardware.
+- [x] Repeat deployment and reconnect/churn validation with
+  `DPUMESH_L7_LINKERD_WORKER=all` for 2 and 4 workers.
 
 ## Final completion gate
 
 - [x] Ten sequential native reconnect points pass.
 - [x] Native and gRPC churn pass without timeout or leaked session/task.
 - [x] Multiple same-service sessions pass after P2.
-- [x] Every configured L7 flow reaches its owning worker without fallback.
+- [x] Every configured L7 flow reaches its selected numeric owner without
+  fallback.
+- [x] Under `all`, selected L7 flows spread across every active worker without
+  fallback.
 - [x] Opened and closed session totals balance after quiescence.
 - [x] No custody, stale-generation, over-release, stray-release, drop or reorder
   error is present.

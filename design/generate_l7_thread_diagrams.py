@@ -269,7 +269,7 @@ def generate_dpumesh_threads():
         "Pinned ARM data worker s",
         edge=GREEN,
         face="#fbfffd",
-        count="selected (default: 0)",
+        count="selected id; x A with all",
     )
     box(
         ax,
@@ -324,7 +324,7 @@ def generate_dpumesh_threads():
         1.15,
         4.75,
         3.75,
-        "Pinned ARM data workers i ≠ s",
+        "Other pinned ARM data workers i ≠ s",
         edge=GRAY,
         face="#fcfcfb",
         count="when A > 1",
@@ -348,7 +348,7 @@ def generate_dpumesh_threads():
         4.15,
         1.25,
         "Persistent DPUmesh driver",
-        ("owns its completion PE and DMA lanes", "no Linkerd session state"),
+        ("owns its completion PE and DMA lanes", "Linkerd state too when selector = all"),
         edge=GRAY,
         face=GRAY_BG,
         title_size=10.2,
@@ -421,7 +421,7 @@ def generate_dpumesh_threads():
     ax.text(
         14.65,
         3.47,
-        "selected L7 flows are routed to worker s;",
+        "one id routes L7 flows to worker s;",
         fontsize=8.6,
         color="#444444",
         ha="left",
@@ -429,7 +429,7 @@ def generate_dpumesh_threads():
     ax.text(
         14.65,
         3.09,
-        "every other flow keeps the port policy.",
+        "all gives every worker a proxy + port policy.",
         fontsize=8.6,
         color="#444444",
         ha="left",
@@ -440,7 +440,7 @@ def generate_dpumesh_threads():
 
 def generate_l7_interaction():
     fig, ax = setup_figure(15.0, 12.4, (0, 15.0), (0, 12.4))
-    ax.text(0.1, 12.0, "Selected ARM worker — persistent runtime loop", fontsize=17, ha="left")
+    ax.text(0.1, 12.0, "Linkerd-enabled ARM worker — persistent runtime loop", fontsize=17, ha="left")
     ax.text(
         0.1,
         11.53,
@@ -728,7 +728,7 @@ def generate_linkerd_driven():
         4.90,
         4.85,
         1.65,
-        "Selected worker state",
+        "Enabled worker state",
         ("DmeshIo endpoint pairs", "one outbound stack per session", "exact-token backend registry"),
         edge=GREEN,
         face=GREEN_BG,
@@ -781,7 +781,7 @@ def generate_linkerd_driven():
     ax.text(
         2.55,
         0.92,
-        "DPUMESH_L7_LINKERD_WORKER selects the worker that holds Linkerd sessions (default: 0).",
+        "DPUMESH_L7_LINKERD_WORKER selects one worker (default: 0), or all workers with `all`.",
         fontsize=9.2,
         color="#444444",
         ha="left",

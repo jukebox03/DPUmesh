@@ -2,7 +2,8 @@
 //!
 //! DPUmesh owns DOCA, progress engines, DMA rings and worker threads. Each ARM
 //! worker hosts a Tokio `current_thread` runtime and the persistent driver in
-//! `dmesh_doca::runtime`. One configured worker carries Linkerd sessions.
+//! `dmesh_doca::runtime`. One configured worker, or every worker under the
+//! `all` selection, carries Linkerd sessions.
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -962,26 +963,98 @@ impl Worker {
     }
 }
 
-/// Build the configured worker's Linkerd proxy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WorkerSelection {
+    One(c_int),
+    All,
+}
+
+fn parse_worker_selection(value: &str) -> Result<WorkerSelection, String> {
+    if value.is_empty() {
+        return Ok(WorkerSelection::One(0));
+    }
+    if value.eq_ignore_ascii_case("all") {
+        return Ok(WorkerSelection::All);
+    }
+    let worker = value.parse::<c_int>().map_err(|_| {
+        format!("DPUMESH_L7_LINKERD_WORKER={value} is neither a worker id nor 'all'")
+    })?;
+    if worker < 0 {
+        return Err(format!(
+            "DPUMESH_L7_LINKERD_WORKER={value} is neither a nonnegative worker id nor 'all'"
+        ));
+    }
+    Ok(WorkerSelection::One(worker))
+}
+
+fn admin_addr_for_worker(
+    mut addr: SocketAddr,
+    worker_id: c_int,
+    every_worker: bool,
+) -> Result<SocketAddr, String> {
+    if !every_worker || worker_id == 0 || addr.port() == 0 {
+        return Ok(addr);
+    }
+    let offset = u16::try_from(worker_id)
+        .map_err(|_| format!("invalid worker id for admin endpoint: {worker_id}"))?;
+    let base = addr.port();
+    let port = base
+        .checked_add(offset)
+        .ok_or_else(|| format!("admin port {base} + worker {worker_id} overflows"))?;
+    addr.set_port(port);
+    Ok(addr)
+}
+
+/// The process's tracing dispatcher, shared by every worker that builds a proxy.
+///
+/// Registering it is a process-wide, once-only action, so each worker after the
+/// first takes a clone of the handle the first one installed rather than failing
+/// to install a second.
+#[cfg(not(test))]
+fn shared_trace() -> Result<linkerd_app::trace::Handle, String> {
+    static TRACE: std::sync::OnceLock<Result<linkerd_app::trace::Handle, String>> =
+        std::sync::OnceLock::new();
+    TRACE
+        .get_or_init(|| {
+            linkerd_app::trace::Settings::from_env()
+                .init()
+                .map_err(|e| format!("trace: {e}"))
+        })
+        .clone()
+}
+
+/// Build this worker's Linkerd proxy, or nothing when it carries no sessions.
+///
+/// `DPUMESH_L7_LINKERD_WORKER` names the worker that owns session state, or
+/// `all` to give every ARM data worker its own proxy. Under `all` the data
+/// plane stops funnelling L7 requests to one owner and routes them by the
+/// ordinary port policy, so each worker serves the connections its ports name.
 #[cfg(not(test))]
 async fn build_worker(worker_id: c_int) -> Result<Option<Worker>, String> {
-    // One worker owns Linkerd session state.
-    let only: c_int = std::env::var("DPUMESH_L7_LINKERD_WORKER")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
-    if worker_id != only {
-        return Ok(None);
+    let selection =
+        parse_worker_selection(&std::env::var("DPUMESH_L7_LINKERD_WORKER").unwrap_or_default())?;
+    let every_worker = selection == WorkerSelection::All;
+    if let WorkerSelection::One(only) = selection {
+        if worker_id != only {
+            return Ok(None);
+        }
     }
 
     linkerd_rustls::install_default_provider();
 
     // Initialize tracing before parsing Linkerd settings.
-    let trace = linkerd_app::trace::Settings::from_env()
-        .init()
-        .map_err(|e| format!("trace: {e}"))?;
+    let trace = shared_trace()?;
 
-    let config = linkerd_app::Config::try_from_env().map_err(|e| format!("config: {e}"))?;
+    let mut config = linkerd_app::Config::try_from_env().map_err(|e| format!("config: {e}"))?;
+
+    // The inbound, outbound and control listeners are already ephemeral, so the
+    // admin server is the one address several proxies in one process would
+    // contend for. Offset it by worker id: worker 0 keeps the configured port,
+    // so existing tooling still finds it, and each other worker's metrics stay
+    // at a port that can be derived rather than discovered. A configured port of
+    // zero is already per-worker ephemeral and is left alone.
+    config.admin.server.addr.0 =
+        admin_addr_for_worker(config.admin.server.addr.0, worker_id, every_worker)?;
 
     let (events_tx, events_rx) = mpsc::unbounded_channel::<DmeshEvent>();
     let (registrar, registrations) = mpsc::unbounded_channel::<Registration>();
@@ -1307,6 +1380,37 @@ mod tests {
     use super::*;
     use dmesh_doca::DmeshIo;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn worker_selection_is_strict_and_supports_all() {
+        assert_eq!(parse_worker_selection("").unwrap(), WorkerSelection::One(0));
+        assert_eq!(
+            parse_worker_selection("3").unwrap(),
+            WorkerSelection::One(3)
+        );
+        assert_eq!(parse_worker_selection("ALL").unwrap(), WorkerSelection::All);
+        assert!(parse_worker_selection("-1").is_err());
+        assert!(parse_worker_selection("worker0").is_err());
+    }
+
+    #[test]
+    fn all_mode_assigns_one_admin_port_per_worker() {
+        let base: SocketAddr = "127.0.0.1:4191".parse().unwrap();
+        assert_eq!(admin_addr_for_worker(base, 0, true).unwrap(), base);
+        assert_eq!(
+            admin_addr_for_worker(base, 3, true).unwrap(),
+            "127.0.0.1:4194".parse().unwrap()
+        );
+        assert_eq!(admin_addr_for_worker(base, 3, false).unwrap(), base);
+
+        let ephemeral: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        assert_eq!(
+            admin_addr_for_worker(ephemeral, 3, true).unwrap(),
+            ephemeral
+        );
+        let last: SocketAddr = "127.0.0.1:65535".parse().unwrap();
+        assert!(admin_addr_for_worker(last, 1, true).is_err());
+    }
 
     /// Adapter worker with test endpoints and datapath calls.
     struct TestWorker {

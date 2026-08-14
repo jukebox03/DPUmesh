@@ -11,6 +11,7 @@
 #include <signal.h>
 #include <stdatomic.h>
 #include <math.h>
+#include <ctype.h>
 #include <sys/socket.h>
 #include <sys/epoll.h>
 #include <netinet/in.h>
@@ -28,6 +29,7 @@
 #define DRAIN_GRACE_SEC    1.0        /* finish replies already issued at measurement end */
 #define REQ_FILL           42
 #define BENCH_MAX_BACKENDS 32         /* pod_id space we tally replies over (>= MAX_PODS) */
+#define MAX_DST_SERVICES   MAX_THREADS /* at most one distinct destination per worker */
 #define INFLIGHT_RING      (1u << 16) /* seq-indexed outstanding requests */
 #define OPEN_CAP           (INFLIGHT_RING / 2)
 /* Ceiling on a backpressure park. TX_READY wakes the worker as soon as capacity
@@ -39,9 +41,42 @@
 enum { MODE_CLOSED = 0, MODE_OPEN = 1 };
 enum { ARR_CONST = 0, ARR_POISSON = 1 };
 
-static dmesh_channel_t *g_s           = NULL;   /* shared, thread-safe channel */
-static const char      *g_dst_service = "echo-dpumesh";  /* backend service NAME to address */
-static uint32_t         g_post_max    = 0;      /* max bytes one dmesh_alloc/post can carry */
+static dmesh_channel_t *g_s        = NULL;   /* shared, thread-safe channel */
+static uint32_t         g_post_max = 0;      /* max bytes one dmesh_alloc/post can carry */
+static const char      *g_dst_services[MAX_DST_SERVICES] = { "echo-dpumesh" };
+static int              g_dst_service_count = 1;
+static const char      *g_dst_services_text = "echo-dpumesh";
+static char            *g_dst_services_storage;
+
+/* BENCH_DST_SERVICES distributes benchmark threads round-robin over a strict
+ * comma-separated service list. It makes one client pod sufficient for
+ * simultaneous multi-service L7 placement tests while preserving the existing
+ * BENCH_DST_SERVICE single-destination interface. */
+static int configure_dst_services(void) {
+    const char *csv = getenv("BENCH_DST_SERVICES");
+    const char *single = getenv("BENCH_DST_SERVICE");
+    if (!csv || !*csv) {
+        g_dst_services[0] = (single && *single) ? single : "echo-dpumesh";
+        g_dst_service_count = 1;
+        g_dst_services_text = g_dst_services[0];
+        return 0;
+    }
+
+    g_dst_services_storage = strdup(csv);
+    if (!g_dst_services_storage) return -1;
+    char *rest = g_dst_services_storage;
+    g_dst_service_count = 0;
+    while (rest) {
+        char *service = strsep(&rest, ",");
+        while (*service && isspace((unsigned char)*service)) service++;
+        char *end = service + strlen(service);
+        while (end > service && isspace((unsigned char)end[-1])) *--end = '\0';
+        if (!*service || g_dst_service_count == MAX_DST_SERVICES) return -1;
+        g_dst_services[g_dst_service_count++] = service;
+    }
+    g_dst_services_text = csv;
+    return 0;
+}
 
 /* ------------------------------------------------------------ per-thread run */
 typedef struct {
@@ -57,6 +92,7 @@ typedef struct {
     double       start_at;     /* shared barrier: all threads begin at this time */
     long         reconn;       /* events per conn before close+reconnect (0 = never) */
     int          batch;        /* control/result layout field */
+    const char  *dst_service;  /* this worker's backend service NAME */
     atomic_int  *stop;         /* watchdog / abort flag */
 
     /* per-thread transport + pipeline state. ALL of it — issue side and reply side
@@ -160,6 +196,14 @@ static int eq_pump(worker_t *w) {
                 atomic_store(&w->broken, 1);              /* backend FIN — abort this thread */
             } else if (events[i].type == DMESH_EVENT_TX_READY) {
                 w->tx_blocked = 0;                        /* reservations may resume */
+            } else if (events[i].type == DMESH_EVENT_TX_ERROR) {
+                /* A deferred tail failed after post_send accepted it. TX is now
+                 * sticky-terminal, so neither the partial frame nor any live
+                 * request on this connection can complete. Exclude the worker
+                 * instead of waiting for a reply or TX_READY that cannot arrive. */
+                fprintf(stderr, "[bench] deferred transmit failed\n");
+                w->fail++;
+                atomic_store(&w->broken, 1);
             }
         }
         got += n;
@@ -263,10 +307,10 @@ static void *worker_fn(void *arg) {
         fprintf(stderr, "[bench] worker epoll setup failed: errno=%d\n", errno);
         atomic_store(&w->broken, 1); goto done;
     }
-    w->c = dmesh_create_qp(w->eq, g_dst_service);
+    w->c = dmesh_create_qp(w->eq, w->dst_service);
     if (!w->c) {
         fprintf(stderr, "[bench] worker dmesh_create_qp(%s) failed: errno=%d\n",
-                g_dst_service, errno);
+                w->dst_service, errno);
         atomic_store(&w->broken, 1); goto done;
     }
 
@@ -301,7 +345,7 @@ static void *worker_fn(void *arg) {
                 atomic_store(&w->broken, 1);
                 break;
             }
-            w->c = dmesh_create_qp(w->eq, g_dst_service);
+            w->c = dmesh_create_qp(w->eq, w->dst_service);
             if (!w->c) { atomic_store(&w->broken, 1); break; }
             bench_reframe_reset(&w->rf);
             w->since_conn = 0;
@@ -457,7 +501,7 @@ static void run_bench(int conn_fd, int mode, int req_size, int reply_size,
             "[bench] %s req=%d reply=%d %s dur=%.1fs warmup=%ld threads=%d "
             "reconn=%ld batch=auto dst_svc=%s\n",
             mode == MODE_OPEN ? "OPEN" : "RUN", req_size, reply_size, load,
-            duration, warmup, threads, reconn, g_dst_service);
+            duration, warmup, threads, reconn, g_dst_services_text);
 
     dmesh_tx_stats_t st0, st1;                    /* elastic-pool event deltas over the run */
     dmesh_get_tx_stats(g_s, &st0);
@@ -483,6 +527,7 @@ static void run_bench(int conn_fd, int mode, int req_size, int reply_size,
         w[i].start_at   = start_at;
         w[i].reconn     = reconn;
         w[i].batch      = 1;
+        w[i].dst_service = g_dst_services[i % g_dst_service_count];
         w[i].stop       = &stop;
         w[i].prng       = 0x9e3779b97f4a7c15ULL ^
                           ((uint64_t)(i + 1) * 0x100000001b3ULL);
@@ -685,13 +730,17 @@ int main(int argc, char **argv) {
         fputs(reply, stdout);
         return rc == 0 ? 0 : 1;
     }
-    if (getenv("BENCH_DST_SERVICE")) g_dst_service = getenv("BENCH_DST_SERVICE");
+    if (configure_dst_services() != 0) {
+        fprintf(stderr, "[bench] invalid BENCH_DST_SERVICES (need 1..%d non-empty names)\n",
+                MAX_DST_SERVICES);
+        return 2;
+    }
 
     g_s = dmesh_create_channel();                     /* pure client ($DPUMESH_SERVICE unset) */
     if (!g_s) { fprintf(stderr, "[bench] dmesh_create_channel failed\n"); return 1; }
     g_post_max = (uint32_t)dmesh_post_max(g_s);
-    fprintf(stderr, "[bench] ready: pod_id=%d dst_service=%s slot=%d\n",
-            dmesh_pod_id(g_s), g_dst_service, dmesh_msg_max(g_s));
+    fprintf(stderr, "[bench] ready: pod_id=%d dst_services=%s slot=%d\n",
+            dmesh_pod_id(g_s), g_dst_services_text, dmesh_msg_max(g_s));
 
     int srv = ctrl_listen(CTRL_PORT);
     if (srv < 0) return 1;

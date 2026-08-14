@@ -224,6 +224,9 @@ int main(void)
     assert(px_l7_request_owner(objs, 7, 11) == -1);
     assert(px_l7_request_owner(objs, DMESH_POD_BLANK, -1) == -1);
     assert(px_l7_request_owner(objs, DMESH_POD_BLANK, POD_ID_SPACE) == -1);
+    px->l7_worker = PX_L7_WORKER_ALL;
+    assert(px_l7_request_owner(objs, DMESH_POD_BLANK, 11) == -1);
+    assert(px_l7_request_owner(objs, DMESH_POD_BLANK, 12) == -1);
 
     struct px_engine *eng = &px->engines[0];
     eng->objs = objs;

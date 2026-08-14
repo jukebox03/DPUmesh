@@ -32,6 +32,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>   /* strcasecmp, for the L7 worker selection */
 #include <time.h>
 #include <unistd.h>
 
@@ -54,6 +55,9 @@ DOCA_LOG_REGISTER(DPU_PROXY);
 #define PX_ARRIVAL_COALESCE_MAX (64u * 1024u)
 
 #define PX_DST_DEFER        (-2)
+
+/* Every ARM data worker owns an L7 layer, so no request needs a fixed owner. */
+#define PX_L7_WORKER_ALL    (-1)
 
 /* How far the L7 layer is involved in one connection, selected per service.
  * Recorded in conntrack when the upstream port is issued, so a reply inherits
@@ -1529,13 +1533,16 @@ static struct px_conn *px_conn_by_handle(struct dmesh_proxy *px, uint64_t conn) 
 
 /* Requests for a service the L7 layer carries belong to the worker that owns
  * the layer: its session state is thread-local to one Tokio runtime, and any
- * other worker would decline the connection. Replies are not routed here — an
- * upstream port is allocated in its owner's residue class (see
- * dpu_upstream_create), so the return path already lands on the same worker. */
+ * other worker would decline the connection. When every worker owns a layer
+ * there is no such constraint, so the request keeps the ordinary port policy
+ * and the load spreads. Replies are never routed here — an upstream port is
+ * allocated in its owner's residue class (see dpu_upstream_create), so the
+ * return path already lands on the same worker either way. */
 int px_l7_request_owner(struct objects *objs, int32_t dst_pod_id,
                         int16_t dst_service) {
     struct dmesh_proxy *px = objs->proxy;
-    if (!px || !px->l7_attached || dst_pod_id != DMESH_POD_BLANK)
+    if (!px || !px->l7_attached || px->l7_worker == PX_L7_WORKER_ALL ||
+        dst_pod_id != DMESH_POD_BLANK)
         return -1;
     if (dst_service < 0 || dst_service >= POD_ID_SPACE)
         return -1;
@@ -3554,21 +3561,26 @@ int px_init(struct objects *objs) {
             px->l7_attached = 1;
     }
 
-    /* One worker owns the L7 layer's session state; the adapter reads the same
-     * variable to decide which worker builds the proxy. */
+    /* Which worker owns the L7 layer's session state; the adapter reads the same
+     * variable to decide which workers build a proxy. `all` gives every worker
+     * one, and PX_L7_WORKER_ALL then leaves request routing to the port policy. */
     px->l7_worker = 0;
     { const char *w = getenv("DPUMESH_L7_LINKERD_WORKER");
       if (w && *w) {
-          char *end;
-          long v = strtol(w, &end, 10);
-          if (end == w || *end != '\0' || v < 0 ||
-              v >= (objs->n_data_workers >= 1 ? objs->n_data_workers : 1)) {
-              DOCA_LOG_ERR("proxy: DPUMESH_L7_LINKERD_WORKER=%s is not one of the "
-                           "%d ARM data workers", w, objs->n_data_workers);
-              ret = DOCA_ERROR_INVALID_VALUE;
-              goto fail;
+          if (strcasecmp(w, "all") == 0) {
+              px->l7_worker = PX_L7_WORKER_ALL;
+          } else {
+              char *end;
+              long v = strtol(w, &end, 10);
+              if (end == w || *end != '\0' || v < 0 ||
+                  v >= (objs->n_data_workers >= 1 ? objs->n_data_workers : 1)) {
+                  DOCA_LOG_ERR("proxy: DPUMESH_L7_LINKERD_WORKER=%s is not one of the "
+                               "%d ARM data workers, nor \"all\"", w, objs->n_data_workers);
+                  ret = DOCA_ERROR_INVALID_VALUE;
+                  goto fail;
+              }
+              px->l7_worker = (int)v;
           }
-          px->l7_worker = (int)v;
       } }
     { const char *fc = getenv("DPUMESH_L7_FAIL_CLOSED");
       px->l7_fail_closed = (fc && *fc && *fc != '0'); }
@@ -3701,11 +3713,16 @@ int px_init(struct objects *objs) {
 
     objs->proxy = px;
 
+    char l7_worker_name[16];
+    if (px->l7_worker == PX_L7_WORKER_ALL)
+        snprintf(l7_worker_name, sizeof(l7_worker_name), "all");
+    else
+        snprintf(l7_worker_name, sizeof(l7_worker_name), "%d", px->l7_worker);
     DOCA_LOG_WARN("DPU PROXY MODE ON (run-to-completion SG-DMA, N/K/A=%d/%d/%d; "
-                  "l7-services=%d, l7-layer=%s, l7-worker=%d, l7-policy=%s, "
+                  "l7-services=%d, l7-layer=%s, l7-worker=%s, l7-policy=%s, "
                   "lb=round-robin; passthru=conn-pinned, sg_pieces=%u)",
                   objs->num_dpa_threads, objs->k_rings, objs->n_data_workers,
-                  n_l7_svc, px->l7_attached ? "attached" : "off", px->l7_worker,
+                  n_l7_svc, px->l7_attached ? "attached" : "off", l7_worker_name,
                   px->l7_fail_closed ? "fail-closed" : "fallback-to-l4",
                   px->sg_pieces_max);
     return DOCA_SUCCESS;

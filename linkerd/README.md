@@ -32,8 +32,10 @@ driver over:
 - Linkerd output wakers;
 - a 1 ms maintenance deadline.
 
-`DPUMESH_L7_LINKERD_WORKER`, default `0`, selects the worker that holds Linkerd
-sessions.
+`DPUMESH_L7_LINKERD_WORKER`, default `0`, selects which workers hold Linkerd
+sessions: a worker id names one, `all` names every ARM data worker. Under `all`
+each worker builds its own proxy and serves its admin endpoint at the configured
+port plus its worker id.
 
 ## Ownership
 
@@ -89,8 +91,9 @@ BENCH_DEPLOY_SCOPE=grpc \
 ```
 
 Both deployments run a single-connection request/response validation after pod
-registration. Requests for a service the L7 layer carries are routed to the
-selected Linkerd worker whatever the ARM worker count is.
+registration. With a numeric worker selection, requests for a service the L7
+layer carries are routed to that worker whatever the ARM worker count is. With
+`all`, requests retain the ordinary port policy and can spread across workers.
 
 ## Configuration
 
@@ -98,7 +101,7 @@ selected Linkerd worker whatever the ARM worker count is.
 DPUMESH_L7_DECISION_SVC=<service ids>
 DPUMESH_L7_OPAQUE_SVC=<service ids>
 DPUMESH_L7_SVC=<service ids>
-DPUMESH_L7_LINKERD_WORKER=<worker id>
+DPUMESH_L7_LINKERD_WORKER=<worker id>|all
 DPUMESH_L7_FAIL_CLOSED=0|1
 DMESH_L7_TX_RESERVE=1|0
 LINKERD_BACKEND_ADDR=10.96.0.<service id>:9092
@@ -120,7 +123,8 @@ configuration and startup fails if any is missing.
 ## Current bounds
 
 - outbound opaque and protocol-aware streams;
-- one selected Linkerd worker, which every selected L7 flow is routed to;
+- one selected Linkerd worker, which every selected L7 flow is routed to, or a
+  proxy on every worker with requests kept on the port policy;
 - concurrent connections to one service: each DMesh session owns a complete
   outbound stack and its connector takes the exact session backend key;
 - DPUmesh-selected backend pod;

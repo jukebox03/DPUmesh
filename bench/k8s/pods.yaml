@@ -22,6 +22,7 @@ spec:
         - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
         - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
         - { name: BENCH_DST_SERVICE, value: "echo-dpumesh" }   # peer by k8s Service NAME (pure client)
+        - { name: BENCH_DST_SERVICES, value: "${BENCH_DST_SERVICES}" } # optional per-thread CSV
         - { name: ASYNC_THREADS, value: "${ASYNC_THREADS}" }
         - { name: BENCH_PIPELINE, value: "${BENCH_PIPELINE}" }
         - { name: BENCH_COALESCE, value: "${BENCH_COALESCE}" }
@@ -90,7 +91,7 @@ spec:
         - { name: BENCH_NUMA_NODE, value: "${BENCH_NUMA_NODE}" }
         - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
         - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
-        - { name: DPUMESH_SERVICE, value: "echo-dpumesh" }   # 2nd backend of the SAME service (fan-out)
+        - { name: DPUMESH_SERVICE, value: "${ECHO_13_SERVICE}" } # default: same-service fan-out
         - { name: ECHO_THREADS, value: "${ECHO_THREADS}" }
         securityContext: { privileged: true }
         volumeMounts:
@@ -119,7 +120,7 @@ spec:
         - { name: BENCH_NUMA_NODE, value: "${BENCH_NUMA_NODE}" }
         - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
         - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
-        - { name: DPUMESH_SERVICE, value: "echo-dpumesh" }   # 3rd backend of the SAME service (fan-out)
+        - { name: DPUMESH_SERVICE, value: "${ECHO_14_SERVICE}" } # default: same-service fan-out
         - { name: ECHO_THREADS, value: "${ECHO_THREADS}" }
         securityContext: { privileged: true }
         volumeMounts:

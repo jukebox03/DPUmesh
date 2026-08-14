@@ -35,13 +35,22 @@ int l7_worker_run(int worker_id, void *driver);
 and returns after the persistent runtime exits. Adapter state is thread-local;
 all connection calls for a worker execute on that same worker thread.
 
-`DPUMESH_L7_LINKERD_WORKER`, default `0`, selects the worker that owns Linkerd
-session state. Other workers run the DPUmesh runtime backend and return
+`DPUMESH_L7_LINKERD_WORKER`, default `0`, selects which workers own Linkerd
+session state: a worker id names one, and `all` names every ARM data worker. A
+worker without session state runs the DPUmesh runtime backend and returns
 `DMESH_L7_DECLINE_NOT_ATTACHED` for Linkerd session opens. DPUmesh validates the
-value against the ARM worker count at initialization and routes the completion
-of every L7-carrying request service to that worker; a reply is routed by its
-upstream port, which is allocated in its owner's residue class. Traffic for
-services the L7 layer does not carry keeps the port policy.
+value against the ARM worker count at initialization.
+
+With one selected worker, the completion of every L7-carrying request service is
+routed to it. With `all`, no worker declines, so requests keep the port policy
+and spread. A reply is routed by its upstream port either way, which is
+allocated in its owner's residue class. Traffic for services the L7 layer does
+not carry always keeps the port policy.
+
+Under `all`, each worker holds a complete proxy: its own control-plane clients,
+session slots, backend registry and metrics registry. Worker `n` serves its
+admin endpoint at the configured port plus `n`, the other listeners already
+being ephemeral.
 
 ## Session identity
 
@@ -154,18 +163,22 @@ struct BackendKey { worker: u16, service: SocketAddr, session: SessionToken }
 
 The registry is owned by the worker, not global: the adapter, the acceptor and
 the outbound connector of one worker share one instance, and no lock is shared
-between workers. `publish` refuses a duplicate live key. `take` answers
-`NotPublished`, `AlreadyTaken` or `Stale`. A close evicts its own key before the
+between workers. `publish` refuses a duplicate live key. Exact-key `take`
+answers `NotPublished`, `AlreadyTaken` or `Stale`; the outbound connector uses
+`take_session`, because discovery may replace the original synthetic service
+address with a concrete endpoint address. A close evicts its own key before the
 next generation publishes.
 
 The normal Linkerd stack continues to key discovery, protocol, balancer and
 transport caches by destination. DMesh does not change those stock keys.
 Instead, the DMA acceptor builds one complete outbound stack per
-`SessionToken`; its connector is bound to that token and calls `take` with the
-exact `BackendKey`. All caches and reconnect state in that stack are therefore
-session-local. Two sessions to the same service use distinct backend channels,
-and closing generation N drops its stack and removes only its registry key
-before a reused slot publishes generation N+1.
+`SessionToken`; its connector is bound to that token and takes only the channel
+owned by that token. The discovery-selected address is retained for routing
+metadata and diagnostics, but cannot substitute another session's DMA channel.
+All caches and reconnect state in that stack are therefore session-local. Two
+sessions to the same service use distinct backend channels, and closing
+generation N drops its stack and removes only its registry key before a reused
+slot publishes generation N+1.
 
 This is the session-isolated model. Sharing one backend HTTP/2 transport across
 several frontend sessions would still require a DPU-side transport identity,
@@ -182,12 +195,14 @@ DmeshTarget(SessionToken)
        -> logical/concrete endpoint caches (private to the stack)
        -> reconnect service (private to the stack)
        -> DmeshOrTcp(session)
-            -> Backends::take(BackendKey(service, session))
+            -> Backends::take_session(session)
 ```
 
 Two targets with the same `OrigDstAddr` never enter the same cache instance.
-The connector tests publish two same-service keys and take them in the opposite
-order, proving that publication order cannot determine the selected channel.
+The registry tests publish two same-service keys and take them in the opposite
+order, and also take a session whose discovery endpoint differs from its
+original service address. Publication order and endpoint rewriting therefore
+cannot select another session's channel.
 
 A service DPUmesh has provided is never dialed over TCP. When its channel is
 missing the connector fails the connection and counts it, because a stream on
@@ -295,7 +310,8 @@ quiesces, active sessions, pending registrations and live tasks are zero.
 ## Current behavior
 
 - outbound Linkerd proxying;
-- one selected Linkerd worker, which every L7 request is routed to;
+- one selected Linkerd worker, which every L7 request is routed to, or a proxy
+  on every worker with requests kept on the port policy;
 - concurrent session-isolated connections to the same service address;
 - opaque and protocol-aware stream modes;
 - DPUmesh backend selection through `DMESH_L7_BACKEND_ANY`;

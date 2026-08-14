@@ -91,6 +91,26 @@ Read-only deployment checks are:
 ./bench/bench.sh dpucpu
 ```
 
+For Linkerd multi-service placement, one native client can assign its worker
+threads round-robin across a CSV of destinations. The two extra echo pods are
+same-service backends by default; override their advertised names to make them
+independent services for this gate:
+
+```sh
+L7_BACKEND=linkerd \
+DPUMESH_L7_OPAQUE_SVC=11,13,14 \
+DPUMESH_L7_LINKERD_WORKER=all \
+DPUMESH_RINGS_PER_POD=8 DPUMESH_ARM_WORKERS=4 \
+BENCH_DST_SERVICES=echo-dpumesh,echo-dpumesh-13,echo-dpumesh-14 \
+ECHO_13_SERVICE=echo-dpumesh-13 \
+ECHO_14_SERVICE=echo-dpumesh-14 \
+BENCH_DEPLOY_SCOPE=core \
+./bench/bench.sh deploy
+```
+
+Run at least as many client threads as destinations, then use `l7metrics` to
+require opened=closed and zero active/pending/tasks/orphaned on every worker.
+
 ## 4. L4 measurements
 
 ```sh

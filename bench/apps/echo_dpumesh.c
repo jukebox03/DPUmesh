@@ -203,6 +203,13 @@ int main(void) {
                 case DMESH_EVENT_TX_READY:
                     if (gc && !gc->dead) reply_pump(c); /* targeted one-shot retry */
                     break;
+                case DMESH_EVENT_TX_ERROR:
+                    /* A deferred tail failed: the QP's TX is terminal, so no reply
+                     * can ever leave. Report it and let the sweep destroy the conn
+                     * rather than hold a connection that answers nothing. */
+                    fprintf(stderr, "[greeter] transmit failed — dropping conn\n");
+                    if (gc) gc->dead = 1;
+                    break;
                 }
             }
         }

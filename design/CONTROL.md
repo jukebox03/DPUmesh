@@ -131,8 +131,9 @@ not create DPU-to-DPU links or register mappings from another node.
 | DPA EU × N | forward-ring drain and completion metadata |
 
 In a Linkerd build, each ARM data-worker thread hosts a Tokio `current_thread`
-runtime and persistent driver. One configured worker owns Linkerd session state.
-The ARM main thread remains the Comch control and doorbell owner.
+runtime and persistent driver. Linkerd session state belongs to the configured
+worker, or to every worker under `DPUMESH_L7_LINKERD_WORKER=all`. The ARM main
+thread remains the Comch control and doorbell owner.
 
 ## Current bounds
 
@@ -140,7 +141,8 @@ The ARM main thread remains the Comch control and doorbell owner.
 - backend membership is node-local and self-registered;
 - service and pod identifiers occupy the signed one-byte wire space;
 - the Linkerd deployment uses mock destination, identity and policy services;
-- Linkerd sessions run on one selected ARM worker;
+- Linkerd sessions run on one selected ARM worker, or on every worker when
+  `DPUMESH_L7_LINKERD_WORKER=all`;
 - concurrent sessions to one service address are isolated, each owning its own
   outbound stack and backend channel;
 - declined L7 sessions use counted L4 fallback.

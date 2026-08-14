@@ -292,6 +292,21 @@ static void run_verbs(int conn_fd, long N, uint32_t size, int zc,
                     if (c->user_data) ((sstate_t *)c->user_data)->dead = 1;
                 } else if (c->user_data) ((cstate_t *)c->user_data)->done = 1;
                 break;
+
+            case DMESH_EVENT_TX_READY:
+                /* Consumed here only to retire the one-shot, and to keep this pass
+                 * off the idle sleep. The sweep below is the actual retry: it
+                 * re-posts client requests and re-drains server backlogs every pass. */
+                break;
+
+            case DMESH_EVENT_TX_ERROR:                /* transmit is terminal on this conn */
+                if (c->role == DMESH_ROLE_SERVER) {
+                    if (c->user_data) ((sstate_t *)c->user_data)->dead = 1;
+                } else if (c->user_data) {            /* same accounting as a failed post */
+                    cstate_t *cs = (cstate_t *)c->user_data;
+                    if (!cs->done) { fail++; completed++; cs->done = 1; }
+                }
+                break;
             }
         }
 

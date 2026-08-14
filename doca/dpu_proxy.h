@@ -50,8 +50,9 @@ enum px_progress_state px_worker_drain(struct objects *objs, int worker_id);
 void px_bind_worker(struct objects *objs, int worker_id);
 
 /* The ARM worker an L7 request must be processed on, or -1 when the completion
- * is not one the L7 layer carries. The layer's session state lives on one
- * worker, so its requests are routed there rather than by port. */
+ * keeps the normal port owner. A selected-worker L7 layer returns its one
+ * owner; DPUMESH_L7_LINKERD_WORKER=all returns -1 because every worker has
+ * local session state. */
 int px_l7_request_owner(struct objects *objs, int32_t dst_pod_id,
                         int16_t dst_service);
 
