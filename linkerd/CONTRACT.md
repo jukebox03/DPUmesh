@@ -208,7 +208,7 @@ The Linkerd consumer accepts modes 2 and 3.
 | `-1` | adapter error |
 | `-2` | no Linkerd state on this worker |
 | `-3` | unsupported mode |
-| `-4` | active session already occupies the service address |
+| `-4` | the session already holds a reply direction, or its backend key is live |
 | `-5` | reply has no matching request session |
 
 DPUmesh counts each decline by cause and reports the totals in the DPU log

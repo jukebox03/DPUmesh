@@ -65,8 +65,8 @@ int main(void) {
     const char *echo_bin  = env_or("ECHO_BIN", "/usr/local/bin/tcp_echo");
     const char *client_bin= env_or("CLIENT_BIN", "/usr/local/bin/tcp_client");
 
-    /* Registry FIRST — before ANY preloaded child starts (NAMING.md §5: the harness
-     * plays the dpumesh-controller). ONE row serves both directions: the echo
+    /* Registry FIRST — before ANY preloaded child starts (the harness plays the
+     * control plane; see design/CONTROL.md). ONE row serves both directions: the echo
      * server's identity (name → svc) and the client's connect() (ClusterIP:port →
      * svc). It MUST exist before the echo child's shim ctor runs, or that child could
      * not resolve its own $DPUMESH_SERVICE. Format: "IP:port name svc". */

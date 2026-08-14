@@ -43,7 +43,8 @@ typedef struct dmesh_qp {
     uint16_t  local_port;      /* my port (this conn's id) */
     int16_t   dst_service;     /* peer service (the service connected to / caller's) */
     int16_t   remote_pod;      /* SERVER: the DPU-facing peer pod (learned at accept).
-                                * CLIENT: always DMESH_POD_BLANK (Model B never pins). */
+                                * CLIENT: always DMESH_POD_BLANK — the DPU selects the
+                                * backend, so the host never names one. */
     uint16_t  remote_port;     /* SERVER: the peer uP (learned at accept); CLIENT: 0. */
     /* Independent inbound and outbound close state. */
     uint8_t   peer_closed;     /* INBOUND: the peer's FIN landed -> EOF (sticky) */

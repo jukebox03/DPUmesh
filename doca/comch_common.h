@@ -204,8 +204,6 @@ _Static_assert(sizeof(struct dmesh_pod_unregister_msg) == 8,
 _Static_assert(sizeof(struct dmesh_pod_quiesced_msg) == 8,
                "dmesh_pod_quiesced_msg ABI drift");
 
-
-
 /* Type-peek wrapper: control-path recv buffers are cast to this to read the
  * leading type, then re-cast to the concrete message struct (mmap/register). */
 struct dmesh_comch_msg {

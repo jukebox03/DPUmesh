@@ -8,9 +8,9 @@
  *
  *   port -> forward ring -> DPA EU -> ARM worker
  *
- * F is the number of forward rings per pod, N the number of DPA EUs, and A the
- * number of ARM data workers. A valid topology requires F and N
- * to be multiples of A.  The EU mapping below then guarantees
+ * K is the number of forward rings per pod, N the number of DPA EUs, and A the
+ * number of ARM data workers. A valid topology requires K and N to be multiples
+ * of A. The EU mapping below then guarantees
  *
  *   dmesh_dpa_eu_for_ring(...) % A == ring % A
  *

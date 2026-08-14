@@ -14,7 +14,6 @@
 #include <stdatomic.h>
 #include <poll.h>
 #include <fcntl.h>
-#include <signal.h>
 #include <time.h>
 #include <sys/eventfd.h>
 #include <sys/socket.h>
@@ -35,7 +34,6 @@
     static ret (*real_##name)(__VA_ARGS__); \
     static void resolve_##name(void) { real_##name = dlsym(RTLD_NEXT, #name); }
 
-REAL_DECL(socket,      int,     int, int, int)
 REAL_DECL(connect,     int,     int, const struct sockaddr *, socklen_t)
 REAL_DECL(bind,        int,     int, const struct sockaddr *, socklen_t)
 REAL_DECL(listen,      int,     int, int)
@@ -70,7 +68,7 @@ REAL_DECL(sendfile64,  ssize_t, int, int, off_t *, size_t)
 /* variadic real fcntl/ioctl need the va-form; glibc's are (int, int/ulong, arg) */
 static pthread_once_t g_resolve_once = PTHREAD_ONCE_INIT;
 static void resolve_all(void) {
-    resolve_socket(); resolve_connect(); resolve_bind(); resolve_listen();
+    resolve_connect(); resolve_bind(); resolve_listen();
     resolve_accept(); resolve_accept4(); resolve_read(); resolve_write();
     resolve_recv(); resolve_send(); resolve_recvfrom(); resolve_sendto();
     resolve_recvmsg(); resolve_sendmsg(); resolve_readv(); resolve_writev();
@@ -1190,8 +1188,8 @@ static ssize_t sendfile_common(int out_fd, int in_fd, off_t *offset, size_t coun
             break;
         }
     }
+    /* The non-offset form read in_fd directly, so its cursor already advanced. */
     if (offset) *offset += (off_t)done;
-    else if (done) { /* non-offset form consumed in_fd via read: already advanced */ }
     pfd_put(e);
     return (ssize_t)done;
 }

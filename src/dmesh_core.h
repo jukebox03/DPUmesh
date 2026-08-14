@@ -186,9 +186,9 @@ int dpumesh_enqueue(dpumesh_ctx_t *ctx, const sw_descriptor_t *desc);
 
 /* ====== Connection API (connection-oriented, full-duplex — no RPC matching) ======
  *
- * A "port" IS a connection (like a socket fd): it owns a peer, an inbound message
- * queue. Inbound is routed by dst_port
- * to the conn's inbox; there is NO request↔response matching. */
+ * A port IS a connection, like a socket fd: it owns one peer and one inbound
+ * message queue. Inbound is routed by dst_port into that queue; there is no
+ * request-to-response matching. */
 
 /* DMESH_ROLE_* live in <dpumesh/dmesh_common.h> (shared with the DPU side). */
 
@@ -234,7 +234,7 @@ void dpumesh_publish_due_tails(struct dmesh_eq *eq);
 
 /* Pop the next NEW inbound connection off the channel-wide accept queue and BIND it
  * to `eq`: allocate a SERVER conn that learns its peer (pod,port) and holds the first
- * first fragment (c->rx_slot). NULL+EAGAIN if none pending; NULL+ENOMEM on alloc failure
+ * fragment (c->rx_slot). NULL+EAGAIN if none pending; NULL+ENOMEM on alloc failure
  * (the message is dropped, its RX credit reclaimed). The native API folds this into
  * dmesh_poll_eq as DMESH_EVENT_CONN_REQ; the shim drives it from its dispatcher thread.
  * The queue is SPMC, so several EQs may call this concurrently — each conn goes to

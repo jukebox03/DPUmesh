@@ -814,25 +814,19 @@ static void px_conn_del_key(struct objects *objs, int32_t pod, uint16_t port) {
 
 /* ====== window: view / advance ====== */
 
-/* The parser's contiguous view at parse_pos: the remainder of the staging run
- * containing the cursor (zero-copy). */
-static void px_view(struct objects *objs, struct px_conn *c,
-                    const uint8_t **buf, uint32_t *avail) {
-    *buf = NULL; *avail = 0;
+/* Bytes the parser may take in one contiguous piece at parse_pos: the remainder
+ * of the staging run containing the cursor. Per-conn staging mirrors the host TX
+ * byte-ring, so the run extends across arrivals whose staging bytes physically
+ * abut in the same pod buffer and stops at the ring wrap. Zero when the window
+ * holds nothing at the cursor. */
+static uint32_t px_view(struct px_conn *c) {
     if (c->parse_pos >= c->stream_end)
-        return;
+        return 0;
     struct px_arrival *a = c->whead;
     while (a && a->stream_base + a->len <= c->parse_pos)
         a = a->next;
     if (!a)
-        return;
-    struct pod_state *p = &objs->pods[a->pod_idx];
-    *buf = (const uint8_t *)p->dma_buffer + a->staging_off +
-           (uint32_t)(c->parse_pos - a->stream_base);
-    /* Per-conn contiguous staging (mirror of host TX): extend the view across
-     * arrivals whose staging bytes PHYSICALLY abut in the SAME pod buffer, so a
-     * run spanning arrivals is handed over whole. Stops at a physical
-     * discontinuity (the host TX byte-ring wrap). */
+        return 0;
     uint64_t run_end  = a->stream_base + a->len;
     uint32_t phys_end = a->staging_off + a->len;
     for (struct px_arrival *n = a->next;
@@ -841,7 +835,7 @@ static void px_view(struct objects *objs, struct px_conn *c,
         run_end  += n->len;
         phys_end += n->len;
     }
-    *avail = (uint32_t)(run_end - c->parse_pos);
+    return (uint32_t)(run_end - c->parse_pos);
 }
 
 /* Advance the window cursor by `consumed`. Consumed bytes NOT claimed by any
@@ -1501,10 +1495,7 @@ static void px_parse(struct objects *objs, struct px_conn *c) {
     }
 
     while (c->parse_pos < c->stream_end) {
-        const uint8_t *buf;
-        uint32_t avail;
-        px_view(objs, c, &buf, &avail);
-        (void)buf;
+        uint32_t avail = px_view(c);
         if (avail == 0)
             break;
         int32_t dst = c->pub.is_reply ? c->pub.peer_pod : PX_DST_DEFER;
@@ -1736,8 +1727,8 @@ static const uint8_t *px_stage_view(struct objects *objs, struct px_conn *c,
         a = a->next;
     if (!a)
         return NULL;
-    /* Extend across arrivals whose staging physically abuts, exactly as px_view
-     * does, so one hand-over covers a run the host wrote contiguously. */
+    /* Extend across arrivals whose staging physically abuts, as px_view does, so
+     * one hand-over covers a run the host wrote contiguously. */
     uint64_t run_end = a->stream_base + a->len;
     uint32_t phys_end = a->staging_off + a->len;
     for (struct px_arrival *n = a->next;
@@ -3081,9 +3072,6 @@ px_lane_retry_head(struct objects *objs, struct px_engine *eng,
     return 0;
 }
 
-/* Worker: one pass over this engine's owned lanes (splice inbox→qhead, submit,
- * retire). Owns destination regions where region % A == worker id. */
-/* Restart this engine's shared DMA context after it reaches IDLE. */
 /* Reset the per-incarnation state of one lane. Queues are NOT touched: they hold
  * units, whose lifetime is custody-managed (px_lane_drop_dead retires them when the
  * pod goes not-ready). Only the credit/landing accounting is incarnation-scoped. */
@@ -3097,6 +3085,7 @@ static void px_lane_rearm(struct px_lane *ln, uint32_t gen) {
     ln->pod_generation = gen;
 }
 
+/* Restart this engine's shared DMA context once it reaches IDLE. */
 static int px_engine_recover(struct px_engine *eng) {
     enum doca_ctx_states st;
 
@@ -3132,6 +3121,8 @@ static int px_engine_recover(struct px_engine *eng) {
     return doca_pe_progress(eng->pe) ? 1 : 0;
 }
 
+/* One pass over this engine's owned lanes (splice inbox→qhead, submit, retire).
+ * An engine owns the destination regions where region % A == its worker id. */
 static int px_engine_pump(struct objects *objs, struct px_engine *eng,
                           int *published_done) {
     struct dmesh_proxy *px = objs->proxy;

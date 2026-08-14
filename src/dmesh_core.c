@@ -1126,9 +1126,6 @@ static void tx_wait_arm(dpumesh_ctx_t *ctx, struct dmesh_port_slot *psl,
     }
 }
 
-/* Demultiplex an inbound descriptor by local destination port. Live connections
- * receive it, free upstream ports enter the accept queue, and stale low ports
- * return the landing credit. Bodies remain in the shared RX mapping. */
 /* Per-conn TX region lifecycle + FIFO reclaim (defined with the TX functions below).
  * port_reset_tx is used by the PE (SERVER_PENDING) above its definition. */
 static void port_reset_tx(struct dmesh_port_slot *psl);
@@ -1177,6 +1174,9 @@ static inline int rx_seq_accept(struct dmesh_port_slot *psl,
     return 1;
 }
 
+/* Demultiplex an inbound descriptor by local destination port. Live connections
+ * receive it, free upstream ports enter the accept queue, and stale low ports
+ * return the landing credit. Bodies remain in the shared RX mapping. */
 static void rx_deliver_desc(dpumesh_ctx_t *ctx, const sw_descriptor_t *desc, int slot)
 {
     uint16_t dport = desc->dst_port;
@@ -2480,9 +2480,8 @@ int dpumesh_enqueue(dpumesh_ctx_t *ctx, const sw_descriptor_t *desc) {
         return -1;
     }
 
-    /* Loopback is valid and is demultiplexed by dst_port. */
-
-    /* body_buf_slot is a byte offset in the shared TX mmap. */
+    /* body_buf_slot is a byte offset in the shared TX mmap. Loopback is legal:
+     * the DPU demultiplexes it by dst_port like any other destination. */
     if (desc->body_buf_slot < 0 ||
         (size_t)desc->body_buf_slot + desc->body_len > (size_t)ctx->num_slots * ctx->slot_size) {
         DOCA_LOG_ERR("ENQUEUE rejected: byte offset=%d + len=%u out of TX buffer (%zu)",
@@ -2551,8 +2550,6 @@ int dpumesh_enqueue(dpumesh_ctx_t *ctx, const sw_descriptor_t *desc) {
     }
     ring_slot = (uint32_t)(t % ring->size);
     dma = &ring->descs[ring_slot];
-
-    /* The send-unit FIFO retains TX bytes until the reverse ring returns TX_ACK. */
 
     dma->mmap = ctx->dpa_mmap_handle;
     dma->addr = (uint64_t)ctx->dma_buffer + (size_t)desc->body_buf_slot;  /* byte offset */
@@ -2885,9 +2882,9 @@ static int emit_desc(dmesh_qp_t *c, size_t moff, uint32_t len,
 dmesh_channel_t *dmesh_create_channel(void) {
     dmesh_channel_t *s = (dmesh_channel_t *)calloc(1, sizeof(*s));
     if (!s) return NULL;
-    /* Identity is injected, not declared: resolve $DPUMESH_SERVICE (a k8s Service
-     * name) to a service_id through the same table peers resolve through. Unset =
-     * pure client (SVC_NONE). One table serves both directions (NAMING.md §2). */
+    /* Identity is injected, not declared: resolve $DPUMESH_SERVICE (a Kubernetes
+     * Service name) to a service_id through the same table peers resolve through.
+     * Unset = pure client (SVC_NONE). One table serves both directions. */
     int service_id = dmesh_config_identity();
     dpumesh_config_t cfg = DPUMESH_CONFIG_DEFAULT;
     if (dpumesh_init(&s->ctx, service_id, &cfg) != 0 || !s->ctx) {
@@ -3028,7 +3025,7 @@ dmesh_qp_t *dmesh_accept(dmesh_eq_t *eq) {
     }
     dmesh_qp_t *c = eq->accept_spare;
     eq->accept_spare = NULL;
-    /* Model B: the PE created a SERVER_PENDING slot at message-1 delivery (port =
+    /* The PE created a SERVER_PENDING slot at message-1 delivery (port =
      * req.dst_port = uP, with any pipelined messages 2..P already coalesced in its
      * inbox). Promote it to a live SERVER conn, attach THIS handle, and bind it to the
      * EQ that won it — dmesh_next_ready then returns it on this EQ only. */

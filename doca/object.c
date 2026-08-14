@@ -25,12 +25,8 @@ elapsed_at_least(const struct timespec *start, const struct timespec *now,
                  time_t seconds)
 {
     time_t sec = now->tv_sec - start->tv_sec;
-    long nsec = now->tv_nsec - start->tv_nsec;
-    if (nsec < 0) {
+    if (now->tv_nsec < start->tv_nsec)
         sec--;
-        nsec += 1000000000L;
-    }
-    (void)nsec;
     return sec >= seconds;
 }
 

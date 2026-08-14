@@ -217,9 +217,8 @@ dpu_route_l4(struct objects *objs, int16_t svc)
  * An L7 request goes to the worker that owns the L7 layer; everything else,
  * including every reply, is owned by the worker its port names. */
 static inline int
-owner_worker(struct objects *objs, int here, const dpu_comp_entry_t *e)
+owner_worker(struct objects *objs, const dpu_comp_entry_t *e)
 {
-    (void)here;
     int l7 = px_l7_request_owner(objs, e->dst_pod_id, e->dst_service);
     if (l7 >= 0)
         return l7;
@@ -387,11 +386,10 @@ dpu_send_wake_worker(struct objects *objs, int id)
 
 /* Progress one worker's consumer PE and deferred receive tasks. */
 static enum px_progress_state
-dpu_progress_worker_pe(struct objects *objs, struct dpu_data_worker *worker_state)
+dpu_progress_worker_pe(struct dpu_data_worker *worker_state)
 {
     enum px_progress_state state = doca_pe_progress(worker_state->pe) ?
         PX_PROGRESS_PROGRESSED : PX_PROGRESS_IDLE;
-    (void)objs;
     if (worker_state->num_deferred_recv > 0 &&
         comp_queue_usage(&worker_state->queue) < COMP_QUEUE_BP_LOW) {
         int remaining = 0, original = worker_state->num_deferred_recv;
@@ -423,7 +421,7 @@ dpu_worker_run_budget(struct objects *objs, struct dpu_data_worker *worker_state
         dpu_comp_entry_t *e = comp_queue_peek(&worker_state->queue);
         if (!e)
             break;
-        int owner = owner_worker(objs, worker_state->id, e);
+        int owner = owner_worker(objs, e);
         if (owner == worker_state->id) {
             if (px_process_forward(objs, worker_state->id, e) == 0) {
                 break;                   /* engine backpressure — retain, retry */
@@ -504,9 +502,10 @@ static inline uint64_t dpu_wake_clock_hz(void)
     return 1000000000ull;
 }
 #endif
-
-/* C-owned ARM data-worker loop. */
 #endif
+
+/* ARM data-worker thread. The Linkerd backend owns the loop when it owns the
+ * runtime; otherwise this file drives poll, drain and park itself. */
 static void *
 dpu_data_worker_main(void *arg)
 {
@@ -569,7 +568,7 @@ dpu_data_worker_main(void *arg)
             dpu_send_wake_worker(objs, worker_state->id);
             wake_deadline = now + wake_period;
         }
-        enum px_progress_state did = dpu_progress_worker_pe(objs, worker_state);
+        enum px_progress_state did = dpu_progress_worker_pe(worker_state);
         enum px_progress_state run = dpu_worker_run(objs, worker_state);
         if (did == PX_PROGRESS_PROGRESSED || run == PX_PROGRESS_PROGRESSED)
             continue;                    /* stay hot while there is work */
@@ -578,7 +577,7 @@ dpu_data_worker_main(void *arg)
         if (dfd >= 0)
             (void)px_worker_arm_notification(objs, worker_state->id);
         atomic_store_explicit(&worker_state->parked, 1, memory_order_release);
-        if (dpu_progress_worker_pe(objs, worker_state) == PX_PROGRESS_PROGRESSED ||
+        if (dpu_progress_worker_pe(worker_state) == PX_PROGRESS_PROGRESSED ||
             dpu_worker_run(objs, worker_state) == PX_PROGRESS_PROGRESSED ||
             !mpsc_comp_queue_empty(&worker_state->cross_worker)) {
             atomic_store_explicit(&worker_state->parked, 0, memory_order_release);
@@ -635,8 +634,7 @@ dmesh_l7_driver_drain(void *driver, int budget)
     if (!worker_state || budget <= 0)
         return -1;
     px_bind_worker(worker_state->objs, worker_state->id);
-    enum px_progress_state pe = dpu_progress_worker_pe(worker_state->objs,
-                                                       worker_state);
+    enum px_progress_state pe = dpu_progress_worker_pe(worker_state);
     enum px_progress_state run = dpu_worker_run_budget(worker_state->objs,
                                                        worker_state, budget);
     if (pe == PX_PROGRESS_PROGRESSED || run == PX_PROGRESS_PROGRESSED)

@@ -141,5 +141,6 @@ The ARM main thread remains the Comch control and doorbell owner.
 - service and pod identifiers occupy the signed one-byte wire space;
 - the Linkerd deployment uses mock destination, identity and policy services;
 - Linkerd sessions run on one selected ARM worker;
-- one Linkerd session is active per service address;
+- concurrent sessions to one service address are isolated, each owning its own
+  outbound stack and backend channel;
 - declined L7 sessions use counted L4 fallback.

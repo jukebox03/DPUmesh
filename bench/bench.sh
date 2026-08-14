@@ -1231,7 +1231,7 @@ run_loopback() {  # self-routing: pod 12 is client + server of its own service
 run_verbs() {  # verbs-façade self-routing: pod 17 is client + server of its own service
     local N="${1:-50000}" size="${2:-8192}" zc="${3:-0}" window="${4:-1}" pipe="${5:-1}" ip resp
     ip=$(running_pod_ip verbs-dpumesh || true)
-    [ -z "$ip" ] && { err "verbs-dpumesh pod not running — run '$0 deploy' (validators no longer self-start)"; return 1; }
+    [ -z "$ip" ] && { err "verbs-dpumesh pod not running — run '$0 deploy' (the validator waits for a RUN command)"; return 1; }
     step "=== verbs (self-service): N=$N size=${size}B zc=$zc window=$window pipeline=$pipe ==="
     resp=$(printf 'RUN %s %s %s %s %s\n' "$N" "$size" "$zc" "$window" "$pipe" | timeout 180s nc "$ip" "$CTRL_PORT" || true)
     [ -z "$resp" ] && { err "no response (timeout or pod down)"; return 1; }

@@ -257,9 +257,9 @@ doca_error_t init_comch_ctrl_path_client(const char *server_name,
     }
 
     result = doca_comch_client_create(objs->dev, server_name, &(objs->cc_client));
-    if (result != DOCA_SUCCESS) {   
+    if (result != DOCA_SUCCESS) {
         DOCA_LOG_ERR("Failed to create client with error = %s", doca_error_get_name(result));
-        goto destroy_pe;
+        goto setup_failed;
     }
 
     ctx = doca_comch_client_as_ctx(objs->cc_client);
@@ -267,7 +267,7 @@ doca_error_t init_comch_ctrl_path_client(const char *server_name,
     result = doca_pe_connect_ctx(objs->pe, ctx);
     if (result != DOCA_SUCCESS) {   
         DOCA_LOG_ERR("Failed adding pe context to client with error = %s", doca_error_get_name(result));
-        goto destroy_client;
+        goto setup_failed;
     }
 
     result = doca_comch_client_task_send_set_conf(objs->cc_client,
@@ -276,14 +276,14 @@ doca_error_t init_comch_ctrl_path_client(const char *server_name,
                                                   CC_SEND_TASK_NUM);
     if (result != DOCA_SUCCESS) {   
         DOCA_LOG_ERR("Failed setting send task cbs with error = %s", doca_error_get_name(result));
-        goto destroy_client;
+        goto setup_failed;
     }
 
     result = doca_comch_client_event_msg_recv_register(objs->cc_client, 
                                                     client_message_recv_callback);
     if (result != DOCA_SUCCESS) {   
         DOCA_LOG_ERR("Failed adding message recv event cb with error = %s", doca_error_get_name(result));
-        goto destroy_client;
+        goto setup_failed;
     }
 
 	/* register event callback for new comsumer and expired consumer */
@@ -291,20 +291,20 @@ doca_error_t init_comch_ctrl_path_client(const char *server_name,
 								dmesh_consumer_connected, dmesh_consumer_expired);
 	if (result != DOCA_SUCCESS) {
 		DOCA_LOG_ERR("Failed adding consumer event cb with error = %s", doca_error_get_name(result));
-		goto destroy_client;
+		goto setup_failed;
 	}
 
     /* Set client properties */
 	result = doca_comch_cap_get_max_msg_size(doca_dev_as_devinfo(objs->dev), &max_msg_size);
 	if (result != DOCA_SUCCESS) {
 		DOCA_LOG_ERR("Failed to get max message size with error = %s", doca_error_get_name(result));
-		goto destroy_client;
+		goto setup_failed;
 	}
 
      result = doca_comch_cap_get_max_recv_queue_size(doca_dev_as_devinfo(objs->dev), &max_rq_size);
     if (result != DOCA_SUCCESS) {
         DOCA_LOG_ERR("Failed to get max recv queue size with error = %s", doca_error_get_name(result));
-        goto destroy_client;
+        goto setup_failed;
     }
 
     DOCA_LOG_INFO("CC client max msg size: %u B, max rq size: %u", max_msg_size, max_rq_size);
@@ -312,7 +312,7 @@ doca_error_t init_comch_ctrl_path_client(const char *server_name,
 	result = doca_comch_client_set_max_msg_size(objs->cc_client, max_msg_size);
 	if (result != DOCA_SUCCESS) {
 		DOCA_LOG_ERR("Failed to set msg size property with error = %s", doca_error_get_name(result));
-		goto destroy_client;
+		goto setup_failed;
 	}
 
 	{
@@ -325,26 +325,26 @@ doca_error_t init_comch_ctrl_path_client(const char *server_name,
 	}
 	if (result != DOCA_SUCCESS) {
 		DOCA_LOG_ERR("Failed to set recv queue size property with error = %s", doca_error_get_name(result));
-		goto destroy_client;
+		goto setup_failed;
 	}
 
 	user_data.ptr = (void *)objs;
 	result = doca_ctx_set_user_data(ctx, user_data);
 	if (result != DOCA_SUCCESS) {
 		DOCA_LOG_ERR("Failed to set ctx user data with error = %s", doca_error_get_name(result));
-		goto destroy_client;
+		goto setup_failed;
 	}
 
 	/* Client is not started until connection is finished, so getting connection in progress */
 	result = doca_ctx_start(ctx);
 	if (result != DOCA_ERROR_IN_PROGRESS) {
 		DOCA_LOG_ERR("Failed to start client context with error = %s", doca_error_get_name(result));
-		goto destroy_client;
+		goto setup_failed;
 	}
 
 	result = doca_ctx_get_state(ctx, &state);
 	if (result != DOCA_SUCCESS)
-		goto destroy_client;
+		goto setup_failed;
 	struct timespec connect_start, now;
 	clock_gettime(CLOCK_MONOTONIC, &connect_start);
 	while (state != DOCA_CTX_STATE_RUNNING) {
@@ -352,18 +352,18 @@ doca_error_t init_comch_ctrl_path_client(const char *server_name,
 		nanosleep(&ts, NULL);
 		result = doca_ctx_get_state(ctx, &state);
 		if (result != DOCA_SUCCESS)
-			goto destroy_client;
+			goto setup_failed;
 		if (state == DOCA_CTX_STATE_IDLE) {
 			DOCA_LOG_ERR("CC client returned to IDLE before connecting");
 			result = DOCA_ERROR_NOT_CONNECTED;
-			goto destroy_client;
+			goto setup_failed;
 		}
 		clock_gettime(CLOCK_MONOTONIC, &now);
 		if (elapsed_ms(&connect_start, &now) >= COMCH_CLIENT_CONNECT_TIMEOUT_MS) {
 			DOCA_LOG_ERR("Timed out after %d ms connecting CC client",
 			             COMCH_CLIENT_CONNECT_TIMEOUT_MS);
 			result = DOCA_ERROR_TIME_OUT;
-			goto destroy_client;
+			goto setup_failed;
 		}
 	}
 
@@ -373,20 +373,19 @@ doca_error_t init_comch_ctrl_path_client(const char *server_name,
 		             doca_error_get_name(result));
 		if (result == DOCA_SUCCESS)
 			result = DOCA_ERROR_NOT_CONNECTED;
-		goto destroy_client;
+		goto setup_failed;
 	}
 	result = doca_comch_connection_set_user_data(objs->connection, user_data);
 	if (result != DOCA_SUCCESS) {
 		DOCA_LOG_ERR("Failed to set CC connection user data: %s",
 		             doca_error_get_name(result));
-		goto destroy_client;
+		goto setup_failed;
 	}
 	DOCA_LOG_INFO("CC client connection established successfully");
 
     return DOCA_SUCCESS;
 
-destroy_client:
-destroy_pe:
+setup_failed:
     /* The caller owns `objs` and always runs cleanup_objects on failure. Leave
      * partially started contexts intact so the shared stop→IDLE→destroy path is
      * used instead of destroying a RUNNING/STARTING object in-place. */

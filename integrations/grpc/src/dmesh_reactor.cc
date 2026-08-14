@@ -668,7 +668,6 @@ class DmeshReactor::Impl final
       return;
     }
 
-
     if (event->type == DMESH_EVENT_RECV_FIN) {
       if (connection->closing || connection->remote_eof) return;
       {
