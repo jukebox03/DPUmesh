@@ -13,6 +13,7 @@ use std::ffi::c_void;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::os::raw::{c_char, c_int};
+use std::path::PathBuf;
 use std::sync::Arc;
 #[cfg(not(test))]
 use std::task::{Context, Poll};
@@ -35,7 +36,7 @@ pub struct DmeshL7Flow {
     pub peer_pod: i32,
     pub mode: u8,
     pub is_reply: u8,
-    pub workload: [c_char; 64],
+    pub workload: [c_char; 384],
 }
 
 /// Mirrors `struct dmesh_l7_verdict`.
@@ -482,6 +483,15 @@ struct Worker {
     /// This worker's backend channels; the connector takes them from here.
     backends: Arc<Backends>,
     metrics: Arc<SessionMetrics>,
+    /// Real Kubernetes destination presented to Linkerd for each DPUmesh
+    /// service. The synthetic address remains the internal backend key.
+    service_targets: HashMap<i32, SocketAddrV4>,
+    /// Ready endpoints in the same authoritative Service generation.
+    service_endpoints: HashMap<i32, Vec<SocketAddr>>,
+    /// Atomically replaced, monotonically versioned controller feed.
+    service_targets_file: Option<PathBuf>,
+    service_targets_version: u64,
+    service_targets_authoritative: bool,
     /// Copy output into the egress arena rather than through a temporary Vec.
     tx_reserve: bool,
     counters: Counters,
@@ -677,6 +687,32 @@ fn pump_side(
 }
 
 impl Worker {
+    fn refresh_service_targets(&mut self) -> Result<(), String> {
+        let Some(path) = self.service_targets_file.as_deref() else {
+            return Ok(());
+        };
+        let document = std::fs::read_to_string(path)
+            .map_err(|error| format!("read {}: {error}", path.display()))?;
+        let (version, targets, endpoints) = parse_versioned_service_targets(&document)?;
+        if version < self.service_targets_version {
+            return Err(format!(
+                "service target generation rolled back from {} to {version}",
+                self.service_targets_version
+            ));
+        }
+        if version > self.service_targets_version {
+            self.service_targets = targets;
+            self.service_endpoints = endpoints;
+            self.service_targets_version = version;
+            tracing::info!(
+                version,
+                targets = self.service_targets.len(),
+                "service targets updated"
+            );
+        }
+        Ok(())
+    }
+
     #[cfg(not(test))]
     fn poll_internal(&mut self, cx: &mut Context<'_>) -> Poll<()> {
         for session in self.sessions.values() {
@@ -900,6 +936,11 @@ impl Worker {
             return self.decline(Decline::SessionLimit, conn, flow, Some(backend_addr));
         }
 
+        if let Err(error) = self.refresh_service_targets() {
+            tracing::warn!(%error, conn, service = flow.dst_service, "service target feed rejected");
+            return self.decline(Decline::Error, conn, flow, Some(backend_addr));
+        }
+
         let workload = {
             let bytes = &flow.workload;
             let end = bytes.iter().position(|&c| c == 0).unwrap_or(bytes.len());
@@ -909,7 +950,14 @@ impl Worker {
             String::from_utf8_lossy(&raw).into_owned()
         };
         let src = pod_addr(flow.src_pod, flow.src_port);
-        let dst = service_addr_v4(flow.dst_service);
+        let dst = match self.service_targets.get(&flow.dst_service).copied() {
+            Some(dst) => dst,
+            None if !self.service_targets_authoritative => service_addr_v4(flow.dst_service),
+            None => {
+                tracing::warn!(conn, service = flow.dst_service, "service target withdrawn");
+                return self.decline(Decline::Error, conn, flow, Some(backend_addr));
+            }
+        };
 
         let Some(token) = self.slots.alloc() else {
             eprintln!("[l7_linkerd] worker {}: no session slot left", self.id);
@@ -930,7 +978,16 @@ impl Worker {
             },
             backend_addr,
         };
-        if let Err(error) = self.backends.publish(session.backend_key(), backend_io) {
+        let mut allowed_targets = self
+            .service_endpoints
+            .get(&flow.dst_service)
+            .cloned()
+            .unwrap_or_default();
+        allowed_targets.push(SocketAddr::V4(dst));
+        if let Err(error) =
+            self.backends
+                .publish_for_targets(session.backend_key(), backend_io, allowed_targets)
+        {
             eprintln!(
                 "[l7_linkerd] worker {}: backend channel refused: {error}",
                 self.id
@@ -999,6 +1056,104 @@ fn parse_worker_selection(value: &str) -> Result<WorkerSelection, String> {
     Ok(WorkerSelection::One(worker))
 }
 
+/// Parses `service-id=IPv4:port` entries separated by commas.
+///
+/// These addresses are presented to Linkerd destination and policy discovery;
+/// DPUmesh's backend channel continues to use its generation-safe session key.
+fn parse_service_targets(value: &str) -> Result<HashMap<i32, SocketAddrV4>, String> {
+    let mut targets = HashMap::new();
+    for raw in value.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let (service, addr) = raw.split_once('=').ok_or_else(|| {
+            format!("DPUMESH_L7_SERVICE_TARGETS entry '{raw}' must be service-id=IPv4:port")
+        })?;
+        let service = service.trim().parse::<i32>().map_err(|_| {
+            format!("DPUMESH_L7_SERVICE_TARGETS entry '{raw}' has an invalid service id")
+        })?;
+        if !(0..=i8::MAX as i32).contains(&service) {
+            return Err(format!(
+                "DPUMESH_L7_SERVICE_TARGETS service id {service} is outside 0..={}",
+                i8::MAX
+            ));
+        }
+        let addr = addr.trim().parse::<SocketAddrV4>().map_err(|_| {
+            format!("DPUMESH_L7_SERVICE_TARGETS entry '{raw}' needs an IPv4 socket address")
+        })?;
+        if targets.insert(service, addr).is_some() {
+            return Err(format!(
+                "DPUMESH_L7_SERVICE_TARGETS repeats service id {service}"
+            ));
+        }
+    }
+    Ok(targets)
+}
+
+fn parse_versioned_service_targets(
+    document: &str,
+) -> Result<
+    (
+        u64,
+        HashMap<i32, SocketAddrV4>,
+        HashMap<i32, Vec<SocketAddr>>,
+    ),
+    String,
+> {
+    let mut version = None;
+    let mut entries = Vec::new();
+    let mut endpoints: HashMap<i32, Vec<SocketAddr>> = HashMap::new();
+    for raw in document.lines() {
+        let line = raw.split('#').next().unwrap_or_default().trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("version=") {
+            if version.is_some() {
+                return Err("service target feed repeats version".to_string());
+            }
+            let parsed = value
+                .trim()
+                .parse::<u64>()
+                .map_err(|_| "service target feed has an invalid version".to_string())?;
+            if parsed == 0 {
+                return Err("service target feed version must be nonzero".to_string());
+            }
+            version = Some(parsed);
+        } else if let Some(value) = line.strip_prefix("endpoint=") {
+            let (service, addr) = value.split_once(',').ok_or_else(|| {
+                format!("service endpoint '{line}' must be endpoint=service-id,IPv4:port")
+            })?;
+            let service = service
+                .parse::<i32>()
+                .map_err(|_| format!("service endpoint '{line}' has an invalid service id"))?;
+            if !(0..=i8::MAX as i32).contains(&service) {
+                return Err(format!(
+                    "service endpoint id {service} is outside 0..={}",
+                    i8::MAX
+                ));
+            }
+            let addr = addr
+                .parse::<SocketAddrV4>()
+                .map(SocketAddr::V4)
+                .map_err(|_| format!("service endpoint '{line}' needs an IPv4 socket address"))?;
+            let service_endpoints = endpoints.entry(service).or_default();
+            if service_endpoints.contains(&addr) {
+                return Err(format!("service endpoint '{line}' is duplicated"));
+            }
+            service_endpoints.push(addr);
+        } else {
+            entries.push(line);
+        }
+    }
+    let version = version.ok_or_else(|| "service target feed has no version".to_string())?;
+    let targets = parse_service_targets(&entries.join(","))?;
+    if let Some(service) = endpoints
+        .keys()
+        .find(|service| !targets.contains_key(service))
+    {
+        return Err(format!("service endpoint {service} has no Service target"));
+    }
+    Ok((version, targets, endpoints))
+}
+
 fn admin_addr_for_worker(
     mut addr: SocketAddr,
     worker_id: c_int,
@@ -1046,6 +1201,16 @@ async fn build_worker(worker_id: c_int) -> Result<Option<Worker>, String> {
     let selection =
         parse_worker_selection(&std::env::var("DPUMESH_L7_LINKERD_WORKER").unwrap_or_default())?;
     let every_worker = selection == WorkerSelection::All;
+    let service_targets_file = std::env::var_os("DPUMESH_L7_SERVICE_TARGETS_FILE")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| "DPUMESH_L7_SERVICE_TARGETS_FILE is required".to_string())?;
+    let document = std::fs::read_to_string(&service_targets_file)
+        .map_err(|error| format!("read {}: {error}", service_targets_file.display()))?;
+    let (service_targets_version, service_targets, service_endpoints) =
+        parse_versioned_service_targets(&document)?;
+    let service_targets_file = Some(service_targets_file);
+    let service_targets_authoritative = true;
     if let WorkerSelection::One(only) = selection {
         if worker_id != only {
             return Ok(None);
@@ -1058,6 +1223,11 @@ async fn build_worker(worker_id: c_int) -> Result<Option<Worker>, String> {
     let trace = shared_trace()?;
 
     let mut config = linkerd_app::Config::try_from_env().map_err(|e| format!("config: {e}"))?;
+
+    // This embedded runtime has no application-facing inbound listener. Avoid
+    // opening policy watches for its ephemeral inbound and admin ports; DMesh
+    // sessions still create their own dynamic outbound policy watches below.
+    config.disable_inbound_policy_discovery();
 
     // The inbound, outbound and control listeners are already ephemeral, so the
     // admin server is the one address several proxies in one process would
@@ -1105,6 +1275,11 @@ async fn build_worker(worker_id: c_int) -> Result<Option<Worker>, String> {
         pending: HashMap::new(),
         backends,
         metrics,
+        service_targets,
+        service_endpoints,
+        service_targets_file,
+        service_targets_version,
+        service_targets_authoritative,
         tx_reserve: tx_reserve_enabled(),
         counters: Counters::default(),
     }))
@@ -1350,7 +1525,7 @@ mod abi {
 
     #[test]
     fn flow_layout_matches_c() {
-        assert_eq!(size_of::<DmeshL7Flow>(), 92);
+        assert_eq!(size_of::<DmeshL7Flow>(), 412);
         assert_eq!(align_of::<DmeshL7Flow>(), 4);
         assert_eq!(offset_of!(DmeshL7Flow, src_ip), 0);
         assert_eq!(offset_of!(DmeshL7Flow, dst_ip), 4);
@@ -1424,6 +1599,65 @@ mod tests {
         assert!(admin_addr_for_worker(last, 1, true).is_err());
     }
 
+    #[test]
+    fn service_targets_are_strict_and_per_service() {
+        let targets =
+            parse_service_targets("11=10.107.58.88:9092, 20=10.111.115.171:9092").unwrap();
+        assert_eq!(
+            targets[&11],
+            "10.107.58.88:9092".parse::<SocketAddrV4>().unwrap()
+        );
+        assert_eq!(
+            targets[&20],
+            "10.111.115.171:9092".parse::<SocketAddrV4>().unwrap()
+        );
+        assert!(parse_service_targets("11").is_err());
+        assert!(parse_service_targets("128=10.0.0.1:80").is_err());
+        assert!(parse_service_targets("11=[::1]:80").is_err());
+        assert!(parse_service_targets("11=10.0.0.1:80,11=10.0.0.2:80").is_err());
+
+        let (version, targets, endpoints) = parse_versioned_service_targets(
+            "# atomic controller feed\nversion=7\n11=10.0.0.11:9092\nendpoint=11,10.244.0.11:9092\n20=10.0.0.20:9092\n",
+        )
+        .unwrap();
+        assert_eq!(version, 7);
+        assert_eq!(targets[&11], "10.0.0.11:9092".parse().unwrap());
+        assert_eq!(endpoints[&11], vec!["10.244.0.11:9092".parse().unwrap()]);
+        assert!(parse_versioned_service_targets("11=10.0.0.11:9092").is_err());
+        assert!(parse_versioned_service_targets("version=0").is_err());
+        assert!(
+            parse_versioned_service_targets("version=1\nendpoint=11,10.244.0.11:9092\n").is_err()
+        );
+    }
+
+    #[test]
+    fn service_target_feed_rejects_rollback_and_applies_withdrawal() {
+        let mut tw = install_worker(0);
+        let path = std::env::temp_dir().join(format!(
+            "dpumesh-service-targets-{}-{}",
+            std::process::id(),
+            session_key(1, 1)
+        ));
+        std::fs::write(&path, "version=2\n11=10.0.0.11:9092\n").unwrap();
+        with_test_worker(|w| {
+            w.service_targets_file = Some(path.clone());
+            w.service_targets_authoritative = true;
+            w.refresh_service_targets().unwrap();
+            assert_eq!(w.service_targets_version, 2);
+        });
+        std::fs::write(&path, "version=1\n11=10.0.0.12:9092\n").unwrap();
+        with_test_worker(|w| assert!(w.refresh_service_targets().is_err()));
+        std::fs::write(&path, "version=3\n").unwrap();
+        with_test_worker(|w| w.refresh_service_targets().unwrap());
+        let flow = request_flow(11, 1, 4001);
+        assert_eq!(
+            unsafe { l7_conn_open(0, session_key(1, 4001), &flow) },
+            DECLINE_ERROR
+        );
+        assert!(tw.events.try_recv().is_err());
+        std::fs::remove_file(path).unwrap();
+    }
+
     /// Adapter worker with test endpoints and datapath calls.
     struct TestWorker {
         events: mpsc::UnboundedReceiver<DmeshEvent>,
@@ -1450,6 +1684,11 @@ mod tests {
             pending: HashMap::new(),
             backends: backends.clone(),
             metrics: metrics.clone(),
+            service_targets: HashMap::new(),
+            service_endpoints: HashMap::new(),
+            service_targets_file: None,
+            service_targets_version: 0,
+            service_targets_authoritative: false,
             tx_reserve: true,
             counters: Counters::default(),
         };
@@ -1483,7 +1722,7 @@ mod tests {
             peer_pod: pod,
             mode: MODE_OPAQUE,
             is_reply: 0,
-            workload: [0; 64],
+            workload: [0; 384],
         }
     }
 
@@ -1562,6 +1801,32 @@ mod tests {
         for &(pod, port, want) in vectors {
             assert_eq!(session_key(pod, port), want, "pod {pod} port {port}");
         }
+    }
+
+    #[test]
+    fn session_uses_real_policy_target_and_registered_workload() {
+        let mut tw = install_worker(0);
+        with_test_worker(|w| {
+            w.service_targets
+                .insert(21, "10.107.58.88:9092".parse().unwrap());
+        });
+        let mut flow = request_flow(21, 1, 4001);
+        let workload = br#"{"ns":"test-bench","pod":"bench-a"}"#;
+        for (dst, src) in flow.workload.iter_mut().zip(workload.iter().copied()) {
+            *dst = src as c_char;
+        }
+
+        let key = session_key(1, 4001);
+        assert_eq!(unsafe { l7_conn_open(0, key, &flow) }, 0);
+        match tw.events.try_recv().unwrap() {
+            DmeshEvent::ConnReady(_, flow) => {
+                assert_eq!(flow.dst, "10.107.58.88:9092".parse().unwrap());
+                assert_eq!(flow.workload, r#"{"ns":"test-bench","pod":"bench-a"}"#);
+            }
+            other => panic!("expected a ready event, got {other:?}"),
+        }
+        assert!(tw.backends.contains_service(&service_addr(21)));
+        with_test_worker(|w| w.close_session(key));
     }
 
     #[test]

@@ -10,12 +10,14 @@
 #include "comch_common.h"
 #include "dpa.h"      /* teardown_pod_dma (DOCA_ARCH_DPU only) */
 #include "dpu_proxy.h"
+#include "workload_grant.h"
 
 #include <doca_pe.h>
 #include <doca_comch.h>
 #include <doca_buf_array.h>
 #include <doca_mmap.h>
 #include <doca_log.h>
+#include <openssl/rand.h>
 
 DOCA_LOG_REGISTER(COMCH_SERVER);
 
@@ -58,7 +60,6 @@ static void server_message_recv_callback(struct doca_comch_event_msg_recv *event
 	struct doca_comch_server *comch_server;
 	struct objects *objs;
 	doca_error_t result;
-	struct dmesh_comch_msg *comch_msg;
 
 	(void)event;
 
@@ -70,7 +71,7 @@ static void server_message_recv_callback(struct doca_comch_event_msg_recv *event
 	}
 
 	objs = (struct objects *)user_data.ptr;
-	if (msg_len < sizeof(enum dmesh_msg_type)) {
+	if (msg_len < 1) {
 		DOCA_LOG_ERR("Received short control message from client: %u", msg_len);
 		return;
 	}
@@ -79,9 +80,7 @@ static void server_message_recv_callback(struct doca_comch_event_msg_recv *event
 	if (objs->connection == NULL)
 		objs->connection = comch_connection;
 
-	comch_msg = (struct dmesh_comch_msg *)recv_buffer;
-
-	switch (comch_msg->type) {
+	switch (recv_buffer[0]) {
 	case DMESH_MSG_MMAP_EXPORT:
 		if (msg_len <= sizeof(struct dmesh_mmap_msg)) {
 			DOCA_LOG_ERR("Received invalid MMAP message from client");
@@ -124,12 +123,82 @@ static void server_message_recv_callback(struct doca_comch_event_msg_recv *event
 			DOCA_LOG_ERR("IDENTITY for an unknown connection");
 			return;
 		}
-		/* The DPU binds identity to the connection that carried it, so a pod
-		 * cannot name itself as another workload. */
+		if (objs->trusted_registration_required) {
+			DOCA_LOG_ERR("IDENTITY rejected: trusted registration is required");
+			return;
+		}
+		/* Development-only attribution. Required mode returns above; its
+		 * authoritative workload is installed by WORKLOAD_GRANT instead. */
 		memcpy(pod->workload, idm->workload, sizeof(pod->workload));
 		pod->workload[sizeof(pod->workload) - 1] = '\0';
 		DOCA_LOG_INFO("pod identity: slot %d workload '%s'",
 		              (int)(pod - objs->pods), pod->workload);
+		break;
+	}
+
+	case DMESH_MSG_WORKLOAD_GRANT: {
+		const struct dmesh_workload_grant_msg *grant =
+			(const struct dmesh_workload_grant_msg *)recv_buffer;
+		if (msg_len != sizeof(*grant)) {
+			DOCA_LOG_ERR("Received invalid WORKLOAD_GRANT size: %u", msg_len);
+			return;
+		}
+		struct pod_state *pod = find_pod_by_connection(objs, comch_connection);
+		if (pod == NULL || !pod->registration_challenge_issued) {
+			DOCA_LOG_ERR("WORKLOAD_GRANT rejected: no connection challenge");
+			return;
+		}
+		if (!objs->trusted_registration_required) {
+			DOCA_LOG_ERR("WORKLOAD_GRANT rejected: verifier is disabled");
+			return;
+		}
+		if (pod->registration_grant_verified ||
+		    __atomic_load_n(&pod->registered, __ATOMIC_ACQUIRE)) {
+			DOCA_LOG_ERR("WORKLOAD_GRANT rejected: duplicate for slot %d",
+			             (int)(pod - objs->pods));
+			return;
+		}
+
+		int32_t authorized_service = DMESH_SVC_NONE;
+		char workload[DMESH_WORKLOAD_MAX];
+		const uint8_t *registration_key =
+			dmesh_registration_find_key(objs, grant->key_id);
+		enum dmesh_grant_result vr = registration_key == NULL ?
+			DMESH_GRANT_BAD_KEY_ID : dmesh_grant_verify_v1(
+				grant, registration_key, objs->registration_issuer,
+				grant->key_id, pod->registration_nonce,
+				(uint64_t)time(NULL), &authorized_service, workload);
+		if (vr == DMESH_GRANT_OK &&
+		    dmesh_registration_consume_grant(objs, grant->grant_id) != 0) {
+			vr = DMESH_GRANT_REPLAY;
+			objs->registration_grants_replayed++;
+		}
+		if (vr != DMESH_GRANT_OK) {
+			objs->registration_grants_rejected++;
+			DOCA_LOG_ERR("workload_grant result=reject reason=%s slot=%d key_id=%.*s "
+			             "grant=%02x%02x%02x%02x rejected=%lu replayed=%lu",
+			             dmesh_grant_result_name(vr), (int)(pod - objs->pods),
+			             DMESH_GRANT_KEY_ID_MAX, grant->key_id,
+			             grant->grant_id[0], grant->grant_id[1],
+			             grant->grant_id[2], grant->grant_id[3],
+			             (unsigned long)objs->registration_grants_rejected,
+			             (unsigned long)objs->registration_grants_replayed);
+			return;
+		}
+
+		memcpy(pod->workload, workload, sizeof(pod->workload));
+		memcpy(pod->registration_grant_id, grant->grant_id,
+		       sizeof(pod->registration_grant_id));
+		pod->grant_service_id = authorized_service;
+		pod->registration_grant_verified = 1;
+		objs->registration_grants_accepted++;
+		DOCA_LOG_INFO("workload_grant result=accept slot=%d service_id=%d key_id=%.*s "
+		              "grant=%02x%02x%02x%02x workload='%s' accepted=%lu",
+		              (int)(pod - objs->pods), authorized_service,
+		              DMESH_GRANT_KEY_ID_MAX, grant->key_id,
+		              grant->grant_id[0], grant->grant_id[1], grant->grant_id[2],
+		              grant->grant_id[3], pod->workload,
+		              (unsigned long)objs->registration_grants_accepted);
 		break;
 	}
 
@@ -201,9 +270,42 @@ static void server_message_recv_callback(struct doca_comch_event_msg_recv *event
 
 	default:
 
-		DOCA_LOG_ERR("Received unknown message type from client: %u", comch_msg->type);
+		DOCA_LOG_ERR("Received unknown message type from client: %u", recv_buffer[0]);
 		break;
 	}
+}
+
+static doca_error_t
+server_send_registration_challenge(struct objects *objs, struct pod_state *pod)
+{
+	if (!objs->trusted_registration_required)
+		return DOCA_SUCCESS;
+	if (pod == NULL || pod->connection == NULL)
+		return DOCA_ERROR_INVALID_VALUE;
+	if (!pod->registration_challenge_issued) {
+		if (RAND_bytes(pod->registration_nonce,
+		               sizeof(pod->registration_nonce)) != 1) {
+			DOCA_LOG_ERR("Failed to create registration challenge nonce");
+			return DOCA_ERROR_INITIALIZATION;
+		}
+		pod->registration_challenge_issued = 1;
+	}
+	if (pod->registration_challenge_sent)
+		return DOCA_SUCCESS;
+
+	struct dmesh_registration_challenge_msg challenge = {
+		.type = DMESH_MSG_REG_CHALLENGE,
+		.version = DMESH_GRANT_VERSION,
+		.trusted_required = 1,
+	};
+	memcpy(challenge.nonce, pod->registration_nonce,
+	       sizeof(challenge.nonce));
+	doca_error_t result = server_send_msg_to_conn(objs, pod->connection,
+	                                              (const char *)&challenge,
+	                                              sizeof(challenge));
+	if (result == DOCA_SUCCESS)
+		pod->registration_challenge_sent = 1;
+	return result;
 }
 
 /**
@@ -247,6 +349,14 @@ static void server_connection_event_callback(struct doca_comch_event_connection_
 	 * for REGISTER to receive an explicit REGISTER_FAILED response. */
 	if (pods_add_connection(objs, comch_connection) != 0)
 		DOCA_LOG_ERR("New connection has no available pod slot");
+	else {
+		struct pod_state *pod = find_pod_by_connection(objs, comch_connection);
+		doca_error_t challenge_result =
+			server_send_registration_challenge(objs, pod);
+		if (challenge_result != DOCA_SUCCESS)
+			DOCA_LOG_WARN("Registration challenge send deferred: %s",
+			              doca_error_get_name(challenge_result));
+	}
 
 	DOCA_LOG_INFO("New connection established (total pods: %d)", objs->num_pods);
 }
@@ -553,6 +663,9 @@ server_flush_pod_init_results(struct objects *objs)
 	int n = __atomic_load_n(&objs->num_pods, __ATOMIC_ACQUIRE);
 	for (int i = 0; i < n; i++) {
 		struct pod_state *pod = &objs->pods[i];
+		if (objs->trusted_registration_required && pod->connection != NULL &&
+		    !pod->registration_challenge_sent)
+			(void)server_send_registration_challenge(objs, pod);
 		if (pod->connection == NULL ||
 		    !__atomic_load_n(&pod->registered, __ATOMIC_ACQUIRE) ||
 		    __atomic_load_n(&pod->cleanup_pending, __ATOMIC_ACQUIRE) ||
@@ -609,6 +722,15 @@ pods_add_connection(struct objects *objs, struct doca_comch_connection *conn)
 	objs->pods[idx].pod_id = -1;  /* not yet registered */
 	objs->pods[idx].service_id = DMESH_SVC_NONE;
 	objs->pods[idx].workload[0] = '\0';   /* the new tenant states its own */
+	memset(objs->pods[idx].registration_nonce, 0,
+	       sizeof(objs->pods[idx].registration_nonce));
+	memset(objs->pods[idx].registration_grant_id, 0,
+	       sizeof(objs->pods[idx].registration_grant_id));
+	objs->pods[idx].grant_service_id = DMESH_SVC_NONE;
+	objs->pods[idx].registration_challenge_issued = 0;
+	objs->pods[idx].registration_challenge_sent = 0;
+	objs->pods[idx].registration_grant_verified = 0;
+	objs->pods[idx].registration_grant_consumed = 0;
 	objs->pods[idx].landing_stripes = objs->n_data_workers;
 	objs->pods[idx].rev_ring_mmap_count = 0;
 	objs->pods[idx].rev_doorbell_pending_epoch = 0;
@@ -880,6 +1002,15 @@ pods_register(struct objects *objs, struct doca_comch_connection *conn,
 			DOCA_LOG_ERR("pods_register: conflicting replay on slot %d", i);
 			return -1;
 		}
+		if (objs->trusted_registration_required &&
+		    (!objs->pods[i].registration_grant_verified ||
+		     objs->pods[i].registration_grant_consumed ||
+		     service_id != objs->pods[i].grant_service_id)) {
+			DOCA_LOG_ERR("pods_register: trusted grant missing/consumed or Service mismatch "
+			             "on slot %d (requested=%d authorized=%d)",
+			             i, service_id, objs->pods[i].grant_service_id);
+			return -1;
+		}
 
 			/* Negative pod_id requests a live pods[] slot index. */
 		if (pod_id < 0)
@@ -894,6 +1025,8 @@ pods_register(struct objects *objs, struct doca_comch_connection *conn,
 		 * to see the prior pod_id write. */
 		objs->pods[i].pod_id = pod_id;
 		objs->pods[i].service_id = service_id;
+		if (objs->trusted_registration_required)
+			objs->pods[i].registration_grant_consumed = 1;
 		__atomic_store_n(&objs->pods[i].registered, 1, __ATOMIC_RELEASE);
 
 		/* Publish the O(1) pod_id->slot map AFTER registered=1, so a reader

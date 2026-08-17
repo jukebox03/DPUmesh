@@ -740,7 +740,7 @@ def generate_linkerd_driven():
         4.85,
         1.65,
         "Control-plane clients",
-        ("destination, identity and policy", "current build uses mock services", "service address → backend connector"),
+        ("deployed destination, identity and policy", "host-network TCP gateway", "service target → backend connector"),
         edge=GREEN,
         face=GREEN_BG,
     )

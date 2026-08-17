@@ -29,7 +29,8 @@ struct dmesh_l7_flow {
     int32_t  peer_pod;
     uint8_t  mode;
     uint8_t  is_reply;
-    char     workload[64];
+    /* Max namespace (63) + max Pod DNS subdomain (253) plus JSON framing. */
+    char     workload[384];
 };
 
 static inline uint64_t dmesh_l7_conn_handle(int32_t pod, uint16_t port)

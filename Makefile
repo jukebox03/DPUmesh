@@ -5,6 +5,7 @@ CC      ?= gcc
 DOCA_PKGS := doca-common doca-comch doca-dpa
 DOCA_CFLAGS := $(shell pkg-config --cflags $(DOCA_PKGS))
 DOCA_LIBS   := $(shell pkg-config --libs   $(DOCA_PKGS))
+CRYPTO_LIBS := $(shell pkg-config --libs libcrypto)
 DOCA_LIBDIR := $(shell pkg-config --variable=libdir doca-common)
 FLEXIO_LIBDIR := /opt/mellanox/flexio/lib
 
@@ -32,6 +33,7 @@ RPATHS  := -Wl,-rpath,/usr/local/lib \
 LIB_SRCS := \
 	src/dmesh_core.c \
 	src/dmesh_api.c \
+	src/dmesh_attest.c \
 	src/dmesh_resolve.c \
 	doca/common.c \
 	doca/object.c \
@@ -41,6 +43,7 @@ LIB_SRCS := \
 	doca/comch_client.c \
 	doca/comch_server.c \
 	doca/comch_msgq.c \
+	doca/workload_grant.c \
 	doca/dpa.c
 LIB_HDRS := $(shell rg --files include src doca -g '*.h')
 
@@ -84,7 +87,7 @@ dirs:
 lib: dirs $(LIB) $(LIB_LINK)
 $(LIB): $(LIB_SRCS) $(LIB_HDRS) | dirs
 	$(CC) $(CFLAGS) $(DEPFLAGS) -shared -Wl,-soname,libdpumesh.so.$(ABI_MAJOR) -o $@ $(LIB_SRCS) \
-		$(DOCA_LIBS) -lpthread $(RPATHS)
+		$(DOCA_LIBS) $(CRYPTO_LIBS) -lpthread $(RPATHS)
 	@echo "  -> $@"
 
 # The unversioned name is the LINKER's entry point only (-ldpumesh). What a binary
@@ -100,9 +103,14 @@ $(TESTDIR)/native_api_contract_test: tests/native_api_contract_test.c src/dmesh_
 	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -Wl,--gc-sections \
 		-o $@ tests/native_api_contract_test.c src/dmesh_api.c
 
-$(TESTDIR)/native_control_state_test: tests/native_control_state_test.c doca/comch_server.c $(LIB_HDRS) | dirs
+$(TESTDIR)/native_control_state_test: tests/native_control_state_test.c doca/comch_server.c doca/workload_grant.c $(LIB_HDRS) | dirs
 	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -Wl,--gc-sections \
-		-o $@ tests/native_control_state_test.c doca/comch_server.c $(DOCA_LIBS) -lpthread $(RPATHS)
+		-o $@ tests/native_control_state_test.c doca/comch_server.c doca/workload_grant.c \
+		$(DOCA_LIBS) $(CRYPTO_LIBS) -lpthread $(RPATHS)
+
+$(TESTDIR)/workload_grant_test: tests/workload_grant_test.c doca/workload_grant.c $(LIB_HDRS) | dirs
+	$(CC) $(CFLAGS) -o $@ tests/workload_grant_test.c doca/workload_grant.c \
+		$(DOCA_LIBS) $(CRYPTO_LIBS) $(RPATHS)
 
 $(TESTDIR)/native_tx_batch_policy_test: tests/native_tx_batch_policy_test.c src/dmesh_core.c $(LIB_HDRS) | dirs
 	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -Wl,--gc-sections \
@@ -143,6 +151,7 @@ $(TESTDIR)/benchmark_result_contract_test: tests/benchmark_result_contract_test.
 	$(CC) $(CFLAGS) -o $@ tests/benchmark_result_contract_test.c
 
 test: $(TESTDIR)/native_api_contract_test $(TESTDIR)/native_control_state_test \
+	$(TESTDIR)/workload_grant_test \
 	$(TESTDIR)/native_tx_batch_policy_test $(TESTDIR)/native_writable_test \
 	$(TESTDIR)/preload_api_contract_test $(TESTDIR)/l4_pin_policy_test \
 	$(TESTDIR)/lb_policy_test \
@@ -152,6 +161,7 @@ test: $(TESTDIR)/native_api_contract_test $(TESTDIR)/native_control_state_test \
 	$(BINDIR)/bench_dpumesh $(BINDIR)/bench_sock
 	$(TESTDIR)/native_api_contract_test
 	$(TESTDIR)/native_control_state_test
+	$(TESTDIR)/workload_grant_test
 	$(TESTDIR)/native_tx_batch_policy_test
 	$(TESTDIR)/native_writable_test
 	$(TESTDIR)/preload_api_contract_test
@@ -169,6 +179,8 @@ test: $(TESTDIR)/native_api_contract_test $(TESTDIR)/native_control_state_test \
 	sh tests/l4_collector_contract_test.sh
 	python3 tests/analyze_saturation_test.py
 	python3 tests/summarize_l4_test.py
+	python3 tests/workload_attest_agent_test.py
+	python3 tests/linkerd_cp_relay_test.py
 
 # dmesh API binaries link the transport library. One explicit rule each so the
 # source is a tracked prerequisite (rebuilds on edit).

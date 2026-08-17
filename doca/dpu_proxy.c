@@ -1666,7 +1666,7 @@ static void px_l7_fill_flow(struct objects *objs, const struct px_conn *c,
     flow->peer_pod    = c->pub.is_reply ? c->pub.peer_pod : c->pub.src_pod;
     flow->mode        = c->l7_mode;
     flow->is_reply    = (uint8_t)(c->pub.is_reply != 0);
-    /* Identity as the DPU granted it at registration, not as the pod claims it. */
+    /* Workload bound to this Pod's registration, never read from payload. */
     struct pod_state *sp = find_pod_by_id(objs, c->pub.src_pod);
     if (sp)
         memcpy(flow->workload, sp->workload, sizeof(flow->workload));

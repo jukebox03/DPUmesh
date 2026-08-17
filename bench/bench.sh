@@ -33,13 +33,23 @@ LINKERD_BENCH_DIR="$PROJ_ROOT/linkerd/bench"
 LINKERD_MANIFEST="$LINKERD_BENCH_DIR/k8s/pods.yaml"
 BENCH_LINKERD="${BENCH_LINKERD:-0}"
 
+# Trusted workload registration is opt-in for compatibility with existing L4
+# campaigns. `required` provisions a Host-only keyring and a namespace-scoped
+# node agent; no key or authoritative claims are mounted into application Pods.
+DPUMESH_TRUSTED_REGISTRATION="${DPUMESH_TRUSTED_REGISTRATION:-off}"
+DPUMESH_REGISTRATION_KEY_DIR_DPU="${DPUMESH_REGISTRATION_KEY_DIR_DPU:-/etc/dpumesh/registration.keys}"
+DPUMESH_REGISTRATION_ISSUER="${DPUMESH_REGISTRATION_ISSUER:-dpumesh-node-agent}"
+DPUMESH_REGISTRATION_KEY_ID="${DPUMESH_REGISTRATION_KEY_ID:-node-hmac-v1}"
+DPUMESH_ATTEST_SOCKET="${DPUMESH_ATTEST_SOCKET:-}"
+DPUMESH_REQUIRE_TRUSTED_WORKLOAD="${DPUMESH_REQUIRE_TRUSTED_WORKLOAD:-}"
+
 INCLUDE_SRC="$PROJ_ROOT/include"
 DOCA_SRC="$PROJ_ROOT/doca"
 # The DPU binary also compiles the L7 adapter contract and its consumer.
 LINKERD_INCLUDE_SRC="$PROJ_ROOT/linkerd/include"
 LINKERD_SHIM_SRC="$PROJ_ROOT/linkerd/shim"
-# What L7_BACKEND=linkerd needs built on the DPU: the staticlib and the mock
-# control plane. `rust` and `port` are siblings there because
+# What L7_BACKEND=linkerd needs built on the DPU. `rust` and `port` are siblings
+# there because
 # linkerd/rust/Cargo.toml resolves the port by relative path.
 LINKERD_RUST_SRC="$PROJ_ROOT/linkerd/rust"
 LINKERD_PORT_SRC="$PROJ_ROOT/linkerd/port/linkerd2-proxy"
@@ -70,6 +80,8 @@ IMG_BENCH_GRPC="bench/bench-grpc:latest"
 IMG_ECHO_GRPC="bench/echo-grpc:latest"
 IMG_BENCH_TCP="bench/bench-tcp:latest"
 IMG_ECHO_TCP="bench/echo-tcp:latest"
+IMG_WORKLOAD_AGENT="bench/dpumesh-workload-agent:latest"
+IMG_LINKERD_GATEWAY="bench/dpumesh-linkerd-cp-gateway:latest"
 # BENCH_ENVOY_DEBUG=1 selects the unstripped build of the same release, which
 # resolves sidecar symbols in a profile.
 if [ "${BENCH_ENVOY_DEBUG:-0}" = 1 ]; then
@@ -340,6 +352,15 @@ build_images() {
     step "=== Building Docker images (scope=$scope) ==="
     collect_doca_libs
     echo "$HOST_PASS" | sudo -S true 2>/dev/null
+    if [ "$DPUMESH_TRUSTED_REGISTRATION" = required ] ||
+       [ "$DPUMESH_TRUSTED_REGISTRATION" = 1 ]; then
+        build_image "$BENCH_DIR/docker/workload_attest.Dockerfile" \
+            "$IMG_WORKLOAD_AGENT" "$PROJ_ROOT"
+    fi
+    if [ "${L7_BACKEND:-null}" = linkerd ]; then
+        build_image "$BENCH_DIR/docker/linkerd_cp_gateway.Dockerfile" \
+            "$IMG_LINKERD_GATEWAY" "$PROJ_ROOT"
+    fi
     if [ "$scope" != grpc ]; then
         build_image "$BENCH_DIR/docker/bench_dpumesh.Dockerfile" "$IMG_BENCH_DPU" "$PROJ_ROOT"
         build_image "$BENCH_DIR/docker/echo_dpumesh.Dockerfile"  "$IMG_ECHO_DPU"  "$PROJ_ROOT"
@@ -388,51 +409,47 @@ stop_dpu() {
     sleep 5
 }
 
-# DPU paths for the static library, mock control plane and fixtures.
+# DPU paths for the static library and provisioned identity.
 dpu_home_cached=""
 dpu_home() {
     [ -n "$dpu_home_cached" ] || dpu_home_cached=$(ssh_dpu 'echo $HOME')
     printf '%s' "$dpu_home_cached"
 }
 linkerd_build_dir() { printf '%s' "$(dpu_home)/$DPU_L7_BUILD"; }
-linkerd_mock_dir()  { printf '%s' "${LINKERD_MOCK_DIR:-$(linkerd_build_dir)/mock}"; }
 linkerd_staticlib() {
     printf '%s' "${L7_LIB_PATH:-$(linkerd_build_dir)/rust/target/release/libdmesh_l7.a}"
 }
-linkerd_data_dir() {
-    printf '%s' "${LINKERD_DATA_DIR:-$(linkerd_build_dir)/port/linkerd2-proxy/linkerd/app/integration/src/data}"
-}
 # The DPU's workload identity material: the directory holding its key, its
 # service-account token and the trust anchors it validates the control plane
-# with. The defaults are the port's test fixture; a deployment overrides them
-# with the material provisioned for the DPU.
+# with. These defaults are provisioned by linkerd_identity.sh.
 linkerd_identity_dir() {
-    printf '%s' "${LINKERD_IDENTITY_DIR:-$(linkerd_data_dir)/$LINKERD_FIXTURE}"
+    printf '%s' "${LINKERD_IDENTITY_DIR:-/etc/dpumesh/linkerd-identity}"
 }
 linkerd_trust_anchors() {
-    printf '%s' "${LINKERD_TRUST_ANCHORS:-$(linkerd_data_dir)/ca1.pem}"
+    printf '%s' "${LINKERD_TRUST_ANCHORS:-/etc/dpumesh/linkerd-identity/trust-anchors.pem}"
 }
-LINKERD_FIXTURE="${LINKERD_FIXTURE:-default-default}"
-# Linkerd backend address for the selected DPUmesh service.
-LINKERD_BACKEND_ADDR="${LINKERD_BACKEND_ADDR:-10.96.0.11:9092}"
+linkerd_service_target_file() {
+    printf '%s' "${DPUMESH_L7_SERVICE_TARGETS_FILE:-$(linkerd_build_dir)/service-targets.v1}"
+}
+# Identity names are connection-specific. The local name is the identity
+# certified for this DPU proxy; the other three names authenticate the Linkerd
+# services it dials.
+LINKERD_LOCAL_NAME="${LINKERD_LOCAL_NAME:-dpumesh-dpu.test-bench.serviceaccount.identity.linkerd.cluster.local}"
+LINKERD_IDENTITY_NAME="${LINKERD_IDENTITY_NAME:-linkerd-identity.linkerd.serviceaccount.identity.linkerd.cluster.local}"
+LINKERD_DST_NAME="${LINKERD_DST_NAME:-linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local}"
+LINKERD_POLICY_NAME="${LINKERD_POLICY_NAME:-$LINKERD_DST_NAME}"
 
-# Which control plane the DPU proxy talks to. The mock identity, destination
-# and policy servers are test fixtures: they run only for a benchmark, and
-# LINKERD_MOCK_CONTROL_PLANE=0 points the proxy at a deployed control plane
-# instead. Everything the proxy needs is then deploy-time configuration, and a
-# missing piece is a startup failure rather than a silent fixture.
-LINKERD_MOCK_CONTROL_PLANE="${LINKERD_MOCK_CONTROL_PLANE:-1}"
-if [ "$LINKERD_MOCK_CONTROL_PLANE" = 1 ]; then
-    LINKERD_DST_ADDR="${LINKERD_DST_ADDR:-127.0.0.1:8089}"
-    LINKERD_POLICY_ADDR="${LINKERD_POLICY_ADDR:-127.0.0.1:8087}"
-    LINKERD_IDENTITY_ADDR="${LINKERD_IDENTITY_ADDR:-127.0.0.1:8088}"
-fi
+# Management-link gateway addresses for the deployed Linkerd control plane.
+# TLS remains end-to-end; these listeners only relay TCP.
+LINKERD_DST_ADDR="${LINKERD_DST_ADDR:-192.168.100.1:28086}"
+LINKERD_POLICY_ADDR="${LINKERD_POLICY_ADDR:-192.168.100.1:28087}"
+LINKERD_IDENTITY_ADDR="${LINKERD_IDENTITY_ADDR:-192.168.100.1:28088}"
 
 # Synchronize the embedded adapter and port sources.
 sync_linkerd_sources() {
     local dest; dest=$(linkerd_build_dir)
     step "=== Syncing linkerd sources to DPU ($DPU_HOST:$dest) ==="
-    ssh_dpu "mkdir -p '$dest/rust' '$dest/port/linkerd2-proxy' '$dest/mock'"
+    ssh_dpu "mkdir -p '$dest/rust' '$dest/port/linkerd2-proxy'"
     # Preserve remote build outputs.
     local ex=(--exclude='.git' --exclude='.git/' --exclude='target/'
               --exclude='build/' --exclude='*.o' --exclude='*.a')
@@ -448,7 +465,7 @@ sync_linkerd_sources() {
 build_linkerd_artifacts() {
     local dest; dest=$(linkerd_build_dir)
     local cargo="$LINKERD_CARGO +$LINKERD_TOOLCHAIN"
-    step "=== Building linkerd artifacts on DPU (libdmesh_l7.a + mock control plane) ==="
+    step "=== Building Linkerd adapter on DPU (libdmesh_l7.a) ==="
     # Use pinned dependency graphs.
     if ! ssh_dpu "test -f '$dest/rust/Cargo.lock'"; then
         err "missing $dest/rust/Cargo.lock — a reproducible build needs it"
@@ -461,54 +478,53 @@ build_linkerd_artifacts() {
         err "libdmesh_l7.a build failed:"; printf '%s\n' "$out" | tail -40; exit 1
     fi
     info "libdmesh_l7.a built ($(linkerd_staticlib))"
-    if ! out=$(ssh_dpu "cd '$dest/port/linkerd2-proxy' && $cargo build --release --locked \
-                        -p linkerd-app-integration \
-                        --bin mock-identity --bin mock-destination --bin mock-policy" 2>&1); then
-        err "mock control plane build failed:"; printf '%s\n' "$out" | tail -40; exit 1
-    fi
-    if ! out=$(ssh_dpu "install -D -m 0755 -t '$(linkerd_mock_dir)' \
-                        '$dest/port/linkerd2-proxy/target/release/mock-identity' \
-                        '$dest/port/linkerd2-proxy/target/release/mock-destination' \
-                        '$dest/port/linkerd2-proxy/target/release/mock-policy'" 2>&1); then
-        err "staging the mock binaries failed:"; printf '%s\n' "$out"; exit 1
-    fi
-    info "mock control plane staged ($(linkerd_mock_dir))"
 }
 
 # Validate Linkerd artifacts and adapter symbols.
 preflight_linkerd() {
     local lib; lib=$(linkerd_staticlib)
-    local mocks; mocks=$(linkerd_mock_dir)
     local data; data=$(linkerd_identity_dir)
     local anchors; anchors=$(linkerd_trust_anchors)
-    if [ "$LINKERD_MOCK_CONTROL_PLANE" != 1 ]; then
-        local unset_vars=""
-        for v in LINKERD_DST_ADDR LINKERD_POLICY_ADDR LINKERD_IDENTITY_ADDR; do
-            [ -n "${!v:-}" ] || unset_vars="$unset_vars $v"
-        done
-        if [ -n "$unset_vars" ]; then
-            err "LINKERD_MOCK_CONTROL_PLANE=0 needs the deployed control plane's"
-            err "addresses:$unset_vars"
-            exit 1
-        fi
-        info "control plane: deployed (dst=$LINKERD_DST_ADDR policy=$LINKERD_POLICY_ADDR" \
-             "identity=$LINKERD_IDENTITY_ADDR)"
+    local unset_vars=""
+    for v in LINKERD_DST_ADDR LINKERD_POLICY_ADDR LINKERD_IDENTITY_ADDR \
+             LINKERD_DST_NAME LINKERD_POLICY_NAME LINKERD_IDENTITY_NAME \
+             LINKERD_LOCAL_NAME; do
+        [ -n "${!v:-}" ] || unset_vars="$unset_vars $v"
+    done
+    if [ -n "$unset_vars" ]; then
+        err "deployed Linkerd control plane configuration is missing:$unset_vars"
+        exit 1
     fi
+    info "control plane: deployed (dst=$LINKERD_DST_ADDR policy=$LINKERD_POLICY_ADDR" \
+         "identity=$LINKERD_IDENTITY_ADDR)"
+    ssh_dpu "test -r '$(linkerd_service_target_file)'" || {
+        err "versioned Service target feed is missing: $(linkerd_service_target_file)"
+        exit 1
+    }
     local missing
-    missing=$(ssh_dpu "for f in '$lib' '$data/token.txt' '$anchors'; do
-                           [ -r \"\$f\" ] || echo \"unreadable: \$f\"
+    missing=$(ssh_dpu "[ -r '$lib' ] || echo 'unreadable: $lib'
+                       for f in '$data/token.txt' '$data/csr.der' '$data/key.p8' '$anchors'; do
+                           echo '$DPU_PASS' | sudo -S test -r \"\$f\" 2>/dev/null ||
+                               echo \"unreadable: \$f\"
                        done
-                       if [ '$LINKERD_MOCK_CONTROL_PLANE' = 1 ]; then
-                           for m in mock-identity mock-destination mock-policy; do
-                               [ -x '$mocks'/\$m ] || echo \"not executable: $mocks/\$m\"
-                           done
-                       fi")
+                       echo '$DPU_PASS' | sudo -S test -s '$data/token.txt' 2>/dev/null ||
+                           echo 'empty: $data/token.txt'")
     if [ -n "$missing" ]; then
         err "linkerd preflight failed:"
-        printf '  %s\n' $missing
+        printf '%s\n' "$missing" | sed 's/^/  /'
         err "build them with: L7_BACKEND=linkerd $0 linkerdbuild"
         exit 1
     fi
+
+    local csr_san
+    csr_san=$(ssh_dpu "echo '$DPU_PASS' | sudo -S openssl req -inform DER \
+                           -in '$data/csr.der' -noout -text 2>/dev/null" || true)
+    case "$csr_san" in
+        *"DNS:$LINKERD_LOCAL_NAME"*) ;;
+        *) err "identity CSR does not contain DNS:$LINKERD_LOCAL_NAME"
+           err "  CSR: $data/csr.der"
+           exit 1 ;;
+    esac
 
     # Check the exported adapter and external runtime backend boundary.
     local defined undefined absent="" s
@@ -541,36 +557,42 @@ preflight_linkerd() {
         esac
     done
     info "linkerd preflight OK (staticlib exports the contract and needs no port datapath," \
-         "identity material readable, control plane=$([ "$LINKERD_MOCK_CONTROL_PLANE" = 1 ] &&
-         echo mock || echo deployed))"
+         "identity material readable, deployed control plane required)"
 }
 
-start_mocks() {
-    step "=== Starting mock control plane (identity/destination/policy) ==="
-    ssh_dpu "cat > /tmp/start_mocks.sh << 'MOCKS'
-#!/bin/bash
-sleep 1
-cd /tmp
-MOCK_IDENTITY_ADDR=127.0.0.1:8088 MOCK_IDENTITY_DATA_DIR=$(linkerd_data_dir) \
-  MOCK_IDENTITY_FIXTURE=$LINKERD_FIXTURE \
-  setsid nohup $(linkerd_mock_dir)/mock-identity > /tmp/mock-identity.log 2>&1 < /dev/null &
-MOCK_DESTINATION_ADDR=127.0.0.1:8089 MOCK_DESTINATION_BACKEND=$LINKERD_BACKEND_ADDR \
-  setsid nohup $(linkerd_mock_dir)/mock-destination > /tmp/mock-destination.log 2>&1 < /dev/null &
-MOCK_POLICY_ADDR=127.0.0.1:8087 MOCK_POLICY_BACKEND=$LINKERD_BACKEND_ADDR \
-  setsid nohup $(linkerd_mock_dir)/mock-policy > /tmp/mock-policy.log 2>&1 < /dev/null &
-sleep 2
-pgrep -c -f 'l7build/mock/mock-' || true
-MOCKS
-chmod +x /tmp/start_mocks.sh"
-    # Restart the three mock processes.
-    local n; n=$(ssh_dpu "echo '$DPU_PASS' | sudo -S pkill -f 'mock-(identity|destination|policy)\$' 2>/dev/null; \
-                          bash /tmp/start_mocks.sh" 2>&1 | tail -1)
-    if [ "$n" != 3 ]; then
-        err "mock control plane did not start (got '$n' of 3); see /tmp/mock-*.log on the DPU"
-        ssh_dpu "tail -3 /tmp/mock-identity.log /tmp/mock-destination.log /tmp/mock-policy.log" || true
-        exit 1
+wait_linkerd_ready() {
+    local base_addr="${LINKERD_ADMIN_ADDR:-127.0.0.1:4191}"
+    local base_port="${base_addr##*:}"
+    local selection="${DPUMESH_L7_LINKERD_WORKER:-0}"
+    local workers="${DPUMESH_ARM_WORKERS:-1}"
+    local timeout_s="${LINKERD_READY_TIMEOUT:-30}"
+    local ports="$base_port"
+    if [ "$selection" = all ]; then
+        ports=""
+        local worker
+        for ((worker = 0; worker < workers; worker++)); do
+            ports="${ports:+$ports }$((base_port + worker))"
+        done
     fi
-    info "mock control plane up (identity :8088, destination :8089, policy :8087)"
+
+    step "=== Waiting for Linkerd identity and control-plane readiness ==="
+    if ! ssh_dpu "deadline=\$((SECONDS + $timeout_s))
+ports='$ports'
+while [ \$SECONDS -lt \$deadline ]; do
+    pending=''
+    for port in \$ports; do
+        curl -fsS --max-time 1 http://127.0.0.1:\$port/ready >/dev/null 2>&1 || pending=\"\$pending \$port\"
+    done
+    [ -z \"\$pending\" ] && exit 0
+    sleep 1
+done
+echo \"not ready on admin port(s):\$pending\" >&2
+exit 1"; then
+        err "Linkerd did not become ready within ${timeout_s}s"
+        ssh_dpu "grep -E 'identity|control|certif|WARN|ERROR' '$DPU_LOG' | tail -40" || true
+        return 1
+    fi
+    info "Linkerd ready on admin port(s): $ports"
 }
 
 start_dpu() {
@@ -584,40 +606,51 @@ start_dpu() {
     # Linkerd environment and identity material.
     local l7_env=""
     if [ "${L7_BACKEND:-null}" = linkerd ]; then
-        local id_name="${LINKERD_LOCAL_NAME:-default.default.serviceaccount.identity.linkerd.cluster.local}"
+        local id_name="$LINKERD_LOCAL_NAME"
+        local default_policy_workload='{"ns":"default","pod":"dpumesh-dpu"}'
+        local policy_workload="${LINKERD_WORKLOAD:-$default_policy_workload}"
+        local destination_context="${LINKERD_DESTINATION_CONTEXT:-$policy_workload}"
+        local policy_workload_q destination_context_q
+        printf -v policy_workload_q '%q' "$policy_workload"
+        printf -v destination_context_q '%q' "$destination_context"
         ssh_dpu "cat > /tmp/dpumesh-l7.env << 'L7ENV'
-LINKERD2_PROXY_DESTINATION_SVC_ADDR=${LINKERD_DST_ADDR:-127.0.0.1:8089}
-LINKERD2_PROXY_DESTINATION_SVC_NAME=$id_name
-LINKERD2_PROXY_POLICY_SVC_ADDR=${LINKERD_POLICY_ADDR:-127.0.0.1:8087}
-LINKERD2_PROXY_POLICY_SVC_NAME=$id_name
-LINKERD2_PROXY_POLICY_WORKLOAD=${LINKERD_WORKLOAD:-default:dpumesh}
-LINKERD2_PROXY_IDENTITY_SVC_ADDR=${LINKERD_IDENTITY_ADDR:-127.0.0.1:8088}
-LINKERD2_PROXY_IDENTITY_SVC_NAME=$id_name
+LINKERD2_PROXY_DESTINATION_SVC_ADDR=$LINKERD_DST_ADDR
+LINKERD2_PROXY_DESTINATION_SVC_NAME=$LINKERD_DST_NAME
+LINKERD2_PROXY_POLICY_SVC_ADDR=$LINKERD_POLICY_ADDR
+LINKERD2_PROXY_POLICY_SVC_NAME=$LINKERD_POLICY_NAME
+LINKERD2_PROXY_POLICY_WORKLOAD=$policy_workload_q
+LINKERD2_PROXY_IDENTITY_SVC_ADDR=$LINKERD_IDENTITY_ADDR
+LINKERD2_PROXY_IDENTITY_SVC_NAME=$LINKERD_IDENTITY_NAME
 LINKERD2_PROXY_IDENTITY_LOCAL_NAME=$id_name
 LINKERD2_PROXY_IDENTITY_DIR=$(linkerd_identity_dir)
 LINKERD2_PROXY_IDENTITY_TOKEN_FILE=$(linkerd_identity_dir)/token.txt
+LINKERD2_PROXY_DESTINATION_CONTEXT=$destination_context_q
 LINKERD2_PROXY_DESTINATION_PROFILE_NETWORKS=0.0.0.0/0
-LINKERD2_PROXY_CLUSTER_NETWORKS=0.0.0.0/0
+LINKERD2_PROXY_POLICY_CLUSTER_NETWORKS=0.0.0.0/0
 LINKERD2_PROXY_INBOUND_LISTEN_ADDR=127.0.0.1:0
+LINKERD2_PROXY_INBOUND_DEFAULT_POLICY=all-unauthenticated
 LINKERD2_PROXY_OUTBOUND_LISTEN_ADDR=127.0.0.1:0
 LINKERD2_PROXY_CONTROL_LISTEN_ADDR=127.0.0.1:0
 LINKERD2_PROXY_ADMIN_LISTEN_ADDR=${LINKERD_ADMIN_ADDR:-127.0.0.1:4191}
 LINKERD2_PROXY_LOG=${LINKERD_LOG:-warn,linkerd=info,dmesh_l7=info}
 DPUMESH_L7_LINKERD_WORKER=${DPUMESH_L7_LINKERD_WORKER:-0}
+DPUMESH_L7_SERVICE_TARGETS_FILE=$(linkerd_service_target_file)
 DPUMESH_L7_FAIL_CLOSED=${DPUMESH_L7_FAIL_CLOSED:-0}
 DMESH_L7_TX_RESERVE=${DMESH_L7_TX_RESERVE:-1}
 L7ENV
-{ printf 'LINKERD2_PROXY_IDENTITY_TRUST_ANCHORS=\"'; cat $(linkerd_trust_anchors); printf '\"\n'; } >> /tmp/dpumesh-l7.env"
+{ printf 'LINKERD2_PROXY_IDENTITY_TRUST_ANCHORS=\"'; \
+  echo '$DPU_PASS' | sudo -S cat $(linkerd_trust_anchors) 2>/dev/null; \
+  printf '\"\n'; } >> /tmp/dpumesh-l7.env"
         l7_env='set -a; . /tmp/dpumesh-l7.env; set +a;'
     fi
     local dpa_threads="${DPUMESH_DPA_THREADS:-}"
     local rings="${DPUMESH_RINGS_PER_POD:-}"
     local workers="${DPUMESH_ARM_WORKERS:-}"
+    local trusted_registration="$DPUMESH_TRUSTED_REGISTRATION"
+    local registration_key_dir="$DPUMESH_REGISTRATION_KEY_DIR_DPU"
+    local registration_issuer="$DPUMESH_REGISTRATION_ISSUER"
     step "=== Starting dpumesh_dpu (l7_decision='$l7_decision' l7_opaque='$l7_opaque' l7_full='$l7_full' dpa_threads='$dpa_threads' rings_per_pod='$rings' arm_workers='$workers') ==="
     stop_dpu
-    if [ "${L7_BACKEND:-null}" = linkerd ] && [ "$LINKERD_MOCK_CONTROL_PLANE" = 1 ]; then
-        start_mocks
-    fi
     local dpu_home; dpu_home=$(ssh_dpu 'echo $HOME')
     # Start one DPU process.
     ssh_dpu "cat > /tmp/start_dpu_bench.sh << 'LAUNCHER'
@@ -625,7 +658,7 @@ L7ENV
 running=\$(pgrep -x dpumesh_dpu | head -1)
 if [ -n \"\$running\" ]; then echo \"\$running\"; exit 0; fi
 ulimit -c unlimited
-screen -dmS dpumesh-bench bash -c \"ulimit -c unlimited; cd $dpu_home/$DPU_BUILD && $l7_env DPUMESH_L7_DECISION_SVC=$l7_decision DPUMESH_L7_OPAQUE_SVC=$l7_opaque DPUMESH_L7_SVC=$l7_full DPUMESH_L7_NULL_TRACE=$l7_trace DPUMESH_L7_FRAMED_RR=$l7_rr DPUMESH_DPA_THREADS=$dpa_threads DPUMESH_RINGS_PER_POD=$rings DPUMESH_ARM_WORKERS=$workers ./dpumesh_dpu $DPU_PCI -l $log_level > $DPU_LOG 2>&1\"
+screen -dmS dpumesh-bench bash -c \"ulimit -c unlimited; cd $dpu_home/$DPU_BUILD && $l7_env DPUMESH_TRUSTED_REGISTRATION=$trusted_registration DPUMESH_REGISTRATION_KEY_DIR=$registration_key_dir DPUMESH_REGISTRATION_ISSUER=$registration_issuer DPUMESH_L7_DECISION_SVC=$l7_decision DPUMESH_L7_OPAQUE_SVC=$l7_opaque DPUMESH_L7_SVC=$l7_full DPUMESH_L7_NULL_TRACE=$l7_trace DPUMESH_L7_FRAMED_RR=$l7_rr DPUMESH_DPA_THREADS=$dpa_threads DPUMESH_RINGS_PER_POD=$rings DPUMESH_ARM_WORKERS=$workers ./dpumesh_dpu $DPU_PCI -l $log_level > $DPU_LOG 2>&1\"
 sleep 2
 pgrep -x dpumesh_dpu | head -1 || echo NO_PID
 LAUNCHER
@@ -880,6 +913,31 @@ clean_failed_pods() {
     fi
 }
 
+prepare_trusted_registration() {
+    case "$DPUMESH_TRUSTED_REGISTRATION" in
+        off|0|dev)
+            DPUMESH_TRUSTED_REGISTRATION=off
+            DPUMESH_ATTEST_SOCKET=""
+            DPUMESH_REQUIRE_TRUSTED_WORKLOAD=""
+            ;;
+        required|1)
+            DPUMESH_TRUSTED_REGISTRATION=required
+            DPUMESH_ATTEST_SOCKET="${DPUMESH_ATTEST_SOCKET:-/run/dpumesh/attest.sock}"
+            case "$DPUMESH_ATTEST_SOCKET" in
+                /run/dpumesh/*) ;;
+                *) err "benchmark attestation socket must be under /run/dpumesh"; exit 1 ;;
+            esac
+            DPUMESH_REQUIRE_TRUSTED_WORKLOAD=1
+            export DPUMESH_ATTEST_SOCKET DPUMESH_REQUIRE_TRUSTED_WORKLOAD
+            "$BENCH_DIR/workload_attest.sh" prepare
+            ;;
+        *)
+            err "DPUMESH_TRUSTED_REGISTRATION must be off or required"
+            exit 1
+            ;;
+    esac
+}
+
 # Render bench/k8s/pods.yaml with envsubst and apply it (replicas: 0).
 apply_manifest() {
     configure_host_numa
@@ -887,6 +945,7 @@ apply_manifest() {
     command -v envsubst >/dev/null 2>&1 || { err "envsubst not found (apt install gettext-base)"; exit 1; }
     export IMG_BENCH_DPU IMG_ECHO_DPU IMG_LOOPBACK_DPU IMG_VERBS_DPU IMG_PRELOAD_DPU IMG_PRELOAD_SOCK IMG_BENCH_TCP IMG_ECHO_TCP IMG_ENVOY IMG_BENCH_GRPC IMG_ECHO_GRPC
     export CTRL_PORT TCP_PORT HOST_PCI LIB_OUT BENCH_NUMA_NODE
+    export DPUMESH_ATTEST_SOCKET DPUMESH_REQUIRE_TRUSTED_WORKLOAD
     export DPUMESH_RINGS_PER_POD="${DPUMESH_RINGS_PER_POD:-2}" \
            ASYNC_THREADS="${ASYNC_THREADS:-4}" \
            BENCH_DST_SERVICES ECHO_13_SERVICE ECHO_14_SERVICE \
@@ -1000,11 +1059,13 @@ deploy() {
     ensure_namespace
     ensure_envoy_tls_secret
     clean_failed_pods
+    prepare_trusted_registration
     apply_manifest
+    if [ "${L7_BACKEND:-null}" = linkerd ]; then
+        "$BENCH_DIR/linkerd_service_registry.sh" start
+    fi
     sync_sources
-    # The staticlib the DPU binary links has to exist before it is linked, and
-    # the mocks before the proxy inside it asks for a certificate. Both are
-    # built from this tree, so the deploy carries what it was run from.
+    # The staticlib the DPU binary links has to exist before it is linked.
     if [ "${L7_BACKEND:-null}" = linkerd ]; then
         sync_linkerd_sources
         build_linkerd_artifacts
@@ -1017,8 +1078,17 @@ deploy() {
     fi
     build_images
     [ "$BENCH_DEPLOY_SCOPE" = core ] || ensure_envoy_image
+    if [ "$DPUMESH_TRUSTED_REGISTRATION" = required ]; then
+        IMG_WORKLOAD_AGENT="$IMG_WORKLOAD_AGENT" "$BENCH_DIR/workload_attest.sh" deploy
+    fi
+    if [ "${L7_BACKEND:-null}" = linkerd ]; then
+        IMG_LINKERD_GATEWAY="$IMG_LINKERD_GATEWAY" "$BENCH_DIR/linkerd_cp_gateway.sh" start
+        "$BENCH_DIR/linkerd_identity.sh" start-agent
+    fi
     start_dpu
     start_pods
+    [ "${L7_BACKEND:-null}" = linkerd ] && "$BENCH_DIR/linkerd_service_registry.sh" sync
+    [ "${L7_BACKEND:-null}" = linkerd ] && wait_linkerd_ready
     pin_pods fair
     [ "${L7_BACKEND:-null}" = linkerd ] && validate_linkerd_session
     info "=== Deploy complete ==="
@@ -1042,12 +1112,22 @@ validate_linkerd_session() {
     case "$reply" in
         OK*) info "single-connection L7 validation passed" ;;
         *)   err "single-connection L7 validation failed: $reply"
-             err "  see: $0 dpulog 200, and /tmp/mock-*.log on the DPU"
+             err "  see: $0 dpulog 200 and the gateway/control-plane Pod logs"
              return 1 ;;
     esac
 }
 
-cleanup() { info "Deleting namespace $NS"; kubectl delete ns "$NS" --ignore-not-found=true 2>/dev/null || true; stop_dpu; }
+cleanup() {
+    info "Deleting namespace $NS"
+    kubectl delete ns "$NS" --ignore-not-found=true 2>/dev/null || true
+    stop_dpu
+    if [ "$DPUMESH_TRUSTED_REGISTRATION" = required ] ||
+       [ "$DPUMESH_TRUSTED_REGISTRATION" = 1 ]; then
+        "$BENCH_DIR/workload_attest.sh" stop || true
+    fi
+    "$BENCH_DIR/linkerd_service_registry.sh" stop >/dev/null 2>&1 || true
+    "$BENCH_DIR/linkerd_identity.sh" stop-agent >/dev/null 2>&1 || true
+}
 
 show_logs() {
     for app in bench-dpumesh echo-dpumesh echo-dpumesh-13 echo-dpumesh-14 loopback-dpumesh verbs-dpumesh preload-dpumesh preload-echo preload-bench bench-tcp echo-tcp bench-tcp-strict echo-tcp-strict; do
@@ -1544,7 +1624,7 @@ Usage: $0 <command> [args]
 
   deploy                                     build + DPU + images + pods + pin (the ONLY bring-up path)
   build | restart                            rebuild the DPU binary | restart the DPU alone (no pod may be meshed)
-  linkerdbuild                               sync + build libdmesh_l7.a and the mock control plane on the DPU
+  linkerdbuild                               sync + build libdmesh_l7.a on the DPU
                                              (deploy does this itself when L7_BACKEND=linkerd)
   latency|bandwidth|rate|all [dpumesh|tcp|both]   benchmark families -> CSVs under $OUT
   point <sol> <req> <reply> <conc> <dur> <warmup> <threads> [reconn]   one raw RUN (reconn = conn-churn period)
@@ -1558,10 +1638,12 @@ Usage: $0 <command> [args]
 
 Deploy knobs (env): BENCH_NUMA_POLICY=local|auto BENCH_DEPLOY_SCOPE=all|core|l4|grpc
                     BENCH_LINKERD=1 adds the injected linkerd L7 pods (grpc scope)
+                    DPUMESH_TRUSTED_REGISTRATION=required enables the root Host
+                    workload agent, signed grants, and DPU fail-closed admission
                     BENCH_DST_SERVICES=a,b,... assigns native client threads round-robin
                     ECHO_13_SERVICE/ECHO_14_SERVICE split the extra echo pods into services
-                    L7_BACKEND=null|linkerd selects the L7 consumer; linkerd builds
-                    libdmesh_l7.a and the mocks on the DPU and starts the mock CP
+                    L7_BACKEND=null|linkerd selects the L7 consumer; linkerd requires
+                    the deployed control plane and builds libdmesh_l7.a on the DPU
                     BENCH_GRPC_BUILD=release|asan (asan instruments echo_grpc only;
                     reports land in ASAN_LOG_DIR, default /var/log/dpumesh-asan)
 Sweep knobs (env): OUT LAT_DUR BW_DUR RATE_DUR WARMUP BW_CONC RATE_CONC RATE_THREADS LAT_SIZES BW_SIZES

@@ -129,6 +129,27 @@ static void client_message_recv_callback(struct doca_comch_event_msg_recv *event
 		}
 		break;
 
+	case DMESH_MSG_REG_CHALLENGE:
+		if (msg_len == sizeof(struct dmesh_registration_challenge_msg)) {
+			const struct dmesh_registration_challenge_msg *challenge =
+				(const struct dmesh_registration_challenge_msg *)recv_buffer;
+			if (challenge->version != DMESH_GRANT_VERSION ||
+			    challenge->reserved != 0) {
+				DOCA_LOG_ERR("Invalid registration challenge version/reserved");
+				break;
+			}
+			memcpy(objs->registration_challenge, challenge->nonce,
+			       sizeof(objs->registration_challenge));
+			__atomic_store_n(&objs->registration_trusted_required,
+			                 challenge->trusted_required ? 1 : 0,
+			                 __ATOMIC_RELAXED);
+			__atomic_store_n(&objs->registration_challenge_ready, 1,
+			                 __ATOMIC_RELEASE);
+		} else {
+			DOCA_LOG_ERR("Invalid REG_CHALLENGE message size: %u", msg_len);
+		}
+		break;
+
 	case DMESH_MSG_POD_INIT_RESULT:
 		if (msg_len == sizeof(struct dmesh_pod_init_result_msg)) {
 			const struct dmesh_pod_init_result_msg *im =

@@ -16,6 +16,7 @@
 #include "common.h"
 #include "object.h"
 #include "dpu_worker.h"
+#include "workload_grant.h"
 
 DOCA_LOG_REGISTER(DPU_MAIN);
 
@@ -45,6 +46,15 @@ int main(int argc, char **argv)
     result = doca_log_backend_set_sdk_level(sdk_log, DOCA_LOG_LEVEL_WARNING);
     if (result != DOCA_SUCCESS)
         goto exit;
+
+    char registration_error[256] = {0};
+    if (dmesh_registration_configure(objs, registration_error,
+                                     sizeof(registration_error)) != 0) {
+        DOCA_LOG_ERR("Trusted registration configuration failed: %s",
+                     registration_error);
+        result = DOCA_ERROR_INVALID_VALUE;
+        goto exit;
+    }
 
     /* Detect mode */
 #ifdef DOCA_ARCH_DPU
@@ -90,5 +100,5 @@ int main(int argc, char **argv)
 argp_cleanup:
     clean_argp();
 exit:
-    return 0;
+    return result == DOCA_SUCCESS ? 0 : 1;
 }

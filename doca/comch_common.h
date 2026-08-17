@@ -36,6 +36,8 @@ enum dmesh_msg_type {
     DMESH_MSG_POD_QUIESCED=8,  /* DPU→Host: remote mappings reclaimed; host may destroy exports */
     DMESH_MSG_REV_DOORBELL=9,  /* DPU→Host: reverse-ring wake notification */
     DMESH_MSG_POD_IDENTITY=10, /* Host→DPU: this pod's workload name, for the L7 layer */
+    DMESH_MSG_REG_CHALLENGE=11,/* DPU→Host: connection-bound trusted-registration nonce */
+    DMESH_MSG_WORKLOAD_GRANT=12,/* Host→DPU: node-agent-authorized workload grant */
 };
 
 /* POD_ASSIGNED only reserves an address. A channel is usable only after the DPU
@@ -140,21 +142,79 @@ struct dmesh_register_msg {
 _Static_assert(sizeof(struct dmesh_register_msg) == 12,
                "dmesh_register_msg ABI drift");
 
-/* Host→DPU: the workload this pod runs as, which the L7 layer needs and the
- * registration message cannot carry — that struct is checked by exact length on
- * both sides, so growing it would force host and DPU to be deployed in
- * lockstep. Sent on the registration connection before POD_REGISTER, so it is
- * in place before any byte flows, and bound to the slot the connection owns:
- * the DPU grants the identity rather than accepting a claim from the pod. A
- * replay is idempotent, and a host that does not send it simply leaves the
- * workload empty. */
-#define DMESH_WORKLOAD_MAX 64
+/* Development-only Host→DPU workload attribution. Required mode rejects this
+ * message and accepts only dmesh_workload_grant_msg below. It remains a
+ * separate fixed-size message so development Host/DPU versions fail on an ABI
+ * mismatch instead of silently truncating identity. */
+#define DMESH_WORKLOAD_MAX 384
 struct dmesh_identity_msg {
     enum dmesh_msg_type type;   /* = DMESH_MSG_POD_IDENTITY */
     char workload[DMESH_WORKLOAD_MAX];   /* NUL-terminated */
 };
-_Static_assert(sizeof(struct dmesh_identity_msg) == 68,
+_Static_assert(sizeof(struct dmesh_identity_msg) == 388,
                "dmesh_identity_msg ABI drift");
+
+/* Trusted workload registration is deliberately a separate, versioned wire
+ * contract. The DPU creates a fresh challenge for every Comch connection. The
+ * Host process can relay it to a root-owned node agent, but does not possess the
+ * HMAC key and therefore cannot choose or alter the returned claims. */
+#define DMESH_GRANT_VERSION 1u
+#define DMESH_REG_NONCE_SIZE 32u
+#define DMESH_GRANT_ID_SIZE 16u
+#define DMESH_GRANT_MAC_SIZE 32u
+#define DMESH_GRANT_ISSUER_MAX 64u
+#define DMESH_GRANT_KEY_ID_MAX 32u
+#define DMESH_POD_UID_MAX 64u
+#define DMESH_K8S_NAMESPACE_MAX 64u
+#define DMESH_K8S_NAME_MAX 254u
+
+struct dmesh_registration_challenge_msg {
+    uint8_t type;               /* = DMESH_MSG_REG_CHALLENGE */
+    uint8_t version;            /* = DMESH_GRANT_VERSION */
+    uint8_t trusted_required;   /* 1: POD_IDENTITY is rejected */
+    uint8_t reserved;           /* must be zero */
+    uint8_t nonce[DMESH_REG_NONCE_SIZE];
+};
+_Static_assert(sizeof(struct dmesh_registration_challenge_msg) == 36,
+               "dmesh_registration_challenge_msg ABI drift");
+
+/* Canonical v1 grant. Numeric fields are explicit little-endian byte strings;
+ * all text fields are NUL-terminated and zero-padded. The HMAC-SHA256 covers
+ * every byte before `mac`, including the message type and version. */
+struct dmesh_workload_grant_msg {
+    uint8_t type;               /* = DMESH_MSG_WORKLOAD_GRANT */
+    uint8_t version;            /* = DMESH_GRANT_VERSION */
+    uint8_t flags;              /* v1: zero */
+    uint8_t reserved;           /* zero */
+    uint8_t service_id_le[4];
+    uint8_t issued_at_le[8];
+    uint8_t expires_at_le[8];
+    uint8_t grant_id[DMESH_GRANT_ID_SIZE];
+    uint8_t nonce[DMESH_REG_NONCE_SIZE];
+    char issuer[DMESH_GRANT_ISSUER_MAX];
+    char key_id[DMESH_GRANT_KEY_ID_MAX];
+    char pod_uid[DMESH_POD_UID_MAX];
+    char namespace_name[DMESH_K8S_NAMESPACE_MAX];
+    char pod_name[DMESH_K8S_NAME_MAX];
+    char service_account[DMESH_K8S_NAME_MAX];
+    char node_name[DMESH_K8S_NAME_MAX];
+    uint8_t mac[DMESH_GRANT_MAC_SIZE];
+};
+_Static_assert(sizeof(struct dmesh_workload_grant_msg) == 1090,
+               "dmesh_workload_grant_msg ABI drift");
+
+/* Host→trusted-node-agent request, transported over a root-owned AF_UNIX
+ * SOCK_SEQPACKET socket. SO_PEERCRED, not request data, identifies the caller. */
+#define DMESH_ATTEST_MAGIC "DMESHAR1"
+struct dmesh_attest_request {
+    uint8_t magic[8];
+    uint8_t version;
+    uint8_t reserved[3];
+    uint8_t service_id_le[4];
+    uint8_t nonce[DMESH_REG_NONCE_SIZE];
+};
+_Static_assert(sizeof(struct dmesh_attest_request) == 48,
+               "dmesh_attest_request ABI drift");
 
 /* DPU→Host: the pod_id the DPU allocated for a pod_id==-1 registration. Byte
  * `type` at offset 0 (the host dispatches DPU→host messages by recv_buffer[0]). */
@@ -204,11 +264,6 @@ _Static_assert(sizeof(struct dmesh_pod_unregister_msg) == 8,
 _Static_assert(sizeof(struct dmesh_pod_quiesced_msg) == 8,
                "dmesh_pod_quiesced_msg ABI drift");
 
-/* Type-peek wrapper: control-path recv buffers are cast to this to read the
- * leading type, then re-cast to the concrete message struct (mmap/register). */
-struct dmesh_comch_msg {
-    enum dmesh_msg_type type;
-};
 doca_error_t
 export_mmap_to_remote(struct objects *objs, struct doca_mmap *mmap, void *buffer, size_t buf_size, enum mmap_type mmap_type);
 doca_error_t

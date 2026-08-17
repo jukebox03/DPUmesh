@@ -149,6 +149,7 @@ number was produced; reports carry the numbers.
 | [design/API.md](design/API.md) | the native `<dpumesh/dmesh.h>` contract: lifecycle, batching, EQ, errors |
 | [design/CORE.md](design/CORE.md) | host/DPA/ARM custody, rings, and replay barriers |
 | [design/CONTROL.md](design/CONTROL.md) | naming, identity, registry, control channels, and node scope |
+| [design/LINKERD_CONTROL.md](design/LINKERD_CONTROL.md) | current and target Linkerd control-plane interaction on the DPU |
 | [design/L7.md](design/L7.md) | the DPU-side Linkerd runtime, ownership, custody, and limits |
 | [design/GRPC.md](design/GRPC.md) | how the gRPC adapter maps chttp2 onto the transport |
 

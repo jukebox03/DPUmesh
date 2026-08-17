@@ -21,6 +21,14 @@ spec:
         - { name: BENCH_NUMA_NODE, value: "${BENCH_NUMA_NODE}" }
         - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
         - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
+        - { name: DPUMESH_ATTEST_SOCKET, value: "${DPUMESH_ATTEST_SOCKET}" }
+        - { name: DPUMESH_REQUIRE_TRUSTED_WORKLOAD, value: "${DPUMESH_REQUIRE_TRUSTED_WORKLOAD}" }
+        - name: _DPUMESH_POD_NAME
+          valueFrom: { fieldRef: { fieldPath: metadata.name } }
+        - name: _DPUMESH_POD_NAMESPACE
+          valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+        - name: DPUMESH_WORKLOAD
+          value: '{"ns":"$(_DPUMESH_POD_NAMESPACE)","pod":"$(_DPUMESH_POD_NAME)"}'
         - { name: BENCH_DST_SERVICE, value: "echo-dpumesh" }   # peer by k8s Service NAME (pure client)
         - { name: BENCH_DST_SERVICES, value: "${BENCH_DST_SERVICES}" } # optional per-thread CSV
         - { name: ASYNC_THREADS, value: "${ASYNC_THREADS}" }
@@ -30,9 +38,11 @@ spec:
         volumeMounts:
         - { mountPath: /dev/infiniband, name: infiniband }
         - { mountPath: /usr/local/lib/libdpumesh.so.4, name: libdpumesh-so, subPath: libdpumesh.so.4 }
+        - { mountPath: /run/dpumesh, name: dpumesh-attest, readOnly: true }
       volumes:
       - { name: infiniband, hostPath: { path: /dev/infiniband } }
       - { name: libdpumesh-so, hostPath: { path: ${LIB_OUT}, type: Directory } }
+      - { name: dpumesh-attest, hostPath: { path: /run/dpumesh, type: DirectoryOrCreate } }
 ---
 apiVersion: v1
 kind: Service
@@ -49,7 +59,7 @@ spec:
   replicas: 0
   selector: { matchLabels: { app: echo-dpumesh } }
   template:
-    metadata: { labels: { app: echo-dpumesh } }
+    metadata: { labels: { app: echo-dpumesh, dpumesh-service: echo-dpumesh } }
     spec:
       hostname: echo-dpumesh
       containers:
@@ -60,15 +70,19 @@ spec:
         - { name: BENCH_NUMA_NODE, value: "${BENCH_NUMA_NODE}" }
         - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
         - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
+        - { name: DPUMESH_ATTEST_SOCKET, value: "${DPUMESH_ATTEST_SOCKET}" }
+        - { name: DPUMESH_REQUIRE_TRUSTED_WORKLOAD, value: "${DPUMESH_REQUIRE_TRUSTED_WORKLOAD}" }
         - { name: DPUMESH_SERVICE, value: "echo-dpumesh" }     # identity: k8s Service name → registry
         - { name: ECHO_THREADS, value: "${ECHO_THREADS}" }
         securityContext: { privileged: true }
         volumeMounts:
         - { mountPath: /dev/infiniband, name: infiniband }
         - { mountPath: /usr/local/lib/libdpumesh.so.4, name: libdpumesh-so, subPath: libdpumesh.so.4 }
+        - { mountPath: /run/dpumesh, name: dpumesh-attest, readOnly: true }
       volumes:
       - { name: infiniband, hostPath: { path: /dev/infiniband } }
       - { name: libdpumesh-so, hostPath: { path: ${LIB_OUT}, type: Directory } }
+      - { name: dpumesh-attest, hostPath: { path: /run/dpumesh, type: DirectoryOrCreate } }
 ---
 # echo-dpumesh-13 / -14 (pod_id=13,14): extra backends for the weighted-LB demo
 # (DPU LBs service 11 across pods 11,13,14). Same echo image, different id.
@@ -80,7 +94,7 @@ spec:
   replicas: 0
   selector: { matchLabels: { app: echo-dpumesh-13 } }
   template:
-    metadata: { labels: { app: echo-dpumesh-13 } }
+    metadata: { labels: { app: echo-dpumesh-13, dpumesh-service: ${ECHO_13_SERVICE} } }
     spec:
       hostname: echo-dpumesh-13
       containers:
@@ -91,15 +105,19 @@ spec:
         - { name: BENCH_NUMA_NODE, value: "${BENCH_NUMA_NODE}" }
         - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
         - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
+        - { name: DPUMESH_ATTEST_SOCKET, value: "${DPUMESH_ATTEST_SOCKET}" }
+        - { name: DPUMESH_REQUIRE_TRUSTED_WORKLOAD, value: "${DPUMESH_REQUIRE_TRUSTED_WORKLOAD}" }
         - { name: DPUMESH_SERVICE, value: "${ECHO_13_SERVICE}" } # default: same-service fan-out
         - { name: ECHO_THREADS, value: "${ECHO_THREADS}" }
         securityContext: { privileged: true }
         volumeMounts:
         - { mountPath: /dev/infiniband, name: infiniband }
         - { mountPath: /usr/local/lib/libdpumesh.so.4, name: libdpumesh-so, subPath: libdpumesh.so.4 }
+        - { mountPath: /run/dpumesh, name: dpumesh-attest, readOnly: true }
       volumes:
       - { name: infiniband, hostPath: { path: /dev/infiniband } }
       - { name: libdpumesh-so, hostPath: { path: ${LIB_OUT}, type: Directory } }
+      - { name: dpumesh-attest, hostPath: { path: /run/dpumesh, type: DirectoryOrCreate } }
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -109,7 +127,7 @@ spec:
   replicas: 0
   selector: { matchLabels: { app: echo-dpumesh-14 } }
   template:
-    metadata: { labels: { app: echo-dpumesh-14 } }
+    metadata: { labels: { app: echo-dpumesh-14, dpumesh-service: ${ECHO_14_SERVICE} } }
     spec:
       hostname: echo-dpumesh-14
       containers:
@@ -120,15 +138,27 @@ spec:
         - { name: BENCH_NUMA_NODE, value: "${BENCH_NUMA_NODE}" }
         - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
         - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
+        - { name: DPUMESH_ATTEST_SOCKET, value: "${DPUMESH_ATTEST_SOCKET}" }
+        - { name: DPUMESH_REQUIRE_TRUSTED_WORKLOAD, value: "${DPUMESH_REQUIRE_TRUSTED_WORKLOAD}" }
         - { name: DPUMESH_SERVICE, value: "${ECHO_14_SERVICE}" } # default: same-service fan-out
         - { name: ECHO_THREADS, value: "${ECHO_THREADS}" }
         securityContext: { privileged: true }
         volumeMounts:
         - { mountPath: /dev/infiniband, name: infiniband }
         - { mountPath: /usr/local/lib/libdpumesh.so.4, name: libdpumesh-so, subPath: libdpumesh.so.4 }
+        - { mountPath: /run/dpumesh, name: dpumesh-attest, readOnly: true }
       volumes:
       - { name: infiniband, hostPath: { path: /dev/infiniband } }
       - { name: libdpumesh-so, hostPath: { path: ${LIB_OUT}, type: Directory } }
+      - { name: dpumesh-attest, hostPath: { path: /run/dpumesh, type: DirectoryOrCreate } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: echo-dpumesh }
+spec:
+  clusterIP: 10.96.0.11
+  selector: { dpumesh-service: echo-dpumesh }
+  ports: [{ port: ${CTRL_PORT}, targetPort: ${CTRL_PORT} }]
 ---
 # loopback-dpumesh (pod_id=12): one pod that is both client and server of its own
 # service — proves self-routing + oriented-tuple demux on a single host.
@@ -152,14 +182,18 @@ spec:
         - { name: BENCH_NUMA_NODE, value: "${BENCH_NUMA_NODE}" }
         - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
         - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
+        - { name: DPUMESH_ATTEST_SOCKET, value: "${DPUMESH_ATTEST_SOCKET}" }
+        - { name: DPUMESH_REQUIRE_TRUSTED_WORKLOAD, value: "${DPUMESH_REQUIRE_TRUSTED_WORKLOAD}" }
         - { name: DPUMESH_SERVICE, value: "loopback-dpumesh" }
         securityContext: { privileged: true }
         volumeMounts:
         - { mountPath: /dev/infiniband, name: infiniband }
         - { mountPath: /usr/local/lib/libdpumesh.so.4, name: libdpumesh-so, subPath: libdpumesh.so.4 }
+        - { mountPath: /run/dpumesh, name: dpumesh-attest, readOnly: true }
       volumes:
       - { name: infiniband, hostPath: { path: /dev/infiniband } }
       - { name: libdpumesh-so, hostPath: { path: ${LIB_OUT}, type: Directory } }
+      - { name: dpumesh-attest, hostPath: { path: /run/dpumesh, type: DirectoryOrCreate } }
 ---
 apiVersion: v1
 kind: Service
@@ -191,14 +225,18 @@ spec:
         - { name: BENCH_NUMA_NODE, value: "${BENCH_NUMA_NODE}" }
         - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
         - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
+        - { name: DPUMESH_ATTEST_SOCKET, value: "${DPUMESH_ATTEST_SOCKET}" }
+        - { name: DPUMESH_REQUIRE_TRUSTED_WORKLOAD, value: "${DPUMESH_REQUIRE_TRUSTED_WORKLOAD}" }
         - { name: DPUMESH_SERVICE, value: "verbs-dpumesh" }
         securityContext: { privileged: true }
         volumeMounts:
         - { mountPath: /dev/infiniband, name: infiniband }
         - { mountPath: /usr/local/lib/libdpumesh.so.4, name: libdpumesh-so, subPath: libdpumesh.so.4 }
+        - { mountPath: /run/dpumesh, name: dpumesh-attest, readOnly: true }
       volumes:
       - { name: infiniband, hostPath: { path: /dev/infiniband } }
       - { name: libdpumesh-so, hostPath: { path: ${LIB_OUT}, type: Directory } }
+      - { name: dpumesh-attest, hostPath: { path: /run/dpumesh, type: DirectoryOrCreate } }
 ---
 apiVersion: v1
 kind: Service
@@ -229,6 +267,8 @@ spec:
         - { name: BENCH_NUMA_NODE, value: "${BENCH_NUMA_NODE}" }
         - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
         - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
+        - { name: DPUMESH_ATTEST_SOCKET, value: "${DPUMESH_ATTEST_SOCKET}" }
+        - { name: DPUMESH_REQUIRE_TRUSTED_WORKLOAD, value: "${DPUMESH_REQUIRE_TRUSTED_WORKLOAD}" }
         - { name: PRELOAD_SVC, value: "15" }
         - { name: ECHO_PORT, value: "9095" }
         - { name: DMESH_PRELOAD_DEBUG, value: "${DMESH_PRELOAD_DEBUG}" }
@@ -236,9 +276,11 @@ spec:
         volumeMounts:
         - { mountPath: /dev/infiniband, name: infiniband }
         - { mountPath: /usr/local/lib/libdpumesh.so.4, name: libdpumesh-so, subPath: libdpumesh.so.4 }
+        - { mountPath: /run/dpumesh, name: dpumesh-attest, readOnly: true }
       volumes:
       - { name: infiniband, hostPath: { path: /dev/infiniband } }
       - { name: libdpumesh-so, hostPath: { path: ${LIB_OUT}, type: Directory } }
+      - { name: dpumesh-attest, hostPath: { path: /run/dpumesh, type: DirectoryOrCreate } }
 ---
 apiVersion: v1
 kind: Service
@@ -272,6 +314,8 @@ spec:
         - { name: BENCH_NUMA_NODE, value: "${BENCH_NUMA_NODE}" }
         - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
         - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
+        - { name: DPUMESH_ATTEST_SOCKET, value: "${DPUMESH_ATTEST_SOCKET}" }
+        - { name: DPUMESH_REQUIRE_TRUSTED_WORKLOAD, value: "${DPUMESH_REQUIRE_TRUSTED_WORKLOAD}" }
         - { name: DPUMESH_SERVICE, value: "preload-sock" }
         - { name: DPUMESH_PORT, value: "9100" }
         - { name: ECHO_PORT, value: "9100" }
@@ -280,9 +324,11 @@ spec:
         volumeMounts:
         - { mountPath: /dev/infiniband, name: infiniband }
         - { mountPath: /usr/local/lib/libdpumesh.so.4, name: libdpumesh-so, subPath: libdpumesh.so.4 }
+        - { mountPath: /run/dpumesh, name: dpumesh-attest, readOnly: true }
       volumes:
       - { name: infiniband, hostPath: { path: /dev/infiniband } }
       - { name: libdpumesh-so, hostPath: { path: ${LIB_OUT}, type: Directory } }
+      - { name: dpumesh-attest, hostPath: { path: /run/dpumesh, type: DirectoryOrCreate } }
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -305,6 +351,8 @@ spec:
         - { name: BENCH_NUMA_NODE, value: "${BENCH_NUMA_NODE}" }
         - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
         - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
+        - { name: DPUMESH_ATTEST_SOCKET, value: "${DPUMESH_ATTEST_SOCKET}" }
+        - { name: DPUMESH_REQUIRE_TRUSTED_WORKLOAD, value: "${DPUMESH_REQUIRE_TRUSTED_WORKLOAD}" }
         - { name: BENCH_TARGET, value: "10.96.0.18:9100" }
         - { name: CTRL_PORT, value: "${CTRL_PORT}" }
         - { name: NUMA_TARGET_LD_PRELOAD, value: "/usr/local/lib/libdmesh_preload.so" }
@@ -312,9 +360,11 @@ spec:
         volumeMounts:
         - { mountPath: /dev/infiniband, name: infiniband }
         - { mountPath: /usr/local/lib/libdpumesh.so.4, name: libdpumesh-so, subPath: libdpumesh.so.4 }
+        - { mountPath: /run/dpumesh, name: dpumesh-attest, readOnly: true }
       volumes:
       - { name: infiniband, hostPath: { path: /dev/infiniband } }
       - { name: libdpumesh-so, hostPath: { path: ${LIB_OUT}, type: Directory } }
+      - { name: dpumesh-attest, hostPath: { path: /run/dpumesh, type: DirectoryOrCreate } }
 ---
 apiVersion: v1
 kind: Service

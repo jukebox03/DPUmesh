@@ -28,6 +28,7 @@
 #include "doca/comch_common.h"
 #include "doca/comch_msgq.h"
 #include "doca/dpa_common.h"
+#include "dmesh_attest.h"
 #include <dpumesh/dmesh_topology.h>
 
 DOCA_LOG_REGISTER(DPUMESH_DOCA);
@@ -1420,6 +1421,7 @@ static doca_error_t init_doca_device(dpumesh_ctx_t *ctx) {
 
 #define DPUMESH_POD_INIT_TIMEOUT_MS 30000
 #define DPUMESH_CONTROL_RETRY_MS 100
+#define DPUMESH_REG_CHALLENGE_TIMEOUT_MS 5000
 
 static int init_elapsed_ms(const struct timespec *start, const struct timespec *now) {
     time_t sec = now->tv_sec - start->tv_sec;
@@ -1532,6 +1534,15 @@ static doca_error_t wait_for_pod_init_result(dpumesh_ctx_t *ctx) {
 static doca_error_t init_control_path(dpumesh_ctx_t *ctx) {
     doca_error_t result;
 
+    /* Initialize challenge publication before connecting: the DPU may submit
+     * REG_CHALLENGE as soon as the Comch connection callback runs. */
+    memset(ctx->doca_objs.registration_challenge, 0,
+           sizeof(ctx->doca_objs.registration_challenge));
+    __atomic_store_n(&ctx->doca_objs.registration_trusted_required, 0,
+                     __ATOMIC_RELAXED);
+    __atomic_store_n(&ctx->doca_objs.registration_challenge_ready, 0,
+                     __ATOMIC_RELEASE);
+
     fprintf(stderr, "[dpumesh] Connecting comch client...\n");
     result = init_comch_ctrl_path_client("DPUMesh", &ctx->doca_objs);
     if (result != DOCA_SUCCESS) return result;
@@ -1545,12 +1556,77 @@ static doca_error_t init_control_path(dpumesh_ctx_t *ctx) {
     __atomic_store_n(&ctx->doca_objs.landing_stripes, 0,
                      __ATOMIC_RELAXED);
     __atomic_store_n(&ctx->doca_objs.pod_quiesced, 0, __ATOMIC_RELEASE);
-    /* State the workload before registering. It is a separate message because
-     * the registration struct is checked by exact length on both sides; the DPU
-     * binds what arrives here to this connection's slot. */
-    {
-        const char *workload = getenv("DPUMESH_SERVICE");
+    const char *attest_socket = getenv("DPUMESH_ATTEST_SOCKET");
+    const char *require_trusted = getenv("DPUMESH_REQUIRE_TRUSTED_WORKLOAD");
+    int require_trusted_set = require_trusted != NULL &&
+        (strcmp(require_trusted, "1") == 0 ||
+         strcmp(require_trusted, "true") == 0 ||
+         strcmp(require_trusted, "required") == 0);
+    if (require_trusted_set && (attest_socket == NULL || *attest_socket == '\0')) {
+        DOCA_LOG_ERR("Trusted workload registration requires DPUMESH_ATTEST_SOCKET");
+        return DOCA_ERROR_INVALID_VALUE;
+    }
+
+    if (attest_socket != NULL && *attest_socket != '\0') {
+        /* A process can relay the connection-bound nonce, but only the node
+         * agent sees SO_PEERCRED and owns the signing key. */
+        struct timespec challenge_start, challenge_now;
+        struct timespec challenge_pause = { .tv_sec = 0, .tv_nsec = 10000 };
+        clock_gettime(CLOCK_MONOTONIC, &challenge_start);
+        while (!__atomic_load_n(&ctx->doca_objs.registration_challenge_ready,
+                                __ATOMIC_ACQUIRE)) {
+            if (ctx->doca_objs.pe)
+                (void)doca_pe_progress(ctx->doca_objs.pe);
+            clock_gettime(CLOCK_MONOTONIC, &challenge_now);
+            if (init_elapsed_ms(&challenge_start, &challenge_now) >=
+                DPUMESH_REG_CHALLENGE_TIMEOUT_MS) {
+                DOCA_LOG_ERR("Timed out awaiting trusted-registration challenge");
+                return DOCA_ERROR_TIME_OUT;
+            }
+            nanosleep(&challenge_pause, NULL);
+        }
+        if (!__atomic_load_n(&ctx->doca_objs.registration_trusted_required,
+                             __ATOMIC_RELAXED)) {
+            DOCA_LOG_ERR("DPU challenge did not require trusted registration");
+            return DOCA_ERROR_BAD_STATE;
+        }
+
+        struct dmesh_workload_grant_msg grant;
+        char attest_error[256] = {0};
+        if (dmesh_attest_request_grant(
+                attest_socket, ctx->service_id,
+                ctx->doca_objs.registration_challenge, &grant,
+                attest_error, sizeof(attest_error)) != 0) {
+            DOCA_LOG_ERR("Trusted node agent rejected registration: %s",
+                         attest_error);
+            return DOCA_ERROR_INITIALIZATION;
+        }
+        result = client_send_msg(&ctx->doca_objs, (const char *)&grant,
+                                 sizeof(grant));
+        memset(&grant, 0, sizeof(grant));
+        if (result != DOCA_SUCCESS) {
+            DOCA_LOG_ERR("WORKLOAD_GRANT send failed: %s",
+                         doca_error_get_name(result));
+            return result;
+        }
+        DOCA_LOG_INFO("Sent connection-bound trusted workload grant");
+    } else {
+        /* Explicit development compatibility: the application states the
+         * workload itself. A DPU in required mode rejects this message and the
+         * following REGISTER; there is no silent production fallback. */
+        /* Linkerd policy identifies the source workload (normally the
+         * injector-compatible namespace/Pod JSON), which is distinct from the
+         * DPUmesh Service this process provides. Keep DPUMESH_SERVICE as the
+         * legacy fallback for clients that have not been updated yet. */
+        const char *workload = getenv("DPUMESH_WORKLOAD");
+        if (!workload || !*workload)
+            workload = getenv("DPUMESH_SERVICE");
         if (workload && *workload) {
+            if (strlen(workload) >= DMESH_WORKLOAD_MAX) {
+                DOCA_LOG_ERR("DPUMESH_WORKLOAD is too long (%zu >= %u)",
+                             strlen(workload), DMESH_WORKLOAD_MAX);
+                return DOCA_ERROR_INVALID_VALUE;
+            }
             struct dmesh_identity_msg idm;
             memset(&idm, 0, sizeof(idm));
             idm.type = DMESH_MSG_POD_IDENTITY;

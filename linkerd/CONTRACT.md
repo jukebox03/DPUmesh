@@ -103,7 +103,7 @@ struct dmesh_l7_flow {
     int32_t  peer_pod;
     uint8_t  mode;
     uint8_t  is_reply;
-    char     workload[64];
+    char     workload[384];
 };
 ```
 
@@ -257,7 +257,9 @@ The L7 runtime does not alter the Host↔DPU protocol.
 
 | Control message | Direction | Function |
 |---|---|---|
-| `POD_IDENTITY` | Host→DPU | workload identity |
+| `REG_CHALLENGE` | DPU→Host | fresh connection nonce; required-mode bit |
+| `WORKLOAD_GRANT` | Host→DPU | node-agent-authorized Pod and Service claims |
+| `POD_IDENTITY` | Host→DPU | development-only reported workload |
 | `POD_REGISTER` | Host→DPU | pod and service registration |
 | `POD_ASSIGNED` | DPU→Host | assigned pod and landing stripes |
 | `MMAP_EXPORT` | Host→DPU | ring and buffer mappings |
@@ -286,15 +288,20 @@ and does not define this macro.
 ## Control plane and identity
 
 Destination, policy and identity addresses, the identity directory, the token
-file and the trust anchors are deploy-time configuration
+file and the trust anchors are startup configuration
 (`LINKERD_DST_ADDR`, `LINKERD_POLICY_ADDR`, `LINKERD_IDENTITY_ADDR`,
-`LINKERD_IDENTITY_DIR`, `LINKERD_TRUST_ANCHORS`). `LINKERD_MOCK_CONTROL_PLANE=1`
-starts the mock servers for a benchmark; `0` requires a deployed control plane
-and fails startup if its addresses are absent. The mock binaries are fixtures
-and are never a fallback for a missing address.
+`LINKERD_IDENTITY_DIR`, `LINKERD_TRUST_ANCHORS`). A deployed Linkerd control
+plane is mandatory. Missing addresses, identity material or a versioned Service
+target feed fail preflight; there is no in-process or benchmark mock fallback.
 
-The workload identity in `struct dmesh_l7_flow` is the one the DPU granted at
-pod registration. A payload never supplies identity.
+The workload in `struct dmesh_l7_flow` is bound to the Pod registration and a
+payload never supplies it. In required mode, a root-owned Host agent resolves
+the Unix peer PID/cgroup to Kubernetes Pod and Service objects and signs a
+connection-nonce-bound grant. The DPU verifies the HMAC, lifetime, issuer,
+key-id, nonce and exact Service id, then constructs the workload from signed
+namespace/Pod claims. `DPUMESH_WORKLOAD` is accepted only in development mode.
+Each DMesh outbound Policy Watch uses the flow value, not the process-wide
+Linkerd fallback.
 
 While identity is unavailable the proxy does not serve: sessions are opened,
 their outbound connections fail, and each failure is counted. Nothing is
@@ -302,13 +309,13 @@ forwarded without the policy the service selected.
 
 ## Transport security
 
-Node-local DMesh traffic is plaintext. A session's bytes travel pod registration
-memory, PCIe and DPU memory; what separates one pod from another is the DPU's
-per-pod mapping and routing, not a wire an attacker could reach. The client
-identity that authorization would otherwise read from a certificate comes from
-the registration path instead, and the DPU grants it rather than accepting a
-claim, so a stolen key impersonates nobody. Node-to-node mTLS terminates on the
-DPU and is a separate milestone.
+Node-local DMesh traffic is plaintext. A session's bytes travel Pod registration
+memory, PCIe and DPU memory; what separates one Pod from another is the DPU's
+per-Pod mapping and routing, not a wire an attacker could reach. The source
+workload used for policy comes from the registration path. Required mode makes
+it node-agent-attested, connection-bound authorization; development mode is
+only reported attribution and must not protect a Service. Node-to-node mTLS
+terminates on the DPU and is a separate milestone.
 
 This is a discovery contract, not a proxy code path. `push_tcp_endpoint` layers
 `tls::Client` and `TaggedTransport` above the connector, so an endpoint whose
@@ -336,6 +343,6 @@ quiesces, active sessions, pending registrations and live tasks are zero.
 - concurrent session-isolated connections to the same service address;
 - opaque and protocol-aware stream modes;
 - DPUmesh backend selection through `DMESH_L7_BACKEND_ANY`;
-- deploy-time control-plane configuration, with mock servers as fixtures;
+- deployed Linkerd control-plane configuration through the host-network gateway;
 - plaintext node-local transport, with identity granted at pod registration;
 - L4 fallback with per-cause counters, or fail-closed refusal.

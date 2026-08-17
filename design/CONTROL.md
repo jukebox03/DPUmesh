@@ -28,17 +28,34 @@ name-only entry.
 unknown value creates a client-only channel.
 
 ```text
-Host                                      DPU
-  │── POD_IDENTITY(workload) ─────────────▶│
-  │── POD_REGISTER(service_id) ───────────▶│
-  │◀─ POD_ASSIGNED(pod_id, stripes) ───────│
-  │── MMAP_EXPORT × regions ──────────────▶│
-  │◀─ POD_INIT_RESULT(READY) ──────────────│
+Host Pod                 trusted Host agent                    DPU
+  │                               │                              │
+  │◀──────────────────────── REG_CHALLENGE(nonce) ───────────────│
+  │── nonce + requested service ─▶│                              │
+  │                               │── SO_PEERCRED/cgroup ─┐      │
+  │                               │◀─ K8s Pod/Service ────┘      │
+  │◀─ signed immutable claims ────│                              │
+  │───────────────────────── WORKLOAD_GRANT ────────────────────▶│
+  │───────────────────────── POD_REGISTER(service_id) ──────────▶│
+  │◀──────────────────────── POD_ASSIGNED(pod_id, stripes) ──────│
+  │───────────────────────── MMAP_EXPORT × regions ─────────────▶│
+  │◀──────────────────────── POD_INIT_RESULT(READY) ─────────────│
 ```
 
-The DPU assigns the pod id and binds the workload, Service, imported mappings
-and DMA generation to the registration connection. The pod enters backend
-selection after `POD_INIT_RESULT(READY)`.
+With `DPUMESH_TRUSTED_REGISTRATION=required`, the DPU creates a fresh 32-byte
+nonce for each Comch connection. The root-owned agent identifies the Unix-socket
+peer with `SO_PEERCRED`, resolves its host cgroup to the authoritative
+Kubernetes Pod, verifies that the Pod labels select the requested Service, and
+returns a canonical HMAC-SHA256 grant. It includes issuer/key id, issue/expiry,
+grant id, nonce, Pod UID, namespace, Pod name, ServiceAccount, node and Service
+id. The application can relay the grant but cannot change a claim.
+
+The DPU verifies and consumes the grant once, rejects a Service mismatch, and
+constructs the Linkerd workload JSON from the signed namespace and Pod. A grant
+cannot move to another connection or survive reconnect/DPU restart because its
+nonce is different. `DPUMESH_WORKLOAD` and `POD_IDENTITY` remain only in the
+explicit `off`/development mode; required mode rejects them and never falls
+back. The Pod enters backend selection after `POD_INIT_RESULT(READY)`.
 
 Unregister or Comch disconnect removes the pod from selection. Each ARM worker
 first closes the connection/L7 state it owns. After every producer has joined
@@ -77,9 +94,11 @@ injection API. Protobuf messages, stubs and handlers are unchanged.
 | sequence | per-connection `uint16_t` |
 | internal routing fields | `int32_t` |
 
-`POD_REGISTER` is a fixed 12-byte message. Forward and reverse descriptors use
-fixed-width fields and compile-time layout assertions. Host and DPU endpoints
-are little-endian.
+`POD_REGISTER` is a fixed 12-byte message. The v1 grant is a 1090-byte canonical
+message whose numeric fields are explicit little-endian bytes and whose text is
+NUL-terminated and zero-padded. Forward and reverse descriptors use fixed-width
+fields and compile-time layout assertions. Host and DPU endpoints are
+little-endian.
 
 ## Control channels
 
@@ -96,23 +115,25 @@ join and leave through Comch registration.
 ## Linkerd control plane
 
 The Linkerd static library creates destination, identity and policy clients from
-`LINKERD2_PROXY_*` environment variables. The benchmark deployment defaults to
-the port's mock services on the DPU:
+`LINKERD2_PROXY_*` environment variables. The complete current/target protocol
+is defined in [LINKERD_CONTROL.md](LINKERD_CONTROL.md). Deployment requires the
+stock Linkerd control plane, its three management-link gateway addresses,
+provisioned identity material and a monotonically versioned Service target
+feed. Missing configuration fails preflight; no mock control-plane path exists.
 
-```text
-mock-destination  127.0.0.1:8089
-mock-identity     127.0.0.1:8088
-mock-policy       127.0.0.1:8087
-```
+Internally, the selected Service remains keyed by
+`10.96.0.<service-id>:9092`. The versioned controller feed maps service ids to
+real Kubernetes `ClusterIP:port` discovery targets. The adapter atomically
+applies only newer generations and rejects new protected sessions when a target
+is withdrawn. Each session's Policy Watch uses the workload carried by its
+attested registration rather than the process-wide fallback.
 
-With `LINKERD_MOCK_CONTROL_PLANE=0`, deployment instead requires
-`LINKERD_DST_ADDR`, `LINKERD_POLICY_ADDR`, `LINKERD_IDENTITY_ADDR`, the identity
-directory and trust anchors. Missing external configuration fails deployment;
-the mock processes are test fixtures and are never an automatic fallback.
-
-`LINKERD_BACKEND_ADDR` maps the selected Service to
-`10.96.0.<service-id>:9092`. The adapter supplies each connection's workload and
-synthetic source/destination addresses to the Linkerd outbound stack.
+Control connections authenticate distinct service identities:
+`LINKERD_IDENTITY_NAME`, `LINKERD_DST_NAME` and `LINKERD_POLICY_NAME`. Deployment
+waits for each embedded proxy's `/ready` endpoint, which is released only after
+the first identity certificate has been installed. Because the DPU has no route
+to the Kubernetes Service/Pod CIDRs on the current testbed, the configured
+addresses point to an mTLS-pass-through gateway on the Host management link.
 
 The Linkerd consumer handles opaque and protocol-aware payload modes. Its
 decision-mode entry point returns a decline, which DPUmesh counts before using
@@ -143,13 +164,17 @@ thread remains the Comch control and doorbell owner.
 ## Current bounds
 
 - configured Service names come from one static registry;
-- backend membership is node-local and self-registered;
+- backend membership is node-local; required mode admits only node-agent-signed
+  Pod/Service membership, while development mode remains self-reported;
 - service and pod identifiers occupy the signed one-byte wire space;
-- benchmark deployments default to mock destination, identity and policy
-  services; external control-plane addresses and identity material are
-  deploy-time supported, while renewal and failure/update coverage remain P6;
+- deployments require Linkerd destination, identity and policy services;
+  gateway addresses, TLS service names, dynamic per-service discovery targets
+  and DPU identity material are supervised. The stock certificate loop renews
+  certificates and reloads its token source while the identity agent rotates
+  the audience-bound token atomically;
 - Linkerd sessions run on one selected ARM worker, or on every worker when
   `DPUMESH_L7_LINKERD_WORKER=all`;
 - concurrent sessions to one service address are isolated, each owning its own
   outbound stack and backend channel;
-- declined L7 sessions use counted L4 fallback.
+- declined L7 sessions use counted L4 fallback only when the explicit
+  protected-service fail-closed switch is disabled.

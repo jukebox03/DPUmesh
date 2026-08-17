@@ -21,6 +21,7 @@ deps += dependency('doca-argp')
 deps += dependency('doca-dpa')
 deps += dependency('doca-dma')   # ARM generic SG-DMA engine for the L7-proxy egress (dpu_proxy.c)
 deps += dependency('libflexio')
+deps += dependency('libcrypto')  # HMAC/RNG for trusted workload registration
 
 srcs = [
     'dpu_main.c',
@@ -34,6 +35,7 @@ srcs = [
     'comch_server.c',
     'comch_client.c',
     'comch_msgq.c',
+    'workload_grant.c',
     'dpa.c',
     'dpu_proxy.c',
 ]

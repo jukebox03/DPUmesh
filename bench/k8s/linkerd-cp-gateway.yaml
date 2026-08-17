@@ -1,0 +1,65 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dpumesh-linkerd-cp-gateway
+  namespace: ${LINKERD_CONTROL_NAMESPACE}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: dpumesh-linkerd-cp-gateway
+  namespace: ${LINKERD_CONTROL_NAMESPACE}
+rules:
+- apiGroups: [""]
+  resources: ["services", "endpoints"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: dpumesh-linkerd-cp-gateway
+  namespace: ${LINKERD_CONTROL_NAMESPACE}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: dpumesh-linkerd-cp-gateway
+subjects:
+- kind: ServiceAccount
+  name: dpumesh-linkerd-cp-gateway
+  namespace: ${LINKERD_CONTROL_NAMESPACE}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: dpumesh-linkerd-cp-gateway
+  namespace: ${LINKERD_CONTROL_NAMESPACE}
+spec:
+  selector:
+    matchLabels: { app: dpumesh-linkerd-cp-gateway }
+  template:
+    metadata:
+      labels: { app: dpumesh-linkerd-cp-gateway }
+    spec:
+      serviceAccountName: dpumesh-linkerd-cp-gateway
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      nodeSelector:
+        kubernetes.io/hostname: ${K8S_NODE_NAME}
+      containers:
+      - name: gateway
+        image: docker.io/${IMG_LINKERD_GATEWAY}
+        imagePullPolicy: Never
+        args:
+        - --kube-route=destination=${LINKERD_GATEWAY_BIND}:${LINKERD_GATEWAY_DST_PORT}->${LINKERD_CONTROL_NAMESPACE}/linkerd-dst:8086
+        - --kube-route=policy=${LINKERD_GATEWAY_BIND}:${LINKERD_GATEWAY_POLICY_PORT}->${LINKERD_CONTROL_NAMESPACE}/linkerd-policy:8090
+        - --kube-route=identity=${LINKERD_GATEWAY_BIND}:${LINKERD_GATEWAY_IDENTITY_PORT}->${LINKERD_CONTROL_NAMESPACE}/linkerd-identity:8080
+        securityContext:
+          runAsUser: 65532
+          runAsGroup: 65532
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities: { drop: ["ALL"] }
+        readinessProbe:
+          tcpSocket: { host: ${LINKERD_GATEWAY_BIND}, port: ${LINKERD_GATEWAY_DST_PORT} }
+          initialDelaySeconds: 1
+          periodSeconds: 2

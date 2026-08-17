@@ -42,6 +42,29 @@ main(void)
     assert(pods_register(objs, conn, -1, 7) == -1);
 
     free(objs);
+
+    /* Required mode admits only the exact Service in a verified, unconsumed
+     * connection grant. A normal REGISTER retry remains idempotent after the
+     * grant has been consumed. */
+    objs = calloc(1, sizeof(*objs));
+    assert(objs != NULL);
+    objs->num_dpa_threads = 4;
+    objs->k_rings = 2;
+    objs->n_data_workers = 2;
+    objs->trusted_registration_required = 1;
+    for (int i = 0; i < POD_ID_SPACE; i++)
+        objs->pod_id_to_slot[i] = -1;
+    conn = (struct doca_comch_connection *)(uintptr_t)0x2000;
+    assert(pods_add_connection(objs, conn) == 0);
+    assert(pods_register(objs, conn, -1, 7) == -1);
+    objs->pods[0].registration_grant_verified = 1;
+    objs->pods[0].grant_service_id = 7;
+    assert(pods_register(objs, conn, -1, 8) == -1);
+    assert(pods_register(objs, conn, -1, 7) == 0);
+    assert(objs->pods[0].registration_grant_consumed == 1);
+    assert(pods_register(objs, conn, -1, 7) == 0);
+    free(objs);
+
     puts("native_control_state_test: PASS");
     return 0;
 }

@@ -24,7 +24,7 @@
     } while (0)
 
 /* struct dmesh_l7_flow */
-_Static_assert(sizeof(struct dmesh_l7_flow) == 92, "flow size");
+_Static_assert(sizeof(struct dmesh_l7_flow) == 412, "flow size");
 _Static_assert(_Alignof(struct dmesh_l7_flow) == 4, "flow alignment");
 _Static_assert(offsetof(struct dmesh_l7_flow, src_ip) == 0, "src_ip");
 _Static_assert(offsetof(struct dmesh_l7_flow, dst_ip) == 4, "dst_ip");
@@ -36,7 +36,7 @@ _Static_assert(offsetof(struct dmesh_l7_flow, peer_pod) == 20, "peer_pod");
 _Static_assert(offsetof(struct dmesh_l7_flow, mode) == 24, "mode");
 _Static_assert(offsetof(struct dmesh_l7_flow, is_reply) == 25, "is_reply");
 _Static_assert(offsetof(struct dmesh_l7_flow, workload) == 26, "workload");
-_Static_assert(sizeof(((struct dmesh_l7_flow *)0)->workload) == 64, "workload size");
+_Static_assert(sizeof(((struct dmesh_l7_flow *)0)->workload) == 384, "workload size");
 
 /* struct dmesh_l7_verdict */
 _Static_assert(sizeof(struct dmesh_l7_verdict) == 8, "verdict size");
@@ -146,7 +146,7 @@ int main(void)
     /* The flow the data plane fills is the flow the layer reads: a NUL in the
      * last byte of the workload is what keeps a full-width name terminated. */
     struct dmesh_l7_flow flow;
-    CHECK(sizeof(flow.workload) == 64);
+    CHECK(sizeof(flow.workload) == 384);
 
     printf("l7_abi_contract_test: PASS\n");
     return 0;

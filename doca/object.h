@@ -189,16 +189,31 @@ struct dpu_worker_counter {
     _Alignas(64) uint32_t v;
 };
 
+#define DMESH_REGISTRATION_MAX_KEYS 4
+#define DMESH_REGISTRATION_REPLAY_SLOTS 4096
+
+struct dmesh_registration_key {
+    uint8_t bytes[32];
+    char key_id[DMESH_GRANT_KEY_ID_MAX];
+};
+
 /* Per-pod state (DPU only) */
 struct pod_state {
     struct doca_comch_connection *connection;
     int32_t pod_id;
     int32_t service_id;     /* this pod's service id (an LB backend of that service; the live
                              * set is derived from pods[] by service_id); SVC_NONE if none */
-    /* Workload this pod runs as, from DMESH_MSG_POD_IDENTITY. Bound to the slot
-     * rather than asserted per message, so a reused slot cannot inherit the
-     * previous tenant's identity. Empty when the host did not send one. */
+    /* Authoritative Linkerd workload bound to this connection. In trusted mode
+     * it is derived from a verified node-agent grant; POD_IDENTITY is accepted
+     * only by the explicit development compatibility mode. */
     char workload[DMESH_WORKLOAD_MAX];
+    uint8_t registration_nonce[DMESH_REG_NONCE_SIZE];
+    uint8_t registration_grant_id[DMESH_GRANT_ID_SIZE];
+    int32_t grant_service_id;
+    int registration_challenge_issued;
+    int registration_challenge_sent;
+    int registration_grant_verified;
+    int registration_grant_consumed;
     int registered;         /* 1 = DMESH_MSG_POD_REGISTER received */
     int dma_ready;          /* 1 = all mmaps + worker barrier + DPA ADD ACKs complete */
     int init_result;        /* enum dmesh_pod_init_result; terminal once non-PENDING */
@@ -465,6 +480,25 @@ struct objects {
      * references and destroyed its imported mmap views. Host teardown waits on
      * this before destroying the exported mmaps. */
     int32_t pod_quiesced;
+    /* Trusted registration challenge received from the DPU. The callback
+     * publishes `registration_challenge_ready` last. */
+    uint8_t registration_challenge[DMESH_REG_NONCE_SIZE];
+    int32_t registration_trusted_required;
+    int32_t registration_challenge_ready;
+
+    /* DPU-only trusted-registration verifier configuration. Off is the
+     * development-compatible default; required mode is initialized by
+     * dmesh_registration_configure() before the Comch server starts. */
+    int trusted_registration_required;
+    struct dmesh_registration_key registration_keys[DMESH_REGISTRATION_MAX_KEYS];
+    size_t registration_key_count;
+    char registration_issuer[DMESH_GRANT_ISSUER_MAX];
+    uint8_t consumed_grant_ids[DMESH_REGISTRATION_REPLAY_SLOTS][DMESH_GRANT_ID_SIZE];
+    size_t consumed_grant_count;
+    size_t consumed_grant_cursor;
+    uint64_t registration_grants_accepted;
+    uint64_t registration_grants_rejected;
+    uint64_t registration_grants_replayed;
 
     /* Shared DPA device with N EU threads. The common topology maps each ring
      * to an EU whose EU%A equals ring%A. */
