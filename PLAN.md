@@ -27,6 +27,41 @@ The following behavior is the starting point and is not a TODO:
 - The Host transport protocol and `DmeshRuntime` gRPC threading model do not
   depend on the Linkerd runtime.
 
+## Execution order
+
+Phases are numbered below; this is the order they are worked in. The control
+plane (P6) is last, and everything before it runs against the mock control
+plane. That is sound because the mock returns endpoint metadata with no
+`tls_identity` and no tagged transport port, which is the data path node-local
+traffic is specified to take — see `linkerd/CONTRACT.md`, Transport security.
+
+1. Pin the node-local plaintext contract in the documents, and refuse a
+   duplicate live connection handle (P0.1). **Done 2026-08-17.**
+2. Freeze this tree's ARM numbers as the pre-change baseline. **Done**: the
+   reservation arm of `bench/report/REPORT_L7_TX_AB.md` is that baseline.
+3. P5.1 hardware A/B of the reservation and copy output paths. **Done.**
+4. P4.5 session-count costs, with an L4 control on each axis. **Measured
+   2026-08-17**, and it reordered what follows. Building a Linkerd session costs
+   1,127 microseconds more than the DPUmesh connection under it; the copy P5.2
+   would remove is 0.265 microseconds per request. They break even at about
+   4,300 requests per connection.
+5. Reduce what a Linkerd session costs to build, guided by a per-part split of
+   those 1,127 microseconds and without giving up the P2.2 isolation the
+   per-session stack buys. This is the largest lever in the L7 path.
+6. P5.2 direct output reservation. Evidence-backed, and the larger lever for
+   long-lived connections. It has to preserve the output coalescing the tx queue
+   provides today, or publication frequency will cost more than the copy it
+   saves.
+7. P4.2 worker-local I/O, only if a profile attributes cost to the endpoint
+   lock. Two profiles now report zero contention on it.
+8. Load-adaptive output policy, only if a measurement shows the better path
+   changes with load. The A/B found one path better everywhere.
+9. P8 ARM/x86, as a separate track. It is not required to close the final gate.
+10. P6 control plane, after a regression run.
+
+Out of scope until this sequence completes: P2.3 shared backend transports and
+the `intra-mtls`/`inter-mtls` service modes.
+
 ## Invariants for every change
 
 - [x] A connection and every object reachable from it have one owning ARM
@@ -70,7 +105,16 @@ The following behavior is the starting point and is not a TODO:
   - terminal `dmesh_l7_send` failure followed by C close.
 - [x] Extend `tests/l7_abi_contract_test.c` only if the C ABI changes. A Rust
   internal session token does not require a C ABI change.
-- [x] Run:
+- [x] Refuse a duplicate live connection handle in `open_request`
+  (`linkerd/rust/src/lib.rs`). The C side cannot produce one —
+  `px_conn_del` always calls `px_l7_close` first — but the map insert would
+  silently drop the older `Session`, losing its staging custody release, its
+  endpoint abort, its registry eviction, its slot release and its `ConnClosed`,
+  and would leave the handle in `order` twice. The second open is declined as
+  `SESSION_LIMIT`, which the P0.2 reject rule already watches for.
+- [x] Run every suite that carries DMesh tests. The acceptor's task-ownership
+  tests live in `linkerd-app` and the connector's in `linkerd-app-outbound`, so
+  the first three commands alone do not cover P1.2 or P2.2:
 
   ```sh
   make test
@@ -78,6 +122,11 @@ The following behavior is the starting point and is not a TODO:
   cargo +1.90.0 test --manifest-path \
     linkerd/port/linkerd2-proxy/Cargo.toml -p dmesh-doca \
     --no-default-features
+  cargo +1.90.0 test --manifest-path \
+    linkerd/port/linkerd2-proxy/Cargo.toml -p linkerd-app --features doca dmesh
+  cargo +1.90.0 test --manifest-path \
+    linkerd/port/linkerd2-proxy/Cargo.toml -p linkerd-app-outbound \
+    --features doca dmesh
   ```
 
 ### P0.2 Reconnect and churn validation
@@ -244,6 +293,12 @@ change.
   request connection. Version that ABI separately; do not overload the current
   `conn` handle.
 
+The paired session is also what bounds half-close. `Worker::drain` ends a
+session as soon as either endpoint reports `tx_finished`, and `px_try_fin`
+issues `l7_conn_eof` and `l7_conn_close` together, so a client that shuts down
+its write half and then waits for a response is not modelled. The C and Rust
+sides agree, so this is a transport bound, not an adapter defect.
+
 ## P3 — route all selected L7 traffic to its owner
 
 ### P3.1 Single Linkerd worker
@@ -253,9 +308,10 @@ change.
 - [x] In the completion owner selection near `owner_worker` and
   `dmesh_worker_for_port` in `doca/dpu_worker.c`, route an L7 request service to
   the selected Linkerd worker before calling `l7_conn_open`.
-- [x] Route its reply by conntrack's recorded L7 owner, not by upstream port
-  hashing. Add `l7_worker_id` to `struct dpu_upstream` in `doca/object.h` if the
-  existing owner is not recoverable.
+- [x] Route its reply to the same worker. `dpu_upstream_create` allocates the
+  upstream port from the owner's residue class, so `dmesh_worker_for_port`
+  already returns it there and no `l7_worker_id` field was added to
+  `struct dpu_upstream`.
 - [x] Keep non-L7 traffic distributed by the existing port/ring policy.
 - [x] Exercise `DPUMESH_ARM_WORKERS=2` and `4`; no selected L7 flow may report
   `DECLINE_NOT_ATTACHED`.
@@ -351,6 +407,36 @@ change.
 - [x] Run `worker_mpsc_queue_test`, `proxy_lane_queue_test`, DMA fault tests and
   TSAN before performance comparison.
 
+### P4.5 Session-count costs
+
+Measured 2026-08-17 in `bench/report/REPORT_L7_SESSION_COST.md`, each direction
+against an `L7_BACKEND=null` control. The two axes have different owners.
+
+Building a session is the Linkerd stack almost entirely: a DPUmesh connection
+costs 73 ARM core-microseconds to build and tear down, and putting a Linkerd
+session on it costs 1,200 — sixteen times more. Under churn the L4 datapath does
+not move at all, while at 110 sessions per second the L7 path loses 30% of its
+throughput and more than doubles p99.
+
+Carrying live sessions is mostly not the Linkerd layer: at a fixed outstanding
+window the L4 control costs 262% more per request at eight connections than at
+one, and the L7 layer only multiplies that by a roughly constant 1.6x to 1.9x.
+
+- [x] Quantify both directions, with an L4 control for each.
+- [x] Rule out backend fan-out and worker activation. A single-backend service
+  left the L7 numbers unchanged, and an idle worker draws 2.1%.
+- [ ] Price the per-session outbound stack by part — discovery and policy cache
+  construction, endpoint and reconnect layers, the balancer — before deciding
+  what may be shared without giving up the P2.2 isolation. This is where the
+  1,127 microseconds the Linkerd session adds actually goes.
+- [ ] Pursue live-connection scaling in the datapath, not here. The L4 control
+  carries the same curve without any of the paths below.
+- [ ] `Worker::poll_internal` walks every session and takes each endpoint lock
+  on every runtime poll. Ruled out as the cause of the measured rise; still
+  linear in live sessions.
+- [ ] `Backends::take_session` scans every published service to find one
+  session's channel.
+
 ## P5 — remove avoidable output copies
 
 ### P5.1 Eliminate the temporary `Vec`
@@ -364,13 +450,30 @@ change.
   On negative result, close the session.
 - [x] Keep `dmesh_l7_send` as a compatibility fallback and cover the real C
   reserve/cancel/commit/close paths in `proxy_lane_queue_test`.
-- [ ] Measure the fallback and reserve/commit paths on hardware.
+- [x] Measure the fallback and reserve/commit paths on hardware.
+  `bench/suite/l7_tx_ab.sh` deploys each path and compares them;
+  `bench/report/REPORT_L7_TX_AB.md` records the run. The reservation path costs
+  4.4% to 6.5% less ARM CPU per request, and at concurrency 32 and 128 the two
+  arms' three-run ranges are disjoint. The reservation was never refused
+  (`retries=0`), so the copy path did not run as a fallback during the
+  comparison. Keep the reservation path as the default.
 
 ### P5.2 Direct AsyncWrite reservation
+
+P5.1 priced the copy this removes: one copy of the published bytes is worth
+about 5% of a request's ARM cost, rising to 6.5% where the fixed per-request
+work is amortized. That is the evidence this phase was waiting for.
 
 - [ ] Attempt this only after P5.1. A direct path must provide a worker-local
   egress reservation to `DmeshIo::poll_write`, copy the stack buffer once into
   the arena and commit it without the intermediate tx queue.
+- [ ] Reach the arena without giving `dmesh-doca` a DPUmesh symbol. The crate is
+  built without `own-datapath` and holds no FFI; the adapter owns every
+  `dmesh_l7_*` call. Inject the reservation as a trait object the adapter
+  implements, rather than moving the FFI into the endpoint.
+- [ ] Do not call into C while the endpoint lock is held. The owning worker runs
+  a `current_thread` runtime, so `poll_write` is on the worker's own thread and
+  may call the datapath, but the borrow must end first.
 - [ ] Define cancellation for task drop, shutdown and partial write. At most one
   reservation may exist per connection, matching `px_conn::l7_tx_chunk`.
 - [ ] `poll_write` returns `Pending` when no chunk is available and registers a
@@ -380,15 +483,23 @@ change.
 
 ## P6 — production control plane and policy
 
-- [ ] Replace mock destination, identity and policy addresses with deploy-time
+- [x] Replace mock destination, identity and policy addresses with deploy-time
   configuration. Keep mock binaries as test fixtures only.
-- [ ] Define the DPU workload identity source. Continue using the identity
-  granted during pod registration; never trust a payload-provided identity.
+  `LINKERD_MOCK_CONTROL_PLANE=0` requires `LINKERD_DST_ADDR`,
+  `LINKERD_POLICY_ADDR` and `LINKERD_IDENTITY_ADDR` and refuses to deploy
+  without them; the mock binaries are never a fallback for a missing address.
+- [x] Define the DPU workload identity source. `px_l7_fill_flow` copies the
+  workload the DPU granted at pod registration into `struct dmesh_l7_flow`;
+  a payload never supplies identity.
 - [ ] Define certificate/token provisioning and renewal on the DPU, including
-  restart behavior when identity is unavailable.
-- [ ] Implement policy failure mode explicitly: fail closed for protected
+  restart behavior when identity is unavailable. The identity directory, token
+  file and trust anchors are deploy-time inputs; nothing renews them.
+- [x] Implement policy failure mode explicitly: fail closed for protected
   services or emit an auditable L4 fallback. Do not silently dial TCP from a
-  missing DMesh backend.
+  missing DMesh backend. `DPUMESH_L7_FAIL_CLOSED=1` poisons a declined stream;
+  otherwise the decline is counted by cause and forwarded at L4. A DMesh target
+  whose backend channel is missing returns `NotConnected` from `dmesh_channel`
+  rather than dialing.
 - [ ] Add control-plane disconnect, certificate rotation, destination update
   and policy deny tests.
 - [ ] Implement `decision` mode only if its no-payload verdict semantics are
@@ -474,6 +585,11 @@ P0.2 and the final hardware gate.
 - [x] Opened and closed session totals balance after quiescence.
 - [x] No custody, stale-generation, over-release, stray-release, drop or reorder
   error is present.
-- [ ] ARM performance is reported from valid runs and compared against the
-  frozen pre-change baseline.
+- [ ] ARM performance is reported from valid runs and compared against a frozen
+  pre-change baseline. No such baseline exists yet: `bench/report/REPORT_L7.md`
+  and `bench/report/data/l7-20260812-062044` measure the reference consumer in
+  `linkerd/shim/l7_null.c`, not linkerd2-proxy, and
+  `bench/report/REPORT_L7_ARM_PROFILE.md` is a single-sample attribution run
+  that says so itself. Freeze this tree's numbers, with repetitions and recorded
+  affinity and clock provenance, before starting P4.2 or P5.
 - [x] Current implementation documents and generated diagrams match the code.

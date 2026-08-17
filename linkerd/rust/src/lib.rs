@@ -888,6 +888,14 @@ impl Worker {
     fn open_request(&mut self, conn: u64, flow: &DmeshL7Flow) -> c_int {
         let backend_addr = service_addr(flow.dst_service);
 
+        // One live session per connection handle. Replacing the map entry would
+        // drop the older session without releasing its staging custody,
+        // aborting its endpoints, evicting its backend channel, freeing its slot
+        // or telling the acceptor, and would leave the handle in `order` twice.
+        if self.sessions.contains_key(&conn) {
+            return self.decline(Decline::SessionLimit, conn, flow, Some(backend_addr));
+        }
+
         let workload = {
             let bytes = &flow.workload;
             let end = bytes.iter().position(|&c| c == 0).unwrap_or(bytes.len());
@@ -1655,6 +1663,48 @@ mod tests {
         );
         with_test_worker(|w| w.close_session(2));
         assert_eq!(tw.metrics.sessions_active.get(), 0);
+    }
+
+    /// A second open on a live handle is refused. Replacing the entry would
+    /// strand everything the older session owns.
+    #[test]
+    fn a_duplicate_live_handle_is_refused() {
+        let tw = install_worker(0);
+        let flow = request_flow(43, 5, 4301);
+        let key = session_key(5, 4301);
+        assert_eq!(unsafe { l7_conn_open(0, key, &flow) }, 0);
+        let live = token_of(key);
+        let handle = register_client(&tw, live);
+        with_test_worker(|w| {
+            w.sessions.get_mut(&key).unwrap().client.outstanding = vec![(0, 16)];
+        });
+
+        assert_eq!(
+            unsafe { l7_conn_open(0, key, &flow) },
+            DECLINE_SESSION_LIMIT
+        );
+        with_test_worker(|w| {
+            assert_eq!(w.sessions.len(), 1);
+            assert_eq!(w.sessions[&key].token, live, "the live session is intact");
+            assert!(w.sessions[&key].client.handle.is_some());
+            assert_eq!(w.order, vec![key], "the handle is queued once");
+            assert_eq!(w.counters.connections_opened, 1);
+        });
+        assert_eq!(
+            tw.backends.sessions_for(&service_addr(43)),
+            vec![live],
+            "the refused open published nothing"
+        );
+        assert_eq!(tw.metrics.sessions_active.get(), 1);
+
+        // The refusal also consumed no slot, so the next handle reuses nothing.
+        with_test_worker(|w| w.close_session(key));
+        assert_eq!(unsafe { l7_conn_open(0, key, &flow) }, 0);
+        assert_eq!(token_of(key).generation, live.generation + 1);
+        with_test_worker(|w| w.close_session(key));
+        assert_eq!(released(), vec![(key, 0, 16)], "released exactly once");
+        drop(handle);
+        assert!(tw.backends.is_empty());
     }
 
     /// A slot handed out again is a new session: the closed generation's

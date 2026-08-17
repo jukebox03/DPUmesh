@@ -300,6 +300,27 @@ While identity is unavailable the proxy does not serve: sessions are opened,
 their outbound connections fail, and each failure is counted. Nothing is
 forwarded without the policy the service selected.
 
+## Transport security
+
+Node-local DMesh traffic is plaintext. A session's bytes travel pod registration
+memory, PCIe and DPU memory; what separates one pod from another is the DPU's
+per-pod mapping and routing, not a wire an attacker could reach. The client
+identity that authorization would otherwise read from a certificate comes from
+the registration path instead, and the DPU grants it rather than accepting a
+claim, so a stolen key impersonates nobody. Node-to-node mTLS terminates on the
+DPU and is a separate milestone.
+
+This is a discovery contract, not a proxy code path. `push_tcp_endpoint` layers
+`tls::Client` and `TaggedTransport` above the connector, so an endpoint whose
+metadata carries `tls_identity` or a tagged transport port is given a real
+handshake and a transport header **over its `DmeshIo`**. A destination service
+serving node-local backends must return neither for them. Returning them changes
+the shape of the data path rather than its configuration — per-byte cryptography
+on the ARM cores, and a header written into a stream whose far end is a pod, not
+a proxy — and invalidates every performance figure collected without it. When
+node-to-node arrives, the choice belongs to a per-service mode
+(`intra-plaintext`, `intra-mtls`, `inter-mtls`), never to a global constant.
+
 ## Observability
 
 The proxy's own metrics registry carries the `dmesh` counters: sessions opened,
@@ -316,4 +337,5 @@ quiesces, active sessions, pending registrations and live tasks are zero.
 - opaque and protocol-aware stream modes;
 - DPUmesh backend selection through `DMESH_L7_BACKEND_ANY`;
 - deploy-time control-plane configuration, with mock servers as fixtures;
+- plaintext node-local transport, with identity granted at pod registration;
 - L4 fallback with per-cause counters, or fail-closed refusal.

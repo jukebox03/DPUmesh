@@ -1,0 +1,29 @@
+arm DMESH_L7_TX_RESERVE=0
+tree 162d8099bb63d8e9ef67c2909131589cca37dadf  M PLAN.md  M design/L7.md  M linkerd/CONTRACT.md  m linkerd/port  M linkerd/rust/src/lib.rs ?? bench/report/data/l7-tx-ab-20260817/ ?? bench/suite/l7_session_cost.sh ?? bench/suite/l7_tx_ab.sh 
+request 1024B reply 8B threads 1 dur 10s reps 3
+stack dpa=32 rings=8 workers=4 l7_worker=all opaque=11,13,14
+--- DPU ---
+[     0.026944s]  INFO ThreadId(05) dmesh: linkerd_app::dmesh: dmesh infrastructure ready
+[     0.028352s]  INFO ThreadId(07) linkerd_app::env: `LINKERD2_PROXY_INBOUND_IPS` allowlist not configured, allowing all target addresses
+[     0.028426s]  INFO ThreadId(07) linkerd_app::env: LINKERD2_PROXY_POLICY_CLUSTER_NETWORKS not set; cluster-scoped modes are unsupported
+[     0.028434s]  WARN ThreadId(07) linkerd_app::env: LINKERD2_PROXY_INBOUND_DEFAULT_POLICY was not set; using `all-unauthenticated`
+[     0.028641s]  INFO ThreadId(06) identity:identity{server.addr=127.0.0.1:8088}:controller{addr=127.0.0.1:8088}: linkerd_pool_p2c: Adding endpoint addr=127.0.0.1:8088
+[     0.029992s]  INFO ThreadId(04) daemon:identity: linkerd_app: Certified identity id=default.default.serviceaccount.identity.linkerd.cluster.local
+[     0.030091s]  INFO ThreadId(02) daemon:identity: linkerd_app: Certified identity id=default.default.serviceaccount.identity.linkerd.cluster.local
+[l7_linkerd] worker 3 running: opened=0 closed=0 declined=0 replies=0 into_linkerd=0 to_backend=0 to_origin=0 released=0 retries=0 errors=0 orphans=0
+[     0.030763s]  INFO ThreadId(07) dst:controller{addr=127.0.0.1:8089}: linkerd_pool_p2c: Adding endpoint addr=127.0.0.1:8089
+[06:53:19:075154][3032695872][DOCA][WRN][dpu_worker.c:973][run_dpu_worker] MAIN CONTROL/DOORBELL: workers=4, notification-driven (1 ms backstop tick)
+[     0.030909s]  INFO ThreadId(06) daemon:identity: linkerd_app: Certified identity id=default.default.serviceaccount.identity.linkerd.cluster.local
+[     0.031114s]  INFO ThreadId(07) policy:controller{addr=127.0.0.1:8087}: linkerd_pool_p2c: Adding endpoint addr=127.0.0.1:8087
+[     0.031534s]  INFO ThreadId(07) dmesh: linkerd_app::dmesh: dmesh infrastructure ready
+[     0.033312s]  INFO ThreadId(08) identity:identity{server.addr=127.0.0.1:8088}:controller{addr=127.0.0.1:8088}: linkerd_pool_p2c: Adding endpoint addr=127.0.0.1:8088
+[     0.035370s]  INFO ThreadId(08) daemon:identity: linkerd_app: Certified identity id=default.default.serviceaccount.identity.linkerd.cluster.local
+[     6.802427s]  INFO ThreadId(03) dmesh_l7: dmesh session opened conn=196609 session=w1/s0/g0 service=11 addr=10.96.0.11:9092 direction="request"
+[     6.807838s]  INFO ThreadId(03) proxy{addr=10.96.0.11:9092}:forward{addr=10.96.0.11:9092}: linkerd_app_outbound::tcp::connect: Connecting via dmesh DMA backend channel server.addr=10.96.0.11:9092
+[     6.809193s]  INFO ThreadId(03) dmesh_l7: dmesh session attached conn=32769 session=196609 addr=10.96.0.11:9092 direction="reply"
+[06:53:29:059336][2798881664][DOCA][WRN][dpu_proxy.c:1579][px_l7_log_fallbacks] proxy: worker 0 L7 fallbacks total=0 (adapter-error=0 worker-not-attached=0 unsupported-mode=0 single-session-limit=0 unknown-reply=0 no-verdict=0) over_release=0 stray_release=0 pool_lock=4 contended=0
+[l7_linkerd] worker 1 session w1/s0/g0 closed (10.96.0.11:9092): opened=1 closed=1 declined=0 replies=1 into_linkerd=26951120 to_backend=26343200 to_origin=607920 released=50660 retries=0 errors=0 orphans=0 endpoint_lock=4870698/0 registry_lock=3/0
+--- ARM clocks ---
+governor: n/a
+cores: 16
+affinity: pid 3786938's current affinity list: 3
