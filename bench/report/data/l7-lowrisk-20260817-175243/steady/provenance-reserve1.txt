@@ -1,0 +1,29 @@
+arm DMESH_L7_TX_RESERVE=1
+tree c8f50f05285640287019785f8032773ed103035c  M PLAN.md  M README.md  M bench/report/REPORT_L7_TX_AB.md  M design/CONTROL.md  M design/L7.md  M linkerd/README.md  m linkerd/port  M linkerd/rust/src/lib.rs ?? bench/report/data/l7-lowrisk-20260817-175243/ 
+request 1024B reply 8B threads 1 dur 10s reps 3
+stack dpa=32 rings=8 workers=4 l7_worker=all opaque=11,13,14
+--- DPU ---
+[     0.028153s]  INFO ThreadId(04) daemon:identity: linkerd_app: Certified identity id=default.default.serviceaccount.identity.linkerd.cluster.local
+[l7_linkerd] worker 3 running: opened=0 closed=0 declined=0 replies=0 into_linkerd=0 to_backend=0 to_origin=0 released=0 retries=0 errors=0 orphans=0
+[     0.029204s]  INFO ThreadId(07) dst:controller{addr=127.0.0.1:8089}: linkerd_pool_p2c: Adding endpoint addr=127.0.0.1:8089
+[08:58:40:862919][2193929280][DOCA][WRN][dpu_worker.c:973][run_dpu_worker] MAIN CONTROL/DOORBELL: workers=4, notification-driven (1 ms backstop tick)
+[     0.029321s]  INFO ThreadId(06) identity:identity{server.addr=127.0.0.1:8088}:controller{addr=127.0.0.1:8088}: linkerd_pool_p2c: Adding endpoint addr=127.0.0.1:8088
+[     0.029551s]  INFO ThreadId(07) policy:controller{addr=127.0.0.1:8087}: linkerd_pool_p2c: Adding endpoint addr=127.0.0.1:8087
+[     0.029985s]  INFO ThreadId(07) dmesh: linkerd_app::dmesh: dmesh infrastructure ready
+[     0.031306s]  INFO ThreadId(06) daemon:identity: linkerd_app: Certified identity id=default.default.serviceaccount.identity.linkerd.cluster.local
+[     0.031786s]  INFO ThreadId(08) identity:identity{server.addr=127.0.0.1:8088}:controller{addr=127.0.0.1:8088}: linkerd_pool_p2c: Adding endpoint addr=127.0.0.1:8088
+[     0.033882s]  INFO ThreadId(08) daemon:identity: linkerd_app: Certified identity id=default.default.serviceaccount.identity.linkerd.cluster.local
+[     6.631194s]  INFO ThreadId(03) dmesh_l7: dmesh session opened conn=196609 session=w1/s0/g0 service=11 addr=10.96.0.11:9092 direction="request"
+[     6.637188s]  INFO ThreadId(03) proxy{addr=10.96.0.11:9092}:forward{addr=10.96.0.11:9092}: linkerd_app_outbound::tcp::connect: Connecting via dmesh DMA backend channel server.addr=10.96.0.11:9092
+[     6.638018s]  INFO ThreadId(03) dmesh_l7: dmesh session attached conn=32769 session=196609 addr=10.96.0.11:9092 direction="reply"
+[08:58:50:848520][1879042944][DOCA][WRN][dpu_proxy.c:1579][px_l7_log_fallbacks] proxy: worker 1 L7 fallbacks total=0 (adapter-error=0 worker-not-attached=0 unsupported-mode=0 single-session-limit=0 unknown-reply=0 no-verdict=0) over_release=0 stray_release=0 pool_lock=4 contended=0
+[l7_linkerd] worker 1 session w1/s0/g0 closed (10.96.0.11:9092): opened=1 closed=1 declined=0 replies=1 into_linkerd=28161952 to_backend=27526720 to_origin=635232 released=52936 retries=0 errors=0 orphans=0 endpoint_lock=5227898/0 registry_lock=3/0
+[    34.861914s]  INFO ThreadId(05) dmesh_l7: dmesh session opened conn=196610 session=w2/s0/g0 service=11 addr=10.96.0.11:9092 direction="request"
+[    34.863701s]  INFO ThreadId(05) proxy{addr=10.96.0.11:9092}:forward{addr=10.96.0.11:9092}: linkerd_app_outbound::tcp::connect: Connecting via dmesh DMA backend channel server.addr=10.96.0.11:9092
+[    34.864276s]  INFO ThreadId(05) dmesh_l7: dmesh session attached conn=98306 session=196610 addr=10.96.0.11:9092 direction="reply"
+[08:59:20:850711][1870588800][DOCA][WRN][dpu_proxy.c:1579][px_l7_log_fallbacks] proxy: worker 2 L7 fallbacks total=0 (adapter-error=0 worker-not-attached=0 unsupported-mode=0 single-session-limit=0 unknown-reply=0 no-verdict=0) over_release=0 stray_release=0 pool_lock=8 contended=0
+[l7_linkerd] worker 2 session w2/s0/g0 closed (10.96.0.11:9092): opened=1 closed=1 declined=0 replies=1 into_linkerd=58032688 to_backend=56723680 to_origin=1309008 released=109084 retries=0 errors=0 orphans=0 endpoint_lock=10886532/0 registry_lock=3/0
+--- ARM clocks ---
+governor: n/a
+cores: 16
+affinity: pid 3904986's current affinity list: 6

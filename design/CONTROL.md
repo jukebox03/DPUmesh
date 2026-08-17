@@ -96,14 +96,19 @@ join and leave through Comch registration.
 ## Linkerd control plane
 
 The Linkerd static library creates destination, identity and policy clients from
-`LINKERD2_PROXY_*` environment variables. The repository deployment starts the
-port's mock services on the DPU:
+`LINKERD2_PROXY_*` environment variables. The benchmark deployment defaults to
+the port's mock services on the DPU:
 
 ```text
 mock-destination  127.0.0.1:8089
 mock-identity     127.0.0.1:8088
 mock-policy       127.0.0.1:8087
 ```
+
+With `LINKERD_MOCK_CONTROL_PLANE=0`, deployment instead requires
+`LINKERD_DST_ADDR`, `LINKERD_POLICY_ADDR`, `LINKERD_IDENTITY_ADDR`, the identity
+directory and trust anchors. Missing external configuration fails deployment;
+the mock processes are test fixtures and are never an automatic fallback.
 
 `LINKERD_BACKEND_ADDR` maps the selected Service to
 `10.96.0.<service-id>:9092`. The adapter supplies each connection's workload and
@@ -140,7 +145,9 @@ thread remains the Comch control and doorbell owner.
 - configured Service names come from one static registry;
 - backend membership is node-local and self-registered;
 - service and pod identifiers occupy the signed one-byte wire space;
-- the Linkerd deployment uses mock destination, identity and policy services;
+- benchmark deployments default to mock destination, identity and policy
+  services; external control-plane addresses and identity material are
+  deploy-time supported, while renewal and failure/update coverage remain P6;
 - Linkerd sessions run on one selected ARM worker, or on every worker when
   `DPUMESH_L7_LINKERD_WORKER=all`;
 - concurrent sessions to one service address are isolated, each owning its own

@@ -113,7 +113,9 @@ LINKERD_IDENTITY_DIR / LINKERD_TRUST_ANCHORS
 
 `DPUMESH_L7_FAIL_CLOSED=1` refuses a connection the L7 layer declined instead of
 forwarding it at L4. `DMESH_L7_TX_RESERVE=0` selects the copy-then-send output
-path in place of the egress reservation.
+path in place of the egress reservation. It is a startup compatibility and A/B
+selection, not an automatic fallback when the reservation path is temporarily
+out of chunks.
 
 `LINKERD_MOCK_CONTROL_PLANE=1` starts the three mock servers before
 `dpumesh_dpu` and points the proxy at them. With `0`, the destination, policy

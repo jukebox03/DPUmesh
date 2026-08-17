@@ -27,13 +27,29 @@ The following behavior is the starting point and is not a TODO:
 - The Host transport protocol and `DmeshRuntime` gRPC threading model do not
   depend on the Linkerd runtime.
 
+### Validation checkpoint (2026-08-17)
+
+- `make -j4 test` passes all 19 native/script/Python test groups.
+- Rust passes: `dmesh-doca` 19 tests, `linkerd-app` 5 DMesh tests,
+  `linkerd-app-outbound` 4 connector tests, and `dmesh-l7` 28 adapter tests.
+- gRPC TSAN passes 4/4. In the ASAN build, the full-suite channel churn case
+  failed transiently twice after the preceding endpoint case, then passed 3/3
+  when repeated alone; the other three ASAN tests pass. Keep this suite-order
+  flake visible rather than treating the isolated passes as a clean full-suite
+  gate.
+- The cleanup was rebuilt and redeployed on the target DPU with the frozen
+  32/8/4 geometry, four Linkerd workers, identical core placement and 2.5 GHz
+  clock. `bench/report/REPORT_L7_LOWRISK.md` records three-repetition steady and
+  churn comparisons: no regression, and the fitted session cost falls from
+  1,200 to 1,154 ARM core-us (-3.8%) with all quiescence gates passing.
+
 ## Execution order
 
-Phases are numbered below; this is the order they are worked in. The control
-plane (P6) is last, and everything before it runs against the mock control
-plane. That is sound because the mock returns endpoint metadata with no
-`tls_identity` and no tagged transport port, which is the data path node-local
-traffic is specified to take — see `linkerd/CONTRACT.md`, Transport security.
+Phases below retain their historical numbers, but the remaining work follows
+this risk order: freeze and document the measured implementation, take the
+obvious behavior-preserving wins, complete the production control plane, then
+make profile-guided structural optimizations. This fixes the session and policy
+lifecycle before deeper stack sharing can depend on it.
 
 1. Pin the node-local plaintext contract in the documents, and refuse a
    duplicate live connection handle (P0.1). **Done 2026-08-17.**
@@ -45,19 +61,25 @@ traffic is specified to take — see `linkerd/CONTRACT.md`, Transport security.
    1,127 microseconds more than the DPUmesh connection under it; the copy P5.2
    would remove is 0.265 microseconds per request. They break even at about
    4,300 requests per connection.
-5. Reduce what a Linkerd session costs to build, guided by a per-part split of
-   those 1,127 microseconds and without giving up the P2.2 isolation the
-   per-session stack buys. This is the largest lever in the L7 path.
-6. P5.2 direct output reservation. Evidence-backed, and the larger lever for
+5. Remove behavior-preserving overhead and add measurement. **Done
+   2026-08-17**: backend lookup now uses a session-to-service index, shutdown
+   avoids temporary token lists, and synchronous stack construction exports
+   configure/layers/service time counters.
+6. Complete P6 certificate/token renewal and control-plane failure/update
+   tests. Keep mocks as fixtures, not the production default.
+7. Reduce what a Linkerd session costs to build, guided first by the new phase
+   counters and then by a semantic split of the 1,127 microseconds. Preserve
+   the P2.2 isolation the per-session stack buys. This is the largest lever in
+   the L7 path.
+8. P5.2 direct output reservation. Evidence-backed, and the larger lever for
    long-lived connections. It has to preserve the output coalescing the tx queue
    provides today, or publication frequency will cost more than the copy it
    saves.
-7. P4.2 worker-local I/O, only if a profile attributes cost to the endpoint
+9. P4.2 worker-local I/O, only if a profile attributes cost to the endpoint
    lock. Two profiles now report zero contention on it.
-8. Load-adaptive output policy, only if a measurement shows the better path
+10. Load-adaptive output policy, only if a measurement shows the better path
    changes with load. The A/B found one path better everywhere.
-9. P8 ARM/x86, as a separate track. It is not required to close the final gate.
-10. P6 control plane, after a regression run.
+11. P8 ARM/x86, as a separate track. It is not required to close the final gate.
 
 Out of scope until this sequence completes: P2.3 shared backend transports and
 the `intra-mtls`/`inter-mtls` service modes.
@@ -429,13 +451,18 @@ one, and the L7 layer only multiplies that by a roughly constant 1.6x to 1.9x.
   construction, endpoint and reconnect layers, the balancer — before deciding
   what may be shared without giving up the P2.2 isolation. This is where the
   1,127 microseconds the Linkerd session adds actually goes.
+- [x] Instrument the synchronous stack-build boundary by configure, layer
+  construction and target-service instantiation. The worker admin metrics now
+  expose a build count and cumulative nanoseconds for each phase; use these to
+  direct the finer semantic split above.
 - [ ] Pursue live-connection scaling in the datapath, not here. The L4 control
   carries the same curve without any of the paths below.
 - [ ] `Worker::poll_internal` walks every session and takes each endpoint lock
   on every runtime poll. Ruled out as the cause of the measured rise; still
   linear in live sessions.
-- [ ] `Backends::take_session` scans every published service to find one
-  session's channel.
+- [x] Replace `Backends::take_session`'s all-service scan with a
+  generation-safe `SessionToken -> service` index. Service-local publication
+  order remains unchanged, and close removes both indexes atomically.
 
 ## P5 — remove avoidable output copies
 
@@ -448,15 +475,16 @@ one, and the L7 layer only multiplies that by a roughly constant 1.6x to 1.9x.
 - [x] On commit `0`, cancel the reservation with commit length `0` and leave
   the source bytes queued. On a positive prefix, consume exactly that prefix.
   On negative result, close the session.
-- [x] Keep `dmesh_l7_send` as a compatibility fallback and cover the real C
-  reserve/cancel/commit/close paths in `proxy_lane_queue_test`.
-- [x] Measure the fallback and reserve/commit paths on hardware.
+- [x] Keep `dmesh_l7_send` as an explicitly selected compatibility/comparison
+  path and cover the real C reserve/cancel/commit/close paths in
+  `proxy_lane_queue_test`.
+- [x] Measure the copy and reserve/commit paths on hardware.
   `bench/suite/l7_tx_ab.sh` deploys each path and compares them;
   `bench/report/REPORT_L7_TX_AB.md` records the run. The reservation path costs
   4.4% to 6.5% less ARM CPU per request, and at concurrency 32 and 128 the two
   arms' three-run ranges are disjoint. The reservation was never refused
-  (`retries=0`), so the copy path did not run as a fallback during the
-  comparison. Keep the reservation path as the default.
+  (`retries=0`). The copy path was selected only in its own deployment; it is
+  not an automatic runtime fallback. Keep the reservation path as the default.
 
 ### P5.2 Direct AsyncWrite reservation
 
@@ -585,11 +613,11 @@ P0.2 and the final hardware gate.
 - [x] Opened and closed session totals balance after quiescence.
 - [x] No custody, stale-generation, over-release, stray-release, drop or reorder
   error is present.
-- [ ] ARM performance is reported from valid runs and compared against a frozen
-  pre-change baseline. No such baseline exists yet: `bench/report/REPORT_L7.md`
-  and `bench/report/data/l7-20260812-062044` measure the reference consumer in
-  `linkerd/shim/l7_null.c`, not linkerd2-proxy, and
-  `bench/report/REPORT_L7_ARM_PROFILE.md` is a single-sample attribution run
-  that says so itself. Freeze this tree's numbers, with repetitions and recorded
-  affinity and clock provenance, before starting P4.2 or P5.
+- [x] ARM performance is reported from valid repeated runs and frozen as the
+  pre-optimization baseline. `bench/report/REPORT_L7_TX_AB.md` records three
+  repetitions per point for the current linkerd2-proxy tree, including core
+  affinity and the fixed 2.5 GHz clock; its reservation arm is the baseline.
+  `bench/report/REPORT_L7_SESSION_COST.md` separately freezes the connection
+  and session axes with the same placement and clock provenance. The older
+  `REPORT_L7.md` remains explicitly a reference-consumer result.
 - [x] Current implementation documents and generated diagrams match the code.

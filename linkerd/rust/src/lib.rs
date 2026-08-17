@@ -587,8 +587,8 @@ fn publish_reserved(
 
 /// Copy queued output through a temporary buffer and hand it to the datapath.
 ///
-/// The compatibility path: it exists so the reservation path can be compared
-/// against it on hardware, and so an arena that lends no chunk is not a stall.
+/// This explicit compatibility/comparison path is selected at worker startup;
+/// it is not an automatic fallback when the reservation path has no chunk.
 fn publish_copied(
     worker_id: c_int,
     handle: &DmeshIoHandle,
@@ -790,7 +790,11 @@ impl Worker {
         let Some(mut s) = self.sessions.remove(&key) else {
             return;
         };
-        self.order.retain(|&k| k != key);
+        if self.order.last() == Some(&key) {
+            self.order.pop();
+        } else {
+            self.order.retain(|&queued| queued != key);
+        }
         if let Some(c) = s.client.conn {
             self.by_conn.remove(&c);
         }
@@ -1286,7 +1290,7 @@ pub unsafe extern "C" fn l7_conn_close(worker_id: c_int, conn: u64) {
 fn detach_worker(worker_id: c_int) {
     // Close sessions and release their staging custody.
     let mine = with_worker(worker_id, false, |w| {
-        for key in w.order.clone() {
+        while let Some(key) = w.order.last().copied() {
             w.close_session(key);
         }
         true

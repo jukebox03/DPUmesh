@@ -3,7 +3,9 @@
 DPUmesh is a BlueField service-mesh transport built with DOCA Comch, DPA, and
 DMA. Applications address a Kubernetes Service; the DPU owns backend selection,
 connection tracking, host-to-DPU forwarding, and reverse DMA. The default mode
-is an ordered L4 byte stream. DPUmesh does not terminate TLS or interpret HTTP/2.
+is an ordered L4 byte stream; in that mode DPUmesh does not terminate TLS or
+interpret HTTP/2. Services explicitly assigned to the embedded L7 layer are the
+exception described below.
 
 This repository is a research prototype. The evaluation contract and
 measurements are in the [performance report](bench/report/REPORT.md).
@@ -174,6 +176,7 @@ number was produced; reports carry the numbers.
 |---|---|
 | [bench/report/REPORT.md](bench/report/REPORT.md) | what DPUmesh costs at L4 against Envoy sidecars |
 | [bench/report/REPORT_L7.md](bench/report/REPORT_L7.md) | what backend-selection granularity costs on the DPU |
+| [bench/report/REPORT_L7_LOWRISK.md](bench/report/REPORT_L7_LOWRISK.md) | whether the first Linkerd cleanup regresses steady-state or session-churn cost |
 | [bench/report/REPORT_CORE.md](bench/report/REPORT_CORE.md) | where the cores go, attributed per component |
 | [integrations/grpc/bench/report/REPORT_GRPC.md](integrations/grpc/bench/report/REPORT_GRPC.md) | whether the L4 win carries to gRPC, and how it scales with cores and channels |
 | [linkerd/bench/report/REPORT_LINKERD.md](linkerd/bench/report/REPORT_LINKERD.md) | linkerd as a sidecar, against Envoy and DPUmesh |

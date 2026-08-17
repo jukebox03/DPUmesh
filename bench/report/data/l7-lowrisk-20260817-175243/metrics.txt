@@ -1,0 +1,21 @@
+Post-run DPU Linkerd metrics (admin ports 4191..4194)
+
+worker 0
+sessions_opened=2363 sessions_closed=2363 active=0 pending=0 tasks=0 orphaned=0
+stack_builds=2363 configure_ns=13564684 layers_ns=258415316 service_ns=82955522
+
+worker 1
+sessions_opened=2401 sessions_closed=2401 active=0 pending=0 tasks=0 orphaned=0
+stack_builds=2401 configure_ns=15408377 layers_ns=263070709 service_ns=84815395
+
+worker 2
+sessions_opened=2401 sessions_closed=2401 active=0 pending=0 tasks=0 orphaned=0
+stack_builds=2401 configure_ns=13486182 layers_ns=255352099 service_ns=81878896
+
+worker 3
+sessions_opened=2400 sessions_closed=2400 active=0 pending=0 tasks=0 orphaned=0
+stack_builds=2400 configure_ns=14335320 layers_ns=254584203 service_ns=82064331
+
+aggregate
+stack_builds=9565 configure_us_per_build=5.938 layers_us_per_build=107.833
+service_us_per_build=34.680 synchronous_total_us_per_build=148.451

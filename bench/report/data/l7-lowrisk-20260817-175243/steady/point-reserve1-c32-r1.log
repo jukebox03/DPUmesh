@@ -1,0 +1,14 @@
+[0;34m[STEP][0m === DPU ARM balance: 1024B/8B conc=32 threads=1 dur=10s ===
+   OK mrps=0.043059 gbps=0.3665 req_gbps=0.3583 resp_gbps=0.0083 p50=695.00 p95=1281.00 p99=1295.00 p999=1462.00 p9999=2394.00 avg=736.24 min=128.81 max=3277.42 rcnt=430272 scheduled=430504 pending=32 fail=0 conc=32 threads=1 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.043059 drops=0 overflow=0 worker_fail=0 mode=closed arr=const batch=1 reconns=0 reconn_us=0.00 grabs=20 rets=20 recyc=838 waits=0 pads=837 reorder=0 dist=2:430472
+   DPU pid=3904986 elapsed=10.000s (100% = one ARM core)
+   THREAD              TID LAST_CPU    ALLOWED    CORE_PCT
+   dmesh-main      3904986        6          6        8.4%
+   dmesh-w0        3905039       15         15        2.2%
+   dmesh-w1        3905041        0          0        2.3%
+   dmesh-w2        3905043        8          8       32.7%
+   dmesh-w3        3905045       10         10        2.2%
+   total process: 48.5%  named main/workers: 47.8%  SDK/helper threads: 0.7%
+   worker balance: n=4 avg=9.8% min=2.2% max=32.7% CV=134.6%
+   L7_WORKER OPENED_DELTA CLOSED_TOTAL   ACTIVE  PENDING    TASKS
+   0                   0            1        0        0        0
+[0;32m[INFO][0m -> bench/report/data/l7-lowrisk-20260817-175243/steady/threads-reserve1-c32-r1.csv

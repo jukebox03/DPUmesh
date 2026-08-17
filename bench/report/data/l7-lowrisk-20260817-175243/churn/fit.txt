@@ -1,0 +1,24 @@
+What a DMesh session costs
+
+## Building one: reconnect churn at a fixed load
+
+| reconnect period | sessions/s | Mrps | ARM us/req | p99 us |
+|---|---|---|---|---|
+| never | 0.0 | 0.010470 | 51.629 | 1279.0 |
+| 4000 | 2.5 | 0.010340 | 52.173 | 1282.0 |
+| 1000 | 10.1 | 0.010137 | 54.201 | 1386.0 |
+| 250 | 36.3 | 0.009318 | 62.446 | 2703.0 |
+| 60 | 110.1 | 0.007369 | 90.295 | 2743.0 |
+
+DPU cores = 0.539 + 1.1540e-3 x sessions/s
+building and tearing down one session costs 1154 ARM core-us
+which is worth about 22 requests at 51.63 us/req
+
+## Carrying them: live sessions at a fixed outstanding window
+
+| threads | conc | live sessions | Mrps | ARM us/req | p99 us |
+|---|---|---|---|---|---|
+
+The outstanding request window is the same on every row of the second
+table, so a rising us/req is what more live sessions cost, not more load.
+Every point carried fail=0, drops=0, reorder=0 and worker_fail=0.

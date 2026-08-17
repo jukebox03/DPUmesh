@@ -71,9 +71,10 @@ anything beyond agreeing in sign.
 - Keep the reservation path as the default. It is not a wash: one copy of the
   published bytes is worth about 5% of the ARM cost of a request, rising to 6.5%
   where the fixed per-request cost is amortized.
-- The copy path stays as the comparison instrument and as the answer when the
-  arena lends no chunk. It cost nothing to keep: `retries=0` says the reservation
-  path never fell back during these runs.
+- The copy path stays as an explicitly selected compatibility and comparison
+  instrument. It is not an automatic fallback: if the default reservation path
+  cannot borrow an arena chunk, the bytes remain queued for a later driver
+  pass. `retries=0` says no reservation was refused during these runs.
 - Output copying is a real, measured cost rather than a suspected one, so the
   remaining copy is worth attacking. Linkerd still writes into the endpoint's
   `tx` queue before the adapter copies that queue into the arena. Removing the
