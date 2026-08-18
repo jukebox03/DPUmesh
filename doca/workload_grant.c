@@ -249,7 +249,6 @@ out:
 int
 dmesh_registration_configure(struct objects *objs, char *error, size_t error_len)
 {
-    const char *mode = getenv("DPUMESH_TRUSTED_REGISTRATION");
     const char *issuer;
     const char *key_dir;
     DIR *directory = NULL;
@@ -259,7 +258,6 @@ dmesh_registration_configure(struct objects *objs, char *error, size_t error_len
         CONFIG_ERROR("registration objects are null");
         return -1;
     }
-    objs->trusted_registration_required = 0;
     OPENSSL_cleanse(objs->registration_keys, sizeof(objs->registration_keys));
     objs->registration_key_count = 0;
     objs->registration_issuer[0] = '\0';
@@ -271,20 +269,12 @@ dmesh_registration_configure(struct objects *objs, char *error, size_t error_len
     objs->registration_grants_rejected = 0;
     objs->registration_grants_replayed = 0;
 
-    if (mode == NULL || *mode == '\0' || strcmp(mode, "0") == 0 ||
-        strcmp(mode, "off") == 0 || strcmp(mode, "dev") == 0)
-        return 0;
-    if (strcmp(mode, "1") != 0 && strcmp(mode, "required") != 0) {
-        CONFIG_ERROR("DPUMESH_TRUSTED_REGISTRATION must be off or required");
-        return -1;
-    }
-
     issuer = getenv("DPUMESH_REGISTRATION_ISSUER");
     if (issuer == NULL || *issuer == '\0')
         issuer = "dpumesh-node-agent";
     key_dir = getenv("DPUMESH_REGISTRATION_KEY_DIR");
     if (key_dir == NULL || *key_dir == '\0') {
-        CONFIG_ERROR("required registration needs DPUMESH_REGISTRATION_KEY_DIR");
+        CONFIG_ERROR("registration needs DPUMESH_REGISTRATION_KEY_DIR");
         return -1;
     }
     if (strlen(issuer) >= sizeof(objs->registration_issuer)) {
@@ -353,7 +343,6 @@ dmesh_registration_configure(struct objects *objs, char *error, size_t error_len
              "%s", issuer);
     snprintf(objs->registration_key_dir, sizeof(objs->registration_key_dir),
              "%s", key_dir);
-    objs->trusted_registration_required = 1;
     return 0;
 
 keyring_error:

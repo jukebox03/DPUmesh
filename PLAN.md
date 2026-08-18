@@ -11,41 +11,7 @@ finishes the milestone this architecture already implements. **Line B** is what 
 mesh would additionally have to do; it is scoped out of the current claim rather
 than half-built.
 
-## Architecture
-
-### Before the control-plane work
-
-```text
-HOST / Kubernetes                         DPU
-
-+----------------------+                 +-----------------------+
-| Service Pod          |  self-reported  | Comch control thread  |
-|  app thread          |  workload +---->|  Pod registration     |
-|  DPUmesh client      |  Service        |  no trusted binding   |
-+----------------------+                 +-----------+-----------+
-                                                    |
-                                                    v
-                                        +-----------------------+
-                                        | ARM data worker       |
-                                        |  Linkerd session task |
-                                        |  embedded proxy       |
-                                        +-----------+-----------+
-                                                    |
-                                         static/mock control data
-                                                    |
-                                                    v
-                                        +-----------------------+
-                                        | control-plane fixture |
-                                        +-----------------------+
-```
-
-The Pod could influence the workload attributed to its session. Control-plane
-reachability, identity renewal and Service targets were deployment fixtures, and
-there was no authoritative same-Service endpoint check. This diagram is kept
-because every requirement below is a consequence of removing one of its
-assumptions.
-
-### Now
+## Deployed architecture
 
 ```text
 HOST / Kubernetes                                      DPU
@@ -72,11 +38,11 @@ HOST / Kubernetes                                      DPU
  | Destination    |                             | Linkerd task   |
  +----------------+                             +--------+-------+
                                                          |
-                                         validated DMesh |
+                                       validated session |
                                                          |
  +----------------+                                      |
  | registered     |<-------------------------------------+
- | backend Pod    |          PCIe/DMesh channel
+ | backend Pod    |          PCIe / DPUmesh channel
  +----------------+
 
 Authoritative feeds, each installed by atomic rename at a monotonic generation:
@@ -113,11 +79,10 @@ upstream `linkerd-app-integration` test crate and are not linked or deployed.
 | Control-plane gateway | `bench/linkerd_cp_gateway.sh`, `bench/linkerd_cp_relay.py` |
 | Orchestration | `bench/bench.sh` |
 
-Switches: `DPUMESH_TRUSTED_REGISTRATION`, `DPUMESH_REGISTRATION_KEY_DIR`,
-`DPUMESH_REGISTRATION_ISSUER`, `DPUMESH_ATTEST_SOCKET`,
-`DPUMESH_REQUIRE_TRUSTED_WORKLOAD`, `DPUMESH_MEMBERSHIP_FILE`,
-`DPUMESH_ADMISSION_FILE`, `DPUMESH_L7_SERVICE_TARGETS_FILE`,
-`DPUMESH_L7_FAIL_CLOSED`, `DPUMESH_L7_LINKERD_WORKER`.
+Switches: `DPUMESH_REGISTRATION_KEY_DIR`, `DPUMESH_REGISTRATION_ISSUER`,
+`DPUMESH_ATTEST_SOCKET`, `DPUMESH_MEMBERSHIP_FILE`, `DPUMESH_ADMISSION_FILE`,
+`DPUMESH_L7_SERVICE_TARGETS_FILE`, `DPUMESH_L7_FAIL_CLOSED`,
+`DPUMESH_L7_LINKERD_WORKER`.
 
 Counters: `dmesh_control_events_total{kind,reason}`,
 `dmesh_sessions_declined_total{reason}`,
@@ -331,7 +296,7 @@ on the current build before optimizing anything.**
 
 - [ ] Re-profile after A3.1/A3.2; continue only if endpoint locking becomes
   material. `Backends::lock_stats` has observed zero contention.
-- [ ] If justified, prototype only the DMesh specialization on Tokio `LocalSet`
+- [ ] If justified, prototype only the DPUmesh specialization on Tokio `LocalSet`
   with `Rc<RefCell<_>>`; do not add unsafe `Send`/`Sync` claims or modify stock
   TCP Linkerd behavior.
 
@@ -494,9 +459,9 @@ nodes has no such argument — the bytes cross a real network.
 
 ### Problem
 
-`DPUMESH_TRUSTED_REGISTRATION=required` protects every registration; `off`
-protects none. A real deployment has both, and the choice must not be inferable
-from Pod input — otherwise a Pod opts itself out.
+Every registration is attested, so every Service is protected to the same
+degree. A real deployment grades protection per Service, and that choice must
+not be inferable from Pod input — otherwise a Pod opts itself out.
 
 ### Design
 
@@ -509,8 +474,9 @@ signature=<key-id>,<hex>
 ```
 
 Consumed by `doca/comch_server.c` at registration time: a Service in the set
-requires a verified grant; a Service outside it may use development attribution.
-The switch stays a deployment-level default for Services the feed does not name.
+carries the strict policy below, and a Service outside it carries the relaxed
+one. Every registration stays grant-verified either way; what the feed grades is
+the interaction rules, not whether a Pod is attested.
 
 Interaction rules to define:
 
@@ -540,11 +506,10 @@ Interaction rules to define:
 **`dmesh-doca`'s `own-datapath` feature.** It compiles a second copy of the
 DPUmesh C datapath — `linkerd/port/DPUMesh/` plus `src/shim.c`, `driver.rs` and
 the `DmeshDoca` owner — so the crate can open DOCA and run its own worker loop.
-It is the scaffolding the port stood on before `dpumesh_dpu` exposed the L7
-entry points. The product build selects `default-features = false`, the bundled
-sources no longer match the current tree, and nothing builds the feature.
-Removing it would also drop the second `RuntimeBackend` implementation and
-change what `linkerd/CONTRACT.md` documents as a deliberate boundary.
+The product build selects `default-features = false`, its bundled sources do not
+match the current tree, and nothing builds the feature. Removing it would also
+drop the second `RuntimeBackend` implementation that `linkerd/CONTRACT.md`
+documents as the boundary between the two owners.
 
 **Do not delete any of it without asking and receiving explicit confirmation
 first.**

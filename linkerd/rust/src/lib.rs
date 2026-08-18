@@ -70,9 +70,8 @@ const STAGING_SPAN: usize = 64 * 1024 * 1024;
 /// Per-connection output budget for one drain pass.
 const TX_DRAIN_MAX: usize = 64 * 1024;
 
-/// Reservations one connection may publish in a drain pass. A reservation is
-/// one egress chunk, so this is what makes the reservation path's per-pass
-/// volume the same as the copy path's `dmesh_l7_send` cap.
+/// Reservations one connection may publish in a drain pass. A reservation is one
+/// egress chunk, so this matches the copy path's `dmesh_l7_send` cap.
 const TX_RESERVATIONS_MAX: usize = 4;
 
 /// Aggregate output and session budgets for one drain pass.
@@ -380,26 +379,6 @@ struct Counters {
     send_retries: u64,
     send_errors: u64,
     registrations_orphaned: u64,
-}
-
-impl Counters {
-    fn summary(&self) -> String {
-        format!(
-            "opened={} closed={} declined={} replies={} into_linkerd={} \
-             to_backend={} to_origin={} released={} retries={} errors={} orphans={}",
-            self.connections_opened,
-            self.connections_closed,
-            self.connections_declined,
-            self.reply_connections_attached,
-            self.bytes_into_linkerd,
-            self.bytes_to_backend,
-            self.bytes_to_origin,
-            self.segments_released,
-            self.send_retries,
-            self.send_errors,
-            self.registrations_orphaned,
-        )
-    }
 }
 
 /// Log the first event and every 4096th event.
@@ -735,6 +714,42 @@ fn pump_side(
 }
 
 impl Worker {
+    /// Publish which Service each address the held generation names belongs to:
+    /// its session key, its ClusterIP and its ready endpoints. The connector
+    /// judges a Linkerd-selected target against this.
+    ///
+    /// An address two Services both name is left unplaced. `take_session`
+    /// refuses a target the generation places in another Service; an unplaced
+    /// address stays with the session that selected it.
+    fn place_service_targets(&self) {
+        let mut placements: HashMap<SocketAddr, SocketAddr> = HashMap::new();
+        let mut ambiguous: Vec<SocketAddr> = Vec::new();
+        {
+            let mut place = |addr: SocketAddr, key: SocketAddr| {
+                if let Some(previous) = placements.insert(addr, key) {
+                    if previous != key {
+                        ambiguous.push(addr);
+                    }
+                }
+            };
+            for (&service, &cluster_ip) in &self.service_targets {
+                let key = service_addr(service);
+                place(key, key);
+                place(SocketAddr::V4(cluster_ip), key);
+            }
+            for (&service, endpoints) in &self.service_endpoints {
+                let key = service_addr(service);
+                for &endpoint in endpoints {
+                    place(endpoint, key);
+                }
+            }
+        }
+        for addr in &ambiguous {
+            placements.remove(addr);
+        }
+        self.backends.place_targets(placements);
+    }
+
     /// Adopt the current feed generation. Session open runs this, so it reads
     /// and parses only when the publisher has installed a new generation.
     fn refresh_service_targets(&mut self) -> Result<(), String> {
@@ -775,11 +790,7 @@ impl Worker {
             self.service_targets = targets;
             self.service_endpoints = endpoints;
             self.service_targets_version = version;
-            tracing::info!(
-                version,
-                targets = self.service_targets.len(),
-                "service targets updated"
-            );
+            self.place_service_targets();
         }
         // Only an accepted generation is stamped, so a rejected rollback is
         // re-read until the publisher installs a newer one.
@@ -913,7 +924,6 @@ impl Worker {
         }
         let token = s.token;
         self.pending.remove(&token);
-        let addr = s.backend_addr;
         // Withdraw this session's channel before the next generation is
         // admitted, so a connector cannot take a closed session's endpoint.
         self.backends.remove(&s.backend_key());
@@ -929,17 +939,6 @@ impl Worker {
             .registrations_pending
             .set(self.pending.len() as i64);
         self.metrics.slots_retired.set(self.slots.retired() as i64);
-        if rate_limited(self.counters.connections_closed) {
-            let (acquired, contended) = dmesh_doca::lock_stats();
-            let (registry_acquired, registry_contended) = self.backends.lock_stats();
-            eprintln!(
-                "[l7_linkerd] worker {} session {token} closed ({addr}): {} \
-                 endpoint_lock={acquired}/{contended} \
-                 registry_lock={registry_acquired}/{registry_contended}",
-                self.id,
-                self.counters.summary()
-            );
-        }
     }
 
     /// Count and log an adapter decline.
@@ -955,8 +954,7 @@ impl Worker {
         if rate_limited(self.counters.connections_declined) {
             eprintln!(
                 "[l7_linkerd] worker {} declined conn {conn} \
-                 (dst_service={} backend_addr={} reason={}) — forwarding at L4 \
-                 (total {})",
+                 (dst_service={} backend_addr={} reason={}) (total {})",
                 self.id,
                 flow.dst_service,
                 addr.map_or_else(|| "-".to_string(), |a| a.to_string()),
@@ -984,16 +982,9 @@ impl Worker {
         match attached {
             None => self.decline(Decline::UnknownReply, conn, flow, None),
             Some((false, addr)) => self.decline(Decline::SessionLimit, conn, flow, Some(addr)),
-            Some((true, addr)) => {
+            Some((true, _)) => {
                 self.by_conn.insert(conn, key);
                 self.counters.reply_connections_attached += 1;
-                tracing::info!(
-                    conn,
-                    session = key,
-                    %addr,
-                    direction = "reply",
-                    "dmesh session attached"
-                );
                 0
             }
         }
@@ -1003,10 +994,8 @@ impl Worker {
     fn open_request(&mut self, conn: u64, flow: &DmeshL7Flow) -> c_int {
         let backend_addr = service_addr(flow.dst_service);
 
-        // One live session per connection handle. Replacing the map entry would
-        // drop the older session without releasing its staging custody,
-        // aborting its endpoints, evicting its backend channel, freeing its slot
-        // or telling the acceptor, and would leave the handle in `order` twice.
+        // One live session per connection handle: a second open is refused
+        // rather than replacing the entry.
         if self.sessions.contains_key(&conn) {
             return self.decline(Decline::SessionLimit, conn, flow, Some(backend_addr));
         }
@@ -1053,16 +1042,7 @@ impl Worker {
             },
             backend_addr,
         };
-        let mut allowed_targets = self
-            .service_endpoints
-            .get(&flow.dst_service)
-            .cloned()
-            .unwrap_or_default();
-        allowed_targets.push(SocketAddr::V4(dst));
-        if let Err(error) =
-            self.backends
-                .publish_for_targets(session.backend_key(), backend_io, allowed_targets)
-        {
+        if let Err(error) = self.backends.publish(session.backend_key(), backend_io) {
             eprintln!(
                 "[l7_linkerd] worker {}: backend channel refused: {error}",
                 self.id
@@ -1095,14 +1075,6 @@ impl Worker {
         self.metrics
             .registrations_pending
             .set(self.pending.len() as i64);
-        tracing::info!(
-            conn,
-            session = %token,
-            service = flow.dst_service,
-            addr = %backend_addr,
-            direction = "request",
-            "dmesh session opened"
-        );
         0
     }
 }
@@ -1275,9 +1247,8 @@ fn admin_addr_for_worker(
 
 /// The process's tracing dispatcher, shared by every worker that builds a proxy.
 ///
-/// Registering it is a process-wide, once-only action, so each worker after the
-/// first takes a clone of the handle the first one installed rather than failing
-/// to install a second.
+/// Registration is process-wide and once-only: each worker after the first takes
+/// a clone of the handle the first one installed.
 #[cfg(not(test))]
 fn shared_trace() -> Result<linkerd_app::trace::Handle, String> {
     static TRACE: std::sync::OnceLock<Result<linkerd_app::trace::Handle, String>> =
@@ -1330,12 +1301,10 @@ async fn build_worker(worker_id: c_int) -> Result<Option<Worker>, String> {
     // sessions still create their own dynamic outbound policy watches below.
     config.disable_inbound_policy_discovery();
 
-    // The inbound, outbound and control listeners are already ephemeral, so the
-    // admin server is the one address several proxies in one process would
-    // contend for. Offset it by worker id: worker 0 keeps the configured port,
-    // so existing tooling still finds it, and each other worker's metrics stay
-    // at a port that can be derived rather than discovered. A configured port of
-    // zero is already per-worker ephemeral and is left alone.
+    // The inbound, outbound and control listeners are ephemeral; the admin
+    // server is the one fixed address, so it is offset by worker id. Worker 0
+    // keeps the configured port. A configured port of zero is already
+    // per-worker ephemeral and is left alone.
     config.admin.server.addr.0 =
         admin_addr_for_worker(config.admin.server.addr.0, worker_id, every_worker)?;
 
@@ -1363,7 +1332,7 @@ async fn build_worker(worker_id: c_int) -> Result<Option<Worker>, String> {
     let drain = app.spawn();
     let _ = events_tx.send(DmeshEvent::InfraReady);
 
-    Ok(Some(Worker {
+    let worker = Worker {
         id: worker_id,
         _drain: Box::new(drain),
         events: events_tx,
@@ -1384,12 +1353,15 @@ async fn build_worker(worker_id: c_int) -> Result<Option<Worker>, String> {
         service_targets_stamp: None,
         tx_reserve: tx_reserve_enabled(),
         counters: Counters::default(),
-    }))
+    };
+    // The first generation is parsed here rather than adopted by a refresh, so
+    // publish its placement before any session opens.
+    worker.place_service_targets();
+    Ok(Some(worker))
 }
 
 /// Output path selection. The reservation path copies once, into the egress
-/// arena; `DMESH_L7_TX_RESERVE=0` selects the copy-then-send path it replaced,
-/// which is what makes the two comparable on hardware.
+/// arena; `DMESH_L7_TX_RESERVE=0` selects the copy-then-send path instead.
 #[cfg(not(test))]
 fn tx_reserve_enabled() -> bool {
     std::env::var("DMESH_L7_TX_RESERVE").map_or(true, |v| v != "0")
@@ -1421,13 +1393,9 @@ pub unsafe extern "C" fn l7_worker_run(worker_id: c_int, driver: *mut c_void) ->
     let result = runtime.block_on(async {
         match build_worker(worker_id).await {
             Ok(Some(worker)) => {
-                let summary = worker.counters.summary();
                 WORKER.with(|slot| *slot.borrow_mut() = Some(worker));
-                eprintln!("[l7_linkerd] worker {worker_id} running: {summary}");
             }
-            Ok(None) => {
-                eprintln!("[l7_linkerd] worker {worker_id} running without Linkerd sessions");
-            }
+            Ok(None) => {}
             Err(error) => return Err(io::Error::other(error)),
         }
 
@@ -1576,18 +1544,7 @@ fn detach_worker(worker_id: c_int) {
         return;
     }
     WORKER.with(|slot| {
-        if let Some(w) = slot.borrow_mut().take() {
-            let (acquired, contended) = dmesh_doca::lock_stats();
-            let (registry_acquired, registry_contended) = w.backends.lock_stats();
-            eprintln!(
-                "[l7_linkerd] worker {worker_id} detached: {} sessions left; {}; {}; \
-                 endpoint_lock={acquired}/{contended} \
-                 registry_lock={registry_acquired}/{registry_contended}",
-                w.sessions.len(),
-                w.counters.summary(),
-                w.metrics.summary()
-            );
-        }
+        slot.borrow_mut().take();
     });
 }
 
@@ -1917,10 +1874,11 @@ mod tests {
         io
     }
 
+    /// Take a session's channel the way the connector does: by session token,
+    /// against the target Linkerd selected.
     fn take_backend(tw: &TestWorker, service: i32, conn: u64) -> DmeshIo {
-        let key = BackendKey::new(service_addr(service), token_of(conn));
         tw.backends
-            .take(&key)
+            .take_session(token_of(conn), service_addr(service))
             .expect("the session published its backend channel")
     }
 

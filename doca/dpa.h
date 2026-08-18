@@ -16,22 +16,33 @@ struct dmesh_doca_dpa_thread {
     struct doca_dpa *dpa;           /* DOCA DPA */
     struct doca_dpa_thread *thread; /* DPA thread */
     doca_dpa_dev_uintptr_t arg;     /* argument to be used by DPA thread */
+	/* Watchdog-safe cooperative handoff. The helper has the same fixed EU
+	 * affinity as thread, so the scheduler cannot run it until the data thread
+	 * releases that EU; it then wakes the already-parked data thread. */
+	struct doca_dpa_thread *yield_thread;
+	struct doca_dpa_notification_completion *resume_completion;
+	doca_dpa_dev_notification_completion_t resume_handle;
+	struct doca_dpa_notification_completion *yield_completion;
+	doca_dpa_dev_notification_completion_t yield_handle;
 };
 
 struct dmesh_doca_dpa_msgq {
-	struct doca_pe *pe;
 	struct doca_comch_msgq *msgq;	      /**< The DOCA Comch MsgQ */
 	struct doca_comch_producer *producer; /**< The DOCA Comch Producer */
 	struct doca_comch_consumer *consumer; /**< The DOCA Comch Consumer */
 	uint32_t target_consumer_id;          /**< Remote consumer target used by producer send tasks */
-	/* At most one fire-and-forget WAKE may occupy the DPU→DPA queue. The
-	 * completion callback clears this after the EU consumes it. Without
-	 * coalescing, a parked EU can accumulate 1 kHz WAKEs until control messages
-	 * such as RING_DEL/ADD_RING fail with DOCA_ERROR_AGAIN. */
-	int wake_inflight;
-	/* Reusable payload for the channel's single in-flight keepalive. */
-	void *wake_payload;
+	/* Receives currently posted on this channel. The DPA drops a ring ACK when
+	 * the count reaches zero, so DPA_CTRL_RECV_FLOOR keeps a few posted through
+	 * soft backpressure and a teardown that cannot finish reports this. The
+	 * owning PE thread is the only writer; the control thread reads it, so
+	 * every access is a relaxed atomic. */
+	int recv_posted;
 };
+
+/* Receives held posted on a DPA channel while forwarding is being throttled, so
+ * the EU can always place a ring ACK. Small enough that forwarding still stalls
+ * on consumer credit. */
+#define DPA_CTRL_RECV_FLOOR 8
 
 struct dmesh_doca_dpa_comch {
 	struct dmesh_doca_dpa_msgq send;			      /**< MsgQ used to send message from DPU to DPA */
@@ -74,7 +85,7 @@ dmesh_doca_dpa_thread_create(struct dmesh_doca_dpa_thread *dpa_thread, int eu_id
 doca_error_t
 dmesh_doca_dpa_comch_create(struct objects *objs, int idx);
 
-/* Control-path send: retries transient submit failures with PE progress. */
+/* Control-path send. The caller owns and progresses the producer's PE. */
 doca_error_t
 dmesh_doca_dpa_msgq_send(struct dmesh_doca_dpa_msgq *msgq, void *msg, uint32_t msg_size);
 

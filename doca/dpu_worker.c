@@ -340,10 +340,6 @@ dpu_finalize_pending_pod_inits(struct objects *objs)
             /* RELEASE publication: setup_complete ACQUIRE above observed all
              * data-plane fields, and dma_ready is the reader-side gate. */
             __atomic_store_n(&pod->dma_ready, 1, __ATOMIC_RELEASE);
-            DOCA_LOG_INFO("DPU pod is data-ready: pod_id=%d generation=%u EU mask=0x%x",
-                          pod->pod_id,
-                          __atomic_load_n(&pod->dma_generation, __ATOMIC_RELAXED),
-                          expected);
             (void)server_publish_pod_init_result(objs, pod,
                                                  DMESH_POD_INIT_READY);
         }
@@ -370,23 +366,6 @@ dpu_drain_iteration(struct objects *objs)
 
 /* ====== ARM data workers ====== */
 
-/* Send the periodic wake message to this worker's DPA channels. */
-static void
-dpu_send_wake_worker(struct objects *objs, int id)
-{
-    if (!objs->dpa_thread_running_any)
-        return;
-    struct comch_msg trigger;
-    memset(&trigger, 0, sizeof(trigger));
-    trigger.type = DPA_MSG_WAKE;
-    int worker_count = objs->n_data_workers;
-    for (int k = id; k < objs->num_dpa_threads; k += worker_count)
-        if (objs->dpa_thread_running[k] &&
-            __atomic_load_n(&objs->dpa_eu_rings[k], __ATOMIC_ACQUIRE) > 0)
-            (void)dmesh_doca_dpa_msgq_send_try(&objs->dpa_comches[k]->send,
-                                                &trigger, sizeof(trigger));
-}
-
 /* Progress one worker's consumer PE and deferred receive tasks. */
 static enum px_progress_state
 dpu_progress_worker_pe(struct dpu_data_worker *worker_state)
@@ -401,6 +380,10 @@ dpu_progress_worker_pe(struct dpu_data_worker *worker_state)
             if (doca_task_submit(t) != DOCA_SUCCESS) {
                 worker_state->deferred_recv[remaining++] = t;
             } else {
+                struct dmesh_doca_dpa_msgq *mq = doca_task_get_user_data(t).ptr;
+                if (mq != NULL)
+                    __atomic_fetch_add(&mq->recv_posted, 1,
+                                       __ATOMIC_RELAXED);
                 state = PX_PROGRESS_PROGRESSED;
             }
         }
@@ -477,6 +460,7 @@ dpu_worker_run(struct objects *objs, struct dpu_data_worker *worker_state)
     return dpu_worker_run_budget(objs, worker_state,
                                  DPU_WORKER_COMPLETION_BUDGET);
 }
+#endif
 
 #if defined(__aarch64__)
 static inline uint64_t dpu_wake_clock_now(void)
@@ -504,7 +488,6 @@ static inline uint64_t dpu_wake_clock_hz(void)
 {
     return 1000000000ull;
 }
-#endif
 #endif
 
 /* ARM data-worker thread. The Linkerd backend owns the loop when it owns the
@@ -561,16 +544,7 @@ dpu_data_worker_main(void *arg)
 
     atomic_store_explicit(&worker_state->init_state, 1, memory_order_release);
 
-    uint64_t wake_period = dpu_wake_clock_hz() / 1000u;
-    if (wake_period == 0)
-        wake_period = 1;
-    uint64_t wake_deadline = dpu_wake_clock_now() + wake_period;
     while (!worker_state->stop) {
-        uint64_t now = dpu_wake_clock_now();
-        if ((int64_t)(now - wake_deadline) >= 0) {
-            dpu_send_wake_worker(objs, worker_state->id);
-            wake_deadline = now + wake_period;
-        }
         enum px_progress_state did = dpu_progress_worker_pe(worker_state);
         enum px_progress_state run = dpu_worker_run(objs, worker_state);
         if (did == PX_PROGRESS_PROGRESSED || run == PX_PROGRESS_PROGRESSED)
@@ -672,7 +646,6 @@ dmesh_l7_driver_maintenance(void *driver)
     struct dpu_data_worker *worker_state = driver;
     if (!worker_state)
         return -1;
-    dpu_send_wake_worker(worker_state->objs, worker_state->id);
     px_l7_stats_report(worker_state->objs, worker_state->id);
     return 0;
 }
@@ -760,8 +733,6 @@ void
 run_dpu_worker(struct objects *objs)
 {
     doca_error_t result;
-
-    DOCA_LOG_INFO("Starting DPU worker");
 
     /* Initialize pod state. */
     memset(objs->pods, 0, sizeof(objs->pods));
@@ -971,11 +942,27 @@ run_dpu_worker(struct objects *objs)
         }
 
         dpu_publish_ready_and_setup_pods(objs);
-        /* The 1 ms backstop tick also drives the DPA EU wake and ringless-EU
-         * gating, so an idle DPU still wakes once per millisecond. */
+        /* The 1 ms backstop remains for control/membership progress. DPA live
+         * EUs use a same-EU helper for watchdog handoff and need no ARM tick. */
         DOCA_LOG_WARN("MAIN CONTROL/DOORBELL: workers=%d, notification-driven "
                       "(1 ms backstop tick)", objs->n_data_workers);
+        uint64_t health_period = dpu_wake_clock_hz();
+        if (health_period == 0)
+            health_period = 1;
+        uint64_t health_deadline = dpu_wake_clock_now() + health_period;
+        int dpa_fatal_reported = 0;
         while (true) {
+            uint64_t now = dpu_wake_clock_now();
+            if (!dpa_fatal_reported &&
+                (int64_t)(now - health_deadline) >= 0) {
+                doca_error_t health = doca_dpa_peek_at_last_error(objs->dpa);
+                if (health != DOCA_SUCCESS) {
+                    DOCA_LOG_ERR("DPA fatal state detected: %s",
+                                 doca_error_get_descr(health));
+                    dpa_fatal_reported = 1;
+                }
+                health_deadline = now + health_period;
+            }
             int progressed = dpu_drain_iteration(objs);
             if (progressed)
                 continue;

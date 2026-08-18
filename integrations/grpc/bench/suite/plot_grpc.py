@@ -106,12 +106,19 @@ def figure_cpu(rows, out):
                 y.append(m[0]["client"] + m[0]["server"] if m else 0.0)
             ax.bar(idx + (off - centre) * width, y, width, color=COLORS[config],
                    label=LABELS[config] if frame == FRAMES[0] else None)
+            for i, v in enumerate(y):
+                if v == 0.0:
+                    ax.text(idx[i] + (off - centre) * width, 0.04, "did not\ndeliver",
+                            rotation=90, ha="center", va="bottom",
+                            fontsize=6.0, color="#777777")
         ax.axhline(BUDGET, color="#333333", linestyle="--", linewidth=0.9)
         ax.set_xticks(idx, [human(v) + "/s" for v in loads])
         ax.set_ylim(0, BUDGET * 1.08)
         ax.set_title(FRAME_LABEL[frame])
         ax.set_xlabel("Offered load")
     axes[0].set_ylabel("Host cores consumed\n(client + server)")
+    axes[-1].text(len(FRAMES) - 0.4, BUDGET, "two-core budget", fontsize=8,
+                  color="#333333", ha="right", va="bottom")
     h, l = axes[0].get_legend_handles_labels()
     fig.legend(h, l, ncol=min(4, len(l)), frameon=False, loc="upper center",
                bbox_to_anchor=(0.5, 1.04))

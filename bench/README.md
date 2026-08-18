@@ -5,6 +5,18 @@ feature validators, and measured reports for the current working tree.
 Results are meaningful only when the compared paths use the same request/reply
 semantics, frame sizes, concurrency, warmup, duration, and CPU allocation.
 
+## 0. Terms
+
+| Term | Meaning |
+|---|---|
+| open loop | the generator offers a fixed rate whether or not replies keep up |
+| closed loop | the generator keeps a fixed number of requests in flight |
+| offered rate | requests per second the generator was asked to send |
+| delivered | a run where achieved/offered ≥ 0.98 with no failure, reorder or histogram overflow |
+| knee | the offered rate at which a path stops delivering what it is offered |
+| generator headroom | how much faster the generator can run than the rate under test |
+| matched workload | the same program and frame sizes on every compared path |
+
 ## 1. Layout
 
 ```text

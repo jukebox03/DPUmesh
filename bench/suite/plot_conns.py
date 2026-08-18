@@ -26,7 +26,8 @@ import numpy as np
 
 # Channel count is ordered, so its hues are one ramp light to dark rather than
 # four unrelated colours.
-CHANNEL_COLOR = {1: "#9dc3ea", 2: "#5a9bd9", 4: "#2a78d6", 8: "#14508f"}
+CHANNEL_COLOR = {1: "#9dc3ea", 2: "#5a9bd9", 4: "#2a78d6", 8: "#14508f",
+                 16: "#8c7ab8", 32: "#4c3d78"}
 WORKER_COLOR = "#2a78d6"
 IDLE_COLOR = "#c9c6bd"
 RULE_COLOR = "#e34948"
@@ -219,11 +220,14 @@ def scaling(points, out: Path, stem: str):
     colors = [CHANNEL_COLOR.get(c, "#666666") for c in counts]
     bars = axes[0].bar(x, values, color=colors, width=0.62)
     for xi, bar, value, is_capped in zip(x, bars, values, capped):
-        axes[0].text(xi, value + 1.0, f"≥{value:g}K" if is_capped else f"{value:g}K",
+        # A capped bar carries its arrow first, then its label above it, so the
+        # two never overlap.
+        axes[0].text(xi, value + (7.0 if is_capped else 1.0),
+                     f"≥{value:g}K" if is_capped else f"{value:g}K",
                      ha="center", fontsize=9,
                      color=RULE_COLOR if is_capped else "#333333")
         if is_capped:
-            axes[0].annotate("", xy=(xi, value + 5.5), xytext=(xi, value + 0.5),
+            axes[0].annotate("", xy=(xi, value + 6.0), xytext=(xi, value + 1.0),
                              arrowprops=dict(arrowstyle="->", color=RULE_COLOR,
                                              linewidth=1.4))
     axes[0].set_xticks(x)

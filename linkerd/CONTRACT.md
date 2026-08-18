@@ -5,6 +5,16 @@ embedded Linkerd build. The normative definitions are
 `linkerd/include/dmesh_l7.h`, `doca/dpu_worker.c`, `doca/dpu_proxy.c` and
 `linkerd/rust/src/lib.rs`.
 
+| Term | Meaning |
+|---|---|
+| session | one client connection together with the Linkerd outbound stack built for it |
+| `DmeshIo` | the byte-stream endpoint the Linkerd stack reads from and writes to |
+| staging | DPU memory holding arrived bytes; an *extent* is one contiguous range of it |
+| custody | arrived bytes stay valid, and their sender uncredited, until the layer releases them |
+| egress arena | DPU buffers holding produced output until the DMA sends it |
+| backend channel | the DPUmesh path a session's bytes take to the backend Pod |
+| decline | the layer refusing a connection, by code, instead of taking it |
+
 ## Component boundary
 
 DPUmesh owns all transport and hardware state. The Linkerd static library owns
@@ -41,11 +51,11 @@ worker without session state runs the DPUmesh runtime backend and returns
 `DMESH_L7_DECLINE_NOT_ATTACHED` for Linkerd session opens. DPUmesh validates the
 value against the ARM worker count at initialization.
 
-With one selected worker, the completion of every L7-carrying request service is
-routed to it. With `all`, no worker declines, so requests keep the port policy
-and spread. A reply is routed by its upstream port either way, which is
-allocated in its owner's residue class. Traffic for services the L7 layer does
-not carry always keeps the port policy.
+With one selected worker, a request for a service the L7 layer carries is routed
+to that worker. With `all`, no worker declines, so requests keep the ordinary
+port policy and spread. A reply is routed by its upstream port either way: the
+DPU allocates that port so that `port % A` names its owning worker. Traffic for
+services the L7 layer does not carry always keeps the port policy.
 
 Under `all`, each worker holds a complete proxy: its own control-plane clients,
 session slots, backend registry and metrics registry. Worker `n` serves its
@@ -78,9 +88,9 @@ DPUmesh implements the backend consumed by `dmesh_doca::runtime::run`.
 | Entry point | Contract |
 |---|---|
 | `dmesh_l7_driver_notification_fds` | return completion, optional DMA and wake fds |
-| `dmesh_l7_driver_arm` | arm progress-engine notifications and mark the worker parked |
+| `dmesh_l7_driver_arm` | ask the completion engines to notify, and mark the worker parked |
 | `dmesh_l7_driver_drain` | perform bounded DPUmesh progress and return `Idle`, `Pending` or `Progressed` |
-| `dmesh_l7_driver_clear_notifications` | clear PE notifications, drain the wake fd and mark the worker active |
+| `dmesh_l7_driver_clear_notifications` | clear those notifications, drain the wake fd and mark the worker active |
 | `dmesh_l7_driver_maintenance` | run the 1 ms worker maintenance action |
 | `dmesh_l7_driver_stopped` | expose the DPUmesh worker stop state |
 | `dmesh_l7_driver_ready` | publish successful worker initialization |
@@ -151,8 +161,8 @@ Output takes the reservation path: the adapter copies queued bytes straight from
 the endpoint into the chunk `dmesh_l7_tx_reserve` lends and publishes it with
 `dmesh_l7_tx_commit`. A commit of `0` cancels the reservation and leaves the
 bytes queued; a negative result closes the session. `DMESH_L7_TX_RESERVE=0`
-selects the `dmesh_l7_send` path, which copies through a temporary buffer, and
-exists so the two can be compared on hardware.
+selects the `dmesh_l7_send` path, which copies through a temporary buffer, so the
+two can be compared on hardware.
 
 ## Backend channels
 
@@ -172,7 +182,7 @@ address with a concrete endpoint address. A close evicts its own key before the
 next generation publishes.
 
 The normal Linkerd stack continues to key discovery, protocol, balancer and
-transport caches by destination. DMesh does not change those stock keys.
+transport caches by destination. DPUmesh does not change those stock keys.
 Instead, the DMA acceptor builds one complete outbound stack per
 `SessionToken`; its connector is bound to that token and takes only the channel
 owned by that token. The discovery-selected address is retained for routing
@@ -230,8 +240,9 @@ The Linkerd consumer accepts modes 2 and 3.
 
 DPUmesh counts each decline by cause and reports the totals in the DPU log
 whenever they move. `DPUMESH_L7_FAIL_CLOSED=1` refuses a declined connection
-instead of forwarding it; the default forwards it through the L4 path, which is
-auditable but carries no policy.
+instead of forwarding it at L4. The deployment script sets it and rejects any
+other value, because a Service the L7 layer was configured to carry must not be
+forwarded without the policy that layer applies.
 
 ## Custody and ordering
 
@@ -259,9 +270,8 @@ The L7 runtime does not alter the Host↔DPU protocol.
 
 | Control message | Direction | Function |
 |---|---|---|
-| `REG_CHALLENGE` | DPU→Host | fresh connection nonce; required-mode bit |
+| `REG_CHALLENGE` | DPU→Host | fresh connection nonce |
 | `WORKLOAD_GRANT` | Host→DPU | node-agent-authorized Pod and Service claims |
-| `POD_IDENTITY` | Host→DPU | development-only reported workload |
 | `POD_REGISTER` | Host→DPU | pod and service registration |
 | `POD_ASSIGNED` | DPU→Host | assigned pod and landing stripes |
 | `MMAP_EXPORT` | Host→DPU | ring and buffer mappings |
@@ -297,8 +307,8 @@ plane is mandatory. Missing addresses, identity material or a versioned Service
 target feed fail preflight; there is no in-process or benchmark mock fallback.
 
 The workload in `struct dmesh_l7_flow` is bound to the Pod registration and a
-payload never supplies it. In required mode, a root-owned Host agent resolves
-the Unix peer PID/cgroup to Kubernetes Pod and Service objects and signs a
+payload never supplies it. A root-owned Host agent resolves the Unix peer
+PID/cgroup to Kubernetes Pod and Service objects and signs a
 connection-nonce-bound grant. The DPU selects the key by the signed key id,
 verifies the HMAC, lifetime, issuer, nonce and exact Service id, then constructs
 the workload from signed namespace/Pod claims and retains the signed Pod UID
@@ -307,9 +317,16 @@ authoritative node membership generation has that exact registration closed.
 Both feeds are signed by the registration keyring; the adapter verifies the
 Service target feed through `dmesh_l7_verify_feed` and parses only the signed
 prefix, so it holds no key material of its own.
-`DPUMESH_WORKLOAD` is accepted only in development mode.
-Each DMesh outbound Policy Watch uses the flow value, not the process-wide
+Each outbound Policy Watch uses the flow value, not the process-wide
 Linkerd fallback.
+
+Each adopted generation publishes which Service every address it names belongs
+to: the session key, the ClusterIP and the ready endpoints. When Linkerd selects
+an endpoint, the connector takes the session's channel unless that generation
+places the address in another Service, which is refused and counted as
+`dmesh_backend_target_mismatches`. An address no generation places is this
+session's; the channel taken is the session's own either way, so discovery
+cannot move a session to another Service.
 
 While identity is unavailable the proxy does not serve: sessions are opened,
 their outbound connections fail, and each failure is counted. Nothing is
@@ -317,12 +334,11 @@ forwarded without the policy the service selected.
 
 ## Transport security
 
-Node-local DMesh traffic is plaintext. A session's bytes travel Pod registration
+Node-local DPUmesh traffic is plaintext. A session's bytes travel Pod registration
 memory, PCIe and DPU memory; what separates one Pod from another is the DPU's
 per-Pod mapping and routing, not a wire an attacker could reach. The source
-workload used for policy comes from the registration path. Required mode makes
-it node-agent-attested, connection-bound authorization; development mode is
-only reported attribution and must not protect a Service. Node-to-node mTLS
+workload used for policy comes from the registration path, which makes it
+node-agent-attested, connection-bound authorization. Node-to-node mTLS
 terminates on the DPU and is a separate milestone.
 
 This is a discovery contract, not a proxy code path. `push_tcp_endpoint` layers
@@ -359,5 +375,4 @@ live tasks are zero.
 - DPUmesh backend selection through `DMESH_L7_BACKEND_ANY`;
 - deployed Linkerd control-plane configuration through the host-network gateway;
 - plaintext node-local transport, with identity granted at pod registration;
-- L4 fallback with per-cause counters in development mode; required
-  registration selects fail-closed refusal.
+- fail-closed refusal of declined sessions, with per-cause counters.

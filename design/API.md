@@ -24,8 +24,8 @@ that may run on a different thread than its EQ's consumer — the POSIX shim
 transmits from application threads, the gRPC adapter from endpoint executors —
 and the caller serializes that stream against itself and against the QP's
 destruction. The library serializes that stream against the buffered-tail
-publication `dmesh_poll_eq()` performs. The transport PE is a separate single
-producer of EQ-ready edges. `qp->user_data` belongs entirely to the
+publication `dmesh_poll_eq()` performs. The library's own progress thread is the
+single producer of EQ readiness. `qp->user_data` belongs entirely to the
 application.
 
 The public surface consists of nineteen calls:
@@ -46,11 +46,11 @@ the DPU, exports the data-path mappings, and waits for an end-to-end readiness
 barrier:
 
 ```text
-Comch RUNNING
-  → POD_REGISTER / POD_ASSIGNED
-  → K rings + TX mmap + RX mmap imported
-  → generation-matched RING_ADD_ACK from every target EU
-  → POD_INIT_RESULT(READY, L)
+control connection established
+  → POD_REGISTER / POD_ASSIGNED           the DPU assigns this process a pod id
+  → K rings + TX mmap + RX mmap imported  the DPU maps the process's memory
+  → RING_ADD_ACK from every target EU     each accelerator unit confirms its ring
+  → POD_INIT_RESULT(READY, L)             the channel is usable; L stripes granted
 ```
 
 Registration is idempotent. While assignment or readiness is pending, the host
@@ -79,19 +79,20 @@ what causes DPU routing and backend connection creation. Inbound connections
 arrive as `DMESH_EVENT_CONN_REQ`; their `event.qp` is already usable and permanently
 bound to the EQ that accepted it.
 
-Every QP is one reliable full-duplex byte stream. Default L4 passthrough pins that
-stream to one backend. A service-selected DPU codec may recognize application
-frames and route complete frames to different upstreams, but this does not add a
-public stream identifier: the application still receives one ordered sequence of
-byte fragments and performs its own framing and request correlation. DPUmesh does
-not expose numeric service, backend, or upstream ids in this API.
+Every QP is one reliable full-duplex byte stream. By default the DPU forwards
+those bytes untouched (L4) and pins the stream to one backend. A Service assigned
+to the DPU's L7 layer instead has its frames parsed there, and complete frames may
+go to different backends; that adds no identifier to this API. The application
+still receives one ordered sequence of byte fragments and does its own framing and
+request correlation. DPUmesh exposes no numeric service, backend, or upstream id
+here.
 
 `dmesh_destroy_qp()` is graceful close: it submits the buffered tail, waits until
-all submitted data has left DPU proxy custody, and only then sends FIN. It returns
+the DPU has finished reading every submitted byte, and only then sends FIN. It returns
 any held RX credit and always frees the local QP. `dmesh_abort_qp()` instead
 discards bytes that have not yet been submitted, waits for already-submitted bytes
-to leave proxy custody, then sends FIN when a peer exists so remote state can be
-reclaimed. Already-submitted bytes cannot be recalled. The custody wait is bounded;
+to leave the DPU, then sends FIN when a peer exists so remote state can be
+reclaimed. Already-submitted bytes cannot be recalled. That wait is bounded;
 on a broken transport the close returns `-1/EBADMSG` without sending an overtaking
 FIN. Either call may return `-1/EBADMSG`, and the pointer is invalid on every return.
 Because one EQ poll can return several entries that name the same QP, defer

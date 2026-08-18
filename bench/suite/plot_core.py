@@ -66,12 +66,14 @@ ROLLUP_OF = {
     "app": "app", "transport": "transport", "grpc": "grpc", "envoy": "transport",
     "net": "transport", "syscall": "transport", "sched": "sched", "other": None,
 }
-# One hue per configuration for the load curve, assigned in CONFIG_ORDER.
+# One hue per configuration for the load curve. These are the colours the other
+# reports give the same configurations, and they are deliberately distinct from
+# the layer colours above, which appear in the split figures of this report.
 LINE_COLOR = {
-    "envoy-permissive": "#2a78d6", "envoy-strict": "#1baf7a",
-    "dpumesh-preload": "#eda100", "dpumesh-native": "#e87ba4",
-    "grpc-envoy-permissive": "#2a78d6", "grpc-envoy-strict": "#1baf7a",
-    "grpc-tcp": "#eda100", "grpc-dpumesh": "#e87ba4",
+    "envoy-permissive": "#5B6573", "envoy-strict": "#D55E00",
+    "dpumesh-preload": "#0072B2", "dpumesh-native": "#009E73",
+    "grpc-envoy-permissive": "#5B6573", "grpc-envoy-strict": "#D55E00",
+    "grpc-tcp": "#0072B2", "grpc-dpumesh": "#009E73",
 }
 MARKERS = ["o", "s", "^", "D"]
 

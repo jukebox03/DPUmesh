@@ -172,6 +172,9 @@ CQ_INLINE int mpsc_comp_queue_empty(dpu_mpsc_comp_queue_t *q) {
  * so enlarging the queue does not move the trip points. */
 #define COMP_QUEUE_BP_HIGH  3072
 #define COMP_QUEUE_BP_LOW   2048
+/* Real exhaustion. Above this every receive is withheld, including the floor
+ * that otherwise keeps ring ACKs sendable under soft backpressure. */
+#define COMP_QUEUE_BP_HARD  (DPU_COMP_QUEUE_SIZE - 1024)
 
 /* Max deferred recv tasks. When comp_queue ≥ BP_HIGH the DPA recv-cb stashes
  * completed recv tasks here for the PE owner to resubmit once it drains below
@@ -204,13 +207,10 @@ struct pod_state {
     int32_t pod_id;
     int32_t service_id;     /* this pod's service id (an LB backend of that service; the live
                              * set is derived from pods[] by service_id); SVC_NONE if none */
-    /* Authoritative Linkerd workload bound to this connection. In trusted mode
-     * it is derived from a verified node-agent grant; POD_IDENTITY is accepted
-     * only by the explicit development compatibility mode. */
+    /* Linkerd workload bound to this connection by its verified grant. */
     char workload[DMESH_WORKLOAD_MAX];
     /* Signed Kubernetes Pod UID of the granted registration. It names the exact
-     * live registration a membership withdrawal has to close, and is empty in
-     * development mode. */
+     * live registration a membership withdrawal has to close. */
     char pod_uid[DMESH_POD_UID_MAX];
     uint8_t registration_nonce[DMESH_REG_NONCE_SIZE];
     uint8_t registration_grant_id[DMESH_GRANT_ID_SIZE];
@@ -230,10 +230,10 @@ struct pod_state {
     int dma_ready;          /* 1 = all mmaps + worker barrier + DPA ADD ACKs complete */
     enum dmesh_pod_init_result init_result;   /* terminal once non-PENDING */
     int init_result_sent;   /* result message was submitted to this connection */
-    /* Bumped by setup_pod_dma per incarnation of this SLOT. A DMA error names its pod
-     * by slot index, which is RECYCLED, and lands asynchronously — possibly after the
-     * slot's next tenant registered. Stamped into the submitted op so px_dma_err_cb
-     * can tell whose DMA failed and not kill a live pod. Also drives px_lane_rearm. */
+    /* Bumped by setup_pod_dma per incarnation of this slot. A DMA error names its
+     * pod by recycled slot index and lands asynchronously, so the generation is
+     * stamped into the submitted op: px_dma_err_cb matches it before killing a
+     * pod. Also drives px_lane_rearm. */
     uint32_t dma_generation;
     /* DPA setup barrier. Each EU contributes one bit to add_ack_mask. */
     uint32_t dpa_add_expected_mask;
@@ -250,13 +250,11 @@ struct pod_state {
      * POD_QUIESCED. */
     int cleanup_pending;
     int cleanup_reply_sent;
+    uint64_t cleanup_started_ns;
+    uint64_t cleanup_stall_report_ns;
     uint32_t dpa_del_expected_mask;
     uint32_t dpa_del_ack_mask;
     uint64_t dpa_del_last_send_ns;
-    /* EUs whose dpa_eu_rings count this pod's ring (set on ADD_ACK OK,
-     * cleared on DEL_ACK); a bit that never clears leaves the EU wake-eligible. */
-    uint32_t dpa_rings_counted_mask;
-    int egress_quiesced;
     /* Each worker closes its own connections and Linkerd sessions before the
      * egress owners may declare their destination lanes empty. This producer
      * barrier prevents a late worker close from publishing into a lane after
@@ -264,7 +262,7 @@ struct pod_state {
     uint32_t proxy_producers_quiesced_mask;
     /* Pod teardown waits for every region%A owner bit. */
     uint32_t egress_quiesced_mask;
-    /* A second worker pass after egress_quiesced. DOCA may release a task's
+    /* A second worker pass after the quiesce barrier. DOCA may release a task's
      * internal buffer reference only after its completion callback returns;
      * the first quiet bit can be published from the pump immediately following
      * that callback. The control thread destroys imported mmaps only after this
@@ -498,10 +496,8 @@ struct objects {
     int32_t registration_trusted_required;
     int32_t registration_challenge_ready;
 
-    /* DPU-only trusted-registration verifier configuration. Off is the
-     * development-compatible default; required mode is initialized by
+    /* DPU-only verifier configuration, installed by
      * dmesh_registration_configure() before the Comch server starts. */
-    int trusted_registration_required;
     struct dmesh_registration_key registration_keys[DMESH_REGISTRATION_MAX_KEYS];
     size_t registration_key_count;
     char registration_issuer[DMESH_GRANT_ISSUER_MAX];
@@ -550,12 +546,10 @@ struct objects {
     int dpu_ready;
     /* Worker-owned routing, SG-DMA, and reverse-ring publication. */
     struct dmesh_proxy *proxy;
-    int dpa_thread_running[MAX_DPA_EU];     /* per-EU: 1 = thread k started */
-    int dpa_thread_running_any;             /* 1 = at least one EU started (keepalive guard) */
-    /* Per-EU count of live forward rings, maintained on ADD_ACK/DEL_ACK
-     * transitions. Periodic WAKEs go only to EUs with at least one ring; a
-     * ringless EU parks until a control message wakes it. */
-    uint32_t dpa_eu_rings[MAX_DPA_EU];
+    /* Per-EU: 1 = thread k started. A started EU polls its own rings and hands
+     * its EU to a same-affinity DPA helper for the watchdog; a ringless EU
+     * parks until a control message wakes it. Neither needs an ARM tick. */
+    int dpa_thread_running[MAX_DPA_EU];
 
     struct doca_pe *consumer_pe;   /* consumer_pes[0] */
     /* DPA channel k binds to consumer_pes[k % A]. */
@@ -575,21 +569,18 @@ struct objects {
      * Must be initialized to all -1 before the worker starts. */
     int pod_id_to_slot[POD_ID_SPACE];
 
-    /* Per-service round-robin cursor for the L4 load balancer (lb_pick). The
-     * healthy backend SET of a service is DERIVED on demand from pods[] (single
-     * source of truth: registered + service_id + dma_ready), so there is no
-     * separate service->backend table to keep in sync — a disconnect removes a
-     * backend from the set automatically. Existing pins terminate; new
-     * connections rotate across the live set. Indexed by service_id
-     * [0,POD_ID_SPACE).
-     * Data workers advance it with a relaxed atomic. Init to 0. */
+    /* Per-service round-robin cursor for the L4 load balancer (lb_pick). A
+     * service's healthy backend set is derived on demand from pods[] —
+     * registered + service_id + dma_ready — so a disconnect removes a backend
+     * from it. Existing pins terminate; new connections rotate across the live
+     * set. Indexed by service_id [0,POD_ID_SPACE), advanced by data workers with
+     * a relaxed atomic, initialized to 0. */
     uint32_t svc_rr[POD_ID_SPACE];
 
     /* ====== In-flight counters for DOCA task pools ======
-     * Mirror DOCA's internal task pool usage so submits can be gated
-     * BEFORE calling doca_task_submit, avoiding DOCA_ERROR_AGAIN entirely.
-     * Counters are atomic because completions fire in PE threads while
-     * submits may come from other threads (e.g. host worker threads). */
+     * Mirror DOCA's task pool usage so a submit is gated before
+     * doca_task_submit is called. The counters are atomic: completions fire in
+     * PE threads while submits may come from other threads. */
     atomic_int send_tasks_in_flight;   /* comch send task pool (server or client) */
     int        send_tasks_max;          /* CC_SEND_TASK_NUM */
 
@@ -601,9 +592,9 @@ struct objects {
 };
 
 /* ====== Task-pool helpers ======
- * Acquire/release a slot in an atomic in-flight counter. Acquire may fail
- * (return 0) if the pool is full; caller must treat that like DOCA_ERROR_AGAIN
- * and defer. These never sleep, never block, never call DOCA. */
+ * Acquire or release a slot in an atomic in-flight counter. Acquire returns 0
+ * when the pool is full, which the caller treats like DOCA_ERROR_AGAIN. These
+ * never sleep, block, or call DOCA. */
 static inline int doca_pool_try_acquire(atomic_int *cnt, int max) {
     int new_count = atomic_fetch_add(cnt, 1) + 1;
     if (new_count > max - TASK_POOL_MARGIN) {

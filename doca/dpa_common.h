@@ -87,6 +87,8 @@ struct dpa_thread_arg {
 	uint64_t dpa_producer_comp;
 	uint64_t dpa_producer;
 	uint64_t dpa_consumer;
+	/* Activates the same-EU yield helper, never this thread itself. */
+	uint64_t yield_notification;
 	uint32_t dpu_consumer_id; /* DPU-side comch consumer ID for DPA->DPU sends */
 	uint32_t eu_index; /* which EU this thread is (0..N-1) */
 	/* Generation of rings[0]. The first ring is installed by h2d_memcpy before
@@ -96,6 +98,12 @@ struct dpa_thread_arg {
 	/* doca_dpa_dev_thread_reschedule restarts the global entry function, so this
 	 * persistent device-memory guard is required to emit the initial ACK once. */
 	uint32_t initial_ack_sent;
+	/* DEL ACKs the DPU channel had no posted receive for. They are the teardown
+	 * fence ARM waits on, so the EU keeps one entry per ring it can hold and
+	 * probes them once before releasing its EU. */
+	uint32_t pending_del_n;
+	int32_t pending_del_pod[MAX_DPA_RINGS];
+	uint32_t pending_del_generation[MAX_DPA_RINGS];
 
 	/* Forward rings (CPU→DPU, per-pod). Reverse (DPU→host) egress is the ARM
 	 * SG-DMA engine (dpu_proxy.c), not a DPA ring — no reverse ring state here.
@@ -103,8 +111,6 @@ struct dpa_thread_arg {
 	 * landing cursor either (the completion pos == host offset). */
 	volatile uint32_t num_rings;
 	uint32_t producer_deferred;
-	uint32_t producer_reports_submitted;
-	uint32_t producer_reports_completed;
 	struct dpa_ring_info rings[MAX_DPA_RINGS];
 	uint64_t consumer_head[MAX_DPA_RINGS];
 	/* Incarnation paired with rings[] and echoed by FWD_DONE. */

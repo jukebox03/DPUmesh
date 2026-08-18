@@ -28,13 +28,6 @@ spec:
         - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
         - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
         - { name: DPUMESH_ATTEST_SOCKET, value: "${DPUMESH_ATTEST_SOCKET}" }
-        - { name: DPUMESH_REQUIRE_TRUSTED_WORKLOAD, value: "${DPUMESH_REQUIRE_TRUSTED_WORKLOAD}" }
-        - name: _DPUMESH_POD_NAME
-          valueFrom: { fieldRef: { fieldPath: metadata.name } }
-        - name: _DPUMESH_POD_NAMESPACE
-          valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
-        - name: DPUMESH_WORKLOAD
-          value: '{"ns":"$(_DPUMESH_POD_NAMESPACE)","pod":"$(_DPUMESH_POD_NAME)"}'
         - { name: BENCH_DST_SERVICE, value: "echo-grpc-dpumesh" }
         - { name: BENCH_REACTORS, value: "${BENCH_REACTORS}" }
         securityContext: { privileged: true }
@@ -75,7 +68,6 @@ spec:
         - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
         - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
         - { name: DPUMESH_ATTEST_SOCKET, value: "${DPUMESH_ATTEST_SOCKET}" }
-        - { name: DPUMESH_REQUIRE_TRUSTED_WORKLOAD, value: "${DPUMESH_REQUIRE_TRUSTED_WORKLOAD}" }
         - { name: DPUMESH_SERVICE, value: "echo-grpc-dpumesh" }
         - { name: BENCH_REACTORS, value: "${BENCH_REACTORS}" }
         # Ignored by a release build. Under the ASan image the report goes to the

@@ -17,11 +17,11 @@ extern "C" {
 
 /* ====== Default constants ====== */
 #define DPUMESH_SLOT_SIZE_DEFAULT       8192            /* 8KB */
-/* Slot pool size (host TX byte-ring + host RX). num_slots × slot_size MUST equal
+/* Slot pool size (host TX byte-ring + host RX). num_slots × slot_size must equal
  * DPU_BUFFER_SIZE so in-flight bytes inside the DPU staging stay bounded (TX
  * byte-ring occupancy; RX slot admission). */
 #define DPUMESH_NUM_SLOTS_DEFAULT       8192
-/* The host→DPU descriptor ring depth is NOT configurable: it is the wire-ABI
+/* The host→DPU descriptor ring depth is not configurable: it is the wire-ABI
  * constant DMA_RING_SIZE (dpumesh/dmesh_common.h), which the host and the DPA
  * kernel must agree on at build time. */
 
@@ -34,7 +34,7 @@ typedef struct {
 #define DPUMESH_CONFIG_DEFAULT { 0, 0 }
 
 /* ====== SwDescriptor (host-internal RX/TX descriptor, packed) ====== */
-/* Host-internal descriptor (NOT a wire layout): the façade builds it for
+/* Host-internal descriptor (not a wire layout): the façade builds it for
  * dpumesh_enqueue (translated to dma_desc) and dpumesh_dequeue fills it from a
  * delivered RX event. Carries the oriented endpoint tuple — see design/API.md §5/§6. */
 typedef struct {
@@ -54,7 +54,7 @@ typedef struct {
 /* ====== Opaque context ====== */
 typedef struct dpumesh_ctx dpumesh_ctx_t;
 
-/* Connection table index space: port [1,65535] IS a connection; 0 = BLANK. */
+/* Connection table index space: each port in [1,65535] is a connection; 0 = BLANK. */
 #define DMESH_PORT_SPACE  65536
 /* The port table covers every representable port, so a uint16_t port needs no
  * upper bound check at the API surface. */
@@ -110,12 +110,11 @@ struct dmesh_eq {
     /* Set by the timer when a retained tail may have come due. dmesh_poll_eq
      * consults the clock only after seeing it. */
     atomic_int           tx_due_hint;
-    /* PE-published READY LIST for this EQ's conns. The PE pushes a conn's port the
-     * moment its inbox goes empty->non-empty; the EQ thread drains it via
-     * dmesh_next_ready instead of scanning conns or holding a per-conn fd. SPSC: PE =
-     * sole producer (ready_tail), this EQ's thread = sole consumer (ready_head). Sized
-     * to the port space so it never overflows (each live conn appears at most once —
-     * the on_ready flag dedups). */
+    /* PE-published ready list for this EQ's conns. The PE pushes a conn's port
+     * when its inbox goes empty->non-empty; the EQ thread drains it through
+     * dmesh_next_ready. SPSC: PE = sole producer (ready_tail), this EQ's thread =
+     * sole consumer (ready_head). Sized to the port space; the on_ready flag
+     * admits each live conn at most once. */
     char _rl_pad0[64];
     atomic_uint_fast32_t ready_head;   /* consumer (this EQ's thread) */
     char _rl_pad1[64];
@@ -162,7 +161,7 @@ int         dpumesh_get_pod_id(dpumesh_ctx_t *ctx);
 
 /* ====== Raw Buffer API ====== */
 
-/* Pop one NEW-connection descriptor off the accept ring. NON-BLOCKING: 0 + *desc,
+/* Pop one new-connection descriptor off the accept ring. Nonblocking: 0 + *desc,
  * or -1 when empty. Readiness comes from any EQ's fd (dmesh_eq_fd): the ring is
  * SPMC, so every EQ is woken and may pop. */
 int dpumesh_dequeue(dpumesh_ctx_t *ctx, sw_descriptor_t *desc);
@@ -190,7 +189,7 @@ int dpumesh_enqueue(dpumesh_ctx_t *ctx, const sw_descriptor_t *desc);
 
 /* ====== Connection API (connection-oriented, full-duplex — no RPC matching) ======
  *
- * A port IS a connection, like a socket fd: it owns one peer and one inbound
+ * A port is a connection, like a socket fd: it owns one peer and one inbound
  * message queue. Inbound is routed by dst_port into that queue; there is no
  * request-to-response matching. */
 
@@ -213,11 +212,11 @@ void     dpumesh_free_port(dpumesh_ctx_t *ctx, uint16_t port);
  * via dpumesh_rx_free after reading), or 0 if the conn inbox is empty. */
 int dpumesh_conn_recv(dpumesh_ctx_t *ctx, uint16_t port, sw_descriptor_t *out);
 
-/* Pop the next READY conn ON THIS EQ (one whose inbox went empty→non-empty since you
- * last drained it) and return the `user` handle registered at alloc; NULL when
- * drained. The EQ's fd (dmesh_eq_fd) wakes you; this names the conns to service
- * WITHOUT scanning every conn or holding a per-conn fd. Drain each returned conn to
- * EAGAIN (edge-triggered re-arm). Single-consumer (this EQ's thread). */
+/* Pop the next ready conn on this EQ — one whose inbox went empty→non-empty since
+ * it was last drained — and return the `user` handle registered at alloc; NULL
+ * when drained. The EQ's fd (dmesh_eq_fd) wakes the caller, and this names the
+ * conns to service without scanning every conn or holding a per-conn fd. Drain
+ * each returned conn to EAGAIN. Single-consumer (this EQ's thread). */
 void *dpumesh_next_ready(struct dmesh_eq *eq);
 /* Pop one QP whose automatically armed dmesh_alloc(EAGAIN) became retryable. */
 void *dpumesh_next_tx_ready(struct dmesh_eq *eq);
@@ -228,25 +227,24 @@ void *dpumesh_next_tx_error(struct dmesh_eq *eq);
  * the EQ's own thread, which owns these QPs. */
 void dpumesh_publish_due_tails(struct dmesh_eq *eq);
 
-/* ====== Connection lifecycle — INTERNAL, shared by both surfaces ======
+/* ====== Connection lifecycle — internal, shared by both surfaces ======
  *
- * These are transport, not façade: nothing here is socket- or verbs-specific, so
- * they live in dmesh_core.c and both src/dmesh_api.c and src/dmesh_preload.c call
- * them. The public half of the lifecycle (dmesh_create_channel / dmesh_create_qp /
- * dmesh_destroy_qp) is declared in <dpumesh/dmesh.h> and implemented in the same
- * file; only the three below stay internal. */
+ * Transport calls, with nothing socket- or verbs-specific, used by both
+ * src/dmesh_api.c and src/dmesh_preload.c. The public half of the lifecycle
+ * (dmesh_create_channel / dmesh_create_qp / dmesh_destroy_qp) is declared in
+ * <dpumesh/dmesh.h>. */
 
-/* Pop the next NEW inbound connection off the channel-wide accept queue and BIND it
- * to `eq`: allocate a SERVER conn that learns its peer (pod,port) and holds the first
- * fragment (c->rx_slot). NULL+EAGAIN if none pending; NULL+ENOMEM on alloc failure
- * (the message is dropped, its RX credit reclaimed). The native API folds this into
- * dmesh_poll_eq as DMESH_EVENT_CONN_REQ; the shim drives it from its dispatcher thread.
- * The queue is SPMC, so several EQs may call this concurrently — each conn goes to
- * exactly one of them, which owns it from then on. */
+/* Pop the next inbound connection off the channel-wide accept queue and bind it to
+ * `eq`: allocate a SERVER conn that learns its peer (pod,port) and holds the first
+ * fragment (c->rx_slot). NULL+EAGAIN if none pending; NULL+ENOMEM on alloc failure,
+ * which drops the message and reclaims its RX credit. The native API folds this
+ * into dmesh_poll_eq as DMESH_EVENT_CONN_REQ; the shim drives it from its
+ * dispatcher thread. The queue is SPMC: several EQs may call this concurrently and
+ * each conn goes to exactly one of them, which owns it from then on. */
 dmesh_qp_t *dmesh_accept(dmesh_eq_t *eq);
 
-/* Pop the next conn that has inbound, from THIS EQ's ready list (the PE puts ready
- * conns here, so there is NO scan and NO per-conn fd). Returns the SAME conn handle
+/* Pop the next conn that has inbound from this EQ's ready list, which the PE
+ * publishes, so there is no scan and no per-conn fd. Returns the conn handle
  * created at accept/connect, or NULL when drained. Single-consumer. */
 dmesh_qp_t *dmesh_next_ready(dmesh_eq_t *eq);
 

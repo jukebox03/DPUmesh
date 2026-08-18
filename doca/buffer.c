@@ -42,7 +42,6 @@ alloc_buffer_and_set_mmap(struct doca_mmap **mmap, struct doca_dev *dev,
     }
 	
 	memset(*buffer, 0, buffer_size);
-	DOCA_LOG_INFO("Allocated buffer at address %p with size %zu", *buffer, buffer_size);
 
     result = doca_mmap_set_memrange(*mmap, *buffer, buffer_size);
     if (result != DOCA_SUCCESS) {

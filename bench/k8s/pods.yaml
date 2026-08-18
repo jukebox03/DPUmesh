@@ -22,13 +22,6 @@ spec:
         - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
         - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
         - { name: DPUMESH_ATTEST_SOCKET, value: "${DPUMESH_ATTEST_SOCKET}" }
-        - { name: DPUMESH_REQUIRE_TRUSTED_WORKLOAD, value: "${DPUMESH_REQUIRE_TRUSTED_WORKLOAD}" }
-        - name: _DPUMESH_POD_NAME
-          valueFrom: { fieldRef: { fieldPath: metadata.name } }
-        - name: _DPUMESH_POD_NAMESPACE
-          valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
-        - name: DPUMESH_WORKLOAD
-          value: '{"ns":"$(_DPUMESH_POD_NAMESPACE)","pod":"$(_DPUMESH_POD_NAME)"}'
         - { name: BENCH_DST_SERVICE, value: "echo-dpumesh" }   # peer by k8s Service NAME (pure client)
         - { name: BENCH_DST_SERVICES, value: "${BENCH_DST_SERVICES}" } # optional per-thread CSV
         - { name: ASYNC_THREADS, value: "${ASYNC_THREADS}" }
@@ -71,7 +64,6 @@ spec:
         - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
         - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
         - { name: DPUMESH_ATTEST_SOCKET, value: "${DPUMESH_ATTEST_SOCKET}" }
-        - { name: DPUMESH_REQUIRE_TRUSTED_WORKLOAD, value: "${DPUMESH_REQUIRE_TRUSTED_WORKLOAD}" }
         - { name: DPUMESH_SERVICE, value: "echo-dpumesh" }     # identity: k8s Service name → registry
         - { name: ECHO_THREADS, value: "${ECHO_THREADS}" }
         securityContext: { privileged: true }
@@ -106,7 +98,6 @@ spec:
         - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
         - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
         - { name: DPUMESH_ATTEST_SOCKET, value: "${DPUMESH_ATTEST_SOCKET}" }
-        - { name: DPUMESH_REQUIRE_TRUSTED_WORKLOAD, value: "${DPUMESH_REQUIRE_TRUSTED_WORKLOAD}" }
         - { name: DPUMESH_SERVICE, value: "${ECHO_13_SERVICE}" } # default: same-service fan-out
         - { name: ECHO_THREADS, value: "${ECHO_THREADS}" }
         securityContext: { privileged: true }
@@ -139,7 +130,6 @@ spec:
         - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
         - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
         - { name: DPUMESH_ATTEST_SOCKET, value: "${DPUMESH_ATTEST_SOCKET}" }
-        - { name: DPUMESH_REQUIRE_TRUSTED_WORKLOAD, value: "${DPUMESH_REQUIRE_TRUSTED_WORKLOAD}" }
         - { name: DPUMESH_SERVICE, value: "${ECHO_14_SERVICE}" } # default: same-service fan-out
         - { name: ECHO_THREADS, value: "${ECHO_THREADS}" }
         securityContext: { privileged: true }
@@ -183,7 +173,6 @@ spec:
         - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
         - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
         - { name: DPUMESH_ATTEST_SOCKET, value: "${DPUMESH_ATTEST_SOCKET}" }
-        - { name: DPUMESH_REQUIRE_TRUSTED_WORKLOAD, value: "${DPUMESH_REQUIRE_TRUSTED_WORKLOAD}" }
         - { name: DPUMESH_SERVICE, value: "loopback-dpumesh" }
         securityContext: { privileged: true }
         volumeMounts:
@@ -226,7 +215,6 @@ spec:
         - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
         - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
         - { name: DPUMESH_ATTEST_SOCKET, value: "${DPUMESH_ATTEST_SOCKET}" }
-        - { name: DPUMESH_REQUIRE_TRUSTED_WORKLOAD, value: "${DPUMESH_REQUIRE_TRUSTED_WORKLOAD}" }
         - { name: DPUMESH_SERVICE, value: "verbs-dpumesh" }
         securityContext: { privileged: true }
         volumeMounts:
@@ -268,7 +256,6 @@ spec:
         - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
         - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
         - { name: DPUMESH_ATTEST_SOCKET, value: "${DPUMESH_ATTEST_SOCKET}" }
-        - { name: DPUMESH_REQUIRE_TRUSTED_WORKLOAD, value: "${DPUMESH_REQUIRE_TRUSTED_WORKLOAD}" }
         - { name: PRELOAD_SVC, value: "15" }
         - { name: ECHO_PORT, value: "9095" }
         - { name: DMESH_PRELOAD_DEBUG, value: "${DMESH_PRELOAD_DEBUG}" }
@@ -315,7 +302,6 @@ spec:
         - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
         - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
         - { name: DPUMESH_ATTEST_SOCKET, value: "${DPUMESH_ATTEST_SOCKET}" }
-        - { name: DPUMESH_REQUIRE_TRUSTED_WORKLOAD, value: "${DPUMESH_REQUIRE_TRUSTED_WORKLOAD}" }
         - { name: DPUMESH_SERVICE, value: "preload-sock" }
         - { name: DPUMESH_PORT, value: "9100" }
         - { name: ECHO_PORT, value: "9100" }
@@ -352,7 +338,6 @@ spec:
         - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
         - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
         - { name: DPUMESH_ATTEST_SOCKET, value: "${DPUMESH_ATTEST_SOCKET}" }
-        - { name: DPUMESH_REQUIRE_TRUSTED_WORKLOAD, value: "${DPUMESH_REQUIRE_TRUSTED_WORKLOAD}" }
         - { name: BENCH_TARGET, value: "10.96.0.18:9100" }
         - { name: CTRL_PORT, value: "${CTRL_PORT}" }
         - { name: NUMA_TARGET_LD_PRELOAD, value: "/usr/local/lib/libdmesh_preload.so" }

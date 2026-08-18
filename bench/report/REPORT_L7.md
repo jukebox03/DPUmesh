@@ -190,7 +190,7 @@ is quoted only at matched load, above.
 ## Per connection: what a Linkerd session costs
 
 The mode study holds connections open. That hides the largest cost in the real
-layer, because every DMesh frontend connection builds its own complete outbound
+layer, because every client connection builds its own complete outbound
 stack: the per-target closure calls `outbound.mk`, so a session constructs its
 own discovery, protocol, endpoint and reconnect caches. That is what makes
 concurrent sessions to one service independent, and it is paid per connection.

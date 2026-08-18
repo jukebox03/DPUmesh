@@ -23,6 +23,10 @@ main(void)
         (struct doca_comch_connection *)(uintptr_t)0x1000;
     assert(pods_add_connection(objs, conn) == 0);
 
+    /* The slot lifecycle below runs on an admitted registration. */
+    objs->pods[0].registration_grant_verified = 1;
+    objs->pods[0].grant_service_id = 7;
+
     int assigned = pods_register(objs, conn, -1, 7);
     assert(assigned == 0);
     assert(objs->pods[0].registered == 1);
@@ -43,7 +47,7 @@ main(void)
 
     free(objs);
 
-    /* Required mode admits only the exact Service in a verified, unconsumed
+    /* Registration admits only the exact Service in a verified, unconsumed
      * connection grant. A normal REGISTER retry remains idempotent after the
      * grant has been consumed. */
     objs = calloc(1, sizeof(*objs));
@@ -51,7 +55,6 @@ main(void)
     objs->num_dpa_threads = 4;
     objs->k_rings = 2;
     objs->n_data_workers = 2;
-    objs->trusted_registration_required = 1;
     for (int i = 0; i < POD_ID_SPACE; i++)
         objs->pod_id_to_slot[i] = -1;
     conn = (struct doca_comch_connection *)(uintptr_t)0x2000;

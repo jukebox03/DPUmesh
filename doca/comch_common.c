@@ -19,7 +19,6 @@ dmesh_consumer_connected(struct doca_comch_event_consumer *event,
 {
 	(void)event;
 	(void)connection;
-	DOCA_LOG_INFO("Remote consumer connected: id=%u", id);
 }
 
 void
@@ -31,7 +30,6 @@ dmesh_consumer_expired(struct doca_comch_event_consumer *event,
 	(void)connection;
 	(void)id;
 }
-
 
 doca_error_t
 export_mmap_to_remote(struct objects *objs, struct doca_mmap *mmap, void *buffer, size_t buf_size, enum mmap_type mmap_type)
@@ -47,9 +45,6 @@ export_mmap_to_remote(struct objects *objs, struct doca_mmap *mmap, void *buffer
         DOCA_LOG_ERR("Failed to export local mmap to DPU: %s", doca_error_get_descr(result));
         return result;
     }
-
-    DOCA_LOG_INFO("Successfully exported local mmap to DPU, export descriptor length: %zu bytes",
-                  export_desc_len);
 
     /* Bound the export descriptor against the fixed staging buffer before the
      * memcpy below, so an oversized descriptor cannot smash the stack. */
@@ -95,9 +90,6 @@ process_mmap_msg(struct objects *objs, struct doca_comch_connection *conn,
 		             remote_addr, buf_size);
 		return DOCA_ERROR_INVALID_VALUE;
 	}
-
-	DOCA_LOG_INFO("remote_addr: %p, buf_size: %zu, export_desc_len: %zu",
-		      remote_addr, buf_size, export_desc_len);
 
 #ifdef DOCA_ARCH_DPU
 	/* DPU side: store per-pod */
@@ -210,8 +202,6 @@ process_mmap_msg(struct objects *objs, struct doca_comch_connection *conn,
 		pod->host_rx_buf_size = buf_size;
 		/* rq_depth derived from host_rx buffer size: num_slots × slot_size. */
 		pod->rq_depth = (uint32_t)(buf_size / DPUMESH_SLOT_SIZE);
-		DOCA_LOG_INFO("Pod %d: Host RX buffer stored (addr=%p, size=%zu, rq_depth=%u)",
-			      pod->pod_id, remote_addr, buf_size, pod->rq_depth);
 	} else if (mmap_msg->mmap_type == DMA_BUFFER) {
 		pod->remote_mmap = imported_mmap;
 		pod->remote_addr = remote_addr;
@@ -226,12 +216,6 @@ process_mmap_msg(struct objects *objs, struct doca_comch_connection *conn,
 		pod->rev_ring_host_addrs[pod->rev_ring_mmap_count] = remote_addr;
 		pod->rev_ring_mmap_count++;
 	}
-
-	DOCA_LOG_INFO("Pod %d: mmap_type=%d stored (fwd=%d/%d rev=%d/%d tx=%p rx=%p)",
-		      pod->pod_id, mmap_msg->mmap_type,
-		      pod->ring_mmap_count, kmax,
-		      pod->rev_ring_mmap_count, lmax,
-		      (void *)pod->remote_mmap, (void *)pod->host_rx_mmap);
 
 	/* Start per-pod DMA setup when DPU initialization and every required host
 	 * mapping are ready. Pending mappings are handled by the worker setup pass. */

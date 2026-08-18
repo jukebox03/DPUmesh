@@ -6,6 +6,10 @@
 
 #include "doca/comch_common.h"
 
+/* Where the node-agent DaemonSet publishes its request socket.
+ * DPUMESH_ATTEST_SOCKET names another one. */
+#define DMESH_DEFAULT_ATTEST_SOCKET "/run/dpumesh/attest.sock"
+
 /* Ask the root-owned node agent to authorize the calling process. The agent
  * identifies this process with SO_PEERCRED and derives claims from cgroup/K8s
  * metadata; request bytes are never treated as workload identity. */

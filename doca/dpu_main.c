@@ -105,9 +105,6 @@ int main(int argc, char **argv)
         }
     }
 
-    DOCA_LOG_INFO("Starting %s application",
-                  gcfg.mode == DPU_MODE ? "DPU" : "Host");
-
     /* Run DPU worker (blocking) */
     run_dpu_worker(objs);
 

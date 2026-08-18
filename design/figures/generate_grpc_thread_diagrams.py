@@ -10,8 +10,8 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import FancyArrowPatch, FancyBboxPatch
 
 
-OUT = Path(__file__).resolve().parent / "figures"
-OUT.mkdir(exist_ok=True)
+OUT = Path(__file__).resolve().parent
+OUT.mkdir(exist_ok=True, parents=True)
 
 BLUE = "#287de1"
 BLUE_BG = "#edf4ff"
@@ -132,6 +132,30 @@ def arrow(ax, start, end, *, label=None, color=BLACK, dashed=False, lw=1.45):
         )
 
 
+def terms(ax, x, y, w, h, entries, *, columns=2, title="How to read this figure"):
+    """Legend strip defining the vocabulary the boxes use."""
+    patch = FancyBboxPatch(
+        (x, y),
+        w,
+        h,
+        boxstyle="round,pad=0.06,rounding_size=0.10",
+        linewidth=1.1,
+        edgecolor="#d9d9d4",
+        facecolor="#fafaf8",
+        mutation_aspect=1.0,
+    )
+    ax.add_patch(patch)
+    ax.text(x + 0.22, y + h - 0.32, title, fontsize=9.6, color="#444444", ha="left")
+    rows = (len(entries) + columns - 1) // columns
+    col_w = (w - 0.44) / columns
+    for i, (term, meaning) in enumerate(entries):
+        col, row = divmod(i, rows)
+        tx = x + 0.22 + col * col_w
+        ty = y + h - 0.70 - row * 0.34
+        ax.text(tx, ty, term, fontsize=8.3, color="#151515", ha="left")
+        ax.text(tx + 2.35, ty, meaning, fontsize=8.3, color="#555555", ha="left")
+
+
 def save(fig, stem: str):
     fig.savefig(
         OUT / f"{stem}.png",
@@ -155,7 +179,7 @@ def save(fig, stem: str):
 
 
 def generate_grpc_threads():
-    fig, ax = setup_figure(18.5, 18.0, (0, 18.5), (0, 18.0))
+    fig, ax = setup_figure(18.5, 19.4, (0, 18.5), (-1.5, 18.0))
     ax.text(
         0.1,
         17.55,
@@ -397,11 +421,26 @@ def generate_grpc_threads():
         va="bottom",
         bbox=dict(boxstyle="round,pad=0.45", fc=GRAY_BG, ec="#b0b0aa"),
     )
+    terms(
+        ax,
+        0.35,
+        -1.35,
+        17.80,
+        1.46,
+        [
+            ("QP", "one full-duplex DPUmesh byte stream, one per connection"),
+            ("EQ", "event queue one reactor thread polls for its QPs"),
+            ("EQ owner thread", "the adapter's reactor shard: one thread per EQ"),
+            ("forward / reverse ring", "host→DPU descriptor queue / DPU→host completion queue"),
+            ("DPA EU", "BlueField accelerator core that drains forward rings"),
+            ("SG-DMA", "scatter-gather DMA into the receiver's registered memory"),
+        ],
+    )
     save(fig, "grpc_threads")
 
 
 def generate_grpc_vs_stock():
-    fig, ax = setup_figure(20.0, 13.7, (0, 20.0), (0, 13.7))
+    fig, ax = setup_figure(20.0, 15.1, (0, 20.0), (-1.5, 13.7))
     ax.text(0.15, 13.25, "Where DPUmesh enters gRPC — both directions", fontsize=17, ha="left")
     ax.text(
         0.15,
@@ -679,6 +718,21 @@ def generate_grpc_vs_stock():
             "The callback dispatcher is a separate control/terminal path, not an extra normal-data-path hop.",
         ),
         body_size=7.7,
+    )
+    terms(
+        ax,
+        0.55,
+        -1.35,
+        18.90,
+        1.46,
+        [
+            ("EventEngine", "gRPC's transport interface; an Endpoint is one byte stream"),
+            ("chttp2", "gRPC's own HTTP/2 implementation, unchanged here"),
+            ("QP", "one full-duplex DPUmesh byte stream behind one Endpoint"),
+            ("EQ owner thread", "the adapter's reactor shard: one thread per event queue"),
+            ("TX_READY", "event saying a blocked stream may retry its send"),
+            ("pod RX mmap", "registered host memory the DPU writes received bytes into"),
+        ],
     )
     save(fig, "grpc_vs_stock")
 

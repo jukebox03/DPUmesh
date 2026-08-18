@@ -10,8 +10,8 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import FancyArrowPatch, FancyBboxPatch
 
 
-OUT = Path(__file__).resolve().parent / "figures"
-OUT.mkdir(exist_ok=True)
+OUT = Path(__file__).resolve().parent
+OUT.mkdir(exist_ok=True, parents=True)
 
 BLUE = "#287de1"
 BLUE_BG = "#edf4ff"
@@ -158,6 +158,30 @@ def line(ax, points, *, color=GRAY, dashed=False, lw=1.25):
     ax.plot(xs, ys, color=color, lw=lw, ls="--" if dashed else "-")
 
 
+def terms(ax, x, y, w, h, entries, *, columns=2, title="How to read this figure"):
+    """Legend strip defining the vocabulary the boxes use."""
+    patch = FancyBboxPatch(
+        (x, y),
+        w,
+        h,
+        boxstyle="round,pad=0.06,rounding_size=0.10",
+        linewidth=1.1,
+        edgecolor="#d9d9d4",
+        facecolor="#fafaf8",
+        mutation_aspect=1.0,
+    )
+    ax.add_patch(patch)
+    ax.text(x + 0.22, y + h - 0.32, title, fontsize=9.6, color="#444444", ha="left")
+    rows = (len(entries) + columns - 1) // columns
+    col_w = (w - 0.44) / columns
+    for i, (term, meaning) in enumerate(entries):
+        col, row = divmod(i, rows)
+        tx = x + 0.22 + col * col_w
+        ty = y + h - 0.70 - row * 0.34
+        ax.text(tx, ty, term, fontsize=8.3, color="#151515", ha="left")
+        ax.text(tx + 2.05, ty, meaning, fontsize=8.3, color="#555555", ha="left")
+
+
 def save(fig, stem: str):
     fig.savefig(
         OUT / f"{stem}.png",
@@ -181,7 +205,7 @@ def save(fig, stem: str):
 
 
 def generate_dpumesh_threads():
-    fig, ax = setup_figure(18.0, 11.5, (0, 18.0), (0, 11.5))
+    fig, ax = setup_figure(18.0, 13.0, (0, 18.0), (-1.75, 11.5))
     ax.text(0.1, 11.1, "DPUmesh with embedded Linkerd — thread model", fontsize=17, ha="left")
     ax.text(2.3, 10.55, "HOST", fontsize=11, color="#555555", ha="center")
     ax.text(10.0, 10.55, "BLUEFIELD DPU", fontsize=11, color="#555555", ha="center")
@@ -206,11 +230,11 @@ def generate_dpumesh_threads():
         5.95,
         3.95,
         1.35,
-        "Host PE progress thread",
-        ("reverse rings: REV_DONE / TX_ACK", "EQ readiness and callbacks"),
+        "Host progress thread",
+        ("drains reverse rings: REV_DONE / TX_ACK", "raises event-queue readiness"),
         edge=BLUE,
         face=BLUE_BG,
-        count="x 1 / context",
+        count="x 1 / channel",
     )
     box(
         ax,
@@ -219,10 +243,10 @@ def generate_dpumesh_threads():
         3.95,
         1.25,
         "Tail timer thread",
-        ("retained partial-unit deadlines", "signals the owning EQ fd"),
+        ("deadline of a retained partial unit", "signals the owning event queue"),
         edge=BLUE,
         face=BLUE_BG,
-        count="x 1 / context",
+        count="x 1 / channel",
     )
     box(
         ax,
@@ -267,10 +291,10 @@ def generate_dpumesh_threads():
         5.45,
         4.75,
         4.45,
-        "Pinned ARM data worker s",
+        "Pinned ARM data worker s — holds the Linkerd sessions",
         edge=GREEN,
         face="#fbfffd",
-        count="selected id; x A with all",
+        count=None,
     )
     box(
         ax,
@@ -349,7 +373,7 @@ def generate_dpumesh_threads():
         4.15,
         1.25,
         "Persistent DPUmesh driver",
-        ("owns its completion PE and DMA lanes", "Linkerd state too when selector = all"),
+        ("owns its completion engine and DMA lanes", "Linkerd state too when selector = all"),
         edge=GRAY,
         face=GRAY_BG,
         title_size=10.2,
@@ -414,7 +438,7 @@ def generate_dpumesh_threads():
     ax.text(
         14.65,
         3.85,
-        "One connection remains on one ARM worker.",
+        "One connection stays on one ARM worker.",
         fontsize=8.6,
         color="#444444",
         ha="left",
@@ -422,7 +446,7 @@ def generate_dpumesh_threads():
     ax.text(
         14.65,
         3.47,
-        "one id routes L7 flows to worker s;",
+        "A worker id sends every L7 flow to worker s;",
         fontsize=8.6,
         color="#444444",
         ha="left",
@@ -430,17 +454,35 @@ def generate_dpumesh_threads():
     ax.text(
         14.65,
         3.09,
-        "all gives every worker a proxy + port policy.",
+        "`all` builds a proxy on every worker instead.",
         fontsize=8.6,
         color="#444444",
         ha="left",
+    )
+
+    terms(
+        ax,
+        0.35,
+        -1.60,
+        17.25,
+        1.80,
+        [
+            ("channel", "one process's transport: registered memory and its rings"),
+            ("QP", "one full-duplex byte stream on that channel"),
+            ("event queue (EQ)", "what one host thread polls for a QP's events"),
+            ("forward ring", "host→DPU descriptor queue, K per registered pod"),
+            ("reverse ring", "DPU→host completions: REV_DONE = delivered, TX_ACK = capacity"),
+            ("DPA execution unit", "BlueField accelerator core that drains forward rings"),
+            ("ARM data worker", "DPU CPU thread owning routing, DMA and reverse publication"),
+            ("SG-DMA", "scatter-gather DMA into the receiver's registered memory"),
+        ],
     )
 
     save(fig, "dpumesh_threads")
 
 
 def generate_l7_interaction():
-    fig, ax = setup_figure(15.0, 12.4, (0, 15.0), (0, 12.4))
+    fig, ax = setup_figure(15.0, 13.8, (0, 15.0), (-1.7, 12.4))
     ax.text(0.1, 12.0, "Linkerd-enabled ARM worker — persistent runtime loop", fontsize=17, ha="left")
     ax.text(
         0.1,
@@ -483,7 +525,7 @@ def generate_l7_interaction():
         8.35,
         1.20,
         "Drain with budget 64",
-        ("DPU completion PE + cross-worker queues + SG-DMA", "registration events + Linkerd DmeshIo output"),
+        ("DPU completion engine + cross-worker queues + SG-DMA", "registration events + Linkerd DmeshIo output"),
         edge=ORANGE,
         face=ORANGE_BG,
     )
@@ -506,7 +548,7 @@ def generate_l7_interaction():
         3.70,
         1.05,
         "Idle / pending",
-        ("arm PE notifications", "mark worker parked"),
+        ("arm completion notifications", "mark worker parked"),
         edge=PURPLE,
         face=PURPLE_BG,
     )
@@ -630,11 +672,27 @@ def generate_l7_interaction():
         ha="left",
     )
 
+    terms(
+        ax,
+        0.45,
+        -1.55,
+        14.10,
+        1.46,
+        [
+            ("drain", "one bounded pass over each work source, 64 items"),
+            ("arm", "ask a completion engine to raise its fd next time"),
+            ("DmeshIo", "byte-stream endpoint the Linkerd stack reads/writes"),
+            ("segment", "arrival bytes lent to the L7 layer until released"),
+            ("tx reserve / commit", "write output into an egress buffer the DMA sends"),
+            ("maintenance", "the 1 ms deadline for periodic worker work"),
+        ],
+    )
+
     save(fig, "l7_interaction")
 
 
 def generate_linkerd_driven():
-    fig, ax = setup_figure(17.0, 10.4, (0, 17.0), (0, 10.4))
+    fig, ax = setup_figure(17.0, 11.7, (0, 17.0), (-1.6, 10.4))
     ax.text(0.1, 10.0, "Embedded Linkerd — runtime and ownership boundary", fontsize=17, ha="left")
     ax.text(3.10, 9.45, "DPUMESH", fontsize=11, color="#555555", ha="center")
     ax.text(8.50, 9.45, "C ABI / RUNTIME BACKEND", fontsize=11, color="#555555", ha="center")
@@ -786,6 +844,22 @@ def generate_linkerd_driven():
         fontsize=9.2,
         color="#444444",
         ha="left",
+    )
+
+    terms(
+        ax,
+        0.45,
+        -1.45,
+        16.10,
+        1.46,
+        [
+            ("RuntimeBackend", "the C calls the Rust runtime drives DPUmesh through"),
+            ("DmeshIo", "byte-stream endpoint the Linkerd stack reads/writes"),
+            ("staging custody", "arrival bytes DPUmesh holds until the layer releases"),
+            ("egress arena", "DPU buffers holding output until the DMA sends it"),
+            ("backend registry", "per-worker map from a session to its DMesh channel"),
+            ("session", "one client connection and its Linkerd outbound stack"),
+        ],
     )
 
     save(fig, "linkerd_driven")

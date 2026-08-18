@@ -2,9 +2,20 @@
 
 DPUmesh maps application Service names to compact transport identifiers, admits
 Pods through the Host↔DPU registration protocol, and drives the embedded Linkerd
-consumer from the stock Kubernetes control plane. This document defines all
-three, because they answer one question: how the DPU learns who is calling and
-where the call may go.
+consumer from the stock Kubernetes control plane. All three answer one question:
+how the DPU learns who is calling and where the call may go.
+
+## Terms
+
+| Term | Meaning |
+|---|---|
+| node agent | a root-owned DaemonSet on the host that reads Kubernetes objects and signs claims |
+| grant | the signed statement of a Pod's identity and authorized Service that registration must present |
+| feed | a file the DPU reads for authoritative data: Service targets, or node membership |
+| generation | one version of a feed, installed whole by atomic rename and numbered monotonically |
+| workload | the Linkerd identifier of the calling Pod, `{"ns":…,"pod":…}`, built from signed claims |
+| gateway | a host-network DaemonSet that carries the DPU's control-plane connections, without reading them |
+| admission switch | a file that stops new protected sessions while established ones continue |
 
 ## Registry
 
@@ -43,9 +54,9 @@ Host Pod                 trusted node agent                    DPU
   │◀──────────────────────── POD_INIT_RESULT(READY) ─────────────│
 ```
 
-With `DPUMESH_TRUSTED_REGISTRATION=required`, the DPU creates a fresh 32-byte
-nonce for each Comch connection. The root-owned node agent identifies the
-Unix-socket peer with `SO_PEERCRED`, re-checks the peer's process start time
+The DPU creates a fresh 32-byte nonce for each Comch connection. The root-owned
+node agent identifies the Unix-socket peer with `SO_PEERCRED`, re-checks the
+peer's process start time
 around the cgroup read so a recycled pid cannot be attested as another Pod,
 resolves the cgroup to the authoritative Kubernetes Pod, verifies that the Pod
 labels select the requested Service, and returns a canonical HMAC-SHA256 grant.
@@ -59,15 +70,25 @@ workload JSON from the signed namespace and Pod, and keeps the signed Pod UID
 with the registration. A grant cannot move to another connection or survive
 reconnect or DPU restart, because the nonce is different.
 
-`DPUMESH_WORKLOAD` and `POD_IDENTITY` are accepted only in the explicit
-development mode; required mode rejects them and never falls back. The Pod
+A Pod cannot state a workload or a Service of its own: the grant is the only
+thing that names either, and a registration without one is refused. The Pod
 enters backend selection after `POD_INIT_RESULT(READY)`.
 
 Unregister, revocation or Comch disconnect removes the Pod from selection. Each
 ARM worker first closes the connection and L7 state it owns. After every producer
-has joined that barrier, egress owners drain their lanes and run one further PE
-progress pass to fence DOCA's post-callback buffer release. Only then does the
-control thread destroy imported mappings and return `POD_QUIESCED`.
+has joined that barrier, the workers that own destination lanes drain them and
+run one further progress pass, so DOCA has released the buffer references its
+completion callbacks hold. Only then does the control thread destroy imported
+mappings and return `POD_QUIESCED`.
+
+Revocation begins this while the Pod's Comch connection is still live, so the
+first gate — every EU acknowledging `RING_DEL` — runs against a Pod that is
+still mapped. An acknowledgement the DPU channel has no posted receive for is
+held as a fence and retried whenever that EU releases its execution unit, and
+the control thread resends `RING_DEL` to unacknowledged EUs every 10 ms. A
+quiescence that has not passed every gate within five seconds is reported with
+the gate holding it, and reported again every five seconds it remains there;
+until it passes, the slot and its imported mappings are held.
 
 ## Authoritative feeds
 
@@ -76,6 +97,12 @@ adapter presents to Linkerd, and the node membership the verifier revokes
 against. They share one contract. Identity material is not one of them — it is
 root-only files installed atomically, and what authenticates it is the
 certificate the control plane issues against them.
+
+The target snapshot places every address it names — session key, ClusterIP and
+ready endpoints — in its Service, and a session refuses to dial an address the
+held generation places in another one. Linkerd resolves endpoints from a live
+control-plane watch while the snapshot arrives as a file, so an address no
+generation places yet belongs to the session that selected it.
 
 A generation is installed by atomic rename and ends with the envelope
 
@@ -127,24 +154,45 @@ preflight; no mock control-plane path exists. The remaining `mock-identity`,
 
 ```mermaid
 flowchart LR
-    Pod[Host Pod] -->|nonce + requested Service id| Attest[least-privilege node-agent DaemonSet]
-    KAPI[Kubernetes Pod + Service API] --> Attest
-    Attest -->|short-lived signed claims| Pod
-    Reg[Comch trusted registration] -->|fresh nonce| Pod
-    Pod -->|grant + register| Reg
-    Reg --> Flow[connection-bound DMesh flow]
-    Watch[supervised Service registry watch] -->|signed versioned target + endpoint feed| Map[DPU Service snapshot]
-    Map --> Flow
-    Attest -->|signed versioned node membership| Revoke[Comch membership scan]
-    Revoke -->|withdrawn pair closes its registration| Reg
-    Flow --> Proxy[embedded linkerd2-proxy]
-    Agent[supervised identity renewal agent\naudience TokenRequest] -->|atomic update| Creds[DPU root-only files]
+    subgraph host[Host node]
+        Pod[Service Pod<br/>application + DPUmesh client]
+        Agent[Node agent DaemonSet<br/>reads Kubernetes, signs claims]
+        Registry[Service registry publisher]
+        Ident[Identity renewal agent]
+        GW[Gateway DaemonSet<br/>carries the DPU's control connections]
+        Backend[Backend Pod on this node]
+    end
+    subgraph dpu[BlueField DPU]
+        Reg[Registration<br/>verifies the grant, admits the Pod]
+        Snap[Service snapshot<br/>targets and ready endpoints]
+        Flow[Connection bound to that registration]
+        Proxy[Embedded linkerd2-proxy]
+        Creds[Identity material<br/>root-only files]
+    end
+    subgraph k8s[Kubernetes]
+        KAPI[Pod and Service API]
+        LI[Linkerd Identity]
+        LP[Linkerd Policy]
+        LD[Linkerd Destination]
+    end
+
+    Reg -->|1. fresh nonce| Pod
+    Pod -->|2. nonce + requested Service| Agent
+    KAPI --> Agent
+    Agent -->|3. signed grant| Pod
+    Pod -->|4. grant + POD_REGISTER| Reg
+    Reg --> Flow
+    Flow --> Proxy
+    Agent -->|signed node membership feed| Reg
+    Registry -->|signed Service target feed| Snap
+    Snap -->|the addresses a session may dial| Flow
+    Ident -->|atomic update| Creds
     Creds --> Proxy
-    Proxy -->|end-to-end mTLS| GW[host-network gateway DaemonSet]
-    GW --> I[Linkerd Identity]
-    GW --> P[Linkerd Policy]
-    GW --> X[Linkerd Destination]
-    Proxy -->|validated session-token channel| Data[DPUmesh node-local backend]
+    Proxy -->|end-to-end mTLS| GW
+    GW --> LI
+    GW --> LP
+    GW --> LD
+    Proxy -->|policy applied, then DMA| Backend
 ```
 
 The application can request only a compact Service id; it cannot assert Pod UID,
@@ -189,7 +237,7 @@ proxy and reaches the control application as plaintext gRPC.
 
 ### Outbound policy
 
-Each DMesh frontend session builds its own outbound stack and policy watch.
+Each client session builds its own outbound stack and policy watch.
 `OutboundPolicies.Watch` carries:
 
 ```text
@@ -209,16 +257,15 @@ watches.
 An invalid or unroutable policy fails the protected L7 session. A control-plane
 disconnect retains only state Linkerd's watches already hold; a new lookup that
 cannot obtain policy fails and is never converted to an unobserved TCP dial.
-Required trusted registration protects every Service, so it selects
-`DPUMESH_L7_FAIL_CLOSED=1` itself: the two cannot be deployed apart, and an
-explicit `DPUMESH_L7_FAIL_CLOSED=0` is refused rather than silently forwarding a
-declined protected session as plain L4.
+Trusted registration protects every Service, so the deployment script sets
+`DPUMESH_L7_FAIL_CLOSED=1` and refuses to deploy with any other value: a
+declined protected session ends rather than being forwarded as plain L4.
 
 ### Destination
 
 The destination presented to Linkerd is the Service's real ClusterIP and port.
 The adapter keeps its synthetic `10.96.0.<service-id>:9092` address only as an
-internal DMesh registry key, and the registry agent publishes the mapping as a
+internal DPUmesh registry key, and the registry agent publishes the mapping as a
 signed versioned feed.
 
 Destination and profile streams may update policy metadata while a session is
@@ -235,7 +282,7 @@ translation contract and is not claimed.
 Linkerd's stock `OutboundPolicies.Get/Watch` response contains protocol and
 route configuration. It does not expose the inbound `AuthorizationPolicy`
 allow/deny decision, which the destination's inbound proxy normally enforces
-against the authenticated peer identity. The node-local DMesh backend path has
+against the authenticated peer identity. The node-local DPUmesh backend path has
 no Linkerd inbound proxy in that byte path, and every outbound stack
 authenticates to the control plane with the shared `dpumesh-dpu` certificate.
 Consequently:
@@ -311,16 +358,17 @@ creates no DPU-to-DPU links and registers no mappings from another node.
 | Thread | Work |
 |---|---|
 | Host application | API calls and QP operations |
-| Host PE progress | reverse-ring drain and EQ readiness |
-| Host tail timer | retained partial-send deadlines |
-| ARM main | registration, revocation, teardown and Host doorbells |
-| ARM data worker × A | DPA completions, routing, SG-DMA and reverse publication |
+| Host progress | reverse-ring drain and event-queue readiness |
+| Host tail timer | deadlines of retained partial sends |
+| ARM main | registration, revocation, teardown and the messages that wake the host |
+| ARM data worker × A | DPA completions, routing, DMA and reverse publication |
 | DPA EU × N | forward-ring drain and completion metadata |
 
 In a Linkerd build, each ARM data-worker thread hosts a Tokio `current_thread`
 runtime and persistent driver. Linkerd session state belongs to the configured
 worker, or to every worker under `DPUMESH_L7_LINKERD_WORKER=all`. The ARM main
-thread remains the Comch control and doorbell owner.
+thread remains the owner of the control connection and of the messages that wake
+the host.
 
 ## Operations
 
@@ -365,8 +413,8 @@ registration and leaves every other registration and its traffic untouched.
 ## Current bounds
 
 - configured Service names come from one static registry;
-- backend membership is node-local; required mode admits only node-agent-signed
-  Pod and Service membership, while development mode remains self-reported;
+- backend membership is node-local, and only node-agent-signed Pod and Service
+  membership is admitted;
 - service and pod identifiers occupy the signed one-byte wire space;
 - deployment requires Linkerd destination, identity and policy services, gateway
   addresses, TLS service names, a signed per-service discovery feed and DPU
@@ -375,6 +423,5 @@ registration and leaves every other registration and its traffic untouched.
   `DPUMESH_L7_LINKERD_WORKER=all`;
 - concurrent sessions to one service address are isolated, each owning its own
   outbound stack and backend channel;
-- declined L7 sessions use counted L4 fallback only in development mode;
-  required registration selects fail-closed refusal and refuses to start with
-  the fallback enabled.
+- declined L7 sessions are refused fail-closed, and the deployment script does
+  not deploy a configuration that would forward them at L4 instead.

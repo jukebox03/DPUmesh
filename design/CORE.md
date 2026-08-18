@@ -1,12 +1,33 @@
 # DPUmesh Core Architecture
 
-DPUmesh is a BlueField transport with registered host memory, DPA forwarding,
-ARM routing, and DPU-initiated SG-DMA.
+DPUmesh is a BlueField transport. A sending application writes into host memory
+that the DPU has mapped, the DPU's data-path accelerator reads it, and a DPU CPU
+thread writes it into the receiving application's mapped memory.
+
+## Terms
+
+| Term | Meaning |
+|---|---|
+| channel | one process's transport: its registration, its registered memory and its rings |
+| QP | one full-duplex byte stream on a channel |
+| EQ (event queue) | what one application thread polls for the events of the QPs it owns |
+| forward ring | host→DPU descriptor queue |
+| reverse ring | DPU→host completion queue |
+| DPA EU | one execution unit of the BlueField data-path accelerator |
+| ARM data worker | a DPU CPU thread owning routing, DMA and reverse publication for its connections |
+| PE (progress engine) | a DOCA completion queue that one thread polls |
+| SG-DMA | scatter-gather DMA: one operation writing several source pieces into one destination range |
+| transport unit | the fixed 8 KiB block the transport submits at once |
+| staging | DPU memory holding arrived bytes until they have been sent onward |
+| custody | the rule that arrived bytes stay valid, and their sender stays uncredited, until released |
+| landing stripe | one disjoint region of the receiving pod's RX mapping, written by one worker |
+| lane | the queue of pending deliveries for one (destination pod, landing stripe) pair |
+| egress arena | DPU buffers holding bytes the L7 layer produced, until DMA sends them |
 
 ## Topology
 
-`N`, `K`, `A`, and `L` denote DPA EUs, rings per pod, ARM data workers, and RX
-landing stripes.
+`N`, `K`, `A`, and `L` denote DPA EUs, forward rings per pod, ARM data workers,
+and RX landing stripes.
 
 ```text
 1 ≤ L = A ≤ K ≤ N
@@ -40,24 +61,24 @@ DPA EUs
   │ completion metadata
   ▼
 A ARM workers
-  ├─ connection and conntrack state
+  ├─ connection state and the upstream-port map
   ├─ routing: L4, or the L7 layer
   ├─ payload SG-DMA, from arrival staging or the egress arena
   └─ reverse publication
           │
           ▼
 L reverse rings
-          │ REV_DONE / TX_ACK
+          │ REV_DONE (bytes delivered) / TX_ACK (send capacity returned)
           ▼
-host PE progress thread
+host progress thread
 
 DPU main thread: registration, teardown, and host doorbells
 ```
 
 ## Host memory and rings
 
-One `dpumesh_ctx` owns K forward rings, K reverse rings, registered TX/RX
-mappings, the TX block pool, EQ registry, PE progress thread, and a tail timer
+One channel owns K forward rings, K reverse rings, registered TX/RX mappings,
+the TX block pool, the EQ registry, the progress thread, and a tail timer
 thread. The 64 MiB RX mapping is divided into L equal landing stripes.
 
 The timer holds no transmit state. It writes the readiness fd of an EQ whose
@@ -83,12 +104,13 @@ credits by landing position. The DPU reads the counters with one SG-DMA and uses
 their sum as the stripe credit.
 
 A stripe is filled by a byte cursor. The cursor returns to the stripe head only
-once every landing it holds has been released.
+once every delivery it holds has been released by the receiving application.
 
 ## DPA and ARM execution
 
-Each forward ring is a bounded MPSC queue. A producer reserves a monotonic
-ticket, writes one descriptor, and publishes `publish_seq = ticket + 1`. The DPA
+Each forward ring is a bounded multi-producer, single-consumer queue. A producer
+reserves a monotonic ticket, writes one descriptor, and publishes
+`publish_seq = ticket + 1`. The DPA
 consumes consecutive tickets, copies request bytes into DPU staging, and sends
 completion metadata to the connection owner.
 
@@ -103,20 +125,35 @@ An ARM data worker owns its completion and DMA progress. One drain pass:
 
 A worker stays hot while a drain pass advances work. Otherwise it arms its DPA
 and SG-DMA completion handles, rechecks, and waits on them, its cross-worker
-eventfd, and a 1 ms maintenance deadline. The 1 ms keepalive wakes only EUs
-serving at least one forward ring; a ringless EU parks until a control message
-arrives.
+eventfd, and a 1 ms maintenance deadline. No ARM tick reaches the EUs: an EU
+schedules itself.
+
+An EU polls the rings it holds and never sleeps waiting for data. The DPA
+scheduler's watchdog still requires it to surrender its execution unit
+periodically, so each EU owns a second DPA thread pinned to the same unit. Releasing the unit is one
+operation, and it takes one of two forms:
+
+- an EU holding rings or an unacknowledged teardown fence notifies its helper
+  and reschedules. Same-unit affinity means the scheduler cannot run the helper
+  until the unit is actually free, so the helper's wake always reaches a parked
+  thread and the EU resumes polling;
+- a ringless EU arms its consumer and producer notifications, rescans both, and
+  parks only if the rescan is empty. Rescheduling promises re-entry on a *new*
+  completion only, so a message already queued at arming time has to be found
+  by that rescan rather than parked on. A ringless EU is woken by `RING_ADD`.
 
 With the Linkerd backend, the pinned ARM thread hosts a Tokio `current_thread`
 runtime. Its persistent driver invokes the same DPUmesh drain path and also
 polls Linkerd output wakers. The null backend uses the C-owned event loop.
 
-Same-owner lanes use a private FIFO. Cross-owner delivery and ACK custody use
-bounded MPSC queues.
+A worker delivering to a lane it owns uses a private FIFO. Delivery and
+acknowledgement across workers use bounded multi-producer, single-consumer
+queues.
 
 A connection's routing is resolved once. At L4 the connection keeps one backend
-for its life. A service assigned to the L7 layer hands its extents to that layer
-and lets it name the backend per delivery; `design/L7.md` describes that path.
+for its life. A service assigned to the L7 layer instead hands that layer the
+arrived byte ranges and lets it name the backend per delivery;
+`design/L7.md` describes that path.
 
 ## DMA fault handling
 
@@ -127,8 +164,8 @@ its lane FIFO. The exclusive retry preserves lane order.
 
 Pod readiness is controlled by the registration connection. Disconnect cleanup
 removes the pod from routing and clears DMA readiness. Connection state remains
-worker-owned during teardown: every worker closes its sessions and conntrack
-edges, then destination workers drain all lanes. A second worker progress pass
+worker-owned during teardown: every worker closes its own sessions and
+upstream-port entries, then destination workers drain all lanes. A second worker progress pass
 fences DOCA buffer release after completion callbacks before the main thread
 destroys imported mappings.
 
@@ -143,9 +180,10 @@ publish_seq = consumer ticket + 1
 ```
 
 The host drains visible entries and writes one monotonic `consumer_head`. Before
-blocking, it increments `arm_epoch` and rechecks the rings. After a publication
-the producing worker reads that control block and, on a new epoch, requests a
-doorbell that the DPU main thread sends as one Comch message.
+blocking, it increments `arm_epoch` — the counter that says the host is about to
+sleep — and rechecks the rings. After a publication the producing worker reads
+that control block and, on a new epoch, asks the DPU main thread to send one
+Comch message that wakes the host.
 
 ## Registration and teardown
 
@@ -160,9 +198,9 @@ Host                                      BlueField ARM / DPA
  |-- POD_UNREGISTER ------------------------>|
  |                              stop routing
  |                              RING_DEL to EUs
- |                              close worker-owned sessions/conntrack
+ |                              close worker-owned sessions and ports
  |                              drain DMA and reverse publishers
- |                              post-callback PE release fence
+ |                              second progress pass: DOCA buffers released
  |                              destroy imported mappings
  |<---------------- POD_QUIESCED -------------|
 ```
@@ -170,6 +208,18 @@ Host                                      BlueField ARM / DPA
 Control messages are idempotent. Pod generations bind imported mappings, DPA
 rings, and asynchronous completions to one registration. The host retains its
 exports until `POD_QUIESCED`.
+
+`RING_DEL` is the teardown fence: the EU removes the ring and acknowledges on
+the same ordered producer every forward DMA uses, so an acknowledged deletion
+means no outstanding operation can still name the ring. The slot and its
+imported mappings are held until that acknowledgement lands. An EU whose DPU
+channel has no posted receive keeps the fence — one entry per ring it can hold,
+so a burst of teardowns displaces none of them — and probes it again each time
+it releases its execution unit, never on the forwarding path; the control
+thread independently resends `RING_DEL` to unacknowledged EUs every 10 ms.
+Forwarding backpressure withholds DPU receives, so a floor of them stays posted
+to keep the fence sendable: the data path must not be able to hold the control
+path shut.
 
 ## Bounds
 

@@ -549,9 +549,7 @@ static void *dispatcher_main(void *arg) {
 static pthread_mutex_t g_ch_mu = PTHREAD_MUTEX_INITIALIZER;
 
 /* Create the channel + dispatcher. Called under g_ch_mu; leaves g_ch NULL on
- * failure so a later attempt RETRIES (a register timeout — e.g. the DPU came
- * up after us, or its pod table was momentarily full — must not latch a
- * long-lived process into permanent failure). */
+ * failure, so a later mapped socket operation retries the registration. */
 static void channel_init(void) {
     /* Identity is injected: dmesh_create_channel() resolves $DPUMESH_SERVICE via the
      * registry (a server/mixed process) or opens a pure client if unset. One channel
@@ -743,8 +741,8 @@ static ssize_t shim_recv(pfd_t *e, void *buf, size_t len, int flags) {
     int peek    = flags & MSG_PEEK;
     int waitall = flags & MSG_WAITALL;
     int block   = !(e->nonblock || (flags & MSG_DONTWAIT));
-    /* SO_RCVTIMEO caps the WHOLE call, not each wait — partial wakes must not
-     * restart the clock. 0 = block forever. */
+    /* SO_RCVTIMEO caps the whole call rather than each wait, so a partial wake
+     * does not restart the clock. 0 = block forever. */
     long deadline = (block && e->rcv_timeout_ms > 0) ? now_ms() + e->rcv_timeout_ms : 0;
     size_t got = 0;
     int drain_budget = 2;
@@ -1241,9 +1239,9 @@ int shutdown(int fd, int how) {
     pthread_mutex_lock(&e->mu);
     if ((how == SHUT_WR || how == SHUT_RDWR) && !e->wr_closed) {
         e->wr_closed = 1;
-        /* Approximate half-close: ship buffered bytes, then a FIN. NOTE: the
-         * FIN frees the DPU upstream — replies sent after it are undeliverable
-         * (the transport has no true half-close; documented limit). */
+        /* Approximate half-close: ship buffered bytes, then a FIN. The FIN frees
+         * the DPU upstream, so replies sent after it are undeliverable — the
+         * transport has no true half-close. */
         if (e->conn) {
             if (dmesh_flush(e->conn) != 0 || dmesh_send_fin(e->conn) != 0) {
                 pthread_mutex_unlock(&e->mu);

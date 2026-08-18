@@ -113,21 +113,18 @@ static inline int px_l7_carries_bytes(uint8_t mode) {
  * monopolize the worker. What is left re-enters through the stall list. */
 #define PX_L7_SEGMENTS_PER_PASS 16
 
-/* Egress arena for bytes the L7 layer produced rather than forwarded.
- *
- * A chunk is wider than one reverse entry on purpose. Quantizing deliveries at
- * the entry width splits any message that carries a header on top of a full
- * payload, and each extra delivery is an extra host-side publication. Emission
- * still cuts entries at PX_ENTRY_BYTES_MAX, so credit accounting is unchanged. */
+/* Egress arena for bytes the L7 layer produced rather than forwarded. A chunk is
+ * wider than one reverse entry; emission still cuts entries at
+ * PX_ENTRY_BYTES_MAX, so credit accounting is unchanged. */
 #define PX_ARENA_CHUNK      (2u * PX_ENTRY_BYTES_MAX)
 #define PX_ARENA_CHUNKS     1024u
-/* One send becomes one delivery, so a caller handing a whole message gets it
- * delivered whole: chunks are chained rather than the message being cut. */
+/* One send is one delivery: a payload longer than a chunk chains chunks rather
+ * than being split across deliveries. */
 #define PX_L7_SEND_MAX      (4u * PX_ARENA_CHUNK)
 #define PX_L7_SEND_CHUNKS   (PX_L7_SEND_MAX / PX_ARENA_CHUNK)
 
-/* Refresh the (DMA-read) host credit cache when headroom drops below this
- * many entries — same lazy scheme as the DPA reverse admission. */
+/* Refresh the DMA-read host credit cache when headroom drops below this many
+ * entries. */
 #define PX_CREDIT_REFRESH_MARGIN 64
 #define PX_CREDIT_REFRESH_RETRY_NS (100u * 1000u)
 
@@ -184,11 +181,10 @@ struct px_unit {
     struct px_unit *next;
     int8_t   src_pod_id, src_service, dst_service;
     uint16_t src_port, dst_port, seq;
-    /* The port the ORIGIN sent these bytes on, un-rewritten — src_port is the DPU's
-     * upstream id on a request, which the client cannot be addressed by. This is how a
-     * failed unit reports EOF back (px_eof_to_origin) without the conn table, which the
-     * emit paths may not own. 0 = nothing to notify (a synthetic EOF: it must not
-     * spawn another one). */
+    /* The port the origin sent these bytes on, un-rewritten: src_port is the DPU's
+     * upstream id on a request, which the client cannot be addressed by. A failed
+     * unit reports EOF back through it (px_eof_to_origin) without the conn table.
+     * 0 = nothing to notify, which is what a synthetic EOF carries. */
     uint16_t org_port;
     uint32_t total_len;           /* 0 == FIN / notify-only (still 1 RX credit) */
     uint32_t landing_pos;         /* absolute pos in the host RX buffer (at submit) */
@@ -326,11 +322,11 @@ struct px_conn {
     uint8_t  l7_resolved;             /* answered once by l7_resolve; owes a report */
     uint64_t l7_open_ns;              /* when that answer was given */
     uint64_t l7_shipped;              /* bytes forwarded, reported back as load */
-    /* Connection-scoped LB stickiness (Envoy TCP-proxy / session-affinity): the
-     * backend this byte-stream conn was pinned to. The L4 path uses it: with no
-     * message boundaries the stream cannot be split, so it stays on one backend for
-     * life. `decision` mode pins it from the L7 layer's answer instead.
-     * Cluster-scoped, so a message to a different service re-picks. -1 = unpinned. */
+    /* Connection-scoped backend stickiness: the backend this byte stream was
+     * pinned to. An L4 stream carries no message boundaries, so it stays on one
+     * backend for life; `decision` mode pins it from the L7 layer's answer.
+     * Cluster-scoped, so a message to a different service re-picks. -1 =
+     * unpinned. */
     int32_t  pinned_backend;
     int16_t  pinned_cluster;
 };
@@ -345,13 +341,10 @@ struct px_engine {
     struct doca_pe            *pe;
     struct doca_buf_inventory *inv;
     int      dma_tasks_inflight;
-    /* Set when the doca_dma ctx faults. Gates every submit on this engine (no spin,
-     * no DOCA "state IDLE" flood) and tells px_engine_pump/px_drain to run
-     * px_engine_recover, which restarts the ctx and clears this.
-     * RECOVERABLE and EXPECTED, not a should-never-happen: the egress DMAs into pods'
-     * host memory, and a dying pod takes its memory with it before comch can tell us.
-     * Every path that can observe the fault must latch it — px_dma_err_cb, the SG-batch
-     * submit, and px_lane_refresh_credit — or the engine retry-spins instead. */
+    /* Set when the doca_dma ctx faults: gates every submit on this engine and
+     * tells px_engine_pump/px_drain to run px_engine_recover, which restarts the
+     * ctx and clears it. Every path that can observe the fault latches it —
+     * px_dma_err_cb, the SG-batch submit, and px_lane_refresh_credit. */
     int      dma_stalled;
     int      dma_fault_warned;
     uint64_t retry_after_ns;       /* earliest retry timestamp */
@@ -415,14 +408,10 @@ struct dmesh_proxy {
     atomic_ullong stat_stall_uport;
     atomic_ullong stat_stall_arena;
     atomic_ullong stat_l7_fallback;      /* conns the L7 layer declined */
-    /* The same total, split by the reason the layer gave. A fallback is only
-     * an availability path, so which one is being taken is what says whether
-     * the layer is carrying the traffic it was configured to carry. */
+    /* The same total, split by the reason the layer gave. */
     atomic_ullong stat_l7_fallback_by[PX_L7_FB_KINDS];
     atomic_ullong stat_l7_over_release;  /* releases naming more than is outstanding */
     atomic_ullong stat_l7_stray_release; /* releases against a conn holding nothing */
-    atomic_ullong stat_pool_lock;        /* shared free-list acquisitions */
-    atomic_ullong stat_pool_lock_contended; /* of those, the ones that waited */
     atomic_ullong l7_report_ns;          /* when the L7 counters were last reported */
     atomic_ullong l7_report_mark;        /* what they summed to then */
 };
@@ -481,8 +470,7 @@ static __thread struct px_worker_state *px_cur_worker;
 /* Per-thread magazines cache up to PX_MAG_CAP nodes per type on both the
  * allocation and the free side, so a worker whose allocs and frees interleave
  * touches pool_lock only to refill (a PX_MAG_N run) or to spill a full cache.
- * Nodes are interchangeable across threads: a node freed on any thread simply
- * joins that thread's cache. */
+ * Nodes are interchangeable across threads. */
 #define PX_MAG_N   64
 #define PX_MAG_CAP (2 * PX_MAG_N)
 static __thread struct px_arrival *tls_arr_mag;
@@ -569,16 +557,11 @@ px_emit_tx_ack(struct objects *objs, int32_t pod_id, uint16_t port, uint16_t seq
     return px_rev_append_ack(&objs->proxy->engines[owner], pod, port, seq);
 }
 
-/* Take the shared free-list lock, counting the acquisitions that had to wait.
- * The per-worker magazines are meant to keep this off the hot path; the
- * contended count is what shows whether they do. */
+/* Take the shared free-list lock. The per-worker magazines are meant to keep
+ * this off the hot path. */
 static inline void px_pool_lock(struct dmesh_proxy *px) {
-    if (pthread_mutex_trylock(&px->pool_lock) == 0) {
-        px_stat_inc(&px->stat_pool_lock);
+    if (pthread_mutex_trylock(&px->pool_lock) == 0)
         return;
-    }
-    px_stat_inc(&px->stat_pool_lock);
-    px_stat_inc(&px->stat_pool_lock_contended);
     pthread_mutex_lock(&px->pool_lock);
 }
 
@@ -1014,18 +997,12 @@ px_worker_quiesce_pod_connections(struct objects *objs, int32_t pod_id)
         }
     }
 
-    if (closed)
-        DOCA_LOG_INFO("proxy: worker %d closed %d connection states for pod %d",
-                      worker_state->id, closed, pod_id);
     return closed;
 }
 
-/* Kill a conn whose stream can no longer be delivered intact, and TELL its sender
- * rather than leaving it to block forever. Idempotent.
- *
- * The EOF is a DEBT, not a best-effort notify: if the unit pool is dry, eof_pending
- * latches and px_drain_stalled retries it. Dropping it would hang the sender, which is
- * exactly what poisoning is supposed to prevent. */
+/* Kill a conn whose stream can no longer be delivered intact and notify its
+ * sender. Idempotent. If the unit pool is dry, eof_pending latches and
+ * px_drain_stalled retries the EOF. */
 static void px_poison(struct objects *objs, struct px_conn *c, const char *why) {
     if (c->dead)
         return;
@@ -1562,9 +1539,7 @@ static inline uint64_t px_stat_get(atomic_ullong *counter) {
     return atomic_load_explicit(counter, memory_order_relaxed);
 }
 
-/* What the L7 layer did not carry, by cause. A service configured for the layer
- * whose traffic shows up here was forwarded without policy, which is the one
- * thing a successful run must not contain. The counters are the process's; the
+/* What the L7 layer did not carry, by cause. The counters are the process's; the
  * worker id names who is reporting them. */
 static void px_l7_log_fallbacks(struct dmesh_proxy *px, int worker_id) {
     char by[192];
@@ -1578,22 +1553,16 @@ static void px_l7_log_fallbacks(struct dmesh_proxy *px, int worker_id) {
         n += w;
     }
     DOCA_LOG_WARN("proxy: worker %d L7 fallbacks total=%llu (%s) over_release=%llu "
-                  "stray_release=%llu pool_lock=%llu contended=%llu",
+                  "stray_release=%llu",
                   worker_id, (unsigned long long)px_stat_get(&px->stat_l7_fallback), by,
                   (unsigned long long)px_stat_get(&px->stat_l7_over_release),
-                  (unsigned long long)px_stat_get(&px->stat_l7_stray_release),
-                  (unsigned long long)px_stat_get(&px->stat_pool_lock),
-                  (unsigned long long)px_stat_get(&px->stat_pool_lock_contended));
+                  (unsigned long long)px_stat_get(&px->stat_l7_stray_release));
 }
 
-/* Report the L7 audit and lock counters when they move, at most every 10 s.
- *
- * A run is valid only if nothing the L7 layer refused was forwarded without
- * policy, so these counters are the run's verdict. The linkerd backend owns the
- * worker thread for the process's lifetime and never reaches a detach point, so
- * the maintenance tick is where a deployed run reports them. The shared-pool
- * lock counters ride along: they move only while traffic flows, which is
- * exactly when their cost is worth attributing. */
+/* Report the L7 audit and shared-pool lock counters when they move, at most every
+ * 10 s. The linkerd backend owns the worker thread for the process's lifetime and
+ * reaches no detach point, so the maintenance tick is where a deployed run reports
+ * them. */
 #define PX_L7_REPORT_NS (10ull * 1000000000ull)
 
 void px_l7_stats_report(struct objects *objs, int worker_id)
@@ -1607,12 +1576,11 @@ void px_l7_stats_report(struct objects *objs, int worker_id)
         return;
     uint64_t mark = px_stat_get(&px->stat_l7_fallback) +
                     px_stat_get(&px->stat_l7_over_release) +
-                    px_stat_get(&px->stat_l7_stray_release) +
-                    px_stat_get(&px->stat_pool_lock);
+                    px_stat_get(&px->stat_l7_stray_release);
     uint64_t seen = atomic_load_explicit(&px->l7_report_mark, memory_order_relaxed);
     atomic_store_explicit(&px->l7_report_ns, now, memory_order_relaxed);
-    if (last && mark == seen)
-        return;                                /* nothing new to audit */
+    if (mark == seen)
+        return;                                /* no new fault to audit */
     atomic_store_explicit(&px->l7_report_mark, mark, memory_order_relaxed);
     px_l7_log_fallbacks(px, worker_id);
 }
@@ -1640,9 +1608,9 @@ static void px_l7_close(struct objects *objs, struct px_conn *c, int eof) {
         l7_conn_close(px_cur_worker->id, handle);
         c->l7_open = 0;
         /* Closing is where the layer gives back what it still holds. Apply it
-         * while the window is still standing: the release names arrivals that
-         * the caller is about to reclaim, and applied afterwards it would name
-         * nothing. What is still held after this never came back. */
+         * while the window is still standing: the release names arrivals the
+         * caller is about to reclaim. What is still held after this never came
+         * back. */
         if (outstanding) {
             px_l7_apply_release(objs, c);
             if (c->l7_handed > c->parse_pos)
@@ -1679,8 +1647,8 @@ _Static_assert(PX_L7_DECISION == DMESH_L7_MODE_DECISION &&
                PX_L7_FULL     == DMESH_L7_MODE_FULL,
                "mode values are shared with the L7 layer");
 
-/* Present this connection to the L7 layer. A refusal is not fatal: nothing has
- * been handed over yet, so the data plane's own forwarding remains correct. */
+/* Present this connection to the L7 layer. Nothing has been handed over yet, so a
+ * refusal leaves the data plane's own forwarding correct. */
 static int px_l7_open_conn(struct objects *objs, struct px_conn *c) {
     struct dmesh_l7_flow flow;
     /* A drain stops admitting sessions without stopping the ones in flight, so
@@ -1715,9 +1683,8 @@ static void px_l7_apply_release(struct objects *objs, struct px_conn *c) {
         return;
     uint64_t outstanding = c->l7_handed - c->parse_pos;
     if ((uint64_t)n > outstanding) {
-        /* The layer named more than it was ever handed. Clamping keeps the
-         * window consistent, but the surplus is a custody bug on the other
-         * side of the contract, so it is counted rather than absorbed. */
+        /* The layer named more than it was ever handed. The surplus is clamped to
+         * keep the window consistent, and counted. */
         uint64_t bad = px_stat_inc(&objs->proxy->stat_l7_over_release);
         DOCA_LOG_DBG("proxy: L7 over-release worker %d conn (%d:%u) asked %u of %llu "
                      "outstanding (total %llu)",
@@ -1793,8 +1760,7 @@ static int px_l7_decide(struct objects *objs, struct px_conn *c) {
 
 /* Hand arrival extents to the L7 layer. Nothing is consumed here: the bytes stay
  * in the window, and their custody is released only when the layer reports having
- * read them. That is what makes this a terminating proxy rather than a decoder —
- * the layer holds the bytes across worker revolutions while it produces its own. */
+ * read them, so the layer may hold them across worker revolutions. */
 static void px_parse_l7(struct objects *objs, struct px_conn *c) {
     px_l7_apply_release(objs, c);
     if (c->l7_closed)
@@ -1968,12 +1934,9 @@ void dmesh_l7_release(int worker_id, uint64_t conn, uint32_t pos, uint32_t len) 
         return;
     /* Everything outstanding is already spoken for, so this release names an
      * extent that was returned once. Applying it would advance the window past
-     * bytes the layer has not read, so it is counted instead.
-     *
-     * Only outside a hand-over walk: a layer that consumes a segment inside
-     * l7_conn_segment releases it before the walk books the hand-over, and
-     * there the two are legitimately out of step. What that path over-releases
-     * is caught by px_l7_apply_release instead. */
+     * bytes the layer has not read, so it is counted instead. Inside a hand-over
+     * walk the two are legitimately out of step, and px_l7_apply_release catches
+     * an over-release there. */
     if (!worker_state->in_l7_parse &&
         c->l7_handed - c->parse_pos <= (uint64_t)c->l7_release_pending) {
         uint64_t n = px_stat_inc(&px->stat_l7_stray_release);
@@ -2013,7 +1976,6 @@ void px_l7_detach_worker(struct objects *objs, int worker_id) {
         return;
     px_cur_worker = &px->workers[worker_id];
     l7_worker_detach(worker_id);
-    px_l7_log_fallbacks(px, worker_id);
 }
 #endif
 
@@ -2129,8 +2091,7 @@ int px_drain_stalled(struct objects *objs, int worker_id) {
 }
 
 /* Collapse one physically adjacent DPA completion into an untouched tail window
- * extent. Kept as a small pure state transition so the contiguity/custody contract
- * has host-only regression coverage. */
+ * extent, as a pure state transition over the contiguity and custody fields. */
 static int px_arrival_try_extend(struct px_conn *c, const dpu_comp_entry_t *e,
                                  uint16_t seq_delta) {
     struct px_arrival *tail = c->wtail;
@@ -2166,8 +2127,6 @@ int px_process_forward(struct objects *objs, int worker_id, void *ventry) {
         /* The source was unpublished after the recv callback queued this item,
          * or the slot was already re-tenanted. Never ACK through find_pod_by_id:
          * that could return the new tenant and corrupt its sequence accounting. */
-        DOCA_LOG_INFO("proxy forward: dropping stale completion pod_idx=%d src=%d gen=%u seq=%u",
-                      e->pod_idx, e->src_pod_id, e->generation, e->seq);
         return -1;
     }
 
@@ -2391,6 +2350,8 @@ px_rev_complete(struct px_engine *eng, struct px_op *op)
         return;
     }
 
+    /* The landed control block is struct dmesh_rev_ring_ctrl, read positionally:
+     * ctrl[0] is consumer_head and ctrl[1] is arm_epoch. */
     uint64_t *ctrl = (uint64_t *)(px->rev_scratch +
         PX_REV_CTRL_OFF(op->pod_idx, op->region));
     pub->cached_head = ctrl[0];
@@ -3474,10 +3435,9 @@ static int px_lane_submit(struct objects *objs, struct px_engine *eng, int pod_i
                 if (!ln->qtail)
                     ln->qtail = take_tail;
                 px_batch_free_node(eng, b);
-                /* BAD_STATE = the doca_dma ctx stopped (fault) — retrying can never
-                 * succeed and floods DOCA's internal "state IDLE" log forever, so
-                 * STALL this engine's submits instead of spinning. Any other error
-                 * (NO_MEMORY / inventory) is a real transient shortage → retry. */
+                /* BAD_STATE = the doca_dma ctx stopped (fault): retrying can
+                 * never succeed, so stall this engine's submits. Any other error
+                 * (NO_MEMORY / inventory) is a transient shortage → retry. */
                 if (ret == DOCA_ERROR_BAD_STATE)
                     px_engine_latch_bad_state(eng, ret);
                 break;
@@ -3521,7 +3481,6 @@ int px_pod_reclaim_ready(struct objects *objs, int pod_idx) {
         __atomic_load_n(&pod->egress_pending_emit, __ATOMIC_ACQUIRE) != 0 ||
         __atomic_load_n(&pod->proxy_source_refs, __ATOMIC_ACQUIRE) != 0)
         return 0;
-    __atomic_store_n(&pod->egress_quiesced, 1, __ATOMIC_RELEASE);
     return 1;
 }
 
@@ -3640,8 +3599,6 @@ int px_init(struct objects *objs) {
         atomic_init(&px->stat_l7_fallback_by[i], 0);
     atomic_init(&px->stat_l7_over_release, 0);
     atomic_init(&px->stat_l7_stray_release, 0);
-    atomic_init(&px->stat_pool_lock, 0);
-    atomic_init(&px->stat_pool_lock_contended, 0);
     atomic_init(&px->l7_report_ns, 0);
     atomic_init(&px->l7_report_mark, 0);
     /* Splice the shared free lists directly: workers are not running yet, and

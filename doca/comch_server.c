@@ -122,31 +122,6 @@ static void server_message_recv_callback(struct doca_comch_event_msg_recv *event
 		}
 		break;
 
-	case DMESH_MSG_POD_IDENTITY: {
-		const struct dmesh_identity_msg *idm =
-			(const struct dmesh_identity_msg *)recv_buffer;
-		if (msg_len != sizeof(struct dmesh_identity_msg)) {
-			DOCA_LOG_ERR("Received invalid IDENTITY message");
-			return;
-		}
-		struct pod_state *pod = find_pod_by_connection(objs, comch_connection);
-		if (pod == NULL) {
-			DOCA_LOG_ERR("IDENTITY for an unknown connection");
-			return;
-		}
-		if (objs->trusted_registration_required) {
-			DOCA_LOG_ERR("IDENTITY rejected: trusted registration is required");
-			return;
-		}
-		/* Development-only attribution. Required mode returns above; its
-		 * authoritative workload is installed by WORKLOAD_GRANT instead. */
-		memcpy(pod->workload, idm->workload, sizeof(pod->workload));
-		pod->workload[sizeof(pod->workload) - 1] = '\0';
-		DOCA_LOG_INFO("pod identity: slot %d workload '%s'",
-		              (int)(pod - objs->pods), pod->workload);
-		break;
-	}
-
 	case DMESH_MSG_WORKLOAD_GRANT: {
 		const struct dmesh_workload_grant_msg *grant =
 			(const struct dmesh_workload_grant_msg *)recv_buffer;
@@ -157,10 +132,6 @@ static void server_message_recv_callback(struct doca_comch_event_msg_recv *event
 		struct pod_state *pod = find_pod_by_connection(objs, comch_connection);
 		if (pod == NULL || !pod->registration_challenge_issued) {
 			DOCA_LOG_ERR("WORKLOAD_GRANT rejected: no connection challenge");
-			return;
-		}
-		if (!objs->trusted_registration_required) {
-			DOCA_LOG_ERR("WORKLOAD_GRANT rejected: verifier is disabled");
 			return;
 		}
 		if (pod->registration_grant_verified ||
@@ -264,7 +235,6 @@ static void server_message_recv_callback(struct doca_comch_event_msg_recv *event
 				DOCA_LOG_ERR("REGISTER failure result send failed: %s",
 				             doca_error_get_name(sr));
 		}
-		DOCA_LOG_INFO("Pod registered: pod_id=%d service_id=%d", assigned, reg->service_id);
 		break;
 	}
 
@@ -293,8 +263,6 @@ static void server_message_recv_callback(struct doca_comch_event_msg_recv *event
 static doca_error_t
 server_send_registration_challenge(struct objects *objs, struct pod_state *pod)
 {
-	if (!objs->trusted_registration_required)
-		return DOCA_SUCCESS;
 	if (pod == NULL || pod->connection == NULL)
 		return DOCA_ERROR_INVALID_VALUE;
 	if (!pod->registration_challenge_issued) {
@@ -373,7 +341,6 @@ static void server_connection_event_callback(struct doca_comch_event_connection_
 			              doca_error_get_name(challenge_result));
 	}
 
-	DOCA_LOG_INFO("New connection established (total pods: %d)", objs->num_pods);
 }
 
 /**
@@ -424,16 +391,12 @@ static void server_state_changed_callback(const union doca_data user_data,
 
 	switch (next_state) {
 	case DOCA_CTX_STATE_IDLE:
-		DOCA_LOG_INFO("CC server context is idle");
 		break;
 	case DOCA_CTX_STATE_STARTING:
-		DOCA_LOG_INFO("CC server context is starting");
 		break;
 	case DOCA_CTX_STATE_RUNNING:
-		DOCA_LOG_INFO("CC server context is running. Waiting for clients to connect");
 		break;
 	case DOCA_CTX_STATE_STOPPING:
-		DOCA_LOG_INFO("CC server context is stopping");
 		break;
 	default:
 		break;
@@ -541,7 +504,6 @@ init_comch_ctrl_path_server(const char *server_name, struct objects *objs)
                          desired_rq, doca_error_get_name(result));
             goto setup_failed;
         }
-        DOCA_LOG_INFO("CC server recv queue size set to %u (cap=%u)", desired_rq, max_rq_size);
     }
 
     user_data.ptr = (void *)objs;
@@ -561,8 +523,6 @@ init_comch_ctrl_path_server(const char *server_name, struct objects *objs)
 		if (doca_pe_progress(objs->pe) == 0)
 			nanosleep(&ts, &ts);
 	}
-
-	DOCA_LOG_INFO("Server connection established");
 
     return DOCA_SUCCESS;
 
@@ -647,8 +607,6 @@ send_pod_init_result(struct objects *objs, struct pod_state *pod)
 	                                               (const char *)&msg, sizeof(msg));
 	if (result == DOCA_SUCCESS) {
 		pod->init_result_sent = 1;
-		DOCA_LOG_INFO("Pod init result submitted: pod_id=%d result=%d",
-		              pod->pod_id, pod->init_result);
 	}
 	return result;
 }
@@ -678,8 +636,7 @@ server_flush_pod_init_results(struct objects *objs)
 	int n = __atomic_load_n(&objs->num_pods, __ATOMIC_ACQUIRE);
 	for (int i = 0; i < n; i++) {
 		struct pod_state *pod = &objs->pods[i];
-		if (objs->trusted_registration_required && pod->connection != NULL &&
-		    !pod->registration_challenge_sent)
+		if (pod->connection != NULL && !pod->registration_challenge_sent)
 			(void)server_send_registration_challenge(objs, pod);
 		if (pod->connection == NULL ||
 		    !__atomic_load_n(&pod->registered, __ATOMIC_ACQUIRE) ||
@@ -692,7 +649,6 @@ server_flush_pod_init_results(struct objects *objs)
 	}
 	return submitted;
 }
-
 
 /* ====================================================================
  * Pod connection management
@@ -766,8 +722,6 @@ pods_add_connection(struct objects *objs, struct doca_comch_connection *conn)
 	objs->pods[idx].dpa_del_expected_mask = 0;
 	objs->pods[idx].dpa_del_ack_mask = 0;
 	objs->pods[idx].dpa_del_last_send_ns = 0;
-	objs->pods[idx].dpa_rings_counted_mask = 0;
-	objs->pods[idx].egress_quiesced = 0;
 	objs->pods[idx].proxy_producers_quiesced_mask = 0;
 	objs->pods[idx].egress_quiesced_mask = 0;
 	objs->pods[idx].egress_reclaim_fenced_mask = 0;
@@ -780,7 +734,6 @@ pods_add_connection(struct objects *objs, struct doca_comch_connection *conn)
 	if (idx == n)
 		__atomic_store_n(&objs->num_pods, idx + 1, __ATOMIC_RELEASE);
 
-	DOCA_LOG_INFO("pods_add_connection: slot %d%s", idx, (idx == n) ? "" : " (reused)");
 	return 0;
 }
 
@@ -804,7 +757,6 @@ pod_begin_cleanup(struct objects *objs, struct pod_state *pod)
 
 	/* Stop every producer before asking either DMA engine to quiesce. Keep all
 	 * imported handles published in the private slot until both barriers pass. */
-	__atomic_store_n(&pod->egress_quiesced, 0, __ATOMIC_RELEASE);
 	__atomic_store_n(&pod->proxy_producers_quiesced_mask, 0,
 	                 __ATOMIC_RELEASE);
 	__atomic_store_n(&pod->egress_quiesced_mask, 0, __ATOMIC_RELEASE);
@@ -816,6 +768,11 @@ pod_begin_cleanup(struct objects *objs, struct pod_state *pod)
 		__atomic_store_n(&objs->pod_id_to_slot[pod->pod_id], -1,
 		                 __ATOMIC_RELEASE);
 	pod->cleanup_reply_sent = 0;
+	pod->cleanup_stall_report_ns = 0;
+	struct timespec started;
+	pod->cleanup_started_ns = clock_gettime(CLOCK_MONOTONIC, &started) == 0
+		? (uint64_t)started.tv_sec * 1000000000ull + (uint64_t)started.tv_nsec
+		: 0;
 	__atomic_store_n(&pod->cleanup_pending, 1, __ATOMIC_RELEASE);
 #ifdef DOCA_ARCH_DPU
 	teardown_pod_dma(objs, pod);
@@ -825,6 +782,9 @@ pod_begin_cleanup(struct objects *objs, struct pod_state *pod)
 /* Membership is consulted on its own cadence: the control loop runs on a 1 ms
  * backstop and the publisher installs generations far more slowly. */
 #define MEMBERSHIP_CHECK_INTERVAL_NS 1000000000ull
+
+/* How long a quiescence may run before it is reported as stalled. */
+#define DMESH_CLEANUP_STALL_NS 5000000000ull
 
 int
 server_progress_membership(struct objects *objs)
@@ -853,9 +813,6 @@ server_progress_membership(struct objects *objs)
 		return 0;
 	}
 	l7_control_event("membership", "ok");
-	DOCA_LOG_INFO("membership generation adopted: generation=%lu entries=%zu",
-	              (unsigned long)objs->membership_generation,
-	              objs->membership_count);
 
 	int revoked = 0;
 	int n = __atomic_load_n(&objs->num_pods, __ATOMIC_ACQUIRE);
@@ -939,7 +896,6 @@ pods_unregister_connection(struct objects *objs,
 	if (pod == NULL || pod->pod_id != pod_id)
 		return -1;
 	pod_begin_cleanup(objs, pod);
-	DOCA_LOG_INFO("POD_UNREGISTER accepted: pod_id=%d", pod_id);
 	return 0;
 }
 
@@ -966,10 +922,6 @@ pods_remove_connection(struct objects *objs, struct doca_comch_connection *conn)
 		pod->connection = NULL;
 		if (!__atomic_load_n(&pod->cleanup_pending, __ATOMIC_ACQUIRE))
 			pod->pod_id = -1;
-		DOCA_LOG_INFO("pods_remove_connection: slot %d pod_id=%d cleanup_pending=%d",
-		              i, pod_id,
-		              __atomic_load_n(&pod->cleanup_pending,
-		                              __ATOMIC_ACQUIRE));
 		return 0;
 	}
 	return -1;
@@ -1038,6 +990,50 @@ pod_destroy_imported_resources(struct pod_state *pod)
 }
 #endif
 
+#ifdef DOCA_ARCH_DPU
+/* A quiescence that cannot finish holds its slot and its imported mappings.
+ * Name the gate holding it, and keep naming it: a stall that outlives one
+ * report is the case worth watching, and a single line cannot show whether the
+ * gate moved. */
+static void
+pod_report_cleanup_stall(struct objects *objs, struct pod_state *pod,
+                         int dma_done, int reclaimed)
+{
+	struct timespec now;
+	if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+		return;
+	uint64_t now_ns = (uint64_t)now.tv_sec * 1000000000ull + (uint64_t)now.tv_nsec;
+	if (pod->cleanup_started_ns == 0 ||
+	    now_ns - pod->cleanup_started_ns < DMESH_CLEANUP_STALL_NS)
+		return;
+	if (pod->cleanup_stall_report_ns != 0 &&
+	    now_ns - pod->cleanup_stall_report_ns < DMESH_CLEANUP_STALL_NS)
+		return;
+	pod->cleanup_stall_report_ns = now_ns;
+	uint32_t expected = __atomic_load_n(&pod->dpa_del_expected_mask, __ATOMIC_ACQUIRE);
+	DOCA_LOG_WARN("pod cleanup stalled: pod_id=%d gate=%s connection=%s "
+	              "k_rings=%d del_expected=0x%x del_acked=0x%x",
+	              pod->pod_id,
+	              !dma_done ? "dpa-ring-del" :
+	              !reclaimed ? "proxy-reclaim" : "mapping-destroy",
+	              pod->connection != NULL ? "live" : "gone", pod->k_rings,
+	              expected,
+	              __atomic_load_n(&pod->dpa_del_ack_mask, __ATOMIC_ACQUIRE));
+	/* The DPA drops a ring ACK when the channel has no posted receive, and
+	 * receives are withheld while a worker's completion queue is above its
+	 * backpressure mark. */
+	for (int w = 0; w < objs->n_data_workers; w++)
+		DOCA_LOG_WARN("  worker %d: comp_queue=%u deferred_recv=%d", w,
+		              comp_queue_usage(&objs->data_workers[w].queue),
+		              objs->data_workers[w].num_deferred_recv);
+	for (int eu = 0; eu < objs->num_dpa_threads && eu < MAX_DPA_EU; eu++)
+		if ((expected & (1u << eu)) && objs->dpa_comches[eu] != NULL)
+			DOCA_LOG_WARN("  EU %d: recv_posted=%d", eu,
+			              __atomic_load_n(&objs->dpa_comches[eu]->recv.recv_posted,
+			                              __ATOMIC_RELAXED));
+}
+#endif
+
 int
 server_progress_pod_cleanup(struct objects *objs)
 {
@@ -1051,12 +1047,13 @@ server_progress_pod_cleanup(struct objects *objs)
 		struct pod_state *pod = &objs->pods[i];
 		if (!__atomic_load_n(&pod->cleanup_pending, __ATOMIC_ACQUIRE))
 			continue;
-		if (!progress_teardown_pod_dma(objs, pod))
+		int dma_done = progress_teardown_pod_dma(objs, pod);
+		int reclaimed = dma_done && px_pod_reclaim_ready(objs, i);
+		int destroyed = reclaimed && pod_destroy_imported_resources(pod);
+		if (!destroyed) {
+			pod_report_cleanup_stall(objs, pod, dma_done, reclaimed);
 			continue;
-		if (!px_pod_reclaim_ready(objs, i))
-			continue;
-		if (!pod_destroy_imported_resources(pod))
-			continue;
+		}
 
 		pod->ring_mmap_count = 0;
 		pod->rev_ring_mmap_count = 0;
@@ -1087,7 +1084,6 @@ server_progress_pod_cleanup(struct objects *objs)
 			if (result != DOCA_SUCCESS)
 				continue; /* send-pool backpressure: retain and retry */
 			pod->cleanup_reply_sent = 1;
-			DOCA_LOG_INFO("POD_QUIESCED submitted: pod_id=%d", pod->pod_id);
 		}
 
 		__atomic_store_n(&pod->cleanup_pending, 0, __ATOMIC_RELEASE);
@@ -1129,10 +1125,9 @@ pods_register(struct objects *objs, struct doca_comch_connection *conn,
 			DOCA_LOG_ERR("pods_register: conflicting replay on slot %d", i);
 			return -1;
 		}
-		if (objs->trusted_registration_required &&
-		    (!objs->pods[i].registration_grant_verified ||
-		     objs->pods[i].registration_grant_consumed ||
-		     service_id != objs->pods[i].grant_service_id)) {
+		if (!objs->pods[i].registration_grant_verified ||
+		    objs->pods[i].registration_grant_consumed ||
+		    service_id != objs->pods[i].grant_service_id) {
 			DOCA_LOG_ERR("pods_register: trusted grant missing/consumed or Service mismatch "
 			             "on slot %d (requested=%d authorized=%d)",
 			             i, service_id, objs->pods[i].grant_service_id);
@@ -1152,24 +1147,21 @@ pods_register(struct objects *objs, struct doca_comch_connection *conn,
 		 * to see the prior pod_id write. */
 		objs->pods[i].pod_id = pod_id;
 		objs->pods[i].service_id = service_id;
-		if (objs->trusted_registration_required)
-			objs->pods[i].registration_grant_consumed = 1;
+		objs->pods[i].registration_grant_consumed = 1;
 		/* Judge this registration only against generations newer than the one
 		 * the node published before it existed. */
 		objs->pods[i].membership_generation = objs->membership_generation;
 		objs->pods[i].membership_absences = 0;
 		__atomic_store_n(&objs->pods[i].registered, 1, __ATOMIC_RELEASE);
 
-		/* Publish the O(1) pod_id->slot map AFTER registered=1, so a reader
-		 * that observes the map entry is guaranteed to also see registered=1.
-		 * (find_pod_by_id re-validates registered + pod_id regardless.) */
+		/* Publish the O(1) pod_id->slot map after registered=1, so a reader
+		 * that observes the map entry also sees registered=1. find_pod_by_id
+		 * re-validates registered + pod_id regardless. */
 		if (pod_id >= 0 && pod_id < POD_ID_SPACE)
 			__atomic_store_n(&objs->pod_id_to_slot[pod_id], i, __ATOMIC_RELEASE);
 
 		/* The load balancer derives live backends from published pod fields. */
 
-		DOCA_LOG_INFO("pods_register: slot %d → pod_id=%d service_id=%d",
-		              i, pod_id, service_id);
 		return pod_id;
 	}
 	DOCA_LOG_ERR("pods_register: connection not found");

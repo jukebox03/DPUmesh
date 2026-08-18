@@ -17,7 +17,10 @@ init_comch_dpa_msgq(struct objects *objs, struct doca_pe *pe)
 {
 	doca_error_t result;
 
-		/* Channel k binds to consumer_pes[k % A]. */
+	/* DPU->DPA control producers are owned by the main thread and therefore
+	 * bind to objs->pe. DPA->DPU completion consumers remain sharded across
+	 * the data-worker PEs. A DOCA PE and all tasks routed to it have one ARM
+	 * owner for their entire running lifetime. */
 	int nb = objs->n_data_workers >= 1 ? objs->n_data_workers : 1;
 	for (int k = 0; k < objs->num_dpa_threads; k++) {
 		result = dmesh_doca_dpa_comch_create(objs, k);
@@ -26,7 +29,7 @@ init_comch_dpa_msgq(struct objects *objs, struct doca_pe *pe)
 			return result;
 		}
 
-		struct doca_pe *chan_pe = (nb >= 1 && objs->consumer_pes[k % nb])
+		struct doca_pe *recv_pe = (nb >= 1 && objs->consumer_pes[k % nb])
 		                          ? objs->consumer_pes[k % nb] : pe;
 		struct dmesh_doca_dpa_msgq_create_attr msgq_attr = {
 			.dev = objs->dev,
@@ -34,7 +37,7 @@ init_comch_dpa_msgq(struct objects *objs, struct doca_pe *pe)
 			.max_num_msg = CC_DPA_MAX_MSG_NUM,
 			.consumer_comp = objs->dpa_comches[k]->consumer_comp,
 			.producer_comp = objs->dpa_comches[k]->producer_comp,
-			.pe = chan_pe,
+			.pe = objs->pe,
 			.ctx_state_changed_cb = dmesh_doca_dpa_comch_msgq_ctx_state_changed_cb,
 			.ctx_user_data = objs,
 		};
@@ -45,6 +48,7 @@ init_comch_dpa_msgq(struct objects *objs, struct doca_pe *pe)
 			return result;
 
 		msgq_attr.is_send = false;
+		msgq_attr.pe = recv_pe;
 		result = dmesh_doca_dpa_msgq_create(&msgq_attr, &objs->dpa_comches[k]->recv);
 		if (result != DOCA_SUCCESS)
 			return result;

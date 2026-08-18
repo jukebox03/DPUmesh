@@ -33,15 +33,12 @@ LINKERD_BENCH_DIR="$PROJ_ROOT/linkerd/bench"
 LINKERD_MANIFEST="$LINKERD_BENCH_DIR/k8s/pods.yaml"
 BENCH_LINKERD="${BENCH_LINKERD:-0}"
 
-# Trusted workload registration is opt-in for compatibility with existing L4
-# campaigns. `required` provisions a Host-only keyring and a namespace-scoped
-# node agent; no key or authoritative claims are mounted into application Pods.
-DPUMESH_TRUSTED_REGISTRATION="${DPUMESH_TRUSTED_REGISTRATION:-off}"
+# Every registration is attested. The deploy provisions a Host-only keyring and
+# a namespace-scoped node agent; no key or authoritative claims are mounted into
+# application Pods.
 DPUMESH_REGISTRATION_KEY_DIR_DPU="${DPUMESH_REGISTRATION_KEY_DIR_DPU:-/etc/dpumesh/registration.keys}"
 DPUMESH_REGISTRATION_ISSUER="${DPUMESH_REGISTRATION_ISSUER:-dpumesh-node-agent}"
-DPUMESH_REGISTRATION_KEY_ID="${DPUMESH_REGISTRATION_KEY_ID:-node-hmac-v1}"
-DPUMESH_ATTEST_SOCKET="${DPUMESH_ATTEST_SOCKET:-}"
-DPUMESH_REQUIRE_TRUSTED_WORKLOAD="${DPUMESH_REQUIRE_TRUSTED_WORKLOAD:-}"
+DPUMESH_ATTEST_SOCKET="${DPUMESH_ATTEST_SOCKET:-/run/dpumesh/attest.sock}"
 
 INCLUDE_SRC="$PROJ_ROOT/include"
 DOCA_SRC="$PROJ_ROOT/doca"
@@ -352,11 +349,8 @@ build_images() {
     step "=== Building Docker images (scope=$scope) ==="
     collect_doca_libs
     echo "$HOST_PASS" | sudo -S true 2>/dev/null
-    if [ "$DPUMESH_TRUSTED_REGISTRATION" = required ] ||
-       [ "$DPUMESH_TRUSTED_REGISTRATION" = 1 ]; then
-        build_image "$BENCH_DIR/docker/workload_attest.Dockerfile" \
-            "$IMG_WORKLOAD_AGENT" "$PROJ_ROOT"
-    fi
+    build_image "$BENCH_DIR/docker/workload_attest.Dockerfile" \
+        "$IMG_WORKLOAD_AGENT" "$PROJ_ROOT"
     if [ "${L7_BACKEND:-null}" = linkerd ]; then
         build_image "$BENCH_DIR/docker/linkerd_cp_gateway.Dockerfile" \
             "$IMG_LINKERD_GATEWAY" "$PROJ_ROOT"
@@ -595,25 +589,18 @@ exit 1"; then
     info "Linkerd ready on admin port(s): $ports"
 }
 
-# Required trusted registration protects every Service, so a declined L7 session
-# has to end instead of continuing as unobserved L4. Both the deploy path and a
-# bare `restart` resolve the switch here.
+# Trusted registration protects every Service, so a declined L7 session has to
+# end instead of continuing as unobserved L4. Both the deploy path and a bare
+# `restart` resolve the switch here.
 resolve_l7_fail_closed() {
-    case "$DPUMESH_TRUSTED_REGISTRATION" in
-        required|1)
-            case "${DPUMESH_L7_FAIL_CLOSED:-1}" in
-                1) ;;
-                *) err "DPUMESH_L7_FAIL_CLOSED=$DPUMESH_L7_FAIL_CLOSED forwards declined"
-                   err "  protected sessions as plain L4; it cannot be combined with"
-                   err "  DPUMESH_TRUSTED_REGISTRATION=required"
-                   exit 1 ;;
-            esac
-            DPUMESH_L7_FAIL_CLOSED=1
-            ;;
-        *)
-            DPUMESH_L7_FAIL_CLOSED="${DPUMESH_L7_FAIL_CLOSED:-0}"
-            ;;
+    case "${DPUMESH_L7_FAIL_CLOSED:-1}" in
+        1) ;;
+        *) err "DPUMESH_L7_FAIL_CLOSED=$DPUMESH_L7_FAIL_CLOSED forwards declined"
+           err "  protected sessions as plain L4, which trusted registration"
+           err "  does not allow"
+           exit 1 ;;
     esac
+    DPUMESH_L7_FAIL_CLOSED=1
     export DPUMESH_L7_FAIL_CLOSED
 }
 
@@ -655,7 +642,7 @@ LINKERD2_PROXY_INBOUND_DEFAULT_POLICY=all-unauthenticated
 LINKERD2_PROXY_OUTBOUND_LISTEN_ADDR=127.0.0.1:0
 LINKERD2_PROXY_CONTROL_LISTEN_ADDR=127.0.0.1:0
 LINKERD2_PROXY_ADMIN_LISTEN_ADDR=${LINKERD_ADMIN_ADDR:-127.0.0.1:4191}
-LINKERD2_PROXY_LOG=${LINKERD_LOG:-warn,linkerd=info,dmesh_l7=info}
+LINKERD2_PROXY_LOG=${LINKERD_LOG:-warn}
 DPUMESH_L7_LINKERD_WORKER=${DPUMESH_L7_LINKERD_WORKER:-0}
 DPUMESH_L7_SERVICE_TARGETS_FILE=$(linkerd_service_target_file)
 DPUMESH_L7_FAIL_CLOSED=$DPUMESH_L7_FAIL_CLOSED
@@ -669,17 +656,11 @@ L7ENV
     local dpa_threads="${DPUMESH_DPA_THREADS:-}"
     local rings="${DPUMESH_RINGS_PER_POD:-}"
     local workers="${DPUMESH_ARM_WORKERS:-}"
-    local trusted_registration="$DPUMESH_TRUSTED_REGISTRATION"
     local registration_key_dir="$DPUMESH_REGISTRATION_KEY_DIR_DPU"
     local registration_issuer="$DPUMESH_REGISTRATION_ISSUER"
-    # Revocation consumes the node membership generation; an empty path leaves
-    # it off, which is what development mode wants.
-    local membership_file=""
-    local admission_file=""
-    if [ "$DPUMESH_TRUSTED_REGISTRATION" = required ]; then
-        membership_file="${DPUMESH_MEMBERSHIP_FILE:-/etc/dpumesh/membership.v1}"
-        admission_file="${DPUMESH_ADMISSION_FILE:-/etc/dpumesh/admission}"
-    fi
+    # Revocation consumes the node membership generation.
+    local membership_file="${DPUMESH_MEMBERSHIP_FILE:-/etc/dpumesh/membership.v1}"
+    local admission_file="${DPUMESH_ADMISSION_FILE:-/etc/dpumesh/admission}"
     step "=== Starting dpumesh_dpu (l7_decision='$l7_decision' l7_opaque='$l7_opaque' l7_full='$l7_full' dpa_threads='$dpa_threads' rings_per_pod='$rings' arm_workers='$workers') ==="
     stop_dpu
     local dpu_home; dpu_home=$(ssh_dpu 'echo $HOME')
@@ -689,7 +670,7 @@ L7ENV
 running=\$(pgrep -x dpumesh_dpu | head -1)
 if [ -n \"\$running\" ]; then echo \"\$running\"; exit 0; fi
 ulimit -c unlimited
-screen -dmS dpumesh-bench bash -c \"ulimit -c unlimited; cd $dpu_home/$DPU_BUILD && $l7_env DPUMESH_TRUSTED_REGISTRATION=$trusted_registration DPUMESH_REGISTRATION_KEY_DIR=$registration_key_dir DPUMESH_REGISTRATION_ISSUER=$registration_issuer DPUMESH_MEMBERSHIP_FILE=$membership_file DPUMESH_ADMISSION_FILE=$admission_file DPUMESH_L7_DECISION_SVC=$l7_decision DPUMESH_L7_OPAQUE_SVC=$l7_opaque DPUMESH_L7_SVC=$l7_full DPUMESH_L7_NULL_TRACE=$l7_trace DPUMESH_L7_FRAMED_RR=$l7_rr DPUMESH_DPA_THREADS=$dpa_threads DPUMESH_RINGS_PER_POD=$rings DPUMESH_ARM_WORKERS=$workers ./dpumesh_dpu $DPU_PCI -l $log_level > $DPU_LOG 2>&1\"
+screen -dmS dpumesh-bench bash -c \"ulimit -c unlimited; cd $dpu_home/$DPU_BUILD && $l7_env DPUMESH_REGISTRATION_KEY_DIR=$registration_key_dir DPUMESH_REGISTRATION_ISSUER=$registration_issuer DPUMESH_MEMBERSHIP_FILE=$membership_file DPUMESH_ADMISSION_FILE=$admission_file DPUMESH_L7_DECISION_SVC=$l7_decision DPUMESH_L7_OPAQUE_SVC=$l7_opaque DPUMESH_L7_SVC=$l7_full DPUMESH_L7_NULL_TRACE=$l7_trace DPUMESH_L7_FRAMED_RR=$l7_rr DPUMESH_DPA_THREADS=$dpa_threads DPUMESH_RINGS_PER_POD=$rings DPUMESH_ARM_WORKERS=$workers ./dpumesh_dpu $DPU_PCI -l $log_level > $DPU_LOG 2>&1\"
 sleep 2
 pgrep -x dpumesh_dpu | head -1 || echo NO_PID
 LAUNCHER
@@ -945,32 +926,14 @@ clean_failed_pods() {
 }
 
 prepare_trusted_registration() {
-    case "$DPUMESH_TRUSTED_REGISTRATION" in
-        off|0|dev)
-            DPUMESH_TRUSTED_REGISTRATION=off
-            DPUMESH_ATTEST_SOCKET=""
-            DPUMESH_REQUIRE_TRUSTED_WORKLOAD=""
-            ;;
-        required|1)
-            DPUMESH_TRUSTED_REGISTRATION=required
-            DPUMESH_ATTEST_SOCKET="${DPUMESH_ATTEST_SOCKET:-/run/dpumesh/attest.sock}"
-            case "$DPUMESH_ATTEST_SOCKET" in
-                /run/dpumesh/*) ;;
-                *) err "benchmark attestation socket must be under /run/dpumesh"; exit 1 ;;
-            esac
-            DPUMESH_REQUIRE_TRUSTED_WORKLOAD=1
-            export DPUMESH_ATTEST_SOCKET DPUMESH_REQUIRE_TRUSTED_WORKLOAD
-            ;;
-        *)
-            err "DPUMESH_TRUSTED_REGISTRATION must be off or required"
-            exit 1
-            ;;
+    case "$DPUMESH_ATTEST_SOCKET" in
+        /run/dpumesh/*) ;;
+        *) err "benchmark attestation socket must be under /run/dpumesh"; exit 1 ;;
     esac
+    export DPUMESH_ATTEST_SOCKET
     # Settle the protected-service policy before provisioning anything.
     resolve_l7_fail_closed
-    if [ "$DPUMESH_TRUSTED_REGISTRATION" = required ]; then
-        "$BENCH_DIR/workload_attest.sh" prepare
-    fi
+    "$BENCH_DIR/workload_attest.sh" prepare
 }
 
 # Render bench/k8s/pods.yaml with envsubst and apply it (replicas: 0).
@@ -980,7 +943,7 @@ apply_manifest() {
     command -v envsubst >/dev/null 2>&1 || { err "envsubst not found (apt install gettext-base)"; exit 1; }
     export IMG_BENCH_DPU IMG_ECHO_DPU IMG_LOOPBACK_DPU IMG_VERBS_DPU IMG_PRELOAD_DPU IMG_PRELOAD_SOCK IMG_BENCH_TCP IMG_ECHO_TCP IMG_ENVOY IMG_BENCH_GRPC IMG_ECHO_GRPC
     export CTRL_PORT TCP_PORT HOST_PCI LIB_OUT BENCH_NUMA_NODE
-    export DPUMESH_ATTEST_SOCKET DPUMESH_REQUIRE_TRUSTED_WORKLOAD
+    export DPUMESH_ATTEST_SOCKET
     export DPUMESH_RINGS_PER_POD="${DPUMESH_RINGS_PER_POD:-2}" \
            ASYNC_THREADS="${ASYNC_THREADS:-4}" \
            BENCH_DST_SERVICES ECHO_13_SERVICE ECHO_14_SERVICE \
@@ -1046,7 +1009,7 @@ start_pods() {
         *) err "BENCH_DEPLOY_SCOPE must be all|core|l4|grpc (got $scope)"; exit 1;;
     esac
     step "=== Starting pods (innermost first, scope=$scope) ==="
-    local ready="DPU pod is data-ready"
+    local ready="DPUmesh DOCA initialized"
     # `grpc` starts only the four L7 paths, so no other backend can enter the
     # DPU registry while the gRPC campaign runs.
     if [ "$scope" = grpc ]; then
@@ -1113,10 +1076,8 @@ deploy() {
     fi
     build_images
     [ "$BENCH_DEPLOY_SCOPE" = core ] || ensure_envoy_image
-    if [ "$DPUMESH_TRUSTED_REGISTRATION" = required ]; then
-        IMG_WORKLOAD_AGENT="$IMG_WORKLOAD_AGENT" "$BENCH_DIR/workload_attest.sh" deploy
-        "$BENCH_DIR/workload_attest.sh" membership-start
-    fi
+    IMG_WORKLOAD_AGENT="$IMG_WORKLOAD_AGENT" "$BENCH_DIR/workload_attest.sh" deploy
+    "$BENCH_DIR/workload_attest.sh" membership-start
     if [ "${L7_BACKEND:-null}" = linkerd ]; then
         IMG_LINKERD_GATEWAY="$IMG_LINKERD_GATEWAY" "$BENCH_DIR/linkerd_cp_gateway.sh" start
         "$BENCH_DIR/linkerd_identity.sh" start-agent
@@ -1238,11 +1199,8 @@ cleanup() {
     info "Deleting namespace $NS"
     kubectl delete ns "$NS" --ignore-not-found=true 2>/dev/null || true
     stop_dpu
-    if [ "$DPUMESH_TRUSTED_REGISTRATION" = required ] ||
-       [ "$DPUMESH_TRUSTED_REGISTRATION" = 1 ]; then
-        "$BENCH_DIR/workload_attest.sh" membership-stop || true
-        "$BENCH_DIR/workload_attest.sh" stop || true
-    fi
+    "$BENCH_DIR/workload_attest.sh" membership-stop || true
+    "$BENCH_DIR/workload_attest.sh" stop || true
     "$BENCH_DIR/linkerd_service_registry.sh" stop >/dev/null 2>&1 || true
     "$BENCH_DIR/linkerd_identity.sh" stop-agent >/dev/null 2>&1 || true
 }
@@ -1758,8 +1716,8 @@ Usage: $0 <command> [args]
 
 Deploy knobs (env): BENCH_NUMA_POLICY=local|auto BENCH_DEPLOY_SCOPE=all|core|l4|grpc
                     BENCH_LINKERD=1 adds the injected linkerd L7 pods (grpc scope)
-                    DPUMESH_TRUSTED_REGISTRATION=required enables the root Host
-                    workload agent, signed grants, and DPU fail-closed admission
+                    Every deploy brings up the root Host workload agent; grants
+                    are signed and DPU admission is fail-closed
                     BENCH_DST_SERVICES=a,b,... assigns native client threads round-robin
                     ECHO_13_SERVICE/ECHO_14_SERVICE split the extra echo pods into services
                     L7_BACKEND=null|linkerd selects the L7 consumer; linkerd requires

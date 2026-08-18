@@ -328,8 +328,6 @@ doca_error_t init_comch_ctrl_path_client(const char *server_name,
         goto setup_failed;
     }
 
-    DOCA_LOG_INFO("CC client max msg size: %u B, max rq size: %u", max_msg_size, max_rq_size);
-
 	result = doca_comch_client_set_max_msg_size(objs->cc_client, max_msg_size);
 	if (result != DOCA_SUCCESS) {
 		DOCA_LOG_ERR("Failed to set msg size property with error = %s", doca_error_get_name(result));
@@ -340,9 +338,6 @@ doca_error_t init_comch_ctrl_path_client(const char *server_name,
 		uint32_t desired_rq = CC_CLIENT_RECV_QUEUE_SIZE;
 		if (desired_rq > max_rq_size) desired_rq = max_rq_size;
 		result = doca_comch_client_set_recv_queue_size(objs->cc_client, desired_rq);
-		if (result == DOCA_SUCCESS) {
-			DOCA_LOG_INFO("CC client recv queue size set to %u (cap=%u)", desired_rq, max_rq_size);
-		}
 	}
 	if (result != DOCA_SUCCESS) {
 		DOCA_LOG_ERR("Failed to set recv queue size property with error = %s", doca_error_get_name(result));
@@ -402,7 +397,6 @@ doca_error_t init_comch_ctrl_path_client(const char *server_name,
 		             doca_error_get_name(result));
 		goto setup_failed;
 	}
-	DOCA_LOG_INFO("CC client connection established successfully");
 
     return DOCA_SUCCESS;
 

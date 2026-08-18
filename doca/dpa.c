@@ -27,12 +27,11 @@ DOCA_LOG_REGISTER(DPA);
 
 struct dpa_send_payload {
     struct dmesh_doca_dpa_msgq *msgq;
-    uint8_t is_wake;
-    uint8_t _pad[7];
     uint8_t bytes[];
 };
 /* Kernel function declaration (resolved from dpa_program.a stubs, DPU only) */
 extern doca_dpa_func_t run_dma_manager;
+extern doca_dpa_func_t run_dma_yield_helper;
 extern doca_dpa_func_t thread_init_rpc;
 
 extern struct doca_dpa_app *DPU_mesh_dpa_app;
@@ -55,13 +54,14 @@ static void dmesh_doca_dpa_msgq_recv_cb(struct doca_comch_consumer_task_post_rec
 				       union doca_data task_user_data,
 				       union doca_data ctx_user_data)
 {
-	(void)task_user_data;
-
 	doca_error_t result;
     uint32_t data_len;
 
 	struct objects *objs = ctx_user_data.ptr;
 	struct doca_task *task = doca_comch_consumer_task_post_recv_as_task(recv_task);
+    struct dmesh_doca_dpa_msgq *recv_msgq = task_user_data.ptr;
+    if (recv_msgq != NULL)
+        __atomic_fetch_sub(&recv_msgq->recv_posted, 1, __ATOMIC_RELAXED);
 
     struct dpu_data_worker *worker_state =
         &objs->data_workers[dpu_worker_id];
@@ -112,8 +112,6 @@ static void dmesh_doca_dpa_msgq_recv_cb(struct doca_comch_consumer_task_post_rec
                 /* Normal during teardown: DEL_ACK fences the DMA itself, but an
                  * older FWD_DONE can already be queued on ARM. Generation makes
                  * this safe even if the pod_id slot has since been reused. */
-                DOCA_LOG_INFO("Ignoring stale FWD_DONE src_pod=%d gen=%u seq=%u",
-                              src_pod_id, comp_msg->generation, seq);
                 break;
             }
 
@@ -142,10 +140,9 @@ static void dmesh_doca_dpa_msgq_recv_cb(struct doca_comch_consumer_task_post_rec
             entry.pod_idx = (int)(src_pod - objs->pods);
 
             if (comp_queue_enqueue(q, &entry) != 0) {
-                /* comp_queue-full drops happen at MESSAGE RATE under overload/wedge —
-                 * an unthrottled log here floods the DPU log (fills the disk). Log the
-                 * first and then 1-in-65536 with a running total. Single-threaded
-                 * (consumer_pe owner), so the static counter needs no atomic. */
+                /* Throttled: the first drop, then one in 65536 with a running
+                 * total. Single-threaded (consumer_pe owner), so the counter
+                 * needs no atomic. */
                 static uint64_t cq_full_drops;
                 if ((cq_full_drops++ & 0xFFFFu) == 0)
                     DOCA_LOG_ERR("Completion queue full, dropping (total %llu) seq=%u (src=%d, dst=%d)",
@@ -181,17 +178,7 @@ static void dmesh_doca_dpa_msgq_recv_cb(struct doca_comch_consumer_task_post_rec
             }
             if (ack->status != DPA_RING_ACK_OK)
                 __atomic_store_n(&pod->dpa_add_ack_failed, 1, __ATOMIC_RELEASE);
-            uint32_t prev_add_mask = __atomic_fetch_or(&pod->dpa_add_ack_mask,
-                                                       bit, __ATOMIC_ACQ_REL);
-            if (!(prev_add_mask & bit) && ack->status == DPA_RING_ACK_OK &&
-                ack->eu_index < MAX_DPA_EU) {
-                __atomic_fetch_add(&objs->dpa_eu_rings[ack->eu_index], 1,
-                                   __ATOMIC_ACQ_REL);
-                __atomic_fetch_or(&pod->dpa_rings_counted_mask, bit,
-                                  __ATOMIC_ACQ_REL);
-            }
-            DOCA_LOG_INFO("DPA ADD_ACK: pod=%d eu=%u gen=%u status=%u",
-                          ack->pod_id, ack->eu_index, ack->generation, ack->status);
+            __atomic_fetch_or(&pod->dpa_add_ack_mask, bit, __ATOMIC_ACQ_REL);
             dpu_wake_main(objs);
             break;
         }
@@ -231,21 +218,7 @@ static void dmesh_doca_dpa_msgq_recv_cb(struct doca_comch_consumer_task_post_rec
                               ack->status, expected);
                 break;
             }
-            uint32_t prev_del_mask = __atomic_fetch_or(&pod->dpa_del_ack_mask,
-                                                       bit, __ATOMIC_ACQ_REL);
-            if (!(prev_del_mask & bit) && ack->eu_index < MAX_DPA_EU &&
-                (__atomic_fetch_and(&pod->dpa_rings_counted_mask, ~bit,
-                                    __ATOMIC_ACQ_REL) & bit)) {
-                uint32_t cur = __atomic_load_n(&objs->dpa_eu_rings[ack->eu_index],
-                                               __ATOMIC_ACQUIRE);
-                while (cur > 0 &&
-                       !__atomic_compare_exchange_n(
-                           &objs->dpa_eu_rings[ack->eu_index], &cur, cur - 1, 0,
-                           __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-                }
-            }
-            DOCA_LOG_INFO("DPA DEL_ACK: pod=%d eu=%u gen=%u",
-                          ack->pod_id, ack->eu_index, ack->generation);
+            __atomic_fetch_or(&pod->dpa_del_ack_mask, bit, __ATOMIC_ACQ_REL);
             dpu_wake_main(objs);
             break;
         }
@@ -260,12 +233,24 @@ resubmit_recv_task:
     /* Backpressure: if comp_queue is nearly full, defer recv task resubmission
      * so DPA sees consumer_empty and pauses; main loop resubmits when the queue
      * drops below BP_LOW. On submit failure also stash for the main loop to
-     * retry rather than losing the task. */
-    if (comp_queue_usage(q) >= COMP_QUEUE_BP_HIGH &&
+     * retry rather than losing the task.
+     *
+     * A floor of receives stays posted through soft backpressure: the DPA sends
+     * ring ACKs on this same channel and drops them when it has no receive, so
+     * the control path stays sendable while forwarding is throttled. Only
+     * genuine queue exhaustion (BP_HARD) withholds the floor. */
+    uint32_t usage = comp_queue_usage(q);
+    int below_floor = recv_msgq != NULL &&
+                      __atomic_load_n(&recv_msgq->recv_posted,
+                                      __ATOMIC_RELAXED) < DPA_CTRL_RECV_FLOOR;
+    if ((usage >= COMP_QUEUE_BP_HARD ||
+         (usage >= COMP_QUEUE_BP_HIGH && !below_floor)) &&
         *ndef < MAX_DEFERRED_RECV) {
         defrecv[(*ndef)++] = task;
     } else {
         result = doca_task_submit(task);
+        if (result == DOCA_SUCCESS && recv_msgq != NULL)
+            __atomic_fetch_add(&recv_msgq->recv_posted, 1, __ATOMIC_RELAXED);
         if (result != DOCA_SUCCESS) {
             if (*ndef < MAX_DEFERRED_RECV) {
                 defrecv[(*ndef)++] = task;
@@ -290,16 +275,19 @@ static void dmesh_doca_dpa_msgq_recv_error_cb(struct doca_comch_consumer_task_po
 					     union doca_data task_user_data,
 					     union doca_data ctx_user_data)
 {
-	(void)task_user_data;
-
 	struct doca_task *task = doca_comch_consumer_task_post_recv_as_task(recv_task);
 	doca_error_t status = doca_task_get_status(task);
+	struct dmesh_doca_dpa_msgq *recv_msgq = task_user_data.ptr;
+	if (recv_msgq != NULL)
+		__atomic_fetch_sub(&recv_msgq->recv_posted, 1, __ATOMIC_RELAXED);
 
 	DOCA_LOG_ERR("DPA MsgQ recv ERROR callback: status=%s(%d)",
 	             doca_error_get_descr(status), (int)status);
 
 	/* Resubmit to keep the recv task alive — do not free. */
 	doca_error_t resubmit = doca_task_submit(task);
+	if (resubmit == DOCA_SUCCESS && recv_msgq != NULL)
+		__atomic_fetch_add(&recv_msgq->recv_posted, 1, __ATOMIC_RELAXED);
 	if (resubmit != DOCA_SUCCESS) {
 		struct objects *objs = ctx_user_data.ptr;
 		struct dpu_data_worker *worker_state =
@@ -327,13 +315,7 @@ static void dmesh_doca_dpa_msgq_send_cb(struct doca_comch_producer_task_send *se
 	struct dpa_send_payload *payload = task_user_data.ptr;
 	(void)ctx_user_data;
 
-	if (payload != NULL) {
-		if (payload->is_wake && payload->msgq != NULL)
-			payload->msgq->wake_inflight = 0;
-		if (payload->msgq == NULL ||
-		    payload != payload->msgq->wake_payload)
-			free(payload);
-	}
+    free(payload);
 
 	struct doca_task *task = doca_comch_producer_task_send_as_task(send_task);
 	doca_task_free(task);
@@ -355,13 +337,7 @@ static void dmesh_doca_dpa_msgq_send_error_cb(struct doca_comch_producer_task_se
 
     struct doca_task *task = doca_comch_producer_task_send_as_task(send_task);
     DOCA_LOG_ERR("Failed to send msg");
-	if (payload != NULL) {
-		if (payload->is_wake && payload->msgq != NULL)
-			payload->msgq->wake_inflight = 0;
-		if (payload->msgq == NULL ||
-		    payload != payload->msgq->wake_payload)
-			free(payload);
-    }
+    free(payload);
     doca_task_free(task);
 }
 
@@ -382,10 +358,8 @@ void dmesh_doca_dpa_comch_msgq_ctx_state_changed_cb(const union doca_data user_d
         DOCA_LOG_ERR("DPA comch msgQ state is idle.");
 		break;
     case DOCA_CTX_STATE_STARTING:
-        DOCA_LOG_INFO("DPA comch msgQ state is starting.");
         break;
     case DOCA_CTX_STATE_RUNNING:
-        DOCA_LOG_INFO("DPA comch msgQ ctx RUNNING.");
         break;
 	case DOCA_CTX_STATE_STOPPING:
 	default:
@@ -412,8 +386,9 @@ init_dpa_objects(struct objects *objs)
     DOCA_LOG_INFO("DPA multi-EU: num_dpa_threads=%d k_rings=%d (MAX_DPA_RINGS=%d)",
                   objs->num_dpa_threads, objs->k_rings, MAX_DPA_RINGS);
 
-    /* Allocate ALL EU-thread containers up to the array cap (small structs); only
-     * num_dpa_threads (finalized by auto-detect after doca_dpa_start) get created/used. */
+    /* Allocate every EU-thread container up to the array cap; only
+     * num_dpa_threads of them, finalized by auto-detect after doca_dpa_start,
+     * are created and used. */
     for (int k = 0; k < MAX_DPA_EU; k++) {
         if (!objs->dpa_threads[k]) {
             objs->dpa_threads[k] = calloc(1, sizeof(struct dmesh_doca_dpa_thread));
@@ -501,7 +476,6 @@ init_dpa_objects(struct objects *objs)
     for (int k = 0; k < objs->num_dpa_threads; k++)
         objs->dpa_threads[k]->dpa = objs->dpa;
 
-    DOCA_LOG_INFO("Init DOCA DPA done.");
     return DOCA_SUCCESS;
 
 destroy_dpa:
@@ -514,6 +488,8 @@ doca_error_t
 dmesh_doca_dpa_thread_create(struct dmesh_doca_dpa_thread *dpa_thread, int eu_id)
 {
     doca_error_t result;
+    struct doca_dpa_eu_affinity *data_affinity = NULL;
+    struct doca_dpa_eu_affinity *yield_affinity = NULL;
 
     result = doca_dpa_mem_alloc(dpa_thread->dpa, sizeof(struct dpa_thread_arg), &dpa_thread->arg);
     if (result != DOCA_SUCCESS) {
@@ -536,30 +512,92 @@ dmesh_doca_dpa_thread_create(struct dmesh_doca_dpa_thread *dpa_thread, int eu_id
         return result;
     }
 
-    /* Pin this thread to a distinct EU so N threads land on N distinct EUs.
-     * eu_id < 0 = leave placement relaxed. Affinity must be set between create
-     * and start. The affinity object is intentionally NOT destroyed (lives for
-     * the process lifetime) to avoid a use-after-free if the SDK references it
-     * past thread_start. */
-    if (eu_id >= 0) {
-        struct doca_dpa_eu_affinity *affinity = NULL;
-        doca_error_t ar = doca_dpa_eu_affinity_create(dpa_thread->dpa, &affinity);
-        if (ar == DOCA_SUCCESS) {
-            ar = doca_dpa_eu_affinity_set(affinity, (unsigned int)eu_id);
-            if (ar == DOCA_SUCCESS)
-                ar = doca_dpa_thread_set_affinity(dpa_thread->thread, affinity);
-        }
-        if (ar != DOCA_SUCCESS)
-            DOCA_LOG_WARN("EU affinity for eu_id=%d failed: %s (continuing relaxed)",
-                          eu_id, doca_error_get_descr(ar));
-        else
-            DOCA_LOG_INFO("DPA thread pinned to EU %d", eu_id);
+    /* The handoff below requires exact affinity: with a relaxed one the helper
+     * could notify the data thread before that thread released its EU. */
+    if (eu_id < 0)
+        return DOCA_ERROR_INVALID_VALUE;
+    result = doca_dpa_eu_affinity_create(dpa_thread->dpa, &data_affinity);
+    if (result == DOCA_SUCCESS)
+        result = doca_dpa_eu_affinity_set(data_affinity,
+                                          (unsigned int)eu_id);
+    if (result == DOCA_SUCCESS)
+        result = doca_dpa_thread_set_affinity(dpa_thread->thread,
+                                              data_affinity);
+    if (result != DOCA_SUCCESS) {
+        DOCA_LOG_ERR("Required data-thread affinity for EU %d failed: %s",
+                     eu_id, doca_error_get_descr(result));
+        return result;
     }
 
     result = doca_dpa_thread_start(dpa_thread->thread);
     if (result != DOCA_SUCCESS) {
         DOCA_LOG_ERR("Failed to start DPA thread: %s",
             doca_error_get_descr(result));
+        return result;
+    }
+
+    /* The helper wakes this data thread only after the helper itself has been
+     * scheduled on their shared physical EU. */
+    result = doca_dpa_notification_completion_create(
+        dpa_thread->dpa, dpa_thread->thread,
+        &dpa_thread->resume_completion);
+    if (result == DOCA_SUCCESS)
+        result = doca_dpa_notification_completion_start(
+            dpa_thread->resume_completion);
+    if (result == DOCA_SUCCESS)
+        result = doca_dpa_notification_completion_get_dpa_handle(
+            dpa_thread->resume_completion, &dpa_thread->resume_handle);
+    if (result != DOCA_SUCCESS) {
+        DOCA_LOG_ERR("Failed to create data resume completion for EU %d: %s",
+                     eu_id, doca_error_get_descr(result));
+        return result;
+    }
+
+    result = doca_dpa_thread_create(dpa_thread->dpa,
+                                    &dpa_thread->yield_thread);
+    if (result == DOCA_SUCCESS)
+        result = doca_dpa_thread_set_func_arg(
+            dpa_thread->yield_thread, run_dma_yield_helper,
+            dpa_thread->resume_handle);
+    if (result == DOCA_SUCCESS)
+        result = doca_dpa_eu_affinity_create(dpa_thread->dpa,
+                                             &yield_affinity);
+    if (result == DOCA_SUCCESS)
+        result = doca_dpa_eu_affinity_set(yield_affinity,
+                                          (unsigned int)eu_id);
+    if (result == DOCA_SUCCESS)
+        result = doca_dpa_thread_set_affinity(dpa_thread->yield_thread,
+                                              yield_affinity);
+    if (result == DOCA_SUCCESS)
+        result = doca_dpa_thread_start(dpa_thread->yield_thread);
+    if (result != DOCA_SUCCESS) {
+        DOCA_LOG_ERR("Failed to create same-EU yield helper for EU %d: %s",
+                     eu_id, doca_error_get_descr(result));
+        return result;
+    }
+
+    result = doca_dpa_notification_completion_create(
+        dpa_thread->dpa, dpa_thread->yield_thread,
+        &dpa_thread->yield_completion);
+    if (result == DOCA_SUCCESS)
+        result = doca_dpa_notification_completion_start(
+            dpa_thread->yield_completion);
+    if (result == DOCA_SUCCESS)
+        result = doca_dpa_notification_completion_get_dpa_handle(
+            dpa_thread->yield_completion, &dpa_thread->yield_handle);
+    if (result != DOCA_SUCCESS) {
+        DOCA_LOG_ERR("Failed to create yield-helper completion for EU %d: %s",
+                     eu_id, doca_error_get_descr(result));
+        return result;
+    }
+
+    /* Make the helper activatable. doca_dpa_thread_run does not execute a
+     * kernel — it only lets a notification schedule one — so the helper stays
+     * dormant until the data thread notifies it on the way out of this EU. */
+    result = doca_dpa_thread_run(dpa_thread->yield_thread);
+    if (result != DOCA_SUCCESS) {
+        DOCA_LOG_ERR("Failed to prime yield helper for EU %d: %s", eu_id,
+                     doca_error_get_descr(result));
         return result;
     }
 
@@ -576,13 +614,6 @@ dmesh_doca_dpa_msgq_create(const struct dmesh_doca_dpa_msgq_create_attr *attr,
     uint32_t consumer_id;
 
     memset(msgq, 0, sizeof(*msgq));
-
-    result = doca_pe_create(&msgq->pe);
-    if (result != DOCA_SUCCESS) {
-        DOCA_LOG_ERR("Failed to create PE - %s",
-                doca_error_get_name(result));
-        return result;
-    }
 
     result = doca_comch_msgq_create(attr->dev, &msgq->msgq);
     if (result != DOCA_SUCCESS) {
@@ -788,13 +819,17 @@ dmesh_doca_dpa_msgq_create(const struct dmesh_doca_dpa_msgq_create_attr *attr,
                 DOCA_LOG_ERR("Failed to alloc recv task at idx=%u: %s", idx, doca_error_get_name(result));
                 return result;
             }
+            union doca_data recv_user_data = { .ptr = msgq };
+            doca_task_set_user_data(
+                doca_comch_consumer_task_post_recv_as_task(recv_task),
+                recv_user_data);
             result = doca_task_submit(doca_comch_consumer_task_post_recv_as_task(recv_task));
             if (result != DOCA_SUCCESS) {
                 DOCA_LOG_ERR("Failed to submit recv task at idx=%u: %s", idx, doca_error_get_name(result));
                 return result;
             }
+            __atomic_fetch_add(&msgq->recv_posted, 1, __ATOMIC_RELAXED);
         }
-        DOCA_LOG_INFO("msgq_create(is_send=0): pre-posted %u recv tasks", attr->max_num_msg);
     }
 
     return DOCA_SUCCESS;
@@ -843,11 +878,11 @@ dmesh_doca_dpa_comch_create(struct objects *objs, int idx)
     }
 
     result = doca_comch_consumer_completion_start(comch->consumer_comp);
-	if (result != DOCA_SUCCESS) {
+    if (result != DOCA_SUCCESS) {
 		DOCA_LOG_ERR("Failed to start consumer completion - %s",
 			     doca_error_get_name(result));
-		return result;
-	}
+        return result;
+    }
 
     result = doca_dpa_completion_create(dpa_thread->dpa, CC_DPA_MAX_MSG_NUM, &comch->producer_comp);
     if (result != DOCA_SUCCESS) {
@@ -910,11 +945,6 @@ dmesh_fill_dpa_thread_arg(struct objects *objs, int idx, struct dpa_thread_arg *
         return result;
     }
 
-    if (send_consumer_id != recv_consumer_id) {
-        DOCA_LOG_INFO("DPA MsgQ consumer IDs differ: send.consumer=%u recv.consumer=%u (using recv.consumer)",
-                      send_consumer_id, recv_consumer_id);
-    }
-
     result = doca_comch_producer_get_dpa_handle(comch->recv.producer, &dpa_producer);
     if (result != DOCA_SUCCESS) {
         DOCA_LOG_ERR("Failed to get producer DPA handle: %s", doca_error_get_name(result));
@@ -927,13 +957,9 @@ dmesh_fill_dpa_thread_arg(struct objects *objs, int idx, struct dpa_thread_arg *
     arg->dpa_producer_comp = dpa_producer_comp;
     arg->dpa_consumer = dpa_consumer;
     arg->dpa_producer = dpa_producer;
+    arg->yield_notification = objs->dpa_threads[idx]->yield_handle;
     arg->dpu_consumer_id = recv_consumer_id;
     arg->num_rings = 0;  /* rings added dynamically via setup_pod_dma */
-
-    DOCA_LOG_INFO("DPA thread arg: consumer_comp=0x%lx, producer_comp=0x%lx, consumer=0x%lx, producer=0x%lx, dpu_consumer_id=%u (send.consumer=%u recv.consumer=%u)",
-        arg->dpa_consumer_comp, arg->dpa_producer_comp,
-        arg->dpa_consumer, arg->dpa_producer, arg->dpu_consumer_id,
-        send_consumer_id, recv_consumer_id);
 
     return DOCA_SUCCESS;
 }
@@ -950,26 +976,10 @@ dmesh_doca_dpa_msgq_send_try(struct dmesh_doca_dpa_msgq *msgq, void *msg, uint32
     struct doca_comch_producer_task_send *send_task;
     struct doca_task *task;
 
-    int is_wake =
-        msg_size >= sizeof(enum dpa_msg_type) &&
-        *(const enum dpa_msg_type *)msg == DPA_MSG_WAKE;
-    if (is_wake && msgq->wake_inflight)
-        return DOCA_SUCCESS;
-
-    if (is_wake) {
-        payload = msgq->wake_payload;
-        if (payload == NULL) {
-            payload = malloc(sizeof(*payload) + msg_size);
-            if (payload != NULL)
-                msgq->wake_payload = payload;
-        }
-    } else {
-        payload = malloc(sizeof(*payload) + msg_size);
-    }
+    payload = malloc(sizeof(*payload) + msg_size);
     if (payload == NULL)
         return DOCA_ERROR_NO_MEMORY;
     payload->msgq = msgq;
-    payload->is_wake = (uint8_t)is_wake;
     memcpy(payload->bytes, msg, msg_size);
 
     result = doca_comch_producer_task_send_alloc_init(msgq->producer, NULL,
@@ -977,8 +987,7 @@ dmesh_doca_dpa_msgq_send_try(struct dmesh_doca_dpa_msgq *msgq, void *msg, uint32
                                                        msgq->target_consumer_id,
                                                        &send_task);
     if (result != DOCA_SUCCESS) {
-        if (!is_wake)
-            free(payload);
+        free(payload);
         return result;
     }
 
@@ -988,20 +997,17 @@ dmesh_doca_dpa_msgq_send_try(struct dmesh_doca_dpa_msgq *msgq, void *msg, uint32
 
     result = doca_task_submit(task);
     if (result != DOCA_SUCCESS) {
-        if (!is_wake)
-            free(payload);
+        free(payload);
         doca_task_free(task);
         return result;
     }
-    if (is_wake)
-        msgq->wake_inflight = 1;
     return DOCA_SUCCESS;
 }
 
-/* Send one message over a DPA Comch queue, retrying transient submit failures
- * with PE progress. Control-path only (thread start, RING_ADD): always
- * transmits, with its own payload copy — never suppressed or coalesced with
- * wake hints. */
+/* Send one message over a DPA Comch queue. Control-path only (thread start,
+ * RING_ADD): always transmits, with its own payload copy — never suppressed or
+ * coalesced with wake hints. This can run inside the main PE's Comch callback,
+ * so it must not recursively progress that PE. */
 doca_error_t
 dmesh_doca_dpa_msgq_send(struct dmesh_doca_dpa_msgq *msgq, void *msg, uint32_t msg_size)
 {
@@ -1017,9 +1023,6 @@ dmesh_doca_dpa_msgq_send(struct dmesh_doca_dpa_msgq *msgq, void *msg, uint32_t m
         return DOCA_ERROR_NO_MEMORY;
     }
     payload->msgq = msgq;
-    payload->is_wake =
-        (msg_size >= sizeof(enum dpa_msg_type) &&
-         *(const enum dpa_msg_type *)msg == DPA_MSG_WAKE);
     memcpy(payload->bytes, msg, msg_size);
     result = doca_comch_producer_task_send_alloc_init(msgq->producer,
                                                       NULL,
@@ -1038,25 +1041,15 @@ dmesh_doca_dpa_msgq_send(struct dmesh_doca_dpa_msgq *msgq, void *msg, uint32_t m
     user_data.ptr = payload;
     doca_task_set_user_data(task, user_data);
 
-    int retry = 0;
-    const int max_retry = 10000;
-    do {
-        result = doca_task_submit(task);
-        if (result == DOCA_ERROR_AGAIN) {
-            doca_pe_progress(msgq->pe);
-            retry++;
-        }
-    } while (result == DOCA_ERROR_AGAIN && retry < max_retry);
+    result = doca_task_submit(task);
 
     if (result != DOCA_SUCCESS) {
-        DOCA_LOG_ERR("DPA MsgQ send failed: %s (retries=%d, msg_size=%u)",
-                     doca_error_get_name(result), retry, msg_size);
+        DOCA_LOG_ERR("DPA MsgQ send failed: %s (msg_size=%u)",
+                     doca_error_get_name(result), msg_size);
         free(payload);
         doca_task_free(task);
         return result;
     }
-    if (payload->is_wake)
-        msgq->wake_inflight = 1;
 
     return DOCA_SUCCESS;
 }
@@ -1160,8 +1153,6 @@ setup_pod_dma(struct objects *objs, struct pod_state *pod)
 {
     doca_error_t result;
 
-    DOCA_LOG_INFO("setup_pod_dma: pod_id=%d", pod->pod_id);
-
     int N = objs->num_dpa_threads;
     int K = objs->k_rings > 0 ? objs->k_rings : 1;
     if (K > N) K = N;
@@ -1175,7 +1166,6 @@ setup_pod_dma(struct objects *objs, struct pod_state *pod)
     }
     pod->k_rings = K;
     pod->landing_stripes = L;
-    __atomic_store_n(&pod->egress_quiesced, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&pod->egress_quiesced_mask, 0, __ATOMIC_RELEASE);
     for (int a = 0; a < MAX_ARM_WORKERS; a++)
         __atomic_store_n(&pod->egress_inflight_worker[a].v, 0,
@@ -1198,11 +1188,10 @@ setup_pod_dma(struct objects *objs, struct pod_state *pod)
 
     /* One staging buffer per pod mirrors host TX offsets across all forward rings.
      * The 128-byte tail covers ALIGN_UP_128 at the buffer boundary. */
-    /* Allocated ONCE PER SLOT and reused across incarnations: it is DPU-local and holds
-     * nothing host-specific, so a reconnecting pod lands in the same staging. Reuse is
-     * what makes never freeing it viable — freeing is not an option, since this is the
-     * egress SG-DMA read source and destroying it faults the engine's shared doca_dma
-     * ctx (see pods_remove_connection). */
+    /* Allocated once per slot and reused across incarnations: it is DPU-local, so
+     * a reconnecting pod lands in the same staging. It is never freed — it is the
+     * egress SG-DMA read source, and destroying it faults the engine's shared
+     * doca_dma ctx (see pods_remove_connection). */
     if (pod->local_mmap == NULL) {
         result = alloc_buffer_and_set_mmap(&pod->local_mmap, objs->dev,
                                            &pod->dma_buffer, DPU_BUFFER_SIZE + 128,
@@ -1212,12 +1201,9 @@ setup_pod_dma(struct objects *objs, struct pod_state *pod)
                          pod->pod_id, doca_error_get_descr(result));
             return result;
         }
-        DOCA_LOG_INFO("setup_pod_dma: pod %d staging allocated (%d MB)",
-                      pod->pod_id, (DPU_BUFFER_SIZE + 128) / (1024 * 1024));
     } else {
         /* No memset: stale bytes are unreachable, since the DPA only lands at offsets
          * the new pod's own descriptors name. */
-        DOCA_LOG_INFO("setup_pod_dma: pod %d staging reused (no realloc)", pod->pod_id);
     }
     /* (The per-pod DPU staging buffer is NOT exported to the host: the host never
      * reads it — the SG-DMA egress lands into the receiver's own rx_dma_buffer.) */
@@ -1275,7 +1261,6 @@ setup_pod_dma(struct objects *objs, struct pod_state *pod)
                 return result;
             }
             objs->dpa_thread_running[k_j] = 1;
-            objs->dpa_thread_running_any = 1;
 
             struct comch_msg trigger;
             memset(&trigger, 0, sizeof(trigger));
@@ -1284,7 +1269,6 @@ setup_pod_dma(struct objects *objs, struct pod_state *pod)
                                                &trigger, sizeof(trigger));
             if (result != DOCA_SUCCESS)
                 DOCA_LOG_WARN("Trigger msg to EU %d failed: %s", k_j, doca_error_get_descr(result));
-            DOCA_LOG_INFO("EU %d started (pod_id=%d ring=%d)", k_j, pod->pod_id, j);
         } else {
             struct comch_add_ring_msg add_msg;
             memset(&add_msg, 0, sizeof(add_msg));
@@ -1298,7 +1282,6 @@ setup_pod_dma(struct objects *objs, struct pod_state *pod)
                              k_j, doca_error_get_descr(result));
                 return result;
             }
-            DOCA_LOG_INFO("Sent ADD_RING to EU %d (pod_id=%d ring=%d)", k_j, pod->pod_id, j);
         }
     }
 
@@ -1362,10 +1345,7 @@ progress_setup_pod_dma(struct objects *objs, struct pod_state *pod)
             return -1;
         result = dmesh_doca_dpa_msgq_send_try(
             &objs->dpa_comches[eu]->send, &add_msg, sizeof(add_msg));
-        if (result == DOCA_SUCCESS)
-            DOCA_LOG_INFO("Retried RING_ADD to EU %d (pod_id=%d gen=%u)",
-                          eu, pod->pod_id, generation);
-        else if (result != DOCA_ERROR_AGAIN) {
+        if (result != DOCA_SUCCESS && result != DOCA_ERROR_AGAIN) {
             DOCA_LOG_ERR("RING_ADD retry to EU %d failed (pod_id=%d): %s",
                          eu, pod->pod_id, doca_error_get_descr(result));
             return -1;
@@ -1436,10 +1416,7 @@ progress_teardown_pod_dma(struct objects *objs, struct pod_state *pod)
         del_msg.ring.pod_id = pod->pod_id;
         doca_error_t result = dmesh_doca_dpa_msgq_send_try(
             &objs->dpa_comches[eu]->send, &del_msg, sizeof(del_msg));
-        if (result == DOCA_SUCCESS)
-            DOCA_LOG_INFO("Sent RING_DEL to EU %d (pod_id=%d gen=%u)",
-                          eu, pod->pod_id, generation);
-        else if (result != DOCA_ERROR_AGAIN)
+        if (result != DOCA_SUCCESS && result != DOCA_ERROR_AGAIN)
             DOCA_LOG_WARN("RING_DEL retry to EU %d failed (pod_id=%d): %s",
                           eu, pod->pod_id, doca_error_get_descr(result));
     }

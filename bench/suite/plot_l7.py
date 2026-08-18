@@ -156,7 +156,18 @@ def band_figure(band, out_dir):
                        (axes[1], [(p[2] or 0) / 1000 for p in pts])):
             ax.plot([p[0] / 1e6 for p in pts], ys, marker=mark, markersize=4,
                     linewidth=1.5, color=color, linestyle=dash, label=label)
+    # Shade the rates a curve fails to deliver, which is what "band" names: the
+    # excursion is bounded on both sides by rates the same path serves cleanly.
+    for pts in curves.values():
+        bad = [p[0] / 1e6 for p in pts if p[1] / p[0] < DELIVERED]
+        if not bad:
+            continue
+        for ax in axes:
+            ax.axvspan(min(bad) * 0.97, max(bad) * 1.03, color="#F3E3D6",
+                       zorder=0, linewidth=0)
     axes[0].axhline(DELIVERED, color="#BBBBBB", linewidth=0.9, zorder=1)
+    axes[0].text(axes[0].get_xlim()[1], DELIVERED, "delivered (0.98)", fontsize=7.5,
+                 color="#888888", ha="right", va="top")
     axes[0].set_ylim(0, 1.12)
     axes[0].set_ylabel("delivered / offered", fontsize=9)
     axes[1].set_yscale("log")
@@ -164,10 +175,12 @@ def band_figure(band, out_dir):
     for ax in axes:
         ax.set_xlabel("offered (Mrps)", fontsize=9)
         style(ax)
+    fig.suptitle("Delivery collapses over a band of offered rates and recovers "
+                 "above it (shaded)", fontsize=10)
     handles, labels = axes[0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="lower center", ncol=len(labels),
                frameon=False, fontsize=8.5, bbox_to_anchor=(0.5, -0.06))
-    fig.tight_layout(rect=(0, 0.07, 1, 1))
+    fig.tight_layout(rect=(0, 0.07, 1, 0.94))
     save(fig, out_dir, "l7_band")
 
 
@@ -212,6 +225,8 @@ def cores_figure(matched, out_dir):
     ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}"))
     style(ax)
     ax.legend(frameon=False, fontsize=8.5)
+    fig.text(0.5, -0.02, "line: median of three runs; shaded: the range they span",
+             ha="center", fontsize=8, color="#666666")
     fig.tight_layout()
     save(fig, out_dir, "l7_arm_cores")
 

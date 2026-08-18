@@ -20,9 +20,8 @@ dmesh_consumer_expired(struct doca_comch_event_consumer *event,
                        struct doca_comch_connection *connection,
                        uint32_t id);
 
-/* Number of Comch control-path send tasks (HW max ~65536). Defined once here
- * and shared by BOTH the client and server send pools (each sizes its pool to
- * this) so the two sides can never drift out of lockstep. */
+/* Number of Comch control-path send tasks (HW max ~65536). Both the client and
+ * the server size their send pool to this value. */
 #define CC_SEND_TASK_NUM 8192
 
 /* Host ↔ DPU ARM control messages. Values are wire ABI and remain below 256. */
@@ -35,7 +34,6 @@ enum dmesh_msg_type {
     DMESH_MSG_POD_UNREGISTER=7, /* Host→DPU: stop routing and quiesce every remote DMA reference */
     DMESH_MSG_POD_QUIESCED=8,  /* DPU→Host: remote mappings reclaimed; host may destroy exports */
     DMESH_MSG_REV_DOORBELL=9,  /* DPU→Host: reverse-ring wake notification */
-    DMESH_MSG_POD_IDENTITY=10, /* Host→DPU: this pod's workload name, for the L7 layer */
     DMESH_MSG_REG_CHALLENGE=11,/* DPU→Host: connection-bound trusted-registration nonce */
     DMESH_MSG_WORKLOAD_GRANT=12,/* Host→DPU: node-agent-authorized workload grant */
 };
@@ -98,8 +96,12 @@ _Static_assert(offsetof(struct dmesh_rev_ring_entry, publish_seq) == 24,
 /* The host-owned control fields occupy a separate cache line from the slots. */
 struct dmesh_rev_ring_ctrl {
     uint8_t reserved[64];
+    /* The DPU egress engine reads this control block positionally through
+     * PX_REV_CTRL_OFF (dpu_proxy.c): ctrl[0] is consumer_head and ctrl[1] is
+     * arm_epoch. Neither field may be moved or dropped. */
     volatile uint64_t consumer_head; /* host publishes after a drain batch */
-    volatile uint64_t arm_epoch;     /* host increments before blocking */
+    volatile uint64_t arm_epoch;     /* host increments before blocking; a change
+                                      * makes the DPU send REV_DOORBELL */
     uint8_t consumer_reserved[48];
 } __attribute__((aligned(64)));
 _Static_assert(sizeof(struct dmesh_rev_ring_ctrl) == 128,
@@ -130,7 +132,7 @@ typedef uint64_t doca_dpa_dev_completion_t;
 typedef uint64_t doca_dpa_dev_comch_producer_t;
 typedef uint64_t doca_dpa_dev_comch_consumer_t;
 
-/* Host→DPU: register this connection. pod_id == -1 asks the DPU to ALLOCATE a
+/* Host→DPU: register this connection. pod_id == -1 asks the DPU to allocate a
  * free pod_id and return it in a DMESH_MSG_POD_ASSIGNED reply. */
 struct dmesh_register_msg {
     enum dmesh_msg_type type;   /* = DMESH_MSG_POD_REGISTER */
@@ -142,22 +144,13 @@ struct dmesh_register_msg {
 _Static_assert(sizeof(struct dmesh_register_msg) == 12,
                "dmesh_register_msg ABI drift");
 
-/* Development-only Host→DPU workload attribution. Required mode rejects this
- * message and accepts only dmesh_workload_grant_msg below. It remains a
- * separate fixed-size message so development Host/DPU versions fail on an ABI
- * mismatch instead of silently truncating identity. */
+/* Bound on the Linkerd workload a registration is attributed to: the grant's
+ * namespace and Pod name as injector-compatible JSON. */
 #define DMESH_WORKLOAD_MAX 384
-struct dmesh_identity_msg {
-    enum dmesh_msg_type type;   /* = DMESH_MSG_POD_IDENTITY */
-    char workload[DMESH_WORKLOAD_MAX];   /* NUL-terminated */
-};
-_Static_assert(sizeof(struct dmesh_identity_msg) == 388,
-               "dmesh_identity_msg ABI drift");
 
-/* Trusted workload registration is deliberately a separate, versioned wire
- * contract. The DPU creates a fresh challenge for every Comch connection. The
- * Host process can relay it to a root-owned node agent, but does not possess the
- * HMAC key and therefore cannot choose or alter the returned claims. */
+/* Trusted workload registration is the only way a Pod enters the mesh. The DPU
+ * creates a fresh challenge for every Comch connection. The Host relays it to a
+ * root-owned node agent; it holds no HMAC key and cannot alter the claims. */
 #define DMESH_GRANT_VERSION 1u
 #define DMESH_REG_NONCE_SIZE 32u
 #define DMESH_GRANT_ID_SIZE 16u
@@ -171,7 +164,7 @@ _Static_assert(sizeof(struct dmesh_identity_msg) == 388,
 struct dmesh_registration_challenge_msg {
     uint8_t type;               /* = DMESH_MSG_REG_CHALLENGE */
     uint8_t version;            /* = DMESH_GRANT_VERSION */
-    uint8_t trusted_required;   /* 1: POD_IDENTITY is rejected */
+    uint8_t trusted_required;   /* always 1; a Host that reads 0 refuses to register */
     uint8_t reserved;           /* must be zero */
     uint8_t nonce[DMESH_REG_NONCE_SIZE];
 };

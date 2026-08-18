@@ -36,8 +36,7 @@ enum dmesh_membership_result {
 
 const char *dmesh_membership_result_name(enum dmesh_membership_result result);
 
-/* Parse DPUMESH_MEMBERSHIP_FILE. An unset path leaves revocation disabled;
- * required trusted registration is what makes it meaningful. */
+/* Parse DPUMESH_MEMBERSHIP_FILE. An unset path leaves revocation disabled. */
 int dmesh_membership_configure(struct objects *objs, char *error, size_t error_len);
 
 /* Parse DPUMESH_ADMISSION_FILE. An unset path leaves admission always open. */

@@ -121,7 +121,6 @@ class FakeDmeshState::Impl final {
 
   mutable std::mutex mu;
   dmesh_channel_t channel{nullptr, 7, 8192, 65536};
-  bool channel_created = false;
   int post_max = 65536;
   int next_create_qp_error = 0;
   uint16_t next_port = 1;
@@ -148,7 +147,6 @@ class FakeDmeshApiOps final : public DmeshApiOps {
 
   dmesh_channel_t* CreateChannel() override {
     std::lock_guard<std::mutex> lock(impl_->mu);
-    impl_->channel_created = true;
     return &impl_->channel;
   }
 
@@ -159,7 +157,6 @@ class FakeDmeshApiOps final : public DmeshApiOps {
       return -1;
     }
     ++impl_->channel_destroys;
-    impl_->channel_created = false;
     return 0;
   }
 

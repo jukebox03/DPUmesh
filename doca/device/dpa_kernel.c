@@ -4,10 +4,6 @@
 #include "dpaintrin.h"
 #include "dpa_common.h"
 
-/* Spin iterations waiting for DPU consumer to resubmit recv tasks before
- * dropping the descriptor (consumer stalled). */
-#define DMA_CONSUMER_EMPTY_WAIT_LOOPS  0x800000
-
 /* Max DMA size for doca_dpa_dev_comch_producer_dma_copy.
  * HW supports up to 8KB per single call with 128B-aligned addresses. */
 /* The DPU staging slot is DPUMESH_SLOT_SIZE bytes; each FORWARD dma_copy (host →
@@ -37,18 +33,21 @@ _Static_assert(DPA_DMA_COPY_MAX <= DPUMESH_SLOT_SIZE,
 
 __dpa_rpc__ uint64_t thread_init_rpc(doca_dpa_dev_comch_consumer_t consumer, uint32_t num_msg)
 {
-    DOCA_DPA_DEV_LOG_INFO("recv thread init RPC, num_msg: %u\n", num_msg);
-	doca_dpa_dev_comch_consumer_ack(consumer, num_msg);
+    doca_dpa_dev_comch_consumer_ack(consumer, num_msg);
 
-	return 0;
+    return 0;
 }
 
-/* An ADD ACK is an init correctness barrier, not a data completion. Wait only
- * for a posted ARM receive and then issue a flushed immediate. If ARM has no
- * receive after the bounded wait, the host-side 30 s init timeout fails closed. */
+/* A ring ACK is a control barrier, not a data completion, and it needs a posted
+ * ARM receive to land. The first attempt for a message waits briefly; the retry
+ * from the park path probes once, so a starved DPU channel never holds the EU.
+ * A dropped ACK is re-driven by the ARM control thread, which resends
+ * RING_ADD/RING_DEL to unacked EUs every 10 ms. */
 #define RING_ACK_CONSUMER_WAIT_LOOPS 100000u
+#define RING_ACK_PROBE_ONLY          1u
 static int send_ring_ack(struct dpa_thread_arg *thread_arg, uint8_t type,
-                         int32_t pod_id, uint32_t generation, uint8_t status)
+                         int32_t pod_id, uint32_t generation, uint8_t status,
+                         uint32_t wait_loops)
 {
     struct dpa_ring_ack_msg ack = {
         .type = type,
@@ -60,19 +59,70 @@ static int send_ring_ack(struct dpa_thread_arg *thread_arg, uint8_t type,
     uint32_t wait = 0;
     while (doca_dpa_dev_comch_producer_is_consumer_empty(
                thread_arg->dpa_producer, thread_arg->dpu_consumer_id) == 1 &&
-           ++wait < RING_ACK_CONSUMER_WAIT_LOOPS) {
+           ++wait < wait_loops) {
     }
-    if (wait >= RING_ACK_CONSUMER_WAIT_LOOPS) {
-        DOCA_DPA_DEV_LOG_INFO("RING_ACK type=%u: DPU consumer unavailable pod=%d eu=%u gen=%u\n",
-                              type, pod_id, thread_arg->eu_index, generation);
+    if (wait >= wait_loops)
         return 0;
-    }
     doca_dpa_dev_comch_producer_post_send_imm_only(
         thread_arg->dpa_producer, thread_arg->dpu_consumer_id,
         (const uint8_t *)&ack, sizeof(ack), DOCA_DPA_DEV_SUBMIT_FLAG_FLUSH);
     thread_arg->producer_deferred = 0;
-    thread_arg->producer_reports_submitted++;
     return 1;
+}
+
+/* Record a DEL ACK the DPU channel had no receive for. One entry per ring this
+ * EU can hold, so a burst of teardowns cannot displace an earlier fence. */
+static void pending_del_push(struct dpa_thread_arg *thread_arg, int32_t pod_id,
+                             uint32_t generation)
+{
+    for (uint32_t i = 0; i < thread_arg->pending_del_n; i++) {
+        if (thread_arg->pending_del_pod[i] == pod_id) {
+            thread_arg->pending_del_generation[i] = generation;
+            return;
+        }
+    }
+    if (thread_arg->pending_del_n >= MAX_DPA_RINGS)
+        return;                  /* ARM re-drives this RING_DEL in 10 ms */
+    uint32_t slot = thread_arg->pending_del_n;
+    thread_arg->pending_del_pod[slot] = pod_id;
+    thread_arg->pending_del_generation[slot] = generation;
+    thread_arg->pending_del_n = slot + 1;
+}
+
+/* Forget a fence that has landed, so a later probe cannot resend it. */
+static void pending_del_drop(struct dpa_thread_arg *thread_arg, int32_t pod_id)
+{
+    for (uint32_t i = 0; i < thread_arg->pending_del_n; i++) {
+        if (thread_arg->pending_del_pod[i] != pod_id)
+            continue;
+        uint32_t last = thread_arg->pending_del_n - 1;
+        thread_arg->pending_del_pod[i] = thread_arg->pending_del_pod[last];
+        thread_arg->pending_del_generation[i] =
+            thread_arg->pending_del_generation[last];
+        thread_arg->pending_del_n = last;
+        return;
+    }
+}
+
+/* One nonblocking probe per outstanding fence, compacting the ones that land.
+ * Called only where the EU is about to be released anyway, so a starved channel
+ * costs no forwarding. */
+static void pending_del_retry(struct dpa_thread_arg *thread_arg)
+{
+    uint32_t kept = 0;
+
+    for (uint32_t i = 0; i < thread_arg->pending_del_n; i++) {
+        if (send_ring_ack(thread_arg, DPA_MSG_RING_DEL_ACK,
+                          thread_arg->pending_del_pod[i],
+                          thread_arg->pending_del_generation[i],
+                          DPA_RING_ACK_OK, RING_ACK_PROBE_ONLY))
+            continue;
+        thread_arg->pending_del_pod[kept] = thread_arg->pending_del_pod[i];
+        thread_arg->pending_del_generation[kept] =
+            thread_arg->pending_del_generation[i];
+        kept++;
+    }
+    thread_arg->pending_del_n = kept;
 }
 
 static void handle_dpu_msg(struct dpa_thread_arg *thread_arg, const struct comch_msg *msg)
@@ -80,15 +130,12 @@ static void handle_dpu_msg(struct dpa_thread_arg *thread_arg, const struct comch
     switch(msg->type) {
         case DPA_MSG_RING_ADD: {
             struct comch_add_ring_msg *add_msg = (struct comch_add_ring_msg *)msg;
-            /* A pod has at most ONE ring per EU, so a same-pod_id entry is a stale
-             * duplicate: overwrite in place rather than accrete. Defensive — RING_DEL
-             * on disconnect should mean this never fires. */
+            /* A pod holds at most one ring per EU, so a same-pod_id entry is a
+             * stale duplicate and is overwritten in place. */
             uint32_t slot = thread_arg->num_rings;
             for (uint32_t r = 0; r < thread_arg->num_rings; r++) {
                 if (thread_arg->rings[r].pod_id == add_msg->ring.pod_id) {
                     slot = r;
-                    DOCA_DPA_DEV_LOG_INFO("ADD_RING: replacing stale entry for pod_id=%d at r=%u\n",
-                                          add_msg->ring.pod_id, r);
                     break;
                 }
             }
@@ -98,16 +145,13 @@ static void handle_dpu_msg(struct dpa_thread_arg *thread_arg, const struct comch
                 thread_arg->consumer_head[slot] = 0;
                 if (slot == thread_arg->num_rings)
                     thread_arg->num_rings++;
-                DOCA_DPA_DEV_LOG_INFO("Added ring: pod_id=%d, r=%u, num_rings=%u\n",
-                                     add_msg->ring.pod_id, slot, thread_arg->num_rings);
                 send_ring_ack(thread_arg, DPA_MSG_RING_ADD_ACK,
                               add_msg->ring.pod_id, add_msg->generation,
-                              DPA_RING_ACK_OK);
+                              DPA_RING_ACK_OK, RING_ACK_CONSUMER_WAIT_LOOPS);
             } else {
-                DOCA_DPA_DEV_LOG_INFO("Ring add failed: too many rings=%u\n", thread_arg->num_rings);
                 send_ring_ack(thread_arg, DPA_MSG_RING_ADD_ACK,
                               add_msg->ring.pod_id, add_msg->generation,
-                              DPA_RING_ACK_FULL);
+                              DPA_RING_ACK_FULL, RING_ACK_CONSUMER_WAIT_LOOPS);
             }
             break;
         }
@@ -132,23 +176,25 @@ static void handle_dpu_msg(struct dpa_thread_arg *thread_arg, const struct comch
                 /* Plain store is enough: this EU is the only mutator (handle_msgs runs
                  * on it), and num_rings is volatile so the drain loop re-reads it. */
                 thread_arg->num_rings = last;
-                DOCA_DPA_DEV_LOG_INFO("RING_DEL: dropped pod_id=%d at r=%u, num_rings=%u\n",
-                                      del_msg->ring.pod_id, r, thread_arg->num_rings);
                 break;
             }
             /* This FLUSHED send is on the same ordered producer as every forward
              * DMA. Once ARM receives it, every older DMA WQE that could name the
              * removed ring's mmap/buf_arr has completed. DEL is idempotent: a
-             * retry for an already absent pod still gets an ACK. */
-            send_ring_ack(thread_arg, DPA_MSG_RING_DEL_ACK,
-                          del_msg->ring.pod_id, del_msg->generation,
-                          DPA_RING_ACK_OK);
+             * retry for an already absent pod still gets an ACK. A consumer with
+             * no posted receive is retained as a fence and retried before this
+             * EU parks, because ARM holds the slot and its mappings until the
+             * ACK lands. */
+            if (send_ring_ack(thread_arg, DPA_MSG_RING_DEL_ACK,
+                              del_msg->ring.pod_id, del_msg->generation,
+                              DPA_RING_ACK_OK, RING_ACK_CONSUMER_WAIT_LOOPS))
+                pending_del_drop(thread_arg, del_msg->ring.pod_id);
+            else
+                pending_del_push(thread_arg, del_msg->ring.pod_id,
+                                 del_msg->generation);
             break;
         }
-        case DPA_MSG_WAKE:
-            break;
         default:
-            DOCA_DPA_DEV_LOG_INFO("Unknown msg type received from host: %d\n", msg->type);
             break;
     }
 }
@@ -164,7 +210,8 @@ static uint32_t handle_msgs(struct dpa_thread_arg *thread_arg)
     struct comch_msg *msg;
     uint32_t msg_size;
     doca_dpa_dev_comch_consumer_t consumer = thread_arg->dpa_consumer;
-    doca_dpa_dev_comch_consumer_completion_t consumer_comp = thread_arg->dpa_consumer_comp;
+    doca_dpa_dev_comch_consumer_completion_t consumer_comp =
+        thread_arg->dpa_consumer_comp;
     uint32_t num_msgs = 0;
 
     while (doca_dpa_dev_comch_consumer_get_completion(consumer_comp, &completion) != 0) {
@@ -200,25 +247,9 @@ static uint32_t drain_producer_completions(struct dpa_thread_arg *thread_arg)
 
     if (count > 0) {
         doca_dpa_dev_completion_ack(producer_comp, count);
-        thread_arg->producer_reports_completed += count;
         doca_dpa_dev_completion_request_notification(producer_comp);
     }
     return count;
-}
-
-/* A report-generating producer operation completes after every older DMA on
- * this ordered producer. Drain that report before releasing the EU. */
-#define PRODUCER_FENCE_WAIT_LOOPS  0x800000u
-static int wait_for_producer_fence(struct dpa_thread_arg *thread_arg)
-{
-    for (uint32_t wait = 0; wait < PRODUCER_FENCE_WAIT_LOOPS; wait++) {
-        if (thread_arg->producer_reports_completed ==
-            thread_arg->producer_reports_submitted)
-            return 1;
-        drain_producer_completions(thread_arg);
-    }
-    DOCA_DPA_DEV_LOG_INFO("producer fence timeout before reschedule\n");
-    return 0;
 }
 
 static struct dma_ring_ctrl *fwd_ring_ctrl(const struct dpa_ring_info *ring)
@@ -254,8 +285,6 @@ static int process_fwd_ring(struct dpa_thread_arg *thread_arg, uint32_t r,
         /* Host enforces desc->size <= slot_size (= DPA_DMA_COPY_MAX = 8KB) in
          * dpumesh_enqueue. Anything larger is a caller bug; drop. */
         if (desc->size > DPA_DMA_COPY_MAX) {
-            DOCA_DPA_DEV_LOG_INFO("FWD: desc size %u > %u (slot cap); dropping ring=%u slot=%u\n",
-                                  desc->size, DPA_DMA_COPY_MAX, r, desc_idx);
             thread_arg->consumer_head[r]++;
             if (++desc_idx == ring->buf_arr_size)
                 desc_idx = 0;
@@ -263,19 +292,12 @@ static int process_fwd_ring(struct dpa_thread_arg *thread_arg, uint32_t r,
             continue;
         }
 
-        /* Leave the descriptor in place when the DPU consumer is unavailable. */
-        int stalled = 0;
-        {
-            uint32_t wait = 0;
-            while (doca_dpa_dev_comch_producer_is_consumer_empty(producer, dpu_consumer_id) == 1) {
-                if (++wait >= DMA_CONSUMER_EMPTY_WAIT_LOOPS) { stalled = 1; break; }
-            }
-        }
-        if (stalled) {
-            DOCA_DPA_DEV_LOG_INFO("FWD: consumer timeout (ring=%u slot=%u). Retrying.\n",
-                                  r, desc_idx);
+        /* Leave the descriptor in place when the ARM consumer has no receive
+         * credit and return to the outer loop, which releases the EU within the
+         * watchdog window. The next poll pass retries the descriptor. */
+        if (doca_dpa_dev_comch_producer_is_consumer_empty(
+                producer, dpu_consumer_id) == 1)
             break;
-        }
 
         /* dma_copy requires 128B-aligned size. A FIN carries desc->size==0
          * (comp.length stays 0 → receiver reads EOF); still issue one min 128B
@@ -290,8 +312,6 @@ static int process_fwd_ring(struct dpa_thread_arg *thread_arg, uint32_t r,
         if (chunk == 0)
             chunk = DPA_DMA_COPY_ALIGN;
         if (chunk > DPA_DMA_COPY_MAX) {
-            DOCA_DPA_DEV_LOG_INFO("FWD: aligned window %u > %u (offset=%u size=%u); dropping\n",
-                                  chunk, DPA_DMA_COPY_MAX, moff, desc->size);
             thread_arg->consumer_head[r]++;
             if (++desc_idx == ring->buf_arr_size)
                 desc_idx = 0;
@@ -313,11 +333,8 @@ static int process_fwd_ring(struct dpa_thread_arg *thread_arg, uint32_t r,
         comp.generation = thread_arg->ring_generation[r];
 
         uint32_t submit_flags = DOCA_DPA_DEV_SUBMIT_FLAG_FLUSH;
-        if (!dpa_producer_report_due(&thread_arg->producer_deferred)) {
+        if (!dpa_producer_report_due(&thread_arg->producer_deferred))
             submit_flags |= DOCA_DPA_DEV_SUBMIT_FLAG_OPTIMIZE_REPORTS;
-        } else {
-            thread_arg->producer_reports_submitted++;
-        }
 
         doca_dpa_dev_comch_producer_dma_copy(producer,
                                     dpu_consumer_id,
@@ -343,10 +360,7 @@ static int process_fwd_ring(struct dpa_thread_arg *thread_arg, uint32_t r,
 /* Drain each ring in round-robin quanta. */
 #define HANDLE_MSGS_EVERY 32
 
-/* poll_msgs is clear for the pre-park rescan: its caller drains and counts
- * consumer completions explicitly so a racing one-shot wake is not lost. */
-static int drain_all_rings(struct dpa_thread_arg *thread_arg, int poll_msgs,
-                           uint32_t budget)
+static int drain_all_rings(struct dpa_thread_arg *thread_arg, uint32_t budget)
 {
     int total_dma_calls = 0;
     uint32_t iter = 0;
@@ -354,7 +368,7 @@ static int drain_all_rings(struct dpa_thread_arg *thread_arg, int poll_msgs,
     for (;;) {
         int found = 0;
 
-        if (poll_msgs && (iter & (HANDLE_MSGS_EVERY - 1)) == 0)
+        if ((iter & (HANDLE_MSGS_EVERY - 1)) == 0)
             handle_msgs(thread_arg);
         drain_producer_completions(thread_arg);
         iter++;
@@ -386,8 +400,57 @@ static int drain_all_rings(struct dpa_thread_arg *thread_arg, int poll_msgs,
     return total_dma_calls;
 }
 
-/* Consecutive empty drains before the EU parks for the FlexIO watchdog. */
+/* Consecutive empty drains before the EU releases its EU. */
 #define IDLE_SPINS_BEFORE_PARK  262144u
+
+/* This helper and its data thread have the same fixed EU affinity, so the DPA
+ * scheduler cannot run it until the data thread has released that EU. Its
+ * notification therefore always reaches an already-parked data thread. It runs
+ * only when notified: doca_dpa_thread_run makes a thread activatable, it does
+ * not execute the kernel. */
+__dpa_global__ void run_dma_yield_helper(uint64_t resume_notification)
+{
+    doca_dpa_dev_thread_notify(resume_notification);
+    doca_dpa_dev_thread_reschedule();
+}
+
+/* The one place this thread releases its EU.
+ *
+ * doca_dpa_dev_thread_reschedule only promises that a NEW completion re-triggers
+ * the thread, so anything already queued when the notifications are armed has to
+ * be found by the rescan below — otherwise the thread parks on top of it and
+ * waits for the next message. A thread that still owns rings or an
+ * unacknowledged teardown fence never reaches that park: it hands the EU to the
+ * same-affinity helper, which wakes it once the scheduler has actually taken
+ * the EU away.
+ */
+static void park_or_yield(struct dpa_thread_arg *thread_arg)
+{
+    pending_del_retry(thread_arg);
+
+    if (thread_arg->num_rings > 0 || thread_arg->pending_del_n > 0) {
+        doca_dpa_dev_thread_notify(thread_arg->yield_notification);
+        doca_dpa_dev_thread_reschedule();
+        return;
+    }
+
+    for (;;) {
+        doca_dpa_dev_comch_consumer_completion_request_notification(
+            thread_arg->dpa_consumer_comp);
+        doca_dpa_dev_completion_request_notification(
+            thread_arg->dpa_producer_comp);
+        /* Rescan after arming: a control message or completion that landed in
+         * the arm window must cancel the park, not be parked on. */
+        uint32_t msgs = handle_msgs(thread_arg);
+        uint32_t comps = drain_producer_completions(thread_arg);
+        if (thread_arg->num_rings > 0 || thread_arg->pending_del_n > 0)
+            return;                       /* work arrived → resume polling */
+        if (msgs == 0 && comps == 0) {
+            doca_dpa_dev_thread_reschedule();
+            return;
+        }
+    }
+}
 
 __dpa_global__ void run_dma_manager(uint64_t arg)
 {
@@ -404,50 +467,28 @@ __dpa_global__ void run_dma_manager(uint64_t arg)
          * repeated reschedules must not flood the ARM consumer. */
         if (send_ring_ack(thread_arg, DPA_MSG_RING_ADD_ACK,
                           thread_arg->rings[0].pod_id,
-                          thread_arg->initial_generation, DPA_RING_ACK_OK))
+                          thread_arg->initial_generation, DPA_RING_ACK_OK,
+                          RING_ACK_CONSUMER_WAIT_LOOPS))
             thread_arg->initial_ack_sent = 1;
     }
 
-    /* Poll through the idle grace window. Before parking, arm both completion
-     * contexts and rescan the rings and consumer completions. Detected work
-     * restarts the loop. */
+    /* Poll through the idle grace window; park_or_yield owns every release of
+     * the EU, whether it is the watchdog handoff of a live EU or the real park
+     * of a ringless one. */
     while (1) {
         handle_msgs(thread_arg);
         uint32_t budget = dpa_reschedule_budget(
             completed_since_reschedule, thread_arg->producer_deferred);
-        int chunks = drain_all_rings(thread_arg, 1, budget);
+        int chunks = drain_all_rings(thread_arg, budget);
         if (chunks > 0) {
             idle_spins = 0;                       /* work found → keep polling HOT */
             if (dpa_reschedule_due(&completed_since_reschedule,
                                    (uint32_t)chunks,
-                                   thread_arg->producer_deferred) &&
-                wait_for_producer_fence(thread_arg)) {
-                doca_dpa_dev_comch_consumer_completion_request_notification(
-                    thread_arg->dpa_consumer_comp);
-                doca_dpa_dev_completion_request_notification(
-                    thread_arg->dpa_producer_comp);
-                doca_dpa_dev_thread_reschedule();
-            }
+                                   thread_arg->producer_deferred))
+                park_or_yield(thread_arg);
             drain_producer_completions(thread_arg);
         } else if (++idle_spins >= IDLE_SPINS_BEFORE_PARK) {
-            doca_dpa_dev_comch_consumer_completion_request_notification(thread_arg->dpa_consumer_comp);
-            doca_dpa_dev_completion_request_notification(thread_arg->dpa_producer_comp);
-            /* Re-scan after arming. handle_msgs() drains and counts the consumer
-             * queue so a control message in the arm window prevents parking. */
-            uint32_t msgs = handle_msgs(thread_arg);
-            uint32_t producer_comps = drain_producer_completions(thread_arg);
-            budget = dpa_reschedule_budget(
-                completed_since_reschedule, thread_arg->producer_deferred);
-            int rescan = drain_all_rings(thread_arg, 0, budget);
-            if (rescan > 0 &&
-                dpa_reschedule_due(&completed_since_reschedule,
-                                   (uint32_t)rescan,
-                                   thread_arg->producer_deferred) &&
-                wait_for_producer_fence(thread_arg)) {
-                doca_dpa_dev_thread_reschedule();
-            }
-            if (msgs == 0 && producer_comps == 0 && rescan == 0)
-                doca_dpa_dev_thread_reschedule();   /* park; woken by WAKE completion */
+            park_or_yield(thread_arg);
             idle_spins = 0;                       /* reset after wake */
         }
         /* else: empty but within grace window → loop again (keep polling) */

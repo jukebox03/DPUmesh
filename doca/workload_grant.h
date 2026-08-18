@@ -47,9 +47,9 @@ enum dmesh_feed_result
 dmesh_feed_verify(const char *document, size_t length, const char *key_dir,
                   size_t *signed_length);
 
-/* Parse the DPU verifier configuration. DPUMESH_TRUSTED_REGISTRATION=required
- * requires a root-only DPUMESH_REGISTRATION_KEY_DIR containing up to four
- * KEY_ID.key files; unset/off selects development compatibility. */
+/* Parse the DPU verifier configuration. A root-only
+ * DPUMESH_REGISTRATION_KEY_DIR holding up to four KEY_ID.key files is required;
+ * a DPU that cannot load one refuses to start. */
 int dmesh_registration_configure(struct objects *objs,
                                  char *error, size_t error_len);
 

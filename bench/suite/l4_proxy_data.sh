@@ -262,7 +262,6 @@ fi
 payload_count=$(wc -w <<<"$FRAME_SIZES")
 base_rates_per_config=$(( $(wc -w <<<"$COMMON_FACTORS") + $(wc -w <<<"$KNEE_FACTORS") ))
 span_rates_per_config=$(wc -w <<<"$CONFIG_SPAN_FACTORS")
-max_rates_per_config=$((base_rates_per_config + span_rates_per_config))
 load_rows_max=$((payload_count * ${#CONFIGS[@]} *
   (base_rates_per_config * REPS + span_rates_per_config)))
 idle_rows=$((${#CONFIGS[@]} * IDLE_REPS))

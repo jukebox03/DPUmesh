@@ -12,14 +12,41 @@ measurements are in the [performance report](bench/report/REPORT.md).
 
 ## Architecture
 
+A sending application writes into memory the transport registered with the DPU
+and publishes a descriptor. The DPU reads those bytes, chooses the backend, and
+writes them straight into the receiving application's registered memory. No copy
+travels through the host kernel, and no proxy process runs beside either pod.
+
 ```text
-C/C++ application or gRPC
-          │
-          ▼
-libdpumesh.so.4 ─ registered TX/RX memory ─ BlueField DPA + ARM ─ backend TCP
-          ▲
-          └─ EQ events and optional epoll fd
+           host                        BlueField DPU                      host
+ +-----------------------+       +----------------------+       +-----------------------+
+ | client app or gRPC    |       | DPA execution unit   |       | backend app or gRPC   |
+ | libdpumesh.so.4       |       | ARM data worker      |       | libdpumesh.so.4       |
+ | registered memory     |       | staging and routing  |       | registered memory     |
+ +-----------------------+       +----------------------+       +-----------------------+
+
+ 1. forward ring   the client publishes a descriptor for the bytes it wrote
+ 2. DPA + ARM      the DPU stages those bytes and selects the backend
+ 3. DMA            a scatter-gather DMA writes them into the backend's memory
+ 4. reverse ring   completions report delivered bytes and return send capacity
 ```
+
+### Terms
+
+The rest of this repository uses these names. The first three are borrowed from
+RDMA verbs, because the native API has the same shape.
+
+| Term | Meaning |
+|---|---|
+| channel | one process's transport: its DPU registration, its registered memory, and its rings |
+| QP | one full-duplex byte stream on that channel — the equivalent of a TCP connection |
+| EQ (event queue) | what one application thread polls for the events of the QPs it owns |
+| forward ring | host→DPU descriptor queue; a pod has `K` of them |
+| reverse ring | DPU→host completion queue: bytes delivered, and send capacity returned |
+| DPA | the BlueField data-path accelerator; its execution units (EUs) drain forward rings |
+| ARM data worker | a DPU CPU thread that owns routing, DMA and reverse publication for its connections |
+| staging | DPU memory holding arrived bytes until the DPU has finished sending them on |
+| `N` / `K` / `A` / `L` | DPA execution units / forward rings per pod / ARM data workers / receive-side landing stripes |
 
 The host exposes three integration surfaces:
 
@@ -32,16 +59,15 @@ The host exposes three integration surfaces:
 The shared libdpumesh send core batches all three surfaces. `dmesh_alloc()`
 reserves registered bytes and `dmesh_post_send()` commits them into one ordered
 stream: complete transport units submit at once, and a partial tail is published
-at a bounded deadline unless `dmesh_flush()` forces it earlier. The physical unit
-and its timing are internal data-plane choices, not application tuning
-parameters, and the preload and gRPC layers keep no batch queue or timer of their
-own.
+at a bounded deadline unless `dmesh_flush()` forces it earlier. The size of that
+unit and its timing are internal, not application tuning parameters, and the
+preload and gRPC layers keep no batch queue or timer of their own.
 
-Every public QP is one full-duplex byte stream. Optional DPU L7 framing is an
-internal routing policy and does not expose backend or stream ids through native
-events. The in-tree L7 validator uses a simple length-prefixed benchmark
-frame; gRPC uses backend-pinned L4 passthrough unless its service is assigned to
-the L7 layer, which terminates HTTP/2 on the DPU.
+Every QP is one full-duplex byte stream. Optional DPU L7 framing is an internal
+routing policy and does not expose backend or stream ids through native events.
+The in-tree L7 validator uses a simple length-prefixed benchmark frame; gRPC
+uses backend-pinned L4 passthrough unless its service is assigned to the L7
+layer, which terminates HTTP/2 on the DPU.
 
 Backpressure is nonblocking. `dmesh_alloc()` returning `NULL/EAGAIN` arms that QP
 itself, and returned capacity produces one `DMESH_EVENT_TX_READY` on its EQ:
@@ -53,29 +79,30 @@ one-shot hint, not a reservation. [design/API.md](design/API.md) is the contract
 Channel creation returns only after a replayable two-phase barrier:
 
 ```text
-POD_REGISTER → POD_ASSIGNED → mmap/ring import → all DPA RING_ADD_ACKs
+POD_REGISTER → POD_ASSIGNED → memory and ring import → all DPA RING_ADD_ACKs
              → POD_INIT_RESULT(READY, L)
 ```
 
-Under `DPUMESH_TRUSTED_REGISTRATION=required` a node agent's signed grant
-precedes `POD_REGISTER`, and the DPU admits only the Service that grant
-authorizes. [design/CONTROL.md](design/CONTROL.md) is the contract.
+A node agent's signed grant precedes every `POD_REGISTER`, and the DPU admits
+only the Service that grant authorizes.
+[design/CONTROL.md](design/CONTROL.md) is the contract.
 
 The host retries registration while either assignment or readiness is pending;
 the DPU treats identical registration as idempotent. Missing DPA add ACKs are
 also retried. Graceful destruction similarly retries `POD_UNREGISTER` until the
-DPU has removed every ring, drained ARM DMA custody, destroyed imported handles,
-and replied `POD_QUIESCED`.
+DPU has removed every ring, finished every DMA that reads the pod's memory,
+destroyed the mappings it imported, and replied `POD_QUIESCED`.
 
 Those retries are phase-local. A ready channel does not periodically send
 registration heartbeats, and unregister traffic starts only when channel
 destruction begins. The steady-state data plane uses the imported rings and
 reverse DMA path.
 
-Per-slot DMA generations reject delayed work from a prior registration. A
-worker-level DMA fault restarts the shared context without unpublishing healthy
-pods. Current-generation payload batches receive one ordered retry; control-path
-disconnect remains authoritative for pod removal and mapping teardown.
+Each registration of a pod slot carries a generation number, so a DMA completion
+that arrives late cannot be attributed to the slot's next occupant. A DMA fault
+restarts that worker's DMA engine without unpublishing healthy pods, and a
+current-generation payload batch is retried once, in order. Removing a pod and
+tearing its mappings down remains the control connection's decision.
 
 ## Repository
 
@@ -118,12 +145,13 @@ DPUMESH_RINGS_PER_POD=8 \
 ./bench/bench.sh latency both
 ```
 
-A bare deploy selects one ARM data worker. Each data worker owns its DPA
-consumer PE, connection state, SG-DMA context, completion callbacks, and
-reverse-ring producers. `K` controls rings, `A` controls ARM workers, and the
-64 MiB RX mapping uses `L=A` landing stripes. `K` and `N` must be multiples of
-`A`; an incompatible worker count is reduced at startup and reported in the DPU
-log.
+A bare deploy selects one ARM data worker. Each data worker owns the completion
+queue it drains, the state of its connections, its DMA engine, and the reverse
+rings it publishes to. `K` sets forward rings per pod, `A` sets ARM data
+workers, and the 64 MiB receive mapping is divided into `L=A` landing stripes —
+the disjoint regions the DPU writes into, one per worker. `K` and `N` must be
+multiples of `A`; an incompatible worker count is reduced at startup and
+reported in the DPU log.
 
 `DPUMESH_DPA_THREADS` sets `N` and `DPUMESH_ARM_WORKERS` sets `A`; both are
 clamped at startup, `N` to 32 EUs and `A` to 8 workers.

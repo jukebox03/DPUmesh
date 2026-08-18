@@ -23,7 +23,12 @@ generated stub / handler
  DmeshEndpoint ─ DmeshReactor ─ native EQ/QP ─ BlueField
 ```
 
-The adapter uses only the public native C API.
+The adapter uses only the public native C API. Everything above the Endpoint is
+stock gRPC; only what is below it changes:
+
+![Where DPUmesh enters gRPC, on both directions](figures/grpc_vs_stock.png)
+
+[PDF](figures/grpc_vs_stock.pdf)
 
 ## Endpoint injection
 
@@ -55,6 +60,12 @@ the caller's factory and submitted through
 callback and returns after in-flight injections finish.
 
 ## Threads
+
+The threads one connection and then one RPC cross:
+
+![The threads a connection and one RPC cross](figures/grpc_threads.png)
+
+[PDF](figures/grpc_threads.pdf)
 
 | Thread | Owner | Count | Waits on | Runs |
 |---|---|---|---|---|
