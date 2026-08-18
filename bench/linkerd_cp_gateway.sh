@@ -29,14 +29,14 @@ start() {
     fi
     [ -n "$K8S_NODE_NAME" ] || { echo "no Kubernetes node selected" >&2; exit 1; }
 
-    # Stop the former user-systemd implementation before the host-network Pod
-    # binds the same management-link ports.
-    systemctl --user stop dpumesh-linkerd-cp-gateway.service 2>/dev/null || true
-
     export LINKERD_CONTROL_NAMESPACE LINKERD_GATEWAY_BIND
     export LINKERD_GATEWAY_DST_PORT LINKERD_GATEWAY_POLICY_PORT
     export LINKERD_GATEWAY_IDENTITY_PORT IMG_LINKERD_GATEWAY K8S_NODE_NAME
     envsubst < "$SCRIPT_DIR/k8s/linkerd-cp-gateway.yaml" | kubectl apply -f -
+    # The image is rebuilt under one tag, so an unchanged Pod spec would keep
+    # the previous relay binary running behind a successful apply.
+    kubectl rollout restart daemonset/dpumesh-linkerd-cp-gateway \
+        -n "$LINKERD_CONTROL_NAMESPACE"
     kubectl rollout status daemonset/dpumesh-linkerd-cp-gateway \
         -n "$LINKERD_CONTROL_NAMESPACE" --timeout=120s
     kubectl auth can-i get services -n "$LINKERD_CONTROL_NAMESPACE" \

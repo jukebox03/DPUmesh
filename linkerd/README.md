@@ -111,19 +111,23 @@ LINKERD_DST_ADDR / LINKERD_POLICY_ADDR / LINKERD_IDENTITY_ADDR
 LINKERD_DST_NAME / LINKERD_POLICY_NAME / LINKERD_IDENTITY_NAME
 LINKERD_LOCAL_NAME / LINKERD_WORKLOAD / LINKERD_DESTINATION_CONTEXT
 LINKERD_IDENTITY_DIR / LINKERD_TRUST_ANCHORS
-DPUMESH_L7_SERVICE_TARGETS_FILE=<versioned controller feed>
+DPUMESH_L7_SERVICE_TARGETS_FILE=<signed versioned controller feed>
+DPUMESH_MEMBERSHIP_FILE=<signed versioned node membership>
+DPUMESH_ADMISSION_FILE=<open|drain switch the control thread polls>
 ```
 
 `DPUMESH_L7_FAIL_CLOSED=1` refuses a connection the L7 layer declined instead of
-forwarding it at L4. `DMESH_L7_TX_RESERVE=0` selects the copy-then-send output
+forwarding it at L4; required trusted registration selects it and refuses to
+start without it. `DMESH_L7_TX_RESERVE=0` selects the copy-then-send output
 path in place of the egress reservation. It is a startup compatibility and A/B
 selection, not an automatic fallback when the reservation path is temporarily
 out of chunks.
 
-The destination, policy and identity addresses, identity material and dynamic
-Service target feed are required; preflight fails if any is missing. The three `*_NAME` values
-authenticate the control services and are deliberately distinct from
-`LINKERD_LOCAL_NAME`, the identity certified for the DPU proxy.
+The destination, policy and identity addresses, identity material and the signed
+Service target feed are required; preflight fails if any is missing. The feed is
+verified against the registration keyring before any of it is parsed. The three
+`*_NAME` values authenticate the control services and are deliberately distinct
+from `LINKERD_LOCAL_NAME`, the identity certified for the DPU proxy.
 
 Production uses `DPUMESH_TRUSTED_REGISTRATION=required` on the DPU and mounts
 only `/run/dpumesh/attest.sock` into Host Pods. The node agent derives the
@@ -131,11 +135,14 @@ injector-shaped `{"ns":"...","pod":"..."}` workload and authorized Service
 from peer cgroup and Kubernetes metadata; the application never supplies them.
 `DPUMESH_WORKLOAD` remains a development-mode compatibility value. Each DMesh
 session creates its Policy Watch with the registration-bound workload.
-`DPUMESH_L7_SERVICE_TARGETS_FILE` names the required, monotonically versioned
-Service/ready-endpoint feed. It presents real Kubernetes addresses to the stock
-Linkerd control plane while the DMesh backend channel keeps its internal
-synthetic key. A stale generation, target withdrawal or cross-Service selected
-endpoint fails closed.
+`DPUMESH_L7_SERVICE_TARGETS_FILE` names the signed, monotonically versioned
+Service and ready-endpoint feed. It presents real Kubernetes addresses to the
+stock Linkerd control plane while the DMesh backend channel keeps its internal
+synthetic key. An unsigned or stale generation, a target withdrawal or a
+cross-Service selected endpoint fails closed. `DPUMESH_MEMBERSHIP_FILE` names
+the node membership generation the verifier revokes against, and
+`DPUMESH_ADMISSION_FILE` the switch that stops admitting protected sessions
+without cutting the ones in flight.
 
 [`bench/linkerd_identity.sh`](../bench/linkerd_identity.sh) creates the dedicated
 `dpumesh-dpu` key/CSR, requests audience-bound Kubernetes ServiceAccount tokens,
@@ -160,7 +167,10 @@ Pod's Linkerd inbound proxy and control-plane mTLS remains end-to-end.
 - DPUmesh-selected backend pod;
 - deployed Linkerd control plane with endpoint-re-resolving gateway;
 - Linkerd output copied once, into the DPUmesh egress arena;
-- L4 fallback for declined sessions, or refusal when fail-closed.
+- signed authoritative feeds, with membership withdrawal closing the exact
+  registration it names;
+- L4 fallback for declined sessions in development mode; required registration
+  selects refusal.
 
 ## Submodules
 

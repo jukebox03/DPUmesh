@@ -91,6 +91,20 @@ Read-only deployment checks are:
 ./bench/bench.sh dpucpu
 ```
 
+Control-plane operations on a live deployment:
+
+```sh
+./bench/bench.sh admission drain      # stop admitting protected sessions
+./bench/bench.sh admission open       # resume
+./bench/bench.sh rotate-identity      # drain, replace identity material, restart, resume
+./bench/workload_attest.sh membership-show    # the node membership the DPU holds
+./bench/linkerd_service_registry.sh show      # the Service target generation it holds
+```
+
+`rotate-identity` waits for the DPU to observe the drain and for its active
+session count to reach zero before it replaces anything, and aborts without
+cutting sessions if the drain does not settle.
+
 For Linkerd multi-service placement, one native client can assign its worker
 threads round-robin across a CSV of destinations. The two extra echo pods are
 same-service backends by default; override their advertised names to make them

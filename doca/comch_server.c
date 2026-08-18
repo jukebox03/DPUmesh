@@ -11,6 +11,7 @@
 #include "dpa.h"      /* teardown_pod_dma (DOCA_ARCH_DPU only) */
 #include "dpu_proxy.h"
 #include "workload_grant.h"
+#include "dmesh_l7.h"   /* l7_control_event: admission accounting */
 
 #include <doca_pe.h>
 #include <doca_comch.h>
@@ -20,6 +21,16 @@
 #include <openssl/rand.h>
 
 DOCA_LOG_REGISTER(COMCH_SERVER);
+
+/* The L7 layer owns the metrics surface these outcomes are exported through.
+ * A build that links no L7 layer — the Host transport library — resolves this
+ * weak definition instead and drops the accounting. */
+__attribute__((weak)) void
+l7_control_event(const char *kind, const char *reason)
+{
+	(void)kind;
+	(void)reason;
+}
 
 static void server_send_task_completion_callback(struct doca_comch_task_send *task,
 						 union doca_data task_user_data,
@@ -161,13 +172,14 @@ static void server_message_recv_callback(struct doca_comch_event_msg_recv *event
 
 		int32_t authorized_service = DMESH_SVC_NONE;
 		char workload[DMESH_WORKLOAD_MAX];
+		char pod_uid[DMESH_POD_UID_MAX];
 		const uint8_t *registration_key =
 			dmesh_registration_find_key(objs, grant->key_id);
 		enum dmesh_grant_result vr = registration_key == NULL ?
 			DMESH_GRANT_BAD_KEY_ID : dmesh_grant_verify_v1(
 				grant, registration_key, objs->registration_issuer,
-				grant->key_id, pod->registration_nonce,
-				(uint64_t)time(NULL), &authorized_service, workload);
+				pod->registration_nonce, (uint64_t)time(NULL),
+				&authorized_service, workload, pod_uid);
 		if (vr == DMESH_GRANT_OK &&
 		    dmesh_registration_consume_grant(objs, grant->grant_id) != 0) {
 			vr = DMESH_GRANT_REPLAY;
@@ -175,6 +187,7 @@ static void server_message_recv_callback(struct doca_comch_event_msg_recv *event
 		}
 		if (vr != DMESH_GRANT_OK) {
 			objs->registration_grants_rejected++;
+			l7_control_event("grant", dmesh_grant_result_name(vr));
 			DOCA_LOG_ERR("workload_grant result=reject reason=%s slot=%d key_id=%.*s "
 			             "grant=%02x%02x%02x%02x rejected=%lu replayed=%lu",
 			             dmesh_grant_result_name(vr), (int)(pod - objs->pods),
@@ -187,17 +200,19 @@ static void server_message_recv_callback(struct doca_comch_event_msg_recv *event
 		}
 
 		memcpy(pod->workload, workload, sizeof(pod->workload));
+		memcpy(pod->pod_uid, pod_uid, sizeof(pod->pod_uid));
 		memcpy(pod->registration_grant_id, grant->grant_id,
 		       sizeof(pod->registration_grant_id));
 		pod->grant_service_id = authorized_service;
 		pod->registration_grant_verified = 1;
 		objs->registration_grants_accepted++;
+		l7_control_event("grant", "ok");
 		DOCA_LOG_INFO("workload_grant result=accept slot=%d service_id=%d key_id=%.*s "
-		              "grant=%02x%02x%02x%02x workload='%s' accepted=%lu",
+		              "grant=%02x%02x%02x%02x pod_uid=%s workload='%s' accepted=%lu",
 		              (int)(pod - objs->pods), authorized_service,
 		              DMESH_GRANT_KEY_ID_MAX, grant->key_id,
 		              grant->grant_id[0], grant->grant_id[1], grant->grant_id[2],
-		              grant->grant_id[3], pod->workload,
+		              grant->grant_id[3], pod->pod_uid, pod->workload,
 		              (unsigned long)objs->registration_grants_accepted);
 		break;
 	}
@@ -722,6 +737,7 @@ pods_add_connection(struct objects *objs, struct doca_comch_connection *conn)
 	objs->pods[idx].pod_id = -1;  /* not yet registered */
 	objs->pods[idx].service_id = DMESH_SVC_NONE;
 	objs->pods[idx].workload[0] = '\0';   /* the new tenant states its own */
+	objs->pods[idx].pod_uid[0] = '\0';
 	memset(objs->pods[idx].registration_nonce, 0,
 	       sizeof(objs->pods[idx].registration_nonce));
 	memset(objs->pods[idx].registration_grant_id, 0,
@@ -731,6 +747,9 @@ pods_add_connection(struct objects *objs, struct doca_comch_connection *conn)
 	objs->pods[idx].registration_challenge_sent = 0;
 	objs->pods[idx].registration_grant_verified = 0;
 	objs->pods[idx].registration_grant_consumed = 0;
+	objs->pods[idx].membership_generation = 0;
+	objs->pods[idx].membership_absences = 0;
+	objs->pods[idx].revoked = 0;
 	objs->pods[idx].landing_stripes = objs->n_data_workers;
 	objs->pods[idx].rev_ring_mmap_count = 0;
 	objs->pods[idx].rev_doorbell_pending_epoch = 0;
@@ -801,6 +820,114 @@ pod_begin_cleanup(struct objects *objs, struct pod_state *pod)
 #ifdef DOCA_ARCH_DPU
 	teardown_pod_dma(objs, pod);
 #endif
+}
+
+/* Membership is consulted on its own cadence: the control loop runs on a 1 ms
+ * backstop and the publisher installs generations far more slowly. */
+#define MEMBERSHIP_CHECK_INTERVAL_NS 1000000000ull
+
+int
+server_progress_membership(struct objects *objs)
+{
+	if (objs == NULL || !objs->membership_enabled)
+		return 0;
+
+	struct timespec now;
+	if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+		return 0;
+	uint64_t now_ns = (uint64_t)now.tv_sec * 1000000000ull + (uint64_t)now.tv_nsec;
+	if (now_ns < objs->membership_next_check_ns)
+		return 0;
+	objs->membership_next_check_ns = now_ns + MEMBERSHIP_CHECK_INTERVAL_NS;
+
+	enum dmesh_membership_result result = dmesh_membership_refresh(objs);
+	if (result == DMESH_MEMBERSHIP_UNCHANGED)
+		return 0;
+	if (result != DMESH_MEMBERSHIP_ADOPTED) {
+		objs->membership_rejected++;
+		l7_control_event("membership", dmesh_membership_result_name(result));
+		DOCA_LOG_WARN("membership generation rejected: reason=%s generation=%lu rejected=%lu",
+		              dmesh_membership_result_name(result),
+		              (unsigned long)objs->membership_generation,
+		              (unsigned long)objs->membership_rejected);
+		return 0;
+	}
+	l7_control_event("membership", "ok");
+	DOCA_LOG_INFO("membership generation adopted: generation=%lu entries=%zu",
+	              (unsigned long)objs->membership_generation,
+	              objs->membership_count);
+
+	int revoked = 0;
+	int n = __atomic_load_n(&objs->num_pods, __ATOMIC_ACQUIRE);
+	for (int i = 0; i < n; i++) {
+		struct pod_state *pod = &objs->pods[i];
+		if (!__atomic_load_n(&pod->registered, __ATOMIC_ACQUIRE) ||
+		    __atomic_load_n(&pod->cleanup_pending, __ATOMIC_ACQUIRE) ||
+		    pod->revoked || pod->pod_uid[0] == '\0')
+			continue;
+		/* A generation no newer than the one this registration was last
+		 * judged against says nothing new about it. */
+		if (objs->membership_generation <= pod->membership_generation)
+			continue;
+		pod->membership_generation = objs->membership_generation;
+		if (dmesh_membership_contains(objs, pod->pod_uid, pod->service_id)) {
+			pod->membership_absences = 0;
+			continue;
+		}
+		if (++pod->membership_absences < DMESH_MEMBERSHIP_ABSENCES_TO_REVOKE) {
+			DOCA_LOG_INFO("membership absence %u for slot %d pod_id=%d pod_uid=%s",
+			              pod->membership_absences, i, pod->pod_id, pod->pod_uid);
+			continue;
+		}
+		pod->revoked = 1;
+		objs->membership_revocations++;
+		l7_control_event("revocation", "membership-withdrawn");
+		DOCA_LOG_WARN("registration revoked: slot=%d pod_id=%d service_id=%d "
+		              "pod_uid=%s generation=%lu revocations=%lu",
+		              i, pod->pod_id, pod->service_id, pod->pod_uid,
+		              (unsigned long)objs->membership_generation,
+		              (unsigned long)objs->membership_revocations);
+		pod_begin_cleanup(objs, pod);
+		revoked++;
+	}
+	return revoked;
+}
+
+/* `drain` refuses new protected sessions; anything else opens admission. The
+ * switch is a file so it can be set without restarting the proxy. */
+int
+server_progress_admission(struct objects *objs)
+{
+	if (objs == NULL || !objs->admission_enabled)
+		return 0;
+
+	struct timespec now;
+	if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+		return 0;
+	uint64_t now_ns = (uint64_t)now.tv_sec * 1000000000ull + (uint64_t)now.tv_nsec;
+	if (now_ns < objs->admission_next_check_ns)
+		return 0;
+	objs->admission_next_check_ns = now_ns + MEMBERSHIP_CHECK_INTERVAL_NS;
+
+	char state[32] = {0};
+	int drain = 0;
+	FILE *file = fopen(objs->admission_path, "r");
+	if (file != NULL) {
+		if (fgets(state, sizeof(state), file) != NULL) {
+			state[strcspn(state, "\r\n")] = '\0';
+			drain = strcmp(state, "drain") == 0;
+		}
+		fclose(file);
+	}
+	/* An unreadable switch means open: a lost file must not stop admission. */
+	if (drain == __atomic_load_n(&objs->admission_drain, __ATOMIC_RELAXED))
+		return 0;
+	__atomic_store_n(&objs->admission_drain, drain, __ATOMIC_RELAXED);
+	l7_control_event("admission", drain ? "drain" : "open");
+	DOCA_LOG_WARN("protected admission %s (refusals=%lu)",
+	              drain ? "draining" : "open",
+	              (unsigned long)objs->admission_drain_refusals);
+	return 1;
 }
 
 int
@@ -1027,6 +1154,10 @@ pods_register(struct objects *objs, struct doca_comch_connection *conn,
 		objs->pods[i].service_id = service_id;
 		if (objs->trusted_registration_required)
 			objs->pods[i].registration_grant_consumed = 1;
+		/* Judge this registration only against generations newer than the one
+		 * the node published before it existed. */
+		objs->pods[i].membership_generation = objs->membership_generation;
+		objs->pods[i].membership_absences = 0;
 		__atomic_store_n(&objs->pods[i].registered, 1, __ATOMIC_RELEASE);
 
 		/* Publish the O(1) pod_id->slot map AFTER registered=1, so a reader

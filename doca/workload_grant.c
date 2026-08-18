@@ -145,6 +145,107 @@ dmesh_grant_result_name(enum dmesh_grant_result result)
     return "unknown";
 }
 
+static int hex_nibble(unsigned char c);
+
+/* A feed names its key, so the name becomes a filename. It may not contain a
+ * separator or start with a dot. */
+static int
+feed_key_id(const char *text, size_t length, char out[DMESH_GRANT_KEY_ID_MAX])
+{
+    if (length == 0 || length >= DMESH_GRANT_KEY_ID_MAX || text[0] == '.')
+        return 0;
+    for (size_t i = 0; i < length; i++) {
+        unsigned char c = (unsigned char)text[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.'))
+            return 0;
+    }
+    memset(out, 0, DMESH_GRANT_KEY_ID_MAX);
+    memcpy(out, text, length);
+    return 1;
+}
+
+enum dmesh_feed_result
+dmesh_feed_verify(const char *document, size_t length, const char *key_dir,
+                  size_t *signed_length)
+{
+    static const char MARKER[] = "\nsignature=";
+    const size_t marker_len = sizeof(MARKER) - 1;
+    uint8_t key[DMESH_GRANT_KEY_SIZE];
+    uint8_t expected[DMESH_GRANT_MAC_SIZE];
+    uint8_t signature[DMESH_GRANT_MAC_SIZE];
+    char key_id[DMESH_GRANT_KEY_ID_MAX];
+    char path[4096];
+    unsigned int mac_len = 0;
+    enum dmesh_feed_result result = DMESH_FEED_INTERNAL;
+
+    if (document == NULL || key_dir == NULL || *key_dir == '\0' ||
+        signed_length == NULL || length < marker_len)
+        return DMESH_FEED_UNSIGNED;
+
+    /* The envelope is the last line, so the signed prefix ends at the newline
+     * that introduces it. */
+    const char *marker = NULL;
+    for (size_t i = length - marker_len + 1; i-- > 0; ) {
+        if (memcmp(document + i, MARKER, marker_len) == 0) {
+            marker = document + i;
+            break;
+        }
+    }
+    if (marker == NULL)
+        return DMESH_FEED_UNSIGNED;
+
+    size_t prefix_len = (size_t)(marker - document) + 1;
+    const char *value = marker + marker_len;
+    size_t value_len = length - (size_t)(value - document);
+    if (value_len > 0 && value[value_len - 1] == '\n')
+        value_len--;
+    /* Nothing may follow the envelope: appended bytes would be unsigned. */
+    if (memchr(value, '\n', value_len) != NULL)
+        return DMESH_FEED_UNSIGNED;
+
+    const char *comma = memchr(value, ',', value_len);
+    if (comma == NULL)
+        return DMESH_FEED_UNSIGNED;
+    if (!feed_key_id(value, (size_t)(comma - value), key_id))
+        return DMESH_FEED_BAD_KEY_ID;
+
+    const char *hex = comma + 1;
+    size_t hex_len = value_len - (size_t)(hex - value);
+    if (hex_len != 2u * DMESH_GRANT_MAC_SIZE)
+        return DMESH_FEED_UNSIGNED;
+    for (size_t i = 0; i < DMESH_GRANT_MAC_SIZE; i++) {
+        int hi = hex_nibble((unsigned char)hex[2 * i]);
+        int lo = hex_nibble((unsigned char)hex[2 * i + 1]);
+        if (hi < 0 || lo < 0)
+            return DMESH_FEED_UNSIGNED;
+        signature[i] = (uint8_t)((hi << 4) | lo);
+    }
+
+    int written = snprintf(path, sizeof(path), "%s/%s.key", key_dir, key_id);
+    if (written < 0 || (size_t)written >= sizeof(path))
+        return DMESH_FEED_BAD_KEY_ID;
+    if (dmesh_grant_load_key(path, key, NULL, 0) != 0)
+        return DMESH_FEED_BAD_KEY_ID;
+
+    if (HMAC(EVP_sha256(), key, DMESH_GRANT_KEY_SIZE,
+             (const unsigned char *)document, prefix_len,
+             expected, &mac_len) == NULL || mac_len != DMESH_GRANT_MAC_SIZE) {
+        result = DMESH_FEED_INTERNAL;
+        goto out;
+    }
+    if (CRYPTO_memcmp(signature, expected, sizeof(expected)) != 0) {
+        result = DMESH_FEED_BAD_MAC;
+        goto out;
+    }
+    *signed_length = prefix_len;
+    result = DMESH_FEED_OK;
+out:
+    OPENSSL_cleanse(key, sizeof(key));
+    OPENSSL_cleanse(expected, sizeof(expected));
+    return result;
+}
+
 int
 dmesh_registration_configure(struct objects *objs, char *error, size_t error_len)
 {
@@ -162,6 +263,7 @@ dmesh_registration_configure(struct objects *objs, char *error, size_t error_len
     OPENSSL_cleanse(objs->registration_keys, sizeof(objs->registration_keys));
     objs->registration_key_count = 0;
     objs->registration_issuer[0] = '\0';
+    objs->registration_key_dir[0] = '\0';
     memset(objs->consumed_grant_ids, 0, sizeof(objs->consumed_grant_ids));
     objs->consumed_grant_count = 0;
     objs->consumed_grant_cursor = 0;
@@ -187,6 +289,10 @@ dmesh_registration_configure(struct objects *objs, char *error, size_t error_len
     }
     if (strlen(issuer) >= sizeof(objs->registration_issuer)) {
         CONFIG_ERROR("registration issuer is too long");
+        return -1;
+    }
+    if (strlen(key_dir) + DMESH_GRANT_KEY_ID_MAX + 8 >= sizeof(objs->registration_key_dir)) {
+        CONFIG_ERROR("DPUMESH_REGISTRATION_KEY_DIR is too long");
         return -1;
     }
 
@@ -245,6 +351,8 @@ dmesh_registration_configure(struct objects *objs, char *error, size_t error_len
 
     snprintf(objs->registration_issuer, sizeof(objs->registration_issuer),
              "%s", issuer);
+    snprintf(objs->registration_key_dir, sizeof(objs->registration_key_dir),
+             "%s", key_dir);
     objs->trusted_registration_required = 1;
     return 0;
 
@@ -430,11 +538,11 @@ enum dmesh_grant_result
 dmesh_grant_verify_v1(const struct dmesh_workload_grant_msg *grant,
                       const uint8_t key[DMESH_GRANT_KEY_SIZE],
                       const char *expected_issuer,
-                      const char *expected_key_id,
                       const uint8_t expected_nonce[DMESH_REG_NONCE_SIZE],
                       uint64_t now_sec,
                       int32_t *service_id,
-                      char workload[DMESH_WORKLOAD_MAX])
+                      char workload[DMESH_WORKLOAD_MAX],
+                      char pod_uid[DMESH_POD_UID_MAX])
 {
     uint8_t expected_mac[DMESH_GRANT_MAC_SIZE];
     unsigned int mac_len = 0;
@@ -443,8 +551,6 @@ dmesh_grant_verify_v1(const struct dmesh_workload_grant_msg *grant,
         return result;
     if (expected_issuer == NULL || strcmp(grant->issuer, expected_issuer) != 0)
         return DMESH_GRANT_BAD_ISSUER;
-    if (expected_key_id == NULL || strcmp(grant->key_id, expected_key_id) != 0)
-        return DMESH_GRANT_BAD_KEY_ID;
 
     int32_t sid = dmesh_grant_get_i32_le(grant->service_id_le);
     if (sid != DMESH_SVC_NONE && (sid < 0 || sid >= POD_ID_SPACE))
@@ -478,6 +584,7 @@ dmesh_grant_verify_v1(const struct dmesh_workload_grant_msg *grant,
         workload[0] = '\0';
         return DMESH_GRANT_NONCANONICAL;
     }
+    memcpy(pod_uid, grant->pod_uid, DMESH_POD_UID_MAX);
     *service_id = sid;
     return DMESH_GRANT_OK;
 }

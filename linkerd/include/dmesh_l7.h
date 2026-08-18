@@ -78,6 +78,12 @@ int  l7_resolve(int worker_id, const struct dmesh_l7_flow *flow,
 void l7_report(int worker_id, uint64_t conn, uint64_t bytes_in,
                uint64_t bytes_out, uint64_t duration_ns, int reason);
 
+/* Control-plane admission accounting. `kind` is the decision surface
+ * (`grant`, `membership`, `revocation`) and `reason` a stable lowercase slug,
+ * `ok` for the accepting outcome. Called from the Comch control thread, which
+ * owns no worker, so the counters are process-global. */
+void l7_control_event(const char *kind, const char *reason);
+
 /* DPUmesh data-path entry points. */
 int dmesh_l7_backends(int worker_id, int32_t service, int32_t *out, int max);
 int dmesh_l7_send(int worker_id, uint64_t conn, int32_t backend_pod,
@@ -86,6 +92,10 @@ uint8_t *dmesh_l7_tx_reserve(int worker_id, uint64_t conn, uint32_t *cap);
 int dmesh_l7_tx_commit(int worker_id, uint64_t conn, int32_t backend_pod,
                        uint32_t len);
 void dmesh_l7_release(int worker_id, uint64_t conn, uint32_t pos, uint32_t len);
+/* Length of the signed prefix of an authoritative feed document, or -1 when it
+ * is unsigned or its signature does not verify against the registration
+ * keyring. Only that prefix may be parsed. */
+long dmesh_l7_verify_feed(const uint8_t *document, size_t length);
 
 /* Persistent runtime backend implemented by DPUmesh. */
 int dmesh_l7_driver_notification_fds(void *driver, int *completion_fd,

@@ -130,8 +130,8 @@ typedef struct pfd {
     uint16_t lport;            /* synthesized getsockname port */
     uint16_t pport;            /* getpeername port */
     uint32_t paddr;            /* getpeername IP (net-order); 0 = synthesize loopback.
-                                * A CLIENT stores the real dialed ClusterIP here; a
-                                * SERVER/accepted conn keeps 0 (real client id is P1). */
+                                * A CLIENT stores the real dialed ClusterIP here; an
+                                * accepted SERVER conn has no peer address to report. */
     pthread_mutex_t mu;
     pthread_mutex_t tx_mu;      /* serialize bytes from concurrent POSIX send calls */
     preload_rx_t *rx_head, *rx_tail;
@@ -1460,7 +1460,7 @@ int getsockname(int fd, struct sockaddr *addr, socklen_t *alen) {
     ENSURE_REAL();
     pfd_t *e = pfd_get(fd);
     if (!e) return real_getsockname(fd, addr, alen);
-    int r = synth_name(0, e->lport, addr, alen);   /* loopback — real pod IP is P1 */
+    int r = synth_name(0, e->lport, addr, alen);   /* the socket has no pod-local IP */
     pfd_put(e);
     return r;
 }

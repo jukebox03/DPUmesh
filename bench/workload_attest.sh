@@ -15,6 +15,10 @@ DPU_KEY_DIR="${DPUMESH_REGISTRATION_KEY_DIR_DPU:-/etc/dpumesh/registration.keys}
 DEFAULT_KEY_ID="${DPUMESH_REGISTRATION_KEY_ID:-node-hmac-v1}"
 ISSUER="${DPUMESH_REGISTRATION_ISSUER:-dpumesh-node-agent}"
 NS="${NS:-test-bench}"
+MEMBERSHIP_HOST="${DPUMESH_MEMBERSHIP_FILE_HOST:-/run/dpumesh/membership.v1}"
+MEMBERSHIP_DPU="${DPUMESH_MEMBERSHIP_FILE:-/etc/dpumesh/membership.v1}"
+MEMBERSHIP_INTERVAL="${DPUMESH_MEMBERSHIP_PUSH_INTERVAL:-5}"
+MEMBERSHIP_UNIT="dpumesh-membership.service"
 
 valid_key_id() {
     [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9_.:-]{0,30}[A-Za-z0-9]$ ]]
@@ -106,20 +110,48 @@ deploy_agent() {
         echo "envsubst not found (apt install gettext-base)" >&2
         exit 1
     }
-    # Retire the former Host systemd fixture before the DaemonSet owns the
-    # shared hostPath socket.
-    echo "$HOST_PASS" | sudo -S systemctl stop dpumesh-workload-attest.service \
-        >/dev/null 2>&1 || true
     export NS IMG_WORKLOAD_AGENT DPUMESH_REGISTRATION_ISSUER="$ISSUER"
     DPUMESH_REGISTRY_YAML=$(sed 's/^/    /' "$BENCH_DIR/k8s/registry")
     export DPUMESH_REGISTRY_YAML
     envsubst < "$BENCH_DIR/k8s/workload-agent.yaml" | kubectl apply -f -
+    # The image is rebuilt under one tag, so an unchanged Pod spec would keep
+    # the previous agent binary running behind a successful apply.
+    kubectl rollout restart daemonset/dpumesh-node-agent -n "$NS"
     kubectl rollout status daemonset/dpumesh-node-agent -n "$NS" --timeout=120s
     kubectl auth can-i list pods -n "$NS" \
         --as="system:serviceaccount:$NS:dpumesh-node-agent" | grep -qx yes
     [ "$(kubectl auth can-i list pods --all-namespaces \
         --as="system:serviceaccount:$NS:dpumesh-node-agent" 2>/dev/null || true)" = no ]
     echo "trusted workload node agent ready in namespace $NS"
+}
+
+# Move one membership generation to the DPU. The node agent owns the content;
+# this only carries it, and installs it root-only because it is an input the
+# verifier acts on. An unchanged generation is not reinstalled, so the consumer
+# does not re-read a document it already holds.
+membership_sync() {
+    need_dpu
+    [ -s "$MEMBERSHIP_HOST" ] || { echo "no membership document at $MEMBERSHIP_HOST" >&2; return 1; }
+    local digest
+    digest=$(sha256sum "$MEMBERSHIP_HOST" | cut -d' ' -f1)
+    [ "$digest" != "${MEMBERSHIP_LAST_DIGEST:-}" ] || return 0
+    local stage="/tmp/dpumesh-membership.v1.in"
+    rsync -az --chmod=F600 -e "ssh -o ConnectTimeout=8" \
+        "$MEMBERSHIP_HOST" "$DPU_HOST:$stage"
+    ssh -o ConnectTimeout=8 "$DPU_HOST" \
+        "echo '$DPU_PASS' | sudo -S install -d -o root -g root -m 0755 '${MEMBERSHIP_DPU%/*}' && \
+         echo '$DPU_PASS' | sudo -S install -o root -g root -m 0644 '$stage' '$MEMBERSHIP_DPU.new' && \
+         echo '$DPU_PASS' | sudo -S mv '$MEMBERSHIP_DPU.new' '$MEMBERSHIP_DPU' && \
+         rm -f '$stage'"
+    MEMBERSHIP_LAST_DIGEST="$digest"
+    echo "installed membership generation $(sed -n 's/^version=//p' "$MEMBERSHIP_HOST") at $DPU_HOST:$MEMBERSHIP_DPU"
+}
+
+membership_watch() {
+    while true; do
+        membership_sync || echo "membership push failed; retrying in ${MEMBERSHIP_INTERVAL}s" >&2
+        sleep "$MEMBERSHIP_INTERVAL"
+    done
 }
 
 case "${1:-status}" in
@@ -155,14 +187,39 @@ case "${1:-status}" in
         ssh "$DPU_HOST" "echo '$DPU_PASS' | sudo -S rm -f '$DPU_KEY_DIR/$key_id.key'"
         echo "pruned inactive registration key $key_id from Host and DPU"
         ;;
+    membership-sync)
+        membership_sync
+        ;;
+    membership-watch)
+        membership_watch
+        ;;
+    membership-start)
+        need_dpu
+        systemctl --user stop "$MEMBERSHIP_UNIT" >/dev/null 2>&1 || true
+        systemctl --user reset-failed "$MEMBERSHIP_UNIT" >/dev/null 2>&1 || true
+        systemd-run --user --collect --unit="${MEMBERSHIP_UNIT%.service}" \
+            --property=Restart=always --property=RestartSec=2s "$0" membership-watch
+        systemctl --user is-active --quiet "$MEMBERSHIP_UNIT"
+        echo "membership publication running (interval=${MEMBERSHIP_INTERVAL}s)"
+        ;;
+    membership-stop)
+        systemctl --user stop "$MEMBERSHIP_UNIT" >/dev/null 2>&1 || true
+        ;;
+    membership-show)
+        : "${DPU_HOST:?DPU_HOST is required}"
+        ssh "$DPU_HOST" "cat '$MEMBERSHIP_DPU'"
+        ;;
     stop)
+        systemctl --user stop "$MEMBERSHIP_UNIT" >/dev/null 2>&1 || true
         kubectl delete daemonset/dpumesh-node-agent -n "$NS" --ignore-not-found=true
         ;;
     status)
         kubectl get daemonset,pod -n "$NS" -l app=dpumesh-node-agent -o wide
         ;;
     *)
-        echo "usage: $0 prepare|deploy|rotate-stage KEY_ID|activate KEY_ID|prune KEY_ID|stop|status" >&2
+        echo "usage: $0 prepare|deploy|rotate-stage KEY_ID|activate KEY_ID|prune KEY_ID|" >&2
+        echo "       membership-start|membership-stop|membership-sync|membership-show|" >&2
+        echo "       stop|status" >&2
         exit 2
         ;;
 esac

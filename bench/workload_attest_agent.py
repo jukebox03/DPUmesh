@@ -11,6 +11,7 @@ names, labels, namespace, ServiceAccount, or node name from the caller.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import hashlib
 import hmac
 import json
@@ -23,6 +24,7 @@ import ssl
 import stat
 import struct
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -135,11 +137,34 @@ def pod_uid_from_cgroup(cgroup: str) -> str:
     return match.group(1).replace("_", "-").lower()
 
 
+def process_start_time(pid: int) -> str:
+    """Boot-relative start time of a process, which a recycled pid never repeats."""
+    try:
+        status = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise AttestationError(f"cannot read peer state for pid {pid}") from exc
+    # The comm field can contain spaces and parentheses, so fields are counted
+    # from the last ')': state is field 3 and starttime is field 22.
+    fields = status.rpartition(")")[2].split()
+    if len(fields) < 20:
+        raise AttestationError(f"unreadable /proc/{pid}/stat")
+    return fields[19]
+
+
 def pod_uid_for_pid(pid: int) -> str:
+    """Resolve the Pod that owns the peer process.
+
+    `SO_PEERCRED` names the pid at connect time, so the start time is checked on
+    both sides of the cgroup read: a pid recycled into another Pod between them
+    is rejected instead of being attested under the wrong identity.
+    """
+    started = process_start_time(pid)
     try:
         cgroup = Path(f"/proc/{pid}/cgroup").read_text(encoding="ascii")
     except (OSError, UnicodeDecodeError) as exc:
         raise AttestationError(f"cannot read peer cgroup for pid {pid}") from exc
+    if process_start_time(pid) != started:
+        raise AttestationError(f"pid {pid} was recycled during attestation")
     try:
         return pod_uid_from_cgroup(cgroup)
     except AttestationError as exc:
@@ -278,16 +303,122 @@ def build_grant(
     return unsigned[:-32] + mac
 
 
+def membership_document(
+    version: int,
+    service_names: dict[int, str],
+    pods: list[dict[str, Any]],
+    services: list[dict[str, Any]],
+) -> str:
+    """The (Pod UID, Service) pairs this node is authorized to hold.
+
+    Every live Pod contributes a `-1` pair, which is what a Pod registering
+    without Service membership holds, plus one pair per Service its labels
+    select. A registration whose pair leaves the document has lost membership,
+    so the same rule decides a grant and a revocation.
+    """
+    lines = [f"version={version}"]
+    for pod in pods:
+        metadata = pod.get("metadata", {})
+        uid = str(metadata.get("uid", ""))
+        if not uid or metadata.get("deletionTimestamp"):
+            continue
+        lines.append(f"member={uid},-1")
+        for service_id in sorted(service_names):
+            try:
+                authorize_service(service_id, service_names, pod, services)
+            except AttestationError:
+                continue
+            lines.append(f"member={uid},{service_id}")
+    return "\n".join(lines) + "\n"
+
+
+def sign_document(body: str, key_id: str, key: bytes) -> str:
+    """Append the feed envelope the DPU verifies before adopting a generation."""
+    mac = hmac.new(key, body.encode("ascii"), hashlib.sha256).hexdigest()
+    return f"{body}signature={key_id},{mac}\n"
+
+
+def published_version(path: Path) -> int:
+    """The generation already installed at `path`, or zero."""
+    try:
+        for line in path.read_text(encoding="ascii").splitlines():
+            if line.startswith("version="):
+                return int(line[len("version=") :])
+    except (OSError, UnicodeDecodeError, ValueError):
+        return 0
+    return 0
+
+
 class Agent:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
         # Validate the keyring before opening a world-accessible request socket.
         load_active_key(args.key_dir)
-        self.service_names = read_registry(args.registry)
+        self.registry_lock = threading.Lock()
+        self.registry_stamp: tuple[int, int] | None = None
+        self.registry_services: dict[int, str] = {}
+        self.service_names()
         self.kubernetes = KubernetesAPI(
             args.api_server, args.api_token_file, args.api_ca_file, args.namespace
         )
+        # Every Pod on the node shares one socket, so a caller that stalls must
+        # not hold the only server. Admission is bounded rather than queued.
+        self.slots = threading.BoundedSemaphore(args.max_concurrency)
         self.listener: socket.socket | None = None
+        # The consumer refuses a generation that is not newer than the one it
+        # holds, so publication continues from whatever is already installed.
+        self.membership_version = published_version(args.membership_file)
+
+    def publish_membership(self) -> int:
+        """Install one membership generation for this node."""
+        # The generation is stamped before the reads, so it names the world at
+        # snapshot time rather than at publication time.
+        version = max(time.time_ns(), self.membership_version + 1)
+        service_names = self.service_names()
+        pods = self.kubernetes.pods(self.args.node_name)
+        services = self.kubernetes.services()
+        body = membership_document(version, service_names, pods, services)
+        key_id, key = load_active_key(self.args.key_dir)
+        document = sign_document(body, key_id, key)
+
+        path = self.args.membership_file
+        path.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+        temporary = path.with_name(f".{path.name}.new")
+        temporary.write_text(document, encoding="ascii")
+        os.chmod(temporary, 0o644)
+        os.replace(temporary, path)
+        self.membership_version = version
+        return version
+
+    def publish_membership_forever(self) -> None:
+        while True:
+            try:
+                version = self.publish_membership()
+                print(
+                    f"workload-attest-agent: membership generation {version}",
+                    flush=True,
+                )
+            except (AttestationError, OSError) as exc:
+                print(
+                    f"workload-attest-agent: membership publish failed: {exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            time.sleep(self.args.membership_interval)
+
+    def service_names(self) -> dict[int, str]:
+        """The authoritative id/name registry, reloaded when it is republished."""
+        path = self.args.registry
+        try:
+            status = path.stat()
+        except OSError as exc:
+            raise AttestationError(f"cannot read Service registry {path}") from exc
+        stamp = (status.st_mtime_ns, status.st_size)
+        with self.registry_lock:
+            if stamp != self.registry_stamp:
+                self.registry_services = read_registry(path)
+                self.registry_stamp = stamp
+            return self.registry_services
 
     def attest(self, connection: socket.socket) -> bytes:
         credentials = connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
@@ -305,7 +436,7 @@ class Agent:
         pods = self.kubernetes.pods(self.args.node_name)
         pod = resolve_pod(pod_uid, pods, self.args.node_name)
         services = self.kubernetes.services() if service_id != -1 else []
-        authorize_service(service_id, self.service_names, pod, services)
+        authorize_service(service_id, self.service_names(), pod, services)
         key_id, key = load_active_key(self.args.key_dir)
         return build_grant(
             key=key,
@@ -316,6 +447,17 @@ class Agent:
             pod=pod,
             ttl=self.args.ttl,
         )
+
+    def serve(self, connection: socket.socket) -> None:
+        try:
+            with connection:
+                connection.settimeout(self.args.request_timeout)
+                try:
+                    connection.sendall(self.attest(connection))
+                except (AttestationError, OSError) as exc:
+                    print(f"workload-attest-agent: reject: {exc}", file=sys.stderr, flush=True)
+        finally:
+            self.slots.release()
 
     def run(self) -> None:
         path = self.args.socket
@@ -329,15 +471,31 @@ class Agent:
         listener.bind(str(path))
         os.chmod(path, self.args.socket_mode)
         listener.listen(128)
-        print(f"workload-attest-agent: listening on {path}", flush=True)
-        while True:
-            connection, _ = listener.accept()
-            with connection:
-                connection.settimeout(2.0)
-                try:
-                    connection.sendall(self.attest(connection))
-                except (AttestationError, OSError) as exc:
-                    print(f"workload-attest-agent: reject: {exc}", file=sys.stderr, flush=True)
+        print(
+            f"workload-attest-agent: listening on {path} "
+            f"(concurrency={self.args.max_concurrency})",
+            flush=True,
+        )
+        threading.Thread(
+            target=self.publish_membership_forever,
+            name="membership",
+            daemon=True,
+        ).start()
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=self.args.max_concurrency,
+            thread_name_prefix="attest",
+        ) as pool:
+            while True:
+                connection, _ = listener.accept()
+                if not self.slots.acquire(blocking=False):
+                    print(
+                        "workload-attest-agent: reject: concurrency limit reached",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    connection.close()
+                    continue
+                pool.submit(self.serve, connection)
 
 
 def parse_args() -> argparse.Namespace:
@@ -363,9 +521,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--issuer", default="dpumesh-node-agent")
     parser.add_argument("--ttl", type=int, default=60)
     parser.add_argument("--socket-mode", type=lambda value: int(value, 8), default=0o666)
+    parser.add_argument("--max-concurrency", type=int, default=8)
+    parser.add_argument("--request-timeout", type=float, default=2.0)
+    parser.add_argument(
+        "--membership-file", type=Path, default=Path("/run/dpumesh/membership.v1")
+    )
+    parser.add_argument("--membership-interval", type=float, default=10.0)
     args = parser.parse_args()
     if not 1 <= args.ttl <= MAX_TTL:
         parser.error(f"--ttl must be between 1 and {MAX_TTL}")
+    if not 1 <= args.max_concurrency <= 256:
+        parser.error("--max-concurrency must be between 1 and 256")
+    if not 0 < args.request_timeout <= 30:
+        parser.error("--request-timeout must be between 0 and 30 seconds")
+    if not 1 <= args.membership_interval <= 300:
+        parser.error("--membership-interval must be between 1 and 300 seconds")
     if os.geteuid() != 0:
         parser.error("the workload attestation agent must run as root")
     return args

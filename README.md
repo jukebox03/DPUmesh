@@ -57,6 +57,10 @@ POD_REGISTER → POD_ASSIGNED → mmap/ring import → all DPA RING_ADD_ACKs
              → POD_INIT_RESULT(READY, L)
 ```
 
+Under `DPUMESH_TRUSTED_REGISTRATION=required` a node agent's signed grant
+precedes `POD_REGISTER`, and the DPU admits only the Service that grant
+authorizes. [design/CONTROL.md](design/CONTROL.md) is the contract.
+
 The host retries registration while either assignment or readiness is pending;
 the DPU treats identical registration as idempotent. Missing DPA add ACKs are
 also retried. Graceful destruction similarly retries `POD_UNREGISTER` until the
@@ -148,8 +152,7 @@ number was produced; reports carry the numbers.
 |---|---|
 | [design/API.md](design/API.md) | the native `<dpumesh/dmesh.h>` contract: lifecycle, batching, EQ, errors |
 | [design/CORE.md](design/CORE.md) | host/DPA/ARM custody, rings, and replay barriers |
-| [design/CONTROL.md](design/CONTROL.md) | naming, identity, registry, control channels, and node scope |
-| [design/LINKERD_CONTROL.md](design/LINKERD_CONTROL.md) | current and target Linkerd control-plane interaction on the DPU |
+| [design/CONTROL.md](design/CONTROL.md) | naming, trusted registration, signed feeds, the Linkerd control plane, and node scope |
 | [design/L7.md](design/L7.md) | the DPU-side Linkerd runtime, ownership, custody, and limits |
 | [design/GRPC.md](design/GRPC.md) | how the gRPC adapter maps chttp2 onto the transport |
 
@@ -176,8 +179,7 @@ number was produced; reports carry the numbers.
 | Report | Question it answers |
 |---|---|
 | [bench/report/REPORT.md](bench/report/REPORT.md) | what DPUmesh costs at L4 against Envoy sidecars |
-| [bench/report/REPORT_L7.md](bench/report/REPORT_L7.md) | what backend-selection granularity costs on the DPU |
-| [bench/report/REPORT_L7_LOWRISK.md](bench/report/REPORT_L7_LOWRISK.md) | whether the first Linkerd cleanup regresses steady-state or session-churn cost |
+| [bench/report/REPORT_L7.md](bench/report/REPORT_L7.md) | what the DPU's L7 layer costs per message, per connection and per request |
 | [bench/report/REPORT_CORE.md](bench/report/REPORT_CORE.md) | where the cores go, attributed per component |
 | [integrations/grpc/bench/report/REPORT_GRPC.md](integrations/grpc/bench/report/REPORT_GRPC.md) | whether the L4 win carries to gRPC, and how it scales with cores and channels |
 | [linkerd/bench/report/REPORT_LINKERD.md](linkerd/bench/report/REPORT_LINKERD.md) | linkerd as a sidecar, against Envoy and DPUmesh |

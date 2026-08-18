@@ -595,8 +595,31 @@ exit 1"; then
     info "Linkerd ready on admin port(s): $ports"
 }
 
+# Required trusted registration protects every Service, so a declined L7 session
+# has to end instead of continuing as unobserved L4. Both the deploy path and a
+# bare `restart` resolve the switch here.
+resolve_l7_fail_closed() {
+    case "$DPUMESH_TRUSTED_REGISTRATION" in
+        required|1)
+            case "${DPUMESH_L7_FAIL_CLOSED:-1}" in
+                1) ;;
+                *) err "DPUMESH_L7_FAIL_CLOSED=$DPUMESH_L7_FAIL_CLOSED forwards declined"
+                   err "  protected sessions as plain L4; it cannot be combined with"
+                   err "  DPUMESH_TRUSTED_REGISTRATION=required"
+                   exit 1 ;;
+            esac
+            DPUMESH_L7_FAIL_CLOSED=1
+            ;;
+        *)
+            DPUMESH_L7_FAIL_CLOSED="${DPUMESH_L7_FAIL_CLOSED:-0}"
+            ;;
+    esac
+    export DPUMESH_L7_FAIL_CLOSED
+}
+
 start_dpu() {
     local log_level="${DPUMESH_LOG_LEVEL:-40}"
+    resolve_l7_fail_closed
     # Services routed through each L7 mode.
     local l7_decision="${DPUMESH_L7_DECISION_SVC:-}"
     local l7_opaque="${DPUMESH_L7_OPAQUE_SVC:-}"
@@ -635,7 +658,7 @@ LINKERD2_PROXY_ADMIN_LISTEN_ADDR=${LINKERD_ADMIN_ADDR:-127.0.0.1:4191}
 LINKERD2_PROXY_LOG=${LINKERD_LOG:-warn,linkerd=info,dmesh_l7=info}
 DPUMESH_L7_LINKERD_WORKER=${DPUMESH_L7_LINKERD_WORKER:-0}
 DPUMESH_L7_SERVICE_TARGETS_FILE=$(linkerd_service_target_file)
-DPUMESH_L7_FAIL_CLOSED=${DPUMESH_L7_FAIL_CLOSED:-0}
+DPUMESH_L7_FAIL_CLOSED=$DPUMESH_L7_FAIL_CLOSED
 DMESH_L7_TX_RESERVE=${DMESH_L7_TX_RESERVE:-1}
 L7ENV
 { printf 'LINKERD2_PROXY_IDENTITY_TRUST_ANCHORS=\"'; \
@@ -649,6 +672,14 @@ L7ENV
     local trusted_registration="$DPUMESH_TRUSTED_REGISTRATION"
     local registration_key_dir="$DPUMESH_REGISTRATION_KEY_DIR_DPU"
     local registration_issuer="$DPUMESH_REGISTRATION_ISSUER"
+    # Revocation consumes the node membership generation; an empty path leaves
+    # it off, which is what development mode wants.
+    local membership_file=""
+    local admission_file=""
+    if [ "$DPUMESH_TRUSTED_REGISTRATION" = required ]; then
+        membership_file="${DPUMESH_MEMBERSHIP_FILE:-/etc/dpumesh/membership.v1}"
+        admission_file="${DPUMESH_ADMISSION_FILE:-/etc/dpumesh/admission}"
+    fi
     step "=== Starting dpumesh_dpu (l7_decision='$l7_decision' l7_opaque='$l7_opaque' l7_full='$l7_full' dpa_threads='$dpa_threads' rings_per_pod='$rings' arm_workers='$workers') ==="
     stop_dpu
     local dpu_home; dpu_home=$(ssh_dpu 'echo $HOME')
@@ -658,7 +689,7 @@ L7ENV
 running=\$(pgrep -x dpumesh_dpu | head -1)
 if [ -n \"\$running\" ]; then echo \"\$running\"; exit 0; fi
 ulimit -c unlimited
-screen -dmS dpumesh-bench bash -c \"ulimit -c unlimited; cd $dpu_home/$DPU_BUILD && $l7_env DPUMESH_TRUSTED_REGISTRATION=$trusted_registration DPUMESH_REGISTRATION_KEY_DIR=$registration_key_dir DPUMESH_REGISTRATION_ISSUER=$registration_issuer DPUMESH_L7_DECISION_SVC=$l7_decision DPUMESH_L7_OPAQUE_SVC=$l7_opaque DPUMESH_L7_SVC=$l7_full DPUMESH_L7_NULL_TRACE=$l7_trace DPUMESH_L7_FRAMED_RR=$l7_rr DPUMESH_DPA_THREADS=$dpa_threads DPUMESH_RINGS_PER_POD=$rings DPUMESH_ARM_WORKERS=$workers ./dpumesh_dpu $DPU_PCI -l $log_level > $DPU_LOG 2>&1\"
+screen -dmS dpumesh-bench bash -c \"ulimit -c unlimited; cd $dpu_home/$DPU_BUILD && $l7_env DPUMESH_TRUSTED_REGISTRATION=$trusted_registration DPUMESH_REGISTRATION_KEY_DIR=$registration_key_dir DPUMESH_REGISTRATION_ISSUER=$registration_issuer DPUMESH_MEMBERSHIP_FILE=$membership_file DPUMESH_ADMISSION_FILE=$admission_file DPUMESH_L7_DECISION_SVC=$l7_decision DPUMESH_L7_OPAQUE_SVC=$l7_opaque DPUMESH_L7_SVC=$l7_full DPUMESH_L7_NULL_TRACE=$l7_trace DPUMESH_L7_FRAMED_RR=$l7_rr DPUMESH_DPA_THREADS=$dpa_threads DPUMESH_RINGS_PER_POD=$rings DPUMESH_ARM_WORKERS=$workers ./dpumesh_dpu $DPU_PCI -l $log_level > $DPU_LOG 2>&1\"
 sleep 2
 pgrep -x dpumesh_dpu | head -1 || echo NO_PID
 LAUNCHER
@@ -929,13 +960,17 @@ prepare_trusted_registration() {
             esac
             DPUMESH_REQUIRE_TRUSTED_WORKLOAD=1
             export DPUMESH_ATTEST_SOCKET DPUMESH_REQUIRE_TRUSTED_WORKLOAD
-            "$BENCH_DIR/workload_attest.sh" prepare
             ;;
         *)
             err "DPUMESH_TRUSTED_REGISTRATION must be off or required"
             exit 1
             ;;
     esac
+    # Settle the protected-service policy before provisioning anything.
+    resolve_l7_fail_closed
+    if [ "$DPUMESH_TRUSTED_REGISTRATION" = required ]; then
+        "$BENCH_DIR/workload_attest.sh" prepare
+    fi
 }
 
 # Render bench/k8s/pods.yaml with envsubst and apply it (replicas: 0).
@@ -1080,6 +1115,7 @@ deploy() {
     [ "$BENCH_DEPLOY_SCOPE" = core ] || ensure_envoy_image
     if [ "$DPUMESH_TRUSTED_REGISTRATION" = required ]; then
         IMG_WORKLOAD_AGENT="$IMG_WORKLOAD_AGENT" "$BENCH_DIR/workload_attest.sh" deploy
+        "$BENCH_DIR/workload_attest.sh" membership-start
     fi
     if [ "${L7_BACKEND:-null}" = linkerd ]; then
         IMG_LINKERD_GATEWAY="$IMG_LINKERD_GATEWAY" "$BENCH_DIR/linkerd_cp_gateway.sh" start
@@ -1095,6 +1131,87 @@ deploy() {
     echo "  Run:  $0 latency|bandwidth|rate|all [dpumesh|tcp|both]"
     echo "        $0 loopback|verbs|preload ...   (validators)"
     echo "  Re-pin:  $0 pin [fair|l4|hw|hw3|hw6]"
+}
+
+# Protected admission is a file the DPU control thread polls, so it can be set
+# without restarting the proxy.
+set_admission() {
+    local state="$1" path="${DPUMESH_ADMISSION_FILE:-/etc/dpumesh/admission}"
+    case "$state" in
+        open|drain) ;;
+        *) err "admission state must be open or drain"; exit 1 ;;
+    esac
+    ssh_dpu "printf '%s\n' '$state' > /tmp/dpumesh-admission.in && \
+        echo '$DPU_PASS' | sudo -S -p '' install -d -o root -g root -m 0755 '${path%/*}' && \
+        echo '$DPU_PASS' | sudo -S -p '' install -o root -g root -m 0644 /tmp/dpumesh-admission.in '$path.new' && \
+        echo '$DPU_PASS' | sudo -S -p '' mv '$path.new' '$path' && \
+        rm -f /tmp/dpumesh-admission.in" >/dev/null
+    info "protected admission: $state"
+}
+
+# The DPU polls the switch, so writing it is not the same as it taking effect.
+# The state change is counted, which is what a caller can wait on.
+admission_events() {
+    local state="$1" admin="${LINKERD_ADMIN_ADDR:-127.0.0.1:4191}" seen
+    seen=$(ssh_dpu "curl -s $admin/metrics | sed -n 's/^dmesh_control_events_total{kind=\"admission\",reason=\"$state\"} //p'" 2>/dev/null | tr -d '[:space:]')
+    printf '%s\n' "${seen:-0}"
+}
+
+await_admission() {
+    local state="$1" before="$2" waited=0
+    while [ "$waited" -lt 20 ]; do
+        [ "$(admission_events "$state")" -gt "$before" ] && { info "protected admission observed: $state"; return 0; }
+        sleep 1
+        waited=$((waited + 1))
+    done
+    err "the DPU did not observe admission=$state within ${waited}s"
+    return 1
+}
+
+# Replace identity material against a quiet proxy: nothing in flight is cut, and
+# nothing new is admitted until the new certificate is installed.
+rotate_identity() {
+    need_env
+    resolve_l7_fail_closed
+    local deadline="${LINKERD_DRAIN_TIMEOUT:-60}"
+    local admin="${LINKERD_ADMIN_ADDR:-127.0.0.1:4191}"
+
+    step "=== Draining protected admission ==="
+    local drain_before; drain_before=$(admission_events drain)
+    set_admission drain
+    await_admission drain "$drain_before" || exit 1
+    local waited=0 active=1
+    while [ "$waited" -lt "$deadline" ]; do
+        active=$(ssh_dpu "curl -s $admin/metrics | sed -n 's/^dmesh_sessions_active //p'" 2>/dev/null | tr -d '[:space:]')
+        [ -n "$active" ] || active=0
+        [ "$active" = 0 ] && break
+        sleep 2
+        waited=$((waited + 2))
+    done
+    if [ "${active:-1}" != 0 ]; then
+        err "drain did not reach zero active sessions in ${deadline}s (active=$active)"
+        set_admission open
+        exit 1
+    fi
+    unset drain_before
+    info "drained after ${waited}s"
+
+    step "=== Installing identity material ==="
+    "$BENCH_DIR/linkerd_identity.sh" install-dpu
+
+    step "=== Restarting with the new material ==="
+    start_dpu
+    start_pods
+    wait_linkerd_ready
+    # A restart re-creates the Pods, so their placement has to be restored:
+    # without it the rotation reads as an L7 latency regression.
+    pin_pods fair
+
+    local open_before; open_before=$(admission_events open)
+    set_admission open
+    await_admission open "$open_before" || exit 1
+    validate_linkerd_session
+    info "=== Identity material rotated ==="
 }
 
 validate_linkerd_session() {
@@ -1123,6 +1240,7 @@ cleanup() {
     stop_dpu
     if [ "$DPUMESH_TRUSTED_REGISTRATION" = required ] ||
        [ "$DPUMESH_TRUSTED_REGISTRATION" = 1 ]; then
+        "$BENCH_DIR/workload_attest.sh" membership-stop || true
         "$BENCH_DIR/workload_attest.sh" stop || true
     fi
     "$BENCH_DIR/linkerd_service_registry.sh" stop >/dev/null 2>&1 || true
@@ -1594,6 +1712,8 @@ case "$CMD" in
     deploy)    deploy ;;
     build)     need_env; sync_sources; build_dpu ;;
     restart)   need_env; start_dpu ;;
+    rotate-identity) rotate_identity ;;
+    admission) need_env; set_admission "${1:?usage: $0 admission open|drain}" ;;
     grpcbuild) build_grpc_apps ;;
     linkerdbuild) need_env; sync_linkerd_sources; build_linkerd_artifacts; preflight_linkerd ;;
     # NOTE: `restart` is valid only while no pod is meshed, and there is no

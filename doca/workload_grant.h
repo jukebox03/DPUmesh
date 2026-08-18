@@ -29,6 +29,24 @@ enum dmesh_grant_result {
 
 const char *dmesh_grant_result_name(enum dmesh_grant_result result);
 
+/* Authoritative feeds carry the same authority as a grant, so they are signed
+ * by the same keyring. The envelope is a final line
+ * `signature=<key-id>,<64 hex>`; the MAC covers every byte before it. */
+enum dmesh_feed_result {
+    DMESH_FEED_OK = 0,
+    DMESH_FEED_UNSIGNED,
+    DMESH_FEED_BAD_KEY_ID,
+    DMESH_FEED_BAD_MAC,
+    DMESH_FEED_INTERNAL,
+};
+
+/* Verify a feed document against the keyring in `key_dir`. On success
+ * `signed_length` is the prefix the caller may parse; bytes after the envelope
+ * are refused rather than ignored, so nothing unsigned is ever read. */
+enum dmesh_feed_result
+dmesh_feed_verify(const char *document, size_t length, const char *key_dir,
+                  size_t *signed_length);
+
 /* Parse the DPU verifier configuration. DPUMESH_TRUSTED_REGISTRATION=required
  * requires a root-only DPUMESH_REGISTRATION_KEY_DIR containing up to four
  * KEY_ID.key files; unset/off selects development compatibility. */
@@ -60,17 +78,19 @@ int dmesh_grant_load_key(const char *path, uint8_t key[DMESH_GRANT_KEY_SIZE],
 int dmesh_grant_sign_v1(struct dmesh_workload_grant_msg *grant,
                         const uint8_t key[DMESH_GRANT_KEY_SIZE]);
 
-/* Verify a grant for one exact connection challenge. On success, returns the
- * authorized service and builds the Linkerd injector-compatible workload from
- * signed namespace/Pod claims. */
+/* Verify a grant for one exact connection challenge. The key is selected by the
+ * signed key id before this call, so a grant naming an unknown key id is
+ * rejected by that lookup. On success, returns the authorized service, the
+ * signed Pod UID that names this registration for revocation, and the Linkerd
+ * injector-compatible workload built from signed namespace/Pod claims. */
 enum dmesh_grant_result
 dmesh_grant_verify_v1(const struct dmesh_workload_grant_msg *grant,
                       const uint8_t key[DMESH_GRANT_KEY_SIZE],
                       const char *expected_issuer,
-                      const char *expected_key_id,
                       const uint8_t expected_nonce[DMESH_REG_NONCE_SIZE],
                       uint64_t now_sec,
                       int32_t *service_id,
-                      char workload[DMESH_WORKLOAD_MAX]);
+                      char workload[DMESH_WORKLOAD_MAX],
+                      char pod_uid[DMESH_POD_UID_MAX]);
 
 #endif /* DMESH_WORKLOAD_GRANT_H */

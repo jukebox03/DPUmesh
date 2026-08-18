@@ -11,6 +11,7 @@
 #include <dmesh_l7.h>
 
 #include "object.h"
+#include "workload_grant.h"
 #include "dpu_worker.h"
 #include "comch_server.h"
 #include "dpa_common.h"
@@ -1452,7 +1453,7 @@ static void px_stall(struct px_conn *c) {
 
 /* ====== parse loop ====== */
 
-static int px_resolve_reply_peer(struct objects *objs, struct px_conn *c) {
+static int px_resolve_reply_peer(struct px_conn *c) {
     if (!c->pub.is_reply)
         return 1;
     int have = 0;
@@ -1477,7 +1478,7 @@ static void px_parse_l7(struct objects *objs, struct px_conn *c);
 static int  px_l7_decide(struct objects *objs, struct px_conn *c);
 
 static void px_parse(struct objects *objs, struct px_conn *c) {
-    if (!px_resolve_reply_peer(objs, c)) {
+    if (!px_resolve_reply_peer(c)) {
         px_drop_window(objs, c, "stale upstream (client closed)");
         c->dead = 1;
         return;
@@ -1682,6 +1683,14 @@ _Static_assert(PX_L7_DECISION == DMESH_L7_MODE_DECISION &&
  * been handed over yet, so the data plane's own forwarding remains correct. */
 static int px_l7_open_conn(struct objects *objs, struct px_conn *c) {
     struct dmesh_l7_flow flow;
+    /* A drain stops admitting sessions without stopping the ones in flight, so
+     * identity material can be replaced against a quiet proxy. The decline
+     * follows the same policy as any other: refusal under fail-closed. */
+    if (__atomic_load_n(&objs->admission_drain, __ATOMIC_RELAXED)) {
+        __atomic_fetch_add(&objs->admission_drain_refusals, 1, __ATOMIC_RELAXED);
+        l7_control_event("admission", "draining");
+        return 0;
+    }
     px_l7_fill_flow(objs, c, &flow);
     int rc = l7_conn_open(px_cur_worker->id, px_conn_handle(c), &flow);
     if (rc < 0) {
@@ -1853,6 +1862,20 @@ static struct px_conn *px_l7_caller_conn(int worker_id, uint64_t conn,
         return NULL;
     *out_objs = worker_state->objs;
     return c;
+}
+
+/* Verify a feed document the adapter read, against the registration keyring.
+ * Returns the length of the signed prefix, or -1 when the document is unsigned
+ * or its signature does not verify. The adapter parses only that prefix. */
+long dmesh_l7_verify_feed(const uint8_t *document, size_t length) {
+    const char *key_dir = getenv("DPUMESH_REGISTRATION_KEY_DIR");
+    size_t signed_length = 0;
+    if (key_dir == NULL || *key_dir == '\0' || document == NULL)
+        return -1;
+    if (dmesh_feed_verify((const char *)document, length, key_dir,
+                          &signed_length) != DMESH_FEED_OK)
+        return -1;
+    return (long)signed_length;
 }
 
 int dmesh_l7_backends(int worker_id, int32_t service, int32_t *out, int max) {

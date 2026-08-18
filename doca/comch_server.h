@@ -38,6 +38,17 @@ server_flush_pod_init_results(struct objects *objs);
 int
 server_progress_pod_cleanup(struct objects *objs);
 
+/* Adopt the authoritative node membership generation and close registrations
+ * it no longer authorizes. Called once per DPU main-loop pass; it consults the
+ * feed on its own interval and never blocks. */
+int
+server_progress_membership(struct objects *objs);
+
+/* Track the protected-admission switch. Called once per DPU main-loop pass; it
+ * consults the file on its own interval and never blocks. */
+int
+server_progress_admission(struct objects *objs);
+
 
 /* Find a pod by pod_id. Returns NULL if not found. */
 struct pod_state *

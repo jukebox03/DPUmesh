@@ -10,7 +10,8 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import FancyArrowPatch, FancyBboxPatch
 
 
-OUT = Path(__file__).resolve().parent
+OUT = Path(__file__).resolve().parent / "figures"
+OUT.mkdir(exist_ok=True)
 
 BLUE = "#287de1"
 BLUE_BG = "#edf4ff"

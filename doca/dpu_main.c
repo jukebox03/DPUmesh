@@ -17,6 +17,7 @@
 #include "object.h"
 #include "dpu_worker.h"
 #include "workload_grant.h"
+#include "pod_membership.h"
 
 DOCA_LOG_REGISTER(DPU_MAIN);
 
@@ -52,6 +53,19 @@ int main(int argc, char **argv)
                                      sizeof(registration_error)) != 0) {
         DOCA_LOG_ERR("Trusted registration configuration failed: %s",
                      registration_error);
+        result = DOCA_ERROR_INVALID_VALUE;
+        goto exit;
+    }
+    char membership_error[256] = {0};
+    if (dmesh_membership_configure(objs, membership_error,
+                                   sizeof(membership_error)) != 0) {
+        DOCA_LOG_ERR("Membership configuration failed: %s", membership_error);
+        result = DOCA_ERROR_INVALID_VALUE;
+        goto exit;
+    }
+    if (dmesh_admission_configure(objs, membership_error,
+                                  sizeof(membership_error)) != 0) {
+        DOCA_LOG_ERR("Admission configuration failed: %s", membership_error);
         result = DOCA_ERROR_INVALID_VALUE;
         goto exit;
     }

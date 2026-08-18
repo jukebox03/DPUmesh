@@ -19,7 +19,7 @@ TESTDIR := $(BUILD)/test
 # -Wextra minus the categories that only fire on deliberate patterns: callback
 # parameters fixed by DOCA's signatures, ring index arithmetic, and port-table
 # bound checks a uint16_t index already satisfies.
-WARNFLAGS := -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare -Wno-type-limits
+WARNFLAGS := -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare
 CFLAGS  := -O2 -g $(WARNFLAGS) -fPIC -DDOCA_ALLOW_EXPERIMENTAL_API -Iinclude -I. -Ilinkerd/include $(DOCA_CFLAGS)
 
 # Runtime search paths. In a container everything is copied to /usr/local/lib;
@@ -44,6 +44,7 @@ LIB_SRCS := \
 	doca/comch_server.c \
 	doca/comch_msgq.c \
 	doca/workload_grant.c \
+	doca/pod_membership.c \
 	doca/dpa.c
 LIB_HDRS := $(shell rg --files include src doca -g '*.h')
 
@@ -112,6 +113,12 @@ $(TESTDIR)/workload_grant_test: tests/workload_grant_test.c doca/workload_grant.
 	$(CC) $(CFLAGS) -o $@ tests/workload_grant_test.c doca/workload_grant.c \
 		$(DOCA_LIBS) $(CRYPTO_LIBS) $(RPATHS)
 
+$(TESTDIR)/pod_membership_test: tests/pod_membership_test.c doca/pod_membership.c doca/comch_server.c doca/workload_grant.c $(LIB_HDRS) | dirs
+	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -Wl,--gc-sections \
+		-o $@ tests/pod_membership_test.c doca/pod_membership.c \
+		doca/comch_server.c doca/workload_grant.c \
+		$(DOCA_LIBS) $(CRYPTO_LIBS) -lpthread $(RPATHS)
+
 $(TESTDIR)/native_tx_batch_policy_test: tests/native_tx_batch_policy_test.c src/dmesh_core.c $(LIB_HDRS) | dirs
 	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -Wl,--gc-sections \
 		-o $@ tests/native_tx_batch_policy_test.c $(DOCA_LIBS) -lpthread $(RPATHS)
@@ -151,7 +158,7 @@ $(TESTDIR)/benchmark_result_contract_test: tests/benchmark_result_contract_test.
 	$(CC) $(CFLAGS) -o $@ tests/benchmark_result_contract_test.c
 
 test: $(TESTDIR)/native_api_contract_test $(TESTDIR)/native_control_state_test \
-	$(TESTDIR)/workload_grant_test \
+	$(TESTDIR)/workload_grant_test $(TESTDIR)/pod_membership_test \
 	$(TESTDIR)/native_tx_batch_policy_test $(TESTDIR)/native_writable_test \
 	$(TESTDIR)/preload_api_contract_test $(TESTDIR)/l4_pin_policy_test \
 	$(TESTDIR)/lb_policy_test \
@@ -162,6 +169,7 @@ test: $(TESTDIR)/native_api_contract_test $(TESTDIR)/native_control_state_test \
 	$(TESTDIR)/native_api_contract_test
 	$(TESTDIR)/native_control_state_test
 	$(TESTDIR)/workload_grant_test
+	$(TESTDIR)/pod_membership_test
 	$(TESTDIR)/native_tx_batch_policy_test
 	$(TESTDIR)/native_writable_test
 	$(TESTDIR)/preload_api_contract_test

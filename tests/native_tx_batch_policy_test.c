@@ -269,7 +269,7 @@ test_tail_publication_policy(void)
     assert(atomic_load_explicit(&psl->tx_s, memory_order_acquire) == psl->tx_w);
 
     /* A deferred failure is a one-shot EQ event but stays sticky on the QP. */
-    tx_error_publish(f->ctx, psl, 17, EIO);
+    tx_error_publish(psl, 17, EIO);
     assert(dpumesh_next_tx_error(&f->eq) == &f->qp);
     assert(dpumesh_next_tx_error(&f->eq) == NULL);
     errno = 0;

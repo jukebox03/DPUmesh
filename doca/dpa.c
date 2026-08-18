@@ -373,6 +373,7 @@ void dmesh_doca_dpa_comch_msgq_ctx_state_changed_cb(const union doca_data user_d
 							  enum doca_ctx_states prev_state,
 							  enum doca_ctx_states next_state)
 {
+	(void)user_data;
 	(void)prev_state;
 	(void)ctx;
 

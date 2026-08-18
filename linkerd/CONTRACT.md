@@ -122,12 +122,13 @@ It is an identifier, not a pointer.
 
 | Entry point | Result |
 |---|---|
-| `l7_conn_open` | `0` accepts; a negative decline code selects L4 fallback |
+| `l7_conn_open` | `0` accepts; a negative decline code selects L4 fallback, or refusal under required registration |
 | `l7_conn_segment` | accepted prefix in `[0, len]`; negative closes the adapter session |
 | `l7_conn_eof` | closes the input half for the named direction |
 | `l7_conn_close` | drops the session and releases all held extents |
 | `l7_resolve` | decision verdict; the Linkerd consumer currently declines |
 | `l7_report` | terminal accounting for decision mode |
+| `l7_control_event` | one control-plane admission outcome by kind and reason |
 
 `l7_conn_segment` may retain the accepted prefix after the call. The staging
 memory remains valid until the matching release.
@@ -141,6 +142,7 @@ memory remains valid until the matching release.
 | `dmesh_l7_tx_reserve` | writable egress-arena region or `NULL` |
 | `dmesh_l7_tx_commit` | publishes a reservation or returns it unused |
 | `dmesh_l7_release` | returns staging custody and sender credit |
+| `dmesh_l7_verify_feed` | signed prefix of an authoritative feed document, or `-1` |
 
 `DMESH_L7_BACKEND_ANY` delegates backend selection to the DPUmesh balancer.
 `DMESH_L7_ORIGIN` sends bytes to the source of the request connection.
@@ -297,9 +299,15 @@ target feed fail preflight; there is no in-process or benchmark mock fallback.
 The workload in `struct dmesh_l7_flow` is bound to the Pod registration and a
 payload never supplies it. In required mode, a root-owned Host agent resolves
 the Unix peer PID/cgroup to Kubernetes Pod and Service objects and signs a
-connection-nonce-bound grant. The DPU verifies the HMAC, lifetime, issuer,
-key-id, nonce and exact Service id, then constructs the workload from signed
-namespace/Pod claims. `DPUMESH_WORKLOAD` is accepted only in development mode.
+connection-nonce-bound grant. The DPU selects the key by the signed key id,
+verifies the HMAC, lifetime, issuer, nonce and exact Service id, then constructs
+the workload from signed namespace/Pod claims and retains the signed Pod UID
+with the registration. A Pod whose (Pod UID, Service) pair leaves the
+authoritative node membership generation has that exact registration closed.
+Both feeds are signed by the registration keyring; the adapter verifies the
+Service target feed through `dmesh_l7_verify_feed` and parses only the signed
+prefix, so it holds no key material of its own.
+`DPUMESH_WORKLOAD` is accepted only in development mode.
 Each DMesh outbound Policy Watch uses the flow value, not the process-wide
 Linkerd fallback.
 
@@ -332,8 +340,14 @@ node-to-node arrives, the choice belongs to a per-service mode
 
 The proxy's own metrics registry carries the `dmesh` counters: sessions opened,
 closed and active, registrations pending and orphaned, endpoints aborted, tasks
-live and cancelled, backend take errors and retired slots. After traffic
-quiesces, active sessions, pending registrations and live tasks are zero.
+live and cancelled, backend take errors and target mismatches, per-session stack
+build phases, and retired slots. Refused sessions are counted by cause as
+`dmesh_sessions_declined_total{reason}`, and registration, membership,
+revocation and admission outcomes as `dmesh_control_events_total{kind,reason}`.
+The control events are decided on the Comch control thread rather than on a
+worker, so they are process-global and every worker's admin endpoint reports the
+same values. After traffic quiesces, active sessions, pending registrations and
+live tasks are zero.
 
 ## Current behavior
 
@@ -345,4 +359,5 @@ quiesces, active sessions, pending registrations and live tasks are zero.
 - DPUmesh backend selection through `DMESH_L7_BACKEND_ANY`;
 - deployed Linkerd control-plane configuration through the host-network gateway;
 - plaintext node-local transport, with identity granted at pod registration;
-- L4 fallback with per-cause counters, or fail-closed refusal.
+- L4 fallback with per-cause counters in development mode; required
+  registration selects fail-closed refusal.

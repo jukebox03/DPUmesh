@@ -348,7 +348,7 @@ struct dpumesh_ctx {
  * dmesh_poll_eq. The timer wakes an EQ that still holds armed bits.
  * ==================================================================== */
 
-static void tx_error_publish(dpumesh_ctx_t *ctx, struct dmesh_port_slot *psl,
+static void tx_error_publish(struct dmesh_port_slot *psl,
                              uint16_t port, int error_number);
 static inline void eq_notify(struct dmesh_eq *eq);
 
@@ -986,7 +986,7 @@ static int eq_tx_error_pop(struct dmesh_eq *eq, uint16_t *port) {
 
 /* The event is one-shot; tx_error itself remains sticky. Publication may come
  * from the caller or the claimed deadline worker. */
-static void tx_error_publish(dpumesh_ctx_t *ctx, struct dmesh_port_slot *psl,
+static void tx_error_publish(struct dmesh_port_slot *psl,
                              uint16_t port, int error_number) {
     int expected = 0;
     int published = error_number ? error_number : EBADMSG;
@@ -1614,10 +1614,10 @@ static doca_error_t init_control_path(dpumesh_ctx_t *ctx) {
         /* Explicit development compatibility: the application states the
          * workload itself. A DPU in required mode rejects this message and the
          * following REGISTER; there is no silent production fallback. */
-        /* Linkerd policy identifies the source workload (normally the
-         * injector-compatible namespace/Pod JSON), which is distinct from the
-         * DPUmesh Service this process provides. Keep DPUMESH_SERVICE as the
-         * legacy fallback for clients that have not been updated yet. */
+        /* Linkerd policy identifies the source workload, normally the
+         * injector-compatible namespace/Pod JSON, which is distinct from the
+         * DPUmesh Service this process provides. A client that states only its
+         * Service falls back to that name. */
         const char *workload = getenv("DPUMESH_WORKLOAD");
         if (!workload || !*workload)
             workload = getenv("DPUMESH_SERVICE");
@@ -2214,7 +2214,7 @@ static void try_return_blocks(dpumesh_ctx_t *ctx, struct dmesh_port_slot *psl) {
 /* Reserve one contiguous message in the connection's TX block chain. The owner
  * thread receives EAGAIN for capacity pressure or EINVAL for invalid state. */
 uint8_t *dpumesh_tx_reserve(dpumesh_ctx_t *ctx, uint16_t port, uint32_t len) {
-    if (port == 0 || port >= DMESH_PORT_SPACE) { errno = EINVAL; return NULL; }
+    if (port == 0) { errno = EINVAL; return NULL; }
     struct dmesh_port_slot *psl = &ctx->ports[port];
     uint64_t bs = (uint64_t)ctx->block_size;
     uint64_t block_slots = (uint64_t)ctx->blocks_per_conn;
@@ -2335,7 +2335,7 @@ uint8_t *dpumesh_tx_reserve(dpumesh_ctx_t *ctx, uint16_t port, uint32_t len) {
  * caller-contract break; nothing is mutated). Owner thread. */
 int dpumesh_tx_commit(dpumesh_ctx_t *ctx, uint16_t port,
                       const void *buf, uint32_t len) {
-    if (port == 0 || port >= DMESH_PORT_SPACE || buf == NULL) {
+    if (port == 0 || buf == NULL) {
         errno = EINVAL;
         return -1;
     }
@@ -2498,7 +2498,7 @@ static void tx_arm_idle_tail(struct dmesh_port_slot *psl, uint16_t port,
  * then advance tx_f only across the contiguous completed FIFO prefix; a later ACK
  * can never release an earlier unit whose DPU read is still in flight. */
 static inline void tx_reclaim_ack(dpumesh_ctx_t *ctx, uint16_t port, uint16_t seq) {
-    if (port == 0 || port >= DMESH_PORT_SPACE) return;
+    if (port == 0) return;
     struct dmesh_port_slot *psl = &ctx->ports[port];
     uint16_t tail = atomic_load_explicit(&psl->su_tail, memory_order_relaxed);
     uint16_t head = atomic_load_explicit(&psl->su_head, memory_order_acquire);
@@ -2772,7 +2772,7 @@ uint16_t dpumesh_alloc_port(dpumesh_ctx_t *ctx, int role, void *user, struct dme
 /* Promote a pending server port to the accepting EQ exactly once. Returns the port
  * on success or zero when it is no longer pending. */
 uint16_t dpumesh_accept_port(dpumesh_ctx_t *ctx, uint16_t port, void *user, struct dmesh_eq *eq) {
-    if (port == 0 || port >= DMESH_PORT_SPACE) return 0;
+    if (port == 0) return 0;
     struct dmesh_port_slot *psl = &ctx->ports[port];
     pthread_mutex_lock(&ctx->port_lock);
     if (__atomic_load_n(&psl->role, __ATOMIC_ACQUIRE) != DMESH_ROLE_SERVER_PENDING) {
@@ -2791,7 +2791,7 @@ uint16_t dpumesh_accept_port(dpumesh_ctx_t *ctx, uint16_t port, void *user, stru
  * reclaim any undelivered inbound (their RX credits). The inbox ring is kept for
  * the slot's next reuse. */
 void dpumesh_free_port(dpumesh_ctx_t *ctx, uint16_t port) {
-    if (port == 0 || port >= DMESH_PORT_SPACE) return;
+    if (port == 0) return;
     struct dmesh_port_slot *psl = &ctx->ports[port];
     /* Lifecycle changes also take port_lock, matching both client allocation and
      * PE-side SERVER_PENDING creation. */
@@ -2830,7 +2830,7 @@ void dpumesh_free_port(dpumesh_ctx_t *ctx, uint16_t port) {
  * path). Returns 1 + fills *out, or 0 if the conn inbox is empty. The body is in
  * the shared RX mmap at out->body_buf_slot (a landing pos). */
 int dpumesh_conn_recv(dpumesh_ctx_t *ctx, uint16_t port, sw_descriptor_t *out) {
-    if (port == 0 || port >= DMESH_PORT_SPACE) return 0;
+    if (port == 0) return 0;
     struct dmesh_port_slot *psl = &ctx->ports[port];
     if (!psl->inbox) return 0;
     if (inbox_pop(psl, out)) return 1;
@@ -3263,8 +3263,7 @@ static int dmesh_wait_tx_reclaimed_locked(const struct dmesh_port_slot *psl) {
  * handle and carry no latched fault. Takes the transmit gate on success; the
  * caller releases it. */
 int dmesh_tx_qp_valid(dmesh_qp_t *c) {
-    if (!c || !c->ep || !c->ep->ctx || c->local_port == 0 ||
-        c->local_port >= DMESH_PORT_SPACE) {
+    if (!c || !c->ep || !c->ep->ctx || c->local_port == 0) {
         errno = EINVAL;
         return -1;
     }
@@ -3293,16 +3292,14 @@ int dmesh_tx_qp_valid(dmesh_qp_t *c) {
 
 /* True between a successful dmesh_alloc and its dmesh_post_send. */
 int dmesh_tx_call_active(dmesh_qp_t *c) {
-    if (!c || !c->ep || !c->ep->ctx || c->local_port == 0 ||
-        c->local_port >= DMESH_PORT_SPACE)
+    if (!c || !c->ep || !c->ep->ctx || c->local_port == 0)
         return 0;
     return tx_call_open(&c->ep->ctx->ports[c->local_port]);
 }
 
 /* Release the transmit gate taken by dmesh_tx_qp_valid(). */
 void dmesh_tx_call_done(dmesh_qp_t *c) {
-    if (!c || !c->ep || !c->ep->ctx || c->local_port == 0 ||
-        c->local_port >= DMESH_PORT_SPACE)
+    if (!c || !c->ep || !c->ep->ctx || c->local_port == 0)
         return;
     tx_gate_release(&c->ep->ctx->ports[c->local_port]);
 }
@@ -3367,7 +3364,7 @@ void dmesh_tx_pressure(dmesh_qp_t *c) {
         return;
     }
     if (dmesh_drain_tx_locked(c, 1) != 0)
-        tx_error_publish(ctx, psl, c->local_port, EBADMSG);
+        tx_error_publish(psl, c->local_port, EBADMSG);
     errno = saved_errno;
 }
 
@@ -3396,7 +3393,7 @@ void dpumesh_publish_due_tails(struct dmesh_eq *eq) {
             atomic_load_explicit(&psl->tx_s, memory_order_relaxed) <
                 atomic_load_explicit(&psl->tx_c, memory_order_acquire) &&
             dmesh_drain_tx_locked(c, 1) != 0)
-            tx_error_publish(ctx, psl, port, EBADMSG);
+            tx_error_publish(psl, port, EBADMSG);
         tx_gate_release(psl);
     }
     eq_tx_armed_refresh(eq);

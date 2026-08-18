@@ -1,3 +1,4 @@
+import argparse
 import hashlib
 import hmac
 import importlib.util
@@ -74,6 +75,80 @@ def main():
     assert unpacked[4] == 11
     assert unpacked[8] == nonce
     assert unpacked[12].rstrip(b"\0") == b"test-bench"
+
+    # The membership document decides revocation with the same rule that
+    # decides a grant, so a Pod appears exactly for the Services it selects.
+    other = {
+        "metadata": {
+            "uid": "abcdef01-2345-6789-abcd-ef0123456789",
+            "namespace": "test-bench",
+            "name": "bench-dpumesh-xyz",
+            "labels": {"app": "bench-dpumesh"},
+        },
+        "spec": {"serviceAccountName": "default", "nodeName": "worker-1"},
+    }
+    terminating = {
+        "metadata": {
+            "uid": "deadbeef-2345-6789-abcd-ef0123456789",
+            "namespace": "test-bench",
+            "name": "echo-dpumesh-gone",
+            "labels": {"app": "echo-dpumesh"},
+            "deletionTimestamp": "2026-08-18T00:00:00Z",
+        },
+        "spec": {"serviceAccountName": "default", "nodeName": "worker-1"},
+    }
+    document = agent.membership_document(
+        7, {11: "echo-dpumesh"}, [pod(), other, terminating], [service]
+    )
+    lines = document.splitlines()
+    assert lines[0] == "version=7"
+    assert "member=12345678-1234-1234-1234-123456789abc,-1" in lines
+    assert "member=12345678-1234-1234-1234-123456789abc,11" in lines
+    # A Pod whose labels do not select the Service holds only its bare entry.
+    assert "member=abcdef01-2345-6789-abcd-ef0123456789,-1" in lines
+    assert "member=abcdef01-2345-6789-abcd-ef0123456789,11" not in lines
+    # A terminating Pod is already withdrawn.
+    assert not any("deadbeef" in line for line in lines)
+
+    # The DPU refuses a generation it cannot verify, so the publisher signs it.
+    signed = agent.sign_document(document, "feed-key-v1", key)
+    assert signed.startswith(document)
+    envelope = signed[len(document) :].strip()
+    key_id, _, mac = envelope.removeprefix("signature=").partition(",")
+    assert key_id == "feed-key-v1"
+    assert hmac.compare_digest(
+        mac, hmac.new(key, document.encode("ascii"), hashlib.sha256).hexdigest()
+    )
+
+    # The peer is named by pid, so its start time has to be readable and stable.
+    assert agent.process_start_time(os.getpid()) == agent.process_start_time(os.getpid())
+    try:
+        agent.process_start_time(-1)
+    except agent.AttestationError:
+        pass
+    else:
+        raise AssertionError("an unreadable peer state was accepted")
+    try:
+        agent.pod_uid_for_pid(os.getpid())
+    except agent.AttestationError:
+        pass
+    else:
+        raise AssertionError("a non-Pod peer process was attested")
+
+    with tempfile.TemporaryDirectory() as temporary:
+        registry = Path(temporary) / "registry"
+        registry.write_text("10.96.0.11 echo-dpumesh 11\n", encoding="utf-8")
+        state = argparse.Namespace(registry=registry)
+        reloader = agent.Agent.__new__(agent.Agent)
+        reloader.args = state
+        reloader.registry_lock = agent.threading.Lock()
+        reloader.registry_stamp = None
+        reloader.registry_services = {}
+        assert reloader.service_names() == {11: "echo-dpumesh"}
+        registry.write_text(
+            "10.96.0.11 echo-dpumesh 11\n10.96.0.20 other-dpumesh 20\n", encoding="utf-8"
+        )
+        assert reloader.service_names() == {11: "echo-dpumesh", 20: "other-dpumesh"}
 
     with tempfile.TemporaryDirectory() as temporary:
         key_dir = Path(temporary)

@@ -495,3 +495,13 @@ l7_report(int worker_id, uint64_t conn, uint64_t bytes_in,
                 (unsigned long long)bytes_in, (unsigned long long)bytes_out,
                 (unsigned long long)duration_ns, reason);
 }
+
+/* The reference consumer has no metrics surface: control-plane admission
+ * outcomes stay in the DPU log. */
+void
+l7_control_event(const char *kind, const char *reason)
+{
+    if (l7_trace())
+        fprintf(stderr, "[l7_ref] control %s: %s\n",
+                kind ? kind : "?", reason ? reason : "?");
+}

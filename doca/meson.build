@@ -36,6 +36,7 @@ srcs = [
     'comch_client.c',
     'comch_msgq.c',
     'workload_grant.c',
+    'pod_membership.c',
     'dpa.c',
     'dpu_proxy.c',
 ]

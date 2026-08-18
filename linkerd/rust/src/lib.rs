@@ -17,6 +17,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 #[cfg(not(test))]
 use std::task::{Context, Poll};
+use std::time::{Duration, SystemTime};
+
+/// How long a feed generation must have been installed before its stamp is
+/// trusted to mean "unchanged".
+const STAMP_SETTLE: Duration = Duration::from_secs(2);
 
 use dmesh_doca::{
     BackendKey, Backends, DmeshEvent, DmeshIoHandle, FlowId, Registration, SessionMetrics,
@@ -233,6 +238,26 @@ mod datapath {
     }
 }
 
+// Length of the signed prefix of an authoritative feed document, or -1 when it
+// is unsigned or its signature does not verify against the registration keyring
+// the DPU already holds. The crypto stays on the C side, so the adapter keeps no
+// key material of its own.
+#[cfg(not(test))]
+extern "C" {
+    fn dmesh_l7_verify_feed(document: *const u8, length: usize) -> isize;
+}
+
+/// Test stand-in: the envelope handling and the failure paths are what the
+/// adapter owns; the MAC itself is covered by `tests/workload_grant_test.c`.
+#[cfg(test)]
+unsafe fn dmesh_l7_verify_feed(document: *const u8, length: usize) -> isize {
+    let text = std::str::from_utf8(std::slice::from_raw_parts(document, length)).unwrap();
+    match text.rfind("\nsignature=") {
+        Some(at) if text[at + 1..].trim_end() == "signature=test,valid" => at as isize + 1,
+        _ => -1,
+    }
+}
+
 #[cfg(not(test))]
 extern "C" {
     fn dmesh_l7_driver_notification_fds(
@@ -386,14 +411,28 @@ fn rate_limited(count: u64) -> bool {
 #[derive(Clone, Copy)]
 enum Decline {
     Error,
+    /// The Service target feed could not be read, parsed, or had rolled back.
+    FeedRejected,
+    /// The Service the session names is absent from the current generation.
+    TargetWithdrawn,
+    /// No session token was available.
+    NoSlot,
+    /// The backend registry refused this session's channel.
+    BackendRefused,
     SessionLimit,
     UnknownReply,
 }
 
 impl Decline {
+    /// The DPUmesh-visible code. The finer causes stay Rust-side labels so the
+    /// datapath ABI does not grow a code per diagnosis.
     fn code(self) -> c_int {
         match self {
-            Decline::Error => DECLINE_ERROR,
+            Decline::Error
+            | Decline::FeedRejected
+            | Decline::TargetWithdrawn
+            | Decline::NoSlot
+            | Decline::BackendRefused => DECLINE_ERROR,
             Decline::SessionLimit => DECLINE_SESSION_LIMIT,
             Decline::UnknownReply => DECLINE_UNKNOWN_REPLY,
         }
@@ -402,6 +441,10 @@ impl Decline {
     fn reason(self) -> &'static str {
         match self {
             Decline::Error => "adapter-error",
+            Decline::FeedRejected => "feed-rejected",
+            Decline::TargetWithdrawn => "target-withdrawn",
+            Decline::NoSlot => "no-session-slot",
+            Decline::BackendRefused => "backend-refused",
             Decline::SessionLimit => "single-session-limit",
             Decline::UnknownReply => "unknown-reply",
         }
@@ -492,6 +535,11 @@ struct Worker {
     service_targets_file: Option<PathBuf>,
     service_targets_version: u64,
     service_targets_authoritative: bool,
+    /// Inode, modification time and length of the feed generation already
+    /// parsed. The publisher installs a generation by rename, so each one
+    /// arrives on its own inode; modification time alone would not separate two
+    /// generations installed within a filesystem timestamp tick.
+    service_targets_stamp: Option<(u64, SystemTime, u64)>,
     /// Copy output into the egress arena rather than through a temporary Vec.
     tx_reserve: bool,
     counters: Counters,
@@ -687,13 +735,36 @@ fn pump_side(
 }
 
 impl Worker {
+    /// Adopt the current feed generation. Session open runs this, so it reads
+    /// and parses only when the publisher has installed a new generation.
     fn refresh_service_targets(&mut self) -> Result<(), String> {
         let Some(path) = self.service_targets_file.as_deref() else {
             return Ok(());
         };
+        let metadata = std::fs::metadata(path)
+            .map_err(|error| format!("stat {}: {error}", path.display()))?;
+        let modified = metadata
+            .modified()
+            .map_err(|error| format!("mtime {}: {error}", path.display()))?;
+        let stamp = (
+            std::os::unix::fs::MetadataExt::ino(&metadata),
+            modified,
+            metadata.len(),
+        );
+        // Skipping the read is an optimization, never a decision: the
+        // filesystem reuses inodes across a rename and stamps coarse
+        // timestamps, so two generations installed within one tick can share a
+        // stamp. A generation is only trusted to be unchanged once it is older
+        // than that granularity.
+        let settled = SystemTime::now()
+            .duration_since(modified)
+            .is_ok_and(|age| age >= STAMP_SETTLE);
+        if settled && self.service_targets_stamp == Some(stamp) {
+            return Ok(());
+        }
         let document = std::fs::read_to_string(path)
             .map_err(|error| format!("read {}: {error}", path.display()))?;
-        let (version, targets, endpoints) = parse_versioned_service_targets(&document)?;
+        let (version, targets, endpoints) = parse_signed_service_targets(&document)?;
         if version < self.service_targets_version {
             return Err(format!(
                 "service target generation rolled back from {} to {version}",
@@ -710,6 +781,9 @@ impl Worker {
                 "service targets updated"
             );
         }
+        // Only an accepted generation is stamped, so a rejected rollback is
+        // re-read until the publisher installs a newer one.
+        self.service_targets_stamp = Some(stamp);
         Ok(())
     }
 
@@ -877,6 +951,7 @@ impl Worker {
         addr: Option<SocketAddr>,
     ) -> c_int {
         self.counters.connections_declined += 1;
+        self.metrics.record_decline(why.reason());
         if rate_limited(self.counters.connections_declined) {
             eprintln!(
                 "[l7_linkerd] worker {} declined conn {conn} \
@@ -938,7 +1013,7 @@ impl Worker {
 
         if let Err(error) = self.refresh_service_targets() {
             tracing::warn!(%error, conn, service = flow.dst_service, "service target feed rejected");
-            return self.decline(Decline::Error, conn, flow, Some(backend_addr));
+            return self.decline(Decline::FeedRejected, conn, flow, Some(backend_addr));
         }
 
         let workload = {
@@ -955,13 +1030,13 @@ impl Worker {
             None if !self.service_targets_authoritative => service_addr_v4(flow.dst_service),
             None => {
                 tracing::warn!(conn, service = flow.dst_service, "service target withdrawn");
-                return self.decline(Decline::Error, conn, flow, Some(backend_addr));
+                return self.decline(Decline::TargetWithdrawn, conn, flow, Some(backend_addr));
             }
         };
 
         let Some(token) = self.slots.alloc() else {
             eprintln!("[l7_linkerd] worker {}: no session slot left", self.id);
-            return self.decline(Decline::Error, conn, flow, Some(backend_addr));
+            return self.decline(Decline::NoSlot, conn, flow, Some(backend_addr));
         };
 
         // Publish the DPUmesh backend endpoint for the Linkerd connector.
@@ -993,7 +1068,7 @@ impl Worker {
                 self.id
             );
             self.slots.release(token);
-            return self.decline(Decline::SessionLimit, conn, flow, Some(backend_addr));
+            return self.decline(Decline::BackendRefused, conn, flow, Some(backend_addr));
         }
         self.sessions.insert(conn, session);
         self.order.push(conn);
@@ -1085,6 +1160,32 @@ fn parse_service_targets(value: &str) -> Result<HashMap<i32, SocketAddrV4>, Stri
         }
     }
     Ok(targets)
+}
+
+/// Adopt only the signed prefix of a feed generation.
+///
+/// The feed carries the same authority as a registration grant, so it is signed
+/// by the same keyring. An unsigned or badly signed generation is refused
+/// exactly like a malformed one: nothing after the envelope is ever parsed.
+fn parse_signed_service_targets(
+    document: &str,
+) -> Result<
+    (
+        u64,
+        HashMap<i32, SocketAddrV4>,
+        HashMap<i32, Vec<SocketAddr>>,
+    ),
+    String,
+> {
+    let signed = unsafe { dmesh_l7_verify_feed(document.as_ptr(), document.len()) };
+    if signed < 0 {
+        return Err("service target feed is unsigned or its signature is invalid".to_string());
+    }
+    let signed = signed as usize;
+    if signed > document.len() || !document.is_char_boundary(signed) {
+        return Err("service target feed signature covers an invalid prefix".to_string());
+    }
+    parse_versioned_service_targets(&document[..signed])
 }
 
 fn parse_versioned_service_targets(
@@ -1208,7 +1309,7 @@ async fn build_worker(worker_id: c_int) -> Result<Option<Worker>, String> {
     let document = std::fs::read_to_string(&service_targets_file)
         .map_err(|error| format!("read {}: {error}", service_targets_file.display()))?;
     let (service_targets_version, service_targets, service_endpoints) =
-        parse_versioned_service_targets(&document)?;
+        parse_signed_service_targets(&document)?;
     let service_targets_file = Some(service_targets_file);
     let service_targets_authoritative = true;
     if let WorkerSelection::One(only) = selection {
@@ -1280,6 +1381,7 @@ async fn build_worker(worker_id: c_int) -> Result<Option<Worker>, String> {
         service_targets_file,
         service_targets_version,
         service_targets_authoritative,
+        service_targets_stamp: None,
         tx_reserve: tx_reserve_enabled(),
         counters: Counters::default(),
     }))
@@ -1517,6 +1619,28 @@ pub unsafe extern "C" fn l7_report(
 ) {
 }
 
+/// Control-plane admission accounting entry point.
+///
+/// Registration, membership and revocation are decided on the Comch control
+/// thread, which owns no worker. The counters are process-global, so every
+/// worker's admin endpoint reports the same values.
+///
+/// # Safety
+/// `kind` and `reason` must be NUL-terminated or null.
+#[no_mangle]
+pub unsafe extern "C" fn l7_control_event(kind: *const c_char, reason: *const c_char) {
+    unsafe fn slug<'a>(text: *const c_char) -> Option<&'a str> {
+        if text.is_null() {
+            return None;
+        }
+        std::ffi::CStr::from_ptr(text).to_str().ok()
+    }
+    let (Some(kind), Some(reason)) = (slug(kind), slug(reason)) else {
+        return;
+    };
+    dmesh_doca::record_control_event(kind, reason);
+}
+
 /// ABI checks for `dmesh_l7.h`.
 #[cfg(test)]
 mod abi {
@@ -1631,6 +1755,29 @@ mod tests {
     }
 
     #[test]
+    fn an_unsigned_service_target_feed_is_refused() {
+        // The feed carries the same authority as a grant, so an unsigned or
+        // badly signed generation is refused exactly like a malformed one.
+        assert!(parse_signed_service_targets("version=4\n11=10.0.0.11:9092\n").is_err());
+        assert!(parse_signed_service_targets(
+            "version=4\n11=10.0.0.11:9092\nsignature=test,forged\n"
+        )
+        .is_err());
+        let (version, targets, _) = parse_signed_service_targets(
+            "version=4\n11=10.0.0.11:9092\nsignature=test,valid\n",
+        )
+        .unwrap();
+        assert_eq!(version, 4);
+        assert_eq!(targets[&11], "10.0.0.11:9092".parse().unwrap());
+        // Bytes appended after the envelope are outside the signature, so the
+        // document is refused rather than parsed up to the envelope.
+        assert!(parse_signed_service_targets(
+            "version=4\n11=10.0.0.11:9092\nsignature=test,valid\n20=10.0.0.20:9092\n"
+        )
+        .is_err());
+    }
+
+    #[test]
     fn service_target_feed_rejects_rollback_and_applies_withdrawal() {
         let mut tw = install_worker(0);
         let path = std::env::temp_dir().join(format!(
@@ -1638,16 +1785,42 @@ mod tests {
             std::process::id(),
             session_key(1, 1)
         ));
-        std::fs::write(&path, "version=2\n11=10.0.0.11:9092\n").unwrap();
+        std::fs::write(&path, "version=2\n11=10.0.0.11:9092\nsignature=test,valid\n").unwrap();
+        // A generation younger than STAMP_SETTLE is always re-read, so age this
+        // one to exercise the stamp itself.
+        let installed = SystemTime::now() - STAMP_SETTLE * 5;
+        let age = |path: &std::path::Path| {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(installed)
+                .unwrap()
+        };
+        age(&path);
         with_test_worker(|w| {
             w.service_targets_file = Some(path.clone());
             w.service_targets_authoritative = true;
             w.refresh_service_targets().unwrap();
             assert_eq!(w.service_targets_version, 2);
         });
-        std::fs::write(&path, "version=1\n11=10.0.0.12:9092\n").unwrap();
+        // A settled generation is adopted only once: the same inode,
+        // modification time and length mean no read is issued.
+        std::fs::write(&path, "version=9\n11=10.0.0.99:9092\nsignature=test,valid\n").unwrap();
+        age(&path);
+        with_test_worker(|w| {
+            w.refresh_service_targets().unwrap();
+            assert_eq!(w.service_targets_version, 2);
+            assert_eq!(
+                w.service_targets[&11],
+                "10.0.0.11:9092".parse::<SocketAddrV4>().unwrap()
+            );
+        });
+        std::fs::write(&path, "# rolled back\nversion=1\n11=10.0.0.12:9092\nsignature=test,valid\n").unwrap();
         with_test_worker(|w| assert!(w.refresh_service_targets().is_err()));
-        std::fs::write(&path, "version=3\n").unwrap();
+        // A rejected generation is not stamped, so it keeps being rejected.
+        with_test_worker(|w| assert!(w.refresh_service_targets().is_err()));
+        std::fs::write(&path, "version=3\nsignature=test,valid\n").unwrap();
         with_test_worker(|w| w.refresh_service_targets().unwrap());
         let flow = request_flow(11, 1, 4001);
         assert_eq!(
@@ -1689,6 +1862,7 @@ mod tests {
             service_targets_file: None,
             service_targets_version: 0,
             service_targets_authoritative: false,
+            service_targets_stamp: None,
             tx_reserve: true,
             counters: Counters::default(),
         };

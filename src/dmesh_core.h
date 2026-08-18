@@ -56,6 +56,10 @@ typedef struct dpumesh_ctx dpumesh_ctx_t;
 
 /* Connection table index space: port [1,65535] IS a connection; 0 = BLANK. */
 #define DMESH_PORT_SPACE  65536
+/* The port table covers every representable port, so a uint16_t port needs no
+ * upper bound check at the API surface. */
+_Static_assert(DMESH_PORT_SPACE == (UINT16_MAX + 1),
+               "the port table must cover every uint16_t port");
 /* Max EQs per channel (= max parallel RX consumers). Each costs a ready ring +
  * an eventfd, so the cap is what bounds the accept-path notify fan-out. */
 #define DMESH_MAX_EQ      64

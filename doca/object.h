@@ -12,6 +12,7 @@
 #include <doca_comch.h>
 
 #include "comch_server.h"
+#include "pod_membership.h"
 #include "comch_common.h"
 #include <dpumesh/dmesh_common.h>
 
@@ -207,16 +208,27 @@ struct pod_state {
      * it is derived from a verified node-agent grant; POD_IDENTITY is accepted
      * only by the explicit development compatibility mode. */
     char workload[DMESH_WORKLOAD_MAX];
+    /* Signed Kubernetes Pod UID of the granted registration. It names the exact
+     * live registration a membership withdrawal has to close, and is empty in
+     * development mode. */
+    char pod_uid[DMESH_POD_UID_MAX];
     uint8_t registration_nonce[DMESH_REG_NONCE_SIZE];
     uint8_t registration_grant_id[DMESH_GRANT_ID_SIZE];
     int32_t grant_service_id;
+    /* Newest membership generation this registration has been judged against,
+     * and how many consecutive generations have omitted it. A registration
+     * accepted between a generation's snapshot and its publication is absent
+     * from that one generation without having lost membership. */
+    uint64_t membership_generation;
+    uint32_t membership_absences;
+    int revoked;
     int registration_challenge_issued;
     int registration_challenge_sent;
     int registration_grant_verified;
     int registration_grant_consumed;
     int registered;         /* 1 = DMESH_MSG_POD_REGISTER received */
     int dma_ready;          /* 1 = all mmaps + worker barrier + DPA ADD ACKs complete */
-    int init_result;        /* enum dmesh_pod_init_result; terminal once non-PENDING */
+    enum dmesh_pod_init_result init_result;   /* terminal once non-PENDING */
     int init_result_sent;   /* result message was submitted to this connection */
     /* Bumped by setup_pod_dma per incarnation of this SLOT. A DMA error names its pod
      * by slot index, which is RECYCLED, and lands asynchronously — possibly after the
@@ -493,12 +505,39 @@ struct objects {
     struct dmesh_registration_key registration_keys[DMESH_REGISTRATION_MAX_KEYS];
     size_t registration_key_count;
     char registration_issuer[DMESH_GRANT_ISSUER_MAX];
+    char registration_key_dir[4096];
     uint8_t consumed_grant_ids[DMESH_REGISTRATION_REPLAY_SLOTS][DMESH_GRANT_ID_SIZE];
     size_t consumed_grant_count;
     size_t consumed_grant_cursor;
     uint64_t registration_grants_accepted;
     uint64_t registration_grants_rejected;
     uint64_t registration_grants_replayed;
+
+    /* Authoritative node membership. The controller publishes the (Pod UID,
+     * Service) pairs this node may hold; a registration that leaves the set is
+     * closed on the Comch control thread, which is the single owner of all of
+     * this state. An unset DPUMESH_MEMBERSHIP_FILE leaves revocation off. */
+    char membership_path[4096];
+    int membership_enabled;
+    struct dmesh_membership_entry membership[DMESH_MEMBERSHIP_MAX_ENTRIES];
+    size_t membership_count;
+    uint64_t membership_generation;
+    uint64_t membership_stamp_ino;
+    int64_t membership_stamp_sec;
+    int64_t membership_stamp_nsec;
+    uint64_t membership_stamp_size;
+    uint64_t membership_rejected;
+    uint64_t membership_revocations;
+    uint64_t membership_next_check_ns;
+
+    /* Protected admission. A drain refuses new L7 sessions while established
+     * ones continue, so identity material can be replaced against a quiet
+     * proxy. The control thread polls the file; workers read the flag. */
+    char admission_path[4096];
+    int admission_enabled;
+    int32_t admission_drain;
+    uint64_t admission_drain_refusals;
+    uint64_t admission_next_check_ns;
 
     /* Shared DPA device with N EU threads. The common topology maps each ring
      * to an EU whose EU%A equals ring%A. */

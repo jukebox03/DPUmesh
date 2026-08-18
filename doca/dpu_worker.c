@@ -361,8 +361,11 @@ dpu_drain_iteration(struct objects *objs)
     int sent_init_result = server_flush_pod_init_results(objs);
     int sent_doorbell    = dpu_flush_host_doorbells(objs);
     int cleaned_pods = server_progress_pod_cleanup(objs);
+    int revoked = server_progress_membership(objs);
+    int admission = server_progress_admission(objs);
     return (did_ctrl || cleaned_pods > 0 || finalized_init > 0 ||
-            sent_init_result > 0 || sent_doorbell > 0);
+            sent_init_result > 0 || sent_doorbell > 0 || revoked > 0 ||
+            admission > 0);
 }
 
 /* ====== ARM data workers ====== */
