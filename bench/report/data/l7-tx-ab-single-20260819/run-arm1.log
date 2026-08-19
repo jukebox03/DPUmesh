@@ -1,0 +1,79 @@
+[0;32m[ab][0m -> bench/report/data/l7-tx-ab-single-20260819/arm1/provenance-reserve1.txt
+[0;34m[ab][0m arm=1 conc=1 rep=1
+[0;32m[ab][0m   mrps=0.002849 p99=685.00us dpu=27.5% us/req=97.376
+[0;34m[ab][0m arm=1 conc=1 rep=2
+[0;32m[ab][0m   mrps=0.002906 p99=677.00us dpu=37.4% us/req=129.807
+[0;34m[ab][0m arm=1 conc=1 rep=3
+[0;32m[ab][0m   mrps=0.002842 p99=706.00us dpu=37.9% us/req=134.526
+[0;34m[ab][0m arm=1 conc=1 rep=4
+[0;32m[ab][0m   mrps=0.002822 p99=688.00us dpu=36.9% us/req=131.951
+[0;34m[ab][0m arm=1 conc=1 rep=5
+[0;32m[ab][0m   mrps=0.002889 p99=677.00us dpu=38.9% us/req=135.815
+[0;34m[ab][0m arm=1 conc=1 rep=6
+[0;32m[ab][0m   mrps=0.003161 p99=679.00us dpu=40.3% us/req=128.586
+[0;34m[ab][0m arm=1 conc=32 rep=1
+[0;32m[ab][0m   mrps=0.040848 p99=1495.00us dpu=110.6% us/req=27.140
+[0;34m[ab][0m arm=1 conc=32 rep=2
+[0;32m[ab][0m   mrps=0.040694 p99=1492.00us dpu=35.3% us/req=8.692
+[0;34m[ab][0m arm=1 conc=32 rep=3
+[0;32m[ab][0m   mrps=0.039403 p99=1513.00us dpu=35.2% us/req=8.955
+[0;34m[ab][0m arm=1 conc=32 rep=4
+[0;32m[ab][0m   mrps=0.040208 p99=1501.00us dpu=34.5% us/req=8.601
+[0;34m[ab][0m arm=1 conc=32 rep=5
+[0;32m[ab][0m   mrps=0.037467 p99=1596.00us dpu=32.2% us/req=8.614
+[0;34m[ab][0m arm=1 conc=32 rep=6
+[0;32m[ab][0m   mrps=0.038905 p99=1535.00us dpu=33.8% us/req=8.709
+[0;34m[ab][0m arm=1 conc=128 rep=1
+[0;32m[ab][0m   mrps=0.153968 p99=1459.00us dpu=42.4% us/req=2.759
+[0;34m[ab][0m arm=1 conc=128 rep=2
+[0;32m[ab][0m   mrps=0.153634 p99=1456.00us dpu=41.6% us/req=2.713
+[0;34m[ab][0m arm=1 conc=128 rep=3
+[0;32m[ab][0m   mrps=0.153352 p99=1466.00us dpu=42.4% us/req=2.770
+[0;34m[ab][0m arm=1 conc=128 rep=4
+[0;32m[ab][0m   mrps=0.153478 p99=1467.00us dpu=43.4% us/req=2.834
+[0;34m[ab][0m arm=1 conc=128 rep=5
+[0;32m[ab][0m   mrps=0.153954 p99=1456.00us dpu=42.7% us/req=2.779
+[0;34m[ab][0m arm=1 conc=128 rep=6
+[0;32m[ab][0m   mrps=0.154581 p99=1451.00us dpu=42.0% us/req=2.723
+[0;32m[ab][0m -> bench/report/data/l7-tx-ab-single-20260819/arm1/quiescence-reserve1.txt
+[0;32m[ab][0m -> bench/report/data/l7-tx-ab-single-20260819/arm1/summary.txt
+Linkerd output path A/B (arm 1 = reserve into the egress arena, 0 = copy then send)
+
+## Mrps
+| conc | arm 1 (median of n) |
+|---|---|
+| 1 | 0.002869 (n=6, spread 11.8%) |
+| 32 | 0.039806 (n=6, spread 8.5%) |
+| 128 | 0.153794 (n=6, spread 0.8%) |
+
+## p50 us
+| conc | arm 1 (median of n) |
+|---|---|
+| 1 | 337.5 (n=6, spread 8.9%) |
+| 32 | 711.5 (n=6, spread 6.7%) |
+| 128 | 829.0 (n=6, spread 10.5%) |
+
+## p99 us
+| conc | arm 1 (median of n) |
+|---|---|
+| 1 | 682.0 (n=6, spread 4.3%) |
+| 32 | 1507.0 (n=6, spread 6.9%) |
+| 128 | 1457.5 (n=6, spread 1.1%) |
+
+## DPU %
+| conc | arm 1 (median of n) |
+|---|---|
+| 1 | 37.6 (n=6, spread 34.0%) |
+| 32 | 34.9 (n=6, spread 225.0%) |
+| 128 | 42.4 (n=6, spread 4.2%) |
+
+## ARM us/req
+| conc | arm 1 (median of n) |
+|---|---|
+| 1 | 130.879 (n=6, spread 29.4%) |
+| 32 | 8.700 (n=6, spread 213.1%) |
+| 128 | 2.764 (n=6, spread 4.4%) |
+
+Delta is arm 1 relative to arm 0. A negative ARM us/req or DPU % means the
+reservation path costs less. Spread is the range across repetitions as a
+share of the median: a delta smaller than the spread is not a result.

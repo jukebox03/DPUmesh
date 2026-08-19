@@ -51,6 +51,9 @@ Authoritative feeds, each installed by atomic rename at a monotonic generation:
   node agent + pusher     ---> node membership feed (Comch control thread)
 ```
 
+The same picture, drawn rather than sketched, is
+[`design/figures/control_plane.png`](design/figures/control_plane.png).
+
 The production path has no DPUmesh mock control-plane fallback. The remaining
 `mock-identity`, `mock-policy` and `mock-destination` sources belong only to the
 upstream `linkerd-app-integration` test crate and are not linked or deployed.
@@ -154,6 +157,13 @@ Those are Line B.
   waits for `/ready`, restores Pod placement and reopens admission.
 - Grant, membership, revocation and admission outcomes and session declines are
   exported by reason at the proxy admin metrics surface.
+- Fail-closed covers every mode a Service can be assigned to. `px_parse_l7`
+  refuses a declined open, and `px_l7_decide` refuses a connection the layer
+  returned no verdict for, counting it as
+  `dmesh_control_events_total{kind="admission",reason="no-verdict"}`. The
+  embedded consumer declines every decision-mode question, so
+  `resolve_l7_fail_closed` refuses to deploy `DPUMESH_L7_DECISION_SVC` under
+  `L7_BACKEND=linkerd` rather than start a Service that could only refuse.
 - Session close is generation-safe and leaves opened equal to closed with zero
   active sessions, pending registrations, live tasks and orphaned endpoints.
 
@@ -221,9 +231,24 @@ Generation safety: the resolution must fail if the registration's
 endpoint. A recreated Pod carries a new UID, so it cannot inherit a mapping; the
 generation check covers the reverse case where the feed is ahead of the DPU.
 
+### What already exists
+
+- The feed already carries `endpoint=<service-id>,<ip:port>` and the adapter
+  already parses it into `service_endpoints`
+  (`parse_versioned_service_targets`), so only the third field and its
+  resolution are missing.
+- `pod_state` already retains the grant's signed `pod_uid`
+  (`doca/object.h`), so `dmesh_l7_pod_for_uid` has the field it must match on
+  and needs no new claim retention.
+- `Backends::place_targets` / `service_of_target` already give `take_session`
+  the address→Service placement; the UID map is a second value on the same key.
+
 ### Steps
 
-- [ ] Extend the feed writer and `parse_versioned_service_targets`.
+- [ ] Extend the feed writer and `parse_versioned_service_targets` with the
+  third field, rejecting an `endpoint=` line that carries two fields once the
+  writer emits three — a partially upgraded publisher must not silently lose
+  the mapping.
 - [ ] Add `dmesh_l7_pod_for_uid` to `linkerd/include/dmesh_l7.h`,
   `linkerd/shim/l7_null.c` and `doca/dpu_proxy.c`.
 - [ ] Resolve in `Backends::take_session`; add
@@ -245,32 +270,41 @@ generation check covers the reverse case where the feed is ahead of the DPU.
 
 ### What is known
 
-L7 capacity is bounded by per-session cost, not by the transport. The
-synchronous stack build is already instrumented in
-`linkerd/app/src/lib.rs` and reported by
-`SessionMetrics::observe_stack_build`. On the deployed configuration, over four
-sessions — indicative, not a measurement:
+L7 capacity is bounded by per-session cost, not by the transport. The total is
+measured: `bench/suite/l7_session_cost.sh` moves the reconnect rate against an
+`L7_BACKEND=null` control on the identical workload, and least squares over both
+sets puts a DPUmesh connection at **73 ARM core-µs** and the Linkerd session on
+top of it at **1,200** — so 1,127 µs is the Linkerd share. The receipts are in
+[`REPORT_L7.md`](bench/report/REPORT_L7.md) and
+`bench/report/data/l7-session-cost-20260817`.
 
-| Phase | Per session |
-|---|---:|
-| `configure` (clone the outbound template, set `dmesh_session`) | ~9 µs |
-| `layers` (`build_policies` + `outbound.mk`) | ~121 µs |
-| `service` (`NewService::new_service`) | ~79 µs |
-| synchronous total | **~209 µs** |
+The synchronous half of that is instrumented in `linkerd/app/src/lib.rs` and
+reported by `SessionMetrics::observe_stack_build`. Over 9,565 opens and closes
+across four workers:
 
-The earlier session-cost report put total Linkerd session establishment near
-1.1 ms. If that still holds, roughly four fifths is discovery round trips
-through the gateway rather than construction — so template caching and watch
-sharing attack different parts and must not be conflated. **Re-measure the total
-on the current build before optimizing anything.**
+| Phase | Per session | Share of the 1,200 |
+|---|---:|---:|
+| `configure` (clone the outbound template, set `dmesh_session`) | 5.9 µs | 0.5% |
+| `layers` (`build_policies` + `outbound.mk`) | 107.8 µs | 9.3% |
+| `service` (`NewService::new_service`) | 34.7 µs | 3.0% |
+| synchronous total | **148.5 µs** | **12.9%** |
+
+So the synchronous `outbound.mk` boundary is about one eighth of the slope, not
+the four fifths the earlier estimate implied. The remaining seven eighths is
+lazy discovery and policy work, task execution and teardown, and the surrounding
+DPUmesh lifecycle. **Locating it requires instrumenting those asynchronous
+boundaries; do not assume the whole figure is inside the synchronous call, and do
+not conflate template caching with watch sharing — they attack different parts.**
 
 ### A3.1 Reduce per-session stack construction
 
+- [x] Re-measure the total against the frozen baseline and record it in
+  `bench/report/`. Done: 1,200 ARM core-µs per session against a 73 µs L4
+  control, published in `REPORT_L7.md`.
 - [ ] Instrument the untimed remainder: policy discovery, destination/profile
   discovery, reconnect layers, endpoint construction and balancer construction.
-  Extend `SessionMetrics` rather than adding a second surface.
-- [ ] Re-measure the total against the frozen baseline and record it in
-  `bench/report/`.
+  Extend `SessionMetrics` rather than adding a second surface. This is the whole
+  of A3.1's remaining unknown: 1,051 of the 1,200 µs are unattributed.
 - [ ] Cache only immutable templates. `SessionToken`, backend channel, workload,
   target generation, cancellation and metrics must stay session-local — the
   connector binds to `dmesh_session`, so a shared service would take another
@@ -284,18 +318,31 @@ on the current build before optimizing anything.**
 
 ### A3.2 Direct `AsyncWrite` reservation
 
+The reservation-versus-copy A/B is measured and published: the reservation path
+costs 0.265 ARM µs/request less at concurrency 128, with the three-run ranges
+disjoint at 32 and 128. That fixed the default and the priority — 1,127 µs of
+session against 0.265 µs of copy break even at about 4,300 requests per
+connection — but it did not remove the intermediate queue, which is what this
+item is for.
+
 - [ ] Inject a worker-local egress reservation interface while keeping all
   `dmesh_l7_*` FFI in the adapter.
 - [ ] Write from Linkerd directly into the DPUmesh arena without the
   intermediate tx queue, preserving partial-write and output ordering.
 - [ ] Define capacity wakeup, cancellation, shutdown and task-drop semantics.
 - [ ] Compare copy bytes, ARM CPU/request, arena stalls, publication rate and
-  p50/p99 against the frozen reservation baseline in `bench/report/REPORT_L7.md`.
+  p50/p99 against the reservation baseline. **Re-baseline first.** The published
+  `l7-tx-ab-20260817` arm predates the `DmeshIo` tx cursor, which removed the
+  queue-tail move `consume_tx` performed on every publication; the absolute
+  µs/request in that dataset is therefore no longer the arm to subtract from.
 
 ### A3.3 Conditional worker-local state
 
 - [ ] Re-profile after A3.1/A3.2; continue only if endpoint locking becomes
-  material. `Backends::lock_stats` has observed zero contention.
+  material. Nothing counts lock contention today: `Backends` holds one
+  `parking_lot::Mutex` with no instrumentation, and the profile in `REPORT_L7.md`
+  puts the AArch64 parking-lot fast path at 1.3–1.7% with no pool symbol above
+  it. Add a counter before drawing a conclusion from that.
 - [ ] If justified, prototype only the DPUmesh specialization on Tokio `LocalSet`
   with `Rc<RefCell<_>>`; do not add unsafe `Send`/`Sync` claims or modify stock
   TCP Linkerd behavior.
@@ -532,10 +579,13 @@ Determine whether the synthetic source address the adapter already constructs
 (`pod_addr`) can be made to satisfy a realistic `networks` clause, or whether D1
 must treat `networks` as unenforceable and say so.
 
-**Q3 — What is the current total session establishment cost?** The ~1.1 ms
-figure predates the per-session stack work and the control-plane change. A3.1's
-first step is to re-measure it; every optimization target below it depends on the
-split.
+**Q3 — What is the current total session establishment cost? Answered.** On the
+current build a DPUmesh connection costs 73 ARM core-µs to build and tear down
+and the Linkerd session on it costs 1,200, of which 148.5 is the synchronous
+`outbound.mk` boundary. What remains open is not the total but its split: the
+1,051 µs outside the synchronous call is unattributed, and that split is what
+decides whether anything can be shared without giving up session isolation. It
+is A3.1's remaining step, not a question.
 
 ## Acceptance invariants
 
@@ -551,6 +601,11 @@ split.
   entries are zero.
 - [ ] Optimization results use repeated runs with the frozen topology, placement
   and 2.5 GHz clock; otherwise they are not accepted.
+- [ ] A capacity is quoted with the instrument that produced it. The L4 and gRPC
+  reports quote `knees.csv`'s twice-voted `highest_clean_rps`; the linkerd report
+  quotes the single-run rate grid, which reaches further on the same data. The
+  two are not interchangeable and a figure must not present one under the other's
+  caption.
 
 ## Order
 

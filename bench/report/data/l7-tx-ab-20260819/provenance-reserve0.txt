@@ -1,0 +1,11 @@
+arm DMESH_L7_TX_RESERVE=0
+tree 87ba3d1ed6a96edc65fadafbdd406260e69b20c6 M  PLAN.md MM bench/bench.sh  M bench/linkerd_service_registry.sh M  bench/report/REPORT.md M  bench/report/REPORT_CORE.md D  bench/report/figures/02_fixed_budget_throughput.pdf D  bench/report/figures/02_fixed_budget_throughput.png D  bench/report/figures/core_cost_split.pdf D  bench/report/figures/core_cost_split.png D  bench/suite/plot_cost_split.py M  bench/suite/plot_final.py M  design/CONTROL.md M  design/L7.md A  design/figures/control_plane.pdf A  design/figures/control_plane.png A  design/figures/generate_control_diagram.py M  doca/dpa_resource_config.yaml M  doca/dpu_proxy.c M  integrations/grpc/bench/report/REPORT_GRPC.md D  integrations/grpc/bench/report/figures/02_grpc_fixed_budget_throughput.pdf D  integrations/grpc/bench/report/figures/02_grpc_fixed_budget_throughput.png M  linkerd/CONTRACT.md M  linkerd/bench/report/REPORT_LINKERD.md  m linkerd/port M  linkerd/rust/src/lib.rs M  tests/README.md ?? bench/report/data/l7-tx-ab-20260819/ 
+request 1024B reply 8B threads 1 dur 10s reps 3
+stack dpa=32 rings=8 workers=4 l7_worker=all opaque=11,13,14
+--- DPU ---
+[03:14:08:043888][2828771360][DOCA][WRN][dpu_worker.c:807][run_dpu_worker] ARM DATA WORKERS = 4
+[03:14:15:586838][2828771360][DOCA][WRN][dpu_worker.c:947][run_dpu_worker] MAIN CONTROL/DOORBELL: workers=4, notification-driven (1 ms backstop tick)
+--- ARM clocks ---
+governor: n/a
+cores: 16
+affinity: pid 1278260's current affinity list: 13

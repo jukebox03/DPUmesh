@@ -191,7 +191,12 @@ behaves the same way between 8,000/s and 24,000/s, where Envoy's cost per reques
 falls from 129 µs to 83 µs and DPUmesh's from 66 µs to 54 µs.
 
 Host core nanoseconds per request at the highest measured rate, client and server
-together:
+together. The figures divide each endpoint's whole core by the rate it served, so
+a saturated bar is a cost per request rather than a share of a budget:
+
+![Host core nanoseconds per request, L4](core/figures/l4_per_rpc.png)
+
+![Host core nanoseconds per request, gRPC](core/figures/grpc_per_rpc.png)
 
 | Configuration | offered/s | total | application | gRPC runtime | transport | scheduler |
 |---|---:|---:|---:|---:|---:|---:|

@@ -202,6 +202,14 @@ of that test**, which is why every delivered rate above is reported with the p50
 and p99 observed there, and why the latency-budget curve rather than the
 delivered ceiling is the comparison to read.
 
+Every delivered ceiling quoted above is the capacity search's `highest_clean_rps`
+in [`knees.csv`](data/l4-20260810/knees.csv), which votes twice per candidate.
+The retained rate grid in `measurements.csv` is a single run per rate and reaches
+slightly further — 2,118,088/s against 2,021,585 for Envoy permissive at 64 B, and
+11,034,591 against 10,532,411 for native — so `plot_final.py` prints a capacity
+table that does not match this one. The twice-voted figure is the one reported,
+and a bar chart of the grid maximum is deliberately not published beside it.
+
 Cross-checks on this dataset: the three CPU definitions available per run — the
 runqueue runtime reported here, the cgroup sum of application and sidecar, and
 tick-sampled core busy — agree within 5% at every point, so the reported figure

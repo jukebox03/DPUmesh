@@ -490,6 +490,82 @@ static inline uint64_t dpu_wake_clock_hz(void)
 }
 #endif
 
+/* Optional periodic nudge to the DPA threads that own rings. Off by default.
+ *
+ * A ring-owning DPA thread releases its execution unit on the watchdog schedule
+ * and is brought back by its same-affinity helper. A WAKE message is a second,
+ * independent re-trigger on top of that: it lands as a consumer completion, so
+ * a thread waiting on one resumes without waiting for the helper to be
+ * scheduled. `DPUMESH_DPA_WAKE_US` names the period in microseconds; 0, the
+ * default, leaves the helper as the only path.
+ *
+ * A ringless execution unit is never nudged. Waking one is what wedged the DPU
+ * before the helper existed, and it has nothing to poll either way. */
+static uint64_t dpu_dpa_nudge_period(void)
+{
+    static uint64_t period;
+    static int resolved;
+    if (!resolved) {
+        const char *value = getenv("DPUMESH_DPA_WAKE_US");
+        long us = (value && *value) ? strtol(value, NULL, 10) : 0;
+        period = us > 0 ? (dpu_wake_clock_hz() * (uint64_t)us) / 1000000ull : 0;
+        if (us > 0 && period == 0)
+            period = 1;
+        __atomic_store_n(&resolved, 1, __ATOMIC_RELEASE);
+    }
+    return period;
+}
+
+/* Execution units holding a forward ring of some data-ready pod. */
+static uint32_t dpu_dpa_ring_eu_mask(const struct objects *objs)
+{
+    uint32_t mask = 0;
+    for (int i = 0; i < MAX_PODS; i++) {
+        const struct pod_state *pod = &objs->pods[i];
+        if (!__atomic_load_n(&pod->dma_ready, __ATOMIC_ACQUIRE))
+            continue;
+        for (int j = 0; j < objs->k_rings; j++) {
+            int eu = dmesh_dpa_eu_for_ring(pod->pod_id, objs->k_rings, j,
+                                           objs->num_dpa_threads,
+                                           objs->n_data_workers);
+            if (eu >= 0 && eu < MAX_DPA_EU)
+                mask |= 1u << eu;
+        }
+    }
+    return mask;
+}
+
+static void dpu_send_wake_worker(struct objects *objs, int id)
+{
+    uint32_t mask = dpu_dpa_ring_eu_mask(objs);
+    if (mask == 0)
+        return;
+    struct comch_msg trigger;
+    memset(&trigger, 0, sizeof(trigger));
+    trigger.type = DPA_MSG_WAKE;
+    for (int k = id; k < objs->num_dpa_threads; k += objs->n_data_workers)
+        if (objs->dpa_thread_running[k] && (mask & (1u << k)))
+            (void)dmesh_doca_dpa_msgq_send_try(&objs->dpa_comches[k]->send,
+                                               &trigger, sizeof(trigger));
+}
+
+/* Send the nudge if its period has elapsed. */
+static void dpu_dpa_nudge_due(struct dpu_data_worker *worker_state)
+{
+    uint64_t period = dpu_dpa_nudge_period();
+    if (period == 0)
+        return;
+    uint64_t now = dpu_wake_clock_now();
+    if (worker_state->dpa_nudge_deadline == 0) {
+        worker_state->dpa_nudge_deadline = now + period;
+        return;
+    }
+    if ((int64_t)(now - worker_state->dpa_nudge_deadline) < 0)
+        return;
+    dpu_send_wake_worker(worker_state->objs, worker_state->id);
+    worker_state->dpa_nudge_deadline = now + period;
+}
+
 /* ARM data-worker thread. The Linkerd backend owns the loop when it owns the
  * runtime; otherwise this file drives poll, drain and park itself. */
 static void *
@@ -545,6 +621,7 @@ dpu_data_worker_main(void *arg)
     atomic_store_explicit(&worker_state->init_state, 1, memory_order_release);
 
     while (!worker_state->stop) {
+        dpu_dpa_nudge_due(worker_state);
         enum px_progress_state did = dpu_progress_worker_pe(worker_state);
         enum px_progress_state run = dpu_worker_run(objs, worker_state);
         if (did == PX_PROGRESS_PROGRESSED || run == PX_PROGRESS_PROGRESSED)
@@ -646,6 +723,7 @@ dmesh_l7_driver_maintenance(void *driver)
     struct dpu_data_worker *worker_state = driver;
     if (!worker_state)
         return -1;
+    dpu_dpa_nudge_due(worker_state);
     px_l7_stats_report(worker_state->objs, worker_state->id);
     return 0;
 }

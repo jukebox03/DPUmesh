@@ -1,3 +1,12 @@
+# DPA execution-unit partition for this DPU.
+#
+# Not a build input: no script, Meson target or Makefile reads this file. It is
+# applied out of band on the DPU with NVIDIA's DPA resource manager, and it is
+# what makes execution units 0-63 available to one vHCA. `DPUMESH_DPA_THREADS`
+# selects N from that pool and is clamped to MAX_DPA_EU (32), so a DPU whose
+# partition is narrower than N silently gets fewer EUs than the topology asks
+# for. Re-apply it after a DPU firmware reset or a fresh bring-up.
+#
 version: 25.07
  
 partitions:

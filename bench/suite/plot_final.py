@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render the host-CPU and fixed-budget throughput figures from a measurement CSV."""
+"""Render the host-CPU figure and the capacity table from a measurement CSV."""
 
 import csv
 import sys
@@ -18,12 +18,6 @@ LABELS = {
     "envoy-strict": "Envoy strict",
     "dpumesh-preload": "DPUmesh preload",
     "dpumesh-native": "DPUmesh native",
-}
-SHORT = {
-    "envoy-permissive": "Envoy\npermissive",
-    "envoy-strict": "Envoy\nstrict",
-    "dpumesh-preload": "DPUmesh\npreload",
-    "dpumesh-native": "DPUmesh\nnative",
 }
 COLORS = {
     "envoy-permissive": "#5B6573",
@@ -114,35 +108,10 @@ def capacities(rows):
     return best
 
 
-def figure_capacity(rows, out):
-    best = capacities(rows)
-    fig, axes = plt.subplots(1, 3, figsize=(13.0, 4.2))
-    for ax, frame in zip(axes, FRAMES):
-        vals, labels, colors = [], [], []
-        for config in CONFIGS:
-            r = best.get((frame, config))
-            vals.append(r["achieved"] if r else 0.0)
-            labels.append(SHORT[config])
-            colors.append(COLORS[config])
-        idx = np.arange(len(vals))
-        ax.bar(idx, vals, 0.62, color=colors)
-        base = vals[0] or 1.0
-        for i, v in enumerate(vals):
-            ax.text(i, v, (f"{human(v)}\n{v/base:.2f}×" if v else "no clean\nboundary"),
-                    ha="center", va="bottom", fontsize=8.5)
-        ax.set_xticks(idx, labels)
-        ax.set_ylim(0, (max(vals) or 1) * 1.26)
-        ax.set_title(FRAME_LABEL[frame])
-    axes[0].set_ylabel("Sustained throughput (RPC/s)\nat host-core saturation")
-    fig.tight_layout()
-    save(fig, out, "02_fixed_budget_throughput")
-
-
 def main():
     rows = load(sys.argv[1])
     out = Path(sys.argv[2] if len(sys.argv) > 2 else "bench/report/figures")
     figure_cpu(rows, out)
-    figure_capacity(rows, out)
     best = capacities(rows)
     print("=== capacity (highest clean) ===")
     for frame in FRAMES:

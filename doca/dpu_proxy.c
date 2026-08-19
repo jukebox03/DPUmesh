@@ -1664,11 +1664,18 @@ static int px_l7_open_conn(struct objects *objs, struct px_conn *c) {
     if (rc < 0) {
         enum px_l7_fallback_reason why = px_l7_reason_of(rc);
         uint64_t n = px_l7_fallback(objs->proxy, why);
+        /* The caller decides what a decline means, so say what will happen
+         * rather than what the relaxed configuration would do: the deployed
+         * configuration is fail-closed and ends the stream here. */
         if (((n - 1u) & 0xFFFu) == 0)
-            DOCA_LOG_WARN("proxy: L7 layer declined conn (%d:%u) svc %d reason=%s — "
-                          "forwarding at L4 without policy (total %llu)",
+            DOCA_LOG_WARN("proxy: L7 layer declined conn (%d:%u) svc %d reason=%s — %s "
+                          "(total %llu)",
                           c->pub.src_pod, c->pub.src_port, c->pub.dst_service,
-                          px_l7_fallback_name[why], (unsigned long long)n);
+                          px_l7_fallback_name[why],
+                          objs->proxy->l7_fail_closed ?
+                              "refusing the connection" :
+                              "forwarding at L4 without policy",
+                          (unsigned long long)n);
         return 0;
     }
     c->l7_open = 1;
@@ -1741,6 +1748,22 @@ static int px_l7_decide(struct objects *objs, struct px_conn *c) {
     c->l7_open_ns = px_monotonic_ns();
     if (l7_resolve(px_cur_worker->id, &flow, &verdict) < 0) {
         uint64_t n = px_l7_fallback(objs->proxy, PX_L7_FB_NO_VERDICT);
+        /* No verdict is not permission. Under fail-closed a Service assigned to
+         * the layer ends here for the same reason a declined open does: the
+         * stream would otherwise carry without the policy its Service selected.
+         * The admission drain is deliberately not consulted — a decision-mode
+         * connection builds no session and holds no identity material, so it is
+         * not what a drain waits for. */
+        if (objs->proxy->l7_fail_closed) {
+            l7_control_event("admission", "no-verdict");
+            if (((n - 1u) & 0xFFFu) == 0)
+                DOCA_LOG_WARN("proxy: L7 layer gave no verdict for conn (%d:%u) "
+                              "svc %d — refusing the connection (total %llu)",
+                              c->pub.src_pod, c->pub.src_port, c->pub.dst_service,
+                              (unsigned long long)n);
+            px_poison(objs, c, "l7 layer gave no verdict for a protected service");
+            return 0;
+        }
         if (((n - 1u) & 0xFFFu) == 0)
             DOCA_LOG_WARN("proxy: L7 layer gave no verdict for conn (%d:%u) — "
                           "forwarding without policy (total %llu)",

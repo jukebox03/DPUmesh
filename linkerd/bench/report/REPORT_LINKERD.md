@@ -258,6 +258,8 @@ that were core-bound from the path that was not:
 | | **linkerd L7** | 11,215 | **16,226** | **1.45×** | **1.72** | **2.09** |
 | | **DPUmesh** | 27,966 | **119,016** | 4.26× | 3.91 | 5.20 |
 
+![Rate under a p99 budget, six cores per endpoint](figures/slo_linkerd_closed6.png)
+
 Given twelve cores, linkerd L7 uses fewer than four of them and converts the
 extra ones at 1.44×, where every other path converts at 2.0–4.3×. It leaves more
 than half of each endpoint's budget idle while its own balancer queue is 57

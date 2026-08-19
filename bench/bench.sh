@@ -444,13 +444,16 @@ sync_linkerd_sources() {
     local dest; dest=$(linkerd_build_dir)
     step "=== Syncing linkerd sources to DPU ($DPU_HOST:$dest) ==="
     ssh_dpu "mkdir -p '$dest/rust' '$dest/port/linkerd2-proxy'"
-    # Preserve remote build outputs.
+    # Preserve remote build outputs. Both trees mirror the repository: rsync
+    # protects an --exclude'd path from --delete, so target/ survives while a
+    # source file removed here is removed there. Without that a deleted file
+    # keeps being compiled on the DPU and the build stops matching the tree.
     local ex=(--exclude='.git' --exclude='.git/' --exclude='target/'
               --exclude='build/' --exclude='*.o' --exclude='*.a')
     rsync -az --delete --timeout=120 -e "ssh ${SSH_OPTS[*]}" "${ex[@]}" \
         "$LINKERD_RUST_SRC/" "$DPU_HOST:$dest/rust/" ||
         { err "linkerd/rust sync failed"; exit 1; }
-    rsync -az --timeout=300 -e "ssh ${SSH_OPTS[*]}" "${ex[@]}" \
+    rsync -az --delete --timeout=300 -e "ssh ${SSH_OPTS[*]}" "${ex[@]}" \
         "$LINKERD_PORT_SRC/" "$DPU_HOST:$dest/port/linkerd2-proxy/" ||
         { err "linkerd port sync failed"; exit 1; }
     info "linkerd source sync complete"
@@ -602,6 +605,55 @@ resolve_l7_fail_closed() {
     esac
     DPUMESH_L7_FAIL_CLOSED=1
     export DPUMESH_L7_FAIL_CLOSED
+    # The embedded consumer answers every decision-mode question with a decline,
+    # so under fail-closed such a Service refuses connection after connection.
+    # That is safe and useless; refuse the configuration instead of deploying a
+    # Service that cannot carry traffic.
+    if [ "${L7_BACKEND:-null}" = linkerd ] && [ -n "${DPUMESH_L7_DECISION_SVC:-}" ]; then
+        err "DPUMESH_L7_DECISION_SVC=$DPUMESH_L7_DECISION_SVC cannot be served by"
+        err "  L7_BACKEND=linkerd: the embedded consumer declines every verdict,"
+        err "  so fail-closed would refuse every connection to those Services."
+        err "  Use DPUMESH_L7_OPAQUE_SVC or DPUMESH_L7_SVC, or L7_BACKEND=null"
+        exit 1
+    fi
+}
+
+# Every Service assigned to the L7 layer must also appear in the authoritative
+# target feed: a Service the feed omits is a withdrawn target, and under
+# fail-closed the adapter refuses every connection to it. Derive the feed's id
+# list from the assignment rather than leaving two knobs to be kept in step by
+# hand. An explicit DPUMESH_L7_SERVICE_IDS still wins.
+resolve_l7_service_ids() {
+    if [ -n "${DPUMESH_L7_SERVICE_IDS:-}" ]; then
+        export DPUMESH_L7_SERVICE_IDS
+        return 0
+    fi
+    local ids id name kept=""
+    ids=$(printf '%s,%s,%s' "${DPUMESH_L7_DECISION_SVC:-}" \
+                            "${DPUMESH_L7_OPAQUE_SVC:-}" \
+                            "${DPUMESH_L7_SVC:-}" |
+          tr ',' '\n' | grep -E '^[0-9]+$' | sort -nu | paste -sd, - || true)
+    [ -n "$ids" ] || return 0
+    # An assignment may name Services this scope does not deploy — the L7 mode
+    # sweeps list every echo id whether or not its Service exists. Only a
+    # Service that exists can be a target, and a missing one is not the
+    # withdrawal this feed is meant to express.
+    for id in ${ids//,/ }; do
+        name=$(awk -v wanted="$id" \
+                   '/^[[:space:]]*#/ || NF == 0 { next } $3 == wanted { print $2 }' \
+                   "$BENCH_DIR/k8s/registry" | head -1)
+        if [ -z "$name" ]; then
+            warn "L7 Service id $id is not in $BENCH_DIR/k8s/registry; not published"
+        elif ! kubectl get service "$name" -n "$NS" >/dev/null 2>&1; then
+            warn "L7 Service id $id ($name) has no Service in $NS; not published"
+        else
+            kept="${kept:+$kept,}$id"
+        fi
+    done
+    [ -n "$kept" ] || { err "no Service assigned to the L7 layer exists in $NS"; exit 1; }
+    DPUMESH_L7_SERVICE_IDS="$kept"
+    export DPUMESH_L7_SERVICE_IDS
+    info "L7 Service target feed carries service id(s): $DPUMESH_L7_SERVICE_IDS"
 }
 
 start_dpu() {
@@ -1060,6 +1112,7 @@ deploy() {
     prepare_trusted_registration
     apply_manifest
     if [ "${L7_BACKEND:-null}" = linkerd ]; then
+        resolve_l7_service_ids
         "$BENCH_DIR/linkerd_service_registry.sh" start
     fi
     sync_sources

@@ -1,4 +1,4 @@
-[submodule "linkerd/port"]
-	path = linkerd/port
-	url = https://github.com/youngmin-kaist/DPUMesh.git
-	branch = main
+[submodule "linkerd/port/linkerd2-proxy"]
+	path = linkerd/port/linkerd2-proxy
+	url = https://github.com/youngmin-kaist/linkerd2-proxy.git
+	branch = dpumesh-integrate

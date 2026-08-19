@@ -5,6 +5,10 @@ analysis contracts without Kubernetes or BlueField hardware.
 
 | Test | Coverage |
 |---|---|
+| `workload_grant_test.c` | canonical grant form, issuer, expiry, nonce binding, HMAC and key-id selection, replay refusal, and the signed feed envelope: unsigned, appended-to, unknown-key and tampered generations |
+| `pod_membership_test.c` | membership generation parsing and adoption: no version, malformed or oversized tables, atomic-rename install, rollback refusal, and the withdrawal that closes one registration |
+| `workload_attest_agent_test.py` | the node agent's peer-cgroup to Pod UID mapping, its refusal of a non-Pod peer, Service membership authorization, and the 1090-byte grant it signs |
+| `linkerd_cp_relay_test.py` | control-plane relay route parsing and ClusterIP/endpoint resolution, including a headless Service |
 | `native_api_contract_test.c` | public allocation, post, the open-transmit-call pairing, library-owned batching, async TX error, event, and RX-credit contracts |
 | `native_control_state_test.c` | registration, unregister replay, and slot cleanup |
 | `native_tx_batch_policy_test.c` | idle/immediate and busy/deadline tail publication, deadlines that never move once stamped, arming a tail retained when the stream falls quiet, the transmit gate excluding the deadline pass with retention surviving it, waiting for submitted data to leave the DPU before FIN, timer wakes without submitting, armed-bit release on close, deferred TX error, TX units, block ordering, landing geometry, and credit sharding |

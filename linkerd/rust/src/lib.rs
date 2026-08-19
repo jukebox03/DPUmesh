@@ -655,6 +655,15 @@ fn publish_copied(
     Ok(accepted)
 }
 
+/// What one pass over an endpoint did, and what the caller must decide on next.
+#[derive(Clone, Copy)]
+struct Pumped {
+    /// The pass published output or returned staging custody.
+    progressed: bool,
+    /// The stack finished this endpoint's write half, so the session is over.
+    finished: bool,
+}
+
 /// Publish endpoint output and release fully consumed input.
 fn pump_side(
     worker_id: c_int,
@@ -664,11 +673,11 @@ fn pump_side(
     budget: &mut usize,
     reserve: bool,
     counters: &mut Counters,
-) -> Result<bool, ()> {
+) -> Result<Pumped, ()> {
     let mut did = false;
-    let has_rx = {
+    let state = {
         let Some(handle) = side.handle.as_ref() else {
-            return Ok(false);
+            return Ok(Pumped { progressed: false, finished: false });
         };
         if let Some(out) = out_conn {
             let want = TX_DRAIN_MAX.min(*budget);
@@ -703,14 +712,17 @@ fn pump_side(
                 did = true;
             }
         }
-        handle.has_rx()
+        // Both answers are read after publishing, so one lock serves both.
+        handle.drain_state()
     };
     // Release a fully consumed input queue.
-    if !has_rx && !side.outstanding.is_empty() && side.release_outstanding(worker_id, counters) > 0
+    if !state.has_rx
+        && !side.outstanding.is_empty()
+        && side.release_outstanding(worker_id, counters) > 0
     {
         did = true;
     }
-    Ok(did)
+    Ok(Pumped { progressed: did, finished: state.tx_finished })
 }
 
 impl Worker {
@@ -889,11 +901,10 @@ impl Worker {
                 reserve,
                 counters,
             );
-            let endpoint_finished = [&s.client, &s.backend]
-                .iter()
-                .any(|side| side.handle.as_ref().is_some_and(DmeshIoHandle::tx_finished));
-            match (client, backend, endpoint_finished) {
-                (Ok(a), Ok(b), false) => did |= a | b,
+            match (client, backend) {
+                (Ok(a), Ok(b)) if !a.finished && !b.finished => {
+                    did |= a.progressed | b.progressed
+                }
                 _ => failed.push(key),
             }
             if budget == 0 {

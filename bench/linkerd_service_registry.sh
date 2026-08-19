@@ -177,7 +177,19 @@ start() {
     sync_once
     systemctl --user stop "$UNIT" >/dev/null 2>&1 || true
     systemctl --user reset-failed "$UNIT" >/dev/null 2>&1 || true
-    systemd-run --user --collect --unit="${UNIT%.service}" \
+    # A transient unit inherits none of the caller's environment, and the watch
+    # loop republishes every INTERVAL seconds. Anything the feed's contents or
+    # destination depend on has to be carried in, or the unit overwrites what
+    # `sync_once` just published with the defaults.
+    local carried=(--setenv=NS="$NS"
+                   --setenv=DPUMESH_ATTEST_REGISTRY="$REGISTRY"
+                   --setenv=DPUMESH_L7_SERVICE_IDS="$SERVICE_IDS"
+                   --setenv=DPUMESH_SERVICE_REGISTRY_INTERVAL="$INTERVAL"
+                   --setenv=DPUMESH_SERVICE_REGISTRY_STATE="$STATE"
+                   --setenv=DPUMESH_REGISTRATION_KEY_DIR_HOST="$KEY_DIR")
+    [ -z "${DPUMESH_L7_SERVICE_TARGETS_FILE:-}" ] ||
+        carried+=(--setenv=DPUMESH_L7_SERVICE_TARGETS_FILE="$DPUMESH_L7_SERVICE_TARGETS_FILE")
+    systemd-run --user --collect --unit="${UNIT%.service}" "${carried[@]}" \
         --property=Restart=always --property=RestartSec=2s "$0" watch
     systemctl --user is-active --quiet "$UNIT"
 }

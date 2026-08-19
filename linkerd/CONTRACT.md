@@ -136,7 +136,7 @@ It is an identifier, not a pointer.
 | `l7_conn_segment` | accepted prefix in `[0, len]`; negative closes the adapter session |
 | `l7_conn_eof` | closes the input half for the named direction |
 | `l7_conn_close` | drops the session and releases all held extents |
-| `l7_resolve` | decision verdict; the Linkerd consumer currently declines |
+| `l7_resolve` | decision verdict; the Linkerd consumer declines every question, and under fail-closed DPUmesh ends the connection rather than forwarding it |
 | `l7_report` | terminal accounting for decision mode |
 | `l7_control_event` | one control-plane admission outcome by kind and reason |
 
@@ -175,9 +175,9 @@ struct BackendKey { worker: u16, service: SocketAddr, session: SessionToken }
 
 The registry is owned by the worker, not global: the adapter, the acceptor and
 the outbound connector of one worker share one instance, and no lock is shared
-between workers. `publish` refuses a duplicate live key. Exact-key `take`
-answers `NotPublished`, `AlreadyTaken` or `Stale`; the outbound connector uses
-`take_session`, because discovery may replace the original synthetic service
+between workers. `publish` refuses a duplicate live key. The outbound
+connector calls `take_session`, which answers `NotPublished`, `AlreadyTaken` or
+`TargetMismatch`, because discovery may replace the original synthetic service
 address with a concrete endpoint address. A close evicts its own key before the
 next generation publishes.
 

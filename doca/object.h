@@ -458,6 +458,7 @@ struct dpu_data_worker {
     atomic_ullong stat_cross_worker_out;
     atomic_ullong stat_cross_worker_in;
     int wake_fd;                 /* cross-worker eventfd */
+    uint64_t dpa_nudge_deadline; /* next optional DPA nudge; 0 while disabled */
     atomic_int parked;           /* worker is entering or blocked in epoll_wait */
     atomic_int init_state;       /* 0=pending, 1=epoll ready, -1=thread init failed */
     pthread_t thread;

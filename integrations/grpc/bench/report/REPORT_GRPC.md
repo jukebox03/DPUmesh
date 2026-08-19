@@ -338,6 +338,13 @@ of that test**, which is why every delivered rate is reported with the p50 and
 p99 observed there, and why the latency-budget curves rather than the delivered
 ceiling are the comparison to read.
 
+The delivered ceilings above are the capacity search's `highest_clean_rps` in
+[`knees.csv`](data/grpc-20260810/knees.csv), which votes twice per candidate. The
+retained rate grid reaches slightly further — 49,830/s against 47,481 for Envoy
+permissive at 64 B — so the capacity table `plot_grpc.py` prints does not match
+this one. The twice-voted figure is the one reported, and a bar chart of the grid
+maximum is deliberately not published beside it.
+
 Envoy strict authenticates and encrypts the inter-pod leg; DPUmesh does not, and
 the two are not security-equivalent. DPUmesh spends DPU ARM cores that the other
 three do not.

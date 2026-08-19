@@ -1,0 +1,40 @@
+Linkerd output path A/B (arm 1 = reserve into the egress arena, 0 = copy then send)
+
+## Mrps
+| conc | arm 0 (median of n) |
+|---|---|
+| 1 | 0.002821 (n=6, spread 51.5%) |
+| 32 | 0.036907 (n=6, spread 1.1%) |
+| 128 | 0.153955 (n=6, spread 2.2%) |
+
+## p50 us
+| conc | arm 0 (median of n) |
+|---|---|
+| 1 | 346.5 (n=6, spread 59.7%) |
+| 32 | 834.0 (n=6, spread 7.7%) |
+| 128 | 762.0 (n=6, spread 3.4%) |
+
+## p99 us
+| conc | arm 0 (median of n) |
+|---|---|
+| 1 | 687.0 (n=6, spread 10.5%) |
+| 32 | 1598.0 (n=6, spread 3.1%) |
+| 128 | 1469.5 (n=6, spread 0.8%) |
+
+## DPU %
+| conc | arm 0 (median of n) |
+|---|---|
+| 1 | 39.8 (n=6, spread 48.8%) |
+| 32 | 34.3 (n=6, spread 4.1%) |
+| 128 | 46.1 (n=6, spread 4.1%) |
+
+## ARM us/req
+| conc | arm 0 (median of n) |
+|---|---|
+| 1 | 142.215 (n=6, spread 3.6%) |
+| 32 | 9.316 (n=6, spread 3.5%) |
+| 128 | 3.004 (n=6, spread 3.7%) |
+
+Delta is arm 1 relative to arm 0. A negative ARM us/req or DPU % means the
+reservation path costs less. Spread is the range across repetitions as a
+share of the median: a delta smaller than the spread is not a result.

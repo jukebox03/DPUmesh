@@ -1,0 +1,6 @@
+thread,tid,last_cpu,allowed_cpus,core_pct,tick_delta
+dmesh-main,1443609,3,3,7.3,73
+dmesh-w0,1443777,0,0,0.7,7
+dmesh-w1,1443779,15,15,0.7,7
+dmesh-w2,1443781,10,10,0.6,6
+dmesh-w3,1443784,8,8,35.6,356

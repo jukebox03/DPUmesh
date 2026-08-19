@@ -152,48 +152,9 @@ preflight; no mock control-plane path exists. The remaining `mock-identity`,
 `mock-policy` and `mock-destination` sources belong to the upstream
 `linkerd-app-integration` test crate and are neither linked nor deployed.
 
-```mermaid
-flowchart LR
-    subgraph host[Host node]
-        Pod[Service Pod<br/>application + DPUmesh client]
-        Agent[Node agent DaemonSet<br/>reads Kubernetes, signs claims]
-        Registry[Service registry publisher]
-        Ident[Identity renewal agent]
-        GW[Gateway DaemonSet<br/>carries the DPU's control connections]
-        Backend[Backend Pod on this node]
-    end
-    subgraph dpu[BlueField DPU]
-        Reg[Registration<br/>verifies the grant, admits the Pod]
-        Snap[Service snapshot<br/>targets and ready endpoints]
-        Flow[Connection bound to that registration]
-        Proxy[Embedded linkerd2-proxy]
-        Creds[Identity material<br/>root-only files]
-    end
-    subgraph k8s[Kubernetes]
-        KAPI[Pod and Service API]
-        LI[Linkerd Identity]
-        LP[Linkerd Policy]
-        LD[Linkerd Destination]
-    end
+![How a Pod is admitted and where the DPU's authority comes from](figures/control_plane.png)
 
-    Reg -->|1. fresh nonce| Pod
-    Pod -->|2. nonce + requested Service| Agent
-    KAPI --> Agent
-    Agent -->|3. signed grant| Pod
-    Pod -->|4. grant + POD_REGISTER| Reg
-    Reg --> Flow
-    Flow --> Proxy
-    Agent -->|signed node membership feed| Reg
-    Registry -->|signed Service target feed| Snap
-    Snap -->|the addresses a session may dial| Flow
-    Ident -->|atomic update| Creds
-    Creds --> Proxy
-    Proxy -->|end-to-end mTLS| GW
-    GW --> LI
-    GW --> LP
-    GW --> LD
-    Proxy -->|policy applied, then DMA| Backend
-```
+[PDF](figures/control_plane.pdf)
 
 The application can request only a compact Service id; it cannot assert Pod UID,
 namespace, labels, ServiceAccount, node or Linkerd workload. The gateway is
@@ -296,7 +257,9 @@ Consequently:
   be simulated by a local mock or reported as an outbound API feature.
 
 The Linkerd consumer handles opaque and protocol-aware payload modes. Its
-decision-mode entry point returns a decline, which DPUmesh counts.
+decision-mode entry point returns a decline; under fail-closed DPUmesh counts it
+as `admission`/`no-verdict` and ends the connection, and the deployment script
+refuses to assign a Service to decision mode against this consumer at all.
 
 ## Routing
 

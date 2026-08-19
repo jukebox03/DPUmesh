@@ -89,10 +89,36 @@ done
 [ -n "$OUT" ] || { usage; die "--out is required"; }
 mkdir -p "$OUT"
 
+# This script measures the deployment it finds, so what that deployment was is
+# not recoverable from the numbers afterwards. Read it off the DPU: bench.sh
+# leaves its whole launch command in /tmp/start_dpu_bench.sh, the L7 environment
+# in /tmp/dpumesh-l7.env, and the proxy prints its resolved topology at WARN.
+record_provenance() {
+  local out="$OUT/provenance.txt"
+  {
+    echo "tree $(git -C "$PROJ_ROOT" rev-parse HEAD) $(git -C "$PROJ_ROOT" status --short | tr '\n' ' ')"
+    echo "request ${REQ}B reply ${REPLY}B window $WINDOW dur ${DUR}s warmup $WARMUP reps $REPS"
+    echo "backends $(kubectl get pods -n "${NS:-test-bench}" -l app=echo-dpumesh \
+                       --no-headers 2>/dev/null | wc -l) Pod(s) behind echo-dpumesh"
+  } >"$out" 2>&1
+  # shellcheck disable=SC1091
+  { set -a; . "$PROJ_ROOT/.env"; set +a; }
+  sshpass -p "$DPU_PASS" ssh -o StrictHostKeyChecking=no "$DPU_HOST" '
+    echo "--- launch ---"
+    tr " " "\n" < /tmp/start_dpu_bench.sh 2>/dev/null | grep -E "^(DPUMESH|DMESH|L7)_" || echo "n/a"
+    echo "--- l7 env ---"
+    grep -E "^(DPUMESH|DMESH)_" /tmp/dpumesh-l7.env 2>/dev/null || echo "n/a"
+  ' >>"$out" 2>&1 || warn "provenance: DPU launch read failed"
+  "$BENCH" dpulog 400 2>/dev/null | grep -a "PROXY MODE ON" | tail -1 >>"$out" 2>&1 || true
+  info "-> $out"
+}
+
 CHURN="$OUT/churn.csv"
 COUNT="$OUT/count.csv"
 echo "period,rep,mrps,p50_us,p99_us,requests,reconns,durs,dpu_core_pct,arm_core_us_per_req" >"$CHURN"
 echo "threads,conc,rep,mrps,p50_us,p99_us,requests,durs,dpu_core_pct,arm_core_us_per_req" >"$COUNT"
+
+record_provenance
 
 field() {
   sed -n "s/.*[[:space:]]${2}=\([^[:space:]]*\).*/\1/p" <<<"$1" | head -1

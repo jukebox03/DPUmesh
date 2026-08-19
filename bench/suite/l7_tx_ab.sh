@@ -42,6 +42,11 @@ REPLY=8
 DUR=10
 THREADS=1
 DEPLOY=1
+NS="${NS:-test-bench}"
+# `one` scales the extra echo Deployments away so the Service has a single
+# backend; `all` keeps whatever the deployment brought up.
+BACKENDS="${BACKENDS:-one}"
+SETTLE="${SETTLE:-20}"
 
 # The stack every arm is measured on. It is the one the ARM profile note used,
 # so a row here can be read against that note.
@@ -63,6 +68,8 @@ Usage: $0 --out DIR [options]
   --reply B       reply bytes (default $REPLY)
   --dur S         measured seconds per repetition (default $DUR)
   --threads N     client threads (default $THREADS)
+  --backends one|all  one (default) leaves a single Pod behind the target
+                  Service; three backends make the result bimodal
   --no-deploy     measure the running deployment; only valid for a single arm
 EOF
 }
@@ -77,6 +84,7 @@ while [ "$#" -gt 0 ]; do
     --reply)     REPLY="$2"; shift 2 ;;
     --dur)       DUR="$2"; shift 2 ;;
     --threads)   THREADS="$2"; shift 2 ;;
+    --backends)  BACKENDS="$2"; shift 2 ;;
     --no-deploy) DEPLOY=0; shift ;;
     -h|--help)   usage; exit 0 ;;
     *)           usage; die "unknown argument: $1" ;;
@@ -84,6 +92,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 [ -n "$OUT" ] || { usage; die "--out is required"; }
+case "$BACKENDS" in one|all) ;; *) die "--backends takes one|all (got $BACKENDS)";; esac
 if [ "$DEPLOY" = 0 ] && [ "$(wc -w <<<"$ARMS")" -gt 1 ]; then
   die "--no-deploy measures one deployment, so it admits a single arm"
 fi
@@ -112,6 +121,28 @@ deploy_arm() {
   DMESH_L7_TX_RESERVE="$reserve" \
     "$BENCH" deploy >"$OUT/deploy-reserve$reserve.log" 2>&1 ||
       die "deploy failed for arm $reserve; see $OUT/deploy-reserve$reserve.log"
+  single_backend
+}
+
+# Leave one Pod behind the target Service.
+#
+# Every run of this benchmark is served end to end by whichever backend the
+# balancer picked for it, and the backends are pinned to different host cores.
+# With three of them the same build reports two states 20% apart, so which arm
+# looks cheaper is decided by that pick rather than by the output path. One
+# backend removes the choice.
+single_backend() {
+  [ "$BACKENDS" = one ] || return 0
+  kubectl scale -n "$NS" deploy/echo-dpumesh-13 deploy/echo-dpumesh-14 \
+      --replicas=0 >/dev/null 2>&1 || true
+  local app
+  for app in echo-dpumesh-13 echo-dpumesh-14; do
+    kubectl wait -n "$NS" --for=delete pod -l app="$app" --timeout=180s \
+        >/dev/null 2>&1 || true
+  done
+  info "backends: $(kubectl get pods -n "$NS" -l app=echo-dpumesh \
+                     --no-headers 2>/dev/null | wc -l) Pod(s) behind echo-dpumesh"
+  sleep "$SETTLE"
 }
 
 # What the arm actually ran on. A comparison without this is not reproducible.
@@ -125,6 +156,8 @@ record_provenance() {
     echo "tree $(git -C "$PROJ_ROOT" rev-parse HEAD) $(git -C "$PROJ_ROOT" status --short | tr '\n' ' ')"
     echo "request ${REQ}B reply ${REPLY}B threads $THREADS dur ${DUR}s reps $REPS"
     echo "stack dpa=$DPA_THREADS rings=$RINGS_PER_POD workers=$ARM_WORKERS l7_worker=$LINKERD_WORKER opaque=$OPAQUE_SVC"
+    echo "backends $BACKENDS ($(kubectl get pods -n "$NS" -l app=echo-dpumesh \
+                                 --no-headers 2>/dev/null | wc -l) Pod(s) behind echo-dpumesh)"
     echo "--- DPU ---"
     "$BENCH" dpulog 400 2>/dev/null | grep -iE "N=|workers|l7 |linkerd" | tail -20 || true
   } >"$out" 2>&1
