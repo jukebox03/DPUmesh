@@ -120,7 +120,7 @@ An ARM data worker owns its completion and DMA progress. One drain pass:
 2. parses and routes connection data;
 3. submits and progresses SG-DMA;
 4. retires completed destination lanes;
-5. emits `REV_DONE` and exact per-sequence `TX_ACK` entries;
+5. emits `REV_DONE` and the `TX_ACK` run each released extent covers;
 6. publishes reverse-ring entries.
 
 A worker stays hot while a drain pass advances work. Otherwise it arms its DPA
@@ -179,6 +179,11 @@ when:
 publish_seq = consumer ticket + 1
 ```
 
+A `TX_ACK` slot names a run of consecutive sequences. A worker merges physically
+adjacent arrivals of one connection into one staging extent while the parser has
+not consumed them, and acknowledges the whole extent once its last byte has left
+the egress path. Send capacity returns in extent-sized steps.
+
 The host drains visible entries and writes one monotonic `consumer_head`. Before
 blocking, it increments `arm_epoch` — the counter that says the host is about to
 sleep — and rechecks the rings. After a publication the producing worker reads
@@ -226,6 +231,7 @@ path shut.
 | Item | Value |
 |---|---:|
 | Transport unit | 8 KiB |
+| Staging extent | 64 KiB / 65,534 sequences |
 | Host TX mapping | 8,192 units / 64 MiB |
 | Host RX mapping | 8,192 units / 64 MiB |
 | RX landing stripes | L = A |

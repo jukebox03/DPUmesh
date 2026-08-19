@@ -1321,8 +1321,15 @@ static int drain_rev_rings(dpumesh_ctx_t *ctx, uint32_t budget)
                     DOCA_LOG_WARN("Reverse ring %d rejected REV_DONE at ticket=%llu",
                                   r, (unsigned long long)head);
             } else if (entry->kind == DMESH_REV_ENTRY_TX_ACK) {
-                tx_reclaim_ack(ctx, entry->payload.ack.port,
-                               entry->payload.ack.seq);
+                /* One entry names a consecutive run; a zero count is one.
+                 * Ascending order advances the FIFO prefix in one pass. */
+                uint16_t port = entry->payload.ack.port;
+                uint16_t seq = entry->payload.ack.seq;
+                uint32_t count = entry->payload.ack.seq_count;
+                if (count == 0)
+                    count = 1;
+                for (uint32_t i = 0; i < count; i++)
+                    tx_reclaim_ack(ctx, port, (uint16_t)(seq + i));
             } else {
                 DOCA_LOG_ERR("Reverse ring %d invalid kind=%u at ticket=%llu",
                              r, entry->kind, (unsigned long long)head);
@@ -2573,9 +2580,6 @@ int dpumesh_enqueue(dpumesh_ctx_t *ctx, const sw_descriptor_t *desc) {
     dma->src_pod_id  = ctx->pod_id;
 
     dma_ring_publish_desc(ring, t);
-
-    DOCA_LOG_DBG("ENQUEUE: seq=%u dst_svc=%d dst_pod=%d ring=%d slot=%u len=%u",
-                 desc->seq, desc->dst_service, desc->dst_pod, ridx, ring_slot, desc->body_len);
 
     return 0;
 }

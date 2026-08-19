@@ -55,6 +55,10 @@ DOCA_LOG_REGISTER(DPU_PROXY);
  * into one ARM window extent. */
 #define PX_ARRIVAL_COALESCE_MAX (64u * 1024u)
 
+/* Sequences one extent may cover. Its acknowledgement publishes a 16-bit count
+ * whose zero value means one, so a run stops one short of that range. */
+#define PX_ACK_RUN_MAX 0xFFFFu
+
 #define PX_DST_DEFER        (-2)
 
 /* Every ARM data worker owns an L7 layer, so no request needs a fixed owner. */
@@ -153,8 +157,9 @@ struct px_arrival {
     atomic_uint unfreed;          /* custody: (bytes not yet egressed/dropped) + in-window ref */
     uint32_t claimed_round;       /* scratch: seg-claimed bytes, one parse round (forward-thread-only) */
     int32_t  ack_pod;             /* TX_ACK target (original sender, untranslated) */
+    /* The consecutive run this extent acknowledges: it only grows across a
+     * sequence delta of one. */
     uint16_t ack_port, ack_first_seq, ack_seq;
-    uint16_t ack_emit_seq;
 };
 
 /* One egress arena chunk: DPU-local bytes the SG engine can source. Interchangeable
@@ -541,7 +546,7 @@ px_ack_queue_pop(struct px_ack_release_queue *q)
 }
 
 static int px_rev_append_ack(struct px_engine *eng, struct pod_state *pod,
-                             uint16_t port, uint16_t seq);
+                             uint16_t port, uint16_t seq, uint16_t count);
 
 static int
 px_emit_tx_ack(struct objects *objs, int32_t pod_id, uint16_t port, uint16_t seq)
@@ -554,7 +559,7 @@ px_emit_tx_ack(struct objects *objs, int32_t pod_id, uint16_t port, uint16_t seq
     int owner = px_rev_owner(objs->proxy, pod, port);
     if (owner != px_cur_worker->id)
         return 0;
-    return px_rev_append_ack(&objs->proxy->engines[owner], pod, port, seq);
+    return px_rev_append_ack(&objs->proxy->engines[owner], pod, port, seq, 1);
 }
 
 /* Take the shared free-list lock. The per-worker magazines are meant to keep
@@ -648,7 +653,6 @@ px_queue_arrival_release(struct objects *objs, struct px_arrival *a)
     int owner = px_rev_owner(px, src, a->ack_port);
     if (owner < 0 || owner >= px->n_workers)
         return 0;
-    a->ack_emit_seq = a->ack_first_seq;
     a->release_next = NULL;
     if (px_ack_queue_push(&px->engines[owner].ack_releases, a))
         return 1;
@@ -2122,6 +2126,8 @@ static int px_arrival_try_extend(struct px_conn *c, const dpu_comp_entry_t *e,
         tail->ack_pod != e->src_pod_id || tail->ack_port != e->src_port ||
         tail->staging_off + tail->len != e->buf_offset ||
         tail->len + e->length > PX_ARRIVAL_COALESCE_MAX ||
+        (uint32_t)(uint16_t)(e->seq - tail->ack_first_seq) + 1u >=
+            PX_ACK_RUN_MAX ||
         tail->claimed_round != 0 ||
         atomic_load_explicit(&tail->unfreed, memory_order_acquire) != tail->len + 1u)
         return 0;
@@ -2229,7 +2235,6 @@ int px_process_forward(struct objects *objs, int worker_id, void *ventry) {
     a->ack_port = e->src_port;
     a->ack_first_seq = e->seq;
     a->ack_seq = e->seq;
-    a->ack_emit_seq = e->seq;
     a->release_next = NULL;
     __atomic_fetch_add(&objs->pods[a->pod_idx].proxy_source_refs, 1,
                        __ATOMIC_ACQ_REL);
@@ -2802,9 +2807,10 @@ px_rev_stage_append(struct px_engine *eng, struct pod_state *pod,
     return dst;
 }
 
+/* Acknowledge the run [seq, seq + count) in one entry. */
 static int
 px_rev_append_ack(struct px_engine *eng, struct pod_state *pod,
-                  uint16_t port, uint16_t seq)
+                  uint16_t port, uint16_t seq, uint16_t count)
 {
     struct dmesh_rev_ring_entry *dst = px_rev_stage_append(eng, pod, port);
     if (!dst)
@@ -2812,6 +2818,7 @@ px_rev_append_ack(struct px_engine *eng, struct pod_state *pod,
     dst->kind = DMESH_REV_ENTRY_TX_ACK;
     dst->payload.ack.port = port;
     dst->payload.ack.seq = seq;
+    dst->payload.ack.seq_count = count;
     return 1;
 }
 
@@ -2856,13 +2863,11 @@ px_drain_ack_releases(struct px_engine *eng, uint32_t budget)
             emitted++;
             continue;
         }
-        if (!px_rev_append_ack(eng, src, a->ack_port, a->ack_emit_seq))
+        /* PX_ACK_RUN_MAX keeps the count inside the field that carries it. */
+        uint16_t count = (uint16_t)(a->ack_seq - a->ack_first_seq + 1u);
+        if (!px_rev_append_ack(eng, src, a->ack_port, a->ack_first_seq, count))
             break;
         emitted++;
-        if (a->ack_emit_seq != a->ack_seq) {
-            a->ack_emit_seq = (uint16_t)(a->ack_emit_seq + 1u);
-            continue;
-        }
         __atomic_fetch_sub(&objs->pods[a->pod_idx].proxy_source_refs, 1,
                            __ATOMIC_ACQ_REL);
         px_arrival_free(objs->proxy, a);
@@ -3149,20 +3154,38 @@ static int px_engine_pump(struct objects *objs, struct px_engine *eng,
             return recovering;            /* still down: submit nothing, but stay awake
                                            * so the caller keeps driving the recovery */
     }
+    uint32_t own_bit = 1u << eng->id;
     for (int i = 0; i < npods; i++) {
         struct pod_state *pod = &objs->pods[i];
-        int L = px_landing_stripes(pod);
         int dead = !pod_data_ready(pod);
+        /* A slot whose teardown is finished, and which no tenant has taken
+         * since, holds nothing this engine can advance. pod_begin_cleanup and
+         * setup_pod_dma both clear the quiesced mask, so a revived slot fails
+         * this test and is walked again. */
+        if (dead &&
+            !__atomic_load_n(&pod->cleanup_pending, __ATOMIC_ACQUIRE) &&
+            (__atomic_load_n(&pod->egress_quiesced_mask, __ATOMIC_ACQUIRE) &
+             own_bit) &&
+            __atomic_load_n(&pod->egress_inflight_worker[eng->id].v,
+                            __ATOMIC_ACQUIRE) == 0)
+            continue;
+        int L = px_landing_stripes(pod);
         int quiet = dead;
-        uint32_t expected_workers = px->n_workers >= 32
-            ? UINT32_MAX : ((1u << px->n_workers) - 1u);
-        /* Sample before lane draining. If the last connection producer joins
-         * during this pass, wait for the next pass so every cross-worker inbox
-         * is spliced after that producer's release publication. */
-        uint32_t producers_at_start = __atomic_load_n(
-            &pod->proxy_producers_quiesced_mask, __ATOMIC_ACQUIRE);
-        uint32_t quiesced_at_start = __atomic_load_n(
-            &pod->egress_quiesced_mask, __ATOMIC_ACQUIRE);
+        /* Teardown bookkeeping only. Sampled before lane draining: if the last
+         * connection producer joins during this pass, wait for the next one so
+         * every cross-worker inbox is spliced after that producer's release
+         * publication. */
+        uint32_t expected_workers = 0;
+        uint32_t producers_at_start = 0;
+        uint32_t quiesced_at_start = 0;
+        if (dead) {
+            expected_workers = px->n_workers >= 32
+                ? UINT32_MAX : ((1u << px->n_workers) - 1u);
+            producers_at_start = __atomic_load_n(
+                &pod->proxy_producers_quiesced_mask, __ATOMIC_ACQUIRE);
+            quiesced_at_start = __atomic_load_n(
+                &pod->egress_quiesced_mask, __ATOMIC_ACQUIRE);
+        }
         for (int r = eng->id; r < L; r += px->n_workers) {
             struct px_lane *ln = &px->lanes[i][r];
             progressed |= px_lane_splice_inbox(px, ln);
@@ -3212,9 +3235,7 @@ static int px_engine_pump(struct objects *objs, struct px_engine *eng,
                 progressed |= px_rev_kick_lane(eng, i, r);
         }
         if (dead) {
-            uint32_t bit = 1u << eng->id;
-            uint32_t mask = __atomic_load_n(&pod->egress_quiesced_mask,
-                                            __ATOMIC_ACQUIRE);
+            uint32_t bit = own_bit;
             if (__atomic_load_n(&pod->cleanup_pending, __ATOMIC_ACQUIRE)) {
                 uint32_t producer_mask = __atomic_load_n(
                     &pod->proxy_producers_quiesced_mask, __ATOMIC_ACQUIRE);
@@ -3233,8 +3254,8 @@ static int px_engine_pump(struct objects *objs, struct px_engine *eng,
                 quiet = 0;
             /* Read first: an unchanged bit must not steal the line from the
              * peers that publish their own quiesce state in the same word. */
-            mask = __atomic_load_n(&pod->egress_quiesced_mask,
-                                   __ATOMIC_ACQUIRE);
+            uint32_t mask = __atomic_load_n(&pod->egress_quiesced_mask,
+                                            __ATOMIC_ACQUIRE);
             if (quiet) {
                 if ((mask & bit) == 0) {
                     uint32_t previous = __atomic_fetch_or(

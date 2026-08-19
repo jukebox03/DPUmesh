@@ -463,6 +463,54 @@ stream_pattern(uint64_t offset)
     return (uint8_t)x;
 }
 
+/* One TX_ACK entry names a run of consecutive sequences. The reverse-ring drain
+ * reclaims every unit in it; a zero count names one. */
+static void
+test_range_ack_reclaims_the_whole_run(void)
+{
+    struct fixture *f = fixture_new(8, 16, -1);
+    struct dmesh_port_slot *psl = f->psl;
+    struct dmesh_rev_ring_entry *entries = calloc(4, sizeof(*entries));
+    struct dmesh_rev_ring_ctrl *rctrl = calloc(1, sizeof(*rctrl));
+    assert(entries != NULL && rctrl != NULL);
+    struct rev_ring rev = { .size = 4, .entries = entries, .ctrl = rctrl };
+    f->ctx->landing_stripes = 1;
+    f->ctx->rev_rings[0] = &rev;
+
+    for (uint16_t s = 1; s <= 4; s++)
+        dpumesh_tx_track(f->ctx, 17, s, 8192);
+    assert(atomic_load_explicit(&psl->tx_s, memory_order_relaxed) == 4u * 8192u);
+
+    entries[0].kind = DMESH_REV_ENTRY_TX_ACK;
+    entries[0].payload.ack.port = 17;
+    entries[0].payload.ack.seq = 1;
+    entries[0].payload.ack.seq_count = 4;
+    __atomic_store_n(&entries[0].publish_seq, 1u, __ATOMIC_RELEASE);
+    assert(drain_rev_rings(f->ctx, 64) == 1);
+    assert(atomic_load_explicit(&psl->tx_f, memory_order_acquire) == 4u * 8192u);
+    assert(atomic_load_explicit(&psl->su_tail, memory_order_acquire) ==
+           atomic_load_explicit(&psl->su_head, memory_order_acquire));
+    assert(rev.head == 1 && rctrl->consumer_head == 1);
+
+    for (uint16_t s = 5; s <= 6; s++)
+        dpumesh_tx_track(f->ctx, 17, s, 8192);
+    entries[1].kind = DMESH_REV_ENTRY_TX_ACK;
+    entries[1].payload.ack.port = 17;
+    entries[1].payload.ack.seq = 5;
+    entries[1].payload.ack.seq_count = 0;
+    __atomic_store_n(&entries[1].publish_seq, 2u, __ATOMIC_RELEASE);
+    assert(drain_rev_rings(f->ctx, 64) == 1);
+    assert(atomic_load_explicit(&psl->tx_f, memory_order_acquire) == 5u * 8192u);
+    assert((uint16_t)(atomic_load_explicit(&psl->su_head, memory_order_acquire) -
+                      atomic_load_explicit(&psl->su_tail, memory_order_acquire)) == 1);
+
+    f->ctx->rev_rings[0] = NULL;
+    f->ctx->landing_stripes = 0;
+    free(rctrl);
+    free(entries);
+    fixture_free(f);
+}
+
 static void
 test_large_commits_preserve_stream_bytes(void)
 {
@@ -821,6 +869,7 @@ main(void)
     test_timer_wakes_only_armed_eqs();
     test_sustained_commits_preserve_stream_bytes();
     test_large_commits_preserve_stream_bytes();
+    test_range_ack_reclaims_the_whole_run();
     puts("native_tx_batch_policy_test: PASS");
     return 0;
 }

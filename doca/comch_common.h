@@ -51,11 +51,16 @@ enum dmesh_pod_init_result {
     DMESH_POD_INIT_DPA_FAILED      = 4,
 };
 
-/* TX_ACK frees the sender's TX slot by source endpoint and sequence. */
+/* TX_ACK frees the sender's TX slots by source endpoint and sequence. One entry
+ * names the consecutive run [seq, seq + seq_count) one staging extent holds. A
+ * zero count is read as one. */
 struct dmesh_tx_ack_entry {
     uint16_t port;
     uint16_t seq;
+    uint16_t seq_count;
 };
+_Static_assert(sizeof(struct dmesh_tx_ack_entry) <= 16,
+               "dmesh_tx_ack_entry must fit the reverse-entry payload union");
 
 struct dmesh_rev_done_entry {
     int8_t   src_pod_id;   /* sender pod (the peer, for the receiving conn) */

@@ -136,8 +136,12 @@ Each QP has bounded outstanding-send capacity, and QPs also share the channel's
 overall transmit capacity. The transport recovers capacity as previously
 submitted data completes. These limits affect admission and readiness only; how
 the transport partitions or submits the underlying memory is not part of the
-API contract. If committed data cannot be submitted because of a transport
-fault, `dmesh_post_send()` or `dmesh_flush()` returns `-1/EBADMSG`.
+API contract. Submission waits for a descriptor slot, so `dmesh_post_send()` and
+`dmesh_flush()` may pause briefly while the DPU drains one; `dmesh_alloc()` never
+does. If committed data cannot be submitted because of a transport fault,
+`dmesh_post_send()` or `dmesh_flush()` returns `-1/EBADMSG`. A submission that
+makes no progress for five seconds retires that descriptor queue for the
+remaining life of the channel; every QP carried on it then fails the same way.
 
 ### Backpressure
 

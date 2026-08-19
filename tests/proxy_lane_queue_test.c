@@ -447,6 +447,101 @@ int main(void)
     assert(reserved != NULL);
     assert(dmesh_l7_tx_commit(0, tx_handle, DMESH_L7_ORIGIN, 0) == 0);
 
+    /* One extent is acknowledged by one reverse entry naming its whole run,
+     * whatever the run's length. */
+    px->rev_scratch = calloc(1, PX_REV_STAGE_STRIDE);
+    assert(px->rev_scratch != NULL);
+    px_ack_queue_init(&eng->ack_releases);
+    eng->ack_retry_head = eng->ack_retry_tail = NULL;
+    px->n_workers = 1;
+    px_cur_worker = &px->workers[0];
+
+    struct pod_state *ack_pod = &objs->pods[0];
+    memset(ack_pod, 0, sizeof(*ack_pod));
+    ack_pod->pod_id = 5;
+    ack_pod->registered = 1;
+    ack_pod->dma_ready = 1;
+    ack_pod->k_rings = 1;
+    ack_pod->landing_stripes = 1;
+    __atomic_store_n(&objs->num_pods, 1, __ATOMIC_RELEASE);
+    __atomic_store_n(&ack_pod->proxy_source_refs, 1, __ATOMIC_RELEASE);
+
+    struct px_rev_pub *ack_pub = &px->lanes[0][0].rev;
+    const struct dmesh_rev_ring_entry *ack_entry =
+        (const struct dmesh_rev_ring_entry *)px->rev_scratch;
+
+    struct px_arrival run;
+    memset(&run, 0, sizeof(run));
+    run.pod_idx = 0;
+    run.ack_pod = 5;
+    run.ack_port = 42;
+    run.ack_first_seq = 60000;         /* the run wraps the 16-bit space */
+    run.ack_seq = 4;
+    assert(px_ack_queue_push(&eng->ack_releases, &run));
+    assert(px_drain_ack_releases(eng, 256) == 1);
+    assert(ack_pub->count == 1);
+    assert(ack_entry->kind == DMESH_REV_ENTRY_TX_ACK);
+    assert(ack_entry->payload.ack.port == 42);
+    assert(ack_entry->payload.ack.seq == 60000);
+    assert(ack_entry->payload.ack.seq_count == (uint16_t)(4 - 60000 + 1));
+    assert(__atomic_load_n(&ack_pod->proxy_source_refs, __ATOMIC_ACQUIRE) == 0);
+    assert(px_ack_queue_front(&eng->ack_releases) == NULL);
+
+    /* A single-sequence extent, and the FIN path, both name a run of one. */
+    ack_pub->count = 0;
+    struct px_arrival one;
+    memset(&one, 0, sizeof(one));
+    one.pod_idx = 0;
+    one.ack_pod = 5;
+    one.ack_port = 42;
+    one.ack_first_seq = 9;
+    one.ack_seq = 9;
+    __atomic_store_n(&ack_pod->proxy_source_refs, 1, __ATOMIC_RELEASE);
+    assert(px_ack_queue_push(&eng->ack_releases, &one));
+    assert(px_drain_ack_releases(eng, 256) == 1);
+    assert(ack_pub->count == 1);
+    assert(ack_entry->payload.ack.seq == 9);
+    assert(ack_entry->payload.ack.seq_count == 1);
+    ack_pub->count = 0;
+    assert(px_emit_tx_ack(objs, 5, 42, 77) == 1);
+    assert(ack_pub->count == 1);
+    assert(ack_entry->payload.ack.seq == 77);
+    assert(ack_entry->payload.ack.seq_count == 1);
+    ack_pub->count = 0;
+
+    /* Coalescing stops before a run outgrows the count that publishes it. */
+    struct px_arrival wide;
+    memset(&wide, 0, sizeof(wide));
+    wide.pod_idx = 3;
+    wide.len = 8192;
+    wide.ack_pod = 7;
+    wide.ack_port = 42;
+    wide.ack_first_seq = 100;
+    wide.ack_seq = (uint16_t)(100u + PX_ACK_RUN_MAX - 2u);
+    atomic_init(&wide.unfreed, wide.len + 1u);
+    struct px_conn wide_conn;
+    memset(&wide_conn, 0, sizeof(wide_conn));
+    wide_conn.whead = wide_conn.wtail = &wide;
+    dpu_comp_entry_t wide_comp;
+    memset(&wide_comp, 0, sizeof(wide_comp));
+    wide_comp.pod_idx = 3;
+    wide_comp.buf_offset = 8192;
+    wide_comp.length = 1;
+    wide_comp.src_pod_id = 7;
+    wide_comp.src_port = 42;
+    wide_comp.seq = (uint16_t)(wide.ack_seq + 1u);
+    assert(!px_arrival_try_extend(&wide_conn, &wide_comp, 1));
+    wide.ack_seq = (uint16_t)(100u + PX_ACK_RUN_MAX - 3u);
+    wide_comp.seq = (uint16_t)(wide.ack_seq + 1u);
+    assert(px_arrival_try_extend(&wide_conn, &wide_comp, 1));
+    assert((uint16_t)(wide.ack_seq - wide.ack_first_seq + 1u) ==
+           (uint16_t)(PX_ACK_RUN_MAX - 1u));
+
+    free(px->rev_scratch);
+    px->rev_scratch = NULL;
+    tls_arr_mag = NULL;
+    tls_arr_mag_n = 0;
+
     tls_chunk_mag = NULL;
     tls_chunk_mag_n = 0;
     tls_piece_mag = NULL;
