@@ -29,10 +29,6 @@ the per-worker Rust runtime, `DmeshIo` endpoints and outbound proxy tasks.
 | staging custody and sender credits | adapter session state |
 | egress arena and SG-DMA | control-plane clients |
 
-The Linkerd build uses `dmesh-doca` with `default-features = false`. Its C
-datapath, DOCA initialization and standalone `Driver` are not linked into
-`libdmesh_l7.a`.
-
 ## Thread contract
 
 Each DPUmesh data-worker thread calls:
@@ -290,7 +286,6 @@ The Linkerd archive must:
 
 - export `l7_worker_run`, the connection API, `l7_resolve` and `l7_report`;
 - leave every `dmesh_l7_driver_*` symbol undefined for DPUmesh to provide;
-- contain no undefined `dmesh_doca_*` datapath symbol;
 - build with the pinned Rust toolchain and lock files.
 
 Meson links the archive with `-Dl7_backend=linkerd` and defines

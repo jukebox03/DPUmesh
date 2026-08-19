@@ -126,11 +126,8 @@ deploy_arm() {
 
 # Leave one Pod behind the target Service.
 #
-# Every run of this benchmark is served end to end by whichever backend the
-# balancer picked for it, and the backends are pinned to different host cores.
-# With three of them the same build reports two states 20% apart, so which arm
-# looks cheaper is decided by that pick rather than by the output path. One
-# backend removes the choice.
+# A run is served end to end by whichever backend the balancer picks, and the
+# backends sit on different host cores. One backend removes that variable.
 single_backend() {
   [ "$BACKENDS" = one ] || return 0
   kubectl scale -n "$NS" deploy/echo-dpumesh-13 deploy/echo-dpumesh-14 \

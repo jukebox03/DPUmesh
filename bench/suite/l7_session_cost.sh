@@ -89,10 +89,9 @@ done
 [ -n "$OUT" ] || { usage; die "--out is required"; }
 mkdir -p "$OUT"
 
-# This script measures the deployment it finds, so what that deployment was is
-# not recoverable from the numbers afterwards. Read it off the DPU: bench.sh
-# leaves its whole launch command in /tmp/start_dpu_bench.sh, the L7 environment
-# in /tmp/dpumesh-l7.env, and the proxy prints its resolved topology at WARN.
+# Record the deployment this run measured. bench.sh leaves its launch command in
+# /tmp/start_dpu_bench.sh and the L7 environment in /tmp/dpumesh-l7.env, and the
+# proxy prints its resolved topology at WARN.
 record_provenance() {
   local out="$OUT/provenance.txt"
   {

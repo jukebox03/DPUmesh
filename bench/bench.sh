@@ -537,12 +537,6 @@ preflight_linkerd() {
         err "libdmesh_l7.a does not export:$absent"
         exit 1
     fi
-    undefined=$(ssh_dpu "nm -u '$lib' 2>/dev/null | awk '\$NF ~ /^dmesh_doca_/ {print \$NF}' | sort -u")
-    if [ -n "$undefined" ]; then
-        err "libdmesh_l7.a requires the port's own datapath — own-datapath leaked in:"
-        printf '  %s\n' $undefined
-        exit 1
-    fi
     undefined=$(ssh_dpu "nm -u '$lib' 2>/dev/null | awk '\$NF ~ /^dmesh_l7_driver_/ {print \$NF}' | sort -u")
     for s in dmesh_l7_driver_notification_fds dmesh_l7_driver_arm \
              dmesh_l7_driver_drain dmesh_l7_driver_clear_notifications \
@@ -553,8 +547,8 @@ preflight_linkerd() {
             *) err "libdmesh_l7.a does not require runtime backend symbol: $s"; exit 1 ;;
         esac
     done
-    info "linkerd preflight OK (staticlib exports the contract and needs no port datapath," \
-         "identity material readable, deployed control plane required)"
+    info "linkerd preflight OK (staticlib exports the contract, identity material" \
+         "readable, deployed control plane required)"
 }
 
 wait_linkerd_ready() {
@@ -618,11 +612,9 @@ resolve_l7_fail_closed() {
     fi
 }
 
-# Every Service assigned to the L7 layer must also appear in the authoritative
-# target feed: a Service the feed omits is a withdrawn target, and under
-# fail-closed the adapter refuses every connection to it. Derive the feed's id
-# list from the assignment rather than leaving two knobs to be kept in step by
-# hand. An explicit DPUMESH_L7_SERVICE_IDS still wins.
+# The target feed carries every Service assigned to the L7 layer: one the feed
+# omits is a withdrawn target, which fail-closed refuses. The id list is derived
+# from the assignment; an explicit DPUMESH_L7_SERVICE_IDS wins.
 resolve_l7_service_ids() {
     if [ -n "${DPUMESH_L7_SERVICE_IDS:-}" ]; then
         export DPUMESH_L7_SERVICE_IDS

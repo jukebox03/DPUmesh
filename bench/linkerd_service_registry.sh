@@ -178,9 +178,8 @@ start() {
     systemctl --user stop "$UNIT" >/dev/null 2>&1 || true
     systemctl --user reset-failed "$UNIT" >/dev/null 2>&1 || true
     # A transient unit inherits none of the caller's environment, and the watch
-    # loop republishes every INTERVAL seconds. Anything the feed's contents or
-    # destination depend on has to be carried in, or the unit overwrites what
-    # `sync_once` just published with the defaults.
+    # loop republishes every INTERVAL seconds, so the feed's contents and
+    # destination travel with it.
     local carried=(--setenv=NS="$NS"
                    --setenv=DPUMESH_ATTEST_REGISTRY="$REGISTRY"
                    --setenv=DPUMESH_L7_SERVICE_IDS="$SERVICE_IDS"

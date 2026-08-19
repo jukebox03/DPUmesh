@@ -490,17 +490,12 @@ static inline uint64_t dpu_wake_clock_hz(void)
 }
 #endif
 
-/* Optional periodic nudge to the DPA threads that own rings. Off by default.
+/* Optional periodic WAKE to the DPA threads that own rings.
  *
- * A ring-owning DPA thread releases its execution unit on the watchdog schedule
- * and is brought back by its same-affinity helper. A WAKE message is a second,
- * independent re-trigger on top of that: it lands as a consumer completion, so
- * a thread waiting on one resumes without waiting for the helper to be
- * scheduled. `DPUMESH_DPA_WAKE_US` names the period in microseconds; 0, the
- * default, leaves the helper as the only path.
- *
- * A ringless execution unit is never nudged. Waking one is what wedged the DPU
- * before the helper existed, and it has nothing to poll either way. */
+ * The message arrives as a consumer completion, re-triggering a thread that has
+ * released its execution unit. `DPUMESH_DPA_WAKE_US` is the period in
+ * microseconds; 0, the default, sends none. A ringless execution unit has
+ * nothing to poll and is never nudged. */
 static uint64_t dpu_dpa_nudge_period(void)
 {
     static uint64_t period;
