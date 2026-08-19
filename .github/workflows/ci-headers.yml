@@ -1,0 +1,43 @@
+name: public-headers
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  standalone:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Public headers must not reference DOCA
+        run: |
+          if grep -rn 'doca' include/dpumesh/; then
+            echo "::error::Public headers reference DOCA; consumers would need the DOCA SDK"
+            exit 1
+          fi
+          echo "no DOCA references"
+
+      - name: Headers compile standalone as C99 and C++17
+        run: |
+          fail=0
+          for h in include/dpumesh/*.h linkerd/include/*.h; do
+            case "$h" in
+              include/*)         inc="${h#include/}" ;;
+              linkerd/include/*) inc="${h#linkerd/include/}" ;;
+            esac
+            printf '#include <%s>\n#include <%s>\n' "$inc" "$inc" > /tmp/hdr.c
+            gcc -std=c99 -Wall -Wextra -Werror -Iinclude -Ilinkerd/include -fsyntax-only /tmp/hdr.c \
+              || { echo "::error file=$h::standalone C99 compile failed"; fail=1; }
+            g++ -std=c++17 -Wall -Wextra -Werror -Iinclude -Ilinkerd/include -fsyntax-only -x c++ /tmp/hdr.c \
+              || { echo "::error file=$h::standalone C++17 compile failed"; fail=1; }
+          done
+          exit $fail
+
+      - name: C++ linkage guards must stay
+        run: |
+          for h in include/dpumesh/dmesh.h linkerd/include/dmesh_l7.h; do
+            grep -q 'extern "C"' "$h" \
+              || { echo "::error file=$h::extern \"C\" guard is gone; C++ linkage breaks"; exit 1; }
+          done
+          echo "extern \"C\" guards present"
