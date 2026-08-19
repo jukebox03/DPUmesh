@@ -550,13 +550,14 @@ Interaction rules to define:
 
 ## Deferred
 
-**`dmesh-doca`'s `own-datapath` feature.** It compiles a second copy of the
-DPUmesh C datapath — `linkerd/port/DPUMesh/` plus `src/shim.c`, `driver.rs` and
-the `DmeshDoca` owner — so the crate can open DOCA and run its own worker loop.
-The product build selects `default-features = false`, its bundled sources do not
-match the current tree, and nothing builds the feature. Removing it would also
-drop the second `RuntimeBackend` implementation that `linkerd/CONTRACT.md`
-documents as the boundary between the two owners.
+**`dmesh-doca`'s `own-datapath` feature.** It opens DOCA and runs the crate's
+own worker loop through `src/shim.c`, `driver.rs` and the `DmeshDoca` owner.
+The C datapath it compiles against was the port author's separate test copy,
+which the submodule no longer carries now that it tracks `linkerd2-proxy`
+directly, so the feature does not build here. The product build selects
+`default-features = false` and never used it. The Rust half is still the second
+`RuntimeBackend` implementation that `linkerd/CONTRACT.md` documents as the
+boundary between the two owners.
 
 **Do not delete any of it without asking and receiving explicit confirmation
 first.**

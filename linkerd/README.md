@@ -12,9 +12,9 @@ linkerd/
   include/dmesh_l7.h   C ABI
   shim/l7_null.c       reference consumer
   rust/                libdmesh_l7.a adapter
-  port/                port repository
-    linkerd2-proxy/
-      linkerd/doca/     DmeshIo, runtime backend API, standalone driver
+  port/
+    linkerd2-proxy/    ported proxy submodule
+      linkerd/doca/    DmeshIo, runtime backend API, standalone driver
   CONTRACT.md          implemented interface
 ```
 
@@ -48,8 +48,8 @@ port plus its worker id.
 | `DmeshIo` and outbound Linkerd stack | Linkerd port |
 | adapter ABI | `include/dmesh_l7.h` |
 
-The embedded build disables `dmesh-doca`'s `own-datapath` feature. The
-standalone port enables it by default.
+The embedded build disables `dmesh-doca`'s `own-datapath` feature. The port
+enables it by default, and the C datapath it wants is not in this tree.
 
 Either transport direction closing removes the paired adapter session. Both
 endpoints are aborted before unread staging custody is returned, and a late
@@ -169,10 +169,10 @@ Pod's Linkerd inbound proxy and control-plane mTLS remains end-to-end.
 
 ## Submodules
 
-Initialize both repository levels with:
+Initialize the port with:
 
 ```sh
-git submodule update --init --recursive linkerd/port
+git submodule update --init linkerd/port/linkerd2-proxy
 ```
 
 The DPU source sync keeps Rust build outputs on the DPU and updates the source
