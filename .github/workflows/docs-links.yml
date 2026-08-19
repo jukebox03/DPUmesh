@@ -1,0 +1,17 @@
+name: docs-links
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: '0 0 * * 1'
+  workflow_dispatch:
+
+jobs:
+  relative-links:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Relative markdown links must resolve
+        run: ./ci/check-doc-links.sh
