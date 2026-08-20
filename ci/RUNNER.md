@@ -96,38 +96,60 @@ build that does uses `$HOME/.cargo/bin/cargo` over ssh.
 |---|---|---|
 | `rapids4-env` | manual | reports the runner environment and gates on DOCA |
 | `contracts-rapids4` | push to `main`, manual | `make` + all 27 contracts, vs 13 on a hosted runner |
-| `bench-run` | manual | one ad-hoc operating point, uploaded as an artifact |
-| `bench-publish` | manual | the frozen set in [bench-frozen.txt](bench-frozen.txt), appended to the `gh-pages` history |
+| `rapids4-health` | nightly, manual | proves the deployed campaign still answers |
 
-`bench-publish` writes to the `gh-pages` branch and nowhere else. To see the page,
-set Settings → Pages → Source to the `gh-pages` branch after the first run. It also
-runs itself nightly at 04:00 Seoul time, and a nightly run skips itself when the
-1-minute load average is above `BENCH_LOAD_LIMIT` (3.0) — someone else is working.
-A run started by hand never skips: then the load is the operator's own choice.
+## What runs unattended, and what does not
 
-## What a measurement has to say about itself
+Nothing on this machine measures performance on a schedule. What is deployed on
+rapids4 is a variable of the research, not a constant: the DPU's topology and
+the campaign change with every experiment, and a number sampled nightly against
+whatever happened to be up is not a series, it is a scatter of unrelated points.
+Performance campaigns are run by hand, from `bench/suite/`, by someone who knows
+which configuration they meant to measure.
 
-`ci/bench-frozen.txt` fixes what the client asks for. It cannot fix what the DPU
-is, and the DPU is what moves the number: one ARM worker or four, the L7 backend
-loaded or not, which core each process sits on, what else is deployed in the
-namespace. `ci/bench-config.sh` reads all of that before the first point and
-stamps every row with a `config_id`.
+The one scheduled job is **rapids4-health**, at 04:00 Seoul time. It asks a
+different question:
 
-Nothing is published without it. The page draws no line between two points whose
-`config_id` differs — it breaks the line and marks the run — because a slope
-across a redeploy is not a trend, it is two machines side by side. Points from
-before the fingerprint existed carry none and are not plotted at all.
+1. Is a campaign deployed at all? An empty namespace between experiments is a
+   normal state, so it is reported and the run passes.
+2. If one is deployed, what is it? `ci/dpu-state.sh` reads the DPU's own startup
+   line for N/K/A, the L7 layer and the load balancer, and fails if that line
+   cannot be found at all — a DPU that is down or has lost its log.
+3. Does the path still answer? One request, one connection, three seconds,
+   against whichever client is deployed. The reply is printed and thrown away.
+   It is there to prove the path is alive, not to say how fast it is.
 
-To read a `config_id` back to a machine, use the Configurations table at the
-bottom of the page.
+Each run appends one JSON object to `data/health.jsonl` on the `gh-pages`
+branch and regenerates the page there, so the history survives the 90-day limit
+on workflow logs. A red run in the morning means a campaign is wedged, not that
+something got slower.
+
+The page has two halves. The strip is whether the node answered. The table is
+**what was deployed** — N/K/A, the L7 layer, how many clients — with a gold rule
+on any run where the DPU's topology changed from the run before it. On a machine
+whose configuration is a variable of the research, that table is the more useful
+half: it is a log of the states this node has been in, and it is the thing you
+want when a hand-run campaign produces a number you cannot explain.
+
+No latency or throughput is recorded, on purpose. The smoke request proves the
+path carries bytes; its timing is one sample against whatever happened to be
+deployed, and keeping it would rebuild the performance series this replaced.
+
+Both halves run locally, which is the point of keeping them out of the YAML:
+
+```sh
+ci/health-check.sh > record.json     # exit 1 when the campaign is not usable
+ci/health-page.py data/health.jsonl index.html
+```
+
+Set Settings → Pages → Source to the `gh-pages` branch after the first run.
 
 ## Setting the machine up
 
 CI never deploys. `bench/bench.sh deploy` rebuilds the DPU and restarts every
-Pod, which is not something a nightly job may decide to do, so the campaign on
-rapids4 is put there by hand and the nightly run measures whatever it finds.
+Pod, which is not something a scheduled job may decide to do.
 
-The topology the published numbers were taken under is the one the report uses:
+The topology the report's numbers were taken under:
 
 ```sh
 DPUMESH_DPA_THREADS=32 DPUMESH_RINGS_PER_POD=8 DPUMESH_ARM_WORKERS=8 \
@@ -135,22 +157,18 @@ BENCH_NUMA_POLICY=local BENCH_DEPLOY_SCOPE=grpc bash bench/bench.sh deploy
 BENCH_NUMA_POLICY=local bash bench/bench.sh pin grpc
 ```
 
-Confirm it took by reading the DPU's own startup line, which is where
-`ci/bench-config.sh` reads it from too:
+Passing none of those leaves the DPU with **one** ARM data worker, which is a
+different machine and a different set of numbers. Confirm what took by reading
+the DPU's own line, which is where `ci/dpu-state.sh` reads it from too:
 
 ```sh
+ci/dpu-state.sh
 bench/bench.sh dpulog 200 | grep 'DPU PROXY MODE ON'
-# ... N/K/A=32/8/8; ... l7-layer=off, lb=round-robin ...
 ```
 
-Passing none of those variables leaves the DPU with **one** ARM data worker,
-which is a different machine and a different set of numbers. A run under that
-topology is still recorded — its `config_id` keeps it apart — but the runner
-says so in the log.
-
-`BENCH_DEPLOY_SCOPE` picks the campaign, and the two do not overlap: `grpc`
+`BENCH_DEPLOY_SCOPE` picks the campaign and the two do not overlap: `grpc`
 starts only the L7 paths so no other backend can enter the DPU registry while it
-runs, and `l4`/`all` start the byte-stream pods instead. `ci/bench-frozen.txt`
-holds the operating points of both; the rows whose client Pod is not deployed
-are reported as absent and skipped, so the same file serves either campaign and
-the fingerprints keep the two series from being drawn as one.
+runs, and `l4`/`all` start the byte-stream pods instead. Add `BENCH_LINKERD=1`
+for the linkerd sidecar columns, and `L7_BACKEND=linkerd` with
+`DPUMESH_L7_SVC=<ns>/<service>` to put linkerd2-proxy inside the DPU rather than
+beside the Pod.

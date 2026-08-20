@@ -1,0 +1,77 @@
+name: rapids4-health
+
+on:
+  # 04:00 in Seoul. This is the only unattended thing that touches rapids4, and
+  # it is deliberately not a measurement: what is deployed here is a variable of
+  # the research, so a number sampled on a schedule says nothing. Whether the
+  # deployed campaign still answers, and what it was, does.
+  schedule:
+    - cron: '0 19 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: rapids4
+  cancel-in-progress: false
+
+permissions:
+  contents: write        # to append to the gh-pages branch
+
+jobs:
+  health:
+    runs-on: [self-hosted, linux, x64, rapids4]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      # bench.sh reads the DPU's address and sudo password from .env at the repo
+      # root, and .env is not in git. Link the operator's copy instead of making
+      # a second one inside the runner workspace.
+      - name: Link the deploy environment
+        run: |
+          env_file="${DPUMESH_ENV_FILE:-$HOME/DPUmesh/.env}"
+          [ -f "$env_file" ] || { echo "no .env at $env_file; the DPU log cannot be read"; exit 1; }
+          ln -sf "$env_file" .env
+
+      # A fault has to be recorded, not just reported, so the check is allowed
+      # to fail here and the job is failed at the end instead.
+      - name: Check
+        id: check
+        continue-on-error: true
+        run: ci/health-check.sh > record.json
+
+      - name: Publish the record
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          [ -s record.json ] || { echo "the check produced no record at all"; exit 1; }
+          cat record.json
+          url="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          rm -rf pages
+          if ! git clone --quiet --depth 1 --branch gh-pages "$url" pages 2>/dev/null; then
+            echo "gh-pages does not exist yet; starting it"
+            mkdir pages
+            git -C pages init --quiet -b gh-pages
+            git -C pages remote add origin "$url"
+          fi
+          mkdir -p pages/data
+          cat record.json >> pages/data/health.jsonl
+          ci/health-page.py pages/data/health.jsonl pages/index.html
+          touch pages/.nojekyll          # keep Jekyll from eating data/ and the page
+          git -C pages config user.name  "github-actions[bot]"
+          git -C pages config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C pages add -A
+          git -C pages commit --quiet -m "health: $(python3 -c 'import json;print(json.load(open("record.json"))["status"])')"
+          git -C pages push --quiet origin gh-pages
+          {
+            echo "### $(python3 -c 'import json;r=json.load(open("record.json"));print(r["status"])')"
+            echo '```json'
+            cat record.json
+            echo '```'
+            echo "history now holds $(wc -l < pages/data/health.jsonl) run(s)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail if the deployed campaign is not usable
+        if: steps.check.outcome == 'failure'
+        run: |
+          echo "the record was published; the campaign on rapids4 needs attention"
+          exit 1

@@ -1,12 +1,8 @@
 #!/bin/bash
-# Print the configuration a measurement was taken under, as KEY=VALUE lines for
-# ci/bench-to-json.py to merge into the point.
-#
-# ci/bench-frozen.txt fixes what the client asks for: sizes, concurrency,
-# threads. It cannot fix what the DPU is, and the DPU is what moves the number.
-# Two points carrying the same label and a different config_id are measurements
-# of two different machines, so the published page breaks its line between them
-# instead of drawing a slope that means nothing.
+# Report what the DPU and the deployed campaign currently are, as KEY=VALUE
+# lines. Nothing here measures or records; it answers "which machine am I
+# looking at", which is the question that has to be settled before any number
+# from this node means anything.
 #
 # The DPU states its own topology in one line at startup, so that line is the
 # source rather than anything inferred from traffic:
@@ -15,7 +11,8 @@
 #
 # N is DPA execution units, K rings per pod, A ARM data workers. The line is
 # written once per DPU start, which is once per deploy, so the search widens
-# until it finds the most recent one.
+# until it finds the most recent one. Failing to find it is a finding: the DPU
+# is not up, or its log is gone.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -62,18 +59,14 @@ pins="$(for name in bench_dpumesh bench_sock bench_grpc; do
         done | sort -u | paste -sd+ -)"
 [ -n "$pins" ] || pins=none
 
-hashed="nka=$dpa_threads/$rings/$workers l7=$l7 lb=$lb pods=$pods_id pin=$pins cpus=$(nproc)"
-config_id="$(printf '%s' "$hashed" | sha1sum | cut -c1-12)"
-
 cat <<OUT
-config_id=$config_id
-cfg_dpa_threads=$dpa_threads
-cfg_rings_per_pod=$rings
-cfg_workers=$workers
-cfg_l7=$l7
-cfg_lb=$lb
-cfg_pods=$pod_count
-cfg_pods_id=$pods_id
-cfg_pin_clients=$pins
-cfg_cpus=$(nproc)
+dpu_dpa_threads=$dpa_threads
+dpu_rings_per_pod=$rings
+dpu_workers=$workers
+dpu_l7=$l7
+dpu_lb=$lb
+dpu_pods=$pod_count
+dpu_pods_id=$pods_id
+dpu_pin_clients=$pins
+dpu_cpus=$(nproc)
 OUT
