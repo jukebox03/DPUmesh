@@ -78,7 +78,7 @@ preload_runner_SRC := bench/validators/preload_runner.c
 bench_sock_SRC     := bench/apps/bench_sock.c
 echo_sock_SRC      := bench/apps/echo_sock.c
 
-.PHONY: all lib bench test clean dirs
+.PHONY: all lib bench test test-hostfree clean dirs
 all: lib bench
 
 # Header dependencies for the library and all consumers.
@@ -171,6 +171,31 @@ $(TESTDIR)/l7_abi_contract_test: tests/l7_abi_contract_test.c linkerd/include/dm
 $(TESTDIR)/benchmark_result_contract_test: tests/benchmark_result_contract_test.c \
 		bench/apps/bench_result.h | dirs
 	$(CC) $(CFLAGS) -o $@ tests/benchmark_result_contract_test.c
+
+# Tests that build and run without the DOCA SDK or a BlueField device.
+# Kept separate so CI on a plain runner can verify them, and so "runs without
+# hardware" is an explicit contract instead of tribal knowledge.
+HOSTFREE_TESTS := $(TESTDIR)/topology_test $(TESTDIR)/l7_abi_contract_test \
+	$(TESTDIR)/l4_pin_policy_test $(TESTDIR)/preload_api_contract_test \
+	$(TESTDIR)/benchmark_result_contract_test
+
+test-hostfree: $(HOSTFREE_TESTS)
+	@case "$(CFLAGS)" in *-DNDEBUG*) \
+		echo "test-hostfree: NDEBUG disables assert(); these tests would silently pass" >&2; \
+		exit 1;; esac
+	$(TESTDIR)/topology_test
+	$(TESTDIR)/l7_abi_contract_test
+	$(TESTDIR)/l4_pin_policy_test
+	$(TESTDIR)/preload_api_contract_test
+	$(TESTDIR)/benchmark_result_contract_test
+	sh tests/dma_fault_scope_test.sh
+	sh tests/l4_collector_contract_test.sh
+	python3 tests/analyze_saturation_test.py
+	python3 tests/summarize_l4_test.py
+	python3 tests/workload_attest_agent_test.py
+	python3 tests/dpumesh_controller_test.py
+	python3 tests/linkerd_cp_relay_test.py
+	python3 tests/feed_delivery_test.py
 
 test: $(TESTDIR)/native_api_contract_test $(TESTDIR)/native_control_state_test \
 	$(TESTDIR)/workload_grant_test $(TESTDIR)/pod_membership_test \

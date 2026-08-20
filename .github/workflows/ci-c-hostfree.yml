@@ -1,0 +1,21 @@
+name: c-hostfree
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Toolchain versions
+        run: gcc --version | head -1 && make --version | head -1
+
+      - name: Contracts that need no DOCA and no BlueField
+        run: make test-hostfree
