@@ -1,4 +1,4 @@
-name: public-headers
+name: headers-standalone
 
 on:
   push:

@@ -1,8 +1,17 @@
 name: rust-fmt
 
+# The one file this checks is linkerd/rust/src/lib.rs, so nothing else needs to
+# wake it. rust-build.yml filters on the same subtree.
 on:
   push:
+    paths:
+      - 'linkerd/rust/**'
+      - '.github/workflows/rust-fmt.yml'
   pull_request:
+    paths:
+      - 'linkerd/rust/**'
+      - '.github/workflows/rust-fmt.yml'
+  workflow_dispatch:
 
 jobs:
   fmt:

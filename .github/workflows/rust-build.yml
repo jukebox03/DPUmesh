@@ -1,14 +1,14 @@
-name: rust
+name: rust-build
 
 on:
   push:
     paths:
       - 'linkerd/**'
-      - '.github/workflows/ci-rust.yml'
+      - '.github/workflows/rust-build.yml'
   pull_request:
     paths:
       - 'linkerd/**'
-      - '.github/workflows/ci-rust.yml'
+      - '.github/workflows/rust-build.yml'
   workflow_dispatch:
 
 jobs:
