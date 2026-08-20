@@ -1,0 +1,32 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>DPUmesh node health</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 14px/1.6 -apple-system, system-ui, sans-serif; margin: 2rem auto; max-width: 900px;
+          padding: 0 1rem; }
+  h1 { font-size: 1.3rem; margin-bottom: .2rem; }
+  h2 { font-size: 1rem; margin: 2rem 0 .4rem; }
+  p.meta { color: #888; margin-top: 0; }
+  .strip { display: flex; flex-wrap: wrap; gap: 3px; margin: 1rem 0; }
+  .strip i { width: 12px; height: 26px; border-radius: 2px; display: block; }
+  table { border-collapse: collapse; width: 100%; font-size: .85rem; }
+  th, td { text-align: left; padding: .3rem .5rem; border-bottom: 1px solid #8883; }
+  th { color: #888; font-weight: 600; }
+  td.ts { font-family: ui-monospace, monospace; font-size: .8rem; }
+  tr.moved td { border-top: 2px solid #d9a441; }
+  tr.moved td:first-child::before { content: "▲ "; color: #d9a441; }
+  .wrap { overflow-x: auto; }
+</style>
+<h1>DPUmesh node health</h1>
+<p class="meta"><b style="color:#2f8f4e">●</b> answered &middot; 1 run(s)
+&middot; 0 fault(s) &middot; last 2026-08-20T12:02:20Z</p>
+<div class="strip"><i style="background:#2f8f4e" title="2026-08-20T12:02:20Z — answered"></i></div>
+<h2>What was deployed</h2>
+<p class="meta">A gold rule marks a run where the DPU's topology changed from the run before it.
+No latency or throughput is recorded here: a single request against whatever happened to be
+deployed proves the path carries bytes and nothing else. Performance is measured by hand.</p>
+<div class="wrap"><table>
+<thead><tr><th>run (UTC)</th><th>result</th><th>N/K/A</th><th>L7 layer</th>
+<th>clients</th><th>answered</th><th>commit</th></tr></thead>
+<tbody><tr><td class="ts">2026-08-20 12:02</td><td><b style="color:#2f8f4e">●</b> answered</td><td>32/8/8</td><td>attached</td><td>6</td><td class="ts">grpc-dpumesh</td><td class="ts">951193e</td></tr></tbody></table></div>
