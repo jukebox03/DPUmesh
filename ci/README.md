@@ -1,0 +1,130 @@
+# CI
+
+Checks live here as scripts and Makefile targets; the workflows in
+`.github/workflows/` only decide when to run them. Anything CI fails on can be
+reproduced at a terminal with the same command.
+
+## Workflows
+
+Every push, on a hosted x86 runner. Under a minute.
+
+| | what it protects |
+|---|---|
+| `contracts-hostfree` | the 13 contracts that need no DOCA and no BlueField (`make test-hostfree`) |
+| `headers-standalone` | the four public headers compile alone as C99 and C++17, and pull in no DOCA |
+| `abi-guard` | a changed public header carries either an `ABI_MAJOR` bump or an explicit `ABI-Impact:` line |
+| `docs-links` | every relative link in the repository's Markdown resolves |
+
+On a path change only.
+
+| | what it protects | where |
+|---|---|---|
+| `contracts-arm64` | the same 13 contracts plus the crate's 34 unit tests | aarch64 hosted |
+| `rust-build` | `dmesh-l7` builds, tests, and passes clippy | hosted |
+| `rust-fmt` | `linkerd/rust/src/lib.rs` formatting | hosted |
+| `contracts-rapids4` | **all 27 contracts** (`make test`) | rapids4, needs DOCA |
+
+On a schedule.
+
+| | when | what it asks |
+|---|---|---|
+| `rapids4-health` | daily, 04:00 Seoul | does the deployed campaign still answer, and what is deployed |
+| `submodule-watch` | daily, 06:00 Seoul | is the linkerd2-proxy pin still reachable upstream |
+| `docs-links` | weekly | links again, against a moving filesystem |
+
+Manual only: `rapids4-env`, which reports the self-hosted runner's environment
+and fails if it is root, if DOCA does not resolve, or if a tool the other jobs
+call is missing.
+
+## Scripts
+
+| | |
+|---|---|
+| `check-abi-bump.sh` | the ABI decision, called by `abi-guard` |
+| `check-doc-links.sh` | relative links, called by `docs-links` |
+| `check-submodule-pin.sh` | submodule pin reachability, called by `submodule-watch` |
+| `dpu-state.sh` | what the DPU and the deployed campaign currently are |
+| `health-check.sh` | does the campaign answer; prints one JSON record |
+| `health-page.py` | the accumulated records as one self-contained page |
+
+## The two Makefile targets
+
+```
+make test-hostfree     13 contracts, no DOCA and no BlueField
+make test              all 27
+```
+
+The difference between them is the definition of "needs the DOCA SDK". Hosted CI
+runs the first; only rapids4 can run the second. `test-hostfree` refuses to run
+under `-DNDEBUG`, because these tests are built on `assert()` and would all pass
+silently without it.
+
+## What runs unattended
+
+`rapids4-health`, and it does not measure performance. What is deployed on
+rapids4 is a variable of the research — the DPU's topology and the campaign
+change with every experiment — so a number sampled on a schedule against
+whatever happened to be up is not a series. Whether the node still answers is.
+
+Each run appends one JSON record to `data/health.jsonl` on the `gh-pages` branch
+and regenerates the page there. The record holds the result, the deployed
+clients, and the DPU's topology; the page marks every run whose topology changed
+from the run before it, which makes it a log of the states this node has been
+in. A red run means a campaign is wedged, not that something got slower.
+
+Performance campaigns are run by hand from `bench/suite/` by someone who chose
+the configuration. `ci/dpu-state.sh` says what that configuration currently is.
+
+## The rapids4 runner
+
+Hosted runners have no DOCA SDK, no BlueField, and no cluster. Everything that
+needs one of those runs on rapids4 through a self-hosted runner, and every such
+job declares:
+
+```yaml
+runs-on: [self-hosted, linux, x64, rapids4]
+```
+
+`self-hosted`, `linux` and `x64` come from the runner itself. **`rapids4` does
+not** — it is a label given at registration, and a job that omits it from the
+list queues forever instead of failing.
+
+Constraints on anything added to those jobs:
+
+- **No `pull_request` trigger.** This repository is public, and a pull request
+  from a fork carries its own workflow code. The rapids4 jobs trigger on
+  `workflow_dispatch` and on `push` to `main` only.
+- **One job at a time.** Every rapids4 workflow shares
+  `concurrency: group: rapids4` with `cancel-in-progress: false`. A build beside
+  a measurement invalidates the measurement.
+- **The workspace is not disposable.** `_work/` survives between jobs; what
+  keeps a stale object from turning a broken build green is `actions/checkout`,
+  which cleans the tree every run. If a job passes or fails inexplicably, clear
+  `~/actions-runner/_work/DPUmesh` before believing it.
+- **No deploy from CI.** `bench/bench.sh deploy` rebuilds the DPU and restarts
+  every Pod; it stays a deliberate act at a terminal.
+- **The DPU build stays out.** `doca/meson.build` is compiled on the BlueField
+  over ssh, which would put `DPU_PASS` into the runner environment.
+- **The runner service does not read `~/.bashrc`.** A job sees only what the
+  service environment holds; the place to add to it is `~/actions-runner/.env`.
+
+## Setting the machine up
+
+The topology the report's numbers were taken under:
+
+```sh
+DPUMESH_DPA_THREADS=32 DPUMESH_RINGS_PER_POD=8 DPUMESH_ARM_WORKERS=8 \
+BENCH_NUMA_POLICY=local BENCH_DEPLOY_SCOPE=grpc bash bench/bench.sh deploy
+BENCH_NUMA_POLICY=local bash bench/bench.sh pin grpc
+```
+
+Passing none of those leaves the DPU with **one** ARM data worker, which is a
+different machine and a different set of numbers. Confirm what took with
+`ci/dpu-state.sh`.
+
+`BENCH_DEPLOY_SCOPE` picks the campaign and the two do not overlap: `grpc`
+starts only the L7 paths so no other backend can enter the DPU registry while it
+runs, and `l4`/`all` start the byte-stream pods instead. Add `BENCH_LINKERD=1`
+for the linkerd sidecar columns, and `L7_BACKEND=linkerd` with
+`DPUMESH_L7_SVC=<ns>/<service>` to put linkerd2-proxy inside the DPU rather than
+beside the Pod.
