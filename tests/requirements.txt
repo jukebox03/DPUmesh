@@ -1,0 +1,3 @@
+# Runtime dependencies of the host-side tools exercised by the test suite.
+# bench/workload_attest_agent.py signs workload attestations with Ed25519.
+cryptography>=42.0

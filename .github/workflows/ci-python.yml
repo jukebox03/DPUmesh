@@ -14,9 +14,7 @@ jobs:
         with:
           python-version: '3.11'
 
-      # The attestation agent signs its grant with Ed25519, the same dependency
-      # its image installs.
-      - run: pip install --no-cache-dir cryptography
+      - run: pip install --no-cache-dir -r tests/requirements.txt
 
       - run: python3 tests/analyze_saturation_test.py
       - run: python3 tests/summarize_l4_test.py
