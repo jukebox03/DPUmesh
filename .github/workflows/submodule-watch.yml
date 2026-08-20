@@ -1,0 +1,20 @@
+name: submodule-watch
+
+on:
+  schedule:
+    - cron: '0 21 * * *'
+  workflow_dispatch:
+  push:
+    paths:
+      - '.gitmodules'
+      - 'ci/check-submodule-pin.sh'
+      - '.github/workflows/submodule-watch.yml'
+
+jobs:
+  pin-reachable:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Submodule pin must remain reachable upstream
+        run: ./ci/check-submodule-pin.sh
