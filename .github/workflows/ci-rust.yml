@@ -1,0 +1,40 @@
+name: rust
+
+on:
+  push:
+    paths:
+      - 'linkerd/**'
+      - '.github/workflows/ci-rust.yml'
+  pull_request:
+    paths:
+      - 'linkerd/**'
+      - '.github/workflows/ci-rust.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: linkerd/rust
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Report the pinned toolchain
+        run: rustc --version && cargo --version && cmake --version | head -1
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: linkerd/rust
+
+      - name: Build the staticlib
+        run: cargo build --locked
+
+      - name: Unit tests
+        run: cargo test --locked
+
+      - name: Clippy
+        run: rustup component add clippy && cargo clippy --all-targets --locked
