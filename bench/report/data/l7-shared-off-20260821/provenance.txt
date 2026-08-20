@@ -1,0 +1,29 @@
+tree 6a3230558c7920053b3ff41902aa6742cf6d04ef  M bench/bench.sh  m linkerd/port/linkerd2-proxy  M linkerd/rust/Cargo.lock  M linkerd/rust/src/lib.rs ?? bench/report/data/l7-shared-off-20260821/ 
+request 1024B reply 8B window 128 dur 15s warmup 200 reps 2
+backends 1 Pod(s) behind echo-dpumesh
+--- launch ---
+DPUMESH_NODE_NAME=rapids4
+DPUMESH_REGISTRATION_KEY_DIR=/etc/dpumesh/registration.keys
+DPUMESH_FEED_KEY_DIR=/etc/dpumesh/feed.keys
+DPUMESH_MEMBERSHIP_FILE=/etc/dpumesh/membership.v1
+DPUMESH_ADMISSION_FILE=/etc/dpumesh/admission
+DPUMESH_TOPOLOGY_FILE=/etc/dpumesh/topology.v1
+DPUMESH_CONTROLLER_KEY_DIR=/etc/dpumesh/controller.pub.keys
+DPUMESH_NODE_KEY_FILE=/etc/dpumesh/node-static.key
+DPUMESH_NODE_KEY_PUBLIC_FILE=/etc/dpumesh/node-static.pub
+DPUMESH_CONTROLLER_SCOPE_URL=http://192.168.100.1:28089
+DPUMESH_IDENTITY_TRUST_DOMAIN=linkerd.cluster.local
+DPUMESH_L7_DECISION_SVC=
+DPUMESH_L7_OPAQUE_SVC=
+DPUMESH_L7_SVC=test-bench/echo-dpumesh
+DPUMESH_L7_NULL_TRACE=
+DPUMESH_L7_FRAMED_RR=message
+DPUMESH_DPA_THREADS=32
+DPUMESH_RINGS_PER_POD=8
+DPUMESH_ARM_WORKERS=4
+--- l7 env ---
+DPUMESH_L7_LINKERD_WORKER=all
+DPUMESH_L7_SERVICE_TARGETS_FILE=/etc/dpumesh/service-targets.v1
+DPUMESH_L7_FAIL_CLOSED=1
+DMESH_L7_TX_RESERVE=1
+[15:10:55:424954][2178121760][DOCA][WRN][dpu_proxy.c:4231][px_init] DPU PROXY MODE ON (run-to-completion SG-DMA, N/K/A=32/8/4; l7-mode-lists=1, l7-layer=attached, l7-worker=all, l7-policy=fail-closed, lb=round-robin; passthru=conn-pinned, sg_pieces=64)

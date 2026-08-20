@@ -1,0 +1,27 @@
+What a DMesh session costs
+
+## Building one: reconnect churn at a fixed load
+
+| reconnect period | sessions/s | Mrps | ARM us/req | p99 us |
+|---|---|---|---|---|
+| never | 0.0 | 0.009626 | 43.317 | 1475.5 |
+| 4000 | 2.1 | 0.008533 | 44.153 | 1584.5 |
+| 1000 | 6.9 | 0.006979 | 47.273 | 1738.5 |
+| 250 | 17.0 | 0.004347 | 58.746 | 33794.5 |
+| 60 | 29.1 | 0.001931 | 101.758 | 40175.0 |
+
+DPU cores = 0.396 + -7.3044e-3 x sessions/s
+building and tearing down one session costs -7304 ARM core-us
+
+## Carrying them: live sessions at a fixed outstanding window
+
+| threads | conc | live sessions | Mrps | ARM us/req | p99 us |
+|---|---|---|---|---|---|
+| 1 | 128 | 1 | 0.159563 | 2.980 (+0.0%) | 1451.5 |
+| 2 | 64 | 2 | 0.179582 | 4.954 (+66.3%) | 1255.5 |
+| 4 | 32 | 4 | 0.179022 | 7.056 (+136.8%) | 1282.0 |
+| 8 | 16 | 8 | 0.160728 | 13.690 (+359.4%) | 1312.0 |
+
+The outstanding request window is the same on every row of the second
+table, so a rising us/req is what more live sessions cost, not more load.
+Every point carried fail=0, drops=0, reorder=0 and worker_fail=0.

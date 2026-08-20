@@ -663,6 +663,9 @@ start_dpu() {
         local policy_workload_q destination_context_q
         printf -v policy_workload_q '%q' "$policy_workload"
         printf -v destination_context_q '%q' "$destination_context"
+        # The proxy's bool parser accepts only true/false.
+        local shared_stacks=false
+        [ "${DPUMESH_SHARED_STACKS:-0}" = 1 ] && shared_stacks=true
         ssh_dpu "cat > /tmp/dpumesh-l7.env << 'L7ENV'
 LINKERD2_PROXY_DESTINATION_SVC_ADDR=$LINKERD_DST_ADDR
 LINKERD2_PROXY_DESTINATION_SVC_NAME=$LINKERD_DST_NAME
@@ -687,6 +690,7 @@ DPUMESH_L7_LINKERD_WORKER=${DPUMESH_L7_LINKERD_WORKER:-0}
 DPUMESH_L7_SERVICE_TARGETS_FILE=$(linkerd_service_target_file)
 DPUMESH_L7_FAIL_CLOSED=$DPUMESH_L7_FAIL_CLOSED
 DMESH_L7_TX_RESERVE=${DMESH_L7_TX_RESERVE:-1}
+LINKERD2_PROXY_DMESH_SHARED_STACKS=$shared_stacks
 L7ENV
 { printf 'LINKERD2_PROXY_IDENTITY_TRUST_ANCHORS=\"'; \
   echo '$DPU_PASS' | sudo -S cat $(linkerd_trust_anchors) 2>/dev/null; \

@@ -1218,7 +1218,7 @@ impl Worker {
         };
 
         // Publish the DPUmesh backend endpoint for the Linkerd connector.
-        let (backend_io, backend_handle) = dmesh_doca::dmesh_io_pair(backend_addr);
+        let (backend_io, backend_handle) = dmesh_doca::dmesh_io_pair(backend_addr, Some(token));
         let session = Session {
             token,
             client: Side {
@@ -2274,7 +2274,7 @@ mod tests {
 
     /// Register a client endpoint for a session, as the acceptor would.
     fn register_client(tw: &TestWorker, token: SessionToken) -> DmeshIo {
-        let (io, handle) = dmesh_doca::dmesh_io_pair("10.244.0.1:1".parse().unwrap());
+        let (io, handle) = dmesh_doca::dmesh_io_pair("10.244.0.1:1".parse().unwrap(), Some(token));
         tw.registrar.send(Registration { token, handle }).unwrap();
         with_test_worker(|w| w.collect_registrations());
         io

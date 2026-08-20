@@ -1,0 +1,6 @@
+dmesh_sessions_opened_total 1308
+dmesh_backend_session_mismatches_total 0
+dmesh_backend_sessionless_refusals_total 0
+dmesh_session_stack_builds_total 1
+dmesh_session_stack_cache_hits_total 1307
+dmesh_session_stack_cache_misses_total 1
