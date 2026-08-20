@@ -7,7 +7,7 @@ and the campaign driver that runs all six L7 paths as one session.
 
 This is a measurement of stock linkerd against stock Envoy and against DPUmesh,
 with the proxy in a host sidecar. It is not the linkerd-on-DPUmesh integration,
-which runs the proxy on the DPU ARM: `../../design/L7.md` describes that layer
+which runs the proxy on the DPU ARM: `../../design/DATA.md` describes that layer
 and `../README.md` how to build it. This dataset is the baseline it is measured
 against.
 

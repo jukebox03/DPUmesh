@@ -85,7 +85,7 @@ executor OS thread.
 `DmeshEndpoint` and `DmeshClientEventEngine` own no thread. A further host
 thread belongs to the native channel and drains DOCA completions and the
 reverse rings; it and the DPU-side workers are specified in
-[`CORE.md`](CORE.md).
+[`DATA.md`](DATA.md).
 
 An accepted Write is posted on the caller's thread and, if native capacity
 stops it, resumed from an event the EQ owner thread delivers. A receive is

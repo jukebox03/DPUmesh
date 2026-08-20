@@ -7,7 +7,7 @@ Services with their ClusterIPs, ready endpoints, and the protected-Service
 set. It performs no attestation — it has no host-local evidence and never
 asks for it. The generation is Ed25519-signed; DPUs hold public keys only.
 
-The document grammar is design/CLUSTER.md's, one record per line:
+The document grammar is design/CONTROL.md's, one record per line:
 
     version=<u64, strictly increasing>
     node=<name>,<rdma-ip>:<port>,<agent-key-id>,<agent-pub-hex64>,<dpu-pub-hex64>

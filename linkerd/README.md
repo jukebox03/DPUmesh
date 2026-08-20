@@ -18,7 +18,7 @@ linkerd/
 ```
 
 The execution model and the interface contract are documented in
-[`design/L7.md`](../design/L7.md).
+[`design/DATA.md`](../design/DATA.md).
 
 ## Runtime
 

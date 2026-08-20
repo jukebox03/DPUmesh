@@ -110,11 +110,12 @@ tearing its mappings down remains the control connection's decision.
 include/dpumesh/       public C API
 src/                   host core, native facade, resolver, preload facade
 doca/                  BlueField ARM process and DPA kernel
+controller/            cluster controller: topology generation, workload scope
 integrations/grpc/     gRPC C++ runtime, reactor, tests, benchmark
 linkerd/               DPU-side L7 layer: adapter ABI, consumers, port submodule
 bench/                 deployment, workloads, validators, measurement records
 tests/                 fast host-only ABI and state-machine regression tests
-design/                current API, core, naming, L7, and gRPC whitepapers
+design/                current API, data-plane, control-plane and gRPC whitepapers
 ```
 
 ## Build and test
@@ -173,15 +174,15 @@ connection attempt creates a QP; established L4 streams remain backend-pinned.
 
 Design documents define the current contracts; benchmark documents say how a
 number was produced; reports carry the numbers.
+[PLAN.md](PLAN.md) is the open work list, and holds cost work only.
 
 **Design**
 
 | Document | Defines |
 |---|---|
 | [design/API.md](design/API.md) | the native `<dpumesh/dmesh.h>` contract: lifecycle, batching, EQ, errors |
-| [design/CORE.md](design/CORE.md) | host/DPA/ARM custody, rings, and replay barriers |
-| [design/CONTROL.md](design/CONTROL.md) | naming, trusted registration, signed feeds, the Linkerd control plane, and node scope |
-| [design/L7.md](design/L7.md) | the DPU-side Linkerd runtime: ownership, custody, the adapter ABI, and limits |
+| [design/DATA.md](design/DATA.md) | the data plane: host/DPA/ARM custody, rings, replay barriers, and the DPU-side Linkerd runtime that rides on them |
+| [design/CONTROL.md](design/CONTROL.md) | the control plane at both scopes: naming, trusted registration, signed feeds, the Linkerd control plane, the cluster controller and the peer channel |
 | [design/GRPC.md](design/GRPC.md) | how the gRPC adapter maps chttp2 onto the transport |
 
 **Integrations**

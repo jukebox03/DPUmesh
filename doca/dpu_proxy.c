@@ -1,6 +1,6 @@
 /* Ordered forwarding. A connection's routing is resolved once from its service:
  * L4 passthrough, or the L7 layer behind linkerd/include/dmesh_l7.h, which is
- * handed staging extents and names its own backend. See design/L7.md. */
+ * handed staging extents and names its own backend. See design/DATA.md. */
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE

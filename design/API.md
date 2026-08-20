@@ -79,8 +79,11 @@ the channel is destroyed.
 
 ## 3. Connections and naming
 
-`dmesh_create_qp(eq, service_name)` resolves a Kubernetes Service name through
-the immutable process registry. QP creation is local; the first outbound data is
+`dmesh_create_qp(eq, service_name)` resolves a Kubernetes Service name — `"name"`
+in the calling Pod's own namespace, or `"name.namespace"` — by asking the DPU,
+which answers from the signed topology generation it holds. The process holds no
+registry file, and the id the answer carries is an opaque node-local handle.
+QP creation is local; the first outbound data is
 what causes DPU routing and backend connection creation. Inbound connections
 arrive as `DMESH_EVENT_CONN_REQ`; their `event.qp` is already usable and permanently
 bound to the EQ that accepted it.
@@ -339,8 +342,11 @@ Adapter-internal ownership and threading are specified in
 - No arbitrary memory registration, rkey, one-sided READ, or one-sided WRITE.
 - No application-visible send completion; protocol ACKs reclaim internal TX
   capacity.
-- The registry is loaded once and is not live-reloaded.
-- Dynamic instances require a Service already present in the registry.
+- A name the held generation does not define does not resolve, and a Service
+  with no live registered backend on this node answers not-meshed. Answers are
+  cached for one generation interval and re-resolved after that or on a
+  connection error, so a Service that appears later is reachable without
+  restarting the process.
 - L4 passthrough is the default gRPC mode; a Service assigned to the L7 layer is
   terminated there. The in-tree L7 validator uses a bounded 16-byte
   length-prefixed benchmark frame, not HTTP/2.
