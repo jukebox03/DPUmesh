@@ -1,4 +1,3 @@
-
 #include "comch_server.h"
 
 #include <time.h>
@@ -11,6 +10,7 @@
 #include "dpa.h"      /* teardown_pod_dma (DOCA_ARCH_DPU only) */
 #include "dpu_proxy.h"
 #include "workload_grant.h"
+#include "control_scope.h"
 #include "dmesh_l7.h"   /* l7_control_event: admission accounting */
 
 #include <doca_pe.h>
@@ -30,6 +30,14 @@ l7_control_event(const char *kind, const char *reason)
 {
 	(void)kind;
 	(void)reason;
+}
+
+/* Likewise: a build with no L7 layer holds no policy watches to drop. */
+__attribute__((weak)) void
+l7_inbound_forget(int worker_id, const char *workload)
+{
+	(void)worker_id;
+	(void)workload;
 }
 
 static void server_send_task_completion_callback(struct doca_comch_task_send *task,
@@ -122,86 +130,104 @@ static void server_message_recv_callback(struct doca_comch_event_msg_recv *event
 		}
 		break;
 
-	case DMESH_MSG_WORKLOAD_GRANT: {
-		const struct dmesh_workload_grant_msg *grant =
-			(const struct dmesh_workload_grant_msg *)recv_buffer;
-		if (msg_len != sizeof(*grant)) {
-			DOCA_LOG_ERR("Received invalid WORKLOAD_GRANT size: %u", msg_len);
+	case DMESH_MSG_WORKLOAD_ASSERT: {
+		const struct dmesh_workload_assert_msg *assertion =
+			(const struct dmesh_workload_assert_msg *)recv_buffer;
+		if (msg_len != sizeof(*assertion)) {
+			DOCA_LOG_ERR("Received invalid WORKLOAD_ASSERT size: %u", msg_len);
 			return;
 		}
 		struct pod_state *pod = find_pod_by_connection(objs, comch_connection);
 		if (pod == NULL || !pod->registration_challenge_issued) {
-			DOCA_LOG_ERR("WORKLOAD_GRANT rejected: no connection challenge");
+			DOCA_LOG_ERR("WORKLOAD_ASSERT rejected: no connection challenge");
 			return;
 		}
 		if (pod->registration_grant_verified ||
 		    __atomic_load_n(&pod->registered, __ATOMIC_ACQUIRE)) {
-			DOCA_LOG_ERR("WORKLOAD_GRANT rejected: duplicate for slot %d",
+			DOCA_LOG_ERR("WORKLOAD_ASSERT rejected: duplicate for slot %d",
 			             (int)(pod - objs->pods));
 			return;
 		}
 
-		int32_t authorized_service = DMESH_SVC_NONE;
-		char workload[DMESH_WORKLOAD_MAX];
-		char pod_uid[DMESH_POD_UID_MAX];
-		const uint8_t *registration_key =
-			dmesh_registration_find_key(objs, grant->key_id);
-		enum dmesh_grant_result vr = registration_key == NULL ?
-			DMESH_GRANT_BAD_KEY_ID : dmesh_grant_verify_v1(
-				grant, registration_key, objs->registration_issuer,
+		struct dmesh_assert_claims claims;
+		/* The held generation is authoritative for this node's agent key;
+		 * the installed keyring is only the bring-up fallback for a DPU
+		 * that has not adopted any generation yet. */
+		const uint8_t *node_public_key = NULL;
+		if (!dmesh_topology_node_key(objs, objs->node_name,
+		                             assertion->key_id, &node_public_key))
+			node_public_key =
+				dmesh_registration_find_key(objs, assertion->key_id);
+		enum dmesh_grant_result vr = node_public_key == NULL ?
+			DMESH_GRANT_BAD_KEY_ID : dmesh_assert_verify_v2(
+				assertion, node_public_key, objs->node_name,
 				pod->registration_nonce, (uint64_t)time(NULL),
-				&authorized_service, workload, pod_uid);
+				&claims);
 		if (vr == DMESH_GRANT_OK &&
-		    dmesh_registration_consume_grant(objs, grant->grant_id) != 0) {
+		    dmesh_registration_consume_grant(objs, assertion->assert_id) != 0) {
 			vr = DMESH_GRANT_REPLAY;
 			objs->registration_grants_replayed++;
 		}
 		if (vr != DMESH_GRANT_OK) {
 			objs->registration_grants_rejected++;
-			l7_control_event("grant", dmesh_grant_result_name(vr));
-			DOCA_LOG_ERR("workload_grant result=reject reason=%s slot=%d key_id=%.*s "
-			             "grant=%02x%02x%02x%02x rejected=%lu replayed=%lu",
+			l7_control_event("assert", dmesh_grant_result_name(vr));
+			DOCA_LOG_ERR("workload_assert result=reject reason=%s slot=%d key_id=%.*s "
+			             "assert=%02x%02x%02x%02x rejected=%lu replayed=%lu",
 			             dmesh_grant_result_name(vr), (int)(pod - objs->pods),
-			             DMESH_GRANT_KEY_ID_MAX, grant->key_id,
-			             grant->grant_id[0], grant->grant_id[1],
-			             grant->grant_id[2], grant->grant_id[3],
+			             DMESH_GRANT_KEY_ID_MAX, assertion->key_id,
+			             assertion->assert_id[0], assertion->assert_id[1],
+			             assertion->assert_id[2], assertion->assert_id[3],
 			             (unsigned long)objs->registration_grants_rejected,
 			             (unsigned long)objs->registration_grants_replayed);
 			return;
 		}
 
-		memcpy(pod->workload, workload, sizeof(pod->workload));
-		memcpy(pod->pod_uid, pod_uid, sizeof(pod->pod_uid));
-		memcpy(pod->registration_grant_id, grant->grant_id,
+		memcpy(pod->workload, claims.workload, sizeof(pod->workload));
+		memcpy(pod->pod_uid, claims.pod_uid, sizeof(pod->pod_uid));
+		memcpy(pod->namespace_name, claims.namespace_name,
+		       sizeof(pod->namespace_name));
+		memcpy(pod->service_account, claims.service_account,
+		       sizeof(pod->service_account));
+		memcpy(pod->pod_ip, claims.pod_ip, sizeof(pod->pod_ip));
+		memcpy(pod->granted_service, claims.service_name,
+		       sizeof(pod->granted_service));
+		memcpy(pod->registration_grant_id, assertion->assert_id,
 		       sizeof(pod->registration_grant_id));
-		pod->grant_service_id = authorized_service;
 		pod->registration_grant_verified = 1;
 		objs->registration_grants_accepted++;
-		l7_control_event("grant", "ok");
-		DOCA_LOG_INFO("workload_grant result=accept slot=%d service_id=%d key_id=%.*s "
-		              "grant=%02x%02x%02x%02x pod_uid=%s workload='%s' accepted=%lu",
-		              (int)(pod - objs->pods), authorized_service,
-		              DMESH_GRANT_KEY_ID_MAX, grant->key_id,
-		              grant->grant_id[0], grant->grant_id[1], grant->grant_id[2],
-		              grant->grant_id[3], pod->pod_uid, pod->workload,
+		l7_control_event("assert", "ok");
+		DOCA_LOG_INFO("workload_assert result=accept slot=%d service='%s/%s' key_id=%.*s "
+		              "assert=%02x%02x%02x%02x pod_uid=%s pod_ip=%s workload='%s' accepted=%lu",
+		              (int)(pod - objs->pods), pod->namespace_name,
+		              pod->granted_service[0] ? pod->granted_service : "(none)",
+		              DMESH_GRANT_KEY_ID_MAX, assertion->key_id,
+		              assertion->assert_id[0], assertion->assert_id[1],
+		              assertion->assert_id[2], assertion->assert_id[3],
+		              pod->pod_uid, pod->pod_ip, pod->workload,
 		              (unsigned long)objs->registration_grants_accepted);
 		break;
 	}
 
 	case DMESH_MSG_POD_REGISTER: {
 		struct dmesh_register_msg *reg = (struct dmesh_register_msg *)recv_buffer;
-		if (msg_len != sizeof(struct dmesh_register_msg)) {
+		if (msg_len != sizeof(struct dmesh_register_msg) ||
+		    memchr(reg->service_name, '\0', sizeof(reg->service_name)) == NULL) {
 			DOCA_LOG_ERR("Received invalid REGISTER message");
 			return;
 		}
 		int assigned = pods_register(objs, comch_connection, reg->pod_id,
-		                             reg->service_id);
+		                             reg->service_name);
 		if (assigned >= 0) {
 			/* Reply with the assigned pod_id so the host can address itself.
 			 * Non-blocking send (no PE re-entry from this callback). */
 			struct dmesh_pod_assigned_msg am = { .type = DMESH_MSG_POD_ASSIGNED,
-						     .landing_stripes = objs->n_data_workers };
+						     .landing_stripes = objs->n_data_workers,
+						     .service_id = DMESH_SVC_NONE };
 			am.pod_id = assigned;
+			struct pod_state *assigned_pod =
+				find_pod_by_connection(objs, comch_connection);
+			if (assigned_pod != NULL)
+				am.service_id = assigned_pod->service_id;
 			doca_error_t sr = server_send_msg_to_conn(objs, comch_connection,
 			                                          (const char *)&am, sizeof(am));
 			if (sr != DOCA_SUCCESS)
@@ -235,6 +261,98 @@ static void server_message_recv_callback(struct doca_comch_event_msg_recv *event
 				DOCA_LOG_ERR("REGISTER failure result send failed: %s",
 				             doca_error_get_name(sr));
 		}
+		break;
+	}
+
+	case DMESH_MSG_RESOLVE: {
+		const struct dmesh_resolve_msg *req =
+			(const struct dmesh_resolve_msg *)recv_buffer;
+		if (msg_len != sizeof(*req) || req->version != 1 ||
+		    memchr(req->name, '\0', sizeof(req->name)) == NULL) {
+			DOCA_LOG_ERR("Received invalid RESOLVE message");
+			return;
+		}
+		struct pod_state *pod = find_pod_by_connection(objs, comch_connection);
+		if (pod == NULL) {
+			DOCA_LOG_ERR("RESOLVE rejected: unknown connection");
+			return;
+		}
+		struct dmesh_resolve_ack_msg ack;
+		memset(&ack, 0, sizeof(ack));
+		ack.type = DMESH_MSG_RESOLVE_ACK;
+		ack.interned_svc = -1;
+		const struct dmesh_gen_service *service = NULL;
+		if (objs->topology.tables == NULL) {
+			ack.status = 2;                       /* no generation held */
+		} else {
+			ack.status = 1;                       /* not meshed until found */
+			ack.generation_le = objs->topology.tables->version;
+			char service_key[DMESH_K8S_NAMESPACE_MAX + DMESH_SVC_NAME_MAX];
+			if (req->by_name) {
+				/* "name" resolves in the requester's own namespace,
+				 * "name.namespace" is the DNS convention for a
+				 * cross-namespace peer. */
+				const char *dot = strchr(req->name, '.');
+				if (dot != NULL)
+					snprintf(service_key, sizeof(service_key), "%.*s/%.*s",
+					         (int)strlen(dot + 1), dot + 1,
+					         (int)(dot - req->name), req->name);
+				else if (pod->namespace_name[0] != '\0')
+					snprintf(service_key, sizeof(service_key), "%s/%s",
+					         pod->namespace_name, req->name);
+				else
+					service_key[0] = '\0';
+				if (service_key[0] != '\0')
+					service = dmesh_topology_service(objs, service_key);
+			} else {
+				const uint8_t *ip = (const uint8_t *)&req->ipv4_be;
+				const uint8_t *pb = (const uint8_t *)&req->port_be;
+				uint32_t want_ip = ((uint32_t)ip[0] << 24) |
+				                   ((uint32_t)ip[1] << 16) |
+				                   ((uint32_t)ip[2] << 8) | ip[3];
+				uint16_t want_port = (uint16_t)(((uint16_t)pb[0] << 8) | pb[1]);
+				const struct dmesh_topology_tables *tables =
+					objs->topology.tables;
+				for (size_t s = 0; s < tables->service_count; s++) {
+					if (tables->services[s].cluster_ip_be == want_ip &&
+					    tables->services[s].port == want_port) {
+						service = &tables->services[s];
+						break;
+					}
+				}
+			}
+		}
+		if (service != NULL && service->interned >= 0) {
+			/* The generation names every cluster Service, meshed or not
+			 * (the apiserver included). A facade connect() must only be
+			 * lifted onto the mesh when the Service can be served there:
+			 * today that is a live registered backend on this node; S8
+			 * widens it to the generation's endpoint set. A name lookup
+			 * is an explicit request for the mesh and stays as-is. */
+			int served = req->by_name;
+			if (!served) {
+				int n = __atomic_load_n(&objs->num_pods, __ATOMIC_ACQUIRE);
+				for (int i = 0; i < n && !served; i++)
+					served = __atomic_load_n(&objs->pods[i].registered,
+					                         __ATOMIC_ACQUIRE) &&
+					         objs->pods[i].service_id == service->interned;
+			}
+			if (served) {
+				ack.status = 0;
+				ack.interned_svc = service->interned;
+				const char *slash = strchr(service->key, '/');
+				snprintf(ack.namespace_name, sizeof(ack.namespace_name),
+				         "%.*s", (int)(slash - service->key), service->key);
+				snprintf(ack.service_name, sizeof(ack.service_name), "%s",
+				         slash + 1);
+			}
+		}
+		doca_error_t sr = server_send_msg_to_conn(objs, comch_connection,
+		                                          (const char *)&ack,
+		                                          sizeof(ack));
+		if (sr != DOCA_SUCCESS)
+			DOCA_LOG_ERR("RESOLVE_ACK send failed: %s",
+			             doca_error_get_name(sr));
 		break;
 	}
 
@@ -278,7 +396,7 @@ server_send_registration_challenge(struct objects *objs, struct pod_state *pod)
 
 	struct dmesh_registration_challenge_msg challenge = {
 		.type = DMESH_MSG_REG_CHALLENGE,
-		.version = DMESH_GRANT_VERSION,
+		.version = DMESH_ASSERT_VERSION,
 		.trusted_required = 1,
 	};
 	memcpy(challenge.nonce, pod->registration_nonce,
@@ -291,13 +409,7 @@ server_send_registration_challenge(struct objects *objs, struct pod_state *pod)
 	return result;
 }
 
-/**
- * Callback for connection event
- *
- * @event [in]: Connection event object
- * @comch_connection [in]: Connection object
- * @change_success [in]: Whether the connection was successful or not
- */
+/* A new Comch connection: track it and issue its registration challenge. */
 static void server_connection_event_callback(struct doca_comch_event_connection_status_changed *event,
 					     struct doca_comch_connection *comch_connection,
 					     uint8_t change_success)
@@ -343,13 +455,7 @@ static void server_connection_event_callback(struct doca_comch_event_connection_
 
 }
 
-/**
- * Callback for disconnection event
- *
- * @event [in]: Connection event object
- * @comch_connection [in]: Connection object
- * @change_success [in]: Whether the disconnection was successful or not
- */
+/* A Comch disconnect: release the connection's pod slot (cleanup may follow). */
 static void server_disconnection_event_callback(struct doca_comch_event_connection_status_changed *event,
 						struct doca_comch_connection *comch_connection,
 						uint8_t change_success)
@@ -378,29 +484,6 @@ static void server_disconnection_event_callback(struct doca_comch_event_connecti
 
 	if (pods_remove_connection(objs, comch_connection) != 0)
 		DOCA_LOG_WARN("disconnect: no pod slot matched the disconnected connection");
-}
-
-static void server_state_changed_callback(const union doca_data user_data,
-					  struct doca_ctx *ctx,
-					  enum doca_ctx_states prev_state,
-					  enum doca_ctx_states next_state)
-{
-	(void)ctx;
-	(void)prev_state;
-	(void)user_data;
-
-	switch (next_state) {
-	case DOCA_CTX_STATE_IDLE:
-		break;
-	case DOCA_CTX_STATE_STARTING:
-		break;
-	case DOCA_CTX_STATE_RUNNING:
-		break;
-	case DOCA_CTX_STATE_STOPPING:
-		break;
-	default:
-		break;
-	}
 }
 
 doca_error_t
@@ -436,12 +519,6 @@ init_comch_ctrl_path_server(const char *server_name, struct objects *objs)
     result = doca_pe_connect_ctx(objs->pe, ctx);
     if (result != DOCA_SUCCESS) {
         DOCA_LOG_ERR("Failed adding pe context to server with error = %s", doca_error_get_name(result));
-        goto setup_failed;
-    }
-
-    result = doca_ctx_set_state_changed_cb(ctx, server_state_changed_callback);
-    if (result != DOCA_SUCCESS) {
-        DOCA_LOG_ERR("Failed setting state change callback with error = %s", doca_error_get_name(result));
         goto setup_failed;
     }
 
@@ -694,11 +771,14 @@ pods_add_connection(struct objects *objs, struct doca_comch_connection *conn)
 	objs->pods[idx].service_id = DMESH_SVC_NONE;
 	objs->pods[idx].workload[0] = '\0';   /* the new tenant states its own */
 	objs->pods[idx].pod_uid[0] = '\0';
+	objs->pods[idx].namespace_name[0] = '\0';
+	objs->pods[idx].service_account[0] = '\0';
+	objs->pods[idx].pod_ip[0] = '\0';
+	objs->pods[idx].granted_service[0] = '\0';
 	memset(objs->pods[idx].registration_nonce, 0,
 	       sizeof(objs->pods[idx].registration_nonce));
 	memset(objs->pods[idx].registration_grant_id, 0,
 	       sizeof(objs->pods[idx].registration_grant_id));
-	objs->pods[idx].grant_service_id = DMESH_SVC_NONE;
 	objs->pods[idx].registration_challenge_issued = 0;
 	objs->pods[idx].registration_challenge_sent = 0;
 	objs->pods[idx].registration_grant_verified = 0;
@@ -827,7 +907,8 @@ server_progress_membership(struct objects *objs)
 		if (objs->membership_generation <= pod->membership_generation)
 			continue;
 		pod->membership_generation = objs->membership_generation;
-		if (dmesh_membership_contains(objs, pod->pod_uid, pod->service_id)) {
+		if (dmesh_membership_contains(objs, pod->pod_uid,
+		                              pod->granted_service)) {
 			pod->membership_absences = 0;
 			continue;
 		}
@@ -907,6 +988,11 @@ pods_remove_connection(struct objects *objs, struct doca_comch_connection *conn)
 		struct pod_state *pod = &objs->pods[i];
 		if (pod->connection != conn)
 			continue;
+		/* The inbound policy watches this Pod's registration opened end
+		 * with it: their lifetime is the registration's, not the
+		 * process's, so a Pod that leaves stops costing a watch. */
+		if (pod->workload[0] != '\0')
+			l7_inbound_forget(0, pod->workload);
 		int32_t pod_id = pod->pod_id;
 		if (pod_id >= 0 &&
 		    (pod_has_imported_resources(pod) || pod->k_rings > 0) &&
@@ -1097,13 +1183,12 @@ server_progress_pod_cleanup(struct objects *objs)
 
 int
 pods_register(struct objects *objs, struct doca_comch_connection *conn,
-              int32_t pod_id, int32_t service_id)
+              int32_t pod_id, const char *service_name)
 {
-	if ((service_id != DMESH_SVC_NONE &&
-	     (service_id < 0 || service_id >= POD_ID_SPACE)) ||
-	    pod_id < -1 || pod_id >= POD_ID_SPACE) {
-		DOCA_LOG_ERR("pods_register: invalid pod_id=%d service_id=%d",
-		             pod_id, service_id);
+	if (pod_id < -1 || pod_id >= POD_ID_SPACE || service_name == NULL ||
+	    strlen(service_name) >= DMESH_SVC_NAME_MAX) {
+		DOCA_LOG_ERR("pods_register: invalid pod_id=%d name='%s'",
+		             pod_id, service_name == NULL ? "(null)" : service_name);
 		return -1;
 	}
 
@@ -1120,18 +1205,37 @@ pods_register(struct objects *objs, struct doca_comch_connection *conn,
 			 * The host uses this to recover a lost ASSIGNED/INIT_RESULT reply. */
 			int32_t current_id = objs->pods[i].pod_id;
 			if ((pod_id < 0 || pod_id == current_id) &&
-			    service_id == objs->pods[i].service_id)
+			    strcmp(service_name, objs->pods[i].granted_service) == 0)
 				return current_id;
 			DOCA_LOG_ERR("pods_register: conflicting replay on slot %d", i);
 			return -1;
 		}
+		/* The Service name is authoritative for identity: it must equal the
+		 * one the connection's assertion named. */
 		if (!objs->pods[i].registration_grant_verified ||
 		    objs->pods[i].registration_grant_consumed ||
-		    service_id != objs->pods[i].grant_service_id) {
-			DOCA_LOG_ERR("pods_register: trusted grant missing/consumed or Service mismatch "
-			             "on slot %d (requested=%d authorized=%d)",
-			             i, service_id, objs->pods[i].grant_service_id);
+		    strcmp(service_name, objs->pods[i].granted_service) != 0) {
+			DOCA_LOG_ERR("pods_register: trusted assertion missing/consumed or Service mismatch "
+			             "on slot %d (requested='%s' asserted='%s')",
+			             i, service_name, objs->pods[i].granted_service);
 			return -1;
+		}
+		/* The node-local compact id is the DPU's own: interned from the
+		 * held generation. Serving an identity requires the generation
+		 * that defines it, so a Service the generation does not intern
+		 * fails closed; a client-only registration needs no id. */
+		int32_t service_id = DMESH_SVC_NONE;
+		if (service_name[0] != '\0') {
+			char service_key[DMESH_K8S_NAMESPACE_MAX + DMESH_SVC_NAME_MAX];
+			snprintf(service_key, sizeof(service_key), "%s/%s",
+			         objs->pods[i].namespace_name, service_name);
+			service_id = dmesh_topology_interned_id(objs, service_key);
+			if (service_id < 0) {
+				DOCA_LOG_ERR("pods_register: no interned id for %s "
+				             "(no generation defines it): fails closed",
+				             service_key);
+				return -1;
+			}
 		}
 
 			/* Negative pod_id requests a live pods[] slot index. */
@@ -1161,6 +1265,23 @@ pods_register(struct objects *objs, struct doca_comch_connection *conn,
 			__atomic_store_n(&objs->pod_id_to_slot[pod_id], i, __ATOMIC_RELEASE);
 
 		/* The load balancer derives live backends from published pod fields. */
+
+		/* Which interaction rules this registration carries. Every
+		 * registration is assertion-verified either way; what the
+		 * generation grades is the rules, and it is graded here so the
+		 * decision is never taken from Pod input. */
+		/* The mediated lookup, asked once here on the control thread. A
+		 * data worker never asks: it reads the answer. */
+		objs->pods[i].scope_state =
+			(int8_t)dmesh_scope_query(objs, objs->pods[i].pod_uid);
+		int protection = dmesh_topology_service_protection(objs, (int16_t)service_id);
+		l7_control_event("registration",
+		                 protection > 0 ? "protected"
+		                                : (protection == 0 ? "unprotected" : "ungraded"));
+		DOCA_LOG_INFO("pods_register: pod_id=%d service_id=%d protection=%s",
+		              pod_id, service_id,
+		              protection > 0 ? "protected"
+		                             : (protection == 0 ? "unprotected" : "ungraded"));
 
 		return pod_id;
 	}

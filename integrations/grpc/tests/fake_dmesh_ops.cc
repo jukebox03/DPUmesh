@@ -92,7 +92,6 @@ class FakeDmeshState::Impl final {
     dmesh_qp_t* result = &qp->value;
     qps.emplace(result, std::move(qp));
     if (role == DMESH_ROLE_CLIENT) {
-      last_client_qp = result;
       client_qps.push_back(result);
     }
     return FindQp(result);
@@ -125,7 +124,6 @@ class FakeDmeshState::Impl final {
   int next_create_qp_error = 0;
   uint16_t next_port = 1;
   int32_t next_rx_slot = 1;
-  dmesh_qp_t* last_client_qp = nullptr;
   std::vector<dmesh_qp_t*> client_qps;
   std::vector<std::string> client_targets;
   std::vector<std::unique_ptr<Eq>> eqs;
@@ -391,14 +389,6 @@ void FakeDmeshState::FailNextPoll(int error_number) {
   if (impl_->eqs.empty()) return;
   impl_->eqs.front()->next_poll_error = error_number;
   impl_->Signal(impl_->eqs.front().get());
-}
-
-dmesh_qp_t* FakeDmeshState::WaitForClientQp(
-    std::chrono::milliseconds timeout) {
-  WaitUntil(&impl_->mu, timeout,
-            [this] { return impl_->last_client_qp != nullptr; });
-  std::lock_guard<std::mutex> lock(impl_->mu);
-  return impl_->last_client_qp;
 }
 
 bool FakeDmeshState::WaitForClientQpCount(

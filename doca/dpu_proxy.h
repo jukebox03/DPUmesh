@@ -21,6 +21,39 @@ static inline int32_t dmesh_l4_pinned_backend(int32_t pinned_backend,
     return pinned_backend >= 0 && backend_ready ? pinned_backend : -1;
 }
 
+/* The destination-side admission rule, as a decision over its inputs.
+ *
+ * `verdict` is the policy answer: 1 admits, 0 refuses, negative when no
+ * verdict is available. `strict` is whether the generation grades the
+ * destination Service as protected, and `caller_strict` the same for the
+ * calling Service.
+ *
+ * Three rules meet here. A served verdict decides on its own — a policy that
+ * refused is a decision, not an absence. Where no verdict is available, a
+ * protected destination refuses rather than admitting an unauthenticated
+ * stream, and an ungraded or relaxed one carries it, which is what a Service
+ * outside the protected set is graded for. And a protected caller reaching an
+ * unprotected callee cannot authenticate the callee, so that call stands only
+ * where the destination's own policy admitted it explicitly.
+ *
+ * Returns 1 to admit, 0 to refuse, and sets *mixed when the third rule is what
+ * refused it. */
+static inline int dmesh_inbound_admits(int verdict, int strict, int caller_strict,
+                                       int *mixed) {
+    if (mixed)
+        *mixed = 0;
+    if (verdict >= 0)
+        return verdict;
+    if (strict)
+        return 0;
+    if (caller_strict) {
+        if (mixed)
+            *mixed = 1;
+        return 0;
+    }
+    return 1;
+}
+
 /* The proxy's view of one direction of a connection. */
 typedef struct dmesh_proxy_conn {
     int32_t  src_pod;
@@ -35,6 +68,11 @@ typedef struct dmesh_proxy_conn {
 
 /* Create the engine. It is the sole DPU→host reverse path. */
 int px_init(struct objects *objs);
+
+/* Re-derive the interned-id → L7 mode table from the DPUMESH_L7_*_SVC name
+ * lists against the held generation. Called by px_init and after every
+ * topology adoption. Returns -1 when one Service is named by two lists. */
+int px_l7_resolve_modes(struct objects *objs);
 
 /* Process one forward completion on its connection owner. */
 int px_process_forward(struct objects *objs, int worker_id,
@@ -60,6 +98,19 @@ int px_l7_request_owner(struct objects *objs, int32_t dst_pod_id,
  * shared-pool lock traffic. Rate-limited internally, and silent while nothing
  * has changed. */
 void px_l7_stats_report(struct objects *objs, int worker_id);
+/* Peer refusals and poisoned connections, counted by reason. `px_peer_event`
+ * is what `dmesh_peer_ops.event` is bound to. */
+void px_peer_event(struct objects *objs, const char *reason);
+void px_peer_stats_report(struct objects *objs, int worker_id);
+/* Release one extent whose destination was remote, now that its STREAM_ACK
+ * says the bytes landed. `dmesh_peer_ops.release` is bound to this. */
+void px_peer_release(struct objects *objs, uint8_t kind, void *cookie, uint32_t bytes);
+/* Reset peer channels the adopted generation no longer binds, or binds to a
+ * different static key. Runs on the control thread on every adoption. */
+void px_peer_generation_changed(struct objects *objs);
+/* Adopt the generation's `protected=` grading. Runs on the control thread when
+ * a generation is adopted, so a data worker's decision is a byte read. */
+void px_protection_refresh(struct objects *objs);
 
 /* SG-DMA completion notification handle, armed while a worker is parked. */
 int px_worker_notification_fd(struct objects *objs, int worker_id);

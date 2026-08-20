@@ -1,0 +1,109 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dpumesh-controller
+  namespace: ${NS}
+automountServiceAccountToken: true
+---
+# The controller is the one component with cluster-wide read: each node agent
+# keeps its namespaced, node-scoped Role instead.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: dpumesh-controller
+rules:
+- apiGroups: [""]
+  resources: ["pods", "services"]
+  verbs: ["get", "list"]
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["get", "list"]
+- apiGroups: ["discovery.k8s.io"]
+  resources: ["endpointslices"]
+  verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dpumesh-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: dpumesh-controller
+subjects:
+- kind: ServiceAccount
+  name: dpumesh-controller
+  namespace: ${NS}
+---
+# The face the node agents see: the generation, the node report and the
+# mediated workload lookup. A DPU has no route into the cluster CIDRs, so its
+# agent is what reaches this.
+apiVersion: v1
+kind: Service
+metadata:
+  name: dpumesh-controller
+  namespace: ${NS}
+spec:
+  selector: { app: dpumesh-controller }
+  ports:
+  - { name: agents, port: 8080, targetPort: 8080 }
+---
+# The agent key that binds Pods to a node is deployment-time material; what an
+# agent reports is the static handshake key its DPU generates at first boot.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dpumesh-controller-nodes
+  namespace: ${NS}
+data:
+  nodes: |
+${DPUMESH_CONTROLLER_NODES_YAML}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dpumesh-controller
+  namespace: ${NS}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: dpumesh-controller }
+  template:
+    metadata:
+      labels: { app: dpumesh-controller }
+    spec:
+      serviceAccountName: dpumesh-controller
+      terminationGracePeriodSeconds: 5
+      containers:
+      - name: controller
+        image: docker.io/${IMG_CONTROLLER}
+        imagePullPolicy: Never
+        args:
+        - --key-dir=/etc/dpumesh/controller.keys
+        - --nodes-file=/etc/dpumesh/nodes
+        - --output=/run/dpumesh/topology.v1
+        - --listen-port=8080
+${DPUMESH_CONTROLLER_PROTECTED_ARGS}
+        securityContext:
+          runAsUser: 0
+          runAsGroup: 0
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities: { drop: ["ALL"] }
+        ports:
+        - { name: agents, containerPort: 8080 }
+        readinessProbe:
+          httpGet: { path: /healthz, port: 8080 }
+          initialDelaySeconds: 2
+          periodSeconds: 5
+        volumeMounts:
+        - { name: output, mountPath: /run/dpumesh }
+        - { name: keyring, mountPath: /etc/dpumesh/controller.keys, readOnly: true }
+        - { name: nodes, mountPath: /etc/dpumesh/nodes, subPath: nodes, readOnly: true }
+      volumes:
+      - name: output
+        hostPath: { path: /run/dpumesh, type: DirectoryOrCreate }
+      - name: keyring
+        hostPath: { path: /etc/dpumesh/controller.keys, type: Directory }
+      - name: nodes
+        configMap: { name: dpumesh-controller-nodes }

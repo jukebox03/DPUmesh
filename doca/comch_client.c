@@ -32,13 +32,7 @@ elapsed_ms(const struct timespec *start, const struct timespec *now)
 	return (int)(sec * 1000 + nsec / 1000000L);
 }
 
-/**
- * Callback for client send task successful completion
- *
- * @task [in]: Send task object
- * @task_user_data [in]: User data for task
- * @ctx_user_data [in]: User data for context
- */
+/* Client send completed: release the pool slot and the payload copy. */
 static void client_send_task_completion_callback(struct doca_comch_task_send *task,
 						 union doca_data task_user_data,
 						 union doca_data ctx_user_data)
@@ -54,13 +48,7 @@ static void client_send_task_completion_callback(struct doca_comch_task_send *ta
 	doca_task_free(doca_comch_task_send_as_task(task));
 }
 
-/**
- * Callback for client send task completion with error
- *
- * @task [in]: Send task object
- * @task_user_data [in]: User data for task
- * @ctx_user_data [in]: User data for context
- */
+/* Client send failed: release resources and stop the client context. */
 static void client_send_task_completion_err_callback(struct doca_comch_task_send *task,
 						     union doca_data task_user_data,
 						     union doca_data ctx_user_data)
@@ -120,6 +108,8 @@ static void client_message_recv_callback(struct doca_comch_event_msg_recv *event
 				/* Published before the pod id the init loop waits on. */
 				__atomic_store_n(&objs->landing_stripes,
 						 am->landing_stripes, __ATOMIC_RELAXED);
+				__atomic_store_n(&objs->assigned_service_id,
+						 am->service_id, __ATOMIC_RELAXED);
 				__atomic_store_n(&objs->assigned_pod_id, am->pod_id, __ATOMIC_RELEASE);
 			}
 			else
@@ -129,11 +119,22 @@ static void client_message_recv_callback(struct doca_comch_event_msg_recv *event
 		}
 		break;
 
+	case DMESH_MSG_RESOLVE_ACK:
+		/* Publish the answer to the resolving thread. Resolution requests
+		 * are serialized host-side, so one landing slot suffices. */
+		if (msg_len == sizeof(struct dmesh_resolve_ack_msg)) {
+			memcpy(&objs->resolve_ack, recv_buffer, sizeof(objs->resolve_ack));
+			__atomic_store_n(&objs->resolve_ack_ready, 1, __ATOMIC_RELEASE);
+		} else {
+			DOCA_LOG_ERR("Invalid RESOLVE_ACK message size: %u", msg_len);
+		}
+		break;
+
 	case DMESH_MSG_REG_CHALLENGE:
 		if (msg_len == sizeof(struct dmesh_registration_challenge_msg)) {
 			const struct dmesh_registration_challenge_msg *challenge =
 				(const struct dmesh_registration_challenge_msg *)recv_buffer;
-			if (challenge->version != DMESH_GRANT_VERSION ||
+			if (challenge->version != DMESH_ASSERT_VERSION ||
 			    challenge->reserved != 0) {
 				DOCA_LOG_ERR("Invalid registration challenge version/reserved");
 				break;
@@ -307,7 +308,7 @@ doca_error_t init_comch_ctrl_path_client(const char *server_name,
         goto setup_failed;
     }
 
-	/* register event callback for new comsumer and expired consumer */
+	/* Consumer connect/expire callbacks (data-path events; no-ops). */
 	result = doca_comch_client_event_consumer_register(objs->cc_client,
 								dmesh_consumer_connected, dmesh_consumer_expired);
 	if (result != DOCA_SUCCESS) {

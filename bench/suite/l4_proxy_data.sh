@@ -1006,8 +1006,8 @@ cg_delta() {
     $1==r {print $c-x; found=1}
     END {if(!found) print 0}' "$before" "$after"
 }
-# The window a run's CPU is attributed to: the generator's own measured
-# duration, not the wall clock, which also spans connection setup and teardown.
+# The window a run's CPU is attributed to: the bracket placed strictly inside
+# the load, so connection setup and teardown fall outside it.
 to_cores_usec() {
   awk -v d="$1" -v dt="$2" 'BEGIN{if(dt>0) printf "%.6f",d/1e6/dt; else print "NA"}'
 }
@@ -1130,9 +1130,8 @@ to_cores_ticks() {
 }
 
 
-# Sample the DPU process's CPU once a second over one ssh session, stamping each
-# reply with the host clock so the load window trims the same way the endpoint
-# cores do. Writes "<host_epoch> <hz> <ticks>" lines.
+# One snapshot of the DPU process's cumulative CPU: prints "<pid> <hz> <ticks>".
+# Two snapshots bracket a load window; a pid change between them voids the pair.
 dpu_snapshot() {
   # -n prevents ssh from consuming a caller's loop input.
   ssh -n -o ConnectTimeout=8 "$DPU_HOST" \

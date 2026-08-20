@@ -168,7 +168,14 @@ dpu_arm_name_current(const char *role, int logical_id)
 }
 
 /* L4 routing selects a live, ready backend from pods[]. Connection affinity and
- * L7 host overrides are applied by the caller. */
+ * L7 host overrides are applied by the caller.
+ *
+ * The local half of a Service's backend set stays registration-derived rather
+ * than generation-derived, and that is deliberate: a Pod that registered
+ * between a generation's snapshot and its publication is absent from that one
+ * generation without having stopped serving, and a node's own registrations
+ * are the node's own attested truth. What the generation adds is the half a
+ * node cannot see for itself — the replicas somewhere else. */
 int
 collect_live_hosts(struct objects *objs, int16_t svc, int32_t *out)
 {
@@ -189,6 +196,25 @@ collect_live_hosts(struct objects *objs, int16_t svc, int32_t *out)
         out[n++] = p->pod_id;
     }
     return n;
+}
+
+/* The replicas of a Service that are somewhere else. Derived from the held
+ * generation's endpoint= lines joined with pod= for placement, with this
+ * node's own excluded — those are `collect_live_hosts`'s. */
+int
+collect_remote_hosts(struct objects *objs, int16_t svc,
+                     struct dmesh_endpoint_ref *out, int max)
+{
+    if (svc < 0 || svc >= POD_ID_SPACE)
+        return 0;
+    return dmesh_topology_remote_endpoints(objs, svc, objs->node_name, out, max);
+}
+
+int
+dmesh_service_has_remote(struct objects *objs, int16_t svc)
+{
+    struct dmesh_endpoint_ref one;
+    return collect_remote_hosts(objs, svc, &one, 1) > 0;
 }
 
 /* Per-service round robin with a relaxed atomic cursor. */
@@ -359,9 +385,14 @@ dpu_drain_iteration(struct objects *objs)
     int cleaned_pods = server_progress_pod_cleanup(objs);
     int revoked = server_progress_membership(objs);
     int admission = server_progress_admission(objs);
+    int topology = dmesh_topology_progress(objs);
+    /* A new generation can re-intern Services, so the L7 mode table follows. */
+    if (topology > 0 && px_l7_resolve_modes(objs) != 0)
+        DOCA_LOG_WARN("L7 mode lists conflict against the adopted generation; "
+                      "previous mode table kept");
     return (did_ctrl || cleaned_pods > 0 || finalized_init > 0 ||
             sent_init_result > 0 || sent_doorbell > 0 || revoked > 0 ||
-            admission > 0);
+            admission > 0 || topology > 0);
 }
 
 /* ====== ARM data workers ====== */
@@ -720,6 +751,7 @@ dmesh_l7_driver_maintenance(void *driver)
         return -1;
     dpu_dpa_nudge_due(worker_state);
     px_l7_stats_report(worker_state->objs, worker_state->id);
+    px_peer_stats_report(worker_state->objs, worker_state->id);
     return 0;
 }
 
@@ -828,7 +860,7 @@ run_dpu_worker(struct objects *objs)
       if (ne && *ne) { int v = atoi(ne);
           if (v >= 1) { if (v > MAX_DPA_EU) v = MAX_DPA_EU; objs->num_dpa_threads = v; objs->dpa_threads_auto = 0; } } }
     /* K forward rings per pod. Host and DPU use the same configured K. */
-    objs->k_rings = DPUMESH_RINGS_PER_POD_DEFAULT;   /* = 2 */
+    objs->k_rings = DPUMESH_RINGS_PER_POD_DEFAULT;
     { const char *ke = getenv("DPUMESH_RINGS_PER_POD");
       if (ke && *ke) {
           int v = atoi(ke);

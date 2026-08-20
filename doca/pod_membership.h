@@ -21,7 +21,7 @@ struct pod_state;
 
 struct dmesh_membership_entry {
     char pod_uid[DMESH_POD_UID_MAX];
-    int32_t service_id;
+    char service_name[DMESH_SVC_NAME_MAX];  /* empty = bare membership */
 };
 
 enum dmesh_membership_result {
@@ -47,9 +47,10 @@ int dmesh_admission_configure(struct objects *objs, char *error, size_t error_le
  * missing, truncated or rolled-back file never withdraws membership. */
 enum dmesh_membership_result dmesh_membership_refresh(struct objects *objs);
 
-/* Whether the live generation authorizes this exact pair. */
+/* Whether the live generation authorizes this exact (Pod UID, Service name)
+ * pair; an empty name is the bare membership every live Pod holds. */
 int dmesh_membership_contains(const struct objects *objs, const char *pod_uid,
-                              int32_t service_id);
+                              const char *service_name);
 
 /* Parse one document into a caller-owned table. Exposed for unit tests. */
 enum dmesh_membership_result

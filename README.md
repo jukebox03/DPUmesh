@@ -111,7 +111,7 @@ include/dpumesh/       public C API
 src/                   host core, native facade, resolver, preload facade
 doca/                  BlueField ARM process and DPA kernel
 integrations/grpc/     gRPC C++ runtime, reactor, tests, benchmark
-linkerd/               DPU-side L7 layer: contract, consumers, port submodule
+linkerd/               DPU-side L7 layer: adapter ABI, consumers, port submodule
 bench/                 deployment, workloads, validators, measurement records
 tests/                 fast host-only ABI and state-machine regression tests
 design/                current API, core, naming, L7, and gRPC whitepapers
@@ -132,7 +132,7 @@ public-header changes therefore rebuild both ABI and consumers.
 
 `make test` runs the host-only native contract suite without requiring a DPU.
 Its scope and relationship to hardware validation are documented in
-[`tests/README.md`](tests/README.md).
+[`bench/README.md`](bench/README.md#6-correctness-validation).
 
 The BlueField program is built from `doca/meson.build`. The supported benchmark
 bring-up path rebuilds and deploys both sides together:
@@ -181,7 +181,7 @@ number was produced; reports carry the numbers.
 | [design/API.md](design/API.md) | the native `<dpumesh/dmesh.h>` contract: lifecycle, batching, EQ, errors |
 | [design/CORE.md](design/CORE.md) | host/DPA/ARM custody, rings, and replay barriers |
 | [design/CONTROL.md](design/CONTROL.md) | naming, trusted registration, signed feeds, the Linkerd control plane, and node scope |
-| [design/L7.md](design/L7.md) | the DPU-side Linkerd runtime, ownership, custody, and limits |
+| [design/L7.md](design/L7.md) | the DPU-side Linkerd runtime: ownership, custody, the adapter ABI, and limits |
 | [design/GRPC.md](design/GRPC.md) | how the gRPC adapter maps chttp2 onto the transport |
 
 **Integrations**
@@ -190,15 +190,12 @@ number was produced; reports carry the numbers.
 |---|---|
 | [integrations/grpc/README.md](integrations/grpc/README.md) | building and running gRPC over DPUmesh |
 | [linkerd/README.md](linkerd/README.md) | building and deploying the embedded Linkerd consumer |
-| [linkerd/CONTRACT.md](linkerd/CONTRACT.md) | the implemented DPUmesh/Linkerd runtime and data ABI |
 
 **Measurement**
 
 | Document | Covers |
 |---|---|
-| [bench/README.md](bench/README.md) | deployment, the experiment commands, and the measurement rules |
-| [bench/validators/README.md](bench/validators/README.md) | hardware validators and what each one exercises |
-| [tests/README.md](tests/README.md) | host-only contract tests, no hardware needed |
+| [bench/README.md](bench/README.md) | deployment, the experiment commands, the measurement rules, and the host-only and hardware validation gates |
 | [integrations/grpc/bench/README.md](integrations/grpc/bench/README.md) | the gRPC workloads and collectors |
 | [linkerd/bench/README.md](linkerd/bench/README.md) | the linkerd sidecar columns of the gRPC evaluation |
 

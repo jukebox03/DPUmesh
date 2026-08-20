@@ -698,7 +698,7 @@ main(void)
      * all 512 possible 8 KiB transport units without a second admission point. */
     struct dpumesh_ctx *defaults = calloc(1, sizeof(*defaults));
     assert(defaults != NULL);
-    init_config(defaults, NULL, DMESH_SVC_NONE);
+    init_config(defaults, NULL, NULL);
     assert(defaults->num_slots == 8192);
     assert(defaults->slot_size == 8192);
     assert(defaults->block_size == 512 * 1024);

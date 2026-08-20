@@ -28,6 +28,9 @@
 /* Endpoint tuples carry separate service-id and pod-id fields. Clients use a
  * blank destination pod for DPU resolution; replies name a concrete pod. */
 #define DMESH_POD_BLANK     (-1)   /* dst_pod == -1 -> DPU must resolve dst_service */
+#define DMESH_POD_REMOTE    (-2)   /* reported peer on another node: a pod id is a
+                                    * node-local transport identifier, so a remote
+                                    * peer has none */
 #define DMESH_PORT_BLANK     0     /* dst_port == 0 -> service listener / accept queue */
 #define DMESH_SVC_NONE      (-1)   /* no service id */
 

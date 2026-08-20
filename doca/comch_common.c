@@ -19,6 +19,7 @@ dmesh_consumer_connected(struct doca_comch_event_consumer *event,
 {
 	(void)event;
 	(void)connection;
+	(void)id;
 }
 
 void

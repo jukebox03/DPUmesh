@@ -39,8 +39,16 @@ pod_uid_char(unsigned char c)
     return (c >= 'a' && c <= 'f') || (c >= '0' && c <= '9') || c == '-';
 }
 
-/* `member=<pod-uid>,<service-id>`; service id -1 states that the Pod exists on
- * this node without Service membership, which is what a pure client holds. */
+static int
+service_label_char(unsigned char c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-';
+}
+
+/* `member=<pod-uid>,<service-name>`; the name `-` states that the Pod exists
+ * on this node without Service membership, which is what a pure client holds.
+ * Names, not node-local numbers, cross this feed: the compact id is the DPU's
+ * own interning of the topology generation. */
 static enum dmesh_membership_result
 parse_member(const char *line, size_t length,
              struct dmesh_membership_entry *entry)
@@ -55,33 +63,20 @@ parse_member(const char *line, size_t length,
         if (!pod_uid_char((unsigned char)line[i]))
             return DMESH_MEMBERSHIP_MALFORMED;
 
-    const char *digits = comma + 1;
-    size_t digits_len = length - uid_len - 1;
-    if (digits_len == 0 || digits_len > 5)
-        return DMESH_MEMBERSHIP_MALFORMED;
-    int negative = digits[0] == '-';
-    if (negative) {
-        digits++;
-        digits_len--;
-    }
-    if (digits_len == 0)
-        return DMESH_MEMBERSHIP_MALFORMED;
-    int32_t value = 0;
-    for (size_t i = 0; i < digits_len; i++) {
-        if (digits[i] < '0' || digits[i] > '9')
-            return DMESH_MEMBERSHIP_MALFORMED;
-        value = value * 10 + (digits[i] - '0');
-        if (value > POD_ID_SPACE)
-            return DMESH_MEMBERSHIP_MALFORMED;
-    }
-    if (negative)
-        value = -value;
-    if (value != DMESH_SVC_NONE && (value < 0 || value >= POD_ID_SPACE))
-        return DMESH_MEMBERSHIP_MALFORMED;
-
+    const char *name = comma + 1;
+    size_t name_len = length - uid_len - 1;
     memset(entry->pod_uid, 0, sizeof(entry->pod_uid));
     memcpy(entry->pod_uid, line, uid_len);
-    entry->service_id = value;
+    memset(entry->service_name, 0, sizeof(entry->service_name));
+    if (name_len == 1 && name[0] == '-')
+        return DMESH_MEMBERSHIP_ADOPTED;     /* bare membership */
+    if (name_len == 0 || name_len > 63 ||
+        name[0] == '-' || name[name_len - 1] == '-')
+        return DMESH_MEMBERSHIP_MALFORMED;
+    for (size_t i = 0; i < name_len; i++)
+        if (!service_label_char((unsigned char)name[i]))
+            return DMESH_MEMBERSHIP_MALFORMED;
+    memcpy(entry->service_name, name, name_len);
     return DMESH_MEMBERSHIP_ADOPTED;
 }
 
@@ -185,10 +180,10 @@ dmesh_membership_configure(struct objects *objs, char *error, size_t error_len)
             snprintf(error, error_len, "DPUMESH_MEMBERSHIP_FILE is too long");
         return -1;
     }
-    if (objs->registration_key_dir[0] == '\0') {
+    if (objs->feed_key_dir[0] == '\0') {
         if (error && error_len)
             snprintf(error, error_len,
-                     "DPUMESH_MEMBERSHIP_FILE needs a registration keyring to verify it");
+                     "DPUMESH_MEMBERSHIP_FILE needs DPUMESH_FEED_KEY_DIR to verify it");
         return -1;
     }
     snprintf(objs->membership_path, sizeof(objs->membership_path), "%s", path);
@@ -264,7 +259,7 @@ dmesh_membership_refresh(struct objects *objs)
      * withdraw membership. */
     size_t signed_length = 0;
     enum dmesh_feed_result signature =
-        dmesh_feed_verify(document, (size_t)got, objs->registration_key_dir,
+        dmesh_feed_verify(document, (size_t)got, objs->feed_key_dir,
                           &signed_length);
     if (signature != DMESH_FEED_OK) {
         free(document);
@@ -300,12 +295,14 @@ dmesh_membership_refresh(struct objects *objs)
 
 int
 dmesh_membership_contains(const struct objects *objs, const char *pod_uid,
-                          int32_t service_id)
+                          const char *service_name)
 {
-    if (objs == NULL || pod_uid == NULL || *pod_uid == '\0')
+    if (objs == NULL || pod_uid == NULL || *pod_uid == '\0' ||
+        service_name == NULL)
         return 0;
     for (size_t i = 0; i < objs->membership_count; i++)
-        if (objs->membership[i].service_id == service_id &&
+        if (strncmp(objs->membership[i].service_name, service_name,
+                    DMESH_SVC_NAME_MAX) == 0 &&
             strncmp(objs->membership[i].pod_uid, pod_uid,
                     DMESH_POD_UID_MAX) == 0)
             return 1;

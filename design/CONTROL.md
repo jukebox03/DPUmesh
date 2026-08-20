@@ -10,29 +10,36 @@ how the DPU learns who is calling and where the call may go.
 | Term | Meaning |
 |---|---|
 | node agent | a root-owned DaemonSet on the host that reads Kubernetes objects and signs claims |
-| grant | the signed statement of a Pod's identity and authorized Service that registration must present |
+| assertion | the node-agent-signed statement of a Pod's identity and authorized Service that registration must present |
 | feed | a file the DPU reads for authoritative data: Service targets, or node membership |
 | generation | one version of a feed, installed whole by atomic rename and numbered monotonically |
 | workload | the Linkerd identifier of the calling Pod, `{"ns":…,"pod":…}`, built from signed claims |
-| gateway | a host-network DaemonSet that carries the DPU's control-plane connections, without reading them |
+| gateway | the node agent's host-network TCP pass-through leg, which carries the DPU's control-plane connections without reading them |
 | admission switch | a file that stops new protected sessions while established ones continue |
 
-## Registry
+## Resolution
 
-The registry contains one mapping per configured Service:
+Names live outside, handles inside: the host asks, the DPU answers from the
+held topology generation, and the answer carries the DPU-interned compact id —
+a node-local transport identifier, never workload identity. No registry file
+exists anywhere.
 
 ```text
-ClusterIP:port    service-name        service-id
-10.96.23.17:9091  echo-dpumesh       13
-0.0.0.0:0         echo-grpc-dpumesh  20
+Host Pod                                     DPU
+  │──── RESOLVE(name | ClusterIP:port) ─────▶│  answered from the adopted,
+  │◀─── RESOLVE_ACK(status, interned id) ────│  Ed25519-verified generation
 ```
 
-The native API resolves `service-name` in `dmesh_create_qp`. The preload facade
-resolves the IPv4 destination passed to `connect` and uses kernel TCP when the
-destination is absent. Both use `src/dmesh_resolve.c`.
-
-The registry path is `$DPUMESH_CONFIG`, default `/etc/dpumesh/registry`. It is
-loaded once per process. `0.0.0.0:0` defines a name-only entry.
+The native API resolves `"name"` (in the Pod's own namespace) or
+`"name.namespace"` in `dmesh_create_qp`. The preload facade resolves the IPv4
+destination passed to `connect`; a ClusterIP answers `meshed` only when its
+Service has a live registered backend here (the generation names unmeshed
+Services too), `status = not-meshed` makes leaving the mesh an explicit,
+logged kernel-TCP decision, and `status = no-generation` falls back the same
+way while a registration fails closed. Answers are cached per
+key for one generation interval (`src/dmesh_resolve.c`) and re-resolved after
+that or on a connection error, so the cache is never staler than the
+generation itself.
 
 ## Trusted registration
 
@@ -47,8 +54,8 @@ Host Pod                 trusted node agent                    DPU
   │                               │── SO_PEERCRED/cgroup ─┐      │
   │                               │◀─ K8s Pod/Service ────┘      │
   │◀─ signed immutable claims ────│                              │
-  │───────────────────────── WORKLOAD_GRANT ────────────────────▶│
-  │───────────────────────── POD_REGISTER(service_id) ──────────▶│
+  │───────────────────────── WORKLOAD_ASSERT ───────────────────▶│
+  │───────────────────── POD_REGISTER(service name) ────────────▶│
   │◀──────────────────────── POD_ASSIGNED(pod_id, stripes) ──────│
   │───────────────────────── MMAP_EXPORT × regions ─────────────▶│
   │◀──────────────────────── POD_INIT_RESULT(READY) ─────────────│
@@ -59,20 +66,25 @@ node agent identifies the Unix-socket peer with `SO_PEERCRED`, re-checks the
 peer's process start time
 around the cgroup read so a recycled pid cannot be attested as another Pod,
 resolves the cgroup to the authoritative Kubernetes Pod, verifies that the Pod
-labels select the requested Service, and returns a canonical HMAC-SHA256 grant.
-It carries issuer, key id, issue and expiry, grant id, nonce, Pod UID,
-namespace, Pod name, ServiceAccount, node and Service id. The application relays
-the grant; it cannot change a claim.
+labels select the requested Service, and returns a canonical Ed25519-signed
+assertion. It carries key id, issue and expiry, assertion id, nonce, node, Pod
+UID, namespace, Pod name, ServiceAccount, Service name and Pod IP; the issuer
+is implied by `(node, key id)`. The application relays the assertion; it cannot
+change a claim.
 
-The DPU selects the key by the signed key id, verifies and consumes the grant
-once, rejects a Service other than the granted one, constructs the Linkerd
-workload JSON from the signed namespace and Pod, and keeps the signed Pod UID
-with the registration. A grant cannot move to another connection or survive
+The DPU selects the node's *public* key by the signed key id — it holds no key
+that can sign an assertion — refuses an assertion naming another node, verifies
+and consumes it once, rejects a registration whose Service name differs from
+the asserted one (the compact id is the DPU's own interning of the topology
+generation, returned in `POD_ASSIGNED`; a Service no generation defines fails
+closed), constructs the Linkerd workload JSON from the signed namespace and
+Pod, and keeps the signed Pod UID, namespace, ServiceAccount and Pod IP with
+the registration. An assertion cannot move to another connection or survive
 reconnect or DPU restart, because the nonce is different.
 
-A Pod cannot state a workload or a Service of its own: the grant is the only
-thing that names either, and a registration without one is refused. The Pod
-enters backend selection after `POD_INIT_RESULT(READY)`.
+A Pod cannot state a workload or a Service of its own: the assertion is the
+only thing that names either, and a registration without one is refused. The
+Pod enters backend selection after `POD_INIT_RESULT(READY)`.
 
 Unregister, revocation or Comch disconnect removes the Pod from selection. Each
 ARM worker first closes the connection and L7 state it owns. After every producer
@@ -110,10 +122,12 @@ A generation is installed by atomic rename and ends with the envelope
 signature=<key-id>,<hex HMAC-SHA256 over every preceding byte>
 ```
 
-The key comes from the same root-only keyring that verifies grants, so rotating
-that keyring rotates feed signing. Only the signed prefix is parsed: bytes
-appended after the envelope are refused rather than ignored, and a key id naming
-a file outside the keyring directory is rejected.
+The key comes from the root-only feed keyring (`DPUMESH_FEED_KEY_DIR`), which
+is a disjoint set of files from the registration keyring, so a feed publisher
+holds no key that can mint identity and the two roles rotate independently.
+Only the signed prefix is parsed: bytes appended after the envelope are refused
+rather than ignored, and a key id naming a file outside the keyring directory
+is rejected.
 
 A generation is adopted only if it is strictly newer than the one held and
 completely parsed. A missing, malformed, oversized, unsigned or rolled-back
@@ -132,8 +146,8 @@ installed longer than that granularity.
 ## Membership and revocation
 
 The node agent publishes the `(Pod UID, Service)` pairs this node may hold. The
-same label rule decides a grant and a membership entry, so deleting a Pod or
-changing its labels withdraws its pair. Every live Pod also contributes a bare
+same label rule decides an assertion and a membership entry, so deleting a Pod
+or changing its labels withdraws its pair. Every live Pod also contributes a bare
 `-1` pair, which is what a Pod registering without Service membership holds.
 
 The Comch control thread adopts each newer generation and closes the exact
@@ -156,7 +170,7 @@ preflight; no mock control-plane path exists. The remaining `mock-identity`,
 
 [PDF](figures/control_plane.pdf)
 
-The application can request only a compact Service id; it cannot assert Pod UID,
+The application can request only a Service name; it cannot assert Pod UID,
 namespace, labels, ServiceAccount, node or Linkerd workload. The gateway is
 byte-transparent, so it cannot mint or terminate mesh identity.
 
@@ -189,10 +203,11 @@ Control-service TLS names are distinct from the DPU proxy identity:
 The DPU does not participate in the Kubernetes Service or Pod CIDRs, and on the
 current hardware neither ClusterIPs nor Pod IPs are reachable from it.
 `LINKERD_*_ADDR` therefore names a node-local TCP pass-through on the Host/DPU
-management link. TLS remains end-to-end between the embedded proxy and the
-Linkerd service; the gateway neither terminates identity nor interprets gRPC.
-The host-network DaemonSet opens its upstream connections to the Service and Pod
-CIDRs, so the target Pod's Linkerd inbound proxy still terminates mTLS.
+management link, carried by the node agent. TLS remains end-to-end between the
+embedded proxy and the Linkerd service; the gateway neither terminates
+identity nor interprets gRPC. The agent runs on the host network and opens its
+upstream connections to the Service and Pod CIDRs, so the target Pod's Linkerd
+inbound proxy still terminates mTLS.
 Kubernetes API `port-forward` is not suitable, because it bypasses that inbound
 proxy and reaches the control application as plaintext gRPC.
 
@@ -225,9 +240,9 @@ declined protected session ends rather than being forwarded as plain L4.
 ### Destination
 
 The destination presented to Linkerd is the Service's real ClusterIP and port.
-The adapter keeps its synthetic `10.96.0.<service-id>:9092` address only as an
-internal DPUmesh registry key, and the registry agent publishes the mapping as a
-signed versioned feed.
+The adapter keeps its synthetic `10.96.0.<interned-id>:9092` address only as an
+internal backend key; the target feed names Services by `namespace/name` and
+the adapter resolves each to the DPU-interned id.
 
 Destination and profile streams may update policy metadata while a session is
 live. DPUmesh remains the authority for the set of node-local registered Pods.
@@ -292,23 +307,24 @@ injection API. Protobuf messages, stubs and handlers are unchanged.
 | sequence | per-connection `uint16_t` |
 | internal routing fields | `int32_t` |
 
-`POD_REGISTER` is a fixed 12-byte message. The v1 grant is a 1090-byte canonical
-message whose numeric fields are explicit little-endian bytes and whose text is
-NUL-terminated and zero-padded. Forward and reverse descriptors use fixed-width
-fields and compile-time layout assertions. Host and DPU endpoints are
-little-endian.
+`POD_REGISTER` is a fixed 76-byte message carrying the Service name beside the
+compact id. The v2 assertion is a 1134-byte canonical message whose numeric
+fields are explicit little-endian bytes, whose text is NUL-terminated and
+zero-padded, and whose final 64 bytes are an Ed25519 signature over every
+preceding byte. Forward and reverse descriptors use fixed-width fields and
+compile-time layout assertions. Host and DPU endpoints are little-endian.
 
 ## Control channels
 
 | Input | State supplied |
 |---|---|
-| static Host registry | name, socket destination, service id |
-| DOCA Comch | pod registration, mappings, readiness, teardown, doorbells |
+| DOCA Comch | pod registration, resolution, mappings, readiness, teardown, doorbells |
 | signed feeds | Service targets and ready endpoints, node membership |
 | root-only files | Linkerd identity material, the admission switch |
 
-The static registry does not reload. Dynamic instances of an existing Service
-join and leave through Comch registration.
+Resolution answers follow the topology generation, so nothing reloads out of
+band. Dynamic instances of an existing Service join and leave through Comch
+registration.
 
 ## Node boundary
 
@@ -359,9 +375,9 @@ the host.
   `dmesh_control_events_total{kind,reason}` and refused sessions as
   `dmesh_sessions_declined_total{reason}`. Both are process-global, so every
   worker's admin endpoint reports the same values.
-- The node agent and gateway DaemonSets are rebuilt under one image tag, so
-  deployment restarts them explicitly. An apply alone leaves the previous binary
-  running behind a successful rollout status.
+- The node agent DaemonSet — which carries the gateway routes — is rebuilt
+  under one image tag, so deployment restarts it explicitly. An apply alone
+  leaves the previous binary running behind a successful rollout status.
 
 Hardware validation covers initial Identity failure, token rotation and fresh
 certification, gateway and control-service loss and recovery, Linkerd control Pod
@@ -375,7 +391,7 @@ registration and leaves every other registration and its traffic untouched.
 
 ## Current bounds
 
-- configured Service names come from one static registry;
+- Service names resolve through the controller's topology generation;
 - backend membership is node-local, and only node-agent-signed Pod and Service
   membership is admitted;
 - service and pod identifiers occupy the signed one-byte wire space;

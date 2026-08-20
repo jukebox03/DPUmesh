@@ -13,11 +13,27 @@ use std::ffi::c_void;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::os::raw::{c_char, c_int};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 #[cfg(not(test))]
 use std::task::{Context, Poll};
 use std::time::{Duration, SystemTime};
+
+/// Bytes one feed generation may hold. A larger document is refused unread.
+const MAX_FEED_BYTES: u64 = 256 * 1024;
+
+/// Read one feed generation, refusing a document larger than a generation may be.
+fn read_feed(path: &Path) -> Result<String, String> {
+    let len = std::fs::metadata(path)
+        .map_err(|error| format!("stat {}: {error}", path.display()))?
+        .len();
+    if len > MAX_FEED_BYTES {
+        return Err(format!(
+            "service target feed is {len} bytes, over the {MAX_FEED_BYTES}-byte bound"
+        ));
+    }
+    std::fs::read_to_string(path).map_err(|error| format!("read {}: {error}", path.display()))
+}
 
 /// How long a feed generation must have been installed before its stamp is
 /// trusted to mean "unchanged".
@@ -42,6 +58,15 @@ pub struct DmeshL7Flow {
     pub mode: u8,
     pub is_reply: u8,
     pub workload: [c_char; 384],
+    pub source_identity: [c_char; 254],
+}
+
+/// Read one NUL-terminated fixed-width field of a flow.
+fn flow_text(bytes: &[c_char]) -> String {
+    let end = bytes.iter().position(|&c| c == 0).unwrap_or(bytes.len());
+    #[allow(clippy::unnecessary_cast)]
+    let raw: Vec<u8> = bytes[..end].iter().map(|&c| c as u8).collect();
+    String::from_utf8_lossy(&raw).into_owned()
 }
 
 /// Mirrors `struct dmesh_l7_verdict`.
@@ -80,6 +105,58 @@ const DRAIN_SESSIONS_MAX: usize = 64;
 
 /// Port used in synthetic service addresses.
 const SERVICE_PORT: u16 = 9092;
+
+/// Resolve a `namespace/name` Service key to this node's DPU-interned id,
+/// answered from the held topology generation. `None` until a generation
+/// interns it; the publisher republishes, so a later generation retries.
+#[cfg(not(test))]
+fn resolve_service_key(worker_id: c_int, key: &str) -> Option<i32> {
+    extern "C" {
+        fn dmesh_l7_svc_for_name(worker_id: c_int, key: *const c_char) -> i32;
+    }
+    let key = std::ffi::CString::new(key).ok()?;
+    let id = unsafe { dmesh_l7_svc_for_name(worker_id, key.as_ptr()) };
+    (0..=i8::MAX as i32).contains(&id).then_some(id)
+}
+
+/// `DMESH_L7_ENDPOINT_*` ABI values.
+const ENDPOINT_REMOTE: i32 = -2;
+const ENDPOINT_STALE: i32 = -3;
+
+/// Resolve the Pod UID behind an endpoint the balancer selected to the live
+/// destination it names, or to the reason it names none.
+#[cfg(not(test))]
+fn resolve_endpoint_uid(worker_id: c_int, uid: &str) -> i32 {
+    extern "C" {
+        fn dmesh_l7_pod_for_uid(worker_id: c_int, pod_uid: *const c_char) -> i32;
+    }
+    let Ok(uid) = std::ffi::CString::new(uid) else {
+        return -1;
+    };
+    unsafe { dmesh_l7_pod_for_uid(worker_id, uid.as_ptr()) }
+}
+
+/// Test resolution: one live Pod, one placed elsewhere, one whose mapping the
+/// held generation no longer names.
+#[cfg(test)]
+fn resolve_endpoint_uid(_worker_id: c_int, uid: &str) -> i32 {
+    match uid {
+        "11111111-1111-1111-1111-111111111111" => 7,
+        "22222222-2222-2222-2222-222222222222" => ENDPOINT_REMOTE,
+        "33333333-3333-3333-3333-333333333333" => ENDPOINT_STALE,
+        _ => -1,
+    }
+}
+
+/// Test interning: the generation names two Services.
+#[cfg(test)]
+fn resolve_service_key(_worker_id: c_int, key: &str) -> Option<i32> {
+    match key {
+        "test-bench/echo-a" => Some(11),
+        "test-bench/echo-b" => Some(20),
+        _ => None,
+    }
+}
 
 /// DPUmesh ABI calls with a recording test implementation.
 mod datapath {
@@ -508,8 +585,12 @@ struct Worker {
     /// Real Kubernetes destination presented to Linkerd for each DPUmesh
     /// service. The synthetic address remains the internal backend key.
     service_targets: HashMap<i32, SocketAddrV4>,
-    /// Ready endpoints in the same authoritative Service generation.
-    service_endpoints: HashMap<i32, Vec<SocketAddr>>,
+    /// Ready endpoints in the same authoritative Service generation, each with
+    /// the Pod UID the generation names it by. The address is what the Linkerd
+    /// balancer selects; the UID is what resolves it to a live destination,
+    /// and a recreated Pod carries a new one, so a mapping cannot be
+    /// inherited.
+    service_endpoints: HashMap<i32, Vec<(SocketAddr, String)>>,
     /// Atomically replaced, monotonically versioned controller feed.
     service_targets_file: Option<PathBuf>,
     service_targets_version: u64,
@@ -522,6 +603,26 @@ struct Worker {
     /// Copy output into the egress arena rather than through a temporary Vec.
     tx_reserve: bool,
     counters: Counters,
+}
+
+type InboundPolicyBuilder = Arc<dyn Fn(Arc<str>) -> linkerd_app::DmeshPolicyStore + Send + Sync>;
+
+/// The inbound policy stores this worker holds, one per registered destination
+/// Pod, keyed by its workload.
+///
+/// A sidecar holds one store because it is the proxy for one workload. This
+/// proxy is the inbound enforcement point for every Pod its DPU serves, so the
+/// cost scales with destination Pods and ports — one watch per Pod and port,
+/// shared by every stream that arrives at it — rather than with sessions. A
+/// stream pays an evaluation, not a session build.
+///
+/// It is deliberately not a field of `Worker`. The verdict is asked from
+/// inside the data path, which is already inside the `Worker` borrow, so
+/// reaching it through that borrow would be re-entrant.
+#[derive(Default)]
+struct InboundPolicies {
+    build: Option<InboundPolicyBuilder>,
+    cache: HashMap<String, linkerd_app::DmeshPolicyStore>,
 }
 
 /// DPUmesh connection handle from pod and port.
@@ -542,11 +643,18 @@ fn service_addr(dst_service: i32) -> SocketAddr {
     SocketAddr::V4(service_addr_v4(dst_service))
 }
 
-/// Synthetic peer address for a pod.
-fn pod_addr(src_pod: i32, src_port: u16) -> SocketAddrV4 {
+/// The source address a flow presents.
+///
+/// It is the Pod's real cluster IP, carried in its signed assertion within a
+/// node and in the generation across one. Nothing synthetic may stand in for
+/// it: an `AuthorizationPolicy`'s `networks` clause is matched before its
+/// identity clause and an empty match denies, so a made-up address would make
+/// every realistic policy refuse every connection. The port is the source
+/// port; zero would not be a socket address, so it reads as one.
+fn source_addr(flow: &DmeshL7Flow) -> SocketAddrV4 {
     SocketAddrV4::new(
-        Ipv4Addr::new(10, 97, 0, (src_pod & 0xff) as u8),
-        if src_port == 0 { 1 } else { src_port },
+        Ipv4Addr::from(flow.src_ip),
+        if flow.src_port == 0 { 1 } else { flow.src_port },
     )
 }
 
@@ -555,6 +663,9 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
     /// Count calls naming another worker.
     static FOREIGN_CALLS: Cell<u64> = const { Cell::new(0) };
+    /// The inbound policy stores, borrowed independently of the worker.
+    static INBOUND: std::cell::RefCell<InboundPolicies> =
+        std::cell::RefCell::new(InboundPolicies::default());
 }
 
 /// Access the worker bound to the current thread.
@@ -726,9 +837,57 @@ fn pump_side(
 }
 
 impl Worker {
-    /// Publish which Service each address the held generation names belongs to:
-    /// its session key, its ClusterIP and its ready endpoints. The connector
-    /// judges a Linkerd-selected target against this.
+    /// Publish how the balancer's selected endpoints resolve to live
+    /// destinations, alongside the placement snapshot.
+    ///
+    /// The two answer different questions and both are needed. The placement
+    /// says which Service an address belongs to; the resolution says whether
+    /// anything is serving it here and now. Every address that is not one of
+    /// the session's own must resolve to a live Pod.
+    fn place_endpoint_resolution(&self) {
+        let mut own: std::collections::HashSet<SocketAddr> = std::collections::HashSet::new();
+        let mut by_addr: HashMap<SocketAddr, String> = HashMap::new();
+        for (&service, &cluster_ip) in &self.service_targets {
+            own.insert(service_addr(service));
+            own.insert(SocketAddr::V4(cluster_ip));
+        }
+        for endpoints in self.service_endpoints.values() {
+            for (addr, uid) in endpoints {
+                by_addr.insert(*addr, uid.clone());
+            }
+        }
+        let worker = self.id;
+        self.backends
+            .set_endpoint_resolver(Arc::new(move |selected: SocketAddr| {
+                if own.contains(&selected) {
+                    return dmesh_doca::EndpointVerdict::SessionOwn;
+                }
+                // Ports do not participate in identity: the address's IP is
+                // what names the Pod, and a Service may expose it on several.
+                let Some(uid) = by_addr
+                    .get(&selected)
+                    .or_else(|| {
+                        by_addr
+                            .iter()
+                            .find(|(addr, _)| addr.ip() == selected.ip())
+                            .map(|(_, uid)| uid)
+                    })
+                    .cloned()
+                else {
+                    return dmesh_doca::EndpointVerdict::Unresolved;
+                };
+                match resolve_endpoint_uid(worker, &uid) {
+                    pod if pod >= 0 => dmesh_doca::EndpointVerdict::Live,
+                    ENDPOINT_REMOTE => dmesh_doca::EndpointVerdict::Remote,
+                    ENDPOINT_STALE => dmesh_doca::EndpointVerdict::Stale,
+                    _ => dmesh_doca::EndpointVerdict::Unresolved,
+                }
+            }));
+    }
+
+    /// Publish which Service each address the held generation names belongs
+    /// to: its session key, its ClusterIP and its ready endpoints. The
+    /// connector judges a Linkerd-selected target against this.
     ///
     /// An address two Services both name is left unplaced. `take_session`
     /// refuses a target the generation places in another Service; an unplaced
@@ -751,8 +910,8 @@ impl Worker {
             }
             for (&service, endpoints) in &self.service_endpoints {
                 let key = service_addr(service);
-                for &endpoint in endpoints {
-                    place(endpoint, key);
+                for (endpoint, _uid) in endpoints {
+                    place(*endpoint, key);
                 }
             }
         }
@@ -760,6 +919,7 @@ impl Worker {
             placements.remove(addr);
         }
         self.backends.place_targets(placements);
+        self.place_endpoint_resolution();
     }
 
     /// Adopt the current feed generation. Session open runs this, so it reads
@@ -773,6 +933,12 @@ impl Worker {
         let modified = metadata
             .modified()
             .map_err(|error| format!("mtime {}: {error}", path.display()))?;
+        if metadata.len() > MAX_FEED_BYTES {
+            return Err(format!(
+                "service target feed is {} bytes, over the {MAX_FEED_BYTES}-byte bound",
+                metadata.len()
+            ));
+        }
         let stamp = (
             std::os::unix::fs::MetadataExt::ino(&metadata),
             modified,
@@ -789,8 +955,7 @@ impl Worker {
         if settled && self.service_targets_stamp == Some(stamp) {
             return Ok(());
         }
-        let document = std::fs::read_to_string(path)
-            .map_err(|error| format!("read {}: {error}", path.display()))?;
+        let document = read_feed(path)?;
         let (version, targets, endpoints) = parse_signed_service_targets(&document)?;
         if version < self.service_targets_version {
             return Err(format!(
@@ -799,8 +964,10 @@ impl Worker {
             ));
         }
         if version > self.service_targets_version {
-            self.service_targets = targets;
-            self.service_endpoints = endpoints;
+            let (resolved_targets, resolved_endpoints) =
+                resolve_named_targets(self.id, &targets, &endpoints);
+            self.service_targets = resolved_targets;
+            self.service_endpoints = resolved_endpoints;
             self.service_targets_version = version;
             self.place_service_targets();
         }
@@ -1016,15 +1183,8 @@ impl Worker {
             return self.decline(Decline::FeedRejected, conn, flow, Some(backend_addr));
         }
 
-        let workload = {
-            let bytes = &flow.workload;
-            let end = bytes.iter().position(|&c| c == 0).unwrap_or(bytes.len());
-            // Normalize the platform `c_char` representation.
-            #[allow(clippy::unnecessary_cast)]
-            let raw: Vec<u8> = bytes[..end].iter().map(|&c| c as u8).collect();
-            String::from_utf8_lossy(&raw).into_owned()
-        };
-        let src = pod_addr(flow.src_pod, flow.src_port);
+        let workload = flow_text(&flow.workload);
+        let src = source_addr(flow);
         let dst = match self.service_targets.get(&flow.dst_service).copied() {
             Some(dst) => dst,
             None if !self.service_targets_authoritative => service_addr_v4(flow.dst_service),
@@ -1118,28 +1278,51 @@ fn parse_worker_selection(value: &str) -> Result<WorkerSelection, String> {
 ///
 /// These addresses are presented to Linkerd destination and policy discovery;
 /// DPUmesh's backend channel continues to use its generation-safe session key.
-fn parse_service_targets(value: &str) -> Result<HashMap<i32, SocketAddrV4>, String> {
+/// A Kubernetes Service is namespace-scoped, so a feed key is always
+/// `namespace/name`; a bare name is not a valid identifier anywhere.
+fn valid_service_key(key: &str) -> bool {
+    match key.split_once('/') {
+        Some((namespace, name)) => {
+            !namespace.is_empty()
+                && !name.is_empty()
+                && key.len() <= 127
+                && key
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "-./".contains(c))
+                && !name.contains('/')
+        }
+        None => false,
+    }
+}
+
+/// A Kubernetes Pod UID in its canonical RFC 4122 text form. It is the key the
+/// endpoint mapping resolves through, and a recreated Pod carries a new one,
+/// which is what stops a mapping from being inherited.
+fn valid_pod_uid(uid: &str) -> bool {
+    uid.len() == 36
+        && uid.chars().enumerate().all(|(i, c)| match i {
+            8 | 13 | 18 | 23 => c == '-',
+            _ => c.is_ascii_hexdigit() && !c.is_ascii_uppercase(),
+        })
+}
+
+fn parse_service_targets(value: &str) -> Result<HashMap<String, SocketAddrV4>, String> {
     let mut targets = HashMap::new();
     for raw in value.split(',').map(str::trim).filter(|s| !s.is_empty()) {
         let (service, addr) = raw.split_once('=').ok_or_else(|| {
-            format!("DPUMESH_L7_SERVICE_TARGETS entry '{raw}' must be service-id=IPv4:port")
+            format!("service target entry '{raw}' must be namespace/name=IPv4:port")
         })?;
-        let service = service.trim().parse::<i32>().map_err(|_| {
-            format!("DPUMESH_L7_SERVICE_TARGETS entry '{raw}' has an invalid service id")
-        })?;
-        if !(0..=i8::MAX as i32).contains(&service) {
+        let service = service.trim();
+        if !valid_service_key(service) {
             return Err(format!(
-                "DPUMESH_L7_SERVICE_TARGETS service id {service} is outside 0..={}",
-                i8::MAX
+                "service target entry '{raw}' needs a namespace/name Service key"
             ));
         }
         let addr = addr.trim().parse::<SocketAddrV4>().map_err(|_| {
-            format!("DPUMESH_L7_SERVICE_TARGETS entry '{raw}' needs an IPv4 socket address")
+            format!("service target entry '{raw}' needs an IPv4 socket address")
         })?;
-        if targets.insert(service, addr).is_some() {
-            return Err(format!(
-                "DPUMESH_L7_SERVICE_TARGETS repeats service id {service}"
-            ));
+        if targets.insert(service.to_string(), addr).is_some() {
+            return Err(format!("service target feed repeats Service {service}"));
         }
     }
     Ok(targets)
@@ -1155,8 +1338,8 @@ fn parse_signed_service_targets(
 ) -> Result<
     (
         u64,
-        HashMap<i32, SocketAddrV4>,
-        HashMap<i32, Vec<SocketAddr>>,
+        HashMap<String, SocketAddrV4>,
+        HashMap<String, Vec<(SocketAddr, String)>>,
     ),
     String,
 > {
@@ -1176,14 +1359,14 @@ fn parse_versioned_service_targets(
 ) -> Result<
     (
         u64,
-        HashMap<i32, SocketAddrV4>,
-        HashMap<i32, Vec<SocketAddr>>,
+        HashMap<String, SocketAddrV4>,
+        HashMap<String, Vec<(SocketAddr, String)>>,
     ),
     String,
 > {
     let mut version = None;
     let mut entries = Vec::new();
-    let mut endpoints: HashMap<i32, Vec<SocketAddr>> = HashMap::new();
+    let mut endpoints: HashMap<String, Vec<(SocketAddr, String)>> = HashMap::new();
     for raw in document.lines() {
         let line = raw.split('#').next().unwrap_or_default().trim();
         if line.is_empty() {
@@ -1202,27 +1385,35 @@ fn parse_versioned_service_targets(
             }
             version = Some(parsed);
         } else if let Some(value) = line.strip_prefix("endpoint=") {
-            let (service, addr) = value.split_once(',').ok_or_else(|| {
-                format!("service endpoint '{line}' must be endpoint=service-id,IPv4:port")
-            })?;
-            let service = service
-                .parse::<i32>()
-                .map_err(|_| format!("service endpoint '{line}' has an invalid service id"))?;
-            if !(0..=i8::MAX as i32).contains(&service) {
+            let mut fields = value.split(',');
+            let (Some(service), Some(addr), Some(pod_uid), None) = (
+                fields.next(),
+                fields.next(),
+                fields.next(),
+                fields.next(),
+            ) else {
                 return Err(format!(
-                    "service endpoint id {service} is outside 0..={}",
-                    i8::MAX
+                    "service endpoint '{line}' must be \
+                     endpoint=namespace/name,IPv4:port,pod-uid"
                 ));
+            };
+            if !valid_service_key(service) {
+                return Err(format!(
+                    "service endpoint '{line}' needs a namespace/name Service key"
+                ));
+            }
+            if !valid_pod_uid(pod_uid) {
+                return Err(format!("service endpoint '{line}' needs an RFC 4122 Pod UID"));
             }
             let addr = addr
                 .parse::<SocketAddrV4>()
                 .map(SocketAddr::V4)
                 .map_err(|_| format!("service endpoint '{line}' needs an IPv4 socket address"))?;
-            let service_endpoints = endpoints.entry(service).or_default();
-            if service_endpoints.contains(&addr) {
+            let service_endpoints = endpoints.entry(service.to_string()).or_default();
+            if service_endpoints.iter().any(|(known, _)| *known == addr) {
                 return Err(format!("service endpoint '{line}' is duplicated"));
             }
-            service_endpoints.push(addr);
+            service_endpoints.push((addr, pod_uid.to_string()));
         } else {
             entries.push(line);
         }
@@ -1231,11 +1422,43 @@ fn parse_versioned_service_targets(
     let targets = parse_service_targets(&entries.join(","))?;
     if let Some(service) = endpoints
         .keys()
-        .find(|service| !targets.contains_key(service))
+        .find(|service| !targets.contains_key(*service))
     {
         return Err(format!("service endpoint {service} has no Service target"));
     }
     Ok((version, targets, endpoints))
+}
+
+/// Resolve feed-named Services to this node's DPU-interned compact ids.
+///
+/// The feed names Services; the compact ids come from the DPU's interning of
+/// the topology generation. A key no generation interns yet is dropped and
+/// retried once a later generation defines it — the publisher republishes.
+fn resolve_named_targets(
+    worker_id: c_int,
+    named_targets: &HashMap<String, SocketAddrV4>,
+    named_endpoints: &HashMap<String, Vec<(SocketAddr, String)>>,
+) -> (
+    HashMap<i32, SocketAddrV4>,
+    HashMap<i32, Vec<(SocketAddr, String)>>,
+) {
+    let mut targets = HashMap::new();
+    let mut endpoints = HashMap::new();
+    for (key, addr) in named_targets {
+        match resolve_service_key(worker_id, key) {
+            Some(id) => {
+                targets.insert(id, *addr);
+                if let Some(eps) = named_endpoints.get(key) {
+                    endpoints.insert(id, eps.clone());
+                }
+            }
+            None => eprintln!(
+                "[l7_linkerd] worker {worker_id}: Service {key} has no interned id yet; \
+                 target dropped until a generation defines it"
+            ),
+        }
+    }
+    (targets, endpoints)
 }
 
 fn admin_addr_for_worker(
@@ -1288,10 +1511,11 @@ async fn build_worker(worker_id: c_int) -> Result<Option<Worker>, String> {
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .ok_or_else(|| "DPUMESH_L7_SERVICE_TARGETS_FILE is required".to_string())?;
-    let document = std::fs::read_to_string(&service_targets_file)
-        .map_err(|error| format!("read {}: {error}", service_targets_file.display()))?;
-    let (service_targets_version, service_targets, service_endpoints) =
+    let document = read_feed(&service_targets_file)?;
+    let (service_targets_version, named_targets, named_endpoints) =
         parse_signed_service_targets(&document)?;
+    let (service_targets, service_endpoints) =
+        resolve_named_targets(worker_id, &named_targets, &named_endpoints);
     let service_targets_file = Some(service_targets_file);
     let service_targets_authoritative = true;
     if let WorkerSelection::One(only) = selection {
@@ -1307,9 +1531,11 @@ async fn build_worker(worker_id: c_int) -> Result<Option<Worker>, String> {
 
     let mut config = linkerd_app::Config::try_from_env().map_err(|e| format!("config: {e}"))?;
 
-    // This embedded runtime has no application-facing inbound listener. Avoid
-    // opening policy watches for its ephemeral inbound and admin ports; DMesh
-    // sessions still create their own dynamic outbound policy watches below.
+    // This runtime's own inbound and admin listeners are ephemeral and belong
+    // to no Pod, so discovering policy for their ports would only ask the
+    // controller about servers it has never heard of. The Pods this DPU is the
+    // inbound enforcement point for keep full discovery: their stores are
+    // built per workload from the configuration this call preserves.
     config.disable_inbound_policy_discovery();
 
     // The inbound, outbound and control listeners are ephemeral; the admin
@@ -1340,6 +1566,9 @@ async fn build_worker(worker_id: c_int) -> Result<Option<Worker>, String> {
     // The registry and counters this worker's connector uses.
     let backends = app.dmesh_backends();
     let metrics = app.dmesh_metrics();
+    // Taken before the app is consumed by spawn(): the builder outlives it and
+    // is what binds one policy store to each destination Pod as it registers.
+    let inbound_policies: InboundPolicyBuilder = app.dmesh_inbound_policy_builder();
     let drain = app.spawn();
     let _ = events_tx.send(DmeshEvent::InfraReady);
 
@@ -1365,6 +1594,7 @@ async fn build_worker(worker_id: c_int) -> Result<Option<Worker>, String> {
         tx_reserve: tx_reserve_enabled(),
         counters: Counters::default(),
     };
+    INBOUND.with(|slot| slot.borrow_mut().build = Some(inbound_policies));
     // The first generation is parsed here rather than adopted by a refresh, so
     // publish its placement before any session opens.
     worker.place_service_targets();
@@ -1432,6 +1662,97 @@ fn drain_worker(worker_id: c_int) -> c_int {
         did |= w.drain();
         did as c_int
     })
+}
+
+/// Verdict outcomes on the ABI. Negative values are "no verdict", which the
+/// data plane resolves by the destination Service's protection class.
+const VERDICT_ADMIT: c_int = 1;
+const VERDICT_REFUSE: c_int = 0;
+const VERDICT_NO_POLICY: c_int = -1;
+const VERDICT_NOT_ATTACHED: c_int = -2;
+
+impl InboundPolicies {
+    /// Decide whether one inbound stream is admitted to a registered Pod.
+    ///
+    /// Two inputs decide it and a Pod supplies neither. The client address is
+    /// the source Pod's signed cluster IP, because the stock evaluation matches
+    /// `networks` first and an empty match denies. The identity is a TLS
+    /// *state* rather than a string, because that is the only shape
+    /// `Authentication::TlsAuthenticated` matches — so the verified identity is
+    /// presented as an established client, exactly the substitution `DmeshIo`
+    /// makes for the byte stream.
+    fn verdict(&mut self, flow: &DmeshL7Flow) -> c_int {
+        let Some(build) = self.build.clone() else {
+            return VERDICT_NOT_ATTACHED;
+        };
+        let workload = flow_text(&flow.workload);
+        if workload.is_empty() {
+            return VERDICT_NO_POLICY;
+        }
+        let store = self
+            .cache
+            .entry(workload.clone())
+            .or_insert_with(|| build(Arc::from(workload.as_str())));
+        let identity = flow_text(&flow.source_identity);
+        let client = SocketAddr::V4(source_addr(flow));
+        let destination = SocketAddr::new(Ipv4Addr::from(flow.dst_ip).into(), flow.dst_port);
+        if linkerd_app::dmesh_connection_verdict(
+            store,
+            destination,
+            client,
+            Some(identity.as_str()),
+        ) {
+            VERDICT_ADMIT
+        } else {
+            VERDICT_REFUSE
+        }
+    }
+}
+
+/// The destination-side admission verdict for one inbound stream.
+///
+/// # Safety
+/// `flow` must point to a valid `struct dmesh_l7_flow`.
+#[no_mangle]
+pub unsafe extern "C" fn l7_inbound_verdict(
+    worker_id: c_int,
+    flow: *const DmeshL7Flow,
+) -> c_int {
+    if flow.is_null() {
+        return VERDICT_NO_POLICY;
+    }
+    let flow = &*flow;
+    let _ = worker_id;              // the stores are this thread's
+    INBOUND.with(|slot| match slot.try_borrow_mut() {
+        Ok(mut policies) => policies.verdict(flow),
+        // The verdict is asked from inside the data path; a nested ask would
+        // be a re-entrancy this does not have, and answering "no verdict"
+        // leaves the decision to the destination Service's protection class
+        // rather than inventing one.
+        Err(_) => VERDICT_NO_POLICY,
+    })
+}
+
+/// Drop the policy watches held for a destination Pod whose registration
+/// ended. The watch lifetime is the store lifetime, so this is what stops
+/// them.
+///
+/// # Safety
+/// `workload` must be NUL-terminated or null.
+#[no_mangle]
+pub unsafe extern "C" fn l7_inbound_forget(worker_id: c_int, workload: *const c_char) {
+    if workload.is_null() {
+        return;
+    }
+    let Ok(workload) = std::ffi::CStr::from_ptr(workload).to_str() else {
+        return;
+    };
+    let _ = worker_id;
+    INBOUND.with(|slot| {
+        if let Ok(mut policies) = slot.try_borrow_mut() {
+            policies.cache.remove(workload);
+        }
+    });
 }
 
 /// # Safety
@@ -1617,7 +1938,7 @@ mod abi {
 
     #[test]
     fn flow_layout_matches_c() {
-        assert_eq!(size_of::<DmeshL7Flow>(), 412);
+        assert_eq!(size_of::<DmeshL7Flow>(), 664);
         assert_eq!(align_of::<DmeshL7Flow>(), 4);
         assert_eq!(offset_of!(DmeshL7Flow, src_ip), 0);
         assert_eq!(offset_of!(DmeshL7Flow, dst_ip), 4);
@@ -1629,6 +1950,7 @@ mod abi {
         assert_eq!(offset_of!(DmeshL7Flow, mode), 24);
         assert_eq!(offset_of!(DmeshL7Flow, is_reply), 25);
         assert_eq!(offset_of!(DmeshL7Flow, workload), 26);
+        assert_eq!(offset_of!(DmeshL7Flow, source_identity), 410);
     }
 
     #[test]
@@ -1693,54 +2015,92 @@ mod tests {
 
     #[test]
     fn service_targets_are_strict_and_per_service() {
-        let targets =
-            parse_service_targets("11=10.107.58.88:9092, 20=10.111.115.171:9092").unwrap();
+        let targets = parse_service_targets(
+            "test-bench/echo-a=10.107.58.88:9092, test-bench/echo-b=10.111.115.171:9092",
+        )
+        .unwrap();
         assert_eq!(
-            targets[&11],
+            targets["test-bench/echo-a"],
             "10.107.58.88:9092".parse::<SocketAddrV4>().unwrap()
         );
         assert_eq!(
-            targets[&20],
+            targets["test-bench/echo-b"],
             "10.111.115.171:9092".parse::<SocketAddrV4>().unwrap()
         );
-        assert!(parse_service_targets("11").is_err());
-        assert!(parse_service_targets("128=10.0.0.1:80").is_err());
-        assert!(parse_service_targets("11=[::1]:80").is_err());
-        assert!(parse_service_targets("11=10.0.0.1:80,11=10.0.0.2:80").is_err());
+        assert!(parse_service_targets("test-bench/echo-a").is_err());
+        // A Service is never named without its namespace; a bare name or a
+        // numeric id is not a valid key.
+        assert!(parse_service_targets("echo-a=10.0.0.1:80").is_err());
+        assert!(parse_service_targets("11=10.0.0.1:80").is_err());
+        assert!(parse_service_targets("test-bench/echo-a=[::1]:80").is_err());
+        assert!(parse_service_targets(
+            "test-bench/echo-a=10.0.0.1:80,test-bench/echo-a=10.0.0.2:80"
+        )
+        .is_err());
 
         let (version, targets, endpoints) = parse_versioned_service_targets(
-            "# atomic controller feed\nversion=7\n11=10.0.0.11:9092\nendpoint=11,10.244.0.11:9092\n20=10.0.0.20:9092\n",
+            "# atomic controller feed\nversion=7\ntest-bench/echo-a=10.0.0.11:9092\n\
+             endpoint=test-bench/echo-a,10.244.0.11:9092,11111111-1111-1111-1111-111111111111\ntest-bench/echo-b=10.0.0.20:9092\n",
         )
         .unwrap();
         assert_eq!(version, 7);
-        assert_eq!(targets[&11], "10.0.0.11:9092".parse().unwrap());
-        assert_eq!(endpoints[&11], vec!["10.244.0.11:9092".parse().unwrap()]);
-        assert!(parse_versioned_service_targets("11=10.0.0.11:9092").is_err());
-        assert!(parse_versioned_service_targets("version=0").is_err());
-        assert!(
-            parse_versioned_service_targets("version=1\nendpoint=11,10.244.0.11:9092\n").is_err()
+        assert_eq!(
+            targets["test-bench/echo-a"],
+            "10.0.0.11:9092".parse().unwrap()
         );
+        // The address is what the balancer selects; the Pod UID beside it is
+        // what resolves that address to a live destination.
+        assert_eq!(
+            endpoints["test-bench/echo-a"],
+            vec![(
+                "10.244.0.11:9092".parse::<SocketAddr>().unwrap(),
+                "11111111-1111-1111-1111-111111111111".to_string()
+            )]
+        );
+        assert!(parse_versioned_service_targets("test-bench/echo-a=10.0.0.11:9092").is_err());
+        assert!(parse_versioned_service_targets("version=0").is_err());
+        assert!(parse_versioned_service_targets(
+            "version=1\nendpoint=test-bench/echo-a,10.244.0.11:9092,11111111-1111-1111-1111-111111111111\n"
+        )
+        .is_err());
+        // An endpoint without a Pod UID, or with one that is not an RFC 4122
+        // text form, resolves to nothing and is refused rather than carried.
+        assert!(parse_versioned_service_targets(
+            "version=1\ntest-bench/echo-a=10.0.0.11:9092\n\
+             endpoint=test-bench/echo-a,10.244.0.11:9092\n"
+        )
+        .is_err());
+        assert!(parse_versioned_service_targets(
+            "version=1\ntest-bench/echo-a=10.0.0.11:9092\n\
+             endpoint=test-bench/echo-a,10.244.0.11:9092,not-a-uid\n"
+        )
+        .is_err());
     }
 
     #[test]
     fn an_unsigned_service_target_feed_is_refused() {
         // The feed carries the same authority as a grant, so an unsigned or
         // badly signed generation is refused exactly like a malformed one.
-        assert!(parse_signed_service_targets("version=4\n11=10.0.0.11:9092\n").is_err());
+        assert!(
+            parse_signed_service_targets("version=4\ntest-bench/echo-a=10.0.0.11:9092\n").is_err()
+        );
         assert!(parse_signed_service_targets(
-            "version=4\n11=10.0.0.11:9092\nsignature=test,forged\n"
+            "version=4\ntest-bench/echo-a=10.0.0.11:9092\nsignature=test,forged\n"
         )
         .is_err());
         let (version, targets, _) = parse_signed_service_targets(
-            "version=4\n11=10.0.0.11:9092\nsignature=test,valid\n",
+            "version=4\ntest-bench/echo-a=10.0.0.11:9092\nsignature=test,valid\n",
         )
         .unwrap();
         assert_eq!(version, 4);
-        assert_eq!(targets[&11], "10.0.0.11:9092".parse().unwrap());
+        assert_eq!(
+            targets["test-bench/echo-a"],
+            "10.0.0.11:9092".parse().unwrap()
+        );
         // Bytes appended after the envelope are outside the signature, so the
         // document is refused rather than parsed up to the envelope.
         assert!(parse_signed_service_targets(
-            "version=4\n11=10.0.0.11:9092\nsignature=test,valid\n20=10.0.0.20:9092\n"
+            "version=4\ntest-bench/echo-a=10.0.0.11:9092\nsignature=test,valid\ntest-bench/echo-b=10.0.0.20:9092\n"
         )
         .is_err());
     }
@@ -1753,7 +2113,7 @@ mod tests {
             std::process::id(),
             session_key(1, 1)
         ));
-        std::fs::write(&path, "version=2\n11=10.0.0.11:9092\nsignature=test,valid\n").unwrap();
+        std::fs::write(&path, "version=2\ntest-bench/echo-a=10.0.0.11:9092\nsignature=test,valid\n").unwrap();
         // A generation younger than STAMP_SETTLE is always re-read, so age this
         // one to exercise the stamp itself.
         let installed = SystemTime::now() - STAMP_SETTLE * 5;
@@ -1774,7 +2134,7 @@ mod tests {
         });
         // A settled generation is adopted only once: the same inode,
         // modification time and length mean no read is issued.
-        std::fs::write(&path, "version=9\n11=10.0.0.99:9092\nsignature=test,valid\n").unwrap();
+        std::fs::write(&path, "version=9\ntest-bench/echo-a=10.0.0.99:9092\nsignature=test,valid\n").unwrap();
         age(&path);
         with_test_worker(|w| {
             w.refresh_service_targets().unwrap();
@@ -1784,7 +2144,7 @@ mod tests {
                 "10.0.0.11:9092".parse::<SocketAddrV4>().unwrap()
             );
         });
-        std::fs::write(&path, "# rolled back\nversion=1\n11=10.0.0.12:9092\nsignature=test,valid\n").unwrap();
+        std::fs::write(&path, "# rolled back\nversion=1\ntest-bench/echo-a=10.0.0.12:9092\nsignature=test,valid\n").unwrap();
         with_test_worker(|w| assert!(w.refresh_service_targets().is_err()));
         // A rejected generation is not stamped, so it keeps being rejected.
         with_test_worker(|w| assert!(w.refresh_service_targets().is_err()));
@@ -1796,6 +2156,32 @@ mod tests {
             DECLINE_ERROR
         );
         assert!(tw.events.try_recv().is_err());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn service_target_feed_refuses_an_oversized_generation() {
+        let _worker = install_worker(0);
+        let path = std::env::temp_dir().join(format!(
+            "dpumesh-service-targets-oversized-{}",
+            std::process::id()
+        ));
+        let mut document = String::from("version=2\n");
+        while document.len() as u64 <= MAX_FEED_BYTES {
+            document.push_str("# padding past the feed bound\n");
+        }
+        document.push_str("test-bench/echo-a=10.0.0.11:9092\nsignature=test,valid\n");
+        std::fs::write(&path, &document).unwrap();
+        // The startup path reads through read_feed; the refresh path checks the
+        // metadata it already holds. Both refuse without reading the document.
+        assert!(read_feed(&path).is_err());
+        with_test_worker(|w| {
+            w.service_targets_file = Some(path.clone());
+            w.service_targets_authoritative = true;
+            assert!(w.refresh_service_targets().is_err());
+            assert_eq!(w.service_targets_version, 0);
+            assert!(w.service_targets.is_empty());
+        });
         std::fs::remove_file(path).unwrap();
     }
 
@@ -1855,7 +2241,9 @@ mod tests {
 
     fn request_flow(service: i32, pod: i32, port: u16) -> DmeshL7Flow {
         DmeshL7Flow {
-            src_ip: 0,
+            // A real cluster address, because the source address is what an
+            // authorization policy's networks clause is matched against.
+            src_ip: u32::from(Ipv4Addr::new(10, 244, 0, (pod & 0xff) as u8)),
             dst_ip: 0,
             src_port: port,
             dst_port: port,
@@ -1865,6 +2253,7 @@ mod tests {
             mode: MODE_OPAQUE,
             is_reply: 0,
             workload: [0; 384],
+            source_identity: [0; 254],
         }
     }
 
@@ -1879,7 +2268,7 @@ mod tests {
 
     /// Register a client endpoint for a session, as the acceptor would.
     fn register_client(tw: &TestWorker, token: SessionToken) -> DmeshIo {
-        let (io, handle) = dmesh_doca::dmesh_io_pair("10.97.0.1:1".parse().unwrap());
+        let (io, handle) = dmesh_doca::dmesh_io_pair("10.244.0.1:1".parse().unwrap());
         tw.registrar.send(Registration { token, handle }).unwrap();
         with_test_worker(|w| w.collect_registrations());
         io
@@ -1969,6 +2358,77 @@ mod tests {
             other => panic!("expected a ready event, got {other:?}"),
         }
         assert!(tw.backends.contains_service(&service_addr(21)));
+        with_test_worker(|w| w.close_session(key));
+    }
+
+    #[test]
+    fn a_selected_endpoint_must_resolve_to_a_live_destination() {
+        // DPUmesh chooses the backend Pod itself, so a Linkerd-selected
+        // endpoint is translated rather than dialled. Every outcome that is
+        // not a live local Pod declines by its own reason: a round robin or a
+        // TCP fallback would carry a protected stream somewhere its policy
+        // never named.
+        let tw = install_worker(0);
+        with_test_worker(|w| {
+            w.service_targets
+                .insert(21, "10.107.58.88:9092".parse().unwrap());
+            w.service_endpoints.insert(
+                21,
+                vec![
+                    (
+                        "10.244.0.11:9092".parse().unwrap(),
+                        "11111111-1111-1111-1111-111111111111".to_string(),
+                    ),
+                    (
+                        "10.244.1.12:9092".parse().unwrap(),
+                        "22222222-2222-2222-2222-222222222222".to_string(),
+                    ),
+                    (
+                        "10.244.2.13:9092".parse().unwrap(),
+                        "33333333-3333-3333-3333-333333333333".to_string(),
+                    ),
+                ],
+            );
+            w.place_service_targets();
+        });
+
+        let flow = request_flow(21, 1, 4001);
+        let key = session_key(1, 4001);
+        assert_eq!(unsafe { l7_conn_open(0, key, &flow) }, 0);
+        let token = token_of(key);
+
+        // The session's own addresses need no endpoint resolution.
+        assert!(tw.backends.take_session(token, service_addr(21)).is_ok());
+
+        for (selected, expected) in [
+            ("10.244.1.12:9092", dmesh_doca::TakeError::EndpointRemote),
+            ("10.244.2.13:9092", dmesh_doca::TakeError::EndpointStale),
+            ("10.244.9.99:9092", dmesh_doca::TakeError::EndpointUnresolved),
+        ] {
+            let flow = request_flow(21, 2, 4002);
+            let key = session_key(2, 4002);
+            assert_eq!(unsafe { l7_conn_open(0, key, &flow) }, 0);
+            let token = token_of(key);
+            assert_eq!(
+                tw.backends
+                    .take_session(token, selected.parse().unwrap())
+                    .err(),
+                Some(expected),
+                "selected {selected}"
+            );
+            with_test_worker(|w| w.close_session(key));
+        }
+
+        // Ports do not participate in identity: the address's IP names the
+        // Pod, so a Service exposing it on another port still resolves.
+        let flow = request_flow(21, 3, 4003);
+        let key = session_key(3, 4003);
+        assert_eq!(unsafe { l7_conn_open(0, key, &flow) }, 0);
+        let token = token_of(key);
+        assert!(tw
+            .backends
+            .take_session(token, "10.244.0.11:8080".parse().unwrap())
+            .is_ok());
         with_test_worker(|w| w.close_session(key));
     }
 

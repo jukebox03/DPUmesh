@@ -95,7 +95,6 @@ add_library(grpc_dpumesh_endpoint STATIC
 target_compile_features(grpc_dpumesh_endpoint PUBLIC cxx_std_17)
 target_compile_options(grpc_dpumesh_endpoint PRIVATE -Wall -Wextra)
 target_include_directories(grpc_dpumesh_endpoint
-  PUBLIC "${CMAKE_CURRENT_LIST_DIR}/include"
   PRIVATE "${CMAKE_CURRENT_LIST_DIR}/src")
 target_link_libraries(grpc_dpumesh_endpoint
   PUBLIC gRPC::grpc++
@@ -123,7 +122,6 @@ if(DPUMESH_INCLUDE_DIR)
   target_compile_features(grpc_dpumesh_reactor PUBLIC cxx_std_17)
   target_compile_options(grpc_dpumesh_reactor PRIVATE -Wall -Wextra)
   target_include_directories(grpc_dpumesh_reactor
-    PUBLIC "${CMAKE_CURRENT_LIST_DIR}/include"
     PRIVATE
       "${CMAKE_CURRENT_LIST_DIR}/src"
       "${DPUMESH_INCLUDE_DIR}")
@@ -153,7 +151,6 @@ if(DPUMESH_INCLUDE_DIR AND DPUMESH_LIBRARY)
   target_compile_features(grpc_dpumesh_native PUBLIC cxx_std_17)
   target_compile_options(grpc_dpumesh_native PRIVATE -Wall -Wextra)
   target_include_directories(grpc_dpumesh_native
-    PUBLIC "${CMAKE_CURRENT_LIST_DIR}/include"
     PRIVATE "${CMAKE_CURRENT_LIST_DIR}/src")
   target_link_libraries(grpc_dpumesh_native PUBLIC dpumesh_native)
 

@@ -30,10 +30,37 @@ int32_t dpu_route_l4(struct objects *objs, int16_t svc)
     return -1;
 }
 
+/* No generation is held in this build, so no Service has a replica elsewhere
+ * and every unroutable stream stays unroutable. */
+int dmesh_service_has_remote(struct objects *objs, int16_t svc)
+{
+    (void)objs;
+    (void)svc;
+    return 0;
+}
+
 void l7_conn_eof(int worker_id, uint64_t conn)
 {
     (void)worker_id;
     (void)conn;
+}
+
+/* Poison and peer refusals are counted through the adapter's control-event
+ * family; this build has no adapter, so the count lands in the worker stat
+ * line alone. */
+void l7_control_event(const char *kind, const char *reason)
+{
+    (void)kind;
+    (void)reason;
+}
+
+/* No policy source in this build, so the destination Service's protection
+ * class decides — which is what a deployment without a control plane has. */
+int l7_inbound_verdict(int worker_id, const struct dmesh_l7_flow *flow)
+{
+    (void)worker_id;
+    (void)flow;
+    return DMESH_L7_VERDICT_NO_POLICY;
 }
 
 void l7_conn_close(int worker_id, uint64_t conn)

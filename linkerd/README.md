@@ -15,10 +15,10 @@ linkerd/
   port/
     linkerd2-proxy/    ported proxy submodule
       linkerd/doca/    DmeshIo, session registry, runtime backend contract
-  CONTRACT.md          implemented interface
 ```
 
-The execution model is documented in [`design/L7.md`](../design/L7.md).
+The execution model and the interface contract are documented in
+[`design/L7.md`](../design/L7.md).
 
 ## Runtime
 
@@ -65,22 +65,24 @@ L7_BACKEND=linkerd ./bench/bench.sh build
 control-plane preflight checks the adapter/runtime boundary, identity material
 and versioned Service target feed before Meson links the DPU binary.
 
-Native opaque-stream deployment for registry service 11:
+Native opaque-stream deployment for the echo Service. A Service is named by
+`namespace/name` everywhere; the node-local compact id is the DPU's own
+interning of the topology generation and never appears in configuration:
 
 ```sh
 L7_BACKEND=linkerd \
-DPUMESH_L7_OPAQUE_SVC=11 \
+DPUMESH_L7_OPAQUE_SVC=test-bench/echo-dpumesh \
 DPUMESH_ARM_WORKERS=1 \
 DPUMESH_L7_FAIL_CLOSED=1 \
 BENCH_DEPLOY_SCOPE=core \
 ./bench/bench.sh deploy
 ```
 
-gRPC deployment for registry service 20:
+gRPC deployment for the gRPC echo Service:
 
 ```sh
 L7_BACKEND=linkerd \
-DPUMESH_L7_OPAQUE_SVC=20 \
+DPUMESH_L7_OPAQUE_SVC=test-bench/echo-grpc-linkerd-opaque \
 DPUMESH_ARM_WORKERS=1 \
 DPUMESH_L7_FAIL_CLOSED=1 \
 BENCH_DEPLOY_SCOPE=grpc \
@@ -95,11 +97,12 @@ layer carries are routed to that worker whatever the ARM worker count is. With
 ## Configuration
 
 ```text
-DPUMESH_L7_DECISION_SVC=<service ids>
-DPUMESH_L7_OPAQUE_SVC=<service ids>
-DPUMESH_L7_SVC=<service ids>
+DPUMESH_L7_DECISION_SVC=<namespace/name list>
+DPUMESH_L7_OPAQUE_SVC=<namespace/name list>
+DPUMESH_L7_SVC=<namespace/name list>
 DPUMESH_L7_LINKERD_WORKER=<worker id>|all
-DPUMESH_L7_FAIL_CLOSED=0|1
+DPUMESH_L7_FAIL_CLOSED=0|1     (the default for a Service the generation
+                                does not grade; a graded one carries its own)
 DMESH_L7_TX_RESERVE=1|0
 LINKERD_ADMIN_ADDR=127.0.0.1:4191
 LINKERD_DST_ADDR / LINKERD_POLICY_ADDR / LINKERD_IDENTITY_ADDR
@@ -143,12 +146,13 @@ installs root-only material atomically on the DPU and runs as a supervised
 renewal agent. The proxy reloads the token file at every certificate refresh;
 root/key/CSR replacement uses a drain and controlled restart.
 
-The current DPU has no route to Kubernetes Service or Pod CIDRs.
-[`bench/linkerd_cp_gateway.sh`](../bench/linkerd_cp_gateway.sh) deploys a
-host-network DaemonSet TCP pass-through on management-link ports 28086–28088.
-Its dedicated Role can resolve only Linkerd namespace Services and Endpoints;
-each new connection re-resolves the current target. Traffic enters the control
-Pod's Linkerd inbound proxy and control-plane mTLS remains end-to-end.
+The current DPU has no route to Kubernetes Service or Pod CIDRs. The
+host-network node agent therefore carries a TCP pass-through relay
+([`bench/linkerd_cp_relay.py`](../bench/linkerd_cp_relay.py)) on
+management-link ports 28086–28088. Its dedicated Role can resolve only Linkerd
+namespace Services and Endpoints; each new connection re-resolves the current
+target. Traffic enters the control Pod's Linkerd inbound proxy and
+control-plane mTLS remains end-to-end.
 
 ## Current bounds
 
@@ -158,7 +162,8 @@ Pod's Linkerd inbound proxy and control-plane mTLS remains end-to-end.
 - concurrent connections to one service: each session owns a complete
   outbound stack and its connector takes the exact session backend key;
 - DPUmesh-selected backend pod;
-- deployed Linkerd control plane with endpoint-re-resolving gateway;
+- deployed Linkerd control plane, reached through the node agent's
+  endpoint-re-resolving relay;
 - Linkerd output copied once, into the DPUmesh egress arena;
 - signed authoritative feeds, with membership withdrawal closing the exact
   registration it names;

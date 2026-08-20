@@ -45,6 +45,9 @@ LIB_SRCS := \
 	doca/comch_msgq.c \
 	doca/workload_grant.c \
 	doca/pod_membership.c \
+	doca/topology.c \
+	doca/peer_channel.c \
+	doca/control_scope.c \
 	doca/dpa.c
 LIB_HDRS := $(shell rg --files include src doca -g '*.h')
 
@@ -104,19 +107,20 @@ $(TESTDIR)/native_api_contract_test: tests/native_api_contract_test.c src/dmesh_
 	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -Wl,--gc-sections \
 		-o $@ tests/native_api_contract_test.c src/dmesh_api.c
 
-$(TESTDIR)/native_control_state_test: tests/native_control_state_test.c doca/comch_server.c doca/workload_grant.c $(LIB_HDRS) | dirs
+$(TESTDIR)/native_control_state_test: tests/native_control_state_test.c doca/comch_server.c doca/workload_grant.c doca/topology.c doca/control_scope.c $(LIB_HDRS) | dirs
 	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -Wl,--gc-sections \
 		-o $@ tests/native_control_state_test.c doca/comch_server.c doca/workload_grant.c \
+		doca/topology.c doca/control_scope.c \
 		$(DOCA_LIBS) $(CRYPTO_LIBS) -lpthread $(RPATHS)
 
 $(TESTDIR)/workload_grant_test: tests/workload_grant_test.c doca/workload_grant.c $(LIB_HDRS) | dirs
 	$(CC) $(CFLAGS) -o $@ tests/workload_grant_test.c doca/workload_grant.c \
 		$(DOCA_LIBS) $(CRYPTO_LIBS) $(RPATHS)
 
-$(TESTDIR)/pod_membership_test: tests/pod_membership_test.c doca/pod_membership.c doca/comch_server.c doca/workload_grant.c $(LIB_HDRS) | dirs
+$(TESTDIR)/pod_membership_test: tests/pod_membership_test.c doca/pod_membership.c doca/comch_server.c doca/workload_grant.c doca/topology.c doca/control_scope.c $(LIB_HDRS) | dirs
 	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -Wl,--gc-sections \
 		-o $@ tests/pod_membership_test.c doca/pod_membership.c \
-		doca/comch_server.c doca/workload_grant.c \
+		doca/comch_server.c doca/workload_grant.c doca/topology.c doca/control_scope.c \
 		$(DOCA_LIBS) $(CRYPTO_LIBS) -lpthread $(RPATHS)
 
 $(TESTDIR)/native_tx_batch_policy_test: tests/native_tx_batch_policy_test.c src/dmesh_core.c $(LIB_HDRS) | dirs
@@ -137,15 +141,26 @@ $(TESTDIR)/lb_policy_test: tests/lb_policy_test.c doca/dpu_worker.c $(LIB_HDRS) 
 	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -Wl,--gc-sections \
 		-o $@ tests/lb_policy_test.c $(DOCA_LIBS) -lpthread $(RPATHS)
 
-$(TESTDIR)/proxy_lane_queue_test: tests/proxy_lane_queue_test.c doca/dpu_proxy.c $(LIB_HDRS) | dirs
+$(TESTDIR)/proxy_lane_queue_test: tests/proxy_lane_queue_test.c doca/dpu_proxy.c doca/peer_channel.c doca/topology.c doca/workload_grant.c $(LIB_HDRS) | dirs
 	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -Wl,--gc-sections \
-		-o $@ tests/proxy_lane_queue_test.c $(DOCA_LIBS) -lpthread $(RPATHS)
+		-o $@ tests/proxy_lane_queue_test.c doca/peer_channel.c doca/topology.c \
+		doca/workload_grant.c \
+		$(DOCA_LIBS) $(CRYPTO_LIBS) -lpthread $(RPATHS)
 
 $(TESTDIR)/worker_mpsc_queue_test: tests/worker_mpsc_queue_test.c doca/object.h | dirs
 	$(CC) $(CFLAGS) -o $@ tests/worker_mpsc_queue_test.c -lpthread
 
 $(TESTDIR)/topology_test: tests/topology_test.c include/dpumesh/dmesh_topology.h | dirs
 	$(CC) $(CFLAGS) -o $@ tests/topology_test.c
+
+$(TESTDIR)/peer_channel_test: tests/peer_channel_test.c doca/peer_channel.c $(LIB_HDRS) | dirs
+	$(CC) $(CFLAGS) -D_GNU_SOURCE -o $@ tests/peer_channel_test.c doca/peer_channel.c \
+		$(CRYPTO_LIBS) $(RPATHS)
+
+$(TESTDIR)/topology_gen_test: tests/topology_gen_test.c doca/topology.c doca/workload_grant.c doca/control_scope.c $(LIB_HDRS) | dirs
+	$(CC) $(CFLAGS) -o $@ tests/topology_gen_test.c doca/topology.c doca/workload_grant.c \
+		doca/control_scope.c \
+		$(DOCA_LIBS) $(CRYPTO_LIBS) $(RPATHS)
 
 $(TESTDIR)/ring_counter_test: tests/ring_counter_test.c doca/ring.h doca/dpa_common.h | dirs
 	$(CC) $(CFLAGS) -o $@ tests/ring_counter_test.c -lpthread
@@ -163,7 +178,8 @@ test: $(TESTDIR)/native_api_contract_test $(TESTDIR)/native_control_state_test \
 	$(TESTDIR)/preload_api_contract_test $(TESTDIR)/l4_pin_policy_test \
 	$(TESTDIR)/lb_policy_test \
 	$(TESTDIR)/proxy_lane_queue_test $(TESTDIR)/worker_mpsc_queue_test \
-	$(TESTDIR)/topology_test $(TESTDIR)/ring_counter_test \
+	$(TESTDIR)/topology_test $(TESTDIR)/topology_gen_test $(TESTDIR)/peer_channel_test \
+	$(TESTDIR)/ring_counter_test \
 	$(TESTDIR)/l7_abi_contract_test $(TESTDIR)/benchmark_result_contract_test $(PRELOAD) \
 	$(BINDIR)/bench_dpumesh $(BINDIR)/bench_sock
 	$(TESTDIR)/native_api_contract_test
@@ -178,6 +194,8 @@ test: $(TESTDIR)/native_api_contract_test $(TESTDIR)/native_control_state_test \
 	$(TESTDIR)/proxy_lane_queue_test
 	$(TESTDIR)/worker_mpsc_queue_test
 	$(TESTDIR)/topology_test
+	$(TESTDIR)/topology_gen_test
+	$(TESTDIR)/peer_channel_test
 	$(TESTDIR)/ring_counter_test
 	$(TESTDIR)/l7_abi_contract_test
 	$(TESTDIR)/benchmark_result_contract_test
@@ -188,7 +206,9 @@ test: $(TESTDIR)/native_api_contract_test $(TESTDIR)/native_control_state_test \
 	python3 tests/analyze_saturation_test.py
 	python3 tests/summarize_l4_test.py
 	python3 tests/workload_attest_agent_test.py
+	python3 tests/dpumesh_controller_test.py
 	python3 tests/linkerd_cp_relay_test.py
+	python3 tests/feed_delivery_test.py
 
 # dmesh API binaries link the transport library. One explicit rule each so the
 # source is a tracked prerequisite (rebuilds on edit).

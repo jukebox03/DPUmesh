@@ -209,6 +209,12 @@ struct rxq_cell {
 
 struct dpumesh_ctx {
     char worker_id[128];
+    /* The advertised Kubernetes Service name; empty = client-only. The
+     * compact service_id is the DPU's answer at registration, never a host
+     * input. */
+    char service_name[64];
+    /* Serializes DPU resolution round trips (one landing slot in doca_objs). */
+    pthread_mutex_t resolve_lock;
     int  pod_id;             /* this node's address; -1 until the DPU assigns it at register */
     int  num_slots;
     int  slot_size;
@@ -660,12 +666,9 @@ static void *pe_progress_fn(void *arg) {
     struct doca_pe *pe = ctx->doca_objs.pe;
 
     /* Use PE notifications when available; otherwise use adaptive polling. */
-    int want_epoll = 1;
-
     doca_notification_handle_t pfd = 0;
     int ep = -1;
-    if (want_epoll && pe &&
-        doca_pe_get_notification_handle(pe, &pfd) == DOCA_SUCCESS) {
+    if (pe && doca_pe_get_notification_handle(pe, &pfd) == DOCA_SUCCESS) {
         ep = epoll_create1(0);
         if (ep >= 0) {
             struct epoll_event ev = { .events = EPOLLIN, .data = { .u32 = 0 } };
@@ -1346,7 +1349,8 @@ static int drain_rev_rings(dpumesh_ctx_t *ctx, uint32_t budget)
     return (int)drained;
 }
 
-static void init_config(dpumesh_ctx_t *ctx, const dpumesh_config_t *config, int service_id) {
+static void init_config(dpumesh_ctx_t *ctx, const dpumesh_config_t *config,
+                         const char *service_name) {
     /* Programmatic values override the fixed slot-count and slot-size defaults. */
     ctx->num_slots = (config && config->num_slots > 0) ? config->num_slots
                                                        : DPUMESH_NUM_SLOTS_DEFAULT;
@@ -1388,12 +1392,15 @@ static void init_config(dpumesh_ctx_t *ctx, const dpumesh_config_t *config, int 
     if (hh > mb) hh = mb;
     ctx->recycle_reserve = hh;
 
-    /* The registry resolves $DPUMESH_SERVICE to the advertised service id.
-     * SVC_NONE is client-only. The DPU assigns pod_id during registration. */
-    ctx->service_id = service_id;
+    /* The advertised Service is a name; the compact id is the DPU's answer at
+     * registration (interned from the held generation), never a host input. */
+    snprintf(ctx->service_name, sizeof(ctx->service_name), "%s",
+             service_name != NULL ? service_name : "");
+    ctx->service_id = DMESH_SVC_NONE;
 
     ctx->pod_id = -1;   /* unassigned until the DPU replies */
-    snprintf(ctx->worker_id, sizeof(ctx->worker_id), "svc%d", ctx->service_id);
+    snprintf(ctx->worker_id, sizeof(ctx->worker_id), "svc:%s",
+             ctx->service_name[0] != '\0' ? ctx->service_name : "(client)");
 }
 
 static doca_error_t init_doca_device(dpumesh_ctx_t *ctx) {
@@ -1566,28 +1573,31 @@ static doca_error_t init_control_path(dpumesh_ctx_t *ctx) {
         return DOCA_ERROR_BAD_STATE;
     }
 
-    struct dmesh_workload_grant_msg grant;
+    struct dmesh_workload_assert_msg assertion;
     char attest_error[256] = {0};
-    if (dmesh_attest_request_grant(
-            attest_socket, ctx->service_id,
-            ctx->doca_objs.registration_challenge, &grant,
+    if (dmesh_attest_request_assert(
+            attest_socket, ctx->service_name,
+            ctx->doca_objs.registration_challenge, &assertion,
             attest_error, sizeof(attest_error)) != 0) {
         DOCA_LOG_ERR("Trusted node agent rejected registration: %s",
                      attest_error);
         return DOCA_ERROR_INITIALIZATION;
     }
-    result = client_send_msg(&ctx->doca_objs, (const char *)&grant,
-                             sizeof(grant));
-    memset(&grant, 0, sizeof(grant));
+    result = client_send_msg(&ctx->doca_objs, (const char *)&assertion,
+                             sizeof(assertion));
+    memset(&assertion, 0, sizeof(assertion));
     if (result != DOCA_SUCCESS) {
-        DOCA_LOG_ERR("WORKLOAD_GRANT send failed: %s",
+        DOCA_LOG_ERR("WORKLOAD_ASSERT send failed: %s",
                      doca_error_get_name(result));
         return result;
     }
 
     ctx->reg_msg.type = DMESH_MSG_POD_REGISTER;
     ctx->reg_msg.pod_id = -1;                    /* DPU assigns this node's address */
-    ctx->reg_msg.service_id = ctx->service_id;   /* DPU: pods[our slot].service_id = this (the LB set is derived from it) */
+    /* The name is what the DPU authenticates against the assertion; the
+     * compact id is its answer, interned from the held generation. */
+    snprintf(ctx->reg_msg.service_name, sizeof(ctx->reg_msg.service_name),
+             "%s", ctx->service_name);
     result = client_send_msg(&ctx->doca_objs, (const char *)&ctx->reg_msg, sizeof(ctx->reg_msg));
     if (result != DOCA_SUCCESS) return result;
 
@@ -1604,7 +1614,8 @@ static doca_error_t init_control_path(dpumesh_ctx_t *ctx) {
         int32_t init_result = __atomic_load_n(&ctx->doca_objs.pod_init_result,
                                               __ATOMIC_ACQUIRE);
         if (init_result == DMESH_POD_INIT_REGISTER_FAILED) {
-            DOCA_LOG_ERR("DPU rejected pod registration (service_id=%d)", ctx->service_id);
+            DOCA_LOG_ERR("DPU rejected pod registration (service='%s')",
+                         ctx->service_name);
             return DOCA_ERROR_INITIALIZATION;
         }
         if (ctx->doca_objs.pe) (void)doca_pe_progress(ctx->doca_objs.pe);
@@ -1632,10 +1643,15 @@ static doca_error_t init_control_path(dpumesh_ctx_t *ctx) {
     }
     if (assigned < 0) {
         DOCA_LOG_ERR("Timed out after %d ms waiting for DPU pod_id assignment "
-                     "(service_id=%d)", DPUMESH_POD_INIT_TIMEOUT_MS, ctx->service_id);
+                     "(service='%s')", DPUMESH_POD_INIT_TIMEOUT_MS,
+                     ctx->service_name);
         return DOCA_ERROR_TIME_OUT;
     }
     ctx->pod_id = assigned;
+    /* The DPU interned this registration's Service from the held generation;
+     * the id it assigned is echoed on outbound descriptors. */
+    ctx->service_id = __atomic_load_n(&ctx->doca_objs.assigned_service_id,
+                                      __ATOMIC_RELAXED);
     int L = __atomic_load_n(&ctx->doca_objs.landing_stripes, __ATOMIC_RELAXED);
     int K = ctx->k_rings > 0 ? ctx->k_rings : 1;
     if (L < 1 || L > K || K % L != 0) {
@@ -1711,17 +1727,23 @@ static doca_error_t init_datapath(dpumesh_ctx_t *ctx) {
     return wait_for_pod_init_result(ctx);
 }
 
-int dpumesh_init(dpumesh_ctx_t **out, int service_id,
+int dpumesh_init(dpumesh_ctx_t **out, const char *service_name,
                  const dpumesh_config_t *config) {
     if (out == NULL) { errno = EINVAL; return -1; }
     *out = NULL;
+    if (service_name != NULL && strlen(service_name) >= 64) {
+        errno = EINVAL;
+        return -1;
+    }
     dpumesh_ctx_t *ctx = (dpumesh_ctx_t *)calloc(1, sizeof(dpumesh_ctx_t));
     if (!ctx) { errno = ENOMEM; return -1; }
     int prc = pthread_mutex_init(&ctx->eq_lock, NULL);
     if (prc != 0) { errno = prc; goto fail; }
     ctx->eq_lock_initialized = 1;
+    prc = pthread_mutex_init(&ctx->resolve_lock, NULL);
+    if (prc != 0) { errno = prc; goto fail; }
 
-    init_config(ctx, config, service_id);
+    init_config(ctx, config, service_name);
 
     /* These limits are data-plane ABI, not tuning preferences. The DPA copies at
      * most 8 KiB per descriptor, TX byte offsets mirror into a fixed-size DPU
@@ -2877,15 +2899,77 @@ static int emit_desc(dmesh_qp_t *c, size_t moff, uint32_t len,
 
 /* ===== Channel ===== */
 
+/* One resolution round trip over the control channel. Requests are serialized
+ * so the single landing slot in doca_objs is unambiguous; the reply arrives on
+ * the PE thread. */
+int dpumesh_resolve(dpumesh_ctx_t *ctx, int by_name, const char *name,
+                    uint32_t ip_net, uint16_t port_host,
+                    struct dmesh_resolve_ack_msg *ack)
+{
+    if (ctx == NULL || ack == NULL || (by_name && name == NULL)) {
+        errno = EINVAL;
+        return -1;
+    }
+    struct dmesh_resolve_msg request;
+    memset(&request, 0, sizeof(request));
+    request.type = DMESH_MSG_RESOLVE;
+    request.version = 1;
+    request.by_name = by_name ? 1 : 0;
+    if (by_name) {
+        if (strlen(name) >= sizeof(request.name)) {
+            errno = EINVAL;
+            return -1;
+        }
+        snprintf(request.name, sizeof(request.name), "%s", name);
+    } else {
+        memcpy(&request.ipv4_be, &ip_net, sizeof(request.ipv4_be));
+        uint16_t port_be = (uint16_t)((port_host >> 8) | (port_host << 8));
+        memcpy(&request.port_be, &port_be, sizeof(request.port_be));
+    }
+
+    int rc = -1;
+    pthread_mutex_lock(&ctx->resolve_lock);
+    __atomic_store_n(&ctx->doca_objs.resolve_ack_ready, 0, __ATOMIC_RELEASE);
+    doca_error_t send_result = client_send_msg(&ctx->doca_objs,
+                                               (const char *)&request,
+                                               sizeof(request));
+    if (send_result != DOCA_SUCCESS) {
+        pthread_mutex_unlock(&ctx->resolve_lock);
+        errno = EAGAIN;
+        return -1;
+    }
+    const struct timespec pause = { .tv_sec = 0, .tv_nsec = 100000 };
+    struct timespec start, now;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    for (;;) {
+        if (__atomic_load_n(&ctx->doca_objs.resolve_ack_ready,
+                            __ATOMIC_ACQUIRE)) {
+            memcpy(ack, &ctx->doca_objs.resolve_ack, sizeof(*ack));
+            rc = 0;
+            break;
+        }
+        if (!ctx->pe_running && ctx->doca_objs.pe != NULL)
+            (void)doca_pe_progress(ctx->doca_objs.pe);
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        if (init_elapsed_ms(&start, &now) >= 2000) {
+            errno = EAGAIN;
+            break;
+        }
+        nanosleep(&pause, NULL);
+    }
+    pthread_mutex_unlock(&ctx->resolve_lock);
+    return rc;
+}
+
 dmesh_channel_t *dmesh_create_channel(void) {
     dmesh_channel_t *s = (dmesh_channel_t *)calloc(1, sizeof(*s));
     if (!s) return NULL;
-    /* Identity is injected, not declared: resolve $DPUMESH_SERVICE (a Kubernetes
-     * Service name) to a service_id through the same table peers resolve through.
-     * Unset = pure client (SVC_NONE). One table serves both directions. */
-    int service_id = dmesh_config_identity();
+    /* Identity is injected, not declared: $DPUMESH_SERVICE names the
+     * Kubernetes Service this Pod serves; the DPU authenticates the name
+     * against the connection assertion and interns the id itself. Unset =
+     * pure client. */
     dpumesh_config_t cfg = DPUMESH_CONFIG_DEFAULT;
-    if (dpumesh_init(&s->ctx, service_id, &cfg) != 0 || !s->ctx) {
+    if (dpumesh_init(&s->ctx, getenv("DPUMESH_SERVICE"), &cfg) != 0 || !s->ctx) {
         int saved_errno = errno != 0 ? errno : EIO;
         free(s);
         errno = saved_errno;
@@ -3035,7 +3119,11 @@ dmesh_qp_t *dmesh_accept(dmesh_eq_t *eq) {
     c->eq          = eq;
     c->role        = DMESH_ROLE_SERVER;
     c->local_port  = ps;                 /* == req.dst_port == uP */
-    c->remote_pod  = req.src_pod;        /* learned peer (for replies + further sends) */
+    /* The learned peer, for replies and further sends. DMESH_POD_REMOTE when
+     * the peer is on another node: the reply still names it and the DPU
+     * overrides the destination from its conntrack, exactly as it already does
+     * for a host-supplied destination on any reply. */
+    c->remote_pod  = req.src_pod;
     c->remote_port = req.src_port;
     c->dst_service = req.src_service;
     c->seq         = 0;
@@ -3069,11 +3157,18 @@ dmesh_qp_t *dmesh_qp_open(dmesh_eq_t *eq, int dst_service_id) {
     return c;
 }
 
-/* Resolve the Kubernetes Service name and open the public QP. */
+/* Resolve the Kubernetes Service name through the DPU and open the public QP.
+ * "name" resolves in this Pod's own namespace; "name.namespace" is the DNS
+ * convention for a cross-namespace peer. */
 dmesh_qp_t *dmesh_create_qp(dmesh_eq_t *eq, const char *service_name) {
     if (!eq || !service_name) { errno = EINVAL; return NULL; }
-    int svc = dmesh_resolve_name(service_name);
-    if (svc < 0) return NULL;                 /* errno = ENOENT from resolve_name */
+    int svc = dmesh_resolve_name_via(eq->ch->ctx, service_name);
+    if (svc < 0) {
+        DOCA_LOG_WARN("dmesh_create_qp: '%s' did not resolve (%s)",
+                      service_name,
+                      errno == ENOENT ? "not meshed" : "no generation held");
+        return NULL;                          /* errno from the resolver */
+    }
     return dmesh_qp_open(eq, svc);
 }
 

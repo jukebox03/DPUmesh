@@ -7,6 +7,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include <doca_dev.h>
 #include <doca_log.h>
@@ -18,6 +19,9 @@
 #include "dpu_worker.h"
 #include "workload_grant.h"
 #include "pod_membership.h"
+#include "topology.h"
+#include "peer_channel.h"
+#include "control_scope.h"
 
 DOCA_LOG_REGISTER(DPU_MAIN);
 
@@ -48,6 +52,18 @@ int main(int argc, char **argv)
     if (result != DOCA_SUCCESS)
         goto exit;
 
+    /* A grant's signed node_name is checked against this DPU's own node, so a
+     * DPU that does not know its node cannot verify any registration. */
+    const char *node_name = getenv("DPUMESH_NODE_NAME");
+    if (node_name == NULL || *node_name == '\0' ||
+        strlen(node_name) >= sizeof(objs->node_name)) {
+        DOCA_LOG_ERR("Trusted registration configuration failed: "
+                     "DPUMESH_NODE_NAME must name this Kubernetes node");
+        result = DOCA_ERROR_INVALID_VALUE;
+        goto exit;
+    }
+    snprintf(objs->node_name, sizeof(objs->node_name), "%s", node_name);
+
     char registration_error[256] = {0};
     if (dmesh_registration_configure(objs, registration_error,
                                      sizeof(registration_error)) != 0) {
@@ -68,6 +84,41 @@ int main(int argc, char **argv)
         DOCA_LOG_ERR("Admission configuration failed: %s", membership_error);
         result = DOCA_ERROR_INVALID_VALUE;
         goto exit;
+    }
+    if (dmesh_topology_configure(objs, membership_error,
+                                 sizeof(membership_error)) != 0) {
+        DOCA_LOG_ERR("Topology configuration failed: %s", membership_error);
+        result = DOCA_ERROR_INVALID_VALUE;
+        goto exit;
+    }
+    if (dmesh_scope_configure(objs, membership_error,
+                              sizeof(membership_error)) != 0) {
+        DOCA_LOG_ERR("Control-plane scope configuration failed: %s", membership_error);
+        result = DOCA_ERROR_INVALID_VALUE;
+        goto exit;
+    }
+
+    /* The node credential: one static keypair per DPU, generated here at first
+     * boot into a 0400 file that never leaves it. Only the public half travels
+     * — the node agent reports it and the controller publishes it in this
+     * node's `node=` line, so a peer authenticates this DPU with a key it took
+     * from the generation rather than from this DPU. */
+    const char *credential = getenv("DPUMESH_NODE_KEY_FILE");
+    if (credential && *credential) {
+        char credential_error[256] = {0};
+        if (dmesh_peer_node_key_load(credential, objs->node_public_key,
+                                     credential_error, sizeof(credential_error)) != 0) {
+            DOCA_LOG_ERR("Node credential failed: %s", credential_error);
+            result = DOCA_ERROR_INVALID_VALUE;
+            goto exit;
+        }
+        objs->node_key_ready = 1;
+        const char *published = getenv("DPUMESH_NODE_KEY_PUBLIC_FILE");
+        if (published && *published &&
+            dmesh_peer_node_key_publish(published, objs->node_public_key) != 0)
+            DOCA_LOG_WARN("Node credential public half could not be published at %s; "
+                          "this node stays unreachable as a peer until it is",
+                          published);
     }
 
     /* Detect mode */

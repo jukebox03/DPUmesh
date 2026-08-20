@@ -12,11 +12,11 @@
 #include "doca/workload_grant.h"
 
 int
-dmesh_attest_request_grant(const char *socket_path,
-                           int32_t requested_service_id,
-                           const uint8_t nonce[DMESH_REG_NONCE_SIZE],
-                           struct dmesh_workload_grant_msg *grant,
-                           char *error, size_t error_len)
+dmesh_attest_request_assert(const char *socket_path,
+                            const char *requested_service_name,
+                            const uint8_t nonce[DMESH_REG_NONCE_SIZE],
+                            struct dmesh_workload_assert_msg *assertion,
+                            char *error, size_t error_len)
 {
     int fd = -1;
     int rc = -1;
@@ -25,7 +25,7 @@ dmesh_attest_request_grant(const char *socket_path,
     struct dmesh_attest_request request;
 
 #define ATTEST_ERROR(...) do { if (error && error_len) snprintf(error, error_len, __VA_ARGS__); } while (0)
-    if (socket_path == NULL || *socket_path == '\0' || grant == NULL ||
+    if (socket_path == NULL || *socket_path == '\0' || assertion == NULL ||
         nonce == NULL) {
         ATTEST_ERROR("invalid node-agent request arguments");
         return -1;
@@ -58,27 +58,32 @@ dmesh_attest_request_grant(const char *socket_path,
 
     memset(&request, 0, sizeof(request));
     memcpy(request.magic, DMESH_ATTEST_MAGIC, sizeof(request.magic));
-    request.version = DMESH_GRANT_VERSION;
-    dmesh_grant_put_i32_le(request.service_id_le, requested_service_id);
+    request.version = DMESH_ASSERT_VERSION;
+    if (requested_service_name != NULL) {
+        if (strlen(requested_service_name) >= sizeof(request.service_name)) {
+            ATTEST_ERROR("requested Service name is too long");
+            goto out;
+        }
+        snprintf(request.service_name, sizeof(request.service_name), "%s",
+                 requested_service_name);
+    }
     memcpy(request.nonce, nonce, sizeof(request.nonce));
     if (send(fd, &request, sizeof(request), MSG_NOSIGNAL) != sizeof(request)) {
         ATTEST_ERROR("send node-agent request: %s", strerror(errno));
         goto out;
     }
 
-    memset(grant, 0, sizeof(*grant));
-    ssize_t received = recv(fd, grant, sizeof(*grant), MSG_TRUNC);
-    if (received != sizeof(*grant)) {
+    memset(assertion, 0, sizeof(*assertion));
+    ssize_t received = recv(fd, assertion, sizeof(*assertion), MSG_TRUNC);
+    if (received != sizeof(*assertion)) {
         ATTEST_ERROR("node agent returned %zd bytes; expected %zu",
-                     received, sizeof(*grant));
+                     received, sizeof(*assertion));
         goto out;
     }
-    if (grant->type != DMESH_MSG_WORKLOAD_GRANT ||
-        grant->version != DMESH_GRANT_VERSION ||
-        dmesh_grant_get_i32_le(grant->service_id_le) !=
-            requested_service_id ||
-        memcmp(grant->nonce, nonce, DMESH_REG_NONCE_SIZE) != 0) {
-        ATTEST_ERROR("node agent returned a grant for another request");
+    if (assertion->type != DMESH_MSG_WORKLOAD_ASSERT ||
+        assertion->version != DMESH_ASSERT_VERSION ||
+        memcmp(assertion->nonce, nonce, DMESH_REG_NONCE_SIZE) != 0) {
+        ATTEST_ERROR("node agent returned an assertion for another request");
         goto out;
     }
     rc = 0;

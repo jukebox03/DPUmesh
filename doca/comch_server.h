@@ -76,9 +76,12 @@ pods_unregister_connection(struct objects *objs,
                            int32_t pod_id);
 
 /* Register an existing connection. pod_id < 0 → the DPU assigns a free pod_id
- * (the pods[] slot index). Returns the assigned pod_id (>= 0), or -1 on error. */
+ * (the pods[] slot index). `service_name` must equal the Service the
+ * connection's assertion granted (empty = client-only); the compact id is
+ * interned from the held generation, and a Service it does not define fails
+ * closed. Returns the assigned pod_id (>= 0), or -1 on error. */
 int
 pods_register(struct objects *objs, struct doca_comch_connection *conn,
-              int32_t pod_id, int32_t service_id);
+              int32_t pod_id, const char *service_name);
 
 #endif // COMCH_SERVER_H

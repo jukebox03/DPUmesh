@@ -378,7 +378,7 @@ init_dpa_objects(struct objects *objs)
     if (objs->num_dpa_threads <= 0)
         objs->num_dpa_threads = DPA_THREADS_DEFAULT;
     if (objs->k_rings <= 0) {
-        int k = DPUMESH_RINGS_PER_POD_DEFAULT;   /* = 2 */
+        int k = DPUMESH_RINGS_PER_POD_DEFAULT;
         if (k > objs->num_dpa_threads) k = objs->num_dpa_threads;
         if (k > MAX_EU_PER_POD) k = MAX_EU_PER_POD;
         objs->k_rings = k;
@@ -1192,6 +1192,8 @@ setup_pod_dma(struct objects *objs, struct pod_state *pod)
      * a reconnecting pod lands in the same staging. It is never freed — it is the
      * egress SG-DMA read source, and destroying it faults the engine's shared
      * doca_dma ctx (see pods_remove_connection). */
+    /* On reuse it is not memset either: stale bytes are unreachable, since the
+     * DPA only lands at offsets the new pod's own descriptors name. */
     if (pod->local_mmap == NULL) {
         result = alloc_buffer_and_set_mmap(&pod->local_mmap, objs->dev,
                                            &pod->dma_buffer, DPU_BUFFER_SIZE + 128,
@@ -1201,9 +1203,6 @@ setup_pod_dma(struct objects *objs, struct pod_state *pod)
                          pod->pod_id, doca_error_get_descr(result));
             return result;
         }
-    } else {
-        /* No memset: stale bytes are unreachable, since the DPA only lands at offsets
-         * the new pod's own descriptors name. */
     }
     /* (The per-pod DPU staging buffer is NOT exported to the host: the host never
      * reads it — the SG-DMA egress lands into the receiver's own rx_dma_buffer.) */

@@ -13,6 +13,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 #define CHECK(cond)                                                            \
     do {                                                                       \
@@ -24,7 +25,7 @@
     } while (0)
 
 /* struct dmesh_l7_flow */
-_Static_assert(sizeof(struct dmesh_l7_flow) == 412, "flow size");
+_Static_assert(sizeof(struct dmesh_l7_flow) == 664, "flow size");
 _Static_assert(_Alignof(struct dmesh_l7_flow) == 4, "flow alignment");
 _Static_assert(offsetof(struct dmesh_l7_flow, src_ip) == 0, "src_ip");
 _Static_assert(offsetof(struct dmesh_l7_flow, dst_ip) == 4, "dst_ip");
@@ -37,6 +38,9 @@ _Static_assert(offsetof(struct dmesh_l7_flow, mode) == 24, "mode");
 _Static_assert(offsetof(struct dmesh_l7_flow, is_reply) == 25, "is_reply");
 _Static_assert(offsetof(struct dmesh_l7_flow, workload) == 26, "workload");
 _Static_assert(sizeof(((struct dmesh_l7_flow *)0)->workload) == 384, "workload size");
+_Static_assert(offsetof(struct dmesh_l7_flow, source_identity) == 410, "source_identity");
+_Static_assert(sizeof(((struct dmesh_l7_flow *)0)->source_identity) == 254,
+               "source_identity size");
 
 /* struct dmesh_l7_verdict */
 _Static_assert(sizeof(struct dmesh_l7_verdict) == 8, "verdict size");
@@ -144,9 +148,17 @@ int main(void)
     CHECK(dmesh_l7_handle_pod(dmesh_l7_conn_handle(255, 1)) == -1);
 
     /* The flow the data plane fills is the flow the layer reads: a NUL in the
-     * last byte of the workload is what keeps a full-width name terminated. */
+     * last byte of each text field is what keeps a full-width name terminated. */
     struct dmesh_l7_flow flow;
     CHECK(sizeof(flow.workload) == 384);
+    /* An identity is `<service-account>.<namespace>.serviceaccount.identity.
+     * <trust-domain>`; a maximal ServiceAccount and namespace plus the fixed
+     * middle and a cluster-local trust domain fit inside the field with its
+     * terminator, which is what the field width is for. */
+    CHECK(sizeof(flow.source_identity) == 254);
+    memset(&flow, 0, sizeof(flow));
+    memset(flow.source_identity, 'x', sizeof(flow.source_identity) - 1);
+    CHECK(strlen(flow.source_identity) == sizeof(flow.source_identity) - 1);
 
     printf("l7_abi_contract_test: PASS\n");
     return 0;

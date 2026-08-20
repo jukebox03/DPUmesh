@@ -159,7 +159,6 @@ int main(int argc, char **argv) {
 
         long per = n_msgs / conns, rem = n_msgs % conns, base = 0;
         uint64_t t0 = now_us();
-        long started = 0;
         for (long c = 0; c < conns; c++) {
             w[c] = (worker_t){ .sin = sin, .idx = c, .size = size, .base = base,
                                .quota = per + (c < rem ? 1 : 0),
@@ -168,9 +167,7 @@ int main(int argc, char **argv) {
             if (pthread_create(&th[c], NULL, worker_fn, &w[c]) != 0) {
                 w[c].fail = (unsigned long long)w[c].quota;   /* count, don't join */
                 th[c] = 0;
-                continue;
             }
-            started++;
         }
         unsigned long long ok = 0, fail = 0;
         long nlat = 0;
@@ -179,7 +176,6 @@ int main(int argc, char **argv) {
             ok += w[c].ok; fail += w[c].fail;
         }
         uint64_t elapsed = now_us() - t0;
-        (void)started;
 
         /* compact per-thread latency slices into one contiguous run for qsort */
         for (long c = 0; c < conns; c++) {

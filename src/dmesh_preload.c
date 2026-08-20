@@ -85,18 +85,18 @@ static int g_debug;
 
 #define DBG(...) do { if (g_debug) { fprintf(stderr, "[dmesh_preload] " __VA_ARGS__); fputc('\n', stderr); } } while (0)
 
-/* Identity ($DPUMESH_SERVICE) and routing (ClusterIP:port → svc) both come from the
- * shared registry (src/dmesh_resolve.c) — the shim types no integer. connect() keys
- * on IP:port (dmesh_resolve_addr); listen() converts the port named by $DPUMESH_PORT
- * (dmesh_config_listen_port). The registry is loaded once here at ctor. */
+/* Identity ($DPUMESH_SERVICE) is a Kubernetes Service name and routing is
+ * answered by the DPU from the held topology generation (src/dmesh_resolve.c)
+ * — the shim types no integer and carries no registry file. connect() keys on
+ * IP:port; listen() converts the port named by $DPUMESH_PORT
+ * (dmesh_config_listen_port). */
 #ifndef DMESH_PRELOAD_TEST
 __attribute__((constructor))
 static void preload_ctor(void) {
     const char *e;
     g_debug = (e = getenv("DMESH_PRELOAD_DEBUG")) && atoi(e);
-    int n = dmesh_config_load(NULL);   /* $DPUMESH_CONFIG or /etc/dpumesh/registry */
-    DBG("ctor: listen_port=%d service='%s' registry_entries=%d",
-        dmesh_config_listen_port(), getenv("DPUMESH_SERVICE") ? getenv("DPUMESH_SERVICE") : "(none)", n);
+    DBG("ctor: listen_port=%d service='%s'",
+        dmesh_config_listen_port(), getenv("DPUMESH_SERVICE") ? getenv("DPUMESH_SERVICE") : "(none)");
 }
 #endif
 
@@ -377,8 +377,6 @@ static int defer_pfd_once(pfd_t **pfds, int *npfds, int cap, pfd_t *pfd) {
     return 1;
 }
 
-static long now_ms(void);
-
 /* One EQ consumer for every native event type. QP destruction is deferred until
  * the complete returned batch has been inspected because later entries may name the
  * same QP. */
@@ -479,6 +477,11 @@ static int dispatcher_drain_eq(pfd_t *self, int max_batches) {
                 fd_unblock_tx_locked(e);
                 efd_signal(e);
                 pthread_mutex_unlock(&e->mu);
+                /* A connection error outlives the cached answer that routed
+                 * it here; the next connect() asks the DPU again. paddr is
+                 * set only on the connect() side, where the cache entry is. */
+                if (e->paddr != 0)
+                    dmesh_resolve_invalidate(e->paddr, e->pport);
             }
             dmesh_abort_qp(c);
         }
@@ -905,17 +908,51 @@ int connect(int fd, const struct sockaddr *addr, socklen_t alen) {
     if (existing) { pfd_put(existing); errno = EISCONN; return -1; }
     if (addr && addr->sa_family == AF_INET && alen >= sizeof(struct sockaddr_in)) {
         const struct sockaddr_in *sin = (const struct sockaddr_in *)addr;
-        int svc = dmesh_resolve_addr(sin->sin_addr.s_addr, ntohs(sin->sin_port));
-        if (svc >= 0) {
-            /* AF_INET SOCK_STREAM only (design/API.md §7) — a UDP connect() to a mapped
-             * port must stay kernel. */
-            int so_type = 0; socklen_t tl = sizeof so_type;
-            if (real_getsockopt(fd, SOL_SOCKET, SO_TYPE, &so_type, &tl) < 0 ||
-                so_type != SOCK_STREAM)
-                return real_connect(fd, addr, alen);
-            if (ensure_channel() < 0) { errno = ENETUNREACH; return -1; }
+        /* AF_INET SOCK_STREAM only (design/API.md §7) — a UDP connect() to a
+         * mapped port must stay kernel. */
+        int so_type = 0; socklen_t tl = sizeof so_type;
+        if (real_getsockopt(fd, SOL_SOCKET, SO_TYPE, &so_type, &tl) < 0 ||
+            so_type != SOCK_STREAM)
+            return real_connect(fd, addr, alen);
+        /* The DPU answers whether this destination is meshed, so the channel
+         * comes first. A Pod whose channel cannot come up keeps working over
+         * kernel TCP, retried with a backoff rather than per connect. */
+        static _Atomic long g_channel_retry_after;
+        struct timespec mono;
+        clock_gettime(CLOCK_MONOTONIC, &mono);
+        if (mono.tv_sec < atomic_load_explicit(&g_channel_retry_after,
+                                               memory_order_relaxed)) {
+            DBG("connect: channel unavailable; kernel TCP for %s:%d",
+                inet_ntoa(sin->sin_addr), ntohs(sin->sin_port));
+            return real_connect(fd, addr, alen);
+        }
+        if (ensure_channel() < 0) {
+            atomic_store_explicit(&g_channel_retry_after, mono.tv_sec + 5,
+                                  memory_order_relaxed);
+            fprintf(stderr, "[dmesh_preload] channel unavailable; %s:%d "
+                    "leaves the mesh over kernel TCP\n",
+                    inet_ntoa(sin->sin_addr), ntohs(sin->sin_port));
+            return real_connect(fd, addr, alen);
+        }
+        int svc = dmesh_resolve_addr_via(g_ch->ctx, sin->sin_addr.s_addr,
+                                         ntohs(sin->sin_port));
+        if (svc < 0) {
+            /* Leaving the mesh is an explicit, logged decision: the DPU said
+             * not-meshed (ENOENT), holds no generation yet, or the round trip
+             * failed (EAGAIN). */
+            fprintf(stderr, "[dmesh_preload] %s:%d is %s; kernel TCP\n",
+                    inet_ntoa(sin->sin_addr), ntohs(sin->sin_port),
+                    errno == ENOENT ? "not meshed"
+                                    : "unresolvable (no generation held)");
+            return real_connect(fd, addr, alen);
+        }
+        {
             dmesh_qp_t *c = dmesh_qp_open(g_eq, svc);
-            if (!c) return -1;                     /* ENOMEM */
+            if (!c) {
+                dmesh_resolve_invalidate(sin->sin_addr.s_addr,
+                                         ntohs(sin->sin_port));
+                return -1;                         /* ENOMEM */
+            }
             pfd_t *e = pfd_new(c);
             if (!e) { dmesh_destroy_qp(c); errno = ENOMEM; return -1; }
             /* preserve O_NONBLOCK the app may have set on the TCP socket */

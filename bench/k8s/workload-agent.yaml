@@ -14,6 +14,12 @@ rules:
 - apiGroups: [""]
   resources: ["pods", "services"]
   verbs: ["get", "list"]
+# The identity bundle the DPU presents to the Linkerd control plane is minted
+# here, on the cadence the token's lifetime asks for, rather than by a user
+# unit on an operator's login path.
+- apiGroups: [""]
+  resources: ["serviceaccounts/token"]
+  verbs: ["create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -29,14 +35,35 @@ subjects:
   name: dpumesh-node-agent
   namespace: ${NS}
 ---
-apiVersion: v1
-kind: ConfigMap
+# The absorbed control-plane relay resolves the Linkerd Services it forwards
+# to. This is the gateway DaemonSet's former Role, rebound to the agent: one
+# Pod with two listeners, and the same namespaced read it always had.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
 metadata:
-  name: dpumesh-service-registry
+  name: dpumesh-node-agent-relay
+  namespace: ${LINKERD_CONTROL_NAMESPACE}
+rules:
+- apiGroups: [""]
+  resources: ["services", "endpoints"]
+  verbs: ["get"]
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: dpumesh-node-agent-relay
+  namespace: ${LINKERD_CONTROL_NAMESPACE}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: dpumesh-node-agent-relay
+subjects:
+- kind: ServiceAccount
+  name: dpumesh-node-agent
   namespace: ${NS}
-data:
-  registry: |
-${DPUMESH_REGISTRY_YAML}
 ---
 apiVersion: apps/v1
 kind: DaemonSet
@@ -52,6 +79,12 @@ spec:
     spec:
       serviceAccountName: dpumesh-node-agent
       hostPID: true
+      # The DPU is reached on the management interface and the control-plane
+      # relay listens on it, so the agent shares the node's network. It is
+      # also what lets the controller bind a node report to its reporter: the
+      # source address of the report is the node's own.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
       terminationGracePeriodSeconds: 5
       containers:
       - name: workload-agent
@@ -60,10 +93,26 @@ spec:
         args:
         - --socket=/run/dpumesh/attest.sock
         - --key-dir=/etc/dpumesh/registration.keys
-        - --registry=/etc/dpumesh/registry
+        - --feed-key-dir=/etc/dpumesh/feed.keys
         - --namespace=${NS}
         - --node-name=$(NODE_NAME)
-        - --issuer=${DPUMESH_REGISTRATION_ISSUER}
+        # The DPU's only control peer: the delivery hop and what travels on it.
+        - --dpu-feed-host=${DPUMESH_DPU_FEED_HOST}
+        - --dpu-feed-port=${DPUMESH_DPU_FEED_PORT}
+        - --controller-url=${DPUMESH_CONTROLLER_URL}
+        - --node-rdma-addr=${DPUMESH_NODE_RDMA_ADDR}
+        - --identity-dir=/run/dpumesh/linkerd-identity
+        - --identity-service-account=${LINKERD_IDENTITY_SERVICE_ACCOUNT}
+        - --identity-trust-namespace=${LINKERD_CONTROL_NAMESPACE}
+${DPUMESH_AGENT_SERVICE_ARGS}
+        # The absorbed control-plane relay.
+        - --kube-route=destination=${LINKERD_GATEWAY_BIND}:${LINKERD_GATEWAY_DST_PORT}->${LINKERD_CONTROL_NAMESPACE}/linkerd-dst:8086
+        - --kube-route=policy=${LINKERD_GATEWAY_BIND}:${LINKERD_GATEWAY_POLICY_PORT}->${LINKERD_CONTROL_NAMESPACE}/linkerd-policy:8090
+        - --kube-route=identity=${LINKERD_GATEWAY_BIND}:${LINKERD_GATEWAY_IDENTITY_PORT}->${LINKERD_CONTROL_NAMESPACE}/linkerd-identity:8080
+        # The mediated control-plane lookup. It travels this route and no
+        # other, which is what binds the question to the node asking it: the
+        # controller sees this node's own address.
+        - --kube-route=controller=${LINKERD_GATEWAY_BIND}:${DPUMESH_CONTROLLER_RELAY_PORT}->${NS}/dpumesh-controller:8080
         env:
         - name: NODE_NAME
           valueFrom: { fieldRef: { fieldPath: spec.nodeName } }
@@ -72,7 +121,11 @@ spec:
           runAsGroup: 0
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true
-          capabilities: { drop: ["ALL"] }
+          # DAC_READ_SEARCH and nothing else: the identity staging key
+          # (key.p8, 0600, operator-owned) must be readable through the
+          # read-only hostPath mount, and a root uid alone does not bypass
+          # file modes once every capability is dropped.
+          capabilities: { drop: ["ALL"], add: ["DAC_READ_SEARCH"] }
         readinessProbe:
           exec: { command: ["python3", "-c", "import os; assert os.path.exists('/run/dpumesh/attest.sock')"] }
           initialDelaySeconds: 1
@@ -80,11 +133,16 @@ spec:
         volumeMounts:
         - { name: socket, mountPath: /run/dpumesh }
         - { name: keyring, mountPath: /etc/dpumesh/registration.keys, readOnly: true }
-        - { name: registry, mountPath: /etc/dpumesh/registry, subPath: registry, readOnly: true }
+        - { name: feed-keyring, mountPath: /etc/dpumesh/feed.keys, readOnly: true }
+        - { name: identity-stage, mountPath: /run/dpumesh/linkerd-identity, readOnly: true }
       volumes:
       - name: socket
         hostPath: { path: /run/dpumesh, type: DirectoryOrCreate }
       - name: keyring
         hostPath: { path: /etc/dpumesh/registration.keys, type: Directory }
-      - name: registry
-        configMap: { name: dpumesh-service-registry }
+      - name: feed-keyring
+        hostPath: { path: /etc/dpumesh/feed.keys, type: Directory }
+      # Identity material is provisioned on the host and delivered from here;
+      # nothing on this path reaches the DPU except through the agent.
+      - name: identity-stage
+        hostPath: { path: ${DPUMESH_IDENTITY_STAGE_DIR}, type: DirectoryOrCreate }

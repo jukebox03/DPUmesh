@@ -124,20 +124,31 @@ struct dmesh_eq {
 };
 
 /* ====== Lifecycle ====== */
-/* service_id = the service this node advertises (SVC_NONE for a pure client).
- * The node's pod_id is assigned by the DPU at registration (dpumesh_get_pod_id
- * returns it after init). config = NULL uses defaults. */
-int  dpumesh_init(dpumesh_ctx_t **ctx, int service_id,
+/* service_name = the Kubernetes Service this node advertises (NULL/"" for a
+ * pure client; "name" resolves in the Pod's own namespace). The node's pod_id
+ * and its Service's DPU-interned id are assigned by the DPU at registration
+ * (dpumesh_get_pod_id returns the former after init). config = NULL uses
+ * defaults. */
+int  dpumesh_init(dpumesh_ctx_t **ctx, const char *service_name,
                   const dpumesh_config_t *config);
 void dpumesh_destroy(dpumesh_ctx_t *ctx);
 
-/* Shared file-backed service identity and peer resolution for native and preload
- * APIs. Public names and intercepted addresses resolve to internal service IDs. */
-int dmesh_config_load(const char *path);          /* NULL → $DPUMESH_CONFIG or /etc/dpumesh/registry; idempotent, load-once */
+/* Peer resolution for the native and preload APIs. The DPU answers from the
+ * held topology generation; answers are cached per key for one generation
+ * interval and re-resolved after that or on any connection error.
+ * Returns the DPU-interned service id (>= 0); -1 + ENOENT when the
+ * destination is not meshed; -1 + EAGAIN when the DPU holds no generation or
+ * the resolution round trip failed. */
 int dmesh_config_listen_port(void);               /* $DPUMESH_PORT, -1 = not a server */
-int dmesh_config_identity(void);                  /* resolve $DPUMESH_SERVICE, SVC_NONE if unset/unknown */
-int dmesh_resolve_name(const char *name);         /* name → svc, -1 + ENOENT */
-int dmesh_resolve_addr(uint32_t ip_net, uint16_t port_host);  /* ClusterIP:port → svc, -1 = not meshed */
+int dmesh_resolve_name_via(dpumesh_ctx_t *ctx, const char *name);
+int dmesh_resolve_addr_via(dpumesh_ctx_t *ctx, uint32_t ip_net, uint16_t port_host);
+void dmesh_resolve_invalidate(uint32_t ip_net, uint16_t port_host);
+/* One resolution round trip over the control channel (no cache). Fills `ack`
+ * (doca/comch_common.h); -1 + EAGAIN on timeout or send failure. */
+struct dmesh_resolve_ack_msg;
+int dpumesh_resolve(dpumesh_ctx_t *ctx, int by_name, const char *name,
+                    uint32_t ip_net, uint16_t port_host,
+                    struct dmesh_resolve_ack_msg *ack);
 
 /* Integer entry point for the CLIENT QP, shared by the shim and the public
  * name-taking wrapper. The public dmesh_create_qp(eq, name) lives in

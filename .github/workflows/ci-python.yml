@@ -18,3 +18,5 @@ jobs:
       - run: python3 tests/summarize_l4_test.py
       - run: python3 tests/workload_attest_agent_test.py
       - run: python3 tests/linkerd_cp_relay_test.py
+      - run: python3 tests/dpumesh_controller_test.py
+      - run: python3 tests/feed_delivery_test.py

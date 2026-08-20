@@ -207,7 +207,7 @@ done
 python3 - "$CHURN" "$COUNT" >"$OUT/fit.txt" <<'PY'
 import csv, statistics, sys
 
-def load(path, key):
+def load(path):
     rows = []
     for r in csv.DictReader(open(path)):
         try:
@@ -216,8 +216,8 @@ def load(path, key):
             continue
     return rows
 
-churn = load(sys.argv[1], "period")
-count = load(sys.argv[2], "threads")
+churn = load(sys.argv[1])
+count = load(sys.argv[2])
 
 def med(rows, key):
     vals = [r[key] for r in rows if r.get(key) is not None]
@@ -235,14 +235,14 @@ for p in {r["period"] for r in churn}:
 # Ordered by the axis the fit uses, so a shorter period reads as more churn
 # rather than as a smaller number.
 rows.sort()
-pts = [(sps, None, us, mrps) for sps, _, us, mrps, _ in rows]
+pts = [(sps, us, mrps) for sps, _, us, mrps, _ in rows]
 for sps, p, us, mrps, p99 in rows:
     print(f"| {'never' if p == 0 else int(p)} | {sps:.1f} | {mrps:.6f} | {us:.3f} | {p99:.1f} |")
 print()
 
 # ARM cores against sessions per second: intercept is the steady work, slope is
 # one session. Cores = us/req x Mrps, both medians of the same point.
-xy = [(sps, us * mrps) for sps, _, us, mrps in pts]
+xy = [(sps, us * mrps) for sps, us, mrps in pts]
 n = len(xy)
 if n >= 2:
     sx = sum(a for a, _ in xy); sy = sum(b for _, b in xy)
@@ -253,7 +253,7 @@ if n >= 2:
         intercept = (sy - slope * sx) / n
         print(f"DPU cores = {intercept:.3f} + {slope*1e3:.4f}e-3 x sessions/s")
         print(f"building and tearing down one session costs {slope*1e6:.0f} ARM core-us")
-        steady = pts[0][2] if pts else None
+        steady = pts[0][1] if pts else None
         if steady and slope > 0:
             print(f"which is worth about {slope*1e6/steady:,.0f} requests at {steady:.2f} us/req")
 print()

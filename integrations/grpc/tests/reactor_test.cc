@@ -11,7 +11,6 @@
 #include <memory>
 #include <optional>
 #include <string>
-#include <functional>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -195,18 +194,6 @@ bool PumpUntil(ManualExecutor* executor, Predicate predicate,
   for (;;) {
     executor->RunAll();
     if (predicate()) return true;
-    if (std::chrono::steady_clock::now() >= deadline) return false;
-    std::this_thread::sleep_for(100us);
-  }
-}
-
-// Polls a counter the fake exposes without a dedicated waiter.
-template <typename Value>
-bool WaitFor(const std::function<Value()>& read, Value expected,
-             std::chrono::milliseconds timeout) {
-  const auto deadline = std::chrono::steady_clock::now() + timeout;
-  for (;;) {
-    if (read() == expected) return true;
     if (std::chrono::steady_clock::now() >= deadline) return false;
     std::this_thread::sleep_for(100us);
   }

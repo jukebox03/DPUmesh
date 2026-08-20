@@ -124,7 +124,7 @@ independent services for this gate:
 
 ```sh
 L7_BACKEND=linkerd \
-DPUMESH_L7_OPAQUE_SVC=11,13,14 \
+DPUMESH_L7_OPAQUE_SVC=test-bench/echo-dpumesh,test-bench/echo-dpumesh-13,test-bench/echo-dpumesh-14 \
 DPUMESH_L7_LINKERD_WORKER=all \
 DPUMESH_RINGS_PER_POD=8 DPUMESH_ARM_WORKERS=4 \
 BENCH_DST_SERVICES=echo-dpumesh,echo-dpumesh-13,echo-dpumesh-14 \
@@ -224,27 +224,92 @@ the instrument's design constraints are documented in
 A standalone `grpc_dpumesh_qps_benchmark` is available there for closed-loop
 single-machine checks that need no pods or collector.
 
-## 6. Correctness validators
+## 6. Correctness validation
 
-Run the host-only native contract suite before deployment:
+Host-only contract tests run before deployment, without Kubernetes or
+BlueField hardware:
 
 ```sh
-make test
+make -j4 test
 ```
 
-Its scope is documented in [tests/README.md](../tests/README.md). Then exercise
-the real registration, DMA, byte-transfer, FIN, and cleanup paths on BlueField:
+Executables are written under `build/test`. The suite pins the native
+transport, preload adapter, benchmark scheduler, and analysis contracts:
+
+| Test | Coverage |
+|---|---|
+| `workload_grant_test.c` | canonical grant form, issuer, expiry, nonce binding, HMAC and key-id selection, replay refusal, and the signed feed envelope: unsigned, appended-to, unknown-key and tampered generations |
+| `pod_membership_test.c` | membership generation parsing and adoption: no version, malformed or oversized tables, atomic-rename install, rollback refusal, and the withdrawal that closes one registration |
+| `topology_gen_test.c` | topology generation verification, interning, adoption, same-version and oversized refusals |
+| `workload_attest_agent_test.py` | the node agent's peer-cgroup to Pod UID mapping, its refusal of a non-Pod peer, Service membership authorization, and the 1090-byte grant it signs |
+| `dpumesh_controller_test.py` | controller HTTP routes, node-report scope checks, generation bounds, skip-unchanged publication and key-rotation republish |
+| `feed_delivery_test.py` | the one-channel feed hop: digest-first resend, receiver whitelist and fail-static refusals |
+| `linkerd_cp_relay_test.py` | control-plane relay route parsing and ClusterIP/endpoint resolution, including a headless Service |
+| `native_api_contract_test.c` | public allocation, post, the open-transmit-call pairing, library-owned batching, async TX error, event, and RX-credit contracts |
+| `native_control_state_test.c` | registration, unregister replay, and slot cleanup |
+| `native_tx_batch_policy_test.c` | idle/immediate and busy/deadline tail publication, deadlines that never move once stamped, arming a tail retained when the stream falls quiet, the transmit gate excluding the deadline pass with retention surviving it, waiting for submitted data to leave the DPU before FIN, timer wakes without submitting, armed-bit release on close, deferred TX error, TX units, block ordering, landing geometry, credit sharding, and the run one TX_ACK entry names |
+| `native_writable_test.c` | TX-ready arm/recheck, shared-pool readiness, EQ notification suppression, and cursor rollback |
+| `preload_api_contract_test.c` | POSIX blocking, `POLLOUT`, EQ drain serialization, library-owned TX batching/error signalling, RX ordering, FIN, close, and fd lifetime |
+| `l4_pin_policy_test.c` | connection pinning, backend loss, and inbound protection grading |
+| `benchmark_result_contract_test.c` | rejects zero-progress, failed-request and failed-worker benchmark points instead of labelling them `OK` |
+| `lb_policy_test.c` | ready-backend filtering and service round robin |
+| `proxy_lane_queue_test.c` | per-destination queue order, ordered retry, receive-stripe geometry, DMA progress, and the one entry a released extent's acknowledgement uses |
+| `worker_mpsc_queue_test.c` | the multi-producer queue one worker uses to hand work to another |
+| `peer_channel_test.c` | peer-channel lifetime, staging custody under held delivery, per-peer isolation and generation rebind |
+| `topology_test.c` | how a port maps to its forward ring, accelerator unit and ARM worker |
+| `ring_counter_test.c` | descriptor generation, wraparound, and admission |
+| `l7_abi_contract_test.c` | L7 adapter flow/verdict layout, mode and decline constants, and the connection handle both sides form |
+| `analyze_saturation_test.py` | saturation, CPU slopes, knee stability, and generator headroom |
+| `summarize_l4_test.py` | collector metadata and selected-matrix repetition counts |
+| `generator_selftest_test.sh` | native and POSIX transport-free arrival schedulers |
+| `l4_collector_contract_test.sh` | collector matrix and optional RPS limits |
+| `dma_fault_scope_test.sh` | worker DMA-context recovery |
+| `abi_contract_test.sh` | SONAME, public symbols, and preload runtime linkage |
+
+Hardware validators then exercise the real registration, DMA, byte-transfer,
+FIN, and cleanup paths on BlueField, independently of the performance report.
+Build and deploy them through `bench.sh`; direct invocation is useful only
+when the DPU process and pod registration state are already synchronized.
+
+| Validator | Programs | Contract exercised |
+|---|---|---|
+| Loopback | `validators/loopback_dpumesh.c` | One process registers, connects to its own Service, exchanges data, and closes |
+| Verbs-shaped | `validators/verbs_dpumesh.c` | Channel/EQ/QP lifecycle, windowed commit/flush sends, event polling, and RX buffer release |
+| POSIX preload | `validators/preload_runner.c`, `tcp_echo.c`, `tcp_client.c` | Unmodified socket connect/listen/accept/read/write behavior and TCP fallback |
+| Matched-C preload | `validators/preload_sock.Dockerfile`, `bench_sock`, `echo_sock` | Same L4 benchmark workload over the socket facade; control TCP stays kernel, data uses DPUmesh |
+| Idle re-registration | `validators/idle_reregister.sh` | A quiesced pod registers again after the DPU idles with no pods; loopback passes before and after |
 
 ```sh
 ./bench/bench.sh loopback 1000 1024 0
 ./bench/bench.sh verbs    1000 1024 0 32 4
 ./bench/bench.sh preload  1000 1024 8
+./bench/validators/idle_reregister.sh 720 10000 1024
 ```
 
-The validator-specific contracts are in [validators/README.md](validators/README.md).
-The C++ gRPC tests are executed separately with CTest and include fake-native
-reactor tests, event-gated writable retry, a paired real gRPC HTTP/2 channel
-test, native symbol linkage, and an optional BlueField client/server smoke binary.
+The matched-C preload transport runs as the `dpumesh-preload` configuration of
+the measurement collector, on the `preload-bench` control endpoint; the
+`preload` command above is the focused correctness and churn validator.
+
+A passing data test requires exact byte and request-id agreement, zero failed
+operations, correct EOF delivery, and successful reverse-order destruction. A
+process exit without a crash is not sufficient: inspect the DPU log for DMA,
+generation, ring-ACK, egress, or cleanup warnings. All native validators use
+ABI-4 semantics — `post_send` commits and automatically submits complete
+transport units, while explicit `flush` forces each logical request, response
+batch, or large-write tail — so a pass exercises both automatic full-unit
+submission and byte correctness.
+
+The deployed gRPC lifecycle gate is `./bench/bench.sh grpcshutdown`: it stops
+a client process with a live HTTP/2 channel, requires balanced Linkerd
+session/task metrics and no new RX-mmap reclaim error, re-registers the
+recycled pod slot, and finishes with a four-channel smoke point. The C++ gRPC
+tests are executed separately with CTest and include fake-native reactor
+tests, event-gated writable retry, a paired real gRPC HTTP/2 channel test,
+native symbol linkage, and an optional BlueField client/server smoke binary.
+
+Sanitizer validation and performance validation are separate: use ASAN/UBSAN
+builds for memory correctness, and optimized non-sanitized binaries for QPS or
+latency results.
 
 ## 7. Measurement rules
 

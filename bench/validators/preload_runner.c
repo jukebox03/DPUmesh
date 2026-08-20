@@ -60,29 +60,22 @@ int main(void) {
     setvbuf(stdout, NULL, _IOLBF, 0);   /* pod log = pipe → line-buffer it */
     const char *lib       = env_or("PRELOAD_LIB", "/usr/local/lib/libdmesh_preload.so");
     const char *echo_port = env_or("ECHO_PORT", "9095");
-    const char *svc       = env_or("PRELOAD_SVC", "15");
     int ctrl_port         = atoi(env_or("CTRL_PORT", "9092"));
     const char *echo_bin  = env_or("ECHO_BIN", "/usr/local/bin/tcp_echo");
     const char *client_bin= env_or("CLIENT_BIN", "/usr/local/bin/tcp_client");
 
-    /* Registry FIRST — before ANY preloaded child starts (the harness plays the
-     * control plane; see design/CONTROL.md). ONE row serves both directions: the echo
-     * server's identity (name → svc) and the client's connect() (ClusterIP:port →
-     * svc). It MUST exist before the echo child's shim ctor runs, or that child could
-     * not resolve its own $DPUMESH_SERVICE. Format: "IP:port name svc". */
+    /* The DPU answers connect() resolution from the held topology generation,
+     * so the client dials the real Kubernetes Service ClusterIP — kubelet
+     * injects it as PRELOAD_DPUMESH_SERVICE_HOST. */
     const char *svc_name = env_or("PRELOAD_SERVICE", "preload-dpumesh");
-    const char *svc_ip   = env_or("SVC_IP", "10.96.0.15");
-    const char *reg_path = "/tmp/dpumesh_registry";
-    FILE *rf = fopen(reg_path, "w");
-    if (!rf) { fprintf(stderr, "runner: registry open failed\n"); return 1; }
-    fprintf(rf, "%s:%s %s %s\n", svc_ip, echo_port, svc_name, svc);
-    fclose(rf);
+    const char *svc_ip   = getenv("SVC_IP");
+    if (!svc_ip || !*svc_ip)
+        svc_ip = env_or("PRELOAD_DPUMESH_SERVICE_HOST", "10.96.0.15");
 
-    /* echo server (persistent): identity + listen port injected via env, resolved
-     * through the registry above (no integer typed). */
+    /* echo server (persistent): identity + listen port injected via env; the
+     * name is authenticated by the node agent and interned by the DPU. */
     const char *echo_env[][2] = {
         { "LD_PRELOAD", lib },
-        { "DPUMESH_CONFIG", reg_path },
         { "DPUMESH_SERVICE", svc_name },
         { "DPUMESH_PORT", echo_port },
         { NULL, NULL },
@@ -92,11 +85,10 @@ int main(void) {
     if (echo_pid < 0) { fprintf(stderr, "runner: echo spawn failed\n"); return 1; }
     sleep(2);                          /* channel registration + listen */
 
-    /* client daemon (persistent, stdin-driven): pure client — no identity, just the
-     * registry for connect() resolution. */
+    /* client daemon (persistent, stdin-driven): pure client — the DPU resolves
+     * its connect() destinations. */
     const char *cli_env[][2] = {
         { "LD_PRELOAD", lib },
-        { "DPUMESH_CONFIG", reg_path },
         { NULL, NULL },
     };
     char *cli_argv[] = { (char *)client_bin, (char *)svc_ip, (char *)echo_port, NULL };
@@ -117,7 +109,7 @@ int main(void) {
         fprintf(stderr, "runner: ctrl bind/listen: %s\n", strerror(errno));
         return 1;
     }
-    printf("runner: up (svc=%s echo_port=%s ctrl=%d)\n", svc, echo_port, ctrl_port);
+    printf("runner: up (svc=%s echo_port=%s ctrl=%d)\n", svc_name, echo_port, ctrl_port);
     fflush(stdout);
 
     char line[256], resp[256];
@@ -125,10 +117,9 @@ int main(void) {
         int cfd = accept(lfd, NULL, NULL);
         if (cfd < 0) { if (errno == EINTR) continue; break; }
 
-        /* A dead child is unrecoverable for this pod, but DO NOT exit: a pod
-         * restart re-registers 2 dmesh channels while the DPU never reclaims
-         * dead ones (MAX_PODS=8 table) — restarting would burn slots and wedge
-         * the whole mesh. Stay up and keep reporting the error instead. */
+        /* A dead child is unrecoverable for this pod. Stay up and answer every
+         * control request with the error instead of exiting, so the failure is
+         * visible from the bench side rather than as a pod restart loop. */
         if (waitpid(echo_pid, NULL, WNOHANG) != 0 || waitpid(cli_pid, NULL, WNOHANG) != 0) {
             dprintf(cfd, "ERR child_exited\n");
             close(cfd);

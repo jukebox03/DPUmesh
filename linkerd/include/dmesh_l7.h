@@ -20,8 +20,14 @@ extern "C" {
 #define DMESH_L7_DECLINE_SESSION_LIMIT  (-4)
 #define DMESH_L7_DECLINE_UNKNOWN_REPLY  (-5)
 
-/* Addresses are in host byte order. `workload` is NUL-terminated. */
+/* Addresses are in host byte order. `workload` and `source_identity` are
+ * NUL-terminated. */
 struct dmesh_l7_flow {
+    /* The source Pod's real cluster IP, from its signed assertion within a
+     * node or from the generation across one. It is what an authorization
+     * policy's `networks` clause is matched against, so nothing synthetic may
+     * appear here: a clause written against the cluster CIDR has to evaluate
+     * against an address the cluster actually assigned. */
     uint32_t src_ip, dst_ip;
     uint16_t src_port, dst_port;
     int32_t  src_pod;
@@ -31,6 +37,12 @@ struct dmesh_l7_flow {
     uint8_t  is_reply;
     /* Max namespace (63) + max Pod DNS subdomain (253) plus JSON framing. */
     char     workload[384];
+    /* The verified source identity, as Linkerd names one:
+     * `<service-account>.<namespace>.serviceaccount.identity.<trust-domain>`.
+     * Built from the retained registration within a node and from the
+     * generation across one; empty when the source is not attested. No Pod
+     * supplies any part of it. */
+    char     source_identity[254];
 };
 
 static inline uint64_t dmesh_l7_conn_handle(int32_t pod, uint16_t port)
@@ -75,13 +87,32 @@ struct dmesh_l7_verdict {
 
 int  l7_resolve(int worker_id, const struct dmesh_l7_flow *flow,
                 struct dmesh_l7_verdict *out);
+
+/* The destination-side admission verdict for one inbound stream, asked before
+ * the stream is admitted to a registered Pod. `flow.workload` names the
+ * destination Pod, which is the policy subject; `flow.dst_ip:dst_port` is the
+ * port the policy is watched on; `flow.src_ip:src_port` and
+ * `flow.source_identity` are the verified client, and no part of either comes
+ * from a Pod. One watch is held per destination Pod and port and shared by
+ * every stream arriving at it, so a stream costs an evaluation rather than a
+ * session build. 1 admits, 0 refuses, negative means no verdict is available
+ * and the destination Service's protection class decides. */
+#define DMESH_L7_VERDICT_ADMIT         1
+#define DMESH_L7_VERDICT_REFUSE        0
+#define DMESH_L7_VERDICT_NO_POLICY    (-1)
+#define DMESH_L7_VERDICT_NOT_ATTACHED (-2)
+int  l7_inbound_verdict(int worker_id, const struct dmesh_l7_flow *flow);
+/* Drop the policy watches held for a destination Pod whose registration ended.
+ * The watch lifetime is the cached store's lifetime, so this is what ends it. */
+void l7_inbound_forget(int worker_id, const char *workload);
 void l7_report(int worker_id, uint64_t conn, uint64_t bytes_in,
                uint64_t bytes_out, uint64_t duration_ns, int reason);
 
 /* Control-plane admission accounting. `kind` is the decision surface
- * (`grant`, `membership`, `revocation`) and `reason` a stable lowercase slug,
- * `ok` for the accepting outcome. Called from the Comch control thread, which
- * owns no worker, so the counters are process-global. */
+ * (`grant`, `membership`, `revocation`, `peer`) and `reason` a stable
+ * lowercase slug, `ok` for the accepting outcome. Registration decisions are
+ * taken on the Comch control thread and peer refusals on a data worker, so the
+ * counters are process-global and this is called from several threads. */
 void l7_control_event(const char *kind, const char *reason);
 
 /* DPUmesh data-path entry points. */
@@ -93,9 +124,25 @@ int dmesh_l7_tx_commit(int worker_id, uint64_t conn, int32_t backend_pod,
                        uint32_t len);
 void dmesh_l7_release(int worker_id, uint64_t conn, uint32_t pos, uint32_t len);
 /* Length of the signed prefix of an authoritative feed document, or -1 when it
- * is unsigned or its signature does not verify against the registration
- * keyring. Only that prefix may be parsed. */
+ * is unsigned or its signature does not verify against the feed keyring. Only
+ * that prefix may be parsed. */
 long dmesh_l7_verify_feed(const uint8_t *document, size_t length);
+/* The node-local compact id the held topology generation interns for the
+ * `namespace/name` Service key, or -1 while no generation defines it. The id
+ * is a transport identifier, never workload identity. */
+int32_t dmesh_l7_svc_for_name(int worker_id, const char *key);
+
+/* The live destination Pod behind one Kubernetes Pod UID.
+ *
+ * DPUmesh chooses the backend Pod itself on the data path, so an endpoint the
+ * Linkerd balancer selected is resolved through this rather than dialled. Each
+ * negative outcome is a distinct decline — never a round robin and never a TCP
+ * fallback, both of which would carry a protected stream somewhere its policy
+ * never named. */
+#define DMESH_L7_ENDPOINT_UNRESOLVED (-1)  /* no live registration serves it */
+#define DMESH_L7_ENDPOINT_REMOTE     (-2)  /* the generation places it on another node */
+#define DMESH_L7_ENDPOINT_STALE      (-3)  /* the mapping predates the held generation */
+int32_t dmesh_l7_pod_for_uid(int worker_id, const char *pod_uid);
 
 /* Persistent runtime backend implemented by DPUmesh. */
 int dmesh_l7_driver_notification_fds(void *driver, int *completion_fd,

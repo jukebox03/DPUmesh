@@ -60,10 +60,15 @@ static void fake_reset(void) {
 }
 
 /* ---- Native API fakes required by the included production shim. ---- */
-int dmesh_config_load(const char *path) { (void)path; return 0; }
 int dmesh_config_listen_port(void) { return -1; }
-int dmesh_resolve_addr(uint32_t ip_net, uint16_t port_host) {
-    (void)ip_net; (void)port_host; return -1;
+int dmesh_resolve_addr_via(dpumesh_ctx_t *ctx, uint32_t ip_net,
+                           uint16_t port_host) {
+    (void)ctx; (void)ip_net; (void)port_host;
+    errno = ENOENT;
+    return -1;
+}
+void dmesh_resolve_invalidate(uint32_t ip_net, uint16_t port_host) {
+    (void)ip_net; (void)port_host;
 }
 dmesh_channel_t *dmesh_create_channel(void) { return &fake_channel; }
 int dmesh_destroy_channel(dmesh_channel_t *channel) { (void)channel; return 0; }

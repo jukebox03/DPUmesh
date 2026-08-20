@@ -7,13 +7,10 @@
  * pods between configurations, never the server between runs.
  */
 
-#include <atomic>
-#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
 #include <string>
-#include <thread>
 
 #include <grpcpp/grpcpp.h>
 #include <grpcpp/passive_listener.h>
@@ -46,14 +43,8 @@ class EchoService final : public BenchmarkService::Service {
       response->mutable_payload()->set_body(
           std::string(static_cast<size_t>(request->response_size()), '\0'));
     }
-    calls_.fetch_add(1, std::memory_order_relaxed);
     return ::grpc::Status::OK;
   }
-
-  uint64_t calls() const { return calls_.load(std::memory_order_relaxed); }
-
- private:
-  std::atomic<uint64_t> calls_{0};
 };
 
 }  // namespace

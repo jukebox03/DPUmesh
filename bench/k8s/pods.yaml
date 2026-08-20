@@ -24,9 +24,6 @@ spec:
         - { name: DPUMESH_ATTEST_SOCKET, value: "${DPUMESH_ATTEST_SOCKET}" }
         - { name: BENCH_DST_SERVICE, value: "echo-dpumesh" }   # peer by k8s Service NAME (pure client)
         - { name: BENCH_DST_SERVICES, value: "${BENCH_DST_SERVICES}" } # optional per-thread CSV
-        - { name: ASYNC_THREADS, value: "${ASYNC_THREADS}" }
-        - { name: BENCH_PIPELINE, value: "${BENCH_PIPELINE}" }
-        - { name: BENCH_COALESCE, value: "${BENCH_COALESCE}" }
         securityContext: { privileged: true }
         volumeMounts:
         - { mountPath: /dev/infiniband, name: infiniband }
@@ -64,8 +61,7 @@ spec:
         - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
         - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
         - { name: DPUMESH_ATTEST_SOCKET, value: "${DPUMESH_ATTEST_SOCKET}" }
-        - { name: DPUMESH_SERVICE, value: "echo-dpumesh" }     # identity: k8s Service name → registry
-        - { name: ECHO_THREADS, value: "${ECHO_THREADS}" }
+        - { name: DPUMESH_SERVICE, value: "echo-dpumesh" }     # identity: k8s Service name, resolved by the DPU
         securityContext: { privileged: true }
         volumeMounts:
         - { mountPath: /dev/infiniband, name: infiniband }
@@ -99,7 +95,6 @@ spec:
         - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
         - { name: DPUMESH_ATTEST_SOCKET, value: "${DPUMESH_ATTEST_SOCKET}" }
         - { name: DPUMESH_SERVICE, value: "${ECHO_13_SERVICE}" } # default: same-service fan-out
-        - { name: ECHO_THREADS, value: "${ECHO_THREADS}" }
         securityContext: { privileged: true }
         volumeMounts:
         - { mountPath: /dev/infiniband, name: infiniband }
@@ -131,7 +126,6 @@ spec:
         - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
         - { name: DPUMESH_ATTEST_SOCKET, value: "${DPUMESH_ATTEST_SOCKET}" }
         - { name: DPUMESH_SERVICE, value: "${ECHO_14_SERVICE}" } # default: same-service fan-out
-        - { name: ECHO_THREADS, value: "${ECHO_THREADS}" }
         securityContext: { privileged: true }
         volumeMounts:
         - { mountPath: /dev/infiniband, name: infiniband }
@@ -256,7 +250,6 @@ spec:
         - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
         - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
         - { name: DPUMESH_ATTEST_SOCKET, value: "${DPUMESH_ATTEST_SOCKET}" }
-        - { name: PRELOAD_SVC, value: "15" }
         - { name: ECHO_PORT, value: "9095" }
         - { name: DMESH_PRELOAD_DEBUG, value: "${DMESH_PRELOAD_DEBUG}" }
         securityContext: { privileged: true }
@@ -274,12 +267,17 @@ kind: Service
 metadata: { name: preload-dpumesh }
 spec:
   selector: { app: preload-dpumesh }
-  ports: [{ port: ${CTRL_PORT}, targetPort: ${CTRL_PORT} }]
+  # The echo port is first: the topology generation publishes ports[0], which
+  # is what the shim's connect() resolution matches on.
+  ports:
+  - { name: echo, port: 9095, targetPort: 9095 }
+  - { name: ctrl, port: ${CTRL_PORT}, targetPort: ${CTRL_PORT} }
 ---
 # preload-sock: matched bench_sock/echo_sock workload over LD_PRELOAD. The
 # control listener is ordinary kernel TCP; only BENCH_TARGET data connections
-# are intercepted. The static ClusterIP is also the registry key baked into the
-# image, so the client can resolve the DPU service without a sidecar.
+# are intercepted. The client resolves the Service's ClusterIP through the DPU
+# (kubelet injects it as PRELOAD_DPUMESH_SERVICE_HOST), so nothing is baked
+# into the image.
 apiVersion: apps/v1
 kind: Deployment
 metadata:

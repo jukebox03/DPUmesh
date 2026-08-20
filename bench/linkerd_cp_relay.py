@@ -8,10 +8,7 @@ proxy still performs the control-plane mTLS handshake.
 
 import argparse
 import asyncio
-import contextlib
 import json
-import os
-import signal
 import ssl
 import urllib.error
 import urllib.parse
@@ -152,13 +149,9 @@ async def handle(
     )
 
 
-async def serve(routes: list[Route], kube: KubernetesAPI | None) -> None:
-    stop = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    for signum in (signal.SIGINT, signal.SIGTERM):
-        with contextlib.suppress(NotImplementedError):
-            loop.add_signal_handler(signum, stop.set)
-
+async def serve_routes(
+    routes: list[Route], kube: KubernetesAPI | None, stop: asyncio.Event
+) -> None:
     servers: list[asyncio.Server] = []
     for item in routes:
         server = await asyncio.start_server(
@@ -180,28 +173,14 @@ async def serve(routes: list[Route], kube: KubernetesAPI | None) -> None:
     await asyncio.gather(*(server.wait_closed() for server in servers))
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--route", action="append", type=route, default=[])
-    parser.add_argument("--kube-route", action="append", type=kube_route, default=[])
-    parser.add_argument("--api-server", default="https://kubernetes.default.svc")
-    parser.add_argument(
-        "--api-token-file",
-        default="/var/run/secrets/kubernetes.io/serviceaccount/token",
-    )
-    parser.add_argument(
-        "--api-ca-file",
-        default="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt",
-    )
-    args = parser.parse_args()
-    routes = args.route + args.kube_route
-    if not routes:
-        parser.error("at least one --route or --kube-route is required")
-    kube = None
-    if args.kube_route:
-        kube = KubernetesAPI(args.api_server, args.api_token_file, args.api_ca_file)
-    asyncio.run(serve(routes, kube))
+def run_relay(routes: list[Route], kube: KubernetesAPI | None) -> None:
+    """Run the relay to completion on the calling thread.
 
+    The node agent absorbs the relay, and the process's signals belong to the
+    agent, so none are installed here: the relay ends when its thread ends.
+    """
 
-if __name__ == "__main__":
-    main()
+    async def forever() -> None:
+        await serve_routes(routes, kube, asyncio.Event())
+
+    asyncio.run(forever())

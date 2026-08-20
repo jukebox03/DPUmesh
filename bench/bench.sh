@@ -37,7 +37,7 @@ BENCH_LINKERD="${BENCH_LINKERD:-0}"
 # a namespace-scoped node agent; no key or authoritative claims are mounted into
 # application Pods.
 DPUMESH_REGISTRATION_KEY_DIR_DPU="${DPUMESH_REGISTRATION_KEY_DIR_DPU:-/etc/dpumesh/registration.keys}"
-DPUMESH_REGISTRATION_ISSUER="${DPUMESH_REGISTRATION_ISSUER:-dpumesh-node-agent}"
+DPUMESH_FEED_KEY_DIR_DPU="${DPUMESH_FEED_KEY_DIR_DPU:-/etc/dpumesh/feed.keys}"
 DPUMESH_ATTEST_SOCKET="${DPUMESH_ATTEST_SOCKET:-/run/dpumesh/attest.sock}"
 
 INCLUDE_SRC="$PROJ_ROOT/include"
@@ -46,8 +46,7 @@ DOCA_SRC="$PROJ_ROOT/doca"
 LINKERD_INCLUDE_SRC="$PROJ_ROOT/linkerd/include"
 LINKERD_SHIM_SRC="$PROJ_ROOT/linkerd/shim"
 # What L7_BACKEND=linkerd needs built on the DPU. `rust` and `port` are siblings
-# there because
-# linkerd/rust/Cargo.toml resolves the port by relative path.
+# there because linkerd/rust/Cargo.toml resolves the port by relative path.
 LINKERD_RUST_SRC="$PROJ_ROOT/linkerd/rust"
 LINKERD_PORT_SRC="$PROJ_ROOT/linkerd/port/linkerd2-proxy"
 DPU_L7_BUILD="l7build"
@@ -78,7 +77,7 @@ IMG_ECHO_GRPC="bench/echo-grpc:latest"
 IMG_BENCH_TCP="bench/bench-tcp:latest"
 IMG_ECHO_TCP="bench/echo-tcp:latest"
 IMG_WORKLOAD_AGENT="bench/dpumesh-workload-agent:latest"
-IMG_LINKERD_GATEWAY="bench/dpumesh-linkerd-cp-gateway:latest"
+IMG_CONTROLLER="bench/dpumesh-controller:latest"
 # BENCH_ENVOY_DEBUG=1 selects the unstripped build of the same release, which
 # resolves sidecar symbols in a profile.
 if [ "${BENCH_ENVOY_DEBUG:-0}" = 1 ]; then
@@ -351,10 +350,8 @@ build_images() {
     echo "$HOST_PASS" | sudo -S true 2>/dev/null
     build_image "$BENCH_DIR/docker/workload_attest.Dockerfile" \
         "$IMG_WORKLOAD_AGENT" "$PROJ_ROOT"
-    if [ "${L7_BACKEND:-null}" = linkerd ]; then
-        build_image "$BENCH_DIR/docker/linkerd_cp_gateway.Dockerfile" \
-            "$IMG_LINKERD_GATEWAY" "$PROJ_ROOT"
-    fi
+    build_image "$BENCH_DIR/docker/dpumesh_controller.Dockerfile" \
+        "$IMG_CONTROLLER" "$PROJ_ROOT"
     if [ "$scope" != grpc ]; then
         build_image "$BENCH_DIR/docker/bench_dpumesh.Dockerfile" "$IMG_BENCH_DPU" "$PROJ_ROOT"
         build_image "$BENCH_DIR/docker/echo_dpumesh.Dockerfile"  "$IMG_ECHO_DPU"  "$PROJ_ROOT"
@@ -422,8 +419,9 @@ linkerd_identity_dir() {
 linkerd_trust_anchors() {
     printf '%s' "${LINKERD_TRUST_ANCHORS:-/etc/dpumesh/linkerd-identity/trust-anchors.pem}"
 }
+# Where the node agent's delivery hop installs the derived Service-target feed.
 linkerd_service_target_file() {
-    printf '%s' "${DPUMESH_L7_SERVICE_TARGETS_FILE:-$(linkerd_build_dir)/service-targets.v1}"
+    printf '%s' "${DPUMESH_L7_SERVICE_TARGETS_FILE:-${DPUMESH_FEED_ROOT_DPU:-/etc/dpumesh}/service-targets.v1}"
 }
 # Identity names are connection-specific. The local name is the identity
 # certified for this DPU proxy; the other three names authenticate the Linkerd
@@ -613,39 +611,37 @@ resolve_l7_fail_closed() {
 }
 
 # The target feed carries every Service assigned to the L7 layer: one the feed
-# omits is a withdrawn target, which fail-closed refuses. The id list is derived
-# from the assignment; an explicit DPUMESH_L7_SERVICE_IDS wins.
-resolve_l7_service_ids() {
-    if [ -n "${DPUMESH_L7_SERVICE_IDS:-}" ]; then
-        export DPUMESH_L7_SERVICE_IDS
+# omits is a withdrawn target, which fail-closed refuses. The `namespace/name`
+# list is derived from the mode assignment; an explicit DPUMESH_L7_SERVICES
+# wins.
+resolve_l7_services() {
+    if [ -n "${DPUMESH_L7_SERVICES:-}" ]; then
+        export DPUMESH_L7_SERVICES
         return 0
     fi
-    local ids id name kept=""
-    ids=$(printf '%s,%s,%s' "${DPUMESH_L7_DECISION_SVC:-}" \
-                            "${DPUMESH_L7_OPAQUE_SVC:-}" \
-                            "${DPUMESH_L7_SVC:-}" |
-          tr ',' '\n' | grep -E '^[0-9]+$' | sort -nu | paste -sd, - || true)
-    [ -n "$ids" ] || return 0
+    local entries entry ns name kept=""
+    entries=$(printf '%s,%s,%s' "${DPUMESH_L7_DECISION_SVC:-}" \
+                                "${DPUMESH_L7_OPAQUE_SVC:-}" \
+                                "${DPUMESH_L7_SVC:-}" |
+          tr ', ' '\n\n' | grep -E '^[a-z0-9.-]+/[a-z0-9-]+$' | sort -u || true)
+    [ -n "$entries" ] || return 0
     # An assignment may name Services this scope does not deploy — the L7 mode
-    # sweeps list every echo id whether or not its Service exists. Only a
-    # Service that exists can be a target, and a missing one is not the
-    # withdrawal this feed is meant to express.
-    for id in ${ids//,/ }; do
-        name=$(awk -v wanted="$id" \
-                   '/^[[:space:]]*#/ || NF == 0 { next } $3 == wanted { print $2 }' \
-                   "$BENCH_DIR/k8s/registry" | head -1)
-        if [ -z "$name" ]; then
-            warn "L7 Service id $id is not in $BENCH_DIR/k8s/registry; not published"
-        elif ! kubectl get service "$name" -n "$NS" >/dev/null 2>&1; then
-            warn "L7 Service id $id ($name) has no Service in $NS; not published"
+    # sweeps list every echo Service whether or not it exists. Only a Service
+    # that exists can be a target, and a missing one is not the withdrawal
+    # this feed is meant to express.
+    for entry in $entries; do
+        ns=${entry%%/*}
+        name=${entry##*/}
+        if ! kubectl get service "$name" -n "$ns" >/dev/null 2>&1; then
+            warn "L7 Service $entry does not exist; not published"
         else
-            kept="${kept:+$kept,}$id"
+            kept="${kept:+$kept,}$entry"
         fi
     done
-    [ -n "$kept" ] || { err "no Service assigned to the L7 layer exists in $NS"; exit 1; }
-    DPUMESH_L7_SERVICE_IDS="$kept"
-    export DPUMESH_L7_SERVICE_IDS
-    info "L7 Service target feed carries service id(s): $DPUMESH_L7_SERVICE_IDS"
+    [ -n "$kept" ] || { err "no Service assigned to the L7 layer exists"; exit 1; }
+    DPUMESH_L7_SERVICES="$kept"
+    export DPUMESH_L7_SERVICES
+    info "L7 Service target feed carries: $DPUMESH_L7_SERVICES"
 }
 
 start_dpu() {
@@ -701,20 +697,40 @@ L7ENV
     local rings="${DPUMESH_RINGS_PER_POD:-}"
     local workers="${DPUMESH_ARM_WORKERS:-}"
     local registration_key_dir="$DPUMESH_REGISTRATION_KEY_DIR_DPU"
-    local registration_issuer="$DPUMESH_REGISTRATION_ISSUER"
+    local feed_key_dir="$DPUMESH_FEED_KEY_DIR_DPU"
+    # The DPU refuses grants minted for another node, so it must know its own
+    # Kubernetes node name (the agent signs spec.nodeName into every grant).
+    local node_name="${DPUMESH_NODE_NAME:-$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)}"
+    if [ -z "$node_name" ]; then
+        err "DPUMESH_NODE_NAME is unset and kubectl returned no node name"
+        exit 1
+    fi
     # Revocation consumes the node membership generation.
     local membership_file="${DPUMESH_MEMBERSHIP_FILE:-/etc/dpumesh/membership.v1}"
     local admission_file="${DPUMESH_ADMISSION_FILE:-/etc/dpumesh/admission}"
+    # Cluster facts arrive as the controller's signed topology generation.
+    local topology_file="${DPUMESH_TOPOLOGY_FILE:-/etc/dpumesh/topology.v1}"
+    local controller_key_dir="${DPUMESH_CONTROLLER_KEY_DIR_DPU:-/etc/dpumesh/controller.pub.keys}"
+    # The node credential: generated on the DPU at first boot into a 0400 file
+    # that never leaves it. Only the public half is published, and the node
+    # agent is what reports it to the controller.
+    local node_key_file="${DPUMESH_NODE_KEY_FILE:-/etc/dpumesh/node-static.key}"
+    local node_key_public="${DPUMESH_NODE_KEY_PUBLIC_FILE:-/etc/dpumesh/node-static.pub}"
+    # The mediated control-plane lookup, reached through this node's agent.
+    local relay_bind="${LINKERD_GATEWAY_BIND:-192.168.100.1}"
+    local relay_port="${DPUMESH_CONTROLLER_RELAY_PORT:-28089}"
+    local scope_url="${DPUMESH_CONTROLLER_SCOPE_URL:-http://$relay_bind:$relay_port}"
+    local trust_domain="${DPUMESH_IDENTITY_TRUST_DOMAIN:-linkerd.${LINKERD_TRUST_DOMAIN:-cluster.local}}"
     step "=== Starting dpumesh_dpu (l7_decision='$l7_decision' l7_opaque='$l7_opaque' l7_full='$l7_full' dpa_threads='$dpa_threads' rings_per_pod='$rings' arm_workers='$workers') ==="
     stop_dpu
-    local dpu_home; dpu_home=$(ssh_dpu 'echo $HOME')
+    local dpu_home; dpu_home=$(dpu_home)
     # Start one DPU process.
     ssh_dpu "cat > /tmp/start_dpu_bench.sh << 'LAUNCHER'
 #!/bin/bash
 running=\$(pgrep -x dpumesh_dpu | head -1)
 if [ -n \"\$running\" ]; then echo \"\$running\"; exit 0; fi
 ulimit -c unlimited
-screen -dmS dpumesh-bench bash -c \"ulimit -c unlimited; cd $dpu_home/$DPU_BUILD && $l7_env DPUMESH_REGISTRATION_KEY_DIR=$registration_key_dir DPUMESH_REGISTRATION_ISSUER=$registration_issuer DPUMESH_MEMBERSHIP_FILE=$membership_file DPUMESH_ADMISSION_FILE=$admission_file DPUMESH_L7_DECISION_SVC=$l7_decision DPUMESH_L7_OPAQUE_SVC=$l7_opaque DPUMESH_L7_SVC=$l7_full DPUMESH_L7_NULL_TRACE=$l7_trace DPUMESH_L7_FRAMED_RR=$l7_rr DPUMESH_DPA_THREADS=$dpa_threads DPUMESH_RINGS_PER_POD=$rings DPUMESH_ARM_WORKERS=$workers ./dpumesh_dpu $DPU_PCI -l $log_level > $DPU_LOG 2>&1\"
+screen -dmS dpumesh-bench bash -c \"ulimit -c unlimited; cd $dpu_home/$DPU_BUILD && $l7_env DPUMESH_NODE_NAME=$node_name DPUMESH_REGISTRATION_KEY_DIR=$registration_key_dir DPUMESH_FEED_KEY_DIR=$feed_key_dir DPUMESH_MEMBERSHIP_FILE=$membership_file DPUMESH_ADMISSION_FILE=$admission_file DPUMESH_TOPOLOGY_FILE=$topology_file DPUMESH_CONTROLLER_KEY_DIR=$controller_key_dir DPUMESH_NODE_KEY_FILE=$node_key_file DPUMESH_NODE_KEY_PUBLIC_FILE=$node_key_public DPUMESH_CONTROLLER_SCOPE_URL=$scope_url DPUMESH_IDENTITY_TRUST_DOMAIN=$trust_domain DPUMESH_L7_DECISION_SVC=$l7_decision DPUMESH_L7_OPAQUE_SVC=$l7_opaque DPUMESH_L7_SVC=$l7_full DPUMESH_L7_NULL_TRACE=$l7_trace DPUMESH_L7_FRAMED_RR=$l7_rr DPUMESH_DPA_THREADS=$dpa_threads DPUMESH_RINGS_PER_POD=$rings DPUMESH_ARM_WORKERS=$workers ./dpumesh_dpu $DPU_PCI -l $log_level > $DPU_LOG 2>&1\"
 sleep 2
 pgrep -x dpumesh_dpu | head -1 || echo NO_PID
 LAUNCHER
@@ -980,6 +996,82 @@ prepare_trusted_registration() {
     "$BENCH_DIR/workload_attest.sh" prepare
 }
 
+# What the node agent needs to be the DPU's only control peer: where the DPU
+# receives feeds, where the controller serves them, and which Services the
+# derived L7 target feed names.
+export_agent_channel() {
+    export LINKERD_CONTROL_NAMESPACE="${LINKERD_CONTROL_NAMESPACE:-linkerd}"
+    export LINKERD_IDENTITY_SERVICE_ACCOUNT="${LINKERD_IDENTITY_SERVICE_ACCOUNT:-dpumesh-dpu}"
+    # The relay listens where the DPU is configured to reach it: the three
+    # control-plane addresses the DPU is given are the same three listeners.
+    LINKERD_GATEWAY_BIND="${LINKERD_GATEWAY_BIND:-${LINKERD_DST_ADDR%%:*}}"
+    LINKERD_GATEWAY_DST_PORT="${LINKERD_GATEWAY_DST_PORT:-${LINKERD_DST_ADDR##*:}}"
+    LINKERD_GATEWAY_POLICY_PORT="${LINKERD_GATEWAY_POLICY_PORT:-${LINKERD_POLICY_ADDR##*:}}"
+    LINKERD_GATEWAY_IDENTITY_PORT="${LINKERD_GATEWAY_IDENTITY_PORT:-${LINKERD_IDENTITY_ADDR##*:}}"
+    for value in "$LINKERD_GATEWAY_BIND" "$LINKERD_GATEWAY_DST_PORT" \
+                 "$LINKERD_GATEWAY_POLICY_PORT" "$LINKERD_GATEWAY_IDENTITY_PORT"; do
+        [ -n "$value" ] || { err "the control-plane relay addresses are not configured"; exit 1; }
+    done
+    export LINKERD_GATEWAY_BIND LINKERD_GATEWAY_DST_PORT
+    export LINKERD_GATEWAY_POLICY_PORT LINKERD_GATEWAY_IDENTITY_PORT
+    export DPUMESH_CONTROLLER_RELAY_PORT="${DPUMESH_CONTROLLER_RELAY_PORT:-28089}"
+    export DPUMESH_DPU_FEED_HOST="${DPUMESH_DPU_FEED_HOST:-192.168.100.2}"
+    export DPUMESH_DPU_FEED_PORT="${DPUMESH_DPU_FEED_PORT:-4788}"
+    export DPUMESH_NODE_RDMA_ADDR="${DPUMESH_NODE_RDMA_ADDR:-192.168.100.2:4791}"
+    export DPUMESH_IDENTITY_STAGE_DIR="${LINKERD_PROVISION_DIR:-$PROJ_ROOT/build/linkerd-identity}"
+    local controller_ip
+    controller_ip=$(kubectl get service dpumesh-controller -n "$NS" \
+        -o jsonpath='{.spec.clusterIP}' 2>/dev/null || true)
+    [ -n "$controller_ip" ] || { err "dpumesh-controller Service has no ClusterIP"; exit 1; }
+    export DPUMESH_CONTROLLER_URL="${DPUMESH_CONTROLLER_URL:-http://$controller_ip:8080}"
+    DPUMESH_AGENT_SERVICE_ARGS=""
+    if [ "${L7_BACKEND:-null}" = linkerd ]; then
+        DPUMESH_AGENT_SERVICE_ARGS=$("$BENCH_DIR/linkerd_service_registry.sh" service-args)
+    fi
+    export DPUMESH_AGENT_SERVICE_ARGS
+}
+
+# The feeds the DPU consumes, as the DPU holds them. What is waited on is the
+# agent's delivery landing, because after S6 that is the only way any of them
+# arrives — and the DPU build's preflight reads them.
+await_feeds() {
+    local waited=0 deadline="${FEED_DELIVERY_DEADLINE:-90}" want
+    want="${DPUMESH_MEMBERSHIP_FILE:-/etc/dpumesh/membership.v1} ${DPUMESH_TOPOLOGY_FILE:-/etc/dpumesh/topology.v1}"
+    [ "${L7_BACKEND:-null}" = linkerd ] && want="$want $(linkerd_service_target_file)"
+    step "=== Waiting for the node agent to deliver the DPU's feeds ==="
+    while [ "$waited" -lt "$deadline" ]; do
+        local missing="" f
+        for f in $want; do
+            ssh_dpu "test -s '$f'" 2>/dev/null || missing="${missing:+$missing }$f"
+        done
+        if [ -z "$missing" ]; then
+            info "every feed delivered after ${waited}s"
+            return 0
+        fi
+        sleep 3
+        waited=$((waited + 3))
+    done
+    err "the node agent did not deliver: $missing"
+    err "  see: kubectl logs -n $NS -l app=dpumesh-node-agent"
+    return 1
+}
+
+# One delivery interval plus slack. The bundle moves as a unit, so what is
+# waited on is the token the DPU ends up holding, not a file appearing.
+await_identity_delivery() {
+    local waited=0 deadline="${IDENTITY_DELIVERY_DEADLINE:-60}"
+    while [ "$waited" -lt "$deadline" ]; do
+        if ssh_dpu "test -s '$(linkerd_identity_dir)/token.txt'" 2>/dev/null; then
+            info "identity bundle delivered after ${waited}s"
+            return 0
+        fi
+        sleep 2
+        waited=$((waited + 2))
+    done
+    err "the node agent did not deliver an identity bundle in ${deadline}s"
+    return 1
+}
+
 # Render bench/k8s/pods.yaml with envsubst and apply it (replicas: 0).
 apply_manifest() {
     configure_host_numa
@@ -989,10 +1081,7 @@ apply_manifest() {
     export CTRL_PORT TCP_PORT HOST_PCI LIB_OUT BENCH_NUMA_NODE
     export DPUMESH_ATTEST_SOCKET
     export DPUMESH_RINGS_PER_POD="${DPUMESH_RINGS_PER_POD:-2}" \
-           ASYNC_THREADS="${ASYNC_THREADS:-4}" \
            BENCH_DST_SERVICES ECHO_13_SERVICE ECHO_14_SERVICE \
-           BENCH_PIPELINE="${BENCH_PIPELINE:-8}" BENCH_COALESCE="${BENCH_COALESCE:-0}" \
-           ECHO_THREADS="${ECHO_THREADS:-3}" \
            DMESH_PRELOAD_DEBUG="${DMESH_PRELOAD_DEBUG:-0}" \
            BENCH_REACTORS="${BENCH_REACTORS:-8}"
     # A killed container keeps no log, so a sanitizer report has to land on the
@@ -1104,16 +1193,10 @@ deploy() {
     prepare_trusted_registration
     apply_manifest
     if [ "${L7_BACKEND:-null}" = linkerd ]; then
-        resolve_l7_service_ids
-        "$BENCH_DIR/linkerd_service_registry.sh" start
+        resolve_l7_services
+        "$BENCH_DIR/linkerd_service_registry.sh" validate
     fi
     sync_sources
-    # The staticlib the DPU binary links has to exist before it is linked.
-    if [ "${L7_BACKEND:-null}" = linkerd ]; then
-        sync_linkerd_sources
-        build_linkerd_artifacts
-    fi
-    build_dpu
     build_host
     build_bench_binaries
     if [ "$BENCH_DEPLOY_SCOPE" = all ] || [ "$BENCH_DEPLOY_SCOPE" = grpc ]; then
@@ -1121,15 +1204,26 @@ deploy() {
     fi
     build_images
     [ "$BENCH_DEPLOY_SCOPE" = core ] || ensure_envoy_image
+    # The control plane comes up before anything that reads what it publishes.
+    # The DPU build's preflight checks the feeds the DPU will consume, and
+    # every one of them now arrives through the agent, so the agent has to be
+    # running — with its image built — before that preflight.
+    "$BENCH_DIR/dpumesh_controller.sh" prepare
+    IMG_CONTROLLER="$IMG_CONTROLLER" "$BENCH_DIR/dpumesh_controller.sh" deploy
+    # After every root-owned keyring is provisioned: the hop's account owns the
+    # feed directory, and a keyring created under it would take that back.
+    "$BENCH_DIR/workload_attest.sh" install-hop
+    export_agent_channel
     IMG_WORKLOAD_AGENT="$IMG_WORKLOAD_AGENT" "$BENCH_DIR/workload_attest.sh" deploy
-    "$BENCH_DIR/workload_attest.sh" membership-start
+    await_feeds || exit 1
+    # The staticlib the DPU binary links has to exist before it is linked.
     if [ "${L7_BACKEND:-null}" = linkerd ]; then
-        IMG_LINKERD_GATEWAY="$IMG_LINKERD_GATEWAY" "$BENCH_DIR/linkerd_cp_gateway.sh" start
-        "$BENCH_DIR/linkerd_identity.sh" start-agent
+        sync_linkerd_sources
+        build_linkerd_artifacts
     fi
+    build_dpu
     start_dpu
     start_pods
-    [ "${L7_BACKEND:-null}" = linkerd ] && "$BENCH_DIR/linkerd_service_registry.sh" sync
     [ "${L7_BACKEND:-null}" = linkerd ] && wait_linkerd_ready
     pin_pods fair
     [ "${L7_BACKEND:-null}" = linkerd ] && validate_linkerd_session
@@ -1148,7 +1242,7 @@ set_admission() {
         *) err "admission state must be open or drain"; exit 1 ;;
     esac
     ssh_dpu "printf '%s\n' '$state' > /tmp/dpumesh-admission.in && \
-        echo '$DPU_PASS' | sudo -S -p '' install -d -o root -g root -m 0755 '${path%/*}' && \
+        echo '$DPU_PASS' | sudo -S -p '' mkdir -p '${path%/*}' && \
         echo '$DPU_PASS' | sudo -S -p '' install -o root -g root -m 0644 /tmp/dpumesh-admission.in '$path.new' && \
         echo '$DPU_PASS' | sudo -S -p '' mv '$path.new' '$path' && \
         rm -f /tmp/dpumesh-admission.in" >/dev/null
@@ -1161,6 +1255,30 @@ admission_events() {
     local state="$1" admin="${LINKERD_ADMIN_ADDR:-127.0.0.1:4191}" seen
     seen=$(ssh_dpu "curl -s $admin/metrics | sed -n 's/^dmesh_control_events_total{kind=\"admission\",reason=\"$state\"} //p'" 2>/dev/null | tr -d '[:space:]')
     printf '%s\n' "${seen:-0}"
+}
+
+# S9's observation gate. Enforcement must not stand on an unobserved
+# dependency, so what the policy controller actually serves to a caller
+# authenticated as `dpumesh-dpu` is recorded before enforcement is trusted:
+# whether it serves a policy, denies the request, or serves an empty one.
+#
+# The verdict counters separate the three. `admitted` and `denied` are
+# decisions taken against a served policy. `no-policy` is the dependency not
+# answering — a controller that denies the caller, or one that serves an empty
+# policy the union rule then refuses, both land here, and the proxy's own
+# inbound policy family distinguishes them.
+observe_policy() {
+    need_env
+    local admin="${LINKERD_ADMIN_ADDR:-127.0.0.1:4191}"
+    step "=== Observing what the policy controller serves to dpumesh-dpu ==="
+    validate_linkerd_session || true
+    echo "--- inbound verdicts ---"
+    ssh_dpu "curl -s $admin/metrics | grep -E '^dmesh_control_events_total\{kind=\"inbound\"' || true"
+    echo "--- inbound policy watches ---"
+    ssh_dpu "curl -s $admin/metrics | grep -E '^inbound_(http_)?(policy|server)' || true"
+    echo "--- control-plane policy client ---"
+    ssh_dpu "curl -s $admin/metrics | grep -E '^control_policy' || true"
+    info "record the three blocks above with the deploy they were taken from"
 }
 
 await_admission() {
@@ -1202,8 +1320,11 @@ rotate_identity() {
     unset drain_before
     info "drained after ${waited}s"
 
-    step "=== Installing identity material ==="
-    "$BENCH_DIR/linkerd_identity.sh" install-dpu
+    step "=== Re-provisioning identity material ==="
+    # The node agent mints the token and delivers the bundle, so rotation is
+    # provisioning the long-lived half and waiting one delivery interval.
+    "$BENCH_DIR/linkerd_identity.sh" refresh-token
+    await_identity_delivery || exit 1
 
     step "=== Restarting with the new material ==="
     start_dpu
@@ -1244,10 +1365,8 @@ cleanup() {
     info "Deleting namespace $NS"
     kubectl delete ns "$NS" --ignore-not-found=true 2>/dev/null || true
     stop_dpu
-    "$BENCH_DIR/workload_attest.sh" membership-stop || true
     "$BENCH_DIR/workload_attest.sh" stop || true
-    "$BENCH_DIR/linkerd_service_registry.sh" stop >/dev/null 2>&1 || true
-    "$BENCH_DIR/linkerd_identity.sh" stop-agent >/dev/null 2>&1 || true
+    "$BENCH_DIR/dpumesh_controller.sh" stop >/dev/null 2>&1 || true
 }
 
 show_logs() {
@@ -1717,6 +1836,7 @@ case "$CMD" in
     restart)   need_env; start_dpu ;;
     rotate-identity) rotate_identity ;;
     admission) need_env; set_admission "${1:?usage: $0 admission open|drain}" ;;
+    policy-observe) observe_policy ;;
     grpcbuild) build_grpc_apps ;;
     linkerdbuild) need_env; sync_linkerd_sources; build_linkerd_artifacts; preflight_linkerd ;;
     # NOTE: `restart` is valid only while no pod is meshed, and there is no

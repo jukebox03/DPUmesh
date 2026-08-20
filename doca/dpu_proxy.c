@@ -14,6 +14,8 @@
 #include "workload_grant.h"
 #include "dpu_worker.h"
 #include "comch_server.h"
+#include "peer_channel.h"
+#include "control_scope.h"
 #include "dpa_common.h"
 #include "buffer.h"
 #include <dpumesh/dmesh_topology.h>
@@ -60,6 +62,10 @@ DOCA_LOG_REGISTER(DPU_PROXY);
 #define PX_ACK_RUN_MAX 0xFFFFu
 
 #define PX_DST_DEFER        (-2)
+/* Routable only across the peer channel: the held generation names a backend
+ * on another node and none here. Distinct from terminal -1 (no replicas
+ * anywhere) — a missing local replica costs latency, never the connection. */
+#define PX_DST_REMOTE       (-3)
 
 /* Every ARM data worker owns an L7 layer, so no request needs a fixed owner. */
 #define PX_L7_WORKER_ALL    (-1)
@@ -334,6 +340,10 @@ struct px_conn {
      * unpinned. */
     int32_t  pinned_backend;
     int16_t  pinned_cluster;
+    /* The destination-side admission verdict, decided once per stream: 0 not
+     * asked, 1 admitted, -1 refused, against the destination in inbound_dst. */
+    int8_t   inbound_verdict;
+    int32_t  inbound_dst;
 };
 
 /* A data worker owns its DOCA resources and regions where region % A == id.
@@ -374,10 +384,23 @@ struct px_worker_state {
     int in_l7_parse;
 };
 
+/* Per-Service protection class, cached from the generation's `protected=` set
+ * so a decision costs a byte read rather than a table walk. Refreshed by the
+ * control thread on adoption; PX_PROTECT_UNKNOWN until one is held. */
+enum px_protection {
+    PX_PROTECT_UNKNOWN = 0,
+    PX_PROTECT_STRICT,
+    PX_PROTECT_RELAXED,
+};
+
 struct dmesh_proxy {
     uint8_t  svc_mode[POD_ID_SPACE];     /* service id → enum px_l7_mode */
+    uint8_t  svc_protected[POD_ID_SPACE];/* service id → enum px_protection */
     int      l7_attached;                /* some service selects a mode with an L7 layer */
     int      l7_worker;                  /* ARM worker owning the L7 layer's session state */
+    /* The default for a Service the generation does not grade. A Service it
+     * grades carries its own class, which is what makes the choice
+     * un-inferable from Pod input. */
     int      l7_fail_closed;             /* a declined L7 connection is refused, not forwarded */
     uint32_t sg_pieces_max;
 
@@ -419,6 +442,26 @@ struct dmesh_proxy {
     atomic_ullong stat_l7_stray_release; /* releases against a conn holding nothing */
     atomic_ullong l7_report_ns;          /* when the L7 counters were last reported */
     atomic_ullong l7_report_mark;        /* what they summed to then */
+    /* Poisoned connections and peer refusals. A decision a peer can provoke
+     * must be visible as a rate, not only as a log line. */
+    atomic_ullong stat_poison;
+    atomic_ullong stat_peer_refused[DMESH_PEER_REFUSE_MAX];
+    /* Inbound admission, by outcome. A refusal and an absent policy are
+     * different facts and are never summed: the first is a decision, the
+     * second is a dependency that has not answered. */
+    atomic_ullong stat_inbound_admitted;
+    atomic_ullong stat_inbound_denied;
+    atomic_ullong stat_inbound_no_policy;
+    /* A protected Service calling an unprotected one, refused because the
+     * callee cannot be authenticated. */
+    atomic_ullong stat_mixed_callee_unprotected;
+    atomic_ullong peer_report_ns;
+    atomic_ullong peer_report_mark;
+
+    /* The peer channels this DPU holds, and the node it is. NULL until a
+     * transport is configured; every path below then treats a remote
+     * destination as unreachable, which is the state before S7 as well. */
+    struct dmesh_peer_table *peers;
 };
 
 static inline uint64_t px_stat_inc(atomic_ullong *counter)
@@ -723,6 +766,8 @@ static struct px_conn *px_conn_get(struct dmesh_proxy *px, int32_t pod, uint16_t
     c->pub.dst_service = DMESH_SVC_NONE;
     c->pinned_backend = -1;                /* unpinned until the first LB pick */
     c->pinned_cluster = DMESH_SVC_NONE;
+    c->inbound_verdict = 0;
+    c->inbound_dst = DMESH_POD_BLANK;
     uint32_t h = px_conn_hash(pod, port);
     c->hnext = px_cur_worker->buckets[h];
     px_cur_worker->buckets[h] = c;
@@ -924,6 +969,8 @@ static int px_fin_to_sender(struct objects *objs, struct px_conn *c) {
 }
 
 static void px_stall(struct px_conn *c);
+static void px_peer_pod_gone(struct objects *objs, int32_t pod_id);
+static int px_conn_admitted(struct objects *objs, struct px_conn *c, int32_t dst_pod);
 
 /* Terminate a connection whose other pod disappeared. The surviving sender is
  * owed an EOF; if the unit pool is temporarily empty, retain only the small
@@ -960,6 +1007,12 @@ px_worker_quiesce_pod_connections(struct objects *objs, int32_t pod_id)
     struct px_worker_state *worker_state = px_cur_worker;
     struct dpu_conntrack *ct = worker_state->ct;
     int closed = 0;
+
+    /* A destination on another node cannot see this Pod leave, so the source
+     * has to say. Within a node this sweep is what sees it; across nodes the
+     * same event is a message, and it is emitted from the same place so the
+     * two cannot diverge. */
+    px_peer_pod_gone(objs, pod_id);
 
     for (uint32_t p = DMESH_UPORT_BASE; p < 65536u; p++) {
         struct dpu_upstream *u = &ct->upstream[p];
@@ -1010,6 +1063,8 @@ px_worker_quiesce_pod_connections(struct objects *objs, int32_t pod_id)
 static void px_poison(struct objects *objs, struct px_conn *c, const char *why) {
     if (c->dead)
         return;
+    px_stat_inc(&objs->proxy->stat_poison);
+    l7_control_event("peer", "poison");
     DOCA_LOG_ERR("proxy: poisoning conn (%d:%u): %s", c->pub.src_pod, c->pub.src_port, why);
     px_l7_close(objs, c, 0);                   /* the window is about to go */
     px_drop_window(objs, c, why);
@@ -1132,7 +1187,12 @@ static void px_eof_to_origin(struct objects *objs, const struct px_unit *fu) {
                      (int)fu->src_pod_id, fu->org_port);
 }
 
-/* Resolve a byte stream to its pinned backend. A dead pin is terminal. */
+/* Resolve a byte stream to its pinned backend. A dead pin is terminal.
+ *
+ * Local endpoints are preferred because they are a DMA away; a Service with no
+ * local replica falls to the remote set and is reached over the peer channel.
+ * Locality is a preference and never a constraint — having no local replica
+ * costs latency, never the connection. */
 static int32_t px_resolve_backend(struct objects *objs, struct px_conn *c,
                                   int16_t cluster) {
     if (c->pinned_backend >= 0 && c->pinned_cluster == cluster) {
@@ -1144,8 +1204,9 @@ static int32_t px_resolve_backend(struct objects *objs, struct px_conn *c,
     if (b >= 0) {
         c->pinned_backend = b;
         c->pinned_cluster = cluster;
+        return b;
     }
-    return b;
+    return dmesh_service_has_remote(objs, cluster) ? PX_DST_REMOTE : b;
 }
 
 /* A unit with everything but its source bytes: the destination resolved, the
@@ -1193,6 +1254,20 @@ static int px_unit_prepare(struct objects *objs, struct px_conn *c,
         if (dst_pod == PX_DST_DEFER)
             /* No codec named a destination → byte stream → conn-pinned LB. */
             dst_pod = px_resolve_backend(objs, c, c->pub.dst_service);
+        if (dst_pod == PX_DST_REMOTE) {
+            /* The Service is healthy somewhere else. Carrying it needs a peer
+             * channel; without a transport this end holds none, so the stream
+             * is refused by its own reason rather than counted as a Service
+             * with no replicas. */
+            px_peer_event(objs, dmesh_peer_refusal_name(DMESH_PEER_REFUSE_TRANSPORT));
+            static atomic_ullong remote_only_drops;
+            uint64_t drops = px_stat_inc(&remote_only_drops);
+            if (((drops - 1u) & 0xFFFFu) == 0)
+                DOCA_LOG_ERR("proxy: svc=%d has only remote replicas and no peer "
+                             "channel — %u bytes dropped (total %llu)",
+                             c->pub.dst_service, len, (unsigned long long)drops);
+            return -1;
+        }
         if (dst_pod < 0) {
             DOCA_LOG_ERR("proxy: unroutable seg (svc=%d) — %u bytes dropped",
                          c->pub.dst_service, len);
@@ -1212,6 +1287,15 @@ static int px_unit_prepare(struct objects *objs, struct px_conn *c,
     }
 
     if (!reverse && !c->pub.is_reply) {
+        /* The destination decides admission before its Pod sees a byte. The
+         * same path serves an intra-node and a cross-node stream: both arrive
+         * with a verified source address and identity, and neither takes any
+         * part of either from a Pod. */
+        if (!px_conn_admitted(objs, c, dst_pod)) {
+            DOCA_LOG_WARN("proxy: inbound policy refused (%d:%u) -> pod %d",
+                          c->pub.src_pod, c->pub.src_port, dst_pod);
+            return -1;
+        }
         uint16_t uP = dpu_upstream_find(ct, c->pub.src_pod, c->pub.src_port, dst_pod);
         int created = 0;
         if (uP == 0) {
@@ -1589,6 +1673,132 @@ void px_l7_stats_report(struct objects *objs, int worker_id)
     px_l7_log_fallbacks(px, worker_id);
 }
 
+/* ====== peer channels ====== */
+
+/* Every refusal is counted by reason and surfaced twice: through the adapter's
+ * control-event family where one runs, and in the worker stat line always —
+ * the log is the only surface a null-L7 deployment has. */
+void px_peer_event(struct objects *objs, const char *reason)
+{
+    struct dmesh_proxy *px = objs ? objs->proxy : NULL;
+    if (!px)
+        return;
+    for (int i = 0; i < DMESH_PEER_REFUSE_MAX; i++) {
+        if (strcmp(reason, dmesh_peer_refusal_name((enum dmesh_peer_refusal)i)) != 0)
+            continue;
+        px_stat_inc(&px->stat_peer_refused[i]);
+        break;
+    }
+    l7_control_event("peer", reason);
+}
+
+/* Tell every peer holding streams from this Pod that it is gone. The message
+ * carries the signed Pod UID, which is the key a destination sweeps on, and
+ * the source has to send it because a destination cannot observe the
+ * departure itself. */
+static void px_peer_pod_gone(struct objects *objs, int32_t pod_id)
+{
+    struct dmesh_proxy *px = objs ? objs->proxy : NULL;
+    if (!px || !px->peers)
+        return;
+    struct pod_state *pod = find_pod_by_id(objs, pod_id);
+    if (!pod || pod->pod_uid[0] == '\0')
+        return;
+    struct dmesh_peer_pod_gone gone;
+    memset(&gone, 0, sizeof(gone));
+    snprintf(gone.pod_uid, sizeof(gone.pod_uid), "%s", pod->pod_uid);
+    for (uint32_t i = 0; i < DMESH_CHANNEL_MAX; i++) {
+        struct dmesh_peer_channel *channel = &px->peers->channels[i];
+        if (!channel->in_use || channel->state != DMESH_PEER_OPEN)
+            continue;
+        uint8_t frame[sizeof(struct dmesh_peer_msg_header) + sizeof(gone)];
+        long built = dmesh_peer_frame_build(frame, sizeof(frame),
+                                            DMESH_PEER_MSG_POD_GONE,
+                                            channel->incarnation, 0, &gone, sizeof(gone));
+        if (built < 0 || !px->peers->transport || !px->peers->transport->send ||
+            px->peers->transport->send(channel->conn, frame, (size_t)built) != built)
+            px_peer_event(objs, dmesh_peer_refusal_name(DMESH_PEER_REFUSE_TRANSPORT));
+    }
+}
+
+void px_peer_generation_changed(struct objects *objs)
+{
+    struct dmesh_proxy *px = objs ? objs->proxy : NULL;
+    if (!px || !px->peers)
+        return;
+    dmesh_peer_table_rebind(px->peers);
+}
+
+/* Release one extent whose destination was remote.
+ *
+ * Within a node `px_engine_emit` releases custody on the local batch
+ * completion; across a node boundary that release is deferred and the
+ * destination's STREAM_ACK is what performs it, because a completion at this
+ * end says only that the bytes left. The two custody domains keep their own
+ * shapes: an L4 piece returns its bytes to the arrival's custody counter, so
+ * the sender's TX_ACK follows; an L7 arena chunk returns to the arena, which
+ * is what lets the connections that never spoke to that peer keep allocating.
+ */
+void px_peer_release(struct objects *objs, uint8_t kind, void *cookie, uint32_t bytes)
+{
+    struct dmesh_proxy *px = objs ? objs->proxy : NULL;
+    if (!px || !cookie)
+        return;
+    if (kind == DMESH_PEER_CUSTODY_L7) {
+        px_chunk_free(px, (struct px_chunk *)cookie);
+        return;
+    }
+    px_custody_sub(objs, (struct px_arrival *)cookie, bytes);
+}
+
+/* The worker stat line for the peer surface. Reported when it moves, at most
+ * every PX_L7_REPORT_NS, on the same tick as the L7 audit. */
+void px_peer_stats_report(struct objects *objs, int worker_id)
+{
+    struct dmesh_proxy *px = objs ? objs->proxy : NULL;
+    if (!px)
+        return;
+    uint64_t now = px_monotonic_ns();
+    uint64_t last = atomic_load_explicit(&px->peer_report_ns, memory_order_relaxed);
+    if (last && now - last < PX_L7_REPORT_NS)
+        return;
+    uint64_t mark = px_stat_get(&px->stat_poison) +
+                    px_stat_get(&px->stat_inbound_admitted) +
+                    px_stat_get(&px->stat_inbound_denied) +
+                    px_stat_get(&px->stat_inbound_no_policy) +
+                    px_stat_get(&px->stat_mixed_callee_unprotected);
+    for (int i = 0; i < DMESH_PEER_REFUSE_MAX; i++)
+        mark += px_stat_get(&px->stat_peer_refused[i]);
+    uint64_t seen = atomic_load_explicit(&px->peer_report_mark, memory_order_relaxed);
+    atomic_store_explicit(&px->peer_report_ns, now, memory_order_relaxed);
+    if (mark == seen)
+        return;
+    atomic_store_explicit(&px->peer_report_mark, mark, memory_order_relaxed);
+
+    char by[320];
+    int n = 0;
+    for (int i = 1; i < DMESH_PEER_REFUSE_MAX && n >= 0 && (size_t)n < sizeof(by); i++) {
+        uint64_t value = px_stat_get(&px->stat_peer_refused[i]);
+        if (!value)
+            continue;
+        int w = snprintf(by + n, sizeof(by) - (size_t)n, "%s%s=%llu", n ? " " : "",
+                         dmesh_peer_refusal_name((enum dmesh_peer_refusal)i),
+                         (unsigned long long)value);
+        if (w < 0)
+            break;
+        n += w;
+    }
+    DOCA_LOG_WARN("proxy: worker %d peer poison=%llu refused=%s inbound "
+                  "admitted=%llu denied=%llu no-policy=%llu "
+                  "mixed-callee-unprotected=%llu",
+                  worker_id,
+                  (unsigned long long)px_stat_get(&px->stat_poison), n ? by : "none",
+                  (unsigned long long)px_stat_get(&px->stat_inbound_admitted),
+                  (unsigned long long)px_stat_get(&px->stat_inbound_denied),
+                  (unsigned long long)px_stat_get(&px->stat_inbound_no_policy),
+                  (unsigned long long)px_stat_get(&px->stat_mixed_callee_unprotected));
+}
+
 static void px_l7_apply_release(struct objects *objs, struct px_conn *c);
 
 /* Tell the L7 layer to drop every reference into this connection's staging, and
@@ -1629,6 +1839,41 @@ static void px_l7_close(struct objects *objs, struct px_conn *c, int eof) {
 }
 
 /* The identity DPUmesh can state about a connection. */
+/* The trust domain the source identity is spelled in. Linkerd names a
+ * workload `<sa>.<ns>.serviceaccount.identity.<trust-domain>`, and the same
+ * spelling has to come out of here or an `AuthorizationPolicy` naming a
+ * ServiceAccount matches nothing. */
+static const char *px_trust_domain(void) {
+    const char *domain = getenv("DPUMESH_IDENTITY_TRUST_DOMAIN");
+    return domain && *domain ? domain : "linkerd.cluster.local";
+}
+
+/* The source Pod's real cluster address, in host byte order. Nothing
+ * synthetic: an authorization's `networks` clause is matched before its
+ * identity clause and an empty match denies, so a made-up address would make
+ * every realistic policy refuse every connection. */
+static uint32_t px_pod_ipv4(const struct pod_state *pod) {
+    if (!pod || pod->pod_ip[0] == '\0')
+        return 0;
+    unsigned a, b, cc, d;
+    if (sscanf(pod->pod_ip, "%u.%u.%u.%u", &a, &b, &cc, &d) != 4 ||
+        a > 255 || b > 255 || cc > 255 || d > 255)
+        return 0;
+    return (a << 24) | (b << 16) | (cc << 8) | d;
+}
+
+/* The verified source identity, from the signed claims a registration
+ * retained. Every part of it is the node agent's; a Pod states none of it. */
+static void px_fill_source_identity(const struct pod_state *pod, char *out, size_t len) {
+    out[0] = '\0';
+    if (!pod || pod->service_account[0] == '\0' || pod->namespace_name[0] == '\0')
+        return;
+    int written = snprintf(out, len, "%s.%s.serviceaccount.identity.%s",
+                           pod->service_account, pod->namespace_name, px_trust_domain());
+    if (written < 0 || (size_t)written >= len)
+        out[0] = '\0';                     /* a truncated identity is not one */
+}
+
 static void px_l7_fill_flow(struct objects *objs, const struct px_conn *c,
                             struct dmesh_l7_flow *flow) {
     memset(flow, 0, sizeof(*flow));
@@ -1639,11 +1884,159 @@ static void px_l7_fill_flow(struct objects *objs, const struct px_conn *c,
     flow->peer_pod    = c->pub.is_reply ? c->pub.peer_pod : c->pub.src_pod;
     flow->mode        = c->l7_mode;
     flow->is_reply    = (uint8_t)(c->pub.is_reply != 0);
-    /* Workload bound to this Pod's registration, never read from payload. */
+    /* Workload, address and identity all come from this Pod's registration,
+     * never from payload. */
     struct pod_state *sp = find_pod_by_id(objs, c->pub.src_pod);
     if (sp)
         memcpy(flow->workload, sp->workload, sizeof(flow->workload));
     flow->workload[sizeof(flow->workload) - 1] = '\0';
+    flow->src_ip = px_pod_ipv4(sp);
+    px_fill_source_identity(sp, flow->source_identity, sizeof(flow->source_identity));
+}
+
+/* Adopt the generation's protection grading. Called by the control thread on
+ * each adoption; a Service the generation stops naming falls back to the
+ * process-wide default rather than silently changing class. */
+void px_protection_refresh(struct objects *objs)
+{
+    struct dmesh_proxy *px = objs ? objs->proxy : NULL;
+    if (!px)
+        return;
+    for (int svc = 0; svc < POD_ID_SPACE; svc++) {
+        int graded = dmesh_topology_service_protection(objs, (int16_t)svc);
+        uint8_t class = graded < 0 ? PX_PROTECT_UNKNOWN
+                                   : (graded ? PX_PROTECT_STRICT : PX_PROTECT_RELAXED);
+        __atomic_store_n(&px->svc_protected[svc], class, __ATOMIC_RELEASE);
+    }
+}
+
+/* Is this Service protected?
+ *
+ * Every registration is attested, so protection grades the interaction rules
+ * rather than whether a Pod is attested. A Service the generation grades
+ * carries its own class; one it does not grade falls back to the process-wide
+ * default, which is what a deployment without a controller has. No Pod input
+ * reaches here, so a Pod cannot place its Service on the relaxed side. */
+static int px_service_protected(struct objects *objs, int16_t svc)
+{
+    struct dmesh_proxy *px = objs->proxy;
+    if (svc < 0 || svc >= POD_ID_SPACE)
+        return px->l7_fail_closed;
+    uint8_t class = __atomic_load_n(&px->svc_protected[svc], __ATOMIC_ACQUIRE);
+    if (class == PX_PROTECT_STRICT)
+        return 1;
+    if (class == PX_PROTECT_RELAXED)
+        return 0;
+    return px->l7_fail_closed;
+}
+
+/* Does inbound enforcement apply to this Service?
+ *
+ * Only where the generation grades it. This is deliberately not the fallback
+ * above: a deployment with no controller holds no cluster authority to grade
+ * with, and refusing streams there would refuse traffic no policy ever named.
+ * The process-wide default answers a different question — whether a stream the
+ * L7 layer declined may be carried without the policy its Service selected —
+ * and that question exists whether or not a generation is held. */
+static int px_inbound_strict(struct objects *objs, int16_t svc)
+{
+    struct dmesh_proxy *px = objs->proxy;
+    if (svc < 0 || svc >= POD_ID_SPACE)
+        return 0;
+    return __atomic_load_n(&px->svc_protected[svc], __ATOMIC_ACQUIRE) == PX_PROTECT_STRICT;
+}
+
+/* Ask the destination Pod's inbound policy whether one stream is admitted.
+ *
+ * The subject is the destination — its workload names the policy, its address
+ * and port name the watch — and the client is the verified source: its signed
+ * cluster IP and the identity built from its signed claims. The same call
+ * serves an intra-node and a cross-node stream, because both arrive with the
+ * same two verified inputs and neither takes anything from the Pod.
+ *
+ * Returns 1 to admit, 0 to refuse, and -1 when no verdict is available. */
+static int px_l7_inbound_admits(struct objects *objs, const struct px_conn *c,
+                                int32_t dst_pod_id) {
+    struct pod_state *dp = find_pod_by_id(objs, dst_pod_id);
+    if (!dp || dp->workload[0] == '\0') {
+        /* No subject: a destination with no registered workload names no
+         * policy. Counted rather than passed over, because a verdict that was
+         * never asked for is not the same as one that admitted. */
+        px_stat_inc(&objs->proxy->stat_inbound_no_policy);
+        l7_control_event("inbound", "no-subject");
+        return -1;
+    }
+    /* A DPU asks the control plane only about Pods the generation places on
+     * its node, and the controller is what decides that. A Pod it has not
+     * allowed is not asked about at all: the question would be reach beyond
+     * this node, which is what the credential's scope exists to deny. */
+    if (__atomic_load_n(&dp->scope_state, __ATOMIC_ACQUIRE) != DMESH_SCOPE_ALLOWED) {
+        px_stat_inc(&objs->proxy->stat_inbound_no_policy);
+        l7_control_event("inbound", "out-of-scope");
+        return -1;
+    }
+
+    struct dmesh_l7_flow flow;
+    px_l7_fill_flow(objs, c, &flow);
+    memcpy(flow.workload, dp->workload, sizeof(flow.workload));
+    flow.workload[sizeof(flow.workload) - 1] = '\0';
+    flow.dst_ip = px_pod_ipv4(dp);
+    /* An inbound policy is watched per Pod and port, and the port it names is
+     * the one the destination serves — the client's own port names nothing the
+     * policy controller has heard of. */
+    flow.dst_port = dmesh_topology_service_port(objs, c->pub.dst_service);
+    if (flow.dst_port == 0) {
+        px_stat_inc(&objs->proxy->stat_inbound_no_policy);
+        l7_control_event("inbound", "no-port");
+        return -1;
+    }
+
+    int verdict = l7_inbound_verdict(px_cur_worker->id, &flow);
+    if (verdict == DMESH_L7_VERDICT_ADMIT) {
+        px_stat_inc(&objs->proxy->stat_inbound_admitted);
+        /* Counted like a refusal, and for the same reason: the destination
+         * emits the inbound family at connection level, and a verdict that
+         * admitted is as much a fact about this enforcement point as one that
+         * refused. Without it a healthy run is indistinguishable from an
+         * enforcement point that never ran. */
+        l7_control_event("inbound", "admitted");
+        return 1;
+    }
+    if (verdict == DMESH_L7_VERDICT_REFUSE) {
+        px_stat_inc(&objs->proxy->stat_inbound_denied);
+        l7_control_event("inbound", "denied");
+        return 0;
+    }
+    px_stat_inc(&objs->proxy->stat_inbound_no_policy);
+    l7_control_event("inbound", "no-policy");
+    return -1;
+}
+
+/* Admission for one stream, decided once and remembered on the connection.
+ *
+ * A policy change does not disturb an established stream — the gate is that
+ * admission changes within one watch update and nothing is admitted while the
+ * rule denies, which is a statement about new streams and is what a sidecar
+ * mesh does. Caching the verdict per (connection, destination) is that rule.
+ */
+static int px_conn_admitted(struct objects *objs, struct px_conn *c, int32_t dst_pod) {
+    if (c->inbound_dst == dst_pod && c->inbound_verdict != 0)
+        return c->inbound_verdict > 0;
+
+    int verdict = px_l7_inbound_admits(objs, c, dst_pod);
+    int strict = px_inbound_strict(objs, c->pub.dst_service);
+    struct pod_state *sp = find_pod_by_id(objs, c->pub.src_pod);
+    int caller_strict = sp ? px_inbound_strict(objs, (int16_t)sp->service_id) : 0;
+    int mixed = 0;
+    int admitted = dmesh_inbound_admits(verdict, strict, caller_strict, &mixed);
+    if (mixed) {
+        px_stat_inc(&objs->proxy->stat_mixed_callee_unprotected);
+        l7_control_event("inbound", "mixed-callee-unprotected");
+    }
+
+    c->inbound_dst = dst_pod;
+    c->inbound_verdict = admitted ? 1 : -1;
+    return admitted;
 }
 
 _Static_assert(PX_L7_DECISION == DMESH_L7_MODE_DECISION &&
@@ -1676,7 +2069,7 @@ static int px_l7_open_conn(struct objects *objs, struct px_conn *c) {
                           "(total %llu)",
                           c->pub.src_pod, c->pub.src_port, c->pub.dst_service,
                           px_l7_fallback_name[why],
-                          objs->proxy->l7_fail_closed ?
+                          px_service_protected(objs, c->pub.dst_service) ?
                               "refusing the connection" :
                               "forwarding at L4 without policy",
                           (unsigned long long)n);
@@ -1758,7 +2151,7 @@ static int px_l7_decide(struct objects *objs, struct px_conn *c) {
          * The admission drain is deliberately not consulted — a decision-mode
          * connection builds no session and holds no identity material, so it is
          * not what a drain waits for. */
-        if (objs->proxy->l7_fail_closed) {
+        if (px_service_protected(objs, c->pub.dst_service)) {
             l7_control_event("admission", "no-verdict");
             if (((n - 1u) & 0xFFFu) == 0)
                 DOCA_LOG_WARN("proxy: L7 layer gave no verdict for conn (%d:%u) "
@@ -1795,10 +2188,11 @@ static void px_parse_l7(struct objects *objs, struct px_conn *c) {
     if (!c->l7_open && !px_l7_open_conn(objs, c)) {
         c->l7_mode = PX_L7_NONE;               /* nothing handed over yet */
         c->l7_closed = 1;
-        if (objs->proxy->l7_fail_closed) {
+        if (px_service_protected(objs, c->pub.dst_service)) {
             /* The service selected a policy layer that did not take the
              * connection. Forwarding it here would carry the stream without
-             * that policy, so the stream ends instead. */
+             * that policy, so the stream ends instead. Which Services this
+             * applies to is the generation's grading, never Pod input. */
             px_poison(objs, c, "l7 layer declined a protected service");
             return;
         }
@@ -1857,11 +2251,11 @@ static struct px_conn *px_l7_caller_conn(int worker_id, uint64_t conn,
     return c;
 }
 
-/* Verify a feed document the adapter read, against the registration keyring.
+/* Verify a feed document the adapter read, against the feed keyring.
  * Returns the length of the signed prefix, or -1 when the document is unsigned
  * or its signature does not verify. The adapter parses only that prefix. */
 long dmesh_l7_verify_feed(const uint8_t *document, size_t length) {
-    const char *key_dir = getenv("DPUMESH_REGISTRATION_KEY_DIR");
+    const char *key_dir = getenv("DPUMESH_FEED_KEY_DIR");
     size_t signed_length = 0;
     if (key_dir == NULL || *key_dir == '\0' || document == NULL)
         return -1;
@@ -1869,6 +2263,70 @@ long dmesh_l7_verify_feed(const uint8_t *document, size_t length) {
                           &signed_length) != DMESH_FEED_OK)
         return -1;
     return (long)signed_length;
+}
+
+int32_t dmesh_l7_svc_for_name(int worker_id, const char *key) {
+    struct px_worker_state *worker_state = px_cur_worker;
+    if (!worker_state || worker_state->id != worker_id || !key)
+        return -1;
+    return (int32_t)dmesh_topology_interned_id(worker_state->objs, key);
+}
+
+/* Say why an endpoint the balancer selected named no live destination. The
+ * three outcomes are different facts and a decline that does not say which is
+ * a decline nobody can act on. Throttled: a balancer retries. */
+static int32_t px_endpoint_declined(const char *pod_uid, int32_t outcome,
+                                    const char *why) {
+    static atomic_ullong declines;
+    uint64_t n = px_stat_inc(&declines);
+    if (((n - 1u) & 0x3Fu) == 0)
+        DOCA_LOG_WARN("proxy: selected endpoint %s declined (%s) — %s (total %llu)",
+                      pod_uid,
+                      outcome == DMESH_L7_ENDPOINT_STALE ? "stale" :
+                      outcome == DMESH_L7_ENDPOINT_REMOTE ? "remote" : "unresolved",
+                      why, (unsigned long long)n);
+    return outcome;
+}
+
+/* Resolve the Pod UID behind an endpoint the balancer selected to the live
+ * destination it names.
+ *
+ * DPUmesh chooses the backend Pod itself on the data path, so a Linkerd-chosen
+ * endpoint has to be translated rather than dialled — and every negative
+ * outcome is a distinct decline, never a round robin or a TCP fallback. The
+ * order below is the order the facts are known in: where the generation puts
+ * the Pod, and then whether this node is serving it. */
+int32_t dmesh_l7_pod_for_uid(int worker_id, const char *pod_uid) {
+    struct px_worker_state *worker_state = px_cur_worker;
+    if (!worker_state || worker_state->id != worker_id || !pod_uid || !*pod_uid)
+        return DMESH_L7_ENDPOINT_UNRESOLVED;
+    struct objects *objs = worker_state->objs;
+
+    /* A mapping the held generation no longer names predates it: the caller
+     * built it from an older view, and a recreated Pod carries a new UID, so
+     * the mapping cannot be assumed to name the same workload. */
+    const struct dmesh_gen_pod *placed = dmesh_topology_pod(objs, pod_uid);
+    if (!placed)
+        return px_endpoint_declined(pod_uid, DMESH_L7_ENDPOINT_STALE,
+                                    "the held generation does not name it");
+    if (strcmp(placed->node_name, objs->node_name) != 0)
+        return px_endpoint_declined(pod_uid, DMESH_L7_ENDPOINT_REMOTE,
+                                    placed->node_name);
+
+    int np = __atomic_load_n(&objs->num_pods, __ATOMIC_ACQUIRE);
+    for (int i = 0; i < np; i++) {
+        struct pod_state *pod = &objs->pods[i];
+        if (!__atomic_load_n(&pod->registered, __ATOMIC_ACQUIRE))
+            continue;
+        if (strcmp(pod->pod_uid, pod_uid) != 0)
+            continue;
+        if (pod_data_ready(pod))
+            return pod->pod_id;
+        return px_endpoint_declined(pod_uid, DMESH_L7_ENDPOINT_UNRESOLVED,
+                                    "its registration is not data-ready");
+    }
+    return px_endpoint_declined(pod_uid, DMESH_L7_ENDPOINT_UNRESOLVED,
+                                "no live registration serves it");
 }
 
 int dmesh_l7_backends(int worker_id, int32_t service, int32_t *out, int max) {
@@ -3530,25 +3988,54 @@ int px_pod_reclaim_ready(struct objects *objs, int pod_idx) {
 
 /* ====== init ====== */
 
-/* Parse a csv of service ids from `env` into a POD_ID_SPACE flag table.
- * Returns the number of distinct in-range ids set. */
-static int px_parse_svc_csv(const char *env, uint8_t *table) {
-    int count = 0;
-    if (!env || !*env)
+/* Each list names Services by `namespace/name`. A service named twice across
+ * the lists is a configuration error rather than a silent precedence rule. */
+static const struct { const char *env; uint8_t mode; } px_l7_gates[] = {
+    { "DPUMESH_L7_DECISION_SVC", PX_L7_DECISION },
+    { "DPUMESH_L7_OPAQUE_SVC",   PX_L7_OPAQUE },
+    { "DPUMESH_L7_SVC",          PX_L7_FULL },
+};
+
+/* Re-derive the interned-id → mode table from the name lists against the held
+ * generation. A name no generation interns yet stays unmapped and is retried
+ * on the next adoption; workers see mode changes on new connections only.
+ * Returns -1 when one Service is named by two lists. */
+int px_l7_resolve_modes(struct objects *objs) {
+    struct dmesh_proxy *px = objs->proxy;
+    if (!px)
         return 0;
-    const char *p = env;
-    while (*p) {
-        char *end;
-        long v = strtol(p, &end, 10);
-        if (end == p) break;                       /* not a number → stop */
-        if (v >= 0 && v < POD_ID_SPACE && !table[v]) {
-            table[(int)v] = 1;
-            count++;
+    uint8_t staged[POD_ID_SPACE];
+    memset(staged, PX_L7_NONE, sizeof(staged));
+    for (size_t g = 0; g < sizeof(px_l7_gates) / sizeof(px_l7_gates[0]); g++) {
+        const char *env = getenv(px_l7_gates[g].env);
+        if (!env || !*env)
+            continue;
+        const char *p = env;
+        while (*p) {
+            char token[DMESH_K8S_NAMESPACE_MAX + DMESH_SVC_NAME_MAX];
+            size_t len = 0;
+            while (*p && *p != ',' && *p != ' ') {
+                if (len + 1 < sizeof(token))
+                    token[len++] = *p;
+                p++;
+            }
+            token[len] = '\0';
+            while (*p == ',' || *p == ' ') p++;
+            if (len == 0)
+                continue;
+            int id = dmesh_topology_interned_id(objs, token);
+            if (id < 0 || id >= POD_ID_SPACE)
+                continue;                  /* not in the held generation yet */
+            if (staged[id] != PX_L7_NONE) {
+                DOCA_LOG_ERR("proxy: service %s is named by two L7 mode lists "
+                             "(second is %s)", token, px_l7_gates[g].env);
+                return -1;
+            }
+            staged[id] = px_l7_gates[g].mode;
         }
-        p = end;
-        while (*p == ',' || *p == ' ') p++;
     }
-    return count;
+    memcpy(px->svc_mode, staged, sizeof(px->svc_mode));
+    return 0;
 }
 
 int px_init(struct objects *objs) {
@@ -3559,32 +4046,22 @@ int px_init(struct objects *objs) {
     struct dmesh_proxy *px = (struct dmesh_proxy *)calloc(1, sizeof(*px));
     if (!px)
         return DOCA_ERROR_NO_MEMORY;
-    /* Each list names the services that select one mode. A service named twice
-     * is a configuration error rather than a silent precedence rule. */
-    static const struct { const char *env; uint8_t mode; } l7_gates[] = {
-        { "DPUMESH_L7_DECISION_SVC", PX_L7_DECISION },
-        { "DPUMESH_L7_OPAQUE_SVC",   PX_L7_OPAQUE },
-        { "DPUMESH_L7_SVC",          PX_L7_FULL },
-    };
+    /* The lists name Services; interned ids arrive with the generation, so
+     * attachment is decided by configuration presence and the id → mode table
+     * is (re-)derived here and after every adoption. */
     int n_l7_svc = 0;
-    for (size_t g = 0; g < sizeof(l7_gates) / sizeof(l7_gates[0]); g++) {
-        uint8_t named[POD_ID_SPACE];
-        memset(named, 0, sizeof(named));
-        int n = px_parse_svc_csv(getenv(l7_gates[g].env), named);
-        for (int s = 0; s < POD_ID_SPACE; s++) {
-            if (!named[s])
-                continue;
-            if (px->svc_mode[s] != PX_L7_NONE) {
-                DOCA_LOG_ERR("proxy: service %d is named by two L7 mode lists "
-                             "(second is %s)", s, l7_gates[g].env);
-                ret = DOCA_ERROR_INVALID_VALUE;
-                goto fail;
-            }
-            px->svc_mode[s] = l7_gates[g].mode;
-        }
-        n_l7_svc += n;
-        if (n)
+    for (size_t g = 0; g < sizeof(px_l7_gates) / sizeof(px_l7_gates[0]); g++) {
+        const char *env = getenv(px_l7_gates[g].env);
+        if (env && *env) {
             px->l7_attached = 1;
+            n_l7_svc++;
+        }
+    }
+    objs->proxy = px;                      /* px_l7_resolve_modes reads it */
+    if (px_l7_resolve_modes(objs) != 0) {
+        objs->proxy = NULL;
+        ret = DOCA_ERROR_INVALID_VALUE;
+        goto fail;
     }
 
     /* Which worker owns the L7 layer's session state; the adapter reads the same
@@ -3643,6 +4120,15 @@ int px_init(struct objects *objs) {
         atomic_init(&px->stat_l7_fallback_by[i], 0);
     atomic_init(&px->stat_l7_over_release, 0);
     atomic_init(&px->stat_l7_stray_release, 0);
+    atomic_init(&px->stat_poison, 0);
+    atomic_init(&px->stat_inbound_admitted, 0);
+    atomic_init(&px->stat_inbound_denied, 0);
+    atomic_init(&px->stat_inbound_no_policy, 0);
+    atomic_init(&px->stat_mixed_callee_unprotected, 0);
+    for (int i = 0; i < DMESH_PEER_REFUSE_MAX; i++)
+        atomic_init(&px->stat_peer_refused[i], 0);
+    atomic_init(&px->peer_report_ns, 0);
+    atomic_init(&px->peer_report_mark, 0);
     atomic_init(&px->l7_report_ns, 0);
     atomic_init(&px->l7_report_mark, 0);
     /* Splice the shared free lists directly: workers are not running yet, and
@@ -3743,11 +4229,11 @@ int px_init(struct objects *objs) {
     else
         snprintf(l7_worker_name, sizeof(l7_worker_name), "%d", px->l7_worker);
     DOCA_LOG_WARN("DPU PROXY MODE ON (run-to-completion SG-DMA, N/K/A=%d/%d/%d; "
-                  "l7-services=%d, l7-layer=%s, l7-worker=%s, l7-policy=%s, "
+                  "l7-mode-lists=%d, l7-layer=%s, l7-worker=%s, l7-policy=%s, "
                   "lb=round-robin; passthru=conn-pinned, sg_pieces=%u)",
                   objs->num_dpa_threads, objs->k_rings, objs->n_data_workers,
                   n_l7_svc, px->l7_attached ? "attached" : "off", l7_worker_name,
-                  px->l7_fail_closed ? "fail-closed" : "fallback-to-l4",
+                  px->l7_fail_closed ? "fail-closed" : "fallback-to-l4",   /* ungraded default */
                   px->sg_pieces_max);
     return DOCA_SUCCESS;
 

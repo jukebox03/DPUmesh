@@ -42,9 +42,8 @@ using ::grpc::testing::SimpleRequest;
 using ::grpc::testing::SimpleResponse;
 
 constexpr int kCtrlPortDefault = 9092;
-/* Maximum outstanding calls per channel. */
-constexpr size_t kInflightRing = 1u << 16;
-constexpr long kOpenCap = static_cast<long>(kInflightRing / 2);
+/* Open-loop cap on a worker's outstanding calls; arrivals beyond it drop. */
+constexpr long kOpenCap = 1L << 15;
 constexpr int kModeClosed = 0;
 constexpr int kModeOpen = 1;
 constexpr int kArrConst = 0;
@@ -58,8 +57,6 @@ int g_port = 9091;
 int g_reactors = 8;
 std::shared_ptr<DmeshRuntime> g_runtime;
 
-struct Worker;
-
 /* ------------------------------------------------------------ one in-flight RPC */
 struct Call {
   ::grpc::ClientContext context;
@@ -67,7 +64,6 @@ struct Call {
   ::grpc::Status status;
   std::unique_ptr<::grpc::ClientAsyncResponseReader<SimpleResponse>> reader;
   double scheduled = 0.0;   /* intended arrival, not send time */
-  Worker* worker = nullptr;
 };
 
 struct Worker {
@@ -125,7 +121,6 @@ std::shared_ptr<::grpc::Channel> MakeChannel(int index) {
 void Issue(Worker* w, double scheduled) {
   auto* call = new Call();
   call->scheduled = scheduled;
-  call->worker = w;
   {
     std::lock_guard<std::mutex> lock(w->live_mu);
     w->live.insert(call);
@@ -523,11 +518,13 @@ void HandleControl(int fd) {
 
   char cmd[16] = {0};
   if (std::sscanf(buf, "%15s", cmd) == 1 && std::strcmp(cmd, "RUN") == 0) {
-    int req = 32, rep = 8, conc = 1, threads = 1, batch = 0;
+    int req = 32, rep = 8, conc = 1, threads = 1;
     double dur = 10.0;
-    long warm = 1000, reconn = 0;
-    std::sscanf(buf, "%*s %d %d %d %lf %ld %d %ld %d", &req, &rep, &conc, &dur,
-                &warm, &threads, &reconn, &batch);
+    long warm = 1000;
+    /* Trailing harness fields (reconnect churn, batch) are TCP-generator
+     * knobs with no gRPC equivalent; the reply reports them as zero. */
+    std::sscanf(buf, "%*s %d %d %d %lf %ld %d", &req, &rep, &conc, &dur,
+                &warm, &threads);
     RunBench(fd, kModeClosed, req, rep, conc, dur, warm, threads, 0.0, kArrConst,
              0);
     ::close(fd);

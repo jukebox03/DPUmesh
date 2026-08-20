@@ -12,30 +12,34 @@
 #include "doca/object.h"
 
 static void
-fill_grant(struct dmesh_workload_grant_msg *grant,
-           const uint8_t nonce[DMESH_REG_NONCE_SIZE], uint64_t now)
+fill_assert(struct dmesh_workload_assert_msg *assertion,
+            const uint8_t nonce[DMESH_REG_NONCE_SIZE], uint64_t now)
 {
-    memset(grant, 0, sizeof(*grant));
-    grant->type = DMESH_MSG_WORKLOAD_GRANT;
-    grant->version = DMESH_GRANT_VERSION;
-    dmesh_grant_put_i32_le(grant->service_id_le, 11);
-    dmesh_grant_put_u64_le(grant->issued_at_le, now - 1);
-    dmesh_grant_put_u64_le(grant->expires_at_le, now + 60);
-    for (size_t i = 0; i < sizeof(grant->grant_id); i++)
-        grant->grant_id[i] = (uint8_t)(i + 1);
-    memcpy(grant->nonce, nonce, sizeof(grant->nonce));
-    snprintf(grant->issuer, sizeof(grant->issuer), "dpumesh-node-agent");
-    snprintf(grant->key_id, sizeof(grant->key_id), "node-hmac-v1");
-    snprintf(grant->pod_uid, sizeof(grant->pod_uid),
+    memset(assertion, 0, sizeof(*assertion));
+    assertion->type = DMESH_MSG_WORKLOAD_ASSERT;
+    assertion->version = DMESH_ASSERT_VERSION;
+    dmesh_grant_put_u64_le(assertion->issued_at_le, now - 1);
+    dmesh_grant_put_u64_le(assertion->expires_at_le, now + 60);
+    for (size_t i = 0; i < sizeof(assertion->assert_id); i++)
+        assertion->assert_id[i] = (uint8_t)(i + 1);
+    memcpy(assertion->nonce, nonce, sizeof(assertion->nonce));
+    snprintf(assertion->key_id, sizeof(assertion->key_id), "node-ed25519-v1");
+    snprintf(assertion->node_name, sizeof(assertion->node_name), "worker-1");
+    snprintf(assertion->pod_uid, sizeof(assertion->pod_uid),
              "12345678-1234-1234-1234-123456789abc");
-    snprintf(grant->namespace_name, sizeof(grant->namespace_name), "test-bench");
-    snprintf(grant->pod_name, sizeof(grant->pod_name), "bench-dpumesh-abc123");
-    snprintf(grant->service_account, sizeof(grant->service_account), "default");
-    snprintf(grant->node_name, sizeof(grant->node_name), "worker-1");
+    snprintf(assertion->namespace_name, sizeof(assertion->namespace_name),
+             "test-bench");
+    snprintf(assertion->pod_name, sizeof(assertion->pod_name),
+             "bench-dpumesh-abc123");
+    snprintf(assertion->service_account, sizeof(assertion->service_account),
+             "default");
+    snprintf(assertion->service_name, sizeof(assertion->service_name),
+             "echo-dpumesh");
+    snprintf(assertion->pod_ip, sizeof(assertion->pod_ip), "10.244.1.17");
 }
 
-/* An authoritative feed is signed by the registration keyring, so only its
- * signed prefix may be parsed. */
+/* An authoritative feed is signed by the feed keyring, so only its signed
+ * prefix may be parsed. */
 static void
 test_feed_verify(void)
 {
@@ -109,65 +113,106 @@ int
 main(void)
 {
     static struct objects verifier;
-    uint8_t key[DMESH_GRANT_KEY_SIZE];
+    uint8_t seed[DMESH_GRANT_KEY_SIZE];
+    uint8_t public_key[DMESH_GRANT_KEY_SIZE];
     uint8_t nonce[DMESH_REG_NONCE_SIZE];
-    for (size_t i = 0; i < sizeof(key); i++) {
-        key[i] = (uint8_t)(0xa0 + i);
+    for (size_t i = 0; i < sizeof(seed); i++) {
+        seed[i] = (uint8_t)(0xa0 + i);
         nonce[i] = (uint8_t)(0x20 + i);
     }
+    assert(dmesh_assert_public_key(seed, public_key) == 0);
     uint64_t now = (uint64_t)time(NULL);
-    struct dmesh_workload_grant_msg grant;
-    char workload[DMESH_WORKLOAD_MAX];
-    char pod_uid[DMESH_POD_UID_MAX];
-    int32_t service_id = -99;
+    struct dmesh_workload_assert_msg assertion;
+    struct dmesh_assert_claims claims;
 
-    fill_grant(&grant, nonce, now);
-    assert(dmesh_grant_sign_v1(&grant, key) == 0);
-    assert(dmesh_grant_verify_v1(
-               &grant, key, "dpumesh-node-agent", nonce,
-               now, &service_id, workload, pod_uid) == DMESH_GRANT_OK);
-    assert(service_id == 11);
-    assert(strcmp(workload,
+    fill_assert(&assertion, nonce, now);
+    assert(dmesh_assert_sign_v2(&assertion, seed) == 0);
+    assert(dmesh_assert_verify_v2(&assertion, public_key, "worker-1", nonce,
+                                  now, &claims) == DMESH_GRANT_OK);
+    assert(strcmp(claims.workload,
                   "{\"ns\":\"test-bench\",\"pod\":\"bench-dpumesh-abc123\"}") == 0);
-    assert(strcmp(pod_uid, "12345678-1234-1234-1234-123456789abc") == 0);
+    assert(strcmp(claims.pod_uid, "12345678-1234-1234-1234-123456789abc") == 0);
+    assert(strcmp(claims.namespace_name, "test-bench") == 0);
+    assert(strcmp(claims.service_account, "default") == 0);
+    assert(strcmp(claims.service_name, "echo-dpumesh") == 0);
+    assert(strcmp(claims.pod_ip, "10.244.1.17") == 0);
 
-    struct dmesh_workload_grant_msg changed = grant;
+    /* A forged claim fails the signature: the DPU verifies with a key that
+     * cannot sign. */
+    struct dmesh_workload_assert_msg changed = assertion;
     changed.pod_name[0] = 'x';
-    assert(dmesh_grant_verify_v1(
-               &changed, key, "dpumesh-node-agent", nonce,
-               now, &service_id, workload, pod_uid) == DMESH_GRANT_BAD_MAC);
+    assert(dmesh_assert_verify_v2(&changed, public_key, "worker-1", nonce,
+                                  now, &claims) == DMESH_GRANT_BAD_SIG);
+    changed = assertion;
+    changed.sig[0] ^= 1;
+    assert(dmesh_assert_verify_v2(&changed, public_key, "worker-1", nonce,
+                                  now, &claims) == DMESH_GRANT_BAD_SIG);
+
+    /* An assertion minted for another node's Pod is refused on this node even
+     * though its signature is genuine: the Pod relays the assertion, and the
+     * assertion names the node it may register on. */
+    assert(dmesh_assert_verify_v2(&assertion, public_key, "worker-2", nonce,
+                                  now, &claims) == DMESH_GRANT_WRONG_NODE);
+    assert(dmesh_assert_verify_v2(&assertion, public_key, "", nonce,
+                                  now, &claims) == DMESH_GRANT_WRONG_NODE);
 
     uint8_t wrong_nonce[DMESH_REG_NONCE_SIZE];
     memcpy(wrong_nonce, nonce, sizeof(wrong_nonce));
     wrong_nonce[0] ^= 1;
-    assert(dmesh_grant_verify_v1(
-               &grant, key, "dpumesh-node-agent", wrong_nonce,
-               now, &service_id, workload, pod_uid) == DMESH_GRANT_BAD_NONCE);
-    assert(dmesh_grant_verify_v1(
-               &grant, key, "another-agent", nonce,
-               now, &service_id, workload, pod_uid) == DMESH_GRANT_BAD_ISSUER);
+    assert(dmesh_assert_verify_v2(&assertion, public_key, "worker-1",
+                                  wrong_nonce, now,
+                                  &claims) == DMESH_GRANT_BAD_NONCE);
 
-    fill_grant(&changed, nonce, now);
+    /* Expired, and over-long lifetimes: expiry gets no skew grace. */
+    fill_assert(&changed, nonce, now);
     dmesh_grant_put_u64_le(changed.issued_at_le, now - 400);
     dmesh_grant_put_u64_le(changed.expires_at_le, now - 100);
-    assert(dmesh_grant_sign_v1(&changed, key) == 0);
-    assert(dmesh_grant_verify_v1(
-               &changed, key, "dpumesh-node-agent", nonce,
-               now, &service_id, workload, pod_uid) == DMESH_GRANT_BAD_TIME);
+    assert(dmesh_assert_sign_v2(&changed, seed) == 0);
+    assert(dmesh_assert_verify_v2(&changed, public_key, "worker-1", nonce,
+                                  now, &claims) == DMESH_GRANT_BAD_TIME);
+    fill_assert(&changed, nonce, now);
+    dmesh_grant_put_u64_le(changed.expires_at_le,
+                           now + DMESH_ASSERT_MAX_LIFETIME_SEC + 60);
+    assert(dmesh_assert_sign_v2(&changed, seed) == 0);
+    assert(dmesh_assert_verify_v2(&changed, public_key, "worker-1", nonce,
+                                  now, &claims) == DMESH_GRANT_BAD_TIME);
 
-    fill_grant(&changed, nonce, now);
-    dmesh_grant_put_i32_le(changed.service_id_le, 128);
-    assert(dmesh_grant_sign_v1(&changed, key) == 0);
-    assert(dmesh_grant_verify_v1(
-               &changed, key, "dpumesh-node-agent", nonce,
-               now, &service_id, workload, pod_uid) == DMESH_GRANT_BAD_SERVICE);
+    /* A Pod IP that is not a dotted quad never reaches the policy input. */
+    fill_assert(&changed, nonce, now);
+    snprintf(changed.pod_ip, sizeof(changed.pod_ip), "10.244.1.");
+    assert(dmesh_assert_sign_v2(&changed, seed) == -1);
+    assert(dmesh_assert_verify_v2(&changed, public_key, "worker-1", nonce,
+                                  now, &claims) == DMESH_GRANT_NONCANONICAL);
+    snprintf(changed.pod_ip, sizeof(changed.pod_ip), "10.244.1.256");
+    assert(dmesh_assert_verify_v2(&changed, public_key, "worker-1", nonce,
+                                  now, &claims) == DMESH_GRANT_NONCANONICAL);
 
-    changed = grant;
+    /* An empty Service claim is canonical: a client-only Pod serves nothing. */
+    fill_assert(&changed, nonce, now);
+    memset(changed.service_name, 0, sizeof(changed.service_name));
+    assert(dmesh_assert_sign_v2(&changed, seed) == 0);
+    assert(dmesh_assert_verify_v2(&changed, public_key, "worker-1", nonce,
+                                  now, &claims) == DMESH_GRANT_OK);
+    assert(claims.service_name[0] == '\0');
+
+    /* A v1-era message presented to the v2 verifier is refused before any
+     * cryptography: wrong type, then wrong version. */
+    fill_assert(&changed, nonce, now);
+    changed.type = 12; /* retired DMESH_MSG_WORKLOAD_GRANT */
+    assert(dmesh_assert_verify_v2(&changed, public_key, "worker-1", nonce,
+                                  now, &claims) == DMESH_GRANT_BAD_TYPE);
+    fill_assert(&changed, nonce, now);
+    changed.version = 1;
+    assert(dmesh_assert_verify_v2(&changed, public_key, "worker-1", nonce,
+                                  now, &claims) == DMESH_GRANT_BAD_VERSION);
+
+    /* Text after the terminating NUL is hidden input, so it is refused. */
+    changed = assertion;
     changed.namespace_name[strlen(changed.namespace_name) + 1] = 'x';
-    assert(dmesh_grant_verify_v1(
-               &changed, key, "dpumesh-node-agent", nonce,
-               now, &service_id, workload, pod_uid) == DMESH_GRANT_NONCANONICAL);
+    assert(dmesh_assert_verify_v2(&changed, public_key, "worker-1", nonce,
+                                  now, &claims) == DMESH_GRANT_NONCANONICAL);
 
+    /* The keyring lookup and the replay window bound reuse. */
     verifier.registration_key_count = 2;
     snprintf(verifier.registration_keys[0].key_id,
              sizeof(verifier.registration_keys[0].key_id), "old-key-v1");
@@ -177,10 +222,10 @@ main(void)
     assert(dmesh_registration_find_key(&verifier, "missing") == NULL);
     assert(dmesh_registration_find_key(&verifier, "new-key-v2") ==
            verifier.registration_keys[1].bytes);
-    assert(dmesh_registration_consume_grant(&verifier, grant.grant_id) == 0);
-    assert(dmesh_registration_consume_grant(&verifier, grant.grant_id) == -1);
-    grant.grant_id[0] ^= 0xff;
-    assert(dmesh_registration_consume_grant(&verifier, grant.grant_id) == 0);
+    assert(dmesh_registration_consume_grant(&verifier, assertion.assert_id) == 0);
+    assert(dmesh_registration_consume_grant(&verifier, assertion.assert_id) == -1);
+    assertion.assert_id[0] ^= 0xff;
+    assert(dmesh_registration_consume_grant(&verifier, assertion.assert_id) == 0);
 
     test_feed_verify();
     puts("workload_grant_test: PASS");

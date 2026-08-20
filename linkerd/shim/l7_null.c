@@ -483,6 +483,31 @@ l7_resolve(int worker_id, const struct dmesh_l7_flow *flow,
     return 0;
 }
 
+/* The reference consumer holds no policy source, so it answers "no verdict"
+ * and the destination Service's protection class decides. Saying so is the
+ * point: a stand-in that admitted every stream would make an enforcement
+ * regression look like a passing run. */
+int
+l7_inbound_verdict(int worker_id, const struct dmesh_l7_flow *flow)
+{
+    (void)worker_id;
+    if (!flow)
+        return DMESH_L7_VERDICT_NO_POLICY;
+    if (l7_trace())
+        fprintf(stderr, "[l7_ref] worker %d inbound verdict for '%s' from '%s' "
+                "= no policy source\n", worker_id,
+                flow->workload[0] ? flow->workload : "-",
+                flow->source_identity[0] ? flow->source_identity : "-");
+    return DMESH_L7_VERDICT_NO_POLICY;
+}
+
+void
+l7_inbound_forget(int worker_id, const char *workload)
+{
+    (void)worker_id;
+    (void)workload;
+}
+
 void
 l7_report(int worker_id, uint64_t conn, uint64_t bytes_in,
           uint64_t bytes_out, uint64_t duration_ns, int reason)

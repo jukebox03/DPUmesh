@@ -22,7 +22,6 @@ ARG GRPC_BUILD_DIR=build/grpc-release
 COPY ${GRPC_BUILD_DIR}/echo_grpc /usr/local/bin/echo_grpc
 COPY doca-libs/ /usr/local/lib/
 COPY build/lib/libdpumesh.so.4 /usr/local/lib/
-COPY bench/k8s/registry /etc/dpumesh/registry
 COPY bench/docker/numa-entrypoint.sh /usr/local/bin/numa-entrypoint.sh
 
 RUN ldconfig

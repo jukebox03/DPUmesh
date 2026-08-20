@@ -16,16 +16,14 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FLAMEGRAPH="${FLAMEGRAPH:-$HOME/FlameGraph/flamegraph.pl}"
 OUT=""
 STEM="core"
-NOTE=""
 RUNS=()
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --out)  OUT="$2"; shift 2 ;;
     --stem) STEM="$2"; shift 2 ;;
-    --note) NOTE="$2"; shift 2 ;;
     -h|--help)
-      echo "Usage: $0 RUNDIR... --out REPORTDIR [--stem NAME] [--note TEXT]"; exit 0 ;;
+      echo "Usage: $0 RUNDIR... --out REPORTDIR [--stem NAME]"; exit 0 ;;
     *) RUNS+=("$1"); shift ;;
   esac
 done
@@ -37,7 +35,7 @@ DATA="$OUT/data/$STEM"
 FLAME="$OUT/flame"
 mkdir -p "$DATA" "$FLAME" "$OUT/figures"
 
-info "classifying $((${#RUNS[@]})) runs"
+info "classifying ${#RUNS[@]} runs"
 python3 "$ROOT/bench/suite/core_layers.py" "${RUNS[@]}" --out "$DATA" --fold
 
 info "rendering flame graphs"
@@ -55,7 +53,7 @@ FLAME="$(cd "$FLAME" && pwd)"
 
 info "rendering figures"
 python3 "$ROOT/bench/suite/plot_core.py" "$DATA" --out "$OUT/figures" \
-  --stem "$STEM" ${NOTE:+--note "$NOTE"}
+  --stem "$STEM"
 
 rm -f "$DATA"/*.folded
 info "-> $OUT"

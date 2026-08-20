@@ -11,7 +11,6 @@ COPY build/bin/echo_sock /usr/local/bin/echo_sock
 COPY build/lib/libdmesh_preload.so /usr/local/lib/libdmesh_preload.so
 COPY doca-libs/ /usr/local/lib/
 COPY build/lib/libdpumesh.so.4 /usr/local/lib/
-COPY bench/k8s/registry /etc/dpumesh/registry
 COPY bench/docker/numa-entrypoint.sh /usr/local/bin/numa-entrypoint.sh
 
 RUN ldconfig

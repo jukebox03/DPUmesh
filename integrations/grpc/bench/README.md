@@ -88,7 +88,7 @@ The client listens on `CTRL_PORT` and answers one command per connection:
 ```text
 PING
 RUN      <req> <reply> <conc> <dur> <warmup> <threads>
-OPEN     <req> <reply> <threads> <dur> <warmup> <rate> [const|poisson]
+OPEN     <req> <reply> <threads> <dur> <warmup> <rate> [const|poisson] [channels]
 SELFTEST <payload> <threads> <dur> <rate> <const|poisson>
 ```
 

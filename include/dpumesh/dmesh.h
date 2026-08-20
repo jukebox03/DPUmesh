@@ -42,7 +42,11 @@ typedef struct dmesh_qp {
     /* addressing */
     uint16_t  local_port;      /* my port (this conn's id) */
     int16_t   dst_service;     /* peer service (the service connected to / caller's) */
-    int16_t   remote_pod;      /* SERVER: the DPU-facing peer pod (learned at accept).
+    int16_t   remote_pod;      /* SERVER: the DPU-facing peer pod (learned at accept),
+                                * or DMESH_POD_REMOTE when the peer is on another
+                                * node — a pod id is a node-local transport
+                                * identifier, so a remote peer has none, and the
+                                * reply routes from the DPU's conntrack instead.
                                 * CLIENT: always DMESH_POD_BLANK — the DPU selects the
                                 * backend, so the host never names one. */
     uint16_t  remote_port;     /* SERVER: the peer uP (learned at accept); CLIENT: 0. */

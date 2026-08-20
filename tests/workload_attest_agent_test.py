@@ -1,4 +1,3 @@
-import argparse
 import hashlib
 import hmac
 import importlib.util
@@ -27,6 +26,7 @@ def pod():
             "labels": {"app": "echo-dpumesh"},
         },
         "spec": {"serviceAccountName": "default", "nodeName": "worker-1"},
+        "status": {"podIP": "10.244.1.17"},
     }
 
 
@@ -46,9 +46,9 @@ def main():
         "metadata": {"namespace": "test-bench", "name": "echo-dpumesh"},
         "spec": {"selector": {"app": "echo-dpumesh"}},
     }
-    agent.authorize_service(11, {11: "echo-dpumesh"}, pod(), [service])
+    agent.authorize_service("echo-dpumesh", pod(), [service])
     try:
-        agent.authorize_service(12, {12: "other"}, pod(), [service])
+        agent.authorize_service("other", pod(), [service])
     except agent.AttestationError:
         pass
     else:
@@ -56,25 +56,46 @@ def main():
 
     key = bytes(range(1, 33))
     nonce = bytes(range(32))
-    grant = agent.build_grant(
+    assertion = agent.build_assert(
         key=key,
-        issuer="dpumesh-node-agent",
-        key_id="node-hmac-v1",
-        service_id=11,
+        key_id="node-ed25519-v1",
+        service_name="echo-dpumesh",
         nonce=nonce,
         pod=pod(),
         ttl=60,
         now=1_800_000_000,
     )
-    assert len(grant) == 1090
-    assert grant[0:2] == bytes([12, 1])
-    assert hmac.compare_digest(
-        grant[-32:], hmac.new(key, grant[:-32], hashlib.sha256).digest()
+    assert len(assertion) == 1134
+    assert assertion[0:2] == bytes([13, 2])
+    # The signature verifies with the public half only (raises on failure).
+    agent.Ed25519PrivateKey.from_private_bytes(key).public_key().verify(
+        assertion[-64:], assertion[:-64]
     )
-    unpacked = agent.GRANT.unpack(grant)
-    assert unpacked[4] == 11
-    assert unpacked[8] == nonce
-    assert unpacked[12].rstrip(b"\0") == b"test-bench"
+    unpacked = agent.ASSERT.unpack(assertion)
+    assert unpacked[7] == nonce
+    assert unpacked[9].rstrip(b"\0") == b"worker-1"
+    assert unpacked[11].rstrip(b"\0") == b"test-bench"
+    assert unpacked[14].rstrip(b"\0") == b"echo-dpumesh"
+    assert unpacked[15].rstrip(b"\0") == b"10.244.1.17"
+
+    # A Pod without a usable IPv4 address cannot be asserted: the address is
+    # the authorization input for `networks` clauses.
+    no_ip = pod()
+    del no_ip["status"]
+    try:
+        agent.build_assert(
+            key=key,
+            key_id="node-ed25519-v1",
+            service_name="",
+            nonce=nonce,
+            pod=no_ip,
+            ttl=60,
+            now=1_800_000_000,
+        )
+    except agent.AttestationError:
+        pass
+    else:
+        raise AssertionError("a Pod without an IP was asserted")
 
     # The membership document decides revocation with the same rule that
     # decides a grant, so a Pod appears exactly for the Services it selects.
@@ -98,15 +119,15 @@ def main():
         "spec": {"serviceAccountName": "default", "nodeName": "worker-1"},
     }
     document = agent.membership_document(
-        7, {11: "echo-dpumesh"}, [pod(), other, terminating], [service]
+        7, [pod(), other, terminating], [service]
     )
     lines = document.splitlines()
     assert lines[0] == "version=7"
-    assert "member=12345678-1234-1234-1234-123456789abc,-1" in lines
-    assert "member=12345678-1234-1234-1234-123456789abc,11" in lines
+    assert "member=12345678-1234-1234-1234-123456789abc,-" in lines
+    assert "member=12345678-1234-1234-1234-123456789abc,echo-dpumesh" in lines
     # A Pod whose labels do not select the Service holds only its bare entry.
-    assert "member=abcdef01-2345-6789-abcd-ef0123456789,-1" in lines
-    assert "member=abcdef01-2345-6789-abcd-ef0123456789,11" not in lines
+    assert "member=abcdef01-2345-6789-abcd-ef0123456789,-" in lines
+    assert "member=abcdef01-2345-6789-abcd-ef0123456789,echo-dpumesh" not in lines
     # A terminating Pod is already withdrawn.
     assert not any("deadbeef" in line for line in lines)
 
@@ -134,21 +155,6 @@ def main():
         pass
     else:
         raise AssertionError("a non-Pod peer process was attested")
-
-    with tempfile.TemporaryDirectory() as temporary:
-        registry = Path(temporary) / "registry"
-        registry.write_text("10.96.0.11 echo-dpumesh 11\n", encoding="utf-8")
-        state = argparse.Namespace(registry=registry)
-        reloader = agent.Agent.__new__(agent.Agent)
-        reloader.args = state
-        reloader.registry_lock = agent.threading.Lock()
-        reloader.registry_stamp = None
-        reloader.registry_services = {}
-        assert reloader.service_names() == {11: "echo-dpumesh"}
-        registry.write_text(
-            "10.96.0.11 echo-dpumesh 11\n10.96.0.20 other-dpumesh 20\n", encoding="utf-8"
-        )
-        assert reloader.service_names() == {11: "echo-dpumesh", 20: "other-dpumesh"}
 
     with tempfile.TemporaryDirectory() as temporary:
         key_dir = Path(temporary)

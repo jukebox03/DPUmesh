@@ -53,6 +53,12 @@ control connection established
   → POD_INIT_RESULT(READY, L)             the channel is usable; L stripes granted
 ```
 
+A pod id — and the compact service id `POD_ASSIGNED` carries beside it — is a
+node-local transport identifier for one node's slot tables, never workload
+identity. Identity is the Service *name*, authenticated by the registration
+assertion and resolved against the cluster topology generation; the numbers
+are the DPU's own interning of it and travel only on this node's wire.
+
 Registration is idempotent. While assignment or readiness is pending, the host
 replays `POD_REGISTER` every 100 ms; the DPU returns the same pod id and replays
 any terminal result. Missing DPA ring acknowledgements cause idempotent

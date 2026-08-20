@@ -164,7 +164,6 @@ static pthread_once_t g_req_fill_once = PTHREAD_ONCE_INIT;
 static void init_req_fill(void) { memset(g_req_fill, REQ_FILL, sizeof g_req_fill); }
 
 static void enqueue_request(worker_t *w, double sched) {
-    uint32_t total = BENCH_HDR_LEN + (uint32_t)w->req_size;
     uint8_t hdr[BENCH_HDR_LEN];
     bench_put_hdr(hdr, BENCH_REQ_MAGIC, w->next_seq, (uint32_t)w->req_size,
                   (uint32_t)w->reply_size);
@@ -178,7 +177,6 @@ static void enqueue_request(worker_t *w, double sched) {
     uint32_t si = w->next_seq % INFLIGHT_RING;
     w->start_ts[si] = sched; w->slot_seq[si] = w->next_seq; w->live[si] = 1;
     w->next_seq++; w->outstanding++;
-    (void)total;
 }
 
 static int connect_target(void) {
