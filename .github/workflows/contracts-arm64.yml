@@ -1,0 +1,89 @@
+name: contracts-arm64
+
+on:
+  push:
+    paths:
+      - 'include/**'
+      - 'src/**'
+      - 'doca/**'
+      - 'linkerd/**'
+      - 'tests/**'
+      - 'bench/apps/**'
+      - 'Makefile'
+      - '.github/workflows/contracts-arm64.yml'
+  pull_request:
+    paths:
+      - 'include/**'
+      - 'src/**'
+      - 'doca/**'
+      - 'linkerd/**'
+      - 'tests/**'
+      - 'bench/apps/**'
+      - 'Makefile'
+      - '.github/workflows/contracts-arm64.yml'
+  workflow_dispatch:
+
+# The DPU is aarch64 and the x86 runners are not. What only this workflow can
+# catch: struct alignment and padding at the FFI boundary, and code whose
+# correctness depends on x86's stronger memory model.
+jobs:
+  contracts:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      # Without this the job passes on an x86 runner if the label ever stops
+      # resolving, and a green light would mean nothing.
+      - name: Refuse to run anywhere but aarch64
+        run: |
+          arch=$(uname -m)
+          echo "uname -m: $arch"
+          [ "$arch" = aarch64 ] || { echo "not an arm64 runner"; exit 1; }
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - run: pip install --no-cache-dir -r tests/requirements.txt
+
+      - name: Contracts that need no DOCA and no BlueField
+        run: make test-hostfree
+
+  rust:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: linkerd/rust
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Refuse to run anywhere but aarch64
+        run: |
+          arch=$(uname -m)
+          echo "uname -m: $arch"
+          [ "$arch" = aarch64 ] || { echo "not an arm64 runner"; exit 1; }
+
+      # aws-lc-sys builds C through cmake, which the arm64 image does not
+      # carry the same way the x64 one does.
+      - name: Ensure cmake
+        run: command -v cmake || { sudo apt-get update && sudo apt-get install -y cmake; }
+
+      - name: Report the pinned toolchain
+        run: rustc --version && cargo --version && cmake --version | head -1
+
+      # A separate cache key: x86 and aarch64 artifacts are not interchangeable
+      # and would otherwise evict each other under one key.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: linkerd/rust
+          key: aarch64
+
+      - name: Build the staticlib
+        run: cargo build --locked
+
+      - name: Unit tests
+        run: cargo test --locked
