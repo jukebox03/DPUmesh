@@ -788,7 +788,10 @@ fn pump_side(
     let mut did = false;
     let state = {
         let Some(handle) = side.handle.as_ref() else {
-            return Ok(Pumped { progressed: false, finished: false });
+            return Ok(Pumped {
+                progressed: false,
+                finished: false,
+            });
         };
         if let Some(out) = out_conn {
             let want = TX_DRAIN_MAX.min(*budget);
@@ -833,7 +836,10 @@ fn pump_side(
     {
         did = true;
     }
-    Ok(Pumped { progressed: did, finished: state.tx_finished })
+    Ok(Pumped {
+        progressed: did,
+        finished: state.tx_finished,
+    })
 }
 
 impl Worker {
@@ -928,8 +934,8 @@ impl Worker {
         let Some(path) = self.service_targets_file.as_deref() else {
             return Ok(());
         };
-        let metadata = std::fs::metadata(path)
-            .map_err(|error| format!("stat {}: {error}", path.display()))?;
+        let metadata =
+            std::fs::metadata(path).map_err(|error| format!("stat {}: {error}", path.display()))?;
         let modified = metadata
             .modified()
             .map_err(|error| format!("mtime {}: {error}", path.display()))?;
@@ -1069,9 +1075,7 @@ impl Worker {
                 counters,
             );
             match (client, backend) {
-                (Ok(a), Ok(b)) if !a.finished && !b.finished => {
-                    did |= a.progressed | b.progressed
-                }
+                (Ok(a), Ok(b)) if !a.finished && !b.finished => did |= a.progressed | b.progressed,
                 _ => failed.push(key),
             }
             if budget == 0 {
@@ -1318,9 +1322,10 @@ fn parse_service_targets(value: &str) -> Result<HashMap<String, SocketAddrV4>, S
                 "service target entry '{raw}' needs a namespace/name Service key"
             ));
         }
-        let addr = addr.trim().parse::<SocketAddrV4>().map_err(|_| {
-            format!("service target entry '{raw}' needs an IPv4 socket address")
-        })?;
+        let addr = addr
+            .trim()
+            .parse::<SocketAddrV4>()
+            .map_err(|_| format!("service target entry '{raw}' needs an IPv4 socket address"))?;
         if targets.insert(service.to_string(), addr).is_some() {
             return Err(format!("service target feed repeats Service {service}"));
         }
@@ -1386,12 +1391,9 @@ fn parse_versioned_service_targets(
             version = Some(parsed);
         } else if let Some(value) = line.strip_prefix("endpoint=") {
             let mut fields = value.split(',');
-            let (Some(service), Some(addr), Some(pod_uid), None) = (
-                fields.next(),
-                fields.next(),
-                fields.next(),
-                fields.next(),
-            ) else {
+            let (Some(service), Some(addr), Some(pod_uid), None) =
+                (fields.next(), fields.next(), fields.next(), fields.next())
+            else {
                 return Err(format!(
                     "service endpoint '{line}' must be \
                      endpoint=namespace/name,IPv4:port,pod-uid"
@@ -1403,7 +1405,9 @@ fn parse_versioned_service_targets(
                 ));
             }
             if !valid_pod_uid(pod_uid) {
-                return Err(format!("service endpoint '{line}' needs an RFC 4122 Pod UID"));
+                return Err(format!(
+                    "service endpoint '{line}' needs an RFC 4122 Pod UID"
+                ));
             }
             let addr = addr
                 .parse::<SocketAddrV4>()
@@ -1714,15 +1718,12 @@ impl InboundPolicies {
 /// # Safety
 /// `flow` must point to a valid `struct dmesh_l7_flow`.
 #[no_mangle]
-pub unsafe extern "C" fn l7_inbound_verdict(
-    worker_id: c_int,
-    flow: *const DmeshL7Flow,
-) -> c_int {
+pub unsafe extern "C" fn l7_inbound_verdict(worker_id: c_int, flow: *const DmeshL7Flow) -> c_int {
     if flow.is_null() {
         return VERDICT_NO_POLICY;
     }
     let flow = &*flow;
-    let _ = worker_id;              // the stores are this thread's
+    let _ = worker_id; // the stores are this thread's
     INBOUND.with(|slot| match slot.try_borrow_mut() {
         Ok(mut policies) => policies.verdict(flow),
         // The verdict is asked from inside the data path; a nested ask would
@@ -2113,7 +2114,11 @@ mod tests {
             std::process::id(),
             session_key(1, 1)
         ));
-        std::fs::write(&path, "version=2\ntest-bench/echo-a=10.0.0.11:9092\nsignature=test,valid\n").unwrap();
+        std::fs::write(
+            &path,
+            "version=2\ntest-bench/echo-a=10.0.0.11:9092\nsignature=test,valid\n",
+        )
+        .unwrap();
         // A generation younger than STAMP_SETTLE is always re-read, so age this
         // one to exercise the stamp itself.
         let installed = SystemTime::now() - STAMP_SETTLE * 5;
@@ -2134,7 +2139,11 @@ mod tests {
         });
         // A settled generation is adopted only once: the same inode,
         // modification time and length mean no read is issued.
-        std::fs::write(&path, "version=9\ntest-bench/echo-a=10.0.0.99:9092\nsignature=test,valid\n").unwrap();
+        std::fs::write(
+            &path,
+            "version=9\ntest-bench/echo-a=10.0.0.99:9092\nsignature=test,valid\n",
+        )
+        .unwrap();
         age(&path);
         with_test_worker(|w| {
             w.refresh_service_targets().unwrap();
@@ -2144,7 +2153,11 @@ mod tests {
                 "10.0.0.11:9092".parse::<SocketAddrV4>().unwrap()
             );
         });
-        std::fs::write(&path, "# rolled back\nversion=1\ntest-bench/echo-a=10.0.0.12:9092\nsignature=test,valid\n").unwrap();
+        std::fs::write(
+            &path,
+            "# rolled back\nversion=1\ntest-bench/echo-a=10.0.0.12:9092\nsignature=test,valid\n",
+        )
+        .unwrap();
         with_test_worker(|w| assert!(w.refresh_service_targets().is_err()));
         // A rejected generation is not stamped, so it keeps being rejected.
         with_test_worker(|w| assert!(w.refresh_service_targets().is_err()));
@@ -2403,7 +2416,10 @@ mod tests {
         for (selected, expected) in [
             ("10.244.1.12:9092", dmesh_doca::TakeError::EndpointRemote),
             ("10.244.2.13:9092", dmesh_doca::TakeError::EndpointStale),
-            ("10.244.9.99:9092", dmesh_doca::TakeError::EndpointUnresolved),
+            (
+                "10.244.9.99:9092",
+                dmesh_doca::TakeError::EndpointUnresolved,
+            ),
         ] {
             let flow = request_flow(21, 2, 4002);
             let key = session_key(2, 4002);

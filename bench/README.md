@@ -241,7 +241,7 @@ transport, preload adapter, benchmark scheduler, and analysis contracts:
 | `workload_grant_test.c` | canonical grant form, issuer, expiry, nonce binding, HMAC and key-id selection, replay refusal, and the signed feed envelope: unsigned, appended-to, unknown-key and tampered generations |
 | `pod_membership_test.c` | membership generation parsing and adoption: no version, malformed or oversized tables, atomic-rename install, rollback refusal, and the withdrawal that closes one registration |
 | `topology_gen_test.c` | topology generation verification, interning, adoption, same-version and oversized refusals |
-| `workload_attest_agent_test.py` | the node agent's peer-cgroup to Pod UID mapping, its refusal of a non-Pod peer, Service membership authorization, and the 1090-byte grant it signs |
+| `workload_attest_agent_test.py` | the node agent's peer-cgroup to Pod UID mapping, its refusal of a non-Pod peer, Service membership authorization, and the 1134-byte grant it signs |
 | `dpumesh_controller_test.py` | controller HTTP routes, node-report scope checks, generation bounds, skip-unchanged publication and key-rotation republish |
 | `feed_delivery_test.py` | the one-channel feed hop: digest-first resend, receiver whitelist and fail-static refusals |
 | `linkerd_cp_relay_test.py` | control-plane relay route parsing and ClusterIP/endpoint resolution, including a headless Service |
