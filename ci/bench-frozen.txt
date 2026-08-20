@@ -1,0 +1,17 @@
+# The operating points of the published time series, one per line:
+#
+#   label            solution  req    reply  conc  dur  warmup  threads
+#
+# A time series is only readable if its operating point never moves, so this
+# set is version controlled: changing a line is a visible commit, and the
+# series before and after that commit are different series.
+#
+# tcp rows are measured in the same run as their dpumesh counterpart. They are
+# the control: when both move together the machine moved, not DPUmesh.
+
+lat64-dpumesh        dpumesh   64     64     1     10   1000    1
+lat64-tcp            tcp       64     64     1     10   1000    1
+rate64-dpumesh       dpumesh   64     64     32    10   1000    2
+rate64-tcp           tcp       64     64     32    10   1000    2
+bw64k-dpumesh        dpumesh   65536  64     32    10   1000    1
+bw64k-tcp            tcp       65536  64     32    10   1000    1

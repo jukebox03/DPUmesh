@@ -21,3 +21,8 @@ __pycache__/
 *.py[cod]
 # ...but keep the checked-in bench data
 !bench/*.csv
+
+# raw benchmark points, produced by ci/bench-frozen-run.sh and the bench
+# workflows. The published series lives on the gh-pages branch, not here.
+*.jsonl
+/pages/
