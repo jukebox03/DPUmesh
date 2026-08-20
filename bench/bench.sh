@@ -1542,6 +1542,24 @@ run_point() {
     echo "$reply"
 }
 
+# run_ping <sol> -> OK pong | ERR no_pod(app) | ERR silent | ERR refused
+# Liveness that costs the client nothing. The control server is a serial accept
+# loop, so a client in the middle of another RUN leaves this connection sitting
+# in its backlog and answers nothing. That silence is `silent`, and this probe
+# alone cannot tell an occupied client from a wedged one. A port that refuses
+# the connection is `refused`, and that is not ambiguous: nothing is listening.
+run_ping() {
+    local app ip reply rc
+    app="$(app_of "$1")"; [ -z "$app" ] && { echo "ERR bad_target($1)"; return 0; }
+    ip=$(running_pod_ip "$app" || true)
+    [ -z "$ip" ] && { echo "ERR no_pod($app)"; return 0; }
+    rc=0
+    reply=$(printf 'PING\n' | timeout "${PING_TIMEOUT:-2}s" nc -N "$ip" "$CTRL_PORT" 2>/dev/null) || rc=$?
+    case "$reply" in PONG*) echo "OK pong"; return 0 ;; esac
+    [ "$rc" -eq 124 ] && { echo "ERR silent"; return 0; }   # timeout killed it
+    echo "ERR refused"
+}
+
 bench_latency() {
     local sol="$1"; mkdir -p "$OUT"; local csv="$OUT/latency_${sol}.csv"
     step "LATENCY ($sol): concurrency=1, dur=${LAT_DUR}s"
@@ -1859,6 +1877,7 @@ case "$CMD" in
     rate)      for s in $(targets_of "${1:-both}"); do bench_rate      "$s"; done ;;
     all)       for s in $(targets_of "${1:-both}"); do bench_latency "$s"; bench_bandwidth "$s"; bench_rate "$s"; done; info "results under $OUT" ;;
     point)     [ $# -eq 7 ] || [ $# -eq 8 ] || { err "point <sol> <req> <reply> <conc> <dur> <warmup> <threads> [reconn]"; exit 1; }; run_point "$@" ;;
+    ping)      [ $# -eq 1 ] || { err "ping <sol>"; exit 1; }; run_ping "$@" ;;
     loopback)  run_loopback "${1:-50000}" "${2:-8192}" "${3:-0}" ;;
     verbs)     run_verbs    "${1:-50000}" "${2:-8192}" "${3:-0}" "${4:-1}" "${5:-1}" ;;
     preload)   run_preload  "${1:-5000}"  "${2:-1024}" "${3:-8}" ;;
@@ -1881,6 +1900,7 @@ Usage: $0 <command> [args]
                                              (deploy does this itself when L7_BACKEND=linkerd)
   latency|bandwidth|rate|all [dpumesh|tcp|both]   benchmark families -> CSVs under $OUT
   point <sol> <req> <reply> <conc> <dur> <warmup> <threads> [reconn]   one raw RUN (reconn = conn-churn period)
+  ping <sol>                                 PING the client's control port (PING_TIMEOUT, default 2s)
   loopback|preload [args]                    feature validators
   grpcshutdown                              real-DPU HTTP/2 process-stop + slot-reuse gate
   verbs <N> <size> <zc> <window> <pipeline>  native-API loopback validator: window conns x pipeline outstanding

@@ -261,6 +261,7 @@ transport, preload adapter, benchmark scheduler, and analysis contracts:
 | `l7_abi_contract_test.c` | L7 adapter flow/verdict layout, mode and decline constants, and the connection handle both sides form |
 | `analyze_saturation_test.py` | saturation, CPU slopes, knee stability, and generator headroom |
 | `summarize_l4_test.py` | collector metadata and selected-matrix repetition counts |
+| `health_page_test.py` | the nightly health page: which runs count as faults, and the topology change it marks across nights that state none |
 | `generator_selftest_test.sh` | native and POSIX transport-free arrival schedulers |
 | `l4_collector_contract_test.sh` | collector matrix and optional RPS limits |
 | `dma_fault_scope_test.sh` | worker DMA-context recovery |

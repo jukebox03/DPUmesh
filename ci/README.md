@@ -10,7 +10,7 @@ Every push, on a hosted x86 runner. Under a minute.
 
 | | what it protects |
 |---|---|
-| `contracts-hostfree` | the 13 contracts that need no DOCA and no BlueField (`make test-hostfree`) |
+| `contracts-hostfree` | the 14 contracts that need no DOCA and no BlueField (`make test-hostfree`) |
 | `headers-standalone` | the four public headers compile alone as C99 and C++17, and pull in no DOCA |
 | `abi-guard` | a changed public header carries either an `ABI_MAJOR` bump or an explicit `ABI-Impact:` line |
 | `docs-links` | every relative link in the repository's Markdown resolves |
@@ -19,10 +19,10 @@ On a path change only.
 
 | | what it protects | where |
 |---|---|---|
-| `contracts-arm64` | the same 13 contracts plus the crate's 34 unit tests | aarch64 hosted |
+| `contracts-arm64` | the same 14 contracts plus the crate's 34 unit tests | aarch64 hosted |
 | `rust-build` | `dmesh-l7` builds, tests, and passes clippy | hosted |
 | `rust-fmt` | `linkerd/rust/src/lib.rs` formatting | hosted |
-| `contracts-rapids4` | **all 27 contracts** (`make test`) | rapids4, needs DOCA |
+| `contracts-rapids4` | **all 28 contracts** (`make test`) | rapids4, needs DOCA |
 
 On a schedule.
 
@@ -50,8 +50,8 @@ call is missing.
 ## The two Makefile targets
 
 ```
-make test-hostfree     13 contracts, no DOCA and no BlueField
-make test              all 27
+make test-hostfree     14 contracts, no DOCA and no BlueField
+make test              all 28
 ```
 
 The difference between them is the definition of "needs the DOCA SDK". Hosted CI
@@ -67,10 +67,19 @@ change with every experiment — so a number sampled on a schedule against
 whatever happened to be up is not a series. Whether the node still answers is.
 
 Each run appends one JSON record to `data/health.jsonl` on the `gh-pages` branch
-and regenerates the page there. The record holds the result, the deployed
-clients, and the DPU's topology; the page marks every run whose topology changed
-from the run before it, which makes it a log of the states this node has been
-in. A red run means a campaign is wedged, not that something got slower.
+and regenerates the page there. The record holds the result, the load average,
+the deployed clients, and the DPU's topology; the page marks every run whose
+topology differs from the last run that stated one, which makes it a log of the
+states this node has been in. A red run means a campaign is wedged, not that
+something got slower.
+
+The request it sends is real load, and the clients' control servers are serial
+accept loops, so it refuses to probe a machine that is working: over
+`HEALTH_MAX_LOAD` (default 3.0), or when the client does not answer a `PING`, the
+run records `busy` and stops there. `busy` is not a fault — but a client that is
+wedged rather than occupied is silent in exactly the same way, and what separates
+them is that a wedged one is still silent the next night. A run of consecutive
+`busy` records is the signal to go and look.
 
 Performance campaigns are run by hand from `bench/suite/` by someone who chose
 the configuration. `ci/dpu-state.sh` says what that configuration currently is.

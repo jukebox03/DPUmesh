@@ -8,7 +8,10 @@ whether the deployed campaign answered on a given night. The table says what was
 deployed, which on a machine whose configuration is a variable of the research is
 the more useful half: it is a log of the states this node has been in.
 
-A row is marked where the DPU's topology changed from the run before it.
+A row is marked where the DPU's topology differs from the last run that stated
+one. Runs that state no topology — nothing deployed, a busy machine, a DPU that
+did not answer — are gaps in that comparison rather than ends of it, so a
+redeploy is still marked when idle nights sit on either side of it.
 """
 import html
 import json
@@ -16,9 +19,13 @@ import sys
 
 # ok: a campaign answered. idle: none deployed, which is a normal state between
 # experiments and not a fault. Everything else is a fault.
+# busy: the machine was working, so nothing was probed. Not a fault — but a
+# client that is wedged rather than occupied also lands here, and the only thing
+# that tells them apart is that a wedged one stays here run after run.
 STATUS = {
     "ok":          ("#2f8f4e", "answered"),
     "idle":        ("#8a8a8a", "nothing deployed"),
+    "busy":        ("#d9a441", "busy, not probed"),
     "no_answer":   ("#c33", "deployed, did not answer"),
     "no_dpu":      ("#c33", "DPU did not state its topology"),
     "no_path":     ("#c33", "no known path in this campaign"),
@@ -70,18 +77,26 @@ def main():
         f'{html.escape(STATUS.get(r.get("status"), ("", r.get("status", "?")))[1])}"></i>'
         for r in rows)
 
+    # In time order, each run that states a topology against the last one that
+    # did. A run that states none is skipped over rather than compared against,
+    # because it is an absence of information and not a change of state: on a
+    # research machine idle nights are ordinary, and a redeploy across one is
+    # exactly what this page exists to show.
+    moved_at = set()
+    previous = None
+    for index, row in enumerate(rows):
+        signature = topology(row)
+        if not known(signature):
+            continue
+        if previous is not None and signature != previous:
+            moved_at.add(index)
+        previous = signature
+
     body = []
     for index in range(len(rows) - 1, -1, -1):        # newest first
         row = rows[index]
         colour, label = STATUS.get(row.get("status"), ("#c33", row.get("status", "?")))
-        # Compared against the run before it in time. A run with no topology at
-        # all — nothing deployed, or a DPU that did not answer — is an absence,
-        # not a redeploy, so it neither carries the mark nor gives it to the run
-        # after it.
-        earlier = rows[index - 1] if index else None
-        moved = (earlier is not None
-                 and known(topology(row)) and known(topology(earlier))
-                 and topology(row) != topology(earlier))
+        moved = index in moved_at
         clients = row.get("clients") or []
         body.append(
             f'<tr{" class=moved" if moved else ""}>'
@@ -90,11 +105,11 @@ def main():
             f'<td>{html.escape(nka(row))}</td>'
             f'<td>{html.escape(str(row.get("dpu_l7") or "—"))}</td>'
             f'<td>{len(clients) or "—"}</td>'
-            f'<td class="ts">{html.escape(row.get("answered") or "—")}</td>'
+            f'<td class="ts">{html.escape(row.get("answered") or row.get("busy_path") or "—")}</td>'
             f'<td class="ts">{html.escape(str(row.get("commit") or "—"))}</td></tr>')
 
     latest = rows[-1] if rows else {}
-    faults = sum(1 for r in rows if r.get("status") not in ("ok", "idle"))
+    faults = sum(1 for r in rows if r.get("status") not in ("ok", "idle", "busy"))
     colour, label = STATUS.get(latest.get("status"), ("#8a8a8a", "no runs yet"))
 
     page = f"""<!doctype html>
@@ -122,12 +137,13 @@ def main():
 &middot; {faults} fault(s) &middot; last {html.escape(latest.get("ts", "never"))}</p>
 <div class="strip">{strip}</div>
 <h2>What was deployed</h2>
-<p class="meta">A gold rule marks a run where the DPU's topology changed from the run before it.
+<p class="meta">A gold rule marks a run where the DPU's topology differs from the last run that
+stated one; runs that state none are skipped over, not compared against.
 No latency or throughput is recorded here: a single request against whatever happened to be
 deployed proves the path carries bytes and nothing else. Performance is measured by hand.</p>
 <div class="wrap"><table>
 <thead><tr><th>run (UTC)</th><th>result</th><th>N/K/A</th><th>L7 layer</th>
-<th>clients</th><th>answered</th><th>commit</th></tr></thead>
+<th>clients</th><th>path</th><th>commit</th></tr></thead>
 <tbody>{"".join(body)}</tbody></table></div>
 """
     with open(sys.argv[2], "w") as fh:

@@ -22,7 +22,7 @@ __pycache__/
 # ...but keep the checked-in bench data
 !bench/*.csv
 
-# raw benchmark points, produced by ci/bench-frozen-run.sh and the bench
-# workflows. The published series lives on the gh-pages branch, not here.
-*.jsonl
+# what the nightly health job leaves in the checkout: the record it just took,
+# and the gh-pages clone it appends to. The log itself lives on that branch.
+/record.json
 /pages/

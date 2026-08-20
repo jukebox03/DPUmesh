@@ -196,6 +196,7 @@ test-hostfree: $(HOSTFREE_TESTS)
 	python3 tests/dpumesh_controller_test.py
 	python3 tests/linkerd_cp_relay_test.py
 	python3 tests/feed_delivery_test.py
+	python3 tests/health_page_test.py
 
 test: $(TESTDIR)/native_api_contract_test $(TESTDIR)/native_control_state_test \
 	$(TESTDIR)/workload_grant_test $(TESTDIR)/pod_membership_test \
@@ -234,6 +235,7 @@ test: $(TESTDIR)/native_api_contract_test $(TESTDIR)/native_control_state_test \
 	python3 tests/dpumesh_controller_test.py
 	python3 tests/linkerd_cp_relay_test.py
 	python3 tests/feed_delivery_test.py
+	python3 tests/health_page_test.py
 
 # dmesh API binaries link the transport library. One explicit rule each so the
 # source is a tracked prerequisite (rebuilds on edit).
