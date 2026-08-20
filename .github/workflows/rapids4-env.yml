@@ -1,0 +1,62 @@
+name: rapids4-env
+
+on:
+  workflow_dispatch:
+
+# The DPU-attached host, reached through a self-hosted runner. Nothing here
+# builds. It reports what the runner's environment actually has, which is not
+# what an interactive ssh session has: the service does not read ~/.bashrc, so
+# DOCA and rustup can be on the PATH for a person and missing for a job.
+jobs:
+  probe:
+    runs-on: [self-hosted, linux, x64, rapids4]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Identity and capacity
+        run: |
+          echo "user:   $(whoami)"
+          echo "host:   $(hostname)"
+          echo "arch:   $(uname -m)    cores: $(nproc)"
+          echo "memory: $(free -g | awk '/^Mem:/{print $2}') GiB"
+          echo "workdir: $(pwd)"
+          echo "PATH:   $PATH"
+
+      - name: The runner must not be root
+        run: |
+          [ "$(id -u)" -ne 0 ] || { echo "this runner is root; register it as an unprivileged user"; exit 1; }
+
+      - name: DOCA must resolve without an interactive shell
+        run: |
+          if ! v=$(pkg-config --modversion doca-common 2>&1); then
+            echo "doca-common is not on the runner's PKG_CONFIG_PATH: $v"
+            echo "The service environment ignores ~/.bashrc. Put the variable in"
+            echo "actions-runner/.env, which the runner reads on start."
+            exit 1
+          fi
+          echo "doca-common $v"
+          echo "doca-comch  $(pkg-config --modversion doca-comch)"
+          echo "doca-dpa    $(pkg-config --modversion doca-dpa)"
+
+      - name: Tools the later jobs call
+        run: |
+          missing=0
+          for t in gcc make python3 kubectl nc; do
+            p=$(command -v "$t" || true)
+            printf '%-8s %s\n' "$t" "${p:-MISSING}"
+            [ -n "$p" ] || missing=1
+          done
+          # rustup installs into the home directory. The distribution cargo on the
+          # PATH is older than the toolchain linkerd/rust pins, so report the
+          # rustup one first and say which was found.
+          cargo="$HOME/.cargo/bin/cargo"
+          [ -x "$cargo" ] || cargo=$(command -v cargo || true)
+          printf '%-8s %s\n' cargo "${cargo:-MISSING}"
+          [ -z "$cargo" ] || "$cargo" --version
+          [ "$missing" -eq 0 ] || { echo "a tool the build or bench jobs call is missing"; exit 1; }
+
+      - name: Cluster and device, reported not gated
+        run: |
+          kubectl get nodes 2>&1 | head -5 || echo "kubectl cannot reach the cluster from this job"
+          lspci 2>/dev/null | grep -i bluefield || echo "no BlueField on lspci"

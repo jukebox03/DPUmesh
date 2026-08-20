@@ -1,0 +1,56 @@
+name: contracts-rapids4
+
+on:
+  # No pull_request trigger: this repository is public and this job runs on a
+  # machine that is not disposable.
+  push:
+    branches: [main]
+    paths:
+      - 'include/**'
+      - 'src/**'
+      - 'doca/**'
+      - 'linkerd/include/**'
+      - 'linkerd/shim/**'
+      - 'tests/**'
+      - 'bench/apps/**'
+      - 'bench/validators/**'
+      - 'Makefile'
+      - '.github/workflows/contracts-rapids4.yml'
+  workflow_dispatch:
+
+# One machine. Never two of its jobs at once, and never cancel one that is
+# already measuring or building.
+concurrency:
+  group: rapids4
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: [self-hosted, linux, x64, rapids4]
+    timeout-minutes: 30
+    steps:
+      # checkout cleans the workspace, so build/ never carries over between
+      # runs and a stale object cannot turn a broken build green.
+      - uses: actions/checkout@v5
+
+      - name: DOCA must be present, or nothing below means anything
+        run: pkg-config --modversion doca-common doca-comch doca-dpa
+
+      - name: Library, shim, and benchmark binaries
+        run: make -j"$(nproc)" all
+
+      - name: Every contract, including the ones a plain runner cannot build
+        run: make test
+
+      # The DPA and DPU-ARM binaries are built by doca/meson.build over ssh to
+      # the BlueField (bench.sh build), which would put the DPU password in the
+      # runner environment. That build stays out of CI on purpose.
+      - name: What this job adds over the hosted runners
+        run: |
+          {
+            echo "### rapids4"
+            echo "- hosted CI covers \`make test-hostfree\` (13 of 27 contracts)"
+            echo "- this job runs \`make test\`: the DOCA-linked tests, \`abi_contract_test\`"
+            echo "  (needs the built .so) and \`generator_selftest_test\` (needs the binaries)"
+            echo "- not covered anywhere: the DPA/ARM meson build, which happens on the DPU"
+          } >> "$GITHUB_STEP_SUMMARY"
