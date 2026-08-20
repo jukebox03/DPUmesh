@@ -563,6 +563,20 @@ impl Session {
     }
 }
 
+/// Service targets and their ready endpoints as the controller feed names them:
+/// by `namespace/name` Service key, each endpoint carrying the Pod UID the feed
+/// names it by.
+type NamedServiceTargets = HashMap<String, SocketAddrV4>;
+type NamedServiceEndpoints = HashMap<String, Vec<(SocketAddr, String)>>;
+
+/// The same two maps once resolved, keyed by the compact Service id the DPU
+/// interns each key to.
+type ServiceTargets = HashMap<i32, SocketAddrV4>;
+type ServiceEndpoints = HashMap<i32, Vec<(SocketAddr, String)>>;
+
+/// One parsed feed generation: its version and the maps it carries.
+type ServiceFeed = (u64, NamedServiceTargets, NamedServiceEndpoints);
+
 struct Worker {
     id: c_int,
     /// Proxy lifetime guard.
@@ -584,13 +598,13 @@ struct Worker {
     metrics: Arc<SessionMetrics>,
     /// Real Kubernetes destination presented to Linkerd for each DPUmesh
     /// service. The synthetic address remains the internal backend key.
-    service_targets: HashMap<i32, SocketAddrV4>,
+    service_targets: ServiceTargets,
     /// Ready endpoints in the same authoritative Service generation, each with
     /// the Pod UID the generation names it by. The address is what the Linkerd
     /// balancer selects; the UID is what resolves it to a live destination,
     /// and a recreated Pod carries a new one, so a mapping cannot be
     /// inherited.
-    service_endpoints: HashMap<i32, Vec<(SocketAddr, String)>>,
+    service_endpoints: ServiceEndpoints,
     /// Atomically replaced, monotonically versioned controller feed.
     service_targets_file: Option<PathBuf>,
     service_targets_version: u64,
@@ -1310,7 +1324,7 @@ fn valid_pod_uid(uid: &str) -> bool {
         })
 }
 
-fn parse_service_targets(value: &str) -> Result<HashMap<String, SocketAddrV4>, String> {
+fn parse_service_targets(value: &str) -> Result<NamedServiceTargets, String> {
     let mut targets = HashMap::new();
     for raw in value.split(',').map(str::trim).filter(|s| !s.is_empty()) {
         let (service, addr) = raw.split_once('=').ok_or_else(|| {
@@ -1338,16 +1352,7 @@ fn parse_service_targets(value: &str) -> Result<HashMap<String, SocketAddrV4>, S
 /// The feed carries the same authority as a registration grant, so it is signed
 /// by the same keyring. An unsigned or badly signed generation is refused
 /// exactly like a malformed one: nothing after the envelope is ever parsed.
-fn parse_signed_service_targets(
-    document: &str,
-) -> Result<
-    (
-        u64,
-        HashMap<String, SocketAddrV4>,
-        HashMap<String, Vec<(SocketAddr, String)>>,
-    ),
-    String,
-> {
+fn parse_signed_service_targets(document: &str) -> Result<ServiceFeed, String> {
     let signed = unsafe { dmesh_l7_verify_feed(document.as_ptr(), document.len()) };
     if signed < 0 {
         return Err("service target feed is unsigned or its signature is invalid".to_string());
@@ -1359,19 +1364,10 @@ fn parse_signed_service_targets(
     parse_versioned_service_targets(&document[..signed])
 }
 
-fn parse_versioned_service_targets(
-    document: &str,
-) -> Result<
-    (
-        u64,
-        HashMap<String, SocketAddrV4>,
-        HashMap<String, Vec<(SocketAddr, String)>>,
-    ),
-    String,
-> {
+fn parse_versioned_service_targets(document: &str) -> Result<ServiceFeed, String> {
     let mut version = None;
     let mut entries = Vec::new();
-    let mut endpoints: HashMap<String, Vec<(SocketAddr, String)>> = HashMap::new();
+    let mut endpoints: NamedServiceEndpoints = HashMap::new();
     for raw in document.lines() {
         let line = raw.split('#').next().unwrap_or_default().trim();
         if line.is_empty() {
@@ -1440,12 +1436,9 @@ fn parse_versioned_service_targets(
 /// retried once a later generation defines it — the publisher republishes.
 fn resolve_named_targets(
     worker_id: c_int,
-    named_targets: &HashMap<String, SocketAddrV4>,
-    named_endpoints: &HashMap<String, Vec<(SocketAddr, String)>>,
-) -> (
-    HashMap<i32, SocketAddrV4>,
-    HashMap<i32, Vec<(SocketAddr, String)>>,
-) {
+    named_targets: &NamedServiceTargets,
+    named_endpoints: &NamedServiceEndpoints,
+) -> (ServiceTargets, ServiceEndpoints) {
     let mut targets = HashMap::new();
     let mut endpoints = HashMap::new();
     for (key, addr) in named_targets {
