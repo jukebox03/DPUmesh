@@ -28,7 +28,7 @@ METRICS = [
     ("p50", "p50 latency (us)", "lower is better"),
     ("p99", "p99 latency (us)", "lower is better"),
 ]
-COLORS = {"dpumesh": "#2f6fdb", "tcp": "#c2632b"}
+COLORS = {"dpumesh": "#2f6fdb", "tcp": "#c2632b", "envoy": "#4b8b3b"}
 
 W, H = 420, 190          # one chart
 PAD_L, PAD_R, PAD_T, PAD_B = 52, 12, 10, 28
@@ -50,7 +50,18 @@ def load(path):
 
 
 def family_of(label):
+    """"rate64-dpumesh" -> "rate64": the operating point, shared by a row and its control."""
     return label.rsplit("-", 1)[0] if "-" in label else label
+
+
+def transport_of(label):
+    """"grpc64-dpumesh" -> "dpumesh": which transport this row measured.
+
+    Taken from the label rather than from the target name, because a target is
+    named for the client Pod ("grpc-dpumesh") while the series is named for what
+    it carries.
+    """
+    return label.rsplit("-", 1)[1] if "-" in label else label
 
 
 def _flush(body, segment, x, y, color):
@@ -66,7 +77,7 @@ def chart(runs, family, metric, title, note):
     for row in runs["rows"]:
         if family_of(row.get("label", "")) != family or metric not in row:
             continue
-        series.setdefault(row.get("solution", "?"), []).append(
+        series.setdefault(transport_of(row["label"]), []).append(
             (runs["index"][row["ts"]], row[metric], row))
 
     values = [v for pts in series.values() for _, v, _ in pts]
@@ -165,13 +176,12 @@ def main():
         configs.append(
             f'<tr><td><code>{html.escape(cid)}</code></td>'
             f'<td>{row.get("cfg_workers", "?")}</td><td>{row.get("cfg_rings_per_pod", "?")}</td>'
-            f'<td>{html.escape(str(row.get("cfg_l7_active", "?")))}</td>'
-            f'<td>{html.escape(str(row.get("cfg_pin_bench", "?")))} / '
-            f'{html.escape(str(row.get("cfg_pin_echo", "?")))}</td>'
+            f'<td>{html.escape(str(row.get("cfg_l7", "?")))}</td>'
+            f'<td>{html.escape(str(row.get("cfg_pin_clients", "?")))}</td>'
             f'<td>{row.get("cfg_pods", "?")}</td>'
             f'<td>{html.escape(ts[:10])}</td></tr>')
     config_table = ("<table><thead><tr><th>config_id</th><th>ARM workers</th><th>rings/pod</th>"
-                    "<th>L7</th><th>pin bench/echo</th><th>pods</th><th>last seen</th></tr></thead>"
+                    "<th>L7 layer</th><th>client cores</th><th>pods</th><th>last seen</th></tr></thead>"
                     "<tbody>" + "".join(configs) + "</tbody></table>")
     orphan_note = (f' &middot; {orphans} point(s) recorded before the fingerprint existed are '
                    f'not plotted') if orphans else ""

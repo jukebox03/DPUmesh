@@ -120,3 +120,37 @@ before the fingerprint existed carry none and are not plotted at all.
 
 To read a `config_id` back to a machine, use the Configurations table at the
 bottom of the page.
+
+## Setting the machine up
+
+CI never deploys. `bench/bench.sh deploy` rebuilds the DPU and restarts every
+Pod, which is not something a nightly job may decide to do, so the campaign on
+rapids4 is put there by hand and the nightly run measures whatever it finds.
+
+The topology the published numbers were taken under is the one the report uses:
+
+```sh
+DPUMESH_DPA_THREADS=32 DPUMESH_RINGS_PER_POD=8 DPUMESH_ARM_WORKERS=8 \
+BENCH_NUMA_POLICY=local BENCH_DEPLOY_SCOPE=grpc bash bench/bench.sh deploy
+BENCH_NUMA_POLICY=local bash bench/bench.sh pin grpc
+```
+
+Confirm it took by reading the DPU's own startup line, which is where
+`ci/bench-config.sh` reads it from too:
+
+```sh
+bench/bench.sh dpulog 200 | grep 'DPU PROXY MODE ON'
+# ... N/K/A=32/8/8; ... l7-layer=off, lb=round-robin ...
+```
+
+Passing none of those variables leaves the DPU with **one** ARM data worker,
+which is a different machine and a different set of numbers. A run under that
+topology is still recorded — its `config_id` keeps it apart — but the runner
+says so in the log.
+
+`BENCH_DEPLOY_SCOPE` picks the campaign, and the two do not overlap: `grpc`
+starts only the L7 paths so no other backend can enter the DPU registry while it
+runs, and `l4`/`all` start the byte-stream pods instead. `ci/bench-frozen.txt`
+holds the operating points of both; the rows whose client Pod is not deployed
+are reported as absent and skipped, so the same file serves either campaign and
+the fingerprints keep the two series from being drawn as one.

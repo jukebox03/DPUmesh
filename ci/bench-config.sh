@@ -3,75 +3,77 @@
 # ci/bench-to-json.py to merge into the point.
 #
 # ci/bench-frozen.txt fixes what the client asks for: sizes, concurrency,
-# threads. It cannot fix what the DPU is. How many ARM workers are running,
-# how many rings a pod holds, which core each process sits on, what else shares
-# the machine — all of that moves with a deploy, and all of it moves the number.
+# threads. It cannot fix what the DPU is, and the DPU is what moves the number.
 # Two points carrying the same label and a different config_id are measurements
 # of two different machines, so the published page breaks its line between them
 # instead of drawing a slope that means nothing.
 #
-# config_id hashes only the fields that a deploy sets and that stay put while it
-# runs. cfg_l7_active is reported but deliberately left out of the hash: it is
-# read from a log window, so a quiet proxy would otherwise split the series for
-# no reason.
+# The DPU states its own topology in one line at startup, so that line is the
+# source rather than anything inferred from traffic:
+#
+#   DPU PROXY MODE ON (... N/K/A=32/8/8; ... l7-layer=off, ...)
+#
+# N is DPA execution units, K rings per pod, A ARM data workers. The line is
+# written once per DPU start, which is once per deploy, so the search widens
+# until it finds the most recent one.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 NS="${NS:-test-bench}"
-LOG_LINES="${DPU_LOG_LINES:-4000}"
 
 fail() { echo "bench-config: $*" >&2; exit 1; }
 
-# --- what the DPU is running ------------------------------------------------
-# Every ARM worker reports itself periodically, so the highest index seen in the
-# window is the worker count minus one. Without this number a throughput point
-# cannot be read at all: the same build serves a very different rate with one
-# worker than with four.
-log="$(cd "$ROOT" && timeout 120 bench/bench.sh dpulog "$LOG_LINES" 2>/dev/null)" \
-    || fail "cannot read the DPU log (is .env present, and is the DPU up?)"
-top_worker="$(printf '%s\n' "$log" | grep -o 'proxy: worker [0-9]\+' | awk '{print $3}' | sort -n | tail -1)"
-[ -n "$top_worker" ] || fail "no worker line in the last $LOG_LINES log lines; the DPU may be idle or wedged"
-workers=$((top_worker + 1))
+banner=""
+for lines in 4000 40000 200000; do
+    log="$(cd "$ROOT" && timeout 180 bench/bench.sh dpulog "$lines" 2>/dev/null)" \
+        || fail "cannot read the DPU log (is .env present, and is the DPU up?)"
+    banner="$(printf '%s\n' "$log" | grep 'DPU PROXY MODE ON' | tail -1)"
+    [ -n "$banner" ] && break
+done
+[ -n "$banner" ] || fail "no startup banner in the last 200000 log lines; restart the DPU or widen the search"
 
-# Matched without a pipeline on purpose: `grep -q` closes the pipe on its first
-# hit, the writer dies of SIGPIPE, and under `pipefail` the whole pipeline then
-# reports failure even though the match succeeded.
-l7=none
-case "$log" in *linkerd_app*) l7=linkerd;; esac
+nka="$(printf '%s' "$banner" | sed -n 's/.*N\/K\/A=\([0-9]*\)\/\([0-9]*\)\/\([0-9]*\).*/\1 \2 \3/p')"
+[ -n "$nka" ] || fail "the startup banner carries no N/K/A: $banner"
+read -r dpa_threads rings workers <<<"$nka"
+l7="$(printf '%s' "$banner" | sed -n 's/.*l7-layer=\([a-z0-9_-]*\).*/\1/p')"
+lb="$(printf '%s' "$banner" | sed -n 's/.*lb=\([a-z0-9_-]*\).*/\1/p')"
 
-# --- what the pods are ------------------------------------------------------
-rings="$(kubectl get pod -n "$NS" -l app=echo-dpumesh \
-    -o jsonpath='{.items[0].spec.containers[0].env[?(@.name=="DPUMESH_RINGS_PER_POD")].value}' 2>/dev/null)"
-[ -n "$rings" ] || fail "no Running echo-dpumesh pod in namespace $NS"
-
-# The set of Running pods, not just the ones under test: a campaign left over in
-# the same namespace is a load the measurement cannot see but does feel.
+# --- what shares the machine -------------------------------------------------
+# Not just the pods under test: a campaign left running in the same namespace is
+# a load the measurement cannot see but does feel. A gRPC campaign and an L4
+# campaign also produce different sets here, which is what keeps their series
+# apart without anyone having to label them.
 pods="$(kubectl get pods -n "$NS" --no-headers 2>/dev/null \
     | awk '$3=="Running"{print $1}' | sed 's/-[a-z0-9]\{6,10\}-[a-z0-9]\{5\}$//' | sort -u)"
 pod_count="$(printf '%s\n' "$pods" | grep -c .)"
+[ "$pod_count" -gt 0 ] || fail "no Running pod in namespace $NS"
 pods_id="$(printf '%s\n' "$pods" | sha1sum | cut -c1-8)"
 
-# --- where the processes sit ------------------------------------------------
+# --- where the client processes sit ------------------------------------------
 # The pods run on this node, so their affinity is readable here. Pinning is the
 # knob that moved these numbers the most in past campaigns.
-pin_of() {
-    local pid; pid="$(pgrep -x "$1" | head -1)"
-    [ -n "$pid" ] && taskset -pc "$pid" 2>/dev/null | sed 's/.*: //' || echo unknown
-}
-pin_bench="$(pin_of bench_dpumesh)"
-pin_echo="$(pin_of echo_dpumesh)"
+# The set of affinities the load generators sit on, not one of them: a campaign
+# runs several clients and a single number would name whichever process pgrep
+# happened to return first.
+pins="$(for name in bench_dpumesh bench_sock bench_grpc; do
+            for pid in $(pgrep -x "$name" 2>/dev/null); do
+                taskset -pc "$pid" 2>/dev/null | sed 's/.*: //'
+            done
+        done | sort -u | paste -sd+ -)"
+[ -n "$pins" ] || pins=none
 
-hashed="workers=$workers rings=$rings pin_bench=$pin_bench pin_echo=$pin_echo pods=$pods_id cpus=$(nproc)"
+hashed="nka=$dpa_threads/$rings/$workers l7=$l7 lb=$lb pods=$pods_id pin=$pins cpus=$(nproc)"
 config_id="$(printf '%s' "$hashed" | sha1sum | cut -c1-12)"
 
 cat <<OUT
 config_id=$config_id
-cfg_workers=$workers
+cfg_dpa_threads=$dpa_threads
 cfg_rings_per_pod=$rings
-cfg_pin_bench=$pin_bench
-cfg_pin_echo=$pin_echo
+cfg_workers=$workers
+cfg_l7=$l7
+cfg_lb=$lb
 cfg_pods=$pod_count
 cfg_pods_id=$pods_id
+cfg_pin_clients=$pins
 cfg_cpus=$(nproc)
-cfg_l7_active=$l7
 OUT

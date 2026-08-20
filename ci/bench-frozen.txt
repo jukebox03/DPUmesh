@@ -1,17 +1,31 @@
 # The operating points of the published time series, one per line:
 #
-#   label            solution  req    reply  conc  dur  warmup  threads
+#   label            target    req    reply  conc  dur  warmup  threads
 #
 # A time series is only readable if its operating point never moves, so this
 # set is version controlled: changing a line is a visible commit, and the
 # series before and after that commit are different series.
 #
-# tcp rows are measured in the same run as their dpumesh counterpart. They are
-# the control: when both move together the machine moved, not DPUmesh.
+# Each row's control is measured in the same run as the row it controls. When a
+# transport and its control move together the machine moved, not DPUmesh.
 
-lat64-dpumesh        dpumesh   64     64     1     10   1000    1
-lat64-tcp            tcp       64     64     1     10   1000    1
-rate64-dpumesh       dpumesh   64     64     32    10   1000    2
-rate64-tcp           tcp       64     64     32    10   1000    2
-bw64k-dpumesh        dpumesh   65536  64     32    10   1000    1
-bw64k-tcp            tcp       65536  64     32    10   1000    1
+# --- L4: the transport on its own, an ordered byte stream with no framing.
+# What this answers is what the transport costs, not what an application gets.
+lat64-dpumesh        dpumesh       64     64     1     10   1000    1
+lat64-tcp            tcp           64     64     1     10   1000    1
+rate64-dpumesh       dpumesh       64     64     32    10   1000    2
+rate64-tcp           tcp           64     64     32    10   1000    2
+bw64k-dpumesh        dpumesh       65536  64     32    10   1000    1
+bw64k-tcp            tcp           65536  64     32    10   1000    1
+
+# --- gRPC: what an application actually gets. The L4 win does not carry over
+# on its own — HTTP/2 framing, the gRPC runtime, and a sidecar's own work sit
+# between the transport and the request, so this is the number a service owner
+# would recognise. Envoy is the control that matters here: it is what the
+# service would otherwise run.
+#
+# req/reply are body bytes. The sweep's 64B frame carries a 16B header, so a
+# 64B frame is 48B of body.
+grpc64-dpumesh       grpc-dpumesh  48     48     32    10   200     8
+grpc64-tcp           grpc-tcp      48     48     32    10   200     8
+grpc64-envoy         grpc-envoy    48     48     32    10   200     8

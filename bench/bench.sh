@@ -1513,7 +1513,17 @@ arm_balance() {
 }
 
 ### ------------------------------------------------------------ benchmark (RUN)
-app_of()     { case "$1" in dpumesh) echo bench-dpumesh;; tcp) echo bench-tcp;; *) echo "";; esac; }
+# The client Pod behind a `point` target. The gRPC clients answer the same RUN
+# line on the same control port; their parser reads the first six fields and
+# ignores the churn period, which only the L4 client implements.
+app_of()     { case "$1" in
+                 dpumesh)      echo bench-dpumesh ;;
+                 tcp)          echo bench-tcp ;;
+                 grpc-dpumesh) echo bench-grpc-dpumesh ;;
+                 grpc-tcp)     echo bench-grpc-tcp ;;
+                 grpc-envoy)   echo bench-grpc-envoy ;;
+                 *)            echo "" ;;
+               esac; }
 targets_of() { case "${1:-both}" in both|"") echo "dpumesh tcp";; *) echo "$1";; esac; }
 field()      { sed -n "s/.*[[:space:]]$2=\([^ ]*\).*/\1/p" <<<"$1"; }
 running_pod_ip() {
