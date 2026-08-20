@@ -1,0 +1,18 @@
+name: abi-guard
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  abi-decision:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Public header changes need an ABI decision
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: ./ci/check-abi-bump.sh "$BASE_SHA"
