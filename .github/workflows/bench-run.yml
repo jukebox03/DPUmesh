@@ -52,6 +52,16 @@ jobs:
 
       # This workflow measures what is already deployed. It never deploys:
       # bench.sh deploy rebuilds the DPU and restarts every pod.
+      # bench.sh reads the DPU's address and sudo password from .env at the repo
+      # root, and .env is not in git. Link the operator's copy instead of making
+      # a second one inside the runner workspace; checkout clears the link on the
+      # next run.
+      - name: Link the deploy environment
+        run: |
+          env_file="${DPUMESH_ENV_FILE:-$HOME/DPUmesh/.env}"
+          [ -f "$env_file" ] || { echo "no .env at $env_file; the DPU log cannot be read"; exit 1; }
+          ln -sf "$env_file" .env
+
       - name: The pods must already be up
         run: |
           ns="${NS:-test-bench}"
@@ -65,6 +75,10 @@ jobs:
 
       - name: Measure
         run: |
+          # Read once, before the first point: a measurement that cannot name
+          # the machine it came from is not comparable to any other.
+          mapfile -t CFG < <(ci/bench-config.sh) || exit 1
+          printf '%s\n' "${CFG[@]}"
           : > results.jsonl
           fail=0
           for sol in $( [ "$SOLUTION" = both ] && echo "dpumesh tcp" || echo "$SOLUTION" ); do
@@ -73,7 +87,8 @@ jobs:
               raw=$(bench/bench.sh point "$sol" "$REQ" "$REPLY" "$CONC" "$DUR" 1000 "$THREADS" 2>&1 </dev/null)
               if json=$(printf '%s\n' "$raw" | ci/bench-to-json.py \
                     solution="$sol" repeat="$i" commit="$GITHUB_SHA" \
-                    run_id="$GITHUB_RUN_ID" ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"); then
+                    run_id="$GITHUB_RUN_ID" ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                    "${CFG[@]}"); then
                 printf '%s\n' "$json" >> results.jsonl
               else
                 fail=$((fail + 1))

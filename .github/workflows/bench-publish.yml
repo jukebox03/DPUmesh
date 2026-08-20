@@ -2,10 +2,11 @@ name: bench-publish
 
 on:
   workflow_dispatch:
-  # Nightly, once someone decides that an unattended run on a shared research
-  # machine is acceptable. Until then this is a deliberate, manual act.
-  # schedule:
-  #   - cron: '0 18 * * *'
+  # 04:00 in Seoul. An unattended run on a shared machine skips itself when
+  # someone else is already working; a run started by hand never does, because
+  # then the load is the operator's own choice.
+  schedule:
+    - cron: '0 19 * * *'
 
 concurrency:
   group: rapids4
@@ -21,6 +22,16 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # bench.sh reads the DPU's address and sudo password from .env at the repo
+      # root, and .env is not in git. Link the operator's copy instead of making
+      # a second one inside the runner workspace; checkout clears the link on the
+      # next run.
+      - name: Link the deploy environment
+        run: |
+          env_file="${DPUMESH_ENV_FILE:-$HOME/DPUmesh/.env}"
+          [ -f "$env_file" ] || { echo "no .env at $env_file; the DPU log cannot be read"; exit 1; }
+          ln -sf "$env_file" .env
+
       - name: The pods must already be up
         run: |
           ns="${NS:-test-bench}"
@@ -31,16 +42,32 @@ jobs:
               || { echo "$app has no Running pod; deploy first (bench/bench.sh deploy)"; exit 1; }
           done
 
+      - name: Skip a nightly run if the machine is busy
+        id: quiet
+        if: github.event_name == 'schedule'
+        run: |
+          load=$(cut -d' ' -f1 /proc/loadavg)
+          limit="${BENCH_LOAD_LIMIT:-3.0}"
+          if [ "$(echo "$load $limit" | awk '{print ($1 > $2)}')" = 1 ]; then
+            echo "busy=1" >> "$GITHUB_OUTPUT"
+            echo "load $load is above $limit; someone else is using rapids4" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "busy=0" >> "$GITHUB_OUTPUT"
+            echo "load $load"
+          fi
+
       # The operating points come from ci/bench-frozen.txt, never from workflow
       # inputs: a series whose operating point can be changed per run is not a
       # series. A point that is not OK is skipped and the step fails, so a gap
       # in the data is visible as a red run rather than as a silent absence.
       - name: Measure the frozen set
         id: measure
+        if: steps.quiet.outputs.busy != '1'
         continue-on-error: true
         run: ci/bench-frozen-run.sh new.jsonl
 
       - name: Append to the published history and rebuild the page
+        if: steps.quiet.outputs.busy != '1'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |

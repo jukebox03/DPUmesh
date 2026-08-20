@@ -100,4 +100,23 @@ build that does uses `$HOME/.cargo/bin/cargo` over ssh.
 | `bench-publish` | manual | the frozen set in [bench-frozen.txt](bench-frozen.txt), appended to the `gh-pages` history |
 
 `bench-publish` writes to the `gh-pages` branch and nowhere else. To see the page,
-set Settings → Pages → Source to the `gh-pages` branch after the first run.
+set Settings → Pages → Source to the `gh-pages` branch after the first run. It also
+runs itself nightly at 04:00 Seoul time, and a nightly run skips itself when the
+1-minute load average is above `BENCH_LOAD_LIMIT` (3.0) — someone else is working.
+A run started by hand never skips: then the load is the operator's own choice.
+
+## What a measurement has to say about itself
+
+`ci/bench-frozen.txt` fixes what the client asks for. It cannot fix what the DPU
+is, and the DPU is what moves the number: one ARM worker or four, the L7 backend
+loaded or not, which core each process sits on, what else is deployed in the
+namespace. `ci/bench-config.sh` reads all of that before the first point and
+stamps every row with a `config_id`.
+
+Nothing is published without it. The page draws no line between two points whose
+`config_id` differs — it breaks the line and marks the run — because a slope
+across a redeploy is not a trend, it is two machines side by side. Points from
+before the fingerprint existed carry none and are not plotted at all.
+
+To read a `config_id` back to a machine, use the Configurations table at the
+bottom of the page.

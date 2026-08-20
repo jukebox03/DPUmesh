@@ -18,6 +18,13 @@ COMMIT="$(git -C "$ROOT" rev-parse --short HEAD)"
 STAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 HOST="$(hostname)"
 
+# What the DPU is, read once before the first point. A point that cannot say
+# which machine produced it is not comparable to any other point, so failing
+# here is better than recording one.
+mapfile -t CFG < <("$ROOT/ci/bench-config.sh") || exit 1
+[ "${#CFG[@]}" -gt 0 ] || { echo "[fail]  no configuration fingerprint; refusing to measure" >&2; exit 1; }
+printf '[config] %s\n' "${CFG[@]}" >&2
+
 [ "$OUT" = /dev/stdout ] || : >>"$OUT"
 
 failed=0 recorded=0
@@ -26,7 +33,8 @@ while read -r label sol req reply conc dur warmup threads; do
     echo "[point] $label: $sol req=$req reply=$reply conc=$conc dur=${dur}s threads=$threads" >&2
     raw="$("$ROOT/bench/bench.sh" point "$sol" "$req" "$reply" "$conc" "$dur" "$warmup" "$threads" 2>&1 </dev/null)"
     if json="$(printf '%s\n' "$raw" | "$ROOT/ci/bench-to-json.py" \
-            label="$label" solution="$sol" commit="$COMMIT" ts="$STAMP" host="$HOST")"; then
+            label="$label" solution="$sol" commit="$COMMIT" ts="$STAMP" host="$HOST" \
+            "${CFG[@]}")"; then
         printf '%s\n' "$json" >>"$OUT"
         recorded=$((recorded + 1))
     else
