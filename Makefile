@@ -49,7 +49,7 @@ LIB_SRCS := \
 	doca/peer_channel.c \
 	doca/control_scope.c \
 	doca/dpa.c
-LIB_HDRS := $(shell rg --files include src doca -g '*.h')
+LIB_HDRS := $(shell find include src doca -name '*.h' 2>/dev/null)
 
 # ABI major. BUMP IT whenever the public ABI changes incompatibly — a field added to
 # dmesh_event_t / dmesh_qp_t / dmesh_channel_t, a reorder, a signature change. The SONAME
