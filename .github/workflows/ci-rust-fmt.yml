@@ -1,0 +1,23 @@
+name: rust-fmt
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: linkerd/rust
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Report the pinned toolchain
+        run: rustc --version
+
+      - name: Install rustfmt for the pinned toolchain
+        run: rustup component add rustfmt
+
+      - name: Check formatting
+        run: rustfmt --check --edition 2021 src/lib.rs
