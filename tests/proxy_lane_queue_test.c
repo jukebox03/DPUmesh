@@ -6,6 +6,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/eventfd.h>
+#include <unistd.h>
 
 /* White-box stress coverage for worker lane publication. */
 #include "../doca/dpu_proxy.c"
@@ -39,6 +41,26 @@ int dmesh_service_has_remote(struct objects *objs, int16_t svc)
     return 0;
 }
 
+int l7_conn_open(int worker_id, uint64_t conn,
+                 const struct dmesh_l7_flow *flow)
+{
+    (void)worker_id;
+    (void)conn;
+    (void)flow;
+    return -1;
+}
+
+int l7_conn_segment(int worker_id, uint64_t conn,
+                    const uint8_t *base, uint32_t pos, uint32_t len)
+{
+    (void)worker_id;
+    (void)conn;
+    (void)base;
+    (void)pos;
+    (void)len;
+    return -1;
+}
+
 void l7_conn_eof(int worker_id, uint64_t conn)
 {
     (void)worker_id;
@@ -68,17 +90,6 @@ void l7_conn_close(int worker_id, uint64_t conn)
     (void)worker_id;
     (void)conn;
     l7_close_calls++;
-}
-
-void l7_report(int worker_id, uint64_t conn, uint64_t bytes_in,
-               uint64_t bytes_out, uint64_t duration_ns, int reason)
-{
-    (void)worker_id;
-    (void)conn;
-    (void)bytes_in;
-    (void)bytes_out;
-    (void)duration_ns;
-    (void)reason;
 }
 
 #define PRODUCERS 2
@@ -198,6 +209,17 @@ int main(void)
     assert(px_lane_wrap_action(16384, 8192, 32768, 3) ==
            PX_LANE_WRAP_NONE);
 
+    /* DMA batches obey the device byte limit independently of their SG-piece
+     * count. Exact-limit batches fit; adding one more unit does not. */
+    assert(px_dma_batch_fits(0, 64 * 1024, 2 * 1024 * 1024));
+    assert(px_dma_batch_fits(2 * 1024 * 1024 - 8192, 8192,
+                             2 * 1024 * 1024));
+    assert(!px_dma_batch_fits(2 * 1024 * 1024, 8192,
+                              2 * 1024 * 1024));
+    assert(!px_dma_batch_fits(0, 2 * 1024 * 1024 + 1u,
+                              2 * 1024 * 1024));
+    assert(!px_dma_batch_fits(0, 1, 0));
+
     /* Delivery sequences are scoped to destination host QPs. */
     px->workers[0].buckets =
         calloc(PX_CONN_HASH, sizeof(*px->workers[0].buckets));
@@ -257,6 +279,34 @@ int main(void)
 
     struct px_engine *eng = &px->engines[0];
     eng->objs = objs;
+
+    /* A cross-worker ACK handoff is an event source in its own right. The
+     * target may already be parked after the last data completion, so queue
+     * publication must also release its event loop. */
+    px->n_workers = 2;
+    objs->n_data_workers = 2;
+    px->engines[1].id = 1;
+    px->engines[1].objs = objs;
+    px_ack_queue_init(&px->engines[1].ack_releases);
+    int ack_wake_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    assert(ack_wake_fd >= 0);
+    objs->data_workers[1].wake_fd = ack_wake_fd;
+    atomic_store_explicit(&objs->data_workers[1].parked, 1,
+                          memory_order_release);
+    struct px_arrival wake_arrival;
+    memset(&wake_arrival, 0, sizeof(wake_arrival));
+    assert(px_ack_queue_handoff(px, 1, &wake_arrival));
+    uint64_t wake_count = 0;
+    assert(read(ack_wake_fd, &wake_count, sizeof(wake_count)) ==
+           (ssize_t)sizeof(wake_count));
+    assert(wake_count == 1);
+    assert(atomic_load_explicit(&objs->data_workers[1].parked,
+                                memory_order_acquire) == 0);
+    assert(px_ack_queue_front(&px->engines[1].ack_releases) == &wake_arrival);
+    px_ack_queue_pop(&px->engines[1].ack_releases);
+    close(ack_wake_fd);
+    objs->data_workers[1].wake_fd = -1;
+    objs->n_data_workers = 0;
 
     /* A disconnected client is purged by its connection-owning worker before
      * that worker reports pod quiescence. This closes the long-lived L7
@@ -429,7 +479,7 @@ int main(void)
     px->workers[0].objs = objs;
     px_cur_worker = &px->workers[0];
 
-    uint64_t tx_handle = dmesh_l7_conn_handle(5, 1234);
+    uint64_t tx_handle = px_conn_handle(downstream);
     uint32_t cap = 123;
     assert(dmesh_l7_tx_reserve(1, tx_handle, &cap) == NULL);
     assert(dmesh_l7_tx_reserve(0, UINT64_C(0x001f0001), &cap) == NULL);
@@ -563,6 +613,48 @@ int main(void)
     assert(px_arrival_try_extend(&wide_conn, &wide_comp, 1));
     assert((uint16_t)(wide.ack_seq - wide.ack_first_seq + 1u) ==
            (uint16_t)(PX_ACK_RUN_MAX - 1u));
+
+    /* FIN is directional: the request survives its write-half close until the
+     * backend half also ends. L7 additionally waits until both stack output
+     * FINs have been accepted by the datapath. */
+    struct px_conn *half = px_conn_get(px, 6, 2222, 0, 1);
+    uint16_t half_up = dpu_upstream_create(px->workers[0].ct,
+                                           6, 2222, 7, PX_L7_NONE, 0, 1);
+    assert(half && half_up >= DMESH_UPORT_BASE);
+    assert(px_conn_get(px, 7, half_up, 1, 1) != NULL);
+    half->input_fin = 1;
+    px->workers[0].ct->upstream[half_up].client_fin_sent = 1;
+    assert(!px_maybe_finish_connection(objs, half));
+    assert(px_conn_find(px, 6, 2222) == half);
+    px->workers[0].ct->upstream[half_up].backend_fin_seen = 1;
+    assert(px_maybe_finish_connection(objs, half));
+    assert(px_conn_find(px, 6, 2222) == NULL);
+    assert(px_conn_find(px, 7, half_up) == NULL);
+    assert(!px->workers[0].ct->upstream[half_up].in_use);
+
+    struct px_conn *l7_half = px_conn_get(px, 8, 3333, 0, 1);
+    uint16_t l7_up = dpu_upstream_create(px->workers[0].ct,
+                                         8, 3333, 9, PX_L7_OPAQUE, 0, 1);
+    assert(l7_half && l7_up >= DMESH_UPORT_BASE);
+    assert(px_conn_get(px, 9, l7_up, 1, 1) != NULL);
+    l7_half->l7_mode = PX_L7_OPAQUE;
+    l7_half->input_fin = 1;
+    l7_half->l7_backend_fin_sent = 1;
+    px->workers[0].ct->upstream[l7_up].client_fin_sent = 1;
+    px->workers[0].ct->upstream[l7_up].backend_fin_seen = 1;
+    assert(!px_maybe_finish_connection(objs, l7_half));
+    l7_half->l7_origin_fin_sent = 1;
+    assert(px_maybe_finish_connection(objs, l7_half));
+    assert(px_conn_find(px, 8, 3333) == NULL);
+    assert(px_conn_find(px, 9, l7_up) == NULL);
+
+    struct px_conn *failed = px_conn_get(px, 10, 4444, 0, 1);
+    assert(failed != NULL);
+    failed->l7_mode = PX_L7_FULL;
+    dmesh_l7_session_failed(0, px_conn_handle(failed));
+    assert(failed->l7_session_failed && failed->lifecycle_pending &&
+           failed->stalled);
+    px_conn_del(objs, failed);
 
     free(px->rev_scratch);
     px->rev_scratch = NULL;

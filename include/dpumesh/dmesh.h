@@ -124,7 +124,7 @@ dmesh_qp_t *dmesh_create_qp(dmesh_eq_t *eq, const char *service_name);
  * on return. Defer destruction until the current EQ batch is fully dispatched. */
 int dmesh_destroy_qp(dmesh_qp_t *c);
 
-/* Discard unsent bytes, send FIN when connected, and destroy the QP. */
+/* Discard unsent bytes, reset the connected stream, and destroy the QP. */
 int dmesh_abort_qp(dmesh_qp_t *c);
 
 /* ===== Send (ibv_post_send) ===== */

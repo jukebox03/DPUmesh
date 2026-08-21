@@ -69,12 +69,12 @@ verbs_dpumesh_SRC    := bench/validators/verbs_dpumesh.c
 
 # LD_PRELOAD shim (interposes libc sockets → dmesh) + its vanilla-TCP validators
 PRELOAD := $(LIBDIR)/libdmesh_preload.so
-POSIX_BINS := tcp_echo tcp_client preload_runner bench_sock echo_sock  # pure POSIX, no dmesh link
+POSIX_BINS := tcp_echo tcp_client preload_runner bench_sock echo_sock  # preload inputs, no dmesh link
 tcp_echo_SRC       := bench/validators/tcp_echo.c
 tcp_client_SRC     := bench/validators/tcp_client.c
 preload_runner_SRC := bench/validators/preload_runner.c
-# bench_sock/echo_sock use the same C-language wire protocol and binaries for
-# TCP+Envoy and DPUmesh-preload, so only the transport differs between them.
+# bench_sock/echo_sock are ordinary POSIX applications; the preload deployment
+# interposes their data sockets without changing the programs.
 bench_sock_SRC     := bench/apps/bench_sock.c
 echo_sock_SRC      := bench/apps/echo_sock.c
 
@@ -189,9 +189,7 @@ test-hostfree: $(HOSTFREE_TESTS)
 	$(TESTDIR)/preload_api_contract_test
 	$(TESTDIR)/benchmark_result_contract_test
 	sh tests/dma_fault_scope_test.sh
-	sh tests/l4_collector_contract_test.sh
 	python3 tests/analyze_saturation_test.py
-	python3 tests/summarize_l4_test.py
 	python3 tests/workload_attest_agent_test.py
 	python3 tests/dpumesh_controller_test.py
 	python3 tests/linkerd_cp_relay_test.py
@@ -228,9 +226,7 @@ test: $(TESTDIR)/native_api_contract_test $(TESTDIR)/native_control_state_test \
 	sh tests/dma_fault_scope_test.sh
 	sh tests/abi_contract_test.sh $(LIB) $(PRELOAD) $(ABI_MAJOR)
 	sh tests/generator_selftest_test.sh $(BINDIR)/bench_dpumesh $(BINDIR)/bench_sock
-	sh tests/l4_collector_contract_test.sh
 	python3 tests/analyze_saturation_test.py
-	python3 tests/summarize_l4_test.py
 	python3 tests/workload_attest_agent_test.py
 	python3 tests/dpumesh_controller_test.py
 	python3 tests/linkerd_cp_relay_test.py

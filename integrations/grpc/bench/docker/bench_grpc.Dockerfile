@@ -15,8 +15,8 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 # gRPC is linked statically, so only libdpumesh and DOCA are needed at runtime.
-# BENCH_TRANSPORT selects dmesh (BENCH_DST_SERVICE) or tcp (BENCH_TARGET), so
-# one image serves both the DPUmesh and the Envoy/TCP configurations.
+# The deployment fixes BENCH_TRANSPORT=dmesh and resolves BENCH_DST_SERVICE
+# through the signed DPU topology.
 # GRPC_BUILD_DIR selects the app build: build/grpc-release measures,
 # build/grpc-asan reproduces a fault under ASan/UBSan.
 ARG GRPC_BUILD_DIR=build/grpc-release

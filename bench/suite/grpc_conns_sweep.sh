@@ -48,7 +48,7 @@ SAMPLE="${SAMPLE:-6}"
 GAP="${GAP:-3}"
 OUT="${OUT:-/tmp/grpc-conns-sweep}"
 REACTORS_TAG="${REACTORS_TAG:-8}"
-PIN_PROFILE="${PIN_PROFILE:-grpccap}"
+PIN_PROFILE="${PIN_PROFILE:-grpc}"
 # Overload can kill an endpoint. Redeploying is the only way to clear the DPU
 # afterwards, so the sweep does it itself rather than stopping at the first one.
 MAX_RECOVERIES="${MAX_RECOVERIES:-6}"

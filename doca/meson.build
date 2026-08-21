@@ -44,22 +44,14 @@ srcs = [
     'dpu_proxy.c',
 ]
 
-# The L7 consumer behind dmesh_l7.h: either the reference consumer in this tree
-# or the Rust staticlib carrying linkerd2-proxy. The datapath compiles against
-# the contract and does not change between them.
-l7_backend = get_option('l7_backend')
-l7_link_args = []
-if l7_backend == 'linkerd'
-  add_project_arguments('-DDMESH_L7_RUNTIME_OWNER=1', language: 'c')
-  l7_lib_path = get_option('l7_lib_path')
-  if l7_lib_path == ''
-    error('l7_backend=linkerd requires -Dl7_lib_path=<libdmesh_l7.a>')
-  endif
-  # A Rust staticlib brings its own std; these are what it leaves undefined.
-  l7_link_args += [l7_lib_path, '-lpthread', '-ldl', '-lm', '-lrt', '-lgcc_s']
-else
-  srcs += ['../linkerd/shim/l7_null.c']
+# Linkerd is the mesh implementation, not a selectable benchmark backend.
+add_project_arguments('-DDMESH_L7_RUNTIME_OWNER=1', language: 'c')
+l7_lib_path = get_option('l7_lib_path')
+if l7_lib_path == ''
+  error('the DPU build requires -Dl7_lib_path=<libdmesh_l7.a>')
 endif
+# A Rust staticlib brings its own std; these are what it leaves undefined.
+l7_link_args = [l7_lib_path, '-lpthread', '-ldl', '-lm', '-lrt', '-lgcc_s']
 
 # Build DPA kernel via DPACC
 dpacc_build_script = files('build_dpacc.sh')

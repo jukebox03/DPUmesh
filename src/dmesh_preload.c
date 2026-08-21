@@ -83,6 +83,10 @@ static void resolve_all(void) {
 
 static int g_debug;
 
+static void preload_atfork_prepare(void);
+static void preload_atfork_parent(void);
+static void preload_atfork_child(void);
+
 #define DBG(...) do { if (g_debug) { fprintf(stderr, "[dmesh_preload] " __VA_ARGS__); fputc('\n', stderr); } } while (0)
 
 /* Identity ($DPUMESH_SERVICE) is a Kubernetes Service name and routing is
@@ -94,7 +98,10 @@ static int g_debug;
 __attribute__((constructor))
 static void preload_ctor(void) {
     const char *e;
+    ENSURE_REAL();
     g_debug = (e = getenv("DMESH_PRELOAD_DEBUG")) && atoi(e);
+    (void)pthread_atfork(preload_atfork_prepare, preload_atfork_parent,
+                         preload_atfork_child);
     DBG("ctor: listen_port=%d service='%s'",
         dmesh_config_listen_port(), getenv("DPUMESH_SERVICE") ? getenv("DPUMESH_SERVICE") : "(none)");
 }
@@ -125,6 +132,9 @@ typedef struct pfd {
     int  active_ops;           /* wrappers that acquired this entry from g_fds */
     int  retired;              /* dispatcher closed resources; last op frees it */
     int  closing;              /* queued for dispatcher dmesh_destroy_qp */
+    int  abort_on_close;       /* SO_LINGER {on,0}: reset instead of FIN */
+    int  orphaned;             /* inherited across fork without its dispatcher */
+    int  fork_locked;          /* atfork's unique-entry marker */
     long rcv_timeout_ms;       /* SO_RCVTIMEO; 0 = block forever */
     long snd_timeout_ms;       /* SO_SNDTIMEO; 0 = block forever */
     uint16_t lport;            /* synthesized getsockname port */
@@ -136,6 +146,7 @@ typedef struct pfd {
     pthread_mutex_t tx_mu;      /* serialize bytes from concurrent POSIX send calls */
     preload_rx_t *rx_head, *rx_tail;
     struct pfd *q_next;        /* accept- / close-queue linkage */
+    struct pfd *fork_next;     /* atfork's temporary unique-entry list */
 } pfd_t;
 
 static pfd_t *g_fds[PRELOAD_MAX_FDS];
@@ -323,6 +334,15 @@ static int pfd_queue_rx(pfd_t *e, const dmesh_event_t *event, int defer_signal) 
     rx->event = *event;
 
     pthread_mutex_lock(&e->mu);
+    if (e->rd_closed) {
+        /* POSIX SHUT_RD discards data that arrives afterwards. Return the native
+         * landing credit immediately so a read-disabled socket cannot stall the
+         * shared reverse-DMA ring. */
+        pthread_mutex_unlock(&e->mu);
+        dmesh_release_rx_buffer(g_ch, &rx->event);
+        free(rx);
+        return 0;
+    }
     if (e->peer_closed && !e->io_error) {
         e->io_error = EPROTO;               /* data after FIN violates stream order */
         efd_signal(e);
@@ -499,12 +519,18 @@ static void dispatcher_reap_pfd(pfd_t *e) {
     pthread_mutex_lock(&e->mu);
     dmesh_qp_t *c = e->conn;
     e->conn = NULL;
+    int abort_on_close = e->abort_on_close;
     preload_rx_t *rx = e->rx_head;
     e->rx_head = e->rx_tail = NULL;
     fd_unblock_tx_locked(e);
     pthread_mutex_unlock(&e->mu);
     release_rx_list(rx);
-    if (c) dmesh_destroy_qp(c);
+    if (c) {
+        if (abort_on_close)
+            dmesh_abort_qp(c);
+        else
+            dmesh_destroy_qp(c);
+    }
     real_close(e->sigfd);
     real_close(e->efd);
     pfd_retire(e);
@@ -550,6 +576,96 @@ static void *dispatcher_main(void *arg) {
 }
 
 static pthread_mutex_t g_ch_mu = PTHREAD_MUTEX_INITIALIZER;
+static pfd_t *g_fork_entries;
+
+/* fork() retains only the calling thread.  Therefore the child's inherited
+ * native channel has no dispatcher and none of its QPs can safely remain
+ * usable.  The prepare handler pins every table entry and stops producers;
+ * the child turns inherited mesh descriptors into fail-closed descriptors,
+ * drops the dead global channel without running non-async-safe teardown, and
+ * leaves later sockets free to create a fresh channel and dispatcher.
+ *
+ * The artificial active_ops references also keep a concurrent close/reap from
+ * freeing an entry while fork copies the address space. */
+static void preload_atfork_prepare(void) {
+    pthread_mutex_lock(&g_ch_mu);
+
+    g_fork_entries = NULL;
+    pthread_mutex_lock(&g_tbl_mu);
+    for (int fd = 0; fd < PRELOAD_MAX_FDS; fd++) {
+        pfd_t *e = g_fds[fd];
+        if (!e || e->fork_locked)
+            continue;
+        e->fork_locked = 1;
+        e->active_ops++;
+        e->fork_next = g_fork_entries;
+        g_fork_entries = e;
+    }
+    pthread_mutex_unlock(&g_tbl_mu);
+
+    /* A sender may probe g_poll_mu while holding tx_mu; the probe is a
+     * trylock, so taking tx_mu first cannot form a lock cycle. */
+    for (pfd_t *e = g_fork_entries; e; e = e->fork_next)
+        pthread_mutex_lock(&e->tx_mu);
+    pthread_mutex_lock(&g_poll_mu);
+    pthread_mutex_lock(&g_q_mu);
+    for (pfd_t *e = g_fork_entries; e; e = e->fork_next)
+        pthread_mutex_lock(&e->mu);
+    pthread_mutex_lock(&g_tbl_mu);
+}
+
+static void preload_atfork_unlock_entries(int drop_refs) {
+    pfd_t *entries = g_fork_entries;
+    g_fork_entries = NULL;
+    pthread_mutex_unlock(&g_tbl_mu);
+    for (pfd_t *e = entries; e;) {
+        pfd_t *next = e->fork_next;
+        e->fork_next = NULL;
+        e->fork_locked = 0;
+        pthread_mutex_unlock(&e->mu);
+        pthread_mutex_unlock(&e->tx_mu);
+        if (drop_refs)
+            pfd_put(e);
+        e = next;
+    }
+    pthread_mutex_unlock(&g_q_mu);
+    pthread_mutex_unlock(&g_poll_mu);
+    pthread_mutex_unlock(&g_ch_mu);
+}
+
+static void preload_atfork_parent(void) {
+    preload_atfork_unlock_entries(1);
+}
+
+static void preload_atfork_child(void) {
+    /* The native objects are deliberately not destroyed here: pthread atfork
+     * child handlers may call only async-signal-safe operations.  Their
+     * CLOEXEC descriptors disappear on exec; a child that continues gets a
+     * fresh channel on its next mapped socket operation. */
+    g_ch = NULL;
+    g_eq = NULL;
+    if (g_wake_fd >= 0) {
+        real_close(g_wake_fd);
+        g_wake_fd = -1;
+    }
+    atomic_store_explicit(&g_listener, NULL, memory_order_release);
+    atomic_store_explicit(&g_listener_closed, 0, memory_order_release);
+    g_accept_head = g_accept_tail = NULL;
+    g_close_head = NULL;
+
+    for (pfd_t *e = g_fork_entries; e; e = e->fork_next) {
+        e->orphaned = 1;
+        e->conn = NULL;
+        e->io_error = ECONNRESET;
+        e->rx_head = e->rx_tail = NULL;
+        e->active_ops = 0;       /* vanished threads owned every old reference */
+        if (e->sigfd >= 0) {
+            real_close(e->sigfd); /* makes every app alias observe HUP */
+            e->sigfd = -1;
+        }
+    }
+    preload_atfork_unlock_entries(0);
+}
 
 /* Create the channel + dispatcher. Called under g_ch_mu; leaves g_ch NULL on
  * failure, so a later mapped socket operation retries the registration. */
@@ -1252,6 +1368,22 @@ int close(int fd) {
     pthread_mutex_unlock(&g_tbl_mu);
     real_close(fd);                               /* the kernel dup */
     if (last) {
+        if (e->orphaned) {
+            /* The child has no thread that may reap this entry and no native
+             * object it may safely destroy.  Only local descriptor/storage
+             * cleanup remains. */
+            if (e->sigfd >= 0) {
+                real_close(e->sigfd);
+                e->sigfd = -1;
+            }
+            if (e->efd >= 0) {
+                real_close(e->efd);
+                e->efd = -1;
+            }
+            pfd_retire(e);
+            pfd_put(e);
+            return 0;
+        }
         if (atomic_load_explicit(&g_listener, memory_order_acquire) == e) {
             atomic_store_explicit(&g_listener, NULL, memory_order_release);
             atomic_store_explicit(&g_listener_closed, 1, memory_order_release);
@@ -1273,14 +1405,28 @@ int shutdown(int fd, int how) {
     pfd_t *e = pfd_get(fd);
     if (!e) return real_shutdown(fd, how);
     if (e->listener) { pfd_put(e); errno = ENOTCONN; return -1; }
+    if (how != SHUT_RD && how != SHUT_WR && how != SHUT_RDWR) {
+        pfd_put(e);
+        errno = EINVAL;
+        return -1;
+    }
+    preload_rx_t *discard = NULL;
     pthread_mutex_lock(&e->mu);
     if ((how == SHUT_WR || how == SHUT_RDWR) && !e->wr_closed) {
         e->wr_closed = 1;
-        /* Approximate half-close: ship buffered bytes, then a FIN. The FIN frees
-         * the DPU upstream, so replies sent after it are undeliverable — the
-         * transport has no true half-close. */
+        /* Ship buffered bytes, then close only the write half. The DPU keeps
+         * the return mapping until the peer's FIN, so reads may continue and
+         * a request/response protocol can finish normally. */
         if (e->conn) {
             if (dmesh_flush(e->conn) != 0 || dmesh_send_fin(e->conn) != 0) {
+                /* A failed FIN is terminal.  Retrying cannot distinguish a FIN
+                 * that was accepted from one that was not, and leaving only
+                 * wr_closed set would make the failure disappear from poll,
+                 * SO_ERROR, and later reads. */
+                if (!e->io_error)
+                    e->io_error = ECONNRESET;
+                fd_unblock_tx_locked(e);
+                efd_signal(e);
                 pthread_mutex_unlock(&e->mu);
                 pfd_put(e);
                 errno = ECONNRESET;
@@ -1288,8 +1434,16 @@ int shutdown(int fd, int how) {
             }
         }
     }
-    if (how == SHUT_RD || how == SHUT_RDWR) e->rd_closed = 1;
+    if ((how == SHUT_RD || how == SHUT_RDWR) && !e->rd_closed) {
+        e->rd_closed = 1;
+        /* Already queued receives are no longer observable after SHUT_RD.
+         * Detach them under the socket lock and return their DMA credits after
+         * unlocking. Future arrivals take the immediate-discard path above. */
+        discard = e->rx_head;
+        e->rx_head = e->rx_tail = NULL;
+    }
     pthread_mutex_unlock(&e->mu);
+    release_rx_list(discard);
     if (how == SHUT_RD || how == SHUT_RDWR) efd_signal(e);   /* unblock readers → EOF */
     pfd_put(e);
     return 0;
@@ -1342,8 +1496,20 @@ static int fcntl_common(int fd, int cmd, void *arg, int no_arg,
         return 0;
     case F_DUPFD:
     case F_DUPFD_CLOEXEC: {
+        if ((long)(intptr_t)arg >= PRELOAD_MAX_FDS) {
+            pfd_put(e);
+            errno = EMFILE;
+            return -1;
+        }
         int nf = realf(fd, cmd, arg);
-        if (nf >= 0 && nf < PRELOAD_MAX_FDS) {
+        if (nf >= PRELOAD_MAX_FDS) {
+            /* The returned descriptor is already an alias of the private
+             * socketpair.  Letting it escape the table would turn a mesh
+             * socket into a silent kernel socket on just this alias. */
+            real_close(nf);
+            nf = -1;
+            errno = EMFILE;
+        } else if (nf >= 0) {
             pthread_mutex_lock(&g_tbl_mu);
             g_fds[nf] = e;
             e->refs++;
@@ -1432,6 +1598,13 @@ int setsockopt(int fd, int level, int optname, const void *val, socklen_t len) {
         else e->snd_timeout_ms = timeout;
         pthread_mutex_unlock(&e->mu);
     }
+    if (level == SOL_SOCKET && optname == SO_LINGER && val &&
+        len >= sizeof(struct linger)) {
+        const struct linger *linger = (const struct linger *)val;
+        pthread_mutex_lock(&e->mu);
+        e->abort_on_close = linger->l_onoff && linger->l_linger == 0;
+        pthread_mutex_unlock(&e->mu);
+    }
     pfd_put(e);
     return 0;                                       /* accepted no-op (TCP_NODELAY, …) */
 }
@@ -1469,6 +1642,17 @@ int getsockopt(int fd, int level, int optname, void *val, socklen_t *len) {
             pfd_put(e);
             return 0;
         }
+        case SO_LINGER:
+            if (*len >= sizeof(struct linger)) {
+                pthread_mutex_lock(&e->mu);
+                int abort_on_close = e->abort_on_close;
+                pthread_mutex_unlock(&e->mu);
+                struct linger linger = { .l_onoff = abort_on_close, .l_linger = 0 };
+                memcpy(val, &linger, sizeof linger);
+                *len = sizeof linger;
+            }
+            pfd_put(e);
+            return 0;
         }
     }
     if (val && len && *len >= sizeof(int)) { *(int *)val = 0; *len = sizeof(int); }

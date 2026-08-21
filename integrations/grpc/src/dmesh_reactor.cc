@@ -38,6 +38,11 @@ namespace {
 // reader keeps its backpressure bounded and cannot withhold the ring.
 constexpr size_t kMaxHeldReceives = 64;
 
+// Bytes accepted before gRPC has constructed and bound the Endpoint. Connect
+// and accept delivery are asynchronous, so a stalled callback executor must
+// not turn that gap into an unbounded per-connection queue.
+constexpr size_t kMaxPrebindBytes = kReceiveHighWaterBytes;
+
 // Poll batches one loop iteration consumes before it returns to the command
 // queue, so a saturated EQ still yields to commands and the stop request.
 constexpr int kEqBatchBudget = 8;
@@ -96,6 +101,7 @@ class DmeshReactor::Impl final
     dmesh_qp_t* qp = nullptr;
     std::weak_ptr<DmeshEndpointDriver> driver;
     std::deque<QueuedReceive> prebind_receives;
+    size_t prebind_bytes = 0;
     // Receives whose credit is withheld while the endpoint queue is above its
     // high-water mark.
     std::deque<dmesh_event_t> held_receives;
@@ -479,6 +485,7 @@ class DmeshReactor::Impl final
     while (!connection->prebind_receives.empty()) {
       auto receive = std::move(connection->prebind_receives.front());
       connection->prebind_receives.pop_front();
+      connection->prebind_bytes -= receive.bytes.size();
       const ReceiveOutcome outcome = bound_driver->OnIncomingData(
           absl::MakeConstSpan(receive.bytes));
       if (!outcome.status.ok()) {
@@ -549,10 +556,19 @@ class DmeshReactor::Impl final
 
   bool QueuePrebindReceive(const std::shared_ptr<Connection>& connection,
                            dmesh_event_t* event) {
+    if (event->len > kMaxPrebindBytes - connection->prebind_bytes) {
+      ops_->ReleaseRxBuffer(channel_, event);
+      FailConnectionOwner(
+          connection,
+          absl::ResourceExhaustedError(
+              "DPUmesh endpoint binding did not keep up with receive data"));
+      return false;
+    }
     Connection::QueuedReceive queued;
     try {
       queued.bytes.assign(event->buf, event->buf + event->len);
       connection->prebind_receives.push_back(std::move(queued));
+      connection->prebind_bytes += event->len;
     } catch (const std::bad_alloc&) {
       ops_->ReleaseRxBuffer(channel_, event);
       FailConnectionOwner(
@@ -617,17 +633,29 @@ class DmeshReactor::Impl final
     /* A withheld credit stops the transport landing more bytes for this
      * connection until a read drains the endpoint queue. */
     const bool hold = outcome.hold_credit && outcome.status.ok();
+    bool credit_overflow = false;
     for (int i = 0; i < count; ++i) {
       if (hold && connection->held_receives.size() < kMaxHeldReceives) {
         connection->held_receives.push_back(events[i]);
       } else {
         if (hold) {
           receive_credit_hold_dropped_.fetch_add(1, std::memory_order_relaxed);
+          credit_overflow = true;
         }
         ops_->ReleaseRxBuffer(channel_, &events[i]);
       }
     }
-    if (!outcome.status.ok()) FailConnectionOwner(connection, outcome.status);
+    if (!outcome.status.ok()) {
+      FailConnectionOwner(connection, outcome.status);
+    } else if (credit_overflow) {
+      /* Returning credits while the endpoint remains above its high-water mark
+       * would let a non-cooperating peer grow the gRPC slice queue without a
+       * bound. The retention cap is a fail-closed guard. */
+      FailConnectionOwner(
+          connection,
+          absl::ResourceExhaustedError(
+              "DPUmesh receive backpressure retention limit exceeded"));
+    }
   }
 
   void HandleEvent(dmesh_event_t* event) {

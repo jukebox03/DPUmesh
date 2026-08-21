@@ -36,6 +36,12 @@
  * the smallest extents finite too. */
 #define DMESH_PEER_TX_SLOTS         8192u
 #define DMESH_PEER_TX_NIL           0xFFFFFFFFu
+/* Handles are allocated independently at both ends of a full-duplex channel.
+ * The owner bit gives the two allocators disjoint wire namespaces without
+ * halving either one's 4096-stream capacity. Which node owns the high half is
+ * deterministic from the authenticated node names. */
+#define DMESH_PEER_HANDLE_OWNER_BIT  0x80000000u
+#define DMESH_PEER_HANDLE_INDEX_MASK 0x00000FFFu
 /* The unit that crosses is a staging extent, and nothing is re-segmented at
  * the boundary, so the largest frame is the arrival coalescing bound. */
 #define DMESH_PEER_EXTENT_MAX       (64u * 1024u)
@@ -75,22 +81,37 @@ _Static_assert(sizeof(struct dmesh_peer_msg_header) == 16,
 struct dmesh_peer_stream_open {
     char     src_pod_uid[DMESH_POD_UID_MAX];
     char     dst_pod_uid[DMESH_POD_UID_MAX];
+    /* Cluster-qualified Service asserted by the source registration. The
+     * destination verifies that the signed generation places src_pod_uid in
+     * this Service before using its protection class. */
+    char     src_service_key[DMESH_K8S_NAMESPACE_MAX + DMESH_SVC_NAME_MAX];
     uint16_t dst_port;
     uint16_t reserved;
-    uint32_t reserved2;
+    /* Source-local correlation token. The destination never interprets it;
+     * STREAM_OPEN_ACK returns it so several opens may be in flight together. */
+    uint32_t source_token;
     /* Not an identity input. It lets a destination notice it is behind and
      * adopt sooner, which shortens ordinary generation skew. */
     uint64_t src_generation;
 };
-_Static_assert(sizeof(struct dmesh_peer_stream_open) == 144,
+_Static_assert(sizeof(struct dmesh_peer_stream_open) == 272,
                "dmesh_peer_stream_open wire ABI drift");
 
 struct dmesh_peer_stream_open_ack {
+    uint32_t source_token;
     uint32_t handle;
     int32_t  status;        /* 0, or enum dmesh_peer_refusal */
+    uint32_t reserved;
 };
-_Static_assert(sizeof(struct dmesh_peer_stream_open_ack) == 8,
+_Static_assert(sizeof(struct dmesh_peer_stream_open_ack) == 16,
                "dmesh_peer_stream_open_ack wire ABI drift");
+
+struct dmesh_peer_data_prefix {
+    uint32_t seq;
+    uint32_t reserved;
+};
+_Static_assert(sizeof(struct dmesh_peer_data_prefix) == 8,
+               "dmesh_peer_data_prefix wire ABI drift");
 
 /* One entry names a run of consecutive sequences rather than one, which is the
  * encoding `dmesh_tx_ack_entry` already uses on the reverse ring: one
@@ -140,6 +161,7 @@ const char *dmesh_peer_refusal_name(enum dmesh_peer_refusal reason);
  * been re-tenanted. */
 struct dmesh_peer_handle {
     uint32_t incarnation;
+    uint32_t wire_handle;
     int32_t  dst_pod_idx;
     uint32_t dst_pod_generation;
     uint16_t dst_port;
@@ -148,6 +170,25 @@ struct dmesh_peer_handle {
     uint8_t  in_use;
     uint8_t  reserved[3];
     uint32_t staging_bytes;    /* what this stream holds of the peer's bound */
+    uint32_t rx_seq;            /* newest ordered DATA sequence */
+    uint8_t  rx_seq_valid;
+    uint8_t  rx_fin;             /* peer ended source -> destination */
+    uint8_t  tx_fin;             /* local reply direction ended */
+};
+
+/* One accepted DATA extent stays here until its local DMA landing completes
+ * and its acknowledgement has been staged. This both validates asynchronous
+ * completions and bounds the number of one-byte extents a hostile peer can
+ * leave pending independently of the byte bound. */
+struct dmesh_peer_rxslot {
+    uint32_t next;
+    uint32_t handle;
+    uint32_t seq;
+    uint32_t bytes;
+    uint8_t  source_side;
+    uint8_t  completed;
+    uint8_t  in_use;
+    uint8_t  reserved;
 };
 
 /* ---- what the source owes --------------------------------------------- */
@@ -189,6 +230,8 @@ struct dmesh_peer_transport {
     void (*close)(void *conn);
 };
 
+struct dmesh_peer_channel;
+
 /* What this module asks of the node it runs on. Every one of these is a
  * lookup in state the DPU already holds; none of them consults the peer. */
 struct dmesh_peer_ops {
@@ -203,6 +246,14 @@ struct dmesh_peer_ops {
     int32_t (*local_pod)(void *ctx, const char *pod_uid, uint32_t *pod_generation);
     /* The intra-node upstream a stream to (slot, port) feeds. */
     uint16_t (*upstream_for)(void *ctx, int32_t dst_pod_idx, uint16_t dst_port);
+    /* Finish destination-side stream setup after the peer handle is known.
+     * The proxy uses this to allocate the node-local upstream/return mapping.
+     * Zero refuses the OPEN; absent falls back to `upstream_for`. */
+    uint16_t (*destination_opened)(void *ctx,
+                                   struct dmesh_peer_channel *channel,
+                                   uint32_t handle,
+                                   const struct dmesh_peer_stream_open *open,
+                                   int32_t dst_pod_idx);
     /* The destination slot's current pod generation. A handle whose slot has
      * been re-tenanted names a Pod that no longer exists, and the arithmetic
      * that catches it is the pair `px_batch` already carries: stamped at open,
@@ -216,11 +267,30 @@ struct dmesh_peer_ops {
      * Negative: cannot be delivered — the stream is poisoned. */
     int  (*deliver)(void *ctx, const struct dmesh_peer_handle *handle,
                     const uint8_t *bytes, uint32_t len, uint32_t seq);
+    /* The reverse direction of a locally originated stream. The handle is in
+     * the remote allocator's namespace, so it is deliberately not looked up
+     * in the destination handle table above. Return values match `deliver`. */
+    int  (*source_deliver)(void *ctx, struct dmesh_peer_channel *channel,
+                           uint32_t handle, const uint8_t *bytes,
+                           uint32_t len, uint32_t seq);
+    /* Deliver EOF after all earlier DATA for a destination-owned handle has
+     * been queued. A positive result means the local proxy retained the EOF
+     * for retry; zero means it was queued synchronously. */
+    int  (*destination_fin)(void *ctx, const struct dmesh_peer_handle *handle);
     /* Release custody of one extent at the source, now that it landed. */
     void (*release)(void *ctx, uint8_t kind, void *cookie, uint32_t bytes);
     /* End the streams a handle carried, as `px_poison` does within a node. */
     void (*poison)(void *ctx, const struct dmesh_peer_handle *handle,
                    const char *why);
+    /* Source-side completions. source_token is the token supplied in OPEN;
+     * `source_fin` returns nonzero only when the handle names a live source
+     * stream, so an unknown FIN is refused rather than trusted. */
+    void (*source_opened)(void *ctx, struct dmesh_peer_channel *channel,
+                          uint32_t source_token, uint32_t handle, int32_t status);
+    int  (*source_fin)(void *ctx, struct dmesh_peer_channel *channel,
+                       uint32_t handle);
+    void (*source_reset)(void *ctx, struct dmesh_peer_channel *channel,
+                         const char *why);
     /* Counted, surfaced as dmesh_control_events_total{kind="peer",reason=...}. */
     void (*event)(void *ctx, const char *reason);
     uint64_t (*now_ns)(void *ctx);
@@ -245,6 +315,7 @@ struct dmesh_peer_channel {
     uint16_t port;
     uint8_t  in_use;
     uint8_t  state;                  /* enum dmesh_peer_state */
+    uint8_t  initiated_local;        /* deterministic simultaneous-open winner */
     /* Advanced on every entry to AUTHENTICATING, so a completion belonging to
      * the previous incarnation is refused rather than applied to this one. */
     uint32_t incarnation;
@@ -264,8 +335,18 @@ struct dmesh_peer_channel {
     uint64_t inflight_bytes;
     uint8_t  stalled;
 
+    struct dmesh_peer_rxslot *rx;
+    uint32_t rx_free;
+
     struct dmesh_peer_ack_entry ack_stage[DMESH_STREAM_ACK_BATCH];
     uint32_t ack_staged;
+
+    /* Ordered transport framing. Allocated only for a live channel, avoiding
+     * 16 MiB of inline buffers in the fixed 256-channel table. */
+    uint8_t *rx_frame;
+    uint8_t *tx_frame;
+    uint32_t rx_len;
+    uint32_t tx_len;
 
     uint64_t refused[DMESH_PEER_REFUSE_MAX];
     uint64_t poisoned;
@@ -310,6 +391,12 @@ int dmesh_peer_prologue(const char *local_node, const char *peer_node,
 struct dmesh_peer_channel *dmesh_peer_open(struct dmesh_peer_table *table,
                                            const char *node_name,
                                            enum dmesh_peer_refusal *reason);
+/* Adopt the connection accepted by the lower RDMA transport. The handshake
+ * supplies the peer node, incarnation, and authenticated static key. */
+struct dmesh_peer_channel *
+dmesh_peer_accept(struct dmesh_peer_table *table, const char *node_name,
+                  uint32_t incarnation, void *conn, const uint8_t peer_key[32],
+                  enum dmesh_peer_refusal *reason);
 /* The one rule added on top of the stock protocol: the peer's static key must
  * equal the one the held generation binds to the node name it claims. */
 enum dmesh_peer_refusal dmesh_peer_authenticated(struct dmesh_peer_table *table,
@@ -346,6 +433,11 @@ dmesh_peer_data(struct dmesh_peer_table *table, struct dmesh_peer_channel *chann
 void dmesh_peer_delivered(struct dmesh_peer_table *table,
                           struct dmesh_peer_channel *channel,
                           uint32_t handle, uint32_t seq, uint32_t len);
+/* Asynchronous landing completion for DATA in the reverse direction of a
+ * source-originated stream. */
+void dmesh_peer_source_delivered(struct dmesh_peer_table *table,
+                                 struct dmesh_peer_channel *channel,
+                                 uint32_t handle, uint32_t seq, uint32_t len);
 enum dmesh_peer_refusal
 dmesh_peer_stream_fin(struct dmesh_peer_table *table,
                       struct dmesh_peer_channel *channel,
@@ -355,8 +447,9 @@ enum dmesh_peer_refusal
 dmesh_peer_pod_gone(struct dmesh_peer_table *table,
                     struct dmesh_peer_channel *channel,
                     uint32_t incarnation, const char *pod_uid);
-/* Flush the staged acknowledgements. Called when the batch fills and when the
- * worker's send path drains. */
+/* Flush the staged acknowledgements. Completed async landings that did not fit
+ * the current wire batch remain in the bounded RX slot pool and are drained on
+ * later progress passes. */
 int dmesh_peer_ack_flush(struct dmesh_peer_table *table,
                          struct dmesh_peer_channel *channel);
 
@@ -375,6 +468,35 @@ dmesh_peer_tx_ack(struct dmesh_peer_table *table, struct dmesh_peer_channel *cha
 /* Release everything this source holds for one handle, without delivery. */
 void dmesh_peer_tx_drop(struct dmesh_peer_table *table,
                         struct dmesh_peer_channel *channel, uint32_t handle);
+
+/* Source-side wire operations. DATA takes custody only after a complete frame
+ * is accepted by the ordered transport; a failed/would-block send leaves the
+ * caller's cookie untouched so it can retry. */
+enum dmesh_peer_refusal
+dmesh_peer_stream_request(struct dmesh_peer_table *table,
+                          struct dmesh_peer_channel *channel,
+                          const struct dmesh_peer_stream_open *open);
+enum dmesh_peer_refusal
+dmesh_peer_stream_data_send(struct dmesh_peer_table *table,
+                            struct dmesh_peer_channel *channel,
+                            uint32_t handle, uint32_t seq,
+                            const uint8_t *bytes, uint32_t len,
+                            uint8_t custody_kind, void *cookie);
+enum dmesh_peer_refusal
+dmesh_peer_stream_fin_send(struct dmesh_peer_table *table,
+                           struct dmesh_peer_channel *channel,
+                           uint32_t handle);
+enum dmesh_peer_refusal
+dmesh_peer_pod_gone_send(struct dmesh_peer_table *table,
+                         struct dmesh_peer_channel *channel,
+                         const char *pod_uid);
+
+/* Authenticate a newly connected channel and drain/dispatch a bounded number
+ * of ordered frames. Returns frames progressed, 0 when idle/handshaking, -1
+ * after a transport or malformed-frame reset. */
+int dmesh_peer_channel_progress(struct dmesh_peer_table *table,
+                                struct dmesh_peer_channel *channel,
+                                int frame_budget);
 
 /* ---- frames ----------------------------------------------------------- */
 

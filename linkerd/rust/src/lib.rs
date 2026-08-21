@@ -6,7 +6,7 @@
 //! `all` selection, carries Linkerd sessions.
 
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 #[cfg(not(test))]
 use std::ffi::c_void;
 #[cfg(not(test))]
@@ -69,15 +69,9 @@ fn flow_text(bytes: &[c_char]) -> String {
     String::from_utf8_lossy(&raw).into_owned()
 }
 
-/// Mirrors `struct dmesh_l7_verdict`.
-#[repr(C)]
-pub struct DmeshL7Verdict {
-    pub allow: c_int,
-    pub backend_pod: i32,
-}
-
-const MODE_OPAQUE: u8 = 2;
-const MODE_FULL: u8 = 3;
+const MODE_OPAQUE: u8 = 1;
+const MODE_FULL: u8 = 2;
+#[cfg(test)]
 const BACKEND_ANY: i32 = -1;
 /// Return output to the connection's sender.
 const BACKEND_ORIGIN: i32 = -2;
@@ -96,7 +90,7 @@ const STAGING_SPAN: usize = 64 * 1024 * 1024;
 const TX_DRAIN_MAX: usize = 64 * 1024;
 
 /// Reservations one connection may publish in a drain pass. A reservation is one
-/// egress chunk, so this matches the copy path's `dmesh_l7_send` cap.
+/// egress chunk, so this bounds one reservation-path drain pass.
 const TX_RESERVATIONS_MAX: usize = 4;
 
 /// Aggregate output and session budgets for one drain pass.
@@ -108,7 +102,8 @@ const SERVICE_PORT: u16 = 9092;
 
 /// Resolve a `namespace/name` Service key to this node's DPU-interned id,
 /// answered from the held topology generation. `None` until a generation
-/// interns it; the publisher republishes, so a later generation retries.
+/// interns it; session admission retries the retained feed names after every
+/// topology change can have become visible.
 #[cfg(not(test))]
 fn resolve_service_key(worker_id: c_int, key: &str) -> Option<i32> {
     extern "C" {
@@ -151,6 +146,9 @@ fn resolve_endpoint_uid(_worker_id: c_int, uid: &str) -> i32 {
 /// Test interning: the generation names two Services.
 #[cfg(test)]
 fn resolve_service_key(_worker_id: c_int, key: &str) -> Option<i32> {
+    if !TEST_SERVICE_KEYS_READY.with(Cell::get) {
+        return None;
+    }
     match key {
         "test-bench/echo-a" => Some(11),
         "test-bench/echo-b" => Some(20),
@@ -158,31 +156,37 @@ fn resolve_service_key(_worker_id: c_int, key: &str) -> Option<i32> {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static TEST_SERVICE_KEYS_READY: Cell<bool> = const { Cell::new(true) };
+}
+
 /// DPUmesh ABI calls with a recording test implementation.
 mod datapath {
     #[cfg(test)]
-    pub use fake::{release, send, tx_publish};
+    pub use fake::{release, session_failed, tx_finish, tx_publish};
 
     #[cfg(not(test))]
     use std::os::raw::c_int;
 
     #[cfg(not(test))]
     extern "C" {
-        fn dmesh_l7_send(
-            worker_id: c_int,
-            conn: u64,
-            backend_pod: i32,
-            buf: *const u8,
-            len: usize,
-        ) -> c_int;
         fn dmesh_l7_release(worker_id: c_int, conn: u64, pos: u32, len: u32);
         fn dmesh_l7_tx_reserve(worker_id: c_int, conn: u64, cap: *mut u32) -> *mut u8;
         fn dmesh_l7_tx_commit(worker_id: c_int, conn: u64, backend_pod: i32, len: u32) -> c_int;
-    }
-
-    #[cfg(not(test))]
-    pub fn send(worker_id: c_int, conn: u64, backend_pod: i32, buf: &[u8]) -> c_int {
-        unsafe { dmesh_l7_send(worker_id, conn, backend_pod, buf.as_ptr(), buf.len()) }
+        fn dmesh_l7_tx_commit_remote(
+            worker_id: c_int,
+            conn: u64,
+            pod_uid: *const std::os::raw::c_char,
+            len: u32,
+        ) -> c_int;
+        fn dmesh_l7_tx_fin(
+            worker_id: c_int,
+            conn: u64,
+            backend_pod: i32,
+            pod_uid: *const std::os::raw::c_char,
+        ) -> c_int;
+        fn dmesh_l7_session_failed(worker_id: c_int, conn: u64);
     }
 
     #[cfg(not(test))]
@@ -199,7 +203,7 @@ mod datapath {
     pub fn tx_publish(
         worker_id: c_int,
         conn: u64,
-        backend_pod: i32,
+        route: &dmesh_doca::BackendRoute,
         fill: impl FnOnce(&mut [u8]) -> usize,
     ) -> Option<c_int> {
         let mut cap: u32 = 0;
@@ -211,7 +215,52 @@ mod datapath {
         // until the commit below, and this thread owns the reservation.
         let reservation = unsafe { std::slice::from_raw_parts_mut(base, cap as usize) };
         let len = fill(reservation).min(cap as usize) as u32;
-        Some(unsafe { dmesh_l7_tx_commit(worker_id, conn, backend_pod, len) })
+        Some(unsafe {
+            match route {
+                dmesh_doca::BackendRoute::Any => dmesh_l7_tx_commit(worker_id, conn, -1, len),
+                dmesh_doca::BackendRoute::Origin => {
+                    dmesh_l7_tx_commit(worker_id, conn, super::BACKEND_ORIGIN, len)
+                }
+                dmesh_doca::BackendRoute::Local(pod) => {
+                    dmesh_l7_tx_commit(worker_id, conn, *pod, len)
+                }
+                dmesh_doca::BackendRoute::Remote(uid) => {
+                    let Ok(uid) = std::ffi::CString::new(uid.as_str()) else {
+                        let _ = dmesh_l7_tx_commit(worker_id, conn, -1, 0);
+                        return Some(-1);
+                    };
+                    dmesh_l7_tx_commit_remote(worker_id, conn, uid.as_ptr(), len)
+                }
+            }
+        })
+    }
+
+    #[cfg(not(test))]
+    pub fn tx_finish(worker_id: c_int, conn: u64, route: &dmesh_doca::BackendRoute) -> c_int {
+        unsafe {
+            match route {
+                dmesh_doca::BackendRoute::Any => {
+                    dmesh_l7_tx_fin(worker_id, conn, -1, std::ptr::null())
+                }
+                dmesh_doca::BackendRoute::Origin => {
+                    dmesh_l7_tx_fin(worker_id, conn, super::BACKEND_ORIGIN, std::ptr::null())
+                }
+                dmesh_doca::BackendRoute::Local(pod) => {
+                    dmesh_l7_tx_fin(worker_id, conn, *pod, std::ptr::null())
+                }
+                dmesh_doca::BackendRoute::Remote(uid) => {
+                    let Ok(uid) = std::ffi::CString::new(uid.as_str()) else {
+                        return -1;
+                    };
+                    dmesh_l7_tx_fin(worker_id, conn, -1, uid.as_ptr())
+                }
+            }
+        }
+    }
+
+    #[cfg(not(test))]
+    pub fn session_failed(worker_id: c_int, conn: u64) {
+        unsafe { dmesh_l7_session_failed(worker_id, conn) }
     }
 
     #[cfg(test)]
@@ -223,6 +272,8 @@ mod datapath {
         #[derive(Default)]
         pub struct Recorded {
             pub sent: Vec<(u64, i32, Vec<u8>)>,
+            pub fins: Vec<(u64, i32, Option<String>)>,
+            pub failed_sessions: Vec<u64>,
             pub released: Vec<(u64, u32, u32)>,
             /// Bytes the next send accepts; `None` accepts everything offered.
             pub accept: Option<usize>,
@@ -232,6 +283,8 @@ mod datapath {
             pub fail: bool,
             /// Refuse the next reservation, as an exhausted arena would.
             pub no_chunk: bool,
+            /// Backpressure the next output FIN without accepting it.
+            pub refuse_fin: bool,
             /// Reservation size. The datapath lends one arena chunk.
             pub chunk: usize,
             /// Reservations cancelled with a zero-length commit.
@@ -246,23 +299,6 @@ mod datapath {
             STATE.with(|s| *s.borrow_mut() = Recorded::default());
         }
 
-        pub fn send(_worker_id: c_int, conn: u64, backend_pod: i32, buf: &[u8]) -> c_int {
-            STATE.with(|s| {
-                let mut s = s.borrow_mut();
-                if s.fail {
-                    return -1;
-                }
-                if s.over_accept {
-                    return buf.len() as c_int + 1;
-                }
-                let n = s.accept.unwrap_or(buf.len()).min(buf.len());
-                if n > 0 {
-                    s.sent.push((conn, backend_pod, buf[..n].to_vec()));
-                }
-                n as c_int
-            })
-        }
-
         pub fn release(_worker_id: c_int, conn: u64, pos: u32, len: u32) {
             STATE.with(|s| s.borrow_mut().released.push((conn, pos, len)));
         }
@@ -271,7 +307,7 @@ mod datapath {
         pub fn tx_publish(
             _worker_id: c_int,
             conn: u64,
-            backend_pod: i32,
+            route: &dmesh_doca::BackendRoute,
             fill: impl FnOnce(&mut [u8]) -> usize,
         ) -> Option<c_int> {
             let cap = STATE.with(|s| {
@@ -306,10 +342,40 @@ mod datapath {
                     // The datapath publishes a whole reservation or none of it.
                     return 0;
                 }
-                s.sent
-                    .push((conn, backend_pod, reservation[..len].to_vec()));
+                let backend = match route {
+                    dmesh_doca::BackendRoute::Any => -1,
+                    dmesh_doca::BackendRoute::Origin => super::super::BACKEND_ORIGIN,
+                    dmesh_doca::BackendRoute::Local(pod) => *pod,
+                    dmesh_doca::BackendRoute::Remote(_) => -3,
+                };
+                s.sent.push((conn, backend, reservation[..len].to_vec()));
                 len as c_int
             }))
+        }
+
+        pub fn tx_finish(_worker_id: c_int, conn: u64, route: &dmesh_doca::BackendRoute) -> c_int {
+            STATE.with(|s| {
+                let mut s = s.borrow_mut();
+                if s.fail {
+                    return -1;
+                }
+                if s.refuse_fin {
+                    s.refuse_fin = false;
+                    return 0;
+                }
+                let (backend, uid) = match route {
+                    dmesh_doca::BackendRoute::Any => (-1, None),
+                    dmesh_doca::BackendRoute::Origin => (super::super::BACKEND_ORIGIN, None),
+                    dmesh_doca::BackendRoute::Local(pod) => (*pod, None),
+                    dmesh_doca::BackendRoute::Remote(uid) => (-3, Some(uid.clone())),
+                };
+                s.fins.push((conn, backend, uid));
+                1
+            })
+        }
+
+        pub fn session_failed(_worker_id: c_int, conn: u64) {
+            STATE.with(|s| s.borrow_mut().failed_sessions.push(conn));
         }
     }
 }
@@ -513,6 +579,8 @@ struct Side {
     conn: Option<u64>,
     handle: Option<DmeshIoHandle>,
     staging_set: bool,
+    /// The datapath accepted the ordered FIN for this output direction.
+    fin_published: bool,
     /// Extents handed to Linkerd and not released.
     outstanding: Vec<(u32, u32)>,
 }
@@ -550,6 +618,9 @@ impl Side {
 struct Session {
     /// Names this session to the acceptor for its whole lifetime.
     token: SessionToken,
+    /// Stable low-24-bit `(source Pod, source port)` route used to associate
+    /// the independently arriving reply connection with this incarnation.
+    request_route: u64,
     /// Linkerd's client-facing endpoint.
     client: Side,
     /// Linkerd's backend-facing endpoint.
@@ -587,6 +658,10 @@ struct Worker {
     sessions: HashMap<u64, Session>,
     /// Connection handle to request session.
     by_conn: HashMap<u64, u64>,
+    /// Generation-free request route to its generation-bearing session key.
+    /// A source route has at most one live incarnation, while callbacks use
+    /// the full key so a late callback cannot reach its replacement.
+    by_request_route: HashMap<u64, u64>,
     /// Fair drain order and cursor.
     order: Vec<u64>,
     drain_next: usize,
@@ -596,6 +671,11 @@ struct Worker {
     /// This worker's backend channels; the connector takes them from here.
     backends: Arc<Backends>,
     metrics: Arc<SessionMetrics>,
+    /// Authoritative names are retained independently of their current
+    /// topology resolution. The controller feed and topology are delivered on
+    /// separate channels, so either one may arrive first.
+    named_service_targets: NamedServiceTargets,
+    named_service_endpoints: NamedServiceEndpoints,
     /// Real Kubernetes destination presented to Linkerd for each DPUmesh
     /// service. The synthetic address remains the internal backend key.
     service_targets: ServiceTargets,
@@ -605,6 +685,9 @@ struct Worker {
     /// and a recreated Pod carries a new one, so a mapping cannot be
     /// inherited.
     service_endpoints: ServiceEndpoints,
+    /// Names the currently held topology cannot resolve. Keeping the set makes
+    /// startup-order and withdrawal logs edge-triggered instead of per-flow.
+    unresolved_service_targets: HashSet<String>,
     /// Atomically replaced, monotonically versioned controller feed.
     service_targets_file: Option<PathBuf>,
     service_targets_version: u64,
@@ -614,8 +697,6 @@ struct Worker {
     /// arrives on its own inode; modification time alone would not separate two
     /// generations installed within a filesystem timestamp tick.
     service_targets_stamp: Option<(u64, SystemTime, u64)>,
-    /// Copy output into the egress arena rather than through a temporary Vec.
-    tx_reserve: bool,
     counters: Counters,
 }
 
@@ -716,12 +797,12 @@ fn publish_reserved(
     worker_id: c_int,
     handle: &DmeshIoHandle,
     out: u64,
-    backend: i32,
+    route: &dmesh_doca::BackendRoute,
     want: usize,
     counters: &mut Counters,
 ) -> Result<Option<usize>, ()> {
     let mut copied = 0usize;
-    let Some(rc) = datapath::tx_publish(worker_id, out, backend, |chunk| {
+    let Some(rc) = datapath::tx_publish(worker_id, out, route, |chunk| {
         let room = chunk.len().min(want);
         copied = handle.copy_tx_into(&mut chunk[..room]);
         copied
@@ -747,45 +828,12 @@ fn publish_reserved(
     Ok(Some(accepted))
 }
 
-/// Copy queued output through a temporary buffer and hand it to the datapath.
-///
-/// This explicit compatibility/comparison path is selected at worker startup;
-/// it is not an automatic fallback when the reservation path has no chunk.
-fn publish_copied(
-    worker_id: c_int,
-    handle: &DmeshIoHandle,
-    out: u64,
-    backend: i32,
-    want: usize,
-    counters: &mut Counters,
-) -> Result<usize, ()> {
-    let tx = handle.take_tx(want);
-    if tx.is_empty() {
-        return Ok(0);
-    }
-    let accepted = datapath::send(worker_id, out, backend, &tx);
-    if accepted < 0 {
-        counters.send_errors += 1;
-        return Err(());
-    }
-    let accepted = accepted as usize;
-    if accepted > tx.len() {
-        counters.send_errors += 1;
-        return Err(());
-    }
-    if accepted < tx.len() {
-        handle.untake_tx(&tx[accepted..]);
-        counters.send_retries += 1;
-    }
-    Ok(accepted)
-}
-
 /// What one pass over an endpoint did, and what the caller must decide on next.
 #[derive(Clone, Copy)]
 struct Pumped {
     /// The pass published output or returned staging custody.
     progressed: bool,
-    /// The stack finished this endpoint's write half, so the session is over.
+    /// The stack finished this endpoint's write half; its ordered FIN is due.
     finished: bool,
 }
 
@@ -794,9 +842,8 @@ fn pump_side(
     worker_id: c_int,
     side: &mut Side,
     out_conn: Option<u64>,
-    backend: i32,
+    route: dmesh_doca::BackendRoute,
     budget: &mut usize,
-    reserve: bool,
     counters: &mut Counters,
 ) -> Result<Pumped, ()> {
     let mut did = false;
@@ -811,28 +858,26 @@ fn pump_side(
             let want = TX_DRAIN_MAX.min(*budget);
             let accepted = if want == 0 || handle.tx_len() == 0 {
                 0
-            } else if reserve {
+            } else {
                 let mut total = 0;
                 for _ in 0..TX_RESERVATIONS_MAX {
                     if total == want || handle.tx_len() == 0 {
                         break;
                     }
-                    // `None` is an arena with no chunk to lend; the copy path
-                    // needs one too, so the bytes wait for the next pass
-                    // either way. `Some(0)` is a refused publication.
-                    match publish_reserved(worker_id, handle, out, backend, want - total, counters)?
+                    // `None` is an arena with no chunk to lend, so the bytes
+                    // wait for the next pass. `Some(0)` is a refused
+                    // publication.
+                    match publish_reserved(worker_id, handle, out, &route, want - total, counters)?
                     {
                         Some(n) if n > 0 => total += n,
                         _ => break,
                     }
                 }
                 total
-            } else {
-                publish_copied(worker_id, handle, out, backend, want, counters)?
             };
             if accepted > 0 {
                 *budget -= accepted;
-                if backend == BACKEND_ORIGIN {
+                if route == dmesh_doca::BackendRoute::Origin {
                     counters.bytes_to_origin += accepted as u64;
                 } else {
                     counters.bytes_to_backend += accepted as u64;
@@ -850,13 +895,66 @@ fn pump_side(
     {
         did = true;
     }
+    if state.tx_aborted {
+        return Err(());
+    }
+    let finished = if state.tx_finished {
+        if side.fin_published {
+            true
+        } else {
+            match datapath::tx_finish(worker_id, out_conn.ok_or(())?, &route) {
+                n if n > 0 => {
+                    side.fin_published = true;
+                    did = true;
+                    true
+                }
+                0 => false,
+                _ => return Err(()),
+            }
+        }
+    } else {
+        false
+    };
     Ok(Pumped {
         progressed: did,
-        finished: state.tx_finished,
+        finished,
     })
 }
 
 impl Worker {
+    /// Re-resolve the retained feed against the topology generation currently
+    /// held by the datapath.
+    ///
+    /// Feed publication and topology adoption are independent. In particular,
+    /// the feed may be valid before the topology has interned any Service ids;
+    /// that must be a temporary unresolved state, not a permanent withdrawal.
+    fn refresh_resolved_service_targets(&mut self) {
+        let (targets, endpoints, unresolved) = resolve_named_targets(
+            self.id,
+            &self.named_service_targets,
+            &self.named_service_endpoints,
+        );
+        for key in unresolved.difference(&self.unresolved_service_targets) {
+            eprintln!(
+                "[l7_linkerd] worker {}: Service {key} has no interned id yet; target pending",
+                self.id
+            );
+        }
+        for key in self.unresolved_service_targets.difference(&unresolved) {
+            eprintln!(
+                "[l7_linkerd] worker {}: Service {key} now resolves in the held topology",
+                self.id
+            );
+        }
+        self.unresolved_service_targets = unresolved;
+        if targets == self.service_targets && endpoints == self.service_endpoints {
+            return;
+        }
+        self.service_targets = targets;
+        self.service_endpoints = endpoints;
+        self.place_service_targets();
+    }
+
     /// Publish how the balancer's selected endpoints resolve to live
     /// destinations, alongside the placement snapshot.
     ///
@@ -897,8 +995,8 @@ impl Worker {
                     return dmesh_doca::EndpointVerdict::Unresolved;
                 };
                 match resolve_endpoint_uid(worker, &uid) {
-                    pod if pod >= 0 => dmesh_doca::EndpointVerdict::Live,
-                    ENDPOINT_REMOTE => dmesh_doca::EndpointVerdict::Remote,
+                    pod if pod >= 0 => dmesh_doca::EndpointVerdict::Live(pod),
+                    ENDPOINT_REMOTE => dmesh_doca::EndpointVerdict::Remote(uid),
                     ENDPOINT_STALE => dmesh_doca::EndpointVerdict::Stale,
                     _ => dmesh_doca::EndpointVerdict::Unresolved,
                 }
@@ -973,6 +1071,9 @@ impl Worker {
             .duration_since(modified)
             .is_ok_and(|age| age >= STAMP_SETTLE);
         if settled && self.service_targets_stamp == Some(stamp) {
+            // The file is unchanged, but the independently delivered topology
+            // may now intern names which were unresolved at startup.
+            self.refresh_resolved_service_targets();
             return Ok(());
         }
         let document = read_feed(path)?;
@@ -983,14 +1084,19 @@ impl Worker {
                 self.service_targets_version
             ));
         }
-        if version > self.service_targets_version {
-            let (resolved_targets, resolved_endpoints) =
-                resolve_named_targets(self.id, &targets, &endpoints);
-            self.service_targets = resolved_targets;
-            self.service_endpoints = resolved_endpoints;
-            self.service_targets_version = version;
-            self.place_service_targets();
+        if version == self.service_targets_version
+            && (targets != self.named_service_targets || endpoints != self.named_service_endpoints)
+        {
+            return Err(format!(
+                "service target generation {version} changed without advancing its version"
+            ));
         }
+        if version > self.service_targets_version {
+            self.named_service_targets = targets;
+            self.named_service_endpoints = endpoints;
+            self.service_targets_version = version;
+        }
+        self.refresh_resolved_service_targets();
         // Only an accepted generation is stamped, so a rejected rollback is
         // re-read until the publisher installs a newer one.
         self.service_targets_stamp = Some(stamp);
@@ -1047,19 +1153,17 @@ impl Worker {
             sessions,
             order,
             drain_next,
-            tx_reserve,
             counters,
             ..
         } = self;
         let worker_id = *id;
-        let reserve = *tx_reserve;
         let n = order.len();
         if n == 0 {
             return false;
         }
         let mut did = false;
         let mut budget = DRAIN_MAX;
-        let mut failed = Vec::new();
+        let mut closed = Vec::new();
         for _ in 0..n.min(DRAIN_SESSIONS_MAX) {
             let key = order[*drain_next % n];
             *drain_next = drain_next.wrapping_add(1);
@@ -1074,29 +1178,41 @@ impl Worker {
                 worker_id,
                 &mut s.client,
                 request,
-                BACKEND_ORIGIN,
+                dmesh_doca::BackendRoute::Origin,
                 &mut budget,
-                reserve,
                 counters,
             );
+            let route = s
+                .backend
+                .handle
+                .as_ref()
+                .map(DmeshIoHandle::backend_route)
+                .unwrap_or_default();
             let backend = pump_side(
                 worker_id,
                 &mut s.backend,
                 request,
-                BACKEND_ANY,
+                route,
                 &mut budget,
-                reserve,
                 counters,
             );
             match (client, backend) {
-                (Ok(a), Ok(b)) if !a.finished && !b.finished => did |= a.progressed | b.progressed,
-                _ => failed.push(key),
+                (Ok(a), Ok(b)) => {
+                    did |= a.progressed | b.progressed;
+                    if a.finished && b.finished {
+                        closed.push((key, false));
+                    }
+                }
+                _ => closed.push((key, true)),
             }
             if budget == 0 {
                 break;
             }
         }
-        for key in failed {
+        for (key, failed) in closed {
+            if failed {
+                datapath::session_failed(worker_id, key);
+            }
             self.close_session(key);
             did = true;
         }
@@ -1107,6 +1223,9 @@ impl Worker {
         let Some(mut s) = self.sessions.remove(&key) else {
             return;
         };
+        if self.by_request_route.get(&s.request_route) == Some(&key) {
+            self.by_request_route.remove(&s.request_route);
+        }
         if self.order.last() == Some(&key) {
             self.order.pop();
         } else {
@@ -1163,8 +1282,13 @@ impl Worker {
 
     /// Attach a reply direction to its request session.
     fn attach_reply(&mut self, conn: u64, flow: &DmeshL7Flow) -> c_int {
-        // Replies identify the request by peer pod and destination port.
-        let key = session_key(flow.peer_pod, flow.dst_port);
+        // Replies carry the request's routable `(Pod, port)`, not its private
+        // incarnation. Resolve that route to the generation-bearing key the
+        // request registered; all callbacks continue to use the full key.
+        let request_route = session_key(flow.peer_pod, flow.dst_port);
+        let Some(key) = self.by_request_route.get(&request_route).copied() else {
+            return self.decline(Decline::UnknownReply, conn, flow, None);
+        };
         let attached = match self.sessions.get_mut(&key) {
             None => None,
             // One reply direction per session.
@@ -1189,10 +1313,12 @@ impl Worker {
     /// Open one request session and publish its backend endpoint.
     fn open_request(&mut self, conn: u64, flow: &DmeshL7Flow) -> c_int {
         let backend_addr = service_addr(flow.dst_service);
+        let request_route = session_key(flow.src_pod, flow.dst_port);
 
-        // One live session per connection handle: a second open is refused
-        // rather than replacing the entry.
-        if self.sessions.contains_key(&conn) {
+        // One live incarnation per routable source connection. The full handle
+        // also has to be unique so neither map can be replaced underneath an
+        // established session.
+        if self.sessions.contains_key(&conn) || self.by_request_route.contains_key(&request_route) {
             return self.decline(Decline::SessionLimit, conn, flow, Some(backend_addr));
         }
 
@@ -1221,6 +1347,7 @@ impl Worker {
         let (backend_io, backend_handle) = dmesh_doca::dmesh_io_pair(backend_addr, Some(token));
         let session = Session {
             token,
+            request_route,
             client: Side {
                 conn: Some(conn),
                 ..Side::default()
@@ -1242,6 +1369,7 @@ impl Worker {
         self.sessions.insert(conn, session);
         self.order.push(conn);
         self.by_conn.insert(conn, conn);
+        self.by_request_route.insert(request_route, conn);
         self.pending.insert(token, conn);
 
         let ready = DmeshEvent::ConnReady(
@@ -1251,6 +1379,7 @@ impl Worker {
                 dst,
                 workload,
                 is_backend: false,
+                protocol_aware: flow.mode == MODE_FULL,
             },
         );
         if self.events.send(ready).is_err() {
@@ -1432,15 +1561,16 @@ fn parse_versioned_service_targets(document: &str) -> Result<ServiceFeed, String
 /// Resolve feed-named Services to this node's DPU-interned compact ids.
 ///
 /// The feed names Services; the compact ids come from the DPU's interning of
-/// the topology generation. A key no generation interns yet is dropped and
-/// retried once a later generation defines it — the publisher republishes.
+/// the topology generation. The caller retains unresolved names and retries
+/// them against the topology held at each subsequent session admission.
 fn resolve_named_targets(
     worker_id: c_int,
     named_targets: &NamedServiceTargets,
     named_endpoints: &NamedServiceEndpoints,
-) -> (ServiceTargets, ServiceEndpoints) {
+) -> (ServiceTargets, ServiceEndpoints, HashSet<String>) {
     let mut targets = HashMap::new();
     let mut endpoints = HashMap::new();
+    let mut unresolved = HashSet::new();
     for (key, addr) in named_targets {
         match resolve_service_key(worker_id, key) {
             Some(id) => {
@@ -1449,13 +1579,12 @@ fn resolve_named_targets(
                     endpoints.insert(id, eps.clone());
                 }
             }
-            None => eprintln!(
-                "[l7_linkerd] worker {worker_id}: Service {key} has no interned id yet; \
-                 target dropped until a generation defines it"
-            ),
+            None => {
+                unresolved.insert(key.clone());
+            }
         }
     }
-    (targets, endpoints)
+    (targets, endpoints, unresolved)
 }
 
 fn admin_addr_for_worker(
@@ -1511,8 +1640,6 @@ async fn build_worker(worker_id: c_int) -> Result<Option<Worker>, String> {
     let document = read_feed(&service_targets_file)?;
     let (service_targets_version, named_targets, named_endpoints) =
         parse_signed_service_targets(&document)?;
-    let (service_targets, service_endpoints) =
-        resolve_named_targets(worker_id, &named_targets, &named_endpoints);
     let service_targets_file = Some(service_targets_file);
     let service_targets_authoritative = true;
     if let WorkerSelection::One(only) = selection {
@@ -1569,40 +1696,37 @@ async fn build_worker(worker_id: c_int) -> Result<Option<Worker>, String> {
     let drain = app.spawn();
     let _ = events_tx.send(DmeshEvent::InfraReady);
 
-    let worker = Worker {
+    let mut worker = Worker {
         id: worker_id,
         _drain: Box::new(drain),
         events: events_tx,
         registrations,
         sessions: HashMap::new(),
         by_conn: HashMap::new(),
+        by_request_route: HashMap::new(),
         order: Vec::new(),
         drain_next: 0,
         slots: Slots::new(worker_id.max(0) as u16),
         pending: HashMap::new(),
         backends,
         metrics,
-        service_targets,
-        service_endpoints,
+        named_service_targets: named_targets,
+        named_service_endpoints: named_endpoints,
+        service_targets: HashMap::new(),
+        service_endpoints: HashMap::new(),
+        unresolved_service_targets: HashSet::new(),
         service_targets_file,
         service_targets_version,
         service_targets_authoritative,
         service_targets_stamp: None,
-        tx_reserve: tx_reserve_enabled(),
         counters: Counters::default(),
     };
     INBOUND.with(|slot| slot.borrow_mut().build = Some(inbound_policies));
-    // The first generation is parsed here rather than adopted by a refresh, so
-    // publish its placement before any session opens.
-    worker.place_service_targets();
+    // The first generation is parsed here rather than adopted by a refresh.
+    // Resolve what the topology already knows, retaining everything else for a
+    // later admission after topology adoption.
+    worker.refresh_resolved_service_targets();
     Ok(Some(worker))
-}
-
-/// Output path selection. The reservation path copies once, into the egress
-/// arena; `DMESH_L7_TX_RESERVE=0` selects the copy-then-send path instead.
-#[cfg(not(test))]
-fn tx_reserve_enabled() -> bool {
-    std::env::var("DMESH_L7_TX_RESERVE").map_or(true, |v| v != "0")
 }
 
 // ---- the contract ----
@@ -1874,34 +1998,6 @@ fn detach_worker(worker_id: c_int) {
     });
 }
 
-/// Decline decision-mode handling.
-///
-/// # Safety
-/// `flow` and `out` must be valid for the call.
-#[no_mangle]
-pub unsafe extern "C" fn l7_resolve(
-    _worker_id: c_int,
-    _flow: *const DmeshL7Flow,
-    _out: *mut DmeshL7Verdict,
-) -> c_int {
-    -1
-}
-
-/// Decision-mode terminal report entry point.
-///
-/// # Safety
-/// Called on the worker's own thread.
-#[no_mangle]
-pub unsafe extern "C" fn l7_report(
-    _worker_id: c_int,
-    _conn: u64,
-    _bytes_in: u64,
-    _bytes_out: u64,
-    _duration_ns: u64,
-    _reason: c_int,
-) {
-}
-
 /// Control-plane admission accounting entry point.
 ///
 /// Registration, membership and revocation are decided on the Comch control
@@ -1948,17 +2044,9 @@ mod abi {
     }
 
     #[test]
-    fn verdict_layout_matches_c() {
-        assert_eq!(size_of::<DmeshL7Verdict>(), 8);
-        assert_eq!(align_of::<DmeshL7Verdict>(), 4);
-        assert_eq!(offset_of!(DmeshL7Verdict, allow), 0);
-        assert_eq!(offset_of!(DmeshL7Verdict, backend_pod), 4);
-    }
-
-    #[test]
     fn constants_match_c() {
-        assert_eq!(MODE_OPAQUE, 2);
-        assert_eq!(MODE_FULL, 3);
+        assert_eq!(MODE_OPAQUE, 1);
+        assert_eq!(MODE_FULL, 2);
         assert_eq!(BACKEND_ANY, -1);
         assert_eq!(BACKEND_ORIGIN, -2);
         assert_eq!(DECLINE_ERROR, -1);
@@ -2166,6 +2254,41 @@ mod tests {
     }
 
     #[test]
+    fn retained_feed_resolves_after_topology_arrives_without_republication() {
+        let _worker = install_worker(0);
+        TEST_SERVICE_KEYS_READY.with(|ready| ready.set(false));
+        with_test_worker(|w| {
+            w.named_service_targets.insert(
+                "test-bench/echo-a".to_string(),
+                "10.0.0.11:9092".parse().unwrap(),
+            );
+            w.named_service_endpoints.insert(
+                "test-bench/echo-a".to_string(),
+                vec![(
+                    "10.244.0.11:9092".parse().unwrap(),
+                    "11111111-1111-1111-1111-111111111111".to_string(),
+                )],
+            );
+            w.refresh_resolved_service_targets();
+            assert!(w.service_targets.is_empty());
+            assert!(w.unresolved_service_targets.contains("test-bench/echo-a"));
+        });
+
+        // The controller feed is unchanged. Only the independently delivered
+        // topology has become visible, and the retained name must now bind.
+        TEST_SERVICE_KEYS_READY.with(|ready| ready.set(true));
+        with_test_worker(|w| {
+            w.refresh_resolved_service_targets();
+            assert_eq!(
+                w.service_targets[&11],
+                "10.0.0.11:9092".parse::<SocketAddrV4>().unwrap()
+            );
+            assert_eq!(w.service_endpoints[&11].len(), 1);
+            assert!(w.unresolved_service_targets.is_empty());
+        });
+    }
+
+    #[test]
     fn service_target_feed_refuses_an_oversized_generation() {
         let _worker = install_worker(0);
         let path = std::env::temp_dir().join(format!(
@@ -2200,6 +2323,7 @@ mod tests {
     }
 
     fn install_worker(id: c_int) -> TestWorker {
+        TEST_SERVICE_KEYS_READY.with(|ready| ready.set(true));
         let (events_tx, events) = mpsc::unbounded_channel();
         let (registrar, registrations) = mpsc::unbounded_channel();
         let backends = Arc::new(Backends::new());
@@ -2211,19 +2335,22 @@ mod tests {
             registrations,
             sessions: HashMap::new(),
             by_conn: HashMap::new(),
+            by_request_route: HashMap::new(),
             order: Vec::new(),
             drain_next: 0,
             slots: Slots::new(id.max(0) as u16),
             pending: HashMap::new(),
             backends: backends.clone(),
             metrics: metrics.clone(),
+            named_service_targets: HashMap::new(),
+            named_service_endpoints: HashMap::new(),
             service_targets: HashMap::new(),
             service_endpoints: HashMap::new(),
+            unresolved_service_targets: HashSet::new(),
             service_targets_file: None,
             service_targets_version: 0,
             service_targets_authoritative: false,
             service_targets_stamp: None,
-            tx_reserve: true,
             counters: Counters::default(),
         };
         WORKER.with(|slot| *slot.borrow_mut() = Some(w));
@@ -2323,6 +2450,14 @@ mod tests {
         fake::STATE.with(|s| s.borrow().cancels)
     }
 
+    fn fins() -> Vec<(u64, i32, Option<String>)> {
+        fake::STATE.with(|s| s.borrow().fins.clone())
+    }
+
+    fn failed_sessions() -> Vec<u64> {
+        fake::STATE.with(|s| s.borrow().failed_sessions.clone())
+    }
+
     #[test]
     fn session_key_matches_c_handle() {
         // Shared C and Rust handle vectors.
@@ -2406,8 +2541,18 @@ mod tests {
         // The session's own addresses need no endpoint resolution.
         assert!(tw.backends.take_session(token, service_addr(21)).is_ok());
 
+        /* A remote authoritative endpoint is carried by the peer channel; it
+         * is not a reason to decline the Linkerd-selected route. */
+        let flow = request_flow(21, 2, 4002);
+        let key = session_key(2, 4002);
+        assert_eq!(unsafe { l7_conn_open(0, key, &flow) }, 0);
+        assert!(tw
+            .backends
+            .take_session(token_of(key), "10.244.1.12:9092".parse().unwrap())
+            .is_ok());
+        with_test_worker(|w| w.close_session(key));
+
         for (selected, expected) in [
-            ("10.244.1.12:9092", dmesh_doca::TakeError::EndpointRemote),
             ("10.244.2.13:9092", dmesh_doca::TakeError::EndpointStale),
             (
                 "10.244.9.99:9092",
@@ -2517,6 +2662,36 @@ mod tests {
         read_eof(&mut second_client);
         read_eof(&mut second_backend);
         assert!(!tw.backends.contains_service(&service_addr(21)));
+    }
+
+    #[test]
+    fn output_half_closes_are_ordered_retried_and_both_required() {
+        let tw = install_worker(0);
+        let flow = request_flow(22, 4, 4022);
+        let key = session_key(4, 4022);
+        assert_eq!(unsafe { l7_conn_open(0, key, &flow) }, 0);
+        let token = token_of(key);
+        let mut client = register_client(&tw, token);
+        let mut backend = take_backend(&tw, 22, key);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        rt.block_on(async { client.shutdown().await.unwrap() });
+        assert_eq!(drain_worker(0), 1);
+        assert_eq!(fins(), vec![(key, BACKEND_ORIGIN, None)]);
+        with_test_worker(|w| assert!(w.sessions.contains_key(&key)));
+
+        fake::STATE.with(|s| s.borrow_mut().refuse_fin = true);
+        rt.block_on(async { backend.shutdown().await.unwrap() });
+        assert_eq!(drain_worker(0), 0, "backpressured FIN stays pending");
+        with_test_worker(|w| assert!(w.sessions.contains_key(&key)));
+
+        assert_eq!(drain_worker(0), 1);
+        assert_eq!(fins(), vec![(key, BACKEND_ORIGIN, None), (key, -1, None)]);
+        with_test_worker(|w| assert!(!w.sessions.contains_key(&key)));
+        assert!(failed_sessions().is_empty());
     }
 
     /// Sessions to different services run side by side, each with its own
@@ -2629,21 +2804,28 @@ mod tests {
     fn reply_attaches_to_existing_session() {
         let _tw = install_worker(0);
         let req = request_flow(22, 3, 4003);
-        let key = session_key(3, 4003);
+        // Production handles carry a high-bit incarnation. A reply only knows
+        // the stable low-24-bit route and must still attach to this exact live
+        // incarnation.
+        let route = session_key(3, 4003);
+        let key = (7u64 << 24) | route;
         assert_eq!(unsafe { l7_conn_open(0, key, &req) }, 0);
         let rep = reply_flow(22, 3, 4003);
-        assert_eq!(unsafe { l7_conn_open(0, 777, &rep) }, 0);
+        let reply = (8u64 << 24) | session_key(0, 32768);
+        assert_eq!(unsafe { l7_conn_open(0, reply, &rep) }, 0);
         with_test_worker(|w| {
-            assert_eq!(w.by_conn.get(&777), Some(&key));
-            assert_eq!(w.sessions[&key].backend.conn, Some(777));
+            assert_eq!(w.by_request_route.get(&route), Some(&key));
+            assert_eq!(w.by_conn.get(&reply), Some(&key));
+            assert_eq!(w.sessions[&key].backend.conn, Some(reply));
             assert_eq!(w.counters.reply_connections_attached, 1);
             assert_eq!(w.sessions.len(), 1, "a reply is not a new session");
         });
         // A second, concurrent reply direction is refused rather than swapped in.
         assert_eq!(unsafe { l7_conn_open(0, 778, &rep) }, DECLINE_SESSION_LIMIT);
         with_test_worker(|w| {
-            assert_eq!(w.sessions[&key].backend.conn, Some(777));
+            assert_eq!(w.sessions[&key].backend.conn, Some(reply));
             w.close_session(key);
+            assert!(w.by_request_route.is_empty());
         });
     }
 
@@ -2766,23 +2948,6 @@ mod tests {
         with_test_worker(|w| w.close_session(1));
     }
 
-    /// The compatibility path publishes the same bytes, and a partial accept
-    /// restores only the unaccepted suffix.
-    #[test]
-    fn the_copy_path_requeues_only_the_suffix() {
-        let tw = install_worker(0);
-        with_test_worker(|w| w.tx_reserve = false);
-        let _io = session_with_backend_output(&tw, 26, 1, b"0123456789");
-        fake::STATE.with(|s| s.borrow_mut().accept = Some(4));
-        drain_worker(0);
-        assert_eq!(sent(), vec![(1, BACKEND_ANY, b"0123".to_vec())]);
-        fake::STATE.with(|s| s.borrow_mut().accept = None);
-        drain_worker(0);
-        // The suffix, once, in order: no byte is offered twice.
-        assert_eq!(sent(), vec![(1, BACKEND_ANY, b"456789".to_vec())]);
-        with_test_worker(|w| w.close_session(1));
-    }
-
     #[test]
     fn over_accept_is_terminal() {
         let tw = install_worker(0);
@@ -2889,6 +3054,7 @@ mod tests {
             assert!(w.by_conn.is_empty());
             assert!(w.order.is_empty());
         });
+        assert_eq!(failed_sessions(), vec![key]);
 
         let next = request_flow(35, 15, 15000);
         let next_key = session_key(15, 15000);

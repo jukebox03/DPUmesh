@@ -447,7 +447,9 @@ done:
     /* Conn first, then its EQ (a conn outliving its EQ has nowhere to report). */
     if (epoll_fd >= 0) close(epoll_fd);
     if (w->c) {
-        if (dmesh_destroy_qp(w->c) != 0) {
+        int close_rc = atomic_load(&w->broken)
+                     ? dmesh_abort_qp(w->c) : dmesh_destroy_qp(w->c);
+        if (close_rc != 0) {
             fprintf(stderr, "[bench] final close failed: errno=%d\n", errno);
             atomic_store(&w->broken, 1);
         }
@@ -571,7 +573,10 @@ static void run_bench(int conn_fd, int mode, int req_size, int reply_size,
         for (int b = 0; b < BENCH_MAX_BACKENDS; b++) dist[b] += w[i].dist[b];
         total_reconns += w[i].reconns;
         reconn_sec    += w[i].reconn_sec;
-        if (!atomic_load(&w[i].broken) && w[i].dura > 1e-9 && measured > 0) {
+        /* A worker that misses the drain deadline still completed valid
+         * measured requests before the fault. Keep those completions in the
+         * achieved-rate and latency totals; worker_fail keeps the point ERR. */
+        if (w[i].dura > 1e-9 && measured > 0) {
             mrps += (double)measured / w[i].dura * 1e-6;
             double rps = (double)measured / w[i].dura;
             request_gbps += 8e-9 * rps * request_frame;

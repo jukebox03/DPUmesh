@@ -1195,9 +1195,11 @@ setup_pod_dma(struct objects *objs, struct pod_state *pod)
     /* On reuse it is not memset either: stale bytes are unreachable, since the
      * DPA only lands at offsets the new pod's own descriptors name. */
     if (pod->local_mmap == NULL) {
-        result = alloc_buffer_and_set_mmap(&pod->local_mmap, objs->dev,
-                                           &pod->dma_buffer, DPU_BUFFER_SIZE + 128,
-                                           DOCA_ACCESS_FLAG_LOCAL_READ_WRITE | DOCA_ACCESS_FLAG_PCI_READ_WRITE);
+        result = alloc_buffer_and_set_thread_safe_mmap(
+            &pod->local_mmap, objs->dev, &pod->dma_buffer,
+            DPU_BUFFER_SIZE + 128,
+            DOCA_ACCESS_FLAG_LOCAL_READ_WRITE |
+                DOCA_ACCESS_FLAG_PCI_READ_WRITE);
         if (result != DOCA_SUCCESS) {
             DOCA_LOG_ERR("setup_pod_dma: alloc buffer failed for pod %d: %s",
                          pod->pod_id, doca_error_get_descr(result));

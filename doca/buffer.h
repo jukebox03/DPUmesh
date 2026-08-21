@@ -11,6 +11,12 @@
 doca_error_t
 alloc_buffer_and_set_mmap(struct doca_mmap **mmap, struct doca_dev *dev,
                         void **buffer, size_t buffer_size, uint32_t access_mask);
+
+doca_error_t
+alloc_buffer_and_set_thread_safe_mmap(struct doca_mmap **mmap,
+                                      struct doca_dev *dev,
+                                      void **buffer, size_t buffer_size,
+                                      uint32_t access_mask);
 						
 doca_error_t
 destroy_mmap_and_free_buffer(struct doca_mmap *mmap, void *buffer);

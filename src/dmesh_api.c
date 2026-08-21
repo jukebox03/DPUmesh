@@ -22,7 +22,7 @@ void *dmesh_alloc(dmesh_qp_t *c, uint32_t len) {
 
 int dmesh_post_send(dmesh_qp_t *c, const void *buf, uint32_t len) {
     /* Completes the transmit call dmesh_alloc opened. */
-    if (!dmesh_tx_call_active(c) || len == 0) { errno = EINVAL; return -1; }
+    if (!dmesh_tx_call_active(c)) { errno = EINVAL; return -1; }
     /* Commit first, then publish every newly complete transport slot. The newest
      * partial follows the library-owned idle/deadline policy. */
     if (dpumesh_tx_commit(c->ep->ctx, c->local_port, buf, len) != 0) {

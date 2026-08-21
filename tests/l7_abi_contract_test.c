@@ -10,6 +10,7 @@
 
 #include <dmesh_l7.h>
 
+#include <assert.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -42,16 +43,9 @@ _Static_assert(offsetof(struct dmesh_l7_flow, source_identity) == 410, "source_i
 _Static_assert(sizeof(((struct dmesh_l7_flow *)0)->source_identity) == 254,
                "source_identity size");
 
-/* struct dmesh_l7_verdict */
-_Static_assert(sizeof(struct dmesh_l7_verdict) == 8, "verdict size");
-_Static_assert(_Alignof(struct dmesh_l7_verdict) == 4, "verdict alignment");
-_Static_assert(offsetof(struct dmesh_l7_verdict, allow) == 0, "allow");
-_Static_assert(offsetof(struct dmesh_l7_verdict, backend_pod) == 4, "backend_pod");
-
 /* The values both sides compare against, rather than translate. */
-_Static_assert(DMESH_L7_MODE_DECISION == 1, "mode decision");
-_Static_assert(DMESH_L7_MODE_OPAQUE == 2, "mode opaque");
-_Static_assert(DMESH_L7_MODE_FULL == 3, "mode full");
+_Static_assert(DMESH_L7_MODE_OPAQUE == 1, "mode opaque");
+_Static_assert(DMESH_L7_MODE_FULL == 2, "mode full");
 _Static_assert(DMESH_L7_BACKEND_ANY == -1, "backend any");
 _Static_assert(DMESH_L7_ORIGIN == -2, "backend origin");
 _Static_assert(DMESH_L7_DECLINE_ERROR == -1, "decline error");
@@ -68,27 +62,21 @@ _Static_assert(DMESH_L7_DECLINE_UNKNOWN_REPLY == -5, "decline unknown reply");
                    "function signature: " #name)
 
 CHECK_FN(l7_worker_run, int (*)(int, void *));
-#ifndef DMESH_L7_RUNTIME_OWNER
-CHECK_FN(l7_worker_attach, int (*)(int));
-CHECK_FN(l7_worker_step, int (*)(int));
-CHECK_FN(l7_worker_detach, void (*)(int));
-#endif
 CHECK_FN(l7_conn_open,
          int (*)(int, uint64_t, const struct dmesh_l7_flow *));
 CHECK_FN(l7_conn_segment,
          int (*)(int, uint64_t, const uint8_t *, uint32_t, uint32_t));
 CHECK_FN(l7_conn_eof, void (*)(int, uint64_t));
 CHECK_FN(l7_conn_close, void (*)(int, uint64_t));
-CHECK_FN(l7_resolve,
-         int (*)(int, const struct dmesh_l7_flow *, struct dmesh_l7_verdict *));
-CHECK_FN(l7_report,
-         void (*)(int, uint64_t, uint64_t, uint64_t, uint64_t, int));
 CHECK_FN(dmesh_l7_backends, int (*)(int, int32_t, int32_t *, int));
-CHECK_FN(dmesh_l7_send,
-         int (*)(int, uint64_t, int32_t, const uint8_t *, size_t));
 CHECK_FN(dmesh_l7_tx_reserve,
          uint8_t *(*)(int, uint64_t, uint32_t *));
 CHECK_FN(dmesh_l7_tx_commit, int (*)(int, uint64_t, int32_t, uint32_t));
+CHECK_FN(dmesh_l7_tx_commit_remote,
+         int (*)(int, uint64_t, const char *, uint32_t));
+CHECK_FN(dmesh_l7_tx_fin,
+         int (*)(int, uint64_t, int32_t, const char *));
+CHECK_FN(dmesh_l7_session_failed, void (*)(int, uint64_t));
 CHECK_FN(dmesh_l7_release,
          void (*)(int, uint64_t, uint32_t, uint32_t));
 CHECK_FN(dmesh_l7_driver_notification_fds,
@@ -105,7 +93,7 @@ CHECK_FN(dmesh_l7_driver_failed, void (*)(void *));
 
 /* The decline codes are what the data plane counts a fallback by, so no two of
  * them may name the same reason. `DMESH_L7_ORIGIN` shares a value with one of
- * them and does not collide: it is an argument to dmesh_l7_send, never a
+ * them and does not collide: it is a tx-commit destination, never a
  * return from l7_conn_open. */
 _Static_assert(DMESH_L7_DECLINE_ERROR != DMESH_L7_DECLINE_NOT_ATTACHED &&
                    DMESH_L7_DECLINE_NOT_ATTACHED != DMESH_L7_DECLINE_MODE &&
@@ -128,6 +116,10 @@ static const struct {
 
 int main(void)
 {
+    uint64_t generated = dmesh_l7_conn_handle_generation(-7, 4321, 99);
+    assert(dmesh_l7_handle_pod(generated) == -7);
+    assert(dmesh_l7_handle_port(generated) == 4321);
+    assert(dmesh_l7_handle_generation(generated) == 99);
     for (size_t i = 0; i < sizeof(handles) / sizeof(handles[0]); i++) {
         uint64_t got = dmesh_l7_conn_handle(handles[i].pod, handles[i].port);
         if (got != handles[i].handle) {

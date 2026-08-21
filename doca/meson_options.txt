@@ -1,5 +1,2 @@
-# Which consumer sits behind the L7 adapter contract (linkerd/include/dmesh_l7.h).
-# 'null' compiles the reference consumer in this tree; 'linkerd' links the Rust
-# staticlib that carries linkerd2-proxy, whose path l7_lib_path names.
-option('l7_backend', type: 'combo', choices: ['null', 'linkerd'], value: 'null')
+# The Rust staticlib that carries the embedded linkerd2-proxy.
 option('l7_lib_path', type: 'string', value: '')

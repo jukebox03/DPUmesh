@@ -20,6 +20,7 @@
 #include <grpc/event_engine/memory_request.h>
 #include <grpc/event_engine/slice.h>
 #include <grpc/event_engine/slice_buffer.h>
+#include <grpc/grpc.h>
 #include <grpc/slice.h>
 #include <grpc/impl/channel_arg_names.h>
 #include <grpcpp/security/credentials.h>
@@ -409,6 +410,47 @@ void TestPrebindDataAndFinAreReplayedInOrder() {
   endpoint.reset();
   CHECK_TRUE(state->WaitForDestroyCount(1, 2s));
   runtime.reset();
+}
+
+void TestPrebindReceiveQueueIsBounded() {
+  ManualExecutor callbacks;
+  auto state = std::make_shared<FakeDmeshState>();
+  auto created =
+      DmeshRuntime::Create(MakeFakeDmeshApiOps(state), UnownedExecutor(&callbacks));
+  CHECK_TRUE(created.ok());
+  auto runtime = std::move(*created);
+
+  runtime->Connect(
+      "greeter",
+      [](absl::StatusOr<DmeshReactor::ConnectedTransport>) {});
+  CHECK_TRUE(callbacks.WaitForSize(1, 2s));
+  const auto qps = state->ClientQps();
+  CHECK_EQ(qps.size(), size_t{1});
+
+  /* Leave the connect callback queued, so no Endpoint binds. */
+  const std::string chunk(64 * 1024, 'p');
+  const size_t receives = kReceiveHighWaterBytes / chunk.size() + 1;
+  for (size_t i = 0; i < receives; ++i) {
+    state->InjectReceive(qps.front(), chunk);
+  }
+  CHECK_TRUE(state->WaitForDestroyCount(1, 2s));
+  CHECK_TRUE(state->WaitForReleaseCount(receives, 2s));
+
+  callbacks.RunAll();
+  runtime.reset();
+}
+
+void TestReceiveRetentionOverflowFailsClosed() {
+  Fixture fixture;
+  const std::string chunk(64 * 1024, 'b');
+  const size_t to_high_water = kReceiveHighWaterBytes / chunk.size();
+  /* The fake keeps injecting despite held native credits. This models a broken
+   * or excessively deep lower transport and verifies bounded adapter memory. */
+  for (size_t i = 0; i < to_high_water + 65; ++i) {
+    fixture.state->InjectReceive(fixture.qp, chunk);
+  }
+  CHECK_TRUE(fixture.state->WaitForDestroyCount(1, 2s));
+  CHECK_TRUE(fixture.runtime->stats().receive_credit_hold_dropped > 0);
 }
 
 void TestBatchedRxPreservesByteOrder() {
@@ -1017,6 +1059,7 @@ struct TestCase {
 
 int main() {
   using namespace dpumesh::grpc::testing;
+  grpc_init();
   const TestCase tests[] = {
       {"TX copies and splits across posts",
        TestTxCopiesAndSplitsAcrossPosts},
@@ -1032,6 +1075,9 @@ int main() {
        TestReceiveAboveHighWaterHoldsCreditUntilRead},
       {"pre-bind data and FIN replay in order",
        TestPrebindDataAndFinAreReplayedInOrder},
+      {"pre-bind receive queue is bounded", TestPrebindReceiveQueueIsBounded},
+      {"receive retention overflow fails closed",
+       TestReceiveRetentionOverflowFailsClosed},
       {"batched RX preserves byte order", TestBatchedRxPreservesByteOrder},
       {"remote FIN fails read and defers close",
        TestRemoteFinFailsPendingReadThenCloseIsDeferred},
@@ -1081,5 +1127,6 @@ int main() {
       std::cerr << "FAIL: " << test.name << ": " << failure.message << '\n';
     }
   }
+  grpc_shutdown_blocking();
   return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }

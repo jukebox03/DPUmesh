@@ -167,6 +167,8 @@ RPCs over independent channels to one service and exercises both client and
 server FIN plus graceful server GOAWAY. Reconnect testing separately requires
 a fresh targeted QP.
 
-The integration uses L4 passthrough. It does not provide a `dpumesh:///`
-resolver, HTTP/2 routing, registry reload, EndpointSlice watching, admission
-control, or workload identity.
+The integration supplies gRPC's DPUmesh Endpoint and PassiveListener. In the
+supported deployment its Service is always assigned to the DPU-hosted Linkerd
+HTTP/2 path; destination discovery, endpoint generation updates, admission,
+and workload identity are owned there rather than duplicated in a
+`dpumesh:///` resolver inside the application process.

@@ -8,6 +8,8 @@
 #include <stdint.h>
 
 struct objects;
+struct dmesh_peer_channel;
+struct dmesh_peer_transport;
 
 enum px_progress_state {
     PX_PROGRESS_IDLE = 0,
@@ -108,6 +110,16 @@ void px_peer_release(struct objects *objs, uint8_t kind, void *cookie, uint32_t 
 /* Reset peer channels the adopted generation no longer binds, or binds to a
  * different static key. Runs on the control thread on every adoption. */
 void px_peer_generation_changed(struct objects *objs);
+/* Attach the assumed RDMA transport to one data worker. The lower layer owns
+ * its context and accepted connection objects; this layer owns authenticated
+ * stream state and all proxy custody above them. */
+int px_peer_configure(struct objects *objs, int worker_id,
+                      const struct dmesh_peer_transport *transport,
+                      void *transport_ctx);
+struct dmesh_peer_channel *
+px_peer_accept(struct objects *objs, int worker_id, const char *node_name,
+               uint32_t incarnation, void *conn,
+               const uint8_t peer_key[32]);
 /* Adopt the generation's `protected=` grading. Runs on the control thread when
  * a generation is adopted, so a data worker's decision is a byte read. */
 void px_protection_refresh(struct objects *objs);
@@ -116,13 +128,6 @@ void px_protection_refresh(struct objects *objs);
 int px_worker_notification_fd(struct objects *objs, int worker_id);
 int px_worker_arm_notification(struct objects *objs, int worker_id);
 void px_worker_clear_notification(struct objects *objs, int worker_id, int fd);
-
-#ifndef DMESH_L7_RUNTIME_OWNER
-/* C-driven L7 lifecycle used by the null backend. */
-int px_l7_attach_worker(struct objects *objs, int worker_id);
-int px_l7_step_worker(struct objects *objs, int worker_id);
-void px_l7_detach_worker(struct objects *objs, int worker_id);
-#endif
 
 /* True only after the egress owner has stopped submitting for this dead pod,
  * every destination DMA/credit read has completed, all lane queues are empty,

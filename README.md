@@ -1,14 +1,14 @@
 # DPUmesh
 
-DPUmesh is a BlueField service-mesh transport built with DOCA Comch, DPA, and
-DMA. Applications address a Kubernetes Service; the DPU owns backend selection,
-connection tracking, host-to-DPU forwarding, and reverse DMA. The default mode
-is an ordered L4 byte stream; in that mode DPUmesh does not terminate TLS or
-interpret HTTP/2. Services explicitly assigned to the embedded L7 layer are the
-exception described below.
+DPUmesh is a BlueField service mesh built with DOCA Comch, DPA, DMA, and an
+embedded Linkerd proxy. Applications address a Kubernetes Service; the DPU owns
+policy, discovery, backend selection, connection state, and Host↔DPU transfer.
+Native and preload connections use Linkerd's opaque byte-stream path. gRPC uses
+its HTTP/2 path. Local endpoints are reached by DMA and remote endpoints by the
+RDMA peer channel.
 
-This repository is a research prototype. The evaluation contract and
-measurements are in the [performance report](bench/report/REPORT.md).
+This repository is a research prototype. The design documents below define its
+transport, proxy, control-plane, and API contracts.
 
 ## Architecture
 
@@ -63,11 +63,11 @@ at a bounded deadline unless `dmesh_flush()` forces it earlier. The size of that
 unit and its timing are internal, not application tuning parameters, and the
 preload and gRPC layers keep no batch queue or timer of their own.
 
-Every QP is one full-duplex byte stream. Optional DPU L7 framing is an internal
-routing policy and does not expose backend or stream ids through native events.
-The in-tree L7 validator uses a simple length-prefixed benchmark frame; gRPC
-uses backend-pinned L4 passthrough unless its service is assigned to the L7
-layer, which terminates HTTP/2 on the DPU.
+Every QP is one full-duplex byte stream into the DPU-hosted Linkerd proxy and
+does not expose backend or proxy-session ids through native events. Native and
+preload Services enter Linkerd as opaque streams; the gRPC Service enters its
+HTTP/2 path. Linkerd's selected backend is then reached through DMA on this node
+or the RDMA-backed peer channel across nodes.
 
 Backpressure is nonblocking. `dmesh_alloc()` returning `NULL/EAGAIN` arms that QP
 itself, and returned capacity produces one `DMESH_EVENT_TX_READY` on its EQ:
@@ -139,23 +139,15 @@ The BlueField program is built from `doca/meson.build`. The supported benchmark
 bring-up path rebuilds and deploys both sides together:
 
 ```sh
-DPUMESH_DPA_THREADS=16 \
-DPUMESH_ARM_WORKERS=2 \
-DPUMESH_RINGS_PER_POD=8 \
 ./bench/bench.sh deploy
-./bench/bench.sh latency both
+./bench/bench.sh latency dpumesh
 ```
 
-A bare deploy selects one ARM data worker. Each data worker owns the completion
-queue it drains, the state of its connections, its DMA engine, and the reverse
-rings it publishes to. `K` sets forward rings per pod, `A` sets ARM data
-workers, and the 64 MiB receive mapping is divided into `L=A` landing stripes —
-the disjoint regions the DPU writes into, one per worker. `K` and `N` must be
-multiples of `A`; an incompatible worker count is reduced at startup and
-reported in the DPU log.
-
-`DPUMESH_DPA_THREADS` sets `N` and `DPUMESH_ARM_WORKERS` sets `A`; both are
-clamped at startup, `N` to 32 EUs and `A` to 8 workers.
+The deployment geometry is `N/K/A/L=32/8/8/8`: 32 DPA execution units, eight
+rings per Pod, eight ARM data workers, and eight receive landing stripes. Each
+Pod exposes one ring to each worker; each worker owns four DPA EUs, its
+connection shard, DMA engine, reverse-ring producer, and Linkerd runtime. A
+connection remains on that shard for its lifetime.
 
 The gRPC adapter has an independent CMake build:
 
@@ -168,13 +160,13 @@ ASAN_OPTIONS=detect_leaks=0 ctest --test-dir build/grpc --output-on-failure
 
 LeakSanitizer is disabled; AddressSanitizer and the functional test suite run.
 Clients use a Service-name target and ordinary gRPC channel arguments. Each
-connection attempt creates a QP; established L4 streams remain backend-pinned.
+connection attempt creates a QP and a session-local HTTP/2 transport in the
+DPU-hosted Linkerd proxy; its selected backend remains pinned for that session.
 
 ## Documentation
 
-Design documents define the current contracts; benchmark documents say how a
-number was produced; reports carry the numbers.
-[PLAN.md](PLAN.md) is the open work list, and holds cost work only.
+Design documents define the contracts; benchmark documents define the
+DPU-hosted Linkerd/DMA deployment and its validation method.
 
 **Design**
 
@@ -198,14 +190,3 @@ number was produced; reports carry the numbers.
 |---|---|
 | [bench/README.md](bench/README.md) | deployment, the experiment commands, the measurement rules, and the host-only and hardware validation gates |
 | [integrations/grpc/bench/README.md](integrations/grpc/bench/README.md) | the gRPC workloads and collectors |
-| [linkerd/bench/README.md](linkerd/bench/README.md) | the linkerd sidecar columns of the gRPC evaluation |
-
-**Reports**
-
-| Report | Question it answers |
-|---|---|
-| [bench/report/REPORT.md](bench/report/REPORT.md) | what DPUmesh costs at L4 against Envoy sidecars |
-| [bench/report/REPORT_L7.md](bench/report/REPORT_L7.md) | what the DPU's L7 layer costs per message, per connection and per request |
-| [bench/report/REPORT_CORE.md](bench/report/REPORT_CORE.md) | where the cores go, attributed per component |
-| [integrations/grpc/bench/report/REPORT_GRPC.md](integrations/grpc/bench/report/REPORT_GRPC.md) | whether the L4 win carries to gRPC, and how it scales with cores and channels |
-| [linkerd/bench/report/REPORT_LINKERD.md](linkerd/bench/report/REPORT_LINKERD.md) | linkerd as a sidecar, against Envoy and DPUmesh |

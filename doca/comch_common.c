@@ -198,7 +198,26 @@ process_mmap_msg(struct objects *objs, struct doca_comch_connection *conn,
 	}
 
 	if (mmap_msg->mmap_type == DMA_HOST_RX_BUFFER) {
+		/* A from-export mmap is not fast-path thread-safe and cannot be made
+		 * thread-safe after import. Give every egress worker its own handle so
+		 * concurrent doca_buf allocation cannot corrupt the mmap's accounting. */
+		struct doca_mmap *worker_mmaps[MAX_ARM_WORKERS] = {0};
+		for (int w = 1; w < lmax; w++) {
+			result = doca_mmap_create_from_export(
+				NULL, mmap_msg->export_desc, export_desc_len,
+				objs->dev, &worker_mmaps[w]);
+			if (result != DOCA_SUCCESS) {
+				DOCA_LOG_ERR("Pod %d: failed to import RX mmap for worker %d: %s",
+				             pod->pod_id, w, doca_error_get_name(result));
+				for (int j = 1; j < w; j++)
+					doca_mmap_destroy(worker_mmaps[j]);
+				doca_mmap_destroy(imported_mmap);
+				return result;
+			}
+		}
 		pod->host_rx_mmap = imported_mmap;
+		for (int w = 1; w < lmax; w++)
+			pod->host_rx_worker_mmaps[w] = worker_mmaps[w];
 		pod->host_rx_addr = remote_addr;
 		pod->host_rx_buf_size = buf_size;
 		/* rq_depth derived from host_rx buffer size: num_slots × slot_size. */

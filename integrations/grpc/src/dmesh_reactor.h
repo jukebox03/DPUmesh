@@ -30,8 +30,8 @@ class DmeshReactor final {
 
   // Each field is sampled independently.
   struct Stats {
-    // Receives whose credit was returned at the per-connection retention cap
-    // while the endpoint asked to hold it.
+    // Receives that exceeded the per-connection credit-retention cap. The
+    // connection is failed closed so its gRPC receive queue stays bounded.
     uint64_t receive_credit_hold_dropped = 0;
     // Drains that ended on the per-iteration poll budget with the EQ non-empty.
     uint64_t eq_drain_budget_exhausted = 0;

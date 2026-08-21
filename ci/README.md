@@ -117,23 +117,20 @@ Constraints on anything added to those jobs:
 - **The runner service does not read `~/.bashrc`.** A job sees only what the
   service environment holds; the place to add to it is `~/actions-runner/.env`.
 
-## Setting the machine up
+## Hardware deployment profile
 
-The topology the report's numbers were taken under:
+The self-hosted node uses the repository deployment profile:
 
 ```sh
-DPUMESH_DPA_THREADS=32 DPUMESH_RINGS_PER_POD=8 DPUMESH_ARM_WORKERS=8 \
-BENCH_NUMA_POLICY=local BENCH_DEPLOY_SCOPE=grpc bash bench/bench.sh deploy
-BENCH_NUMA_POLICY=local bash bench/bench.sh pin grpc
+BENCH_NUMA_POLICY=local BENCH_DEPLOY_SCOPE=all bash bench/bench.sh deploy
+BENCH_NUMA_POLICY=local bash bench/bench.sh pin fair
+ci/dpu-state.sh
 ```
 
-Passing none of those leaves the DPU with **one** ARM data worker, which is a
-different machine and a different set of numbers. Confirm what took with
-`ci/dpu-state.sh`.
+The profile is `N/K/A/L=32/8/8/8` with a Linkerd runtime on every ARM worker.
+`ci/dpu-state.sh` records the active geometry with each measurement.
 
-`BENCH_DEPLOY_SCOPE` picks the campaign and the two do not overlap: `grpc`
-starts only the L7 paths so no other backend can enter the DPU registry while it
-runs, and `l4`/`all` start the byte-stream pods instead. Add `BENCH_LINKERD=1`
-for the linkerd sidecar columns, and `L7_BACKEND=linkerd` with
-`DPUMESH_L7_SVC=<ns>/<service>` to put linkerd2-proxy inside the DPU rather than
-beside the Pod.
+`BENCH_DEPLOY_SCOPE` is `all`, `native`, `preload`, or `grpc`. Each scope uses
+the same Host↔DPU DMA path and embedded Linkerd proxy. Set
+`DPUMESH_L7_SVC=<ns>/<service>` for HTTP/1 or HTTP/2 and
+`DPUMESH_L7_OPAQUE_SVC=<ns>/<service>` for opaque TCP.

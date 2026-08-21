@@ -1,4 +1,4 @@
-/* Matched-C POSIX RPC benchmark client for Envoy and DPUmesh preload.
+/* POSIX RPC benchmark client used through the DPUmesh preload adapter.
  *
  * RUN uses a closed fixed-concurrency window. OPEN schedules constant or Poisson
  * arrivals and measures latency from scheduled send time. bench.h defines the
@@ -42,11 +42,10 @@ enum { ARR_CONST = 0, ARR_POISSON = 1 };
 static char g_host[256] = "127.0.0.1";
 static int  g_port      = 9100;
 
-/* ------------------------------------------------------------ tx byte queue
- * Unsent request bytes for one connection: append whole frames, drain with
- * non-blocking write(). Compacts to the front when the head runs on. Bounded — a
- * full queue is backpressure (the server is not draining), which stops new issues
- * (closed) or records a drop (open) rather than growing without limit. */
+/* ------------------------------------------------------- pending TX frame
+ * A non-blocking write may accept only part of a request. Keep that one frame
+ * until it completes, but never append a second frame behind it: one logical
+ * request must enter the transport through its own write() call. */
 typedef struct { uint8_t *buf; size_t cap, head, len; } txq_t;
 
 static int txq_init(txq_t *q, size_t cap) {
@@ -55,11 +54,9 @@ static int txq_init(txq_t *q, size_t cap) {
 }
 static void txq_free(txq_t *q) { free(q->buf); q->buf = NULL; }
 static int txq_room(txq_t *q, size_t need) {
-    if (q->head + q->len + need > q->cap) {           /* would run off the end */
-        if (q->len) memmove(q->buf, q->buf + q->head, q->len);
-        q->head = 0;
-    }
-    return q->len + need <= q->cap;
+    if (q->len != 0) return 0;
+    q->head = 0;
+    return need <= q->cap;
 }
 static void txq_append(txq_t *q, const uint8_t *b, size_t n) {
     memcpy(q->buf + q->head + q->len, b, n); q->len += n;
@@ -75,6 +72,7 @@ static int txq_flush(txq_t *q, int fd, int *blocked) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) { *blocked = 1; return 0; }
             return -1;
         }
+        if (w == 0) { errno = EPIPE; return -1; }
         q->head += (size_t)w; q->len -= (size_t)w;
     }
     q->head = 0;
@@ -154,9 +152,9 @@ static int reap(worker_t *w, bench_reframer_t *rf, uint8_t *rd) {
     }
 }
 
-/* Build one request frame [hdr | filler] into the tx queue. Caller has ensured the
- * slot is free and the queue has room. Stamps start_ts with `sched` (the intended
- * send time in open loop; the actual time in closed loop). */
+/* Build one request frame [hdr | filler] into the pending-frame buffer. Caller
+ * has ensured that no earlier frame remains. Stamps start_ts with `sched` (the
+ * intended send time in open loop; the actual time in closed loop). */
 /* Shared read-only request filler, initialised exactly once across all worker
  * threads via pthread_once — a plain `static int ready` guard is a data race. */
 static uint8_t g_req_fill[RD_CHUNK];
@@ -208,15 +206,10 @@ static void *worker_fn(void *arg) {
     w->start_ts = (double *)calloc(INFLIGHT_RING, sizeof(double));
     w->live     = (uint8_t *)calloc(INFLIGHT_RING, 1);
     w->slot_seq = (uint32_t *)calloc(INFLIGHT_RING, sizeof(uint32_t));
-    /* tx queue holds UNSENT frames. Size it to the whole closed-loop window so the
-     * issue loop can actually keep W requests in flight (a queue that fits only a
-     * couple of frames silently caps effective concurrency); bound it for very large
-     * messages, where flush-when-full below keeps the window filling anyway. */
+    /* Only the unwritten suffix of one logical request is retained. Transport
+     * batching belongs below write(), in the preload/native implementation. */
     size_t frame = (size_t)BENCH_HDR_LEN + (size_t)w->req_size;
-    size_t txcap = frame * (size_t)(w->W > 0 ? (w->W + 2) : 66);
-    if (txcap > (8u << 20)) txcap = 8u << 20;
-    if (txcap < frame + 8192) txcap = frame + 8192;
-    if (txq_init(&w->tx, txcap) < 0 ||
+    if (txq_init(&w->tx, frame) < 0 ||
         !w->start_ts || !w->live || !w->slot_seq) { atomic_store(&w->broken, 1); goto done; }
     w->prev_seq = UINT32_MAX;
 
@@ -245,16 +238,27 @@ static void *worker_fn(void *arg) {
         if (reap(w, &rf, rd) < 0) { atomic_store(&w->broken, 1); break; }
         w->now_cache = bench_now_sec();
 
-        /* Issue side. */
+        /* Finish only the previously submitted frame before issuing another. */
+        tx_blocked = 0;
+        if (w->tx.len > 0 && txq_flush(&w->tx, w->fd, &tx_blocked) < 0) {
+            atomic_store(&w->broken, 1);
+            break;
+        }
+
+        /* Issue side. Every completed iteration below makes one write() call for
+         * one logical frame; a short write may only continue that same frame. */
         if (w->mode == MODE_CLOSED) {
-            while (w->outstanding < w->W) {
+            while (w->outstanding < w->W && w->tx.len == 0) {
                 if (!txq_room(&w->tx, BENCH_HDR_LEN + w->req_size)) {
-                    /* queue full mid-fill: flush to the socket and keep going, so the
-                     * window fills to W. A blocked kernel buffer is real backpressure. */
-                    if (txq_flush(&w->tx, w->fd, &tx_blocked) < 0) { atomic_store(&w->broken, 1); break; }
-                    if (tx_blocked) break;
+                    atomic_store(&w->broken, 1);
+                    break;
                 }
                 enqueue_request(w, w->now_cache);
+                if (txq_flush(&w->tx, w->fd, &tx_blocked) < 0) {
+                    atomic_store(&w->broken, 1);
+                    break;
+                }
+                if (tx_blocked) break;
             }
         } else {
             while (w->now_cache >= w->sched_next) {
@@ -262,13 +266,22 @@ static void *worker_fn(void *arg) {
                 double gap = (w->arrival == ARR_POISSON) ? prng_exp_gap(w, w->rate)
                                                          : 1.0 / w->rate;
                 w->sched_next += gap;
-                if (w->outstanding >= OPEN_CAP ||
-                    !txq_room(&w->tx, BENCH_HDR_LEN + w->req_size)) { w->drops++; continue; }
+                if (w->outstanding >= OPEN_CAP || w->tx.len != 0) {
+                    w->drops++;
+                    continue;
+                }
+                if (!txq_room(&w->tx, BENCH_HDR_LEN + w->req_size)) {
+                    atomic_store(&w->broken, 1);
+                    break;
+                }
                 enqueue_request(w, sched);
+                if (txq_flush(&w->tx, w->fd, &tx_blocked) < 0) {
+                    atomic_store(&w->broken, 1);
+                    break;
+                }
             }
         }
-
-        if (txq_flush(&w->tx, w->fd, &tx_blocked) < 0) { atomic_store(&w->broken, 1); break; }
+        if (atomic_load(&w->broken)) break;
 
         /* Arm EPOLLOUT only while the kernel buffer is full with bytes pending. */
         uint32_t want = EPOLLIN | (tx_blocked && w->tx.len ? EPOLLOUT : 0);
@@ -320,7 +333,17 @@ static void *worker_fn(void *arg) {
 done_ep:
     close(ep);
 done:
-    if (w->fd >= 0) { close(w->fd); w->fd = -1; }
+    if (w->fd >= 0) {
+        /* A failed run must not leave its overloaded byte stream draining into
+         * the next measurement. POSIX linger-zero maps to the preload
+         * transport's ordered reset marker. */
+        if (atomic_load(&w->broken)) {
+            struct linger reset = { .l_onoff = 1, .l_linger = 0 };
+            (void)setsockopt(w->fd, SOL_SOCKET, SO_LINGER, &reset, sizeof reset);
+        }
+        close(w->fd);
+        w->fd = -1;
+    }
     w->dura = (end > start && w->rcnt > w->warmup) ? (end - w->warmup_end) : 0.0;
     free(rd); txq_free(&w->tx);
     free(w->start_ts); free(w->live); free(w->slot_seq);
@@ -401,7 +424,10 @@ static void run_bench(int conn_fd, int mode, int req_size, int reply_size, int c
         if (atomic_load(&w[i].broken)) { worker_fail++; total_fail++; }
         total_scheduled += (long)w[i].next_seq + w[i].drops;
         total_pending += w[i].pending;
-        if (!atomic_load(&w[i].broken) && w[i].dura > 1e-9 && measured > 0) {
+        /* Preserve completed work in an overload point's achieved rate. The
+         * point remains ERR through worker_fail, but no longer reports zero
+         * throughput merely because its final drain did not quiesce. */
+        if (w[i].dura > 1e-9 && measured > 0) {
             mrps += (double)measured / w[i].dura * 1e-6;
             double rps = (double)measured / w[i].dura;
             request_gbps += 8e-9 * rps * request_frame;

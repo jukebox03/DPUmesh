@@ -48,7 +48,8 @@ barrier:
 ```text
 control connection established
   → POD_REGISTER / POD_ASSIGNED           the DPU assigns this process a pod id
-  → K rings + TX mmap + RX mmap imported  the DPU maps the process's memory
+  → K rings + TX mmap imported             the DPU maps the process's send state
+  → A worker-private RX mmap imports       one DPU handle per egress worker
   → RING_ADD_ACK from every target EU     each accelerator unit confirms its ring
   → POD_INIT_RESULT(READY, L)             the channel is usable; L stripes granted
 ```
@@ -88,24 +89,23 @@ what causes DPU routing and backend connection creation. Inbound connections
 arrive as `DMESH_EVENT_CONN_REQ`; their `event.qp` is already usable and permanently
 bound to the EQ that accepted it.
 
-Every QP is one reliable full-duplex byte stream. By default the DPU forwards
-those bytes untouched (L4) and pins the stream to one backend. A Service assigned
-to the DPU's L7 layer instead has its frames parsed there, and complete frames may
-go to different backends; that adds no identifier to this API. The application
-still receives one ordered sequence of byte fragments and does its own framing and
-request correlation. DPUmesh exposes no numeric service, backend, or upstream id
-here.
+Every QP is one reliable full-duplex byte stream through the DPU-hosted Linkerd
+proxy. Native and preload QPs use the opaque path and remain pinned to one
+backend. gRPC binds its QP to a session-local HTTP/2 transport. The application
+receives one ordered sequence of byte fragments and owns framing and request
+correlation. DPUmesh exposes no numeric service, backend, proxy-session, or
+upstream id through this API.
 
 `dmesh_destroy_qp()` is graceful close: it submits the buffered tail, waits until
-the DPU has finished reading every submitted byte, and only then sends FIN. It returns
-any held RX credit and always frees the local QP. `dmesh_abort_qp()` instead
-discards bytes that have not yet been submitted, waits for already-submitted bytes
-to leave the DPU, then sends FIN when a peer exists so remote state can be
-reclaimed. Already-submitted bytes cannot be recalled. That wait is bounded;
-on a broken transport the close returns `-1/EBADMSG` without sending an overtaking
-FIN. Either call may return `-1/EBADMSG`, and the pointer is invalid on every return.
-Because one EQ poll can return several entries that name the same QP, defer
-destruction until the whole returned batch has been processed.
+the DPU has released every submitted byte, and then sends FIN. If submission or
+the bounded custody wait fails, it sends an ordered reset marker instead.
+`dmesh_abort_qp()` discards the unsent tail and sends that reset immediately,
+without waiting for submitted custody. Data and reset share the QP's ordered
+forward ring, so the DPU observes earlier descriptors before it drops both proxy
+directions and their remaining buffers. Both calls return held RX credit, always
+free the local QP, and may return `-1/EBADMSG`; the pointer is invalid on every
+return. Because one EQ poll can return several entries that name the same QP,
+defer destruction until the whole returned batch has been processed.
 
 ## 4. TX: buffered sending and backpressure
 
@@ -315,9 +315,10 @@ does not select or observe the physical batch size.
 The gRPC C++ adapter maps one runtime to channels, reactor shards to EQs, and
 EventEngine endpoints to QPs. Client bootstrap accepts a Service-name target,
 credentials, and `grpc::ChannelArguments`; absent authority defaults to the
-target. Each EventEngine `Connect` creates a targeted QP. Established L4 streams
-remain backend-pinned and terminate when that backend is lost. TLS and HTTP/2
-remain end-to-end unless the Service is assigned to the DPU's L7 layer.
+target. Each EventEngine `Connect` creates a targeted QP. The supported
+deployment assigns the gRPC Service to the DPU-hosted Linkerd HTTP/2 path; each
+channel has its own proxy transport and its selected backend remains pinned for
+that session.
 
 The adapter uses `dmesh_alloc`/`dmesh_post_send` for TX, calls `dmesh_flush`
 once at each EventEngine Write boundary, and consumes
@@ -347,6 +348,6 @@ Adapter-internal ownership and threading are specified in
   cached for one generation interval and re-resolved after that or on a
   connection error, so a Service that appears later is reachable without
   restarting the process.
-- L4 passthrough is the default gRPC mode; a Service assigned to the L7 layer is
-  terminated there. The in-tree L7 validator uses a bounded 16-byte
-  length-prefixed benchmark frame, not HTTP/2.
+- The supported gRPC deployment always terminates HTTP/2 in the DPU-hosted
+  Linkerd proxy. Native and preload Services use the same proxy in opaque mode;
+  unassigned L4 forwarding is not a supported deployment topology.

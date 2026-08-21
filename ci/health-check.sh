@@ -28,7 +28,7 @@ NS="${NS:-test-bench}"
 HEALTH_MAX_LOAD="${HEALTH_MAX_LOAD:-3.0}"
 # The order paths are tried in. The first one that is part of the deployed
 # campaign answers for it; the rest are simply not in this campaign.
-PATHS="${HEALTH_PATHS:-grpc-dpumesh dpumesh grpc-tcp tcp grpc-envoy}"
+PATHS="${HEALTH_PATHS:-grpc-dpumesh dpumesh preload}"
 
 say() { echo "$*" >&2; }
 fields=()

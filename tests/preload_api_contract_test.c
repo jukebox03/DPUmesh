@@ -24,6 +24,7 @@ static atomic_int fake_fail_allocs;
 static atomic_int fake_fail_forever;
 static atomic_int fake_post_calls;
 static atomic_int fake_flush_calls;
+static atomic_int fake_fail_fin;
 static atomic_int fake_inflight;
 static atomic_int fake_release_calls;
 static atomic_int fake_suppress_depth;
@@ -44,6 +45,7 @@ static void fake_reset(void) {
     atomic_store(&fake_fail_forever, 0);
     atomic_store(&fake_post_calls, 0);
     atomic_store(&fake_flush_calls, 0);
+    atomic_store(&fake_fail_fin, 0);
     atomic_store(&fake_inflight, 0);
     atomic_store(&fake_release_calls, 0);
     atomic_store(&fake_suppress_depth, 0);
@@ -112,7 +114,14 @@ int dmesh_destroy_qp(dmesh_qp_t *qp) {
     return 0;
 }
 int dmesh_abort_qp(dmesh_qp_t *qp) { (void)qp; return 0; }
-int dmesh_send_fin(dmesh_qp_t *qp) { (void)qp; return 0; }
+int dmesh_send_fin(dmesh_qp_t *qp) {
+    (void)qp;
+    if (atomic_load(&fake_fail_fin)) {
+        errno = EIO;
+        return -1;
+    }
+    return 0;
+}
 int dmesh_poll_eq(dmesh_eq_t *eq, dmesh_event_t *events, int max_events) {
     (void)eq;
     int active = atomic_fetch_add(&fake_poll_active, 1) + 1;
@@ -350,6 +359,83 @@ static void test_data_after_fin_fails_closed(void) {
     test_pfd_free(e);
 }
 
+static void test_shutdown_read_releases_and_discards_rx(void) {
+    fake_reset();
+    pfd_t *e = test_pfd();
+    static const uint8_t before[] = "before";
+    dmesh_event_t queued = {
+        .qp = &fake_qp,
+        .type = DMESH_EVENT_RECV,
+        .buf = before,
+        .len = sizeof(before) - 1,
+        ._rx_token = 31,
+    };
+    assert(pfd_queue_rx(e, &queued, 0) == 0);
+
+    int fd = real_dup(e->efd);
+    assert(fd >= 0 && fd < PRELOAD_MAX_FDS);
+    pthread_mutex_lock(&g_tbl_mu);
+    g_fds[fd] = e;
+    e->refs = 1;
+    pthread_mutex_unlock(&g_tbl_mu);
+
+    assert(shutdown(fd, SHUT_RD) == 0);
+    assert(e->rd_closed == 1);
+    assert(e->rx_head == NULL && e->rx_tail == NULL);
+    assert(atomic_load(&fake_release_calls) == 1);
+
+    static const uint8_t after[] = "after";
+    dmesh_event_t late = {
+        .qp = &fake_qp,
+        .type = DMESH_EVENT_RECV,
+        .buf = after,
+        .len = sizeof(after) - 1,
+        ._rx_token = 32,
+    };
+    assert(pfd_queue_rx(e, &late, 0) == 0);
+    assert(e->rx_head == NULL && e->rx_tail == NULL);
+    assert(atomic_load(&fake_release_calls) == 2);
+
+    char byte;
+    assert(shim_recv(e, &byte, 1, MSG_DONTWAIT) == 0);
+    errno = 0;
+    assert(shutdown(fd, 99) == -1 && errno == EINVAL);
+
+    pthread_mutex_lock(&g_tbl_mu);
+    g_fds[fd] = NULL;
+    e->refs = 0;
+    pthread_mutex_unlock(&g_tbl_mu);
+    real_close(fd);
+    test_pfd_free(e);
+}
+
+static void test_failed_shutdown_write_is_sticky(void) {
+    fake_reset();
+    pfd_t *e = test_pfd();
+    int fd = real_dup(e->efd);
+    assert(fd >= 0 && fd < PRELOAD_MAX_FDS);
+    pthread_mutex_lock(&g_tbl_mu);
+    g_fds[fd] = e;
+    e->refs = 1;
+    pthread_mutex_unlock(&g_tbl_mu);
+
+    atomic_store(&fake_fail_fin, 1);
+    errno = 0;
+    assert(shutdown(fd, SHUT_WR) == -1 && errno == ECONNRESET);
+    assert(e->wr_closed == 1 && e->io_error == ECONNRESET);
+    assert(fd_ready(e, POLLIN));
+    errno = 0;
+    assert(shim_send(e, "x", 1, MSG_DONTWAIT) == -1);
+    assert(errno == ECONNRESET);
+
+    pthread_mutex_lock(&g_tbl_mu);
+    g_fds[fd] = NULL;
+    e->refs = 0;
+    pthread_mutex_unlock(&g_tbl_mu);
+    real_close(fd);
+    test_pfd_free(e);
+}
+
 static void test_fcntl_getfl_without_third_argument(void) {
     fake_reset();
     pfd_t *e = test_pfd();
@@ -360,6 +446,27 @@ static void test_fcntl_getfl_without_third_argument(void) {
     pthread_mutex_unlock(&g_tbl_mu);
     assert((fcntl(e->efd, F_GETFL) & O_NONBLOCK) == 0);
     assert(e->active_ops == 0);
+    pthread_mutex_lock(&g_tbl_mu);
+    g_fds[e->efd] = NULL;
+    e->refs = 0;
+    pthread_mutex_unlock(&g_tbl_mu);
+    test_pfd_free(e);
+}
+
+static void test_fcntl_dupfd_cannot_escape_tracking_bound(void) {
+    fake_reset();
+    pfd_t *e = test_pfd();
+    assert(e->efd >= 0 && e->efd < PRELOAD_MAX_FDS);
+    pthread_mutex_lock(&g_tbl_mu);
+    g_fds[e->efd] = e;
+    e->refs = 1;
+    pthread_mutex_unlock(&g_tbl_mu);
+
+    errno = 0;
+    assert(fcntl(e->efd, F_DUPFD_CLOEXEC, PRELOAD_MAX_FDS) == -1);
+    assert(errno == EMFILE);
+    assert(e->refs == 1);
+
     pthread_mutex_lock(&g_tbl_mu);
     g_fds[e->efd] = NULL;
     e->refs = 0;
@@ -610,6 +717,33 @@ static void test_preload_tx_stats(void) {
     g_ch = NULL;
 }
 
+static void test_fork_child_fails_inherited_socket_closed(void) {
+    fake_reset();
+    pfd_t *e = test_pfd();
+    int fd = real_dup(e->efd);
+    assert(fd >= 0 && fd < PRELOAD_MAX_FDS);
+    pthread_mutex_lock(&g_tbl_mu);
+    g_fds[fd] = e;
+    e->refs = 1;
+    pthread_mutex_unlock(&g_tbl_mu);
+
+    /* Exercise the child transition directly.  The production constructor
+     * registers these handlers with pthread_atfork. */
+    preload_atfork_prepare();
+    preload_atfork_parent();
+    assert(e->active_ops == 0 && !e->fork_locked);
+    preload_atfork_prepare();
+    preload_atfork_child();
+    assert(g_ch == NULL && g_eq == NULL && g_wake_fd == -1);
+    assert(e->orphaned && e->conn == NULL && e->io_error == ECONNRESET);
+    char byte;
+    errno = 0;
+    assert(shim_recv(e, &byte, 1, MSG_DONTWAIT) == -1);
+    assert(errno == ECONNRESET);
+    assert(close(fd) == 0); /* direct orphan reap; no vanished dispatcher */
+    fake_qp.user_data = NULL;
+}
+
 int main(void) {
     ENSURE_REAL();
     test_preload_tx_stats();
@@ -619,6 +753,8 @@ int main(void) {
     test_send_timeout_does_not_poll_native();
     test_rx_partial_peek_credit_and_fin();
     test_data_after_fin_fails_closed();
+    test_shutdown_read_releases_and_discards_rx();
+    test_failed_shutdown_write_is_sticky();
     test_rx_fragments_preserve_order();
     test_dispatcher_batches_rx_signal();
     test_tx_batching_is_library_owned();
@@ -628,8 +764,10 @@ int main(void) {
     test_eq_consumers_are_serialized();
     test_close_waits_for_eq_consumer();
     test_fcntl_getfl_without_third_argument();
+    test_fcntl_dupfd_cannot_escape_tracking_bound();
     test_install_fd_preserves_cloexec();
     test_retire_waits_for_active_wrapper();
+    test_fork_child_fails_inherited_socket_closed();
     puts("preload_api_contract_test: PASS");
     return 0;
 }

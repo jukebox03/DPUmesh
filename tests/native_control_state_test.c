@@ -28,6 +28,23 @@ install_generation(struct objects *objs)
 int
 main(void)
 {
+	char service_key[DMESH_K8S_NAMESPACE_MAX + DMESH_SVC_NAME_MAX];
+	assert(dmesh_resolve_service_key("test-bench", "echo-dpumesh",
+	                                 service_key, sizeof(service_key)) == 0);
+	assert(strcmp(service_key, "test-bench/echo-dpumesh") == 0);
+	assert(dmesh_resolve_service_key("ignored", "echo-dpumesh.test-bench",
+	                                 service_key, sizeof(service_key)) == 0);
+	assert(strcmp(service_key, "test-bench/echo-dpumesh") == 0);
+	assert(dmesh_resolve_service_key("test-bench", "bad.name.extra",
+	                                 service_key, sizeof(service_key)) == -1);
+	assert(dmesh_resolve_service_key("test-bench", "-bad",
+	                                 service_key, sizeof(service_key)) == -1);
+	char overlong[65];
+	memset(overlong, 'a', sizeof(overlong) - 1);
+	overlong[sizeof(overlong) - 1] = '\0';
+	assert(dmesh_resolve_service_key("test-bench", overlong,
+	                                 service_key, sizeof(service_key)) == -1);
+
     struct objects *objs = calloc(1, sizeof(*objs));
     assert(objs != NULL);
     objs->num_dpa_threads = 4;

@@ -75,7 +75,6 @@ DOCA_LOG_REGISTER(DPU_PROXY);
  * its request's mode. */
 enum px_l7_mode {
     PX_L7_NONE = 0,      /* fallback: the data plane alone */
-    PX_L7_DECISION,      /* one query per connection; payload does not traverse */
     PX_L7_OPAQUE,        /* payload traverses the L7 layer */
     PX_L7_FULL,          /* the above, plus request-level routing */
 };
@@ -89,13 +88,12 @@ enum px_l7_fallback_reason {
     PX_L7_FB_UNSUPPORTED_MODE,
     PX_L7_FB_SESSION_LIMIT,
     PX_L7_FB_UNKNOWN_REPLY,
-    PX_L7_FB_NO_VERDICT,
     PX_L7_FB_KINDS
 };
 
 static const char *const px_l7_fallback_name[PX_L7_FB_KINDS] = {
     "adapter-error", "worker-not-attached", "unsupported-mode",
-    "single-session-limit", "unknown-reply", "no-verdict",
+    "single-session-limit", "unknown-reply",
 };
 
 /* The decline codes are wire ABI with the layer: a value it returns is looked
@@ -126,12 +124,8 @@ static inline int px_l7_carries_bytes(uint8_t mode) {
 /* Egress arena for bytes the L7 layer produced rather than forwarded. A chunk is
  * wider than one reverse entry; emission still cuts entries at
  * PX_ENTRY_BYTES_MAX, so credit accounting is unchanged. */
-#define PX_ARENA_CHUNK      (2u * PX_ENTRY_BYTES_MAX)
+#define PX_ARENA_CHUNK      DMESH_PEER_EXTENT_MAX
 #define PX_ARENA_CHUNKS     1024u
-/* One send is one delivery: a payload longer than a chunk chains chunks rather
- * than being split across deliveries. */
-#define PX_L7_SEND_MAX      (4u * PX_ARENA_CHUNK)
-#define PX_L7_SEND_CHUNKS   (PX_L7_SEND_MAX / PX_ARENA_CHUNK)
 
 /* Refresh the DMA-read host credit cache when headroom drops below this many
  * entries. */
@@ -166,6 +160,12 @@ struct px_arrival {
     /* The consecutive run this extent acknowledges: it only grows across a
      * sequence delta of one. */
     uint16_t ack_port, ack_first_seq, ack_seq;
+    /* Peer reply input owned by the source Linkerd session. It has no local
+     * sender reverse ring; stack consumption returns STREAM_ACK and the arena
+     * chunk instead. */
+    struct px_chunk *peer_chunk;
+    struct dmesh_peer_channel *peer_channel;
+    uint32_t peer_incarnation, peer_handle, peer_seq;
 };
 
 /* One egress arena chunk: DPU-local bytes the SG engine can source. Interchangeable
@@ -203,6 +203,11 @@ struct px_unit {
     uint8_t  emit_fin_done;
     int8_t   dst_pod_idx;         /* receiver pod slot (REV_DONE target; set at ship) */
     uint8_t  err;                 /* batch errored; skip REV_DONE */
+    /* Set for a peer DATA landing. The destination acknowledges only after
+     * this unit is visible in the Pod's host RX mapping. */
+    struct dmesh_peer_channel *peer_channel;
+    uint32_t peer_incarnation, peer_handle, peer_seq, peer_len;
+    uint8_t  peer_source_side;
     struct px_piece *pieces, *pieces_tail;
     int npieces;
 };
@@ -302,6 +307,7 @@ struct px_lane {
 struct px_conn {
     dmesh_proxy_conn pub;
     struct px_conn *hnext;
+    uint32_t l7_generation;          /* rejects callbacks after key reuse */
     struct px_arrival *whead, *wtail; /* input window (unparsed tail kept) */
     uint64_t stream_end;              /* total bytes arrived */
     uint64_t parse_pos;               /* window cursor (consumed boundary) */
@@ -324,26 +330,56 @@ struct px_conn {
     uint8_t  l7_mode;                 /* enum px_l7_mode, resolved once per conn */
     uint8_t  l7_open;                 /* the L7 layer holds this conn */
     uint8_t  l7_closed;               /* closed once; never reopened */
+    uint8_t  l7_eof;                  /* this input half has reported EOF */
+    uint8_t  input_fin;               /* transport input FIN was accepted */
+    uint8_t  l7_origin_fin_sent;       /* stack finished output to origin */
+    uint8_t  l7_backend_fin_sent;      /* stack finished output to backend */
+    uint8_t  l7_session_failed;        /* stack ended without both output FINs */
+    uint8_t  lifecycle_pending;        /* normal half-close cleanup is parked */
     /* Bytes handed to the L7 layer, ahead of parse_pos. The window keeps them
      * until dmesh_l7_release reports consumption, so custody outlives the parse
      * pass that handed them over. */
     uint64_t l7_handed;
     uint32_t l7_release_pending;      /* released but not yet applied (see px_l7_apply_release) */
     struct px_chunk *l7_tx_chunk;     /* egress memory lent out by dmesh_l7_tx_reserve */
-    uint8_t  l7_resolved;             /* answered once by l7_resolve; owes a report */
-    uint64_t l7_open_ns;              /* when that answer was given */
-    uint64_t l7_shipped;              /* bytes forwarded, reported back as load */
     /* Connection-scoped backend stickiness: the backend this byte stream was
      * pinned to. An L4 stream carries no message boundaries, so it stays on one
-     * backend for life; `decision` mode pins it from the L7 layer's answer.
-     * Cluster-scoped, so a message to a different service re-picks. -1 =
-     * unpinned. */
+     * backend for life. Cluster-scoped, so a message to a different service
+     * re-picks. -1 = unpinned. */
     int32_t  pinned_backend;
     int16_t  pinned_cluster;
     /* The destination-side admission verdict, decided once per stream: 0 not
      * asked, 1 admitted, -1 refused, against the destination in inbound_dst. */
     int8_t   inbound_verdict;
     int32_t  inbound_dst;
+    /* Cross-node pin and full-duplex stream state. Owned by this connection's
+     * worker; callbacks locate it by the generation-safe source token. */
+    struct dmesh_peer_channel *peer_channel;
+    uint32_t peer_source_token;
+    uint32_t peer_handle;
+    uint32_t peer_tx_seq;
+    uint32_t peer_rx_seq;
+    uint8_t  peer_rx_seq_valid;
+    uint8_t  peer_open_pending;
+    uint8_t  peer_failed;
+    uint8_t  peer_fin_sent;
+    uint8_t  peer_rx_fin;
+    uint8_t  peer_eof_pending;
+    struct px_conn *peer_reply;       /* source request -> synthetic L7 reply */
+    struct px_conn *peer_owner;       /* synthetic L7 reply -> source request */
+    char peer_node[DMESH_K8S_NAME_MAX];
+    char peer_pod_uid[DMESH_POD_UID_MAX];
+};
+
+struct px_remote_upstream {
+    struct dmesh_peer_channel *channel;
+    uint32_t incarnation;
+    uint32_t handle;
+    int16_t src_service;
+    int16_t dst_service;
+    uint8_t fin_pending;
+    uint8_t source_fin_seen;
+    uint8_t backend_fin_sent;
 };
 
 /* A data worker owns its DOCA resources and regions where region % A == id.
@@ -382,6 +418,11 @@ struct px_worker_state {
      * that walk is applied at its end instead of parking the conn, because
      * applying it there would unlink arrivals the walk still holds. */
     int in_l7_parse;
+    struct dmesh_peer_table *peers;
+    struct px_remote_upstream *remote_upstreams; /* indexed by local uP */
+    uint32_t next_peer_token;
+    uint32_t next_peer_reply_key;
+    uint32_t next_l7_generation;
 };
 
 /* Per-Service protection class, cached from the generation's `protected=` set
@@ -403,6 +444,7 @@ struct dmesh_proxy {
      * un-inferable from Pod input. */
     int      l7_fail_closed;             /* a declined L7 connection is refused, not forwarded */
     uint32_t sg_pieces_max;
+    uint32_t dma_bytes_max;              /* device limit for one memcpy task */
 
     /* Per-worker connection and routing tables. */
     struct px_worker_state workers[MAX_ARM_WORKERS];
@@ -458,10 +500,6 @@ struct dmesh_proxy {
     atomic_ullong peer_report_ns;
     atomic_ullong peer_report_mark;
 
-    /* The peer channels this DPU holds, and the node it is. NULL until a
-     * transport is configured; every path below then treats a remote
-     * destination as unreachable, which is the state before S7 as well. */
-    struct dmesh_peer_table *peers;
 };
 
 static inline uint64_t px_stat_inc(atomic_ullong *counter)
@@ -563,6 +601,21 @@ px_ack_queue_push(struct px_ack_release_queue *q, struct px_arrival *arrival)
     }
     slot->arrival = arrival;
     atomic_store_explicit(&slot->sequence, pos + 1, memory_order_release);
+    return 1;
+}
+
+/* Publish a custody release to its reverse-ring owner and make the publication
+ * visible to a worker that has already parked. The queue alone is not a DOCA
+ * notification source: without this edge, a final partial transport unit can
+ * wait indefinitely after traffic on the owner worker goes quiet. */
+static int
+px_ack_queue_handoff(struct dmesh_proxy *px, int owner,
+                     struct px_arrival *arrival)
+{
+    if (owner < 0 || owner >= px->n_workers ||
+        !px_ack_queue_push(&px->engines[owner].ack_releases, arrival))
+        return 0;
+    px_engine_wake(&px->engines[owner]);
     return 1;
 }
 
@@ -697,7 +750,7 @@ px_queue_arrival_release(struct objects *objs, struct px_arrival *a)
     if (owner < 0 || owner >= px->n_workers)
         return 0;
     a->release_next = NULL;
-    if (px_ack_queue_push(&px->engines[owner].ack_releases, a))
+    if (px_ack_queue_handoff(px, owner, a))
         return 1;
 
     /* Detached arrivals remain covered by proxy_source_refs until ACK publication. */
@@ -712,6 +765,17 @@ px_queue_arrival_release(struct objects *objs, struct px_arrival *a)
 
 /* Return every source TX unit after its arrival leaves the egress path. */
 static void px_arrival_release(struct objects *objs, struct px_arrival *a) {
+    if (a->peer_channel) {
+        struct dmesh_peer_table *peers = px_cur_worker ? px_cur_worker->peers : NULL;
+        if (peers && a->peer_channel->state == DMESH_PEER_OPEN &&
+            a->peer_channel->incarnation == a->peer_incarnation)
+            dmesh_peer_source_delivered(peers, a->peer_channel,
+                                        a->peer_handle, a->peer_seq, a->len);
+        if (a->peer_chunk)
+            px_chunk_free(objs->proxy, a->peer_chunk);
+        px_arrival_free(objs->proxy, a);
+        return;
+    }
     if (px_queue_arrival_release(objs, a))
         return;
     __atomic_fetch_sub(&objs->pods[a->pod_idx].proxy_source_refs, 1,
@@ -768,6 +832,9 @@ static struct px_conn *px_conn_get(struct dmesh_proxy *px, int32_t pod, uint16_t
     c->pinned_cluster = DMESH_SVC_NONE;
     c->inbound_verdict = 0;
     c->inbound_dst = DMESH_POD_BLANK;
+    c->l7_generation = ++px_cur_worker->next_l7_generation;
+    if (c->l7_generation == 0)
+        c->l7_generation = ++px_cur_worker->next_l7_generation;
     uint32_t h = px_conn_hash(pod, port);
     c->hnext = px_cur_worker->buckets[h];
     px_cur_worker->buckets[h] = c;
@@ -813,6 +880,14 @@ static void px_resolve_route(struct objects *objs, struct px_conn *c,
 }
 
 static void px_conn_del(struct objects *objs, struct px_conn *c) {
+    if (c->peer_reply) {
+        struct px_conn *reply = c->peer_reply;
+        c->peer_reply = NULL;
+        reply->peer_owner = NULL;
+        px_conn_del(objs, reply);
+    }
+    if (c->peer_owner)
+        c->peer_owner->peer_reply = NULL;
     px_l7_close(objs, c, 0);                   /* before the window goes: the L7
                                                 * layer may still point into it */
     if (c->parse_pos < c->stream_end)
@@ -970,7 +1045,15 @@ static int px_fin_to_sender(struct objects *objs, struct px_conn *c) {
 
 static void px_stall(struct px_conn *c);
 static void px_peer_pod_gone(struct objects *objs, int32_t pod_id);
+static struct px_conn *px_peer_source_conn(
+    struct px_worker_state *worker, struct dmesh_peer_channel *channel,
+    uint32_t token, uint32_t handle);
 static int px_conn_admitted(struct objects *objs, struct px_conn *c, int32_t dst_pod);
+static uint16_t px_peer_destination_opened(
+    void *ctx, struct dmesh_peer_channel *channel, uint32_t handle,
+    const struct dmesh_peer_stream_open *open, int32_t dst_pod_idx);
+static int px_l7_open_conn(struct objects *objs, struct px_conn *c);
+static void px_parse_l7(struct objects *objs, struct px_conn *c);
 
 /* Terminate a connection whose other pod disappeared. The surviving sender is
  * owed an EOF; if the unit pool is temporarily empty, retain only the small
@@ -1042,6 +1125,12 @@ px_worker_quiesce_pod_connections(struct objects *objs, int32_t pod_id)
         while (c) {
             struct px_conn *next = c->hnext;
             if (c->pub.src_pod == pod_id) {
+                /* The source mapping is about to be destroyed, so this Pod's
+                 * peer custody cannot wait for remote landing ACKs. POD_GONE
+                 * tells the destination to discard the matching RX slots. */
+                if (worker_state->peers && c->peer_channel && c->peer_handle)
+                    dmesh_peer_tx_drop(worker_state->peers, c->peer_channel,
+                                       c->peer_handle);
                 px_conn_del(objs, c);
                 closed++;
             } else if (!c->disconnect_pending &&
@@ -1079,6 +1168,15 @@ static void px_poison(struct objects *objs, struct px_conn *c, const char *why) 
 
 static inline uint32_t px_unit_entries(const struct px_unit *u) {
     return u->total_len ? (u->total_len + PX_ENTRY_BYTES_MAX - 1) / PX_ENTRY_BYTES_MAX : 1;
+}
+
+/* Both the SG source list and its contiguous destination are owned by one DMA
+ * memcpy task. The device constrains the task's total buffer length separately
+ * from the SG element count, so a valid piece count alone is not sufficient. */
+static inline int
+px_dma_batch_fits(uint32_t bytes, uint32_t unit_bytes, uint32_t limit)
+{
+    return limit > 0 && bytes <= limit && unit_bytes <= limit - bytes;
 }
 
 enum px_lane_wrap_action {
@@ -1209,14 +1307,192 @@ static int32_t px_resolve_backend(struct objects *objs, struct px_conn *c,
     return dmesh_service_has_remote(objs, cluster) ? PX_DST_REMOTE : b;
 }
 
+static int px_peer_pin_endpoint(struct objects *objs, struct px_conn *c,
+                                const char *pod_uid)
+{
+    if (c->peer_pod_uid[0])
+        return !pod_uid || strcmp(c->peer_pod_uid, pod_uid) == 0;
+    static atomic_ullong remote_pick;
+    struct dmesh_endpoint_ref endpoint;
+    uint64_t pick = atomic_fetch_add_explicit(&remote_pick, 1,
+                                               memory_order_relaxed);
+    if (!dmesh_topology_remote_endpoint(objs, c->pub.dst_service,
+                                        objs->node_name, pod_uid, pick,
+                                        &endpoint))
+        return 0;
+    if (snprintf(c->peer_pod_uid, sizeof(c->peer_pod_uid), "%s",
+                 endpoint.pod_uid) >= (int)sizeof(c->peer_pod_uid) ||
+        snprintf(c->peer_node, sizeof(c->peer_node), "%s",
+                 endpoint.node_name) >= (int)sizeof(c->peer_node)) {
+        c->peer_pod_uid[0] = '\0';
+        c->peer_node[0] = '\0';
+        return 0;
+    }
+    return 1;
+}
+
+/* 1 ready, 0 pending/backpressured, -1 terminal. */
+static int px_peer_stream_ready(struct objects *objs, struct px_conn *c,
+                                const char *selected_pod_uid)
+{
+    struct px_worker_state *worker = px_cur_worker;
+    if (!worker || !worker->peers || !worker->peers->transport ||
+        c->peer_failed)
+        return -1;
+    if (c->peer_handle && c->peer_channel &&
+        c->peer_channel->state == DMESH_PEER_OPEN)
+        return 1;
+    if (!px_peer_pin_endpoint(objs, c, selected_pod_uid))
+        return -1;
+    enum dmesh_peer_refusal reason = DMESH_PEER_OK;
+    struct dmesh_peer_channel *channel =
+        dmesh_peer_open(worker->peers, c->peer_node, &reason);
+    if (!channel) {
+        px_peer_event(objs, dmesh_peer_refusal_name(reason));
+        return -1;
+    }
+    c->peer_channel = channel;
+    if (channel->state != DMESH_PEER_OPEN)
+        return 0;                              /* handshake progresses on this worker */
+    if (c->peer_open_pending)
+        return 0;
+    if (channel->tx_len != 0)
+        return 0;
+
+    struct pod_state *source = find_pod_by_id(objs, c->pub.src_pod);
+    if (!source || source->pod_uid[0] == '\0')
+        return -1;
+    struct dmesh_peer_stream_open open;
+    memset(&open, 0, sizeof(open));
+    snprintf(open.src_pod_uid, sizeof(open.src_pod_uid), "%s",
+             source->pod_uid);
+    snprintf(open.dst_pod_uid, sizeof(open.dst_pod_uid), "%s",
+             c->peer_pod_uid);
+    if (source->granted_service[0] && source->namespace_name[0])
+        snprintf(open.src_service_key, sizeof(open.src_service_key), "%s/%s",
+                 source->namespace_name, source->granted_service);
+    open.dst_port = dmesh_topology_service_port(objs, c->pub.dst_service);
+    if (open.dst_port == 0)
+        return -1;
+    uint32_t token = 0;
+    /* Tokens correlate OPEN_ACK before a wire handle exists. Wrap must not
+     * let a late ACK bind to another pending connection on this channel. */
+    for (uint32_t attempts = 0; attempts < DMESH_PEER_STREAMS_MAX + 1u;
+         attempts++) {
+        token = ++worker->next_peer_token;
+        if (token == 0)
+            token = ++worker->next_peer_token;
+        if (!px_peer_source_conn(worker, channel, token, 0))
+            break;
+        token = 0;
+    }
+    if (token == 0)
+        return 0;
+    open.source_token = token;
+    c->peer_source_token = token;
+    reason = dmesh_peer_stream_request(worker->peers, channel, &open);
+    if (reason == DMESH_PEER_OK) {
+        c->peer_open_pending = 1;
+        return 0;
+    }
+    c->peer_source_token = 0;
+    if (reason == DMESH_PEER_REFUSE_INFLIGHT)
+        return 0;
+    px_peer_event(objs, dmesh_peer_refusal_name(reason));
+    return -1;
+}
+
+/* Publish one contiguous arrival extent to the peer and transfer its custody
+ * to the STREAM_ACK slot. Returns bytes accepted, zero to retry, negative on
+ * terminal channel failure. */
+static int px_peer_ship_range(struct objects *objs, struct px_conn *c,
+                              uint32_t len, const char *selected_pod_uid)
+{
+    int ready = c->pub.is_reply && c->peer_channel && c->peer_handle
+                    ? 1
+                    : px_peer_stream_ready(objs, c, selected_pod_uid);
+    if (ready <= 0)
+        return ready;
+    if (!c->peer_channel || c->peer_channel->state != DMESH_PEER_OPEN ||
+        c->peer_channel->tx_len != 0 || c->peer_channel->stalled)
+        return 0;
+    struct px_arrival *arrival = c->whead;
+    while (arrival && arrival->stream_base + arrival->len <= c->parse_pos)
+        arrival = arrival->next;
+    if (!arrival)
+        return -1;
+    uint32_t within = (uint32_t)(c->parse_pos - arrival->stream_base);
+    uint32_t take = arrival->len - within;
+    if (take > len)
+        take = len;
+    if (take > DMESH_PEER_EXTENT_MAX)
+        take = DMESH_PEER_EXTENT_MAX;
+    const uint8_t *bytes = (const uint8_t *)objs->pods[arrival->pod_idx].dma_buffer +
+                           arrival->staging_off + within;
+    uint32_t seq = c->peer_tx_seq + 1u;
+    enum dmesh_peer_refusal sent = dmesh_peer_stream_data_send(
+        px_cur_worker->peers, c->peer_channel, c->peer_handle, seq,
+        bytes, take, DMESH_PEER_CUSTODY_L4, arrival);
+    if (sent == DMESH_PEER_OK) {
+        arrival->claimed_round += take;
+        c->peer_tx_seq = seq;
+        return (int)take;
+    }
+    if (sent == DMESH_PEER_REFUSE_INFLIGHT)
+        return 0;
+    px_peer_event(objs, dmesh_peer_refusal_name(sent));
+    return -1;
+}
+
 /* A unit with everything but its source bytes: the destination resolved, the
  * upstream port issued, the delivery-sequence counter located. Its own bytes
  * come from staging (px_build_range) or from the egress arena
- * (px_ship_arm_bytes), which is the only difference between the two. */
+ * (dmesh_l7_tx_commit), which is the only difference between the two. */
 struct px_unit_slot {
     struct px_unit *u;
     uint16_t       *seq_counter;   /* bumped once the pieces are attached */
 };
+
+/* Resolve or create the node-local return mapping for one backend. This is
+ * shared by DATA and by a zero-data L7 shutdown: an empty HTTP request still
+ * has to open the selected backend before its FIN can be delivered. */
+static int px_upstream_resolve(struct objects *objs, struct px_conn *c,
+                               int32_t dst_pod, uint16_t *out)
+{
+    struct dmesh_proxy *px = objs->proxy;
+    struct dpu_conntrack *ct = px_cur_worker->ct;
+    if (!out || dst_pod < 0)
+        return -1;
+    struct pod_state *tp = find_pod_by_id(objs, dst_pod);
+    if (!tp || !pod_data_ready(tp) || !tp->host_rx_mmap || !tp->host_rx_addr)
+        return -1;
+    if (!px_conn_admitted(objs, c, dst_pod))
+        return -1;
+
+    uint16_t uP = dpu_upstream_find(ct, c->pub.src_pod,
+                                    c->pub.src_port, dst_pod);
+    int created = 0;
+    if (uP == 0) {
+        uP = dpu_upstream_create(ct, c->pub.src_pod, c->pub.src_port,
+                                 dst_pod, c->l7_mode,
+                                 (uint16_t)px_cur_worker->id,
+                                 (uint16_t)px->n_workers);
+        created = uP != 0;
+    }
+    if (created)
+        px_conn_del_key(objs, dst_pod, uP);
+    if (uP == 0) {
+        uint64_t stalls = px_stat_inc(&px->stat_stall_uport);
+        if (((stalls - 1u) & 0xFFFFu) == 0)
+            DOCA_LOG_WARN("proxy: upstream space full (%d:%u -> pod %d) — "
+                          "stalling (total %llu)",
+                          c->pub.src_pod, c->pub.src_port, dst_pod,
+                          (unsigned long long)stalls);
+        return 0;
+    }
+    *out = uP;
+    return 1;
+}
 
 static int px_unit_prepare(struct objects *objs, struct px_conn *c,
                            uint32_t len, int32_t route_dst, int reverse,
@@ -1296,29 +1572,10 @@ static int px_unit_prepare(struct objects *objs, struct px_conn *c,
                           c->pub.src_pod, c->pub.src_port, dst_pod);
             return -1;
         }
-        uint16_t uP = dpu_upstream_find(ct, c->pub.src_pod, c->pub.src_port, dst_pod);
-        int created = 0;
-        if (uP == 0) {
-            /* Encode this worker in the upstream port for reply dispatch. */
-            uP = dpu_upstream_create(ct, c->pub.src_pod, c->pub.src_port, dst_pod,
-                                     c->l7_mode,
-                                     (uint16_t)px_cur_worker->id,
-                                     (uint16_t)px->n_workers);
-            created = (uP != 0);
-        }
-        /* Clear reply state for a newly allocated upstream port. */
-        if (created)
-            px_conn_del_key(objs, dst_pod, uP);
-        if (uP == 0) {
-            /* Every uP is in use. Transient — a client FIN frees one. */
-            uint64_t stalls = px_stat_inc(&px->stat_stall_uport);
-            if (((stalls - 1u) & 0xFFFFu) == 0)
-                DOCA_LOG_WARN("proxy: upstream space full (%d:%u -> pod %d) — stalling "
-                              "(total %llu); a FIN frees one",
-                              c->pub.src_pod, c->pub.src_port, dst_pod,
-                              (unsigned long long)stalls);
-            return 0;                          /* EAGAIN: nothing mutated */
-        }
+        uint16_t uP = 0;
+        int resolved = px_upstream_resolve(objs, c, dst_pod, &uP);
+        if (resolved <= 0)
+            return resolved;
         out_src_port = uP;
         out_dst_port = uP;
         seq_counter = &ct->upstream[uP].delivery_seq;
@@ -1418,11 +1675,16 @@ static void px_enqueue_unit(struct objects *objs, struct px_unit *u) {
 
 static int px_ship_range(struct objects *objs, struct px_conn *c,
                          uint32_t len, int32_t route_dst) {
+    if (route_dst == PX_DST_DEFER)
+        route_dst = px_resolve_backend(objs, c, c->pub.dst_service);
+    if (route_dst == PX_DST_REMOTE ||
+        (c->pub.is_reply && c->pub.peer_pod == DMESH_POD_REMOTE))
+        return px_peer_ship_range(objs, c, len, NULL);
     struct px_unit *u = NULL;
     int r = px_build_range(objs, c, len, route_dst, &u);
     if (r > 0)
         px_enqueue_unit(objs, u);
-    return r;
+    return r > 0 ? (int)len : r;
 }
 
 /* Attach one arena chunk to a unit as its next SG source piece. */
@@ -1446,66 +1708,6 @@ static int px_unit_attach_chunk(struct dmesh_proxy *px, struct px_unit *u,
     return 1;
 }
 
-/* Publish bytes the L7 layer produced. They are not in any pod's staging, so the
- * unit sources arena chunks and carries no arrival custody. One call is one
- * delivery: a payload longer than a chunk chains several rather than splitting.
- * Returns the bytes published, 0 when a pool is momentarily empty, or -1 when
- * undeliverable. */
-static int px_ship_arm_bytes(struct objects *objs, struct px_conn *c,
-                             int32_t backend, int reverse,
-                             const uint8_t *buf, uint32_t len) {
-    struct dmesh_proxy *px = objs->proxy;
-    struct px_chunk *chunks[PX_L7_SEND_CHUNKS];
-    uint32_t want = (len + PX_ARENA_CHUNK - 1u) / PX_ARENA_CHUNK;
-    uint32_t got = 0;
-
-    while (got < want) {
-        struct px_chunk *ch = px_chunk_alloc(px);
-        if (!ch)
-            break;
-        chunks[got++] = ch;
-    }
-    if (got < want) {
-        /* Publish whole chunks only, so what does go out keeps its own extent. */
-        len = got * PX_ARENA_CHUNK;
-        uint64_t stalls = px_stat_inc(&px->stat_stall_arena);
-        if (((stalls - 1u) & 0xFFFFu) == 0)
-            DOCA_LOG_WARN("proxy: egress arena dry — %u of %u chunks (total %llu)",
-                          got, want, (unsigned long long)stalls);
-        if (got == 0)
-            return 0;
-    }
-
-    struct px_unit_slot slot;
-    int32_t route_dst = c->pub.is_reply ? c->pub.peer_pod :
-                        (backend >= 0 ? backend : PX_DST_DEFER);
-    int prepared = px_unit_prepare(objs, c, len, route_dst, reverse, &slot);
-    if (prepared <= 0) {
-        for (uint32_t i = 0; i < got; i++)
-            px_chunk_free(px, chunks[i]);
-        return prepared;
-    }
-    uint32_t off = 0;
-    for (uint32_t i = 0; i < got; i++) {
-        uint32_t n = len - off < PX_ARENA_CHUNK ? len - off : PX_ARENA_CHUNK;
-        memcpy(px->arena + chunks[i]->off, buf + off, n);
-        if (!px_unit_attach_chunk(px, slot.u, chunks[i], n)) {
-            uint64_t stalls = px_stat_inc(&px->stat_stall_piece);
-            if (((stalls - 1u) & 0xFFFFu) == 0)
-                DOCA_LOG_WARN("proxy: piece pool dry — stalling %u L7 bytes (total %llu)",
-                              len, (unsigned long long)stalls);
-            for (uint32_t j = i; j < got; j++)   /* the attached ones go with the unit */
-                px_chunk_free(px, chunks[j]);
-            px_unit_free_node(px, slot.u);
-            return 0;
-        }
-        off += n;
-    }
-    slot.u->seq = ++*slot.seq_counter;
-    px_enqueue_unit(objs, slot.u);
-    return (int)len;
-}
-
 /* Park a connection whose pool allocation failed. Its parse position remains in
  * the window, and the forward loop retries it on the next drain pass. */
 static void px_stall(struct px_conn *c) {
@@ -1525,6 +1727,19 @@ static int px_resolve_reply_peer(struct px_conn *c) {
     int32_t cpod = 0;
     uint16_t cport = 0;
     if (c->pub.src_port >= DMESH_UPORT_BASE) {
+        struct px_remote_upstream *remote =
+            px_cur_worker->remote_upstreams
+                ? &px_cur_worker->remote_upstreams[c->pub.src_port]
+                : NULL;
+        if (remote && remote->channel &&
+            remote->channel->state == DMESH_PEER_OPEN &&
+            remote->channel->incarnation == remote->incarnation) {
+            c->peer_channel = remote->channel;
+            c->peer_handle = remote->handle;
+            c->pub.peer_pod = DMESH_POD_REMOTE;
+            c->pub.peer_port = (uint16_t)remote->handle;
+            return 1;
+        }
         struct dpu_upstream *u = &px_cur_worker->ct->upstream[c->pub.src_port];
         if (u->in_use) {
             have = 1;
@@ -1540,9 +1755,9 @@ static int px_resolve_reply_peer(struct px_conn *c) {
 }
 
 static void px_parse_l7(struct objects *objs, struct px_conn *c);
-static int  px_l7_decide(struct objects *objs, struct px_conn *c);
 
 static void px_parse(struct objects *objs, struct px_conn *c) {
+    struct dmesh_proxy *px = objs->proxy;
     if (!px_resolve_reply_peer(c)) {
         px_drop_window(objs, c, "stale upstream (client closed)");
         c->dead = 1;
@@ -1553,13 +1768,6 @@ static void px_parse(struct objects *objs, struct px_conn *c) {
     case PX_L7_FULL:
         px_parse_l7(objs, c);
         return;
-    case PX_L7_DECISION:
-        /* Asked once, on the request side; the reply inherits the pin through
-         * conntrack. The payload then takes the path below, untouched. */
-        if (!c->pub.is_reply && !c->l7_resolved && !c->l7_closed &&
-            !px_l7_decide(objs, c))
-            return;
-        break;
     default:
         break;              /* the data plane forwards these itself */
     }
@@ -1568,6 +1776,11 @@ static void px_parse(struct objects *objs, struct px_conn *c) {
         uint32_t avail = px_view(c);
         if (avail == 0)
             break;
+        /* One pass-through unit becomes part of one DMA task. Bound it before
+         * constructing the SG list so even a long continuously queued stream
+         * cannot create an intrinsically un-submittable unit. */
+        if (px->dma_bytes_max > 0 && avail > px->dma_bytes_max)
+            avail = px->dma_bytes_max;
         int32_t dst = c->pub.is_reply ? c->pub.peer_pod : PX_DST_DEFER;
         int r = px_ship_range(objs, c, avail, dst);
         if (r == 0) {
@@ -1578,9 +1791,7 @@ static void px_parse(struct objects *objs, struct px_conn *c) {
             px_poison(objs, c, "stream range cannot be delivered");
             return;
         }
-        px_advance(objs, c, avail);
-        if (c->l7_resolved)
-            c->l7_shipped += avail;
+        px_advance(objs, c, (uint32_t)r);
     }
 }
 
@@ -1590,11 +1801,14 @@ static void px_parse(struct objects *objs, struct px_conn *c) {
  * late call from the L7 layer must not land on a different connection. The key
  * is the same (pod, port) pair the connection table is indexed by. */
 static inline uint64_t px_conn_handle(const struct px_conn *c) {
-    return dmesh_l7_conn_handle(c->pub.src_pod, c->pub.src_port);
+    return dmesh_l7_conn_handle_generation(c->pub.src_pod, c->pub.src_port,
+                                           c->l7_generation);
 }
 
 static struct px_conn *px_conn_by_handle(struct dmesh_proxy *px, uint64_t conn) {
-    return px_conn_find(px, dmesh_l7_handle_pod(conn), dmesh_l7_handle_port(conn));
+    struct px_conn *c = px_conn_find(px, dmesh_l7_handle_pod(conn),
+                                     dmesh_l7_handle_port(conn));
+    return c && c->l7_generation == dmesh_l7_handle_generation(conn) ? c : NULL;
 }
 
 /* Requests for a service the L7 layer carries belong to the worker that owns
@@ -1692,6 +1906,448 @@ void px_peer_event(struct objects *objs, const char *reason)
     l7_control_event("peer", reason);
 }
 
+static int px_peer_node_binding(void *ctx, const char *node_name,
+                                const uint8_t **key, uint32_t *ip_be,
+                                uint16_t *port)
+{
+    struct px_worker_state *worker = ctx;
+    return worker && dmesh_topology_node_peer(worker->objs, node_name,
+                                               key, ip_be, port);
+}
+
+static int px_peer_pod_on_node(void *ctx, const char *pod_uid,
+                               const char *node_name)
+{
+    struct px_worker_state *worker = ctx;
+    return worker && dmesh_topology_pod_on_node(worker->objs, pod_uid,
+                                                node_name);
+}
+
+static int32_t px_peer_local_pod(void *ctx, const char *pod_uid,
+                                 uint32_t *generation)
+{
+    struct px_worker_state *worker = ctx;
+    if (!worker)
+        return -1;
+    int npods = __atomic_load_n(&worker->objs->num_pods, __ATOMIC_ACQUIRE);
+    for (int i = 0; i < npods; i++) {
+        struct pod_state *pod = &worker->objs->pods[i];
+        if (!pod_data_ready(pod) || strcmp(pod->pod_uid, pod_uid) != 0)
+            continue;
+        if (generation)
+            *generation = __atomic_load_n(&pod->dma_generation,
+                                           __ATOMIC_ACQUIRE);
+        return i;                              /* handle stores the slot, not pod_id */
+    }
+    return -1;
+}
+
+static uint32_t px_peer_pod_generation(void *ctx, int32_t pod_idx)
+{
+    struct px_worker_state *worker = ctx;
+    if (!worker || pod_idx < 0 || pod_idx >= MAX_PODS)
+        return 0;
+    return __atomic_load_n(&worker->objs->pods[pod_idx].dma_generation,
+                           __ATOMIC_ACQUIRE);
+}
+
+static struct px_conn *
+px_peer_source_conn(struct px_worker_state *worker,
+                    struct dmesh_peer_channel *channel,
+                    uint32_t token, uint32_t handle)
+{
+    if (!worker)
+        return NULL;
+    for (uint32_t bucket = 0; bucket < PX_CONN_HASH; bucket++) {
+        for (struct px_conn *c = worker->buckets[bucket]; c; c = c->hnext) {
+            if (c->peer_channel != channel)
+                continue;
+            if (token && c->peer_source_token == token)
+                return c;
+            if (handle && !c->pub.is_reply &&
+                c->peer_handle == handle)
+                return c;
+        }
+    }
+    return NULL;
+}
+
+static int
+px_peer_queue_delivery(struct px_worker_state *worker,
+                       struct dmesh_peer_channel *channel,
+                       uint32_t incarnation, uint32_t handle,
+                       const uint8_t *bytes, uint32_t len, uint32_t peer_seq,
+                       struct pod_state *dst, uint16_t dst_port,
+                       int16_t dst_service, int source_side)
+{
+    struct objects *objs = worker->objs;
+    struct dmesh_proxy *px = objs->proxy;
+    if (!dst || !pod_data_ready(dst) || !bytes || len == 0 ||
+        len > PX_ARENA_CHUNK)
+        return -1;
+    struct px_chunk *chunk = px_chunk_alloc(px);
+    struct px_unit *unit = px_unit_alloc(px);
+    if (!chunk || !unit) {
+        if (chunk)
+            px_chunk_free(px, chunk);
+        if (unit)
+            px_unit_free_node(px, unit);
+        return -1;
+    }
+    memcpy(px->arena + chunk->off, bytes, len);
+    if (!px_unit_attach_chunk(px, unit, chunk, len)) {
+        px_unit_free_node(px, unit);           /* returns chunk too */
+        return -1;
+    }
+    unit->src_pod_id = DMESH_POD_REMOTE;
+    unit->src_service = (int8_t)dst_service;
+    unit->dst_service = (int8_t)dst->service_id;
+    /* Host-visible connection identity is the destination-local upstream
+     * port. The 32-bit wire handle may carry its owner bit and is retained
+     * separately in peer_handle for acknowledgements. */
+    unit->src_port = dst_port;
+    unit->dst_port = dst_port;
+    unit->seq = (uint16_t)peer_seq;
+    unit->total_len = len;
+    unit->dst_pod_idx = (int8_t)(dst - objs->pods);
+    unit->peer_channel = channel;
+    unit->peer_incarnation = incarnation;
+    unit->peer_handle = handle;
+    unit->peer_seq = peer_seq;
+    unit->peer_len = len;
+    unit->peer_source_side = (uint8_t)(source_side != 0);
+    px_enqueue_unit(objs, unit);
+    return 1;                                 /* held until SG-DMA + REV_DONE publication */
+}
+
+static int px_peer_deliver(void *ctx, const struct dmesh_peer_handle *handle,
+                           const uint8_t *bytes, uint32_t len, uint32_t seq)
+{
+    struct px_worker_state *worker = ctx;
+    if (!worker || !handle || handle->dst_pod_idx < 0 ||
+        handle->dst_pod_idx >= MAX_PODS)
+        return -1;
+    struct px_remote_upstream *remote =
+        &worker->remote_upstreams[handle->up_port];
+    if (!remote->channel || remote->handle == 0)
+        return -1;
+    struct pod_state *dst = &worker->objs->pods[handle->dst_pod_idx];
+    return px_peer_queue_delivery(worker, remote->channel,
+                                  remote->incarnation, remote->handle,
+                                  bytes, len, seq, dst, handle->up_port,
+                                  remote->src_service, 0);
+}
+
+static struct px_conn *px_peer_reply_conn(struct px_worker_state *worker,
+                                          struct px_conn *owner,
+                                          struct dmesh_peer_channel *channel,
+                                          uint32_t handle)
+{
+    struct dmesh_proxy *px = worker->objs->proxy;
+    struct px_conn *reply = owner->peer_reply;
+    if (reply && reply->dead) {
+        px_conn_del(worker->objs, reply);
+        reply = NULL;
+    }
+    /* Peer-local handles overlap across channels, so synthetic reply objects
+     * use the full negative-pod key space. This helper is also used for a
+     * FIN-only response: EOF must attach the backend side even with no DATA. */
+    for (uint32_t attempts = 0; !reply && attempts < 128u * 65535u;
+         attempts++) {
+        uint32_t key = worker->next_peer_reply_key++ % (128u * 65535u);
+        int32_t pod = -1 - (int32_t)(key / 65535u);
+        uint16_t port = (uint16_t)(1u + key % 65535u);
+        if (px_conn_find(px, pod, port))
+            continue;
+        reply = px_conn_get(px, pod, port, 1, 1);
+    }
+    if (!reply)
+        return NULL;
+    if (!reply->dst_service_set) {
+        reply->pub.dst_service = owner->pub.dst_service;
+        reply->dst_service_set = 1;
+        reply->l7_mode = owner->l7_mode;
+        reply->pub.peer_pod = owner->pub.src_pod;
+        reply->pub.peer_port = owner->pub.src_port;
+        reply->peer_channel = channel;
+        reply->peer_handle = handle;
+        reply->peer_owner = owner;
+        owner->peer_reply = reply;
+    }
+    if (!reply->l7_open && !px_l7_open_conn(worker->objs, reply))
+        return NULL;
+    return reply;
+}
+
+static int px_peer_source_deliver(void *ctx,
+                                  struct dmesh_peer_channel *channel,
+                                  uint32_t handle, const uint8_t *bytes,
+                                  uint32_t len, uint32_t seq)
+{
+    struct px_worker_state *worker = ctx;
+    struct px_conn *c = px_peer_source_conn(worker, channel, 0, handle);
+    if (!c || c->peer_failed)
+        return -1;
+    if (c->peer_rx_seq_valid && seq != c->peer_rx_seq + 1u)
+        return -1;
+    if (px_l7_carries_bytes(c->l7_mode)) {
+        struct dmesh_proxy *px = worker->objs->proxy;
+        struct px_conn *reply = px_peer_reply_conn(worker, c, channel, handle);
+        if (!reply)
+            return -1;
+        struct px_chunk *chunk = px_chunk_alloc(px);
+        struct px_arrival *arrival = px_arrival_alloc(px);
+        if (!chunk || !arrival) {
+            if (chunk)
+                px_chunk_free(px, chunk);
+            if (arrival)
+                px_arrival_free(px, arrival);
+            return -1;
+        }
+        memcpy(px->arena + chunk->off, bytes, len);
+        memset(arrival, 0, sizeof(*arrival));
+        arrival->stream_base = reply->stream_end;
+        arrival->pod_idx = -1;
+        arrival->staging_off = chunk->off;
+        arrival->len = len;
+        atomic_init(&arrival->unfreed, len + 1u);
+        arrival->peer_chunk = chunk;
+        arrival->peer_channel = channel;
+        arrival->peer_incarnation = channel->incarnation;
+        arrival->peer_handle = handle;
+        arrival->peer_seq = seq;
+        if (reply->wtail)
+            reply->wtail->next = arrival;
+        else
+            reply->whead = arrival;
+        reply->wtail = arrival;
+        reply->stream_end += len;
+        px_parse_l7(worker->objs, reply);
+        c->peer_rx_seq = seq;
+        c->peer_rx_seq_valid = 1;
+        return 1;
+    }
+    struct pod_state *dst = find_pod_by_id(worker->objs, c->pub.src_pod);
+    int delivered = px_peer_queue_delivery(
+        worker, channel, channel->incarnation, handle, bytes, len, seq,
+        dst, c->pub.src_port, c->pub.dst_service, 1);
+    if (delivered >= 0) {
+        c->peer_rx_seq = seq;
+        c->peer_rx_seq_valid = 1;
+    }
+    return delivered;
+}
+
+static void px_peer_source_opened(void *ctx,
+                                  struct dmesh_peer_channel *channel,
+                                  uint32_t source_token, uint32_t handle,
+                                  int32_t status)
+{
+    struct px_worker_state *worker = ctx;
+    struct px_conn *c = px_peer_source_conn(worker, channel, source_token, 0);
+    if (!c || !c->peer_open_pending)
+        return;
+    c->peer_open_pending = 0;
+    if (status == DMESH_PEER_OK && handle != 0) {
+        c->peer_handle = handle;
+        return;
+    }
+    c->peer_failed = 1;
+    px_poison(worker->objs, c, "peer refused stream open");
+}
+
+static int px_peer_source_fin(void *ctx,
+                              struct dmesh_peer_channel *channel,
+                              uint32_t handle)
+{
+    struct px_worker_state *worker = ctx;
+    struct px_conn *c = px_peer_source_conn(worker, channel, 0, handle);
+    if (!c || c->peer_rx_fin)
+        return 0;
+    c->peer_rx_fin = 1;
+    if (c->dead) {
+        if (c->peer_fin_sent || c->peer_failed)
+            px_conn_del(worker->objs, c);
+        return 1;
+    }
+    if (px_l7_carries_bytes(c->l7_mode)) {
+        struct px_conn *reply = px_peer_reply_conn(worker, c, channel, handle);
+        if (!reply)
+            return -1;
+        if (!reply->l7_eof) {
+            l7_conn_eof(worker->id, px_conn_handle(reply));
+            reply->l7_eof = 1;
+        }
+        reply->input_fin = 1;
+    } else if (!px_fin_to_sender(worker->objs, c)) {
+        c->peer_eof_pending = 1;
+        px_stall(c);
+    }
+    c->lifecycle_pending = 1;
+    px_stall(c);
+    return 1;
+}
+
+static void px_peer_source_reset(void *ctx,
+                                 struct dmesh_peer_channel *channel,
+                                 const char *why)
+{
+    struct px_worker_state *worker = ctx;
+    if (!worker)
+        return;
+    for (uint32_t bucket = 0; bucket < PX_CONN_HASH; bucket++) {
+        for (struct px_conn *c = worker->buckets[bucket]; c; c = c->hnext) {
+            if (c->peer_channel != channel || c->peer_failed)
+                continue;
+            c->peer_failed = 1;
+            px_poison(worker->objs, c, why);
+        }
+    }
+}
+
+static void px_peer_poison_handle(void *ctx,
+                                  const struct dmesh_peer_handle *handle,
+                                  const char *why)
+{
+    struct px_worker_state *worker = ctx;
+    if (!worker || !handle || !worker->remote_upstreams)
+        return;
+    struct px_remote_upstream *remote =
+        &worker->remote_upstreams[handle->up_port];
+    memset(remote, 0, sizeof(*remote));
+    struct pod_state *dst = handle->dst_pod_idx >= 0 &&
+                                    handle->dst_pod_idx < MAX_PODS
+                                ? &worker->objs->pods[handle->dst_pod_idx]
+                                : NULL;
+    if (dst && pod_data_ready(dst))
+        (void)px_queue_eof_unit(worker->objs, dst, DMESH_POD_REMOTE,
+                                DMESH_SVC_NONE, (int8_t)dst->service_id,
+                                handle->up_port,
+                                handle->up_port);
+    dpu_upstream_free(worker->ct, handle->up_port);
+    (void)why;
+}
+
+static int px_remote_upstream_finish(struct px_worker_state *worker,
+                                     uint16_t up_port)
+{
+    struct px_remote_upstream *remote = &worker->remote_upstreams[up_port];
+    struct dpu_upstream *up = &worker->ct->upstream[up_port];
+    if (!up->in_use || !remote->channel || remote->fin_pending ||
+        !remote->source_fin_seen || !remote->backend_fin_sent)
+        return 0;
+    int32_t backend = up->backend_pod;
+    px_conn_del_key(worker->objs, backend, up_port);
+    memset(remote, 0, sizeof(*remote));
+    dpu_upstream_free(worker->ct, up_port);
+    return 1;
+}
+
+static int px_peer_destination_fin(void *ctx,
+                                   const struct dmesh_peer_handle *handle)
+{
+    struct px_worker_state *worker = ctx;
+    if (!worker || !handle || !worker->remote_upstreams ||
+        handle->dst_pod_idx < 0 || handle->dst_pod_idx >= MAX_PODS)
+        return -1;
+    struct px_remote_upstream *remote =
+        &worker->remote_upstreams[handle->up_port];
+    if (!remote->channel || remote->handle != handle->wire_handle)
+        return -1;
+    if (remote->source_fin_seen)
+        return 0;
+    struct pod_state *dst = &worker->objs->pods[handle->dst_pod_idx];
+    if (!pod_data_ready(dst))
+        return -1;
+    remote->source_fin_seen = 1;
+    if (!px_queue_eof_unit(worker->objs, dst, DMESH_POD_REMOTE,
+                           (int8_t)remote->src_service,
+                           (int8_t)remote->dst_service,
+                           handle->up_port, handle->up_port)) {
+        remote->fin_pending = 1;
+        return 1;
+    }
+    (void)px_remote_upstream_finish(worker, handle->up_port);
+    return 0;
+}
+
+static void px_peer_release_cb(void *ctx, uint8_t kind, void *cookie,
+                               uint32_t bytes)
+{
+    struct px_worker_state *worker = ctx;
+    if (worker)
+        px_peer_release(worker->objs, kind, cookie, bytes);
+}
+
+static void px_peer_event_cb(void *ctx, const char *reason)
+{
+    struct px_worker_state *worker = ctx;
+    if (worker)
+        px_peer_event(worker->objs, reason);
+}
+
+static uint64_t px_peer_now(void *ctx)
+{
+    (void)ctx;
+    return px_monotonic_ns();
+}
+
+static const struct dmesh_peer_ops PX_PEER_OPS = {
+    .node_binding = px_peer_node_binding,
+    .pod_on_node = px_peer_pod_on_node,
+    .local_pod = px_peer_local_pod,
+    .destination_opened = px_peer_destination_opened,
+    .pod_generation = px_peer_pod_generation,
+    .deliver = px_peer_deliver,
+    .source_deliver = px_peer_source_deliver,
+    .destination_fin = px_peer_destination_fin,
+    .release = px_peer_release_cb,
+    .poison = px_peer_poison_handle,
+    .source_opened = px_peer_source_opened,
+    .source_fin = px_peer_source_fin,
+    .source_reset = px_peer_source_reset,
+    .event = px_peer_event_cb,
+    .now_ns = px_peer_now,
+};
+
+int px_peer_configure(struct objects *objs, int worker_id,
+                      const struct dmesh_peer_transport *transport,
+                      void *transport_ctx)
+{
+    struct dmesh_proxy *px = objs ? objs->proxy : NULL;
+    if (!px || worker_id < 0 || worker_id >= px->n_workers || !transport ||
+        !transport->connect || !transport->peer_key || !transport->send ||
+        !transport->recv || !transport->close || !objs->node_key_ready ||
+        objs->node_name[0] == '\0')
+        return -1;
+    struct px_worker_state *worker = &px->workers[worker_id];
+    if (!worker->peers || !worker->remote_upstreams)
+        return -1;
+    dmesh_peer_table_fini(worker->peers);
+    dmesh_peer_table_init(worker->peers, objs->node_name,
+                          objs->node_public_key, transport, transport_ctx,
+                          &PX_PEER_OPS, worker);
+    return 0;
+}
+
+struct dmesh_peer_channel *
+px_peer_accept(struct objects *objs, int worker_id, const char *node_name,
+               uint32_t incarnation, void *conn, const uint8_t peer_key[32])
+{
+    struct dmesh_proxy *px = objs ? objs->proxy : NULL;
+    if (!px || worker_id < 0 || worker_id >= px->n_workers)
+        return NULL;
+    struct px_worker_state *worker = &px->workers[worker_id];
+    if (!worker->peers || !worker->peers->transport)
+        return NULL;
+    enum dmesh_peer_refusal reason = DMESH_PEER_OK;
+    struct dmesh_peer_channel *channel = dmesh_peer_accept(
+        worker->peers, node_name, incarnation, conn, peer_key, &reason);
+    if (!channel)
+        px_peer_event(objs, dmesh_peer_refusal_name(reason));
+    return channel;
+}
+
 /* Tell every peer holding streams from this Pod that it is gone. The message
  * carries the signed Pod UID, which is the key a destination sweeps on, and
  * the source has to send it because a destination cannot observe the
@@ -1699,34 +2355,35 @@ void px_peer_event(struct objects *objs, const char *reason)
 static void px_peer_pod_gone(struct objects *objs, int32_t pod_id)
 {
     struct dmesh_proxy *px = objs ? objs->proxy : NULL;
-    if (!px || !px->peers)
+    if (!px)
         return;
     struct pod_state *pod = find_pod_by_id(objs, pod_id);
     if (!pod || pod->pod_uid[0] == '\0')
         return;
-    struct dmesh_peer_pod_gone gone;
-    memset(&gone, 0, sizeof(gone));
-    snprintf(gone.pod_uid, sizeof(gone.pod_uid), "%s", pod->pod_uid);
-    for (uint32_t i = 0; i < DMESH_CHANNEL_MAX; i++) {
-        struct dmesh_peer_channel *channel = &px->peers->channels[i];
-        if (!channel->in_use || channel->state != DMESH_PEER_OPEN)
+    for (int w = 0; w < px->n_workers; w++) {
+        struct dmesh_peer_table *peers = px->workers[w].peers;
+        if (!peers)
             continue;
-        uint8_t frame[sizeof(struct dmesh_peer_msg_header) + sizeof(gone)];
-        long built = dmesh_peer_frame_build(frame, sizeof(frame),
-                                            DMESH_PEER_MSG_POD_GONE,
-                                            channel->incarnation, 0, &gone, sizeof(gone));
-        if (built < 0 || !px->peers->transport || !px->peers->transport->send ||
-            px->peers->transport->send(channel->conn, frame, (size_t)built) != built)
-            px_peer_event(objs, dmesh_peer_refusal_name(DMESH_PEER_REFUSE_TRANSPORT));
+        for (uint32_t i = 0; i < DMESH_CHANNEL_MAX; i++) {
+            struct dmesh_peer_channel *channel = &peers->channels[i];
+            if (!channel->in_use || channel->state != DMESH_PEER_OPEN)
+                continue;
+            enum dmesh_peer_refusal sent =
+                dmesh_peer_pod_gone_send(peers, channel, pod->pod_uid);
+            if (sent != DMESH_PEER_OK && sent != DMESH_PEER_REFUSE_INFLIGHT)
+                px_peer_event(objs, dmesh_peer_refusal_name(sent));
+        }
     }
 }
 
 void px_peer_generation_changed(struct objects *objs)
 {
     struct dmesh_proxy *px = objs ? objs->proxy : NULL;
-    if (!px || !px->peers)
+    if (!px)
         return;
-    dmesh_peer_table_rebind(px->peers);
+    for (int w = 0; w < px->n_workers; w++)
+        if (px->workers[w].peers)
+            dmesh_peer_table_rebind(px->workers[w].peers);
 }
 
 /* Release one extent whose destination was remote.
@@ -1801,20 +2458,13 @@ void px_peer_stats_report(struct objects *objs, int worker_id)
 
 static void px_l7_apply_release(struct objects *objs, struct px_conn *c);
 
-/* Tell the L7 layer to drop every reference into this connection's staging, and
- * return the load a `decision` connection placed on the backend it named — its
- * bytes never traversed the layer, so nothing else would account for them. */
+/* Tell the L7 layer to drop every reference into this connection's staging. */
 static void px_l7_close(struct objects *objs, struct px_conn *c, int eof) {
     if (c->l7_tx_chunk) {                      /* reservation the layer never committed */
         px_chunk_free(objs->proxy, c->l7_tx_chunk);
         c->l7_tx_chunk = NULL;
     }
     uint64_t handle = px_conn_handle(c);
-    if (c->l7_resolved) {
-        l7_report(px_cur_worker->id, handle, c->stream_end, c->l7_shipped,
-                  px_monotonic_ns() - c->l7_open_ns, eof ? 0 : 1);
-        c->l7_resolved = 0;
-    }
     if (c->l7_open) {
         uint64_t outstanding = c->l7_handed - c->parse_pos;
         if (eof)
@@ -2039,8 +2689,95 @@ static int px_conn_admitted(struct objects *objs, struct px_conn *c, int32_t dst
     return admitted;
 }
 
-_Static_assert(PX_L7_DECISION == DMESH_L7_MODE_DECISION &&
-               PX_L7_OPAQUE   == DMESH_L7_MODE_OPAQUE &&
+/* Complete a peer OPEN at the destination: verify the source Service claim,
+ * evaluate the destination's inbound policy from generation-owned identity,
+ * and allocate the local upstream that returns replies to this handle. */
+static uint16_t px_peer_destination_opened(
+    void *ctx, struct dmesh_peer_channel *channel, uint32_t handle,
+    const struct dmesh_peer_stream_open *open, int32_t dst_pod_idx)
+{
+    struct px_worker_state *worker = ctx;
+    if (!worker || !channel || !open || !worker->remote_upstreams ||
+        dst_pod_idx < 0 || dst_pod_idx >= MAX_PODS || handle == 0)
+        return 0;
+    struct objects *objs = worker->objs;
+    struct pod_state *dst = &objs->pods[dst_pod_idx];
+    if (!pod_data_ready(dst) || dst->service_id < 0 ||
+        !dmesh_topology_pod_in_service(objs, open->src_pod_uid,
+                                       open->src_service_key) ||
+        dmesh_topology_service_port(objs, (int16_t)dst->service_id) !=
+            open->dst_port)
+        return 0;
+    const struct dmesh_gen_pod *source =
+        dmesh_topology_pod(objs, open->src_pod_uid);
+    if (!source || __atomic_load_n(&dst->scope_state, __ATOMIC_ACQUIRE) !=
+                       DMESH_SCOPE_ALLOWED)
+        return 0;
+
+    struct dmesh_l7_flow flow;
+    memset(&flow, 0, sizeof(flow));
+    flow.src_ip = source->ip_be;
+    flow.dst_ip = px_pod_ipv4(dst);
+    flow.src_port = (uint16_t)handle;
+    flow.dst_port = open->dst_port;
+    flow.src_pod = DMESH_POD_REMOTE;
+    flow.peer_pod = DMESH_POD_REMOTE;
+    flow.dst_service = dst->service_id;
+    flow.mode = objs->proxy->svc_mode[dst->service_id];
+    memcpy(flow.workload, dst->workload, sizeof(flow.workload));
+    flow.workload[sizeof(flow.workload) - 1] = '\0';
+    if (source->service_account[0] && source->namespace_name[0]) {
+        int n = snprintf(flow.source_identity, sizeof(flow.source_identity),
+                         "%s.%s.serviceaccount.identity.%s",
+                         source->service_account, source->namespace_name,
+                         px_trust_domain());
+        if (n < 0 || (size_t)n >= sizeof(flow.source_identity))
+            flow.source_identity[0] = '\0';
+    }
+    int verdict = l7_inbound_verdict(worker->id, &flow);
+    if (verdict == DMESH_L7_VERDICT_ADMIT) {
+        px_stat_inc(&objs->proxy->stat_inbound_admitted);
+        l7_control_event("inbound", "admitted");
+    } else if (verdict == DMESH_L7_VERDICT_REFUSE) {
+        px_stat_inc(&objs->proxy->stat_inbound_denied);
+        l7_control_event("inbound", "denied");
+    } else {
+        px_stat_inc(&objs->proxy->stat_inbound_no_policy);
+        l7_control_event("inbound", "no-policy");
+    }
+    int source_service = dmesh_topology_interned_id(objs,
+                                                     open->src_service_key);
+    if (source_service < 0 || source_service >= POD_ID_SPACE)
+        return 0;
+    int mixed = 0;
+    if (!dmesh_inbound_admits(
+            verdict, px_inbound_strict(objs, (int16_t)dst->service_id),
+            px_inbound_strict(objs, (int16_t)source_service), &mixed)) {
+        if (mixed) {
+            px_stat_inc(&objs->proxy->stat_mixed_callee_unprotected);
+            l7_control_event("inbound", "mixed-callee-unprotected");
+        }
+        return 0;
+    }
+
+    ptrdiff_t channel_index = channel - worker->peers->channels;
+    if (channel_index < 0 || channel_index >= DMESH_CHANNEL_MAX)
+        return 0;
+    int32_t remote_key = DMESH_POD_REMOTE - (int32_t)channel_index;
+    uint16_t up_port = dpu_upstream_create(
+        worker->ct, remote_key, (uint16_t)handle, dst->pod_id, PX_L7_NONE,
+        (uint16_t)worker->id, (uint16_t)objs->proxy->n_workers);
+    if (up_port == 0)
+        return 0;
+    worker->remote_upstreams[up_port].channel = channel;
+    worker->remote_upstreams[up_port].incarnation = channel->incarnation;
+    worker->remote_upstreams[up_port].handle = handle;
+    worker->remote_upstreams[up_port].src_service = (int16_t)source_service;
+    worker->remote_upstreams[up_port].dst_service = dst->service_id;
+    return up_port;
+}
+
+_Static_assert(PX_L7_OPAQUE   == DMESH_L7_MODE_OPAQUE &&
                PX_L7_FULL     == DMESH_L7_MODE_FULL,
                "mode values are shared with the L7 layer");
 
@@ -2114,6 +2851,11 @@ static const uint8_t *px_stage_view(struct objects *objs, struct px_conn *c,
         a = a->next;
     if (!a)
         return NULL;
+    if (a->peer_chunk) {
+        *pos = a->peer_chunk->off + (uint32_t)(from - a->stream_base);
+        *avail = a->len - (uint32_t)(from - a->stream_base);
+        return objs->proxy->arena;
+    }
     /* Extend across arrivals whose staging physically abuts, as px_view does, so
      * one hand-over covers a run the host wrote contiguously. */
     uint64_t run_end = a->stream_base + a->len;
@@ -2127,55 +2869,6 @@ static const uint8_t *px_stage_view(struct objects *objs, struct px_conn *c,
     *pos = a->staging_off + (uint32_t)(from - a->stream_base);
     *avail = (uint32_t)(run_end - from);
     return (const uint8_t *)objs->pods[a->pod_idx].dma_buffer;
-}
-
-/* `decision` mode: one question at connection establishment, and no payload.
- * The answer admits the connection and names the backend the stream is pinned
- * to, after which the bytes take the data plane's own path and the L7 layer
- * costs nothing per byte. Returns 0 when the connection was denied and
- * poisoned. */
-static int px_l7_decide(struct objects *objs, struct px_conn *c) {
-    struct dmesh_l7_flow flow;
-    px_l7_fill_flow(objs, c, &flow);
-    struct dmesh_l7_verdict verdict;
-    verdict.allow = 1;
-    verdict.backend_pod = -1;
-
-    c->l7_resolved = 1;                        /* owes a report either way */
-    c->l7_open_ns = px_monotonic_ns();
-    if (l7_resolve(px_cur_worker->id, &flow, &verdict) < 0) {
-        uint64_t n = px_l7_fallback(objs->proxy, PX_L7_FB_NO_VERDICT);
-        /* No verdict is not permission. Under fail-closed a Service assigned to
-         * the layer ends here for the same reason a declined open does: the
-         * stream would otherwise carry without the policy its Service selected.
-         * The admission drain is deliberately not consulted — a decision-mode
-         * connection builds no session and holds no identity material, so it is
-         * not what a drain waits for. */
-        if (px_service_protected(objs, c->pub.dst_service)) {
-            l7_control_event("admission", "no-verdict");
-            if (((n - 1u) & 0xFFFu) == 0)
-                DOCA_LOG_WARN("proxy: L7 layer gave no verdict for conn (%d:%u) "
-                              "svc %d — refusing the connection (total %llu)",
-                              c->pub.src_pod, c->pub.src_port, c->pub.dst_service,
-                              (unsigned long long)n);
-            px_poison(objs, c, "l7 layer gave no verdict for a protected service");
-            return 0;
-        }
-        if (((n - 1u) & 0xFFFu) == 0)
-            DOCA_LOG_WARN("proxy: L7 layer gave no verdict for conn (%d:%u) — "
-                          "forwarding without policy (total %llu)",
-                          c->pub.src_pod, c->pub.src_port, (unsigned long long)n);
-        return 1;                              /* fall open */
-    }
-    if (!verdict.allow) {
-        px_poison(objs, c, "l7 policy denied the connection");
-        return 0;
-    }
-    if (verdict.backend_pod >= 0) {
-        c->pinned_backend = verdict.backend_pod;
-        c->pinned_cluster = c->pub.dst_service;
-    }
-    return 1;
 }
 
 /* Hand arrival extents to the L7 layer. Nothing is consumed here: the bytes stay
@@ -2343,17 +3036,6 @@ int dmesh_l7_backends(int worker_id, int32_t service, int32_t *out, int max) {
     return n;
 }
 
-int dmesh_l7_send(int worker_id, uint64_t conn, int32_t backend_pod,
-                  const uint8_t *buf, size_t len) {
-    struct objects *objs;
-    struct px_conn *c = px_l7_caller_conn(worker_id, conn, &objs);
-    if (!c || !buf || len == 0)
-        return -1;
-    uint32_t take = len > PX_L7_SEND_MAX ? PX_L7_SEND_MAX : (uint32_t)len;
-    return px_ship_arm_bytes(objs, c, backend_pod,
-                             backend_pod == DMESH_L7_ORIGIN, buf, take);
-}
-
 uint8_t *dmesh_l7_tx_reserve(int worker_id, uint64_t conn, uint32_t *cap) {
     struct objects *objs;
     struct px_conn *c = px_l7_caller_conn(worker_id, conn, &objs);
@@ -2391,6 +3073,32 @@ int dmesh_l7_tx_commit(int worker_id, uint64_t conn, int32_t backend_pod,
     struct px_unit_slot slot;
     int32_t route_dst = c->pub.is_reply ? c->pub.peer_pod :
                         (backend_pod >= 0 ? backend_pod : PX_DST_DEFER);
+    if (route_dst == PX_DST_DEFER)
+        route_dst = px_resolve_backend(objs, c, c->pub.dst_service);
+    if (route_dst == PX_DST_REMOTE ||
+        (c->pub.is_reply && c->pub.peer_pod == DMESH_POD_REMOTE)) {
+        int ready = c->pub.is_reply && c->peer_channel && c->peer_handle
+                        ? 1
+                        : px_peer_stream_ready(objs, c, NULL);
+        if (ready <= 0 || !c->peer_channel || c->peer_channel->tx_len != 0 ||
+            c->peer_channel->stalled) {
+            px_chunk_free(px, ch);
+            return ready < 0 ? -1 : 0;
+        }
+        uint32_t seq = c->peer_tx_seq + 1u;
+        enum dmesh_peer_refusal sent = dmesh_peer_stream_data_send(
+            px_cur_worker->peers, c->peer_channel, c->peer_handle, seq,
+            px->arena + ch->off, len, DMESH_PEER_CUSTODY_L7, ch);
+        if (sent == DMESH_PEER_OK) {
+            c->peer_tx_seq = seq;
+            return (int)len;                    /* STREAM_ACK returns the chunk */
+        }
+        px_chunk_free(px, ch);                  /* send retained no custody */
+        if (sent == DMESH_PEER_REFUSE_INFLIGHT)
+            return 0;
+        px_peer_event(objs, dmesh_peer_refusal_name(sent));
+        return -1;
+    }
     int prepared = px_unit_prepare(objs, c, len, route_dst,
                                    backend_pod == DMESH_L7_ORIGIN, &slot);
     if (prepared <= 0) {
@@ -2406,6 +3114,124 @@ int dmesh_l7_tx_commit(int worker_id, uint64_t conn, int32_t backend_pod,
     slot.u->seq = ++*slot.seq_counter;
     px_enqueue_unit(objs, slot.u);
     return (int)len;
+}
+
+int dmesh_l7_tx_commit_remote(int worker_id, uint64_t conn,
+                              const char *pod_uid, uint32_t len)
+{
+    struct objects *objs;
+    struct px_conn *c = px_l7_caller_conn(worker_id, conn, &objs);
+    if (!c || !pod_uid || !*pod_uid)
+        return -1;
+    struct dmesh_proxy *px = objs->proxy;
+    struct px_chunk *chunk = c->l7_tx_chunk;
+    if (!chunk)
+        return -1;
+    c->l7_tx_chunk = NULL;
+    if (len == 0 || len > PX_ARENA_CHUNK) {
+        px_chunk_free(px, chunk);
+        return len == 0 ? 0 : -1;
+    }
+    int ready = px_peer_stream_ready(objs, c, pod_uid);
+    if (ready <= 0 || !c->peer_channel || c->peer_channel->tx_len != 0 ||
+        c->peer_channel->stalled) {
+        px_chunk_free(px, chunk);
+        return ready < 0 ? -1 : 0;
+    }
+    uint32_t seq = c->peer_tx_seq + 1u;
+    enum dmesh_peer_refusal sent = dmesh_peer_stream_data_send(
+        px_cur_worker->peers, c->peer_channel, c->peer_handle, seq,
+        px->arena + chunk->off, len, DMESH_PEER_CUSTODY_L7, chunk);
+    if (sent == DMESH_PEER_OK) {
+        c->peer_tx_seq = seq;
+        return (int)len;
+    }
+    px_chunk_free(px, chunk);
+    if (sent == DMESH_PEER_REFUSE_INFLIGHT)
+        return 0;
+    px_peer_event(objs, dmesh_peer_refusal_name(sent));
+    return -1;
+}
+
+int dmesh_l7_tx_fin(int worker_id, uint64_t conn, int32_t backend_pod,
+                    const char *pod_uid)
+{
+    struct objects *objs;
+    struct px_conn *c = px_l7_caller_conn(worker_id, conn, &objs);
+    if (!c || c->pub.is_reply || !px_l7_carries_bytes(c->l7_mode))
+        return -1;
+
+    if (backend_pod == DMESH_L7_ORIGIN) {
+        if (c->l7_origin_fin_sent)
+            return 1;
+        if (!px_fin_to_sender(objs, c))
+            return 0;
+        c->l7_origin_fin_sent = 1;
+        c->lifecycle_pending = 1;
+        px_stall(c);
+        return 1;
+    }
+
+    int remote = pod_uid && *pod_uid;
+    int32_t route = backend_pod;
+    if (!remote && c->peer_channel && c->peer_handle)
+        remote = 1;                           /* retain the stream's first pin */
+    if (!remote && route < 0)
+        route = px_resolve_backend(objs, c, c->pub.dst_service);
+    if (remote || route == PX_DST_REMOTE) {
+        int ready = c->peer_channel && c->peer_handle
+                        ? 1
+                        : px_peer_stream_ready(objs, c, remote ? pod_uid : NULL);
+        if (ready < 0)
+            return -1;
+        if (ready == 0 || !c->peer_channel ||
+            c->peer_channel->state != DMESH_PEER_OPEN ||
+            c->peer_channel->tx_len != 0 || c->peer_channel->stalled)
+            return 0;
+        if (!c->peer_fin_sent) {
+            enum dmesh_peer_refusal sent = dmesh_peer_stream_fin_send(
+                px_cur_worker->peers, c->peer_channel, c->peer_handle);
+            if (sent == DMESH_PEER_REFUSE_INFLIGHT)
+                return 0;
+            if (sent != DMESH_PEER_OK) {
+                px_peer_event(objs, dmesh_peer_refusal_name(sent));
+                return -1;
+            }
+            c->peer_fin_sent = 1;
+        }
+    } else {
+        if (route < 0)
+            return -1;
+        uint16_t up_port = 0;
+        int resolved = px_upstream_resolve(objs, c, route, &up_port);
+        if (resolved <= 0)
+            return resolved;
+        struct dpu_upstream *up = &px_cur_worker->ct->upstream[up_port];
+        if (!up->client_fin_sent) {
+            struct pod_state *dst = find_pod_by_id(objs, route);
+            if (!dst || !pod_data_ready(dst) || !dst->host_rx_addr)
+                return -1;
+            if (!px_queue_fin_unit(objs, c, dst, up_port, up_port))
+                return 0;
+            up->client_fin_sent = 1;
+        }
+    }
+    c->l7_backend_fin_sent = 1;
+    c->lifecycle_pending = 1;
+    px_stall(c);
+    return 1;
+}
+
+void dmesh_l7_session_failed(int worker_id, uint64_t conn)
+{
+    struct objects *objs;
+    struct px_conn *c = px_l7_caller_conn(worker_id, conn, &objs);
+    (void)objs;
+    if (!c || c->pub.is_reply)
+        return;
+    c->l7_session_failed = 1;
+    c->lifecycle_pending = 1;
+    px_stall(c);
 }
 
 void dmesh_l7_release(int worker_id, uint64_t conn, uint32_t pos, uint32_t len) {
@@ -2436,38 +3262,138 @@ void dmesh_l7_release(int worker_id, uint64_t conn, uint32_t pos, uint32_t len) 
         px_stall(c);                           /* reported outside a parse: schedule one */
 }
 
-/* ---- worker lifecycle, called from dpu_worker.c ---- */
-
-#ifndef DMESH_L7_RUNTIME_OWNER
-int px_l7_attach_worker(struct objects *objs, int worker_id) {
-    struct dmesh_proxy *px = objs->proxy;
-    if (!px || !px->l7_attached || worker_id < 0 || worker_id >= px->n_workers)
-        return 0;
-    px_cur_worker = &px->workers[worker_id];
-    return l7_worker_attach(worker_id) < 0 ? -1 : 0;
-}
-
-int px_l7_step_worker(struct objects *objs, int worker_id) {
-    struct dmesh_proxy *px = objs->proxy;
-    if (!px || !px->l7_attached || worker_id < 0 || worker_id >= px->n_workers)
-        return 0;
-    px_cur_worker = &px->workers[worker_id];
-    return l7_worker_step(worker_id) ? 1 : 0;
-}
-
-void px_l7_detach_worker(struct objects *objs, int worker_id) {
-    struct dmesh_proxy *px = objs->proxy;
-    if (!px || !px->l7_attached || worker_id < 0 || worker_id >= px->n_workers)
-        return;
-    px_cur_worker = &px->workers[worker_id];
-    l7_worker_detach(worker_id);
-}
-#endif
-
 /* ====== FIN ====== */
 
+static struct px_conn *px_request_for_reply(struct objects *objs,
+                                            struct px_conn *reply)
+{
+    if (!reply || !reply->pub.is_reply)
+        return reply;
+    if (reply->peer_owner)
+        return reply->peer_owner;
+    if (reply->pub.src_port < DMESH_UPORT_BASE)
+        return NULL;
+    struct dpu_upstream *up = &px_cur_worker->ct->upstream[reply->pub.src_port];
+    if (!up->in_use || up->client_pod < 0)
+        return NULL;
+    return px_conn_find(objs->proxy, up->client_pod, up->client_port);
+}
+
+/* Retire a normally half-closed stream only after both directions are done.
+ * L7 callbacks park this work because they run while Rust holds its Worker
+ * borrow; deleting here would call l7_conn_close re-entrantly. */
+static int px_maybe_finish_connection(struct objects *objs, struct px_conn *c)
+{
+    struct px_conn *request = px_request_for_reply(objs, c);
+    if (!request || request->pub.is_reply || !request->input_fin)
+        return 0;
+
+    if (request->peer_channel && request->peer_handle) {
+        if (!request->peer_fin_sent || !request->peer_rx_fin)
+            return 0;
+        if (px_l7_carries_bytes(request->l7_mode) &&
+            (!request->l7_backend_fin_sent ||
+             !request->l7_origin_fin_sent))
+            return 0;
+        px_conn_del(objs, request);
+        return 1;
+    }
+
+    struct dpu_conntrack *ct = px_cur_worker->ct;
+    for (uint32_t port = DMESH_UPORT_BASE; port < 65536u; port++) {
+        struct dpu_upstream *up = &ct->upstream[port];
+        if (!up->in_use || up->client_pod != request->pub.src_pod ||
+            up->client_port != request->pub.src_port)
+            continue;
+        if (!up->client_fin_sent || !up->backend_fin_seen)
+            return 0;
+    }
+    if (px_l7_carries_bytes(request->l7_mode) &&
+        (!request->l7_backend_fin_sent || !request->l7_origin_fin_sent))
+        return 0;
+
+    /* Nothing can route through these entries now. Drop reply objects only
+     * after the Linkerd stack published both output FINs. */
+    for (uint32_t port = DMESH_UPORT_BASE; port < 65536u; port++) {
+        struct dpu_upstream *up = &ct->upstream[port];
+        if (!up->in_use || up->client_pod != request->pub.src_pod ||
+            up->client_port != request->pub.src_port)
+            continue;
+        int32_t backend = up->backend_pod;
+        px_conn_del_key(objs, backend, (uint16_t)port);
+        dpu_upstream_free(ct, (uint16_t)port);
+    }
+    px_conn_del(objs, request);
+    return 1;
+}
+
+static int px_abort_failed_session(struct objects *objs, struct px_conn *request)
+{
+    if (!request || request->pub.is_reply)
+        return 0;
+    if (!request->dead)
+        px_poison(objs, request, "Linkerd session ended before both output FINs");
+    if (request->eof_pending)
+        return 0;
+
+    if (request->peer_channel && request->peer_handle) {
+        dmesh_peer_tx_drop(px_cur_worker->peers, request->peer_channel,
+                           request->peer_handle);
+        if (request->peer_channel->state == DMESH_PEER_OPEN &&
+            !request->peer_fin_sent) {
+            enum dmesh_peer_refusal sent = dmesh_peer_stream_fin_send(
+                px_cur_worker->peers, request->peer_channel,
+                request->peer_handle);
+            if (sent == DMESH_PEER_REFUSE_INFLIGHT) {
+                px_stall(request);
+                return 0;
+            }
+            if (sent == DMESH_PEER_OK)
+                request->peer_fin_sent = 1;
+            else
+                request->peer_failed = 1;
+        }
+        request->input_fin = 1;
+        request->l7_backend_fin_sent = 1;
+        request->l7_origin_fin_sent = 1;
+        if (!request->peer_rx_fin && !request->peer_failed)
+            return 0;                         /* small tombstone until peer EOF */
+        px_conn_del(objs, request);
+        return 1;
+    }
+
+    struct dpu_conntrack *ct = px_cur_worker->ct;
+    for (uint32_t port = DMESH_UPORT_BASE; port < 65536u; port++) {
+        struct dpu_upstream *up = &ct->upstream[port];
+        if (!up->in_use || up->client_pod != request->pub.src_pod ||
+            up->client_port != request->pub.src_port)
+            continue;
+        if (!up->client_fin_sent) {
+            struct pod_state *backend = find_pod_by_id(objs, up->backend_pod);
+            if (backend && pod_data_ready(backend) && backend->host_rx_addr &&
+                !px_queue_fin_unit(objs, request, backend,
+                                   (uint16_t)port, (uint16_t)port)) {
+                px_stall(request);
+                return 0;
+            }
+            up->client_fin_sent = 1;
+        }
+    }
+    for (uint32_t port = DMESH_UPORT_BASE; port < 65536u; port++) {
+        struct dpu_upstream *up = &ct->upstream[port];
+        if (!up->in_use || up->client_pod != request->pub.src_pod ||
+            up->client_port != request->pub.src_port)
+            continue;
+        int32_t backend = up->backend_pod;
+        px_conn_del_key(objs, backend, (uint16_t)port);
+        dpu_upstream_free(ct, (uint16_t)port);
+    }
+    px_conn_del(objs, request);
+    return 1;
+}
+
 /* Returns 1 after freeing the connection. On pool pressure, retains fin_pending
- * and parks the connection. Each upstream is freed after its FIN unit is queued. */
+ * and parks the connection. A normal FIN ends only this input half. */
 static int px_try_fin(struct objects *objs, struct px_conn *c) {
     struct dpu_conntrack *ct = px_cur_worker->ct;
     if (!c->fin_pending)
@@ -2475,6 +3401,9 @@ static int px_try_fin(struct objects *objs, struct px_conn *c) {
     /* A tail sitting in the L7 layer is not truncation — it is payload the layer
      * has not finished with. Give it the remaining passes before the window goes,
      * then close so it stops pointing into staging. */
+    if (px_l7_carries_bytes(c->l7_mode) && !c->l7_closed && !c->dead &&
+        !c->l7_open && !px_l7_open_conn(objs, c))
+        px_poison(objs, c, "L7 layer refused FIN-only connection");
     if (px_l7_carries_bytes(c->l7_mode) && !c->l7_closed && !c->dead) {
         if (c->parse_pos < c->stream_end) {
             px_parse(objs, c);
@@ -2483,37 +3412,110 @@ static int px_try_fin(struct objects *objs, struct px_conn *c) {
                 return 0;
             }
         }
-        px_l7_close(objs, c, 1);
+        if (!c->l7_eof) {
+            l7_conn_eof(px_cur_worker->id, px_conn_handle(c));
+            c->l7_eof = 1;
+        }
     }
     /* FIN = no more input: an unconsumed tail is a truncated unit — drop it
      * (the parser could never complete it). Idempotent across retries. */
     if (c->parse_pos < c->stream_end)
         px_drop_window(objs, c, "FIN with unconsumed tail");
 
-    if (!c->pub.is_reply) {
-        /* Fan out client FIN behind each upstream's queued data. */
-        for (int i = 0; i < objs->num_pods; i++) {
-            int32_t b = objs->pods[i].pod_id;
-            uint16_t uP = dpu_upstream_find(ct, c->pub.src_pod, c->pub.src_port, b);
-            if (uP == 0)
-                continue;                      /* none, or an earlier pass already did it */
-            struct pod_state *B = find_pod_by_id(objs, b);
-            if (B && pod_data_ready(B) && B->host_rx_addr) {
-                if (!px_queue_fin_unit(objs, c, B, uP, uP)) {
-                    px_stall(c);               /* pool dry — uP still findable, so retry */
-                    return 0;
-                }
+    if (c->dead) {
+        struct px_conn *request = px_request_for_reply(objs, c);
+        if (!px_emit_tx_ack(objs, c->fin_ack_pod,
+                            c->fin_ack_port, c->fin_ack_seq)) {
+            px_stall(c);
+            return 0;
+        }
+        c->fin_pending = 0;
+        c->input_fin = 1;
+        if (!request) {
+            px_conn_del(objs, c);
+            return 1;
+        }
+        request->l7_session_failed = 1;
+        if (request != c && !request->dead)
+            px_poison(objs, request, "paired L7 direction failed");
+        return px_abort_failed_session(objs, request);
+    }
+
+    if (c->peer_channel && c->peer_handle) {
+        if (c->peer_channel->state != DMESH_PEER_OPEN) {
+            c->peer_failed = 1;
+        } else if (!px_l7_carries_bytes(c->l7_mode) && !c->peer_fin_sent) {
+            enum dmesh_peer_refusal sent = dmesh_peer_stream_fin_send(
+                px_cur_worker->peers, c->peer_channel, c->peer_handle);
+            if (sent == DMESH_PEER_REFUSE_INFLIGHT) {
+                px_stall(c);
+                return 0;
             }
-            dpu_upstream_free(ct, uP);         /* only now: this one's FIN is on its lane */
-            px_conn_del_key(objs, b, uP);
+            if (sent != DMESH_PEER_OK) {
+                px_peer_event(objs, dmesh_peer_refusal_name(sent));
+                c->peer_failed = 1;
+            } else
+                c->peer_fin_sent = 1;
+        }
+        if (!px_emit_tx_ack(objs, c->fin_ack_pod,
+                            c->fin_ack_port, c->fin_ack_seq)) {
+            px_stall(c);
+            return 0;
+        }
+        c->fin_pending = 0;
+        c->input_fin = 1;
+        if (c->pub.is_reply && c->pub.src_port >= DMESH_UPORT_BASE &&
+            px_cur_worker->remote_upstreams) {
+            struct px_remote_upstream *remote =
+                &px_cur_worker->remote_upstreams[c->pub.src_port];
+            remote->backend_fin_sent = c->peer_fin_sent;
+            if (remote->source_fin_seen && !remote->fin_pending &&
+                remote->backend_fin_sent) {
+                memset(remote, 0, sizeof(*remote));
+                dpu_upstream_free(ct, c->pub.src_port);
+                px_conn_del(objs, c);
+                return 1;
+            }
+            return 0;
+        }
+        return px_maybe_finish_connection(objs, c);
+    }
+
+    if (!c->pub.is_reply) {
+        /* L4 directly propagates its input half-close. For L7, Linkerd owns
+         * output ordering and dmesh_l7_tx_fin publishes it after all bytes. */
+        if (!px_l7_carries_bytes(c->l7_mode)) {
+            for (uint32_t port = DMESH_UPORT_BASE; port < 65536u; port++) {
+                struct dpu_upstream *up = &ct->upstream[port];
+                if (!up->in_use || up->client_pod != c->pub.src_pod ||
+                    up->client_port != c->pub.src_port || up->client_fin_sent)
+                    continue;
+                struct pod_state *backend = find_pod_by_id(objs, up->backend_pod);
+                if (backend && pod_data_ready(backend) && backend->host_rx_addr) {
+                    if (!px_queue_fin_unit(objs, c, backend,
+                                           (uint16_t)port, (uint16_t)port)) {
+                        px_stall(c);
+                        return 0;
+                    }
+                }
+                up->client_fin_sent = 1;
+            }
         }
     } else {
-        int have = 0; int32_t cpod = 0; uint16_t cport = 0;
+        int have = 0;
+        int32_t cpod = 0;
+        uint16_t cport = 0;
+        struct dpu_upstream *up = NULL;
         if (c->pub.src_port >= DMESH_UPORT_BASE) {
-            struct dpu_upstream *u = &ct->upstream[c->pub.src_port];
-            if (u->in_use) { have = 1; cpod = u->client_pod; cport = u->client_port; }
+            up = &ct->upstream[c->pub.src_port];
+            if (up->in_use) {
+                have = 1;
+                cpod = up->client_pod;
+                cport = up->client_port;
+            }
         }
-        if (have) {
+        if (have && !px_l7_carries_bytes(c->l7_mode) &&
+            !up->backend_fin_seen) {
             struct pod_state *cp = find_pod_by_id(objs, cpod);
             if (cp && pod_data_ready(cp) && cp->host_rx_addr) {
                 if (!px_queue_fin_unit(objs, c, cp, c->pub.src_port, cport)) {
@@ -2521,16 +3523,18 @@ static int px_try_fin(struct objects *objs, struct px_conn *c) {
                     return 0;
                 }
             }
-            /* The client FIN fan-out frees the upstream. */
         }
+        if (have)
+            up->backend_fin_seen = 1;
     }
     if (!px_emit_tx_ack(objs, c->fin_ack_pod,
                         c->fin_ack_port, c->fin_ack_seq)) {
         px_stall(c);
         return 0;
     }
-    px_conn_del(objs, c);
-    return 1;
+    c->fin_pending = 0;
+    c->input_fin = 1;
+    return px_maybe_finish_connection(objs, c);
 }
 
 /* Resume connections on one worker's stall list. */
@@ -2554,6 +3558,15 @@ int px_drain_stalled(struct objects *objs, int worker_id) {
             c->eof_pending = 0;
             did = 1;
         }
+        if (c->peer_eof_pending) {
+            if (!px_fin_to_sender(objs, c)) {
+                px_stall(c);
+                c = next;
+                continue;
+            }
+            c->peer_eof_pending = 0;
+            did = 1;
+        }
         if (c->disconnect_pending) {
             px_conn_del(objs, c);
             did = 1;
@@ -2568,8 +3581,20 @@ int px_drain_stalled(struct objects *objs, int worker_id) {
         }
         /* Resume a teardown the pool cut short (a poisoned conn still gets one — its
          * upstreams must go). Returns 1 having FREED c, so nothing may touch it after. */
-        if (c->fin_pending && px_try_fin(objs, c))
+        if (c->fin_pending && px_try_fin(objs, c)) {
             did = 1;
+            c = next;
+            continue;
+        }
+        if (c->lifecycle_pending) {
+            c->lifecycle_pending = 0;
+            if (c->l7_session_failed) {
+                if (px_abort_failed_session(objs, c))
+                    did = 1;
+            } else if (px_maybe_finish_connection(objs, c)) {
+                did = 1;
+            }
+        }
         c = next;
     }
     return did;
@@ -2580,7 +3605,8 @@ int px_drain_stalled(struct objects *objs, int worker_id) {
 static int px_arrival_try_extend(struct px_conn *c, const dpu_comp_entry_t *e,
                                  uint16_t seq_delta) {
     struct px_arrival *tail = c->wtail;
-    if (seq_delta != 1 || !tail || tail->pod_idx != e->pod_idx ||
+    if (seq_delta != 1 || !tail || tail->peer_chunk ||
+        tail->pod_idx != e->pod_idx ||
         tail->ack_pod != e->src_pod_id || tail->ack_port != e->src_port ||
         tail->staging_off + tail->len != e->buf_offset ||
         tail->len + e->length > PX_ARRIVAL_COALESCE_MAX ||
@@ -2617,6 +3643,18 @@ int px_process_forward(struct objects *objs, int worker_id, void *ventry) {
         return -1;
     }
 
+    /* Reset is connection-affine control, ordered after all earlier descriptors
+     * on the source QP's forward ring. It deliberately does not enter the byte
+     * stream: poison drops unconsumed custody, closes Linkerd, and terminates
+     * every paired backend direction. */
+    if (e->dst_pod_id == DMESH_POD_ABORT) {
+        struct px_conn *c = px_conn_find(px, e->src_pod_id, e->src_port);
+        struct px_conn *request = px_request_for_reply(objs, c);
+        if (request)
+            (void)px_abort_failed_session(objs, request);
+        return 1;
+    }
+
     int is_reply = (e->dst_pod_id != DMESH_POD_BLANK);
     struct px_conn *c = px_conn_get(px, e->src_pod_id, e->src_port, is_reply, 1);
     if (!c)
@@ -2651,6 +3689,18 @@ int px_process_forward(struct objects *objs, int worker_id, void *ventry) {
         c->fin_ack_seq = e->seq;
         px_try_fin(objs, c);                   /* window is drained per-arrival */
         return 1;
+    }
+
+    if (c->input_fin) {
+        /* FIN is sticky and ordered. A producer that posts DATA afterwards is
+         * corrupt; acknowledging and ignoring it would silently splice bytes
+         * into a stream whose peer has already observed EOF. */
+        px_poison(objs, c, "data arrived after FIN");
+        if (!px_emit_tx_ack(objs, e->src_pod_id, e->src_port, e->seq))
+            return 0;
+        c->forward_seq = e->seq;
+        c->forward_seq_valid = 1;
+        return -1;
     }
 
     if (c->dead) {                             /* poisoned stream: drop + ack */
@@ -2694,6 +3744,11 @@ int px_process_forward(struct objects *objs, int worker_id, void *ventry) {
     a->ack_first_seq = e->seq;
     a->ack_seq = e->seq;
     a->release_next = NULL;
+    a->peer_chunk = NULL;
+    a->peer_channel = NULL;
+    a->peer_incarnation = 0;
+    a->peer_handle = 0;
+    a->peer_seq = 0;
     __atomic_fetch_add(&objs->pods[a->pod_idx].proxy_source_refs, 1,
                        __ATOMIC_ACQ_REL);
     a->next = NULL;
@@ -2752,8 +3807,9 @@ px_batch_destination_current(struct objects *objs, const struct px_batch *b)
     if (b->pod_idx < 0 || b->pod_idx >= MAX_PODS)
         return 0;
     const struct pod_state *pod = &objs->pods[b->pod_idx];
+    int worker_id = b->region % objs->proxy->n_workers;
     return pod_data_ready(pod) &&
-           pod->host_rx_mmap != NULL &&
+           pod_host_rx_mmap_for_worker(pod, worker_id) != NULL &&
            pod->host_rx_addr != NULL &&
            __atomic_load_n(&pod->dma_generation, __ATOMIC_ACQUIRE) ==
                b->pod_generation;
@@ -3012,7 +4068,7 @@ px_batch_submit_dma(struct objects *objs, struct px_engine *eng,
     if (ret == DOCA_SUCCESS) {
         uint64_t dst_off = b->units->landing_pos;
         ret = doca_buf_inventory_buf_get_by_addr(
-            eng->inv, pod->host_rx_mmap,
+            eng->inv, pod_host_rx_mmap_for_worker(pod, eng->id),
             (uint8_t *)pod->host_rx_addr + dst_off, b->bytes, &dst);
     }
 
@@ -3290,8 +4346,7 @@ px_ack_retry_handoffs(struct px_engine *eng)
         /* A vanished sender has no staging owner; this engine's drain frees it. */
         struct pod_state *src = find_pod_by_id(eng->objs, a->ack_pod);
         int owner = src ? px_rev_owner(px, src, a->ack_port) : eng->id;
-        if (owner < 0 || owner >= px->n_workers ||
-            !px_ack_queue_push(&px->engines[owner].ack_releases, a))
+        if (!px_ack_queue_handoff(px, owner, a))
             break;
         eng->ack_retry_head = a->release_next;
         if (!eng->ack_retry_head)
@@ -3361,6 +4416,20 @@ px_emit_append(struct px_engine *eng, struct px_unit *head,
     else
         eng->emit_head = head;
     eng->emit_tail = tail;
+}
+
+/* Reject a unit before DMA without abandoning its custody. The ordinary error
+ * emission path notifies the sender and releases every source piece. */
+static void
+px_lane_reject_head(struct px_engine *eng, struct px_lane *ln)
+{
+    struct px_unit *u = ln->qhead;
+    ln->qhead = u->next;
+    if (!ln->qhead)
+        ln->qtail = NULL;
+    u->next = NULL;
+    u->err = 1;
+    px_emit_append(eng, u, u, (int)u->dst_pod_idx, 1);
 }
 
 /* Retire completed lane batches into the worker emission queue. */
@@ -3444,6 +4513,25 @@ static int px_engine_emit(struct objects *objs, struct px_engine *eng) {
                     u->emit_off += elen;
                     did = 1;
                 }
+            }
+        }
+        if (u->peer_channel) {
+            struct dmesh_peer_table *peers = px_cur_worker->peers;
+            if (!u->err && peers && u->peer_channel->state == DMESH_PEER_OPEN &&
+                u->peer_channel->incarnation == u->peer_incarnation) {
+                if (u->peer_source_side)
+                    dmesh_peer_source_delivered(peers, u->peer_channel,
+                                                u->peer_handle, u->peer_seq,
+                                                u->peer_len);
+                else
+                    dmesh_peer_delivered(peers, u->peer_channel,
+                                         u->peer_handle, u->peer_seq,
+                                         u->peer_len);
+            } else if (peers &&
+                       u->peer_channel->state == DMESH_PEER_OPEN &&
+                       u->peer_channel->incarnation == u->peer_incarnation) {
+                dmesh_peer_reset(peers, u->peer_channel,
+                                 "peer DATA failed to land in destination Pod");
             }
         }
         /* custody: the SG op has read (or abandoned) these staging bytes */
@@ -3748,8 +4836,69 @@ static int px_engine_pump(struct objects *objs, struct px_engine *eng,
 static int
 px_worker_has_pending(struct px_engine *eng)
 {
-    return eng->dma_stalled || eng->dma_tasks_inflight > 0 ||
-           eng->retry_batches > 0 || eng->retry_probe != NULL;
+    if (eng->dma_stalled || eng->dma_tasks_inflight > 0 ||
+        eng->retry_batches > 0 || eng->retry_probe != NULL)
+        return 1;
+    struct dmesh_peer_table *peers = eng->objs->proxy->workers[eng->id].peers;
+    if (!peers || !peers->transport)
+        return 0;
+    for (uint32_t i = 0; i < DMESH_CHANNEL_MAX; i++) {
+        struct dmesh_peer_channel *channel = &peers->channels[i];
+        if (channel->in_use &&
+            (channel->state == DMESH_PEER_AUTHENTICATING || channel->tx_len))
+            return 1;
+    }
+    return 0;
+}
+
+static int px_peer_progress_worker(struct px_worker_state *worker, int budget)
+{
+    if (!worker->peers || !worker->peers->transport || budget <= 0)
+        return 0;
+    int progressed = 0;
+    /* EOF allocation may have been backpressured after the peer FIN was
+     * accepted. Retry it before more frames so DATA/FIN order on the landing
+     * lane remains the channel's order. */
+    for (uint32_t port = DMESH_UPORT_BASE;
+         worker->remote_upstreams && port < 65536u && budget > 0; port++) {
+        struct px_remote_upstream *remote = &worker->remote_upstreams[port];
+        if (!remote->fin_pending)
+            continue;
+        struct dpu_upstream *up = &worker->ct->upstream[port];
+        struct pod_state *dst = up->in_use
+                                    ? find_pod_by_id(worker->objs,
+                                                     up->backend_pod)
+                                    : NULL;
+        if (!dst || !pod_data_ready(dst)) {
+            dmesh_peer_reset(worker->peers, remote->channel,
+                             "peer FIN destination disappeared");
+            remote->fin_pending = 0;
+        } else if (px_queue_eof_unit(worker->objs, dst, DMESH_POD_REMOTE,
+                                     (int8_t)remote->src_service,
+                                     (int8_t)remote->dst_service,
+                                     (uint16_t)port, (uint16_t)port)) {
+            remote->fin_pending = 0;
+            (void)px_remote_upstream_finish(worker, (uint16_t)port);
+        } else {
+            break;
+        }
+        progressed = 1;
+        budget--;
+    }
+    for (uint32_t i = 0; i < DMESH_CHANNEL_MAX && budget > 0; i++) {
+        struct dmesh_peer_channel *channel = &worker->peers->channels[i];
+        if (!channel->in_use || channel->state == DMESH_PEER_CLOSED)
+            continue;
+        int n = dmesh_peer_channel_progress(worker->peers, channel,
+                                            budget > 16 ? 16 : budget);
+        if (n < 0) {
+            progressed = 1;
+            continue;
+        }
+        progressed |= n > 0;
+        budget -= n > 0 ? n : 1;
+    }
+    return progressed;
 }
 
 static enum px_progress_state
@@ -3757,6 +4906,7 @@ px_worker_progress(struct px_engine *eng) {
     px_cur_worker = &eng->objs->proxy->workers[eng->id];
     int published_done = 0;
     int progressed = doca_pe_progress(eng->pe) ? 1 : 0;
+    progressed |= px_peer_progress_worker(px_cur_worker, 64);
     progressed |= px_engine_pump(eng->objs, eng, &published_done);
     progressed |= px_engine_emit(eng->objs, eng);
     progressed |= px_ack_retry_handoffs(eng);
@@ -3824,7 +4974,8 @@ static int px_lane_submit(struct objects *objs, struct px_engine *eng, int pod_i
         return 0;
     if (eng->retry_batches)                    /* serialize retry probes */
         return 0;
-    if (!pod_data_ready(pod) || !pod->host_rx_addr || !pod->host_rx_mmap)
+    if (!pod_data_ready(pod) || !pod->host_rx_addr ||
+        !pod_host_rx_mmap_for_worker(pod, eng->id))
         return 0;
 
     int L = px_landing_stripes(pod);
@@ -3843,15 +4994,13 @@ static int px_lane_submit(struct objects *objs, struct px_engine *eng, int pod_i
         if (avail_entries < first_needed)
             break;                             /* wait for the refresh */
 
-        if (ln->qhead->total_len > region_size) {
-            DOCA_LOG_ERR("proxy: unit of %u bytes exceeds region (%llu) — dropped",
-                         ln->qhead->total_len, (unsigned long long)region_size);
-            struct px_unit *u = ln->qhead;
-            ln->qhead = u->next;
-            if (!ln->qhead) ln->qtail = NULL;
-            for (struct px_piece *p = u->pieces; p; p = p->next)
-                px_piece_release(objs, p);     /* over-region drop: release iff last */
-            px_unit_free_node(px, u);
+        if (ln->qhead->total_len > region_size ||
+            !px_dma_batch_fits(0, ln->qhead->total_len, px->dma_bytes_max)) {
+            DOCA_LOG_ERR("proxy: unit of %u bytes exceeds landing/DMA limit "
+                         "(region=%llu dma=%u) — refusing stream",
+                         ln->qhead->total_len,
+                         (unsigned long long)region_size, px->dma_bytes_max);
+            px_lane_reject_head(eng, ln);
             did = 1;
             continue;
         }
@@ -3880,6 +5029,7 @@ static int px_lane_submit(struct objects *objs, struct px_engine *eng, int pod_i
             if (nunits > 0 &&
                 (pieces + (uint32_t)u->npieces > px->sg_pieces_max ||
                  entries + ue > avail_entries ||
+                 !px_dma_batch_fits(bytes, u->total_len, px->dma_bytes_max) ||
                  ln->cursor + bytes + u->total_len > region_size))
                 break;
             if (nunits == 0 && (uint32_t)u->npieces > px->sg_pieces_max) {
@@ -3991,7 +5141,6 @@ int px_pod_reclaim_ready(struct objects *objs, int pod_idx) {
 /* Each list names Services by `namespace/name`. A service named twice across
  * the lists is a configuration error rather than a silent precedence rule. */
 static const struct { const char *env; uint8_t mode; } px_l7_gates[] = {
-    { "DPUMESH_L7_DECISION_SVC", PX_L7_DECISION },
     { "DPUMESH_L7_OPAQUE_SVC",   PX_L7_OPAQUE },
     { "DPUMESH_L7_SVC",          PX_L7_FULL },
 };
@@ -4102,6 +5251,14 @@ int px_init(struct objects *objs) {
         if (!worker_state->ct)
             goto oom;
         worker_state->ct->next_uport = DMESH_UPORT_BASE;
+        worker_state->peers = calloc(1, sizeof(*worker_state->peers));
+        worker_state->remote_upstreams =
+            calloc(65536u, sizeof(*worker_state->remote_upstreams));
+        if (!worker_state->peers || !worker_state->remote_upstreams)
+            goto oom;
+        dmesh_peer_table_init(worker_state->peers, objs->node_name,
+                              objs->node_key_ready ? objs->node_public_key : NULL,
+                              NULL, NULL, &PX_PEER_OPS, worker_state);
     }
 
     px->arr_mem = (struct px_arrival *)calloc(PX_ARRIVAL_POOL, sizeof(*px->arr_mem));
@@ -4137,7 +5294,7 @@ int px_init(struct objects *objs) {
     for (int i = PX_PIECE_POOL - 1; i >= 0; i--)   { px->piece_mem[i].next = px->piece_free; px->piece_free = &px->piece_mem[i]; }
     for (int i = PX_UNIT_POOL - 1; i >= 0; i--)    { px->unit_mem[i].next  = px->unit_free;  px->unit_free  = &px->unit_mem[i]; }
 
-    /* Clamp the SG piece cap to the device capability. */
+    /* Clamp both independent memcpy limits to the device capabilities. */
     px->sg_pieces_max = PX_SG_PIECES_MAX;
     {
         uint32_t cap = 0;
@@ -4145,6 +5302,18 @@ int px_init(struct objects *objs) {
                                                           &cap) == DOCA_SUCCESS &&
             cap > 0 && cap < px->sg_pieces_max)
             px->sg_pieces_max = cap;
+    }
+    {
+        uint64_t cap = 0;
+        ret = doca_dma_cap_task_memcpy_get_max_buf_size(
+            doca_dev_as_devinfo(objs->dev), &cap);
+        if (ret != DOCA_SUCCESS || cap == 0) {
+            DOCA_LOG_ERR("proxy: DMA memcpy byte-size capability unavailable");
+            if (ret == DOCA_SUCCESS)
+                ret = DOCA_ERROR_INVALID_VALUE;
+            goto fail;
+        }
+        px->dma_bytes_max = cap > UINT32_MAX ? UINT32_MAX : (uint32_t)cap;
     }
     int landing_stripes =
         objs->n_data_workers > 0 ? objs->n_data_workers : 1;
@@ -4192,20 +5361,22 @@ int px_init(struct objects *objs) {
     }
 
     /* credit-read landing cells (shared mmap; each cell touched by one engine) */
-    ret = alloc_buffer_and_set_mmap(&px->scratch_mmap, objs->dev,
-                                    (void **)&px->scratch,
-                                    (size_t)MAX_PODS * MAX_EU_PER_POD * PX_SCRATCH_CELL,
-                                    DOCA_ACCESS_FLAG_LOCAL_READ_WRITE);
+    ret = alloc_buffer_and_set_thread_safe_mmap(
+        &px->scratch_mmap, objs->dev, (void **)&px->scratch,
+        (size_t)MAX_PODS * MAX_EU_PER_POD * PX_SCRATCH_CELL,
+        DOCA_ACCESS_FLAG_LOCAL_READ_WRITE);
     if (ret != DOCA_SUCCESS) goto fail;
-    ret = alloc_buffer_and_set_mmap(
+    ret = alloc_buffer_and_set_thread_safe_mmap(
         &px->rev_scratch_mmap, objs->dev, (void **)&px->rev_scratch,
         (size_t)MAX_PODS * MAX_EU_PER_POD * PX_REV_STAGE_STRIDE,
         DOCA_ACCESS_FLAG_LOCAL_READ_WRITE);
     if (ret != DOCA_SUCCESS) goto fail;
 
-    /* Egress arena, only for modes that rewrite payload on the ARM. */
-    if (px->l7_attached) {
-        ret = alloc_buffer_and_set_mmap(
+    /* Egress/peer staging arena. Linkerd writes output here and an inbound
+     * peer DATA frame is copied here before SG-DMA so the ordered transport's
+     * receive frame can be reused immediately. */
+    {
+        ret = alloc_buffer_and_set_thread_safe_mmap(
             &px->arena_mmap, objs->dev, (void **)&px->arena,
             (size_t)PX_ARENA_CHUNKS * PX_ARENA_CHUNK,
             DOCA_ACCESS_FLAG_LOCAL_READ_WRITE);
@@ -4243,6 +5414,10 @@ fail:
     DOCA_LOG_ERR("proxy init failed: %s", doca_error_get_descr(ret));
     objs->proxy = NULL;
     for (int s = 0; s < MAX_ARM_WORKERS; s++) {
+        if (px->workers[s].peers)
+            dmesh_peer_table_fini(px->workers[s].peers);
+        free(px->workers[s].peers);
+        free(px->workers[s].remote_upstreams);
         free(px->workers[s].buckets);
         free(px->workers[s].ct);
     }

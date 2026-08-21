@@ -31,6 +31,7 @@
 #define DMESH_POD_REMOTE    (-2)   /* reported peer on another node: a pod id is a
                                     * node-local transport identifier, so a remote
                                     * peer has none */
+#define DMESH_POD_ABORT     (-3)   /* forward-ring control: tear down this source QP */
 #define DMESH_PORT_BLANK     0     /* dst_port == 0 -> service listener / accept queue */
 #define DMESH_SVC_NONE      (-1)   /* no service id */
 

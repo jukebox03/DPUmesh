@@ -226,7 +226,7 @@ if(DPUMESH_INCLUDE_DIR AND DPUMESH_LIBRARY)
     endif()
 
     # L4-harness peers: same control protocol and result line as bench_sock and
-    # bench_dpumesh, so bench/suite/l4_proxy_data.sh drives gRPC unchanged.
+    # bench_dpumesh, so the DPUmesh collector drives gRPC unchanged.
     foreach(app bench_grpc echo_grpc)
       add_executable(${app} "bench/${app}.cc")
       target_compile_features(${app} PRIVATE cxx_std_17)

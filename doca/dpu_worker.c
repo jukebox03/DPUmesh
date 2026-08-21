@@ -245,7 +245,11 @@ dpu_route_l4(struct objects *objs, int16_t svc)
 static inline int
 owner_worker(struct objects *objs, const dpu_comp_entry_t *e)
 {
-    int l7 = px_l7_request_owner(objs, e->dst_pod_id, e->dst_service);
+    /* An abort retains the original service so it reaches the same Linkerd
+     * owner as the request whose source QP it terminates. */
+    int32_t route_pod = e->dst_pod_id == DMESH_POD_ABORT
+                      ? DMESH_POD_BLANK : e->dst_pod_id;
+    int l7 = px_l7_request_owner(objs, route_pod, e->dst_service);
     if (l7 >= 0)
         return l7;
     return dmesh_worker_for_port(e->src_port, objs->n_data_workers);
@@ -472,9 +476,6 @@ dpu_worker_run_budget(struct objects *objs, struct dpu_data_worker *worker_state
 
     /* Resume connections stalled by egress backpressure. */
     did += px_drain_stalled(objs, worker_state->id);
-#ifndef DMESH_L7_RUNTIME_OWNER
-    did += px_l7_step_worker(objs, worker_state->id);
-#endif
     /* Submit DMA, progress completions, and retire owned lanes. */
     enum px_progress_state proxy_state =
         px_worker_drain(objs, worker_state->id);
@@ -483,15 +484,6 @@ dpu_worker_run_budget(struct objects *objs, struct dpu_data_worker *worker_state
         return PX_PROGRESS_PROGRESSED;
     return proxy_state;
 }
-
-#ifndef DMESH_L7_RUNTIME_OWNER
-static enum px_progress_state
-dpu_worker_run(struct objects *objs, struct dpu_data_worker *worker_state)
-{
-    return dpu_worker_run_budget(objs, worker_state,
-                                 DPU_WORKER_COMPLETION_BUDGET);
-}
-#endif
 
 #if defined(__aarch64__)
 static inline uint64_t dpu_wake_clock_now(void)
@@ -592,8 +584,7 @@ static void dpu_dpa_nudge_due(struct dpu_data_worker *worker_state)
     worker_state->dpa_nudge_deadline = now + period;
 }
 
-/* ARM data-worker thread. The Linkerd backend owns the loop when it owns the
- * runtime; otherwise this file drives poll, drain and park itself. */
+/* ARM data-worker thread. The embedded Linkerd runtime owns the loop. */
 static void *
 dpu_data_worker_main(void *arg)
 {
@@ -602,83 +593,13 @@ dpu_data_worker_main(void *arg)
     dpu_arm_name_current("worker", worker_state->id);
     dpu_arm_pin_current("worker", worker_state->id);
 
-#ifdef DMESH_L7_RUNTIME_OWNER
     if (l7_worker_run(worker_state->id, worker_state) < 0) {
         DOCA_LOG_ERR("ARM worker %d runtime failed", worker_state->id);
         atomic_store_explicit(&worker_state->init_state, -1, memory_order_release);
     }
     return NULL;
-#else
-    struct objects *objs = worker_state->objs;
-
-    doca_notification_handle_t cfd = 0;
-    int dfd = px_worker_notification_fd(objs, worker_state->id);
-    int ep = -1;
-    if (doca_pe_get_notification_handle(worker_state->pe, &cfd) == DOCA_SUCCESS)
-        ep = epoll_create1(0);
-    if (ep >= 0) {
-        struct epoll_event ec = { .events = EPOLLIN, .data = { .u32 = 0 } };  /* own PE fd */
-        struct epoll_event ew = { .events = EPOLLIN, .data = { .u32 = 1 } };  /* cross-worker wake */
-        if (epoll_ctl(ep, EPOLL_CTL_ADD, (int)cfd, &ec) != 0 ||
-            epoll_ctl(ep, EPOLL_CTL_ADD, worker_state->wake_fd, &ew) != 0) { close(ep); ep = -1; }
-        if (ep >= 0 && dfd >= 0) {
-            struct epoll_event ed = { .events = EPOLLIN, .data = { .u32 = 2 } };
-            if (epoll_ctl(ep, EPOLL_CTL_ADD, dfd, &ed) != 0) {
-                DOCA_LOG_WARN("worker %d: DMA PE notification unavailable; "
-                              "1 ms event-loop backstop remains active", worker_state->id);
-                dfd = -1;
-            }
-        }
-    }
-    if (ep < 0) {
-        DOCA_LOG_ERR("ARM worker %d: consumer PE event-loop setup failed",
-                     worker_state->id);
-        atomic_store_explicit(&worker_state->init_state, -1, memory_order_release);
-        return NULL;
-    }
-
-    if (px_l7_attach_worker(objs, worker_state->id) < 0) {
-        DOCA_LOG_ERR("ARM worker %d: L7 layer attach failed", worker_state->id);
-        atomic_store_explicit(&worker_state->init_state, -1, memory_order_release);
-        close(ep);
-        return NULL;
-    }
-
-    atomic_store_explicit(&worker_state->init_state, 1, memory_order_release);
-
-    while (!worker_state->stop) {
-        dpu_dpa_nudge_due(worker_state);
-        enum px_progress_state did = dpu_progress_worker_pe(worker_state);
-        enum px_progress_state run = dpu_worker_run(objs, worker_state);
-        if (did == PX_PROGRESS_PROGRESSED || run == PX_PROGRESS_PROGRESSED)
-            continue;                    /* stay hot while there is work */
-        /* Arm notifications, recheck queues, then wait up to 1 ms. */
-        (void)doca_pe_request_notification(worker_state->pe);
-        if (dfd >= 0)
-            (void)px_worker_arm_notification(objs, worker_state->id);
-        atomic_store_explicit(&worker_state->parked, 1, memory_order_release);
-        if (dpu_progress_worker_pe(worker_state) == PX_PROGRESS_PROGRESSED ||
-            dpu_worker_run(objs, worker_state) == PX_PROGRESS_PROGRESSED ||
-            !mpsc_comp_queue_empty(&worker_state->cross_worker)) {
-            atomic_store_explicit(&worker_state->parked, 0, memory_order_release);
-            (void)doca_pe_clear_notification(worker_state->pe, cfd);
-            px_worker_clear_notification(objs, worker_state->id, dfd);
-            continue;
-        }
-        struct epoll_event evs[3];
-        (void)epoll_wait(ep, evs, 3, 1);
-        atomic_store_explicit(&worker_state->parked, 0, memory_order_release);
-        uint64_t drain; ssize_t rn = read(worker_state->wake_fd, &drain, sizeof(drain)); (void)rn;
-        (void)doca_pe_clear_notification(worker_state->pe, cfd);
-        px_worker_clear_notification(objs, worker_state->id, dfd);
-    }
-    px_l7_detach_worker(objs, worker_state->id);
-    close(ep);
-    return NULL;
-#endif
 }
 
-#ifdef DMESH_L7_RUNTIME_OWNER
 int
 dmesh_l7_driver_notification_fds(void *driver, int *completion_fd,
                                  int *dma_fd, int *wake_fd)
@@ -777,8 +698,6 @@ dmesh_l7_driver_failed(void *driver)
     if (worker_state)
         atomic_store_explicit(&worker_state->init_state, -1, memory_order_release);
 }
-#endif
-
 static void
 stop_data_workers(struct objects *objs)
 {

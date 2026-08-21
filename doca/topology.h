@@ -151,6 +151,13 @@ struct dmesh_endpoint_ref {
 int dmesh_topology_remote_endpoints(const struct objects *objs, int16_t svc,
                                     const char *node_name,
                                     struct dmesh_endpoint_ref *out, int max);
+/* Select one remote endpoint without truncating the Service's endpoint set.
+ * When pod_uid is non-NULL it must match exactly; otherwise ordinal is reduced
+ * across the complete remote set. */
+int dmesh_topology_remote_endpoint(const struct objects *objs, int16_t svc,
+                                   const char *node_name,
+                                   const char *pod_uid, uint64_t ordinal,
+                                   struct dmesh_endpoint_ref *out);
 
 /* The protection class of the Service interned as `svc`: 1 when the held
  * generation's `protected=` set names it, 0 when the generation names the
@@ -170,6 +177,11 @@ uint16_t dmesh_topology_service_port(const struct objects *objs, int16_t svc);
  * table, and the reason the generation is signed by a key no DPU holds. */
 int dmesh_topology_pod_on_node(const struct objects *objs, const char *pod_uid,
                                const char *node_name);
+/* 1 only when the generation places this exact Pod UID in the qualified
+ * Service. Used to verify a peer's source-Service claim. */
+int dmesh_topology_pod_in_service(const struct objects *objs,
+                                  const char *pod_uid,
+                                  const char *service_key);
 
 /* The node record the peer channel authenticates against: its static handshake
  * key and the transport address it listens on. 1 when the generation binds the

@@ -49,6 +49,12 @@ server_progress_membership(struct objects *objs);
 int
 server_progress_admission(struct objects *objs);
 
+/* Canonicalize `service` or `service.namespace` to `namespace/service`.
+ * Both components must be Kubernetes DNS labels and the result must fit
+ * whole; malformed or truncating inputs are refused. */
+int dmesh_resolve_service_key(const char *namespace_name, const char *query,
+                              char *out, size_t out_len);
+
 
 /* Find a pod by pod_id. Returns NULL if not found. */
 struct pod_state *

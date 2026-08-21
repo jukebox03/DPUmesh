@@ -5,9 +5,10 @@
 
 DOCA_LOG_REGISTER(BUFFER);
 
-doca_error_t
-alloc_buffer_and_set_mmap(struct doca_mmap **mmap, struct doca_dev *dev,
-                        void **buffer, size_t buffer_size, uint32_t access_mask)
+static doca_error_t
+alloc_buffer_and_set_mmap_impl(struct doca_mmap **mmap, struct doca_dev *dev,
+                               void **buffer, size_t buffer_size,
+                               uint32_t access_mask, int thread_safe)
 {
     doca_error_t result;
     int ret;
@@ -17,6 +18,15 @@ alloc_buffer_and_set_mmap(struct doca_mmap **mmap, struct doca_dev *dev,
         DOCA_LOG_ERR("Failed to create local mmap - %s",
                 doca_error_get_name(result));
         return result;
+    }
+
+    if (thread_safe) {
+        result = doca_mmap_enable_thread_safety(*mmap);
+        if (result != DOCA_SUCCESS) {
+            DOCA_LOG_ERR("Failed to enable mmap thread safety - %s",
+                         doca_error_get_name(result));
+            goto destroy_mmap;
+        }
     }
 
     result = doca_mmap_add_dev(*mmap, dev);
@@ -66,6 +76,25 @@ destroy_mmap:
     *mmap = NULL;
 
     return result;
+}
+
+doca_error_t
+alloc_buffer_and_set_mmap(struct doca_mmap **mmap, struct doca_dev *dev,
+                          void **buffer, size_t buffer_size,
+                          uint32_t access_mask)
+{
+    return alloc_buffer_and_set_mmap_impl(mmap, dev, buffer, buffer_size,
+                                          access_mask, 0);
+}
+
+doca_error_t
+alloc_buffer_and_set_thread_safe_mmap(struct doca_mmap **mmap,
+                                      struct doca_dev *dev,
+                                      void **buffer, size_t buffer_size,
+                                      uint32_t access_mask)
+{
+    return alloc_buffer_and_set_mmap_impl(mmap, dev, buffer, buffer_size,
+                                          access_mask, 1);
 }
 
 doca_error_t

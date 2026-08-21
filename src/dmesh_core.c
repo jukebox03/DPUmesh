@@ -3325,7 +3325,8 @@ int dmesh_tx_after_commit(dmesh_qp_t *c) {
      * close. A tail it retains without an armed bit is armed by
      * tx_arm_idle_tail when the last acknowledgement leaves the QP idle. */
     if (atomic_load_explicit(&psl->tx_deadline_ns, memory_order_relaxed) != 0 &&
-        psl->tx_w - sent < (uint64_t)ctx->slot_size)
+        psl->tx_w - sent < (uint64_t)ctx->slot_size &&
+        dmesh_tx_inflight_locked(psl))
         return 0;
 
     if (dmesh_drain_tx_locked(c, 0) != 0) {
@@ -3345,20 +3346,23 @@ int dmesh_tx_after_commit(dmesh_qp_t *c) {
     }
     uint64_t deadline = atomic_load_explicit(&psl->tx_deadline_ns,
                                              memory_order_relaxed);
+    /* The last ACK can make the stream idle just before this commit. In that
+     * race the old coalescing stamp remains, but no ACK remains to arm the new
+     * tail. An idle tail always goes now, independent of that stale stamp. */
+    if (!dmesh_tx_inflight_locked(psl)) {
+        tx_disarm_tail(psl, c->local_port);
+        return dmesh_drain_tx_locked(c, 1);
+    }
     if (deadline == 0) {
-        /* An idle stream has no outstanding unit for a successor to arrive
-         * behind, so its first partial goes now. */
-        if (!dmesh_tx_inflight_locked(psl))
-            return dmesh_drain_tx_locked(c, 1);
-    } else if (monotonic_ns() >= deadline) {
+        tx_arm_tail(psl, c->local_port);
+        return 0;
+    }
+    if (monotonic_ns() >= deadline) {
         /* A retained tail is released by its deadline alone. */
         tx_disarm_tail(psl, c->local_port);
         return dmesh_drain_tx_locked(c, 1);
-    } else {
-        return 0;                                /* keep coalescing */
     }
-    tx_arm_tail(psl, c->local_port);
-    return 0;
+    return 0;                                    /* keep coalescing */
 }
 
 /* Publish a retained tail before returning capacity pressure to the caller. */
@@ -3458,6 +3462,33 @@ static int dmesh_send_fin_locked(dmesh_qp_t *c) {
     return 0;
 }
 
+/* Publish an ordered reset marker without waiting for earlier data custody.
+ * The marker shares the QP's forward ring, so the DPU observes every earlier
+ * descriptor first, then drops the stream window and both proxy directions.
+ * Unlike FIN, reset is used only when graceful ordering cannot complete. */
+static int dmesh_send_abort_locked(dmesh_qp_t *c) {
+    if (c->fin_sent) return 0;
+    dpumesh_ctx_t *ctx = c->ep->ctx;
+    uint16_t next_seq = (uint16_t)(c->seq + 1);
+    sw_descriptor_t d;
+    memset(&d, 0, sizeof(d));
+    d.body_buf_slot = 0;
+    d.body_len      = 0;
+    d.src_port      = c->local_port;
+    d.seq           = next_seq;
+    d.dst_service   = c->dst_service;
+    d.dst_pod       = DMESH_POD_ABORT;
+    d.dst_port      = c->remote_port;
+    d.valid         = 1;
+    if (dpumesh_enqueue(ctx, &d) < 0) {
+        if (errno != EAGAIN) errno = EBADMSG;
+        return -1;
+    }
+    c->seq = next_seq;
+    c->fin_sent = 1;
+    return 0;
+}
+
 int dmesh_send_fin(dmesh_qp_t *c) {
     if (dmesh_tx_qp_valid(c) != 0) return -1;
     struct dmesh_port_slot *psl = &c->ep->ctx->ports[c->local_port];
@@ -3472,7 +3503,7 @@ int dmesh_send_fin(dmesh_qp_t *c) {
 static int dmesh_release_qp(dmesh_qp_t *c, int graceful) {
     if (!c) return 0;
     int close_result = 0, close_errno = 0;
-    int fin_ordered = 1;
+    int reset = !graceful;
     dpumesh_ctx_t *ctx = c->ep->ctx;
     struct dmesh_port_slot *psl = &ctx->ports[c->local_port];
     if (c->eq && c->eq->drain_cur == c) c->eq->drain_cur = NULL; /* poll_eq resume cursor */
@@ -3484,6 +3515,7 @@ static int dmesh_release_qp(dmesh_qp_t *c, int graceful) {
     if (graceful && dmesh_drain_tx_locked(c, 1) != 0) {
         close_result = -1;
         close_errno = errno;
+        reset = 1;
     }
     /* Abort always discards the buffered tail. Graceful close reaches this with no
      * unsent committed bytes unless its flush failed; a live, un-posted reservation
@@ -3492,8 +3524,8 @@ static int dmesh_release_qp(dmesh_qp_t *c, int graceful) {
     /* A data ACK releases DPU proxy custody rather than reporting a DMA copy, so
      * an empty submitted FIFO is the stream-order fence that keeps the
      * zero-copy FIN behind the payload. */
-    if (dmesh_wait_tx_reclaimed_locked(psl) != 0) {
-        fin_ordered = 0;
+    if (!reset && dmesh_wait_tx_reclaimed_locked(psl) != 0) {
+        reset = 1;
         if (close_result == 0) {
             close_result = -1;
             close_errno = errno;
@@ -3502,8 +3534,10 @@ static int dmesh_release_qp(dmesh_qp_t *c, int graceful) {
     /* An established conn always closes its half (dmesh_send_fin self-guards a
      * second one). A CLIENT that never sent (seq==0) has no peer and no DPU-side
      * conn to tear down. */
-    if (fin_ordered && (c->role == DMESH_ROLE_SERVER || c->seq > 0)) {
-        if (dmesh_send_fin_locked(c) != 0 && close_result == 0) {
+    if (c->role == DMESH_ROLE_SERVER || c->seq > 0) {
+        int end_result = reset ? dmesh_send_abort_locked(c)
+                               : dmesh_send_fin_locked(c);
+        if (end_result != 0 && close_result == 0) {
             close_result = -1;
             close_errno = errno;
         }

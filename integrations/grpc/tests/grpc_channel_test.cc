@@ -20,6 +20,7 @@
 #include <grpcpp/generic/async_generic_service.h>
 #include <grpcpp/generic/generic_stub.h>
 #include <grpcpp/passive_listener.h>
+#include <grpcpp/resource_quota.h>
 #include <grpcpp/security/credentials.h>
 #include <grpcpp/server_builder.h>
 #include <grpcpp/support/byte_buffer.h>
@@ -159,7 +160,10 @@ class LinkedEndpointTransport final : public EndpointTransport {
       state_->closed[side_] = true;
       peer = state_->drivers[1 - side_].lock();
     }
-    if (peer != nullptr) peer->OnRemoteEof();
+    if (peer != nullptr) {
+      peer_inbound_executor_->Run(
+          [peer = std::move(peer)] { peer->OnRemoteEof(); });
+    }
   }
 
  private:
@@ -185,6 +189,16 @@ bool Next(::grpc::CompletionQueue* cq, void* expected_tag) {
       &tag, &ok, std::chrono::system_clock::now() + std::chrono::seconds(10));
   return result == ::grpc::CompletionQueue::GOT_EVENT && ok &&
          tag == expected_tag;
+}
+
+bool WaitForTrue(const std::shared_ptr<std::atomic<bool>>& value) {
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  while (!value->load(std::memory_order_acquire)) {
+    if (std::chrono::steady_clock::now() >= deadline) return false;
+    std::this_thread::yield();
+  }
+  return true;
 }
 
 ::grpc::ByteBuffer MakeBuffer(const std::string& value) {
@@ -213,6 +227,12 @@ class EchoServer {
   /// completion queue: a queue shared by two serving threads hands one thread
   /// the other's tag, and the call it belongs to is then abandoned mid-flight.
   explicit EchoServer(int calls = 1) {
+    // Do not share gRPC's process-global memory quota with the many short-lived
+    // client channels this sanitizer stress test deliberately leaves to gRPC's
+    // asynchronous reclamation. Under ASan that quota can enter pressure and
+    // reject an otherwise valid passive endpoint before reclamation catches up.
+    resource_quota_.Resize(256 * 1024 * 1024);
+    builder_.SetResourceQuota(resource_quota_);
     builder_.RegisterAsyncGenericService(&service_);
     for (int i = 0; i < calls; ++i) cqs_.push_back(builder_.AddCompletionQueue());
     builder_.experimental().AddPassiveListener(
@@ -271,6 +291,7 @@ class EchoServer {
   }
 
  private:
+  ::grpc::ResourceQuota resource_quota_{"dpumesh-channel-test"};
   ::grpc::AsyncGenericService service_;
   ::grpc::ServerBuilder builder_;
   std::unique_ptr<::grpc::experimental::PassiveListener> listener_;
@@ -313,7 +334,10 @@ struct Link {
       state->closed[side] = true;
       peer = state->drivers[1 - side].lock();
     }
-    if (peer != nullptr) peer->OnRemoteEof();
+    if (peer != nullptr) {
+      ThreadExecutor* executor = side == 0 ? &server_work : &client_work;
+      executor->Run([peer = std::move(peer)] { peer->OnRemoteEof(); });
+    }
   }
 };
 
@@ -389,7 +413,7 @@ bool RunUnaryEcho() {
             << " server_bytes=" << server_bytes
             << " client_posts=" << client_posts
             << " server_posts=" << server_posts << '\n';
-  return call.client_ok && served->load() && call.status.ok() &&
+  return call.client_ok && WaitForTrue(served) && call.status.ok() &&
          call.response == payload && client_bytes > payload.size() &&
          server_bytes > payload.size() && client_posts > 1 && server_posts > 1;
 }
@@ -417,7 +441,7 @@ bool RunChannelChurn() {
     }
     const CallResult call = UnaryEcho(channel, payload);
     if (!call.client_ok || !call.status.ok() || call.response != payload ||
-        !served->load()) {
+        !WaitForTrue(served)) {
       std::cerr << "churn cycle " << i << " failed: " << call.status.error_message()
                 << '\n';
       return false;
@@ -458,7 +482,7 @@ bool RunConcurrentChannels() {
   for (int i = 0; i < kChannels; ++i) {
     if (!results[i].client_ok || !results[i].status.ok() ||
         results[i].response != std::string(2048, 'a' + i) ||
-        !served[i]->load()) {
+        !WaitForTrue(served[i])) {
       std::cerr << "channel " << i << " failed: " << results[i].status.error_message()
                 << '\n';
       return false;
@@ -509,7 +533,7 @@ bool RunServerGoAway() {
   const std::string payload(512, 'g');
   const CallResult before = UnaryEcho(channel, payload);
   if (!before.client_ok || !before.status.ok() || before.response != payload ||
-      !served->load()) {
+      !WaitForTrue(served)) {
     std::cerr << "GOAWAY: the first call did not complete\n";
     return false;
   }

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Closed-loop concurrency sweep for the four gRPC paths.
+# Closed-loop concurrency sweep for the DPUmesh gRPC path.
 #
 # An open-loop rate sweep lets the queue grow without bound, so a path that
 # trades latency for throughput scores higher: deeper batching amortises the
@@ -24,7 +24,7 @@ PROJ_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 NS="${NS:-test-bench}"
 CTRL_PORT="${CTRL_PORT:-9092}"
-CONFIGS="${CONFIGS:-grpc-envoy-permissive grpc-envoy-strict grpc-tcp grpc-dpumesh}"
+CONFIGS="${CONFIGS:-grpc-dpumesh}"
 FRAMES="${FRAMES:-64 1024 8192}"
 CONCS="${CONCS:-1 2 4 8 16 32}"
 REPS="${REPS:-1}"
@@ -69,26 +69,17 @@ log() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*" | tee -a "$LOG" >&2; }
 field() { sed -n "s/.*[[:space:]]$2=\([^[:space:]]*\).*/\1/p" <<<"$1"; }
 
 client_app() {
-  case "$1" in
-    grpc-envoy-permissive) echo bench-grpc-envoy ;;
-    grpc-envoy-strict)     echo bench-grpc-envoy-strict ;;
-    grpc-tcp)              echo bench-grpc-tcp ;;
+    case "$1" in
     grpc-dpumesh)          echo bench-grpc-dpumesh ;;
-    grpc-linkerd)          echo bench-grpc-linkerd ;;
-    grpc-linkerd-opaque)   echo bench-grpc-linkerd-opaque ;;
+    *) return 1 ;;
   esac
 }
 server_app() {
   case "$1" in
-    grpc-envoy-permissive) echo echo-grpc-envoy ;;
-    grpc-envoy-strict)     echo echo-grpc-envoy-strict ;;
-    grpc-tcp)              echo echo-grpc-tcp ;;
     grpc-dpumesh)          echo echo-grpc-dpumesh ;;
-    grpc-linkerd)          echo echo-grpc-linkerd ;;
-    grpc-linkerd-opaque)   echo echo-grpc-linkerd-opaque ;;
+    *) return 1 ;;
   esac
 }
-is_dpu() { [ "$1" = grpc-dpumesh ]; }
 
 pod_name() {
   kubectl get pod -n "$NS" -l "app=$1" \
@@ -109,8 +100,7 @@ container_pid() {
   [ -n "$cid" ] && [ "$cid" != null ] || return
   printf '%s\n' "$HOST_PASS" | sudo -S crictl inspect "$cid" 2>/dev/null | jq -r '.info.pid'
 }
-# An Envoy path runs its sidecar in the same pod and on the same core, so the
-# pod cgroup is what the configuration costs.
+# Charge the complete workload Pod cgroup.
 pod_cgroup_usec() {
   local pid="$1" rel podrel
   [ "${pid:-0}" -gt 0 ] || { echo 0; return; }
@@ -184,13 +174,13 @@ for config in $CONFIGS; do
         ncpid=$!
 
         sleep "$SETTLE"
-        d0=""; is_dpu "$config" && d0=$(dpu_snapshot || true)
+        d0=$(dpu_snapshot || true)
         cg_c0=$(pod_cgroup_usec "$cpid"); cg_s0=$(pod_cgroup_usec "$spid")
         t0=$(date +%s.%N)
         sleep "$SAMPLE"
         cg_c1=$(pod_cgroup_usec "$cpid"); cg_s1=$(pod_cgroup_usec "$spid")
         t1=$(date +%s.%N)
-        d1=""; is_dpu "$config" && d1=$(dpu_snapshot || true)
+        d1=$(dpu_snapshot || true)
         wait "$ncpid" || true
         result=$(cat "$raw")
 

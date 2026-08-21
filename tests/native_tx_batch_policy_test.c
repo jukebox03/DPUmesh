@@ -208,6 +208,28 @@ test_fin_waits_for_submitted_data(void)
     fixture_free(f);
 }
 
+/* Abort is the bounded-close escape hatch: it is ordered on the forward ring
+ * but does not wait for destination custody to return. */
+static void
+test_abort_marker_does_not_wait_for_submitted_data(void)
+{
+    struct fixture *f = fixture_new(8, 16, -1);
+    assert(fixture_commit(f, 64) == 0);
+    assert(dmesh_tx_inflight(&f->qp));
+
+    uint64_t started = monotonic_ns();
+    assert(dmesh_send_abort_locked(&f->qp) == 0);
+    uint64_t elapsed = monotonic_ns() - started;
+
+    assert(elapsed < 5000000ull);
+    assert(dmesh_tx_inflight(&f->qp));
+    assert(__atomic_load_n(&f->ring.enq_pos, __ATOMIC_ACQUIRE) == 2);
+    assert(f->descs[1].size == 0);
+    assert(f->descs[1].dst_pod_id == DMESH_POD_ABORT);
+    assert(f->descs[1].seq == 2);
+    fixture_free(f);
+}
+
 static void
 test_tail_publication_policy(void)
 {
@@ -320,6 +342,38 @@ test_tail_retained_when_the_stream_falls_quiet(void)
     dpumesh_publish_due_tails(&f->eq);
     assert(__atomic_load_n(&f->ring.enq_pos, __ATOMIC_ACQUIRE) == 3);
     assert(f->descs[2].size == 64);
+    assert(armed_count(f) == 0);
+    assert(psl->tx_deadline_ns == 0);
+
+    fixture_free(f);
+}
+
+/* The final ACK may make a stamped stream idle before the next partial commit.
+ * No later ACK then exists to arm that tail, so the commit itself must recognize
+ * the idle stream instead of retaining bytes behind the stale stamp. */
+static void
+test_tail_committed_after_the_stream_goes_idle(void)
+{
+    struct fixture *f = fixture_new(8, 16, -1);
+    struct dmesh_port_slot *psl = f->psl;
+
+    assert(fixture_commit(f, 64) == 0);       /* idle -> published */
+    assert(fixture_commit(f, 64) == 0);       /* in flight -> retained */
+    assert(fixture_commit(f, 8128) == 0);     /* complete unit -> published */
+    assert(__atomic_load_n(&f->ring.enq_pos, __ATOMIC_ACQUIRE) == 2);
+    assert(atomic_load_explicit(&psl->tx_s, memory_order_acquire) == psl->tx_w);
+    assert(psl->tx_deadline_ns != 0);         /* coalescing stamp survives */
+
+    tx_reclaim_ack(f->ctx, 17, 1);
+    tx_reclaim_ack(f->ctx, 17, 2);
+    assert(!dmesh_tx_inflight_locked(psl));
+    assert(armed_count(f) == 0);              /* no tail existed at ACK time */
+    assert(psl->tx_deadline_ns != 0);         /* owner has not cleared the stamp */
+
+    assert(fixture_commit(f, 64) == 0);       /* later idle tail -> immediate */
+    assert(__atomic_load_n(&f->ring.enq_pos, __ATOMIC_ACQUIRE) == 3);
+    assert(f->descs[2].size == 64);
+    assert(atomic_load_explicit(&psl->tx_s, memory_order_acquire) == psl->tx_w);
     assert(armed_count(f) == 0);
     assert(psl->tx_deadline_ns == 0);
 
@@ -863,8 +917,10 @@ main(void)
     free(ctx);
     test_tail_publication_policy();
     test_tail_retained_when_the_stream_falls_quiet();
+    test_tail_committed_after_the_stream_goes_idle();
     test_deadline_pass_yields_to_an_active_tx_call();
     test_fin_waits_for_submitted_data();
+    test_abort_marker_does_not_wait_for_submitted_data();
     test_close_paths_release_the_armed_bit();
     test_timer_wakes_only_armed_eqs();
     test_sustained_commits_preserve_stream_bytes();

@@ -29,7 +29,9 @@ static dmesh_channel_t *g_s      = NULL;
 static dmesh_eq_t      *g_eq     = NULL;  /* the one EQ both roles are polled from */
 static const char      *g_service = NULL; /* own service NAME (self-routing: connect to ourselves) */
 static int              g_msgmax  = 0;    /* max bytes per RECV == max bytes per echo post */
-static long             g_served  = 0;    /* requests the echo side replied to */
+/* Byte-stream fragments are not application request boundaries. Keep the
+ * cumulative echoed byte count and derive a per-RUN logical request count. */
+static uint64_t         g_served_bytes = 0;
 
 static double now_sec(void) {
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -89,7 +91,7 @@ static int sq_drain(dmesh_qp_t *c) {
         memcpy(b, ss->q, n);
         if (dmesh_post_send(c, b, n) != 0) { ss->dead = 1; break; }
         ss->len -= n; memmove(ss->q, ss->q + n, ss->len);
-        g_served++; posted++;
+        g_served_bytes += n; posted++;
     }
     if (posted && dmesh_flush(c) != 0) ss->dead = 1;
     return posted;
@@ -106,7 +108,7 @@ static void srv_recv(dmesh_qp_t *c, const dmesh_event_t *w) {
             memcpy(b, w->buf, w->len);
             if (dmesh_post_send(c, b, w->len) != 0 ||
                 dmesh_flush(c) != 0) ss->dead = 1;
-            else g_served++;
+            else g_served_bytes += w->len;
             return;
         }
         if (errno != EAGAIN) { ss->dead = 1; return; }   /* EINVAL: conn not established */
@@ -220,6 +222,7 @@ static void run_loopback(int conn_fd, long N, int size, int zc) {
                          "ERR bad args (size<=%d for non-zc, <=%d for zc)\n", msgmax, postmax);
         ctl_reply(conn_fd, reply, (size_t)n); return;
     }
+    uint64_t served_start = g_served_bytes;
     uint8_t *body = malloc((size_t)size), *rb = malloc((size_t)size);
     double  *lat  = malloc((size_t)N * sizeof(double));
     if (!body || !rb || !lat) { free(body); free(rb); free(lat);
@@ -259,10 +262,12 @@ static void run_loopback(int conn_fd, long N, int size, int zc) {
 
     qsort(lat, ns, sizeof(double), cmp_d);
     double p50 = ns ? lat[ns / 2] : 0.0;
-    int rn = snprintf(reply, sizeof reply, "OK %ld %ld %ld %.1f\n", ok, fail, g_served, p50);
+    uint64_t echoed = g_served_bytes - served_start;
+    long served = (long)(echoed / (uint32_t)size);
+    int rn = snprintf(reply, sizeof reply, "OK %ld %ld %ld %.1f\n", ok, fail, served, p50);
     ctl_reply(conn_fd, reply, (size_t)rn);
-    fprintf(stderr, "[loopback] DONE N=%ld ok=%ld fail=%ld served=%ld p50=%.1fus\n",
-            N, ok, fail, g_served, p50);
+    fprintf(stderr, "[loopback] DONE N=%ld ok=%ld fail=%ld served=%ld echoed_bytes=%llu p50=%.1fus\n",
+            N, ok, fail, served, (unsigned long long)echoed, p50);
     free(body); free(rb); free(lat);
 }
 

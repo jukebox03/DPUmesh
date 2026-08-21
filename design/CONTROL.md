@@ -8,13 +8,11 @@ DPU needs about Pods it cannot see, and a DPU authenticates its peers against
 it. This document is both halves and the boundary between them.
 
 The data plane those admissions govern is [`DATA.md`](DATA.md); the
-application's own contract is [`API.md`](API.md). The RDMA transport that would
-carry bytes across a node boundary is out of scope: `struct
-dmesh_peer_transport` is the seam it plugs into, and nothing is behind that seam
-today.
-
-Assume that transport for a moment: the data path then has one shape on both
-sides of a node boundary, and only the middle hop differs.
+application's own contract is [`API.md`](API.md). The lower RDMA implementation
+supplies `struct dmesh_peer_transport`; this tree owns and instantiates every
+authenticated stream, routing, custody and lifetime rule above that seam. The
+data path has one shape on both sides of a node boundary, and only the middle
+hop differs.
 
 ```text
    intra-node   host TX mmap → DPA → staging → SG-DMA         → host RX mmap
@@ -620,8 +618,9 @@ new UID, so no window lets an old identity inherit a new placement.
 Everything here has a counterpart inside a node: the Comch connection between a
 host process and its DPU already solves the same problems, and the mechanisms
 that survived hardware validation there are the ones extended.
-`doca/peer_channel.{c,h}` carries the state machine, the handle table, the five
-control messages and their bounded parsing, and both sides' bounds;
+`doca/peer_channel.{c,h}` carries the state machine, disjoint full-duplex handle
+namespaces, the five control messages plus DATA, bounded parsing and both
+sides' bounds;
 `doca/dpu_proxy.c` carries the hooks it binds to. `tests/peer_channel_test.c`
 drives the module end to end through a recording transport.
 
@@ -697,7 +696,8 @@ A peer DPU is authenticated, not trusted. Everything it sends is input: stream
 opens, lengths, handles, and the rate of all of them.
 
 At the **destination** a peer is admitted against `DMESH_PEER_STREAMS_MAX`
-concurrent streams, `DMESH_PEER_STAGING_MAX` staging bytes and
+concurrent streams, `DMESH_PEER_STAGING_MAX` staging bytes,
+`DMESH_PEER_TX_SLOTS` pending landing completions and
 `DMESH_PEER_OPEN_RATE` opens per second (a token bucket), and is refused beyond
 them rather than letting one node's traffic displace another's. Staging is
 charged per `DATA` arrival, and a delivery the node holds keeps its charge and
@@ -779,11 +779,12 @@ bytes.
 
 | Message | Direction | Fields |
 |---|---|---|
-| `STREAM_OPEN` | source → destination | `incarnation`, `src_pod_uid[64]`, `dst_pod_uid[64]`, `dst_port`, `src_generation` |
-| `STREAM_OPEN_ACK` | destination → source | `incarnation`, `handle`, `status` |
+| `STREAM_OPEN` | source → destination | `incarnation`, `source_token`, `src_pod_uid[64]`, `src_service_key[128]`, `dst_pod_uid[64]`, `dst_port`, `src_generation` |
+| `STREAM_OPEN_ACK` | destination → source | `incarnation`, `source_token`, `handle`, `status` |
 | `STREAM_FIN` | either | `incarnation`, `handle` |
-| `STREAM_ACK` | destination → source | `incarnation`, `handle`, `seq_first`, `seq_count` |
+| `STREAM_ACK` | receiver → sender | `incarnation`, `handle`, `seq_first`, `seq_count` |
 | `POD_GONE` | source → destination | `incarnation`, `pod_uid[64]` |
+| `DATA` | either | `incarnation`, `handle`, `seq`, bytes |
 
 `STREAM_ACK` names a run of consecutive sequences, which is the encoding
 `dmesh_tx_ack_entry` already uses on the reverse ring, for the same reason: one
@@ -792,7 +793,9 @@ acknowledgement per released extent rather than one per transport unit.
 notice it is behind and adopt sooner.
 
 A stream is full-duplex and has one handle, because a `dmesh_qp_t` is one
-full-duplex byte stream. Each side owns it on its own worker by its own rule: at
+full-duplex byte stream. The handle's owner bit gives the two nodes disjoint
+wire namespaces even when each independently allocates index 1. Each side owns
+its streams on its own worker by its own rule: at
 the source the Pod's port decides (`dmesh_worker_for_port`), at the destination
 the DPU that allocates the handle encodes its own worker in it. The two are
 independent because the two DPUs have independent worker sets. To keep a
@@ -816,11 +819,15 @@ space is per peer, so nothing cluster-wide has to allocate it.
  * survives the teardown of anything that named it. */
 struct peer_handle {
     uint32_t incarnation;      /* the channel incarnation that issued it */
+    uint32_t wire_handle;      /* owner bit plus allocator-local index */
     int32_t  dst_pod_idx;      /* destination slot; validated against pod generation */
     uint32_t dst_pod_generation;
     uint16_t dst_port;
     uint16_t up_port;          /* the intra-node upstream this stream feeds */
     char     src_pod_uid[64];  /* the key POD_GONE and peer loss sweep on */
+    uint32_t staging_bytes;
+    uint32_t rx_seq;
+    uint8_t  rx_seq_valid, rx_fin, tx_fin;
 };
 ```
 
@@ -925,6 +932,12 @@ needs a verdict, not a proxy:
 string, so the adapter calls it once per registered destination Pod rather than
 once per process, and streams share the watch and pay only `connection_verdict`.
 A cross-node L7 stream therefore costs one outbound session plus a lookup.
+Sidecarless workload templates opt into that index with the Linkerd
+control-plane label while marking DMA ports as skipped inbound ports. This
+keeps policy discovery enabled without falsely claiming that a proxy listener
+exists inside each Pod. The DPU destination context includes its real
+Kubernetes `nodeName`, so stock endpoint discovery can apply locality without
+an empty-node lookup.
 
 ## Scope of the control-plane credential ⟨T⟩
 
@@ -1282,16 +1295,15 @@ between two generations pays setup twice.
   [`DATA.md`](DATA.md)'s bounds.
 
 **Cluster scope and the node boundary**
-- The DPU-to-DPU transport does not exist. `struct dmesh_peer_transport` is the
-  seam, the module is driven by a recording transport in
-  `tests/peer_channel_test.c`, and nothing instantiates a peer table in
-  production, because no channel can open without one.
-- Cross-node identity, custody and observability are stated here and exercised
-  against the recording transport; the clauses that need bytes on a wire are
-  unmet until the transport lands.
-- Encryption on the peer channel is the transport's, and arrives with it.
-- A remote-only Service is therefore counted `peer.transport` and refused. Every
-  other reach outcome is routable.
+- Each ARM worker instantiates a peer table and `px_peer_configure` binds the
+  supplied lower RDMA transport. Accepted lower connections enter through
+  `px_peer_accept`; the authenticated upper state owns them thereafter.
+- Linkerd-selected remote endpoints retain their exact topology Pod UID. The
+  source opens that Pod on its node's channel, DATA lands through destination
+  SG-DMA, and `STREAM_ACK` releases source custody only after `REV_DONE` was
+  published.
+- Encryption and mutual key agreement are the lower transport's; topology key
+  binding, stream identity and policy admission are this layer's.
 - Route-level HTTP authorization at the destination is out of scope: the
   connection verdict needs no parser, and a route-level one needs a second L7
   stack — the cost the source/destination split exists to avoid.

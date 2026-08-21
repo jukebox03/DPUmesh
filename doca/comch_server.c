@@ -40,6 +40,36 @@ l7_inbound_forget(int worker_id, const char *workload)
 	(void)workload;
 }
 
+static int resolve_dns_label(const char *text, size_t len)
+{
+	if (len == 0 || len > 63 || text[0] == '-' || text[len - 1] == '-')
+		return 0;
+	for (size_t i = 0; i < len; i++) {
+		unsigned char c = (unsigned char)text[i];
+		if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-'))
+			return 0;
+	}
+	return 1;
+}
+
+int dmesh_resolve_service_key(const char *namespace_name, const char *query,
+			      char *out, size_t out_len)
+{
+	if (namespace_name == NULL || query == NULL || out == NULL || out_len == 0)
+		return -1;
+	const char *dot = strchr(query, '.');
+	const char *ns = dot != NULL ? dot + 1 : namespace_name;
+	size_t name_len = dot != NULL ? (size_t)(dot - query) : strlen(query);
+	size_t ns_len = strlen(ns);
+	if ((dot != NULL && strchr(dot + 1, '.') != NULL) ||
+	    !resolve_dns_label(query, name_len) || !resolve_dns_label(ns, ns_len) ||
+	    ns_len + 1 + name_len + 1 > out_len)
+		return -1;
+	snprintf(out, out_len, "%.*s/%.*s", (int)ns_len, ns,
+	         (int)name_len, query);
+	return 0;
+}
+
 static void server_send_task_completion_callback(struct doca_comch_task_send *task,
 						 union doca_data task_user_data,
 						 union doca_data ctx_user_data)
@@ -267,7 +297,8 @@ static void server_message_recv_callback(struct doca_comch_event_msg_recv *event
 	case DMESH_MSG_RESOLVE: {
 		const struct dmesh_resolve_msg *req =
 			(const struct dmesh_resolve_msg *)recv_buffer;
-		if (msg_len != sizeof(*req) || req->version != 1 ||
+		if (msg_len != sizeof(*req) || req->version != 1 || req->by_name > 1 ||
+		    req->reserved != 0 || req->reserved2 != 0 ||
 		    memchr(req->name, '\0', sizeof(req->name)) == NULL) {
 			DOCA_LOG_ERR("Received invalid RESOLVE message");
 			return;
@@ -292,16 +323,11 @@ static void server_message_recv_callback(struct doca_comch_event_msg_recv *event
 				/* "name" resolves in the requester's own namespace,
 				 * "name.namespace" is the DNS convention for a
 				 * cross-namespace peer. */
-				const char *dot = strchr(req->name, '.');
-				if (dot != NULL)
-					snprintf(service_key, sizeof(service_key), "%.*s/%.*s",
-					         (int)strlen(dot + 1), dot + 1,
-					         (int)(dot - req->name), req->name);
-				else if (pod->namespace_name[0] != '\0')
-					snprintf(service_key, sizeof(service_key), "%s/%s",
-					         pod->namespace_name, req->name);
-				else
+				if (dmesh_resolve_service_key(pod->namespace_name, req->name,
+				                              service_key,
+				                              sizeof(service_key)) != 0) {
 					service_key[0] = '\0';
+				}
 				if (service_key[0] != '\0')
 					service = dmesh_topology_service(objs, service_key);
 			} else {
@@ -326,8 +352,8 @@ static void server_message_recv_callback(struct doca_comch_event_msg_recv *event
 			/* The generation names every cluster Service, meshed or not
 			 * (the apiserver included). A facade connect() must only be
 			 * lifted onto the mesh when the Service can be served there:
-			 * today that is a live registered backend on this node; S8
-			 * widens it to the generation's endpoint set. A name lookup
+			 * that is a live registered backend on this node or an endpoint
+			 * the generation places on another node. A name lookup
 			 * is an explicit request for the mesh and stays as-is. */
 			int served = req->by_name;
 			if (!served) {
@@ -336,6 +362,11 @@ static void server_message_recv_callback(struct doca_comch_event_msg_recv *event
 					served = __atomic_load_n(&objs->pods[i].registered,
 					                         __ATOMIC_ACQUIRE) &&
 					         objs->pods[i].service_id == service->interned;
+				if (!served) {
+					struct dmesh_endpoint_ref remote;
+					served = dmesh_topology_remote_endpoints(
+						objs, service->interned, objs->node_name, &remote, 1) > 0;
+				}
 			}
 			if (served) {
 				ack.status = 0;
@@ -822,6 +853,9 @@ pod_has_imported_resources(const struct pod_state *pod)
 {
 	if (pod->remote_mmap || pod->host_rx_mmap)
 		return 1;
+	for (int w = 1; w < MAX_ARM_WORKERS; w++)
+		if (pod->host_rx_worker_mmaps[w] != NULL)
+			return 1;
 	for (int j = 0; j < MAX_EU_PER_POD; j++)
 		if (pod->buf_arrs[j] || pod->ring_mmaps[j] ||
 		    pod->rev_ring_mmaps[j])
@@ -1063,10 +1097,21 @@ pod_destroy_imported_resources(struct pod_state *pod)
 		}
 		pod->remote_mmap = NULL;
 	}
+	for (int w = 1; w < MAX_ARM_WORKERS; w++) {
+		if (pod->host_rx_worker_mmaps[w] == NULL)
+			continue;
+		doca_error_t result = doca_mmap_destroy(pod->host_rx_worker_mmaps[w]);
+		if (result != DOCA_SUCCESS) {
+			DOCA_LOG_ERR("pod %d: worker %d RX mmap reclaim failed: %s",
+			             pod->pod_id, w, doca_error_get_name(result));
+			return 0;
+		}
+		pod->host_rx_worker_mmaps[w] = NULL;
+	}
 	if (pod->host_rx_mmap != NULL) {
 		doca_error_t result = doca_mmap_destroy(pod->host_rx_mmap);
 		if (result != DOCA_SUCCESS) {
-			DOCA_LOG_ERR("pod %d: RX mmap reclaim failed: %s",
+			DOCA_LOG_ERR("pod %d: worker 0 RX mmap reclaim failed: %s",
 			             pod->pod_id, doca_error_get_name(result));
 			return 0;
 		}
@@ -1227,8 +1272,10 @@ pods_register(struct objects *objs, struct doca_comch_connection *conn,
 		int32_t service_id = DMESH_SVC_NONE;
 		if (service_name[0] != '\0') {
 			char service_key[DMESH_K8S_NAMESPACE_MAX + DMESH_SVC_NAME_MAX];
-			snprintf(service_key, sizeof(service_key), "%s/%s",
-			         objs->pods[i].namespace_name, service_name);
+			snprintf(service_key, sizeof(service_key), "%.*s/%.*s",
+			         (int)sizeof(objs->pods[i].namespace_name) - 1,
+			         objs->pods[i].namespace_name,
+			         (int)DMESH_SVC_NAME_MAX - 1, service_name);
 			service_id = dmesh_topology_interned_id(objs, service_key);
 			if (service_id < 0) {
 				DOCA_LOG_ERR("pods_register: no interned id for %s "

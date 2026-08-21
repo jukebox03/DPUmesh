@@ -38,6 +38,7 @@ static const char      *g_service = "verbs-dpumesh";  /* own service NAME (self-
  * PERMANENT alloc faults (EINVAL); an SQ-full EAGAIN is backpressure, not a failure,
  * and is counted separately — a non-zero eagain with ok==N is a healthy run. */
 static long D_cl_sent, D_cl_recv, D_sv_recv, D_sv_sent;
+static uint64_t D_cl_sent_bytes, D_cl_recv_bytes, D_sv_recv_bytes, D_sv_sent_bytes;
 static long D_cl_allocfail, D_cl_postfail, D_sv_allocfail, D_sv_postfail;
 static long D_cl_eagain, D_sv_eagain;
 
@@ -64,6 +65,8 @@ typedef struct {
     uint32_t    reqno;         /* monotonic request counter -> marker */
     out_slot_t  ring[MAX_PIPELINE];
     int         cap, head, cnt;/* FIFO ring of outstanding requests */
+    uint32_t    rx_off;        /* bytes received in the reply at ring[head] */
+    int         rx_bad;        /* that logical reply has a corrupt byte */
     int         done;          /* target met (or faulted) -> FIN, retired by the sweep */
 } cstate_t;
 
@@ -102,6 +105,7 @@ static int post_request(dmesh_qp_t *c) {
 
     cs->ring[(cs->head + cs->cnt) % cs->cap] = (out_slot_t){ .marker = m, .t0 = now_sec() };
     cs->cnt++; cs->reqno++; cs->sent++; D_cl_sent++;
+    D_cl_sent_bytes += cs->size;
     return 0;
 }
 
@@ -141,7 +145,7 @@ static int sq_drain(dmesh_qp_t *c) {
         if (dmesh_post_send(c, b, m->len) != 0) { D_sv_postfail++; ss->dead = 1; break; }
         free(m->b);
         ss->head = (ss->head + 1) % ss->cap; ss->cnt--;
-        D_sv_sent++; posted++;
+        D_sv_sent++; D_sv_sent_bytes += m->len; posted++;
     }
     if (posted && dmesh_flush(c) != 0) { D_sv_postfail++; ss->dead = 1; }
     return posted;
@@ -162,7 +166,7 @@ static int srv_recv(dmesh_qp_t *c, const dmesh_event_t *w) {
                 ss->dead = 1;
                 return 0;
             }
-            D_sv_sent++;
+            D_sv_sent++; D_sv_sent_bytes += w->len;
             return 1;
         }
         if (errno != EAGAIN) { D_sv_allocfail++; ss->dead = 1; return 0; }
@@ -198,6 +202,7 @@ static void run_verbs(int conn_fd, long N, uint32_t size, int zc,
         ctl_reply(conn_fd, reply, (size_t)n); return;
     }
     D_cl_sent = D_cl_recv = D_sv_recv = D_sv_sent = 0;
+    D_cl_sent_bytes = D_cl_recv_bytes = D_sv_recv_bytes = D_sv_sent_bytes = 0;
     D_cl_allocfail = D_cl_postfail = D_sv_allocfail = D_sv_postfail = 0;
     D_cl_eagain = D_sv_eagain = 0;
 
@@ -258,24 +263,41 @@ static void run_verbs(int conn_fd, long N, uint32_t size, int zc,
             case DMESH_EVENT_RECV:
                 if (c->role == DMESH_ROLE_SERVER) {          /* a request -> echo verbatim */
                     D_sv_recv++;
+                    D_sv_recv_bytes += events[i].len;
                     served += srv_recv(c, &events[i]);
                     dmesh_release_rx_buffer(g_s, &events[i]);
                 } else {                                     /* a reply -> validate FIFO */
                     D_cl_recv++;
+                    D_cl_recv_bytes += events[i].len;
                     cstate_t *cs = (cstate_t *)c->user_data;
-                    int bad = 1;
-                    if (cs && cs->cnt > 0 && events[i].len == cs->size) {
+                    uint32_t pos = 0;
+                    /* A QP is a byte stream: Linkerd and the transport may split one
+                     * post across RECV events or coalesce several posts into one. Walk
+                     * the FIFO by bytes and complete only whole logical validator
+                     * records. This still detects corruption, loss and reordering, but
+                     * does not invent a message-boundary promise the API does not make. */
+                    while (cs && pos < events[i].len && cs->cnt > 0 && !cs->done) {
                         out_slot_t os = cs->ring[cs->head];
-                        cs->head = (cs->head + 1) % cs->cap; cs->cnt--;
-                        bad = 0;                                 /* full byte-exact compare */
-                        for (uint32_t j = 0; j < cs->size; j++)
-                            if (events[i].buf[j] != patb(os.marker, j)) { bad = 1; break; }
-                        if (!bad && nlat < N) lat[nlat++] = (now_sec() - os.t0) * 1e6;
-                    }
-                    dmesh_release_rx_buffer(g_s, &events[i]);
-                    if (bad) fail++; else ok++;
-                    completed++;
-                    if (cs) {
+                        uint32_t take = cs->size - cs->rx_off;
+                        if (take > events[i].len - pos) take = events[i].len - pos;
+                        for (uint32_t j = 0; j < take; j++) {
+                            if (events[i].buf[pos + j] != patb(os.marker, cs->rx_off + j))
+                                cs->rx_bad = 1;
+                        }
+                        cs->rx_off += take;
+                        pos += take;
+                        if (cs->rx_off != cs->size) continue;
+
+                        cs->head = (cs->head + 1) % cs->cap;
+                        cs->cnt--;
+                        cs->rx_off = 0;
+                        if (cs->rx_bad) fail++;
+                        else {
+                            ok++;
+                            if (nlat < N) lat[nlat++] = (now_sec() - os.t0) * 1e6;
+                        }
+                        cs->rx_bad = 0;
+                        completed++;
                         cs->acked++;
                         if (cs->sent < cs->target) {         /* keep the pipe full */
                             int r = post_request(c);         /* r > 0: SQ full — the sweep retries */
@@ -283,6 +305,14 @@ static void run_verbs(int conn_fd, long N, uint32_t size, int zc,
                         } else if (cs->acked >= cs->target && cs->cnt == 0) {
                             cs->done = 1;                    /* -> FIN, sent by the sweep */
                         }
+                    }
+                    dmesh_release_rx_buffer(g_s, &events[i]);
+                    if (!cs || pos != events[i].len) {
+                        /* Bytes with no corresponding posted request are a terminal
+                         * stream-contract violation, not a fragment-shape mismatch. */
+                        fail += N - completed;
+                        completed = N;
+                        if (cs) cs->done = 1;
                     }
                 }
                 break;
@@ -347,12 +377,18 @@ static void run_verbs(int conn_fd, long N, uint32_t size, int zc,
     /* Anything still outstanding at the deadline counts as failed. */
     if (completed < N) {
         fail += (N - completed);
-        fprintf(stderr, "[verbs] WEDGE DIAG: cl_sent=%ld sv_recv=%ld sv_sent=%ld cl_recv=%ld "
-                "| fwd_gap(cl_sent-sv_recv)=%ld rev_gap(sv_sent-cl_recv)=%ld "
+        fprintf(stderr, "[verbs] WEDGE DIAG: cl_sent=%ld sv_recv_frag=%ld sv_sent_frag=%ld cl_recv_frag=%ld "
+                "| bytes cl_sent=%llu sv_recv=%llu sv_sent=%llu cl_recv=%llu "
+                "| fwd_byte_gap=%lld rev_byte_gap=%lld "
                 "| cl_allocfail=%ld cl_postfail=%ld sv_allocfail=%ld sv_postfail=%ld "
                 "| cl_eagain=%ld sv_eagain=%ld | nserv=%d\n",
                 D_cl_sent, D_sv_recv, D_sv_sent, D_cl_recv,
-                D_cl_sent - D_sv_recv, D_sv_sent - D_cl_recv,
+                (unsigned long long)D_cl_sent_bytes,
+                (unsigned long long)D_sv_recv_bytes,
+                (unsigned long long)D_sv_sent_bytes,
+                (unsigned long long)D_cl_recv_bytes,
+                (long long)(D_cl_sent_bytes - D_sv_recv_bytes),
+                (long long)(D_sv_sent_bytes - D_cl_recv_bytes),
                 D_cl_allocfail, D_cl_postfail, D_sv_allocfail, D_sv_postfail,
                 D_cl_eagain, D_sv_eagain, nserv);
         for (int i = 0; i < window; i++) {
@@ -370,6 +406,9 @@ static void run_verbs(int conn_fd, long N, uint32_t size, int zc,
     while (nserv > 0) srv_retire(servers, &nserv, servers[0]);
 
 report:
+    /* `served` is a logical validator-record count. Fragment counts are retained
+     * separately in diagnostics because an opaque stream may reshape them. */
+    served = (long)(D_sv_recv_bytes / size);
     qsort(lat, (size_t)nlat, sizeof(double), cmp_d);
     double p50 = nlat ? lat[nlat / 2] : 0.0;
     int rn = snprintf(reply, sizeof reply, "OK %ld %ld %ld %.1f\n", ok, fail, served, p50);

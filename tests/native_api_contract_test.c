@@ -149,6 +149,20 @@ main(void)
     assert(commit_calls == 3);            /* no commit attempted */
     assert(gate_depth == 0);              /* and no gate released */
 
+    /* A zero-length commit is invalid, but it still closes the transmit call.
+     * Otherwise one bad post leaves the QP's gate held forever. */
+    assert(dmesh_alloc(&qp, 32) == reservation);
+    errno = 0;
+    assert(dmesh_post_send(&qp, reservation, 0) == -1);
+    assert(errno == EINVAL);
+    assert(commit_calls == 4);
+    assert(after_commit_calls == 2);
+    assert(gate_depth == 0);
+    assert(dmesh_alloc(&qp, 32) == reservation);
+    assert(dmesh_post_send(&qp, reservation, 32) == 0);
+    assert(commit_calls == 5);
+    assert(after_commit_calls == 3);
+
     /* poll_eq exposes the core one-shot as a payload-free API event. */
     struct dmesh_eq eq = {0};
     dmesh_event_t event = {0};

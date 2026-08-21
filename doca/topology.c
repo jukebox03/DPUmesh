@@ -543,13 +543,15 @@ dmesh_topology_parse(const char *document, size_t length,
 
     /* Sort, then refuse duplicates: a duplicate pod= for one UID (and one
      * service= for one Service) would make lookups ambiguous. */
-    qsort(tables->pods, tables->pod_count, sizeof(*tables->pods),
-          compare_pod_uid);
+    if (tables->pod_count > 1)
+        qsort(tables->pods, tables->pod_count, sizeof(*tables->pods),
+              compare_pod_uid);
     for (size_t p = 1; p < tables->pod_count; p++)
         if (strcmp(tables->pods[p - 1].uid, tables->pods[p].uid) == 0)
             goto malformed;
-    qsort(tables->services, tables->service_count, sizeof(*tables->services),
-          compare_service_key);
+    if (tables->service_count > 1)
+        qsort(tables->services, tables->service_count,
+              sizeof(*tables->services), compare_service_key);
     for (size_t s = 1; s < tables->service_count; s++)
         if (strcmp(tables->services[s - 1].key, tables->services[s].key) == 0)
             goto malformed;
@@ -569,12 +571,12 @@ dmesh_topology_parse(const char *document, size_t length,
             goto malformed;
         struct dmesh_gen_service probe_service;
         snprintf(probe_service.key, sizeof(probe_service.key), "%s", key);
-        struct dmesh_gen_service *service =
+        struct dmesh_gen_service *service = tables->service_count == 0 ? NULL :
             bsearch(&probe_service, tables->services, tables->service_count,
                     sizeof(*tables->services), compare_service_key);
         struct dmesh_gen_pod probe_pod;
         snprintf(probe_pod.uid, sizeof(probe_pod.uid), "%s", uid);
-        struct dmesh_gen_pod *pod =
+        struct dmesh_gen_pod *pod = tables->pod_count == 0 ? NULL :
             bsearch(&probe_pod, tables->pods, tables->pod_count,
                     sizeof(*tables->pods), compare_pod_uid);
         if (service == NULL || pod == NULL)
@@ -585,8 +587,9 @@ dmesh_topology_parse(const char *document, size_t length,
             (uint32_t)(pod - tables->pods);
         tables->endpoint_count++;
     }
-    qsort(tables->endpoints, tables->endpoint_count,
-          sizeof(*tables->endpoints), compare_endpoint);
+    if (tables->endpoint_count > 1)
+        qsort(tables->endpoints, tables->endpoint_count,
+              sizeof(*tables->endpoints), compare_endpoint);
     for (size_t s = 0, e = 0; s < tables->service_count; s++) {
         tables->services[s].endpoint_first = (uint32_t)e;
         while (e < tables->endpoint_count &&
@@ -603,7 +606,7 @@ dmesh_topology_parse(const char *document, size_t length,
             goto malformed;
         struct dmesh_gen_service probe_service;
         snprintf(probe_service.key, sizeof(probe_service.key), "%s", key);
-        struct dmesh_gen_service *service =
+        struct dmesh_gen_service *service = tables->service_count == 0 ? NULL :
             bsearch(&probe_service, tables->services, tables->service_count,
                     sizeof(*tables->services), compare_service_key);
         if (service == NULL)
@@ -910,6 +913,54 @@ dmesh_topology_remote_endpoints(const struct objects *objs, int16_t svc,
 }
 
 int
+dmesh_topology_remote_endpoint(const struct objects *objs, int16_t svc,
+                               const char *node_name, const char *pod_uid,
+                               uint64_t ordinal, struct dmesh_endpoint_ref *out)
+{
+    const struct dmesh_topology_tables *tables = topology_tables_acquire(objs);
+    if (tables == NULL || svc < 0 || out == NULL)
+        return 0;
+    for (size_t s = 0; s < tables->service_count; s++) {
+        const struct dmesh_gen_service *service = &tables->services[s];
+        if (service->interned != svc)
+            continue;
+        uint32_t remote_count = 0;
+        for (uint32_t e = 0; e < service->endpoint_count; e++) {
+            const struct dmesh_gen_endpoint *endpoint =
+                &tables->endpoints[service->endpoint_first + e];
+            const struct dmesh_gen_pod *pod = &tables->pods[endpoint->pod];
+            if (node_name && strcmp(pod->node_name, node_name) == 0)
+                continue;
+            if (pod_uid && strcmp(pod->uid, pod_uid) == 0) {
+                out->pod_uid = pod->uid;
+                out->node_name = pod->node_name;
+                out->ip_be = pod->ip_be;
+                return 1;
+            }
+            remote_count++;
+        }
+        if (pod_uid || remote_count == 0)
+            return 0;
+        uint32_t selected = (uint32_t)(ordinal % remote_count);
+        for (uint32_t e = 0; e < service->endpoint_count; e++) {
+            const struct dmesh_gen_endpoint *endpoint =
+                &tables->endpoints[service->endpoint_first + e];
+            const struct dmesh_gen_pod *pod = &tables->pods[endpoint->pod];
+            if (node_name && strcmp(pod->node_name, node_name) == 0)
+                continue;
+            if (selected-- == 0) {
+                out->pod_uid = pod->uid;
+                out->node_name = pod->node_name;
+                out->ip_be = pod->ip_be;
+                return 1;
+            }
+        }
+        return 0;
+    }
+    return 0;
+}
+
+int
 dmesh_topology_service_protection(const struct objects *objs, int16_t svc)
 {
     const struct dmesh_topology_tables *tables = topology_tables_acquire(objs);
@@ -940,6 +991,37 @@ dmesh_topology_pod_on_node(const struct objects *objs, const char *pod_uid,
     const struct dmesh_gen_pod *pod = dmesh_topology_pod(objs, pod_uid);
     return pod != NULL && node_name != NULL &&
            strcmp(pod->node_name, node_name) == 0;
+}
+
+int
+dmesh_topology_pod_in_service(const struct objects *objs, const char *pod_uid,
+                              const char *service_key)
+{
+    const struct dmesh_topology_tables *tables = topology_tables_acquire(objs);
+    if (tables == NULL || pod_uid == NULL || service_key == NULL)
+        return 0;
+    uint32_t pod_index = UINT32_MAX;
+    for (size_t p = 0; p < tables->pod_count; p++) {
+        if (strcmp(tables->pods[p].uid, pod_uid) == 0) {
+            pod_index = (uint32_t)p;
+            break;
+        }
+    }
+    if (pod_index == UINT32_MAX)
+        return 0;
+    for (size_t s = 0; s < tables->service_count; s++) {
+        const struct dmesh_gen_service *service = &tables->services[s];
+        if (strcmp(service->key, service_key) != 0)
+            continue;
+        for (uint32_t e = 0; e < service->endpoint_count; e++) {
+            const struct dmesh_gen_endpoint *endpoint =
+                &tables->endpoints[service->endpoint_first + e];
+            if (endpoint->pod == pod_index)
+                return 1;
+        }
+        return 0;
+    }
+    return 0;
 }
 
 int

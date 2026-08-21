@@ -308,6 +308,10 @@ struct pod_state {
 
     /* Host RX buffer mmap (exported from Host; the egress SG-DMA lands into it) */
     struct doca_mmap *host_rx_mmap;
+    /* Imported mmaps are not fast-path thread-safe. Worker 0 uses the canonical
+     * handle above; every other egress worker owns an independent handle over
+     * the same exported range. */
+    struct doca_mmap *host_rx_worker_mmaps[MAX_ARM_WORKERS];
     void *host_rx_addr;
     size_t host_rx_buf_size;
     struct doca_mmap *rev_ring_mmaps[MAX_EU_PER_POD];
@@ -321,6 +325,16 @@ struct pod_state {
     uint32_t rq_depth;
 
 };
+
+static inline struct doca_mmap *
+pod_host_rx_mmap_for_worker(const struct pod_state *pod, int worker_id)
+{
+    if (worker_id <= 0)
+        return pod->host_rx_mmap;
+    if (worker_id >= MAX_ARM_WORKERS)
+        return NULL;
+    return pod->host_rx_worker_mmaps[worker_id];
+}
 
 /* Acquire the DMA publication gate before reading the pod's data-plane fields. */
 static inline int pod_data_ready(const struct pod_state *pod) {
@@ -338,6 +352,10 @@ struct dpu_upstream {
     uint16_t client_port;   /* the downstream client's REAL port */
     int32_t  backend_pod;
     uint8_t  l7_mode;      /* enum px_l7_mode, inherited by the reply */
+    /* TCP FIN is directional. Keep the return mapping until both input halves
+     * ended; otherwise shutdown(SHUT_WR) makes a later response unroutable. */
+    uint8_t  client_fin_sent;
+    uint8_t  backend_fin_seen;
     uint16_t delivery_seq;
 };
 
@@ -405,6 +423,8 @@ static inline uint16_t dpu_upstream_create(struct dpu_conntrack *ct, int32_t cp,
     ct->upstream[uP].client_port = cport;
     ct->upstream[uP].backend_pod = bpod;
     ct->upstream[uP].l7_mode     = l7_mode;
+    ct->upstream[uP].client_fin_sent = 0;
+    ct->upstream[uP].backend_fin_seen = 0;
     ct->upstream[uP].delivery_seq = 0;
     uint32_t mask = DPU_CONN_HT_SIZE - 1u, i = dpu_ct_hash(cp, cport, bpod);
     for (uint32_t n = 0; n < DPU_CONN_HT_SIZE; n++) {
