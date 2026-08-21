@@ -3022,6 +3022,43 @@ int32_t dmesh_l7_pod_for_uid(int worker_id, const char *pod_uid) {
                                 "no live registration serves it");
 }
 
+/* The destinations this worker serves, as inbound policy subjects.
+ *
+ * The L7 layer holds one policy watch per destination Pod and port for as long
+ * as that Pod is served, so it needs to know both when one appears and when one
+ * is gone. Registration happens on the control thread and each worker's watches
+ * are its own, which is why the workers reconcile against this rather than
+ * being told. A Pod with no Service port publishes nothing to watch and is
+ * left out. */
+int dmesh_l7_workloads(int worker_id, struct dmesh_l7_workload *out, int max) {
+    struct px_worker_state *worker_state = px_cur_worker;
+    if (!worker_state || worker_state->id != worker_id || !out || max <= 0)
+        return -1;
+    struct objects *objs = worker_state->objs;
+    int np = __atomic_load_n(&objs->num_pods, __ATOMIC_ACQUIRE);
+    int written = 0;
+    for (int i = 0; i < np && written < max; i++) {
+        struct pod_state *pod = &objs->pods[i];
+        if (!__atomic_load_n(&pod->registered, __ATOMIC_ACQUIRE) ||
+            !pod_data_ready(pod) || pod->workload[0] == '\0' ||
+            pod->service_id < 0)
+            continue;
+        if (__atomic_load_n(&pod->scope_state, __ATOMIC_ACQUIRE) !=
+            DMESH_SCOPE_ALLOWED)
+            continue;
+        uint16_t port = dmesh_topology_service_port(objs,
+                                                    (int16_t)pod->service_id);
+        if (port == 0)
+            continue;
+        struct dmesh_l7_workload *slot = &out[written++];
+        memset(slot, 0, sizeof(*slot));
+        snprintf(slot->workload, sizeof(slot->workload), "%s", pod->workload);
+        slot->ip = px_pod_ipv4(pod);
+        slot->port = port;
+    }
+    return written;
+}
+
 int dmesh_l7_backends(int worker_id, int32_t service, int32_t *out, int max) {
     struct px_worker_state *worker_state = px_cur_worker;
     if (!worker_state || worker_state->id != worker_id || !out || max <= 0 ||

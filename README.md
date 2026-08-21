@@ -48,13 +48,10 @@ RDMA verbs, because the native API has the same shape.
 | staging | DPU memory holding arrived bytes until the DPU has finished sending them on |
 | `N` / `K` / `A` / `L` | DPA execution units / forward rings per pod / ARM data workers / receive-side landing stripes |
 
-The host exposes three integration surfaces:
-
-| Surface | Purpose |
-|---|---|
-| `<dpumesh/dmesh.h>` | Native channel/EQ/QP API with registered TX and zero-copy RX |
-| `libdmesh_preload.so` | POSIX socket compatibility for libc-based C/C++ binaries |
-| `integrations/grpc` | gRPC C++ v1.80 Endpoint and PassiveListener integration |
+The host exposes three integration surfaces — the native
+`<dpumesh/dmesh.h>` API, a POSIX socket shim for libc binaries, and a gRPC C++
+integration. [Using it from an application](#using-it-from-an-application) is
+where to start; the rest of this section is what sits underneath all three.
 
 The shared libdpumesh send core batches all three surfaces. `dmesh_alloc()`
 reserves registered bytes and `dmesh_post_send()` commits them into one ordered
@@ -118,50 +115,190 @@ tests/                 fast host-only ABI and state-machine regression tests
 design/                current API, data-plane, control-plane and gRPC whitepapers
 ```
 
-## Build and test
+## Using it from an application
 
-In a DOCA development environment:
+An application addresses a Kubernetes Service by name and never names a backend.
+Three surfaces reach the transport; which one to use follows from what the
+application already is.
 
-```sh
-make -j2
-make test
-```
+| The application is | Surface | Source change |
+|---|---|---|
+| an existing libc TCP binary | `libdmesh_preload.so` | none |
+| new, or already event-loop shaped | `<dpumesh/dmesh.h>` | writes against the native API |
+| gRPC C++ | `integrations/grpc` | channel and server bootstrap only |
 
-The build produces `build/lib/libdpumesh.so.5`, the preload library, and native
-bench/validator binaries. The library target tracks all source and header inputs;
-public-header changes therefore rebuild both ABI and consumers.
+All three register the same way, under the same signed grant, and share the same
+send core. Mixing them in one process is not a supported arrangement: one
+process holds one channel.
 
-`make test` runs the host-only native contract suite without requiring a DPU.
-Its scope and relationship to hardware validation are documented in
-[`bench/README.md`](bench/README.md#6-correctness-validation).
+### No source change: the preload shim
 
-The BlueField program is built from `doca/meson.build`. The supported benchmark
-bring-up path rebuilds and deploys both sides together:
-
-```sh
-./bench/bench.sh deploy
-./bench/bench.sh latency dpumesh
-```
-
-The deployment geometry is `N/K/A/L=32/8/8/8`: 32 DPA execution units, eight
-rings per Pod, eight ARM data workers, and eight receive landing stripes. Each
-Pod exposes one ring to each worker; each worker owns four DPA EUs, its
-connection shard, DMA engine, reverse-ring producer, and Linkerd runtime. A
-connection remains on that shard for its lifetime.
-
-The gRPC adapter has an independent CMake build:
+The shim interposes the POSIX socket calls and routes the connections whose
+destination resolves to a meshed Service; every other descriptor stays
+kernel-backed. It hands the application a real kernel file descriptor, so
+`epoll`, `poll` and `select` see ordinary readiness and an event loop needs no
+change.
 
 ```sh
-cmake -S integrations/grpc -B build/grpc \
-  -DDPUMESH_GRPC_SOURCE_DIR=/path/to/grpc-v1.80.0
-cmake --build build/grpc -j2
-ASAN_OPTIONS=detect_leaks=0 ctest --test-dir build/grpc --output-on-failure
+# a server: take over the port it listens on
+LD_PRELOAD=/usr/local/lib/libdmesh_preload.so \
+DPUMESH_SERVICE=echo-dpumesh DPUMESH_PORT=9095 ./my-server
+
+# a client: connect() to the Service as usual, by DNS or ClusterIP
+LD_PRELOAD=/usr/local/lib/libdmesh_preload.so ./my-client
 ```
 
-LeakSanitizer is disabled; AddressSanitizer and the functional test suite run.
-Clients use a Service-name target and ordinary gRPC channel arguments. Each
-connection attempt creates a QP and a session-local HTTP/2 transport in the
-DPU-hosted Linkerd proxy; its selected backend remains pinned for that session.
+`DPUMESH_SERVICE` names the Service this process serves; a client-only process
+leaves it unset. `DPUMESH_PORT` is the listening port to take over, and its
+absence means the process is not a server.
+
+The shim reaches a binary only through `dlsym(RTLD_NEXT, …)`. A static link, or
+a runtime that issues syscalls without going through libc — every Go program —
+cannot be interposed, and those workloads need the native API instead.
+
+### The native API
+
+One channel per process, one event queue per polling thread, one QP per
+byte stream. A QP is the equivalent of a TCP connection; the DPU chooses which
+backend of the Service it lands on.
+
+```c
+#include <dpumesh/dmesh.h>
+
+dmesh_channel_t *ch = dmesh_create_channel();              /* registers as $DPUMESH_SERVICE */
+dmesh_eq_t      *eq = dmesh_create_eq(ch);                 /* one per polling thread */
+dmesh_qp_t      *qp = dmesh_create_qp(eq, "echo-dpumesh"); /* a Service name, not an address */
+```
+
+Sending reserves registered bytes, fills them, and commits. The reservation is
+the transport's own memory, so the committed bytes are never copied through the
+kernel:
+
+```c
+void *tx = dmesh_alloc(qp, len);
+if (tx == NULL) {
+    /* EAGAIN: the window is full. Park this write and retry it when
+     * DMESH_EVENT_TX_READY arrives for this QP. Readiness is a one-shot
+     * hint, not a reservation. */
+} else {
+    memcpy(tx, payload, len);
+    dmesh_post_send(qp, tx, len);   /* ownership transfers on success */
+}
+```
+
+Receiving reads in place out of the RX mapping and returns the credit:
+
+```c
+dmesh_event_t ev[32];
+int n = dmesh_poll_eq(eq, ev, 32);
+for (int i = 0; i < n; i++) {
+    switch (ev[i].type) {
+    case DMESH_EVENT_RECV:                       /* ev[i].buf points into the RX mapping */
+        handle(ev[i].qp, ev[i].buf, ev[i].len);
+        dmesh_release_rx_buffer(ch, &ev[i]);     /* until this, the buffer is yours */
+        break;
+    case DMESH_EVENT_CONN_REQ:  accept_conn(ev[i].qp);      break;  /* server side */
+    case DMESH_EVENT_RECV_FIN:  peer_closed(ev[i].qp);      break;
+    case DMESH_EVENT_TX_READY:  retry_parked(ev[i].qp);     break;
+    case DMESH_EVENT_TX_ERROR:  fail_conn(ev[i].qp);        break;
+    }
+}
+```
+
+A server does not listen. It creates a channel under its own
+`DPUMESH_SERVICE` and takes the QP that arrives with `DMESH_EVENT_CONN_REQ`;
+`ev.qp->user_data` is where per-connection context belongs.
+
+To fold this into an existing event loop, `dmesh_eq_fd()` gives an eventfd to
+add to `epoll` — drain it on wake, then poll until empty — and
+`dmesh_eq_next_deadline_ns()` bounds the loop's own timeout so a buffered
+transmit tail is not left waiting. Batching itself is library-owned:
+`dmesh_post_send()` submits complete units immediately and publishes a partial
+tail at a bounded deadline, and `dmesh_flush()` forces it earlier.
+[design/API.md](design/API.md) is the full contract.
+
+Build against the installed header and link `libdpumesh.so.5`:
+
+```sh
+cc app.c -I/path/to/include -ldpumesh -o app
+```
+
+### gRPC C++
+
+Generated stubs, services, RPC semantics, metadata, deadlines and credentials
+are unchanged. Only bootstrap differs: the channel target is a Service name
+rather than an address, and the server takes connections from a
+`PassiveListener` instead of binding a port.
+
+```cpp
+auto runtime = dpumesh::grpc::DmeshRuntime::Create(
+    dpumesh::grpc::MakeNativeDmeshApiOps());
+
+// client
+auto channel = dpumesh::grpc::CreateDmeshChannel(
+    *runtime, "echo-dpumesh", grpc::InsecureChannelCredentials(), args);
+auto stub = Echo::NewStub(*channel);
+
+// server
+grpc::ServerBuilder builder;
+builder.RegisterService(&service);
+std::unique_ptr<grpc::experimental::PassiveListener> listener;
+builder.experimental().AddPassiveListener(credentials, listener);
+auto server = builder.BuildAndStart();
+auto attachment = dpumesh::grpc::AttachDmeshGrpcServer(*runtime, listener.get());
+```
+
+Create one runtime per process and share it across every channel and the server
+attachment. Link `grpc_dpumesh`;
+[integrations/grpc/README.md](integrations/grpc/README.md) covers the build and
+the connection lifecycle.
+
+### What the Pod must carry
+
+There is no injection webhook, so a meshed Pod declares its own access to the
+transport. The five parts below are all required, and
+[bench/k8s/pods.yaml](bench/k8s/pods.yaml) is a working example of each.
+
+```yaml
+metadata:
+  annotations:
+    config.linkerd.io/skip-inbound-ports: "9092"   # the Service port
+spec:
+  containers:
+  - name: app
+    env:
+    - { name: DPUMESH_PCI_ADDR, value: "<host PCI function>" }
+    - { name: DPUMESH_SERVICE,  value: "echo-dpumesh" }        # this Pod's Service
+    securityContext: { privileged: true }
+    volumeMounts:
+    - { mountPath: /dev/infiniband, name: infiniband }
+    - { mountPath: /usr/local/lib/libdpumesh.so.5, name: libdpumesh, subPath: libdpumesh.so.5 }
+    - { mountPath: /run/dpumesh, name: attest, readOnly: true }  # the node agent's socket
+```
+
+The annotation is part of the data path, not a tuning choice. It is what keeps
+Linkerd's destination controller advertising the backend as unmeshed; without
+it the controller offers an endpoint that expects a second proxy, and sessions
+end before carrying a byte.
+
+### What to expect from the mesh
+
+- A Service's Pods must be on a node running `dpumesh_dpu`, and a node serves at
+  most 32 meshed Pods.
+- The deployment assigns each Service a protocol treatment: native and preload
+  Services are opaque byte streams, gRPC Services take Linkerd's HTTP/2 path.
+  Policy, discovery and balancing run either way; per-request routing needs the
+  HTTP/2 path.
+- A backend is chosen per session. Several client connections or gRPC channels
+  spread across backends; one does not.
+- An `HTTPRoute` may reorder, filter or reject requests within its parent
+  Service; it may not route them into a different Service.
+- Traffic between Pods on one node is plaintext inside registered DMA mappings.
+  Between nodes it is carried by the authenticated RDMA peer channel. There is
+  no per-hop proxy TLS.
+
+Building the library and bringing up a cluster are covered in
+[bench/README.md](bench/README.md).
 
 ## Documentation
 

@@ -25,6 +25,13 @@
         }                                                                      \
     } while (0)
 
+/* struct dmesh_l7_workload */
+_Static_assert(sizeof(struct dmesh_l7_workload) == 392, "workload size");
+_Static_assert(_Alignof(struct dmesh_l7_workload) == 4, "workload alignment");
+_Static_assert(offsetof(struct dmesh_l7_workload, workload) == 0, "workload");
+_Static_assert(offsetof(struct dmesh_l7_workload, ip) == 384, "ip");
+_Static_assert(offsetof(struct dmesh_l7_workload, port) == 388, "port");
+
 /* struct dmesh_l7_flow */
 _Static_assert(sizeof(struct dmesh_l7_flow) == 664, "flow size");
 _Static_assert(_Alignof(struct dmesh_l7_flow) == 4, "flow alignment");

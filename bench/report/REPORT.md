@@ -59,13 +59,13 @@ own verdict counters.
 
 | Arm | Attached | Requests completed | Verdicts |
 |---|---|---:|---|
-| P0 | nothing | 40,703 | 205 admitted |
+| P0 | nothing | 41,955 | 211 admitted |
 | P1 | a `Server` and no authorization | 0 | 1 denied |
-| P2 | + `AuthorizationPolicy` naming the caller's identity | 45,281 | 227 admitted |
+| P2 | + `AuthorizationPolicy` naming the caller's identity | 44,582 | 224 admitted |
 | P3 | the same, naming a different identity | 0 | 1 denied |
-| P4 | + `AuthorizationPolicy` naming the caller's address | 45,295 | 227 admitted |
+| P4 | + `AuthorizationPolicy` naming the caller's address | 44,100 | 221 admitted |
 | P5 | the same, naming a different network | 0 | 1 denied |
-| P6 | nothing | 63,889 | 320 admitted |
+| P6 | nothing | 42,046 | 211 admitted |
 
 The `Server` stays attached from P1 to P5; a `Server` with no authorization
 denies everything, which is what makes P1 the deny arm and what each later arm
@@ -83,27 +83,48 @@ cluster address that assertion binds — which matters because an authorization'
 denies, so a synthetic source address would make every realistic policy refuse
 every connection.
 
-### The watch has an idle timeout, and the timeout is fail-open
+### The verdict used to lapse when a Service fell quiet
 
-The inbound policy watch is held per destination workload and port, and it is
-dropped after 90 s with no connection to it. A rebuilt watch is created holding
-the *default* policy and is updated when the policy controller answers, so
-connections that arrive in between are decided by the default rather than by the
-policy.
+The first pass of these arms found a hole, and it is worth stating because the
+shape of it is not obvious from either the code or the traffic.
 
-| Watch state | First connections after the deny policy was attached |
+An inbound policy watch is held per destination workload and port, and the store
+that caches watches evicts one that has gone 90 s without a connection. An
+evicted watch is respawned holding the proxy's *configured* default, and its
+value is replaced only when the policy controller answers — asynchronously,
+after the connection that respawned it has already been decided. Each of the
+eight ARM workers holds its own store, so the window was one connection per
+worker, and it reopened every time a Service went quiet.
+
+| Arm, before the fix | Result |
 |---|---|
-| warm (P1, straight after a loaded arm) | 0 admitted, denied immediately |
-| rebuilt (P1b, after 100 s of silence) | **8 admitted**, then denied |
+| P1, watch warm from the previous arm | 0 admitted, refused on the first connection |
+| P1b, after 100 s of silence | **8 admitted**, then refused |
 
-The window is per worker rather than per process: each of the eight ARM workers
-holds its own Linkerd runtime, and the store the verdict is asked from is that
-worker's, so each rebuilds its own watch. Eight connections were served before
-the first refusal on an eight-worker deployment; a first pass of the same arm
-served nine. This is a real hole in an otherwise fail-closed design — a
-caller a policy refuses is admitted once per worker whenever its Service has
-been idle for 90 s — and it comes from the stock discovery configuration rather
-than from anything DPUmesh adds.
+Nothing about the traffic showed it. The run failed either way; only the verdict
+counter said whether it failed for the right reason.
+
+Three changes close it, and none of them is a timeout:
+
+- the adapter **holds** each destination's watch for as long as that Pod is
+  registered, so nothing evicts it and no respawn can return it to the default;
+- a watch the controller has not answered yet reports **no verdict** rather than
+  the default's answer, so the destination Service's protection class decides —
+  the same answer a port no policy names gets;
+- each worker starts a Pod's watch when that Pod registers, which puts the
+  answer in place before the Pod's first caller arrives, and drops it when the
+  registration ends, which is what bounds a set that no longer expires.
+
+After the fix the same arm refuses the first connection, and the campaign now
+fails the stage if it admits anything at all:
+
+| Arm, after the fix | Result |
+|---|---|
+| P1b, after 100 s of silence | 0 admitted, refused on the first connection |
+
+The deploy's own smoke gate is the second reading: every connection it makes now
+carries a resolved verdict, where before the fix the first connection to each
+destination reported no policy.
 
 ## Routing
 
@@ -372,10 +393,13 @@ connections or channels, not from per-request dispatch.
   repetitions) and `bench/suite/api_l7_cost.sh` (closed and open-loop CPU, 3
   repetitions each). Raw data in `data/api-l7-20260821/`.
 - Policy, routing and balancing: `bench/suite/policy_route.sh`, with the
-  resources it attaches in `bench/k8s/policy/`. Raw data in
-  `data/policy-route-20260821/`. Every arm is judged twice — by whether the
-  client's requests completed and by the DPU's own counters — because traffic
-  that stops without a matching verdict is not a policy result.
+  resources it attaches in `bench/k8s/policy/`. Every arm is judged twice — by
+  whether the client's requests completed and by the DPU's own counters —
+  because traffic that stops without a matching verdict is not a policy result.
+- Raw data in `data/policy-route-20260821/` for the first pass, which is where
+  the lapsing verdict was found, and `data/policy-route-20260821-fixed/` for the
+  build these tables report. The balancing arms were not re-run against the fix;
+  it does not touch the data path.
 - Every one of the 99 points carried `fail=0 drops=0 overflow=0 worker_fail=0
   reorder=0`. No point was discarded.
 - There is no host-sidecar control. The deployment builds one arrangement — the

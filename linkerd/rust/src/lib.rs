@@ -46,6 +46,44 @@ use dmesh_doca::{
 use tokio::sync::mpsc;
 
 /// Rust layout of `struct dmesh_l7_flow`.
+/// Bound on the destinations one worker holds policy watches for. It is the
+/// Pod-state table's capacity, so a full table is listed in one call.
+const MAX_POLICY_SUBJECTS: usize = 32;
+
+/// One destination this DPU serves, as `struct dmesh_l7_workload`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct DmeshL7Workload {
+    workload: [c_char; 384],
+    ip: u32,
+    port: u16,
+}
+
+impl Default for DmeshL7Workload {
+    fn default() -> Self {
+        Self {
+            workload: [0; 384],
+            ip: 0,
+            port: 0,
+        }
+    }
+}
+
+impl DmeshL7Workload {
+    /// The workload and the address its policy is watched on, or `None` for an
+    /// entry naming neither.
+    fn subject(&self) -> Option<(String, SocketAddr)> {
+        let workload = flow_text(&self.workload);
+        if workload.is_empty() || self.port == 0 {
+            return None;
+        }
+        Some((
+            workload,
+            SocketAddr::new(Ipv4Addr::from(self.ip).into(), self.port),
+        ))
+    }
+}
+
 #[repr(C)]
 pub struct DmeshL7Flow {
     pub src_ip: u32,
@@ -62,6 +100,19 @@ pub struct DmeshL7Flow {
 }
 
 /// Read one NUL-terminated fixed-width field of a flow.
+/// The NUL-terminated text in a fixed-size ABI field, borrowed in place.
+///
+/// The verdict path runs once per connection and looks a workload up by name,
+/// so it reads the name where it already is. `None` is text the field does not
+/// hold as UTF-8, which no caller may substitute anything for.
+fn flow_str(bytes: &[c_char]) -> Option<&str> {
+    let end = bytes.iter().position(|&c| c == 0).unwrap_or(bytes.len());
+    #[allow(clippy::unnecessary_cast)]
+    let raw =
+        unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const u8, end) };
+    std::str::from_utf8(raw).ok()
+}
+
 fn flow_text(bytes: &[c_char]) -> String {
     let end = bytes.iter().position(|&c| c == 0).unwrap_or(bytes.len());
     #[allow(clippy::unnecessary_cast)]
@@ -164,7 +215,7 @@ thread_local! {
 /// DPUmesh ABI calls with a recording test implementation.
 mod datapath {
     #[cfg(test)]
-    pub use fake::{release, session_failed, tx_finish, tx_publish};
+    pub use fake::{release, session_failed, tx_finish, tx_publish, workloads};
 
     #[cfg(not(test))]
     use std::os::raw::c_int;
@@ -187,11 +238,30 @@ mod datapath {
             pod_uid: *const std::os::raw::c_char,
         ) -> c_int;
         fn dmesh_l7_session_failed(worker_id: c_int, conn: u64);
+        fn dmesh_l7_workloads(
+            worker_id: c_int,
+            out: *mut super::DmeshL7Workload,
+            max: c_int,
+        ) -> c_int;
     }
 
     #[cfg(not(test))]
     pub fn release(worker_id: c_int, conn: u64, pos: u32, len: u32) {
         unsafe { dmesh_l7_release(worker_id, conn, pos, len) }
+    }
+
+    /// Every destination this worker serves, as an inbound policy subject.
+    #[cfg(not(test))]
+    pub fn workloads(worker_id: c_int) -> Vec<(String, std::net::SocketAddr)> {
+        let mut raw = vec![super::DmeshL7Workload::default(); super::MAX_POLICY_SUBJECTS];
+        let n = unsafe {
+            dmesh_l7_workloads(worker_id, raw.as_mut_ptr(), raw.len() as c_int)
+        };
+        if n <= 0 {
+            return Vec::new();
+        }
+        raw.truncate(n as usize);
+        raw.iter().filter_map(super::DmeshL7Workload::subject).collect()
     }
 
     /// Write output straight into the connection's egress chunk.
@@ -289,6 +359,12 @@ mod datapath {
             pub chunk: usize,
             /// Reservations cancelled with a zero-length commit.
             pub cancels: usize,
+        }
+
+        /// Tests drive the adapter directly and register no Pods, so the
+        /// reconciliation this feeds is not exercised by them.
+        pub fn workloads(_worker_id: c_int) -> Vec<(String, std::net::SocketAddr)> {
+            Vec::new()
         }
 
         thread_local! {
@@ -421,7 +497,21 @@ extern "C" {
 struct ExternalBackend {
     worker_id: c_int,
     driver: *mut c_void,
+    /// Maintenance passes left before the next policy reconciliation.
+    ///
+    /// Maintenance runs on a millisecond period because that is what the
+    /// datapath needs; the set of Pods this DPU serves does not change on that
+    /// scale, and reconciling against it costs a call across the boundary and a
+    /// walk of the Pod table. It is counted down rather than timed because the
+    /// period is already the runtime's clock.
+    policy_refresh_in: u32,
 }
+
+/// Maintenance passes between policy reconciliations. At the runtime's
+/// millisecond period this is roughly twice a second, which is far inside the
+/// gap between a Pod registering and its first caller arriving.
+#[cfg(not(test))]
+const POLICY_REFRESH_PASSES: u32 = 500;
 
 #[cfg(not(test))]
 fn driver_result(code: c_int, operation: &'static str) -> io::Result<c_int> {
@@ -482,6 +572,16 @@ impl dmesh_doca::runtime::RuntimeBackend for ExternalBackend {
     }
 
     fn maintenance(&mut self) -> io::Result<()> {
+        // Held policy watches neither start nor end on their own, so the
+        // maintenance pass is where they do both — on its own cadence, because
+        // registrations do not change as often as maintenance runs.
+        match self.policy_refresh_in.checked_sub(1) {
+            Some(remaining) => self.policy_refresh_in = remaining,
+            None => {
+                self.policy_refresh_in = POLICY_REFRESH_PASSES;
+                refresh_inbound_policies(self.worker_id);
+            }
+        }
         driver_result(
             unsafe { dmesh_l7_driver_maintenance(self.driver) },
             "maintenance",
@@ -717,7 +817,29 @@ type InboundPolicyBuilder = Arc<dyn Fn(Arc<str>) -> linkerd_app::DmeshPolicyStor
 #[derive(Default)]
 struct InboundPolicies {
     build: Option<InboundPolicyBuilder>,
-    cache: HashMap<String, linkerd_app::DmeshPolicyStore>,
+    cache: HashMap<String, WorkloadPolicies>,
+}
+
+/// One destination Pod's policy store and the port watches taken from it.
+///
+/// A watch is held rather than asked for per stream because the store evicts
+/// one that has gone idle and respawns it holding the configured default. A
+/// verdict taken against a respawned watch is taken against this proxy's
+/// configuration, so an enforcement point that only asks while streams arrive
+/// lapses to the default exactly when a Service falls quiet — which is when a
+/// caller its policy refuses would find it open.
+struct WorkloadPolicies {
+    store: linkerd_app::DmeshPolicyStore,
+    ports: HashMap<u16, PortPolicy>,
+}
+
+/// One destination port's watch, and whether it has been answered.
+struct PortPolicy {
+    policy: linkerd_app::DmeshPortPolicy,
+    /// Latched on the first answer. An answer is never withdrawn, so once a
+    /// port has been decided by the cluster it is never decided by this
+    /// proxy's configuration again.
+    answered: bool,
 }
 
 /// DPUmesh connection handle from pod and port.
@@ -1761,7 +1883,13 @@ pub unsafe extern "C" fn l7_worker_run(worker_id: c_int, driver: *mut c_void) ->
             Err(error) => return Err(io::Error::other(error)),
         }
 
-        dmesh_doca::runtime::run(ExternalBackend { worker_id, driver }).await
+        dmesh_doca::runtime::run(ExternalBackend {
+            worker_id,
+            driver,
+            // Reconcile on the first pass, before any Pod carries traffic.
+            policy_refresh_in: 0,
+        })
+        .await
     });
 
     detach_worker(worker_id);
@@ -1793,6 +1921,41 @@ const VERDICT_NO_POLICY: c_int = -1;
 const VERDICT_NOT_ATTACHED: c_int = -2;
 
 impl InboundPolicies {
+    /// The watch for one destination Pod and port, started on first use and
+    /// held until that Pod's registration ends.
+    ///
+    /// A watch that is already held is found by name and port with nothing
+    /// allocated, which is what the per-connection path takes.
+    fn port_policy(
+        &mut self,
+        workload: &str,
+        destination: SocketAddr,
+    ) -> Option<&mut PortPolicy> {
+        if !self.cache.contains_key(workload) {
+            let build = self.build.clone()?;
+            self.cache.insert(
+                workload.to_owned(),
+                WorkloadPolicies {
+                    store: build(Arc::from(workload)),
+                    ports: HashMap::new(),
+                },
+            );
+        }
+        let held = self.cache.get_mut(workload)?;
+        let store = &held.store;
+        let port = held
+            .ports
+            .entry(destination.port())
+            .or_insert_with(|| PortPolicy {
+                policy: linkerd_app::dmesh_port_policy(store, destination),
+                answered: false,
+            });
+        if !port.answered {
+            port.answered = linkerd_app::dmesh_policy_discovered(&port.policy);
+        }
+        Some(port)
+    }
+
     /// Decide whether one inbound stream is admitted to a registered Pod.
     ///
     /// Two inputs decide it and a Pod supplies neither. The client address is
@@ -1803,29 +1966,63 @@ impl InboundPolicies {
     /// presented as an established client, exactly the substitution `DmeshIo`
     /// makes for the byte stream.
     fn verdict(&mut self, flow: &DmeshL7Flow) -> c_int {
-        let Some(build) = self.build.clone() else {
+        if self.build.is_none() {
+            return VERDICT_NOT_ATTACHED;
+        }
+        let Some(workload) = flow_str(&flow.workload).filter(|text| !text.is_empty()) else {
+            return VERDICT_NO_POLICY;
+        };
+        let destination = SocketAddr::new(Ipv4Addr::from(flow.dst_ip).into(), flow.dst_port);
+        let identity = flow_str(&flow.source_identity).unwrap_or_default();
+        let client = SocketAddr::V4(source_addr(flow));
+        let Some(held) = self.port_policy(workload, destination) else {
             return VERDICT_NOT_ATTACHED;
         };
-        let workload = flow_text(&flow.workload);
-        if workload.is_empty() {
+        // A watch begins holding the configured default and is replaced when
+        // the policy controller answers. Deciding on the default would decide
+        // with something the cluster never said about this port, so until the
+        // answer lands there is no verdict and the destination Service's
+        // protection class decides. Once it lands the answer governs, whether
+        // it names a `Server` or is the cluster's own default.
+        if !held.answered {
             return VERDICT_NO_POLICY;
         }
-        let store = self
-            .cache
-            .entry(workload.clone())
-            .or_insert_with(|| build(Arc::from(workload.as_str())));
-        let identity = flow_text(&flow.source_identity);
-        let client = SocketAddr::V4(source_addr(flow));
-        let destination = SocketAddr::new(Ipv4Addr::from(flow.dst_ip).into(), flow.dst_port);
-        if linkerd_app::dmesh_connection_verdict(
-            store,
-            destination,
-            client,
-            Some(identity.as_str()),
-        ) {
+        if linkerd_app::dmesh_policy_admits(&held.policy, client, Some(identity)) {
             VERDICT_ADMIT
         } else {
             VERDICT_REFUSE
+        }
+    }
+
+    /// Drop everything held for one workload, ending its watches.
+    fn forget(&mut self, workload: &str) {
+        self.cache.remove(workload);
+    }
+
+    /// Hold a watch for every destination this worker serves, and only those.
+    ///
+    /// Starting one here rather than on the stream that needs it is what puts
+    /// the controller's answer in place before a destination's first caller
+    /// arrives: a watch created by that caller still holds the configured
+    /// default when its verdict is taken. Dropping the rest is what bounds the
+    /// held set, since a held watch does not expire.
+    fn reconcile(&mut self, subjects: &[(String, SocketAddr)]) {
+        if self.build.is_none() {
+            return;
+        }
+        let mut live: HashMap<&str, Vec<u16>> = HashMap::new();
+        for (workload, addr) in subjects {
+            live.entry(workload.as_str()).or_default().push(addr.port());
+        }
+        self.cache.retain(|workload, held| {
+            let Some(ports) = live.get(workload.as_str()) else {
+                return false;
+            };
+            held.ports.retain(|port, _| ports.contains(port));
+            true
+        });
+        for (workload, addr) in subjects {
+            self.port_policy(workload, *addr);
         }
     }
 }
@@ -1868,7 +2065,22 @@ pub unsafe extern "C" fn l7_inbound_forget(worker_id: c_int, workload: *const c_
     let _ = worker_id;
     INBOUND.with(|slot| {
         if let Ok(mut policies) = slot.try_borrow_mut() {
-            policies.cache.remove(workload);
+            policies.forget(workload);
+        }
+    });
+}
+
+/// Match the watches this worker holds to the destinations it serves.
+///
+/// Registration and its end both happen on the control thread, and each
+/// worker's stores are its own, so the workers reconcile rather than being
+/// told. The maintenance pass is where it runs: a watch a Pod needs is started
+/// before that Pod carries traffic, and one whose Pod is gone ends there.
+fn refresh_inbound_policies(worker_id: c_int) {
+    let subjects = datapath::workloads(worker_id);
+    INBOUND.with(|slot| {
+        if let Ok(mut policies) = slot.try_borrow_mut() {
+            policies.reconcile(&subjects);
         }
     });
 }
@@ -2025,6 +2237,15 @@ pub unsafe extern "C" fn l7_control_event(kind: *const c_char, reason: *const c_
 mod abi {
     use super::*;
     use std::mem::{align_of, offset_of, size_of};
+
+    #[test]
+    fn workload_layout_matches_c() {
+        assert_eq!(size_of::<DmeshL7Workload>(), 392);
+        assert_eq!(align_of::<DmeshL7Workload>(), 4);
+        assert_eq!(offset_of!(DmeshL7Workload, workload), 0);
+        assert_eq!(offset_of!(DmeshL7Workload, ip), 384);
+        assert_eq!(offset_of!(DmeshL7Workload, port), 388);
+    }
 
     #[test]
     fn flow_layout_matches_c() {

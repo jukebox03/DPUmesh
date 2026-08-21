@@ -121,10 +121,15 @@ cleanup() {
 trap cleanup EXIT
 
 ### ------------------------------------------------------------ one stage
-# stage <id> <fixture-label> <arm> <serve|refuse> <threads> <reconn> [note]
+# stage <id> <fixture-label> <arm> <serve|refuse> <threads> <reconn> [note] [max-admitted]
+#
+# `max-admitted` bounds how many streams a stage may admit. A refusing stage
+# that admits anything admitted it against a policy that refuses, which is the
+# one failure traffic alone cannot show: the run fails either way, and only the
+# verdict counter says whether it failed for the right reason.
 PASSES=0; FAILURES=0
 stage() {
-    local id="$1" fixture="$2" arm="$3" expected="$4" threads="${5:-1}" reconn="${6:-$RECONN}" extra="${7:-}"
+    local id="$1" fixture="$2" arm="$3" expected="$4" threads="${5:-1}" reconn="${6:-$RECONN}" extra="${7:-}" max_admitted="${8:-}"
     local a0 d0 m0 r0 a1 d1 m1 r1 metrics result rcnt fail observed verdict
 
     a0=$(ctl_event inbound admitted); d0=$(ctl_event inbound denied)
@@ -143,8 +148,15 @@ stage() {
     r1=$(metric_sum "$metrics" 'outbound_http_route_request_statuses_total.*route_kind="HTTPRoute"')
 
     if [ "$fail" -eq 0 ] && [ "$rcnt" -gt 0 ]; then observed=serve; else observed=refuse; fi
-    if [ "$observed" = "$expected" ]; then verdict=PASS; PASSES=$((PASSES + 1))
-    else verdict=FAIL; FAILURES=$((FAILURES + 1)); fi
+    if [ "$observed" != "$expected" ]; then
+        verdict=FAIL
+    elif [ -n "$max_admitted" ] && [ "$((a1 - a0))" -gt "$max_admitted" ]; then
+        verdict=FAIL
+        extra="$extra; admitted $((a1 - a0)) > $max_admitted"
+    else
+        verdict=PASS
+    fi
+    if [ "$verdict" = PASS ]; then PASSES=$((PASSES + 1)); else FAILURES=$((FAILURES + 1)); fi
 
     printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
         "$id" "$fixture" "$arm" "$expected" "$observed" "$verdict" \
@@ -184,8 +196,10 @@ run_policy() {
 
     say "P1b — the watch's idle timeout, probed after ${IDLE_PROBE}s of silence"
     sleep "$IDLE_PROBE"
-    stage P1b "Server, no authorization (cold watch)" dpumesh refuse 1 "$RECONN" \
-        "admitted>0 here is the fail-open window"
+    # The watch is held for the destination Pod's registration, so silence
+    # cannot return it to the configured default. Nothing may be admitted here.
+    stage P1b "Server, no authorization (after ${IDLE_PROBE}s idle)" dpumesh refuse 1 "$RECONN" \
+        "no stream may be admitted after silence" 0
 
     fixture_apply authz-identity.yaml; sleep 6
     stage P2 "AuthorizationPolicy: caller identity" dpumesh serve 1 "$RECONN" "identity allows"

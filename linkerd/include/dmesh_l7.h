@@ -104,7 +104,10 @@ void l7_conn_close(int worker_id, uint64_t conn);
 #define DMESH_L7_VERDICT_NOT_ATTACHED (-2)
 int  l7_inbound_verdict(int worker_id, const struct dmesh_l7_flow *flow);
 /* Drop the policy watches held for a destination Pod whose registration ended.
- * The watch lifetime is the cached store's lifetime, so this is what ends it. */
+ * The watch lifetime is the cached store's lifetime, so this is what ends it.
+ * Registration ends on the control thread and each worker's stores are its
+ * own, so this reaches only the caller's; `dmesh_l7_workload_live` is what the
+ * workers prune their own with. */
 void l7_inbound_forget(int worker_id, const char *workload);
 /* Control-plane admission accounting. `kind` is the decision surface
  * (`grant`, `membership`, `revocation`, `peer`) and `reason` a stable
@@ -149,6 +152,26 @@ int32_t dmesh_l7_svc_for_name(int worker_id, const char *key);
 #define DMESH_L7_ENDPOINT_REMOTE     (-2)  /* the generation places it on another node */
 #define DMESH_L7_ENDPOINT_STALE      (-3)  /* the mapping predates the held generation */
 int32_t dmesh_l7_pod_for_uid(int worker_id, const char *pod_uid);
+
+/* One destination this DPU serves, as an inbound policy subject. */
+struct dmesh_l7_workload {
+    char     workload[384];   /* same bound as dmesh_l7_flow.workload */
+    uint32_t ip;              /* the Pod's cluster address, host byte order */
+    uint16_t port;            /* the port its Service publishes */
+};
+
+/* Every registered, data-ready Pod, written into `out` up to `max`; returns how
+ * many were written, or -1 when the caller does not own this worker.
+ *
+ * An inbound policy watch is held for as long as its destination Pod is served,
+ * rather than asked for per stream: a watch the store evicted comes back
+ * holding the configured default, and a verdict taken against that default is
+ * not a verdict about the port. Holding one means nothing expires it and
+ * nothing starts it either, so a worker reconciles what it holds against this
+ * list — starting a watch when a Pod registers, which is what puts the answer
+ * in place before the Pod's first caller arrives, and dropping one whose Pod is
+ * gone, which is what bounds the held set across Pod churn. */
+int dmesh_l7_workloads(int worker_id, struct dmesh_l7_workload *out, int max);
 
 /* Persistent runtime backend implemented by DPUmesh. */
 int dmesh_l7_driver_notification_fds(void *driver, int *completion_fd,
