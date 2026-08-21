@@ -108,8 +108,7 @@ pub struct DmeshL7Flow {
 fn flow_str(bytes: &[c_char]) -> Option<&str> {
     let end = bytes.iter().position(|&c| c == 0).unwrap_or(bytes.len());
     #[allow(clippy::unnecessary_cast)]
-    let raw =
-        unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const u8, end) };
+    let raw = unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const u8, end) };
     std::str::from_utf8(raw).ok()
 }
 
@@ -254,14 +253,14 @@ mod datapath {
     #[cfg(not(test))]
     pub fn workloads(worker_id: c_int) -> Vec<(String, std::net::SocketAddr)> {
         let mut raw = vec![super::DmeshL7Workload::default(); super::MAX_POLICY_SUBJECTS];
-        let n = unsafe {
-            dmesh_l7_workloads(worker_id, raw.as_mut_ptr(), raw.len() as c_int)
-        };
+        let n = unsafe { dmesh_l7_workloads(worker_id, raw.as_mut_ptr(), raw.len() as c_int) };
         if n <= 0 {
             return Vec::new();
         }
         raw.truncate(n as usize);
-        raw.iter().filter_map(super::DmeshL7Workload::subject).collect()
+        raw.iter()
+            .filter_map(super::DmeshL7Workload::subject)
+            .collect()
     }
 
     /// Write output straight into the connection's egress chunk.
@@ -1926,11 +1925,7 @@ impl InboundPolicies {
     ///
     /// A watch that is already held is found by name and port with nothing
     /// allocated, which is what the per-connection path takes.
-    fn port_policy(
-        &mut self,
-        workload: &str,
-        destination: SocketAddr,
-    ) -> Option<&mut PortPolicy> {
+    fn port_policy(&mut self, workload: &str, destination: SocketAddr) -> Option<&mut PortPolicy> {
         if !self.cache.contains_key(workload) {
             let build = self.build.clone()?;
             self.cache.insert(
