@@ -1,4 +1,0 @@
-generator,config,frame_bytes,highest_clean_rps,lowest_bad_rps,status,reps,duration_s
-grpc,grpc-envoy-permissive,64,28832525,43248788,bracketed,3,1
-grpc,grpc-envoy-permissive,1024,28832525,43248788,bracketed,3,1
-grpc,grpc-envoy-permissive,8192,12814455,19221683,bracketed,3,1

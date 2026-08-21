@@ -7,23 +7,24 @@ the items independently schedulable — and what makes it a measurement error to
 run one of them across a build that also changes correctness behavior.
 
 **Measurement discipline (binding).** A capacity is quoted with the instrument
-that produced it. The L4 and gRPC reports quote `knees.csv`'s twice-voted
-`highest_clean_rps`; the linkerd report quotes the single-run rate grid, which
-reaches further on the same data. The two are not interchangeable and a figure
-must not present one under the other's caption. An optimization result is
-accepted only from repeated runs with the frozen topology, placement and
-2.5 GHz clock.
+that produced it. `bench/suite/analyze_saturation.py` votes a `knees.csv`
+`highest_clean_rps` out of an open-loop grid; a closed-loop rate grid reaches
+further on the same data. The two are not interchangeable and a figure must not
+present one under the other's caption. An optimization result is accepted only
+from repeated runs with the frozen topology, placement and 2.5 GHz clock.
 
 ## What is known
 
-L7 capacity is bounded by per-session cost, not by the transport. The total is
-measured: `bench/suite/l7_session_cost.sh` moves the reconnect rate against an
-`L7_BACKEND=null` control on the identical workload, and least squares over both
-sets puts a DPUmesh connection at **73 ARM core-µs** and the Linkerd session on
-top of it at **1,200** — so 1,127 µs is the Linkerd share. The receipts are in
-[`bench/report/REPORT_L7.md`](bench/report/REPORT_L7.md) and
-`bench/report/data/l7-session-cost-20260817` (the L4 control fits live in
-`l4-churn-control-20260817` and `l4-session-control-20260817`).
+L7 capacity is bounded by per-session cost, not by the transport.
+`bench/suite/l7_session_cost.sh` moves the reconnect rate and reads the ARM cost
+out of the slope. The live receipt is
+[`bench/report/data/l7-shared-ab-20260821.md`](bench/report/data/l7-shared-ab-20260821.md),
+which puts one session at **3.9 ms** of ARM time without per-workload stack
+sharing and **0.4–0.5 ms** with it. An earlier campaign split that total into a
+DPUmesh connection (**73 ARM core-µs**) and the Linkerd session above it
+(**1,200**) by differencing against a null-L7 control; neither that control nor
+that campaign's data is in the tree any more, so the split is history rather
+than a receipt.
 
 The synchronous half of that is instrumented in `linkerd/app/src/lib.rs` and
 reported by `SessionMetrics::observe_stack_build`. Over 9,565 opens and closes
@@ -47,7 +48,7 @@ not conflate template caching with watch sharing — they attack different parts
 
 - [x] Re-measure the total against the frozen baseline and record it in
   `bench/report/`. Done: 1,200 ARM core-µs per session against a 73 µs L4
-  control, published in `REPORT_L7.md`.
+  control. That campaign's raw data has been retired.
 - [ ] Instrument the untimed remainder: policy discovery, destination/profile
   discovery, reconnect layers, endpoint construction and balancer construction.
   Extend `SessionMetrics` rather than adding a second surface. This is the whole
@@ -88,9 +89,9 @@ item is for.
 
 - [ ] Re-profile after O1/O2; continue only if endpoint locking becomes
   material. Nothing counts lock contention today: `Backends` holds one
-  `parking_lot::Mutex` with no instrumentation, and the profile in `REPORT_L7.md`
-  puts the AArch64 parking-lot fast path at 1.3–1.7% with no pool symbol above
-  it. Add a counter before drawing a conclusion from that.
+  `parking_lot::Mutex` with no instrumentation, and a retired profile put the
+  AArch64 parking-lot fast path at 1.3–1.7% with no pool symbol above it. Add a
+  counter before drawing a conclusion from that.
 - [ ] If justified, prototype only the DPUmesh specialization on Tokio `LocalSet`
   with `Rc<RefCell<_>>`; do not add unsafe `Send`/`Sync` claims or modify stock
   TCP Linkerd behavior.

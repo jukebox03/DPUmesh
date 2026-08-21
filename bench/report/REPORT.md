@@ -1,246 +1,393 @@
-# DPUmesh L4 Evaluation
+# DPUmesh Evaluation
 
-Four L4 paths carry the same request/response workload under one client core and
-one server core each: Envoy as a plaintext TCP proxy, Envoy with mutual TLS on
-the inter-pod leg, DPUmesh through the POSIX preload shim, and DPUmesh through
-its native API. Three measurements describe them — the host CPU each consumes at
-a shared offered load, the rate each sustains under a latency budget, and the
-rate each delivers when latency is left unbounded.
+DPUmesh exposes three application adapters — the native API, the LD_PRELOAD
+socket shim, and gRPC — and all three reach a backend the same way: registered
+Host TX memory, DPA SG-DMA into DPU staging, the Linkerd outbound stack running
+inside the DPU, and a DMA write into the destination Pod's RX memory. Nothing
+here compares a meshed path against an unmeshed one. Every number below was
+produced with Linkerd in the path, choosing the endpoint.
 
-## Host CPU at matched load
+The two protocol treatments the deployment assigns are not benchmark knobs.
+Native and preload carry byte streams, so their Services are opaque
+(`DPUMESH_L7_OPAQUE_SVC`): policy, discovery, and the endpoint balancer run, and
+the balancer's choice is made once per connection. gRPC is HTTP/2
+(`DPUMESH_L7_SVC`): the same stack runs, plus per-request routing through the
+HTTP layer. A byte stream has no request boundary for the proxy to route on, so
+the opaque treatment is the most Linkerd a native or preload Service can use.
 
-![Host cores at matched load](figures/01_host_cpu_by_load.png)
+## The path is real
 
-Host cores consumed by the client and server cores together, at loads every
-configuration serves:
+Both treatments were read out of the proxy's own metrics while load was running.
 
-| Frame | Offered/s | Envoy permissive | Envoy strict | DPUmesh preload | DPUmesh native |
-|---|---:|---:|---:|---:|---:|
-| 64 B | 505,396 | 1.877 | 1.853 | 0.709 | **0.503** |
-| 64 B | 1,010,793 | 1.842 | 1.853 | 0.753 | **0.529** |
-| 64 B | 1,516,189 | 1.752 | 1.742 | 0.805 | **0.603** |
-| 64 B | 1,819,427 | 1.651 | 1.673 | 0.880 | **0.622** |
-| 1 KiB | 112,710 | 1.954 | 1.964 | 0.622 | **0.393** |
-| 1 KiB | 225,421 | 1.957 | 1.949 | 0.982 | **0.531** |
-| 1 KiB | 338,131 | 1.937 | 1.896 | 1.223 | **0.611** |
-| 1 KiB | 405,757 | 1.934 | 1.904 | 1.368 | **0.670** |
-| 8 KiB | 18,619 | 1.265 | 1.439 | 0.501 | **0.265** |
-| 8 KiB | 37,239 | 1.931 | 1.964 | 0.789 | **0.445** |
-| 8 KiB | 55,858 | 1.963 | 1.956 | 1.100 | **0.567** |
-| 8 KiB | 67,029 | 1.963 | 1.963 | 1.285 | **0.620** |
+Opaque, under native load, from one of the eight worker runtimes:
 
-Native serves every load for a third of what the sidecar costs, and the shim for
-about half. The gap is not a fixed ratio: Envoy's cost per message falls steeply
-as load rises — 3,714 ns at 505,396/s down to 908 ns at 1,819,427/s — because a
-byte-stream socket returns whatever queued since the last read, so a busier
-connection places more messages in each read and each wake. Native falls too,
-from 996 ns to 342 ns, but from a much lower start. A ratio taken at one load
-therefore measures how far each path is from its own efficient operating point as
-much as it measures the path.
-
-Both Envoy paths sit within 2% of each other at 64 B. They separate as frames
-grow and the cipher follows the byte count.
-
-## Why cost per request falls with load
-
-The tables above have a shape worth stating plainly: the server core *falls* as
-offered load rises, from 0.935 at 303,238/s to 0.518 at 2,021,585/s on the
-sidecar path, while every one of those rates is delivered in full. Seven times
-the traffic on half the core is a claim that needs evidence, not a hand wave —
-the alternative explanation is that the CPU figure is simply wrong.
-
-It is batching, and the wake count says so. Counting every context switch across
-all threads of each endpoint over the same window as the CPU sample, on the
-sidecar path at 64 B:
-
-| Offered/s | Delivered | Server wakes/request | Server ns/request |
-|---:|---:|---:|---:|
-| 300,000 | 1.000 | 0.123 | 3,225 |
-| 600,000 | 1.000 | 0.054 | 1,491 |
-| 1,200,000 | 1.000 | 0.021 | 700 |
-| 1,800,000 | 1.000 | 0.012 | 414 |
-| 2,100,000 | 0.998 | **0.007** | **272** |
-
-Wakes per request fall 17.6× while cost per request falls 11.9×. One wake serves
-about 8 requests at the low end and about 143 at the high end, which is well
-inside what a 64 KiB socket buffer holds at this frame size. Had the CPU figure
-been wrong, the wake count would have stayed flat while the cost fell; it moves
-first and further.
-
-The consequence is that **cost per request is not a property of a path** — it is
-a property of a path at a load. Batching depth is set by queue occupancy, which
-the offered rate itself determines, so the independent variable moves a parameter
-that then dominates the result. Every per-request figure in this report is
-therefore quoted with the load it was taken at, and comparisons between paths are
-made at equal load.
-
-## Rate under a latency budget
-
-![Sustained rate under a p99 budget](figures/slo_l4.png)
-
-A single "maximum rate" rewards whichever path queues deepest: a deeper queue
-amortises the per-wake cost over more messages, and the offered rate is still
-delivered, just later. The number means nothing until a latency ceiling is
-attached, and any one ceiling decides the ranking. The curve below reports, for
-each p99 budget, the highest rate a path delivered while staying under it.
-
-64 B:
-
-| p99 budget | Envoy permissive | Envoy strict | DPUmesh preload | DPUmesh native |
-|---|---:|---:|---:|---:|
-| 1 ms | 1,109,324 | 1,109,472 | 5,165,483 | **5,266,120** |
-| 2 ms | 2,118,088 | 2,019,876 | 5,165,483 | **9,063,105** |
-| 5 ms | 2,118,088 | 2,019,876 | 5,165,483 | **10,002,506** |
-| 10 ms | 2,118,088 | 2,019,876 | 5,165,483 | **10,525,543** |
-| 30 ms | 2,118,088 | 2,019,876 | 5,165,483 | **11,034,591** |
-
-At 64 B native leads at every budget by 4.3× to 5.0×, and the lead does not
-depend on where the line is drawn. Envoy stops improving past 2 ms: its host
-cores are already spent, so a looser budget buys it nothing. Native keeps
-converting a looser budget into rate up to 30 ms, which is what a path bound by
-queueing rather than by cycles looks like.
-
-The 1 KiB and 8 KiB panels order the two DPUmesh paths the other way: the shim
-is above native at every budget, by 1.35× at 1 KiB and by 1.49–1.57× at 8 KiB.
-Both stay well above the sidecar — at 8 KiB the shim carries 273,062/s under a
-1 ms budget where Envoy manages 67,028/s, and 287,033/s under 5 ms against
-149,871/s.
-
-Budgets tighter than 1 ms are sparsely covered at L4. The rate grid starts high
-enough that few points land under 500 µs, so that column is a property of the
-grid rather than of the paths.
-
-## Delivered rate, with the latency it costs
-
-The highest rate each configuration delivered at 98% or better, and what the
-median and tail were there:
-
-| Frame | Configuration | Delivered/s | vs permissive | Client | Server | p50 | p99 |
-|---|---|---:|---:|---:|---:|---:|---:|
-| 64 B | Envoy permissive | 2,021,585 | 1.00× | 0.995 | 0.621 | 875 µs | 1,455 µs |
-| 64 B | Envoy strict | 2,021,585 | 1.00× | 0.995 | 0.660 | 978 µs | 1,624 µs |
-| 64 B | DPUmesh preload | 4,973,858 | 2.46× | 0.981 | 0.548 | **336 µs** | **578 µs** |
-| 64 B | DPUmesh native | **10,532,411** | **5.21×** | 0.995 | 0.624 | 1,241 µs | 8,140 µs |
-| 1 KiB | Envoy permissive | 821,657 | 1.00× | 0.995 | 0.896 | 1,444 µs | 2,238 µs |
-| 1 KiB | Envoy strict | 450,841 | 0.55× | 0.995 | 0.954 | 1,998 µs | 3,200 µs |
-| 1 KiB | DPUmesh preload | **1,497,470** | **1.82×** | 0.995 | 0.928 | 336 µs | 572 µs |
-| 1 KiB | DPUmesh native | 1,109,237 | 1.35× | 0.946 | 0.385 | **219 µs** | **634 µs** |
-| 8 KiB | Envoy permissive | 157,709 | 1.00× | 0.995 | 0.994 | 5,399 µs | 9,711 µs |
-| 8 KiB | Envoy strict | 74,477 | 0.47× | 0.995 | 0.988 | 7,068 µs | 16,475 µs |
-| 8 KiB | DPUmesh preload | **287,424** | **1.82×** | 0.995 | 0.922 | 1,326 µs | 2,633 µs |
-| 8 KiB | DPUmesh native | 183,241 | 1.16× | 0.947 | 0.391 | **178 µs** | **863 µs** |
-
-The two DPUmesh paths are the same transport reached two ways, and which one
-leads depends on the frame. At 64 B native delivers 2.1× the shim. At 1 KiB and
-8 KiB the shim delivers 1.4×, and it does so without giving up latency: the
-budget curve above puts the shim over native across every budget at those two
-frames.
-
-The medians in this table invite the opposite reading, and they should not be
-read that way — each row sits at a different rate, so the comparison is not
-like-for-like. Held at one rate the shim is ahead at both frames. At 1 KiB and
-about 100,000/s the shim runs p50 544 µs and p99 955 µs against native's 776 µs
-and 1,460 µs.
-
-Native's latency is unusual in that it *falls* as load rises — p50 952 µs at
-40,859/s, 776 µs at 100,562/s, 219 µs at its ceiling. A transport unit that is
-not yet full waits for its deadline, and at low rates that wait is most of the
-median; at high rates the unit fills before the deadline arrives. The shim
-reaches the same effect through the socket buffer, which is why its cost per
-message falls with load the way any socket path's does. Native also stops with a
-core to spare at those frames — 0.946 client and 0.385 server — while the shim
-runs its client core out.
-
-## What it costs in total
-
-Host cores are not the only cores. At the highest matched load of each frame:
-
-| Frame | Configuration | Host | DPU ARM | Total |
-|---|---|---:|---:|---:|
-| 64 B @ 1,819,427/s | Envoy permissive | 1.651 | — | **1.65** |
-| | DPUmesh preload | 0.880 | 1.34 | 2.22 |
-| | DPUmesh native | **0.622** | 1.16 | 1.78 |
-| 1 KiB @ 405,757/s | Envoy permissive | 1.934 | — | **1.93** |
-| | DPUmesh preload | 1.368 | 4.11 | 5.48 |
-| | DPUmesh native | **0.670** | 2.98 | 3.65 |
-| 8 KiB @ 67,029/s | Envoy permissive | 1.963 | — | **1.96** |
-| | DPUmesh preload | 1.285 | 4.79 | 6.08 |
-| | DPUmesh native | **0.620** | 3.48 | 4.10 |
-
-DPUmesh buys host cores with ARM cores, and the exchange rate worsens with frame
-size: at 64 B native spends 1.16 ARM to save 1.03 host, at 8 KiB it spends 3.48
-to save 1.34. Whether that is worth making depends on what a host core costs
-against a card that is already in the machine — the two are not interchangeable,
-and the table reports both rather than summing them into a verdict.
-
-## Contract
-
-| Axis | Value |
+| Metric | Value |
 |---|---|
-| Configurations | Envoy permissive TCP, Envoy strict mTLS, DPUmesh preload, DPUmesh native |
-| Frames | symmetric request/response: 64 B, 1 KiB, 8 KiB |
-| Frame format | 16 B benchmark header plus 48 B, 1008 B or 8176 B body |
-| Load | constant-rate open loop; 8 persistent connections; 10 s per rate |
-| Repetitions | one per retained rate; capacity search votes twice per candidate |
-| Host budget | one exclusive client core and one exclusive server core per configuration |
-| Core placement | cores 18–35, NUMA node 1, SMT disabled, 2.5 GHz performance governor |
-| Host CPU | runqueue runtime of the endpoint cores (`/proc/schedstat`), which counts the application, its sidecar and the kernel threads working on their behalf |
-| CPU window | 6 s, opened 2.5 s into each run so connection setup and teardown fall outside it |
-| DPU | `N/K/A=32/8/8`; no service assigned to the L7 layer; ARM cores from per-tid ticks of the data-path process, 0.14 core at idle |
-| Backend | exactly one ready server per configuration |
-| Platform | `rapids4`, Intel Xeon Gold 6554S, Linux 5.15.0-186-generic |
-| Software | Envoy `v1.30-latest`; swap disabled |
+| `tcp_open_total{authority="echo-dpumesh…", dst_pod="echo-dpumesh-…lbpg7"}` | 6 |
+| `tcp_open_total{authority="echo-dpumesh…", dst_pod="echo-dpumesh-13-…xlxfr"}` | 7 |
+| `tcp_open_total{authority="echo-dpumesh…", dst_pod="echo-dpumesh-14-…vcnwv"}` | 1 |
+| `outbound_tcp_protocol_connections_total{protocol="detect"}` | 20 |
 
-Envoy permissive, Envoy strict and DPUmesh preload run byte-identical
-`bench_sock` and `echo_sock`. Native runs `bench_dpumesh` and `echo_dpumesh`.
-Envoy strict authenticates and encrypts the inter-pod leg; DPUmesh does not, and
-the two are not security-equivalent.
+The three rows are three distinct backend Pods of one Service, each resolved
+through service discovery — the balancer picked among them, it did not forward
+to a fixed address.
 
-A rate is delivered when achieved/offered ≥ 0.98 with no failure, reorder or
-histogram overflow, and the generator's own schedule holds. **Latency is not part
-of that test**, which is why every delivered rate above is reported with the p50
-and p99 observed there, and why the latency-budget curve rather than the
-delivered ceiling is the comparison to read.
+Protocol-aware, under gRPC load, from the same worker:
 
-Every delivered ceiling quoted above is the capacity search's `highest_clean_rps`
-in [`knees.csv`](data/l4-20260810/knees.csv), which votes twice per candidate.
-The retained rate grid in `measurements.csv` is a single run per rate and reaches
-slightly further — 2,118,088/s against 2,021,585 for Envoy permissive at 64 B, and
-11,034,591 against 10,532,411 for native — so `plot_final.py` prints a capacity
-table that does not match this one. The twice-voted figure is the one reported,
-and a bar chart of the grid maximum is deliberately not published beside it.
+| Metric | Value |
+|---|---|
+| `request_total{direction="outbound", authority="echo-grpc-dpumesh…", dst_pod="echo-grpc-dpumesh-…lg75l"}` | 491,094 |
+| `outbound_http_route_request_duration_seconds_count` | 490,915 |
 
-Cross-checks on this dataset: the three CPU definitions available per run — the
-runqueue runtime reported here, the cgroup sum of application and sidecar, and
-tick-sampled core busy — agree within 5% at every point, so the reported figure
-does not depend on which is chosen. `fail`, `reorder` and `overflow` are zero
-across all 116 retained runs.
+Half a million HTTP requests traversed the outbound route layer on one worker
+alone. Sessions themselves spread across all eight worker runtimes (25–28
+sessions each over the campaign), which is the port-affinity sharding doing its
+job.
 
-Per-point medians are in
-[`data/l4-20260810/measurements.csv`](data/l4-20260810/measurements.csv); the
-capacity search is in [`data/l4-20260810/knees.csv`](data/l4-20260810/knees.csv); the
-wake counts are in
-[`data/l4-20260810/wakes_per_request.csv`](data/l4-20260810/wakes_per_request.csv).
+## Policy
 
-## Reproduction
+Nothing above this line was decided by a policy. The namespace held no `Server`,
+no `AuthorizationPolicy` and no route, so every connection was admitted by the
+default the proxy is configured with: the enforcement point ran, but nothing had
+ever asked it to refuse. These are the arms that did.
 
-Create `.env` with `HOST_PASS`, `DPU_HOST` and `DPU_PASS`, then from the
-repository root:
+The subject is the native Service's three backends on the port they serve. Each
+arm attaches a resource, offers one point with connection churn — a verdict is
+taken once per connection and remembered on it, so a run that opens one
+connection tests one verdict — and reads both the client's result and the DPU's
+own verdict counters.
 
-```sh
-sudo swapoff -a
+| Arm | Attached | Requests completed | Verdicts |
+|---|---|---:|---|
+| P0 | nothing | 40,703 | 205 admitted |
+| P1 | a `Server` and no authorization | 0 | 1 denied |
+| P2 | + `AuthorizationPolicy` naming the caller's identity | 45,281 | 227 admitted |
+| P3 | the same, naming a different identity | 0 | 1 denied |
+| P4 | + `AuthorizationPolicy` naming the caller's address | 45,295 | 227 admitted |
+| P5 | the same, naming a different network | 0 | 1 denied |
+| P6 | nothing | 63,889 | 320 admitted |
 
-env DPUMESH_DPA_THREADS=32 DPUMESH_RINGS_PER_POD=8 DPUMESH_ARM_WORKERS=8 \
-    BENCH_NUMA_POLICY=local BENCH_DEPLOY_SCOPE=l4 \
-    REPS=1 ./bench/suite/l4_proxy_data.sh --no-perf --out /tmp/l4run
+The `Server` stays attached from P1 to P5; a `Server` with no authorization
+denies everything, which is what makes P1 the deny arm and what each later arm
+is authorizing against.
 
-python3 bench/suite/distill.py /tmp/l4run measurements.csv
-python3 bench/suite/plot_final.py measurements.csv bench/report/figures
-python3 bench/suite/plot_slo.py bench/report/figures slo_l4 /tmp/l4run
-```
+P3 and P5 are what make P2 and P4 mean anything. A policy that admits whatever
+is offered would pass P2 and P4 on its own; changing one field of the same
+resource to name a caller that is not this one refuses every connection, so the
+identity string and the client address are compared rather than carried.
 
-The collector deploys, validates pinning and the core budget, discovers each
-path's capacity, and retains the matched and per-path rates around it. A campaign
-holds `/tmp/dpumesh-bench.lock`: two under load contend for the DPU and the
-memory system even on disjoint cores, and each one's traffic lands in the other's
-CPU window.
+Neither input comes from the Pod. The identity is built from the service account
+and namespace in the Pod's node-agent-signed assertion, and the address is the
+cluster address that assertion binds — which matters because an authorization's
+`networks` clause is matched before its identity clause and an empty match
+denies, so a synthetic source address would make every realistic policy refuse
+every connection.
+
+### The watch has an idle timeout, and the timeout is fail-open
+
+The inbound policy watch is held per destination workload and port, and it is
+dropped after 90 s with no connection to it. A rebuilt watch is created holding
+the *default* policy and is updated when the policy controller answers, so
+connections that arrive in between are decided by the default rather than by the
+policy.
+
+| Watch state | First connections after the deny policy was attached |
+|---|---|
+| warm (P1, straight after a loaded arm) | 0 admitted, denied immediately |
+| rebuilt (P1b, after 100 s of silence) | **8 admitted**, then denied |
+
+The window is per worker rather than per process: each of the eight ARM workers
+holds its own Linkerd runtime, and the store the verdict is asked from is that
+worker's, so each rebuilds its own watch. Eight connections were served before
+the first refusal on an eight-worker deployment; a first pass of the same arm
+served nine. This is a real hole in an otherwise fail-closed design — a
+caller a policy refuses is admitted once per worker whenever its Service has
+been idle for 90 s — and it comes from the stock discovery configuration rather
+than from anything DPUmesh adds.
+
+## Routing
+
+A route can only apply where there are requests to route, so the subject is the
+protocol-aware gRPC Service. The route's parent is the Service the DPU dials —
+the ClusterIP its outbound policy discovery asks about — and its match is the
+gRPC method path the benchmark calls.
+
+| Arm | Attached | Requests completed | What the proxy reports |
+|---|---|---:|---|
+| R0 | nothing | 11,770 | `route_kind="default"` |
+| R1 | `HTTPRoute` matching the method | 11,738 | 11,838 requests under `route_kind="HTTPRoute"` |
+| R2 | the same route, matching a path nothing calls | 0, and 35,752 failed | no route matched |
+| R3 | the same route, `backendRefs` in another Service | 0 | 81 `dmesh_backend_target_mismatches_total` |
+| R4 | nothing | 11,845 | `route_kind="default"` |
+
+R1 shows the route is consulted; R2 shows it decides. A rule that cannot match
+is the whole difference between every request being served and none of them
+being served, which is not something a decorative route layer could produce.
+
+R3 is a limit rather than a defect. Linkerd may replace a Service's ClusterIP
+with one of that Service's endpoints, but it may not move a DMA session to a
+different Service: the session's backend channel was published against one
+Service key and the signed generation places the selected address in another, so
+the connector refuses it and counts it. Nothing falls through to kernel TCP.
+Traffic splitting across Services — the ordinary use of `backendRefs` weights —
+is therefore not available here; splitting *within* a Service is what the
+balancer already does.
+
+## Load balancing
+
+The client stamps the serving Pod's id into every reply, so the distribution is
+observable from outside the DPU. The two protocol treatments balance at
+different grains, and that is a consequence of how their stacks are built rather
+than a setting: an opaque session shares one workload stack whose balancer holds
+every ready endpoint, while a protocol-aware session gets a session-local stack
+whose balancer can only reach the endpoint that session's backend channel
+serves.
+
+Opaque, three backends, one connection per client thread, three repetitions of
+each:
+
+| Client threads | Backends reached, per repetition |
+|---|---|
+| 1 | 1, 1, 1 |
+| 2 | 2, 2, 1 |
+| 4 | 1, 2, 3 |
+| 6 | 3, 3, 3 |
+
+One connection can only land on one endpoint, so a single thread reaching one
+backend is what connection-grained balancing means; across repetitions the
+backend it reaches changes. Six connections reach all three in every repetition.
+The four-thread repetition that put all four on one backend is ordinary p2c at
+that sample size, and it is the reason a single repetition is not evidence about
+a balancer.
+
+The endpoint set is followed rather than fixed at start-up. Scaling one backend
+to zero and offering the same six-connection load leaves the balancer holding
+two ready endpoints, and only those two serve; restoring the backend brings it
+back to three. No request failed in either direction.
+
+| Endpoint set | `outbound_tcp_balancer_endpoints{ready}` | Backends that served, union of three repetitions |
+|---|---:|---|
+| one of three withdrawn | 2 | 2 of 2 |
+| restored | 3 | 3 of 3 |
+
+The protocol-aware Service balances per session, not per request. With two
+backends and one client channel every one of 25,104 requests went to a single
+Pod, and the session's balancer reported one ready endpoint. The same load over
+four channels reached both Pods, and each session still saw one ready endpoint
+of its own:
+
+| gRPC client channels | Ready endpoints in a session | Requests served, by Pod |
+|---|---:|---|
+| 1 | 1 | 25,104 / 0 |
+| 4 | 1 | 90,801 / 29,974 |
+
+Discovery resolves both endpoints — the second is present and stays `pending`.
+What the balancer cannot do is dial it: the session owns exactly one backend
+channel, a second take is refused and counted in
+`dmesh_backend_take_errors_total`, and nothing is dialled over TCP instead.
+Spread across backends therefore comes from the number of client channels, and
+an application that opens one channel per destination Service will use one
+backend of it however many replicas it has.
+
+This is also how to read the tables below: the native Service has three backends
+and the preload and gRPC Services have one, so part of native's throughput is
+server-side parallelism its balancer hands it.
+
+## Round-trip latency, one outstanding request
+
+One client core, one server core per Pod, three repetitions, median.
+
+| Request | native p50 | preload p50 | gRPC p50 | native p99 | preload p99 | gRPC p99 |
+|---|---:|---:|---:|---:|---:|---:|
+| 64 B | 337 | **148** | 1,253 | 687 | **568** | 1,525 |
+| 1 KiB | 337 | **151** | 1,284 | 695 | **569** | 1,547 |
+| 8 KiB | 1,003 | **907** | 1,258 | 1,268 | **1,105** | 1,578 |
+
+Two facts sit in this table. The preload shim answers a small request in half
+the time the native API does — about 190 µs of fixed cost separates them, and it
+is fixed: at 8 KiB, where transfer dominates, the gap falls to 96 µs. And gRPC's
+latency barely moves across a 128× change in frame size (1,253 → 1,258 µs),
+because what it spends is per-message protocol work, not per-byte transfer.
+
+## Throughput on one client core
+
+Concurrency 32 on a single connection, one client core.
+
+| Request | native req/s | preload req/s | gRPC req/s |
+|---|---:|---:|---:|
+| 64 B | 34,619 | **76,586** | 2,194 |
+| 1 KiB | 45,042 | **87,073** | 2,107 |
+| 8 KiB | 49,898 | **65,366** | 1,879 |
+
+Neither L4 arm is CPU-bound here — the client core sits at 0.07 (native) and
+0.14 (preload) of a core. The ceiling is the closed loop's own arithmetic: 32
+outstanding requests divided by the round-trip time. The latency gap above is
+therefore the whole throughput gap, and gRPC's 2 K/s is the same arithmetic
+applied to a 15 ms queueing latency at 32 concurrent streams on one channel.
+
+## Scaling client threads
+
+Six client cores and six server cores, 1 KiB, one connection (gRPC: one
+channel) per thread.
+
+| Threads | native req/s | preload req/s | gRPC req/s |
+|---|---:|---:|---:|
+| 1 | 38,799 | 27,458 | 2,216 |
+| 2 | 86,113 | 57,073 | 5,312 |
+| 4 | 192,361 | 151,310 | 12,334 |
+| 6 | **303,217** | 273,745 | 19,439 |
+
+The ordering from the single-connection table inverts. Native scales 7.8× over
+six threads and passes preload, because the per-request cost that decides a
+multi-core ceiling is lower for native even though its single-request latency is
+higher. gRPC scales 8.8× — its curve is not flat, it is simply an order of
+magnitude below.
+
+Adding cores does not by itself help a single thread: native at one thread is
+38,799 req/s across six cores against 45,042 on one, and preload drops from
+87,073 to 27,458. Spreading one thread over six cores costs locality and buys
+nothing.
+
+## What a request costs
+
+Host CPU is each Pod's cgroup `usage_usec` — scheduler accounting, not the
+100 Hz tick, which undercounts a core that runs in bursts. DPU CPU is the summed
+tick delta of the data path's threads. The window opens after the load is in
+steady state and closes before it ends. For native the server figure sums all
+three backends, since the balancer chooses which one serves.
+
+At each arm's own saturation point (concurrency 32, one thread):
+
+| API | req/s | Host cores | ARM cores | Host µs/req | ARM µs/req |
+|---|---:|---:|---:|---:|---:|
+| native | 48,952 | 0.139 | 0.534 | **2.91** | 11.43 |
+| preload | 89,224 | 0.330 | 1.029 | 3.80 | 11.53 |
+| gRPC | 2,065 | 0.153 | 1.059 | 74.18 | 512.62 |
+
+Native and preload cost the DPU the *same* per request — 11.43 against 11.53 µs
+of ARM — which is what should happen: below the adapter they are the same
+opaque session on the same data path. They differ on the Host, where native's
+submission path is 23% cheaper per request. gRPC costs 45× the ARM time of
+either.
+
+Because those three rows sit at three different rates, and per-request cost
+falls as load rises, they are also measured at one offered rate every arm can
+serve:
+
+| API | 8,000/s host µs/req | 8,000/s ARM µs/req | 15,000/s host µs/req | 15,000/s ARM µs/req |
+|---|---:|---:|---:|---:|
+| native | **37.65** | 104.08 | **27.36** | 95.87 |
+| preload | 55.14 | **100.40** | 40.72 | 98.21 |
+| gRPC | 133.45 | 495.99 | 101.46 | 400.77 |
+
+The relative picture holds at a matched rate: native is 1.46–1.49× cheaper
+than preload on the Host, the two are indistinguishable on the ARM, and gRPC
+costs 2.4–3.7× the Host and 4.1–4.9× the ARM of either. The absolute numbers are
+much larger than the saturation table because 8–15 K/s is a lightly loaded
+regime for this rig — the fixed per-second work of eight worker runtimes is
+divided among few requests. Comparing a per-request cost across the two tables
+measures the load level, not the API.
+
+## Why gRPC costs what it does
+
+The proxy builds a session-local outbound stack for every protocol-aware
+session and a workload-shared one for every opaque session
+(`dmesh_session_stack_cache_hits_total` climbed while
+`dmesh_session_stack_builds_total` stayed flat during the opaque arms). HTTP
+parsing turns a byte stream into requests, and those requests carry H1/H2 pools
+and reconnect caches that must not cross a DMA session boundary, so that stack
+cannot be shared.
+
+The larger term is per-request. An opaque session does policy, discovery, and
+balancer dispatch once per connection and then moves bytes; a protocol-aware
+session does route matching and balancer dispatch once per *request*, which is
+why its per-request cost does not amortise as offered load rises the way a byte
+proxy's does. The proxy pays that dispatch on every request even though the
+answer cannot vary: the session owns one backend channel, so the endpoint the
+balancer may reach is fixed for the life of the session.
+
+## Deployment constraints
+
+Everything above measures a path that works. What follows is what a deployment
+has to accept in order to get it. None of it is a tuning knob.
+
+**A Pod is meshed by editing its spec.** There is no injection. Linkerd enters a
+workload through one namespace annotation and a mutating webhook; this tree has
+no webhook, and its controller publishes the signed topology and nothing else.
+Every meshed Pod carries, by hand: `privileged: true`, a `/dev/infiniband`
+hostPath, a hostPath mount for `libdpumesh.so`, `DPUMESH_PCI_ADDR` and
+`DPUMESH_SERVICE`, and `config.linkerd.io/skip-inbound-ports` on the data port.
+
+That last annotation is load-bearing, not cosmetic. Removing it from the three
+live backends — an annotation edit on running Pods, no restart — made the
+destination controller advertise those endpoints as meshed, and the next point
+returned `rcnt=0 fail=1` with `Linkerd session ended before both output FINs` in
+the DPU log. Restoring the annotation restored the path on the following point.
+A backend has to look unmeshed to Linkerd's destination controller, because the
+DPU *is* the proxy and there is no second one waiting behind the endpoint
+address.
+
+**The application must use one of the three adapters.** The preload shim is the
+one that takes unmodified binaries, and it takes them properly: it occupies the
+application's file descriptor number with a kernel `socketpair` end, so `epoll`,
+`poll` and `select` see ordinary readiness and an event-loop application needs
+no change. What it cannot do is attach to a binary `LD_PRELOAD` does not reach —
+a static link, or a runtime that issues syscalls without going through libc,
+which is every Go program. A large part of the Kubernetes ecosystem is Go, and
+for those workloads the native API or the gRPC adapter means a source change.
+
+**There is no endpoint mTLS.** Every outbound request the proxy counted carries
+`tls="no_identity"` with `no_tls_reason="not_provided_by_service_discovery"`:
+discovery offers no identity for these endpoints, and a DMA-session endpoint
+answers `ConditionalClientTls::None(Disabled)` in both the TCP and the HTTP
+stacks, so no handshake would be attempted even if it did. This is the design's
+own trade — node-local bytes are isolated by the registered DMA mapping and
+node-to-node confidentiality belongs to the authenticated RDMA peer channel,
+which is why identity is established at registration rather than per connection.
+It is still a trade: an audit requirement that reads "the proxy encrypts every
+hop" is not met by this deployment, and the same annotation that keeps the data
+path working is what makes discovery withhold the endpoint identity.
+
+**Thirty-two Pods per node.** `MAX_PODS` is the Pod-state table's capacity, and
+the live cap the DPU enforces is `MAX_DPA_RINGS x N / K` — eight rings per
+execution unit, eight units, two rings per Pod. On this deployment the two meet
+at 32, so raising the constant alone buys nothing: past it, a Pod needs either
+fewer rings each or a larger per-unit ring array, and the ring array is DPA
+device code. The wire format itself reaches 127.
+
+**Routing and balancing stay inside one Service.** A session's backend channel
+is published against one Service key, so an `HTTPRoute` may reorder, filter or
+reject requests within its parent Service but may not send them to another one,
+and a request that names a foreign Service is refused rather than dialled over
+TCP. Within a Service the choice is per session: a session owns exactly one
+backend channel, so spread across backends comes from the number of client
+connections or channels, not from per-request dispatch.
+
+## Method and limits
+
+- Deploy: `BENCH_DEPLOY_SCOPE=all bench/bench.sh deploy` at `1518aae`,
+  N/K/A/L = 32/8/8/8, all eight ARM workers hosting a Linkerd runtime,
+  fail-closed L7 policy, node-agent-relayed control plane.
+- Campaign: `bench/suite/api_l7_compare.sh` (phases A/B/C, 99 points, 3
+  repetitions) and `bench/suite/api_l7_cost.sh` (closed and open-loop CPU, 3
+  repetitions each). Raw data in `data/api-l7-20260821/`.
+- Policy, routing and balancing: `bench/suite/policy_route.sh`, with the
+  resources it attaches in `bench/k8s/policy/`. Raw data in
+  `data/policy-route-20260821/`. Every arm is judged twice — by whether the
+  client's requests completed and by the DPU's own counters — because traffic
+  that stops without a matching verdict is not a policy result.
+- Every one of the 99 points carried `fail=0 drops=0 overflow=0 worker_fail=0
+  reorder=0`. No point was discarded.
+- There is no host-sidecar control. The deployment builds one arrangement — the
+  DPU-hosted mesh — so these numbers rank the three APIs against each other, not
+  the mesh against a sidecar.
+- The three Services do not hold equal backend counts (3 / 1 / 1). Native's
+  throughput includes the server-side parallelism its balancer provides.
+- The policy arms attach resources to one Service and read process-wide verdict
+  counters, so they show that enforcement happens and what decides it. They do
+  not measure what enforcement costs; no arm was run with and without a policy
+  at a matched rate.
+- Run-to-run spread on this rig is several percent; differences smaller than
+  that are not differences.
+- Latency figures are the client's own histogram; the DPU is not instrumented
+  per request.

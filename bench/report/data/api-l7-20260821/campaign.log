@@ -1,0 +1,110 @@
+output -> /home/jukebox/DPUmesh/bench/report/data/api-l7-20260821
+== Phase A: shared one-core pinning (fair), latency and throughput ==
+  -- rep 1 --
+    dpumesh       req=64     conc=1   thr=1  Mrps=0.002853   p50=346.00   p99=687.00   fail=0
+    preload       req=64     conc=1   thr=1  Mrps=0.004461   p50=150.00   p99=570.00   fail=0
+    grpc-dpumesh  req=64     conc=1   thr=1  Mrps=0.000797   p50=1244.00  p99=1514.00  fail=0
+    dpumesh       req=1024   conc=1   thr=1  Mrps=0.002863   p50=338.00   p99=697.00   fail=0
+    preload       req=1024   conc=1   thr=1  Mrps=0.004478   p50=154.00   p99=569.00   fail=0
+    grpc-dpumesh  req=1024   conc=1   thr=1  Mrps=0.000775   p50=1284.00  p99=1547.00  fail=0
+    dpumesh       req=8192   conc=1   thr=1  Mrps=0.000996   p50=1003.00  p99=1279.00  fail=0
+    preload       req=8192   conc=1   thr=1  Mrps=0.001141   p50=909.00   p99=1105.00  fail=0
+    grpc-dpumesh  req=8192   conc=1   thr=1  Mrps=0.000800   p50=1258.00  p99=1587.00  fail=0
+    dpumesh       req=64     conc=32  thr=1  Mrps=0.034619   p50=1031.00  p99=1398.00  fail=0
+    preload       req=64     conc=32  thr=1  Mrps=0.077112   p50=436.00   p99=468.00   fail=0
+    grpc-dpumesh  req=64     conc=32  thr=1  Mrps=0.002242   p50=14267.00 p99=14885.00 fail=0
+    dpumesh       req=1024   conc=32  thr=1  Mrps=0.045087   p50=705.00   p99=1263.00  fail=0
+    preload       req=1024   conc=32  thr=1  Mrps=0.087073   p50=334.00   p99=522.00   fail=0
+    grpc-dpumesh  req=1024   conc=32  thr=1  Mrps=0.002072   p50=15441.00 p99=16094.00 fail=0
+    dpumesh       req=8192   conc=32  thr=1  Mrps=0.048370   p50=642.00   p99=977.00   fail=0
+    preload       req=8192   conc=32  thr=1  Mrps=0.065908   p50=480.00   p99=757.00   fail=0
+    grpc-dpumesh  req=8192   conc=32  thr=1  Mrps=0.001879   p50=17050.00 p99=19127.00 fail=0
+  -- rep 2 --
+    dpumesh       req=64     conc=1   thr=1  Mrps=0.003106   p50=317.00   p99=685.00   fail=0
+    preload       req=64     conc=1   thr=1  Mrps=0.004899   p50=143.00   p99=568.00   fail=0
+    grpc-dpumesh  req=64     conc=1   thr=1  Mrps=0.000790   p50=1258.00  p99=1525.00  fail=0
+    dpumesh       req=1024   conc=1   thr=1  Mrps=0.002915   p50=337.00   p99=695.00   fail=0
+    preload       req=1024   conc=1   thr=1  Mrps=0.004619   p50=151.00   p99=567.00   fail=0
+    grpc-dpumesh  req=1024   conc=1   thr=1  Mrps=0.000795   p50=1249.00  p99=1516.00  fail=0
+    dpumesh       req=8192   conc=1   thr=1  Mrps=0.000996   p50=1003.00  p99=1268.00  fail=0
+    preload       req=8192   conc=1   thr=1  Mrps=0.001140   p50=907.00   p99=1117.00  fail=0
+    grpc-dpumesh  req=8192   conc=1   thr=1  Mrps=0.000784   p50=1258.00  p99=1578.00  fail=0
+    dpumesh       req=64     conc=32  thr=1  Mrps=0.034955   p50=1034.00  p99=1379.00  fail=0
+    preload       req=64     conc=32  thr=1  Mrps=0.076573   p50=439.00   p99=470.00   fail=0
+    grpc-dpumesh  req=64     conc=32  thr=1  Mrps=0.002121   p50=15071.00 p99=15763.00 fail=0
+    dpumesh       req=1024   conc=32  thr=1  Mrps=0.043270   p50=730.00   p99=1280.00  fail=0
+    preload       req=1024   conc=32  thr=1  Mrps=0.086858   p50=334.00   p99=524.00   fail=0
+    grpc-dpumesh  req=1024   conc=32  thr=1  Mrps=0.002107   p50=15201.00 p99=16057.00 fail=0
+    dpumesh       req=8192   conc=32  thr=1  Mrps=0.049898   p50=627.00   p99=955.00   fail=0
+    preload       req=8192   conc=32  thr=1  Mrps=0.065366   p50=478.00   p99=758.00   fail=0
+    grpc-dpumesh  req=8192   conc=32  thr=1  Mrps=0.001902   p50=16810.00 p99=18953.00 fail=0
+  -- rep 3 --
+    dpumesh       req=64     conc=1   thr=1  Mrps=0.002925   p50=337.00   p99=687.00   fail=0
+    preload       req=64     conc=1   thr=1  Mrps=0.004637   p50=148.00   p99=568.00   fail=0
+    grpc-dpumesh  req=64     conc=1   thr=1  Mrps=0.000795   p50=1253.00  p99=1555.00  fail=0
+    dpumesh       req=1024   conc=1   thr=1  Mrps=0.002900   p50=337.00   p99=689.00   fail=0
+    preload       req=1024   conc=1   thr=1  Mrps=0.004542   p50=150.00   p99=571.00   fail=0
+    grpc-dpumesh  req=1024   conc=1   thr=1  Mrps=0.000767   p50=1293.00  p99=1565.00  fail=0
+    dpumesh       req=8192   conc=1   thr=1  Mrps=0.000996   p50=1003.00  p99=1262.00  fail=0
+    preload       req=8192   conc=1   thr=1  Mrps=0.001170   p50=873.00   p99=1086.00  fail=0
+    grpc-dpumesh  req=8192   conc=1   thr=1  Mrps=0.000781   p50=1261.00  p99=1577.00  fail=0
+    dpumesh       req=64     conc=32  thr=1  Mrps=0.033453   p50=1051.00  p99=1379.00  fail=0
+    preload       req=64     conc=32  thr=1  Mrps=0.076586   p50=439.00   p99=468.00   fail=0
+    grpc-dpumesh  req=64     conc=32  thr=1  Mrps=0.002194   p50=14574.00 p99=15225.00 fail=0
+    dpumesh       req=1024   conc=32  thr=1  Mrps=0.045042   p50=718.00   p99=1273.00  fail=0
+    preload       req=1024   conc=32  thr=1  Mrps=0.089248   p50=324.00   p99=507.00   fail=0
+    grpc-dpumesh  req=1024   conc=32  thr=1  Mrps=0.002186   p50=14649.00 p99=15418.00 fail=0
+    dpumesh       req=8192   conc=32  thr=1  Mrps=0.050256   p50=629.00   p99=958.00   fail=0
+    preload       req=8192   conc=32  thr=1  Mrps=0.065079   p50=488.00   p99=754.00   fail=0
+    grpc-dpumesh  req=8192   conc=32  thr=1  Mrps=0.001818   p50=17575.00 p99=19791.00 fail=0
+== Phase B: six client + six server cores per arm, client-thread scaling ==
+  -- dpumesh (pin profile native) --
+    dpumesh       req=1024   conc=32  thr=1  Mrps=0.039255   p50=829.00   p99=1535.00  fail=0
+    dpumesh       req=1024   conc=32  thr=2  Mrps=0.077168   p50=847.00   p99=1591.00  fail=0
+    dpumesh       req=1024   conc=32  thr=4  Mrps=0.263705   p50=367.00   p99=1457.00  fail=0
+    dpumesh       req=1024   conc=32  thr=6  Mrps=0.300627   p50=573.00   p99=1530.00  fail=0
+    dpumesh       req=1024   conc=32  thr=1  Mrps=0.038799   p50=836.00   p99=1547.00  fail=0
+    dpumesh       req=1024   conc=32  thr=2  Mrps=0.086113   p50=691.00   p99=1811.00  fail=0
+    dpumesh       req=1024   conc=32  thr=4  Mrps=0.192361   p50=561.00   p99=1739.00  fail=0
+    dpumesh       req=1024   conc=32  thr=6  Mrps=0.434135   p50=320.00   p99=1343.00  fail=0
+    dpumesh       req=1024   conc=32  thr=1  Mrps=0.037308   p50=831.00   p99=1919.00  fail=0
+    dpumesh       req=1024   conc=32  thr=2  Mrps=0.086727   p50=678.00   p99=1809.00  fail=0
+    dpumesh       req=1024   conc=32  thr=4  Mrps=0.191979   p50=554.00   p99=1756.00  fail=0
+    dpumesh       req=1024   conc=32  thr=6  Mrps=0.303217   p50=569.00   p99=1514.00  fail=0
+  -- preload (pin profile preload) --
+    preload       req=1024   conc=32  thr=1  Mrps=0.026859   p50=1229.00  p99=2250.00  fail=0
+    preload       req=1024   conc=32  thr=2  Mrps=0.055434   p50=1183.00  p99=2273.00  fail=0
+    preload       req=1024   conc=32  thr=4  Mrps=0.151310   p50=809.00   p99=1906.00  fail=0
+    preload       req=1024   conc=32  thr=6  Mrps=0.272973   p50=634.00   p99=1676.00  fail=0
+    preload       req=1024   conc=32  thr=1  Mrps=0.027919   p50=1190.00  p99=2223.00  fail=0
+    preload       req=1024   conc=32  thr=2  Mrps=0.057073   p50=1151.00  p99=2202.00  fail=0
+    preload       req=1024   conc=32  thr=4  Mrps=0.150279   p50=819.00   p99=1896.00  fail=0
+    preload       req=1024   conc=32  thr=6  Mrps=0.280132   p50=619.00   p99=1629.00  fail=0
+    preload       req=1024   conc=32  thr=1  Mrps=0.027458   p50=1201.00  p99=2314.00  fail=0
+    preload       req=1024   conc=32  thr=2  Mrps=0.060102   p50=1079.00  p99=2242.00  fail=0
+    preload       req=1024   conc=32  thr=4  Mrps=0.152998   p50=800.00   p99=1897.00  fail=0
+    preload       req=1024   conc=32  thr=6  Mrps=0.273745   p50=629.00   p99=1677.00  fail=0
+  -- grpc-dpumesh (pin profile grpc) --
+    grpc-dpumesh  req=1024   conc=32  thr=1  Mrps=0.002216   p50=14488.00 p99=15781.00 fail=0
+    grpc-dpumesh  req=1024   conc=32  thr=2  Mrps=0.005353   p50=12029.00 p99=13734.00 fail=0
+    grpc-dpumesh  req=1024   conc=32  thr=4  Mrps=0.012498   p50=10372.00 p99=11903.00 fail=0
+    grpc-dpumesh  req=1024   conc=32  thr=6  Mrps=0.017825   p50=10851.00 p99=12593.00 fail=0
+    grpc-dpumesh  req=1024   conc=32  thr=1  Mrps=0.002258   p50=14232.00 p99=15431.00 fail=0
+    grpc-dpumesh  req=1024   conc=32  thr=2  Mrps=0.005312   p50=12096.00 p99=13662.00 fail=0
+    grpc-dpumesh  req=1024   conc=32  thr=4  Mrps=0.011434   p50=11256.00 p99=13222.00 fail=0
+    grpc-dpumesh  req=1024   conc=32  thr=6  Mrps=0.019439   p50=9926.00  p99=11820.00 fail=0
+    grpc-dpumesh  req=1024   conc=32  thr=1  Mrps=0.002175   p50=14775.00 p99=15978.00 fail=0
+    grpc-dpumesh  req=1024   conc=32  thr=2  Mrps=0.005233   p50=12279.00 p99=14082.00 fail=0
+    grpc-dpumesh  req=1024   conc=32  thr=4  Mrps=0.012334   p50=10482.00 p99=11984.00 fail=0
+    grpc-dpumesh  req=1024   conc=32  thr=6  Mrps=0.019598   p50=9911.00  p99=11342.00 fail=0
+== Phase C: endpoint distribution across the native Service's three backends ==
+    dpumesh       req=1024   conc=32  thr=1  Mrps=0.037065   p50=854.00   p99=1560.00  fail=0
+    dpumesh       req=1024   conc=32  thr=3  Mrps=0.171374   p50=452.00   p99=1574.00  fail=0
+    dpumesh       req=1024   conc=32  thr=6  Mrps=0.415441   p50=370.00   p99=1318.00  fail=0
+    dpumesh       req=1024   conc=32  thr=1  Mrps=0.044853   p50=637.00   p99=1837.00  fail=0
+    dpumesh       req=1024   conc=32  thr=3  Mrps=0.117090   p50=796.00   p99=1872.00  fail=0
+    dpumesh       req=1024   conc=32  thr=6  Mrps=0.289072   p50=567.00   p99=1681.00  fail=0
+    dpumesh       req=1024   conc=32  thr=1  Mrps=0.036882   p50=862.00   p99=1549.00  fail=0
+    dpumesh       req=1024   conc=32  thr=3  Mrps=0.144913   p50=632.00   p99=1521.00  fail=0
+    dpumesh       req=1024   conc=32  thr=6  Mrps=0.270110   p50=658.00   p99=1705.00  fail=0
+done -> /home/jukebox/DPUmesh/bench/report/data/api-l7-20260821/points.csv

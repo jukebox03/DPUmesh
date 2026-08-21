@@ -1,0 +1,26 @@
+# Authorize by client address. An authorization's networks clause is matched
+# before its identity clause, so this arm proves the source address the DPU
+# presents is the calling Pod's real cluster address and not a synthetic one.
+apiVersion: policy.linkerd.io/v1alpha1
+kind: NetworkAuthentication
+metadata:
+  name: bench-caller-network
+  namespace: ${NS}
+spec:
+  networks:
+    - cidr: "${POLICY_NETWORK}"
+---
+apiVersion: policy.linkerd.io/v1alpha1
+kind: AuthorizationPolicy
+metadata:
+  name: bench-allow-network
+  namespace: ${NS}
+spec:
+  targetRef:
+    group: policy.linkerd.io
+    kind: Server
+    name: bench-echo-dpumesh
+  requiredAuthenticationRefs:
+    - group: policy.linkerd.io
+      kind: NetworkAuthentication
+      name: bench-caller-network

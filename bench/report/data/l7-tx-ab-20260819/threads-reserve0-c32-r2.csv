@@ -1,6 +1,0 @@
-thread,tid,last_cpu,allowed_cpus,core_pct,tick_delta
-dmesh-main,1278260,13,13,9.5,95
-dmesh-w0,1278417,0,0,0.6,6
-dmesh-w1,1278419,15,15,0.6,6
-dmesh-w2,1278421,10,10,29.5,295
-dmesh-w3,1278423,8,8,0.6,6

@@ -1,0 +1,26 @@
+# Authorize by workload identity. The DPU presents the calling Pod's identity,
+# built from its node-agent-signed service account and namespace, so this is
+# what an ordinary Linkerd mTLS authorization matches against.
+apiVersion: policy.linkerd.io/v1alpha1
+kind: MeshTLSAuthentication
+metadata:
+  name: bench-caller-identity
+  namespace: ${NS}
+spec:
+  identities:
+    - "${POLICY_IDENTITY}"
+---
+apiVersion: policy.linkerd.io/v1alpha1
+kind: AuthorizationPolicy
+metadata:
+  name: bench-allow-identity
+  namespace: ${NS}
+spec:
+  targetRef:
+    group: policy.linkerd.io
+    kind: Server
+    name: bench-echo-dpumesh
+  requiredAuthenticationRefs:
+    - group: policy.linkerd.io
+      kind: MeshTLSAuthentication
+      name: bench-caller-identity

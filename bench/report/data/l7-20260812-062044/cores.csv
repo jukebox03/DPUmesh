@@ -1,7 +1,0 @@
-mode,frame,conc,threads,achieved_rps,arm_cores_pct,reorder
-l7-message,1024,32,8,0.224153,198.3,320341
-l7-pass,1024,32,8,1.225368,530.4,494292
-l7-conn,1024,32,8,1.374631,455.0,0
-opaque,1024,32,8,1.335376,421.3,0
-decision,1024,32,8,1.332483,403.4,0
-dataplane,1024,32,8,1.326775,403.9,0

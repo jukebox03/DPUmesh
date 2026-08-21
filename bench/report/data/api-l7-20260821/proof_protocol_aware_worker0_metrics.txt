@@ -1,0 +1,900 @@
+# HELP inbound_http_authz_allow_total The total number of inbound HTTP requests that were authorized
+# TYPE inbound_http_authz_allow_total counter
+inbound_http_authz_allow_total{target_addr="127.0.0.1:4191",target_ip="127.0.0.1",target_port="4191",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",tls="no_identity",no_tls_reason="no_tls_from_remote"} 20
+# HELP request_total Total count of HTTP requests.
+# TYPE request_total counter
+request_total{direction="inbound",target_addr="127.0.0.1:4191",target_ip="127.0.0.1",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated"} 20
+request_total{direction="outbound",authority="echo-grpc-dpumesh.test-bench.svc.cluster.local:9092",target_addr="10.244.0.67:9092",target_ip="10.244.0.67",target_port="9092",tls="no_identity",no_tls_reason="not_provided_by_service_discovery",dst_control_plane_ns="linkerd",dst_deployment="echo-grpc-dpumesh",dst_namespace="test-bench",dst_pod="echo-grpc-dpumesh-96fdcf88c-lg75l",dst_pod_template_hash="96fdcf88c",dst_service="echo-grpc-dpumesh",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown"} 491094
+# HELP response_latency_ms Elapsed times between a request's headers being received and its response stream completing
+# TYPE response_latency_ms histogram
+response_latency_ms_bucket{direction="inbound",target_addr="127.0.0.1:4191",target_ip="127.0.0.1",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200",le="1"} 19
+response_latency_ms_bucket{direction="inbound",target_addr="127.0.0.1:4191",target_ip="127.0.0.1",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200",le="2"} 19
+response_latency_ms_bucket{direction="inbound",target_addr="127.0.0.1:4191",target_ip="127.0.0.1",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200",le="3"} 19
+response_latency_ms_bucket{direction="inbound",target_addr="127.0.0.1:4191",target_ip="127.0.0.1",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200",le="4"} 19
+response_latency_ms_bucket{direction="inbound",target_addr="127.0.0.1:4191",target_ip="127.0.0.1",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200",le="5"} 19
+response_latency_ms_bucket{direction="inbound",target_addr="127.0.0.1:4191",target_ip="127.0.0.1",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200",le="10"} 19
+response_latency_ms_bucket{direction="inbound",target_addr="127.0.0.1:4191",target_ip="127.0.0.1",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200",le="20"} 19
+response_latency_ms_bucket{direction="inbound",target_addr="127.0.0.1:4191",target_ip="127.0.0.1",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200",le="30"} 19
+response_latency_ms_bucket{direction="inbound",target_addr="127.0.0.1:4191",target_ip="127.0.0.1",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200",le="40"} 19
+response_latency_ms_bucket{direction="inbound",target_addr="127.0.0.1:4191",target_ip="127.0.0.1",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200",le="50"} 19
+response_latency_ms_bucket{direction="inbound",target_addr="127.0.0.1:4191",target_ip="127.0.0.1",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200",le="100"} 19
+response_latency_ms_bucket{direction="inbound",target_addr="127.0.0.1:4191",target_ip="127.0.0.1",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200",le="200"} 19
+response_latency_ms_bucket{direction="inbound",target_addr="127.0.0.1:4191",target_ip="127.0.0.1",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200",le="300"} 19
+response_latency_ms_bucket{direction="inbound",target_addr="127.0.0.1:4191",target_ip="127.0.0.1",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200",le="400"} 19
+response_latency_ms_bucket{direction="inbound",target_addr="127.0.0.1:4191",target_ip="127.0.0.1",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200",le="500"} 19
+response_latency_ms_bucket{direction="inbound",target_addr="127.0.0.1:4191",target_ip="127.0.0.1",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200",le="1000"} 19
+response_latency_ms_bucket{direction="inbound",target_addr="127.0.0.1:4191",target_ip="127.0.0.1",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200",le="2000"} 19
+response_latency_ms_bucket{direction="inbound",target_addr="127.0.0.1:4191",target_ip="127.0.0.1",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200",le="3000"} 19
+response_latency_ms_bucket{direction="inbound",target_addr="127.0.0.1:4191",target_ip="127.0.0.1",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200",le="4000"} 19
+response_latency_ms_bucket{direction="inbound",target_addr="127.0.0.1:4191",target_ip="127.0.0.1",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200",le="5000"} 19
+response_latency_ms_bucket{direction="inbound",target_addr="127.0.0.1:4191",target_ip="127.0.0.1",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200",le="10000"} 19
+response_latency_ms_bucket{direction="inbound",target_addr="127.0.0.1:4191",target_ip="127.0.0.1",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200",le="20000"} 19
+response_latency_ms_bucket{direction="inbound",target_addr="127.0.0.1:4191",target_ip="127.0.0.1",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200",le="30000"} 19
+response_latency_ms_bucket{direction="inbound",target_addr="127.0.0.1:4191",target_ip="127.0.0.1",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200",le="40000"} 19
+response_latency_ms_bucket{direction="inbound",target_addr="127.0.0.1:4191",target_ip="127.0.0.1",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200",le="50000"} 19
+response_latency_ms_bucket{direction="inbound",target_addr="127.0.0.1:4191",target_ip="127.0.0.1",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200",le="+Inf"} 19
+response_latency_ms_count{direction="inbound",target_addr="127.0.0.1:4191",target_ip="127.0.0.1",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200"} 19
+response_latency_ms_sum{direction="inbound",target_addr="127.0.0.1:4191",target_ip="127.0.0.1",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200"} 7
+response_latency_ms_bucket{direction="outbound",authority="echo-grpc-dpumesh.test-bench.svc.cluster.local:9092",target_addr="10.244.0.67:9092",target_ip="10.244.0.67",target_port="9092",tls="no_identity",no_tls_reason="not_provided_by_service_discovery",dst_control_plane_ns="linkerd",dst_deployment="echo-grpc-dpumesh",dst_namespace="test-bench",dst_pod="echo-grpc-dpumesh-96fdcf88c-lg75l",dst_pod_template_hash="96fdcf88c",dst_service="echo-grpc-dpumesh",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown",status_code="200",le="1"} 237490
+response_latency_ms_bucket{direction="outbound",authority="echo-grpc-dpumesh.test-bench.svc.cluster.local:9092",target_addr="10.244.0.67:9092",target_ip="10.244.0.67",target_port="9092",tls="no_identity",no_tls_reason="not_provided_by_service_discovery",dst_control_plane_ns="linkerd",dst_deployment="echo-grpc-dpumesh",dst_namespace="test-bench",dst_pod="echo-grpc-dpumesh-96fdcf88c-lg75l",dst_pod_template_hash="96fdcf88c",dst_service="echo-grpc-dpumesh",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown",status_code="200",le="2"} 252606
+response_latency_ms_bucket{direction="outbound",authority="echo-grpc-dpumesh.test-bench.svc.cluster.local:9092",target_addr="10.244.0.67:9092",target_ip="10.244.0.67",target_port="9092",tls="no_identity",no_tls_reason="not_provided_by_service_discovery",dst_control_plane_ns="linkerd",dst_deployment="echo-grpc-dpumesh",dst_namespace="test-bench",dst_pod="echo-grpc-dpumesh-96fdcf88c-lg75l",dst_pod_template_hash="96fdcf88c",dst_service="echo-grpc-dpumesh",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown",status_code="200",le="3"} 279479
+response_latency_ms_bucket{direction="outbound",authority="echo-grpc-dpumesh.test-bench.svc.cluster.local:9092",target_addr="10.244.0.67:9092",target_ip="10.244.0.67",target_port="9092",tls="no_identity",no_tls_reason="not_provided_by_service_discovery",dst_control_plane_ns="linkerd",dst_deployment="echo-grpc-dpumesh",dst_namespace="test-bench",dst_pod="echo-grpc-dpumesh-96fdcf88c-lg75l",dst_pod_template_hash="96fdcf88c",dst_service="echo-grpc-dpumesh",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown",status_code="200",le="4"} 313366
+response_latency_ms_bucket{direction="outbound",authority="echo-grpc-dpumesh.test-bench.svc.cluster.local:9092",target_addr="10.244.0.67:9092",target_ip="10.244.0.67",target_port="9092",tls="no_identity",no_tls_reason="not_provided_by_service_discovery",dst_control_plane_ns="linkerd",dst_deployment="echo-grpc-dpumesh",dst_namespace="test-bench",dst_pod="echo-grpc-dpumesh-96fdcf88c-lg75l",dst_pod_template_hash="96fdcf88c",dst_service="echo-grpc-dpumesh",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown",status_code="200",le="5"} 358420
+response_latency_ms_bucket{direction="outbound",authority="echo-grpc-dpumesh.test-bench.svc.cluster.local:9092",target_addr="10.244.0.67:9092",target_ip="10.244.0.67",target_port="9092",tls="no_identity",no_tls_reason="not_provided_by_service_discovery",dst_control_plane_ns="linkerd",dst_deployment="echo-grpc-dpumesh",dst_namespace="test-bench",dst_pod="echo-grpc-dpumesh-96fdcf88c-lg75l",dst_pod_template_hash="96fdcf88c",dst_service="echo-grpc-dpumesh",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown",status_code="200",le="10"} 486685
+response_latency_ms_bucket{direction="outbound",authority="echo-grpc-dpumesh.test-bench.svc.cluster.local:9092",target_addr="10.244.0.67:9092",target_ip="10.244.0.67",target_port="9092",tls="no_identity",no_tls_reason="not_provided_by_service_discovery",dst_control_plane_ns="linkerd",dst_deployment="echo-grpc-dpumesh",dst_namespace="test-bench",dst_pod="echo-grpc-dpumesh-96fdcf88c-lg75l",dst_pod_template_hash="96fdcf88c",dst_service="echo-grpc-dpumesh",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown",status_code="200",le="20"} 490915
+response_latency_ms_bucket{direction="outbound",authority="echo-grpc-dpumesh.test-bench.svc.cluster.local:9092",target_addr="10.244.0.67:9092",target_ip="10.244.0.67",target_port="9092",tls="no_identity",no_tls_reason="not_provided_by_service_discovery",dst_control_plane_ns="linkerd",dst_deployment="echo-grpc-dpumesh",dst_namespace="test-bench",dst_pod="echo-grpc-dpumesh-96fdcf88c-lg75l",dst_pod_template_hash="96fdcf88c",dst_service="echo-grpc-dpumesh",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown",status_code="200",le="30"} 490915
+response_latency_ms_bucket{direction="outbound",authority="echo-grpc-dpumesh.test-bench.svc.cluster.local:9092",target_addr="10.244.0.67:9092",target_ip="10.244.0.67",target_port="9092",tls="no_identity",no_tls_reason="not_provided_by_service_discovery",dst_control_plane_ns="linkerd",dst_deployment="echo-grpc-dpumesh",dst_namespace="test-bench",dst_pod="echo-grpc-dpumesh-96fdcf88c-lg75l",dst_pod_template_hash="96fdcf88c",dst_service="echo-grpc-dpumesh",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown",status_code="200",le="40"} 490915
+response_latency_ms_bucket{direction="outbound",authority="echo-grpc-dpumesh.test-bench.svc.cluster.local:9092",target_addr="10.244.0.67:9092",target_ip="10.244.0.67",target_port="9092",tls="no_identity",no_tls_reason="not_provided_by_service_discovery",dst_control_plane_ns="linkerd",dst_deployment="echo-grpc-dpumesh",dst_namespace="test-bench",dst_pod="echo-grpc-dpumesh-96fdcf88c-lg75l",dst_pod_template_hash="96fdcf88c",dst_service="echo-grpc-dpumesh",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown",status_code="200",le="50"} 490915
+response_latency_ms_bucket{direction="outbound",authority="echo-grpc-dpumesh.test-bench.svc.cluster.local:9092",target_addr="10.244.0.67:9092",target_ip="10.244.0.67",target_port="9092",tls="no_identity",no_tls_reason="not_provided_by_service_discovery",dst_control_plane_ns="linkerd",dst_deployment="echo-grpc-dpumesh",dst_namespace="test-bench",dst_pod="echo-grpc-dpumesh-96fdcf88c-lg75l",dst_pod_template_hash="96fdcf88c",dst_service="echo-grpc-dpumesh",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown",status_code="200",le="100"} 490915
+response_latency_ms_bucket{direction="outbound",authority="echo-grpc-dpumesh.test-bench.svc.cluster.local:9092",target_addr="10.244.0.67:9092",target_ip="10.244.0.67",target_port="9092",tls="no_identity",no_tls_reason="not_provided_by_service_discovery",dst_control_plane_ns="linkerd",dst_deployment="echo-grpc-dpumesh",dst_namespace="test-bench",dst_pod="echo-grpc-dpumesh-96fdcf88c-lg75l",dst_pod_template_hash="96fdcf88c",dst_service="echo-grpc-dpumesh",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown",status_code="200",le="200"} 490915
+response_latency_ms_bucket{direction="outbound",authority="echo-grpc-dpumesh.test-bench.svc.cluster.local:9092",target_addr="10.244.0.67:9092",target_ip="10.244.0.67",target_port="9092",tls="no_identity",no_tls_reason="not_provided_by_service_discovery",dst_control_plane_ns="linkerd",dst_deployment="echo-grpc-dpumesh",dst_namespace="test-bench",dst_pod="echo-grpc-dpumesh-96fdcf88c-lg75l",dst_pod_template_hash="96fdcf88c",dst_service="echo-grpc-dpumesh",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown",status_code="200",le="300"} 490915
+response_latency_ms_bucket{direction="outbound",authority="echo-grpc-dpumesh.test-bench.svc.cluster.local:9092",target_addr="10.244.0.67:9092",target_ip="10.244.0.67",target_port="9092",tls="no_identity",no_tls_reason="not_provided_by_service_discovery",dst_control_plane_ns="linkerd",dst_deployment="echo-grpc-dpumesh",dst_namespace="test-bench",dst_pod="echo-grpc-dpumesh-96fdcf88c-lg75l",dst_pod_template_hash="96fdcf88c",dst_service="echo-grpc-dpumesh",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown",status_code="200",le="400"} 490915
+response_latency_ms_bucket{direction="outbound",authority="echo-grpc-dpumesh.test-bench.svc.cluster.local:9092",target_addr="10.244.0.67:9092",target_ip="10.244.0.67",target_port="9092",tls="no_identity",no_tls_reason="not_provided_by_service_discovery",dst_control_plane_ns="linkerd",dst_deployment="echo-grpc-dpumesh",dst_namespace="test-bench",dst_pod="echo-grpc-dpumesh-96fdcf88c-lg75l",dst_pod_template_hash="96fdcf88c",dst_service="echo-grpc-dpumesh",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown",status_code="200",le="500"} 490915
+response_latency_ms_bucket{direction="outbound",authority="echo-grpc-dpumesh.test-bench.svc.cluster.local:9092",target_addr="10.244.0.67:9092",target_ip="10.244.0.67",target_port="9092",tls="no_identity",no_tls_reason="not_provided_by_service_discovery",dst_control_plane_ns="linkerd",dst_deployment="echo-grpc-dpumesh",dst_namespace="test-bench",dst_pod="echo-grpc-dpumesh-96fdcf88c-lg75l",dst_pod_template_hash="96fdcf88c",dst_service="echo-grpc-dpumesh",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown",status_code="200",le="1000"} 490915
+response_latency_ms_bucket{direction="outbound",authority="echo-grpc-dpumesh.test-bench.svc.cluster.local:9092",target_addr="10.244.0.67:9092",target_ip="10.244.0.67",target_port="9092",tls="no_identity",no_tls_reason="not_provided_by_service_discovery",dst_control_plane_ns="linkerd",dst_deployment="echo-grpc-dpumesh",dst_namespace="test-bench",dst_pod="echo-grpc-dpumesh-96fdcf88c-lg75l",dst_pod_template_hash="96fdcf88c",dst_service="echo-grpc-dpumesh",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown",status_code="200",le="2000"} 490915
+response_latency_ms_bucket{direction="outbound",authority="echo-grpc-dpumesh.test-bench.svc.cluster.local:9092",target_addr="10.244.0.67:9092",target_ip="10.244.0.67",target_port="9092",tls="no_identity",no_tls_reason="not_provided_by_service_discovery",dst_control_plane_ns="linkerd",dst_deployment="echo-grpc-dpumesh",dst_namespace="test-bench",dst_pod="echo-grpc-dpumesh-96fdcf88c-lg75l",dst_pod_template_hash="96fdcf88c",dst_service="echo-grpc-dpumesh",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown",status_code="200",le="3000"} 490915
+response_latency_ms_bucket{direction="outbound",authority="echo-grpc-dpumesh.test-bench.svc.cluster.local:9092",target_addr="10.244.0.67:9092",target_ip="10.244.0.67",target_port="9092",tls="no_identity",no_tls_reason="not_provided_by_service_discovery",dst_control_plane_ns="linkerd",dst_deployment="echo-grpc-dpumesh",dst_namespace="test-bench",dst_pod="echo-grpc-dpumesh-96fdcf88c-lg75l",dst_pod_template_hash="96fdcf88c",dst_service="echo-grpc-dpumesh",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown",status_code="200",le="4000"} 490915
+response_latency_ms_bucket{direction="outbound",authority="echo-grpc-dpumesh.test-bench.svc.cluster.local:9092",target_addr="10.244.0.67:9092",target_ip="10.244.0.67",target_port="9092",tls="no_identity",no_tls_reason="not_provided_by_service_discovery",dst_control_plane_ns="linkerd",dst_deployment="echo-grpc-dpumesh",dst_namespace="test-bench",dst_pod="echo-grpc-dpumesh-96fdcf88c-lg75l",dst_pod_template_hash="96fdcf88c",dst_service="echo-grpc-dpumesh",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown",status_code="200",le="5000"} 490915
+response_latency_ms_bucket{direction="outbound",authority="echo-grpc-dpumesh.test-bench.svc.cluster.local:9092",target_addr="10.244.0.67:9092",target_ip="10.244.0.67",target_port="9092",tls="no_identity",no_tls_reason="not_provided_by_service_discovery",dst_control_plane_ns="linkerd",dst_deployment="echo-grpc-dpumesh",dst_namespace="test-bench",dst_pod="echo-grpc-dpumesh-96fdcf88c-lg75l",dst_pod_template_hash="96fdcf88c",dst_service="echo-grpc-dpumesh",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown",status_code="200",le="10000"} 490915
+response_latency_ms_bucket{direction="outbound",authority="echo-grpc-dpumesh.test-bench.svc.cluster.local:9092",target_addr="10.244.0.67:9092",target_ip="10.244.0.67",target_port="9092",tls="no_identity",no_tls_reason="not_provided_by_service_discovery",dst_control_plane_ns="linkerd",dst_deployment="echo-grpc-dpumesh",dst_namespace="test-bench",dst_pod="echo-grpc-dpumesh-96fdcf88c-lg75l",dst_pod_template_hash="96fdcf88c",dst_service="echo-grpc-dpumesh",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown",status_code="200",le="20000"} 490915
+response_latency_ms_bucket{direction="outbound",authority="echo-grpc-dpumesh.test-bench.svc.cluster.local:9092",target_addr="10.244.0.67:9092",target_ip="10.244.0.67",target_port="9092",tls="no_identity",no_tls_reason="not_provided_by_service_discovery",dst_control_plane_ns="linkerd",dst_deployment="echo-grpc-dpumesh",dst_namespace="test-bench",dst_pod="echo-grpc-dpumesh-96fdcf88c-lg75l",dst_pod_template_hash="96fdcf88c",dst_service="echo-grpc-dpumesh",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown",status_code="200",le="30000"} 490915
+response_latency_ms_bucket{direction="outbound",authority="echo-grpc-dpumesh.test-bench.svc.cluster.local:9092",target_addr="10.244.0.67:9092",target_ip="10.244.0.67",target_port="9092",tls="no_identity",no_tls_reason="not_provided_by_service_discovery",dst_control_plane_ns="linkerd",dst_deployment="echo-grpc-dpumesh",dst_namespace="test-bench",dst_pod="echo-grpc-dpumesh-96fdcf88c-lg75l",dst_pod_template_hash="96fdcf88c",dst_service="echo-grpc-dpumesh",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown",status_code="200",le="40000"} 490915
+response_latency_ms_bucket{direction="outbound",authority="echo-grpc-dpumesh.test-bench.svc.cluster.local:9092",target_addr="10.244.0.67:9092",target_ip="10.244.0.67",target_port="9092",tls="no_identity",no_tls_reason="not_provided_by_service_discovery",dst_control_plane_ns="linkerd",dst_deployment="echo-grpc-dpumesh",dst_namespace="test-bench",dst_pod="echo-grpc-dpumesh-96fdcf88c-lg75l",dst_pod_template_hash="96fdcf88c",dst_service="echo-grpc-dpumesh",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown",status_code="200",le="50000"} 490915
+response_latency_ms_bucket{direction="outbound",authority="echo-grpc-dpumesh.test-bench.svc.cluster.local:9092",target_addr="10.244.0.67:9092",target_ip="10.244.0.67",target_port="9092",tls="no_identity",no_tls_reason="not_provided_by_service_discovery",dst_control_plane_ns="linkerd",dst_deployment="echo-grpc-dpumesh",dst_namespace="test-bench",dst_pod="echo-grpc-dpumesh-96fdcf88c-lg75l",dst_pod_template_hash="96fdcf88c",dst_service="echo-grpc-dpumesh",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown",status_code="200",le="+Inf"} 490915
+response_latency_ms_count{direction="outbound",authority="echo-grpc-dpumesh.test-bench.svc.cluster.local:9092",target_addr="10.244.0.67:9092",target_ip="10.244.0.67",target_port="9092",tls="no_identity",no_tls_reason="not_provided_by_service_discovery",dst_control_plane_ns="linkerd",dst_deployment="echo-grpc-dpumesh",dst_namespace="test-bench",dst_pod="echo-grpc-dpumesh-96fdcf88c-lg75l",dst_pod_template_hash="96fdcf88c",dst_service="echo-grpc-dpumesh",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown",status_code="200"} 490915
+response_latency_ms_sum{direction="outbound",authority="echo-grpc-dpumesh.test-bench.svc.cluster.local:9092",target_addr="10.244.0.67:9092",target_ip="10.244.0.67",target_port="9092",tls="no_identity",no_tls_reason="not_provided_by_service_discovery",dst_control_plane_ns="linkerd",dst_deployment="echo-grpc-dpumesh",dst_namespace="test-bench",dst_pod="echo-grpc-dpumesh-96fdcf88c-lg75l",dst_pod_template_hash="96fdcf88c",dst_service="echo-grpc-dpumesh",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown",status_code="200"} 1490259
+# HELP response_total Total count of HTTP responses.
+# TYPE response_total counter
+response_total{direction="inbound",target_addr="127.0.0.1:4191",target_ip="127.0.0.1",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",route_group="",route_kind="default",route_name="default",authz_group="",authz_kind="default",authz_name="all-unauthenticated",status_code="200",classification="success",grpc_status="",error=""} 19
+response_total{direction="outbound",authority="echo-grpc-dpumesh.test-bench.svc.cluster.local:9092",target_addr="10.244.0.67:9092",target_ip="10.244.0.67",target_port="9092",tls="no_identity",no_tls_reason="not_provided_by_service_discovery",dst_control_plane_ns="linkerd",dst_deployment="echo-grpc-dpumesh",dst_namespace="test-bench",dst_pod="echo-grpc-dpumesh-96fdcf88c-lg75l",dst_pod_template_hash="96fdcf88c",dst_service="echo-grpc-dpumesh",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown",status_code="200",classification="success",grpc_status="0",error=""} 490915
+# HELP control_request_total Total count of HTTP requests.
+# TYPE control_request_total counter
+control_request_total{addr="192.168.100.1:28086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local"} 83
+control_request_total{addr="192.168.100.1:28087",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local"} 78
+# HELP control_response_latency_ms Elapsed times between a request's headers being received and its response stream completing
+# TYPE control_response_latency_ms histogram
+control_response_latency_ms_bucket{addr="192.168.100.1:28086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="1"} 0
+control_response_latency_ms_bucket{addr="192.168.100.1:28086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="2"} 3
+control_response_latency_ms_bucket{addr="192.168.100.1:28086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="3"} 7
+control_response_latency_ms_bucket{addr="192.168.100.1:28086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="4"} 12
+control_response_latency_ms_bucket{addr="192.168.100.1:28086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="5"} 14
+control_response_latency_ms_bucket{addr="192.168.100.1:28086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="10"} 59
+control_response_latency_ms_bucket{addr="192.168.100.1:28086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="20"} 79
+control_response_latency_ms_bucket{addr="192.168.100.1:28086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="30"} 81
+control_response_latency_ms_bucket{addr="192.168.100.1:28086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="40"} 82
+control_response_latency_ms_bucket{addr="192.168.100.1:28086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="50"} 83
+control_response_latency_ms_bucket{addr="192.168.100.1:28086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="100"} 83
+control_response_latency_ms_bucket{addr="192.168.100.1:28086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="200"} 83
+control_response_latency_ms_bucket{addr="192.168.100.1:28086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="300"} 83
+control_response_latency_ms_bucket{addr="192.168.100.1:28086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="400"} 83
+control_response_latency_ms_bucket{addr="192.168.100.1:28086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="500"} 83
+control_response_latency_ms_bucket{addr="192.168.100.1:28086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="1000"} 83
+control_response_latency_ms_bucket{addr="192.168.100.1:28086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="2000"} 83
+control_response_latency_ms_bucket{addr="192.168.100.1:28086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="3000"} 83
+control_response_latency_ms_bucket{addr="192.168.100.1:28086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="4000"} 83
+control_response_latency_ms_bucket{addr="192.168.100.1:28086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="5000"} 83
+control_response_latency_ms_bucket{addr="192.168.100.1:28086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="10000"} 83
+control_response_latency_ms_bucket{addr="192.168.100.1:28086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="20000"} 83
+control_response_latency_ms_bucket{addr="192.168.100.1:28086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="30000"} 83
+control_response_latency_ms_bucket{addr="192.168.100.1:28086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="40000"} 83
+control_response_latency_ms_bucket{addr="192.168.100.1:28086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="50000"} 83
+control_response_latency_ms_bucket{addr="192.168.100.1:28086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="+Inf"} 83
+control_response_latency_ms_count{addr="192.168.100.1:28086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200"} 83
+control_response_latency_ms_sum{addr="192.168.100.1:28086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200"} 813
+control_response_latency_ms_bucket{addr="192.168.100.1:28087",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="1"} 0
+control_response_latency_ms_bucket{addr="192.168.100.1:28087",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="2"} 4
+control_response_latency_ms_bucket{addr="192.168.100.1:28087",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="3"} 8
+control_response_latency_ms_bucket{addr="192.168.100.1:28087",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="4"} 13
+control_response_latency_ms_bucket{addr="192.168.100.1:28087",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="5"} 17
+control_response_latency_ms_bucket{addr="192.168.100.1:28087",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="10"} 58
+control_response_latency_ms_bucket{addr="192.168.100.1:28087",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="20"} 75
+control_response_latency_ms_bucket{addr="192.168.100.1:28087",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="30"} 76
+control_response_latency_ms_bucket{addr="192.168.100.1:28087",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="40"} 78
+control_response_latency_ms_bucket{addr="192.168.100.1:28087",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="50"} 78
+control_response_latency_ms_bucket{addr="192.168.100.1:28087",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="100"} 78
+control_response_latency_ms_bucket{addr="192.168.100.1:28087",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="200"} 78
+control_response_latency_ms_bucket{addr="192.168.100.1:28087",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="300"} 78
+control_response_latency_ms_bucket{addr="192.168.100.1:28087",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="400"} 78
+control_response_latency_ms_bucket{addr="192.168.100.1:28087",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="500"} 78
+control_response_latency_ms_bucket{addr="192.168.100.1:28087",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="1000"} 78
+control_response_latency_ms_bucket{addr="192.168.100.1:28087",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="2000"} 78
+control_response_latency_ms_bucket{addr="192.168.100.1:28087",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="3000"} 78
+control_response_latency_ms_bucket{addr="192.168.100.1:28087",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="4000"} 78
+control_response_latency_ms_bucket{addr="192.168.100.1:28087",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="5000"} 78
+control_response_latency_ms_bucket{addr="192.168.100.1:28087",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="10000"} 78
+control_response_latency_ms_bucket{addr="192.168.100.1:28087",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="20000"} 78
+control_response_latency_ms_bucket{addr="192.168.100.1:28087",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="30000"} 78
+control_response_latency_ms_bucket{addr="192.168.100.1:28087",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="40000"} 78
+control_response_latency_ms_bucket{addr="192.168.100.1:28087",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="50000"} 78
+control_response_latency_ms_bucket{addr="192.168.100.1:28087",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",le="+Inf"} 78
+control_response_latency_ms_count{addr="192.168.100.1:28087",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200"} 78
+control_response_latency_ms_sum{addr="192.168.100.1:28087",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200"} 734
+# HELP control_response_total Total count of HTTP responses.
+# TYPE control_response_total counter
+control_response_total{addr="192.168.100.1:28086",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",classification="success",grpc_status="2",error=""} 83
+control_response_total{addr="192.168.100.1:28087",tls="true",server_id="linkerd-destination.linkerd.serviceaccount.identity.linkerd.cluster.local",status_code="200",classification="success",grpc_status="2",error=""} 72
+# HELP tcp_open_total Total count of opened connections
+# TYPE tcp_open_total counter
+tcp_open_total{direction="outbound",peer="dst",authority="echo-grpc-dpumesh.test-bench.svc.cluster.local:9092",target_addr="10.244.0.67:9092",target_ip="10.244.0.67",target_port="9092",tls="no_identity",no_tls_reason="not_provided_by_service_discovery",dst_control_plane_ns="linkerd",dst_deployment="echo-grpc-dpumesh",dst_namespace="test-bench",dst_pod="echo-grpc-dpumesh-96fdcf88c-lg75l",dst_pod_template_hash="96fdcf88c",dst_service="echo-grpc-dpumesh",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown"} 12
+tcp_open_total{direction="inbound",peer="src",target_addr="127.0.0.1:4191",target_ip="127.0.0.1",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191"} 20
+tcp_open_total{direction="outbound",peer="src",target_addr="10.96.0.18:9100",target_ip="10.96.0.18",target_port="9100",tls="no_identity",no_tls_reason="loopback"} 12
+tcp_open_total{direction="outbound",peer="src",target_addr="10.111.115.171:9092",target_ip="10.111.115.171",target_port="9092",tls="no_identity",no_tls_reason="loopback"} 12
+tcp_open_total{direction="outbound",peer="src",target_addr="10.96.0.11:9092",target_ip="10.96.0.11",target_port="9092",tls="no_identity",no_tls_reason="loopback"} 19
+tcp_open_total{direction="outbound",peer="dst",authority="echo-dpumesh.test-bench.svc.cluster.local:9092",target_addr="10.244.0.60:9092",target_ip="10.244.0.60",target_port="9092",tls="no_identity",no_tls_reason="not_provided_by_service_discovery",dst_control_plane_ns="linkerd",dst_deployment="echo-dpumesh-14",dst_namespace="test-bench",dst_pod="echo-dpumesh-14-75f99869c5-vcnwv",dst_pod_template_hash="75f99869c5",dst_service="echo-dpumesh",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown"} 6
+tcp_open_total{direction="outbound",peer="dst",authority="echo-dpumesh.test-bench.svc.cluster.local:9092",target_addr="10.244.0.59:9092",target_ip="10.244.0.59",target_port="9092",tls="no_identity",no_tls_reason="not_provided_by_service_discovery",dst_control_plane_ns="linkerd",dst_deployment="echo-dpumesh-13",dst_namespace="test-bench",dst_pod="echo-dpumesh-13-5b559c886d-xlxfr",dst_pod_template_hash="5b559c886d",dst_service="echo-dpumesh",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown"} 7
+tcp_open_total{direction="outbound",peer="dst",authority="echo-dpumesh.test-bench.svc.cluster.local:9092",target_addr="10.244.0.58:9092",target_ip="10.244.0.58",target_port="9092",tls="no_identity",no_tls_reason="not_provided_by_service_discovery",dst_control_plane_ns="linkerd",dst_deployment="echo-dpumesh",dst_namespace="test-bench",dst_pod="echo-dpumesh-848cb8898b-lbpg7",dst_pod_template_hash="848cb8898b",dst_service="echo-dpumesh",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown"} 6
+tcp_open_total{direction="outbound",peer="dst",authority="preload-sock.test-bench.svc.cluster.local:9100",target_addr="10.244.0.65:9100",target_ip="10.244.0.65",target_port="9100",tls="no_identity",no_tls_reason="not_provided_by_service_discovery",dst_control_plane_ns="linkerd",dst_deployment="preload-echo",dst_namespace="test-bench",dst_pod="preload-echo-d44c78894-l7lbp",dst_pod_template_hash="d44c78894",dst_service="preload-sock",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown"} 12
+# HELP tcp_open_connections Number of currently-open connections
+# TYPE tcp_open_connections gauge
+tcp_open_connections{direction="outbound",peer="dst",authority="echo-grpc-dpumesh.test-bench.svc.cluster.local:9092",target_addr="10.244.0.67:9092",target_ip="10.244.0.67",target_port="9092",tls="no_identity",no_tls_reason="not_provided_by_service_discovery",dst_control_plane_ns="linkerd",dst_deployment="echo-grpc-dpumesh",dst_namespace="test-bench",dst_pod="echo-grpc-dpumesh-96fdcf88c-lg75l",dst_pod_template_hash="96fdcf88c",dst_service="echo-grpc-dpumesh",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown"} 0
+tcp_open_connections{direction="inbound",peer="src",target_addr="127.0.0.1:4191",target_ip="127.0.0.1",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191"} 1
+tcp_open_connections{direction="outbound",peer="src",target_addr="10.96.0.18:9100",target_ip="10.96.0.18",target_port="9100",tls="no_identity",no_tls_reason="loopback"} 0
+tcp_open_connections{direction="outbound",peer="src",target_addr="10.111.115.171:9092",target_ip="10.111.115.171",target_port="9092",tls="no_identity",no_tls_reason="loopback"} 0
+tcp_open_connections{direction="outbound",peer="src",target_addr="10.96.0.11:9092",target_ip="10.96.0.11",target_port="9092",tls="no_identity",no_tls_reason="loopback"} 0
+tcp_open_connections{direction="outbound",peer="dst",authority="echo-dpumesh.test-bench.svc.cluster.local:9092",target_addr="10.244.0.60:9092",target_ip="10.244.0.60",target_port="9092",tls="no_identity",no_tls_reason="not_provided_by_service_discovery",dst_control_plane_ns="linkerd",dst_deployment="echo-dpumesh-14",dst_namespace="test-bench",dst_pod="echo-dpumesh-14-75f99869c5-vcnwv",dst_pod_template_hash="75f99869c5",dst_service="echo-dpumesh",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown"} 0
+tcp_open_connections{direction="outbound",peer="dst",authority="echo-dpumesh.test-bench.svc.cluster.local:9092",target_addr="10.244.0.59:9092",target_ip="10.244.0.59",target_port="9092",tls="no_identity",no_tls_reason="not_provided_by_service_discovery",dst_control_plane_ns="linkerd",dst_deployment="echo-dpumesh-13",dst_namespace="test-bench",dst_pod="echo-dpumesh-13-5b559c886d-xlxfr",dst_pod_template_hash="5b559c886d",dst_service="echo-dpumesh",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown"} 0
+tcp_open_connections{direction="outbound",peer="dst",authority="echo-dpumesh.test-bench.svc.cluster.local:9092",target_addr="10.244.0.58:9092",target_ip="10.244.0.58",target_port="9092",tls="no_identity",no_tls_reason="not_provided_by_service_discovery",dst_control_plane_ns="linkerd",dst_deployment="echo-dpumesh",dst_namespace="test-bench",dst_pod="echo-dpumesh-848cb8898b-lbpg7",dst_pod_template_hash="848cb8898b",dst_service="echo-dpumesh",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown"} 0
+tcp_open_connections{direction="outbound",peer="dst",authority="preload-sock.test-bench.svc.cluster.local:9100",target_addr="10.244.0.65:9100",target_ip="10.244.0.65",target_port="9100",tls="no_identity",no_tls_reason="not_provided_by_service_discovery",dst_control_plane_ns="linkerd",dst_deployment="preload-echo",dst_namespace="test-bench",dst_pod="preload-echo-d44c78894-l7lbp",dst_pod_template_hash="d44c78894",dst_service="preload-sock",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown"} 0
+# HELP tcp_read_bytes_total Total count of bytes read from peers
+# TYPE tcp_read_bytes_total counter
+tcp_read_bytes_total{direction="outbound",peer="dst",authority="echo-grpc-dpumesh.test-bench.svc.cluster.local:9092",target_addr="10.244.0.67:9092",target_ip="10.244.0.67",target_port="9092",tls="no_identity",no_tls_reason="not_provided_by_service_discovery",dst_control_plane_ns="linkerd",dst_deployment="echo-grpc-dpumesh",dst_namespace="test-bench",dst_pod="echo-grpc-dpumesh-96fdcf88c-lg75l",dst_pod_template_hash="96fdcf88c",dst_service="echo-grpc-dpumesh",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown"} 25676898
+tcp_read_bytes_total{direction="inbound",peer="src",target_addr="127.0.0.1:4191",target_ip="127.0.0.1",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191"} 1698
+tcp_read_bytes_total{direction="outbound",peer="src",target_addr="10.96.0.18:9100",target_ip="10.96.0.18",target_port="9100",tls="no_identity",no_tls_reason="loopback"} 10064688800
+tcp_read_bytes_total{direction="outbound",peer="src",target_addr="10.111.115.171:9092",target_ip="10.111.115.171",target_port="9092",tls="no_identity",no_tls_reason="loopback"} 653098708
+tcp_read_bytes_total{direction="outbound",peer="src",target_addr="10.96.0.11:9092",target_ip="10.96.0.11",target_port="9092",tls="no_identity",no_tls_reason="loopback"} 15822298432
+tcp_read_bytes_total{direction="outbound",peer="dst",authority="echo-dpumesh.test-bench.svc.cluster.local:9092",target_addr="10.244.0.60:9092",target_ip="10.244.0.60",target_port="9092",tls="no_identity",no_tls_reason="not_provided_by_service_discovery",dst_control_plane_ns="linkerd",dst_deployment="echo-dpumesh-14",dst_namespace="test-bench",dst_pod="echo-dpumesh-14-75f99869c5-vcnwv",dst_pod_template_hash="75f99869c5",dst_service="echo-dpumesh",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown"} 131473032
+tcp_read_bytes_total{direction="outbound",peer="dst",authority="echo-dpumesh.test-bench.svc.cluster.local:9092",target_addr="10.244.0.59:9092",target_ip="10.244.0.59",target_port="9092",tls="no_identity",no_tls_reason="not_provided_by_service_discovery",dst_control_plane_ns="linkerd",dst_deployment="echo-dpumesh-13",dst_namespace="test-bench",dst_pod="echo-dpumesh-13-5b559c886d-xlxfr",dst_pod_template_hash="5b559c886d",dst_service="echo-dpumesh",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown"} 115283424
+tcp_read_bytes_total{direction="outbound",peer="dst",authority="echo-dpumesh.test-bench.svc.cluster.local:9092",target_addr="10.244.0.58:9092",target_ip="10.244.0.58",target_port="9092",tls="no_identity",no_tls_reason="not_provided_by_service_discovery",dst_control_plane_ns="linkerd",dst_deployment="echo-dpumesh",dst_namespace="test-bench",dst_pod="echo-dpumesh-848cb8898b-lbpg7",dst_pod_template_hash="848cb8898b",dst_service="echo-dpumesh",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown"} 43735704
+tcp_read_bytes_total{direction="outbound",peer="dst",authority="preload-sock.test-bench.svc.cluster.local:9100",target_addr="10.244.0.65:9100",target_ip="10.244.0.65",target_port="9100",tls="no_identity",no_tls_reason="not_provided_by_service_discovery",dst_control_plane_ns="linkerd",dst_deployment="preload-echo",dst_namespace="test-bench",dst_pod="preload-echo-d44c78894-l7lbp",dst_pod_template_hash="d44c78894",dst_service="preload-sock",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown"} 141771120
+# HELP tcp_write_bytes_total Total count of bytes written to peers
+# TYPE tcp_write_bytes_total counter
+tcp_write_bytes_total{direction="outbound",peer="dst",authority="echo-grpc-dpumesh.test-bench.svc.cluster.local:9092",target_addr="10.244.0.67:9092",target_ip="10.244.0.67",target_port="9092",tls="no_identity",no_tls_reason="not_provided_by_service_discovery",dst_control_plane_ns="linkerd",dst_deployment="echo-grpc-dpumesh",dst_namespace="test-bench",dst_pod="echo-grpc-dpumesh-96fdcf88c-lg75l",dst_pod_template_hash="96fdcf88c",dst_service="echo-grpc-dpumesh",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown"} 655118086
+tcp_write_bytes_total{direction="inbound",peer="src",target_addr="127.0.0.1:4191",target_ip="127.0.0.1",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191"} 1659676
+tcp_write_bytes_total{direction="outbound",peer="src",target_addr="10.96.0.18:9100",target_ip="10.96.0.18",target_port="9100",tls="no_identity",no_tls_reason="loopback"} 141771120
+tcp_write_bytes_total{direction="outbound",peer="src",target_addr="10.111.115.171:9092",target_ip="10.111.115.171",target_port="9092",tls="no_identity",no_tls_reason="loopback"} 24088159
+tcp_write_bytes_total{direction="outbound",peer="src",target_addr="10.96.0.11:9092",target_ip="10.96.0.11",target_port="9092",tls="no_identity",no_tls_reason="loopback"} 290492160
+tcp_write_bytes_total{direction="outbound",peer="dst",authority="echo-dpumesh.test-bench.svc.cluster.local:9092",target_addr="10.244.0.60:9092",target_ip="10.244.0.60",target_port="9092",tls="no_identity",no_tls_reason="not_provided_by_service_discovery",dst_control_plane_ns="linkerd",dst_deployment="echo-dpumesh-14",dst_namespace="test-bench",dst_pod="echo-dpumesh-14-75f99869c5-vcnwv",dst_pod_template_hash="75f99869c5",dst_service="echo-dpumesh",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown"} 5697164720
+tcp_write_bytes_total{direction="outbound",peer="dst",authority="echo-dpumesh.test-bench.svc.cluster.local:9092",target_addr="10.244.0.59:9092",target_ip="10.244.0.59",target_port="9092",tls="no_identity",no_tls_reason="not_provided_by_service_discovery",dst_control_plane_ns="linkerd",dst_deployment="echo-dpumesh-13",dst_namespace="test-bench",dst_pod="echo-dpumesh-13-5b559c886d-xlxfr",dst_pod_template_hash="5b559c886d",dst_service="echo-dpumesh",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown"} 4664133760
+tcp_write_bytes_total{direction="outbound",peer="dst",authority="echo-dpumesh.test-bench.svc.cluster.local:9092",target_addr="10.244.0.58:9092",target_ip="10.244.0.58",target_port="9092",tls="no_identity",no_tls_reason="not_provided_by_service_discovery",dst_control_plane_ns="linkerd",dst_deployment="echo-dpumesh",dst_namespace="test-bench",dst_pod="echo-dpumesh-848cb8898b-lbpg7",dst_pod_template_hash="848cb8898b",dst_service="echo-dpumesh",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown"} 5460999952
+tcp_write_bytes_total{direction="outbound",peer="dst",authority="preload-sock.test-bench.svc.cluster.local:9100",target_addr="10.244.0.65:9100",target_ip="10.244.0.65",target_port="9100",tls="no_identity",no_tls_reason="not_provided_by_service_discovery",dst_control_plane_ns="linkerd",dst_deployment="preload-echo",dst_namespace="test-bench",dst_pod="preload-echo-d44c78894-l7lbp",dst_pod_template_hash="d44c78894",dst_service="preload-sock",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown"} 10064688800
+# HELP tcp_close_total Total count of closed connections
+# TYPE tcp_close_total counter
+tcp_close_total{direction="outbound",peer="dst",authority="echo-grpc-dpumesh.test-bench.svc.cluster.local:9092",target_addr="10.244.0.67:9092",target_ip="10.244.0.67",target_port="9092",tls="no_identity",no_tls_reason="not_provided_by_service_discovery",dst_control_plane_ns="linkerd",dst_deployment="echo-grpc-dpumesh",dst_namespace="test-bench",dst_pod="echo-grpc-dpumesh-96fdcf88c-lg75l",dst_pod_template_hash="96fdcf88c",dst_service="echo-grpc-dpumesh",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown",errno=""} 12
+tcp_close_total{direction="inbound",peer="src",target_addr="127.0.0.1:4191",target_ip="127.0.0.1",target_port="4191",tls="no_identity",no_tls_reason="no_tls_from_remote",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191",errno=""} 19
+tcp_close_total{direction="outbound",peer="src",target_addr="10.96.0.18:9100",target_ip="10.96.0.18",target_port="9100",tls="no_identity",no_tls_reason="loopback",errno=""} 12
+tcp_close_total{direction="outbound",peer="src",target_addr="10.111.115.171:9092",target_ip="10.111.115.171",target_port="9092",tls="no_identity",no_tls_reason="loopback",errno=""} 12
+tcp_close_total{direction="outbound",peer="src",target_addr="10.96.0.11:9092",target_ip="10.96.0.11",target_port="9092",tls="no_identity",no_tls_reason="loopback",errno=""} 19
+tcp_close_total{direction="outbound",peer="dst",authority="echo-dpumesh.test-bench.svc.cluster.local:9092",target_addr="10.244.0.60:9092",target_ip="10.244.0.60",target_port="9092",tls="no_identity",no_tls_reason="not_provided_by_service_discovery",dst_control_plane_ns="linkerd",dst_deployment="echo-dpumesh-14",dst_namespace="test-bench",dst_pod="echo-dpumesh-14-75f99869c5-vcnwv",dst_pod_template_hash="75f99869c5",dst_service="echo-dpumesh",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown",errno=""} 6
+tcp_close_total{direction="outbound",peer="dst",authority="echo-dpumesh.test-bench.svc.cluster.local:9092",target_addr="10.244.0.59:9092",target_ip="10.244.0.59",target_port="9092",tls="no_identity",no_tls_reason="not_provided_by_service_discovery",dst_control_plane_ns="linkerd",dst_deployment="echo-dpumesh-13",dst_namespace="test-bench",dst_pod="echo-dpumesh-13-5b559c886d-xlxfr",dst_pod_template_hash="5b559c886d",dst_service="echo-dpumesh",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown",errno=""} 7
+tcp_close_total{direction="outbound",peer="dst",authority="echo-dpumesh.test-bench.svc.cluster.local:9092",target_addr="10.244.0.58:9092",target_ip="10.244.0.58",target_port="9092",tls="no_identity",no_tls_reason="not_provided_by_service_discovery",dst_control_plane_ns="linkerd",dst_deployment="echo-dpumesh",dst_namespace="test-bench",dst_pod="echo-dpumesh-848cb8898b-lbpg7",dst_pod_template_hash="848cb8898b",dst_service="echo-dpumesh",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown",errno=""} 6
+tcp_close_total{direction="outbound",peer="dst",authority="preload-sock.test-bench.svc.cluster.local:9100",target_addr="10.244.0.65:9100",target_ip="10.244.0.65",target_port="9100",tls="no_identity",no_tls_reason="not_provided_by_service_discovery",dst_control_plane_ns="linkerd",dst_deployment="preload-echo",dst_namespace="test-bench",dst_pod="preload-echo-d44c78894-l7lbp",dst_pod_template_hash="d44c78894",dst_service="preload-sock",dst_serviceaccount="default",dst_zone="",dst_zone_locality="unknown",errno=""} 12
+# HELP opentelemetry_span_export_streams Total count of opened span export streams
+# TYPE opentelemetry_span_export_streams counter
+opentelemetry_span_export_streams 0
+# HELP opentelemetry_span_export_requests Total count of span export request messages
+# TYPE opentelemetry_span_export_requests counter
+opentelemetry_span_export_requests 0
+# HELP opentelemetry_span_exports Total count of spans exported
+# TYPE opentelemetry_span_exports counter
+opentelemetry_span_exports 0
+# HELP stack_create_total Total number of services created
+# TYPE stack_create_total counter
+stack_create_total{direction="outbound",protocol="tls",name="endpoint"} 0
+stack_create_total{direction="outbound",protocol="http",name="balance"} 12
+stack_create_total{direction="inbound",protocol="http",name="logical"} 0
+stack_create_total{direction="outbound",protocol="opaq",name="forward"} 0
+stack_create_total{direction="outbound",protocol="tls",name="forward"} 0
+stack_create_total{direction="outbound",protocol="http",name="forward"} 0
+stack_create_total{direction="outbound",protocol="opaq",name="endpoint"} 62
+stack_create_total{direction="outbound",protocol="http",name="endpoint"} 12
+stack_create_total{direction="outbound",protocol="tls",name="balance"} 0
+stack_create_total{direction="outbound",protocol="opaq",name="balance"} 28
+# HELP stack_drop_total Total number of services dropped
+# TYPE stack_drop_total counter
+stack_drop_total{direction="outbound",protocol="tls",name="endpoint"} 0
+stack_drop_total{direction="outbound",protocol="http",name="balance"} 12
+stack_drop_total{direction="inbound",protocol="http",name="logical"} 0
+stack_drop_total{direction="outbound",protocol="opaq",name="forward"} 0
+stack_drop_total{direction="outbound",protocol="tls",name="forward"} 0
+stack_drop_total{direction="outbound",protocol="http",name="forward"} 0
+stack_drop_total{direction="outbound",protocol="opaq",name="endpoint"} 62
+stack_drop_total{direction="outbound",protocol="http",name="endpoint"} 12
+stack_drop_total{direction="outbound",protocol="tls",name="balance"} 0
+stack_drop_total{direction="outbound",protocol="opaq",name="balance"} 28
+# HELP stack_poll_total Total number of stack polls
+# TYPE stack_poll_total counter
+stack_poll_total{direction="outbound",protocol="tls",name="endpoint",ready="true"} 0
+stack_poll_total{direction="outbound",protocol="http",name="balance",ready="true"} 491094
+stack_poll_total{direction="inbound",protocol="http",name="logical",ready="true"} 0
+stack_poll_total{direction="outbound",protocol="opaq",name="forward",ready="true"} 0
+stack_poll_total{direction="outbound",protocol="tls",name="forward",ready="true"} 0
+stack_poll_total{direction="outbound",protocol="http",name="forward",ready="true"} 0
+stack_poll_total{direction="outbound",protocol="opaq",name="endpoint",ready="true"} 124
+stack_poll_total{direction="outbound",protocol="http",name="endpoint",ready="true"} 982200
+stack_poll_total{direction="outbound",protocol="tls",name="balance",ready="true"} 0
+stack_poll_total{direction="outbound",protocol="opaq",name="balance",ready="true"} 31
+stack_poll_total{direction="outbound",protocol="tls",name="endpoint",ready="false"} 0
+stack_poll_total{direction="outbound",protocol="http",name="balance",ready="false"} 0
+stack_poll_total{direction="inbound",protocol="http",name="logical",ready="false"} 0
+stack_poll_total{direction="outbound",protocol="opaq",name="forward",ready="false"} 0
+stack_poll_total{direction="outbound",protocol="tls",name="forward",ready="false"} 0
+stack_poll_total{direction="outbound",protocol="http",name="forward",ready="false"} 0
+stack_poll_total{direction="outbound",protocol="opaq",name="endpoint",ready="false"} 0
+stack_poll_total{direction="outbound",protocol="http",name="endpoint",ready="false"} 0
+stack_poll_total{direction="outbound",protocol="tls",name="balance",ready="false"} 0
+stack_poll_total{direction="outbound",protocol="opaq",name="balance",ready="false"} 0
+stack_poll_total{direction="outbound",protocol="tls",name="endpoint",ready="error"} 0
+stack_poll_total{direction="outbound",protocol="http",name="balance",ready="error"} 0
+stack_poll_total{direction="inbound",protocol="http",name="logical",ready="error"} 0
+stack_poll_total{direction="outbound",protocol="opaq",name="forward",ready="error"} 0
+stack_poll_total{direction="outbound",protocol="tls",name="forward",ready="error"} 0
+stack_poll_total{direction="outbound",protocol="http",name="forward",ready="error"} 0
+stack_poll_total{direction="outbound",protocol="opaq",name="endpoint",ready="error"} 0
+stack_poll_total{direction="outbound",protocol="http",name="endpoint",ready="error"} 0
+stack_poll_total{direction="outbound",protocol="tls",name="balance",ready="error"} 0
+stack_poll_total{direction="outbound",protocol="opaq",name="balance",ready="error"} 0
+# HELP stack_poll_total_ms Total number of milliseconds this service has spent awaiting readiness
+# TYPE stack_poll_total_ms counter
+stack_poll_total_ms{direction="outbound",protocol="tls",name="endpoint"} 0
+stack_poll_total_ms{direction="outbound",protocol="http",name="balance"} 0
+stack_poll_total_ms{direction="inbound",protocol="http",name="logical"} 0
+stack_poll_total_ms{direction="outbound",protocol="opaq",name="forward"} 0
+stack_poll_total_ms{direction="outbound",protocol="tls",name="forward"} 0
+stack_poll_total_ms{direction="outbound",protocol="http",name="forward"} 0
+stack_poll_total_ms{direction="outbound",protocol="opaq",name="endpoint"} 0
+stack_poll_total_ms{direction="outbound",protocol="http",name="endpoint"} 0
+stack_poll_total_ms{direction="outbound",protocol="tls",name="balance"} 0
+stack_poll_total_ms{direction="outbound",protocol="opaq",name="balance"} 0
+# HELP proxy_build_info Proxy build info.
+# TYPE proxy_build_info gauge
+proxy_build_info{date="2026-08-19T05:51:42Z",git_sha="",profile="release",vendor="",version="0.0.0-dev"} 1
+# HELP rustls_info Proxy TLS info.
+# TYPE rustls_info gauge
+rustls_info{tls_suites="TLS13_AES_128_GCM_SHA256,TLS13_AES_256_GCM_SHA384,TLS13_CHACHA20_POLY1305_SHA256,",tls_kx_groups="X25519MLKEM768,X25519,secp256r1,secp384r1,",tls_rand="AwsLcRs",tls_key_provider="AwsLcRs",tls_fips="false"} 1
+# HELP control_dns_resolutions Counts the number of DNS records that have been resolved..
+# TYPE control_dns_resolutions counter
+control_dns_resolutions_total{client="identity",record_type="A/AAAA",result="not_found"} 0
+control_dns_resolutions_total{client="trace_collector",record_type="A/AAAA",result="not_found"} 0
+control_dns_resolutions_total{client="identity",record_type="SRV",result="not_found"} 0
+control_dns_resolutions_total{client="policy",record_type="SRV",result="ok"} 0
+control_dns_resolutions_total{client="identity",record_type="A/AAAA",result="ok"} 0
+control_dns_resolutions_total{client="destination",record_type="SRV",result="ok"} 0
+control_dns_resolutions_total{client="trace_collector",record_type="A/AAAA",result="ok"} 0
+control_dns_resolutions_total{client="destination",record_type="A/AAAA",result="not_found"} 0
+control_dns_resolutions_total{client="destination",record_type="SRV",result="not_found"} 0
+control_dns_resolutions_total{client="identity",record_type="SRV",result="ok"} 0
+control_dns_resolutions_total{client="policy",record_type="A/AAAA",result="not_found"} 0
+control_dns_resolutions_total{client="policy",record_type="SRV",result="not_found"} 0
+control_dns_resolutions_total{client="trace_collector",record_type="SRV",result="ok"} 0
+control_dns_resolutions_total{client="policy",record_type="A/AAAA",result="ok"} 0
+control_dns_resolutions_total{client="trace_collector",record_type="SRV",result="not_found"} 0
+control_dns_resolutions_total{client="destination",record_type="A/AAAA",result="ok"} 0
+# HELP control_identity_cert_expiration_timestamp_seconds Time when this proxy's current mTLS identity certificate will expire (in seconds since the UNIX epoch).
+# TYPE control_identity_cert_expiration_timestamp_seconds gauge
+# UNIT control_identity_cert_expiration_timestamp_seconds seconds
+control_identity_cert_expiration_timestamp_seconds 1787367844.0
+# HELP control_identity_cert_refresh_timestamp_seconds Time when this proxy's current mTLS identity certificate was last updated.
+# TYPE control_identity_cert_refresh_timestamp_seconds gauge
+# UNIT control_identity_cert_refresh_timestamp_seconds seconds
+control_identity_cert_refresh_timestamp_seconds 1787281424.776165
+# HELP control_identity_cert_refreshes The total number of times this proxy's mTLS identity certificate has been refreshed by the Identity provider.
+# TYPE control_identity_cert_refreshes counter
+control_identity_cert_refreshes_total{result="error"} 0
+control_identity_cert_refreshes_total{result="ok"} 1
+# HELP control_identity_balancer_endpoints The number of endpoints currently in a HTTP request balancer.
+# TYPE control_identity_balancer_endpoints gauge
+control_identity_balancer_endpoints{endpoint_state="pending",addr="192.168.100.1:28088"} 0
+control_identity_balancer_endpoints{endpoint_state="ready",addr="192.168.100.1:28088"} 0
+# HELP control_identity_balancer_p2c_endpoints The number of endpoints currently in the balancer.
+# TYPE control_identity_balancer_p2c_endpoints gauge
+control_identity_balancer_p2c_endpoints{addr="192.168.100.1:28088"} 0
+# HELP control_identity_balancer_p2c_updates The total number of service discovery updates received by a balancer.
+# TYPE control_identity_balancer_p2c_updates counter
+control_identity_balancer_p2c_updates_total{op="Reset",addr="192.168.100.1:28088"} 1
+control_identity_balancer_p2c_updates_total{op="Remove",addr="192.168.100.1:28088"} 0
+control_identity_balancer_p2c_updates_total{op="Add",addr="192.168.100.1:28088"} 0
+# HELP control_identity_balancer_queue_length The current count of requests waiting in the queue.
+# TYPE control_identity_balancer_queue_length gauge
+control_identity_balancer_queue_length{addr="192.168.100.1:28088"} 0
+# HELP control_identity_balancer_queue_requests The total number of requests that have entered the queue.
+# TYPE control_identity_balancer_queue_requests counter
+control_identity_balancer_queue_requests_total{addr="192.168.100.1:28088"} 1
+# HELP control_identity_balancer_queue_latency_seconds The distribution of durations that requests have spent in the queue.
+# TYPE control_identity_balancer_queue_latency_seconds histogram
+# UNIT control_identity_balancer_queue_latency_seconds seconds
+control_identity_balancer_queue_latency_seconds_sum{addr="192.168.100.1:28088"} 0.068450303
+control_identity_balancer_queue_latency_seconds_count{addr="192.168.100.1:28088"} 1
+control_identity_balancer_queue_latency_seconds_bucket{le="0.0005",addr="192.168.100.1:28088"} 0
+control_identity_balancer_queue_latency_seconds_bucket{le="0.005",addr="192.168.100.1:28088"} 0
+control_identity_balancer_queue_latency_seconds_bucket{le="0.05",addr="192.168.100.1:28088"} 0
+control_identity_balancer_queue_latency_seconds_bucket{le="0.5",addr="192.168.100.1:28088"} 1
+control_identity_balancer_queue_latency_seconds_bucket{le="1.0",addr="192.168.100.1:28088"} 1
+control_identity_balancer_queue_latency_seconds_bucket{le="3.0",addr="192.168.100.1:28088"} 1
+control_identity_balancer_queue_latency_seconds_bucket{le="+Inf",addr="192.168.100.1:28088"} 1
+# HELP control_identity_balancer_queue_gate_open The total number of gate state changes to open.
+# TYPE control_identity_balancer_queue_gate_open counter
+control_identity_balancer_queue_gate_open_total{addr="192.168.100.1:28088"} 1
+# HELP control_identity_balancer_queue_gate_shut The total number of gate state changes from open to shut.
+# TYPE control_identity_balancer_queue_gate_shut counter
+control_identity_balancer_queue_gate_shut_total{addr="192.168.100.1:28088"} 0
+# HELP control_identity_balancer_queue_gate_open_time_seconds The time at which the gate was opened.
+# TYPE control_identity_balancer_queue_gate_open_time_seconds gauge
+# UNIT control_identity_balancer_queue_gate_open_time_seconds seconds
+control_identity_balancer_queue_gate_open_time_seconds{addr="192.168.100.1:28088"} 1787281424.6921335
+# HELP control_identity_balancer_queue_gate_shut_time_seconds The time at which the gate was shut.
+# TYPE control_identity_balancer_queue_gate_shut_time_seconds gauge
+# UNIT control_identity_balancer_queue_gate_shut_time_seconds seconds
+control_identity_balancer_queue_gate_shut_time_seconds{addr="192.168.100.1:28088"} 0.0
+# HELP control_identity_balancer_queue_gate_timeout_seconds Indicates the request timeout after which the gate will shut and enter failfast.
+# TYPE control_identity_balancer_queue_gate_timeout_seconds gauge
+# UNIT control_identity_balancer_queue_gate_timeout_seconds seconds
+control_identity_balancer_queue_gate_timeout_seconds{addr="192.168.100.1:28088"} 30.0
+# HELP control_destination_balancer_endpoints The number of endpoints currently in a HTTP request balancer.
+# TYPE control_destination_balancer_endpoints gauge
+control_destination_balancer_endpoints{endpoint_state="pending",addr="192.168.100.1:28086"} 0
+control_destination_balancer_endpoints{endpoint_state="ready",addr="192.168.100.1:28086"} 1
+# HELP control_destination_balancer_p2c_endpoints The number of endpoints currently in the balancer.
+# TYPE control_destination_balancer_p2c_endpoints gauge
+control_destination_balancer_p2c_endpoints{addr="192.168.100.1:28086"} 1
+# HELP control_destination_balancer_p2c_updates The total number of service discovery updates received by a balancer.
+# TYPE control_destination_balancer_p2c_updates counter
+control_destination_balancer_p2c_updates_total{op="Add",addr="192.168.100.1:28086"} 0
+control_destination_balancer_p2c_updates_total{op="Reset",addr="192.168.100.1:28086"} 1
+control_destination_balancer_p2c_updates_total{op="Remove",addr="192.168.100.1:28086"} 0
+# HELP control_destination_balancer_queue_length The current count of requests waiting in the queue.
+# TYPE control_destination_balancer_queue_length gauge
+control_destination_balancer_queue_length{addr="192.168.100.1:28086"} 0
+# HELP control_destination_balancer_queue_requests The total number of requests that have entered the queue.
+# TYPE control_destination_balancer_queue_requests counter
+control_destination_balancer_queue_requests_total{addr="192.168.100.1:28086"} 83
+# HELP control_destination_balancer_queue_latency_seconds The distribution of durations that requests have spent in the queue.
+# TYPE control_destination_balancer_queue_latency_seconds histogram
+# UNIT control_destination_balancer_queue_latency_seconds seconds
+control_destination_balancer_queue_latency_seconds_sum{addr="192.168.100.1:28086"} 0.002801250999999999
+control_destination_balancer_queue_latency_seconds_count{addr="192.168.100.1:28086"} 83
+control_destination_balancer_queue_latency_seconds_bucket{le="0.0005",addr="192.168.100.1:28086"} 83
+control_destination_balancer_queue_latency_seconds_bucket{le="0.005",addr="192.168.100.1:28086"} 83
+control_destination_balancer_queue_latency_seconds_bucket{le="0.05",addr="192.168.100.1:28086"} 83
+control_destination_balancer_queue_latency_seconds_bucket{le="0.5",addr="192.168.100.1:28086"} 83
+control_destination_balancer_queue_latency_seconds_bucket{le="1.0",addr="192.168.100.1:28086"} 83
+control_destination_balancer_queue_latency_seconds_bucket{le="3.0",addr="192.168.100.1:28086"} 83
+control_destination_balancer_queue_latency_seconds_bucket{le="+Inf",addr="192.168.100.1:28086"} 83
+# HELP control_destination_balancer_queue_gate_open The total number of gate state changes to open.
+# TYPE control_destination_balancer_queue_gate_open counter
+control_destination_balancer_queue_gate_open_total{addr="192.168.100.1:28086"} 1
+# HELP control_destination_balancer_queue_gate_shut The total number of gate state changes from open to shut.
+# TYPE control_destination_balancer_queue_gate_shut counter
+control_destination_balancer_queue_gate_shut_total{addr="192.168.100.1:28086"} 0
+# HELP control_destination_balancer_queue_gate_open_time_seconds The time at which the gate was opened.
+# TYPE control_destination_balancer_queue_gate_open_time_seconds gauge
+# UNIT control_destination_balancer_queue_gate_open_time_seconds seconds
+control_destination_balancer_queue_gate_open_time_seconds{addr="192.168.100.1:28086"} 1787281424.689762
+# HELP control_destination_balancer_queue_gate_shut_time_seconds The time at which the gate was shut.
+# TYPE control_destination_balancer_queue_gate_shut_time_seconds gauge
+# UNIT control_destination_balancer_queue_gate_shut_time_seconds seconds
+control_destination_balancer_queue_gate_shut_time_seconds{addr="192.168.100.1:28086"} 0.0
+# HELP control_destination_balancer_queue_gate_timeout_seconds Indicates the request timeout after which the gate will shut and enter failfast.
+# TYPE control_destination_balancer_queue_gate_timeout_seconds gauge
+# UNIT control_destination_balancer_queue_gate_timeout_seconds seconds
+control_destination_balancer_queue_gate_timeout_seconds{addr="192.168.100.1:28086"} 30.0
+# HELP control_policy_balancer_endpoints The number of endpoints currently in a HTTP request balancer.
+# TYPE control_policy_balancer_endpoints gauge
+control_policy_balancer_endpoints{endpoint_state="ready",addr="192.168.100.1:28087"} 1
+control_policy_balancer_endpoints{endpoint_state="pending",addr="192.168.100.1:28087"} 0
+# HELP control_policy_balancer_p2c_endpoints The number of endpoints currently in the balancer.
+# TYPE control_policy_balancer_p2c_endpoints gauge
+control_policy_balancer_p2c_endpoints{addr="192.168.100.1:28087"} 1
+# HELP control_policy_balancer_p2c_updates The total number of service discovery updates received by a balancer.
+# TYPE control_policy_balancer_p2c_updates counter
+control_policy_balancer_p2c_updates_total{op="Reset",addr="192.168.100.1:28087"} 1
+control_policy_balancer_p2c_updates_total{op="Add",addr="192.168.100.1:28087"} 0
+control_policy_balancer_p2c_updates_total{op="Remove",addr="192.168.100.1:28087"} 0
+# HELP control_policy_balancer_queue_length The current count of requests waiting in the queue.
+# TYPE control_policy_balancer_queue_length gauge
+control_policy_balancer_queue_length{addr="192.168.100.1:28087"} 0
+# HELP control_policy_balancer_queue_requests The total number of requests that have entered the queue.
+# TYPE control_policy_balancer_queue_requests counter
+control_policy_balancer_queue_requests_total{addr="192.168.100.1:28087"} 78
+# HELP control_policy_balancer_queue_latency_seconds The distribution of durations that requests have spent in the queue.
+# TYPE control_policy_balancer_queue_latency_seconds histogram
+# UNIT control_policy_balancer_queue_latency_seconds seconds
+control_policy_balancer_queue_latency_seconds_sum{addr="192.168.100.1:28087"} 0.0024440720000000004
+control_policy_balancer_queue_latency_seconds_count{addr="192.168.100.1:28087"} 78
+control_policy_balancer_queue_latency_seconds_bucket{le="0.0005",addr="192.168.100.1:28087"} 78
+control_policy_balancer_queue_latency_seconds_bucket{le="0.005",addr="192.168.100.1:28087"} 78
+control_policy_balancer_queue_latency_seconds_bucket{le="0.05",addr="192.168.100.1:28087"} 78
+control_policy_balancer_queue_latency_seconds_bucket{le="0.5",addr="192.168.100.1:28087"} 78
+control_policy_balancer_queue_latency_seconds_bucket{le="1.0",addr="192.168.100.1:28087"} 78
+control_policy_balancer_queue_latency_seconds_bucket{le="3.0",addr="192.168.100.1:28087"} 78
+control_policy_balancer_queue_latency_seconds_bucket{le="+Inf",addr="192.168.100.1:28087"} 78
+# HELP control_policy_balancer_queue_gate_open The total number of gate state changes to open.
+# TYPE control_policy_balancer_queue_gate_open counter
+control_policy_balancer_queue_gate_open_total{addr="192.168.100.1:28087"} 1
+# HELP control_policy_balancer_queue_gate_shut The total number of gate state changes from open to shut.
+# TYPE control_policy_balancer_queue_gate_shut counter
+control_policy_balancer_queue_gate_shut_total{addr="192.168.100.1:28087"} 0
+# HELP control_policy_balancer_queue_gate_open_time_seconds The time at which the gate was opened.
+# TYPE control_policy_balancer_queue_gate_open_time_seconds gauge
+# UNIT control_policy_balancer_queue_gate_open_time_seconds seconds
+control_policy_balancer_queue_gate_open_time_seconds{addr="192.168.100.1:28087"} 1787281424.6901515
+# HELP control_policy_balancer_queue_gate_shut_time_seconds The time at which the gate was shut.
+# TYPE control_policy_balancer_queue_gate_shut_time_seconds gauge
+# UNIT control_policy_balancer_queue_gate_shut_time_seconds seconds
+control_policy_balancer_queue_gate_shut_time_seconds{addr="192.168.100.1:28087"} 0.0
+# HELP control_policy_balancer_queue_gate_timeout_seconds Indicates the request timeout after which the gate will shut and enter failfast.
+# TYPE control_policy_balancer_queue_gate_timeout_seconds gauge
+# UNIT control_policy_balancer_queue_gate_timeout_seconds seconds
+control_policy_balancer_queue_gate_timeout_seconds{addr="192.168.100.1:28087"} 30.0
+# HELP inbound_tcp_detect_http_duration_seconds Time taken for protocol detection.
+# TYPE inbound_tcp_detect_http_duration_seconds histogram
+# UNIT inbound_tcp_detect_http_duration_seconds seconds
+inbound_tcp_detect_http_duration_seconds_sum{srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191"} 0.00013622799999999998
+inbound_tcp_detect_http_duration_seconds_count{srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191"} 20
+inbound_tcp_detect_http_duration_seconds_bucket{le="0.001",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191"} 20
+inbound_tcp_detect_http_duration_seconds_bucket{le="0.1",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191"} 20
+inbound_tcp_detect_http_duration_seconds_bucket{le="+Inf",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191"} 20
+# HELP inbound_tcp_detect_http_results Protocol detection results.
+# TYPE inbound_tcp_detect_http_results counter
+inbound_tcp_detect_http_results_total{result="error",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191"} 0
+inbound_tcp_detect_http_results_total{result="http/2",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191"} 0
+inbound_tcp_detect_http_results_total{result="http/1",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191"} 20
+inbound_tcp_detect_http_results_total{result="not_http",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191"} 0
+inbound_tcp_detect_http_results_total{result="read_timeout",srv_group="",srv_kind="default",srv_name="all-unauthenticated",srv_port="4191"} 0
+# HELP inbound_tcp_transport_header_connections TCP connections with transport headers.
+# TYPE inbound_tcp_transport_header_connections counter
+# HELP inbound_grpc_requests The total number of requests dispatched.
+# TYPE inbound_grpc_requests counter
+# HELP inbound_http_requests The total number of requests dispatched.
+# TYPE inbound_http_requests counter
+# HELP inbound_grpc_request_frame_size_bytes Request data frame sizes.
+# TYPE inbound_grpc_request_frame_size_bytes histogram
+# UNIT inbound_grpc_request_frame_size_bytes bytes
+# HELP inbound_http_request_frame_size_bytes Request data frame sizes.
+# TYPE inbound_http_request_frame_size_bytes histogram
+# UNIT inbound_http_request_frame_size_bytes bytes
+# HELP inbound_grpc_request_duration_seconds The time between request initialization and response completion.
+# TYPE inbound_grpc_request_duration_seconds histogram
+# UNIT inbound_grpc_request_duration_seconds seconds
+# HELP inbound_http_request_duration_seconds The time between request initialization and response completion.
+# TYPE inbound_http_request_duration_seconds histogram
+# UNIT inbound_http_request_duration_seconds seconds
+# HELP inbound_grpc_response_frame_size_bytes Response data frame sizes.
+# TYPE inbound_grpc_response_frame_size_bytes histogram
+# UNIT inbound_grpc_response_frame_size_bytes bytes
+# HELP inbound_http_response_frame_size_bytes Response data frame sizes.
+# TYPE inbound_http_response_frame_size_bytes histogram
+# UNIT inbound_http_response_frame_size_bytes bytes
+# HELP inbound_grpc_response_duration_seconds The time between request completion and response completion.
+# TYPE inbound_grpc_response_duration_seconds histogram
+# UNIT inbound_grpc_response_duration_seconds seconds
+# HELP inbound_http_response_duration_seconds The time between request completion and response completion.
+# TYPE inbound_http_response_duration_seconds histogram
+# UNIT inbound_http_response_duration_seconds seconds
+# HELP inbound_grpc_statuses Completed gRPC responses.
+# TYPE inbound_grpc_statuses counter
+# HELP inbound_http_statuses Completed HTTP responses.
+# TYPE inbound_http_statuses counter
+# HELP dmesh_sessions_opened DPUmesh sessions opened.
+# TYPE dmesh_sessions_opened counter
+dmesh_sessions_opened_total 43
+# HELP dmesh_sessions_closed DPUmesh sessions closed.
+# TYPE dmesh_sessions_closed counter
+dmesh_sessions_closed_total 43
+# HELP dmesh_sessions_active DPUmesh sessions currently carried by the adapter.
+# TYPE dmesh_sessions_active gauge
+dmesh_sessions_active 0
+# HELP dmesh_registrations_pending Endpoints registered with the acceptor and not yet bound to a session.
+# TYPE dmesh_registrations_pending gauge
+dmesh_registrations_pending 0
+# HELP dmesh_registrations_orphaned Registrations that arrived after their session closed.
+# TYPE dmesh_registrations_orphaned counter
+dmesh_registrations_orphaned_total 0
+# HELP dmesh_endpoints_aborted DPUmesh endpoints aborted by a close, a poison or a worker stop.
+# TYPE dmesh_endpoints_aborted counter
+dmesh_endpoints_aborted_total 86
+# HELP dmesh_tasks_live Connection tasks the DPUmesh acceptor is driving.
+# TYPE dmesh_tasks_live gauge
+dmesh_tasks_live 0
+# HELP dmesh_tasks_cancelled Connection tasks cancelled by a session close.
+# TYPE dmesh_tasks_cancelled counter
+dmesh_tasks_cancelled_total 0
+# HELP dmesh_backend_take_errors Backend channels a connector could not take.
+# TYPE dmesh_backend_take_errors counter
+dmesh_backend_take_errors_total 0
+# HELP dmesh_backend_target_mismatches Linkerd-selected targets rejected outside the authoritative DPUmesh Service.
+# TYPE dmesh_backend_target_mismatches counter
+dmesh_backend_target_mismatches_total 0
+# HELP dmesh_backend_session_mismatches Connections whose carried session disagreed with their stack's.
+# TYPE dmesh_backend_session_mismatches counter
+dmesh_backend_session_mismatches_total 0
+# HELP dmesh_backend_sessionless_refusals Sessionless connects to DMesh-provided addresses refused.
+# TYPE dmesh_backend_sessionless_refusals counter
+dmesh_backend_sessionless_refusals_total 0
+# HELP dmesh_session_stack_builds Per-session DPUmesh outbound stacks built.
+# TYPE dmesh_session_stack_builds counter
+dmesh_session_stack_builds_total 14
+# HELP dmesh_session_stack_cache_hits Frontend connections served by a reused per-workload outbound stack.
+# TYPE dmesh_session_stack_cache_hits counter
+dmesh_session_stack_cache_hits_total 29
+# HELP dmesh_session_stack_cache_misses Frontend connections that built their workload's outbound stack.
+# TYPE dmesh_session_stack_cache_misses counter
+dmesh_session_stack_cache_misses_total 2
+# HELP dmesh_session_stack_configure_nanoseconds Nanoseconds spent cloning and configuring per-session outbound templates.
+# TYPE dmesh_session_stack_configure_nanoseconds counter
+dmesh_session_stack_configure_nanoseconds_total 121469
+# HELP dmesh_session_stack_layers_nanoseconds Nanoseconds spent constructing per-session outbound layers.
+# TYPE dmesh_session_stack_layers_nanoseconds counter
+dmesh_session_stack_layers_nanoseconds_total 1508465
+# HELP dmesh_session_stack_service_nanoseconds Nanoseconds spent instantiating target services from per-session outbound layers.
+# TYPE dmesh_session_stack_service_nanoseconds counter
+dmesh_session_stack_service_nanoseconds_total 447631
+# HELP dmesh_slots_retired Session slots withdrawn from reuse because their generations ran out.
+# TYPE dmesh_slots_retired gauge
+dmesh_slots_retired 0
+# HELP dmesh_sessions_declined DPUmesh sessions the adapter refused, by cause.
+# TYPE dmesh_sessions_declined counter
+# HELP dmesh_control_events Registration, membership and revocation outcomes by kind and reason.
+# TYPE dmesh_control_events counter
+dmesh_control_events_total{kind="registration",reason="unprotected"} 8
+dmesh_control_events_total{kind="inbound",reason="admitted"} 359
+dmesh_control_events_total{kind="assert",reason="ok"} 11
+dmesh_control_events_total{kind="registration",reason="ungraded"} 3
+dmesh_control_events_total{kind="peer",reason="poison"} 2
+dmesh_control_events_total{kind="membership",reason="ok"} 310
+dmesh_control_events_total{kind="topology",reason="adopted"} 6
+dmesh_control_events_total{kind="topology",reason="unchanged"} 9
+# HELP outbound_tcp_protocol_connections Outbound TCP connections by protocol configuration.
+# TYPE outbound_tcp_protocol_connections counter
+outbound_tcp_protocol_connections_total{protocol="detect",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="preload-sock",parent_port="9100",parent_section_name=""} 12
+outbound_tcp_protocol_connections_total{protocol="detect",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name=""} 12
+outbound_tcp_protocol_connections_total{protocol="detect",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-dpumesh",parent_port="9092",parent_section_name=""} 19
+# HELP outbound_tcp_detect_http_duration_seconds Time taken for protocol detection.
+# TYPE outbound_tcp_detect_http_duration_seconds histogram
+# UNIT outbound_tcp_detect_http_duration_seconds seconds
+outbound_tcp_detect_http_duration_seconds_sum{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-dpumesh",parent_port="9092",parent_section_name=""} 0.000077933
+outbound_tcp_detect_http_duration_seconds_count{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-dpumesh",parent_port="9092",parent_section_name=""} 19
+outbound_tcp_detect_http_duration_seconds_bucket{le="0.001",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-dpumesh",parent_port="9092",parent_section_name=""} 19
+outbound_tcp_detect_http_duration_seconds_bucket{le="0.1",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-dpumesh",parent_port="9092",parent_section_name=""} 19
+outbound_tcp_detect_http_duration_seconds_bucket{le="+Inf",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-dpumesh",parent_port="9092",parent_section_name=""} 19
+outbound_tcp_detect_http_duration_seconds_sum{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="preload-sock",parent_port="9100",parent_section_name=""} 0.000054117000000000007
+outbound_tcp_detect_http_duration_seconds_count{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="preload-sock",parent_port="9100",parent_section_name=""} 12
+outbound_tcp_detect_http_duration_seconds_bucket{le="0.001",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="preload-sock",parent_port="9100",parent_section_name=""} 12
+outbound_tcp_detect_http_duration_seconds_bucket{le="0.1",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="preload-sock",parent_port="9100",parent_section_name=""} 12
+outbound_tcp_detect_http_duration_seconds_bucket{le="+Inf",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="preload-sock",parent_port="9100",parent_section_name=""} 12
+outbound_tcp_detect_http_duration_seconds_sum{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name=""} 0.000036789
+outbound_tcp_detect_http_duration_seconds_count{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name=""} 12
+outbound_tcp_detect_http_duration_seconds_bucket{le="0.001",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name=""} 12
+outbound_tcp_detect_http_duration_seconds_bucket{le="0.1",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name=""} 12
+outbound_tcp_detect_http_duration_seconds_bucket{le="+Inf",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name=""} 12
+# HELP outbound_tcp_detect_http_results Protocol detection results.
+# TYPE outbound_tcp_detect_http_results counter
+outbound_tcp_detect_http_results_total{result="read_timeout",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name=""} 0
+outbound_tcp_detect_http_results_total{result="error",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name=""} 0
+outbound_tcp_detect_http_results_total{result="not_http",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name=""} 0
+outbound_tcp_detect_http_results_total{result="http/1",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="preload-sock",parent_port="9100",parent_section_name=""} 0
+outbound_tcp_detect_http_results_total{result="http/1",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-dpumesh",parent_port="9092",parent_section_name=""} 0
+outbound_tcp_detect_http_results_total{result="error",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="preload-sock",parent_port="9100",parent_section_name=""} 0
+outbound_tcp_detect_http_results_total{result="http/2",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name=""} 12
+outbound_tcp_detect_http_results_total{result="error",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-dpumesh",parent_port="9092",parent_section_name=""} 0
+outbound_tcp_detect_http_results_total{result="not_http",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="preload-sock",parent_port="9100",parent_section_name=""} 12
+outbound_tcp_detect_http_results_total{result="http/2",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="preload-sock",parent_port="9100",parent_section_name=""} 0
+outbound_tcp_detect_http_results_total{result="read_timeout",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-dpumesh",parent_port="9092",parent_section_name=""} 0
+outbound_tcp_detect_http_results_total{result="http/2",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-dpumesh",parent_port="9092",parent_section_name=""} 0
+outbound_tcp_detect_http_results_total{result="http/1",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name=""} 0
+outbound_tcp_detect_http_results_total{result="not_http",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-dpumesh",parent_port="9092",parent_section_name=""} 19
+outbound_tcp_detect_http_results_total{result="read_timeout",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="preload-sock",parent_port="9100",parent_section_name=""} 0
+# HELP outbound_http_route_request_duration_seconds The time between request initialization and response completion.
+# TYPE outbound_http_route_request_duration_seconds histogram
+# UNIT outbound_http_route_request_duration_seconds seconds
+outbound_http_route_request_duration_seconds_sum{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",route_group="",route_kind="default",route_namespace="",route_name="http",hostname=""} 1783.1260977800337
+outbound_http_route_request_duration_seconds_count{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",route_group="",route_kind="default",route_namespace="",route_name="http",hostname=""} 490915
+outbound_http_route_request_duration_seconds_bucket{le="0.05",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",route_group="",route_kind="default",route_namespace="",route_name="http",hostname=""} 490915
+outbound_http_route_request_duration_seconds_bucket{le="0.5",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",route_group="",route_kind="default",route_namespace="",route_name="http",hostname=""} 490915
+outbound_http_route_request_duration_seconds_bucket{le="1.0",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",route_group="",route_kind="default",route_namespace="",route_name="http",hostname=""} 490915
+outbound_http_route_request_duration_seconds_bucket{le="10.0",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",route_group="",route_kind="default",route_namespace="",route_name="http",hostname=""} 490915
+outbound_http_route_request_duration_seconds_bucket{le="+Inf",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",route_group="",route_kind="default",route_namespace="",route_name="http",hostname=""} 490915
+# HELP outbound_http_route_request_frame_size_bytes Request data frame sizes.
+# TYPE outbound_http_route_request_frame_size_bytes histogram
+# UNIT outbound_http_route_request_frame_size_bytes bytes
+outbound_http_route_request_frame_size_bytes_sum{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",route_group="",route_kind="default",route_namespace="",route_name="http",hostname=""} 627607814.0
+outbound_http_route_request_frame_size_bytes_count{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",route_group="",route_kind="default",route_namespace="",route_name="http",hostname=""} 491094
+outbound_http_route_request_frame_size_bytes_bucket{le="128.0",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",route_group="",route_kind="default",route_namespace="",route_name="http",hostname=""} 23084
+outbound_http_route_request_frame_size_bytes_bucket{le="1024.0",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",route_group="",route_kind="default",route_namespace="",route_name="http",hostname=""} 23084
+outbound_http_route_request_frame_size_bytes_bucket{le="10240.0",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",route_group="",route_kind="default",route_namespace="",route_name="http",hostname=""} 491094
+outbound_http_route_request_frame_size_bytes_bucket{le="+Inf",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",route_group="",route_kind="default",route_namespace="",route_name="http",hostname=""} 491094
+# HELP outbound_http_route_backend_requests The total number of requests dispatched.
+# TYPE outbound_http_route_backend_requests counter
+outbound_http_route_backend_requests_total{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",route_group="",route_kind="default",route_namespace="",route_name="http",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-dpumesh",backend_port="9092",backend_section_name=""} 491094
+# HELP outbound_http_route_backend_response_duration_seconds The time between request completion and response completion.
+# TYPE outbound_http_route_backend_response_duration_seconds histogram
+# UNIT outbound_http_route_backend_response_duration_seconds seconds
+outbound_http_route_backend_response_duration_seconds_sum{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",route_group="",route_kind="default",route_namespace="",route_name="http",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-dpumesh",backend_port="9092",backend_section_name=""} 1739.8446184209473
+outbound_http_route_backend_response_duration_seconds_count{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",route_group="",route_kind="default",route_namespace="",route_name="http",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-dpumesh",backend_port="9092",backend_section_name=""} 490915
+outbound_http_route_backend_response_duration_seconds_bucket{le="0.025",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",route_group="",route_kind="default",route_namespace="",route_name="http",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-dpumesh",backend_port="9092",backend_section_name=""} 490915
+outbound_http_route_backend_response_duration_seconds_bucket{le="0.05",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",route_group="",route_kind="default",route_namespace="",route_name="http",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-dpumesh",backend_port="9092",backend_section_name=""} 490915
+outbound_http_route_backend_response_duration_seconds_bucket{le="0.1",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",route_group="",route_kind="default",route_namespace="",route_name="http",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-dpumesh",backend_port="9092",backend_section_name=""} 490915
+outbound_http_route_backend_response_duration_seconds_bucket{le="0.25",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",route_group="",route_kind="default",route_namespace="",route_name="http",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-dpumesh",backend_port="9092",backend_section_name=""} 490915
+outbound_http_route_backend_response_duration_seconds_bucket{le="0.5",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",route_group="",route_kind="default",route_namespace="",route_name="http",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-dpumesh",backend_port="9092",backend_section_name=""} 490915
+outbound_http_route_backend_response_duration_seconds_bucket{le="1.0",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",route_group="",route_kind="default",route_namespace="",route_name="http",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-dpumesh",backend_port="9092",backend_section_name=""} 490915
+outbound_http_route_backend_response_duration_seconds_bucket{le="10.0",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",route_group="",route_kind="default",route_namespace="",route_name="http",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-dpumesh",backend_port="9092",backend_section_name=""} 490915
+outbound_http_route_backend_response_duration_seconds_bucket{le="+Inf",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",route_group="",route_kind="default",route_namespace="",route_name="http",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-dpumesh",backend_port="9092",backend_section_name=""} 490915
+# HELP outbound_http_route_backend_response_frame_size_bytes Response data frame sizes.
+# TYPE outbound_http_route_backend_response_frame_size_bytes histogram
+# UNIT outbound_http_route_backend_response_frame_size_bytes bytes
+outbound_http_route_backend_response_frame_size_bytes_sum{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",route_group="",route_kind="default",route_namespace="",route_name="http",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-dpumesh",backend_port="9092",backend_section_name=""} 8345555.0
+outbound_http_route_backend_response_frame_size_bytes_count{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",route_group="",route_kind="default",route_namespace="",route_name="http",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-dpumesh",backend_port="9092",backend_section_name=""} 490915
+outbound_http_route_backend_response_frame_size_bytes_bucket{le="128.0",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",route_group="",route_kind="default",route_namespace="",route_name="http",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-dpumesh",backend_port="9092",backend_section_name=""} 490915
+outbound_http_route_backend_response_frame_size_bytes_bucket{le="1024.0",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",route_group="",route_kind="default",route_namespace="",route_name="http",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-dpumesh",backend_port="9092",backend_section_name=""} 490915
+outbound_http_route_backend_response_frame_size_bytes_bucket{le="10240.0",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",route_group="",route_kind="default",route_namespace="",route_name="http",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-dpumesh",backend_port="9092",backend_section_name=""} 490915
+outbound_http_route_backend_response_frame_size_bytes_bucket{le="+Inf",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",route_group="",route_kind="default",route_namespace="",route_name="http",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-dpumesh",backend_port="9092",backend_section_name=""} 490915
+# HELP outbound_http_route_backend_response_statuses Completed responses.
+# TYPE outbound_http_route_backend_response_statuses counter
+outbound_http_route_backend_response_statuses_total{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",route_group="",route_kind="default",route_namespace="",route_name="http",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-dpumesh",backend_port="9092",backend_section_name="",http_status="200",error=""} 490915
+# HELP outbound_http_route_request_statuses Completed request-response streams.
+# TYPE outbound_http_route_request_statuses counter
+outbound_http_route_request_statuses_total{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",route_group="",route_kind="default",route_namespace="",route_name="http",hostname="",http_status="200",error=""} 490915
+# HELP outbound_http_route_retry_limit_exceeded Retryable requests not sent due to retry limits.
+# TYPE outbound_http_route_retry_limit_exceeded counter
+# HELP outbound_http_route_retry_overflow Retryable requests not sent due to circuit breakers.
+# TYPE outbound_http_route_retry_overflow counter
+# HELP outbound_http_route_retry_requests Retry requests emitted.
+# TYPE outbound_http_route_retry_requests counter
+# HELP outbound_http_route_retry_successes Successful responses to retry requests.
+# TYPE outbound_http_route_retry_successes counter
+# HELP outbound_http_balancer_endpoints The number of endpoints currently in a HTTP request balancer.
+# TYPE outbound_http_balancer_endpoints gauge
+outbound_http_balancer_endpoints{endpoint_state="ready",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-dpumesh",backend_port="9092",backend_section_name=""} 0
+outbound_http_balancer_endpoints{endpoint_state="pending",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-dpumesh",backend_port="9092",backend_section_name=""} 0
+# HELP outbound_http_balancer_p2c_endpoints The number of endpoints currently in the balancer.
+# TYPE outbound_http_balancer_p2c_endpoints gauge
+outbound_http_balancer_p2c_endpoints{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-dpumesh",backend_port="9092",backend_section_name=""} 0
+# HELP outbound_http_balancer_p2c_updates The total number of service discovery updates received by a balancer.
+# TYPE outbound_http_balancer_p2c_updates counter
+outbound_http_balancer_p2c_updates_total{op="Remove",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-dpumesh",backend_port="9092",backend_section_name=""} 0
+outbound_http_balancer_p2c_updates_total{op="Reset",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-dpumesh",backend_port="9092",backend_section_name=""} 12
+outbound_http_balancer_p2c_updates_total{op="Add",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-dpumesh",backend_port="9092",backend_section_name=""} 0
+# HELP outbound_http_balancer_queue_length The current count of requests waiting in the queue.
+# TYPE outbound_http_balancer_queue_length gauge
+outbound_http_balancer_queue_length{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-dpumesh",backend_port="9092",backend_section_name=""} 0
+# HELP outbound_http_balancer_queue_requests The total number of requests that have entered the queue.
+# TYPE outbound_http_balancer_queue_requests counter
+outbound_http_balancer_queue_requests_total{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-dpumesh",backend_port="9092",backend_section_name=""} 491094
+# HELP outbound_http_balancer_queue_latency_seconds The distribution of durations that requests have spent in the queue.
+# TYPE outbound_http_balancer_queue_latency_seconds histogram
+# UNIT outbound_http_balancer_queue_latency_seconds seconds
+outbound_http_balancer_queue_latency_seconds_sum{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-dpumesh",backend_port="9092",backend_section_name=""} 18.439582551999228
+outbound_http_balancer_queue_latency_seconds_count{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-dpumesh",backend_port="9092",backend_section_name=""} 491094
+outbound_http_balancer_queue_latency_seconds_bucket{le="0.0005",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-dpumesh",backend_port="9092",backend_section_name=""} 490966
+outbound_http_balancer_queue_latency_seconds_bucket{le="0.005",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-dpumesh",backend_port="9092",backend_section_name=""} 490966
+outbound_http_balancer_queue_latency_seconds_bucket{le="0.05",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-dpumesh",backend_port="9092",backend_section_name=""} 491094
+outbound_http_balancer_queue_latency_seconds_bucket{le="0.5",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-dpumesh",backend_port="9092",backend_section_name=""} 491094
+outbound_http_balancer_queue_latency_seconds_bucket{le="1.0",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-dpumesh",backend_port="9092",backend_section_name=""} 491094
+outbound_http_balancer_queue_latency_seconds_bucket{le="3.0",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-dpumesh",backend_port="9092",backend_section_name=""} 491094
+outbound_http_balancer_queue_latency_seconds_bucket{le="+Inf",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-dpumesh",backend_port="9092",backend_section_name=""} 491094
+# HELP outbound_http_balancer_queue_gate_open The total number of gate state changes to open.
+# TYPE outbound_http_balancer_queue_gate_open counter
+outbound_http_balancer_queue_gate_open_total{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-dpumesh",backend_port="9092",backend_section_name=""} 12
+# HELP outbound_http_balancer_queue_gate_shut The total number of gate state changes from open to shut.
+# TYPE outbound_http_balancer_queue_gate_shut counter
+outbound_http_balancer_queue_gate_shut_total{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-dpumesh",backend_port="9092",backend_section_name=""} 0
+# HELP outbound_http_balancer_queue_gate_open_time_seconds The time at which the gate was opened.
+# TYPE outbound_http_balancer_queue_gate_open_time_seconds gauge
+# UNIT outbound_http_balancer_queue_gate_open_time_seconds seconds
+outbound_http_balancer_queue_gate_open_time_seconds{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-dpumesh",backend_port="9092",backend_section_name=""} 1787284455.009121
+# HELP outbound_http_balancer_queue_gate_shut_time_seconds The time at which the gate was shut.
+# TYPE outbound_http_balancer_queue_gate_shut_time_seconds gauge
+# UNIT outbound_http_balancer_queue_gate_shut_time_seconds seconds
+outbound_http_balancer_queue_gate_shut_time_seconds{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-dpumesh",backend_port="9092",backend_section_name=""} 0.0
+# HELP outbound_http_balancer_queue_gate_timeout_seconds Indicates the request timeout after which the gate will shut and enter failfast.
+# TYPE outbound_http_balancer_queue_gate_timeout_seconds gauge
+# UNIT outbound_http_balancer_queue_gate_timeout_seconds seconds
+outbound_http_balancer_queue_gate_timeout_seconds{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-dpumesh",backend_port="9092",backend_section_name=""} 3.0
+# HELP outbound_grpc_route_request_duration_seconds The time between request initialization and response completion.
+# TYPE outbound_grpc_route_request_duration_seconds histogram
+# UNIT outbound_grpc_route_request_duration_seconds seconds
+# HELP outbound_grpc_route_request_frame_size_bytes Request data frame sizes.
+# TYPE outbound_grpc_route_request_frame_size_bytes histogram
+# UNIT outbound_grpc_route_request_frame_size_bytes bytes
+# HELP outbound_grpc_route_backend_requests The total number of requests dispatched.
+# TYPE outbound_grpc_route_backend_requests counter
+# HELP outbound_grpc_route_backend_response_duration_seconds The time between request completion and response completion.
+# TYPE outbound_grpc_route_backend_response_duration_seconds histogram
+# UNIT outbound_grpc_route_backend_response_duration_seconds seconds
+# HELP outbound_grpc_route_backend_response_frame_size_bytes Response data frame sizes.
+# TYPE outbound_grpc_route_backend_response_frame_size_bytes histogram
+# UNIT outbound_grpc_route_backend_response_frame_size_bytes bytes
+# HELP outbound_grpc_route_backend_response_statuses Completed responses.
+# TYPE outbound_grpc_route_backend_response_statuses counter
+# HELP outbound_grpc_route_request_statuses Completed request-response streams.
+# TYPE outbound_grpc_route_request_statuses counter
+# HELP outbound_grpc_route_retry_limit_exceeded Retryable requests not sent due to retry limits.
+# TYPE outbound_grpc_route_retry_limit_exceeded counter
+# HELP outbound_grpc_route_retry_overflow Retryable requests not sent due to circuit breakers.
+# TYPE outbound_grpc_route_retry_overflow counter
+# HELP outbound_grpc_route_retry_requests Retry requests emitted.
+# TYPE outbound_grpc_route_retry_requests counter
+# HELP outbound_grpc_route_retry_successes Successful responses to retry requests.
+# TYPE outbound_grpc_route_retry_successes counter
+# HELP outbound_tcp_balancer_endpoints The number of endpoints currently in a HTTP request balancer.
+# TYPE outbound_tcp_balancer_endpoints gauge
+outbound_tcp_balancer_endpoints{endpoint_state="ready",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="preload-sock",parent_port="9100",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="preload-sock",backend_port="9100",backend_section_name="",logical="preload-sock.test-bench.svc.cluster.local:9100",concrete="preload-sock.test-bench.svc.cluster.local:9100"} 0
+outbound_tcp_balancer_endpoints{endpoint_state="ready",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-dpumesh",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-dpumesh",backend_port="9092",backend_section_name="",logical="echo-dpumesh.test-bench.svc.cluster.local:9092",concrete="echo-dpumesh.test-bench.svc.cluster.local:9092"} 0
+outbound_tcp_balancer_endpoints{endpoint_state="pending",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="preload-sock",parent_port="9100",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="preload-sock",backend_port="9100",backend_section_name="",logical="preload-sock.test-bench.svc.cluster.local:9100",concrete="preload-sock.test-bench.svc.cluster.local:9100"} 0
+outbound_tcp_balancer_endpoints{endpoint_state="pending",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-dpumesh",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-dpumesh",backend_port="9092",backend_section_name="",logical="echo-dpumesh.test-bench.svc.cluster.local:9092",concrete="echo-dpumesh.test-bench.svc.cluster.local:9092"} 0
+# HELP outbound_tcp_balancer_p2c_endpoints The number of endpoints currently in the balancer.
+# TYPE outbound_tcp_balancer_p2c_endpoints gauge
+outbound_tcp_balancer_p2c_endpoints{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-dpumesh",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-dpumesh",backend_port="9092",backend_section_name="",logical="echo-dpumesh.test-bench.svc.cluster.local:9092",concrete="echo-dpumesh.test-bench.svc.cluster.local:9092"} 0
+outbound_tcp_balancer_p2c_endpoints{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="preload-sock",parent_port="9100",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="preload-sock",backend_port="9100",backend_section_name="",logical="preload-sock.test-bench.svc.cluster.local:9100",concrete="preload-sock.test-bench.svc.cluster.local:9100"} 0
+# HELP outbound_tcp_balancer_p2c_updates The total number of service discovery updates received by a balancer.
+# TYPE outbound_tcp_balancer_p2c_updates counter
+outbound_tcp_balancer_p2c_updates_total{op="Reset",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="preload-sock",parent_port="9100",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="preload-sock",backend_port="9100",backend_section_name="",logical="preload-sock.test-bench.svc.cluster.local:9100",concrete="preload-sock.test-bench.svc.cluster.local:9100"} 11
+outbound_tcp_balancer_p2c_updates_total{op="Add",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="preload-sock",parent_port="9100",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="preload-sock",backend_port="9100",backend_section_name="",logical="preload-sock.test-bench.svc.cluster.local:9100",concrete="preload-sock.test-bench.svc.cluster.local:9100"} 0
+outbound_tcp_balancer_p2c_updates_total{op="Remove",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="preload-sock",parent_port="9100",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="preload-sock",backend_port="9100",backend_section_name="",logical="preload-sock.test-bench.svc.cluster.local:9100",concrete="preload-sock.test-bench.svc.cluster.local:9100"} 0
+outbound_tcp_balancer_p2c_updates_total{op="Add",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-dpumesh",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-dpumesh",backend_port="9092",backend_section_name="",logical="echo-dpumesh.test-bench.svc.cluster.local:9092",concrete="echo-dpumesh.test-bench.svc.cluster.local:9092"} 0
+outbound_tcp_balancer_p2c_updates_total{op="Remove",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-dpumesh",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-dpumesh",backend_port="9092",backend_section_name="",logical="echo-dpumesh.test-bench.svc.cluster.local:9092",concrete="echo-dpumesh.test-bench.svc.cluster.local:9092"} 0
+outbound_tcp_balancer_p2c_updates_total{op="Reset",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-dpumesh",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-dpumesh",backend_port="9092",backend_section_name="",logical="echo-dpumesh.test-bench.svc.cluster.local:9092",concrete="echo-dpumesh.test-bench.svc.cluster.local:9092"} 17
+# HELP outbound_tcp_balancer_queue_length The current count of requests waiting in the queue.
+# TYPE outbound_tcp_balancer_queue_length gauge
+outbound_tcp_balancer_queue_length{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-dpumesh",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-dpumesh",backend_port="9092",backend_section_name="",logical="echo-dpumesh.test-bench.svc.cluster.local:9092",concrete="echo-dpumesh.test-bench.svc.cluster.local:9092"} 0
+outbound_tcp_balancer_queue_length{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="preload-sock",parent_port="9100",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="preload-sock",backend_port="9100",backend_section_name="",logical="preload-sock.test-bench.svc.cluster.local:9100",concrete="preload-sock.test-bench.svc.cluster.local:9100"} 0
+# HELP outbound_tcp_balancer_queue_requests The total number of requests that have entered the queue.
+# TYPE outbound_tcp_balancer_queue_requests counter
+outbound_tcp_balancer_queue_requests_total{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-dpumesh",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-dpumesh",backend_port="9092",backend_section_name="",logical="echo-dpumesh.test-bench.svc.cluster.local:9092",concrete="echo-dpumesh.test-bench.svc.cluster.local:9092"} 19
+outbound_tcp_balancer_queue_requests_total{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="preload-sock",parent_port="9100",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="preload-sock",backend_port="9100",backend_section_name="",logical="preload-sock.test-bench.svc.cluster.local:9100",concrete="preload-sock.test-bench.svc.cluster.local:9100"} 12
+# HELP outbound_tcp_balancer_queue_latency_seconds The distribution of durations that requests have spent in the queue.
+# TYPE outbound_tcp_balancer_queue_latency_seconds histogram
+# UNIT outbound_tcp_balancer_queue_latency_seconds seconds
+outbound_tcp_balancer_queue_latency_seconds_sum{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-dpumesh",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-dpumesh",backend_port="9092",backend_section_name="",logical="echo-dpumesh.test-bench.svc.cluster.local:9092",concrete="echo-dpumesh.test-bench.svc.cluster.local:9092"} 0.190780487
+outbound_tcp_balancer_queue_latency_seconds_count{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-dpumesh",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-dpumesh",backend_port="9092",backend_section_name="",logical="echo-dpumesh.test-bench.svc.cluster.local:9092",concrete="echo-dpumesh.test-bench.svc.cluster.local:9092"} 19
+outbound_tcp_balancer_queue_latency_seconds_bucket{le="0.0005",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-dpumesh",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-dpumesh",backend_port="9092",backend_section_name="",logical="echo-dpumesh.test-bench.svc.cluster.local:9092",concrete="echo-dpumesh.test-bench.svc.cluster.local:9092"} 2
+outbound_tcp_balancer_queue_latency_seconds_bucket{le="0.005",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-dpumesh",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-dpumesh",backend_port="9092",backend_section_name="",logical="echo-dpumesh.test-bench.svc.cluster.local:9092",concrete="echo-dpumesh.test-bench.svc.cluster.local:9092"} 2
+outbound_tcp_balancer_queue_latency_seconds_bucket{le="0.05",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-dpumesh",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-dpumesh",backend_port="9092",backend_section_name="",logical="echo-dpumesh.test-bench.svc.cluster.local:9092",concrete="echo-dpumesh.test-bench.svc.cluster.local:9092"} 19
+outbound_tcp_balancer_queue_latency_seconds_bucket{le="0.5",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-dpumesh",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-dpumesh",backend_port="9092",backend_section_name="",logical="echo-dpumesh.test-bench.svc.cluster.local:9092",concrete="echo-dpumesh.test-bench.svc.cluster.local:9092"} 19
+outbound_tcp_balancer_queue_latency_seconds_bucket{le="1.0",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-dpumesh",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-dpumesh",backend_port="9092",backend_section_name="",logical="echo-dpumesh.test-bench.svc.cluster.local:9092",concrete="echo-dpumesh.test-bench.svc.cluster.local:9092"} 19
+outbound_tcp_balancer_queue_latency_seconds_bucket{le="3.0",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-dpumesh",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-dpumesh",backend_port="9092",backend_section_name="",logical="echo-dpumesh.test-bench.svc.cluster.local:9092",concrete="echo-dpumesh.test-bench.svc.cluster.local:9092"} 19
+outbound_tcp_balancer_queue_latency_seconds_bucket{le="+Inf",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-dpumesh",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-dpumesh",backend_port="9092",backend_section_name="",logical="echo-dpumesh.test-bench.svc.cluster.local:9092",concrete="echo-dpumesh.test-bench.svc.cluster.local:9092"} 19
+outbound_tcp_balancer_queue_latency_seconds_sum{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="preload-sock",parent_port="9100",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="preload-sock",backend_port="9100",backend_section_name="",logical="preload-sock.test-bench.svc.cluster.local:9100",concrete="preload-sock.test-bench.svc.cluster.local:9100"} 0.16705043000000004
+outbound_tcp_balancer_queue_latency_seconds_count{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="preload-sock",parent_port="9100",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="preload-sock",backend_port="9100",backend_section_name="",logical="preload-sock.test-bench.svc.cluster.local:9100",concrete="preload-sock.test-bench.svc.cluster.local:9100"} 12
+outbound_tcp_balancer_queue_latency_seconds_bucket{le="0.0005",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="preload-sock",parent_port="9100",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="preload-sock",backend_port="9100",backend_section_name="",logical="preload-sock.test-bench.svc.cluster.local:9100",concrete="preload-sock.test-bench.svc.cluster.local:9100"} 1
+outbound_tcp_balancer_queue_latency_seconds_bucket{le="0.005",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="preload-sock",parent_port="9100",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="preload-sock",backend_port="9100",backend_section_name="",logical="preload-sock.test-bench.svc.cluster.local:9100",concrete="preload-sock.test-bench.svc.cluster.local:9100"} 1
+outbound_tcp_balancer_queue_latency_seconds_bucket{le="0.05",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="preload-sock",parent_port="9100",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="preload-sock",backend_port="9100",backend_section_name="",logical="preload-sock.test-bench.svc.cluster.local:9100",concrete="preload-sock.test-bench.svc.cluster.local:9100"} 12
+outbound_tcp_balancer_queue_latency_seconds_bucket{le="0.5",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="preload-sock",parent_port="9100",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="preload-sock",backend_port="9100",backend_section_name="",logical="preload-sock.test-bench.svc.cluster.local:9100",concrete="preload-sock.test-bench.svc.cluster.local:9100"} 12
+outbound_tcp_balancer_queue_latency_seconds_bucket{le="1.0",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="preload-sock",parent_port="9100",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="preload-sock",backend_port="9100",backend_section_name="",logical="preload-sock.test-bench.svc.cluster.local:9100",concrete="preload-sock.test-bench.svc.cluster.local:9100"} 12
+outbound_tcp_balancer_queue_latency_seconds_bucket{le="3.0",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="preload-sock",parent_port="9100",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="preload-sock",backend_port="9100",backend_section_name="",logical="preload-sock.test-bench.svc.cluster.local:9100",concrete="preload-sock.test-bench.svc.cluster.local:9100"} 12
+outbound_tcp_balancer_queue_latency_seconds_bucket{le="+Inf",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="preload-sock",parent_port="9100",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="preload-sock",backend_port="9100",backend_section_name="",logical="preload-sock.test-bench.svc.cluster.local:9100",concrete="preload-sock.test-bench.svc.cluster.local:9100"} 12
+# HELP outbound_tcp_balancer_queue_gate_open The total number of gate state changes to open.
+# TYPE outbound_tcp_balancer_queue_gate_open counter
+outbound_tcp_balancer_queue_gate_open_total{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-dpumesh",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-dpumesh",backend_port="9092",backend_section_name="",logical="echo-dpumesh.test-bench.svc.cluster.local:9092",concrete="echo-dpumesh.test-bench.svc.cluster.local:9092"} 17
+outbound_tcp_balancer_queue_gate_open_total{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="preload-sock",parent_port="9100",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="preload-sock",backend_port="9100",backend_section_name="",logical="preload-sock.test-bench.svc.cluster.local:9100",concrete="preload-sock.test-bench.svc.cluster.local:9100"} 11
+# HELP outbound_tcp_balancer_queue_gate_shut The total number of gate state changes from open to shut.
+# TYPE outbound_tcp_balancer_queue_gate_shut counter
+outbound_tcp_balancer_queue_gate_shut_total{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-dpumesh",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-dpumesh",backend_port="9092",backend_section_name="",logical="echo-dpumesh.test-bench.svc.cluster.local:9092",concrete="echo-dpumesh.test-bench.svc.cluster.local:9092"} 0
+outbound_tcp_balancer_queue_gate_shut_total{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="preload-sock",parent_port="9100",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="preload-sock",backend_port="9100",backend_section_name="",logical="preload-sock.test-bench.svc.cluster.local:9100",concrete="preload-sock.test-bench.svc.cluster.local:9100"} 0
+# HELP outbound_tcp_balancer_queue_gate_open_time_seconds The time at which the gate was opened.
+# TYPE outbound_tcp_balancer_queue_gate_open_time_seconds gauge
+# UNIT outbound_tcp_balancer_queue_gate_open_time_seconds seconds
+outbound_tcp_balancer_queue_gate_open_time_seconds{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="preload-sock",parent_port="9100",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="preload-sock",backend_port="9100",backend_section_name="",logical="preload-sock.test-bench.svc.cluster.local:9100",concrete="preload-sock.test-bench.svc.cluster.local:9100"} 1787284422.9827493
+outbound_tcp_balancer_queue_gate_open_time_seconds{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-dpumesh",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-dpumesh",backend_port="9092",backend_section_name="",logical="echo-dpumesh.test-bench.svc.cluster.local:9092",concrete="echo-dpumesh.test-bench.svc.cluster.local:9092"} 1787284292.551683
+# HELP outbound_tcp_balancer_queue_gate_shut_time_seconds The time at which the gate was shut.
+# TYPE outbound_tcp_balancer_queue_gate_shut_time_seconds gauge
+# UNIT outbound_tcp_balancer_queue_gate_shut_time_seconds seconds
+outbound_tcp_balancer_queue_gate_shut_time_seconds{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-dpumesh",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-dpumesh",backend_port="9092",backend_section_name="",logical="echo-dpumesh.test-bench.svc.cluster.local:9092",concrete="echo-dpumesh.test-bench.svc.cluster.local:9092"} 0.0
+outbound_tcp_balancer_queue_gate_shut_time_seconds{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="preload-sock",parent_port="9100",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="preload-sock",backend_port="9100",backend_section_name="",logical="preload-sock.test-bench.svc.cluster.local:9100",concrete="preload-sock.test-bench.svc.cluster.local:9100"} 0.0
+# HELP outbound_tcp_balancer_queue_gate_timeout_seconds Indicates the request timeout after which the gate will shut and enter failfast.
+# TYPE outbound_tcp_balancer_queue_gate_timeout_seconds gauge
+# UNIT outbound_tcp_balancer_queue_gate_timeout_seconds seconds
+outbound_tcp_balancer_queue_gate_timeout_seconds{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="preload-sock",parent_port="9100",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="preload-sock",backend_port="9100",backend_section_name="",logical="preload-sock.test-bench.svc.cluster.local:9100",concrete="preload-sock.test-bench.svc.cluster.local:9100"} 3.0
+outbound_tcp_balancer_queue_gate_timeout_seconds{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-dpumesh",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-dpumesh",backend_port="9092",backend_section_name="",logical="echo-dpumesh.test-bench.svc.cluster.local:9092",concrete="echo-dpumesh.test-bench.svc.cluster.local:9092"} 3.0
+# HELP outbound_tcp_route_open The number of connections opened.
+# TYPE outbound_tcp_route_open counter
+outbound_tcp_route_open_total{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-dpumesh",parent_port="9092",parent_section_name="",route_group="",route_kind="default",route_namespace="",route_name="opaq",target_ip="",target_port="9092"} 19
+outbound_tcp_route_open_total{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="preload-sock",parent_port="9100",parent_section_name="",route_group="",route_kind="default",route_namespace="",route_name="opaq",target_ip="",target_port="9100"} 12
+# HELP outbound_tcp_route_close The number of connections closed.
+# TYPE outbound_tcp_route_close counter
+outbound_tcp_route_close_total{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-dpumesh",parent_port="9092",parent_section_name="",route_group="",route_kind="default",route_namespace="",route_name="opaq",target_ip="",target_port="9092",error="forbidden"} 0
+outbound_tcp_route_close_total{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="preload-sock",parent_port="9100",parent_section_name="",route_group="",route_kind="default",route_namespace="",route_name="opaq",target_ip="",target_port="9100",error=""} 12
+outbound_tcp_route_close_total{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-dpumesh",parent_port="9092",parent_section_name="",route_group="",route_kind="default",route_namespace="",route_name="opaq",target_ip="",target_port="9092",error="invalid_policy"} 0
+outbound_tcp_route_close_total{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="preload-sock",parent_port="9100",parent_section_name="",route_group="",route_kind="default",route_namespace="",route_name="opaq",target_ip="",target_port="9100",error="forbidden"} 0
+outbound_tcp_route_close_total{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-dpumesh",parent_port="9092",parent_section_name="",route_group="",route_kind="default",route_namespace="",route_name="opaq",target_ip="",target_port="9092",error=""} 19
+outbound_tcp_route_close_total{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="preload-sock",parent_port="9100",parent_section_name="",route_group="",route_kind="default",route_namespace="",route_name="opaq",target_ip="",target_port="9100",error="invalid_backend"} 0
+outbound_tcp_route_close_total{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="preload-sock",parent_port="9100",parent_section_name="",route_group="",route_kind="default",route_namespace="",route_name="opaq",target_ip="",target_port="9100",error="invalid_policy"} 0
+outbound_tcp_route_close_total{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="preload-sock",parent_port="9100",parent_section_name="",route_group="",route_kind="default",route_namespace="",route_name="opaq",target_ip="",target_port="9100",error="unexpected"} 0
+outbound_tcp_route_close_total{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-dpumesh",parent_port="9092",parent_section_name="",route_group="",route_kind="default",route_namespace="",route_name="opaq",target_ip="",target_port="9092",error="unexpected"} 0
+outbound_tcp_route_close_total{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-dpumesh",parent_port="9092",parent_section_name="",route_group="",route_kind="default",route_namespace="",route_name="opaq",target_ip="",target_port="9092",error="invalid_backend"} 0
+# HELP outbound_tcp_transfer_cost_bytes The total amount of data transferred in and out of this proxy, by cost zone.
+# TYPE outbound_tcp_transfer_cost_bytes counter
+# UNIT outbound_tcp_transfer_cost_bytes bytes
+outbound_tcp_transfer_cost_bytes_total{op="Recv",zone_locality="Unknown"} 457940178
+outbound_tcp_transfer_cost_bytes_total{op="Send",zone_locality="Unknown"} 26542105318
+# HELP outbound_tls_balancer_endpoints The number of endpoints currently in a HTTP request balancer.
+# TYPE outbound_tls_balancer_endpoints gauge
+# HELP outbound_tls_balancer_p2c_endpoints The number of endpoints currently in the balancer.
+# TYPE outbound_tls_balancer_p2c_endpoints gauge
+# HELP outbound_tls_balancer_p2c_updates The total number of service discovery updates received by a balancer.
+# TYPE outbound_tls_balancer_p2c_updates counter
+# HELP outbound_tls_balancer_queue_length The current count of requests waiting in the queue.
+# TYPE outbound_tls_balancer_queue_length gauge
+# HELP outbound_tls_balancer_queue_requests The total number of requests that have entered the queue.
+# TYPE outbound_tls_balancer_queue_requests counter
+# HELP outbound_tls_balancer_queue_latency_seconds The distribution of durations that requests have spent in the queue.
+# TYPE outbound_tls_balancer_queue_latency_seconds histogram
+# UNIT outbound_tls_balancer_queue_latency_seconds seconds
+# HELP outbound_tls_balancer_queue_gate_open The total number of gate state changes to open.
+# TYPE outbound_tls_balancer_queue_gate_open counter
+# HELP outbound_tls_balancer_queue_gate_shut The total number of gate state changes from open to shut.
+# TYPE outbound_tls_balancer_queue_gate_shut counter
+# HELP outbound_tls_balancer_queue_gate_open_time_seconds The time at which the gate was opened.
+# TYPE outbound_tls_balancer_queue_gate_open_time_seconds gauge
+# UNIT outbound_tls_balancer_queue_gate_open_time_seconds seconds
+# HELP outbound_tls_balancer_queue_gate_shut_time_seconds The time at which the gate was shut.
+# TYPE outbound_tls_balancer_queue_gate_shut_time_seconds gauge
+# UNIT outbound_tls_balancer_queue_gate_shut_time_seconds seconds
+# HELP outbound_tls_balancer_queue_gate_timeout_seconds Indicates the request timeout after which the gate will shut and enter failfast.
+# TYPE outbound_tls_balancer_queue_gate_timeout_seconds gauge
+# UNIT outbound_tls_balancer_queue_gate_timeout_seconds seconds
+# HELP outbound_tls_route_open The number of connections opened.
+# TYPE outbound_tls_route_open counter
+# HELP outbound_tls_route_close The number of connections closed.
+# TYPE outbound_tls_route_close counter
+# HELP process_start_time_seconds Time that the process started (in seconds since the UNIX epoch).
+# TYPE process_start_time_seconds gauge
+# UNIT process_start_time_seconds seconds
+process_start_time_seconds 1787281424.6880406
+# HELP process_clock_time_seconds Current system time for this process.
+# TYPE process_clock_time_seconds gauge
+# UNIT process_clock_time_seconds seconds
+process_clock_time_seconds 1787284519.0
+# HELP process_uptime_seconds Total time since the process started (in seconds)
+# TYPE process_uptime_seconds counter
+# UNIT process_uptime_seconds seconds
+process_uptime_seconds_total 3094.368060006
+# HELP process_cpu_seconds Total user and system CPU time spent in seconds
+# TYPE process_cpu_seconds counter
+# UNIT process_cpu_seconds seconds
+process_cpu_seconds_total 3254.6
+# HELP process_virtual_memory_bytes Virtual memory size in bytes
+# TYPE process_virtual_memory_bytes gauge
+# UNIT process_virtual_memory_bytes bytes
+process_virtual_memory_bytes 1768669184
+# HELP process_resident_memory_bytes Resident memory size in bytes
+# TYPE process_resident_memory_bytes gauge
+# UNIT process_resident_memory_bytes bytes
+process_resident_memory_bytes 1082806272
+# HELP process_open_fds Number of open file descriptors
+# TYPE process_open_fds gauge
+process_open_fds 159
+# HELP process_max_fds Maximum number of open file descriptors
+# TYPE process_max_fds gauge
+process_max_fds 1024
+# HELP process_network_receive_bytes Number of bytes received by the process over the network
+# TYPE process_network_receive_bytes counter
+# UNIT process_network_receive_bytes bytes
+process_network_receive_bytes_total 4878479352.0
+# HELP process_network_transmit_bytes Number of bytes sent by the process over the network
+# TYPE process_network_transmit_bytes counter
+# UNIT process_network_transmit_bytes bytes
+process_network_transmit_bytes_total 14507728196.0
+# HELP process_threads Number of OS threads in the process.
+# TYPE process_threads gauge
+process_threads 19
+# EOF

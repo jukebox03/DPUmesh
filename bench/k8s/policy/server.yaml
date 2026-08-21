@@ -1,0 +1,14 @@
+# Inbound policy subject: the backends of the native echo Service on the port
+# they serve. A Server with no AuthorizationPolicy attached denies every
+# client, which is what makes it the deny arm of the campaign.
+apiVersion: policy.linkerd.io/v1beta3
+kind: Server
+metadata:
+  name: bench-echo-dpumesh
+  namespace: ${NS}
+spec:
+  podSelector:
+    matchLabels:
+      dpumesh-service: echo-dpumesh
+  port: ${CTRL_PORT}
+  proxyProtocol: opaque
