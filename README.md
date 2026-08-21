@@ -21,7 +21,7 @@ travels through the host kernel, and no proxy process runs beside either pod.
            host                        BlueField DPU                      host
  +-----------------------+       +----------------------+       +-----------------------+
  | client app or gRPC    |       | DPA execution unit   |       | backend app or gRPC   |
- | libdpumesh.so.4       |       | ARM data worker      |       | libdpumesh.so.4       |
+ | libdpumesh.so.5       |       | ARM data worker      |       | libdpumesh.so.5       |
  | registered memory     |       | staging and routing  |       | registered memory     |
  +-----------------------+       +----------------------+       +-----------------------+
 
@@ -127,7 +127,7 @@ make -j2
 make test
 ```
 
-The build produces `build/lib/libdpumesh.so.4`, the preload library, and native
+The build produces `build/lib/libdpumesh.so.5`, the preload library, and native
 bench/validator binaries. The library target tracks all source and header inputs;
 public-header changes therefore rebuild both ABI and consumers.
 

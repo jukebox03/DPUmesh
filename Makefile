@@ -54,7 +54,7 @@ LIB_HDRS := $(shell find include src doca -name '*.h' 2>/dev/null)
 # ABI major. BUMP IT whenever the public ABI changes incompatibly — a field added to
 # dmesh_event_t / dmesh_qp_t / dmesh_channel_t, a reorder, a signature change. The SONAME
 # identifies incompatible public layouts at load time.
-ABI_MAJOR := 4
+ABI_MAJOR := 5
 LIB      := $(LIBDIR)/libdpumesh.so.$(ABI_MAJOR)
 LIB_LINK := $(LIBDIR)/libdpumesh.so
 

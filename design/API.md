@@ -1,7 +1,7 @@
 # DPUmesh Native API
 
 This document defines the current public contract of `<dpumesh/dmesh.h>`. The
-ABI is `libdpumesh.so.4`. The interface uses RDMA-style channels, QPs, and
+ABI is `libdpumesh.so.5`. The interface uses RDMA-style channels, QPs, and
 registered buffers with DPUmesh event queues. It is a reliable full-duplex byte
 transport, not a remote-memory API.
 

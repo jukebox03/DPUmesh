@@ -32,7 +32,7 @@ spec:
         securityContext: { privileged: true }
         volumeMounts:
         - { mountPath: /dev/infiniband, name: infiniband }
-        - { mountPath: /usr/local/lib/libdpumesh.so.4, name: libdpumesh-so, subPath: libdpumesh.so.4 }
+        - { mountPath: /usr/local/lib/libdpumesh.so.5, name: libdpumesh-so, subPath: libdpumesh.so.5 }
         - { mountPath: /run/dpumesh, name: dpumesh-attest, readOnly: true }
       volumes:
       - { name: infiniband, hostPath: { path: /dev/infiniband } }
@@ -72,7 +72,7 @@ spec:
         securityContext: { privileged: true }
         volumeMounts:
         - { mountPath: /dev/infiniband, name: infiniband }
-        - { mountPath: /usr/local/lib/libdpumesh.so.4, name: libdpumesh-so, subPath: libdpumesh.so.4 }
+        - { mountPath: /usr/local/lib/libdpumesh.so.5, name: libdpumesh-so, subPath: libdpumesh.so.5 }
         - { mountPath: /run/dpumesh, name: dpumesh-attest, readOnly: true }
       volumes:
       - { name: infiniband, hostPath: { path: /dev/infiniband } }
@@ -107,7 +107,7 @@ spec:
         securityContext: { privileged: true }
         volumeMounts:
         - { mountPath: /dev/infiniband, name: infiniband }
-        - { mountPath: /usr/local/lib/libdpumesh.so.4, name: libdpumesh-so, subPath: libdpumesh.so.4 }
+        - { mountPath: /usr/local/lib/libdpumesh.so.5, name: libdpumesh-so, subPath: libdpumesh.so.5 }
         - { mountPath: /run/dpumesh, name: dpumesh-attest, readOnly: true }
       volumes:
       - { name: infiniband, hostPath: { path: /dev/infiniband } }
@@ -140,7 +140,7 @@ spec:
         securityContext: { privileged: true }
         volumeMounts:
         - { mountPath: /dev/infiniband, name: infiniband }
-        - { mountPath: /usr/local/lib/libdpumesh.so.4, name: libdpumesh-so, subPath: libdpumesh.so.4 }
+        - { mountPath: /usr/local/lib/libdpumesh.so.5, name: libdpumesh-so, subPath: libdpumesh.so.5 }
         - { mountPath: /run/dpumesh, name: dpumesh-attest, readOnly: true }
       volumes:
       - { name: infiniband, hostPath: { path: /dev/infiniband } }
@@ -184,7 +184,7 @@ spec:
         securityContext: { privileged: true }
         volumeMounts:
         - { mountPath: /dev/infiniband, name: infiniband }
-        - { mountPath: /usr/local/lib/libdpumesh.so.4, name: libdpumesh-so, subPath: libdpumesh.so.4 }
+        - { mountPath: /usr/local/lib/libdpumesh.so.5, name: libdpumesh-so, subPath: libdpumesh.so.5 }
         - { mountPath: /run/dpumesh, name: dpumesh-attest, readOnly: true }
       volumes:
       - { name: infiniband, hostPath: { path: /dev/infiniband } }
@@ -228,7 +228,7 @@ spec:
         securityContext: { privileged: true }
         volumeMounts:
         - { mountPath: /dev/infiniband, name: infiniband }
-        - { mountPath: /usr/local/lib/libdpumesh.so.4, name: libdpumesh-so, subPath: libdpumesh.so.4 }
+        - { mountPath: /usr/local/lib/libdpumesh.so.5, name: libdpumesh-so, subPath: libdpumesh.so.5 }
         - { mountPath: /run/dpumesh, name: dpumesh-attest, readOnly: true }
       volumes:
       - { name: infiniband, hostPath: { path: /dev/infiniband } }
@@ -272,7 +272,7 @@ spec:
         securityContext: { privileged: true }
         volumeMounts:
         - { mountPath: /dev/infiniband, name: infiniband }
-        - { mountPath: /usr/local/lib/libdpumesh.so.4, name: libdpumesh-so, subPath: libdpumesh.so.4 }
+        - { mountPath: /usr/local/lib/libdpumesh.so.5, name: libdpumesh-so, subPath: libdpumesh.so.5 }
         - { mountPath: /run/dpumesh, name: dpumesh-attest, readOnly: true }
       volumes:
       - { name: infiniband, hostPath: { path: /dev/infiniband } }
@@ -326,7 +326,7 @@ spec:
         securityContext: { privileged: true }
         volumeMounts:
         - { mountPath: /dev/infiniband, name: infiniband }
-        - { mountPath: /usr/local/lib/libdpumesh.so.4, name: libdpumesh-so, subPath: libdpumesh.so.4 }
+        - { mountPath: /usr/local/lib/libdpumesh.so.5, name: libdpumesh-so, subPath: libdpumesh.so.5 }
         - { mountPath: /run/dpumesh, name: dpumesh-attest, readOnly: true }
       volumes:
       - { name: infiniband, hostPath: { path: /dev/infiniband } }
@@ -363,7 +363,7 @@ spec:
         securityContext: { privileged: true }
         volumeMounts:
         - { mountPath: /dev/infiniband, name: infiniband }
-        - { mountPath: /usr/local/lib/libdpumesh.so.4, name: libdpumesh-so, subPath: libdpumesh.so.4 }
+        - { mountPath: /usr/local/lib/libdpumesh.so.5, name: libdpumesh-so, subPath: libdpumesh.so.5 }
         - { mountPath: /run/dpumesh, name: dpumesh-attest, readOnly: true }
       volumes:
       - { name: infiniband, hostPath: { path: /dev/infiniband } }

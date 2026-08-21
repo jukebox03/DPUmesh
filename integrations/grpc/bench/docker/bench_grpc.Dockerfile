@@ -22,7 +22,7 @@ RUN apt-get update && \
 ARG GRPC_BUILD_DIR=build/grpc-release
 COPY ${GRPC_BUILD_DIR}/bench_grpc /usr/local/bin/bench_grpc
 COPY doca-libs/ /usr/local/lib/
-COPY build/lib/libdpumesh.so.4 /usr/local/lib/
+COPY build/lib/libdpumesh.so.5 /usr/local/lib/
 COPY bench/docker/numa-entrypoint.sh /usr/local/bin/numa-entrypoint.sh
 
 RUN ldconfig

@@ -244,7 +244,7 @@ The maintained tests require:
   independently;
 - graceful server GOAWAY retiring the existing HTTP/2 channel;
 - reconnect creating a fresh targeted QP;
-- public-symbol linkage against `libdpumesh.so.4`.
+- public-symbol linkage against `libdpumesh.so.5`.
 
 Hardware validation additionally checks the native register/readiness barrier,
 real byte exchange, FIN, `POD_QUIESCED`, and slot reuse. Those observations show
