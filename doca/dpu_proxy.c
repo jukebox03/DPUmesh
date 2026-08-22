@@ -304,6 +304,10 @@ struct px_lane {
     struct px_rev_pub rev;
 };
 
+/* Backends one stream may alternate between without re-entering the policy
+ * layer. */
+#define PX_INBOUND_CACHE 4
+
 struct px_conn {
     dmesh_proxy_conn pub;
     struct px_conn *hnext;
@@ -336,6 +340,8 @@ struct px_conn {
     uint8_t  l7_backend_fin_sent;      /* stack finished output to backend */
     uint8_t  l7_session_failed;        /* stack ended without both output FINs */
     uint8_t  lifecycle_pending;        /* normal half-close cleanup is parked */
+    uint8_t  close_ack_pending;        /* source port stays quarantined until this
+                                        * request and both output halves retire */
     /* Bytes handed to the L7 layer, ahead of parse_pos. The window keeps them
      * until dmesh_l7_release reports consumption, so custody outlives the parse
      * pass that handed them over. */
@@ -348,10 +354,17 @@ struct px_conn {
      * re-picks. -1 = unpinned. */
     int32_t  pinned_backend;
     int16_t  pinned_cluster;
-    /* The destination-side admission verdict, decided once per stream: 0 not
-     * asked, 1 admitted, -1 refused, against the destination in inbound_dst. */
-    int8_t   inbound_verdict;
-    int32_t  inbound_dst;
+    /* The destination-side admission verdicts this stream has taken, one per
+     * backend it has reached: 0 not asked, 1 admitted, -1 refused. A
+     * protocol-aware stream may pick a different backend per request, and a
+     * single slot would re-enter the policy layer on every unit that
+     * alternates. Replacement is round-robin, so a stream fanning out past the
+     * cache pays the lookup again rather than losing a decision. */
+    struct px_inbound_cache_entry {
+        int32_t dst;
+        int8_t  verdict;
+    } inbound[PX_INBOUND_CACHE];
+    uint8_t  inbound_next;
     /* Cross-node pin and full-duplex stream state. Owned by this connection's
      * worker; callbacks locate it by the generation-safe source token. */
     struct dmesh_peer_channel *peer_channel;
@@ -497,6 +510,10 @@ struct dmesh_proxy {
     /* A protected Service calling an unprotected one, refused because the
      * callee cannot be authenticated. */
     atomic_ullong stat_mixed_callee_unprotected;
+    /* A stream asked to reach a second cross-node destination. One connection
+     * holds one cross-node pin, so the second is refused here rather than
+     * delivered to the first. */
+    atomic_ullong stat_peer_pin_conflict;
     atomic_ullong peer_report_ns;
     atomic_ullong peer_report_mark;
 
@@ -830,8 +847,11 @@ static struct px_conn *px_conn_get(struct dmesh_proxy *px, int32_t pod, uint16_t
     c->pub.dst_service = DMESH_SVC_NONE;
     c->pinned_backend = -1;                /* unpinned until the first LB pick */
     c->pinned_cluster = DMESH_SVC_NONE;
-    c->inbound_verdict = 0;
-    c->inbound_dst = DMESH_POD_BLANK;
+    for (unsigned i = 0; i < PX_INBOUND_CACHE; i++) {
+        c->inbound[i].dst = DMESH_POD_BLANK;
+        c->inbound[i].verdict = 0;
+    }
+    c->inbound_next = 0;
     c->l7_generation = ++px_cur_worker->next_l7_generation;
     if (c->l7_generation == 0)
         c->l7_generation = ++px_cur_worker->next_l7_generation;
@@ -1164,6 +1184,21 @@ static void px_poison(struct objects *objs, struct px_conn *c, const char *why) 
     }
 }
 
+/* A source QP can explicitly cancel a live stream.  It needs the same custody
+ * drop and EOF publication as a poison, but it is not a transport or policy
+ * failure and therefore must not move the peer/poison failure counter. */
+static void px_reset(struct objects *objs, struct px_conn *c) {
+    if (c->dead)
+        return;
+    px_l7_close(objs, c, 0);
+    px_drop_window(objs, c, "source QP reset");
+    c->dead = 1;
+    if (!px_fin_to_sender(objs, c)) {
+        c->eof_pending = 1;
+        px_stall(c);
+    }
+}
+
 /* ====== lanes / units ====== */
 
 static inline uint32_t px_unit_entries(const struct px_unit *u) {
@@ -1331,6 +1366,31 @@ static int px_peer_pin_endpoint(struct objects *objs, struct px_conn *c,
     return 1;
 }
 
+/* Whether this connection's cross-node pin may carry `pod_uid`.
+ *
+ * A connection holds one pin, and a pinned stream carries every remote
+ * destination to that one endpoint. Reaching a second remote backend needs a
+ * pin per destination and a transport under it, and neither exists: this is
+ * the one place that decides, so it is the one place that has to change when
+ * they arrive. Until then the second destination is refused by name and
+ * counted, rather than delivered to the first with no error. */
+static int px_peer_pin_admits(struct objects *objs, const struct px_conn *c,
+                              const char *pod_uid)
+{
+    if (c->peer_pod_uid[0] == '\0' || !pod_uid || *pod_uid == '\0')
+        return 1;
+    if (strcmp(c->peer_pod_uid, pod_uid) == 0)
+        return 1;
+    uint64_t conflicts = px_stat_inc(&objs->proxy->stat_peer_pin_conflict);
+    l7_control_event("peer", "second-remote-destination");
+    if (((conflicts - 1u) & 0xFFu) == 0)
+        DOCA_LOG_WARN("proxy: stream %d:%u is pinned to %s and was asked for %s — "
+                      "a connection carries one cross-node destination (total %llu)",
+                      c->pub.src_pod, c->pub.src_port, c->peer_pod_uid, pod_uid,
+                      (unsigned long long)conflicts);
+    return 0;
+}
+
 /* 1 ready, 0 pending/backpressured, -1 terminal. */
 static int px_peer_stream_ready(struct objects *objs, struct px_conn *c,
                                 const char *selected_pod_uid)
@@ -1338,6 +1398,10 @@ static int px_peer_stream_ready(struct objects *objs, struct px_conn *c,
     struct px_worker_state *worker = px_cur_worker;
     if (!worker || !worker->peers || !worker->peers->transport ||
         c->peer_failed)
+        return -1;
+    /* Asked before the ready shortcut: an established stream is exactly where
+     * a second destination would be swallowed. */
+    if (!px_peer_pin_admits(objs, c, selected_pod_uid))
         return -1;
     if (c->peer_handle && c->peer_channel &&
         c->peer_channel->state == DMESH_PEER_OPEN)
@@ -1593,7 +1657,12 @@ static int px_unit_prepare(struct objects *objs, struct px_conn *c,
     struct pod_state *sp = find_pod_by_id(objs, c->pub.src_pod);
     u->src_pod_id = (int8_t)c->pub.src_pod;
     u->src_service = sp ? (int8_t)sp->service_id : (int8_t)DMESH_SVC_NONE;
-    u->dst_service = (int8_t)c->pub.dst_service;
+    /* Where the unit is going, which is only the Service it was addressed to
+     * when no route moved it. A reply and a reverse unit are already named by
+     * the connection they belong to. */
+    u->dst_service = (reverse || c->pub.is_reply)
+                         ? (int8_t)c->pub.dst_service
+                         : (int8_t)tp->service_id;
     u->src_port = out_src_port;
     u->dst_port = out_dst_port;
     u->org_port = c->pub.src_port;         /* un-rewritten: who to EOF if this unit dies */
@@ -2423,7 +2492,8 @@ void px_peer_stats_report(struct objects *objs, int worker_id)
                     px_stat_get(&px->stat_inbound_admitted) +
                     px_stat_get(&px->stat_inbound_denied) +
                     px_stat_get(&px->stat_inbound_no_policy) +
-                    px_stat_get(&px->stat_mixed_callee_unprotected);
+                    px_stat_get(&px->stat_mixed_callee_unprotected) +
+                    px_stat_get(&px->stat_peer_pin_conflict);
     for (int i = 0; i < DMESH_PEER_REFUSE_MAX; i++)
         mark += px_stat_get(&px->stat_peer_refused[i]);
     uint64_t seen = atomic_load_explicit(&px->peer_report_mark, memory_order_relaxed);
@@ -2447,13 +2517,14 @@ void px_peer_stats_report(struct objects *objs, int worker_id)
     }
     DOCA_LOG_WARN("proxy: worker %d peer poison=%llu refused=%s inbound "
                   "admitted=%llu denied=%llu no-policy=%llu "
-                  "mixed-callee-unprotected=%llu",
+                  "mixed-callee-unprotected=%llu peer-pin-conflict=%llu",
                   worker_id,
                   (unsigned long long)px_stat_get(&px->stat_poison), n ? by : "none",
                   (unsigned long long)px_stat_get(&px->stat_inbound_admitted),
                   (unsigned long long)px_stat_get(&px->stat_inbound_denied),
                   (unsigned long long)px_stat_get(&px->stat_inbound_no_policy),
-                  (unsigned long long)px_stat_get(&px->stat_mixed_callee_unprotected));
+                  (unsigned long long)px_stat_get(&px->stat_mixed_callee_unprotected),
+                  (unsigned long long)px_stat_get(&px->stat_peer_pin_conflict));
 }
 
 static void px_l7_apply_release(struct objects *objs, struct px_conn *c);
@@ -2633,8 +2704,11 @@ static int px_l7_inbound_admits(struct objects *objs, const struct px_conn *c,
     flow.dst_ip = px_pod_ipv4(dp);
     /* An inbound policy is watched per Pod and port, and the port it names is
      * the one the destination serves — the client's own port names nothing the
-     * policy controller has heard of. */
-    flow.dst_port = dmesh_topology_service_port(objs, c->pub.dst_service);
+     * policy controller has heard of. The subject is the destination Pod's own
+     * Service, not the Service the client addressed: a route may send a stream
+     * into another Service, and a watch held on the caller's port does not
+     * refuse anything, it returns a verdict about nothing. */
+    flow.dst_port = dmesh_topology_service_port(objs, (int16_t)dp->service_id);
     if (flow.dst_port == 0) {
         px_stat_inc(&objs->proxy->stat_inbound_no_policy);
         l7_control_event("inbound", "no-port");
@@ -2670,11 +2744,16 @@ static int px_l7_inbound_admits(struct objects *objs, const struct px_conn *c,
  * mesh does. Caching the verdict per (connection, destination) is that rule.
  */
 static int px_conn_admitted(struct objects *objs, struct px_conn *c, int32_t dst_pod) {
-    if (c->inbound_dst == dst_pod && c->inbound_verdict != 0)
-        return c->inbound_verdict > 0;
+    for (unsigned i = 0; i < PX_INBOUND_CACHE; i++)
+        if (c->inbound[i].verdict != 0 && c->inbound[i].dst == dst_pod)
+            return c->inbound[i].verdict > 0;
 
     int verdict = px_l7_inbound_admits(objs, c, dst_pod);
-    int strict = px_inbound_strict(objs, c->pub.dst_service);
+    /* Graded by the Pod that receives the bytes, which is the Pod whose policy
+     * was just evaluated — not by the Service the client asked for. */
+    struct pod_state *dp = find_pod_by_id(objs, dst_pod);
+    int strict = px_inbound_strict(objs, dp ? (int16_t)dp->service_id
+                                            : c->pub.dst_service);
     struct pod_state *sp = find_pod_by_id(objs, c->pub.src_pod);
     int caller_strict = sp ? px_inbound_strict(objs, (int16_t)sp->service_id) : 0;
     int mixed = 0;
@@ -2684,8 +2763,9 @@ static int px_conn_admitted(struct objects *objs, struct px_conn *c, int32_t dst
         l7_control_event("inbound", "mixed-callee-unprotected");
     }
 
-    c->inbound_dst = dst_pod;
-    c->inbound_verdict = admitted ? 1 : -1;
+    c->inbound[c->inbound_next].dst = dst_pod;
+    c->inbound[c->inbound_next].verdict = admitted ? 1 : -1;
+    c->inbound_next = (uint8_t)((c->inbound_next + 1u) % PX_INBOUND_CACHE);
     return admitted;
 }
 
@@ -3316,6 +3396,25 @@ static struct px_conn *px_request_for_reply(struct objects *objs,
     return px_conn_find(objs->proxy, up->client_pod, up->client_port);
 }
 
+/* A request FIN's TX_ACK is the source port's incarnation fence. Publishing it
+ * while the request remains in the connection table lets the host recycle the
+ * same (pod, port) into that old Linkerd session. Replies use DPU-assigned high
+ * ports and keep their immediate directional ACK; only source requests defer. */
+static int px_ack_retired_request(struct objects *objs,
+                                  struct px_conn *request)
+{
+    if (!request->close_ack_pending)
+        return 1;
+    if (!px_emit_tx_ack(objs, request->fin_ack_pod,
+                        request->fin_ack_port, request->fin_ack_seq)) {
+        request->lifecycle_pending = 1;
+        px_stall(request);
+        return 0;
+    }
+    request->close_ack_pending = 0;
+    return 1;
+}
+
 /* Retire a normally half-closed stream only after both directions are done.
  * L7 callbacks park this work because they run while Rust holds its Worker
  * borrow; deleting here would call l7_conn_close re-entrantly. */
@@ -3331,6 +3430,8 @@ static int px_maybe_finish_connection(struct objects *objs, struct px_conn *c)
         if (px_l7_carries_bytes(request->l7_mode) &&
             (!request->l7_backend_fin_sent ||
              !request->l7_origin_fin_sent))
+            return 0;
+        if (!px_ack_retired_request(objs, request))
             return 0;
         px_conn_del(objs, request);
         return 1;
@@ -3360,18 +3461,32 @@ static int px_maybe_finish_connection(struct objects *objs, struct px_conn *c)
         px_conn_del_key(objs, backend, (uint16_t)port);
         dpu_upstream_free(ct, (uint16_t)port);
     }
+    if (!px_ack_retired_request(objs, request))
+        return 0;
     px_conn_del(objs, request);
     return 1;
 }
 
-static int px_abort_failed_session(struct objects *objs, struct px_conn *request)
+static int px_abort_failed_session(struct objects *objs, struct px_conn *request,
+                                   int source_reset)
 {
     if (!request || request->pub.is_reply)
         return 0;
-    if (!request->dead)
-        px_poison(objs, request, "Linkerd session ended before both output FINs");
-    if (request->eof_pending)
+    if (!request->dead) {
+        if (source_reset)
+            px_reset(objs, request);
+        else
+            px_poison(objs, request,
+                      "Linkerd session ended before both output FINs");
+    }
+    if (request->eof_pending) {
+        /* px_drain_stalled consumes lifecycle_pending before calling us. If
+         * poisoning could not allocate the EOF unit, keep teardown armed for
+         * the pass that eventually publishes it; otherwise that pass clears
+         * eof_pending and leaves the refused session behind. */
+        request->lifecycle_pending = 1;
         return 0;
+    }
 
     if (request->peer_channel && request->peer_handle) {
         dmesh_peer_tx_drop(px_cur_worker->peers, request->peer_channel,
@@ -3382,6 +3497,7 @@ static int px_abort_failed_session(struct objects *objs, struct px_conn *request
                 px_cur_worker->peers, request->peer_channel,
                 request->peer_handle);
             if (sent == DMESH_PEER_REFUSE_INFLIGHT) {
+                request->lifecycle_pending = 1;
                 px_stall(request);
                 return 0;
             }
@@ -3395,6 +3511,8 @@ static int px_abort_failed_session(struct objects *objs, struct px_conn *request
         request->l7_origin_fin_sent = 1;
         if (!request->peer_rx_fin && !request->peer_failed)
             return 0;                         /* small tombstone until peer EOF */
+        if (!px_ack_retired_request(objs, request))
+            return 0;
         px_conn_del(objs, request);
         return 1;
     }
@@ -3410,6 +3528,7 @@ static int px_abort_failed_session(struct objects *objs, struct px_conn *request
             if (backend && pod_data_ready(backend) && backend->host_rx_addr &&
                 !px_queue_fin_unit(objs, request, backend,
                                    (uint16_t)port, (uint16_t)port)) {
+                request->lifecycle_pending = 1;
                 px_stall(request);
                 return 0;
             }
@@ -3424,6 +3543,10 @@ static int px_abort_failed_session(struct objects *objs, struct px_conn *request
         int32_t backend = up->backend_pod;
         px_conn_del_key(objs, backend, (uint16_t)port);
         dpu_upstream_free(ct, (uint16_t)port);
+    }
+    if (!px_ack_retired_request(objs, request)) {
+        request->lifecycle_pending = 1;
+        return 0;
     }
     px_conn_del(objs, request);
     return 1;
@@ -3461,10 +3584,14 @@ static int px_try_fin(struct objects *objs, struct px_conn *c) {
 
     if (c->dead) {
         struct px_conn *request = px_request_for_reply(objs, c);
-        if (!px_emit_tx_ack(objs, c->fin_ack_pod,
-                            c->fin_ack_port, c->fin_ack_seq)) {
-            px_stall(c);
-            return 0;
+        if (c->pub.is_reply) {
+            if (!px_emit_tx_ack(objs, c->fin_ack_pod,
+                                c->fin_ack_port, c->fin_ack_seq)) {
+                px_stall(c);
+                return 0;
+            }
+        } else {
+            c->close_ack_pending = 1;
         }
         c->fin_pending = 0;
         c->input_fin = 1;
@@ -3475,7 +3602,7 @@ static int px_try_fin(struct objects *objs, struct px_conn *c) {
         request->l7_session_failed = 1;
         if (request != c && !request->dead)
             px_poison(objs, request, "paired L7 direction failed");
-        return px_abort_failed_session(objs, request);
+        return px_abort_failed_session(objs, request, 0);
     }
 
     if (c->peer_channel && c->peer_handle) {
@@ -3494,10 +3621,14 @@ static int px_try_fin(struct objects *objs, struct px_conn *c) {
             } else
                 c->peer_fin_sent = 1;
         }
-        if (!px_emit_tx_ack(objs, c->fin_ack_pod,
-                            c->fin_ack_port, c->fin_ack_seq)) {
-            px_stall(c);
-            return 0;
+        if (c->pub.is_reply) {
+            if (!px_emit_tx_ack(objs, c->fin_ack_pod,
+                                c->fin_ack_port, c->fin_ack_seq)) {
+                px_stall(c);
+                return 0;
+            }
+        } else {
+            c->close_ack_pending = 1;
         }
         c->fin_pending = 0;
         c->input_fin = 1;
@@ -3564,10 +3695,14 @@ static int px_try_fin(struct objects *objs, struct px_conn *c) {
         if (have)
             up->backend_fin_seen = 1;
     }
-    if (!px_emit_tx_ack(objs, c->fin_ack_pod,
-                        c->fin_ack_port, c->fin_ack_seq)) {
-        px_stall(c);
-        return 0;
+    if (c->pub.is_reply) {
+        if (!px_emit_tx_ack(objs, c->fin_ack_pod,
+                            c->fin_ack_port, c->fin_ack_seq)) {
+            px_stall(c);
+            return 0;
+        }
+    } else {
+        c->close_ack_pending = 1;
     }
     c->fin_pending = 0;
     c->input_fin = 1;
@@ -3626,7 +3761,7 @@ int px_drain_stalled(struct objects *objs, int worker_id) {
         if (c->lifecycle_pending) {
             c->lifecycle_pending = 0;
             if (c->l7_session_failed) {
-                if (px_abort_failed_session(objs, c))
+                if (px_abort_failed_session(objs, c, 0))
                     did = 1;
             } else if (px_maybe_finish_connection(objs, c)) {
                 did = 1;
@@ -3687,9 +3822,14 @@ int px_process_forward(struct objects *objs, int worker_id, void *ventry) {
     if (e->dst_pod_id == DMESH_POD_ABORT) {
         struct px_conn *c = px_conn_find(px, e->src_pod_id, e->src_port);
         struct px_conn *request = px_request_for_reply(objs, c);
-        if (request)
-            (void)px_abort_failed_session(objs, request);
-        return 1;
+        if (request && !px_abort_failed_session(objs, request, 1))
+            return 0;
+        /* Reset is tracked by the host just like FIN. ACK only after the old
+         * request has left the table; a deferred teardown makes this forward
+         * completion retry until that is true. */
+        return px_emit_tx_ack(objs, e->src_pod_id, e->src_port, e->seq)
+                   ? 1
+                   : 0;
     }
 
     int is_reply = (e->dst_pod_id != DMESH_POD_BLANK);

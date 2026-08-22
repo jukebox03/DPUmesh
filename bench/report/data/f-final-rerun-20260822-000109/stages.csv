@@ -1,0 +1,41 @@
+stage,fixture,arm,expected,observed,verdict,rcnt,fail,admitted,denied,route_hits,target_mismatch,note
+R0,no route,grpc-dpumesh,serve,serve,PASS,5644,0,1,0,0,0,served by the default route
+R1,HTTPRoute matching the method,grpc-dpumesh,serve,serve,PASS,5835,0,1,0,5935,0,route_hits must be > 0
+R2,HTTPRoute matching nothing,grpc-dpumesh,refuse,refuse,PASS,0,16523,1,0,0,0,no rule matches
+R3,HTTPRoute to another Service,grpc-dpumesh,serve,serve,PASS,5756,0,2,0,5857,0,liveness guards the dial, not Service identity
+R4,no route,grpc-dpumesh,serve,serve,PASS,5894,0,1,0,0,0,returned to the default route
+X0,no route,grpc-dpumesh,serve,serve,PASS,5773,0,1,0,0,0,baseline for the cross scope
+X1,backendRef in another Service,grpc-dpumesh,serve,serve,PASS,5825,0,2,0,5926,0,target_mismatch must stay flat
+X1b,attribution,grpc-dpumesh,served,served,PASS,,,,,,,served: echo-grpc-alt-774bbbccb5-5hjk7=5926 
+X2,Server on the destination Service, no authorization,grpc-dpumesh,refuse,refuse,PASS,0,496,972,497,0,0,graded by the callee
+X2v,the destination refused,grpc-dpumesh,refused,refused,PASS,,,972,497,,,denied+=497 admitted+=972
+X2b,the destination Server withdrawn,grpc-dpumesh,serve,serve,PASS,5717,0,2,0,5817,0,the route works again
+X3,weighted 50/50 across two Services,grpc-dpumesh,serve,serve,PASS,27413,0,8,0,27816,0,both destinations must serve
+X3b,split,grpc-dpumesh,both,both,PASS,,,,,,,A{echo-grpc-dpumesh-84546996c7-2kgwp=13896 } B{echo-grpc-alt-774bbbccb5-5hjk7=13921 }
+X4,no route,grpc-dpumesh,serve,serve,PASS,5838,0,1,0,0,0,returned to the default route
+F1-1ch,one Service two backends,grpc-dpumesh,2,2,PASS,16547,0,,,,0,served: echo-grpc-dpumesh-84546996c7-2kgwp=8329 echo-grpc-dpumesh-84546996c7-zw56m=8326 
+F1-4ch,one Service two backends,grpc-dpumesh,2,2,PASS,95390,0,,,,0,served: echo-grpc-dpumesh-84546996c7-2kgwp=48467 echo-grpc-dpumesh-84546996c7-zw56m=47355 
+F1r,one backend restored,grpc-dpumesh,serve,serve,PASS,5838,0,1,0,0,0,the Service is healthy again
+I0,caBundle published,present,present,PASS,
+I1,inject-echo,injected,injected,PASS,
+I2,plain-echo,bare,bare,PASS,
+I3,meshed traffic,serve,serve,PASS,rcnt=13341 fail=0 admitted+=1
+I3b,meshed verdict,yes,yes,PASS,
+I4,unmeshed traffic,serve,serve,PASS,rcnt=393425 fail=0 admitted+=0
+I4b,unmeshed verdict,no,no,PASS,
+S0,no route,grpc-dpumesh,serve,serve,PASS,5726,0,1,0,0,0,baseline for the surfaces scope
+S1,timeout 10s,grpc-dpumesh,serve,serve,PASS,5632,0,1,0,5733,0,a generous timeout changes nothing
+S2,timeout 1ms,grpc-dpumesh,refuse,refuse,PASS,5638,10,1,0,5748,0,shorter than the proxy's own request
+S2v,the route timed requests out,grpc-dpumesh,fired,fired,PASS,,,,,,,REQUEST_TIMEOUT+=10
+S3a,1-in-50 failures, no retry policy,grpc-dpumesh,refuse,refuse,PASS,5395,112,1,0,5608,0,the failures reach the client
+S3b,1-in-50 failures, retry limit 3,grpc-dpumesh,serve,refuse,FAIL,5388,112,1,0,5601,0,the retry policy absorbs them
+S4,method POST,grpc-dpumesh,serve,serve,PASS,5686,0,1,0,5787,0,gRPC is POST
+S5,method GET,grpc-dpumesh,refuse,refuse,PASS,0,15846,1,0,0,0,no rule matches
+S6,header content-type: application/grpc,grpc-dpumesh,serve,serve,PASS,5726,0,1,0,5827,0,every gRPC request carries it
+S7,header content-type: application/json,grpc-dpumesh,refuse,refuse,PASS,0,15551,1,0,0,0,no rule matches
+S8,GRPCRoute on the called method,grpc-dpumesh,serve,serve,PASS,5825,0,1,0,0,0,grpc.testing.BenchmarkService/UnaryCall
+S9,GRPCRoute on another method,grpc-dpumesh,refuse,refuse,PASS,0,16910,1,0,0,0,no rule matches
+S10,Server on the protocol-aware Service, no authorization,grpc-dpumesh,refuse,refuse,PASS,0,506,0,1014,0,0,deny by default
+S11,AuthorizationPolicy targeting the HTTPRoute,grpc-dpumesh,serve,refuse,FAIL,0,227,0,454,0,0,the route authorizes the caller
+S12,the same policy naming another identity,grpc-dpumesh,refuse,refuse,PASS,0,357,0,714,-17594,0,negative control for route authorization
+S13,half the route's weight on a backend that always fails,grpc-dpumesh,serve,refuse,FAIL,2847,2866,2,0,5813,0,the breaker ejects it and the client keeps serving

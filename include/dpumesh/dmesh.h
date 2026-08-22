@@ -152,8 +152,9 @@ int dmesh_post_send(dmesh_qp_t *c, const void *buf, uint32_t len);
  * pending data is a no-op. */
 int dmesh_flush(dmesh_qp_t *c);
 
-/* Nonzero while a published TX unit on this QP awaits acknowledgement.
- * Diagnostic only; batching policy is library-owned. */
+/* Nonzero while a published data or close-control unit on this QP awaits
+ * acknowledgement. Diagnostic only; batching and port quarantine are
+ * library-owned. */
 int dmesh_tx_inflight(dmesh_qp_t *c);
 
 /* ===== Diagnostics ===== */

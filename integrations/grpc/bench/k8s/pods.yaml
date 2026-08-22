@@ -73,6 +73,9 @@ spec:
         - { name: DPUMESH_ATTEST_SOCKET, value: "${DPUMESH_ATTEST_SOCKET}" }
         - { name: DPUMESH_SERVICE, value: "echo-grpc-dpumesh" }
         - { name: BENCH_REACTORS, value: "${BENCH_REACTORS}" }
+        # Every Nth call answers INTERNAL. Zero, and the server never fails;
+        # the retry and failure-accrual arms set it while they run.
+        - { name: BENCH_FAIL_EVERY, value: "${BENCH_FAIL_EVERY}" }
         # Ignored by a release build. Under the ASan image the report goes to the
         # host, because a container that dies takes its log with it.
         - { name: ASAN_OPTIONS, value: "log_path=/var/log/dpumesh-asan/echo,detect_leaks=0,print_stacktrace=1" }
@@ -96,3 +99,52 @@ spec:
   selector: { app: echo-grpc-dpumesh }
   ports: [{ port: ${CTRL_PORT}, targetPort: ${CTRL_PORT} }]
 ---
+# echo-grpc-alt: a second Service serving the same protocol. Routing across
+# Services needs two of them, and both ends have to speak the same thing for
+# the arm to be about routing rather than about the application.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-grpc-alt
+spec:
+  replicas: 0
+  selector: { matchLabels: { app: echo-grpc-alt } }
+  template:
+    metadata:
+      annotations: { config.linkerd.io/skip-inbound-ports: "${CTRL_PORT}" }
+      labels: { app: echo-grpc-alt, linkerd.io/control-plane-ns: linkerd }
+    spec:
+      hostname: echo-grpc-alt
+      containers:
+      - name: echo-grpc-alt
+        image: docker.io/${IMG_ECHO_GRPC}
+        imagePullPolicy: Never
+        env:
+        - { name: BENCH_NUMA_NODE, value: "${BENCH_NUMA_NODE}" }
+        - { name: BENCH_TRANSPORT, value: "dmesh" }
+        - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
+        - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
+        - { name: DPUMESH_ATTEST_SOCKET, value: "${DPUMESH_ATTEST_SOCKET}" }
+        - { name: DPUMESH_SERVICE, value: "echo-grpc-alt" }
+        - { name: BENCH_REACTORS, value: "${BENCH_REACTORS}" }
+        - { name: BENCH_FAIL_EVERY, value: "0" }
+        - { name: ASAN_OPTIONS, value: "log_path=/var/log/dpumesh-asan/echo-alt,detect_leaks=0,print_stacktrace=1" }
+        - { name: UBSAN_OPTIONS, value: "log_path=/var/log/dpumesh-asan/echo-alt-ubsan,print_stacktrace=1" }
+        securityContext: { privileged: true }
+        volumeMounts:
+        - { mountPath: /dev/infiniband, name: infiniband }
+        - { mountPath: /usr/local/lib/libdpumesh.so.5, name: libdpumesh-so, subPath: libdpumesh.so.5 }
+        - { mountPath: /run/dpumesh, name: dpumesh-attest, readOnly: true }
+        - { mountPath: /var/log/dpumesh-asan, name: sanitizer-logs }
+      volumes:
+      - { name: infiniband, hostPath: { path: /dev/infiniband } }
+      - { name: libdpumesh-so, hostPath: { path: ${LIB_OUT}, type: Directory } }
+      - { name: dpumesh-attest, hostPath: { path: /run/dpumesh, type: DirectoryOrCreate } }
+      - { name: sanitizer-logs, hostPath: { path: ${ASAN_LOG_DIR}, type: DirectoryOrCreate } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: echo-grpc-alt }
+spec:
+  selector: { app: echo-grpc-alt }
+  ports: [{ port: ${CTRL_PORT}, targetPort: ${CTRL_PORT} }]

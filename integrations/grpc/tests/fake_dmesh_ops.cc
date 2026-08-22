@@ -132,6 +132,7 @@ class FakeDmeshState::Impl final {
       rx_payloads;
   size_t releases = 0;
   size_t destroys = 0;
+  size_t aborts = 0;
   size_t mid_batch_destroys = 0;
   size_t poll_thread_violations = 0;
   size_t channel_destroys = 0;
@@ -230,6 +231,18 @@ class FakeDmeshApiOps final : public DmeshApiOps {
     fake->alive = false;
     fake->allocation.clear();
     ++impl_->destroys;
+    return 0;
+  }
+
+  int AbortQp(dmesh_qp_t* qp) override {
+    std::lock_guard<std::mutex> lock(impl_->mu);
+    auto* fake = impl_->FindQp(qp);
+    if (fake == nullptr || !fake->alive) return 0;
+    if (fake->eq->batch_active) ++impl_->mid_batch_destroys;
+    fake->alive = false;
+    fake->allocation.clear();
+    ++impl_->destroys;
+    ++impl_->aborts;
     return 0;
   }
 
@@ -540,6 +553,11 @@ size_t FakeDmeshState::release_count() const {
 size_t FakeDmeshState::destroy_count() const {
   std::lock_guard<std::mutex> lock(impl_->mu);
   return impl_->destroys;
+}
+
+size_t FakeDmeshState::abort_count() const {
+  std::lock_guard<std::mutex> lock(impl_->mu);
+  return impl_->aborts;
 }
 
 size_t FakeDmeshState::mid_batch_destroy_count() const {

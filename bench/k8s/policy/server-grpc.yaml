@@ -1,0 +1,14 @@
+# Inbound policy subject for the protocol-aware Service. Route-level
+# authorization needs the destination to parse requests, so this Server names
+# the protocol rather than declaring the port opaque.
+apiVersion: policy.linkerd.io/v1beta3
+kind: Server
+metadata:
+  name: bench-echo-grpc
+  namespace: ${NS}
+spec:
+  podSelector:
+    matchLabels:
+      app: echo-grpc-dpumesh
+  port: ${CTRL_PORT}
+  proxyProtocol: gRPC

@@ -1,0 +1,254 @@
+
+=== DPU admin endpoints: 4191 4192 4193 4194 4195 4196 4197 4198
+
+=== output: /home/jukebox/DPUmesh/bench/report/data/f-final-rerun-20260822-000109
+
+=== routing — outbound HTTPRoute on the protocol-aware Service
+R0 | OK mrps=0.000559 gbps=0.0048 req_gbps=0.0047 resp_gbps=0.0001 p50=1799.00 p95=1976.00 p99=2047.00 p999=2169.00 p9999=2827.00 avg=1787.93 min=1124.06 max=4036.54 rcnt=5644 scheduled=5745 pending=0 fail=0 conc=1 threads=1 channels=1 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.000559 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const batch=0 reconns=0 reconn_us=0.00 grabs=0 rets=0 recyc=12 waits=0 pads=0 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA
+    R0 [PASS] no route: expected=serve observed=serve rcnt=5644 fail=0 admitted+=1 denied+=0 route_hits+=0 mismatch+=0
+httproute.gateway.networking.k8s.io/bench-grpc-route created
+R1 | OK mrps=0.000577 gbps=0.0049 req_gbps=0.0048 resp_gbps=0.0001 p50=1742.00 p95=1902.00 p99=1977.00 p999=2252.00 p9999=4332.00 avg=1733.49 min=1156.52 max=9996.28 rcnt=5835 scheduled=5936 pending=0 fail=0 conc=1 threads=1 channels=1 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.000577 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const batch=0 reconns=0 reconn_us=0.00 grabs=0 rets=0 recyc=13 waits=0 pads=0 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA
+    R1 [PASS] HTTPRoute matching the method: expected=serve observed=serve rcnt=5835 fail=0 admitted+=1 denied+=0 route_hits+=5935 mismatch+=0
+httproute.gateway.networking.k8s.io/bench-grpc-route configured
+R2 | OK mrps=0.000000 gbps=0.0000 req_gbps=0.0000 resp_gbps=0.0000 p50=0.00 p95=0.00 p99=0.00 p999=0.00 p9999=0.00 avg=0.00 min=0.00 max=0.00 rcnt=0 scheduled=16524 pending=0 fail=16523 conc=1 threads=1 channels=1 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.000000 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const batch=0 reconns=0 reconn_us=0.00 grabs=0 rets=0 recyc=36 waits=0 pads=0 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA
+    R2 [PASS] HTTPRoute matching nothing: expected=refuse observed=refuse rcnt=0 fail=16523 admitted+=1 denied+=0 route_hits+=0 mismatch+=0
+httproute.gateway.networking.k8s.io/bench-grpc-route configured
+R3 | OK mrps=0.000569 gbps=0.0048 req_gbps=0.0047 resp_gbps=0.0001 p50=1773.00 p95=1955.00 p99=2034.00 p999=2417.00 p9999=2967.00 avg=1757.24 min=931.01 max=5826.56 rcnt=5756 scheduled=5857 pending=0 fail=0 conc=1 threads=1 channels=1 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.000569 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const batch=0 reconns=0 reconn_us=0.00 grabs=0 rets=0 recyc=12 waits=0 pads=0 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA
+    R3 [PASS] HTTPRoute to another Service: expected=serve observed=serve rcnt=5756 fail=0 admitted+=2 denied+=0 route_hits+=5857 mismatch+=0
+httproute.gateway.networking.k8s.io "bench-grpc-route" deleted
+R4 | OK mrps=0.000584 gbps=0.0050 req_gbps=0.0049 resp_gbps=0.0001 p50=1718.00 p95=1923.00 p99=2035.00 p999=3337.00 p9999=15708.00 avg=1711.77 min=950.73 max=25631.18 rcnt=5894 scheduled=5995 pending=0 fail=0 conc=1 threads=1 channels=1 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.000584 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const batch=0 reconns=0 reconn_us=0.00 grabs=0 rets=0 recyc=13 waits=0 pads=0 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA
+    R4 [PASS] no route: expected=serve observed=serve rcnt=5894 fail=0 admitted+=1 denied+=0 route_hits+=0 mismatch+=0
+
+=== stages: 5 pass, 0 fail
+
+=== csv: /home/jukebox/DPUmesh/bench/report/data/f-final-rerun-20260822-000109/stages.csv
+
+=== cleanup
+deployment.apps/echo-dpumesh-14 scaled
+deployment.apps/echo-grpc-dpumesh scaled
+    fixtures removed; replica counts restored
+
+=== DPU admin endpoints: 4191 4192 4193 4194 4195 4196 4197 4198
+
+=== output: /home/jukebox/DPUmesh/bench/report/data/f-final-rerun-20260822-000109
+
+=== cross-Service routing — a route whose backend is another Service
+X0 | OK mrps=0.000571 gbps=0.0049 req_gbps=0.0047 resp_gbps=0.0001 p50=1768.00 p95=1946.00 p99=2046.00 p999=3440.00 p9999=5734.00 avg=1751.30 min=875.86 max=5978.37 rcnt=5773 scheduled=5874 pending=0 fail=0 conc=1 threads=1 channels=1 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.000571 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const batch=0 reconns=0 reconn_us=0.00 grabs=0 rets=0 recyc=12 waits=0 pads=0 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA
+    X0 [PASS] no route: expected=serve observed=serve rcnt=5773 fail=0 admitted+=1 denied+=0 route_hits+=0 mismatch+=0
+
+=== X1 — the route reaches the other Service
+httproute.gateway.networking.k8s.io/bench-grpc-route created
+X1 | OK mrps=0.000575 gbps=0.0049 req_gbps=0.0048 resp_gbps=0.0001 p50=1752.00 p95=1913.00 p99=1988.00 p999=2467.00 p9999=5017.00 avg=1737.97 min=865.92 max=5775.14 rcnt=5825 scheduled=5926 pending=0 fail=0 conc=1 threads=1 channels=1 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.000575 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const batch=0 reconns=0 reconn_us=0.00 grabs=0 rets=0 recyc=13 waits=0 pads=0 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA
+    X1 [PASS] backendRef in another Service: expected=serve observed=serve rcnt=5825 fail=0 admitted+=2 denied+=0 route_hits+=5926 mismatch+=0
+    X1 served by echo-grpc-alt: echo-grpc-alt-774bbbccb5-5hjk7=5926 
+
+=== X2 — the destination's own policy grades the stream that arrives
+server.policy.linkerd.io/bench-echo-grpc-alt created
+X2 | OK mrps=0.000000 gbps=0.0000 req_gbps=0.0000 resp_gbps=0.0000 p50=0.00 p95=0.00 p99=0.00 p999=0.00 p9999=0.00 avg=0.00 min=0.00 max=0.00 rcnt=0 scheduled=497 pending=0 fail=496 conc=1 threads=1 channels=1 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.000000 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const batch=0 reconns=0 reconn_us=0.00 grabs=496 rets=496 recyc=0 waits=0 pads=0 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA
+    X2 [PASS] Server on the destination Service, no authorization: expected=refuse observed=refuse rcnt=0 fail=496 admitted+=972 denied+=497 route_hits+=0 mismatch+=0
+    X2v [PASS] the destination refused: denied+=497
+server.policy.linkerd.io "bench-echo-grpc-alt" deleted
+X2b | OK mrps=0.000565 gbps=0.0048 req_gbps=0.0047 resp_gbps=0.0001 p50=1783.00 p95=1966.00 p99=2048.00 p999=2232.00 p9999=2936.00 avg=1769.68 min=1132.47 max=3112.94 rcnt=5717 scheduled=5818 pending=0 fail=0 conc=1 threads=1 channels=1 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.000565 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const batch=0 reconns=0 reconn_us=0.00 grabs=0 rets=0 recyc=12 waits=0 pads=0 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA
+    X2b [PASS] the destination Server withdrawn: expected=serve observed=serve rcnt=5717 fail=0 admitted+=2 denied+=0 route_hits+=5817 mismatch+=0
+
+=== X3 — weighted backendRefs across two Services
+httproute.gateway.networking.k8s.io/bench-grpc-route configured
+X3 | OK mrps=0.002700 gbps=0.0230 req_gbps=0.0225 resp_gbps=0.0005 p50=1491.00 p95=1843.00 p99=1955.00 p999=2285.00 p9999=3195.00 avg=1481.22 min=619.54 max=29310.94 rcnt=27413 scheduled=27817 pending=0 fail=0 conc=1 threads=4 channels=4 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.002700 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const batch=0 reconns=0 reconn_us=0.00 grabs=0 rets=0 recyc=60 waits=0 pads=0 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA
+    X3 [PASS] weighted 50/50 across two Services: expected=serve observed=serve rcnt=27413 fail=0 admitted+=8 denied+=0 route_hits+=27816 mismatch+=0
+    X3 split: echo-grpc-dpumesh{echo-grpc-dpumesh-84546996c7-2kgwp=13896 } echo-grpc-alt{echo-grpc-alt-774bbbccb5-5hjk7=13921 }
+httproute.gateway.networking.k8s.io "bench-grpc-route" deleted
+X4 | OK mrps=0.000578 gbps=0.0049 req_gbps=0.0048 resp_gbps=0.0001 p50=1749.00 p95=1955.00 p99=2047.00 p999=3061.00 p9999=3584.00 avg=1729.15 min=1024.75 max=4843.44 rcnt=5838 scheduled=5939 pending=0 fail=0 conc=1 threads=1 channels=1 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.000578 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const batch=0 reconns=0 reconn_us=0.00 grabs=0 rets=0 recyc=13 waits=0 pads=0 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA
+    X4 [PASS] no route: expected=serve observed=serve rcnt=5838 fail=0 admitted+=1 denied+=0 route_hits+=0 mismatch+=0
+
+=== stages: 9 pass, 0 fail
+
+=== csv: /home/jukebox/DPUmesh/bench/report/data/f-final-rerun-20260822-000109/stages.csv
+
+=== cleanup
+deployment.apps/echo-dpumesh-14 scaled
+deployment.apps/echo-grpc-dpumesh scaled
+    fixtures removed; replica counts restored
+
+=== DPU admin endpoints: 4191 4192 4193 4194 4195 4196 4197 4198
+
+=== output: /home/jukebox/DPUmesh/bench/report/data/f-final-rerun-20260822-000109
+
+=== fan-out — one client channel across two backends of one Service
+deployment.apps/echo-grpc-dpumesh scaled
+pod/echo-grpc-dpumesh-84546996c7-2kgwp condition met
+pod/echo-grpc-dpumesh-84546996c7-zw56m condition met
+    F1 1 channel(s): backends=2 fail=0 take_errors+=0 served: echo-grpc-dpumesh-84546996c7-2kgwp=8329 echo-grpc-dpumesh-84546996c7-zw56m=8326 
+    F1 4 channel(s): backends=2 fail=0 take_errors+=0 served: echo-grpc-dpumesh-84546996c7-2kgwp=48467 echo-grpc-dpumesh-84546996c7-zw56m=47355 
+
+=== F1 — back to one backend
+deployment.apps/echo-grpc-dpumesh scaled
+timed out waiting for the condition on pods/echo-grpc-dpumesh-84546996c7-2kgwp
+client rate limiter Wait returned an error: context deadline exceeded
+F1r | OK mrps=0.000576 gbps=0.0049 req_gbps=0.0048 resp_gbps=0.0001 p50=1759.00 p95=1945.00 p99=2025.00 p999=2321.00 p9999=3012.00 avg=1736.13 min=861.29 max=4923.23 rcnt=5838 scheduled=5939 pending=0 fail=0 conc=1 threads=1 channels=1 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.000576 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const batch=0 reconns=0 reconn_us=0.00 grabs=0 rets=0 recyc=13 waits=0 pads=0 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA
+    F1r [PASS] one backend restored: expected=serve observed=serve rcnt=5838 fail=0 admitted+=1 denied+=0 route_hits+=0 mismatch+=0
+
+=== stages: 3 pass, 0 fail
+
+=== csv: /home/jukebox/DPUmesh/bench/report/data/f-final-rerun-20260822-000109/stages.csv
+
+=== cleanup
+deployment.apps/echo-dpumesh-14 scaled
+deployment.apps/echo-grpc-dpumesh scaled
+    fixtures removed; replica counts restored
+
+=== webhook — deploy the registration and its serving certificate
+serviceaccount/dpumesh-webhook unchanged
+clusterrole.rbac.authorization.k8s.io/dpumesh-webhook unchanged
+clusterrolebinding.rbac.authorization.k8s.io/dpumesh-webhook unchanged
+service/dpumesh-webhook unchanged
+deployment.apps/dpumesh-webhook configured
+mutatingwebhookconfiguration.admissionregistration.k8s.io/dpumesh-inject unchanged
+Waiting for deployment "dpumesh-webhook" rollout to finish: 1 old replicas are pending termination...
+Waiting for deployment "dpumesh-webhook" rollout to finish: 1 old replicas are pending termination...
+deployment "dpumesh-webhook" successfully rolled out
+    I0 [PASS] caBundle published: expected=present observed=present 
+
+=== workloads — the same Deployment, with and without the annotation
+deployment.apps/inject-echo configured
+service/inject-sock unchanged
+deployment.apps/plain-echo configured
+service/plain-sock unchanged
+deployment.apps/inject-bench configured
+service/inject-bench unchanged
+deployment.apps/plain-bench configured
+service/plain-bench unchanged
+deployment.apps/inject-echo scaled
+deployment.apps/plain-echo scaled
+deployment.apps/inject-bench scaled
+deployment.apps/plain-bench scaled
+    DPU admin ports: 4191 4192 4193 4194 4195 4196 4197 4198
+
+=== I1/I2 — what the admitted Pod objects carry
+    I1 [PASS] inject-echo: expected=injected observed=injected 
+    I2 [PASS] plain-echo: expected=bare observed=bare 
+
+=== I3 — the meshed pair
+I3 | OK mrps=0.001346 gbps=0.0115 req_gbps=0.0112 resp_gbps=0.0003 p50=801.00 p95=1096.00 p99=1189.00 p999=1454.00 p9999=2661.00 avg=735.83 min=135.02 max=6014.33 rcnt=13341 scheduled=13442 pending=1 fail=0 conc=1 threads=1 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.001346 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const grabs=1 rets=1 recyc=29 waits=0 pads=0 wwin=0 wpool=0
+    I3 [PASS] meshed traffic: expected=serve observed=serve rcnt=13341 fail=0 admitted+=1
+    I3b [PASS] meshed verdict: expected=yes observed=yes 
+
+=== I4 — the unmeshed control
+I4 | OK mrps=0.039367 gbps=0.3351 req_gbps=0.3275 resp_gbps=0.0076 p50=24.00 p95=25.00 p99=29.00 p999=58.00 p9999=258.00 avg=25.00 min=17.36 max=439.81 rcnt=393425 scheduled=393526 pending=1 fail=0 conc=1 threads=1 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.039367 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const grabs=NA rets=NA recyc=NA waits=NA pads=NA wwin=NA wpool=NA
+    I4 [PASS] unmeshed traffic: expected=serve observed=serve rcnt=393425 fail=0 admitted+=0
+    I4b [PASS] unmeshed verdict: expected=no observed=no 
+
+=== summary
+    passes=7 failures=0
+    -> /home/jukebox/DPUmesh/bench/report/data/f-final-rerun-20260822-000109/stages.csv
+
+=== cleanup
+deployment.apps/inject-echo scaled
+deployment.apps/inject-bench scaled
+deployment.apps/plain-echo scaled
+deployment.apps/plain-bench scaled
+    injected workloads scaled to zero; the webhook registration is left in place
+
+=== DPU admin endpoints: 4191 4192 4193 4194 4195 4196 4197 4198
+
+=== output: /home/jukebox/DPUmesh/bench/report/data/f-final-rerun-20260822-000109
+
+=== surfaces — Linkerd features running in a proxy nobody has aimed at them
+S0 | OK mrps=0.000566 gbps=0.0048 req_gbps=0.0047 resp_gbps=0.0001 p50=1772.00 p95=1965.00 p99=2068.00 p999=2711.00 p9999=3759.00 avg=1765.52 min=1083.82 max=4619.91 rcnt=5726 scheduled=5827 pending=0 fail=0 conc=1 threads=1 channels=1 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.000566 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const batch=0 reconns=0 reconn_us=0.00 grabs=0 rets=0 recyc=12 waits=0 pads=0 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA
+    S0 [PASS] no route: expected=serve observed=serve rcnt=5726 fail=0 admitted+=1 denied+=0 route_hits+=0 mismatch+=0
+
+=== S1/S2 — HTTPRoute request timeouts
+httproute.gateway.networking.k8s.io/bench-grpc-route created
+S1 | OK mrps=0.000557 gbps=0.0047 req_gbps=0.0046 resp_gbps=0.0001 p50=1794.00 p95=1986.00 p99=2099.00 p999=3051.00 p9999=4106.00 avg=1794.89 min=1074.35 max=4382.81 rcnt=5632 scheduled=5733 pending=0 fail=0 conc=1 threads=1 channels=1 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.000557 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const batch=0 reconns=0 reconn_us=0.00 grabs=0 rets=0 recyc=12 waits=0 pads=0 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA
+    S1 [PASS] timeout 10s: expected=serve observed=serve rcnt=5632 fail=0 admitted+=1 denied+=0 route_hits+=5733 mismatch+=0
+httproute.gateway.networking.k8s.io/bench-grpc-route configured
+S2 | OK mrps=0.000558 gbps=0.0047 req_gbps=0.0046 resp_gbps=0.0001 p50=1794.00 p95=1961.00 p99=2037.00 p999=2448.00 p9999=2811.00 avg=1787.95 min=1030.11 max=3267.97 rcnt=5638 scheduled=5749 pending=0 fail=10 conc=1 threads=1 channels=1 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.000558 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const batch=0 reconns=0 reconn_us=0.00 grabs=0 rets=0 recyc=12 waits=0 pads=0 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA
+    S2 [PASS] timeout 1ms: expected=refuse observed=refuse rcnt=5638 fail=10 admitted+=1 denied+=0 route_hits+=5748 mismatch+=0
+    S2v [PASS] the route timed requests out: REQUEST_TIMEOUT+=10
+httproute.gateway.networking.k8s.io "bench-grpc-route" deleted
+
+=== S3 — retries, against a backend that fails on purpose
+deployment.apps/echo-grpc-dpumesh env updated
+Waiting for deployment "echo-grpc-dpumesh" rollout to finish: 0 out of 1 new replicas have been updated...
+Waiting for deployment "echo-grpc-dpumesh" rollout to finish: 1 old replicas are pending termination...
+Waiting for deployment "echo-grpc-dpumesh" rollout to finish: 1 old replicas are pending termination...
+deployment "echo-grpc-dpumesh" successfully rolled out
+httproute.gateway.networking.k8s.io/bench-grpc-route created
+S3a | OK mrps=0.000536 gbps=0.0046 req_gbps=0.0045 resp_gbps=0.0001 p50=1780.00 p95=1967.00 p99=2058.00 p999=2537.00 p9999=157081.00 avg=1831.67 min=1033.88 max=201116.58 rcnt=5395 scheduled=5608 pending=0 fail=112 conc=1 threads=1 channels=1 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.000536 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const batch=0 reconns=0 reconn_us=0.00 grabs=0 rets=0 recyc=12 waits=0 pads=0 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA
+    S3a [PASS] 1-in-50 failures, no retry policy: expected=refuse observed=refuse rcnt=5395 fail=112 admitted+=1 denied+=0 route_hits+=5608 mismatch+=0
+httproute.gateway.networking.k8s.io/bench-grpc-route configured
+S3b | OK mrps=0.000533 gbps=0.0045 req_gbps=0.0044 resp_gbps=0.0001 p50=1842.00 p95=2026.00 p99=2117.00 p999=2971.00 p9999=3829.00 avg=1837.01 min=1263.77 max=6307.71 rcnt=5388 scheduled=5601 pending=0 fail=112 conc=1 threads=1 channels=1 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.000533 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const batch=0 reconns=0 reconn_us=0.00 grabs=0 rets=0 recyc=12 waits=0 pads=0 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA
+    S3b [FAIL] 1-in-50 failures, retry limit 3: expected=serve observed=refuse rcnt=5388 fail=112 admitted+=1 denied+=0 route_hits+=5601 mismatch+=0
+httproute.gateway.networking.k8s.io "bench-grpc-route" deleted
+deployment.apps/echo-grpc-dpumesh env updated
+Waiting for deployment "echo-grpc-dpumesh" rollout to finish: 1 old replicas are pending termination...
+Waiting for deployment "echo-grpc-dpumesh" rollout to finish: 1 old replicas are pending termination...
+deployment "echo-grpc-dpumesh" successfully rolled out
+
+=== S4/S5 — method matching
+httproute.gateway.networking.k8s.io/bench-grpc-route created
+S4 | OK mrps=0.000564 gbps=0.0048 req_gbps=0.0047 resp_gbps=0.0001 p50=1731.00 p95=1933.00 p99=2027.00 p999=2611.00 p9999=114861.00 avg=1773.87 min=1022.82 max=201167.50 rcnt=5686 scheduled=5787 pending=0 fail=0 conc=1 threads=1 channels=1 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.000564 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const batch=0 reconns=0 reconn_us=0.00 grabs=0 rets=0 recyc=12 waits=0 pads=0 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA
+    S4 [PASS] method POST: expected=serve observed=serve rcnt=5686 fail=0 admitted+=1 denied+=0 route_hits+=5787 mismatch+=0
+httproute.gateway.networking.k8s.io/bench-grpc-route configured
+S5 | OK mrps=0.000000 gbps=0.0000 req_gbps=0.0000 resp_gbps=0.0000 p50=0.00 p95=0.00 p99=0.00 p999=0.00 p9999=0.00 avg=0.00 min=0.00 max=0.00 rcnt=0 scheduled=15847 pending=0 fail=15846 conc=1 threads=1 channels=1 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.000000 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const batch=0 reconns=0 reconn_us=0.00 grabs=0 rets=0 recyc=34 waits=0 pads=0 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA
+    S5 [PASS] method GET: expected=refuse observed=refuse rcnt=0 fail=15846 admitted+=1 denied+=0 route_hits+=0 mismatch+=0
+httproute.gateway.networking.k8s.io "bench-grpc-route" deleted
+
+=== S6/S7 — header matching
+httproute.gateway.networking.k8s.io/bench-grpc-route created
+S6 | OK mrps=0.000566 gbps=0.0048 req_gbps=0.0047 resp_gbps=0.0001 p50=1773.00 p95=1966.00 p99=2056.00 p999=2253.00 p9999=3112.00 avg=1767.22 min=870.11 max=3319.50 rcnt=5726 scheduled=5827 pending=0 fail=0 conc=1 threads=1 channels=1 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.000566 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const batch=0 reconns=0 reconn_us=0.00 grabs=0 rets=0 recyc=12 waits=0 pads=0 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA
+    S6 [PASS] header content-type: application/grpc: expected=serve observed=serve rcnt=5726 fail=0 admitted+=1 denied+=0 route_hits+=5827 mismatch+=0
+httproute.gateway.networking.k8s.io/bench-grpc-route configured
+S7 | OK mrps=0.000000 gbps=0.0000 req_gbps=0.0000 resp_gbps=0.0000 p50=0.00 p95=0.00 p99=0.00 p999=0.00 p9999=0.00 avg=0.00 min=0.00 max=0.00 rcnt=0 scheduled=15552 pending=0 fail=15551 conc=1 threads=1 channels=1 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.000000 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const batch=0 reconns=0 reconn_us=0.00 grabs=0 rets=0 recyc=34 waits=0 pads=0 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA
+    S7 [PASS] header content-type: application/json: expected=refuse observed=refuse rcnt=0 fail=15551 admitted+=1 denied+=0 route_hits+=0 mismatch+=0
+httproute.gateway.networking.k8s.io "bench-grpc-route" deleted
+
+=== S8/S9 — GRPCRoute
+grpcroute.gateway.networking.k8s.io/bench-grpc-grpcroute created
+S8 | OK mrps=0.000577 gbps=0.0049 req_gbps=0.0048 resp_gbps=0.0001 p50=1750.00 p95=1936.00 p99=2028.00 p999=2662.00 p9999=3327.00 avg=1734.09 min=859.18 max=6352.56 rcnt=5825 scheduled=5926 pending=0 fail=0 conc=1 threads=1 channels=1 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.000577 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const batch=0 reconns=0 reconn_us=0.00 grabs=0 rets=0 recyc=13 waits=0 pads=0 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA
+    S8 [PASS] GRPCRoute on the called method: expected=serve observed=serve rcnt=5825 fail=0 admitted+=1 denied+=0 route_hits+=0 mismatch+=0
+grpcroute.gateway.networking.k8s.io/bench-grpc-grpcroute configured
+S9 | OK mrps=0.000000 gbps=0.0000 req_gbps=0.0000 resp_gbps=0.0000 p50=0.00 p95=0.00 p99=0.00 p999=0.00 p9999=0.00 avg=0.00 min=0.00 max=0.00 rcnt=0 scheduled=16911 pending=0 fail=16910 conc=1 threads=1 channels=1 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.000000 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const batch=0 reconns=0 reconn_us=0.00 grabs=0 rets=0 recyc=37 waits=0 pads=0 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA
+    S9 [PASS] GRPCRoute on another method: expected=refuse observed=refuse rcnt=0 fail=16910 admitted+=1 denied+=0 route_hits+=0 mismatch+=0
+grpcroute.gateway.networking.k8s.io "bench-grpc-grpcroute" deleted
+deployment.apps/bench-grpc-dpumesh restarted
+Waiting for deployment "bench-grpc-dpumesh" rollout to finish: 0 out of 1 new replicas have been updated...
+Waiting for deployment "bench-grpc-dpumesh" rollout to finish: 1 old replicas are pending termination...
+Waiting for deployment "bench-grpc-dpumesh" rollout to finish: 1 old replicas are pending termination...
+deployment "bench-grpc-dpumesh" successfully rolled out
+
+=== S10-S12 — authorization whose subject is a route
+    caller identity: default.test-bench.serviceaccount.identity.linkerd.cluster.local
+server.policy.linkerd.io/bench-echo-grpc created
+S10 | OK mrps=0.000000 gbps=0.0000 req_gbps=0.0000 resp_gbps=0.0000 p50=0.00 p95=0.00 p99=0.00 p999=0.00 p9999=0.00 avg=0.00 min=0.00 max=0.00 rcnt=0 scheduled=507 pending=0 fail=506 conc=1 threads=1 channels=1 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.000000 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const batch=0 reconns=0 reconn_us=0.00 grabs=506 rets=506 recyc=0 waits=0 pads=0 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA
+    S10 [PASS] Server on the protocol-aware Service, no authorization: expected=refuse observed=refuse rcnt=0 fail=506 admitted+=0 denied+=1014 route_hits+=0 mismatch+=0
+httproute.policy.linkerd.io/bench-grpc-inbound-route created
+meshtlsauthentication.policy.linkerd.io/bench-route-caller created
+authorizationpolicy.policy.linkerd.io/bench-allow-route created
+S11 | OK mrps=0.000000 gbps=0.0000 req_gbps=0.0000 resp_gbps=0.0000 p50=0.00 p95=0.00 p99=0.00 p999=0.00 p9999=0.00 avg=0.00 min=0.00 max=0.00 rcnt=0 scheduled=228 pending=0 fail=227 conc=1 threads=1 channels=1 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.000000 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const batch=0 reconns=0 reconn_us=0.00 grabs=227 rets=227 recyc=0 waits=0 pads=0 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA
+    S11 [FAIL] AuthorizationPolicy targeting the HTTPRoute: expected=serve observed=refuse rcnt=0 fail=227 admitted+=0 denied+=454 route_hits+=0 mismatch+=0
+httproute.policy.linkerd.io/bench-grpc-inbound-route unchanged
+meshtlsauthentication.policy.linkerd.io/bench-route-caller configured
+authorizationpolicy.policy.linkerd.io/bench-allow-route unchanged
+S12 | OK mrps=0.000000 gbps=0.0000 req_gbps=0.0000 resp_gbps=0.0000 p50=0.00 p95=0.00 p99=0.00 p999=0.00 p9999=0.00 avg=0.00 min=0.00 max=0.00 rcnt=0 scheduled=358 pending=0 fail=357 conc=1 threads=1 channels=1 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.000000 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const batch=0 reconns=0 reconn_us=0.00 grabs=357 rets=356 recyc=0 waits=0 pads=0 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA
+    S12 [PASS] the same policy naming another identity: expected=refuse observed=refuse rcnt=0 fail=357 admitted+=0 denied+=714 route_hits+=-17594 mismatch+=0
+httproute.policy.linkerd.io "bench-grpc-inbound-route" deleted
+meshtlsauthentication.policy.linkerd.io "bench-route-caller" deleted
+authorizationpolicy.policy.linkerd.io "bench-allow-route" deleted
+server.policy.linkerd.io "bench-echo-grpc" deleted
+
+=== S13/S14 — failure accrual
+service/echo-grpc-alt annotated
+deployment.apps/echo-grpc-alt env updated
+Waiting for deployment "echo-grpc-alt" rollout to finish: 0 out of 1 new replicas have been updated...
+Waiting for deployment "echo-grpc-alt" rollout to finish: 1 old replicas are pending termination...
+Waiting for deployment "echo-grpc-alt" rollout to finish: 1 old replicas are pending termination...
+deployment "echo-grpc-alt" successfully rolled out
+httproute.gateway.networking.k8s.io/bench-grpc-route created
+S13 | OK mrps=0.000285 gbps=0.0024 req_gbps=0.0024 resp_gbps=0.0001 p50=1794.00 p95=1966.00 p99=2049.00 p999=2354.00 p9999=2603.00 avg=1789.26 min=1252.09 max=3074.77 rcnt=2847 scheduled=5814 pending=0 fail=2866 conc=1 threads=1 channels=1 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.000285 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const batch=0 reconns=0 reconn_us=0.00 grabs=0 rets=0 recyc=12 waits=0 pads=0 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA
+    S13 [FAIL] half the route's weight on a backend that always fails: expected=serve observed=refuse rcnt=2847 fail=2866 admitted+=2 denied+=0 route_hits+=5813 mismatch+=0
+
+=== cleanup
+httproute.gateway.networking.k8s.io "bench-grpc-route" deleted
+deployment.apps/echo-dpumesh-14 scaled
+deployment.apps/echo-grpc-dpumesh scaled
+    fixtures removed; replica counts restored

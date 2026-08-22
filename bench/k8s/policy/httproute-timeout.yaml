@@ -1,0 +1,26 @@
+# An outbound request timeout on the protocol-aware Service. The value is the
+# whole arm: a timeout shorter than the round trip must end every request, and
+# a generous one must change nothing.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: bench-grpc-route
+  namespace: ${NS}
+spec:
+  parentRefs:
+    - group: core
+      kind: Service
+      name: echo-grpc-dpumesh
+      port: ${CTRL_PORT}
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: "${ROUTE_PATH}"
+      timeouts:
+        request: "${ROUTE_TIMEOUT}"
+      backendRefs:
+        - group: core
+          kind: Service
+          name: echo-grpc-dpumesh
+          port: ${CTRL_PORT}

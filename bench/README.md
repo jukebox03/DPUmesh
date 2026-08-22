@@ -44,11 +44,15 @@ corresponding application adapter over the same mesh.
 |---|---|---|
 | native | `bench_dpumesh` / `echo_dpumesh` | `bench-dpumesh`, `echo-dpumesh` |
 | preload | `bench_sock` / `echo_sock` under `libdmesh_preload.so` | `preload-bench`, `preload-echo` |
-| gRPC | `bench_grpc` / `echo_grpc` using the DPUmesh endpoint | `bench-grpc-dpumesh`, `echo-grpc-dpumesh` |
+| gRPC | `bench_grpc` / `echo_grpc` using the DPUmesh endpoint | `bench-grpc-dpumesh`, `echo-grpc-dpumesh`, `echo-grpc-alt` |
+| HTTP/1.1 | `http1_bench` / `http1_echo` under `libdmesh_preload.so` | `http1-bench`, `http1-echo` |
 
 The loopback, verbs, and preload validator deployments exercise supported API
 contracts on the same DMA mesh. Extra native echo pods validate Service
-fan-out and endpoint pinning.
+fan-out and endpoint pinning. `echo-grpc-alt` is a second Service speaking the
+same protocol, which is what a route crossing Services needs on both ends.
+`echo_grpc` answers `INTERNAL` on every `BENCH_FAIL_EVERY`-th call, because a
+retry policy and a circuit breaker are statements about a backend that fails.
 
 The native and preload workloads preserve the same application submission
 boundary. Each client submits one logical request per native post or POSIX
@@ -63,6 +67,7 @@ transport batching policy below both adapters.
 ./bench/bench.sh point dpumesh 1024 8 1 5 100 1
 ./bench/bench.sh point preload 1024 8 1 5 100 1
 ./bench/bench.sh point grpc-dpumesh 1024 8 1 5 100 1
+./bench/bench.sh point http1 1024 8 1 5 100 1
 
 ./bench/bench.sh loopback
 ./bench/bench.sh verbs
@@ -73,7 +78,36 @@ transport batching policy below both adapters.
 
 The standard latency, bandwidth, and rate families accept exactly one of
 `dpumesh`, `preload`, or `grpc-dpumesh` and write CSVs under
-`$OUT` (default `/tmp/dpumesh-bench`).
+`$OUT` (default `/tmp/dpumesh-bench`). `http1` is a functional driver for the
+protocol-aware path's HTTP/1 branch, not a capacity instrument.
+
+## Function campaigns
+
+What the control plane decides is judged separately from what the transport
+carries, and by two readings: what the client completed, and what the DPU's own
+counters say the enforcement point decided. Traffic that stops without a
+matching verdict is not a policy result, and traffic that flows without one is
+not a routing result.
+
+```sh
+./bench/suite/policy_route.sh [policy|route|cross|fanout|surfaces|lb|all]
+./bench/suite/inject.sh
+```
+
+| Scope | Judges |
+|---|---|
+| `policy` | inbound authorization by caller identity and address |
+| `route` | an `HTTPRoute` on the protocol-aware Service |
+| `cross` | a route into another Service, and the destination's own policy |
+| `fanout` | one client channel across two backends of one Service |
+| `surfaces` | timeouts, retries, matching, `GRPCRoute`, route authorization, failure accrual, HTTP/1.1 |
+| `lb` | connection grain, endpoint changes, and the request grain |
+| `inject.sh` | one annotation meshes a workload, and its absence leaves one alone |
+
+A stage whose client returns no reply is recorded as `nodata` and fails: a
+missing measurement is not a refusal. Stages that fail every request in flight
+restart the gRPC client before the next stage reads anything, because the client
+does not survive that churn indefinitely.
 
 ## Lifecycle invariants
 
@@ -90,9 +124,12 @@ The standard latency, bandwidth, and rate families accept exactly one of
   the sole proxy and enforcement point.
 - `DPUMESH_L7_SVC` selects HTTP/1 and HTTP/2 services and
   `DPUMESH_L7_OPAQUE_SVC` selects opaque TCP services.
-- Cross-node routing uses the authenticated peer-channel seam. RDMA supplies
-  that seam's ordered reliable transport; its stream, custody, and policy
-  semantics are identical to the local DMA path.
+- Cross-node routing runs above the peer-channel seam; its RDMA transport is
+  not yet bound, so a destination the topology places on another node is
+  refused. Every deployment this harness drives is one node.
+- Meshed Pods may declare their own access or take it from the admission
+  webhook; `bench/k8s/pods.yaml` is the first and `bench/k8s/injected.yaml` the
+  second.
 
 ## Useful controls
 

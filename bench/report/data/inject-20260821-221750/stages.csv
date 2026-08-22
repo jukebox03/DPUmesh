@@ -1,0 +1,8 @@
+stage,subject,expected,observed,verdict,detail
+I0,caBundle published,present,present,PASS,
+I1,inject-echo,injected,injected,PASS,
+I2,plain-echo,bare,bare,PASS,
+I3,meshed traffic,serve,refuse,FAIL,rcnt=0 fail=1 admitted+=0
+I3b,meshed verdict,yes,no,FAIL,
+I4,unmeshed traffic,serve,refuse,FAIL,rcnt=0 fail=1 admitted+=0
+I4b,unmeshed verdict,no,no,PASS,

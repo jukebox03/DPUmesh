@@ -782,17 +782,21 @@ void TestGrpcClientBridgeBuildsChannelFromNativeConnect() {
 
   (void)channel->GetState(true);
   CHECK_TRUE(state->WaitForClientQpCount(1, 2s));
+  dmesh_qp_t* qp = state->ClientQps().front();
+  CHECK_TRUE(PumpUntil(&callbacks, [state, qp] {
+    return state->WaitForPostCount(qp, 1, 0ms);
+  }));
 
-  // Endpoint teardown runs on the callback executor, so keep draining it while
-  // gRPC unwinds the channel. The bound is generous because the release is
-  // paced by gRPC's own EventEngine teardown, not by the adapter.
+  // Copies share the DPUmesh channel owner. The native QP remains live until
+  // the final public reference is released, then closes independently of
+  // gRPC's deferred internal Endpoint cleanup.
+  std::shared_ptr<::grpc::Channel> channel_copy = channel;
   channel.reset();
-  bool destroyed = false;
-  for (int i = 0; i < 3000 && !destroyed; ++i) {
-    callbacks.RunAll();
-    destroyed = state->WaitForDestroyCount(1, 10ms);
-  }
-  CHECK_TRUE(destroyed);
+  CHECK_EQ(state->destroy_count(), size_t{0});
+  channel_copy.reset();
+  CHECK_TRUE(state->WaitForDestroyCount(1, 2s));
+  CHECK_EQ(state->abort_count(), size_t{1});
+  callbacks.RunAll();
   runtime.reset();
 }
 
@@ -848,16 +852,21 @@ void TestGrpcClientReconnectCreatesFreshTargetedQp() {
   }
   callbacks.RunAll();
   CHECK_TRUE(state->WaitForClientQpCount(2, 100ms));
+  dmesh_qp_t* second = state->ClientQps().back();
+  CHECK_TRUE(PumpUntil(&callbacks, [state, second] {
+    return state->WaitForPostCount(second, 1, 0ms);
+  }));
   const auto targets = state->ClientTargets();
   CHECK_EQ(targets.size(), size_t{2});
   CHECK_EQ(targets[0], std::string("greeter"));
   CHECK_EQ(targets[1], std::string("greeter"));
 
   channel.reset();
-  for (int i = 0; i < 100; ++i) {
-    callbacks.RunAll();
-    if (state->WaitForDestroyCount(2, 10ms)) break;
-  }
+  CHECK_TRUE(state->WaitForDestroyCount(2, 2s));
+  // The first Endpoint was abandoned after remote EOF and the second by the
+  // public Channel: both client-side terminal paths are prompt resets.
+  CHECK_EQ(state->abort_count(), size_t{2});
+  callbacks.RunAll();
   runtime.reset();
 }
 
@@ -884,17 +893,13 @@ void TestGrpcChannelChurnKeepsOneRuntime() {
     }));
 
     channel.reset();
+    CHECK_TRUE(state->WaitForDestroyCount(cycle + 1, 2s));
+    CHECK_EQ(state->abort_count(), cycle + 1);
     callbacks.RunAll();
     CHECK_EQ(runtime->stats().receive_credit_hold_dropped, uint64_t{0});
     CHECK_EQ(runtime->stats().eq_drain_budget_exhausted, uint64_t{0});
   }
 
-  // gRPC releases a channel EventEngine on its own asynchronous cleanup
-  // schedule. Wait once for every dropped channel rather than serializing the
-  // churn loop on that implementation detail.
-  CHECK_TRUE(PumpUntil(
-      &callbacks,
-      [state] { return state->destroy_count() >= kCycles; }, 45s));
   CHECK_EQ(state->destroy_count(), kCycles);
 
   const auto targets = state->ClientTargets();
@@ -937,15 +942,17 @@ void TestConcurrentGrpcChannelsSameServiceCloseIndependently() {
   }
 
   channels[1].reset();
+  CHECK_TRUE(state->WaitForDestroyCount(1, 2s));
+  CHECK_EQ(state->abort_count(), size_t{1});
   callbacks.RunAll();
   for (size_t i = 0; i < channels.size(); ++i) {
     if (i != 1) CHECK_TRUE(channels[i] != nullptr);
   }
 
   channels.clear();
-  CHECK_TRUE(PumpUntil(
-      &callbacks,
-      [state] { return state->destroy_count() >= kChannels; }, 45s));
+  CHECK_TRUE(state->WaitForDestroyCount(kChannels, 2s));
+  CHECK_EQ(state->abort_count(), kChannels);
+  callbacks.RunAll();
   CHECK_EQ(state->destroy_count(), kChannels);
   CHECK_EQ(runtime->stats().receive_credit_hold_dropped, uint64_t{0});
   CHECK_EQ(runtime->stats().eq_drain_budget_exhausted, uint64_t{0});

@@ -1,0 +1,8 @@
+H0 fresh                        [active=0    opened=3]
+H1 one plain point              rcnt=8071 fail=0   [active=0    opened=4]
+H2 a no-match stage             rcnt=0 fail=23985   [active=0    opened=5]
+H3 route withdrawn              [active=0    opened=5]
+H4 inbound Server, deny         rcnt=0 fail=591   [active=79   opened=1109]
+H5 authorization applied        rcnt=7872 fail=0   [active=79   opened=1110]
+H6 both withdrawn               [active=79   opened=1110]
+H7 a plain point again          rcnt=7870 fail=0   [active=79   opened=1111]

@@ -1,0 +1,46 @@
+=== per-thread CPU
+=== dpumesh_dpu pid=2024418 per-thread %CPU ===
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+2024506 root      20   0 2120504   1.4g  29172 R  99.9   4.6  19:36.13 dmesh-w4
+2024508 root      20   0 2120504   1.4g  29172 R  99.9   4.6  10:07.63 dmesh-w5
+2024502 root      20   0 2120504   1.4g  29172 S   2.0   4.6  10:13.02 dmesh-w2
+2024418 root      20   0 2120504   1.4g  29172 S   1.0   4.6   1:40.72 dpumesh+
+2024447 root      20   0 2120504   1.4g  29172 S   1.0   4.6   0:32.75 dpumesh+
+2024500 root      20   0 2120504   1.4g  29172 S   1.0   4.6  16:48.82 dmesh-w1
+2024510 root      20   0 2120504   1.4g  29172 S   1.0   4.6   2:46.00 dmesh-w6
+2024512 root      20   0 2120504   1.4g  29172 S   1.0   4.6   9:14.39 dmesh-w7
+2024449 root      20   0 2120504   1.4g  29172 S   0.0   4.6   0:32.93 dpumesh+
+2024498 root      20   0 2120504   1.4g  29172 S   0.0   4.6  42:38.64 dmesh-w0
+
+=== admin endpoints
+4191: ok
+4192: ok
+4193: ok
+4194: ok
+4195: NO
+4196: NO
+4197: ok
+4198: ok
+
+=== stacks (gdb -p <dpumesh_dpu>, thread apply all bt), two samples
+dmesh-w4:
+  #0 dmesh_doca::io::DmeshIoHandle::tx_len
+  #1 dmesh_l7::pump_side
+  #2 <dmesh_l7::ExternalBackend as dmesh_doca::runtime::RuntimeBackend>::drain
+  #3 dmesh_l7::l7_worker_run::{{closure}}
+  ... later sample: px_lane_splice_inbox (dpu_proxy.c:1255), then
+      epoll_pwait(timeout=0)
+dmesh-w5:
+  #0 dmesh_doca::runtime::readable::{{closure}}
+  #1 core::future::poll_fn::PollFn::poll
+  #2 dmesh_l7::l7_worker_run::{{closure}}
+  ... later samples: libc read(), then epoll_pwait(timeout=0)
+
+The threads move between samples and the epoll timeout is 0, so both are
+looping rather than blocked: the runtime is being told there is progress on
+every pass and never parks.
+
+The threads were read again six hours later, still spinning, and what they were
+doing is in worker-spin-diagnosis.txt beside this file: the admin thread is a
+thread of its own and it is asleep, the listener it serves is registered in the
+worker runtime's driver, and that driver is never polled.

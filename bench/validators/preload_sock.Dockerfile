@@ -8,6 +8,8 @@ RUN apt-get update && \
 
 COPY build/bin/bench_sock /usr/local/bin/bench_sock
 COPY build/bin/echo_sock /usr/local/bin/echo_sock
+COPY build/bin/http1_bench /usr/local/bin/http1_bench
+COPY build/bin/http1_echo /usr/local/bin/http1_echo
 COPY build/lib/libdmesh_preload.so /usr/local/lib/libdmesh_preload.so
 COPY doca-libs/ /usr/local/lib/
 COPY build/lib/libdpumesh.so.5 /usr/local/lib/
@@ -15,4 +17,4 @@ COPY bench/docker/numa-entrypoint.sh /usr/local/bin/numa-entrypoint.sh
 
 RUN ldconfig
 ENV LD_LIBRARY_PATH=/usr/local/lib
-EXPOSE 9092 9100
+EXPOSE 9092 9100 9103

@@ -1,0 +1,50 @@
+
+=== DPU admin endpoints: 4191 4192 4193 4194 4195 4196 4197 4198
+
+=== output: /home/jukebox/DPUmesh/bench/report/data/f-fix-20260822-014207
+
+=== surfaces — Linkerd features running in a proxy nobody has aimed at them
+    S0 [PASS] no route: expected=serve observed=serve rcnt=5707 fail=0 admitted+=1 denied+=0 route_hits+=0 mismatch+=0
+
+=== S1/S2 — HTTPRoute request timeouts
+    S1 [PASS] timeout 10s: expected=serve observed=serve rcnt=5411 fail=0 admitted+=1 denied+=0 route_hits+=5512 mismatch+=0
+    S2 [PASS] timeout 1ms: expected=refuse observed=refuse rcnt=5598 fail=10 admitted+=1 denied+=0 route_hits+=5708 mismatch+=0
+    S2v [PASS] the route timed requests out: REQUEST_TIMEOUT+=10
+
+=== S3 — retries, against a backend that fails on purpose
+    S3a [PASS] 1-in-50 failures, no retry policy: expected=refuse observed=refuse rcnt=5388 fail=111 admitted+=1 denied+=0 route_hits+=0 mismatch+=0
+    S3b [PASS] 1-in-50 failures, retry limit 3: expected=serve observed=serve rcnt=3913 fail=0 admitted+=1 denied+=0 route_hits+=0 mismatch+=0
+    S3v [PASS] the route retried the failures: retry_requests+=81
+
+=== S4/S5 — method matching
+    S4 [PASS] method POST: expected=serve observed=serve rcnt=5417 fail=0 admitted+=1 denied+=0 route_hits+=5517 mismatch+=0
+    S5 [PASS] method GET: expected=refuse observed=refuse rcnt=0 fail=16023 admitted+=1 denied+=0 route_hits+=0 mismatch+=0
+
+=== S6/S7 — header matching
+    S6 [PASS] header content-type: application/grpc: expected=serve observed=serve rcnt=5690 fail=0 admitted+=1 denied+=0 route_hits+=5790 mismatch+=0
+    S7 [PASS] header content-type: application/json: expected=refuse observed=refuse rcnt=0 fail=15469 admitted+=1 denied+=0 route_hits+=0 mismatch+=0
+
+=== S8/S9 — GRPCRoute
+    S8 [PASS] GRPCRoute on the called method: expected=serve observed=serve rcnt=5451 fail=0 admitted+=1 denied+=0 route_hits+=0 mismatch+=0
+    S9 [PASS] GRPCRoute on another method: expected=refuse observed=refuse rcnt=0 fail=15560 admitted+=1 denied+=0 route_hits+=0 mismatch+=0
+
+=== S10-S12 — authorization whose subject is a route
+    caller identity: default.test-bench.serviceaccount.identity.linkerd.cluster.local
+    S10 [PASS] Server on the protocol-aware Service, no authorization: expected=refuse observed=refuse rcnt=0 fail=509 admitted+=0 denied+=1018 route_hits+=-19139 mismatch+=0
+    S11 [PASS] AuthorizationPolicy targeting the GRPCRoute: expected=serve observed=serve rcnt=5783 fail=0 admitted+=1 denied+=0 route_hits+=0 mismatch+=0
+    S12 [PASS] the same policy naming another identity: expected=refuse observed=refuse rcnt=0 fail=5 admitted+=0 denied+=10 route_hits+=0 mismatch+=0
+
+=== S13/S14 — failure accrual
+    S13 [PASS] a failing endpoint beside a healthy one: expected=serve observed=serve rcnt=5733 fail=3 admitted+=2 denied+=0 route_hits+=0 mismatch+=0
+    S13v ejected: healthy=5834 broken=3
+    S14 [PASS] the failing endpoint withdrawn: expected=serve observed=serve rcnt=5783 fail=0 admitted+=1 denied+=0 route_hits+=0 mismatch+=0
+
+=== S15 — HTTP/1.1 through the protocol-aware path
+    S15 [PASS] HTTP/1.1 request-response: expected=serve observed=serve rcnt=6938 fail=0 admitted+=1 denied+=0 route_hits+=0 mismatch+=0
+
+=== stages: 20 pass, 0 fail
+
+=== csv: /home/jukebox/DPUmesh/bench/report/data/f-fix-20260822-014207/stages.csv
+
+=== cleanup
+    fixtures removed; replica counts restored

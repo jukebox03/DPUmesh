@@ -1,0 +1,38 @@
+stage,fixture,arm,expected,observed,verdict,rcnt,fail,admitted,denied,route_hits,target_mismatch,note
+S0,no route,grpc-dpumesh,serve,serve,PASS,5682,0,1,0,0,0,baseline for the surfaces scope
+S1,timeout 10s,grpc-dpumesh,serve,serve,PASS,5583,0,1,0,5684,0,a generous timeout changes nothing
+S2,timeout 1ms,grpc-dpumesh,refuse,refuse,PASS,5654,4,1,0,5759,0,shorter than the proxy's own request
+S2v,the route timed requests out,grpc-dpumesh,fired,fired,PASS,,,,,,,REQUEST_TIMEOUT+=4
+S3a,1-in-50 failures; no retry policy,grpc-dpumesh,refuse,refuse,PASS,5267,109,1,0,0,0,the failures reach the client
+S3b,1-in-50 failures; retry limit 3,grpc-dpumesh,serve,serve,PASS,3801,0,1,0,0,0,the retry policy absorbs them
+S3v,the route retried the failures,grpc-dpumesh,fired,fired,PASS,,,,,,,retry_requests+=80
+S4,method POST,grpc-dpumesh,serve,serve,PASS,5432,0,1,0,0,0,gRPC is POST
+S5,method GET,grpc-dpumesh,refuse,refuse,PASS,0,17355,1,0,0,0,no rule matches
+S6,header content-type: application/grpc,grpc-dpumesh,serve,serve,PASS,5806,0,1,0,5906,0,every gRPC request carries it
+S7,header content-type: application/json,grpc-dpumesh,refuse,refuse,PASS,0,15657,1,0,0,0,no rule matches
+S8,GRPCRoute on the called method,grpc-dpumesh,serve,serve,PASS,5765,0,1,0,0,0,grpc.testing.BenchmarkService/UnaryCall
+S9,GRPCRoute on another method,grpc-dpumesh,refuse,refuse,PASS,0,17486,1,0,0,0,no rule matches
+S10,Server on the protocol-aware Service; no authorization,grpc-dpumesh,refuse,refuse,PASS,0,57,0,114,0,0,deny by default
+S11,AuthorizationPolicy targeting the GRPCRoute,grpc-dpumesh,serve,serve,PASS,5744,0,1,0,0,0,the route authorizes the caller
+S12,the same policy naming another identity,grpc-dpumesh,refuse,refuse,PASS,0,21,0,42,0,0,negative control for route authorization
+S13,a failing endpoint beside a healthy one,grpc-dpumesh,serve,serve,PASS,5601,3,2,0,0,0,the breaker ejects it and the client keeps serving
+S13v,the breaker ejected the failing endpoint,grpc-dpumesh,ejected,ejected,PASS,,,,,,,healthy=5702 broken=3
+S14,the failing endpoint withdrawn,grpc-dpumesh,serve,serve,PASS,5709,0,1,0,0,0,the Service is healthy again
+S15,HTTP/1.1 request-response,http1,serve,serve,PASS,6937,0,1,0,0,0,the only HTTP/1 workload in the tree
+R0,no route,grpc-dpumesh,serve,serve,PASS,5662,0,1,0,0,0,served by the default route
+R1,HTTPRoute matching the method,grpc-dpumesh,serve,serve,PASS,5680,0,1,0,5780,0,route_hits must be > 0
+R2,HTTPRoute matching nothing,grpc-dpumesh,refuse,refuse,PASS,0,15772,1,0,0,0,no rule matches
+R3,HTTPRoute to another Service,grpc-dpumesh,serve,serve,PASS,5676,0,2,0,5777,0,liveness guards the dial; not Service identity
+R4,no route,grpc-dpumesh,serve,serve,PASS,5703,0,1,0,0,0,returned to the default route
+X0,no route,grpc-dpumesh,serve,serve,PASS,5671,0,1,0,0,0,baseline for the cross scope
+X1,backendRef in another Service,grpc-dpumesh,serve,serve,PASS,5710,0,2,0,5811,0,target_mismatch must stay flat
+X1b,attribution,grpc-dpumesh,served,served,PASS,,,,,,,served: echo-grpc-alt-774bbbccb5-4zjxx=5811 
+X2,Server on the destination Service; no authorization,grpc-dpumesh,refuse,refuse,PASS,0,507,970,507,-47548,0,graded by the callee
+X2v,the destination refused,grpc-dpumesh,refused,refused,PASS,,,970,507,,,denied+=507 admitted+=970
+X2b,the destination Server withdrawn,grpc-dpumesh,serve,serve,PASS,5844,0,2,0,5944,0,the route works again
+X3,weighted 50/50 across two Services,grpc-dpumesh,serve,serve,PASS,27298,0,8,0,27702,0,both destinations must serve
+X3b,split,grpc-dpumesh,both,both,PASS,,,,,,,A{echo-grpc-dpumesh-84546996c7-czkbf=13784 } B{echo-grpc-alt-774bbbccb5-4zjxx=13918 }
+X4,no route,grpc-dpumesh,serve,serve,PASS,5744,0,1,0,0,0,returned to the default route
+F1-1ch,one Service two backends,grpc-dpumesh,2,2,PASS,16371,0,,,,0,served: echo-grpc-dpumesh-84546996c7-czkbf=8235 echo-grpc-dpumesh-84546996c7-wdwxl=8244 
+F1-4ch,one Service two backends,grpc-dpumesh,2,nodata,FAIL,,,,,,,the client did not answer
+F1r,one backend restored,grpc-dpumesh,serve,serve,PASS,5751,0,1,0,0,0,the Service is healthy again

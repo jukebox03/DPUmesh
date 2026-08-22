@@ -1,0 +1,34 @@
+# The same route as `grpcroute.yaml` carrying a retry policy, so the two are an
+# A/B on one route rather than on two kinds of route.
+#
+# The condition has to travel on a GRPCRoute. A gRPC failure is an HTTP 200
+# carrying `grpc-status`, and an HTTPRoute's retry conditions are HTTP status
+# ranges — the policy controller reads `retry.linkerd.io/grpc` only where the
+# route is gRPC-native, and an HTTPRoute annotated with it reaches the proxy
+# with a retry whose condition set is empty.
+apiVersion: gateway.networking.k8s.io/v1
+kind: GRPCRoute
+metadata:
+  name: bench-grpc-grpcroute
+  namespace: ${NS}
+  annotations:
+    retry.linkerd.io/grpc: internal
+    retry.linkerd.io/limit: "${ROUTE_RETRY_LIMIT}"
+    retry.linkerd.io/timeout: 2s
+spec:
+  parentRefs:
+    - group: core
+      kind: Service
+      name: echo-grpc-dpumesh
+      port: ${CTRL_PORT}
+  rules:
+    - matches:
+        - method:
+            type: Exact
+            service: "${GRPC_SERVICE}"
+            method: "${GRPC_METHOD}"
+      backendRefs:
+        - group: core
+          kind: Service
+          name: echo-grpc-dpumesh
+          port: ${CTRL_PORT}

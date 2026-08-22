@@ -1,0 +1,481 @@
+[03:08:08:266298][2568796576][DOCA][WRN][dpu_proxy.c:2501][px_peer_stats_report] proxy: worker 3 peer poison=1026 refused=none inbound admitted=23 denied=1026 no-policy=0 mixed-callee-unprotected=0 peer-pin-conflict=0
+[03:08:38:267095][2071914912][DOCA][WRN][dpu_proxy.c:2501][px_peer_stats_report] proxy: worker 5 peer poison=1026 refused=none inbound admitted=24 denied=1026 no-policy=0 mixed-callee-unprotected=0 peer-pin-conflict=0
+[03:09:08:267700][2063460768][DOCA][WRN][dpu_proxy.c:2501][px_peer_stats_report] proxy: worker 6 peer poison=1026 refused=none inbound admitted=25 denied=1026 no-policy=0 mixed-callee-unprotected=0 peer-pin-conflict=0
+[03:09:38:058902][2947334176][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=9 pod_id=9 service_id=16 pod_uid=bbd4ad32-4a1a-4b20-acba-cc3c833b8419 generation=1787368176711329006 revocations=6
+[03:09:58:268862][2590030240][DOCA][WRN][dpu_proxy.c:2501][px_peer_stats_report] proxy: worker 1 peer poison=1026 refused=none inbound admitted=26 denied=1026 no-policy=0 mixed-callee-unprotected=0 peer-pin-conflict=0
+[03:10:28:269783][2590030240][DOCA][WRN][dpu_proxy.c:2501][px_peer_stats_report] proxy: worker 1 peer poison=1026 refused=none inbound admitted=27 denied=1026 no-policy=0 mixed-callee-unprotected=0 peer-pin-conflict=0
+[03:10:47:091460][2947334176][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=13 pod_id=13 service_id=16 pod_uid=2d77463e-84e5-429d-b105-053b0f7cef24 generation=1787368246795196040 revocations=7
+[03:11:08:270914][2579413408][DOCA][WRN][dpu_proxy.c:2501][px_peer_stats_report] proxy: worker 2 peer poison=1026 refused=none inbound admitted=28 denied=1026 no-policy=0 mixed-callee-unprotected=0 peer-pin-conflict=0
+[03:11:38:271508][2071914912][DOCA][WRN][dpu_proxy.c:2501][px_peer_stats_report] proxy: worker 5 peer poison=1026 refused=none inbound admitted=29 denied=1026 no-policy=0 mixed-callee-unprotected=0 peer-pin-conflict=0
+[03:12:08:272120][2579413408][DOCA][WRN][dpu_proxy.c:2501][px_peer_stats_report] proxy: worker 2 peer poison=1026 refused=none inbound admitted=30 denied=1026 no-policy=0 mixed-callee-unprotected=0 peer-pin-conflict=0
+[03:12:28:272589][2590030240][DOCA][WRN][dpu_proxy.c:2501][px_peer_stats_report] proxy: worker 1 peer poison=1026 refused=none inbound admitted=31 denied=1026 no-policy=0 mixed-callee-unprotected=0 peer-pin-conflict=0
+[03:12:58:273218][2055006624][DOCA][WRN][dpu_proxy.c:2501][px_peer_stats_report] proxy: worker 7 peer poison=1026 refused=none inbound admitted=32 denied=1026 no-policy=0 mixed-callee-unprotected=0 peer-pin-conflict=0
+[03:13:18:273296][2579413408][DOCA][WRN][dpu_proxy.c:2501][px_peer_stats_report] proxy: worker 2 peer poison=1026 refused=none inbound admitted=33 denied=1026 no-policy=0 mixed-callee-unprotected=0 peer-pin-conflict=0
+[03:13:49:484162][2590030240][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:33) -> pod 9
+[03:13:49:484800][2590030240][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:33): Linkerd session ended before both output FINs
+[03:13:49:502448][2590030240][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:33) -> pod 9
+[03:13:49:502875][2590030240][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:33): Linkerd session ended before both output FINs
+[03:13:49:502914][2579413408][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:34) -> pod 9
+[03:13:49:503560][2579413408][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:34): Linkerd session ended before both output FINs
+[03:13:49:522502][2579413408][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:34) -> pod 9
+[03:13:49:522711][2568796576][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:35) -> pod 9
+[03:13:49:522953][2579413408][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:34): Linkerd session ended before both output FINs
+[03:13:49:523357][2568796576][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:35): Linkerd session ended before both output FINs
+[03:13:49:542409][2568796576][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:35) -> pod 9
+[03:13:49:542507][2080369056][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:36) -> pod 9
+[03:13:49:542827][2568796576][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:35): Linkerd session ended before both output FINs
+[03:13:49:543069][2080369056][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:36): Linkerd session ended before both output FINs
+[03:13:49:562787][2071914912][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:37) -> pod 9
+[03:13:49:563180][2080369056][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:36) -> pod 9
+[03:13:49:563439][2071914912][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:37): Linkerd session ended before both output FINs
+[03:13:49:563593][2080369056][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:36): Linkerd session ended before both output FINs
+[03:13:49:582950][2071914912][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:37) -> pod 9
+[03:13:49:583369][2071914912][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:37): Linkerd session ended before both output FINs
+[03:13:49:583568][2063460768][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:38) -> pod 9
+[03:13:49:584247][2063460768][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:38): Linkerd session ended before both output FINs
+[03:13:49:602596][2055006624][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:39) -> pod 9
+[03:13:49:602765][2063460768][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:38) -> pod 9
+[03:13:49:603105][2063460768][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:38): Linkerd session ended before both output FINs
+[03:13:49:603156][2055006624][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:39): Linkerd session ended before both output FINs
+[03:13:49:622778][2055006624][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:39) -> pod 9
+[03:13:49:623247][2055006624][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:39): Linkerd session ended before both output FINs
+[03:13:49:623724][2600647072][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:40) -> pod 9
+[03:13:49:624385][2600647072][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:40): Linkerd session ended before both output FINs
+[03:13:49:642372][2600647072][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:40) -> pod 9
+[03:13:49:642561][2590030240][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:41) -> pod 9
+[03:13:49:642730][2600647072][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:40): Linkerd session ended before both output FINs
+[03:13:49:643101][2590030240][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:41): Linkerd session ended before both output FINs
+[03:13:49:662525][2590030240][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:41) -> pod 9
+[03:13:49:662746][2579413408][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:42) -> pod 9
+[03:13:49:663009][2590030240][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:41): Linkerd session ended before both output FINs
+[03:13:49:663297][2579413408][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:42): Linkerd session ended before both output FINs
+[03:13:49:682068][2579413408][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:42) -> pod 9
+[03:13:49:682271][2568796576][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:43) -> pod 9
+[03:13:49:682533][2579413408][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:42): Linkerd session ended before both output FINs
+[03:13:49:682847][2568796576][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:43): Linkerd session ended before both output FINs
+[03:13:49:702804][2568796576][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:43) -> pod 9
+[03:13:49:702986][2080369056][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:44) -> pod 9
+[03:13:49:703170][2568796576][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:43): Linkerd session ended before both output FINs
+[03:13:49:703538][2080369056][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:44): Linkerd session ended before both output FINs
+[03:13:49:722744][2080369056][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:44) -> pod 9
+[03:13:49:722941][2071914912][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:45) -> pod 9
+[03:13:49:723185][2080369056][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:44): Linkerd session ended before both output FINs
+[03:13:49:723524][2071914912][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:45): Linkerd session ended before both output FINs
+[03:13:49:742553][2071914912][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:45) -> pod 9
+[03:13:49:742990][2071914912][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:45): Linkerd session ended before both output FINs
+[03:13:49:744388][2063460768][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:46) -> pod 9
+[03:13:49:744972][2063460768][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:46): Linkerd session ended before both output FINs
+[03:13:49:762222][2063460768][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:46) -> pod 9
+[03:13:49:762651][2063460768][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:46): Linkerd session ended before both output FINs
+[03:13:49:763309][2055006624][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:47) -> pod 9
+[03:13:49:763946][2055006624][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:47): Linkerd session ended before both output FINs
+[03:13:49:782425][2055006624][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:47) -> pod 9
+[03:13:49:782615][2600647072][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:48) -> pod 9
+[03:13:49:782882][2055006624][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:47): Linkerd session ended before both output FINs
+[03:13:49:783177][2600647072][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:48): Linkerd session ended before both output FINs
+[03:13:49:802426][2600647072][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:48) -> pod 9
+[03:13:49:802624][2590030240][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:49) -> pod 9
+[03:13:49:802900][2600647072][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:48): Linkerd session ended before both output FINs
+[03:13:49:803163][2590030240][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:49): Linkerd session ended before both output FINs
+[03:13:49:822165][2590030240][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:49) -> pod 9
+[03:13:49:822353][2579413408][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:50) -> pod 9
+[03:13:49:822609][2590030240][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:49): Linkerd session ended before both output FINs
+[03:13:49:822923][2579413408][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:50): Linkerd session ended before both output FINs
+[03:13:49:842419][2579413408][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:50) -> pod 9
+[03:13:49:842884][2579413408][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:50): Linkerd session ended before both output FINs
+[03:13:49:843409][2568796576][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:51) -> pod 9
+[03:13:49:844064][2568796576][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:51): Linkerd session ended before both output FINs
+[03:13:49:862918][2568796576][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:51) -> pod 9
+[03:13:49:863114][2080369056][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:52) -> pod 9
+[03:13:49:863381][2568796576][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:51): Linkerd session ended before both output FINs
+[03:13:49:863641][2080369056][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:52): Linkerd session ended before both output FINs
+[03:13:49:882385][2080369056][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:52) -> pod 9
+[03:13:49:882582][2071914912][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:53) -> pod 9
+[03:13:49:882815][2080369056][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:52): Linkerd session ended before both output FINs
+[03:13:49:883172][2071914912][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:53): Linkerd session ended before both output FINs
+[03:13:49:902466][2071914912][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:53) -> pod 9
+[03:13:49:902642][2063460768][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:54) -> pod 9
+[03:13:49:902904][2071914912][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:53): Linkerd session ended before both output FINs
+[03:13:49:903247][2063460768][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:54): Linkerd session ended before both output FINs
+[03:13:49:922376][2063460768][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:54) -> pod 9
+[03:13:49:922558][2055006624][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:55) -> pod 9
+[03:13:49:922750][2063460768][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:54): Linkerd session ended before both output FINs
+[03:13:49:923102][2055006624][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:55): Linkerd session ended before both output FINs
+[03:13:49:941906][2055006624][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:55) -> pod 9
+[03:13:49:942100][2600647072][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:56) -> pod 9
+[03:13:49:942358][2055006624][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:55): Linkerd session ended before both output FINs
+[03:13:49:942689][2600647072][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:56): Linkerd session ended before both output FINs
+[03:13:49:962620][2600647072][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:56) -> pod 9
+[03:13:49:962797][2590030240][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:57) -> pod 9
+[03:13:49:963088][2600647072][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:56): Linkerd session ended before both output FINs
+[03:13:49:963269][2590030240][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:57): Linkerd session ended before both output FINs
+[03:13:49:982207][2590030240][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:57) -> pod 9
+[03:13:49:982389][2579413408][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:58) -> pod 9
+[03:13:49:982683][2590030240][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:57): Linkerd session ended before both output FINs
+[03:13:49:982968][2579413408][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:58): Linkerd session ended before both output FINs
+[03:13:50:002168][2579413408][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:58) -> pod 9
+[03:13:50:002586][2579413408][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:58): Linkerd session ended before both output FINs
+[03:13:50:003328][2568796576][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:59) -> pod 9
+[03:13:50:003977][2568796576][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:59): Linkerd session ended before both output FINs
+[03:13:50:022361][2568796576][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:59) -> pod 9
+[03:13:50:022545][2080369056][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:60) -> pod 9
+[03:13:50:022824][2568796576][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:59): Linkerd session ended before both output FINs
+[03:13:50:023088][2080369056][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:60): Linkerd session ended before both output FINs
+[03:13:50:042269][2080369056][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:60) -> pod 9
+[03:13:50:042473][2071914912][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:61) -> pod 9
+[03:13:50:042704][2080369056][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:60): Linkerd session ended before both output FINs
+[03:13:50:043050][2071914912][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:61): Linkerd session ended before both output FINs
+[03:13:50:062151][2071914912][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:61) -> pod 9
+[03:13:50:062360][2063460768][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:62) -> pod 9
+[03:13:50:062630][2071914912][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:61): Linkerd session ended before both output FINs
+[03:13:50:062927][2063460768][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:62): Linkerd session ended before both output FINs
+[03:13:50:082308][2063460768][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:62) -> pod 9
+[03:13:50:082757][2063460768][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:62): Linkerd session ended before both output FINs
+[03:13:50:083868][2055006624][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:63) -> pod 9
+[03:13:50:084452][2055006624][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:63): Linkerd session ended before both output FINs
+[03:13:50:104242][2055006624][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:63) -> pod 9
+[03:13:50:104422][2600647072][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:64) -> pod 9
+[03:13:50:104665][2055006624][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:63): Linkerd session ended before both output FINs
+[03:13:50:104976][2600647072][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:64): Linkerd session ended before both output FINs
+[03:13:50:122146][2600647072][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:64) -> pod 9
+[03:13:50:122336][2590030240][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:65) -> pod 9
+[03:13:50:122516][2600647072][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:64): Linkerd session ended before both output FINs
+[03:13:50:122874][2590030240][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:65): Linkerd session ended before both output FINs
+[03:13:50:142269][2579413408][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:66) -> pod 9
+[03:13:50:142340][2590030240][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:65) -> pod 9
+[03:13:50:142800][2590030240][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:65): Linkerd session ended before both output FINs
+[03:13:50:142835][2579413408][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:66): Linkerd session ended before both output FINs
+[03:13:50:162120][2579413408][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:66) -> pod 9
+[03:13:50:162325][2568796576][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:67) -> pod 9
+[03:13:50:162496][2579413408][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:66): Linkerd session ended before both output FINs
+[03:13:50:163048][2568796576][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:67): Linkerd session ended before both output FINs
+[03:13:50:182326][2568796576][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:67) -> pod 9
+[03:13:50:182501][2080369056][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:68) -> pod 9
+[03:13:50:182765][2568796576][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:67): Linkerd session ended before both output FINs
+[03:13:50:182994][2080369056][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:68): Linkerd session ended before both output FINs
+[03:13:50:202018][2080369056][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:68) -> pod 9
+[03:13:50:202209][2071914912][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:69) -> pod 9
+[03:13:50:202523][2080369056][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:68): Linkerd session ended before both output FINs
+[03:13:50:202729][2071914912][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:69): Linkerd session ended before both output FINs
+[03:13:50:221917][2071914912][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:69) -> pod 9
+[03:13:50:222104][2063460768][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:70) -> pod 9
+[03:13:50:222403][2071914912][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:69): Linkerd session ended before both output FINs
+[03:13:50:222663][2063460768][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:70): Linkerd session ended before both output FINs
+[03:13:50:242501][2055006624][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:71) -> pod 9
+[03:13:50:243003][2063460768][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:70) -> pod 9
+[03:13:50:243130][2055006624][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:71): Linkerd session ended before both output FINs
+[03:13:50:243413][2063460768][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:70): Linkerd session ended before both output FINs
+[03:13:50:262304][2055006624][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:71) -> pod 9
+[03:13:50:262477][2600647072][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:72) -> pod 9
+[03:13:50:262743][2055006624][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:71): Linkerd session ended before both output FINs
+[03:13:50:262976][2600647072][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:72): Linkerd session ended before both output FINs
+[03:13:50:282470][2600647072][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:72) -> pod 9
+[03:13:50:282648][2590030240][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:73) -> pod 9
+[03:13:50:282952][2600647072][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:72): Linkerd session ended before both output FINs
+[03:13:50:283265][2590030240][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:73): Linkerd session ended before both output FINs
+[03:13:50:302088][2590030240][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:73) -> pod 9
+[03:13:50:302271][2579413408][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:74) -> pod 9
+[03:13:50:302569][2590030240][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:73): Linkerd session ended before both output FINs
+[03:13:50:302826][2579413408][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:74): Linkerd session ended before both output FINs
+[03:13:50:322001][2579413408][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:74) -> pod 9
+[03:13:50:322202][2568796576][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:75) -> pod 9
+[03:13:50:322458][2579413408][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:74): Linkerd session ended before both output FINs
+[03:13:50:322767][2568796576][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:75): Linkerd session ended before both output FINs
+[03:13:50:342315][2568796576][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:75) -> pod 9
+[03:13:50:342503][2080369056][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:76) -> pod 9
+[03:13:50:342787][2568796576][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:75): Linkerd session ended before both output FINs
+[03:13:50:343030][2080369056][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:76): Linkerd session ended before both output FINs
+[03:13:50:362227][2080369056][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:76) -> pod 9
+[03:13:50:362649][2080369056][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:76): Linkerd session ended before both output FINs
+[03:13:50:364340][2071914912][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:77) -> pod 9
+[03:13:50:364943][2071914912][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:77): Linkerd session ended before both output FINs
+[03:13:50:382407][2071914912][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:77) -> pod 9
+[03:13:50:382587][2063460768][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:78) -> pod 9
+[03:13:50:382829][2071914912][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:77): Linkerd session ended before both output FINs
+[03:13:50:383142][2063460768][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:78): Linkerd session ended before both output FINs
+[03:13:50:402248][2055006624][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:79) -> pod 9
+[03:13:50:402835][2055006624][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:79): Linkerd session ended before both output FINs
+[03:13:50:403649][2063460768][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:78) -> pod 9
+[03:13:50:404080][2063460768][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:78): Linkerd session ended before both output FINs
+[03:13:50:422388][2600647072][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:80) -> pod 9
+[03:13:50:422399][2055006624][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:79) -> pod 9
+[03:13:50:422877][2055006624][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:79): Linkerd session ended before both output FINs
+[03:13:50:422958][2600647072][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:80): Linkerd session ended before both output FINs
+[03:13:50:442006][2600647072][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:80) -> pod 9
+[03:13:50:442186][2590030240][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:81) -> pod 9
+[03:13:50:442414][2600647072][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:80): Linkerd session ended before both output FINs
+[03:13:50:442718][2590030240][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:81): Linkerd session ended before both output FINs
+[03:13:50:462321][2590030240][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:81) -> pod 9
+[03:13:50:462522][2579413408][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:82) -> pod 9
+[03:13:50:462767][2590030240][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:81): Linkerd session ended before both output FINs
+[03:13:50:463080][2579413408][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:82): Linkerd session ended before both output FINs
+[03:13:50:482303][2579413408][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:82) -> pod 9
+[03:13:50:482502][2568796576][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:83) -> pod 9
+[03:13:50:482767][2579413408][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:82): Linkerd session ended before both output FINs
+[03:13:50:483056][2568796576][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:83): Linkerd session ended before both output FINs
+[03:13:50:502166][2568796576][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:83) -> pod 9
+[03:13:50:502351][2080369056][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:84) -> pod 9
+[03:13:50:502525][2568796576][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:83): Linkerd session ended before both output FINs
+[03:13:50:502887][2080369056][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:84): Linkerd session ended before both output FINs
+[03:13:50:522602][2071914912][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:85) -> pod 9
+[03:13:50:522847][2080369056][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:84) -> pod 9
+[03:13:50:523218][2080369056][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:84): Linkerd session ended before both output FINs
+[03:13:50:523228][2071914912][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:85): Linkerd session ended before both output FINs
+[03:13:50:542140][2071914912][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:85) -> pod 9
+[03:13:50:542345][2063460768][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:86) -> pod 9
+[03:13:50:542622][2071914912][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:85): Linkerd session ended before both output FINs
+[03:13:50:542917][2063460768][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:86): Linkerd session ended before both output FINs
+[03:13:50:562447][2063460768][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:86) -> pod 9
+[03:13:50:562630][2055006624][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:87) -> pod 9
+[03:13:50:562876][2063460768][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:86): Linkerd session ended before both output FINs
+[03:13:50:563184][2055006624][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:87): Linkerd session ended before both output FINs
+[03:13:50:582298][2055006624][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:87) -> pod 9
+[03:13:50:582478][2600647072][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:88) -> pod 9
+[03:13:50:582757][2055006624][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:87): Linkerd session ended before both output FINs
+[03:13:50:583107][2600647072][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:88): Linkerd session ended before both output FINs
+[03:13:50:601954][2600647072][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:88) -> pod 9
+[03:13:50:602123][2590030240][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:89) -> pod 9
+[03:13:50:602366][2600647072][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:88): Linkerd session ended before both output FINs
+[03:13:50:602653][2590030240][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:89): Linkerd session ended before both output FINs
+[03:13:50:622033][2590030240][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:89) -> pod 9
+[03:13:50:622223][2579413408][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:90) -> pod 9
+[03:13:50:622495][2590030240][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:89): Linkerd session ended before both output FINs
+[03:13:50:622796][2579413408][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:90): Linkerd session ended before both output FINs
+[03:13:50:642379][2579413408][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:90) -> pod 9
+[03:13:50:642848][2579413408][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:90): Linkerd session ended before both output FINs
+[03:13:50:643376][2568796576][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:91) -> pod 9
+[03:13:50:644018][2568796576][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:91): Linkerd session ended before both output FINs
+[03:13:50:662279][2568796576][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:91) -> pod 9
+[03:13:50:662445][2080369056][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:92) -> pod 9
+[03:13:50:662783][2568796576][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:91): Linkerd session ended before both output FINs
+[03:13:50:663040][2080369056][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:92): Linkerd session ended before both output FINs
+[03:13:50:682134][2080369056][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:92) -> pod 9
+[03:13:50:682326][2071914912][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:93) -> pod 9
+[03:13:50:682594][2080369056][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:92): Linkerd session ended before both output FINs
+[03:13:50:682909][2071914912][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:93): Linkerd session ended before both output FINs
+[03:13:50:702323][2071914912][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:93) -> pod 9
+[03:13:50:702770][2071914912][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:93): Linkerd session ended before both output FINs
+[03:13:50:703401][2063460768][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:94) -> pod 9
+[03:13:50:704004][2063460768][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:94): Linkerd session ended before both output FINs
+[03:13:50:721847][2063460768][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:94) -> pod 9
+[03:13:50:722023][2055006624][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:95) -> pod 9
+[03:13:50:722288][2063460768][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:94): Linkerd session ended before both output FINs
+[03:13:50:722579][2055006624][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:95): Linkerd session ended before both output FINs
+[03:13:50:742302][2055006624][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:95) -> pod 9
+[03:13:50:742488][2600647072][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:96) -> pod 9
+[03:13:50:742791][2055006624][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:95): Linkerd session ended before both output FINs
+[03:13:50:743058][2600647072][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:96): Linkerd session ended before both output FINs
+[03:13:50:762079][2600647072][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:96) -> pod 9
+[03:13:50:762259][2590030240][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:97) -> pod 9
+[03:13:50:762432][2600647072][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:96): Linkerd session ended before both output FINs
+[03:13:50:762811][2590030240][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:97): Linkerd session ended before both output FINs
+[03:13:50:782460][2590030240][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:97) -> pod 9
+[03:13:50:782581][2579413408][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:98) -> pod 9
+[03:13:50:782876][2590030240][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:97): Linkerd session ended before both output FINs
+[03:13:50:783171][2579413408][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:98): Linkerd session ended before both output FINs
+[03:13:50:802201][2579413408][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:98) -> pod 9
+[03:13:50:802401][2568796576][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:99) -> pod 9
+[03:13:50:802654][2579413408][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:98): Linkerd session ended before both output FINs
+[03:13:50:802972][2568796576][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:99): Linkerd session ended before both output FINs
+[03:13:50:822315][2568796576][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:99) -> pod 9
+[03:13:50:822496][2080369056][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:100) -> pod 9
+[03:13:50:822685][2568796576][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:99): Linkerd session ended before both output FINs
+[03:13:50:823053][2080369056][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:100): Linkerd session ended before both output FINs
+[03:13:50:842120][2080369056][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:100) -> pod 9
+[03:13:50:842324][2071914912][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:101) -> pod 9
+[03:13:50:842586][2080369056][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:100): Linkerd session ended before both output FINs
+[03:13:50:842897][2071914912][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:101): Linkerd session ended before both output FINs
+[03:13:50:862382][2071914912][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:101) -> pod 9
+[03:13:50:862813][2071914912][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:101): Linkerd session ended before both output FINs
+[03:13:50:863110][2063460768][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:102) -> pod 9
+[03:13:50:863667][2063460768][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:102): Linkerd session ended before both output FINs
+[03:13:50:882483][2055006624][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:103) -> pod 9
+[03:13:50:883073][2055006624][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:103): Linkerd session ended before both output FINs
+[03:13:50:883566][2063460768][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:102) -> pod 9
+[03:13:50:884081][2063460768][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:102): Linkerd session ended before both output FINs
+[03:13:50:902376][2600647072][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:104) -> pod 9
+[03:13:50:902571][2055006624][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:103) -> pod 9
+[03:13:50:902893][2055006624][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:103): Linkerd session ended before both output FINs
+[03:13:50:902934][2600647072][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:104): Linkerd session ended before both output FINs
+[03:13:50:921982][2600647072][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:104) -> pod 9
+[03:13:50:922169][2590030240][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:105) -> pod 9
+[03:13:50:922461][2600647072][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:104): Linkerd session ended before both output FINs
+[03:13:50:922707][2590030240][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:105): Linkerd session ended before both output FINs
+[03:13:50:941961][2590030240][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:105) -> pod 9
+[03:13:50:942114][2579413408][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:106) -> pod 9
+[03:13:50:942363][2590030240][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:105): Linkerd session ended before both output FINs
+[03:13:50:942645][2579413408][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:106): Linkerd session ended before both output FINs
+[03:13:50:962176][2579413408][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:106) -> pod 9
+[03:13:50:962378][2568796576][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:107) -> pod 9
+[03:13:50:962627][2579413408][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:106): Linkerd session ended before both output FINs
+[03:13:50:962947][2568796576][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:107): Linkerd session ended before both output FINs
+[03:13:50:982433][2568796576][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:107) -> pod 9
+[03:13:50:982630][2080369056][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:108) -> pod 9
+[03:13:50:982922][2568796576][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:107): Linkerd session ended before both output FINs
+[03:13:50:983180][2080369056][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:108): Linkerd session ended before both output FINs
+[03:13:51:002219][2080369056][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:108) -> pod 9
+[03:13:51:002398][2071914912][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:109) -> pod 9
+[03:13:51:002690][2080369056][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:108): Linkerd session ended before both output FINs
+[03:13:51:002987][2071914912][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:109): Linkerd session ended before both output FINs
+[03:13:51:022273][2063460768][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:110) -> pod 9
+[03:13:51:022329][2071914912][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:109) -> pod 9
+[03:13:51:022785][2071914912][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:109): Linkerd session ended before both output FINs
+[03:13:51:022827][2063460768][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:110): Linkerd session ended before both output FINs
+[03:13:51:042009][2063460768][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:110) -> pod 9
+[03:13:51:042182][2055006624][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:111) -> pod 9
+[03:13:51:042491][2063460768][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:110): Linkerd session ended before both output FINs
+[03:13:51:042771][2055006624][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:111): Linkerd session ended before both output FINs
+[03:13:51:061970][2055006624][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:111) -> pod 9
+[03:13:51:062164][2600647072][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:112) -> pod 9
+[03:13:51:062435][2055006624][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:111): Linkerd session ended before both output FINs
+[03:13:51:062720][2600647072][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:112): Linkerd session ended before both output FINs
+[03:13:51:082422][2600647072][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:112) -> pod 9
+[03:13:51:082603][2590030240][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:113) -> pod 9
+[03:13:51:082851][2600647072][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:112): Linkerd session ended before both output FINs
+[03:13:51:083117][2590030240][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:113): Linkerd session ended before both output FINs
+[03:13:51:101704][2590030240][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:113) -> pod 9
+[03:13:51:101885][2579413408][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:114) -> pod 9
+[03:13:51:102119][2590030240][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:113): Linkerd session ended before both output FINs
+[03:13:51:102441][2579413408][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:114): Linkerd session ended before both output FINs
+[03:13:51:122338][2579413408][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:114) -> pod 9
+[03:13:51:122777][2579413408][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:114): Linkerd session ended before both output FINs
+[03:13:51:131868][2568796576][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:115) -> pod 9
+[03:13:51:132493][2568796576][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:115): Linkerd session ended before both output FINs
+[03:13:51:152109][2568796576][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:115) -> pod 9
+[03:13:51:152284][2080369056][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:116) -> pod 9
+[03:13:51:152565][2568796576][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:115): Linkerd session ended before both output FINs
+[03:13:51:152774][2080369056][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:116): Linkerd session ended before both output FINs
+[03:13:51:172002][2080369056][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:116) -> pod 9
+[03:13:51:172420][2071914912][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:117) -> pod 9
+[03:13:51:172422][2080369056][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:116): Linkerd session ended before both output FINs
+[03:13:51:173039][2071914912][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:117): Linkerd session ended before both output FINs
+[03:13:51:192002][2071914912][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:117) -> pod 9
+[03:13:51:192390][2063460768][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:118) -> pod 9
+[03:13:51:192448][2071914912][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:117): Linkerd session ended before both output FINs
+[03:13:51:192967][2063460768][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:118): Linkerd session ended before both output FINs
+[03:13:51:212050][2063460768][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:118) -> pod 9
+[03:13:51:212231][2055006624][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:119) -> pod 9
+[03:13:51:212523][2063460768][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:118): Linkerd session ended before both output FINs
+[03:13:51:212785][2055006624][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:119): Linkerd session ended before both output FINs
+[03:13:51:231853][2055006624][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:119) -> pod 9
+[03:13:51:232023][2600647072][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:120) -> pod 9
+[03:13:51:232346][2055006624][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:119): Linkerd session ended before both output FINs
+[03:13:51:232598][2600647072][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:120): Linkerd session ended before both output FINs
+[03:13:51:252213][2600647072][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:120) -> pod 9
+[03:13:51:252395][2590030240][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:121) -> pod 9
+[03:13:51:252694][2600647072][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:120): Linkerd session ended before both output FINs
+[03:13:51:252919][2590030240][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:121): Linkerd session ended before both output FINs
+[03:13:51:271809][2590030240][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:121) -> pod 9
+[03:13:51:272241][2590030240][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:121): Linkerd session ended before both output FINs
+[03:13:51:272364][2579413408][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:122) -> pod 9
+[03:13:51:272923][2579413408][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:122): Linkerd session ended before both output FINs
+[03:13:51:291707][2579413408][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:122) -> pod 9
+[03:13:51:291924][2568796576][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:123) -> pod 9
+[03:13:51:292187][2579413408][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:122): Linkerd session ended before both output FINs
+[03:13:51:292645][2568796576][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:123): Linkerd session ended before both output FINs
+[03:13:51:311714][2568796576][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:123) -> pod 9
+[03:13:51:311948][2080369056][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:124) -> pod 9
+[03:13:51:312217][2568796576][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:123): Linkerd session ended before both output FINs
+[03:13:51:312515][2080369056][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:124): Linkerd session ended before both output FINs
+[03:13:51:331624][2080369056][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:124) -> pod 9
+[03:13:51:331822][2071914912][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:125) -> pod 9
+[03:13:51:332130][2080369056][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:124): Linkerd session ended before both output FINs
+[03:13:51:332432][2071914912][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:125): Linkerd session ended before both output FINs
+[03:13:51:351721][2071914912][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:125) -> pod 9
+[03:13:51:352237][2071914912][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:125): Linkerd session ended before both output FINs
+[03:13:51:352389][2063460768][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:126) -> pod 9
+[03:13:51:352939][2063460768][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:126): Linkerd session ended before both output FINs
+[03:13:51:372006][2055006624][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:127) -> pod 9
+[03:13:51:372173][2063460768][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:126) -> pod 9
+[03:13:51:372523][2055006624][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:127): Linkerd session ended before both output FINs
+[03:13:51:372524][2063460768][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:126): Linkerd session ended before both output FINs
+[03:13:51:392342][2055006624][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:127) -> pod 9
+[03:13:51:392533][2600647072][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:128) -> pod 9
+[03:13:51:392802][2055006624][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:127): Linkerd session ended before both output FINs
+[03:13:51:393084][2600647072][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:128): Linkerd session ended before both output FINs
+[03:13:51:411760][2600647072][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:128) -> pod 9
+[03:13:51:411971][2590030240][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:129) -> pod 9
+[03:13:51:412248][2600647072][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:128): Linkerd session ended before both output FINs
+[03:13:51:412526][2590030240][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:129): Linkerd session ended before both output FINs
+[03:13:51:431937][2590030240][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:129) -> pod 9
+[03:13:51:432351][2590030240][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:129): Linkerd session ended before both output FINs
+[03:13:51:433830][2579413408][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:130) -> pod 9
+[03:13:51:434391][2579413408][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:130): Linkerd session ended before both output FINs
+[03:13:51:451736][2579413408][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:130) -> pod 9
+[03:13:51:451978][2568796576][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:131) -> pod 9
+[03:13:51:452208][2579413408][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:130): Linkerd session ended before both output FINs
+[03:13:51:452547][2568796576][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:131): Linkerd session ended before both output FINs
+[03:13:51:471819][2568796576][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:131) -> pod 9
+[03:13:51:472029][2080369056][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:132) -> pod 9
+[03:13:51:472316][2568796576][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:131): Linkerd session ended before both output FINs
+[03:13:51:472530][2080369056][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:132): Linkerd session ended before both output FINs
+[03:13:51:491854][2080369056][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:132) -> pod 9
+[03:13:51:492063][2071914912][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:133) -> pod 9
+[03:13:51:492337][2080369056][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:132): Linkerd session ended before both output FINs
+[03:13:51:492643][2071914912][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:133): Linkerd session ended before both output FINs
+[03:13:51:511664][2071914912][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:133) -> pod 9
+[03:13:51:512112][2071914912][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:133): Linkerd session ended before both output FINs
+[03:13:51:512396][2063460768][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:134) -> pod 9
+[03:13:51:512964][2063460768][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:134): Linkerd session ended before both output FINs
+[03:13:51:532078][2055006624][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:135) -> pod 9
+[03:13:51:532169][2063460768][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:134) -> pod 9
+[03:13:51:532570][2063460768][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:134): Linkerd session ended before both output FINs
+[03:13:51:532641][2055006624][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:135): Linkerd session ended before both output FINs
+[03:13:51:551814][2055006624][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:135) -> pod 9
+[03:13:51:552023][2600647072][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:136) -> pod 9
+[03:13:51:552283][2055006624][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:135): Linkerd session ended before both output FINs
+[03:13:51:552575][2600647072][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:136): Linkerd session ended before both output FINs
+[03:13:51:571986][2600647072][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:136) -> pod 9
+[03:13:51:572163][2590030240][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:137) -> pod 9
+[03:13:51:572455][2600647072][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:136): Linkerd session ended before both output FINs
+[03:13:51:572636][2590030240][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:137): Linkerd session ended before both output FINs
+[03:13:51:591855][2590030240][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:137) -> pod 9
+[03:13:51:592056][2579413408][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:138) -> pod 9
+[03:13:51:592339][2590030240][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:137): Linkerd session ended before both output FINs
+[03:13:51:592611][2579413408][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:138): Linkerd session ended before both output FINs
+[03:13:51:611642][2579413408][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:138) -> pod 9
+[03:13:51:612068][2579413408][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:138): Linkerd session ended before both output FINs
+[03:13:51:612146][2568796576][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:139) -> pod 9
+[03:13:51:612717][2568796576][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:139): Linkerd session ended before both output FINs
+[03:13:51:632095][2080369056][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:140) -> pod 9
+[03:13:51:632192][2568796576][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:139) -> pod 9
+[03:13:51:632619][2568796576][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:139): Linkerd session ended before both output FINs
+[03:13:51:632669][2080369056][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:140): Linkerd session ended before both output FINs
+[03:13:51:651815][2080369056][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:140) -> pod 9
+[03:13:51:652035][2071914912][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:141) -> pod 9
+[03:13:51:652326][2080369056][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:140): Linkerd session ended before both output FINs
+[03:13:51:652635][2071914912][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:141): Linkerd session ended before both output FINs
+[03:13:51:671924][2071914912][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:141) -> pod 9
+[03:13:51:672114][2063460768][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:142) -> pod 9
+[03:13:51:672400][2071914912][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:141): Linkerd session ended before both output FINs
+[03:13:51:672594][2063460768][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:142): Linkerd session ended before both output FINs
+[03:13:51:691681][2063460768][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:142) -> pod 9
+[03:13:51:691877][2055006624][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:143) -> pod 9
+[03:13:51:692144][2063460768][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:142): Linkerd session ended before both output FINs
+[03:13:51:692418][2055006624][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:143): Linkerd session ended before both output FINs
+[03:13:51:711847][2055006624][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:143) -> pod 9
+[03:13:51:712028][2600647072][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:144) -> pod 9
+[03:13:51:712299][2055006624][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:143): Linkerd session ended before both output FINs
+[03:13:51:712583][2600647072][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:144): Linkerd session ended before both output FINs
+[03:13:51:731892][2600647072][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:144) -> pod 9
+[03:13:51:732067][2590030240][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:145) -> pod 9
+[03:13:51:732307][2600647072][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:144): Linkerd session ended before both output FINs
+[03:13:51:732639][2590030240][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:145): Linkerd session ended before both output FINs
+[03:13:51:751975][2579413408][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:146) -> pod 9
+[03:13:51:752168][2590030240][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:145) -> pod 9
+[03:13:51:752564][2579413408][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:146): Linkerd session ended before both output FINs
+[03:13:51:752575][2590030240][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:145): Linkerd session ended before both output FINs
+[03:13:51:772190][2579413408][DOCA][WRN][dpu_proxy.c:1618][px_unit_prepare] proxy: inbound policy refused (11:146) -> pod 9
+[03:13:51:772625][2579413408][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:146): Linkerd session ended before both output FINs
+[03:13:58:274162][2568796576][DOCA][WRN][dpu_proxy.c:2501][px_peer_stats_report] proxy: worker 3 peer poison=1254 refused=none inbound admitted=33 denied=1254 no-policy=0 mixed-callee-unprotected=0 peer-pin-conflict=0
+[03:14:16:748700][2568796576][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:147): Linkerd session ended before both output FINs
+[03:14:18:274315][2063460768][DOCA][WRN][dpu_proxy.c:2501][px_peer_stats_report] proxy: worker 6 peer poison=1255 refused=none inbound admitted=33 denied=1254 no-policy=0 mixed-callee-unprotected=0 peer-pin-conflict=0
+[03:14:40:756610][2080369056][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:148): Linkerd session ended before both output FINs
+[03:14:48:275094][2568796576][DOCA][WRN][dpu_proxy.c:2501][px_peer_stats_report] proxy: worker 3 peer poison=1256 refused=none inbound admitted=33 denied=1254 no-policy=0 mixed-callee-unprotected=0 peer-pin-conflict=0
+[03:15:12:511853][2063460768][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:150): Linkerd session ended before both output FINs
+[03:15:18:276030][2600647072][DOCA][WRN][dpu_proxy.c:2501][px_peer_stats_report] proxy: worker 0 peer poison=1257 refused=none inbound admitted=33 denied=1254 no-policy=0 mixed-callee-unprotected=0 peer-pin-conflict=0
+[03:16:12:204652][2600647072][DOCA][ERR][dpu_proxy.c:1175][px_poison] proxy: poisoning conn (11:152): Linkerd session ended before both output FINs
+[03:16:18:277412][2600647072][DOCA][WRN][dpu_proxy.c:2501][px_peer_stats_report] proxy: worker 0 peer poison=1258 refused=none inbound admitted=33 denied=1254 no-policy=0 mixed-callee-unprotected=0 peer-pin-conflict=0
+[03:16:28:259821][2947334176][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=13 pod_id=13 service_id=16 pod_uid=5bb05b55-470d-478c-97e6-74ab5faa76ea generation=1787368587212109302 revocations=8
+[03:17:08:278311][2590030240][DOCA][WRN][dpu_proxy.c:2501][px_peer_stats_report] proxy: worker 1 peer poison=1258 refused=none inbound admitted=34 denied=1254 no-policy=0 mixed-callee-unprotected=0 peer-pin-conflict=0
+[03:17:28:278520][2063460768][DOCA][WRN][dpu_proxy.c:2501][px_peer_stats_report] proxy: worker 6 peer poison=1258 refused=none inbound admitted=35 denied=1254 no-policy=0 mixed-callee-unprotected=0 peer-pin-conflict=0

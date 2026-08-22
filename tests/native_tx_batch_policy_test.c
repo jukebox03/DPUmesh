@@ -73,6 +73,7 @@ fixture_new(uint32_t ring_size, uint32_t su_depth, int notify_efd)
     f->ctx->num_slots = 8;
     f->ctx->k_rings = 1;
     f->ctx->su_depth = su_depth;
+    f->ctx->inbox_ring = 8;
     f->ctx->dma_buffer = f->dma;
     f->ctx->dma_rings[0] = &f->ring;
     atomic_init(&f->ctx->tx_armed_total, 0);
@@ -122,12 +123,18 @@ fixture_new(uint32_t ring_size, uint32_t su_depth, int notify_efd)
     f->ctx->n_eqs = 1;
     assert(pthread_mutex_init(&f->ctx->eq_lock, NULL) == 0);
     f->ctx->eq_lock_initialized = 1;
+    assert(pthread_mutex_init(&f->ctx->port_lock, NULL) == 0);
+    f->ctx->port_lock_initialized = 1;
     return f;
 }
 
 static void
 fixture_free(struct fixture *f)
 {
+    for (int port = 0; port < 18; port++)
+        free(f->ports[port].inbox);
+    if (f->ctx->port_lock_initialized)
+        pthread_mutex_destroy(&f->ctx->port_lock);
     if (f->ctx->eq_lock_initialized) pthread_mutex_destroy(&f->ctx->eq_lock);
     free(f->su_done);
     free(f->su_end);
@@ -200,11 +207,14 @@ test_fin_waits_for_submitted_data(void)
     assert(pthread_join(thread, NULL) == 0);
 
     assert(elapsed >= 5000000ull);
-    assert(!dmesh_tx_inflight(&f->qp));
+    /* The payload ACK drained, but FIN itself now holds the port incarnation. */
+    assert(dmesh_tx_inflight(&f->qp));
     assert(__atomic_load_n(&f->ring.enq_pos, __ATOMIC_ACQUIRE) == 2);
     assert(f->descs[1].size == 0);
     assert(f->descs[1].seq == 2);
     assert(f->qp.fin_sent == 1);
+    tx_reclaim_ack(f->ctx, 17, 2);
+    assert(!dmesh_tx_inflight(&f->qp));
     fixture_free(f);
 }
 
@@ -227,6 +237,45 @@ test_abort_marker_does_not_wait_for_submitted_data(void)
     assert(f->descs[1].size == 0);
     assert(f->descs[1].dst_pod_id == DMESH_POD_ABORT);
     assert(f->descs[1].seq == 2);
+    tx_reclaim_ack(f->ctx, 17, 1);
+    assert(dmesh_tx_inflight(&f->qp));       /* reset still quarantines the port */
+    tx_reclaim_ack(f->ctx, 17, 2);
+    assert(!dmesh_tx_inflight(&f->qp));
+    fixture_free(f);
+}
+
+/* A closed client port remains unavailable until the DPU acknowledges the
+ * control descriptor that retires its old (pod, port) key. This prevents a new
+ * protocol-aware session from being spliced into a refused session whose
+ * Linkerd task is still finishing. */
+static void
+test_close_ack_quarantines_port_reuse(void)
+{
+    struct fixture *f = fixture_new(8, 16, -1);
+    f->ctx->port_span = 18;
+    f->ctx->next_port = 17;
+
+    assert(dmesh_send_fin(&f->qp) == 0);
+    assert(dmesh_tx_inflight(&f->qp));
+
+    /* Model dmesh_release_qp after it publishes FREE. There are no data blocks
+     * in this FIN-only case, so only the control FIFO can hold the incarnation. */
+    __atomic_store_n(&f->psl->role, DMESH_ROLE_FREE, __ATOMIC_RELEASE);
+    f->psl->user = NULL;
+    f->psl->eq = NULL;
+    f->psl->nblk_owned = 0;
+
+    int other_owner = 1;
+    uint16_t other = dpumesh_alloc_port(f->ctx, DMESH_ROLE_CLIENT,
+                                        &other_owner, &f->eq);
+    assert(other != 0 && other != 17);
+
+    tx_reclaim_ack(f->ctx, 17, 1);
+    assert(!dmesh_tx_inflight(&f->qp));
+    f->ctx->next_port = 17;
+    int fresh_owner = 2;
+    assert(dpumesh_alloc_port(f->ctx, DMESH_ROLE_CLIENT,
+                              &fresh_owner, &f->eq) == 17);
     fixture_free(f);
 }
 
@@ -921,6 +970,7 @@ main(void)
     test_deadline_pass_yields_to_an_active_tx_call();
     test_fin_waits_for_submitted_data();
     test_abort_marker_does_not_wait_for_submitted_data();
+    test_close_ack_quarantines_port_reuse();
     test_close_paths_release_the_armed_bit();
     test_timer_wakes_only_armed_eqs();
     test_sustained_commits_preserve_stream_bytes();

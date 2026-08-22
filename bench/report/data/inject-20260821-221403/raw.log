@@ -1,0 +1,32 @@
+
+=== webhook — deploy the registration and its serving certificate
+serviceaccount/dpumesh-webhook created
+clusterrole.rbac.authorization.k8s.io/dpumesh-webhook created
+clusterrolebinding.rbac.authorization.k8s.io/dpumesh-webhook created
+service/dpumesh-webhook created
+deployment.apps/dpumesh-webhook created
+mutatingwebhookconfiguration.admissionregistration.k8s.io/dpumesh-inject created
+Waiting for deployment "dpumesh-webhook" rollout to finish: 0 of 1 updated replicas are available...
+deployment "dpumesh-webhook" successfully rolled out
+    I0 [PASS] caBundle published: expected=present observed=present 
+
+=== workloads — the same Deployment, with and without the annotation
+deployment.apps/inject-echo created
+service/inject-sock created
+deployment.apps/plain-echo created
+service/plain-sock created
+deployment.apps/inject-bench created
+service/inject-bench created
+deployment.apps/plain-bench created
+service/plain-bench created
+error: no objects passed to scale
+error: no objects passed to scale
+error: no objects passed to scale
+error: no objects passed to scale
+
+=== cleanup
+error: no objects passed to scale
+error: no objects passed to scale
+error: no objects passed to scale
+error: no objects passed to scale
+    injected workloads scaled to zero; the webhook registration is left in place

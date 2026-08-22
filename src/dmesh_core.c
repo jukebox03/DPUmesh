@@ -1116,6 +1116,7 @@ static void tx_wait_arm(dpumesh_ctx_t *ctx, struct dmesh_port_slot *psl,
  * port_reset_tx is used by the PE (SERVER_PENDING) above its definition. */
 static void port_reset_tx(struct dmesh_port_slot *psl);
 static inline void tx_reclaim_ack(dpumesh_ctx_t *ctx, uint16_t port, uint16_t seq);
+static int dmesh_tx_inflight_locked(const struct dmesh_port_slot *psl);
 
 /* Arm a connection on its EQ ready list after inbox publication. The fence pairs
  * with the receive-side fence to preserve an empty-to-ready transition. */
@@ -1211,10 +1212,9 @@ static void rx_deliver_desc(dpumesh_ctx_t *ctx, const sw_descriptor_t *desc, int
             else arm_ready_after_push(psl, dport);
             return;
         }
-        if (psl->nblk_owned > 0) {
-            /* FREE but the prior conn's TX blocks are still draining: no conn
-             * can be created on this slot yet, so drop and let the client
-             * retry. */
+        if (psl->nblk_owned > 0 || dmesh_tx_inflight_locked(psl)) {
+            /* FREE but the prior conn's data or close marker is still in DPU
+             * custody: no new incarnation may take this port yet. */
             pthread_mutex_unlock(&ctx->port_lock);
             rx_credit_return(ctx, slot);
             return;
@@ -2173,6 +2173,34 @@ static void try_return_blocks(dpumesh_ctx_t *ctx, struct dmesh_port_slot *psl) {
 
 /* ---- Per-conn TX BYTE-RING over the block chain: reserve → commit → send → (ACK) free ---- */
 
+/* Data reserve normally creates the per-port custody FIFO. A zero-byte FIN or
+ * reset may be the first descriptor a server QP sends, so close paths need the
+ * same metadata without reserving a DMA block. The QP owner serializes this
+ * lazy initialization with tx_gate. */
+static int tx_tracking_ensure(dpumesh_ctx_t *ctx,
+                              struct dmesh_port_slot *psl)
+{
+    if (psl->su_seq)
+        return 0;
+    uint16_t *seq = (uint16_t *)malloc((size_t)ctx->su_depth *
+                                       sizeof(uint16_t));
+    uint64_t *end = (uint64_t *)malloc((size_t)ctx->su_depth *
+                                       sizeof(uint64_t));
+    uint8_t *done = (uint8_t *)calloc((size_t)ctx->su_depth,
+                                      sizeof(uint8_t));
+    if (!seq || !end || !done) {
+        free(seq);
+        free(end);
+        free(done);
+        errno = ENOMEM;
+        return -1;
+    }
+    psl->su_seq = seq;
+    psl->su_end = end;
+    psl->su_done = done;
+    return 0;
+}
+
 /* Reserve one contiguous message in the connection's TX block chain. The owner
  * thread receives EAGAIN for capacity pressure or EINVAL for invalid state. */
 uint8_t *dpumesh_tx_reserve(dpumesh_ctx_t *ctx, uint16_t port, uint32_t len) {
@@ -2190,21 +2218,8 @@ uint8_t *dpumesh_tx_reserve(dpumesh_ctx_t *ctx, uint16_t port, uint32_t len) {
                                             memory_order_acquire);
     if (error_number != 0) { errno = error_number; return NULL; }
     if (psl->resv_len != 0) { errno = EINVAL; return NULL; } /* one outstanding alloc/QP */
-    if (!psl->su_seq) {                                    /* lazy per-slot send-unit FIFO */
-        uint16_t *seq = (uint16_t *)malloc((size_t)ctx->su_depth * sizeof(uint16_t));
-        uint64_t *end = (uint64_t *)malloc((size_t)ctx->su_depth * sizeof(uint64_t));
-        uint8_t *done = (uint8_t *)calloc((size_t)ctx->su_depth, sizeof(uint8_t));
-        if (!seq || !end || !done) {
-            free(seq);
-            free(end);
-            free(done);
-            errno = ENOMEM;
-            return NULL;
-        }
-        psl->su_seq = seq;
-        psl->su_end = end;
-        psl->su_done = done;
-    }
+    if (tx_tracking_ensure(ctx, psl) != 0)                 /* lazy send-unit FIFO */
+        return NULL;
 
     /* Probe the block window before mutating tx_w: on EAGAIN the conn's write head
      * is exactly where it was, so the caller's retry is a clean no-op. */
@@ -2682,8 +2697,9 @@ uint16_t dpumesh_alloc_port(dpumesh_ctx_t *ctx, int role, void *user, struct dme
             uint32_t p = ctx->next_port;
             ctx->next_port = (p + 1 >= span) ? 1 : p + 1;           /* wrap in [1, span) */
             struct dmesh_port_slot *psl = &ctx->ports[p];
-            if (psl->role != DMESH_ROLE_FREE || psl->nblk_owned > 0)
-                continue;                                          /* live, or still draining */
+            if (psl->role != DMESH_ROLE_FREE || psl->nblk_owned > 0 ||
+                dmesh_tx_inflight_locked(psl))
+                continue;                                  /* live, or prior conn still draining */
             if (!psl->inbox) {
                 psl->inbox = (sw_descriptor_t *)malloc((size_t)ctx->inbox_ring * sizeof(sw_descriptor_t));
                 if (!psl->inbox) { pthread_mutex_unlock(&ctx->port_lock); return 0; }
@@ -2750,10 +2766,10 @@ void dpumesh_free_port(dpumesh_ctx_t *ctx, uint16_t port) {
     /* Lifecycle changes also take port_lock, matching both client allocation and
      * PE-side SERVER_PENDING creation. */
     pthread_mutex_lock(&ctx->port_lock);
-    /* Mark FREE, then return the TX blocks without blocking. With sends still
-     * un-ACKed the blocks stay until the PE's last ACK returns them
-     * (try_return_blocks); the alloc paths skip a FREE-but-draining port
-     * (nblk_owned>0). */
+    /* Mark FREE, then return the TX blocks without blocking. With data still
+     * un-ACKed the blocks stay until the PE's last ACK returns them. The alloc
+     * paths also inspect the custody FIFO, so a zero-byte FIN/reset keeps a
+     * FREE port quarantined without borrowing a block. */
     __atomic_store_n(&psl->role, DMESH_ROLE_FREE, __ATOMIC_RELEASE);
     tx_wait_cancel(ctx, psl, port);
     /* Drop both EQ-side records while the binding is still valid. */
@@ -3451,9 +3467,16 @@ static int dmesh_send_fin_locked(dmesh_qp_t *c) {
     d.dst_pod       = c->remote_pod;                       /* the learned peer conn */
     d.dst_port      = c->remote_port;
     d.valid         = 1;
+    if (tx_tracking_ensure(ctx, &ctx->ports[c->local_port]) != 0)
+        return -1;
+    /* A close ACK is also the port-incarnation fence. Track this zero-byte
+     * control descriptor before publication so a freed low port cannot be
+     * recycled while the DPU still owns the old (pod, port) session key. */
+    dpumesh_tx_track(ctx, c->local_port, next_seq, 0);
     /* Latch only after enqueue succeeds. A failed attempt must be observable and
      * must not suppress a later close path from trying again. */
     if (dpumesh_enqueue(ctx, &d) < 0) {
+        (void)dpumesh_tx_untrack(ctx, c->local_port, next_seq, 0);
         if (errno != EAGAIN) errno = EBADMSG;
         return -1;
     }
@@ -3480,7 +3503,11 @@ static int dmesh_send_abort_locked(dmesh_qp_t *c) {
     d.dst_pod       = DMESH_POD_ABORT;
     d.dst_port      = c->remote_port;
     d.valid         = 1;
+    if (tx_tracking_ensure(ctx, &ctx->ports[c->local_port]) != 0)
+        return -1;
+    dpumesh_tx_track(ctx, c->local_port, next_seq, 0);
     if (dpumesh_enqueue(ctx, &d) < 0) {
+        (void)dpumesh_tx_untrack(ctx, c->local_port, next_seq, 0);
         if (errno != EAGAIN) errno = EBADMSG;
         return -1;
     }

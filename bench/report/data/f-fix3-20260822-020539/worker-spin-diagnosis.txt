@@ -1,0 +1,108 @@
+Worker spin: what the wedged workers were doing
+===============================================
+
+Same process as worker-spin.txt (pid 2024418), read ~6 hours later. Neither
+worker had cleared, so every reading below is of the same two threads.
+
+1. Still spinning, and it is two of eight
+-----------------------------------------
+    2024506 R  99.0  415:45.90 dmesh-w4
+    2024508 R  99.0  406:17.49 dmesh-w5
+    (every other worker S, 0-1%)
+
+2. The admin endpoint is not refused; it is unanswered
+------------------------------------------------------
+    port=4194 /live 200        curl_exit=0
+    port=4195 /live 000        curl_exit=28   (timed out)
+    port=4196 /live 000        curl_exit=28
+
+    ss -ltn:
+      LISTEN 0 128 127.0.0.1:4194     <- Recv-Q 0
+      LISTEN 7 128 127.0.0.1:4195     <- 7 connections completed, none accepted
+      LISTEN 9 128 127.0.0.1:4196     <- 9
+
+The socket is bound and the kernel finished the handshake. `/live` needs no
+metrics and no lock, and it times out too, so nothing is accepting.
+
+3. The admin server is not on the worker thread
+------------------------------------------------
+linkerd/app/src/lib.rs:748 runs the admin server on its own thread with its own
+current-thread runtime. Those threads are alive and asleep:
+
+    2024506 dmesh-w4   wchan=0          <- running
+    2024507 admin      wchan=ep_poll    <- w4's admin, parked
+    2024508 dmesh-w5   wchan=0
+    2024509 admin      wchan=ep_poll    <- w5's admin, parked
+
+strace of the two admin threads, with a connection arriving 1s in:
+
+    w3 (healthy, 2024505)
+      epoll_pwait(111, [{EPOLLIN, data=0}], 1024, ...) = 1     <- token 0: unparked
+      accept4(104, ...) = 93
+      recvfrom(93, "GET /live HTTP/1.1...")
+      writev(93, "HTTP/1.1 200 OK...")
+    w4 (wedged, 2024507)
+      epoll_pwait(124, <never returns>
+
+4. Why the parked admin thread is never woken
+----------------------------------------------
+Each admin listener is registered in the *worker* runtime's epoll, not in the
+admin runtime's:
+
+    port 4194  listener_fd=104  registered in epoll 94, 96
+    port 4195  listener_fd=117  registered in epoll 107, 110
+    port 4196  listener_fd=130  registered in epoll 120, 122
+
+    epoll 107 (w4's runtime driver)   epoll 124 (w4's admin driver)
+      tfd 18   eventpoll  (DPA completion)     tfd 125  eventfd  (wakeup only)
+      tfd 47   eventpoll  (DMA)
+      tfd 106  eventfd    (wake)
+      tfd 109  eventfd    (tokio wakeup)
+      tfd 114  socket     (inbound listener)
+      tfd 116  socket     (outbound listener)
+      tfd 117  socket     (admin listener)
+
+The admin runtime's epoll holds only its own wakeup fd. Readiness for the admin
+listener is observed by the worker's driver, which then unparks the admin
+thread. The same driver also holds the worker's inbound and outbound listeners,
+so a worker whose driver stops running serves nothing at all; the admin port is
+the window onto it, not the extent of it.
+
+5. The worker's driver is never polled
+---------------------------------------
+strace of the worker threads themselves, 3 seconds each, syscall by fd:
+
+    healthy w0 (2024498)              wedged w4 (2024506)
+      2771 epoll_pwait(60)   <- driver     0 epoll_pwait(107/110)   <- driver
+      1372 write(61)         <- unpark     0 write(109)             <- unpark
+      1375 epoll_pwait(10)                 36408 epoll_pwait(18)
+      1375 epoll_pwait(35)                 36408 epoll_pwait(47)
+      1375 read(59)                        36409 read(106)
+      = 1375 passes / 3s                   = 36408 passes / 3s
+
+Three syscalls per pass and nothing else: the wedged worker runs the datapath
+loop 12,136 times a second and never returns to the scheduler that drives every
+other task on that runtime.
+
+6. What holds it there
+-----------------------
+linkerd/doca/src/runtime.rs waits on a select whose branches are the three
+notification fds, a maintenance deadline, and `poll_internal`. The fd branches
+need the driver, which is not running. The deadline is in the future. So the
+select is completing on `poll_internal`, every pass, synchronously.
+
+    // linkerd/rust/src/lib.rs, Worker::poll_internal
+    handle.tx_finished() || handle.poll_tx_ready(cx).is_ready()
+
+    // linkerd/doca/src/io.rs
+    tx_finished() == tx_closed && tx_queued() == 0
+
+`tx_finished` is the state of a closed write half, not an event. `pump_side`
+publishes that side's FIN once and sets `fin_published`; a session closes only
+when *every* side has finished. So one session another endpoint keeps open --
+one half-closed session -- makes `poll_internal` answer ready forever while the
+drain has nothing left to publish, and the pass never waits.
+
+Two more conditions have the same shape: `tx_finish` refused by the datapath,
+and queued bytes the arena cannot lend a chunk for. Both leave `poll_internal`
+ready and the drain unable to clear it.

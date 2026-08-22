@@ -8,15 +8,28 @@ does. Identity evidence is a fact the kernel knows, not a byte a process hands
 over, so a DPU cannot by itself answer who is on the other end of a channel.
 
 The data plane those admissions govern is [`DATA.md`](DATA.md); the
-application's contract is [`API.md`](API.md). The lower RDMA implementation
-supplies `struct dmesh_peer_transport`; this tree owns every authenticated
-stream, routing, custody and lifetime rule above that seam. Only the middle hop
-of the data path differs across a node boundary.
+application's contract is [`API.md`](API.md). Only the middle hop of the data
+path differs across a node boundary.
 
 ```text
    intra-node   host TX mmap → DPA → staging → SG-DMA         → host RX mmap
    inter-node   host TX mmap → DPA → staging → RDMA → staging → host RX mmap
 ```
+
+The boundary is a layer split, not a special case. `struct dmesh_peer_transport`
+is the seam: the lower RDMA implementation supplies ordered reliable delivery
+within a handle and a mutually authenticated key agreement, and this tree owns
+every authenticated stream, routing, custody and lifetime rule above it —
+handle namespaces, bounded parsing, the node-name-to-key binding check, custody
+across the boundary, and the refusal accounting that answers for all of it.
+Chapters 2-0 and 4 define that upper half, which is built and driven end to end
+by `tests/peer_channel_test.c` through a recording transport.
+
+**Status.** The lower half is the remaining work. No transport binds today, so
+`px_peer_configure` is uncalled, the peer table holds none, and a remote
+destination is refused at the first branch of `px_peer_stream_ready`. Until one
+binds, node-to-node confidentiality and authentication are properties this
+design assigns to the transport rather than properties a deployment has.
 
 ## How to read this
 
@@ -983,7 +996,9 @@ verdict, not a proxy:
 
 `Inbound::build_policies(workload, …)` binds one watch set to one workload
 string, so the adapter calls it once per registered destination Pod rather than
-once per process; streams share the watch and pay only `connection_verdict`. A
+once per process; streams share the watch and pay only `connection_verdict`,
+which the connection caches per destination so a session alternating backends
+does not re-enter the policy layer per unit. A
 cross-node L7 stream costs one outbound session plus a lookup. A full stack on
 both sides would double the measured session cost.
 
@@ -1244,7 +1259,7 @@ refusal is counted by reason.
 namespaces, the five control messages plus DATA, bounded parsing and both sides'
 bounds; `doca/dpu_proxy.c` carries the hooks it binds to.
 `tests/peer_channel_test.c` drives the module end to end through a recording
-transport.
+transport, which stands in for the RDMA implementation until it lands.
 
 ## 4.1 Custody across the boundary
 
@@ -1609,9 +1624,10 @@ The ones marked ∎ change a security property; the rest change only cost.
   [`DATA.md`](DATA.md)'s bounds.
 
 **Cluster scope and the node boundary**
-- Each ARM worker instantiates a peer table and `px_peer_configure` binds the
-  supplied lower RDMA transport. Accepted lower connections enter through
-  `px_peer_accept`; the authenticated upper state owns them thereafter.
+- Each ARM worker instantiates a peer table, and `px_peer_configure` binds the
+  lower RDMA transport to it. Accepted lower connections enter through
+  `px_peer_accept`; the authenticated upper state owns them thereafter. This is
+  the contract the transport meets; no transport binds yet.
 - Linkerd-selected remote endpoints retain their exact topology Pod UID. The
   source opens that Pod on its node's channel, DATA lands through destination
   SG-DMA, and `STREAM_ACK` releases source custody only after `REV_DONE` was
@@ -1647,5 +1663,5 @@ alone and is adopted; the DPU generates its node credential and the controller
 publishes its public half in the generation's `node=` line; the mediated lookup
 answers for a Pod the generation places here and refuses one it names nowhere;
 registrations record their protection class; and the destination-side verdict
-runs once per session against a policy the controller served, with sessions
-opened equal to closed and none left active.
+runs once per destination a session reaches, against a policy the controller
+served, with sessions opened equal to closed and none left active.

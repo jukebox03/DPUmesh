@@ -1,0 +1,125 @@
+
+=== DPU admin endpoints: 4191 4192 4193 4194 4195 4196 4197 4198
+
+=== output: /home/jukebox/DPUmesh/bench/report/data/f-scope-20260821-225817
+
+=== fan-out — one client channel across two backends of one Service
+deployment.apps/echo-grpc-dpumesh scaled
+pod/echo-grpc-dpumesh-84546996c7-j6q2f condition met
+pod/echo-grpc-dpumesh-84546996c7-jxsd6 condition met
+    F1 1 channel(s): backends=2 fail=0 take_errors+=0 served: echo-grpc-dpumesh-84546996c7-j6q2f=8774 echo-grpc-dpumesh-84546996c7-jxsd6=8772 
+    F1 4 channel(s): backends=2 fail=0 take_errors+=0 served: echo-grpc-dpumesh-84546996c7-j6q2f=41621 echo-grpc-dpumesh-84546996c7-jxsd6=41846 
+
+=== F1 — back to one backend
+deployment.apps/echo-grpc-dpumesh scaled
+pod/echo-grpc-dpumesh-84546996c7-j6q2f condition met
+error: timed out waiting for the condition on pods/echo-grpc-dpumesh-84546996c7-jxsd6
+F1r | OK mrps=0.000783 gbps=0.0067 req_gbps=0.0065 resp_gbps=0.0002 p50=1269.00 p95=1464.00 p99=1535.00 p999=2441.00 p9999=6313.00 avg=1277.76 min=791.17 max=7001.08 rcnt=7953 scheduled=8054 pending=0 fail=0 conc=1 threads=1 channels=1 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.000783 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const batch=0 reconns=0 reconn_us=0.00 grabs=0 rets=0 recyc=17 waits=0 pads=0 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA
+    F1r [PASS] one backend restored: expected=serve observed=serve rcnt=7953 fail=0 admitted+=1 denied+=0 route_hits+=0 mismatch+=0
+
+=== stages: 3 pass, 0 fail
+
+=== csv: /home/jukebox/DPUmesh/bench/report/data/f-scope-20260821-225817/stages.csv
+
+=== cleanup
+deployment.apps/echo-dpumesh-14 scaled
+deployment.apps/echo-grpc-dpumesh scaled
+    fixtures removed; replica counts restored
+
+=== DPU admin endpoints: 4191 4192 4193 4194 4195 4196 4197 4198
+
+=== output: /home/jukebox/DPUmesh/bench/report/data/f-scope-20260821-225817
+
+=== cross-Service routing — a route whose backend is another Service
+X0 | OK mrps=0.000792 gbps=0.0067 req_gbps=0.0066 resp_gbps=0.0002 p50=1253.00 p95=1454.00 p99=1526.00 p999=2083.00 p9999=4945.00 avg=1261.82 min=778.21 max=5570.82 rcnt=8054 scheduled=8155 pending=0 fail=0 conc=1 threads=1 channels=1 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.000792 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const batch=0 reconns=0 reconn_us=0.00 grabs=0 rets=0 recyc=17 waits=0 pads=0 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA
+    X0 [PASS] no route: expected=serve observed=serve rcnt=8054 fail=0 admitted+=1 denied+=0 route_hits+=0 mismatch+=0
+
+=== X1 — the route reaches the other Service
+httproute.gateway.networking.k8s.io/bench-grpc-route created
+
+=== cleanup
+httproute.gateway.networking.k8s.io "bench-grpc-route" deleted
+deployment.apps/echo-dpumesh-14 scaled
+deployment.apps/echo-grpc-dpumesh scaled
+    fixtures removed; replica counts restored
+
+=== DPU admin endpoints: 4191 4192 4193 4194 4195 4196 4197 4198
+
+=== output: /home/jukebox/DPUmesh/bench/report/data/f-scope-20260821-225817
+
+=== cross-Service routing — a route whose backend is another Service
+X0 | OK mrps=0.000784 gbps=0.0067 req_gbps=0.0065 resp_gbps=0.0002 p50=1264.00 p95=1461.00 p99=1535.00 p999=2694.00 p9999=6687.00 avg=1274.55 min=792.68 max=15135.47 rcnt=7954 scheduled=8055 pending=0 fail=0 conc=1 threads=1 channels=1 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.000784 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const batch=0 reconns=0 reconn_us=0.00 grabs=0 rets=0 recyc=17 waits=0 pads=0 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA
+    X0 [PASS] no route: expected=serve observed=serve rcnt=7954 fail=0 admitted+=1 denied+=0 route_hits+=0 mismatch+=0
+
+=== X1 — the route reaches the other Service
+httproute.gateway.networking.k8s.io/bench-grpc-route created
+X1 | OK mrps=0.000683 gbps=0.0058 req_gbps=0.0057 resp_gbps=0.0001 p50=1493.00 p95=1678.00 p99=1751.00 p999=2005.00 p9999=3522.00 avg=1464.72 min=821.40 max=3787.69 rcnt=6925 scheduled=7026 pending=0 fail=0 conc=1 threads=1 channels=1 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.000683 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const batch=0 reconns=0 reconn_us=0.00 grabs=0 rets=0 recyc=15 waits=0 pads=0 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA
+    X1 [PASS] backendRef in another Service: expected=serve observed=serve rcnt=6925 fail=0 admitted+=2 denied+=0 route_hits+=7026 mismatch+=0
+    X1 served by echo-grpc-alt: echo-grpc-alt-774bbbccb5-wcjwm=7026 
+
+=== X2 — the destination's own policy grades the stream that arrives
+server.policy.linkerd.io/bench-echo-grpc-alt created
+X2 | OK mrps=0.000000 gbps=0.0000 req_gbps=0.0000 resp_gbps=0.0000 p50=0.00 p95=0.00 p99=0.00 p999=0.00 p9999=0.00 avg=0.00 min=0.00 max=0.00 rcnt=0 scheduled=587 pending=0 fail=586 conc=1 threads=1 channels=1 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.000000 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const batch=0 reconns=0 reconn_us=0.00 grabs=508 rets=507 recyc=0 waits=0 pads=0 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA
+    X2 [FAIL] Server on the destination Service, no authorization: expected=refuse observed=refuse rcnt=0 fail=586 admitted+=959 denied+=509 route_hits+=0 mismatch+=0
+server.policy.linkerd.io "bench-echo-grpc-alt" deleted
+X2b | OK mrps=0.000649 gbps=0.0055 req_gbps=0.0054 resp_gbps=0.0001 p50=1565.00 p95=1730.00 p99=1803.00 p999=2569.00 p9999=6112.00 avg=1540.39 min=832.31 max=7731.75 rcnt=6582 scheduled=6683 pending=0 fail=0 conc=1 threads=1 channels=1 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.000649 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const batch=0 reconns=0 reconn_us=0.00 grabs=0 rets=0 recyc=14 waits=0 pads=0 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA
+    X2b [PASS] the destination Server withdrawn: expected=serve observed=serve rcnt=6582 fail=0 admitted+=2 denied+=0 route_hits+=6683 mismatch+=0
+
+=== X3 — weighted backendRefs across two Services
+httproute.gateway.networking.k8s.io/bench-grpc-route configured
+X3 | OK mrps=0.003563 gbps=0.0303 req_gbps=0.0296 resp_gbps=0.0007 p50=1131.00 p95=1491.00 p99=1660.00 p999=2508.00 p9999=5117.00 avg=1122.49 min=537.27 max=8033.99 rcnt=36322 scheduled=36726 pending=0 fail=0 conc=1 threads=4 channels=4 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.003563 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const batch=0 reconns=0 reconn_us=0.00 grabs=0 rets=0 recyc=79 waits=0 pads=0 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA
+    X3 [PASS] weighted 50/50 across two Services: expected=serve observed=serve rcnt=36322 fail=0 admitted+=8 denied+=0 route_hits+=36723 mismatch+=0
+    X3 split: echo-grpc-dpumesh{echo-grpc-dpumesh-84546996c7-jxsd6=18369 } echo-grpc-alt{echo-grpc-alt-774bbbccb5-wcjwm=18357 }
+httproute.gateway.networking.k8s.io "bench-grpc-route" deleted
+X4 | OK mrps=0.000780 gbps=0.0066 req_gbps=0.0065 resp_gbps=0.0001 p50=1274.00 p95=1474.00 p99=1540.00 p999=2062.00 p9999=2965.00 avg=1282.46 min=813.03 max=3520.09 rcnt=7918 scheduled=8019 pending=0 fail=0 conc=1 threads=1 channels=1 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.000780 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const batch=0 reconns=0 reconn_us=0.00 grabs=0 rets=0 recyc=17 waits=0 pads=0 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA
+    X4 [PASS] no route: expected=serve observed=serve rcnt=7918 fail=0 admitted+=1 denied+=0 route_hits+=0 mismatch+=0
+
+=== stages: 7 pass, 1 fail
+
+=== csv: /home/jukebox/DPUmesh/bench/report/data/f-scope-20260821-225817/stages.csv
+
+=== cleanup
+deployment.apps/echo-dpumesh-14 scaled
+deployment.apps/echo-grpc-dpumesh scaled
+    fixtures removed; replica counts restored
+
+=== DPU admin endpoints: 4191 4192 4193 4194 4195 4196 4197 4198
+
+=== output: /home/jukebox/DPUmesh/bench/report/data/f-scope-20260821-225817
+
+=== cross-Service routing — a route whose backend is another Service
+X0 | OK mrps=0.000775 gbps=0.0066 req_gbps=0.0064 resp_gbps=0.0001 p50=1280.00 p95=1478.00 p99=1545.00 p999=2703.00 p9999=5028.00 avg=1290.40 min=807.60 max=7024.88 rcnt=7869 scheduled=7970 pending=0 fail=0 conc=1 threads=1 channels=1 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.000775 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const batch=0 reconns=0 reconn_us=0.00 grabs=0 rets=0 recyc=17 waits=0 pads=0 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA
+    X0 [PASS] no route: expected=serve observed=serve rcnt=7869 fail=0 admitted+=1 denied+=0 route_hits+=0 mismatch+=0
+
+=== X1 — the route reaches the other Service
+httproute.gateway.networking.k8s.io/bench-grpc-route created
+X1 | OK mrps=0.000656 gbps=0.0056 req_gbps=0.0055 resp_gbps=0.0001 p50=1539.00 p95=1725.00 p99=1802.00 p999=2672.00 p9999=3289.00 avg=1523.84 min=852.41 max=3476.54 rcnt=6646 scheduled=6747 pending=0 fail=0 conc=1 threads=1 channels=1 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.000656 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const batch=0 reconns=0 reconn_us=0.00 grabs=0 rets=0 recyc=14 waits=0 pads=0 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA
+    X1 [PASS] backendRef in another Service: expected=serve observed=serve rcnt=6646 fail=0 admitted+=2 denied+=0 route_hits+=6746 mismatch+=0
+    X1 served by echo-grpc-alt: echo-grpc-alt-774bbbccb5-wcjwm=6747 
+
+=== X2 — the destination's own policy grades the stream that arrives
+server.policy.linkerd.io/bench-echo-grpc-alt created
+X2 | OK mrps=0.000000 gbps=0.0000 req_gbps=0.0000 resp_gbps=0.0000 p50=0.00 p95=0.00 p99=0.00 p999=0.00 p9999=0.00 avg=0.00 min=0.00 max=0.00 rcnt=0 scheduled=582 pending=0 fail=581 conc=1 threads=1 channels=1 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.000000 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const batch=0 reconns=0 reconn_us=0.00 grabs=506 rets=505 recyc=0 waits=0 pads=0 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA
+    X2 [PASS] Server on the destination Service, no authorization: expected=refuse observed=refuse rcnt=0 fail=581 admitted+=971 denied+=506 route_hits+=-13709 mismatch+=0
+    X2v [PASS] the destination refused: denied+=506
+server.policy.linkerd.io "bench-echo-grpc-alt" deleted
+X2b | OK mrps=0.000650 gbps=0.0055 req_gbps=0.0054 resp_gbps=0.0001 p50=1556.00 p95=1729.00 p99=1791.00 p999=2139.00 p9999=2652.00 avg=1538.26 min=941.81 max=3123.42 rcnt=6589 scheduled=6690 pending=0 fail=0 conc=1 threads=1 channels=1 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.000650 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const batch=0 reconns=0 reconn_us=0.00 grabs=0 rets=0 recyc=14 waits=0 pads=0 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA
+    X2b [PASS] the destination Server withdrawn: expected=serve observed=serve rcnt=6589 fail=0 admitted+=2 denied+=0 route_hits+=6689 mismatch+=0
+
+=== X3 — weighted backendRefs across two Services
+httproute.gateway.networking.k8s.io/bench-grpc-route configured
+X3 | OK mrps=0.003565 gbps=0.0303 req_gbps=0.0297 resp_gbps=0.0007 p50=1128.00 p95=1479.00 p99=1653.00 p999=2479.00 p9999=10384.00 avg=1121.92 min=494.12 max=22495.22 rcnt=36354 scheduled=36758 pending=0 fail=0 conc=1 threads=4 channels=4 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.003565 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const batch=0 reconns=0 reconn_us=0.00 grabs=0 rets=0 recyc=79 waits=0 pads=0 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA
+    X3 [PASS] weighted 50/50 across two Services: expected=serve observed=serve rcnt=36354 fail=0 admitted+=8 denied+=0 route_hits+=36758 mismatch+=0
+    X3 split: echo-grpc-dpumesh{echo-grpc-dpumesh-84546996c7-jxsd6=10380 } echo-grpc-alt{echo-grpc-alt-774bbbccb5-wcjwm=18223 }
+httproute.gateway.networking.k8s.io "bench-grpc-route" deleted
+X4 | OK mrps=0.000806 gbps=0.0069 req_gbps=0.0067 resp_gbps=0.0002 p50=1237.00 p95=1451.00 p99=1523.00 p999=2170.00 p9999=2560.00 avg=1240.76 min=779.15 max=2999.85 rcnt=8194 scheduled=8295 pending=0 fail=0 conc=1 threads=1 channels=1 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.000806 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const batch=0 reconns=0 reconn_us=0.00 grabs=0 rets=0 recyc=18 waits=0 pads=0 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA
+    X4 [PASS] no route: expected=serve observed=serve rcnt=8194 fail=0 admitted+=1 denied+=0 route_hits+=0 mismatch+=0
+
+=== stages: 9 pass, 0 fail
+
+=== csv: /home/jukebox/DPUmesh/bench/report/data/f-scope-20260821-225817/stages.csv
+
+=== cleanup
+deployment.apps/echo-dpumesh-14 scaled
+deployment.apps/echo-grpc-dpumesh scaled
+    fixtures removed; replica counts restored

@@ -18,6 +18,7 @@ class NativeDmeshApiOps final : public DmeshApiOps {
     return dmesh_create_qp(eq, service);
   }
   int DestroyQp(dmesh_qp_t* qp) override { return dmesh_destroy_qp(qp); }
+  int AbortQp(dmesh_qp_t* qp) override { return dmesh_abort_qp(qp); }
   void* Alloc(dmesh_qp_t* qp, uint32_t len) override {
     return dmesh_alloc(qp, len);
   }

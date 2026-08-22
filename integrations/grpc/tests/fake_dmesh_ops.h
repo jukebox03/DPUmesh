@@ -58,6 +58,7 @@ class FakeDmeshState final {
   size_t flush_calls(dmesh_qp_t* qp) const;
   size_t release_count() const;
   size_t destroy_count() const;
+  size_t abort_count() const;
   size_t mid_batch_destroy_count() const;
   size_t poll_thread_violation_count() const;
   size_t channel_destroy_count() const;

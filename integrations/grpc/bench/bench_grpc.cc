@@ -10,6 +10,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -71,9 +72,18 @@ struct Worker {
   std::unique_ptr<BenchmarkService::Stub> stub;
   ::grpc::CompletionQueue cq;
 
-  /* Issued calls retained until completion or cancellation. */
+  /* Issued calls retained until completion or cancellation. `closing` ends
+   * issuance: it is set by the sweep that ends a run, under the same lock that
+   * admits a call to `live`, so the sweep cancels every call that will ever
+   * exist on this worker. A call it did not cancel completes only when the
+   * peer answers, and a peer that never answers leaves the queue undrainable
+   * and the whole control loop with it. `starting` counts the calls admitted
+   * but not yet handed to gRPC, which the sweep waits out before shutting the
+   * queue down. */
   std::mutex live_mu;
   std::unordered_set<Call*> live;
+  bool closing = false;
+  std::atomic<int> starting{0};
   std::atomic<long> outstanding{0};
   std::atomic<long> issued{0};
 
@@ -118,17 +128,28 @@ std::shared_ptr<::grpc::Channel> MakeChannel(int index) {
 }
 
 /* ------------------------------------------------------------ issue */
-void Issue(Worker* w, double scheduled) {
+/* The call joins `live` before it reaches gRPC, so a sweep that runs in
+ * between still cancels it: a cancellation asked for before the call starts is
+ * held on the context and applied when it does. False once the run is closing,
+ * which is the only thing that stops an issuer or a closed-loop refill. */
+bool Issue(Worker* w, double scheduled) {
   auto* call = new Call();
   call->scheduled = scheduled;
   {
     std::lock_guard<std::mutex> lock(w->live_mu);
+    if (w->closing) {
+      delete call;
+      return false;
+    }
     w->live.insert(call);
+    w->starting.fetch_add(1, std::memory_order_acq_rel);
   }
   w->outstanding.fetch_add(1, std::memory_order_acq_rel);
   w->issued.fetch_add(1, std::memory_order_relaxed);
   call->reader = w->stub->AsyncUnaryCall(&call->context, w->request, &w->cq);
   call->reader->Finish(&call->response, &call->status, call);
+  w->starting.fetch_sub(1, std::memory_order_acq_rel);
+  return true;
 }
 
 /* ------------------------------------------------------------ completer */
@@ -295,6 +316,52 @@ int SelfTest(char* reply, size_t reply_size, int payload, int threads,
   return 0;
 }
 
+/* ------------------------------------------------------------ run watchdog */
+/* The control server accepts one connection at a time and runs the benchmark
+ * on the accept loop's own thread, so a run that never ends answers nothing
+ * for every stage after it while the Pod stays Ready and its restart count
+ * stays at zero. A run is allowed its own duration, the connect budget its
+ * channels may spend, and a fixed margin; past that the client reports the
+ * fault and leaves, and the Deployment brings back one that answers. */
+class RunWatchdog {
+ public:
+  RunWatchdog(double budget, int conn_fd)
+      : budget_(budget), conn_fd_(conn_fd), thread_([this] { Wait(); }) {}
+
+  ~RunWatchdog() {
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      done_ = true;
+    }
+    cv_.notify_all();
+    thread_.join();
+  }
+
+ private:
+  void Wait() {
+    std::unique_lock<std::mutex> lock(mu_);
+    if (cv_.wait_for(lock, std::chrono::duration<double>(budget_),
+                     [this] { return done_; })) {
+      return;
+    }
+    char reply[160];
+    std::snprintf(reply, sizeof reply,
+                  "ERR run exceeded its %.0fs budget; the client is leaving\n",
+                  budget_);
+    if (write(conn_fd_, reply, std::strlen(reply)) < 0) {}
+    std::fprintf(stderr, "[bench_grpc] %s", reply);
+    std::fflush(stderr);
+    std::_Exit(3);
+  }
+
+  const double budget_;
+  const int conn_fd_;
+  bool done_ = false;
+  std::mutex mu_;
+  std::condition_variable cv_;
+  std::thread thread_;
+};
+
 /* ------------------------------------------------------------ one run */
 void RunBench(int conn_fd, int mode, int req_size, int reply_size, int window,
               double duration, long warmup, int threads, double rate,
@@ -320,6 +387,9 @@ void RunBench(int conn_fd, int mode, int req_size, int reply_size, int window,
                mode == kModeOpen ? "OPEN" : "RUN", req_size, reply_size,
                duration, warmup, threads, channels, g_transport.c_str(),
                g_transport == "dmesh" ? g_service.c_str() : g_host.c_str());
+
+  /* The connect budget is what one channel may spend below, once per channel. */
+  RunWatchdog watchdog(0.3 + duration + 20.0 * channels + 30.0, conn_fd);
 
   std::vector<std::shared_ptr<::grpc::Channel>> channel_pool;
   channel_pool.reserve(channels);
@@ -402,10 +472,17 @@ void RunBench(int conn_fd, int mode, int req_size, int reply_size, int window,
 
   for (auto& w : workers) {
     w->end = end;
-    /* Cancel in-flight calls while holding their ownership lock. */
+    /* Close issuance and cancel what it produced, both under the lock that
+     * admits a call, so no call outlives the sweep uncancelled. */
     {
       std::lock_guard<std::mutex> lock(w->live_mu);
+      w->closing = true;
       for (Call* call : w->live) call->context.TryCancel();
+    }
+    /* A call already admitted may still be on its way to gRPC. The queue may
+     * not be shut down under it. */
+    while (w->starting.load(std::memory_order_acquire) != 0) {
+      std::this_thread::yield();
     }
     w->cq.Shutdown();
   }

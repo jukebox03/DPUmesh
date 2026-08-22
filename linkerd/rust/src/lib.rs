@@ -189,6 +189,7 @@ fn resolve_endpoint_uid(_worker_id: c_int, uid: &str) -> i32 {
         "11111111-1111-1111-1111-111111111111" => 7,
         "22222222-2222-2222-2222-222222222222" => ENDPOINT_REMOTE,
         "33333333-3333-3333-3333-333333333333" => ENDPOINT_STALE,
+        "44444444-4444-4444-4444-444444444444" => 9,
         _ => -1,
     }
 }
@@ -685,6 +686,14 @@ struct Side {
 }
 
 impl Side {
+    /// Whether this endpoint's route names exactly this destination Pod.
+    fn routes_to_pod(&self, pod: i32) -> bool {
+        matches!(
+            self.handle.as_ref().map(DmeshIoHandle::backend_route),
+            Some(dmesh_doca::BackendRoute::Local(named)) if named == pod
+        )
+    }
+
     /// Release all outstanding staging extents.
     fn release_outstanding(&mut self, worker_id: c_int, counters: &mut Counters) -> usize {
         let Some(conn) = self.conn else {
@@ -713,7 +722,7 @@ impl Side {
     }
 }
 
-/// A request connection and its Linkerd backend endpoint.
+/// A request connection and the Linkerd backend endpoints it dialled.
 struct Session {
     /// Names this session to the acceptor for its whole lifetime.
     token: SessionToken,
@@ -722,14 +731,32 @@ struct Session {
     request_route: u64,
     /// Linkerd's client-facing endpoint.
     client: Side,
-    /// Linkerd's backend-facing endpoint.
-    backend: Side,
+    /// Linkerd's backend-facing endpoints, one per endpoint the stack dialled.
+    /// The first is the channel published when the session opened; a later one
+    /// is minted by `take_session` and adopted here.
+    backends: Vec<Side>,
     backend_addr: SocketAddr,
 }
 
 impl Session {
     fn backend_key(&self) -> BackendKey {
         BackendKey::new(self.backend_addr, self.token)
+    }
+
+    /// The direction a connection handle belongs to. A handle this session does
+    /// not own answers `None` rather than falling back to a backend: with more
+    /// than one, guessing would deliver another backend's bytes.
+    fn side_of(&mut self, conn: u64) -> Option<&mut Side> {
+        if self.client.conn == Some(conn) {
+            return Some(&mut self.client);
+        }
+        self.backends
+            .iter_mut()
+            .find(|side| side.conn == Some(conn))
+    }
+
+    fn sides(&self) -> impl Iterator<Item = &Side> {
+        std::iter::once(&self.client).chain(self.backends.iter())
     }
 }
 
@@ -761,6 +788,9 @@ struct Worker {
     /// A source route has at most one live incarnation, while callbacks use
     /// the full key so a late callback cannot reach its replacement.
     by_request_route: HashMap<u64, u64>,
+    /// Session token to session key, for an endpoint minted after the session
+    /// opened: the connector names the session it dialled by token.
+    by_token: HashMap<SessionToken, u64>,
     /// Fair drain order and cursor.
     order: Vec<u64>,
     drain_next: usize,
@@ -1084,11 +1114,16 @@ impl Worker {
     /// anything is serving it here and now. Every address that is not one of
     /// the session's own must resolve to a live Pod.
     fn place_endpoint_resolution(&self) {
-        let mut own: std::collections::HashSet<SocketAddr> = std::collections::HashSet::new();
+        // Each Service's own two addresses, keyed by the session key the
+        // adapter published it under. `SessionOwn` may only answer for the
+        // session's own Service: another Service's ClusterIP resolving that
+        // way is `BackendRoute::Any`, which routes on the *original* Service
+        // with no error and no counter.
+        let mut own: HashMap<SocketAddr, [SocketAddr; 2]> = HashMap::new();
         let mut by_addr: HashMap<SocketAddr, String> = HashMap::new();
         for (&service, &cluster_ip) in &self.service_targets {
-            own.insert(service_addr(service));
-            own.insert(SocketAddr::V4(cluster_ip));
+            let key = service_addr(service);
+            own.insert(key, [key, SocketAddr::V4(cluster_ip)]);
         }
         for endpoints in self.service_endpoints.values() {
             for (addr, uid) in endpoints {
@@ -1097,8 +1132,13 @@ impl Worker {
         }
         let worker = self.id;
         self.backends
-            .set_endpoint_resolver(Arc::new(move |selected: SocketAddr| {
-                if own.contains(&selected) {
+            .set_endpoint_resolver(Arc::new(
+                move |selected: SocketAddr, session_service: SocketAddr| {
+                if own
+                    .get(&session_service)
+                    .is_some_and(|addresses| addresses.contains(&selected))
+                    || selected == session_service
+                {
                     return dmesh_doca::EndpointVerdict::SessionOwn;
                 }
                 // Ports do not participate in identity: the address's IP is
@@ -1121,7 +1161,8 @@ impl Worker {
                     ENDPOINT_STALE => dmesh_doca::EndpointVerdict::Stale,
                     _ => dmesh_doca::EndpointVerdict::Unresolved,
                 }
-            }));
+                },
+            ));
     }
 
     /// Publish which Service each address the held generation names belongs
@@ -1224,12 +1265,23 @@ impl Worker {
         Ok(())
     }
 
+    /// Whether any endpoint holds output a drain pass could still publish:
+    /// bytes the stack has queued, or an orderly FIN this side has not handed
+    /// to the datapath yet.
+    ///
+    /// A side whose FIN the datapath already accepted holds nothing, even
+    /// though its handle goes on reporting the write half closed for as long as
+    /// the session lives. Counting that as work would answer ready on every
+    /// pass of a session another side keeps open, and the pass has nothing left
+    /// to do about it.
     #[cfg(not(test))]
     fn poll_internal(&mut self, cx: &mut Context<'_>) -> Poll<()> {
         for session in self.sessions.values() {
-            for side in [&session.client, &session.backend] {
+            for side in session.sides() {
+                let fin_published = side.fin_published;
                 if side.handle.as_ref().is_some_and(|handle| {
-                    handle.tx_finished() || handle.poll_tx_ready(cx).is_ready()
+                    (!fin_published && handle.tx_finished())
+                        || handle.poll_tx_ready(cx).is_ready()
                 }) {
                     return Poll::Ready(());
                 }
@@ -1260,6 +1312,31 @@ impl Worker {
             self.counters.registrations_orphaned += 1;
             self.metrics.registrations_orphaned.inc();
             self.metrics.endpoints_aborted.inc();
+        }
+        // A second endpoint is minted on the connector's task, so its handle
+        // arrives here the same way a client endpoint's does.
+        for (token, handle) in self.backends.take_minted() {
+            let bound = self
+                .by_token
+                .get(&token)
+                .copied()
+                .and_then(|key| self.sessions.get_mut(&key))
+                .filter(|session| session.token == token);
+            match bound {
+                Some(session) => {
+                    session.backends.push(Side {
+                        handle: Some(handle),
+                        ..Side::default()
+                    });
+                    did = true;
+                }
+                None => {
+                    handle.abort();
+                    self.counters.registrations_orphaned += 1;
+                    self.metrics.registrations_orphaned.inc();
+                    self.metrics.endpoints_aborted.inc();
+                }
+            }
         }
         self.metrics
             .registrations_pending
@@ -1303,28 +1380,37 @@ impl Worker {
                 &mut budget,
                 counters,
             );
-            let route = s
-                .backend
-                .handle
-                .as_ref()
-                .map(DmeshIoHandle::backend_route)
-                .unwrap_or_default();
-            let backend = pump_side(
-                worker_id,
-                &mut s.backend,
-                request,
-                route,
-                &mut budget,
-                counters,
-            );
-            match (client, backend) {
-                (Ok(a), Ok(b)) => {
-                    did |= a.progressed | b.progressed;
-                    if a.finished && b.finished {
-                        closed.push((key, false));
+            // Every backend publishes on the request connection with its own
+            // route, so the destination travels with the bytes rather than
+            // with the session.
+            let mut progressed = false;
+            let mut finished = true;
+            let mut failed = client.is_err();
+            if let Ok(client) = &client {
+                progressed |= client.progressed;
+                finished &= client.finished;
+            }
+            for side in s.backends.iter_mut() {
+                let route = side
+                    .handle
+                    .as_ref()
+                    .map(DmeshIoHandle::backend_route)
+                    .unwrap_or_default();
+                match pump_side(worker_id, side, request, route, &mut budget, counters) {
+                    Ok(pumped) => {
+                        progressed |= pumped.progressed;
+                        finished &= pumped.finished;
                     }
+                    Err(_) => failed = true,
                 }
-                _ => closed.push((key, true)),
+            }
+            if failed {
+                closed.push((key, true));
+            } else {
+                did |= progressed;
+                if finished {
+                    closed.push((key, false));
+                }
             }
             if budget == 0 {
                 break;
@@ -1355,16 +1441,21 @@ impl Worker {
         if let Some(c) = s.client.conn {
             self.by_conn.remove(&c);
         }
-        if let Some(c) = s.backend.conn {
-            self.by_conn.remove(&c);
+        for side in &s.backends {
+            if let Some(c) = side.conn {
+                self.by_conn.remove(&c);
+            }
         }
         let token = s.token;
         self.pending.remove(&token);
+        self.by_token.remove(&token);
         // Withdraw this session's channel before the next generation is
         // admitted, so a connector cannot take a closed session's endpoint.
         self.backends.remove(&s.backend_key());
         s.client.detach(self.id, &mut self.counters, &self.metrics);
-        s.backend.detach(self.id, &mut self.counters, &self.metrics);
+        for side in s.backends.iter_mut() {
+            side.detach(self.id, &mut self.counters, &self.metrics);
+        }
         drop(s);
         let _ = self.events.send(DmeshEvent::ConnClosed(token));
         self.slots.release(token);
@@ -1410,14 +1501,42 @@ impl Worker {
         let Some(key) = self.by_request_route.get(&request_route).copied() else {
             return self.decline(Decline::UnknownReply, conn, flow, None);
         };
+        // Several backends reply to one client on one route, so the reply's
+        // own source Pod is what names which of them sent it. A side whose
+        // route names no Pod takes any reply, which is the single-backend case.
         let attached = match self.sessions.get_mut(&key) {
             None => None,
-            // One reply direction per session.
-            Some(s) if s.backend.conn.is_some_and(|c| c != conn) => Some((false, s.backend_addr)),
             Some(s) => {
-                s.backend.conn = Some(conn);
-                s.backend.staging_set = false;
-                Some((true, s.backend_addr))
+                let addr = s.backend_addr;
+                let source = flow.src_pod;
+                let mut matched = None;
+                let mut first_free = None;
+                let mut free = 0usize;
+                for (index, side) in s.backends.iter().enumerate() {
+                    if side.conn.is_some() {
+                        continue;
+                    }
+                    free += 1;
+                    first_free.get_or_insert(index);
+                    if matched.is_none() && side.routes_to_pod(source) {
+                        matched = Some(index);
+                    }
+                }
+                // One free endpoint is not a guess: it is the only one this
+                // reply can belong to, which is every single-backend session.
+                // Two would be, so two decline.
+                let chosen = matched.or(if free == 1 { first_free } else { None });
+                match chosen {
+                    Some(index) => {
+                        let side = &mut s.backends[index];
+                        side.conn = Some(conn);
+                        side.staging_set = false;
+                        Some((true, addr))
+                    }
+                    // Every backend this session dialled already has its reply
+                    // direction.
+                    None => Some((false, addr)),
+                }
             }
         };
         match attached {
@@ -1473,10 +1592,10 @@ impl Worker {
                 conn: Some(conn),
                 ..Side::default()
             },
-            backend: Side {
+            backends: vec![Side {
                 handle: Some(backend_handle),
                 ..Side::default()
-            },
+            }],
             backend_addr,
         };
         if let Err(error) = self.backends.publish(session.backend_key(), backend_io) {
@@ -1491,6 +1610,7 @@ impl Worker {
         self.order.push(conn);
         self.by_conn.insert(conn, conn);
         self.by_request_route.insert(request_route, conn);
+        self.by_token.insert(token, conn);
         self.pending.insert(token, conn);
 
         let ready = DmeshEvent::ConnReady(
@@ -1825,6 +1945,7 @@ async fn build_worker(worker_id: c_int) -> Result<Option<Worker>, String> {
         sessions: HashMap::new(),
         by_conn: HashMap::new(),
         by_request_route: HashMap::new(),
+        by_token: HashMap::new(),
         order: Vec::new(),
         drain_next: 0,
         slots: Slots::new(worker_id.max(0) as u16),
@@ -2137,10 +2258,8 @@ pub unsafe extern "C" fn l7_conn_segment(
             return -1;
         };
         // Route input to its session direction.
-        let side = if s.client.conn == Some(conn) {
-            &mut s.client
-        } else {
-            &mut s.backend
+        let Some(side) = s.side_of(conn) else {
+            return -1;
         };
         let Some(handle) = side.handle.as_ref() else {
             return 0;
@@ -2165,10 +2284,8 @@ pub unsafe extern "C" fn l7_conn_eof(worker_id: c_int, conn: u64) {
             return;
         };
         if let Some(s) = w.sessions.get_mut(&key) {
-            let side = if s.client.conn == Some(conn) {
-                &s.client
-            } else {
-                &s.backend
+            let Some(side) = s.side_of(conn) else {
+                return;
             };
             if let Some(h) = side.handle.as_ref() {
                 h.close_rx();
@@ -2552,6 +2669,7 @@ mod tests {
             sessions: HashMap::new(),
             by_conn: HashMap::new(),
             by_request_route: HashMap::new(),
+            by_token: HashMap::new(),
             order: Vec::new(),
             drain_next: 0,
             slots: Slots::new(id.max(0) as u16),
@@ -2612,6 +2730,15 @@ mod tests {
             peer_pod,
             dst_port,
             ..request_flow(service, peer_pod, dst_port)
+        }
+    }
+
+    /// A reply carries two Pods: the backend that is sending it, and the
+    /// client whose route it belongs to.
+    fn reply_flow_from(service: i32, backend_pod: i32, peer_pod: i32, dst_port: u16) -> DmeshL7Flow {
+        DmeshL7Flow {
+            src_pod: backend_pod,
+            ..reply_flow(service, peer_pod, dst_port)
         }
     }
 
@@ -2715,6 +2842,66 @@ mod tests {
             other => panic!("expected a ready event, got {other:?}"),
         }
         assert!(tw.backends.contains_service(&service_addr(21)));
+        with_test_worker(|w| w.close_session(key));
+    }
+
+    #[test]
+    fn another_services_address_is_resolved_rather_than_owned() {
+        // `SessionOwn` is `BackendRoute::Any`, which routes on the session's
+        // own Service. If a foreign Service's address answered that way, a
+        // route that crossed Services would land on the original Service's
+        // backend with no error and no counter — which is why the resolver is
+        // narrowed before the target guard is relaxed, not after.
+        let tw = install_worker(0);
+        with_test_worker(|w| {
+            w.service_targets
+                .insert(21, "10.107.58.88:9092".parse().unwrap());
+            w.service_targets
+                .insert(22, "10.107.58.99:9092".parse().unwrap());
+            w.service_endpoints.insert(
+                21,
+                vec![(
+                    "10.244.0.11:9092".parse().unwrap(),
+                    "11111111-1111-1111-1111-111111111111".to_string(),
+                )],
+            );
+            w.service_endpoints.insert(
+                22,
+                vec![(
+                    "10.244.0.21:9092".parse().unwrap(),
+                    "11111111-1111-1111-1111-111111111111".to_string(),
+                )],
+            );
+            w.place_service_targets();
+        });
+
+        for foreign in ["10.107.58.99:9092", "0.0.0.22:0"] {
+            let flow = request_flow(21, 1, 4001);
+            let key = session_key(1, 4001);
+            assert_eq!(unsafe { l7_conn_open(0, key, &flow) }, 0);
+            let token = token_of(key);
+            let selected: SocketAddr = if foreign == "0.0.0.22:0" {
+                service_addr(22)
+            } else {
+                foreign.parse().unwrap()
+            };
+            assert_eq!(
+                tw.backends.take_session(token, selected).err(),
+                Some(dmesh_doca::TakeError::EndpointUnresolved),
+                "a foreign Service's own address must not resolve as this session's"
+            );
+            with_test_worker(|w| w.close_session(key));
+        }
+
+        // A live endpoint of that other Service is a destination like any
+        // other: what guards the dial is liveness, not Service identity.
+        let flow = request_flow(21, 2, 4002);
+        let key = session_key(2, 4002);
+        assert_eq!(unsafe { l7_conn_open(0, key, &flow) }, 0);
+        assert!(tw
+            .backends
+            .take_session(token_of(key), "10.244.0.21:9092".parse().unwrap())
+            .is_ok());
         with_test_worker(|w| w.close_session(key));
     }
 
@@ -3032,15 +3219,100 @@ mod tests {
         with_test_worker(|w| {
             assert_eq!(w.by_request_route.get(&route), Some(&key));
             assert_eq!(w.by_conn.get(&reply), Some(&key));
-            assert_eq!(w.sessions[&key].backend.conn, Some(reply));
+            assert_eq!(w.sessions[&key].backends[0].conn, Some(reply));
             assert_eq!(w.counters.reply_connections_attached, 1);
             assert_eq!(w.sessions.len(), 1, "a reply is not a new session");
         });
         // A second, concurrent reply direction is refused rather than swapped in.
         assert_eq!(unsafe { l7_conn_open(0, 778, &rep) }, DECLINE_SESSION_LIMIT);
         with_test_worker(|w| {
-            assert_eq!(w.sessions[&key].backend.conn, Some(reply));
+            assert_eq!(w.sessions[&key].backends[0].conn, Some(reply));
             w.close_session(key);
+            assert!(w.by_request_route.is_empty());
+        });
+    }
+
+    #[test]
+    fn each_backend_gets_its_own_reply_direction() {
+        // Several backends reply to one client on one route. Keyed by the
+        // client alone they would collide on one side, and one backend's bytes
+        // would be delivered as another's.
+        let tw = install_worker(0);
+        let first_endpoint: SocketAddr = "10.244.0.11:9092".parse().unwrap();
+        let second_endpoint: SocketAddr = "10.244.0.12:9092".parse().unwrap();
+        with_test_worker(|w| {
+            w.service_targets
+                .insert(21, "10.107.58.88:9092".parse().unwrap());
+            w.service_endpoints.insert(
+                21,
+                vec![
+                    (
+                        first_endpoint,
+                        "11111111-1111-1111-1111-111111111111".to_string(),
+                    ),
+                    (
+                        second_endpoint,
+                        "44444444-4444-4444-4444-444444444444".to_string(),
+                    ),
+                ],
+            );
+            w.place_service_targets();
+        });
+
+        let req = request_flow(21, 3, 4003);
+        let key = session_key(3, 4003);
+        assert_eq!(unsafe { l7_conn_open(0, key, &req) }, 0);
+        let token = token_of(key);
+
+        // Two endpoints, two channels: the second is minted rather than
+        // refused, and its handle reaches the worker like any registration.
+        tw.backends.take_session(token, first_endpoint).unwrap();
+        tw.backends.take_session(token, second_endpoint).unwrap();
+        with_test_worker(|w| {
+            w.collect_registrations();
+            assert_eq!(w.sessions[&key].backends.len(), 2);
+        });
+        assert_eq!(
+            tw.metrics.backend_take_errors.get(),
+            0,
+            "a second endpoint is not a take error"
+        );
+
+        // The reply from the *second* backend must not land on the first.
+        let from_nine = reply_flow_from(21, 9, 3, 4003);
+        let reply_nine = (8u64 << 24) | session_key(0, 32768);
+        assert_eq!(unsafe { l7_conn_open(0, reply_nine, &from_nine) }, 0);
+        let from_seven = reply_flow_from(21, 7, 3, 4003);
+        let reply_seven = (9u64 << 24) | session_key(0, 32769);
+        assert_eq!(unsafe { l7_conn_open(0, reply_seven, &from_seven) }, 0);
+
+        with_test_worker(|w| {
+            let session = &w.sessions[&key];
+            let nine = session
+                .backends
+                .iter()
+                .find(|side| side.routes_to_pod(9))
+                .expect("the second backend is held");
+            let seven = session
+                .backends
+                .iter()
+                .find(|side| side.routes_to_pod(7))
+                .expect("the first backend is held");
+            assert_eq!(nine.conn, Some(reply_nine));
+            assert_eq!(seven.conn, Some(reply_seven));
+            assert_eq!(w.counters.reply_connections_attached, 2);
+        });
+
+        // A third reply belongs to no backend this session dialled.
+        let spare = (10u64 << 24) | session_key(0, 32770);
+        assert_eq!(
+            unsafe { l7_conn_open(0, spare, &from_seven) },
+            DECLINE_SESSION_LIMIT
+        );
+
+        with_test_worker(|w| {
+            w.close_session(key);
+            assert!(w.by_conn.is_empty(), "every backend's handle is released");
             assert!(w.by_request_route.is_empty());
         });
     }

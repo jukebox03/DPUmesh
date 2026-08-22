@@ -76,6 +76,9 @@ RATE_THREADS="${RATE_THREADS:-1 2 4 8}"
 LAT_SIZES="${LAT_SIZES:-64 128 256 512 1024}"
 BW_SIZES="${BW_SIZES:-32 128 512 2048 8192 32768 131072 524288 1000000 2097152 8000000}"
 BENCH_NUMA_NODE="${BENCH_NUMA_NODE:-}"
+# Induced backend failure for the retry and failure-accrual arms; 0 = never.
+BENCH_FAIL_EVERY="${BENCH_FAIL_EVERY:-0}"
+export BENCH_FAIL_EVERY
 BENCH_CORE_BASE="${BENCH_CORE_BASE:-}"
 BENCH_NUMA_POLICY="${BENCH_NUMA_POLICY:-local}"
 BENCH_DEPLOY_SCOPE="${BENCH_DEPLOY_SCOPE:-all}"
@@ -96,7 +99,7 @@ export DPUMESH_L7_LINKERD_WORKER
 # are architecture, not benchmark knobs: an environment override must not
 # silently turn one API into an unmeshed L4 deployment.
 DPUMESH_L7_OPAQUE_SVC="$NS/echo-dpumesh,$NS/loopback-dpumesh,$NS/verbs-dpumesh,$NS/preload-dpumesh,$NS/preload-sock"
-DPUMESH_L7_SVC="$NS/echo-grpc-dpumesh"
+DPUMESH_L7_SVC="$NS/echo-grpc-dpumesh,$NS/echo-grpc-alt,$NS/http1-dpumesh"
 BENCH_NUMA_CONFIGURED=0
 
 # Which build the gRPC server image carries. `asan` instruments echo_grpc and
@@ -388,7 +391,38 @@ build_images() {
 }
 
 ### ------------------------------------------------------------ DPU process
+# A DPU that is already gone is the one case where the evidence for why is
+# still on the machine, and a redeploy destroys all of it: the `screen` session
+# it ran under, the kernel ring buffer that outlived it, and the core pattern
+# that says where a core would have been written. Snapshot before the kill, and
+# only when the process is absent — a running DPU has nothing to explain.
+# Nothing here may fail its caller. It runs on the way to a redeploy, where a
+# missing `screen` session, an unreadable kernel log or a full disk is not a
+# reason to stop one -- and `screen -ls` alone answers non-zero whenever no
+# session exists, which is the normal case for a process that is already gone.
+# The presence probe asks with the DPU's own privileges, the way every other
+# probe of that process in this script does.
+capture_absent_dpu() {
+    local snapshot="$OUT/dpu-absent-$(date +%Y%m%d-%H%M%S).log"
+    dpu_sudo 'pgrep -x dpumesh_dpu >/dev/null' >/dev/null 2>&1 && return 0
+    ssh_dpu "test -s $DPU_LOG" >/dev/null 2>&1 || return 0
+    mkdir -p "$OUT" 2>/dev/null || return 0
+    {
+        # The session belongs to root, so the login user's socket directory is
+        # empty whatever the process is doing. Dead sessions accumulate ahead of
+        # the live listing, so only the newest are worth carrying.
+        echo "=== screen -ls"; dpu_sudo 'screen -ls | head -20' 2>&1 || true
+        echo "=== dmesg (tail)"; dpu_sudo 'dmesg | tail -80' 2>&1 || true
+        echo "=== core pattern"
+        ssh_dpu 'cat /proc/sys/kernel/core_pattern; ulimit -c' 2>&1 || true
+        echo "=== $DPU_LOG (tail)"; ssh_dpu "tail -80 $DPU_LOG" 2>&1 || true
+    } >"$snapshot" 2>&1 || true
+    warn "dpumesh_dpu was already absent; evidence captured in $snapshot"
+    return 0
+}
+
 stop_dpu() {
+    capture_absent_dpu
     info "Stopping dpumesh_dpu..."
     # Match process command lines even when the main thread has been renamed.
     ssh_dpu "echo '$DPU_PASS' | sudo -S bash -c \"pids=\\\$(pgrep -f '[d]pumesh_dpu'); [ -z \\\"\\\$pids\\\" ] || kill -9 \\\$pids\" 2>/dev/null; true" 2>&1 | sed 's/^\[sudo\][^:]*: *//' || true
@@ -760,6 +794,8 @@ get_pod_cores() {
                 preload-dpumesh) rel="6";; preload-echo) rel="7";;
                 preload-bench) rel="8";; bench-grpc-dpumesh) rel="9";;
                 echo-grpc-dpumesh) rel="10";;
+                http1-echo) rel="11";; http1-bench) rel="12";;
+                echo-grpc-alt) rel="13";;
             esac ;;
     esac
     [ -z "$rel" ] && { echo ""; return; }
@@ -874,6 +910,8 @@ validate_mesh_metadata() {
         loopback-dpumesh:"$CTRL_PORT" verbs-dpumesh:"$CTRL_PORT"
         preload-dpumesh:9095 preload-echo:9100 preload-bench:"$CTRL_PORT"
         bench-grpc-dpumesh:"$CTRL_PORT" echo-grpc-dpumesh:"$CTRL_PORT"
+        echo-grpc-alt:"$CTRL_PORT"
+        http1-echo:9103 http1-bench:"$CTRL_PORT"
     )
     local entry deployment port control_plane skipped
     for entry in "${entries[@]}"; do
@@ -1017,6 +1055,15 @@ scale_up_with_wait() {
     fi
     ensure_image_imported "$image"
     kubectl scale deployment "$app" --replicas=1 -n "$NS"
+    # `kubectl wait` on a label set that is still empty fails immediately rather
+    # than waiting, and admission runs between the scale and the Pod object, so
+    # the object has to be there before there is a condition to wait on.
+    i=0
+    while [ "$i" -lt 120 ] &&
+          [ -z "$(kubectl get pods -n "$NS" -l "app=$app" -o name 2>/dev/null)" ]; do
+        sleep 0.25
+        i=$((i + 1))
+    done
     if ! kubectl wait --for=condition=Ready pod -l "app=$app" -n "$NS" --timeout=120s 2>&1; then
         err "$app failed to start"; kubectl describe pod -l "app=$app" -n "$NS" | tail -15; exit 1
     fi
@@ -1061,9 +1108,12 @@ start_pods() {
         scale_up_with_wait "preload-dpumesh" "$ready" "$IMG_PRELOAD_DPU"
         scale_up_with_wait "preload-echo"    "$ready" "$IMG_PRELOAD_SOCK"
         scale_up_with_wait "preload-bench"   ""       "$IMG_PRELOAD_SOCK"
+        scale_up_with_wait "http1-echo"      "$ready" "$IMG_PRELOAD_SOCK"
+        scale_up_with_wait "http1-bench"     ""       "$IMG_PRELOAD_SOCK"
     fi
     if [ "$scope" = all ] || [ "$scope" = grpc ]; then
         scale_up_with_wait "echo-grpc-dpumesh"  "$ready" "$IMG_ECHO_GRPC"
+        scale_up_with_wait "echo-grpc-alt"      "$ready" "$IMG_ECHO_GRPC"
         scale_up_with_wait "bench-grpc-dpumesh" "$ready" "$IMG_BENCH_GRPC"
     fi
 }
@@ -1424,6 +1474,7 @@ arm_balance() {
 app_of()     { case "$1" in
                  dpumesh)      echo bench-dpumesh ;;
                  preload)      echo preload-bench ;;
+                 http1)        echo http1-bench ;;
                  grpc-dpumesh) echo bench-grpc-dpumesh ;;
                  *)            echo "" ;;
                esac; }

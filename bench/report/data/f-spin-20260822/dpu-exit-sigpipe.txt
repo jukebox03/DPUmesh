@@ -1,0 +1,48 @@
+The second unexplained DPU exit, and the mechanism that makes one.
+
+=== the process ignores no signals (before the fix)
+  SigIgn: 0000000000000000
+  SigCgt: 0000000100000000     (one glibc-internal thread signal)
+  /proc/sys/kernel/print-fatal-signals = 0
+  /proc/sys/debug/exception-trace      = 0
+  core_pattern = /tmp/core.%e.%p, Max core file size = unlimited
+  df /tmp: 15G available, seven older cores present
+
+SIGPIPE's default action terminates without a core, and this kernel
+reports no fatal signals, so taking one is indistinguishable from a
+clean exit. Nothing in doca/ or src/ calls exit(), _exit() or abort(),
+and no Rust code calls process::exit -- the process has no way to end
+itself deliberately. A Rust binary gets SIGPIPE ignored by the runtime
+start-up its own main runs; the embedded proxy is a static library
+linked into a C main, so that start-up never runs.
+
+=== sending SIGPIPE to the running DPU, before the fix
+=== before: pid=3015408
+log bytes: 17898
+cores: 7
+screen sessions: 481
+--- last log line before the signal
+[02:47:50:141447][1880013216][DOCA][WRN][dpu_proxy.c:2501][px_peer_stats_report] proxy: worker 0 peer poison=0 refused=none inbound admitted=7 denied=0 no-policy=0 mixed-callee-unprotected=0 peer-pin-conflict=0
+
+=== sending SIGPIPE
+=== after
+process present: 0
+cores: 7
+screen sessions: 480
+log bytes: 17898
+--- last log line after
+[02:47:50:141447][1880013216][DOCA][WRN][dpu_proxy.c:2501][px_peer_stats_report] proxy: worker 0 peer poison=0 refused=none inbound admitted=7 denied=0 no-policy=0 mixed-callee-unprotected=0 peer-pin-conflict=0
+--- any fault text in the whole log?
+0
+
+That is finding 2.2's signature line for line: no core, the log frozen
+on a routine statistics line, no fault text anywhere in it, and the
+screen session gone rather than left as (Dead ???).
+
+=== the same signal, after signal(SIGPIPE, SIG_IGN) in main()
+pid=3026722
+SigIgn:	0000000000001000
+cores before: 7
+process present after SIGPIPE: 1
+same pid still: 3026722
+cores after: 7

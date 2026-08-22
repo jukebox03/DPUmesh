@@ -1,0 +1,82 @@
+The second unexplained DPU exit: what was asked and what answered.
+
+The process had been up 9.8 hours; a deploy was restarting the node agent.
+DPU clock runs ~9h behind the host: DPU 00:24:17 is host 09:27:1x, and the
+deploy's next step found the process gone at host 09:27:50.
+
+=== last lines the process wrote (log mtime 2026-08-22_00:24:17, DPU clock)
+=== last 12 lines ===
+[00:24:17:960175][2855718944][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=2 pod_id=2 service_id=14 pod_uid=8506dac2-09ca-4ec7-b559-0de1a3c66bfa generation=1787358256781412677 revocations=49
+[00:24:17:960200][2855718944][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=3 pod_id=3 service_id=-1 pod_uid=f2fd1d62-ad30-425b-b356-bd3ff604401d generation=1787358256781412677 revocations=50
+[00:24:17:960231][2855718944][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=4 pod_id=4 service_id=21 pod_uid=7683c6e2-88a1-4e7d-955a-f665e04c7400 generation=1787358256781412677 revocations=51
+[00:24:17:960245][2855718944][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=5 pod_id=5 service_id=27 pod_uid=4f673a38-7d4d-454c-b747-ad35d84421b0 generation=1787358256781412677 revocations=52
+[00:24:17:960257][2855718944][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=6 pod_id=6 service_id=25 pod_uid=7aa0de41-50d5-4196-8a34-a56bc8f32f3c generation=1787358256781412677 revocations=53
+[00:24:17:960270][2855718944][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=7 pod_id=7 service_id=26 pod_uid=d522459f-3f40-4681-b777-c0cec6a298b7 generation=1787358256781412677 revocations=54
+[00:24:17:960287][2855718944][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=8 pod_id=8 service_id=18 pod_uid=85b059c8-8724-415f-b8d0-815c2ed5b0ad generation=1787358256781412677 revocations=55
+[00:24:17:960304][2855718944][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=9 pod_id=9 service_id=16 pod_uid=414f7f38-3a7a-4d90-9d24-8da190d2a35a generation=1787358256781412677 revocations=56
+[00:24:17:960316][2855718944][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=10 pod_id=10 service_id=15 pod_uid=6deb149e-eadc-4f08-893a-e0b97d418f54 generation=1787358256781412677 revocations=57
+[00:24:17:960327][2855718944][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=11 pod_id=11 service_id=-1 pod_uid=f6f03407-be88-49f8-b1f0-9562954972f4 generation=1787358256781412677 revocations=58
+[00:24:17:960338][2855718944][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=12 pod_id=12 service_id=-1 pod_uid=ae53a1b6-c077-4e47-ac40-0f6568ec61c4 generation=1787358256781412677 revocations=59
+[00:24:17:960349][2855718944][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=13 pod_id=13 service_id=-1 pod_uid=e3135a45-1e38-4f3b-8516-daec38043b20 generation=1787358256781412677 revocations=60
+(the fault/abort/assert/panic/killed/signal grep over the whole 4.1 MB log
+ returned nothing)
+
+=== uptime / meminfo ===
+ 00:55:08 up 21 days, 12:38,  3 users,  load average: 0.53, 0.58, 0.85
+MemTotal:       32252380 kB
+MemAvailable:   25124904 kB
+SwapTotal:             0 kB
+SwapFree:              0 kB
+=== dmesg: oom / segv / kill / trace ===
+=== dmesg last 25 ===
+[Wed Aug 12 01:19:17 2026] perf: interrupt took too long (5137 > 5082), lowering kernel.perf_event_max_sample_rate to 38750
+[Wed Aug 12 01:19:17 2026] perf: interrupt took too long (6481 > 6421), lowering kernel.perf_event_max_sample_rate to 30750
+[Wed Aug 12 01:19:17 2026] perf: interrupt took too long (8137 > 8101), lowering kernel.perf_event_max_sample_rate to 24500
+[Wed Aug 12 01:19:17 2026] perf: interrupt took too long (10215 > 10171), lowering kernel.perf_event_max_sample_rate to 19500
+[Wed Aug 12 01:19:17 2026] perf: interrupt took too long (12806 > 12768), lowering kernel.perf_event_max_sample_rate to 15500
+[Wed Aug 12 01:19:17 2026] perf: interrupt took too long (16023 > 16007), lowering kernel.perf_event_max_sample_rate to 12250
+[Sat Aug 15 02:52:03 2026] MFT device name created: id: 6523, slot id: 0, device name: /dev/mst/mt6523_pci_cr0.0 domain: 0x0 bus: 0x1
+[Sat Aug 15 02:52:03 2026] MFT device name created: id: 6523, slot id: 0, device name: /dev/mst/mt6523_pci_cr0.0 domain: 0x0 bus: 0x2
+[Sat Aug 15 02:52:03 2026] MFT device name created: id: 6523, slot id: 0, device name: /dev/mst/mt6523_pci_cr0.0 domain: 0x0 bus: 0x2
+[Sat Aug 15 02:52:03 2026] MFT device name created: id: 6523, slot id: 0, device name: /dev/mst/mt6523_pci_cr0.0 domain: 0x0 bus: 0x4
+[Sat Aug 15 02:52:03 2026] MFT device name created: id: 6523, slot id: 0, device name: /dev/mst/mt6523_pci_cr0.0 domain: 0x0 bus: 0x5
+[Tue Aug 18 06:08:13 2026] fwctl fwctl0: dpa-ps(2404390): has requested full access to the physical device
+[Tue Aug 18 17:14:06 2026] MFT device name created: id: 6523, slot id: 0, device name: /dev/mst/mt6523_pci_cr0.0 domain: 0x0 bus: 0x1
+[Tue Aug 18 17:14:06 2026] MFT device name created: id: 6523, slot id: 0, device name: /dev/mst/mt6523_pci_cr0.0 domain: 0x0 bus: 0x2
+[Tue Aug 18 17:14:06 2026] MFT device name created: id: 6523, slot id: 0, device name: /dev/mst/mt6523_pci_cr0.0 domain: 0x0 bus: 0x2
+[Tue Aug 18 17:14:06 2026] MFT device name created: id: 6523, slot id: 0, device name: /dev/mst/mt6523_pci_cr0.0 domain: 0x0 bus: 0x4
+[Tue Aug 18 17:14:06 2026] MFT device name created: id: 6523, slot id: 0, device name: /dev/mst/mt6523_pci_cr0.0 domain: 0x0 bus: 0x5
+[Tue Aug 18 17:21:36 2026] mlx5_core 0000:03:00.1: MLX5E: StrdRq(1) RqSz(16) StrdSz(2048) RxCqeCmprss(0 enhanced)
+[Tue Aug 18 17:21:36 2026] mlx5_core 0000:03:00.1: MLX5E: StrdRq(1) RqSz(16) StrdSz(2048) RxCqeCmprss(0 enhanced)
+[Tue Aug 18 17:21:36 2026] mlx5_core 0000:03:00.1 pf1vf0: renamed from eth0
+[Tue Aug 18 17:21:36 2026] mlx5_core 0000:03:00.1 pf1vf1: renamed from eth1
+[Tue Aug 18 17:21:36 2026] IPv6: ADDRCONF(NETDEV_CHANGE): pf1vf0: link becomes ready
+[Tue Aug 18 17:21:36 2026] mlx5_core 0000:03:00.1 mlx5_1: Port: 2 Link ACTIVE
+[Tue Aug 18 17:21:36 2026] mlx5_core 0000:03:00.1 mlx5_1: Port: 3 Link ACTIVE
+[Tue Aug 18 17:21:37 2026] IPv6: ADDRCONF(NETDEV_CHANGE): pf1vf1: link becomes ready
+=== screen sessions as root ===
+There are screens on:
+	2787966.dpumesh-bench	(08/22/2026 12:54:48 AM)	(Detached)
+	2019194.dpumesh-bench	(07/31/2026 12:16:47 PM)	(Dead ???)
+	2009106.dpumesh-bench	(07/31/2026 12:16:47 PM)	(Dead ???)
+	1594704.dpumesh-bench	(07/31/2026 12:16:47 PM)	(Dead ???)
+	1583885.dpumesh-bench	(07/31/2026 12:16:47 PM)	(Dead ???)
+	... 471 more dead sessions from an earlier month
+Remove dead screens with 'screen -wipe'.
+476 Sockets in /run/screen/S-root.
+=== core files ===
+/tmp/core.%e.%p
+-rw------- 1 root root 515792896 Aug 18 03:20 /tmp/core.dmesh-w0.1845949
+-rw------- 1 root root 515547136 Aug 18 03:24 /tmp/core.dmesh-w0.1922491
+-rw------- 1 root root 649895936 Aug 18 04:11 /tmp/core.dmesh-w0.2038455
+-rw------- 1 root root 379559936 Aug 12 04:26 /tmp/core.dmesh-w0.2226733
+-rw------- 1 root root 552615936 Aug 19 18:45 /tmp/core.dmesh-w0.3648318
+-rw------- 1 root root 515956736 Aug 18 01:00 /tmp/core.dpumesh_dpu.1532719
+-rw------- 1 root root 583036928 Aug 18 02:49 /tmp/core.dpumesh_dpu.1816334
+
+/var/crash:
+total 0
+
+Note: the single Detached session above was created by the redeploy that
+followed, at DPU 00:54:48. The session the exited process ran under is not in
+this list at all -- neither live nor dead.

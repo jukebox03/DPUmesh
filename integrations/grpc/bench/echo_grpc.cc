@@ -5,8 +5,14 @@
  * `dmesh` accepts native connections through the DPUmesh passive listener,
  * `tcp` binds a socket. The process runs until killed; the harness restarts
  * pods between configurations, never the server between runs.
+ *
+ * BENCH_FAIL_EVERY makes the server fail on purpose: every Nth call answers
+ * INTERNAL instead of a payload. A retry policy and a failure-accrual policy
+ * are both statements about what happens when a backend fails, so neither can
+ * be tested against a server that always succeeds.
  */
 
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
@@ -31,9 +37,15 @@ using ::grpc::testing::SimpleResponse;
 
 class EchoService final : public BenchmarkService::Service {
  public:
+  explicit EchoService(long fail_every) : fail_every_(fail_every) {}
+
   ::grpc::Status UnaryCall(::grpc::ServerContext* /*context*/,
                            const SimpleRequest* request,
                            SimpleResponse* response) override {
+    if (fail_every_ > 0 &&
+        (calls_.fetch_add(1, std::memory_order_relaxed) + 1) % fail_every_ == 0) {
+      return ::grpc::Status(::grpc::StatusCode::INTERNAL, "induced failure");
+    }
     if (request->response_size() < 0) {
       return ::grpc::Status(::grpc::StatusCode::INVALID_ARGUMENT,
                             "negative response size");
@@ -45,6 +57,10 @@ class EchoService final : public BenchmarkService::Service {
     }
     return ::grpc::Status::OK;
   }
+
+ private:
+  const long fail_every_;
+  std::atomic<long> calls_{0};
 };
 
 }  // namespace
@@ -56,6 +72,9 @@ int main() {
   if (const char* t = std::getenv("BENCH_TRANSPORT")) transport = t;
   if (const char* r = std::getenv("BENCH_REACTORS")) reactors = std::atoi(r);
   if (const char* p = std::getenv("ECHO_PORT")) port = std::atoi(p);
+  long fail_every = 0;
+  if (const char* f = std::getenv("BENCH_FAIL_EVERY")) fail_every = std::atol(f);
+  if (fail_every < 0) fail_every = 0;
   if (reactors < 1) reactors = 1;
 
   std::shared_ptr<DmeshRuntime> runtime;
@@ -75,7 +94,7 @@ int main() {
     return 1;
   }
 
-  EchoService service;
+  EchoService service(fail_every);
   ::grpc::ServerBuilder builder;
   builder.RegisterService(&service);
   int selected_port = 0;

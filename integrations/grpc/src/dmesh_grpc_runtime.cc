@@ -9,6 +9,7 @@
 #include <mutex>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 #include <grpc/event_engine/event_engine.h>
 #include <grpc/event_engine/internal/memory_allocator_impl.h>
@@ -67,6 +68,66 @@ EventEngine::ResolvedAddress NativeAddress(int pod, uint16_t port) {
       reinterpret_cast<const sockaddr*>(&address), sizeof(address));
 }
 
+// One connection can be owned by gRPC for substantially longer than the
+// public Channel that created it. The lease gives the public channel owner a
+// safe, idempotent way to retire that native connection without reaching into
+// the Endpoint object retained by gRPC.
+class ConnectionLease final {
+ public:
+  explicit ConnectionLease(std::function<void()> release)
+      : release_(std::move(release)) {}
+
+  bool ClaimClose() {
+    return !closed_.exchange(true, std::memory_order_acq_rel);
+  }
+
+  void Release() {
+    if (ClaimClose() && release_) release_();
+  }
+
+ private:
+  const std::function<void()> release_;
+  std::atomic<bool> closed_{false};
+};
+
+// Keeps the connection lease alive for exactly as long as gRPC keeps the
+// Endpoint transport. A client Endpoint disappearing means gRPC has abandoned
+// that HTTP/2 connection (including a failed handshaker or reconnect attempt),
+// so it must use the prompt reset path instead of serially waiting for a FIN
+// custody deadline. The one-shot lease makes Endpoint and public Channel
+// teardown race safely.
+class LeasedEndpointTransport final : public EndpointTransport {
+ public:
+  LeasedEndpointTransport(std::unique_ptr<EndpointTransport> delegate,
+                          std::shared_ptr<ConnectionLease> lease,
+                          std::function<void()> on_destroy)
+      : delegate_(std::move(delegate)),
+        lease_(std::move(lease)),
+        on_destroy_(std::move(on_destroy)) {}
+
+  ~LeasedEndpointTransport() override {
+    Close();
+    if (on_destroy_) on_destroy_();
+  }
+
+  void BindDriver(std::weak_ptr<DmeshEndpointDriver> driver) override {
+    delegate_->BindDriver(std::move(driver));
+  }
+  size_t MaxPostSize() const override { return delegate_->MaxPostSize(); }
+  PostResult Post(size_t length,
+                  absl::FunctionRef<void(Reservation)> fill) override {
+    return delegate_->Post(length, fill);
+  }
+  absl::Status Flush() override { return delegate_->Flush(); }
+  void ResumeReceive() override { delegate_->ResumeReceive(); }
+  void Close() override { lease_->Release(); }
+
+ private:
+  const std::unique_ptr<EndpointTransport> delegate_;
+  const std::shared_ptr<ConnectionLease> lease_;
+  const std::function<void()> on_destroy_;
+};
+
 // Delegate every EventEngine operation except DPUmesh connection creation.
 class DmeshClientEventEngine final : public EventEngine {
  public:
@@ -77,6 +138,7 @@ class DmeshClientEventEngine final : public EventEngine {
         delegate_(grpc_event_engine::experimental::GetDefaultEventEngine()) {}
 
   ~DmeshClientEventEngine() override {
+    ReleaseConnections();
     std::unordered_map<uint64_t, PendingConnect> pending;
     {
       std::lock_guard<std::mutex> lock(mu_);
@@ -128,10 +190,22 @@ class DmeshClientEventEngine final : public EventEngine {
     const uint64_t id = next_connect_id_.fetch_add(1, std::memory_order_relaxed);
     ConnectionHandle handle{
         {reinterpret_cast<intptr_t>(this), static_cast<intptr_t>(id)}};
+    bool closing = false;
     {
       std::lock_guard<std::mutex> lock(mu_);
-      pending_.emplace(id, PendingConnect{std::move(on_connect),
-                                          TaskHandle::kInvalid});
+      closing = closing_;
+      if (!closing) {
+        pending_.emplace(id, PendingConnect{std::move(on_connect),
+                                            TaskHandle::kInvalid});
+      }
+    }
+    if (closing) {
+      delegate_->Run(
+          [on_connect = std::move(on_connect)]() mutable {
+            on_connect(absl::CancelledError(
+                "DPUmesh channel is being released"));
+          });
+      return ConnectionHandle::kInvalid;
     }
 
     std::weak_ptr<DmeshClientEventEngine> weak =
@@ -196,6 +270,29 @@ class DmeshClientEventEngine final : public EventEngine {
   }
   bool Cancel(TaskHandle handle) override { return delegate_->Cancel(handle); }
 
+  // Called by the aliasing shared_ptr that represents the public channel as
+  // the underlying grpc::Channel begins its asynchronous teardown.
+  void ReleaseConnections() {
+    std::vector<std::shared_ptr<ConnectionLease>> leases;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      closing_ = true;
+      leases.reserve(active_.size());
+      for (auto& entry : active_) {
+        if (auto lease = entry.second.lock()) {
+          leases.push_back(std::move(lease));
+        }
+      }
+      active_.clear();
+    }
+    for (const auto& lease : leases) lease->Release();
+  }
+
+  void ForgetConnection(uint64_t id) {
+    std::lock_guard<std::mutex> lock(mu_);
+    active_.erase(id);
+  }
+
  private:
   struct PendingConnect {
     OnConnectCallback on_connect;
@@ -221,15 +318,33 @@ class DmeshClientEventEngine final : public EventEngine {
       uint64_t id, MemoryAllocator memory_allocator,
       absl::StatusOr<DmeshReactor::ConnectedTransport> connected) {
     PendingConnect pending;
+    std::shared_ptr<ConnectionLease> lease;
+    bool abandoned = false;
     {
       std::lock_guard<std::mutex> lock(mu_);
       auto found = pending_.find(id);
-      if (found == pending_.end()) return;
-      pending = std::move(found->second);
-      pending_.erase(found);
+      if (found == pending_.end()) {
+        abandoned = true;
+      } else {
+        pending = std::move(found->second);
+        pending_.erase(found);
+        abandoned = closing_;
+        if (!abandoned && connected.ok()) {
+          lease = std::make_shared<ConnectionLease>(
+              std::move(connected->release));
+          active_.emplace(id, lease);
+        }
+      }
     }
     if (pending.timer != TaskHandle::kInvalid) {
       (void)delegate_->Cancel(pending.timer);
+    }
+    // CancelConnect, timeout, or channel release can win after the reactor has
+    // created the QP but before gRPC accepts its Endpoint. No Endpoint exists
+    // to own that QP, so explicitly retire the orphaned native connection.
+    if (abandoned) {
+      if (connected.ok() && connected->release) connected->release();
+      return;
     }
     if (!pending.on_connect) return;
     if (!connected.ok()) {
@@ -241,8 +356,15 @@ class DmeshClientEventEngine final : public EventEngine {
     if (callback_executor == nullptr) {
       callback_executor = runtime_->callback_executor();
     }
+    std::weak_ptr<DmeshClientEventEngine> weak =
+        std::static_pointer_cast<DmeshClientEventEngine>(shared_from_this());
+    auto transport = std::make_unique<LeasedEndpointTransport>(
+        std::move(connected->transport), std::move(lease),
+        [weak, id] {
+          if (auto self = weak.lock()) self->ForgetConnection(id);
+        });
     pending.on_connect(std::make_unique<DmeshEndpoint>(
-        std::move(connected->transport), std::move(callback_executor),
+        std::move(transport), std::move(callback_executor),
         std::move(memory_allocator),
         NativeAddress(connected->peer_pod, connected->peer_port),
         NativeAddress(connected->local_pod, connected->local_port)));
@@ -253,7 +375,33 @@ class DmeshClientEventEngine final : public EventEngine {
   const std::shared_ptr<EventEngine> delegate_;
   std::mutex mu_;
   std::unordered_map<uint64_t, PendingConnect> pending_;
+  std::unordered_map<uint64_t, std::weak_ptr<ConnectionLease>> active_;
+  bool closing_ = false;
   std::atomic<uint64_t> next_connect_id_{1};
+};
+
+// grpc::Channel has no public shutdown operation. An aliasing shared_ptr lets
+// us attach a deterministic native-connection lifetime without changing the
+// type applications and generated stubs consume.
+class DmeshChannelOwner final {
+ public:
+  DmeshChannelOwner(std::shared_ptr<::grpc::Channel> channel,
+                    std::shared_ptr<DmeshClientEventEngine> event_engine)
+      : channel_(std::move(channel)), event_engine_(std::move(event_engine)) {}
+
+  ~DmeshChannelOwner() {
+    // Stop the client channel from launching another reconnect before closing
+    // the native connections its orphaned Endpoints may still retain.
+    channel_.reset();
+    event_engine_->ReleaseConnections();
+    event_engine_.reset();
+  }
+
+  ::grpc::Channel* channel() const { return channel_.get(); }
+
+ private:
+  std::shared_ptr<::grpc::Channel> channel_;
+  std::shared_ptr<DmeshClientEventEngine> event_engine_;
 };
 
 }  // namespace
@@ -374,7 +522,10 @@ absl::StatusOr<std::shared_ptr<::grpc::Channel>> CreateDmeshChannel(
     return absl::InternalError(
         "gRPC rejected the reconnectable DPUmesh channel");
   }
-  return channel;
+  auto owner =
+      std::make_shared<DmeshChannelOwner>(std::move(channel), event_engine);
+  ::grpc::Channel* const channel_ptr = owner->channel();
+  return std::shared_ptr<::grpc::Channel>(std::move(owner), channel_ptr);
 }
 
 absl::StatusOr<std::unique_ptr<DmeshGrpcServerAttachment>>

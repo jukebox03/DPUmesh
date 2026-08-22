@@ -2,9 +2,10 @@
 
 DPUmesh is a BlueField service mesh. A sending application writes into mapped
 host memory, the DPA moves it into DPU staging, an ARM worker runs the embedded
-Linkerd path, and DMA or RDMA lands the result in the receiving application's
-mapped memory. Native and preload Services use Linkerd's opaque stream mode;
-gRPC uses its protocol-aware HTTP/2 mode. The first half of this document is the
+Linkerd path, and DMA lands the result in the receiving application's mapped
+memory, or the peer channel carries it to the DPU that holds the destination.
+Native and preload Services use Linkerd's opaque stream mode; a protocol-aware
+Service uses the HTTP/1, HTTP/2 or gRPC mode. The first half of this document is the
 DMA transport and the second is Linkerd and the C ABI where they meet
 (`linkerd/include/dmesh_l7.h`). The normative definitions are
 `doca/dpu_worker.c`, `doca/dpu_proxy.c`, `linkerd/include/dmesh_l7.h` and
@@ -187,11 +188,12 @@ the second half of this document.
 ## Routing
 
 A public QP names a Service. Backend Pod and upstream port remain internal.
-Linkerd receives every supported stream: opaque native and preload connections
-remain pinned to one selected backend, while protocol-aware gRPC sessions route
-through their session-local HTTP/2 stack. A local selection resolves to a ready
-Pod registered on this DPU; a remote selection resolves to its topology Pod UID
-and authenticated peer channel.
+Linkerd receives every supported stream: an opaque connection carries no message
+boundaries and stays pinned to the backend it first selected, while a
+protocol-aware session routes each request through its session-local stack and
+may reach a different endpoint with each one. A selection resolves to a ready
+Pod registered on this DPU, or to the Pod UID the generation places on another
+node and the peer channel that reaches it.
 
 ## DMA fault handling
 
@@ -478,7 +480,7 @@ request staging
                  └─ backend DmeshIo tx
                       └─ dmesh_l7_tx_commit(local Pod) or
                          dmesh_l7_tx_commit_remote(Pod UID)
-                           └─ egress arena → SG-DMA or peer RDMA → backend pod
+                           └─ egress arena → SG-DMA or peer channel → backend pod
 
 backend reply staging
   └─ reply DmeshIo
@@ -503,22 +505,32 @@ struct BackendKey { worker: u16, service: SocketAddr, session: SessionToken }
 
 The registry is owned by the worker, not global: the adapter, the acceptor and
 the outbound connector of one worker share one instance, and no lock is shared
-between workers. `publish` refuses a duplicate live key. The outbound connector
-calls `take_session`, and every refusal it can answer with is a named cause,
-because discovery may replace the original synthetic service address with a
-concrete endpoint address:
+between workers. `publish` refuses a duplicate live key.
+
+The outbound connector calls `take_session` once per endpoint it dials. The
+first takes the channel published when the session opened; each later endpoint
+is minted its own `DmeshIo`, and its handle is queued for the worker, which
+adopts it on its next pass. A session therefore holds one endpoint per backend
+Linkerd selected, each carrying its own `BackendRoute`, and spread across a
+Service comes from the route rather than from how many channels the client
+opened.
+
+Every refusal the connector can answer with is a named cause, because discovery
+may replace the original synthetic service address with a concrete endpoint
+address:
 
 | `TakeError` | The connector asked for |
 |---|---|
 | `NotPublished` | a session that published no channel |
-| `AlreadyTaken` | a channel a connector already holds |
-| `TargetMismatch` | an endpoint the newest generation places in another Service |
+| `AlreadyTaken` | an endpoint this session was already dialled for |
+| `TargetMismatch` | an endpoint in another Service, before endpoints are authoritative |
 | `EndpointUnresolved` | an address no live registration serves |
 | `EndpointStale` | a mapping that predates the held generation |
 
-A remote endpoint is not a `TakeError`: the connector records
-`BackendRoute::Remote(pod_uid)`, and the C egress commit opens that exact Pod on
-the topology-authenticated peer channel.
+`TargetMismatch` is the guard that holds only while no endpoint resolver has
+been installed, because nothing else can then tell one Service's address from
+another's. Once a resolver is installed, Service identity is not what guards the
+dial — liveness and node placement are, and a route may cross Services.
 
 A close evicts its own key before the next generation publishes. A
 session-to-service index avoids walking unrelated services while preserving
@@ -630,19 +642,32 @@ exactly when no route could ever admit this client. Route-level differences
 are not enforced: that needs a second parser, which is the cost the
 source/destination split exists to avoid.
 
+An authorization reaches this evaluation only on a route the `Server`'s
+`proxyProtocol` admits — a gRPC `Server` carries `GRPCRoute`s, and an
+`HTTPRoute` parented to it is indexed under a protocol that `Server` does not
+speak, so neither it nor the `AuthorizationPolicy` that targets it appears in
+the policy at all. The port then holds the deny-by-default a `Server` with no
+authorization has, which is the same outcome as a policy that refuses.
+
 Each adopted generation publishes which Service every address it names belongs
 to — the session key, the ClusterIP and the ready endpoints — and pairs each
-endpoint with the Pod UID the generation places there. When Linkerd selects an
-endpoint, the connector takes the session's channel unless that generation
-places the address in another Service, which is refused and counted as
-`dmesh_backend_target_mismatches`. The session key and ClusterIP are the
-session's own; every other address resolves through its Pod UID to a live local
-registration, and the three negative outcomes are distinct declines —
-`EndpointUnresolved` and `EndpointStale`; a remote outcome records its Pod UID
-and is sent through the peer channel — never a round robin or a TCP fallback.
-Ports do not participate in identity: the address's IP is
-what names the Pod. The channel taken is the session's own, so discovery cannot
-move a session to another Service.
+endpoint with the Pod UID the generation places there. An endpoint resolver
+answers `SessionOwn` for the session's *own* two addresses and nothing else:
+another Service's ClusterIP resolving that way would be `BackendRoute::Any`,
+which routes on the original Service's backend with no error and no counter.
+Every other address resolves through its Pod UID to a live local registration,
+and each negative outcome is a distinct decline — `EndpointUnresolved`,
+`EndpointStale`, or a remote placement, which records its Pod UID and is sent
+over the peer channel — never a round robin and never a TCP fallback. Ports do not participate in
+identity: the address's IP is what names the Pod.
+
+A route may therefore send a stream into a Service other than the one the
+client addressed, which is what a weighted `backendRefs` is. Admission moves
+with it: the inbound verdict is taken against the destination Pod's own Service
+and the port that Service serves, not against the Service the client asked for,
+because a watch held on the caller's port returns a verdict about nothing. The
+verdict is cached per destination on the connection, so a session alternating
+backends does not re-enter the policy layer on every unit.
 
 While identity is unavailable the proxy does not serve: sessions are opened,
 their outbound connections fail, and each failure is counted. Nothing is
@@ -661,8 +686,11 @@ DMA sessions override endpoint `ConditionalClientTls` to `Disabled` before the
 TLS and tagged-transport layers. Their far end is a Pod, not a second Linkerd
 byte proxy: adding sidecar TLS there would deliver ciphertext and a transport
 header to the application. Node-local isolation is the registered DMA mapping;
-node-to-node confidentiality and mutual authentication are the RDMA peer
-channel, whose authenticated node key is bound by the held topology.
+node-to-node confidentiality and mutual authentication belong to the peer
+channel's RDMA transport, whose authenticated node key the held topology binds.
+That transport is not yet bound, so this is what the design assigns rather than
+what a deployment provides — [`CONTROL.md`](CONTROL.md) carries the seam and its
+status.
 
 ## The adapter ABI
 
@@ -844,6 +872,7 @@ The L7 layer adds:
   through the node agent's control-plane relay; identity material and the
   signed Service target feed are required configuration;
 - endpoint TLS/tagged transport is disabled for DMA sessions; node-local
-  isolation is the mapping and node-to-node security is the peer channel;
+  isolation is the registered mapping and node-to-node security is the peer
+  channel's transport;
 - Linkerd output is copied once, into the DPUmesh egress arena;
 - a declined session is counted by cause and refused fail-closed.

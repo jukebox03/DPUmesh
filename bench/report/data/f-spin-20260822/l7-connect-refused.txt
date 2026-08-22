@@ -1,0 +1,46 @@
+The l7_full path stopped accepting connections; the native and opaque
+paths did not. Readings taken with the cluster otherwise idle.
+
+=== what each arm answered
+  dpumesh  (native)      OK   mrps=0.002840  p50=350us
+  preload  (L7 opaque)   OK   mrps=0.005544  p50=152us
+  grpc-dpumesh (l7 full) ERR connect failed on channel 0   (5 attempts, 5 failures)
+
+=== what the DPU logged, once per attempt
+  px_poison: poisoning conn (11:196): Linkerd session ended before both output FINs
+  px_poison: poisoning conn (11:198): Linkerd session ended before both output FINs
+  px_poison: poisoning conn (11:200): Linkerd session ended before both output FINs
+
+=== Kubernetes' own answer, which is correct
+  pod   echo-grpc-dpumesh-84546996c7-5jn6g   10.244.0.28
+  Endpoints echo-grpc-dpumesh                10.244.0.28
+
+=== worker 0's balancers for that Service
+outbound_http_balancer_endpoints{endpoint_state="pending",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-dpumesh",backend_port="9092",backend_section_name=""} 0
+outbound_http_balancer_endpoints{endpoint_state="ready",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-dpumesh",backend_port="9092",backend_section_name=""} 0
+outbound_http_balancer_p2c_endpoints{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-dpumesh",backend_port="9092",backend_section_name=""} 0
+outbound_http_balancer_p2c_updates_total{op="Remove",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-dpumesh",backend_port="9092",backend_section_name=""} 0
+outbound_http_balancer_p2c_updates_total{op="Reset",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-dpumesh",backend_port="9092",backend_section_name=""} 82
+outbound_http_balancer_p2c_updates_total{op="Add",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-dpumesh",backend_port="9092",backend_section_name=""} 0
+outbound_tcp_balancer_endpoints{endpoint_state="ready",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-dpumesh",backend_port="9092",backend_section_name="",logical="echo-grpc-dpumesh.test-bench.svc.cluster.local:9092",concrete="echo-grpc-dpumesh.test-bench.svc.cluster.local:9092"} 5
+outbound_tcp_balancer_endpoints{endpoint_state="pending",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-dpumesh",backend_port="9092",backend_section_name="",logical="echo-grpc-dpumesh.test-bench.svc.cluster.local:9092",concrete="echo-grpc-dpumesh.test-bench.svc.cluster.local:9092"} 0
+outbound_tcp_balancer_p2c_endpoints{parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-dpumesh",backend_port="9092",backend_section_name="",logical="echo-grpc-dpumesh.test-bench.svc.cluster.local:9092",concrete="echo-grpc-dpumesh.test-bench.svc.cluster.local:9092"} 0
+outbound_tcp_balancer_p2c_updates_total{op="Remove",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-dpumesh",backend_port="9092",backend_section_name="",logical="echo-grpc-dpumesh.test-bench.svc.cluster.local:9092",concrete="echo-grpc-dpumesh.test-bench.svc.cluster.local:9092"} 27
+outbound_tcp_balancer_p2c_updates_total{op="Reset",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-dpumesh",backend_port="9092",backend_section_name="",logical="echo-grpc-dpumesh.test-bench.svc.cluster.local:9092",concrete="echo-grpc-dpumesh.test-bench.svc.cluster.local:9092"} 85
+outbound_tcp_balancer_p2c_updates_total{op="Add",parent_group="core",parent_kind="Service",parent_namespace="test-bench",parent_name="echo-grpc-dpumesh",parent_port="9092",parent_section_name="",backend_group="core",backend_kind="Service",backend_namespace="test-bench",backend_name="echo-grpc-dpumesh",backend_port="9092",backend_section_name="",logical="echo-grpc-dpumesh.test-bench.svc.cluster.local:9092",concrete="echo-grpc-dpumesh.test-bench.svc.cluster.local:9092"} 27
+
+The TCP balancer holds five ready endpoints; the HTTP balancer holds none
+and has taken 82 Reset updates and no Add in this process's lifetime.
+
+=== worker 0 session gauges at the same moment
+dmesh_sessions_opened_total 176
+dmesh_sessions_closed_total 171
+dmesh_sessions_active 5
+dmesh_endpoints_aborted_total 343
+dmesh_tasks_live 5
+dmesh_tasks_cancelled_total 0
+dmesh_backend_take_errors_total 0
+dmesh_backend_target_mismatches_total 0
+dmesh_backend_session_mismatches_total 0
+dmesh_backend_sessionless_refusals_total 0
+dmesh_slots_retired 0

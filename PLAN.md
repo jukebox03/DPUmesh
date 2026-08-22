@@ -1,7 +1,7 @@
 # DPUmesh Plan
 
 The design documents in [`design/`](design/) state what is built. This file is
-the open work list, and it has two halves in a fixed order.
+the open work list, and it has three parts in a fixed order.
 
 **Function comes before cost.** A deployment can weigh "it is slower here"; it
 cannot weigh "it is not supported here". Every item under *Function* is
@@ -9,6 +9,13 @@ something another service mesh does and this one refuses, and refusing is what
 ends an adoption conversation — being cheaper afterwards does not reopen it. No
 cost item is scheduled ahead of a function item, and a cost item that would make
 a function item harder to reach is deferred rather than merged.
+
+**A defect outranks both.** *Defects* holds failures found in behaviour that is
+already published, and fixes written for a failure that has never been run
+against it. Something that falls over after it was claimed costs more than
+something that was never offered, and a fix nobody has watched work is an open
+defect wearing a patch. Where an item there has no receipt in this tree, the
+item says so, and attaching the receipt is the first task in it.
 
 **Measurement discipline (binding).** A capacity is quoted with the instrument
 that produced it. `bench/suite/analyze_saturation.py` votes a `knees.csv`
@@ -21,97 +28,27 @@ runs with the frozen topology, placement and 2.5 GHz clock.
 flowed. `bench/suite/policy_route.sh` judges every arm twice — by what the
 client completed and by what the DPU's own counters say it decided — because
 traffic that stops without a matching verdict is not a policy result, and
-traffic that flows without one is not a routing result either. Each item below
-names the arm that closes it.
+traffic that flows without one is not a routing result either. A stage whose
+client returned no reply at all is recorded as `nodata` and fails: a missing
+measurement is the one thing that must never be read as a refusal, because it
+would let a stopped instrument pass every arm that expects traffic to stop. Each
+item below names the arm that closes it.
 
 ---
 
 # Function
 
-Two of the first three items are one layer thick, and it is worth stating why
-before they are read as architecture. The datapath already carries what they
-need: `dmesh_l7_tx_commit(worker, conn, backend_pod, len)` takes an arbitrary
-destination on every commit, `px_upstream_resolve` allocates a return mapping
-per `(source Pod, source port, destination Pod)`, and `px_conn_admitted`
-re-evaluates inbound policy whenever the destination changes. One client
-connection fanning out across several backends is a shape the C side is already
-built for. What refuses it is the adapter: a session publishes exactly one
-`DmeshIo`, and `Backends::take_session` hands it out once.
+Three items are open. Four that stood here — per-request backend selection,
+routing across Services, automatic injection and the protocol-aware connection
+failure — are built or repaired, measured and stated in [`design/`](design/),
+so they are no longer work. The two fixture questions are closed with the policy
+controller's own answer in
+[`bench/report/data/findings-20260822.md`](bench/report/data/findings-20260822.md),
+and the protocol-aware failure is closed by two consecutive 20/20 campaigns in
+[`bench/report/data/d4-f5-closure-20260822.md`](bench/report/data/d4-f5-closure-20260822.md).
 
-## F1 Per-request backend selection
-
-A protocol-aware Service balances per session, not per request. The balancer
-holds every ready endpoint, but only the one whose channel the session owns ever
-becomes ready; a second dial is refused and counted in
-`dmesh_backend_take_errors_total`. Measured against two backends: one client
-channel sent 25,104 requests to a single Pod and 0 to the other, four channels
-split 90,801 / 29,974. Spread therefore comes from how many channels a client
-opens, which is exactly the property Linkerd's HTTP/2 balancing exists to
-remove.
-
-- [ ] Replace `Session.backend: Side` with one `Side` per selected backend Pod,
-  each carrying its own `BackendRoute`. `pump_side` already publishes per handle
-  with a per-handle route, so the publication path is unchanged.
-- [ ] Mint a `DmeshIo` per `(session, endpoint)` in `Backends::take_session`
-  instead of moving the session's single one out. `AlreadyTaken` stops being the
-  answer to a second endpoint and goes back to meaning what it says.
-- [ ] Demultiplex replies by backend. A reply connection is keyed by
-  `session_key(flow.peer_pod, flow.dst_port)` — the *client* Pod — so several
-  backends replying to one client collide on one key today; `flow.src_pod` on
-  the reply names which backend sent it.
-- [ ] Make FIN pairing, staging custody and session retirement per backend
-  `Side`. **This is the risk in the item.** The drain-set crash and the
-  claim-then-abandon defects were both in this bookkeeping; write the lifecycle
-  tests before the fan-out, not after.
-- [ ] Accept on: two backends, one client channel, requests split across both;
-  `fail=0`; `dmesh_backend_take_errors_total` flat. Arm: extend `L4` in
-  `bench/suite/policy_route.sh`, whose one- against four-channel contrast is the
-  current negative result.
-- [ ] Report the per-request cost of the extra dispatch. Paying for it is the
-  point of the item; hiding it is not.
-
-## F2 Routing across Services
-
-An `HTTPRoute` may reorder, filter or reject requests inside its parent Service
-but may not send them to another one: `take_session` refuses a target the signed
-generation places elsewhere, and the request fails rather than being dialled
-over TCP (81 `dmesh_backend_target_mismatches_total` in the R3 arm). Weighted
-`backendRefs` — the ordinary shape of a canary — are therefore unavailable.
-
-- [ ] Relax the `TargetMismatch` guard to admit a target the endpoint resolver
-  answers `Live` or `Remote` for, whatever Service the generation places it in.
-  The guard that matters is liveness and node placement, not Service identity.
-- [ ] Grade the callee by the callee. `px_conn_admitted` reads
-  `px_inbound_strict(objs, c->pub.dst_service)` — the Service the *client*
-  asked for. Once a route may cross Services that is the wrong subject; it must
-  be the destination Pod's own `service_id`, and the mixed-callee rule with it.
-- [ ] Carry the resolved destination Service into per-unit accounting so a
-  redirected stream is attributed where it went, not where it was addressed.
-- [ ] Confirm the security argument holds by test, not by reading: the
-  destination's inbound policy is evaluated for the Pod that actually receives
-  the bytes. Arm: R3 inverted — a route into another Service must succeed, and
-  a `Server` on that other Service must still refuse an unauthorized caller.
-- [ ] Accept on: weighted `backendRefs` across two Services splitting traffic in
-  the declared ratio, with `fail=0`.
-
-## F3 Automatic injection
-
-There is no injection. A meshed Pod carries, by hand, `privileged: true`, a
-`/dev/infiniband` hostPath, a hostPath mount for `libdpumesh.so.5`, a
-`/run/dpumesh` mount, `DPUMESH_PCI_ADDR`, `DPUMESH_SERVICE`, and
-`config.linkerd.io/skip-inbound-ports` on the data port. Linkerd needs one
-namespace annotation. This is the most visible gap and the one with no research
-risk in it.
-
-- [ ] A mutating webhook that applies that patch on a namespace or Pod
-  annotation, refusing rather than half-injecting when the node has no DPU.
-- [ ] Keep `skip-inbound-ports` in the patch and say why in the webhook's own
-  documentation: removing it makes the destination controller advertise the
-  endpoint as meshed and every session ends before carrying a byte. It is part
-  of the data path, not cosmetic.
-- [ ] Accept on: an unmodified Deployment plus one annotation reaching a meshed
-  backend, and the same Deployment without the annotation still reaching it
-  unmeshed.
+What is left is a Go surface, the transport under the cross-node seam, and node
+density.
 
 ## F4 Workloads `LD_PRELOAD` cannot reach
 
@@ -128,45 +65,45 @@ Kubernetes ecosystem is Go.
 - [ ] Whichever surface is chosen, it registers the process the same way and
   under the same signed grant. No adapter gets its own admission path.
 
-## F5 Surfaces that exist but were never exercised
+## F6 The cross-node path: the transport under the seam
 
-These are Linkerd's own features running in a proxy nobody has pointed at them.
-Each is a short campaign arm, and each either passes — and stops being an open
-question — or becomes an item above.
+The cluster scope is a layer split. `doca/peer_channel.c` owns everything above
+`struct dmesh_peer_transport` — handle namespaces, bounded parsing, the
+node-name-to-key binding check, custody across the boundary, refusal accounting
+— and `doca/dpu_proxy.c` carries the hooks that bind it to the datapath.
+`tests/peer_channel_test.c` drives that layer end to end through a recording
+transport. The remaining work is the half below the seam.
 
-- [ ] `HTTPRoute` timeouts and retries.
-- [ ] Header and method matching, and `GRPCRoute`.
-- [ ] Route-level authorization: an `AuthorizationPolicy` whose `targetRef` is
-  an `HTTPRoute` rather than a `Server`.
-- [ ] HTTP/1.1 through the protocol-aware path. The stack handles it; the bench
-  holds no HTTP/1 workload, so nothing has ever driven it.
-- [ ] Circuit breaking and failure accrual.
-
-## F6 The cross-node path, on two DPUs
-
-`design/CONTROL.md` spends half its length on the cluster scope: pairwise node
-credentials, peer channels, handles, custody across the boundary, and the claim
-that one compromised DPU cannot speak for another node's Pods. The deployment is
-a single node. That machinery has never run between two DPUs; `peer_channel_test.c`
-is a unit test.
-
+- [ ] **Implement the RDMA transport.** Five callbacks — `connect` with a
+  prologue bound into the handshake, `peer_key` returning the peer's
+  authenticated static public key, `send`, `recv`, `close` — plus the accept
+  side that `dmesh_peer_adopt` completes, and `px_peer_configure` called to bind
+  it. What the layer above requires of it is ordered reliable delivery within a
+  handle and a mutually authenticated key agreement whose peer static key can be
+  read back. Nothing above the seam can be exercised on hardware until this
+  binds: the peer table is initialised with no transport, so a remote
+  destination is refused at the first branch of `px_peer_stream_ready`.
 - [ ] Bring up a second DPU node and re-run the deploy against both.
-- [ ] Exercise the remote arm of every campaign that currently proves only the
-  local one: policy verdicts at a remote destination, endpoint selection across
-  the boundary, and peer-channel lifetime under Pod churn.
-- [ ] Until this runs, the threat-model claim is a design statement and must be
-  written as one wherever it is published.
+- [ ] Exercise the remote arm of every campaign that proves only the local one:
+  policy verdicts at a remote destination, endpoint selection across the
+  boundary, and peer-channel lifetime under Pod churn.
+- [ ] Widen the cross-node pin. `px_peer_pin_admits` refuses a stream's second
+  remote destination and counts it; per-request fan-out across nodes needs a pin
+  per destination, and that function is the one place that decides.
+- [ ] Until a transport binds, node-to-node confidentiality, authentication and
+  custody are properties the design assigns to it. Publish them as what the
+  design provides, with the status attached — not as what a deployment does.
 
 ## F7 Node density
 
-`MAX_PODS` is 32 and the live cap the DPU enforces is
-`MAX_DPA_RINGS × N / K` — eight rings per execution unit, eight units, two rings
-per Pod — so the two meet at 32 on this hardware. Nodes routinely run more Pods
-than that.
+A node serves the smaller of `MAX_PODS` and `MAX_DPA_RINGS × N / K`. The sizing
+is in [`bench/report/data/node-density-sizing.md`](bench/report/data/node-density-sizing.md):
+this BlueField reports 32 execution units, so at the default two rings per Pod
+the ring array offers 128 slots and `MAX_PODS = 32` is what binds.
 
-- [ ] Raising it means fewer rings per Pod or a larger per-unit ring array, and
-  the ring array is DPA device code with its own hardware validation. Size the
-  change before promising a number.
+- [ ] Raise `MAX_PODS` to 127. It is a host constant, the ring array already
+  backs it at the default `K`, and pod ids stay inside the signed one-byte wire
+  space. Past 127 those fields widen, which is a host-and-DPU wire-ABI change.
 
 ## Not a gap: per-hop encryption
 
@@ -177,18 +114,82 @@ because the backend is deliberately advertised as unmeshed. Terminating TLS at
 the destination would require the destination DPU to run a second byte-stream
 proxy, which is the arrangement this design exists to remove.
 
-Node-to-node traffic is already encrypted by the authenticated RDMA peer
-channel with pairwise keys. What remains plaintext is the node-local hop, held
-inside registered DMA mappings the workload cannot address. That is a real
-difference from a sidecar mesh and should be published as one — stated as the
-trade it is, with the property it provides instead, and not as a feature that
-is coming.
+What remains plaintext is the node-local hop, held inside registered DMA
+mappings the workload cannot address. That is a real difference from a sidecar
+mesh and should be published as the trade it is. The node-to-node half of the
+argument rests on the peer channel's transport, so it carries F6's status with
+it until that transport binds.
+
+---
+
+# Defects
+
+Three of the six items that stood here are closed and gone: the gRPC client that
+stopped answering after a run of failures, the DPU that exited with no cause,
+and the refused-session leak. The first two are written up in
+[`bench/report/data/findings-20260822.md`](bench/report/data/findings-20260822.md);
+the refused-session repair and its real-DPU receipt are in
+[`bench/report/data/d4-f5-closure-20260822.md`](bench/report/data/d4-f5-closure-20260822.md).
+What remains is two failures nothing has diagnosed and one fix nothing has
+watched work.
+
+## D1 gRPC overload crash
+
+`echo_grpc` takes a SIGSEGV under sustained overload — one channel near 64 K
+rps, two channels near 100 K — faulting inside libc on what reads as a corrupted
+function pointer. Both gRPC sweeps are built around it rather than without it:
+`bench/suite/grpc_closed_sweep.sh` and `grpc_conns_sweep.sh` watch the container
+restart count between points, re-resolve the endpoints, and append the point to
+`crashes.csv`. That is scaffolding around a defect, and scaffolding is not a
+fix.
+
+- [ ] Reproduce under ASAN. Until it reproduces there is nothing to repair, and
+  the sweeps go on measuring across a process that died.
+- [ ] While it stands, no gRPC capacity may be quoted from a sweep whose
+  `crashes.csv` is non-empty without saying that it is.
+
+## D2 gRPC tail regime above the reported capacity
+
+Above roughly 12.5 K rps the p99 changes regime while the p50 stays flat, with a
+periodic stall near 15 ms. Eight causes have been excluded. This is what sets
+the gRPC capacity that gets published, so it bounds a number already in print
+rather than a feature not yet built.
+
+- [ ] **This item carries no receipt in the tree.** Find the campaign data it
+  came from and attach it here, or re-run and replace the figures, before it is
+  cited anywhere else.
+- [ ] Then name the ninth cause, or close it.
+
+## D3 A fix nothing has watched work
+
+A fix written for a failure and never run against that failure is not yet a fix.
+One is left here; the shared-DMA-context item that stood beside it has its arm
+now — see below.
+
+- [ ] DMA ring behaviour under 40 K-rps overload. The abandoned-ticket latch is
+  gone, the overload was still failing when it was last driven, and two
+  candidate fixes — batching, and descriptor admission — were reverted as
+  regressions. Same treatment as D2: attach the receipt or re-run it.
+
+**Shared DMA context collateral — armed.** Killing one backend under load used
+to clear `dma_ready` on Pods that had nothing to do with it; both clear sites
+were made per Pod and nothing had since killed a backend under load to watch the
+others keep running. `surfaces` `S13`/`S14` now does exactly that — a failing
+endpoint inside the Service under test, traffic through it until the breaker
+ejects it, then the Deployment deleted while the campaign continues — and the
+reductions in
+[`f-spin-20260822/`](bench/report/data/f-spin-20260822/) repeat it against a
+freshly deployed DPU. The healthy endpoint keeps serving across the withdrawal
+in every one of them, and the native and opaque arms are untouched. The
+withdrawal was not the cause of the now-closed protocol-aware failure: it was
+tested six ways, none reproduced it, and the closure receipt records the actual
+connection-lifetime cause.
 
 ---
 
 # Cost
 
-Nothing in this half changes admission, custody or any security property, which
+Nothing in this part changes admission, custody or any security property, which
 is what makes these items independently schedulable — and what makes it a
 measurement error to run one across a build that also changes correctness
 behavior.
@@ -205,14 +206,17 @@ per-request point is unchanged, which is the expected result: the data path does
 not know the stacks are shared.
 
 The synchronous half of a stack build is instrumented in
-`linkerd/app/src/lib.rs` and reported by `SessionMetrics::observe_stack_build`:
+`linkerd/app/src/lib.rs` and reported by `SessionMetrics::observe_stack_build`.
+The figures below are that instrument's cumulative nanosecond counters in
+[`bench/report/data/api-l7-20260821/proof_protocol_aware_worker0_metrics.txt`](bench/report/data/api-l7-20260821/proof_protocol_aware_worker0_metrics.txt),
+over the 14 builds the same snapshot counts:
 
 | Phase | Per session |
 |---|---:|
-| `configure` (clone the outbound template, set `dmesh_session`) | 5.9 µs |
-| `layers` (`build_policies` + `outbound.mk`) | 107.8 µs |
-| `service` (`NewService::new_service`) | 34.7 µs |
-| synchronous total | **148.5 µs** |
+| `configure` (clone the outbound template, set `dmesh_session`) | 8.7 µs |
+| `layers` (`build_policies` + `outbound.mk`) | 107.7 µs |
+| `service` (`NewService::new_service`) | 32.0 µs |
+| synchronous total | **148.4 µs** |
 
 The remainder is lazy discovery and policy work, task execution and teardown,
 and the surrounding DPUmesh lifecycle. **Locating it requires instrumenting
@@ -256,16 +260,38 @@ which is what this item is for.
 
 ## O3 Conditional worker-local state
 
-- [ ] Re-profile after O1 and O2; continue only if endpoint locking becomes
-  material. Nothing counts lock contention today — `Backends` holds one
-  `parking_lot::Mutex` with no instrumentation — so add a counter before drawing
-  a conclusion. Note that F1 makes this registry busier, which is a reason to
-  re-profile after F1 rather than before it.
+Per-request backend selection put more through this registry: a session takes
+one channel per endpoint instead of one for its life, and every worker pass asks
+whether an endpoint was minted. That question is answered by an atomic rather
+than the registry lock, so an idle pass does not take it — but the take path
+itself is busier than the profile that last looked at it.
+
+- [ ] Re-profile; continue only if endpoint locking becomes material. Nothing
+  counts lock contention today — `Backends` holds one `parking_lot::Mutex` with
+  no instrumentation — so add a counter before drawing a conclusion.
 - [ ] If justified, prototype only the DPUmesh specialization on Tokio
   `LocalSet` with `Rc<RefCell<_>>`; do not add unsafe `Send`/`Sync` claims or
   modify stock TCP Linkerd behavior.
 
-## O4 Equivalent ARM/x86 study
+## O4 What per-request selection costs the data path
+
+Backend selection per request adds work to paths that run per segment and per
+unit, and none of it has been priced. `l7_conn_segment` names the direction a
+segment belongs to instead of assuming it; `px_conn_admitted` scans a
+four-entry verdict cache instead of comparing one destination; `struct px_conn`
+carries that cache. The verdict cache is a net removal for a session that
+alternates backends — it replaces a policy re-entry per unit with four
+comparisons — and a net addition for one that does not.
+
+The deploy smoke gate shows p50 unchanged at concurrency 1 across the change,
+which bounds nothing: it is one operating point on a closed loop.
+
+- [ ] Price it with `bench/report/CORE.md`'s core-attribution campaign, run
+  against a build that changes nothing else. Report ARM µs/request for a
+  single-backend opaque stream, where the additions are pure cost, and for a
+  protocol-aware stream alternating backends, where the cache is the saving.
+
+## O5 Equivalent ARM/x86 study
 
 This is a study, not an optimization: it answers what the ARM costs relative to
 an x86 host running the same proxy, which is a question the paper needs and no

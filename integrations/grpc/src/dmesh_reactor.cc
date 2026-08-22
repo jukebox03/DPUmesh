@@ -109,6 +109,7 @@ class DmeshReactor::Impl final
     absl::Status prebind_error = absl::OkStatus();
     std::atomic<bool> close_enqueued{false};
     bool closing = false;
+    bool abort = false;
     bool remote_eof = false;
   };
 
@@ -372,6 +373,15 @@ class DmeshReactor::Impl final
     });
   }
 
+  void RequestAbort(const std::shared_ptr<Connection>& connection) {
+    if (connection->close_enqueued.exchange(true, std::memory_order_acq_rel)) {
+      return;
+    }
+    Enqueue([self = shared_from_this(), connection] {
+      self->RequestAbortOwner(connection);
+    });
+  }
+
   void Shutdown() {
     std::lock_guard<std::mutex> shutdown_lock(shutdown_mu_);
     bool expected = true;
@@ -468,6 +478,9 @@ class DmeshReactor::Impl final
     ConnectedTransport connected;
     connected.transport = std::make_unique<Transport>(
         weak_from_this(), connection, static_cast<size_t>(post_max_));
+    connected.release = [impl = weak_from_this(), connection] {
+      if (auto self = impl.lock()) self->RequestAbort(connection);
+    };
     connected.callback_executor = callback_executor_;
     connected.local_pod = ops_->PodId(channel_);
     connected.local_port = connection->qp->local_port;
@@ -514,6 +527,17 @@ class DmeshReactor::Impl final
     {
       std::lock_guard<std::mutex> lock(connection->tx_mu);
       connection->closing = true;
+    }
+    deferred_closes_.push_back(connection);
+  }
+
+  void RequestAbortOwner(const std::shared_ptr<Connection>& connection) {
+    connection->close_enqueued.store(true, std::memory_order_release);
+    if (connection->closing || connection->qp == nullptr) return;
+    {
+      std::lock_guard<std::mutex> lock(connection->tx_mu);
+      connection->closing = true;
+      connection->abort = true;
     }
     deferred_closes_.push_back(connection);
   }
@@ -772,7 +796,11 @@ class DmeshReactor::Impl final
          * completes in full against a live QP or observes qp == nullptr. */
         std::lock_guard<std::mutex> lock(connection->tx_mu);
         connection->qp = nullptr;
-        ops_->DestroyQp(qp);
+        if (connection->abort) {
+          ops_->AbortQp(qp);
+        } else {
+          ops_->DestroyQp(qp);
+        }
       }
     }
     deferred_closes_.clear();

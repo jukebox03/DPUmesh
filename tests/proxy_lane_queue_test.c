@@ -617,20 +617,29 @@ int main(void)
     /* FIN is directional: the request survives its write-half close until the
      * backend half also ends. L7 additionally waits until both stack output
      * FINs have been accepted by the datapath. */
-    struct px_conn *half = px_conn_get(px, 6, 2222, 0, 1);
+    struct px_conn *half = px_conn_get(px, 5, 2222, 0, 1);
     uint16_t half_up = dpu_upstream_create(px->workers[0].ct,
-                                           6, 2222, 7, PX_L7_NONE, 0, 1);
+                                           5, 2222, 7, PX_L7_NONE, 0, 1);
     assert(half && half_up >= DMESH_UPORT_BASE);
     assert(px_conn_get(px, 7, half_up, 1, 1) != NULL);
     half->input_fin = 1;
+    half->close_ack_pending = 1;
+    half->fin_ack_pod = 5;
+    half->fin_ack_port = 2222;
+    half->fin_ack_seq = 91;
     px->workers[0].ct->upstream[half_up].client_fin_sent = 1;
     assert(!px_maybe_finish_connection(objs, half));
-    assert(px_conn_find(px, 6, 2222) == half);
+    assert(px_conn_find(px, 5, 2222) == half);
+    assert(ack_pub->count == 0);              /* port remains quarantined */
     px->workers[0].ct->upstream[half_up].backend_fin_seen = 1;
     assert(px_maybe_finish_connection(objs, half));
-    assert(px_conn_find(px, 6, 2222) == NULL);
+    assert(px_conn_find(px, 5, 2222) == NULL);
     assert(px_conn_find(px, 7, half_up) == NULL);
     assert(!px->workers[0].ct->upstream[half_up].in_use);
+    assert(ack_pub->count == 1);
+    assert(ack_entry->payload.ack.port == 2222);
+    assert(ack_entry->payload.ack.seq == 91);
+    ack_pub->count = 0;
 
     struct px_conn *l7_half = px_conn_get(px, 8, 3333, 0, 1);
     uint16_t l7_up = dpu_upstream_create(px->workers[0].ct,
@@ -648,13 +657,74 @@ int main(void)
     assert(px_conn_find(px, 8, 3333) == NULL);
     assert(px_conn_find(px, 9, l7_up) == NULL);
 
-    struct px_conn *failed = px_conn_get(px, 10, 4444, 0, 1);
+    /* A host reset is acknowledged only after it removes the old request key,
+     * so the tracked control unit can release that source port for reuse. */
+    struct px_conn *aborting = px_conn_get(px, 5, 5555, 0, 1);
+    assert(aborting != NULL);
+    ack_pod->dma_buffer = (void *)(uintptr_t)1;
+    ack_pod->host_rx_addr = (void *)(uintptr_t)1;
+    __atomic_store_n(&ack_pod->dma_generation, 7, __ATOMIC_RELEASE);
+    dpu_comp_entry_t abort_entry;
+    memset(&abort_entry, 0, sizeof(abort_entry));
+    abort_entry.pod_idx = 0;
+    abort_entry.src_pod_id = 5;
+    abort_entry.src_port = 5555;
+    abort_entry.dst_pod_id = DMESH_POD_ABORT;
+    abort_entry.seq = 92;
+    abort_entry.generation = 7;
+    uint64_t poison_before = px_stat_get(&px->stat_poison);
+    assert(px_process_forward(objs, 0, &abort_entry) == 1);
+    assert(px_conn_find(px, 5, 5555) == NULL);
+    assert(px_stat_get(&px->stat_poison) == poison_before);
+    assert(ack_pub->count == 1);
+    assert(ack_entry->payload.ack.port == 5555);
+    assert(ack_entry->payload.ack.seq == 92);
+    ack_pub->count = 0;
+    assert(tx_lane->qhead != NULL && tx_lane->qhead == tx_lane->qtail);
+    tx_unit = tx_lane->qhead;
+    tx_lane->qhead = tx_lane->qtail = NULL;
+    px_unit_free_node(px, tx_unit);
+
+    /* A refusal can poison while the EOF-unit pool is dry. The first stalled
+     * pass must retain lifecycle work so that the pass which finally queues
+     * the EOF also removes the session; otherwise this exact path leaves the
+     * port key occupied until the slow tombstone sweep reaches it. */
+    struct px_unit *retry_unit = px_unit_alloc(px);
+    assert(retry_unit != NULL);
+    ack_pod->host_rx_addr = (void *)(uintptr_t)1;
+    struct px_conn *failed = px_conn_get(px, 5, 4444, 0, 1);
     assert(failed != NULL);
+    uint32_t failed_generation = failed->l7_generation;
     failed->l7_mode = PX_L7_FULL;
     dmesh_l7_session_failed(0, px_conn_handle(failed));
     assert(failed->l7_session_failed && failed->lifecycle_pending &&
            failed->stalled);
-    px_conn_del(objs, failed);
+
+    /* Hide all remaining free units for one retry. */
+    tls_unit_mag = NULL;
+    tls_unit_mag_n = 0;
+    px->unit_free = NULL;
+    (void)px_drain_stalled(objs, 0);
+    failed = px_conn_find(px, 5, 4444);
+    assert(failed != NULL && failed->dead && failed->eof_pending);
+    assert(failed->lifecycle_pending && failed->stalled);
+
+    retry_unit->next = NULL;
+    px->unit_free = retry_unit;
+    (void)px_drain_stalled(objs, 0);
+    assert(px_conn_find(px, 5, 4444) == NULL);
+
+    /* The refused tuple is immediately reusable by a distinct session. */
+    struct px_conn *fresh = px_conn_get(px, 5, 4444, 0, 1);
+    assert(fresh != NULL && fresh->l7_generation != failed_generation);
+    assert(!fresh->dead && !fresh->l7_session_failed && !fresh->input_fin);
+    px_conn_del(objs, fresh);
+
+    /* Reclaim the EOF queued to pod 5 before tearing down the fixture. */
+    assert(tx_lane->qhead != NULL && tx_lane->qhead == tx_lane->qtail);
+    tx_unit = tx_lane->qhead;
+    tx_lane->qhead = tx_lane->qtail = NULL;
+    px_unit_free_node(px, tx_unit);
 
     free(px->rev_scratch);
     px->rev_scratch = NULL;

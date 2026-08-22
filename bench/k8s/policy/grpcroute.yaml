@@ -1,0 +1,24 @@
+# The gRPC-native route kind. The match is a service and a method rather than
+# a path prefix, which is the whole difference from the HTTPRoute arm.
+apiVersion: gateway.networking.k8s.io/v1
+kind: GRPCRoute
+metadata:
+  name: bench-grpc-grpcroute
+  namespace: ${NS}
+spec:
+  parentRefs:
+    - group: core
+      kind: Service
+      name: echo-grpc-dpumesh
+      port: ${CTRL_PORT}
+  rules:
+    - matches:
+        - method:
+            type: Exact
+            service: "${GRPC_SERVICE}"
+            method: "${GRPC_METHOD}"
+      backendRefs:
+        - group: core
+          kind: Service
+          name: echo-grpc-dpumesh
+          port: ${CTRL_PORT}

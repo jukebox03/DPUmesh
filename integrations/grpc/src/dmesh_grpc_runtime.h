@@ -27,7 +27,9 @@ void SetDefaultAuthorityIfAbsent(
 
 // Lazy gRPC channel for a configured DPUmesh Service name. Each gRPC
 // connection opens one targeted QP. The channel shares ownership of the
-// runtime, and DPUmesh owns GRPC_ARG_EVENT_ENGINE.
+// runtime, and DPUmesh owns GRPC_ARG_EVENT_ENGINE. Dropping the last returned
+// shared_ptr actively retires its native QPs even if gRPC keeps internal
+// Endpoint objects on its asynchronous cleanup schedule.
 absl::StatusOr<std::shared_ptr<::grpc::Channel>> CreateDmeshChannel(
     std::shared_ptr<DmeshRuntime> runtime, const std::string& target,
     const std::shared_ptr<::grpc::ChannelCredentials>& creds,

@@ -5,6 +5,7 @@
  * Usage: dpumesh_dpu -p <pci-addr> -r <rep-pci-addr>
  */
 
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,6 +28,18 @@ DOCA_LOG_REGISTER(DPU_MAIN);
 
 int main(int argc, char **argv)
 {
+    /* A write to a socket whose peer has gone must be an `EPIPE` return, not the
+     * end of this process. SIGPIPE's default action terminates without a core
+     * file, and this kernel does not report fatal signals, so taking it looks
+     * exactly like a clean exit: the log stops mid-run on whatever line it had
+     * reached and nothing anywhere says why.
+     *
+     * A Rust binary gets this from the runtime start-up its `main` runs. The
+     * embedded proxy is a static library linked into this `main`, so that
+     * start-up never runs and the default stands unless it is replaced here,
+     * before anything opens a socket. */
+    signal(SIGPIPE, SIG_IGN);
+
     /* Heap-allocated (struct objects is large); never freed — the process runs
      * until killed and run_dpu_worker() below blocks forever. */
     struct objects *objs = calloc(1, sizeof(*objs));

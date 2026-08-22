@@ -3,9 +3,11 @@
 DPUmesh is a BlueField service mesh built with DOCA Comch, DPA, DMA, and an
 embedded Linkerd proxy. Applications address a Kubernetes Service; the DPU owns
 policy, discovery, backend selection, connection state, and Host↔DPU transfer.
-Native and preload connections use Linkerd's opaque byte-stream path. gRPC uses
-its HTTP/2 path. Local endpoints are reached by DMA and remote endpoints by the
-RDMA peer channel.
+Native and preload connections use Linkerd's opaque byte-stream path; gRPC and
+HTTP/1.1 use its protocol-aware path. Endpoints on the node are reached by DMA,
+and endpoints on another node by the authenticated peer channel, whose RDMA
+transport is the one component still to be implemented — until it binds, a
+Service whose only replicas are elsewhere has no route.
 
 This repository is a research prototype. The design documents below define its
 transport, proxy, control-plane, and API contracts.
@@ -62,9 +64,10 @@ preload and gRPC layers keep no batch queue or timer of their own.
 
 Every QP is one full-duplex byte stream into the DPU-hosted Linkerd proxy and
 does not expose backend or proxy-session ids through native events. Native and
-preload Services enter Linkerd as opaque streams; the gRPC Service enters its
-HTTP/2 path. Linkerd's selected backend is then reached through DMA on this node
-or the RDMA-backed peer channel across nodes.
+preload Services enter Linkerd as opaque streams; a protocol-aware Service
+enters the HTTP/1, HTTP/2 or gRPC path. Linkerd's selected backend is reached
+through DMA into that Pod's registered memory, or across the peer channel when
+the generation places it on another node.
 
 Backpressure is nonblocking. `dmesh_alloc()` returning `NULL/EAGAIN` arms that QP
 itself, and returned capacity produces one `DMESH_EVENT_TX_READY` on its EQ:
@@ -253,49 +256,58 @@ attachment. Link `grpc_dpumesh`;
 [integrations/grpc/README.md](integrations/grpc/README.md) covers the build and
 the connection lifecycle.
 
-### What the Pod must carry
+### Making a workload meshed
 
-There is no injection webhook, so a meshed Pod declares its own access to the
-transport. The five parts below are all required, and
-[bench/k8s/pods.yaml](bench/k8s/pods.yaml) is a working example of each.
+One annotation, on the Namespace or the Pod template:
 
 ```yaml
 metadata:
   annotations:
-    config.linkerd.io/skip-inbound-ports: "9092"   # the Service port
-spec:
-  containers:
-  - name: app
-    env:
-    - { name: DPUMESH_PCI_ADDR, value: "<host PCI function>" }
-    - { name: DPUMESH_SERVICE,  value: "echo-dpumesh" }        # this Pod's Service
-    securityContext: { privileged: true }
-    volumeMounts:
-    - { mountPath: /dev/infiniband, name: infiniband }
-    - { mountPath: /usr/local/lib/libdpumesh.so.5, name: libdpumesh, subPath: libdpumesh.so.5 }
-    - { mountPath: /run/dpumesh, name: attest, readOnly: true }  # the node agent's socket
+    dpumesh.io/inject: "enabled"
+  labels:
+    dpumesh-service: echo-dpumesh      # this Pod's Service; a client-only Pod has none
 ```
 
-The annotation is part of the data path, not a tuning choice. It is what keeps
-Linkerd's destination controller advertising the backend as unmeshed; without
-it the controller offers an endpoint that expects a second proxy, and sessions
-end before carrying a byte.
+An admission webhook turns that into the access the transport needs: the DOCA
+device, the transport library and the node agent's socket as mounts, the PCI
+function and the Pod's Service as environment, the preload shim for a workload
+that is not linked against the native API, and the two Linkerd markers that make
+the workload sidecarless. It also requires a node labelled `dpumesh.io/dpu=true`
+and refuses the Pod when the cluster has none, because a Pod holding part of the
+patch fails later and elsewhere.
+
+The second Linkerd marker is `config.linkerd.io/skip-inbound-ports` on the data
+ports. It is part of the data path, not a tuning choice: it keeps the
+destination controller advertising the backend as unmeshed, and without it the
+controller offers an endpoint that expects a second proxy, so sessions end
+before carrying a byte. The webhook applies it and the control-plane label
+together or applies neither.
+
+A Pod that declines the shim — one written against the native API — annotates
+`dpumesh.io/preload: disabled`. [bench/k8s/injected.yaml](bench/k8s/injected.yaml)
+is a workload carrying nothing else; [bench/k8s/pods.yaml](bench/k8s/pods.yaml)
+is the same access written by hand.
 
 ### What to expect from the mesh
 
-- A Service's Pods must be on a node running `dpumesh_dpu`, and a node serves at
-  most 32 meshed Pods.
+- A Service's Pods must be on a node running `dpumesh_dpu`. How many meshed Pods
+  that node serves is its execution units times eight forward rings, divided by
+  the rings each Pod spans — 32 with the default two.
 - The deployment assigns each Service a protocol treatment: native and preload
-  Services are opaque byte streams, gRPC Services take Linkerd's HTTP/2 path.
-  Policy, discovery and balancing run either way; per-request routing needs the
-  HTTP/2 path.
-- A backend is chosen per session. Several client connections or gRPC channels
-  spread across backends; one does not.
-- An `HTTPRoute` may reorder, filter or reject requests within its parent
-  Service; it may not route them into a different Service.
-- Traffic between Pods on one node is plaintext inside registered DMA mappings.
-  Between nodes it is carried by the authenticated RDMA peer channel. There is
-  no per-hop proxy TLS.
+  Services are opaque byte streams, and a protocol-aware Service takes Linkerd's
+  HTTP/1, HTTP/2 or gRPC path. Policy, discovery and balancing run either way;
+  per-request routing needs the protocol-aware path.
+- On the protocol-aware path a backend is chosen per request, so one client
+  channel spreads across a Service's endpoints. An opaque stream carries no
+  message boundaries and stays on the backend it was pinned to.
+- An `HTTPRoute` may reorder, filter, reject or redirect requests, including
+  into another Service — weighted `backendRefs` are the ordinary canary shape.
+  What guards the dial is the endpoint's liveness, and the inbound policy that
+  grades the stream is the destination Pod's own.
+- Traffic between Pods on one node is plaintext inside registered DMA mappings
+  the workload cannot address. There is no per-hop proxy TLS. Confidentiality
+  between nodes belongs to the peer channel's transport, which is not yet
+  bound, so it is a property of the design and not of a deployment.
 
 Building the library and bringing up a cluster are covered in
 [bench/README.md](bench/README.md).

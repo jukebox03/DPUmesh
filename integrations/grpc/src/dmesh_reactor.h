@@ -39,6 +39,12 @@ class DmeshReactor final {
 
   struct ConnectedTransport {
     std::unique_ptr<EndpointTransport> transport;
+    // Retires this native connection independently of gRPC's Endpoint
+    // ownership.  Client channels use it as an incarnation fence when the
+    // last public channel reference is dropped: gRPC may retain an orphaned
+    // Endpoint on its asynchronous cleanup schedule, but the native QP must
+    // not remain live for that implementation detail.
+    std::function<void()> release;
     // Carries the completions a gRPC call raises itself.
     std::shared_ptr<Executor> callback_executor;
     // Native identity of the two ends. The peer pair stays unset on a client

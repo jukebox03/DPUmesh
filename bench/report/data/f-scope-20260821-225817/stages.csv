@@ -1,0 +1,22 @@
+stage,fixture,arm,expected,observed,verdict,rcnt,fail,admitted,denied,route_hits,target_mismatch,note
+F1-1ch,one Service two backends,grpc-dpumesh,2,2,PASS,17438,0,,,,0,served: echo-grpc-dpumesh-84546996c7-j6q2f=8774 echo-grpc-dpumesh-84546996c7-jxsd6=8772 
+F1-4ch,one Service two backends,grpc-dpumesh,2,2,PASS,83035,0,,,,0,served: echo-grpc-dpumesh-84546996c7-j6q2f=41621 echo-grpc-dpumesh-84546996c7-jxsd6=41846 
+F1r,one backend restored,grpc-dpumesh,serve,serve,PASS,7953,0,1,0,0,0,the Service is healthy again
+X0,no route,grpc-dpumesh,serve,serve,PASS,8054,0,1,0,0,0,baseline for the cross scope
+X0,no route,grpc-dpumesh,serve,serve,PASS,7954,0,1,0,0,0,baseline for the cross scope
+X1,backendRef in another Service,grpc-dpumesh,serve,serve,PASS,6925,0,2,0,7026,0,target_mismatch must stay flat
+X1b,attribution,grpc-dpumesh,served,served,PASS,,,,,,,served: echo-grpc-alt-774bbbccb5-wcjwm=7026 
+X2,Server on the destination Service, no authorization,grpc-dpumesh,refuse,refuse,FAIL,0,586,959,509,0,0,graded by the callee; admitted 959 > 0
+X2b,the destination Server withdrawn,grpc-dpumesh,serve,serve,PASS,6582,0,2,0,6683,0,the route works again
+X3,weighted 50/50 across two Services,grpc-dpumesh,serve,serve,PASS,36322,0,8,0,36723,0,both destinations must serve
+X3b,split,grpc-dpumesh,both,both,PASS,,,,,,,A{echo-grpc-dpumesh-84546996c7-jxsd6=18369 } B{echo-grpc-alt-774bbbccb5-wcjwm=18357 }
+X4,no route,grpc-dpumesh,serve,serve,PASS,7918,0,1,0,0,0,returned to the default route
+X0,no route,grpc-dpumesh,serve,serve,PASS,7869,0,1,0,0,0,baseline for the cross scope
+X1,backendRef in another Service,grpc-dpumesh,serve,serve,PASS,6646,0,2,0,6746,0,target_mismatch must stay flat
+X1b,attribution,grpc-dpumesh,served,served,PASS,,,,,,,served: echo-grpc-alt-774bbbccb5-wcjwm=6747 
+X2,Server on the destination Service, no authorization,grpc-dpumesh,refuse,refuse,PASS,0,581,971,506,-13709,0,graded by the callee
+X2v,the destination refused,grpc-dpumesh,refused,refused,PASS,,,971,506,,,denied+=506 admitted+=971
+X2b,the destination Server withdrawn,grpc-dpumesh,serve,serve,PASS,6589,0,2,0,6689,0,the route works again
+X3,weighted 50/50 across two Services,grpc-dpumesh,serve,serve,PASS,36354,0,8,0,36758,0,both destinations must serve
+X3b,split,grpc-dpumesh,both,both,PASS,,,,,,,A{echo-grpc-dpumesh-84546996c7-jxsd6=10380 } B{echo-grpc-alt-774bbbccb5-wcjwm=18223 }
+X4,no route,grpc-dpumesh,serve,serve,PASS,8194,0,1,0,0,0,returned to the default route

@@ -69,7 +69,7 @@ verbs_dpumesh_SRC    := bench/validators/verbs_dpumesh.c
 
 # LD_PRELOAD shim (interposes libc sockets → dmesh) + its vanilla-TCP validators
 PRELOAD := $(LIBDIR)/libdmesh_preload.so
-POSIX_BINS := tcp_echo tcp_client preload_runner bench_sock echo_sock  # preload inputs, no dmesh link
+POSIX_BINS := tcp_echo tcp_client preload_runner bench_sock echo_sock http1_bench http1_echo  # preload inputs, no dmesh link
 tcp_echo_SRC       := bench/validators/tcp_echo.c
 tcp_client_SRC     := bench/validators/tcp_client.c
 preload_runner_SRC := bench/validators/preload_runner.c
@@ -192,6 +192,7 @@ test-hostfree: $(HOSTFREE_TESTS)
 	python3 tests/analyze_saturation_test.py
 	python3 tests/workload_attest_agent_test.py
 	python3 tests/dpumesh_controller_test.py
+	python3 tests/dpumesh_webhook_test.py
 	python3 tests/linkerd_cp_relay_test.py
 	python3 tests/feed_delivery_test.py
 	python3 tests/health_page_test.py
@@ -229,6 +230,7 @@ test: $(TESTDIR)/native_api_contract_test $(TESTDIR)/native_control_state_test \
 	python3 tests/analyze_saturation_test.py
 	python3 tests/workload_attest_agent_test.py
 	python3 tests/dpumesh_controller_test.py
+	python3 tests/dpumesh_webhook_test.py
 	python3 tests/linkerd_cp_relay_test.py
 	python3 tests/feed_delivery_test.py
 	python3 tests/health_page_test.py
@@ -261,6 +263,12 @@ $(BINDIR)/echo_sock: bench/apps/echo_sock.c | dirs
 	$(CC) -O2 -g $(DEPFLAGS) -Ibench/apps -o $@ $< -lpthread
 $(BINDIR)/bench_sock: bench/apps/bench_sock.c | dirs
 	$(CC) -O2 -g $(DEPFLAGS) -Ibench/apps -o $@ $< -lpthread -lm
+# HTTP/1.1 pair: the only workload in the tree that drives the protocol-aware
+# path's HTTP/1 branch.
+$(BINDIR)/http1_echo: bench/apps/http1_echo.c | dirs
+	$(CC) -O2 -g $(DEPFLAGS) -Ibench/apps -o $@ $< -lpthread
+$(BINDIR)/http1_bench: bench/apps/http1_bench.c | dirs
+	$(CC) -O2 -g $(DEPFLAGS) -Ibench/apps -o $@ $< -lpthread
 
 clean:
 	rm -rf $(BUILD)
