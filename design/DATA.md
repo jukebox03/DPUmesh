@@ -4,11 +4,11 @@ DPUmesh is a BlueField service mesh. A sending application writes into mapped
 host memory, the DPA moves it into DPU staging, an ARM worker runs the embedded
 Linkerd path, and DMA lands the result in the receiving application's mapped
 memory, or the peer channel carries it to the DPU that holds the destination.
-Native and preload Services use Linkerd's opaque stream mode; a protocol-aware
-Service uses the HTTP/1, HTTP/2 or gRPC mode. The first half of this document is the
-DMA transport and the second is Linkerd and the C ABI where they meet
-(`linkerd/include/dmesh_l7.h`). The normative definitions are
-`doca/dpu_worker.c`, `doca/dpu_proxy.c`, `linkerd/include/dmesh_l7.h` and
+Each Service is deployed in one of two modes, which decides what Linkerd runs
+for it: an opaque byte stream, or an HTTP/1, HTTP/2 or gRPC stack. The first
+half of this document is the DMA transport and the second is Linkerd and the C
+ABI where they meet (`linkerd/include/dmesh_l7.h`). The normative definitions
+are `doca/dpu_worker.c`, `doca/dpu_proxy.c`, `linkerd/include/dmesh_l7.h` and
 `linkerd/rust/src/lib.rs`. Who may talk to whom is
 [`CONTROL.md`](CONTROL.md); the application's own contract is
 [`API.md`](API.md).
@@ -193,7 +193,9 @@ boundaries and stays pinned to the backend it first selected, while a
 protocol-aware session routes each request through its session-local stack and
 may reach a different endpoint with each one. A selection resolves to a ready
 Pod registered on this DPU, or to the Pod UID the generation places on another
-node and the peer channel that reaches it.
+node and the peer channel that reaches it. One connection carries one cross-node
+destination: a stream already pinned to a remote endpoint is refused a second
+one by name and counted, rather than delivered to the first.
 
 ## DMA fault handling
 
@@ -236,6 +238,21 @@ blocking, it increments `arm_epoch` — the counter that says the host is about 
 sleep — and rechecks the rings. After a publication the producing worker reads
 that control block and, on a new epoch, asks the DPU main thread to send one
 Comch message that wakes the host.
+
+## Closing a stream
+
+A QP's close is an ordered descriptor on its forward ring — FIN behind the last
+byte, or a reset that waits for nothing — and the host carries it in the same
+per-port custody FIFO a payload unit enters. While that entry stands the port is
+held: neither a new client QP nor an inbound connection may take it.
+
+The worker publishes the close `TX_ACK` only once the stream has left its
+tables — for a paired L7 session, after both output directions published FIN and
+the upstream port was freed. A source Pod's `(pod, port)` is the key its Linkerd
+session is held under, so acknowledging earlier would let the host reopen that
+key into a session still closing, and the new stream would arrive in the old
+one. Replies close on DPU-assigned upstream ports that no host allocates, and
+keep their immediate acknowledgement.
 
 ## Registration and teardown
 
@@ -394,11 +411,12 @@ Services are assigned at DPU startup.
 | `DPUMESH_L7_OPAQUE_SVC` | opaque stream | Linkerd adapter |
 | `DPUMESH_L7_SVC` | protocol-aware stream | Linkerd adapter |
 
-Every data Service is assigned exactly once: native and preload Services use
-the opaque stack, and gRPC uses the protocol-aware stack. Duplicate assignments
-are rejected. A declined session is terminated under fail-closed policy.
-Which Services are graded protected, and what decides fail-closed for a Service
-no generation grades, is [`CONTROL.md`](CONTROL.md).
+Every data Service is assigned exactly once, by name rather than by the surface
+its Pods use: an HTTP/1.1 Service under the shim is protocol-aware, and a gRPC
+Service assigned opaque is not. Duplicate assignments are rejected, and a
+declined session is terminated under fail-closed policy. Which Services are
+graded protected, and what decides fail-closed for a Service no generation
+grades, is [`CONTROL.md`](CONTROL.md).
 
 ## Worker runtime
 

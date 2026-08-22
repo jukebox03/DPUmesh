@@ -43,6 +43,22 @@ Service name stays in the engine; the authority reaches chttp2 as
 `GRPC_ARG_DEFAULT_AUTHORITY`, defaulted to the Service name when the caller
 omits it. A caller-supplied `GRPC_ARG_EVENT_ENGINE` is rejected.
 
+The returned `shared_ptr<::grpc::Channel>` aliases an owner that also holds the
+engine, which makes releasing its last public reference a definite point in
+native terms. `grpc::Channel` has no shutdown call and gRPC retires an abandoned
+Endpoint on its own asynchronous schedule; a QP left live for that interval
+holds a proxy session no call can reach. The owner therefore stops the engine
+admitting connects and retires every QP it still has out.
+
+A one-shot lease shared between an Endpoint's transport and the engine makes
+that safe from either side: whichever ends first retires the QP exactly once,
+and a connect completing after cancellation, deadline or release — with no
+Endpoint to own its QP — retires it too. A client retirement is
+`dmesh_abort_qp`, not the graceful close: gRPC destroys an Endpoint when it has
+abandoned that HTTP/2 connection, so the unsent tail belongs to a stream nothing
+will read. The server side has no lease, because an accepted QP is owned by the
+Endpoint injected with it and closes gracefully.
+
 `DmeshClientEventEngine` implements `Connect` and delegates `Run`, `RunAfter`,
 `Cancel`, `CreateListener`, and `GetDNSResolver` to the process default engine.
 `Connect` ignores the resolved address, calls `DmeshRuntime::Connect` with the
@@ -121,6 +137,7 @@ lifecycle.
 | native QP transmit | the thread that pumps the write | serialized by the connection's transmit lock |
 | RX batch run | reactor/Endpoint handoff | one slice per run, copied before credit release; credit held above the queue mark |
 | pending write | Endpoint state | one cursor, completed exactly once |
+| client channel | the application | one aliasing owner; its release retires that channel's QPs |
 | callback executor | `DmeshRuntime` and its endpoints | one shared instance per runtime; default = one worker thread |
 | runtime | application, channel and server attachment | shared; outlives what gRPC still holds |
 
@@ -238,12 +255,15 @@ The maintained tests require:
 - inbound QP conversion and pre-bind event replay;
 - real chttp2 unary exchange over paired Endpoints, including four concurrent
   same-service channels;
-- ten gRPC channel create/drop cycles sharing one runtime, with all QPs
-  reclaimed and runtime statistics returning to zero;
+- the last public channel reference retiring its QPs by reset, while a surviving
+  copy of that handle holds them live;
+- ten gRPC channel create/drop cycles sharing one runtime, each cycle's QP
+  retired at its drop and runtime statistics returning to zero;
 - four concurrent channels for one Service using distinct QPs and closing
   independently;
 - graceful server GOAWAY retiring the existing HTTP/2 channel;
-- reconnect creating a fresh targeted QP;
+- reconnect creating a fresh targeted QP, its abandoned predecessor reset rather
+  than left to a FIN custody wait;
 - public-symbol linkage against `libdpumesh.so.5`.
 
 Hardware validation additionally checks the native register/readiness barrier,

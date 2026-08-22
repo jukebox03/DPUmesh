@@ -90,11 +90,13 @@ arrive as `DMESH_EVENT_CONN_REQ`; their `event.qp` is already usable and permane
 bound to the EQ that accepted it.
 
 Every QP is one reliable full-duplex byte stream through the DPU-hosted Linkerd
-proxy. Native and preload QPs use the opaque path and remain pinned to one
-backend. gRPC binds its QP to a session-local HTTP/2 transport. The application
-receives one ordered sequence of byte fragments and owns framing and request
-correlation. DPUmesh exposes no numeric service, backend, proxy-session, or
-upstream id through this API.
+proxy. What the proxy does with it is the Service's deployed protocol treatment,
+not the calling surface's: an opaque Service stays pinned to the backend its
+first bytes selected, and a protocol-aware Service routes each request through a
+session-local HTTP/1, HTTP/2 or gRPC stack and may reach a different endpoint
+with each one. Either way the application receives one ordered sequence of byte
+fragments and owns framing and request correlation. DPUmesh exposes no numeric
+service, backend, proxy-session, or upstream id through this API.
 
 `dmesh_destroy_qp()` is graceful close: it submits the buffered tail, waits until
 the DPU has released every submitted byte, and then sends FIN. If submission or
@@ -104,8 +106,18 @@ without waiting for submitted custody. Data and reset share the QP's ordered
 forward ring, so the DPU observes earlier descriptors before it drops both proxy
 directions and their remaining buffers. Both calls return held RX credit, always
 free the local QP, and may return `-1/EBADMSG`; the pointer is invalid on every
-return. Because one EQ poll can return several entries that name the same QP,
-defer destruction until the whole returned batch has been processed.
+return.
+
+The close marker is carried in the same per-QP custody as data, and the DPU
+acknowledges it only once it has retired the proxy session that marker closed.
+Until then the QP's `local_port` — the key that session was held under — is
+offered to no new QP, outbound or inbound, so a later stream cannot arrive in
+the session the closed one left. Ports are recycled rather than consumed; a
+process that closes faster than acknowledgements return exhausts its window and
+`dmesh_create_qp()` fails `NULL/ENOMEM` instead of reusing one early.
+
+Because one EQ poll can return several entries that name the same QP, defer
+destruction until the whole returned batch has been processed.
 
 ## 4. TX: buffered sending and backpressure
 
@@ -137,9 +149,10 @@ An idle stream also submits its first partial unit immediately; while an earlier
 unit is in flight, only the newest partial may be retained, and it is submitted
 by a bounded internal deadline. `dmesh_flush()` forces that remainder earlier.
 Applications do not drive this policy, must not depend on a particular physical
-unit size, and have no `SEND_MORE` mode. `dmesh_tx_inflight()` reports the
-stream's outstanding bytes for diagnostics and is not an input to application
-batching policy.
+unit size, and have no `SEND_MORE` mode. `dmesh_tx_inflight()` is nonzero while
+a published unit — data, or the marker that closes the stream — awaits
+acknowledgement; it is diagnostic and not an input to application batching
+policy.
 
 Each QP has bounded outstanding-send capacity, and QPs also share the channel's
 overall transmit capacity. The transport recovers capacity as previously
@@ -315,10 +328,11 @@ does not select or observe the physical batch size.
 The gRPC C++ adapter maps one runtime to channels, reactor shards to EQs, and
 EventEngine endpoints to QPs. Client bootstrap accepts a Service-name target,
 credentials, and `grpc::ChannelArguments`; absent authority defaults to the
-target. Each EventEngine `Connect` creates a targeted QP. The supported
-deployment assigns the gRPC Service to the DPU-hosted Linkerd HTTP/2 path; each
-channel has its own proxy transport and its selected backend remains pinned for
-that session.
+target. Each EventEngine `Connect` creates a targeted QP, and releasing the last
+reference to the returned channel resets those QPs rather than leaving them to
+gRPC's own endpoint cleanup. The supported deployment assigns the gRPC Service
+to the DPU-hosted Linkerd gRPC path, which picks a backend per request, so one
+channel spreads across the Service's endpoints.
 
 The adapter uses `dmesh_alloc`/`dmesh_post_send` for TX, calls `dmesh_flush`
 once at each EventEngine Write boundary, and consumes
@@ -348,6 +362,5 @@ Adapter-internal ownership and threading are specified in
   cached for one generation interval and re-resolved after that or on a
   connection error, so a Service that appears later is reachable without
   restarting the process.
-- The supported gRPC deployment always terminates HTTP/2 in the DPU-hosted
-  Linkerd proxy. Native and preload Services use the same proxy in opaque mode;
-  unassigned L4 forwarding is not a supported deployment topology.
+- Every Service terminates in the DPU-hosted Linkerd proxy, protocol-aware or
+  opaque; unassigned L4 forwarding is not a supported deployment topology.

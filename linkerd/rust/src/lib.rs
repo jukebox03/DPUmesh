@@ -1131,9 +1131,8 @@ impl Worker {
             }
         }
         let worker = self.id;
-        self.backends
-            .set_endpoint_resolver(Arc::new(
-                move |selected: SocketAddr, session_service: SocketAddr| {
+        self.backends.set_endpoint_resolver(Arc::new(
+            move |selected: SocketAddr, session_service: SocketAddr| {
                 if own
                     .get(&session_service)
                     .is_some_and(|addresses| addresses.contains(&selected))
@@ -1161,8 +1160,8 @@ impl Worker {
                     ENDPOINT_STALE => dmesh_doca::EndpointVerdict::Stale,
                     _ => dmesh_doca::EndpointVerdict::Unresolved,
                 }
-                },
-            ));
+            },
+        ));
     }
 
     /// Publish which Service each address the held generation names belongs
@@ -1280,8 +1279,7 @@ impl Worker {
             for side in session.sides() {
                 let fin_published = side.fin_published;
                 if side.handle.as_ref().is_some_and(|handle| {
-                    (!fin_published && handle.tx_finished())
-                        || handle.poll_tx_ready(cx).is_ready()
+                    (!fin_published && handle.tx_finished()) || handle.poll_tx_ready(cx).is_ready()
                 }) {
                     return Poll::Ready(());
                 }
@@ -2735,7 +2733,12 @@ mod tests {
 
     /// A reply carries two Pods: the backend that is sending it, and the
     /// client whose route it belongs to.
-    fn reply_flow_from(service: i32, backend_pod: i32, peer_pod: i32, dst_port: u16) -> DmeshL7Flow {
+    fn reply_flow_from(
+        service: i32,
+        backend_pod: i32,
+        peer_pod: i32,
+        dst_port: u16,
+    ) -> DmeshL7Flow {
         DmeshL7Flow {
             src_pod: backend_pod,
             ..reply_flow(service, peer_pod, dst_port)

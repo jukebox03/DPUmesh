@@ -3,11 +3,12 @@
 DPUmesh is a BlueField service mesh built with DOCA Comch, DPA, DMA, and an
 embedded Linkerd proxy. Applications address a Kubernetes Service; the DPU owns
 policy, discovery, backend selection, connection state, and Host↔DPU transfer.
-Native and preload connections use Linkerd's opaque byte-stream path; gRPC and
-HTTP/1.1 use its protocol-aware path. Endpoints on the node are reached by DMA,
-and endpoints on another node by the authenticated peer channel, whose RDMA
-transport is the one component still to be implemented — until it binds, a
-Service whose only replicas are elsewhere has no route.
+Each Service is deployed as an opaque byte stream or on Linkerd's
+protocol-aware HTTP/1, HTTP/2 or gRPC path, independently of the surface its
+Pods use. Endpoints on the node are reached by DMA, and endpoints on another
+node by the authenticated peer channel, whose RDMA transport is the one
+component still to be implemented — until it binds, a Service whose only
+replicas are elsewhere has no route.
 
 This repository is a research prototype. The design documents below define its
 transport, proxy, control-plane, and API contracts.
@@ -63,11 +64,11 @@ unit and its timing are internal, not application tuning parameters, and the
 preload and gRPC layers keep no batch queue or timer of their own.
 
 Every QP is one full-duplex byte stream into the DPU-hosted Linkerd proxy and
-does not expose backend or proxy-session ids through native events. Native and
-preload Services enter Linkerd as opaque streams; a protocol-aware Service
-enters the HTTP/1, HTTP/2 or gRPC path. Linkerd's selected backend is reached
-through DMA into that Pod's registered memory, or across the peer channel when
-the generation places it on another node.
+does not expose backend or proxy-session ids through native events. An opaque
+Service enters Linkerd as a byte stream and a protocol-aware one as HTTP/1,
+HTTP/2 or gRPC. Linkerd's selected backend is reached through DMA into that
+Pod's registered memory, or across the peer channel when the generation places
+it on another node.
 
 Backpressure is nonblocking. `dmesh_alloc()` returning `NULL/EAGAIN` arms that QP
 itself, and returned capacity produces one `DMESH_EVENT_TX_READY` on its EQ:
@@ -99,9 +100,12 @@ destruction begins. The steady-state data plane uses the imported rings and
 reverse DMA path.
 
 Each registration of a pod slot carries a generation number, so a DMA completion
-that arrives late cannot be attributed to the slot's next occupant. A DMA fault
-restarts that worker's DMA engine without unpublishing healthy pods, and a
-current-generation payload batch is retried once, in order. Removing a pod and
+that arrives late cannot be attributed to the slot's next occupant. A connection
+is fenced the same way at its own scale: its close is acknowledged only once the
+DPU has retired the proxy session, and its port leaves the pool until then, so a
+new stream cannot arrive in the one it replaced. A DMA fault restarts that
+worker's DMA engine without unpublishing healthy pods, and a current-generation
+payload batch is retried once, in order. Removing a pod and
 tearing its mappings down remains the control connection's decision.
 
 ## Repository
@@ -110,7 +114,7 @@ tearing its mappings down remains the control connection's decision.
 include/dpumesh/       public C API
 src/                   host core, native facade, resolver, preload facade
 doca/                  BlueField ARM process and DPA kernel
-controller/            cluster controller: topology generation, workload scope
+controller/            cluster controller and the admission webhook
 integrations/grpc/     gRPC C++ runtime, reactor, tests, benchmark
 linkerd/               DPU-side L7 layer: adapter ABI, consumers, port submodule
 bench/                 deployment, workloads, validators, measurement records
@@ -293,17 +297,18 @@ is the same access written by hand.
 - A Service's Pods must be on a node running `dpumesh_dpu`. How many meshed Pods
   that node serves is its execution units times eight forward rings, divided by
   the rings each Pod spans — 32 with the default two.
-- The deployment assigns each Service a protocol treatment: native and preload
-  Services are opaque byte streams, and a protocol-aware Service takes Linkerd's
-  HTTP/1, HTTP/2 or gRPC path. Policy, discovery and balancing run either way;
-  per-request routing needs the protocol-aware path.
+- The deployment assigns each Service a protocol treatment, and the surface its
+  Pods use does not decide it: an opaque Service is a byte stream, and a
+  protocol-aware one takes Linkerd's HTTP/1, HTTP/2 or gRPC path. Policy,
+  discovery and balancing run either way; per-request routing needs the
+  protocol-aware path.
 - On the protocol-aware path a backend is chosen per request, so one client
   channel spreads across a Service's endpoints. An opaque stream carries no
   message boundaries and stays on the backend it was pinned to.
-- An `HTTPRoute` may reorder, filter, reject or redirect requests, including
-  into another Service — weighted `backendRefs` are the ordinary canary shape.
-  What guards the dial is the endpoint's liveness, and the inbound policy that
-  grades the stream is the destination Pod's own.
+- An `HTTPRoute` or `GRPCRoute` may reorder, filter, reject or redirect
+  requests, including into another Service — weighted `backendRefs` are the
+  ordinary canary shape. What guards the dial is the endpoint's liveness, and
+  the inbound policy that grades the stream is the destination Pod's own.
 - Traffic between Pods on one node is plaintext inside registered DMA mappings
   the workload cannot address. There is no per-hop proxy TLS. Confidentiality
   between nodes belongs to the peer channel's transport, which is not yet

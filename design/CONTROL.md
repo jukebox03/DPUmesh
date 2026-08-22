@@ -1409,6 +1409,13 @@ decides (`dmesh_worker_for_port`), at the destination the DPU that allocates the
 handle encodes its own worker in it. The two are independent because the two
 DPUs have independent worker sets.
 
+One connection also carries one cross-node destination, because it holds one
+pin. A protocol-aware stream picks a backend per request and may therefore ask
+for a second remote endpoint; that ask is refused by name and counted
+`peer.second-remote-destination` rather than delivered to the first, since a
+destination silently wrong is worse than one refused. Reaching two needs a pin
+per destination, and this is the single place that would change.
+
 | Event | Within a node | Across nodes |
 |---|---|---|
 | normal close | FIN fan-out (`px_try_fin`), then the upstream is freed | stream FIN; the destination releases the handle |
@@ -1632,6 +1639,8 @@ The ones marked ∎ change a security property; the rest change only cost.
   source opens that Pod on its node's channel, DATA lands through destination
   SG-DMA, and `STREAM_ACK` releases source custody only after `REV_DONE` was
   published.
+- A connection carries one cross-node destination; a second remote endpoint on
+  the same stream is refused and counted, never delivered to the first.
 - Encryption and mutual key agreement are the lower transport's; topology key
   binding, stream identity and policy admission are this layer's.
 - `src_generation` is carried in `STREAM_OPEN` and no consumer reads it; a
