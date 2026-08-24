@@ -278,7 +278,7 @@ control plane issues against them.
 | Feed | Published by | Scope | Signed with | Carries |
 |---|---|---|---|---|
 | node membership | node agent | node | feed keyring, HMAC-SHA256 | the `(Pod UID, Service)` pairs this node may hold |
-| Service targets | the registry publisher | node | feed keyring, HMAC-SHA256 | each Service's ClusterIP and ready endpoints, with the Pod UID of each |
+| Service targets | node agent, derived from the held topology | node | feed keyring, HMAC-SHA256 | each Service's ClusterIP and ready endpoints, with the Pod UID of each |
 | topology generation | controller | cluster | `DPUMESH_CONTROLLER_KEY_DIR`, Ed25519 | *The generation* above |
 
 The symmetric key still buys everything below a hostile DPU: a non-root host
@@ -287,10 +287,13 @@ does not verify does not revoke — the direction that matters, since revocation
 is the operation that ends a Pod. Membership revocation does not enable at all
 without a feed keyring.
 
-The feed keyring is disjoint from the registration keyring, so a feed publisher
-holds no key that can mint identity and the two roles rotate independently. Key
-selection is filename-driven, so a key file in the wrong directory is a signing
-capability leak; provisioning refuses to place two keyrings in one directory.
+The feed keyring is disjoint from the registration keyring, so a leaked key is
+accepted for only one wire role and the two roles rotate independently. The
+deployed node-agent process necessarily holds both node-scoped keys: compromising
+that trusted process compromises both roles for its node, as the threat model
+already concedes. Key selection is filename-driven, so a key file in the wrong
+directory is a signing-capability leak; provisioning refuses to place two
+keyrings in one directory.
 
 The Service target snapshot is derived from the held generation rather than an
 independent Kubernetes read, so the two cannot disagree. It places every address
@@ -1142,7 +1145,7 @@ byte-transparent, so it cannot mint or terminate mesh identity.
 
 ### Identity
 
-1. A DPU identity agent obtains a projected ServiceAccount token with the
+1. The node agent obtains a projected ServiceAccount token with the
    Linkerd identity audience, the trust roots, and a key and CSR whose DNS SAN
    is `<service-account>.<namespace>.serviceaccount.identity.<trust-domain>`.
 2. The embedded proxy sends `Identity.Certify(token, identity, CSR)` to

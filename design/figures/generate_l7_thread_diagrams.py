@@ -17,9 +17,9 @@ box, container, arrow, terms = styled()
 def generate_dpumesh_threads():
     fig, ax = setup_figure(18.0, 13.0, (0, 18.0), (-1.75, 11.5))
     ax.text(0.1, 11.1, "DPUmesh with embedded Linkerd — thread model", fontsize=17, ha="left")
-    ax.text(2.3, 10.55, "HOST", fontsize=11, color="#555555", ha="center")
+    ax.text(2.3, 10.55, "CLIENT PROCESS (HOST)", fontsize=11, color="#555555", ha="center")
     ax.text(10.0, 10.55, "BLUEFIELD DPU", fontsize=11, color="#555555", ha="center")
-    ax.text(16.0, 10.55, "BACKEND HOST", fontsize=11, color="#555555", ha="center")
+    ax.text(16.0, 10.55, "LOCAL BACKEND POD", fontsize=11, color="#555555", ha="center")
     ax.plot([4.65, 4.65], [0.75, 10.45], color="#ddddda", lw=1, ls=(0, (2, 3)))
     ax.plot([14.15, 14.15], [0.75, 10.45], color="#ddddda", lw=1, ls=(0, (2, 3)))
 
@@ -101,7 +101,7 @@ def generate_dpumesh_threads():
         5.45,
         4.75,
         4.45,
-        "Pinned ARM data worker s — holds the Linkerd sessions",
+        "ARM worker shard s — Linkerd + DPUmesh",
         edge=GREEN,
         face="#fbfffd",
         count=None,
@@ -159,10 +159,10 @@ def generate_dpumesh_threads():
         1.15,
         4.75,
         3.75,
-        "Other pinned ARM data workers i ≠ s",
+        "Other ARM worker shards i ≠ s",
         edge=GRAY,
         face="#fcfcfb",
-        count="when A > 1",
+        count="x A - 1",
     )
     box(
         ax,
@@ -183,7 +183,7 @@ def generate_dpumesh_threads():
         4.15,
         1.25,
         "Persistent DPUmesh driver",
-        ("owns its completion engine and DMA lanes", "Linkerd state too when selector = all"),
+        ("owns its completion engine and DMA lanes", "owns its Linkerd runtime and sessions"),
         edge=GRAY,
         face=GRAY_BG,
         title_size=10.2,
@@ -256,7 +256,7 @@ def generate_dpumesh_threads():
     ax.text(
         14.65,
         3.47,
-        "A worker id sends every L7 flow to worker s;",
+        "Port affinity selects the owning worker shard;",
         fontsize=8.6,
         color="#444444",
         ha="left",
@@ -264,7 +264,7 @@ def generate_dpumesh_threads():
     ax.text(
         14.65,
         3.09,
-        "`all` builds a proxy on every worker instead.",
+        "the deployed configuration enables all A = 8 workers.",
         fontsize=8.6,
         color="#444444",
         ha="left",
@@ -434,7 +434,7 @@ def generate_l7_interaction():
         2.35,
         "Worker-local Linkerd state",
         (
-            "outbound stack tasks",
+            "opaque workload stack + HTTP session stacks",
             "DmeshIo endpoint pairs",
             "backend registry + sessions (per worker)",
             "tx wakers",
@@ -598,7 +598,7 @@ def generate_linkerd_driven():
         4.85,
         1.65,
         "Enabled worker state",
-        ("DmeshIo endpoint pairs", "one outbound stack per session", "exact-token backend registry"),
+        ("DmeshIo endpoint pairs", "opaque: shared workload stack", "protocol-aware: per-session stack", "exact-token backend registry"),
         edge=GREEN,
         face=GREEN_BG,
     )
@@ -609,7 +609,7 @@ def generate_linkerd_driven():
         4.85,
         1.65,
         "Control-plane clients",
-        ("deployed destination, identity and policy", "host-network TCP gateway", "service target → backend connector"),
+        ("deployed destination, identity and policy", "node-agent TCP relay", "service target → backend connector"),
         edge=GREEN,
         face=GREEN_BG,
     )
@@ -650,7 +650,7 @@ def generate_linkerd_driven():
     ax.text(
         2.55,
         0.92,
-        "DPUMESH_L7_LINKERD_WORKER selects one worker (default: 0), or all workers with `all`.",
+        "Deployment uses `all`: every A = 8 worker is an independent Linkerd shard (single-worker mode remains).",
         fontsize=9.2,
         color="#444444",
         ha="left",
@@ -668,7 +668,7 @@ def generate_linkerd_driven():
             ("staging custody", "arrival bytes DPUmesh holds until the layer releases"),
             ("egress arena", "DPU buffers holding output until the DMA sends it"),
             ("backend registry", "per-worker map from a session to its DMesh channel"),
-            ("session", "one client connection and its Linkerd outbound stack"),
+            ("session", "one client connection; opaque sessions may share a workload stack"),
         ],
     )
 

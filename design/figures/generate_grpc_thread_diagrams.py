@@ -30,7 +30,7 @@ def generate_grpc_threads():
     ax.text(
         0.1,
         17.55,
-        "gRPC adapter — the threads a connection and then one RPC cross",
+        "gRPC adapter — thread path for connection setup and one RPC",
         fontsize=17,
         ha="left",
     )
@@ -91,7 +91,7 @@ def generate_grpc_threads():
         4.35,
         1.35,
         "DPU connection setup",
-        ("control message creates the remote QP", "and binds it to a backend pod"),
+        ("control message creates the receiver QP", "and binds it to a backend pod"),
         edge=ORANGE,
         face=ORANGE_BG,
     )
@@ -411,7 +411,7 @@ def generate_grpc_vs_stock():
         4.20,
         1.10,
         "pod RX mmap",
-        ("registered host memory already written", "no kernel and no syscall"),
+        ("registered host memory already written", "data bypasses the socket / TCP path"),
         edge=GREEN,
         face="white",
         title_size=9.0,
