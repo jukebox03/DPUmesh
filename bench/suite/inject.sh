@@ -28,7 +28,7 @@ IMG_PRELOAD_SOCK="${IMG_PRELOAD_SOCK:-bench/preload-sock:latest}"
 IMG_CONTROLLER="${IMG_CONTROLLER:-bench/dpumesh-controller:latest}"
 BENCH_NUMA_NODE="${BENCH_NUMA_NODE:-0}"
 HOST_PCI="${HOST_PCI:-}"
-DPUMESH_RINGS_PER_POD="${DPUMESH_RINGS_PER_POD:-2}"
+DPUMESH_RINGS_PER_POD="${DPUMESH_RINGS_PER_POD:-}"
 DPUMESH_ATTEST_SOCKET="${DPUMESH_ATTEST_SOCKET:-/run/dpumesh/attest.sock}"
 export NS CTRL_PORT LIB_OUT IMG_PRELOAD_SOCK IMG_CONTROLLER BENCH_NUMA_NODE
 export HOST_PCI DPUMESH_RINGS_PER_POD DPUMESH_ATTEST_SOCKET
@@ -44,6 +44,28 @@ LOG="$OUT_DIR/raw.log"
 
 SSH_OPTS=(-o ServerAliveInterval=15 -o ServerAliveCountMax=4
           -o ConnectTimeout=10 -o BatchMode=yes)
+
+# The webhook stamps every injected Pod with the rings it must register with,
+# and the host refuses a channel whose K is below the DPU's landing stripes. So
+# K is read from the DPU that will serve these Pods — its startup banner — and
+# never defaulted, because a default that disagrees with the running DPU
+# crash-loops every Pod the webhook admits.
+deployed_rings_per_pod() {
+    local banner lines
+    # The banner is written once per DPU start, so a long-running node buries
+    # it under the campaigns since; widen until it is found.
+    for lines in 4000 40000 200000; do
+        banner=$(cd "$PROJ_ROOT" && timeout 180 bench/bench.sh dpulog "$lines" 2>/dev/null |
+                     grep 'DPU PROXY MODE ON' | tail -1)
+        [ -n "$banner" ] && break
+    done
+    printf '%s' "$banner" | sed -n 's/.*N\/K\/A=[0-9]*\/\([0-9]*\)\/[0-9]*.*/\1/p'
+}
+if [ -z "$DPUMESH_RINGS_PER_POD" ]; then
+    DPUMESH_RINGS_PER_POD=$(deployed_rings_per_pod)
+    [ -n "$DPUMESH_RINGS_PER_POD" ] || {
+        echo "cannot read K from the DPU's startup banner; is the DPU up?" >&2; exit 1; }
+fi
 say()  { printf '\n=== %s\n' "$*" | tee -a "$LOG"; }
 note() { printf '    %s\n' "$*" | tee -a "$LOG"; }
 field() { sed -n "s/.*[[:space:]]$2=\([^ ]*\).*/\1/p" <<<"$1"; }
@@ -107,14 +129,20 @@ cleanup() {
 }
 trap cleanup EXIT
 
-wait_running() {  # wait_running <app> <seconds>
+# Ready, not Running: a container that exits and restarts keeps its Pod in
+# phase Running, so waiting on the phase hands the traffic stage a server that
+# never started and its refusal reads as a mesh verdict.
+wait_ready() {  # wait_ready <app> <seconds>
     local app="$1" deadline=$(( SECONDS + ${2:-120} ))
     while [ "$SECONDS" -lt "$deadline" ]; do
         [ "$(kubectl get pod -n "$NS" -l "app=$app" \
-              -o jsonpath='{.items[?(@.status.phase=="Running")].metadata.name}' 2>/dev/null \
-              | wc -w)" -ge 1 ] && return 0
+              -o jsonpath='{range .items[*]}{range .status.conditions[?(@.type=="Ready")]}{.status}{end}{end}' \
+              2>/dev/null | grep -c True)" -ge 1 ] && return 0
         sleep 2
     done
+    note "$app never became Ready:"
+    kubectl get pod -n "$NS" -l "app=$app" 2>&1 | tee -a "$LOG"
+    kubectl logs -n "$NS" -l "app=$app" --tail=20 2>&1 | tee -a "$LOG"
     return 1
 }
 # A Deployment mid-replacement has more than one Pod, and a terminating one
@@ -201,7 +229,7 @@ say "workloads — the same Deployment, with and without the annotation"
 apply injected.yaml
 for d in inject-echo plain-echo inject-bench plain-bench; do scale "$d" 1; done
 for a in inject-echo plain-echo inject-bench plain-bench; do
-    wait_running "$a" 180 || { echo "$a never reached Running" >&2; exit 1; }
+    wait_ready "$a" 180 || { echo "$a never became Ready" >&2; exit 1; }
 done
 
 # Running is not serving: a meshed Pod still has to register with the DPU, and

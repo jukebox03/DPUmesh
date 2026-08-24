@@ -1,0 +1,67 @@
+stage,fixture,arm,expected,observed,verdict,rcnt,fail,admitted,denied,route_hits,target_mismatch,note
+P0,no policy,dpumesh,serve,serve,PASS,28374,0,143,0,0,0,default policy admits
+P1,Server; no authorization,dpumesh,refuse,refuse,PASS,0,1,0,1,0,0,deny by default
+P1b,Server; no authorization (after 100s idle),dpumesh,refuse,refuse,PASS,0,1,0,1,0,0,no stream may be admitted after silence
+P2,AuthorizationPolicy: caller identity,dpumesh,serve,serve,PASS,27858,0,140,0,0,0,identity allows
+P3,AuthorizationPolicy: another identity,dpumesh,refuse,refuse,PASS,0,1,0,1,0,0,negative control for identity
+P4,AuthorizationPolicy: caller address,dpumesh,serve,serve,PASS,28300,0,143,0,0,0,networks clause allows
+P5,AuthorizationPolicy: another network,dpumesh,refuse,refuse,PASS,0,1,0,1,0,0,negative control for networks
+P6,no policy,dpumesh,serve,serve,PASS,27934,0,141,0,0,0,returned to the default
+R0,no route,grpc-dpumesh,serve,serve,PASS,8020,0,1,0,0,0,served by the default route
+R1,HTTPRoute matching the method,grpc-dpumesh,serve,serve,PASS,7897,0,1,0,7997,0,route_hits must be > 0
+R2,HTTPRoute matching nothing,grpc-dpumesh,refuse,refuse,PASS,0,24726,1,0,0,0,no rule matches
+R3,HTTPRoute to another Service,grpc-dpumesh,serve,serve,PASS,6791,0,2,0,6892,0,liveness guards the dial; not Service identity
+R4,no route,grpc-dpumesh,serve,serve,PASS,8025,0,1,0,0,0,returned to the default route
+X0,no route,grpc-dpumesh,serve,serve,PASS,7817,0,1,0,0,0,baseline for the cross scope
+X1,backendRef in another Service,grpc-dpumesh,serve,serve,PASS,6665,0,2,0,6766,0,target_mismatch must stay flat
+X1b,attribution,grpc-dpumesh,served,served,PASS,,,,,,,served: echo-grpc-alt-774bbbccb5-l8grm=6766 
+X2,Server on the destination Service; no authorization,grpc-dpumesh,refuse,refuse,PASS,0,587,421,510,0,0,graded by the callee
+X2v,the destination refused,grpc-dpumesh,refused,refused,PASS,,,421,510,,,denied+=510 admitted+=421
+X2b,the destination Server withdrawn,grpc-dpumesh,serve,serve,PASS,6581,0,2,0,6682,0,the route works again
+X3,weighted 50/50 across two Services,grpc-dpumesh,serve,serve,PASS,36059,0,8,0,36460,0,both destinations must serve
+X3b,split,grpc-dpumesh,both,both,PASS,,,,,,,A{echo-grpc-dpumesh-84cbd4d65d-fcr27=3156 } B{echo-grpc-alt-774bbbccb5-l8grm=18205 }
+X4,no route,grpc-dpumesh,serve,serve,PASS,7884,0,1,0,0,0,returned to the default route
+F1-1ch,one Service two backends,grpc-dpumesh,2,2,PASS,18170,0,,,,0,served: echo-grpc-dpumesh-84cbd4d65d-fcr27=9160 echo-grpc-dpumesh-84cbd4d65d-ztncn=9118 
+F1-4ch,one Service two backends,grpc-dpumesh,2,2,PASS,91319,0,,,,0,served: echo-grpc-dpumesh-84cbd4d65d-fcr27=46736 echo-grpc-dpumesh-84cbd4d65d-ztncn=45015 
+F1r,one backend restored,grpc-dpumesh,serve,serve,PASS,8051,0,1,0,0,0,the Service is healthy again
+S0,no route,grpc-dpumesh,serve,serve,PASS,7945,0,1,0,0,0,baseline for the surfaces scope
+S1,timeout 10s,grpc-dpumesh,serve,serve,PASS,7809,0,1,0,7910,0,a generous timeout changes nothing
+S2,timeout 1ms,grpc-dpumesh,refuse,refuse,PASS,7949,4,1,0,8053,0,shorter than the proxy's own request
+S2v,the route timed requests out,grpc-dpumesh,fired,fired,PASS,,,,,,,REQUEST_TIMEOUT+=4
+S3a,1-in-50 failures; no retry policy,grpc-dpumesh,refuse,refuse,PASS,6204,128,1,0,0,0,the failures reach the client
+S3b,1-in-50 failures; retry limit 3,grpc-dpumesh,serve,serve,PASS,4308,0,1,0,0,0,the retry policy absorbs them
+S3v,the route retried the failures,grpc-dpumesh,fired,fired,PASS,,,,,,,retry_requests+=90
+S4,method POST,grpc-dpumesh,serve,serve,PASS,6356,0,1,0,6456,0,gRPC is POST
+S5,method GET,grpc-dpumesh,refuse,refuse,PASS,0,24745,1,0,0,0,no rule matches
+S6,header content-type: application/grpc,grpc-dpumesh,serve,serve,PASS,6610,0,1,0,6710,0,every gRPC request carries it
+S7,header content-type: application/json,grpc-dpumesh,refuse,refuse,PASS,0,24609,1,0,0,0,no rule matches
+S8,GRPCRoute on the called method,grpc-dpumesh,serve,serve,PASS,6720,0,1,0,0,0,grpc.testing.BenchmarkService/UnaryCall
+S9,GRPCRoute on another method,grpc-dpumesh,refuse,refuse,PASS,0,24373,1,0,0,0,no rule matches
+S10,Server on the protocol-aware Service; no authorization,grpc-dpumesh,refuse,refuse,PASS,0,580,0,506,0,0,deny by default
+S11,AuthorizationPolicy targeting the GRPCRoute,grpc-dpumesh,serve,serve,PASS,6500,0,1,0,0,0,the route authorizes the caller
+S12,the same policy naming another identity,grpc-dpumesh,refuse,refuse,PASS,0,589,0,513,0,0,negative control for route authorization
+S13,a failing endpoint beside a healthy one,grpc-dpumesh,serve,serve,PASS,6551,3,2,0,0,0,the breaker ejects it and the client keeps serving
+S13v,the breaker ejected the failing endpoint,grpc-dpumesh,ejected,ejected,PASS,,,,,,,healthy=6652 broken=3
+S14,the failing endpoint withdrawn,grpc-dpumesh,serve,serve,PASS,6674,0,1,0,0,0,the Service is healthy again
+S15,HTTP/1.1 request-response,http1,serve,serve,PASS,6846,0,1,0,0,0,the only HTTP/1 workload in the tree
+L1,opaque; 1 threads; rep 1,dpumesh,,,,95219,0,,,,,backends={1} ready_endpoints=NA dist=1:95319 
+L1,opaque; 1 threads; rep 2,dpumesh,,,,93934,0,,,,,backends={1} ready_endpoints=NA dist=1:94034 
+L1,opaque; 1 threads; rep 3,dpumesh,,,,95169,0,,,,,backends={2} ready_endpoints=NA dist=2:95269 
+L1,opaque; 2 threads; rep 1,dpumesh,,,,195642,0,,,,,backends={1} ready_endpoints=NA dist=1:195842 
+L1,opaque; 2 threads; rep 2,dpumesh,,,,189336,0,,,,,backends={1 2} ready_endpoints=NA dist=1:94693;2:94843 
+L1,opaque; 2 threads; rep 3,dpumesh,,,,209986,0,,,,,backends={2} ready_endpoints=NA dist=2:210186 
+L1,opaque; 4 threads; rep 1,dpumesh,,,,413616,0,,,,,backends={1 2} ready_endpoints=NA dist=1:207232;2:206784 
+L1,opaque; 4 threads; rep 2,dpumesh,,,,416009,0,,,,,backends={0 1 2} ready_endpoints=NA dist=0:207777;1:104462;2:104170 
+L1,opaque; 4 threads; rep 3,dpumesh,,,,425927,0,,,,,backends={1 2} ready_endpoints=NA dist=1:319610;2:106717 
+L1,opaque; 6 threads; rep 1,dpumesh,,,,649266,0,,,,,backends={1 2} ready_endpoints=NA dist=1:433281;2:216585 
+L1,opaque; 6 threads; rep 2,dpumesh,,,,732656,0,,,,,backends={0 1 2} ready_endpoints=NA dist=0:244789;1:122198;2:366269 
+L1,opaque; 6 threads; rep 3,dpumesh,,,,667690,0,,,,,backends={0 1 2} ready_endpoints=NA dist=0:111843;1:333811;2:222636 
+L2,two backends; rep 1,dpumesh,,,,748165,0,,,,,backends={0 1} ready_endpoints=2 dist=0:374301;1:374464 
+L2,two backends; rep 2,dpumesh,,,,564037,0,,,,,backends={0 1} ready_endpoints=2 dist=0:282281;1:282356 
+L2,two backends; rep 3,dpumesh,,,,579799,0,,,,,backends={0 1} ready_endpoints=2 dist=0:386621;1:193778 
+L3,three backends; rep 1,dpumesh,,,,731938,0,,,,,backends={0 2} ready_endpoints=3 dist=0:500931;2:231607 
+L3,three backends; rep 2,dpumesh,,,,650526,0,,,,,backends={0 1} ready_endpoints=3 dist=0:325518;1:325608 
+L3,three backends; rep 3,dpumesh,,,,837521,0,,,,,backends={0 1 2} ready_endpoints=3 dist=0:423740;1:282295;2:132086 
+L4a,grpc 1 channels,grpc-dpumesh,,,,18206,0,,,,,ready_endpoints=2 served: echo-grpc-dpumesh-84cbd4d65d-77qpr=8109 echo-grpc-dpumesh-84cbd4d65d-t2qlk=10205 
+L4b,grpc 4 channels,grpc-dpumesh,,,,101310,0,,,,,ready_endpoints=2 served: echo-grpc-dpumesh-84cbd4d65d-77qpr=48530 echo-grpc-dpumesh-84cbd4d65d-t2qlk=53212 
+L5,grpc; one backend,grpc-dpumesh,,,,16776,0,,,,,backends={} ready_endpoints=NA dist=NA 

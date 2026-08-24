@@ -106,8 +106,8 @@ int  l7_inbound_verdict(int worker_id, const struct dmesh_l7_flow *flow);
 /* Drop the policy watches held for a destination Pod whose registration ended.
  * The watch lifetime is the cached store's lifetime, so this is what ends it.
  * Registration ends on the control thread and each worker's stores are its
- * own, so this reaches only the caller's; `dmesh_l7_workload_live` is what the
- * workers prune their own with. */
+ * own, so this reaches only the caller's; the workers prune their own against
+ * `dmesh_l7_workloads`. */
 void l7_inbound_forget(int worker_id, const char *workload);
 /* Control-plane admission accounting. `kind` is the decision surface
  * (`grant`, `membership`, `revocation`, `peer`) and `reason` a stable
@@ -117,7 +117,6 @@ void l7_inbound_forget(int worker_id, const char *workload);
 void l7_control_event(const char *kind, const char *reason);
 
 /* DPUmesh data-path entry points. */
-int dmesh_l7_backends(int worker_id, int32_t service, int32_t *out, int max);
 uint8_t *dmesh_l7_tx_reserve(int worker_id, uint64_t conn, uint32_t *cap);
 int dmesh_l7_tx_commit(int worker_id, uint64_t conn, int32_t backend_pod,
                        uint32_t len);

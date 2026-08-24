@@ -1,17 +1,19 @@
 # DPUmesh gRPC Integration
 
-This document defines how the gRPC C++ adapter maps chttp2 onto the native
-transport: ownership, threading, the transmit and receive state machines, and
-the contract its tests hold. Application bootstrap and build commands live in
-[`integrations/grpc/README.md`](../integrations/grpc/README.md); the native
-transport contract lives in [`API.md`](API.md).
+This document defines the gRPC C++ adapter: how it maps chttp2 onto the native
+transport, how an application bootstraps against it, and what its tests hold.
+The native transport contract lives in [`API.md`](API.md).
+
+The source contract is gRPC v1.80.0, C++17, and `libdpumesh.so.5`. The endpoint
+injection APIs are experimental. Generated messages, stubs, services, RPC
+semantics, metadata, deadlines, HTTP/2, credentials and TLS are unchanged;
+DPUmesh is a byte-stream transport, not an RPC wrapper or an HTTP/2 parser.
 
 ## Model
 
 gRPC chttp2 consumes an EventEngine byte-stream Endpoint, not necessarily a
 POSIX socket. DPUmesh therefore supplies an Endpoint backed by one native QP and
-injects accepted Endpoints through `PassiveListener`. HTTP/2, protobuf, service
-dispatch, metadata, and security remain ordinary gRPC concerns.
+injects accepted Endpoints through `PassiveListener`.
 
 ```text
 generated stub / handler
@@ -30,6 +32,76 @@ stock gRPC; only what is below it changes:
 
 [PDF](figures/grpc_vs_stock.pdf)
 
+## Using it
+
+Only bootstrap differs. Create one runtime per process and share it across every
+channel and the server attachment; a second runtime registers the process a
+second time, and the native library does not reject that.
+
+**Client.** The channel target is a Service name rather than an address.
+
+```cpp
+auto runtime = dpumesh::grpc::DmeshRuntime::Create(
+    dpumesh::grpc::MakeNativeDmeshApiOps());
+
+grpc::ChannelArguments args;
+args.SetString(GRPC_ARG_DEFAULT_AUTHORITY, "api.example.com");  // optional
+args.SetInt(GRPC_ARG_INITIAL_RECONNECT_BACKOFF_MS, 100);
+
+auto channel = dpumesh::grpc::CreateDmeshChannel(
+    *runtime, "echo-dpumesh", grpc::SslCredentials(ssl_options), args);
+
+auto stub = Echo::NewStub(*channel);
+grpc::ClientContext context;
+context.set_deadline(deadline);
+context.set_wait_for_ready(true);
+grpc::Status status = stub->Call(&context, request, &response);
+```
+
+`CreateDmeshChannel` takes the parameters of `grpc::CreateCustomChannel` after a
+runtime handle and returns `absl::StatusOr`. Channel creation is lazy, and gRPC
+owns reconnect backoff, deadlines and RPC retry policy. An absent
+`GRPC_ARG_DEFAULT_AUTHORITY` defaults to the target; an explicit value is
+preserved. The target is not an IP address or a gRPC resolver URI. DPUmesh owns
+the channel's EventEngine argument and preserves the rest.
+
+**Server.** The service implementation is unchanged; native connections enter
+gRPC through `PassiveListener`.
+
+```cpp
+grpc::ServerBuilder builder;
+builder.RegisterService(&service);
+
+std::unique_ptr<grpc::experimental::PassiveListener> listener;
+builder.experimental().AddPassiveListener(server_credentials, listener);
+std::unique_ptr<grpc::Server> server = builder.BuildAndStart();
+
+auto attachment = dpumesh::grpc::AttachDmeshGrpcServer(
+    *runtime, listener.get());
+```
+
+Optional arguments supply a per-connection memory-allocator factory (default:
+unquota'd malloc slices) and an accept-error callback. Shutdown stops traffic,
+calls `Detach()`, shuts down the gRPC server, destroys the server and listener,
+then destroys the runtime.
+
+**Build and test.** Link `grpc_dpumesh`.
+
+```sh
+make lib
+cmake -S integrations/grpc -B build/grpc \
+  -DDPUMESH_GRPC_SOURCE_DIR=/path/to/grpc-v1.80.0 \
+  -DDPUMESH_GRPC_ENABLE_SANITIZERS=ON \
+  -DBUILD_TESTING=ON
+cmake --build build/grpc -j2
+ASAN_OPTIONS=detect_leaks=0 \
+  ctest --test-dir build/grpc --output-on-failure
+```
+
+ThreadSanitizer needs a separate build with `-DDPUMESH_GRPC_ENABLE_TSAN=ON`; it
+instruments the vendored gRPC source too, which is why the two sanitizer
+configurations are exclusive.
+
 ## Endpoint injection
 
 gRPC exposes two seams for a non-socket transport, and the adapter uses a
@@ -40,8 +112,8 @@ it as `GRPC_ARG_EVENT_ENGINE` through `grpc_event_engine_arg_vtable()`, and
 calls `grpc::CreateCustomChannel` with the synthetic target `ipv4:127.0.0.1:1`.
 The channel argument holds a shared pointer to the engine. The configured
 Service name stays in the engine; the authority reaches chttp2 as
-`GRPC_ARG_DEFAULT_AUTHORITY`, defaulted to the Service name when the caller
-omits it. A caller-supplied `GRPC_ARG_EVENT_ENGINE` is rejected.
+`GRPC_ARG_DEFAULT_AUTHORITY`. A caller-supplied `GRPC_ARG_EVENT_ENGINE` is
+rejected.
 
 The returned `shared_ptr<::grpc::Channel>` aliases an owner that also holds the
 engine, which makes releasing its last public reference a definite point in
@@ -67,13 +139,14 @@ over the returned QP. The connect deadline is a `RunAfter` timer on the
 delegate; the timer and the connect callback both hold a weak reference to the
 engine.
 
-**Server.** No EventEngine is replaced. The application registers a listener
-with `ServerBuilder::experimental().AddPassiveListener`, and
-`AttachDmeshGrpcServer` installs a runtime accept callback. Each
-`DMESH_EVENT_CONN_REQ` is wrapped as a `DmeshEndpoint` with an allocator from
-the caller's factory and submitted through
-`PassiveListener::AcceptConnectedEndpoint`. `Detach()` clears the accept
-callback and returns after in-flight injections finish.
+**Server.** No EventEngine is replaced. `AttachDmeshGrpcServer` installs a
+runtime accept callback; each `DMESH_EVENT_CONN_REQ` is wrapped as a
+`DmeshEndpoint` with an allocator from the caller's factory and submitted
+through `PassiveListener::AcceptConnectedEndpoint`. `Detach()` clears the accept
+callback and returns after in-flight injections finish. Every reactor can
+consume the channel-wide native accept queue, and the EQ that receives the event
+becomes the permanent owner of that QP. No native listen-port call and no
+application-level HTTP/2 parser is introduced.
 
 ## Threads
 
@@ -209,6 +282,10 @@ The Endpoint fails a parked write when peer EOF arrives, and a post that blocks
 after the FIN flag is set fails instead of parking. Every accepted EventEngine
 Write completes even when the peer vanishes mid-transfer.
 
+Transmit batching has no gRPC-specific option: `PostSend` transfers ownership to
+libdpumesh and `Flush` marks the end of one EventEngine Write, while physical
+batch state and deadlines remain in the library.
+
 ## Read state machine
 
 Native RX memory cannot be retained by gRPC after credit return. One
@@ -226,17 +303,102 @@ instead of returning it, and the DPU lands no further bytes for that connection
 until a read drains the queue and the Endpoint asks its reactor to release what
 it holds. Retention is capped per connection, the credits belonging to a landing
 ring shared across the shard; past that cap the credit returns with the copy and
-`Stats::receive_credit_hold_dropped` advances.
+`Stats::receive_credit_hold_dropped` advances. Receive backpressure therefore has
+no tunable, and there is no busy poll, retry timer, connection scan, or per-RPC
+wrapper dispatch.
 
 Peer FIN ends the read half. Transport failure or Endpoint destruction completes
 both pending directions once with an error. Each Endpoint QP is one byte stream;
 HTTP/2 framing and multiplexing remain entirely inside chttp2.
 
-## Server path
+## Runtime configuration
 
-Every reactor can consume the channel-wide native accept queue. The EQ that
-receives `DMESH_EVENT_CONN_REQ` becomes the permanent owner of that QP. No
-native listen-port call or application-level HTTP/2 parser is introduced.
+Each `DmeshRuntime` opens one native channel, which registers the process under
+`$DPUMESH_SERVICE` and maps its RX region.
+
+`DmeshRuntime::Options::reactor_count` sets the number of EQ reactor shards over
+that one channel. Each shard is one EQ and one polling thread, which also runs
+normal receive and TX-ready Endpoint progress for its connections. Outbound
+connections are assigned round-robin; an inbound connection belongs to whichever
+shard received its `DMESH_EVENT_CONN_REQ`.
+
+One further adapter-owned thread per runtime is the default callback executor
+shared by every shard and Endpoint. It delivers connect/accept results and
+deferred Endpoint callbacks, including immediate terminal failures and pending
+operations failed by EOF, transport error or destruction; normal receive and
+TX-ready completions do not take this hop. `DmeshRuntime::Create` accepts a
+`std::shared_ptr<Executor>` that replaces it, and endpoints share ownership of
+the executor they schedule on.
+
+`DmeshRuntime::stats()` sums each shard's `DmeshReactor::Stats`. Both counters
+report a bound being reached rather than an error:
+`receive_credit_hold_dropped` rises when backpressure stops applying to a stalled
+connection, and `eq_drain_budget_exhausted` rises when a shard is saturated.
+
+## Connection lifecycle
+
+The registry maps configured Service names to service ids. Registered backend
+instances form a separate live set, so instances may join or leave without
+changing client channels or registry rows.
+
+Each HTTP/2 connection remains pinned to one backend. Backend loss terminates
+that stream; a later gRPC connection creates a QP and selects from the current
+live set. In-flight RPCs retain normal gRPC deadline, retry, idempotency and
+`wait_for_ready` semantics. New Service names require registry updates.
+
+`GetPeerAddress` and `GetLocalAddress` report loopback addresses carrying the
+DPU-assigned pod id and the connection's native port. A client stream has no
+peer pod until the DPU pins one, and reads as `127.0.0.0:0`.
+
+In the supported deployment the adapter's Service is always assigned to the
+DPU-hosted Linkerd HTTP/2 path, so destination discovery, endpoint generation
+updates, admission and workload identity are owned there rather than duplicated
+in a `dpumesh:///` resolver inside the application process.
+
+## Workloads
+
+`integrations/grpc/bench/` holds the programs the measurement harness drives
+over this adapter. Their wire stack is gRPC chttp2 → DPUmesh endpoint → Host↔DPU
+DMA → embedded Linkerd, and the Kubernetes manifest contains only that path.
+
+- `bench_grpc` is the controlled client behind `bench.sh point grpc-dpumesh …`.
+- `echo_grpc` serves the benchmark service through the DPUmesh endpoint.
+- `grpc_dpumesh_qps_benchmark` is the standalone closed-loop harness.
+
+The deployed programs set `BENCH_TRANSPORT=dmesh`; `BENCH_DST_SERVICE` and
+`DPUMESH_SERVICE` are Kubernetes Service identities resolved by the signed DPU
+topology, and no TCP address is used for the data path. `bench.sh grpcbuild`
+performs the workload build with `-DDPUMESH_GRPC_BUILD_QPS_BENCHMARK=ON`, and
+`BENCH_DEPLOY_SCOPE=grpc bench.sh deploy` performs the complete DPU,
+control-plane, image, Pod and smoke-test lifecycle.
+
+`bench_grpc` accepts:
+
+```text
+PING
+RUN      <req> <reply> <conc> <dur> <warmup> <threads>
+OPEN     <req> <reply> <threads> <dur> <warmup> <rate> [const|poisson] [channels]
+SELFTEST <payload> <threads> <dur> <rate> <const|poisson>
+```
+
+Each issued RPC joins the worker's live set before it reaches gRPC, so shutdown
+cancels every one of them, and issuance closes under the lock the sweep takes.
+A run bounded by its own duration plus its channels' connect budget reports the
+fault and exits rather than holding the control port. The result line reports
+RPC failures, outstanding calls, latency percentiles, retained-credit drops and
+EQ budget exhaustion.
+
+The standalone harness takes:
+
+```text
+grpc_dpumesh_qps_benchmark server dmesh SERVICE DURATION_S [REACTORS=1]
+grpc_dpumesh_qps_benchmark client dmesh SERVICE WARMUP_S DURATION_S \
+    CONCURRENCY REQUEST_BYTES RESPONSE_BYTES [REACTORS=1] [AUTHORITY=SERVICE] \
+    [WAIT_FOR_READY=0]
+```
+
+The benchmark syntax, the rules a retained point must satisfy and the index of
+every evaluation are in [`../bench/README.md`](../bench/README.md).
 
 ## Verification contract
 
@@ -267,8 +429,11 @@ The maintained tests require:
 - public-symbol linkage against `libdpumesh.so.5`.
 
 Hardware validation additionally checks the native register/readiness barrier,
-real byte exchange, FIN, `POD_QUIESCED`, and slot reuse. Those observations show
-the exercised graceful path; they do not prove forced-death DMA isolation.
+real byte exchange, FIN, `POD_QUIESCED`, and slot reuse; `bench.sh
+grpcshutdown` kills a client with a live HTTP/2 session, requires Linkerd
+sessions/tasks and imported mappings to quiesce, re-registers the recycled slot
+and runs another request. Those observations show the exercised graceful path;
+they do not prove forced-death DMA isolation.
 
 The bounded poll budget and shared executor ownership are not covered by the
 maintained tests. Shared runtime ownership and the return of

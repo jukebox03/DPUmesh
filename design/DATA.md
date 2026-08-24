@@ -345,8 +345,8 @@ returns on local DMA completion; a remote chunk remains charged to its peer
 until that peer acknowledges the destination Host landing.
 
 The flow-control property survives as composition rather than as one credit
-loop: a slow destination exhausts arena capacity → `px_ship_arm_bytes` finds no
-chunk and returns 0 → the session's write stalls → the stack stops reading →
+loop: a slow destination exhausts arena capacity → `dmesh_l7_tx_reserve` lends
+no chunk → the session's write stalls → the stack stops reading →
 staging fills to
 `PX_L7_CUSTODY_MAX` → `dmesh_l7_release` stops → TX credit stops → the Pod
 stalls. Every hop is bounded, so the composition is lossless backpressure; what
@@ -370,8 +370,12 @@ the egress chunk arena is not.
 
 [PDF](figures/dpumesh_threads.pdf)
 
-The DPU binary always links `linkerd/rust/libdmesh_l7.a`; Meson refuses a
-configuration without the Linkerd archive.
+The DPU binary always links the adapter archive `linkerd/rust/libdmesh_l7.a`
+and, through it, the pinned proxy fork in `linkerd/port/linkerd2-proxy/`; Meson
+refuses a configuration without them. There is no reference consumer and no
+runtime bypass for a Service the deployment assigned to Linkerd. The ordered L4
+machinery of the first half of this document is the substrate those sessions and
+the peer channel run on, not an alternative to them.
 
 The L7 runtime does not alter the Host↔DPU protocol, wire descriptors or the
 Host API: host channels continue to register services, publish forward
@@ -435,7 +439,10 @@ ports preserve that owner for replies.
 
 Each worker owns independent control-plane clients, session slots, backend
 registry, and metrics registry. Worker `n` exposes its admin endpoint at the
-configured base port plus `n`.
+configured base port plus `n`. The eight runtimes are therefore worker-local
+shards of one DPU proxy rather than eight proxies: connection state, policy
+state, backend registry, DMA callbacks and reply routing all stay on the worker
+port affinity selected.
 
 ![Persistent runtime loop on a Linkerd-enabled ARM worker](figures/l7_interaction.png)
 
@@ -773,7 +780,7 @@ memory remains valid until the matching release.
 
 | Entry point | Result |
 |---|---|
-| `dmesh_l7_backends` | live backend pod identifiers for a service |
+| `dmesh_l7_workloads` | every destination Pod this worker serves, as an inbound policy subject |
 | `dmesh_l7_tx_reserve` | writable egress-arena region or `NULL` |
 | `dmesh_l7_tx_commit` | publishes a reservation or returns it unused |
 | `dmesh_l7_tx_commit_remote` | publishes a reservation to one exact remote Pod UID |

@@ -17,16 +17,12 @@ int32_t dpu_route_l4(struct objects *objs, int16_t svc);
 /* Collect ready backend pod IDs for a service. */
 int collect_live_hosts(struct objects *objs, int16_t svc, int32_t *out);
 
-/* The remote half of a Service's backend set, from the held generation. A
- * Service with no local replica is served, not poisoned: locality is a
- * preference, which is what topology-aware routing treats it as everywhere
- * else. Returns how many endpoints were written. */
-#define DMESH_REMOTE_BACKENDS_MAX 64
-int collect_remote_hosts(struct objects *objs, int16_t svc,
-                         struct dmesh_endpoint_ref *out, int max);
 /* 1 when the held generation names a reachable backend for `svc` on another
  * node. This is what separates "no live host" from "host not ready": the first
- * is routable across the boundary and the second is not routable at all. */
+ * is routable across the boundary and the second is not routable at all. A
+ * Service with no local replica is served, not poisoned: locality is a
+ * preference, which is what topology-aware routing treats it as everywhere
+ * else. */
 int dmesh_service_has_remote(struct objects *objs, int16_t svc);
 
 /* Wake the main control and doorbell loop. */

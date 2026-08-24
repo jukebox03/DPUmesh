@@ -75,7 +75,6 @@ CHECK_FN(l7_conn_segment,
          int (*)(int, uint64_t, const uint8_t *, uint32_t, uint32_t));
 CHECK_FN(l7_conn_eof, void (*)(int, uint64_t));
 CHECK_FN(l7_conn_close, void (*)(int, uint64_t));
-CHECK_FN(dmesh_l7_backends, int (*)(int, int32_t, int32_t *, int));
 CHECK_FN(dmesh_l7_tx_reserve,
          uint8_t *(*)(int, uint64_t, uint32_t *));
 CHECK_FN(dmesh_l7_tx_commit, int (*)(int, uint64_t, int32_t, uint32_t));

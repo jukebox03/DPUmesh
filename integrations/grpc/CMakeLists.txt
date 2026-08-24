@@ -34,6 +34,21 @@ if(DPUMESH_GRPC_ENABLE_TSAN)
   add_link_options(-fsanitize=thread)
 endif()
 
+# Adapter targets carry the sanitizer flags per target: under ASan/UBSan the
+# vendored gRPC build stays uninstrumented, while ThreadSanitizer instruments
+# the whole source build and is set above. The two configurations are exclusive.
+function(dpumesh_grpc_sanitize target)
+  if(DPUMESH_GRPC_ENABLE_SANITIZERS)
+    target_compile_options(${target} PRIVATE
+      -fsanitize=address,undefined -fno-omit-frame-pointer)
+    target_link_options(${target} PRIVATE -fsanitize=address,undefined)
+  elseif(DPUMESH_GRPC_ENABLE_TSAN)
+    target_compile_options(${target} PRIVATE
+      -fsanitize=thread -fno-omit-frame-pointer)
+    target_link_options(${target} PRIVATE -fsanitize=thread)
+  endif()
+endfunction()
+
 if(DPUMESH_GRPC_SOURCE_DIR)
   if(NOT EXISTS "${DPUMESH_GRPC_SOURCE_DIR}/include/grpc/event_engine/event_engine.h")
     message(FATAL_ERROR
@@ -100,14 +115,7 @@ target_link_libraries(grpc_dpumesh_endpoint
   PUBLIC gRPC::grpc++
   PRIVATE Threads::Threads)
 
-if(DPUMESH_GRPC_ENABLE_SANITIZERS)
-  target_compile_options(grpc_dpumesh_endpoint PRIVATE
-    -fsanitize=address,undefined -fno-omit-frame-pointer)
-endif()
-if(DPUMESH_GRPC_ENABLE_TSAN)
-  target_compile_options(grpc_dpumesh_endpoint PRIVATE
-    -fsanitize=thread -fno-omit-frame-pointer)
-endif()
+dpumesh_grpc_sanitize(grpc_dpumesh_endpoint)
 
 find_path(DPUMESH_INCLUDE_DIR dpumesh/dmesh.h
   HINTS "${DPUMESH_ROOT}/include")
@@ -128,14 +136,7 @@ if(DPUMESH_INCLUDE_DIR)
   target_link_libraries(grpc_dpumesh_reactor
     PUBLIC grpc_dpumesh_endpoint
     PRIVATE Threads::Threads)
-  if(DPUMESH_GRPC_ENABLE_SANITIZERS)
-    target_compile_options(grpc_dpumesh_reactor PRIVATE
-      -fsanitize=address,undefined -fno-omit-frame-pointer)
-  endif()
-  if(DPUMESH_GRPC_ENABLE_TSAN)
-    target_compile_options(grpc_dpumesh_reactor PRIVATE
-      -fsanitize=thread -fno-omit-frame-pointer)
-  endif()
+  dpumesh_grpc_sanitize(grpc_dpumesh_reactor)
 else()
   message(STATUS
     "DPUmesh public headers were not found; the reactor target will not be built")
@@ -212,18 +213,7 @@ if(DPUMESH_INCLUDE_DIR AND DPUMESH_LIBRARY)
       "${CMAKE_CURRENT_LIST_DIR}/src")
     target_link_libraries(grpc_dpumesh_qps_benchmark PRIVATE
       grpc_dpumesh grpc_dpumesh_qps_proto Threads::Threads)
-    if(DPUMESH_GRPC_ENABLE_SANITIZERS)
-      target_compile_options(grpc_dpumesh_qps_benchmark PRIVATE
-        -fsanitize=address,undefined -fno-omit-frame-pointer)
-      target_link_options(grpc_dpumesh_qps_benchmark PRIVATE
-        -fsanitize=address,undefined)
-    endif()
-    if(DPUMESH_GRPC_ENABLE_TSAN)
-      target_compile_options(grpc_dpumesh_qps_benchmark PRIVATE
-        -fsanitize=thread -fno-omit-frame-pointer)
-      target_link_options(grpc_dpumesh_qps_benchmark PRIVATE
-        -fsanitize=thread)
-    endif()
+    dpumesh_grpc_sanitize(grpc_dpumesh_qps_benchmark)
 
     # L4-harness peers: same control protocol and result line as bench_sock and
     # bench_dpumesh, so the DPUmesh collector drives gRPC unchanged.
@@ -236,16 +226,7 @@ if(DPUMESH_INCLUDE_DIR AND DPUMESH_LIBRARY)
         "${CMAKE_CURRENT_LIST_DIR}/../../bench/apps")
       target_link_libraries(${app} PRIVATE
         grpc_dpumesh grpc_dpumesh_qps_proto Threads::Threads)
-      if(DPUMESH_GRPC_ENABLE_SANITIZERS)
-        target_compile_options(${app} PRIVATE
-          -fsanitize=address,undefined -fno-omit-frame-pointer)
-        target_link_options(${app} PRIVATE -fsanitize=address,undefined)
-      endif()
-      if(DPUMESH_GRPC_ENABLE_TSAN)
-        target_compile_options(${app} PRIVATE
-          -fsanitize=thread -fno-omit-frame-pointer)
-        target_link_options(${app} PRIVATE -fsanitize=thread)
-      endif()
+      dpumesh_grpc_sanitize(${app})
     endforeach()
   endif()
 else()
@@ -265,18 +246,7 @@ if(BUILD_TESTING)
     "${CMAKE_CURRENT_LIST_DIR}/tests")
   target_link_libraries(grpc_dpumesh_endpoint_test
     PRIVATE grpc_dpumesh_endpoint Threads::Threads)
-  if(DPUMESH_GRPC_ENABLE_SANITIZERS)
-    target_compile_options(grpc_dpumesh_endpoint_test PRIVATE
-      -fsanitize=address,undefined -fno-omit-frame-pointer)
-    target_link_options(grpc_dpumesh_endpoint_test PRIVATE
-      -fsanitize=address,undefined)
-  endif()
-  if(DPUMESH_GRPC_ENABLE_TSAN)
-    target_compile_options(grpc_dpumesh_endpoint_test PRIVATE
-      -fsanitize=thread -fno-omit-frame-pointer)
-    target_link_options(grpc_dpumesh_endpoint_test PRIVATE
-      -fsanitize=thread)
-  endif()
+  dpumesh_grpc_sanitize(grpc_dpumesh_endpoint_test)
   add_test(NAME grpc_dpumesh_endpoint_test
            COMMAND grpc_dpumesh_endpoint_test)
 
@@ -288,18 +258,7 @@ if(BUILD_TESTING)
     "${CMAKE_CURRENT_LIST_DIR}/src")
   target_link_libraries(grpc_dpumesh_channel_test PRIVATE
     grpc_dpumesh_endpoint Threads::Threads)
-  if(DPUMESH_GRPC_ENABLE_SANITIZERS)
-    target_compile_options(grpc_dpumesh_channel_test PRIVATE
-      -fsanitize=address,undefined -fno-omit-frame-pointer)
-    target_link_options(grpc_dpumesh_channel_test PRIVATE
-      -fsanitize=address,undefined)
-  endif()
-  if(DPUMESH_GRPC_ENABLE_TSAN)
-    target_compile_options(grpc_dpumesh_channel_test PRIVATE
-      -fsanitize=thread -fno-omit-frame-pointer)
-    target_link_options(grpc_dpumesh_channel_test PRIVATE
-      -fsanitize=thread)
-  endif()
+  dpumesh_grpc_sanitize(grpc_dpumesh_channel_test)
   add_test(NAME grpc_dpumesh_channel_test
            COMMAND grpc_dpumesh_channel_test)
 
@@ -317,18 +276,7 @@ if(BUILD_TESTING)
       "${DPUMESH_INCLUDE_DIR}")
     target_link_libraries(grpc_dpumesh_reactor_test PRIVATE
       grpc_dpumesh_reactor Threads::Threads)
-    if(DPUMESH_GRPC_ENABLE_SANITIZERS)
-      target_compile_options(grpc_dpumesh_reactor_test PRIVATE
-        -fsanitize=address,undefined -fno-omit-frame-pointer)
-      target_link_options(grpc_dpumesh_reactor_test PRIVATE
-        -fsanitize=address,undefined)
-    endif()
-    if(DPUMESH_GRPC_ENABLE_TSAN)
-      target_compile_options(grpc_dpumesh_reactor_test PRIVATE
-        -fsanitize=thread -fno-omit-frame-pointer)
-      target_link_options(grpc_dpumesh_reactor_test PRIVATE
-        -fsanitize=thread)
-    endif()
+    dpumesh_grpc_sanitize(grpc_dpumesh_reactor_test)
     add_test(NAME grpc_dpumesh_reactor_test
              COMMAND grpc_dpumesh_reactor_test)
   endif()
@@ -341,18 +289,7 @@ if(BUILD_TESTING)
       "${CMAKE_CURRENT_LIST_DIR}/src")
     target_link_libraries(grpc_dpumesh_native_link_test
       PRIVATE grpc_dpumesh)
-    if(DPUMESH_GRPC_ENABLE_SANITIZERS)
-      target_compile_options(grpc_dpumesh_native_link_test PRIVATE
-        -fsanitize=address,undefined -fno-omit-frame-pointer)
-      target_link_options(grpc_dpumesh_native_link_test PRIVATE
-        -fsanitize=address,undefined)
-    endif()
-    if(DPUMESH_GRPC_ENABLE_TSAN)
-      target_compile_options(grpc_dpumesh_native_link_test PRIVATE
-        -fsanitize=thread -fno-omit-frame-pointer)
-      target_link_options(grpc_dpumesh_native_link_test PRIVATE
-        -fsanitize=thread)
-    endif()
+    dpumesh_grpc_sanitize(grpc_dpumesh_native_link_test)
     add_test(NAME grpc_dpumesh_native_link_test
              COMMAND grpc_dpumesh_native_link_test)
 
@@ -367,18 +304,7 @@ if(BUILD_TESTING)
       "${CMAKE_CURRENT_LIST_DIR}/src")
     target_link_libraries(grpc_dpumesh_native_runtime_smoke
       PRIVATE grpc_dpumesh Threads::Threads)
-    if(DPUMESH_GRPC_ENABLE_SANITIZERS)
-      target_compile_options(grpc_dpumesh_native_runtime_smoke PRIVATE
-        -fsanitize=address,undefined -fno-omit-frame-pointer)
-      target_link_options(grpc_dpumesh_native_runtime_smoke PRIVATE
-        -fsanitize=address,undefined)
-    endif()
-    if(DPUMESH_GRPC_ENABLE_TSAN)
-      target_compile_options(grpc_dpumesh_native_runtime_smoke PRIVATE
-        -fsanitize=thread -fno-omit-frame-pointer)
-      target_link_options(grpc_dpumesh_native_runtime_smoke PRIVATE
-        -fsanitize=thread)
-    endif()
+    dpumesh_grpc_sanitize(grpc_dpumesh_native_runtime_smoke)
 
     # Manual two-pod hardware test. Run one copy in server mode and another in
     # client mode; unlike native_runtime_smoke this executes a real gRPC RPC.
@@ -391,17 +317,6 @@ if(BUILD_TESTING)
       "${CMAKE_CURRENT_LIST_DIR}/src")
     target_link_libraries(grpc_dpumesh_native_grpc_smoke
       PRIVATE grpc_dpumesh Threads::Threads)
-    if(DPUMESH_GRPC_ENABLE_SANITIZERS)
-      target_compile_options(grpc_dpumesh_native_grpc_smoke PRIVATE
-        -fsanitize=address,undefined -fno-omit-frame-pointer)
-      target_link_options(grpc_dpumesh_native_grpc_smoke PRIVATE
-        -fsanitize=address,undefined)
-    endif()
-    if(DPUMESH_GRPC_ENABLE_TSAN)
-      target_compile_options(grpc_dpumesh_native_grpc_smoke PRIVATE
-        -fsanitize=thread -fno-omit-frame-pointer)
-      target_link_options(grpc_dpumesh_native_grpc_smoke PRIVATE
-        -fsanitize=thread)
-    endif()
+    dpumesh_grpc_sanitize(grpc_dpumesh_native_grpc_smoke)
   endif()
 endif()

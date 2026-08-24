@@ -10,7 +10,6 @@ have taken with it.
 import hashlib
 import hmac
 import importlib.util
-import socket
 import sys
 import tempfile
 import threading

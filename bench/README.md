@@ -38,6 +38,29 @@ The command performs the complete lifecycle in order:
 Narrow diagnostic scopes are `native`, `preload`, and `grpc`; each deploys the
 corresponding application adapter over the same mesh.
 
+## What a deployment needs
+
+The DPU binary always links the embedded Linkerd adapter, so the deployment
+brings up its control plane too:
+
+- the pinned proxy fork, `git submodule update --init linkerd/port/linkerd2-proxy`;
+- Linkerd destination, policy and identity services, reached through the node
+  agent's authenticated management-link relay;
+- DPU identity material and trust anchors;
+- signed membership, topology, workload-scope and Service-target feeds — the
+  Service-target feed is what presents real ClusterIPs and ready endpoint
+  addresses to Linkerd;
+- `DPUMESH_L7_FAIL_CLOSED=1`.
+
+Steps 2 and 3 of the lifecycle above are also available on their own, for
+rebuilding after a source change without redeploying:
+
+```sh
+./bench/bench.sh linkerdbuild     # the embedded Linkerd static library
+./bench/bench.sh build            # host library, shim, workloads, DPU binary
+./bench/bench.sh grpcbuild        # the gRPC workloads
+```
+
 ## Supported workloads
 
 | API | Client/server | Deployment |
@@ -138,6 +161,12 @@ BENCH_DEPLOY_SCOPE=all|native|preload|grpc
 BENCH_NUMA_POLICY=local|auto
 BENCH_GRPC_BUILD=release|asan
 ```
+
+`bench.sh pin [fair|native|preload|grpc|grpcmax]` places the workloads on the
+benchmark cores. Pinning follows the PID, so anything that recreates a Pod —
+`grpcshutdown`, a campaign stage that rolls a Deployment — drops it, and the
+next point measures the scheduler instead of its subject. Re-pin before
+believing a number taken after one of those.
 
 Operational commands are `status`, `logs`, `dpulog`, `dpucpu`,
 `armbalance`, `rotate-identity`, `admission`, and `cleanup`.

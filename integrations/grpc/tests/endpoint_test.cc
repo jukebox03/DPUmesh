@@ -39,15 +39,13 @@ class TestMemoryAllocator final : public MemoryAllocatorImpl {
     return grpc_slice_malloc(forced == kNoForcedSize ? request.max() : forced);
   }
   void Release(size_t /*bytes*/) override {}
-  void Shutdown() override { ++shutdowns_; }
+  void Shutdown() override {}
 
-  int shutdowns() const { return shutdowns_.load(); }
   void SetNextSliceSize(size_t size) { next_slice_size_.store(size); }
 
  private:
   static constexpr size_t kNoForcedSize =
       std::numeric_limits<size_t>::max();
-  std::atomic<int> shutdowns_{0};
   std::atomic<size_t> next_slice_size_{kNoForcedSize};
 };
 

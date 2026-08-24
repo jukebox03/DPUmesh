@@ -45,9 +45,9 @@ use dmesh_doca::{
 };
 use tokio::sync::mpsc;
 
-/// Rust layout of `struct dmesh_l7_flow`.
 /// Bound on the destinations one worker holds policy watches for. It is the
 /// Pod-state table's capacity, so a full table is listed in one call.
+#[cfg(not(test))]
 const MAX_POLICY_SUBJECTS: usize = 32;
 
 /// One destination this DPU serves, as `struct dmesh_l7_workload`.
@@ -72,6 +72,7 @@ impl Default for DmeshL7Workload {
 impl DmeshL7Workload {
     /// The workload and the address its policy is watched on, or `None` for an
     /// entry naming neither.
+    #[cfg(not(test))]
     fn subject(&self) -> Option<(String, SocketAddr)> {
         let workload = flow_text(&self.workload);
         if workload.is_empty() || self.port == 0 {
@@ -84,6 +85,7 @@ impl DmeshL7Workload {
     }
 }
 
+/// Rust layout of `struct dmesh_l7_flow`.
 #[repr(C)]
 pub struct DmeshL7Flow {
     pub src_ip: u32,
@@ -99,7 +101,6 @@ pub struct DmeshL7Flow {
     pub source_identity: [c_char; 254],
 }
 
-/// Read one NUL-terminated fixed-width field of a flow.
 /// The NUL-terminated text in a fixed-size ABI field, borrowed in place.
 ///
 /// The verdict path runs once per connection and looks a workload up by name,
@@ -215,7 +216,7 @@ thread_local! {
 /// DPUmesh ABI calls with a recording test implementation.
 mod datapath {
     #[cfg(test)]
-    pub use fake::{release, session_failed, tx_finish, tx_publish, workloads};
+    pub use fake::{release, session_failed, tx_finish, tx_publish};
 
     #[cfg(not(test))]
     use std::os::raw::c_int;
@@ -359,12 +360,6 @@ mod datapath {
             pub chunk: usize,
             /// Reservations cancelled with a zero-length commit.
             pub cancels: usize,
-        }
-
-        /// Tests drive the adapter directly and register no Pods, so the
-        /// reconciliation this feeds is not exercised by them.
-        pub fn workloads(_worker_id: c_int) -> Vec<(String, std::net::SocketAddr)> {
-            Vec::new()
         }
 
         thread_local! {
@@ -755,6 +750,7 @@ impl Session {
             .find(|side| side.conn == Some(conn))
     }
 
+    #[cfg(not(test))]
     fn sides(&self) -> impl Iterator<Item = &Side> {
         std::iter::once(&self.client).chain(self.backends.iter())
     }
@@ -1212,12 +1208,6 @@ impl Worker {
         let modified = metadata
             .modified()
             .map_err(|error| format!("mtime {}: {error}", path.display()))?;
-        if metadata.len() > MAX_FEED_BYTES {
-            return Err(format!(
-                "service target feed is {} bytes, over the {MAX_FEED_BYTES}-byte bound",
-                metadata.len()
-            ));
-        }
         let stamp = (
             std::os::unix::fs::MetadataExt::ino(&metadata),
             modified,
@@ -1660,10 +1650,6 @@ fn parse_worker_selection(value: &str) -> Result<WorkerSelection, String> {
     Ok(WorkerSelection::One(worker))
 }
 
-/// Parses `service-id=IPv4:port` entries separated by commas.
-///
-/// These addresses are presented to Linkerd destination and policy discovery;
-/// DPUmesh's backend channel continues to use its generation-safe session key.
 /// A Kubernetes Service is namespace-scoped, so a feed key is always
 /// `namespace/name`; a bare name is not a valid identifier anywhere.
 fn valid_service_key(key: &str) -> bool {
@@ -1692,6 +1678,10 @@ fn valid_pod_uid(uid: &str) -> bool {
         })
 }
 
+/// Parse `namespace/name=IPv4:port` entries separated by commas.
+///
+/// These addresses are presented to Linkerd destination and policy discovery;
+/// DPUmesh's backend channel continues to use its generation-safe session key.
 fn parse_service_targets(value: &str) -> Result<NamedServiceTargets, String> {
     let mut targets = HashMap::new();
     for raw in value.split(',').map(str::trim).filter(|s| !s.is_empty()) {
@@ -2120,6 +2110,7 @@ impl InboundPolicies {
     /// arrives: a watch created by that caller still holds the configured
     /// default when its verdict is taken. Dropping the rest is what bounds the
     /// held set, since a held watch does not expire.
+    #[cfg(not(test))]
     fn reconcile(&mut self, subjects: &[(String, SocketAddr)]) {
         if self.build.is_none() {
             return;
@@ -2190,6 +2181,7 @@ pub unsafe extern "C" fn l7_inbound_forget(worker_id: c_int, workload: *const c_
 /// worker's stores are its own, so the workers reconcile rather than being
 /// told. The maintenance pass is where it runs: a watch a Pod needs is started
 /// before that Pod carries traffic, and one whose Pod is gone ends there.
+#[cfg(not(test))]
 fn refresh_inbound_policies(worker_id: c_int) {
     let subjects = datapath::workloads(worker_id);
     INBOUND.with(|slot| {
@@ -2632,8 +2624,8 @@ mod tests {
         }
         document.push_str("test-bench/echo-a=10.0.0.11:9092\nsignature=test,valid\n");
         std::fs::write(&path, &document).unwrap();
-        // The startup path reads through read_feed; the refresh path checks the
-        // metadata it already holds. Both refuse without reading the document.
+        // The bound is checked against the file's own length, so neither path
+        // reads the document.
         assert!(read_feed(&path).is_err());
         with_test_worker(|w| {
             w.service_targets_file = Some(path.clone());

@@ -198,23 +198,18 @@ collect_live_hosts(struct objects *objs, int16_t svc, int32_t *out)
     return n;
 }
 
-/* The replicas of a Service that are somewhere else. Derived from the held
- * generation's endpoint= lines joined with pod= for placement, with this
- * node's own excluded — those are `collect_live_hosts`'s. */
-int
-collect_remote_hosts(struct objects *objs, int16_t svc,
-                     struct dmesh_endpoint_ref *out, int max)
-{
-    if (svc < 0 || svc >= POD_ID_SPACE)
-        return 0;
-    return dmesh_topology_remote_endpoints(objs, svc, objs->node_name, out, max);
-}
-
+/* Whether the held generation places a replica of this Service somewhere else.
+ * Derived from its endpoint= lines joined with pod= for placement, with this
+ * node's own excluded — those are `collect_live_hosts`'s. One endpoint answers
+ * the question, so only one is asked for. */
 int
 dmesh_service_has_remote(struct objects *objs, int16_t svc)
 {
+    if (svc < 0 || svc >= POD_ID_SPACE)
+        return 0;
     struct dmesh_endpoint_ref one;
-    return collect_remote_hosts(objs, svc, &one, 1) > 0;
+    return dmesh_topology_remote_endpoints(objs, svc, objs->node_name,
+                                           &one, 1) > 0;
 }
 
 /* Per-service round robin with a relaxed atomic cursor. */
@@ -426,9 +421,6 @@ dpu_progress_worker_pe(struct dpu_data_worker *worker_state)
     }
     return state;
 }
-
-/* Maximum DPA completions processed before DMA progress. */
-#define DPU_WORKER_COMPLETION_BUDGET 64
 
 /* Drain local and cross-worker completions. */
 static enum px_progress_state

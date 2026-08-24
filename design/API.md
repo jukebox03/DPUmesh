@@ -149,7 +149,7 @@ An idle stream also submits its first partial unit immediately; while an earlier
 unit is in flight, only the newest partial may be retained, and it is submitted
 by a bounded internal deadline. `dmesh_flush()` forces that remainder earlier.
 Applications do not drive this policy, must not depend on a particular physical
-unit size, and have no `SEND_MORE` mode. `dmesh_tx_inflight()` is nonzero while
+unit size, and are offered no corking mode of their own. `dmesh_tx_inflight()` is nonzero while
 a published unit — data, or the marker that closes the stream — awaits
 acknowledgement; it is diagnostic and not an input to application batching
 policy.

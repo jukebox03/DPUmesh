@@ -256,9 +256,8 @@ auto attachment = dpumesh::grpc::AttachDmeshGrpcServer(*runtime, listener.get())
 ```
 
 Create one runtime per process and share it across every channel and the server
-attachment. Link `grpc_dpumesh`;
-[integrations/grpc/README.md](integrations/grpc/README.md) covers the build and
-the connection lifecycle.
+attachment. Link `grpc_dpumesh`; [design/GRPC.md](design/GRPC.md) covers the
+build, the runtime options and the connection lifecycle.
 
 ### Making a workload meshed
 
@@ -294,9 +293,9 @@ is the same access written by hand.
 
 ### What to expect from the mesh
 
-- A Service's Pods must be on a node running `dpumesh_dpu`. How many meshed Pods
-  that node serves is its execution units times eight forward rings, divided by
-  the rings each Pod spans — 32 with the default two.
+- A Service's Pods must be on a node running `dpumesh_dpu`. That node serves the
+  smaller of `MAX_PODS` and its forward-ring supply — execution units times eight
+  rings, divided by the rings each Pod spans. Both are 32 on this BlueField.
 - The deployment assigns each Service a protocol treatment, and the surface its
   Pods use does not decide it: an opaque Service is a byte stream, and a
   protocol-aware one takes Linkerd's HTTP/1, HTTP/2 or gRPC path. Policy,
@@ -319,8 +318,8 @@ Building the library and bringing up a cluster are covered in
 
 ## Documentation
 
-Design documents define the contracts; benchmark documents define the
-DPU-hosted Linkerd/DMA deployment and its validation method.
+Four design documents define the contracts, one report states what the
+deployment measures, and one plan holds what is still open.
 
 **Design**
 
@@ -329,18 +328,13 @@ DPU-hosted Linkerd/DMA deployment and its validation method.
 | [design/API.md](design/API.md) | the native `<dpumesh/dmesh.h>` contract: lifecycle, batching, EQ, errors |
 | [design/DATA.md](design/DATA.md) | the data plane: host/DPA/ARM custody, rings, replay barriers, and the DPU-side Linkerd runtime that rides on them |
 | [design/CONTROL.md](design/CONTROL.md) | the control plane at both scopes: naming, trusted registration, signed feeds, the Linkerd control plane, the cluster controller and the peer channel |
-| [design/GRPC.md](design/GRPC.md) | how the gRPC adapter maps chttp2 onto the transport |
+| [design/GRPC.md](design/GRPC.md) | the gRPC adapter: how it maps chttp2 onto the transport, how an application bootstraps against it, and its workloads |
 
-**Integrations**
-
-| Document | Covers |
-|---|---|
-| [integrations/grpc/README.md](integrations/grpc/README.md) | building and running gRPC over DPUmesh |
-| [linkerd/README.md](linkerd/README.md) | building and deploying the embedded Linkerd consumer |
-
-**Measurement**
+**Measurement and work**
 
 | Document | Covers |
 |---|---|
 | [bench/README.md](bench/README.md) | deployment, the experiment commands, the measurement rules, and the host-only and hardware validation gates |
-| [integrations/grpc/bench/README.md](integrations/grpc/bench/README.md) | the gRPC workloads and collectors |
+| [bench/report/REPORT.md](bench/report/REPORT.md) | what the deployment measures: policy, routing, balancing, latency, throughput and cost |
+| [PLAN.md](PLAN.md) | open function, defect and cost items, and what the campaigns established |
+| [ci/README.md](ci/README.md) | which checks run where, and what each one protects |

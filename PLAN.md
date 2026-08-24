@@ -1,7 +1,9 @@
 # DPUmesh Plan
 
-The design documents in [`design/`](design/) state what is built. This file is
-the open work list, and it has three parts in a fixed order.
+The design documents in [`design/`](design/) state what is built and
+[`bench/report/REPORT.md`](bench/report/REPORT.md) states what it measures. This
+file is the open work list and the record of what the campaigns established, in
+four parts.
 
 **Function comes before cost.** A deployment can weigh "it is slower here"; it
 cannot weigh "it is not supported here". Every item under *Function* is
@@ -16,6 +18,10 @@ against it. Something that falls over after it was claimed costs more than
 something that was never offered, and a fix nobody has watched work is an open
 defect wearing a patch. Where an item there has no receipt in this tree, the
 item says so, and attaching the receipt is the first task in it.
+
+**Findings is not work.** It is the third part, and it holds what the campaigns
+established about the mesh, the instrument and the harness: the rules that now
+hold, and how each one is seen. Every later item is measured against them.
 
 **Measurement discipline (binding).** A capacity is quoted with the instrument
 that produced it. `bench/suite/analyze_saturation.py` votes a `knees.csv`
@@ -38,17 +44,8 @@ item below names the arm that closes it.
 
 # Function
 
-Three items are open. Four that stood here — per-request backend selection,
-routing across Services, automatic injection and the protocol-aware connection
-failure — are built or repaired, measured and stated in [`design/`](design/),
-so they are no longer work. The two fixture questions are closed with the policy
-controller's own answer in
-[`bench/report/data/findings-20260822.md`](bench/report/data/findings-20260822.md),
-and the protocol-aware failure is closed by two consecutive 20/20 campaigns in
-[`bench/report/data/d4-f5-closure-20260822.md`](bench/report/data/d4-f5-closure-20260822.md).
-
-What is left is a Go surface, the transport under the cross-node seam, and node
-density.
+Three items are open: a Go surface, the transport under the cross-node seam, and
+node density.
 
 ## F4 Workloads `LD_PRELOAD` cannot reach
 
@@ -77,11 +74,11 @@ transport. The remaining work is the half below the seam.
 - [ ] **Implement the RDMA transport.** Five callbacks — `connect` with a
   prologue bound into the handshake, `peer_key` returning the peer's
   authenticated static public key, `send`, `recv`, `close` — plus the accept
-  side that `dmesh_peer_adopt` completes, and `px_peer_configure` called to bind
-  it. What the layer above requires of it is ordered reliable delivery within a
-  handle and a mutually authenticated key agreement whose peer static key can be
-  read back. Nothing above the seam can be exercised on hardware until this
-  binds: the peer table is initialised with no transport, so a remote
+  side that `dmesh_peer_accept` completes, and `px_peer_configure` called to
+  bind it. What the layer above requires of it is ordered reliable delivery
+  within a handle and a mutually authenticated key agreement whose peer static
+  key can be read back. Nothing above the seam can be exercised on hardware
+  until this binds: the peer table is initialised with no transport, so a remote
   destination is refused at the first branch of `px_peer_stream_ready`.
 - [ ] Bring up a second DPU node and re-run the deploy against both.
 - [ ] Exercise the remote arm of every campaign that proves only the local one:
@@ -96,14 +93,69 @@ transport. The remaining work is the half below the seam.
 
 ## F7 Node density
 
-A node serves the smaller of `MAX_PODS` and `MAX_DPA_RINGS × N / K`. The sizing
-is in [`bench/report/data/node-density-sizing.md`](bench/report/data/node-density-sizing.md):
-this BlueField reports 32 execution units, so at the default two rings per Pod
-the ring array offers 128 slots and `MAX_PODS = 32` is what binds.
+A node serves the smaller of two caps, and they bind on different hardware and
+do not cost the same to move. Nodes routinely run more Pods than the 32 that
+answers today, so this is a real limit.
 
-- [ ] Raise `MAX_PODS` to 127. It is a host constant, the ring array already
-  backs it at the default `K`, and pod ids stay inside the signed one-byte wire
-  space. Past 127 those fields widen, which is a host-and-DPU wire-ABI change.
+| Constant | Value | Where | What it bounds |
+|---|---:|---|---|
+| `MAX_DPA_RINGS` | 8 | `include/dpumesh/dmesh_common.h` | forward rings one execution unit can hold |
+| execution units (N) | 32 | device query at start-up | EUs the BlueField reports |
+| `DPUMESH_RINGS_PER_POD_DEFAULT` (K) | 2 | `include/dpumesh/dmesh_common.h` | EUs one Pod spans |
+| `MAX_PODS` | 32 | `include/dpumesh/dmesh_common.h` | registration slots the ARM holds |
+| `POD_ID_SPACE` | 128 | `include/dpumesh/dmesh_common.h` | Service-id keyed tables |
+
+N is read from the device and `DPA_THREADS_DEFAULT = 8` is only the fallback
+when that query is unavailable, so N comes from the deploy log
+(`dpa_threads='32'`) and never from the constant. At the default K, `8 × 32 / 2 = 128` ring slots
+back 32 registration slots, so `MAX_PODS` is what binds. The bench deployment
+runs `K = 8`, which leaves exactly 32 ring slots for those 32 Pods: density and
+per-Pod throughput are the same dial, and the harness has it turned to
+throughput.
+
+**The ring array is not the constraint.** `MAX_DPA_RINGS` sizes five arrays in
+`struct dpa_thread_arg`, one copy per EU in device memory, at 68 bytes per ring
+slot over a fixed 68-byte remainder. Doubling it to 16 takes one EU's thread
+argument from 612 B to 1,156 B and the whole device-side cost from 19.1 KiB to
+36.1 KiB across 32 EUs.
+
+Two other things are.
+
+- **The per-poll scan is linear in the rings an EU holds.** `run_dma_manager`
+  walks `num_rings` on every pass and reads each ring's control block out of
+  host memory, so an idle slot costs nothing and occupancy costs everything: at
+  `K = 2`, 127 Pods put roughly eight rings on every EU, which is eight
+  control-block reads per poll instead of the two a lightly loaded node does.
+  That figure cannot be measured off this deployment; it needs a node carrying
+  that many Pods.
+- **The DPA kernel is device code with its own toolchain.**
+  `doca/device/dpa_kernel.c` is compiled by `dpacc` on the BlueField, not by the
+  host build. Changing `MAX_DPA_RINGS` touches no wire format — `dpa_ring_info`
+  stays 48 bytes, `comch_add_ring_msg` 56, `comch_msg` 60 — but both sides must
+  be recompiled against the same header and redeployed together, or the ARM
+  writes `rings[12]` into an EU that allocated eight.
+
+Ordered by cost:
+
+- [ ] **`MAX_PODS = 127`.** A host constant, no DPA change, no wire-format
+  change: pod ids travel as `int8_t` in `comch_dma_comp_msg` and `struct
+  px_unit` with `-1` reserved, and `_Static_assert(MAX_PODS <= 127)` holds the
+  line. `POD_ID_SPACE` is 128 and moves with it. At the default `K` this
+  hardware's 128 ring slots already back it, so this is the whole move up to 127
+  Pods.
+- [ ] `MAX_DPA_RINGS = 16` — 17 KiB more device memory, a `dpacc` rebuild, a
+  paired redeploy, and a per-poll scan that doubles at full occupancy. Needed
+  only for a device with fewer EUs than this one, or for `K` above 2.
+- [ ] Above 127 those wire fields widen. That is a host-and-DPU ABI change of
+  the kind the reverse ring's `struct dmesh_tx_ack_entry` is static-asserted
+  against, because a count the two ends disagree on is silently lossy rather
+  than a failure. Not worth scheduling until a deployment needs it.
+
+Lowering `K` buys ring slots this hardware does not need, and what it costs is
+per-Pod parallelism: a Pod spanning one EU has its forward traffic served by one
+EU's DMA budget. Which way that goes depends on whether the node's Pods are
+individually hot or collectively many. No number is published as supported until
+a node has been run at it; today's supportable claim is 32.
 
 ## Not a gap: per-hop encryption
 
@@ -124,14 +176,7 @@ it until that transport binds.
 
 # Defects
 
-Three of the six items that stood here are closed and gone: the gRPC client that
-stopped answering after a run of failures, the DPU that exited with no cause,
-and the refused-session leak. The first two are written up in
-[`bench/report/data/findings-20260822.md`](bench/report/data/findings-20260822.md);
-the refused-session repair and its real-DPU receipt are in
-[`bench/report/data/d4-f5-closure-20260822.md`](bench/report/data/d4-f5-closure-20260822.md).
-What remains is two failures nothing has diagnosed and one fix nothing has
-watched work.
+Two failures nothing has diagnosed, and one fix nothing has watched work.
 
 ## D1 gRPC overload crash
 
@@ -163,27 +208,175 @@ rather than a feature not yet built.
 ## D3 A fix nothing has watched work
 
 A fix written for a failure and never run against that failure is not yet a fix.
-One is left here; the shared-DMA-context item that stood beside it has its arm
-now — see below.
 
 - [ ] DMA ring behaviour under 40 K-rps overload. The abandoned-ticket latch is
   gone, the overload was still failing when it was last driven, and two
   candidate fixes — batching, and descriptor admission — were reverted as
   regressions. Same treatment as D2: attach the receipt or re-run it.
 
-**Shared DMA context collateral — armed.** Killing one backend under load used
-to clear `dma_ready` on Pods that had nothing to do with it; both clear sites
-were made per Pod and nothing had since killed a backend under load to watch the
-others keep running. `surfaces` `S13`/`S14` now does exactly that — a failing
-endpoint inside the Service under test, traffic through it until the breaker
-ejects it, then the Deployment deleted while the campaign continues — and the
-reductions in
-[`f-spin-20260822/`](bench/report/data/f-spin-20260822/) repeat it against a
-freshly deployed DPU. The healthy endpoint keeps serving across the withdrawal
-in every one of them, and the native and opaque arms are untouched. The
-withdrawal was not the cause of the now-closed protocol-aware failure: it was
-tested six ways, none reproduced it, and the closure receipt records the actual
-connection-lifetime cause.
+One neighbouring item is not on this list, because it has its arm. Clearing
+`dma_ready` on one Pod must not clear it on Pods that have nothing to do with it,
+and both clear sites are per Pod; `surfaces` `S13`/`S14` drives exactly that — a
+failing endpoint inside the Service under test, traffic through it until the
+breaker ejects it, then the Deployment deleted while the campaign continues — and
+the reductions in [`bench/report/data/f-spin-20260822/`](bench/report/data/f-spin-20260822/)
+repeat it against a freshly deployed DPU. The healthy endpoint keeps serving
+across the withdrawal in every one of them, and the native and opaque arms are
+untouched.
+
+---
+
+# Findings
+
+What the campaigns established. Each entry is a rule that now holds and how it
+is seen. The environment is what `bench/bench.sh deploy` leaves behind: one
+node, `K=8`, 32 execution units, namespace `test-bench`.
+
+## The mesh
+
+**A datapath pass that answers on state never reaches its wait.** The persistent
+driver waits on a `select!` of three notification fds, a maintenance deadline
+and `poll_internal`. The fds need the driver to be running, so an internal poll
+that answers from a *state* rather than an event completes that select
+synchronously on every pass, and the driver never runs. What stops then is not
+one port but every listener registered on that driver — the worker's inbound,
+outbound and admin listeners alike — so a worker at 99.9% CPU with the cluster
+idle serves nothing that lands on it.
+
+Two guards hold it. `Worker::poll_internal` does not count a FIN the datapath has
+already accepted, which is a closed write half's steady state rather than
+outstanding work; and the runtime loop drops the internal poll from the wait
+after one wake that publishes nothing, until a notification, a drain that
+progresses, or the maintenance deadline says something moved. Two conditions of
+the same shape stay reachable — a refused `tx_finish`, and queued bytes no arena
+chunk can carry — and the guard bounds both to the millisecond maintenance
+period instead of a spin. Nothing is dropped: every pass drains before it waits.
+`unpublishable_internal_work_does_not_spin` is the regression test — a backend
+that reports work on every ask and publishes none of it must still reach its
+wait.
+
+The diagnostic signature is worth carrying: a wedged worker's admin port is
+*bound and unanswered*, not refused. The socket is bound, the kernel has
+completed handshakes nobody accepts, and `/live` — which reads no metric and
+takes no lock — times out with everything else.
+
+```sh
+bash bench/bench.sh dpucpu                                       # 99.9% with no traffic
+ssh "$DPU_HOST" 'curl -sf --max-time 4 127.0.0.1:4195/metrics'   # nothing
+ssh "$DPU_HOST" 'ss -ltn'                                        # Recv-Q > 0 on a LISTEN row
+```
+
+Readings are in
+[`bench/report/data/f-fix3-20260822-020539/worker-spin-diagnosis.txt`](bench/report/data/f-fix3-20260822-020539/worker-spin-diagnosis.txt)
+and [`worker-spin.txt`](bench/report/data/f-fix3-20260822-020539/worker-spin.txt).
+
+**A control descriptor is the source port's incarnation fence.** A source port
+must not be reused, and an old `(pod, port)` session must not be reachable, until
+the DPU has retired everything that names it. Four places hold that:
+
+- the host tracks zero-length FIN and reset controls in its TX FIFO and does not
+  reuse a source port until their DPU ACK retires;
+- the DPU defers a request FIN's ACK until both Linkerd output halves and all
+  upstream state are gone, and follows a reset ACK with removal of the old
+  request key — replies use DPU-assigned high ports and keep their immediate
+  directional ACK, so only source requests defer;
+- each gRPC client connection carries a one-shot lease shared by the public
+  `Channel` and its gRPC `Endpoint`, so abandonment and a late successful connect
+  both retire the QP through `dmesh_abort_qp` rather than queueing serial
+  five-second graceful closes on the reactor;
+- stalled DPU lifecycle work is re-armed whenever EOF, peer FIN, backend FIN or
+  ACK publication is still under allocation or backpressure, so a teardown that
+  runs while the unit pool is dry cannot leave the refused session key behind.
+
+A full campaign on a fresh DPU decides every stage it offers —
+[`policy-route-20260824-095824/stages.csv`](bench/report/data/policy-route-20260824-095824/stages.csv),
+45 of 45, with `S14` among them — and afterwards the eight workers report 3,798
+sessions opened and 3,798 closed with `ACTIVE=0`, `PENDING=0` and `TASKS=0` on
+every one. `dmesh_registrations_orphaned_total` is cumulative and counts late
+endpoint registrations the generation fence safely aborted — it is not live
+residue.
+
+**A fatal signal on this DPU leaves nothing behind.** Nothing under `doca/` or
+`src/` calls `exit()`, `_exit()` or `abort()`, and no Rust in the adapter calls
+`process::exit`, so a process that is gone was ended from outside. SIGPIPE's
+default action terminates without a core file, and this kernel reports no fatal
+signals (`kernel/print-fatal-signals` and `debug/exception-trace` are both `0`),
+so taking one leaves no core, no kernel line and a log frozen wherever it had
+reached. A Rust binary gets `SIG_IGN` for SIGPIPE from the runtime start-up its
+own `main` runs; the embedded proxy is a static library linked into a C `main`,
+so `doca/dpu_main.c` installs it before anything opens a socket — while the proxy
+holds sockets to a control plane whose peers come and go.
+
+With `print-fatal-signals=0` a fatal signal of any kind leaves `dmesg` silent, so
+the absence of a kernel message is a fact about this DPU rather than evidence.
+What still rules out the signals that do dump — SIGSEGV, SIGABRT, SIGBUS — is a
+missing core with the limit unlimited, the pattern a plain file and disk free.
+`stop_dpu` snapshots `screen -ls`, the kernel log, the core pattern and the log
+tail into `$OUT` when it finds the process already absent; every command in that
+capture is guarded and the function answers `0` whatever happens, because it runs
+on the way to a redeploy and nothing it collects is a reason to stop one.
+Evidence: [`dpu-exit-sigpipe.txt`](bench/report/data/f-spin-20260822/dpu-exit-sigpipe.txt)
+and [`dpu-exit2-evidence.txt`](bench/report/data/f-spin-20260822/dpu-exit2-evidence.txt).
+
+## The instrument
+
+**A benchmark client must not outlive its own run.** `bench_grpc`'s control
+server accepts one connection at a time and runs the benchmark on the accept
+loop's own thread, so a run that never ends is a client that answers nothing for
+every stage after it. Four rules keep a run bounded: a call joins the worker's
+live set before it reaches gRPC, so a cancellation asked for in between is held
+on the context and applied when the call starts; issuance closes under the same
+lock the shutdown sweep takes, so no call outlives the sweep uncancelled; the
+sweep waits out the calls already admitted before shutting the completion queue
+down; and a run bounded by its own duration plus its channels' connect budget
+reports the fault and exits rather than holding the control port, which lets the
+Deployment bring back a client that answers.
+
+This is closed by construction rather than reproduced on demand: repeated runs
+each failing 120,000–140,000 requests do not wedge a client built without those
+rules either. The campaign therefore runs the mass-failure stages and the ones
+after them without restarting the client between them, which makes the
+`surfaces` arm itself the test.
+
+## The harness
+
+These are the reading rules the campaigns hold. Each one exists because its
+absence puts something false in the record or stops the run that is making it:
+three of them separate a wrong verdict from a pass, two keep a harness fault
+from reading as a defect in the mesh, one keeps a row's columns under its own
+header, two keep the run alive, one keeps a number about its subject, and two
+keep a Pod that never booted from being reported as a refusal.
+
+| Rule | Why |
+|---|---|
+| A reply with no `rcnt=` field is `nodata` and fails | a client that answers nothing otherwise looks exactly like a client whose requests were all refused, and every stage expecting a refusal passes |
+| An unreadable counter answers `NA`, and `ctl_delta` propagates it | defaulting to `0` makes the next delta negative, and a process-global counter cannot run backwards |
+| A counter with no sample defaults on the *value*, not on a line | a metric name with no sample yields no line, and a substitution with no line writes nothing, so the stage evaluates `$(( - ))` — invisible until a freshly restarted DPU has none of the family |
+| An empty metric grep is tolerated | under `set -o pipefail` and `set -e`, reading per-Pod counts for a Service that has served nothing ends the campaign mid-stage |
+| A timeout is read from the route's own counter | the client's latency includes a DMA round trip on both sides that a route timeout does not cover |
+| A breaker's failing endpoint is inside the balancer under test | every endpoint failing leaves it nowhere to eject to, and so does a failing backend a route already chose by weight |
+| A gRPC retry condition is written on a `GRPCRoute` | on an `HTTPRoute` the annotation is dropped and the limit beside it still builds a retry policy with no condition, which can never fire |
+| An inbound authorization is written in the kind its `Server` carries | a gRPC `Server` carries gRPC routes, so an `HTTPRoute` parented to it never appears in the port's policy and the port keeps its deny-by-default |
+| Free text is written with the CSV separator replaced | three fixture labels and every `dist` field contain commas, which shift those rows' columns out from under the header |
+| Evidence capture never fails the run it informs | `screen -ls` answers non-zero when there is no session, which under `set -e` ends the deploy the capture runs inside |
+| A measurement after anything recreated a Pod re-pins first | core pinning is per PID, so a validator or stage that restarts a workload leaves it unpinned; the arm then reads the scheduler rather than its subject |
+| A stage waits for Ready, never for Running | a container that exits and restarts keeps its Pod in phase `Running`, so the traffic stage gets a server that never started and its refusal reads as a mesh verdict |
+| A Pod's ring geometry is read from the running DPU | the host refuses a channel whose `K` is below the DPU's landing stripes, so a harness that defaults `DPUMESH_RINGS_PER_POD` instead of reading the startup banner crash-loops every Pod the webhook admits |
+
+The two route-kind rules are also why `linkerd diagnostics policy` is the
+arbiter for a fixture question: in both, the client cannot tell an enforced
+policy from a policy that was never built, and the controller's own answer can.
+`conditions: {}` under a retry limit, or a `Grpc` port carrying one default
+route and no authorizations, is the whole diagnosis.
+
+## Deployment
+
+**Wait for the object before waiting for its condition.** `kubectl wait` fails
+at once on no matching resources rather than waiting, so scaling a Deployment to
+one and immediately waiting on a still-empty label set reports `failed to start`
+for a Pod that starts normally seconds later. The race is invisible until
+something puts latency in front of Pod creation, which admission does to every
+Pod in the namespace.
 
 ---
 
@@ -197,31 +390,21 @@ behavior.
 ## What is known
 
 Per-session cost, not the transport, bounds L7 capacity, and per-workload stack
-sharing removed most of it. The receipt is
-[`bench/report/data/l7-shared-ab-20260821.md`](bench/report/data/l7-shared-ab-20260821.md):
-one session costs **3.9 ms** of ARM time without sharing and **0.4–0.5 ms**
-with it, the closed loop completes 4.4× more sessions under heavy churn, and
-the 30–40 ms p99 spikes of per-session stack building disappear. The steady
-per-request point is unchanged, which is the expected result: the data path does
-not know the stacks are shared.
+sharing removed most of it: one session costs 3.9 ms of ARM time unshared and
+0.4–0.5 ms shared, the closed loop completes 4.4× more sessions under heavy
+churn, and the 30–40 ms p99 spikes of per-session stack building disappear. The
+steady per-request point is unchanged, which is the expected result: the data
+path does not know the stacks are shared. The receipt is
+[`bench/report/REPORT.md`](bench/report/REPORT.md), *What a session costs*.
 
 The synchronous half of a stack build is instrumented in
-`linkerd/app/src/lib.rs` and reported by `SessionMetrics::observe_stack_build`.
-The figures below are that instrument's cumulative nanosecond counters in
-[`bench/report/data/api-l7-20260821/proof_protocol_aware_worker0_metrics.txt`](bench/report/data/api-l7-20260821/proof_protocol_aware_worker0_metrics.txt),
-over the 14 builds the same snapshot counts:
-
-| Phase | Per session |
-|---|---:|
-| `configure` (clone the outbound template, set `dmesh_session`) | 8.7 µs |
-| `layers` (`build_policies` + `outbound.mk`) | 107.7 µs |
-| `service` (`NewService::new_service`) | 32.0 µs |
-| synchronous total | **148.4 µs** |
-
-The remainder is lazy discovery and policy work, task execution and teardown,
-and the surrounding DPUmesh lifecycle. **Locating it requires instrumenting
-those asynchronous boundaries; do not assume the whole figure sits inside the
-synchronous call.**
+`linkerd/app/src/lib.rs` and reported by `SessionMetrics::observe_stack_build`:
+8.7 µs to clone the outbound template and set `dmesh_session`, 107.7 µs of
+layers (`build_policies` + `outbound.mk`), 32.0 µs of `NewService::new_service`,
+**148.4 µs** in total. The remainder is lazy discovery and policy work, task
+execution and teardown, and the surrounding DPUmesh lifecycle. **Locating it
+requires instrumenting those asynchronous boundaries; do not assume the whole
+figure sits inside the synchronous call.**
 
 ## O1 Attribute what is left of a session
 
@@ -256,7 +439,7 @@ which is what this item is for.
   p50/p99 against the reservation baseline. **Re-baseline first.** The published
   `l7-tx-ab-20260817` arm predates the `DmeshIo` tx cursor, which removed the
   queue-tail move `consume_tx` performed on every publication, so its absolute
-  µs/request is no longer the arm to subtract from.
+  µs/request is not the arm to subtract from.
 
 ## O3 Conditional worker-local state
 
@@ -286,8 +469,8 @@ comparisons — and a net addition for one that does not.
 The deploy smoke gate shows p50 unchanged at concurrency 1 across the change,
 which bounds nothing: it is one operating point on a closed loop.
 
-- [ ] Price it with `bench/report/CORE.md`'s core-attribution campaign, run
-  against a build that changes nothing else. Report ARM µs/request for a
+- [ ] Price it with the core-attribution arms of `bench/suite/api_l7_cost.sh`,
+  run against a build that changes nothing else. Report ARM µs/request for a
   single-backend opaque stream, where the additions are pure cost, and for a
   protocol-aware stream alternating backends, where the cache is the saving.
 

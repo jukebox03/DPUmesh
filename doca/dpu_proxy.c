@@ -3139,20 +3139,6 @@ int dmesh_l7_workloads(int worker_id, struct dmesh_l7_workload *out, int max) {
     return written;
 }
 
-int dmesh_l7_backends(int worker_id, int32_t service, int32_t *out, int max) {
-    struct px_worker_state *worker_state = px_cur_worker;
-    if (!worker_state || worker_state->id != worker_id || !out || max <= 0 ||
-        service < 0 || service >= POD_ID_SPACE)
-        return 0;
-    int32_t hosts[MAX_PODS];
-    int n = collect_live_hosts(worker_state->objs, (int16_t)service, hosts);
-    if (n > max)
-        n = max;
-    for (int i = 0; i < n; i++)
-        out[i] = hosts[i];
-    return n;
-}
-
 uint8_t *dmesh_l7_tx_reserve(int worker_id, uint64_t conn, uint32_t *cap) {
     struct objects *objs;
     struct px_conn *c = px_l7_caller_conn(worker_id, conn, &objs);

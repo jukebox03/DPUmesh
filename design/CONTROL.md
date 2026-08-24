@@ -257,8 +257,8 @@ Field syntax, enforced before anything is adopted:
 - An unknown line kind, a duplicate `pod=` for one UID, an `endpoint=` or
   `protected=` naming a Service or Pod UID no other line defines, or any syntax
   violation refuses the whole document.
-- `GEN_POD_MAX`, `GEN_NODE_MAX`, `GEN_SERVICE_MAX`, `GEN_ENDPOINT_MAX` and
-  `TOPOLOGY_MAX_BYTES` are refused rather than truncated at both ends: the
+- `DMESH_GEN_POD_MAX`, `DMESH_GEN_NODE_MAX`, `DMESH_GEN_SERVICE_MAX`, `DMESH_GEN_ENDPOINT_MAX` and
+  `DMESH_TOPOLOGY_MAX_BYTES` are refused rather than truncated at both ends: the
   publisher refuses to publish an over-bound generation so the last good one
   stands and the failure is loud at the source, and the consumer refuses to
   adopt one.
@@ -376,7 +376,7 @@ that key cannot arrive in a generation. It is deployment-time material in
 `DPUMESH_CONTROLLER_KEY_DIR`, loaded with the checks `dmesh_grant_load_key`
 applies, and a DPU that cannot load one refuses to start.
 
-The directory holds an overlap set of at most `CONTROLLER_KEYS_MAX` public keys
+The directory holds an overlap set of at most `DMESH_CONTROLLER_KEYS_MAX` public keys
 and the envelope names which one signed. Adding a key is a file drop, retiring
 one a delete; a generation naming a key id the set does not hold is refused and
 counted. An empty directory and an over-full one both refuse startup on the
@@ -535,7 +535,7 @@ stream to a node pays for authentication and key agreement.
      │   every pinned extent before it returns, so there is no draining state.
 ```
 
-The LRU that reclaims a slot when all `CHANNEL_MAX` are in use applies the same
+The LRU that reclaims a slot when all `DMESH_CHANNEL_MAX` are in use applies the same
 rule: a channel holding handles or in-flight bytes is skipped, so a new
 connection never displaces live traffic — it is refused instead.
 
@@ -544,8 +544,8 @@ connection never displaces live traffic — it is refused instead.
 To keep a completion on its owner the channel is one queue pair per (node pair,
 destination worker), while authentication and the pairwise key are established
 once per node pair — so `CHANNEL_MAX × PEER_QP_PER_NODE` is the number to check
-against RDMA resource limits, not `CHANNEL_MAX`. `GENERATION_INTERVAL` and
-`CHANNEL_IDLE` interact: a channel evicted and reopened between two generations
+against RDMA resource limits, not `DMESH_CHANNEL_MAX` alone. `GENERATION_INTERVAL` and
+`DMESH_CHANNEL_IDLE_NS` interact: a channel evicted and reopened between two generations
 pays setup twice.
 
 ## 2-0.8 What this layer establishes, and what it does not
@@ -658,10 +658,10 @@ the caller, before the message-body checks.
 | 1 | canonical form: nothing after each NUL, padding intact, DNS fields well formed, `pod_ip` a dotted quad, `flags`/`reserved` zero, `assert_id`/`nonce` not all-zero | `noncanonical` |
 | 2 | `version == 2` | `bad-version` |
 | 3 | `node_name` equals this DPU's own node (`DPUMESH_NODE_NAME`) ⟨T⟩ | `wrong-node` |
-| 4 | `issued_at ≤ now + ASSERT_CLOCK_SKEW`, `expires_at > now`, lifetime ≤ `ASSERT_LIFETIME`; the skew grace is one-sided, on `issued_at` only | `bad-time` |
+| 4 | `issued_at ≤ now + ASSERT_CLOCK_SKEW`, `expires_at > now`, lifetime ≤ `DMESH_ASSERT_MAX_LIFETIME_SEC`; the skew grace is one-sided, on `issued_at` only | `bad-time` |
 | 5 | `nonce` equals the challenge this connection issued (constant-time compare) | `bad-nonce` |
 | 6 | signature verifies over `[0, offsetof(sig))` | `bad-sig` |
-| 7 | `assert_id` not in the consumed ring (`ASSERT_REPLAY_SLOTS`, evicting) | `replay` |
+| 7 | `assert_id` not in the consumed ring (`DMESH_REGISTRATION_REPLAY_SLOTS`, evicting) | `replay` |
 | 8 | `(namespace_name, service_name)` equals the Service this registration requests | `bad-service` |
 
 Everything arithmetic comes before the asymmetric verification, so a Pod that
@@ -938,8 +938,8 @@ live registration rather than by the generation, which is why 2-1.5 retains
 |---|---|---|
 | generation publication | `GENERATION_INTERVAL` + adoption lag | how stale a *placement* can be, both directions |
 | local membership withdrawal | 2 × generation cadence | how long a deleted Pod's *local registration* survives |
-| assertion lifetime | `ASSERT_LIFETIME` | how long a relayed assertion stays usable; the nonce is the hard bound |
-| clock skew | `ASSERT_CLOCK_SKEW`, one-sided | agent↔DPU clock spread |
+| assertion lifetime | `DMESH_ASSERT_MAX_LIFETIME_SEC` | how long a relayed assertion stays usable; the nonce is the hard bound |
+| clock skew | `DMESH_ASSERT_CLOCK_SKEW_SEC`, one-sided | agent↔DPU clock spread |
 
 For a hostile node the operative bound is the first row: it can claim a Pod that
 left it until every destination adopts the generation that moved it. An honest
@@ -1114,7 +1114,7 @@ An unanswered question withdraws nothing and opens nothing: the Pod is
 
 The backend set comes from the generation: `endpoint=` joined with `pod=` for
 placement, split into a local set and a remote set
-(`dmesh_topology_remote_endpoints`, `collect_remote_hosts`).
+(`dmesh_topology_remote_endpoints`, `dmesh_service_has_remote`).
 `px_resolve_backend` prefers local, because local endpoints are a DMA away, and
 falls to `PX_DST_REMOTE` — the third outcome `px_unit_prepare` distinguishes
 from "host not ready", so a Service healthy elsewhere is reported as remote-only
@@ -1576,24 +1576,24 @@ The ones marked ∎ change a security property; the rest change only cost.
 | Name | Value | What it decides |
 |---|---|---|
 | `GENERATION_INTERVAL` | 5 s | ∎ how long a hostile node can claim a Pod that left it |
-| `ASSERT_LIFETIME` | 300 s | ∎ how long a relayed assertion stays usable |
-| `ASSERT_CLOCK_SKEW` | 30 s | ∎ tolerated agent→DPU clock spread, one-sided on `issued_at` |
-| `ASSERT_REPLAY_SLOTS` | 4096 | ∎ consumed assertion ids retained; the nonce is the hard bound |
-| `CHANNEL_IDLE` | 60 s | when an idle peer channel is evicted |
-| `CHANNEL_MAX` | 256 | peer channels one DPU keeps open, LRU beyond it |
+| `DMESH_ASSERT_MAX_LIFETIME_SEC` | 300 s | ∎ how long a relayed assertion stays usable |
+| `DMESH_ASSERT_CLOCK_SKEW_SEC` | 30 s | ∎ tolerated agent→DPU clock spread, one-sided on `issued_at` |
+| `DMESH_REGISTRATION_REPLAY_SLOTS` | 4096 | ∎ consumed assertion ids retained; the nonce is the hard bound |
+| `DMESH_CHANNEL_IDLE_NS` | 60 s | when an idle peer channel is evicted |
+| `DMESH_CHANNEL_MAX` | 256 | peer channels one DPU keeps open, LRU beyond it |
 | `DMESH_PEER_STREAMS_MAX` | 4096 | ⟨T⟩ concurrent streams one peer may hold at a destination |
 | `DMESH_PEER_STAGING_MAX` | 16 MiB | ⟨T⟩ staging bytes one peer may hold at a destination |
 | `DMESH_PEER_OPEN_RATE` | 1000/s | ⟨T⟩ stream opens accepted from one peer |
 | `DMESH_PEER_TX_INFLIGHT_MAX` | 16 MiB | ⟨T⟩ un-ACKed bytes one peer may pin at a **source** |
 | `DMESH_PEER_TX_SLOTS` | 8192 | ⟨T⟩ un-ACKed extents one source may have in flight to one peer |
-| `GEN_POD_MAX` | 65536 | meshed Pods a generation may name, refused rather than truncated |
-| `GEN_NODE_MAX` | 1024 | nodes a generation may name |
-| `GEN_SERVICE_MAX` | 4096 | Services a generation may name |
-| `GEN_ENDPOINT_MAX` | 65536 | endpoints a generation may name |
-| `TOPOLOGY_MAX_BYTES` | 16 MiB | generation byte bound; the 256 KiB membership bound is one node's |
-| `CONTROLLER_KEYS_MAX` | 4 | controller public keys held for rotation overlap |
+| `DMESH_GEN_POD_MAX` | 65536 | meshed Pods a generation may name, refused rather than truncated |
+| `DMESH_GEN_NODE_MAX` | 1024 | nodes a generation may name |
+| `DMESH_GEN_SERVICE_MAX` | 4096 | Services a generation may name |
+| `DMESH_GEN_ENDPOINT_MAX` | 65536 | endpoints a generation may name |
+| `DMESH_TOPOLOGY_MAX_BYTES` | 16 MiB | generation byte bound; the 256 KiB membership bound is one node's |
+| `DMESH_CONTROLLER_KEYS_MAX` | 4 | controller public keys held for rotation overlap |
 | `DMESH_REGISTRATION_MAX_KEYS` | 4 | node agent public keys held for rotation overlap |
-| `PEER_QP_PER_NODE` | A | queue pairs per node pair — one per destination worker |
+| queue pairs per node pair | A | one per destination worker; no constant names it, it is the worker count |
 | `DMESH_STREAM_ACK_BATCH` | 64 | delivery acknowledgements staged before one is sent |
 
 ## 5.7 Decisions taken

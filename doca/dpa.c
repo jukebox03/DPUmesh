@@ -25,10 +25,6 @@ DOCA_LOG_REGISTER(DPA);
 
 #ifdef DOCA_ARCH_DPU
 
-struct dpa_send_payload {
-    struct dmesh_doca_dpa_msgq *msgq;
-    uint8_t bytes[];
-};
 /* Kernel function declaration (resolved from dpa_program.a stubs, DPU only) */
 extern doca_dpa_func_t run_dma_manager;
 extern doca_dpa_func_t run_dma_yield_helper;
@@ -312,10 +308,9 @@ static void dmesh_doca_dpa_msgq_send_cb(struct doca_comch_producer_task_send *se
 				       union doca_data task_user_data,
 				       union doca_data ctx_user_data)
 {
-	struct dpa_send_payload *payload = task_user_data.ptr;
 	(void)ctx_user_data;
 
-    free(payload);
+    free(task_user_data.ptr);
 
 	struct doca_task *task = doca_comch_producer_task_send_as_task(send_task);
 	doca_task_free(task);
@@ -332,12 +327,11 @@ static void dmesh_doca_dpa_msgq_send_error_cb(struct doca_comch_producer_task_se
 					     union doca_data task_user_data,
 					     union doca_data ctx_user_data)
 {
-	struct dpa_send_payload *payload = task_user_data.ptr;
     (void)ctx_user_data;
 
     struct doca_task *task = doca_comch_producer_task_send_as_task(send_task);
     DOCA_LOG_ERR("Failed to send msg");
-    free(payload);
+    free(task_user_data.ptr);
     doca_task_free(task);
 }
 
@@ -964,94 +958,53 @@ dmesh_fill_dpa_thread_arg(struct objects *objs, int idx, struct dpa_thread_arg *
     return DOCA_SUCCESS;
 }
 
-/* Nonblocking send: returns DOCA_ERROR_AGAIN immediately on submit failure,
- * no PE progress, no retry. Hot-path DPU→DPA wake signals use this directly —
- * a missed trigger is recoverable by the next successful send. */
+/* Nonblocking send: returns immediately on submit failure, no PE progress, no
+ * retry. Hot-path DPU→DPA wake signals use this directly — a missed trigger is
+ * recoverable by the next successful send. The message travels in a copy the
+ * completion callback frees, so the caller's buffer is free at return. */
 doca_error_t
 dmesh_doca_dpa_msgq_send_try(struct dmesh_doca_dpa_msgq *msgq, void *msg, uint32_t msg_size)
 {
-    doca_error_t result;
-    union doca_data user_data;
-    struct dpa_send_payload *payload;
-    struct doca_comch_producer_task_send *send_task;
-    struct doca_task *task;
-
-    payload = malloc(sizeof(*payload) + msg_size);
+    void *payload = malloc(msg_size);
     if (payload == NULL)
         return DOCA_ERROR_NO_MEMORY;
-    payload->msgq = msgq;
-    memcpy(payload->bytes, msg, msg_size);
+    memcpy(payload, msg, msg_size);
 
-    result = doca_comch_producer_task_send_alloc_init(msgq->producer, NULL,
-                                                       payload->bytes, msg_size,
-                                                       msgq->target_consumer_id,
-                                                       &send_task);
+    struct doca_comch_producer_task_send *send_task;
+    doca_error_t result =
+        doca_comch_producer_task_send_alloc_init(msgq->producer, NULL,
+                                                 payload, msg_size,
+                                                 msgq->target_consumer_id,
+                                                 &send_task);
     if (result != DOCA_SUCCESS) {
         free(payload);
         return result;
     }
 
-    task = doca_comch_producer_task_send_as_task(send_task);
-    user_data.ptr = payload;
+    struct doca_task *task = doca_comch_producer_task_send_as_task(send_task);
+    union doca_data user_data = { .ptr = payload };
     doca_task_set_user_data(task, user_data);
 
     result = doca_task_submit(task);
     if (result != DOCA_SUCCESS) {
         free(payload);
         doca_task_free(task);
-        return result;
     }
-    return DOCA_SUCCESS;
+    return result;
 }
 
-/* Send one message over a DPA Comch queue. Control-path only (thread start,
- * RING_ADD): always transmits, with its own payload copy — never suppressed or
- * coalesced with wake hints. This can run inside the main PE's Comch callback,
- * so it must not recursively progress that PE. */
+/* The same send on the control path (thread start, RING_ADD), where a refusal
+ * is a fault worth naming rather than a hint the next send recovers. This can
+ * run inside the main PE's Comch callback, so it must not recursively progress
+ * that PE. */
 doca_error_t
 dmesh_doca_dpa_msgq_send(struct dmesh_doca_dpa_msgq *msgq, void *msg, uint32_t msg_size)
 {
-    doca_error_t result;
-    union doca_data user_data;
-    struct dpa_send_payload *payload;
-    struct doca_comch_producer_task_send *send_task;
-    struct doca_task *task;
-
-    payload = malloc(sizeof(*payload) + msg_size);
-    if (payload == NULL) {
-        DOCA_LOG_ERR("DPA MsgQ send failed: payload copy allocation failed");
-        return DOCA_ERROR_NO_MEMORY;
-    }
-    payload->msgq = msgq;
-    memcpy(payload->bytes, msg, msg_size);
-    result = doca_comch_producer_task_send_alloc_init(msgq->producer,
-                                                      NULL,
-                                                      payload->bytes,
-                                                      msg_size,
-                                                      msgq->target_consumer_id,
-                                                      &send_task);
-    if (result != DOCA_SUCCESS) {
-        DOCA_LOG_ERR("DPA MsgQ send failed: failed to allocate send task - %s",
-                     doca_error_get_name(result));
-        free(payload);
-        return result;
-    }
-
-    task = doca_comch_producer_task_send_as_task(send_task);
-    user_data.ptr = payload;
-    doca_task_set_user_data(task, user_data);
-
-    result = doca_task_submit(task);
-
-    if (result != DOCA_SUCCESS) {
+    doca_error_t result = dmesh_doca_dpa_msgq_send_try(msgq, msg, msg_size);
+    if (result != DOCA_SUCCESS)
         DOCA_LOG_ERR("DPA MsgQ send failed: %s (msg_size=%u)",
                      doca_error_get_name(result), msg_size);
-        free(payload);
-        doca_task_free(task);
-        return result;
-    }
-
-    return DOCA_SUCCESS;
+    return result;
 }
 
 /*
