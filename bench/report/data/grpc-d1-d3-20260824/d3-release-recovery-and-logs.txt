@@ -1,0 +1,78 @@
+recovery_started=2026-08-24T14:45:40,870396098+09:00
+OK mrps=0.007184 gbps=0.0074 req_gbps=0.0037 resp_gbps=0.0037 p50=7673680.04 p95=7673680.04 p99=7673680.04 p999=7673680.04 p9999=7673680.04 avg=7098591.20 min=6529446.42 max=7673680.04 rcnt=10396 scheduled=90000 pending=0 fail=57537 conc=0 threads=8 channels=1 reqsz=48 repsz=48 reqframe=64 respframe=64 durs=10.000 offered_mrps=0.009000 drops=0 overflow=10396 worker_fail=0 reorder=0 mode=open arr=const batch=0 reconns=0 reconn_us=0.00 grabs=11 rets=6 recyc=2 waits=1 pads=8 credit_hold_dropped=64 eq_budget_exhausted=1 dist=NA
+--- pod status
+NAME                                  RESTARTS
+bench-grpc-dpumesh-646d5dcc88-b4hqt   0
+echo-grpc-dpumesh-84cbd4d65d-q26qr    0
+--- client ring
+[05:44:21:329880][268432960][DOCA][WRN][dmesh_core.c:2581][dpumesh_enqueue] DMA ring 2 full (size=4096) [stuck x1]
+[05:44:21:630486][1811904064][DOCA][WRN][dmesh_core.c:2581][dpumesh_enqueue] DMA ring 2 full (size=4096) [stuck x4097]
+[05:44:21:913684][1811904064][DOCA][WRN][dmesh_core.c:2581][dpumesh_enqueue] DMA ring 2 full (size=4096) [stuck x8193]
+[05:44:22:195105][1811904064][DOCA][WRN][dmesh_core.c:2581][dpumesh_enqueue] DMA ring 2 full (size=4096) [stuck x12289]
+[05:44:22:477499][1811904064][DOCA][WRN][dmesh_core.c:2581][dpumesh_enqueue] DMA ring 2 full (size=4096) [stuck x16385]
+[05:44:22:763340][2499745344][DOCA][WRN][dmesh_core.c:2581][dpumesh_enqueue] DMA ring 2 full (size=4096) [stuck x20481]
+[05:44:23:046001][2256520768][DOCA][WRN][dmesh_core.c:2581][dpumesh_enqueue] DMA ring 2 full (size=4096) [stuck x24577]
+[05:44:30:522435][427796032][DOCA][WRN][dmesh_core.c:2581][dpumesh_enqueue] DMA ring 3 full (size=4096) [stuck x1]
+[05:44:39:835570][260040256][DOCA][WRN][dmesh_core.c:2581][dpumesh_enqueue] DMA ring 4 full (size=4096) [stuck x1]
+[05:44:40:137345][1862260288][DOCA][WRN][dmesh_core.c:2581][dpumesh_enqueue] DMA ring 4 full (size=4096) [stuck x4097]
+[05:44:40:424051][1862260288][DOCA][WRN][dmesh_core.c:2581][dpumesh_enqueue] DMA ring 4 full (size=4096) [stuck x8193]
+[05:44:40:710485][2248128064][DOCA][WRN][dmesh_core.c:2581][dpumesh_enqueue] DMA ring 4 full (size=4096) [stuck x12289]
+[05:44:40:996101][2248128064][DOCA][WRN][dmesh_core.c:2581][dpumesh_enqueue] DMA ring 4 full (size=4096) [stuck x16385]
+[05:44:41:296105][1853867584][DOCA][WRN][dmesh_core.c:2581][dpumesh_enqueue] DMA ring 4 full (size=4096) [stuck x20481]
+[05:44:41:580431][1853867584][DOCA][WRN][dmesh_core.c:2581][dpumesh_enqueue] DMA ring 4 full (size=4096) [stuck x24577]
+[05:44:47:881263][436188736][DOCA][WRN][dmesh_core.c:2581][dpumesh_enqueue] DMA ring 5 full (size=4096) [stuck x1]
+[05:44:51:488980][2964200960][DOCA][WRN][dmesh_core.c:2581][dpumesh_enqueue] DMA ring 5 full (size=4096) [stuck x4097]
+I0000 00:00:1787550294.970887      13 chttp2_transport.cc:1369] ipv4:127.0.0.0:0: Got goaway [1] err=UNAVAILABLE:GOAWAY received; Error code: 1; Debug Text:  {grpc_status:14, http2_error:1}
+[05:45:00:986228][436188736][DOCA][WRN][dmesh_core.c:2581][dpumesh_enqueue] DMA ring 6 full (size=4096) [stuck x1]
+[05:45:01:309428][2256520768][DOCA][WRN][dmesh_core.c:2581][dpumesh_enqueue] DMA ring 6 full (size=4096) [stuck x4097]
+[05:45:01:583088][2256520768][DOCA][WRN][dmesh_core.c:2581][dpumesh_enqueue] DMA ring 6 full (size=4096) [stuck x8193]
+[05:45:01:859181][243254848][DOCA][WRN][dmesh_core.c:2581][dpumesh_enqueue] DMA ring 6 full (size=4096) [stuck x12289]
+[05:45:02:129973][2239735360][DOCA][WRN][dmesh_core.c:2581][dpumesh_enqueue] DMA ring 6 full (size=4096) [stuck x16385]
+[05:45:08:055396][234862144][DOCA][WRN][dmesh_core.c:2581][dpumesh_enqueue] DMA ring 7 full (size=4096) [stuck x1]
+[05:45:09:996955][1837082176][DOCA][WRN][dmesh_core.c:2581][dpumesh_enqueue] DMA ring 7 full (size=4096) [stuck x4097]
+[05:45:10:864256][2964200960][DOCA][WRN][dmesh_core.c:2581][dpumesh_enqueue] DMA ring 7 full (size=4096) [stuck x8193]
+[05:45:11:126733][2964200960][DOCA][WRN][dmesh_core.c:2581][dpumesh_enqueue] DMA ring 7 full (size=4096) [stuck x12289]
+[05:45:11:572779][2964200960][DOCA][WRN][dmesh_core.c:2581][dpumesh_enqueue] DMA ring 7 full (size=4096) [stuck x16385]
+[05:45:11:969081][2964200960][DOCA][WRN][dmesh_core.c:2581][dpumesh_enqueue] DMA ring 7 full (size=4096) [stuck x20481]
+I0000 00:00:1787550312.274440      15 chttp2_transport.cc:1369] ipv4:127.0.0.0:0: Got goaway [1] err=UNAVAILABLE:GOAWAY received; Error code: 1; Debug Text:  {grpc_status:14, http2_error:1}
+I0000 00:00:1787550315.260932     120 chttp2_transport.cc:1369] ipv4:127.0.0.0:0: Got goaway [11] err=UNAVAILABLE:GOAWAY received; Error code: 11; Debug Text: too_many_internal_resets {grpc_status:14, http2_error:11}
+[05:45:42:012945][419403328][DOCA][WRN][dmesh_core.c:2581][dpumesh_enqueue] DMA ring 0 full (size=4096) [stuck x1]
+[05:45:42:288875][2499745344][DOCA][WRN][dmesh_core.c:2581][dpumesh_enqueue] DMA ring 0 full (size=4096) [stuck x4097]
+[05:45:42:566617][2499745344][DOCA][WRN][dmesh_core.c:2581][dpumesh_enqueue] DMA ring 0 full (size=4096) [stuck x8193]
+[05:45:42:848200][2499745344][DOCA][WRN][dmesh_core.c:2581][dpumesh_enqueue] DMA ring 0 full (size=4096) [stuck x12289]
+[05:45:43:129083][2248128064][DOCA][WRN][dmesh_core.c:2581][dpumesh_enqueue] DMA ring 0 full (size=4096) [stuck x16385]
+[05:45:43:401082][2248128064][DOCA][WRN][dmesh_core.c:2581][dpumesh_enqueue] DMA ring 0 full (size=4096) [stuck x20481]
+[05:45:43:690144][1837082176][DOCA][WRN][dmesh_core.c:2581][dpumesh_enqueue] DMA ring 0 full (size=4096) [stuck x24577]
+[05:45:43:972657][1837082176][DOCA][WRN][dmesh_core.c:2581][dpumesh_enqueue] DMA ring 0 full (size=4096) [stuck x28673]
+[05:45:44:267861][1853867584][DOCA][WRN][dmesh_core.c:2581][dpumesh_enqueue] DMA ring 0 full (size=4096) [stuck x32769]
+[05:45:44:593875][1828689472][DOCA][WRN][dmesh_core.c:2581][dpumesh_enqueue] DMA ring 0 full (size=4096) [stuck x36865]
+[05:45:44:907599][1870652992][DOCA][WRN][dmesh_core.c:2581][dpumesh_enqueue] DMA ring 0 full (size=4096) [stuck x40961]
+[05:45:45:240875][1820296768][DOCA][WRN][dmesh_core.c:2581][dpumesh_enqueue] DMA ring 0 full (size=4096) [stuck x45057]
+[05:45:49:303319][251647552][DOCA][WRN][dmesh_core.c:2581][dpumesh_enqueue] DMA ring 0 full (size=4096) [stuck x49153]
+--- server ring
+I0000 00:00:1787550293.061026      25 chttp2_transport.cc:1369] ipv4:127.0.0.2:32773: Got goaway [11] err=UNAVAILABLE:GOAWAY received; Error code: 11; Debug Text: too_many_internal_resets {http2_error:11, grpc_status:14}
+I0000 00:00:1787550312.971883      33 chttp2_transport.cc:1369] ipv4:127.0.0.2:32774: Got goaway [11] err=UNAVAILABLE:GOAWAY received; Error code: 11; Debug Text: too_many_internal_resets {http2_error:11, grpc_status:14}
+I0000 00:00:1787550314.368473      24 chttp2_transport.cc:1369] ipv4:127.0.0.2:32775: Got goaway [11] err=UNAVAILABLE:GOAWAY received; Error code: 11; Debug Text: too_many_internal_resets {grpc_status:14, http2_error:11}
+--- dpu relevant
+[05:42:22:679730][2169950240][DOCA][WRN][dpa.c:465][init_dpa_objects] Connection-affine topology active: N/K/A=32/8/8 (EU%A == ring%A == port%A)
+[05:42:37:513785][1744824736][DOCA][WRN][dpu_proxy.c:2518][px_peer_stats_report] proxy: worker 1 peer poison=0 refused=none inbound admitted=1 denied=0 no-policy=0 mixed-callee-unprotected=0 peer-pin-conflict=0
+[05:44:27:516487][1207953824][DOCA][WRN][dpu_proxy.c:2518][px_peer_stats_report] proxy: worker 7 peer poison=0 refused=none inbound admitted=2 denied=0 no-policy=0 mixed-callee-unprotected=0 peer-pin-conflict=0
+[05:44:34:458660][1734207904][DOCA][WRN][dpu_proxy.c:1011][px_drop_window] proxy: dropping 1780047 buffered bytes of conn (2:2): source QP reset
+[05:44:35:353099][1734207904][DOCA][WRN][dpu_proxy.c:1011][px_drop_window] proxy: dropping 8192 buffered bytes of conn (0:32770): stale upstream (client closed)
+[05:44:37:516804][1207953824][DOCA][WRN][dpu_proxy.c:2518][px_peer_stats_report] proxy: worker 7 peer poison=0 refused=none inbound admitted=3 denied=0 no-policy=0 mixed-callee-unprotected=0 peer-pin-conflict=0
+[05:44:47:516974][1207953824][DOCA][WRN][dpu_proxy.c:2518][px_peer_stats_report] proxy: worker 7 peer poison=0 refused=none inbound admitted=5 denied=0 no-policy=0 mixed-callee-unprotected=0 peer-pin-conflict=0
+[05:44:55:363356][1702357408][DOCA][WRN][dpu_proxy.c:1011][px_drop_window] proxy: dropping 826840 buffered bytes of conn (0:32773): conn teardown
+[05:44:55:479628][1712974240][DOCA][WRN][dpu_proxy.c:1011][px_drop_window] proxy: dropping 2318170 buffered bytes of conn (2:4): source QP reset
+[05:44:55:479867][1712974240][DOCA][WRN][dpu_proxy.c:1011][px_drop_window] proxy: dropping 861300 buffered bytes of conn (0:32772): conn teardown
+[05:44:56:308255][1712974240][DOCA][WRN][dpu_proxy.c:1011][px_drop_window] proxy: dropping 8192 buffered bytes of conn (0:32772): stale upstream (client closed)
+[05:45:07:517382][1712974240][DOCA][WRN][dpu_proxy.c:2518][px_peer_stats_report] proxy: worker 4 peer poison=0 refused=none inbound admitted=6 denied=0 no-policy=0 mixed-callee-unprotected=0 peer-pin-conflict=0
+[05:45:12:719574][1691740576][DOCA][ERR][dpu_proxy.c:1177][px_poison] proxy: poisoning conn (0:32774): l7 layer rejected a segment
+[05:45:12:719611][1691740576][DOCA][WRN][dpu_proxy.c:1011][px_drop_window] proxy: dropping 1284135 buffered bytes of conn (0:32774): l7 layer rejected a segment
+[05:45:12:719687][1691740576][DOCA][ERR][dpu_proxy.c:1177][px_poison] proxy: poisoning conn (2:6): l7 layer rejected a segment
+[05:45:12:719698][1691740576][DOCA][WRN][dpu_proxy.c:1011][px_drop_window] proxy: dropping 1950533 buffered bytes of conn (2:6): l7 layer rejected a segment
+[05:45:14:917604][1207953824][DOCA][ERR][dpu_proxy.c:1177][px_poison] proxy: poisoning conn (2:7): l7 layer rejected a segment
+[05:45:14:917654][1207953824][DOCA][WRN][dpu_proxy.c:1011][px_drop_window] proxy: dropping 8192 buffered bytes of conn (2:7): l7 layer rejected a segment
+[05:45:14:917684][1207953824][DOCA][ERR][dpu_proxy.c:1177][px_poison] proxy: poisoning conn (0:32775): l7 layer rejected a segment
+[05:45:14:917689][1207953824][DOCA][WRN][dpu_proxy.c:1011][px_drop_window] proxy: dropping 2638201 buffered bytes of conn (0:32775): l7 layer rejected a segment
+[05:45:17:517643][1691740576][DOCA][WRN][dpu_proxy.c:2518][px_peer_stats_report] proxy: worker 6 peer poison=4 refused=none inbound admitted=7 denied=0 no-policy=0 mixed-callee-unprotected=0 peer-pin-conflict=0
+[05:45:47:518011][1207953824][DOCA][WRN][dpu_proxy.c:2518][px_peer_stats_report] proxy: worker 7 peer poison=4 refused=none inbound admitted=8 denied=0 no-policy=0 mixed-callee-unprotected=0 peer-pin-conflict=0

@@ -35,27 +35,32 @@ using ::grpc::testing::BenchmarkService;
 using ::grpc::testing::SimpleRequest;
 using ::grpc::testing::SimpleResponse;
 
-class EchoService final : public BenchmarkService::Service {
+class EchoService final : public BenchmarkService::CallbackService {
  public:
   explicit EchoService(long fail_every) : fail_every_(fail_every) {}
 
-  ::grpc::Status UnaryCall(::grpc::ServerContext* /*context*/,
-                           const SimpleRequest* request,
-                           SimpleResponse* response) override {
+  ::grpc::ServerUnaryReactor* UnaryCall(
+      ::grpc::CallbackServerContext* context, const SimpleRequest* request,
+      SimpleResponse* response) override {
+    ::grpc::ServerUnaryReactor* reactor = context->DefaultReactor();
     if (fail_every_ > 0 &&
         (calls_.fetch_add(1, std::memory_order_relaxed) + 1) % fail_every_ == 0) {
-      return ::grpc::Status(::grpc::StatusCode::INTERNAL, "induced failure");
+      reactor->Finish(
+          ::grpc::Status(::grpc::StatusCode::INTERNAL, "induced failure"));
+      return reactor;
     }
     if (request->response_size() < 0) {
-      return ::grpc::Status(::grpc::StatusCode::INVALID_ARGUMENT,
-                            "negative response size");
+      reactor->Finish(::grpc::Status(::grpc::StatusCode::INVALID_ARGUMENT,
+                                     "negative response size"));
+      return reactor;
     }
     if (request->response_size() > 0) {
       response->mutable_payload()->set_type(request->response_type());
       response->mutable_payload()->set_body(
           std::string(static_cast<size_t>(request->response_size()), '\0'));
     }
-    return ::grpc::Status::OK;
+    reactor->Finish(::grpc::Status::OK);
+    return reactor;
   }
 
  private:
@@ -96,6 +101,11 @@ int main() {
 
   EchoService service(fail_every);
   ::grpc::ServerBuilder builder;
+  // A synchronous Service grows one OS worker per active RPC. Under the open-
+  // loop overload arm, queued calls therefore create thousands of workers and
+  // exhaust the process before it can shed load. This handler is immediate and
+  // needs no blocking worker, so the callback API keeps execution on gRPC's
+  // bounded callback engine while preserving the same wire service.
   builder.RegisterService(&service);
   int selected_port = 0;
   std::unique_ptr<::grpc::experimental::PassiveListener> listener;

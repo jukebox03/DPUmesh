@@ -1,0 +1,15 @@
+2026-08-24T15:23:27,491526422+09:00
+NAME                                  RESTARTS   IMAGE
+bench-grpc-dpumesh-646d5dcc88-pwhk7   0          sha256:a75a0c212b3192bd87773442bbaec9b2f7d17370845a1094d999e38535c7c248
+echo-grpc-dpumesh-84cbd4d65d-vkt7j    0          sha256:2a98241d0083a559f87765bbdb2b6843c0b50a73ec0c7f2b4037a43dd46b4694
+OK mrps=0.000999 gbps=0.0010 req_gbps=0.0005 resp_gbps=0.0005 p50=1878.00 p95=2355.00 p99=2507.00 p999=2636.00 p9999=2685.00 avg=1861.56 min=960.68 max=3410.79 rcnt=3399 scheduled=5000 pending=0 fail=0 conc=0 threads=8 channels=1 reqsz=48 repsz=48 reqframe=64 respframe=64 durs=5.000 offered_mrps=0.001000 drops=0 overflow=0 worker_fail=0 reorder=0 mode=open arr=const batch=0 reconns=0 reconn_us=0.00 grabs=0 rets=0 recyc=1 waits=0 pads=0 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA
+OK mrps=0.000000 gbps=0.0000 req_gbps=0.0000 resp_gbps=0.0000 p50=0.00 p95=0.00 p99=0.00 p999=0.00 p9999=0.00 avg=0.00 min=0.00 max=0.00 rcnt=0 scheduled=90000 pending=0 fail=0 conc=0 threads=8 channels=1 reqsz=48 repsz=48 reqframe=64 respframe=64 durs=10.000 offered_mrps=0.009000 drops=0 overflow=0 worker_fail=0 reorder=0 mode=open arr=const batch=0 reconns=0 reconn_us=0.00 grabs=9 rets=6 recyc=12 waits=62 pads=16 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA
+WORKER       OPENED     CLOSED   ACTIVE  PENDING    TASKS   ORPHANED
+0                 0          0        0        0        0          0
+1                 1          1        0        0        0          0
+2                 1          1        0        0        0          0
+3                 1          1        0        0        1          0
+4                 0          0        0        0        0          0
+5                 0          0        0        0        0          0
+6                 0          0        0        0        0          0
+7                 0          0        0        0        0          0

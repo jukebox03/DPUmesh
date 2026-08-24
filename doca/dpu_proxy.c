@@ -1074,6 +1074,8 @@ static uint16_t px_peer_destination_opened(
     const struct dmesh_peer_stream_open *open, int32_t dst_pod_idx);
 static int px_l7_open_conn(struct objects *objs, struct px_conn *c);
 static void px_parse_l7(struct objects *objs, struct px_conn *c);
+static struct px_conn *px_request_for_reply(struct objects *objs,
+                                            struct px_conn *reply);
 
 /* Terminate a connection whose other pod disappeared. The surviving sender is
  * owed an EOF; if the unit pool is temporarily empty, retain only the small
@@ -2956,6 +2958,16 @@ static const uint8_t *px_stage_view(struct objects *objs, struct px_conn *c,
  * read them, so the layer may hold them across worker revolutions. */
 static void px_parse_l7(struct objects *objs, struct px_conn *c) {
     px_l7_apply_release(objs, c);
+    /* A failed Linkerd session is removed from the adapter immediately after
+     * dmesh_l7_session_failed() arms datapath teardown.  Do not hand a later
+     * completion to that now-absent session and misclassify the resulting
+     * "unknown conn" answer as payload rejection.  The stalled lifecycle pass
+     * below aborts both transport halves; releases are applied first above so
+     * staging custody still drains in order. */
+    struct px_conn *request = px_request_for_reply(objs, c);
+    if (c->l7_session_failed ||
+        (request && request != c && request->l7_session_failed))
+        return;
     if (c->l7_closed)
         return;
     if (!c->l7_open && !px_l7_open_conn(objs, c)) {

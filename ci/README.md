@@ -10,7 +10,7 @@ Every push, on a hosted x86 runner. Under a minute.
 
 | | what it protects |
 |---|---|
-| `contracts-hostfree` | the 13 contracts that need no DOCA and no BlueField (`make test-hostfree`) |
+| `contracts-hostfree` | the 14 contracts that need no DOCA and no BlueField (`make test-hostfree`) |
 | `headers-standalone` | the four public headers compile alone as C99 and C++17, and pull in no DOCA |
 | `abi-guard` | a changed public header carries either an `ABI_MAJOR` bump or an explicit `ABI-Impact:` line |
 | `docs-links` | every relative link in the repository's Markdown resolves |
@@ -19,10 +19,10 @@ On a path change only.
 
 | | what it protects | where |
 |---|---|---|
-| `contracts-arm64` | the same 13 contracts plus the crate's 37 unit tests | aarch64 hosted |
+| `contracts-arm64` | the same 14 contracts plus the crate's 38 unit tests | aarch64 hosted |
 | `rust-build` | `dmesh-l7` builds, tests, and passes clippy | hosted |
 | `rust-fmt` | `linkerd/rust/src/lib.rs` formatting | hosted |
-| `contracts-rapids4` | **all 27 contracts** (`make test`) | rapids4, needs DOCA |
+| `contracts-rapids4` | **all 28 contracts** (`make test`) | rapids4, needs DOCA |
 
 On a schedule.
 
@@ -50,8 +50,8 @@ call is missing.
 ## The two Makefile targets
 
 ```
-make test-hostfree     13 contracts, no DOCA and no BlueField
-make test              all 27
+make test-hostfree     14 contracts, no DOCA and no BlueField
+make test              all 28
 ```
 
 The difference between them is the definition of "needs the DOCA SDK". Hosted CI

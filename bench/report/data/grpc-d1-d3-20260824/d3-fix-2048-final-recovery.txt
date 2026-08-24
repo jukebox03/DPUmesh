@@ -1,0 +1,16 @@
+2026-08-24T15:26:29,726232695+09:00
+OK mrps=0.000999 gbps=0.0010 req_gbps=0.0005 resp_gbps=0.0005 p50=2002.00 p95=2296.00 p99=2415.00 p999=2633.00 p9999=2782.00 avg=1929.75 min=1006.61 max=2796.34 rcnt=3399 scheduled=5000 pending=0 fail=0 conc=0 threads=8 channels=1 reqsz=48 repsz=48 reqframe=64 respframe=64 durs=5.000 offered_mrps=0.001000 drops=0 overflow=0 worker_fail=0 reorder=0 mode=open arr=const batch=0 reconns=0 reconn_us=0.00 grabs=0 rets=0 recyc=1 waits=0 pads=0 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA
+OK mrps=0.002509 gbps=0.0026 req_gbps=0.0013 resp_gbps=0.0013 p50=744212.00 p95=1717053.13 p99=1717053.13 p999=1717053.13 p9999=1717053.13 avg=789889.01 min=182078.23 max=1717053.13 rcnt=14728 scheduled=24000 pending=0 fail=0 conc=0 threads=8 channels=1 reqsz=48 repsz=48 reqframe=64 respframe=64 durs=8.000 offered_mrps=0.003000 drops=0 overflow=3410 worker_fail=0 reorder=0 mode=open arr=const batch=0 reconns=0 reconn_us=0.00 grabs=2 rets=1 recyc=3 waits=17 pads=0 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA
+NAME                                  RESTARTS
+bench-grpc-dpumesh-646d5dcc88-pwhk7   0
+echo-grpc-dpumesh-84cbd4d65d-vkt7j    0
+WORKER       OPENED     CLOSED   ACTIVE  PENDING    TASKS   ORPHANED
+0                 3          3        0        0        0          0
+1                 4          4        0        0        0          0
+2                 4          4        0        0        0          0
+3                 4          4        0        0        0          0
+4                 4          4        0        0        0          0
+5                 6          6        0        0        0          0
+6                 4          4        0        0        0          0
+7                 5          5        0        0        0          0
+client_stall_lines=server_stall_lines=client_ring_full_lines=server_ring_full_lines=dpu_poison_lines=48

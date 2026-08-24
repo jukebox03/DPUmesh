@@ -13,6 +13,7 @@
 #include "../doca/dpu_proxy.c"
 
 static int l7_close_calls;
+static int l7_segment_calls;
 
 /* This white-box test links only dpu_proxy.c. Keep the production lookup and
  * routing dependencies deterministic for the reserve/commit cases below. */
@@ -53,6 +54,7 @@ int l7_conn_open(int worker_id, uint64_t conn,
 int l7_conn_segment(int worker_id, uint64_t conn,
                     const uint8_t *base, uint32_t pos, uint32_t len)
 {
+    l7_segment_calls++;
     (void)worker_id;
     (void)conn;
     (void)base;
@@ -699,6 +701,31 @@ int main(void)
     dmesh_l7_session_failed(0, px_conn_handle(failed));
     assert(failed->l7_session_failed && failed->lifecycle_pending &&
            failed->stalled);
+
+    /* The adapter removes a failed session before the datapath lifecycle pass
+     * runs. A completion arriving in that interval must not be offered to the
+     * removed session and reported as corrupt payload. */
+    failed->l7_open = 1;
+    failed->stream_end = 1;
+    int segments_before_failure = l7_segment_calls;
+    px_parse_l7(objs, failed);
+    assert(l7_segment_calls == segments_before_failure);
+    failed->stream_end = 0;
+
+    /* A reply direction is removed from the same Linkerd session, but the
+     * failure callback names the request handle. It must inherit that state
+     * instead of reporting its now-absent adapter mapping as bad payload. */
+    struct px_conn *failed_reply = px_conn_get(px, 9, 40000, 1, 1);
+    assert(failed_reply != NULL);
+    failed_reply->peer_owner = failed;
+    failed_reply->l7_mode = PX_L7_FULL;
+    failed_reply->l7_open = 1;
+    failed_reply->stream_end = 1;
+    px_parse_l7(objs, failed_reply);
+    assert(l7_segment_calls == segments_before_failure);
+    failed_reply->stream_end = 0;
+    failed_reply->peer_owner = NULL;
+    px_conn_del(objs, failed_reply);
 
     /* Hide all remaining free units for one retry. */
     tls_unit_mag = NULL;

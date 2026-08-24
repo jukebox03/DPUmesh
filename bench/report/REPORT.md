@@ -162,20 +162,21 @@ repetitions of each:
 | Client threads | Backends reached, per repetition |
 |---|---|
 | 1 | 1, 1, 1 |
-| 2 | 2, 2, 1 |
-| 4 | 1, 2, 3 |
+| 2 | 2, 1, 2 |
+| 4 | 3, 3, 3 |
 | 6 | 3, 3, 3 |
 
-Across repetitions the backend a single thread reaches changes, and six
-connections usually reach all three — a repeat of this arm on a later build gave
-two, three and three. Both that and the four-thread repetition which put all
-four on one backend are ordinary p2c at this sample size, which is the reason a
-single repetition is not evidence about a balancer.
+Across repetitions the backend a single thread reaches may change. The number
+reached is not a fairness gate: Linkerd's p2c/EWMA balancer may legitimately
+prefer a strict subset. Each arm instead requires successful traffic, no more
+backends than connections, and the expected ready-endpoint count from every
+active DPU worker that reports one. A missing or mixed worker reading fails.
 
 The endpoint set is followed rather than fixed at start-up. Scaling one backend
-to zero and offering the same six-connection load leaves the balancer holding two
-ready endpoints, and only those two serve; restoring the backend brings it back
-to three. No request failed in either direction.
+to zero and offering the same six-connection load changes the DPU reading from
+three ready endpoints to two; restoring it returns the reading to three. No
+request failed in either direction. The union is reported as characterization,
+not as a promise that p2c must exercise every ready endpoint.
 
 | Endpoint set | `outbound_tcp_balancer_endpoints{ready}` | Backends that served, union of three repetitions |
 |---|---:|---|
@@ -190,12 +191,14 @@ Service, requests attributed by the destination Pod the DPU's own
 
 | Client channels | Backend A | Backend B | `fail` | `take_errors` |
 |---:|---:|---:|---:|---:|
-| 1 | 8,329 | 8,326 | 0 | 0 |
-| 4 | 48,467 | 47,355 | 0 | 0 |
+| 1 | 7,843 | 9,719 | 0 | 0 |
+| 4 | 48,288 | 53,189 | 0 | 0 |
 
-One channel reaching both backends is the result. A repeat of both stages on a
-later build gives 8,350 / 8,352 on one channel and 40,581 / 40,760 on four, with
-`fail=0` and `take_errors=0` throughout.
+One channel reaching both backends is the result. Scaling back to one replica is
+also judged: the DPU reported one ready endpoint, that Pod served 16,398
+requests, and `fail=0`, `take_errors=0`. This restoration arm used to be written
+without a verdict and could not fail the campaign; the accepted 21/21 receipt is
+[`policy-route-lb-20260824-judge-v3/stages.csv`](data/policy-route-lb-20260824-judge-v3/stages.csv).
 
 ## Linkerd surfaces
 
@@ -471,9 +474,11 @@ replicas are elsewhere has no route.
   `data/l7-shared-off-20260821/` and `data/l7-shared-on-20260821/`.
 - Function campaigns: `bench/suite/policy_route.sh` (policy, route, cross,
   fanout, surfaces, lb) with the resources it attaches in `bench/k8s/policy/`,
-  and `bench/suite/inject.sh`. Every stage of both decided on one DPU —
-  `data/policy-route-20260824-095824/stages.csv` (45 of 45) and
-  `data/inject-20260824-103742/stages.csv` (7 of 7).
+  and `bench/suite/inject.sh`. Policy through surfaces decided 45 of 45 in
+  `data/policy-route-20260824-095824/stages.csv`; the corrected balancing scope
+  decided 21 of 21 in `data/policy-route-lb-20260824-judge-v3/stages.csv`; and
+  injection decided 7 of 7 in `data/inject-20260824-103742/stages.csv`. The LB
+  rows in the earlier combined artifact carried no verdict and are not evidence.
 - Every one of the 99 performance points carried `fail=0 drops=0 overflow=0
   worker_fail=0 reorder=0`, and every session-cost point carried `fail=0 drops=0
   reorder=0 worker_fail=0`. No point was discarded.

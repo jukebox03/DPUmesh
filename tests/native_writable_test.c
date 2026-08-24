@@ -81,6 +81,7 @@ static void fixture_init(struct fixture *f, int pool_empty)
     atomic_init(&psl->tx_wait_tail_blk, (uint_fast64_t)0);
     atomic_init(&psl->tx_wait_tx_w, (uint_fast64_t)0);
     atomic_init(&psl->tx_wait_pool_epoch, (uint_fast64_t)0);
+    atomic_init(&psl->tx_wait_su_tail, (uint_fast16_t)0);
 }
 
 static void fixture_destroy(struct fixture *f)
@@ -229,6 +230,59 @@ static void test_failed_forward_publication_rolls_back_tracking(void)
     fixture_destroy(&f);
 }
 
+static void test_send_unit_fifo_never_overwrites_unacked_entries(void)
+{
+    struct fixture f;
+    fixture_init(&f, 0);
+    struct dmesh_port_slot *psl = &f.ports[TEST_PORT];
+    assert(tx_tracking_ensure(f.ctx, psl) == 0);
+
+    for (uint16_t seq = 100; seq < 108; seq++)
+        assert(dpumesh_tx_track(f.ctx, TEST_PORT, seq, 1) == 0);
+    assert(atomic_load(&psl->su_head) == 8);
+    assert(atomic_load(&psl->su_tail) == 0);
+
+    uint16_t first_seq = psl->su_seq[0];
+    uint64_t first_end = psl->su_end[0];
+    errno = 0;
+    assert(dpumesh_tx_track(f.ctx, TEST_PORT, 108, 1) == -1);
+    assert(errno == EAGAIN);
+    assert(atomic_load(&psl->su_head) == 8);
+    assert(psl->su_seq[0] == first_seq && psl->su_end[0] == first_end);
+
+    tx_reclaim_ack(f.ctx, TEST_PORT, 100);
+    assert(atomic_load(&psl->su_tail) == 1);
+    assert(dpumesh_tx_track(f.ctx, TEST_PORT, 108, 1) == 0);
+    assert(atomic_load(&psl->su_head) == 9);
+    assert(psl->su_seq[0] == 108);
+    fixture_destroy(&f);
+}
+
+static void test_send_unit_pressure_wakes_after_ack(void)
+{
+    struct fixture f;
+    fixture_init(&f, 0);
+    struct dmesh_port_slot *psl = &f.ports[TEST_PORT];
+    assert(tx_tracking_ensure(f.ctx, psl) == 0);
+
+    /* Seven data cells fill the data budget; the eighth is reserved for an
+     * ordered close marker. A new allocation parks without mutating tx_w. */
+    for (uint16_t seq = 1; seq <= 7; seq++)
+        assert(dpumesh_tx_track(f.ctx, TEST_PORT, seq, 0) == 0);
+    errno = 0;
+    assert(dpumesh_tx_reserve(f.ctx, TEST_PORT, 8) == NULL);
+    assert(errno == EAGAIN);
+    assert(atomic_load(&psl->tx_wait_state) == DMESH_TX_WAIT_ARMED);
+    assert(atomic_load(&psl->tx_wait_reason) == DMESH_TX_WAIT_SU_RECLAIM);
+    assert(psl->tx_w == 0);
+
+    tx_reclaim_ack(f.ctx, TEST_PORT, 1);
+    assert(atomic_load(&psl->tx_wait_state) == DMESH_TX_WAIT_READY);
+    assert(dpumesh_next_tx_ready(f.eq) == &f.qp);
+    assert(dpumesh_tx_reserve(f.ctx, TEST_PORT, 8) == f.dma);
+    fixture_destroy(&f);
+}
+
 static void test_arm_recheck_closes_lost_wakeup(void)
 {
     struct fixture f;
@@ -306,7 +360,7 @@ static void test_default_four_mib_window_and_dynamic_fifo(void)
     ctx->slot_size = 8192;
     ctx->block_size = 512 * 1024;
     ctx->blocks_per_conn = 8;
-    ctx->su_depth = 512;
+    ctx->su_depth = 8192;
     ctx->recycle_reserve = 1;
     ctx->n_blocks = 8;
     ctx->dma_buffer = dma;
@@ -347,7 +401,7 @@ static void test_default_four_mib_window_and_dynamic_fifo(void)
     for (uint16_t seq = 1; seq <= 512; seq++) {
         assert(dpumesh_tx_next_send(ctx, TEST_PORT, 0, &moff, &len) == 1);
         assert(len == 8192);
-        dpumesh_tx_track(ctx, TEST_PORT, seq, len);
+        assert(dpumesh_tx_track(ctx, TEST_PORT, seq, len) == 0);
     }
     assert(dpumesh_tx_next_send(ctx, TEST_PORT, 0, &moff, &len) == 0);
     assert(atomic_load(&psl->su_head) == 512);
@@ -375,6 +429,8 @@ int main(void)
     test_out_of_order_ack_waits_for_contiguous_prefix();
     test_ack_tracking_precedes_forward_publication();
     test_failed_forward_publication_rolls_back_tracking();
+    test_send_unit_fifo_never_overwrites_unacked_entries();
+    test_send_unit_pressure_wakes_after_ack();
     test_arm_recheck_closes_lost_wakeup();
     test_shared_pool_return_and_direct_retry();
     test_pool_eagain_does_not_commit_padding();

@@ -176,23 +176,6 @@ it until that transport binds.
 
 # Defects
 
-Two failures nothing has diagnosed, and one fix nothing has watched work.
-
-## D1 gRPC overload crash
-
-`echo_grpc` takes a SIGSEGV under sustained overload — one channel near 64 K
-rps, two channels near 100 K — faulting inside libc on what reads as a corrupted
-function pointer. Both gRPC sweeps are built around it rather than without it:
-`bench/suite/grpc_closed_sweep.sh` and `grpc_conns_sweep.sh` watch the container
-restart count between points, re-resolve the endpoints, and append the point to
-`crashes.csv`. That is scaffolding around a defect, and scaffolding is not a
-fix.
-
-- [ ] Reproduce under ASAN. Until it reproduces there is nothing to repair, and
-  the sweeps go on measuring across a process that died.
-- [ ] While it stands, no gRPC capacity may be quoted from a sweep whose
-  `crashes.csv` is non-empty without saying that it is.
-
 ## D2 gRPC tail regime above the reported capacity
 
 Above roughly 12.5 K rps the p99 changes regime while the p50 stays flat, with a
@@ -204,15 +187,6 @@ rather than a feature not yet built.
   came from and attach it here, or re-run and replace the figures, before it is
   cited anywhere else.
 - [ ] Then name the ninth cause, or close it.
-
-## D3 A fix nothing has watched work
-
-A fix written for a failure and never run against that failure is not yet a fix.
-
-- [ ] DMA ring behaviour under 40 K-rps overload. The abandoned-ticket latch is
-  gone, the overload was still failing when it was last driven, and two
-  candidate fixes — batching, and descriptor admission — were reverted as
-  regressions. Same treatment as D2: attach the receipt or re-run it.
 
 One neighbouring item is not on this list, because it has its arm. Clearing
 `dma_ready` on one Pod must not clear it on Pods that have nothing to do with it,
@@ -341,11 +315,7 @@ after them without restarting the client between them, which makes the
 ## The harness
 
 These are the reading rules the campaigns hold. Each one exists because its
-absence puts something false in the record or stops the run that is making it:
-three of them separate a wrong verdict from a pass, two keep a harness fault
-from reading as a defect in the mesh, one keeps a row's columns under its own
-header, two keep the run alive, one keeps a number about its subject, and two
-keep a Pod that never booted from being reported as a refusal.
+absence puts something false in the record or stops the run that is making it.
 
 | Rule | Why |
 |---|---|
@@ -357,7 +327,9 @@ keep a Pod that never booted from being reported as a refusal.
 | A breaker's failing endpoint is inside the balancer under test | every endpoint failing leaves it nowhere to eject to, and so does a failing backend a route already chose by weight |
 | A gRPC retry condition is written on a `GRPCRoute` | on an `HTTPRoute` the annotation is dropped and the limit beside it still builds a retry policy with no condition, which can never fire |
 | An inbound authorization is written in the kind its `Server` carries | a gRPC `Server` carries gRPC routes, so an `HTTPRoute` parented to it never appears in the port's policy and the port keeps its deny-by-default |
-| Free text is written with the CSV separator replaced | three fixture labels and every `dist` field contain commas, which shift those rows' columns out from under the header |
+| Every balancing row has a verdict | a row that only records `rcnt`, `fail` and distribution never increments either campaign total, so missing DPU evidence and a stopped client both disappear from the summary |
+| Opaque balancing reads client distribution and active-worker endpoint gauges; protocol-aware balancing reads client completion, DPU request attribution and take errors | traffic alone cannot distinguish a fixed backend from a working balancer, and one worker's maximum endpoint count must not hide a different positive count on another worker |
+| Free text is written with the CSV separator replaced and every row is schema-checked | fixture labels and `dist` fields contain commas, which shift those rows out from under the 13-column header; a malformed row now fails the campaign even if every behavioural verdict passed |
 | Evidence capture never fails the run it informs | `screen -ls` answers non-zero when there is no session, which under `set -e` ends the deploy the capture runs inside |
 | A measurement after anything recreated a Pod re-pins first | core pinning is per PID, so a validator or stage that restarts a workload leaves it unpinned; the arm then reads the scheduler rather than its subject |
 | A stage waits for Ready, never for Running | a container that exits and restarts keeps its Pod in phase `Running`, so the traffic stage gets a server that never started and its refusal reads as a mesh verdict |
@@ -369,6 +341,14 @@ policy from a policy that was never built, and the controller's own answer can.
 `conditions: {}` under a retry limit, or a `Grpc` port carrying one default
 route and no authorizations, is the whole diagnosis.
 
+The balancing false-pass is closed by
+[`policy-route-lb-20260824-judge-v3/stages.csv`](bench/report/data/policy-route-lb-20260824-judge-v3/stages.csv):
+21 of 21 rows carry `PASS`, every row has exactly 13 columns, L5 returns from two
+replicas to one with one ready endpoint and one serving Pod, and backend take
+errors stay flat. The earlier `policy-route-20260824-095824` LB rows have no
+verdict and are not receipts; its 45 policy-through-surface verdicts remain
+valid.
+
 ## Deployment
 
 **Wait for the object before waiting for its condition.** `kubectl wait` fails
@@ -377,6 +357,11 @@ one and immediately waiting on a still-empty label set reports `failed to start`
 for a Pod that starts normally seconds later. The race is invisible until
 something puts latency in front of Pod creation, which admission does to every
 Pod in the namespace.
+
+Scaling a shared-label Deployment is a different case: waiting for every Pod
+with that label to be deleted can never finish when the desired replica count is
+one, and waiting for `Ready` on the label may accept the old Pod before the new
+replica exists. Scale arms wait on the Deployment's exact `readyReplicas` value.
 
 ---
 

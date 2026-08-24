@@ -193,7 +193,7 @@ int      dpumesh_tx_commit(dpumesh_ctx_t *ctx, uint16_t port,
 void     dpumesh_tx_discard_unsent(dpumesh_ctx_t *ctx, uint16_t port);
 int      dpumesh_tx_next_send(dpumesh_ctx_t *ctx, uint16_t port, int flush_partial,
                               size_t *out_moff, uint32_t *out_len);
-void     dpumesh_tx_track(dpumesh_ctx_t *ctx, uint16_t port, uint16_t seq, uint32_t len);
+int      dpumesh_tx_track(dpumesh_ctx_t *ctx, uint16_t port, uint16_t seq, uint32_t len);
 
 /* Enqueue a descriptor to TX SQ. Returns 0 on success, -1 on failure. */
 int dpumesh_enqueue(dpumesh_ctx_t *ctx, const sw_descriptor_t *desc);

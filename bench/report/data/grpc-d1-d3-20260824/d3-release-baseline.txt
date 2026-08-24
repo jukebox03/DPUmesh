@@ -1,0 +1,6 @@
+2026-08-24T14:44:13,504024621+09:00
+NAME                                  RESTARTS   IMAGE
+bench-grpc-dpumesh-646d5dcc88-b4hqt   0          sha256:2c089fdf56b638506b249047b5683089cbcf9adfe9ba5dba2f2756aa985a80b3
+echo-grpc-dpumesh-84cbd4d65d-q26qr    0          sha256:dcb32ec962800a5c3dab1caa2681c7222c2ab729cc76cb3f9dfb700c73442653
+server_ring_lines=
+client_ring_lines=

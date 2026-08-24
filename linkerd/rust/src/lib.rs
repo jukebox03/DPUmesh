@@ -674,6 +674,10 @@ struct Side {
     conn: Option<u64>,
     handle: Option<DmeshIoHandle>,
     staging_set: bool,
+    /// The datapath delivered EOF for this input direction. Output shutdown
+    /// alone is not enough to retire a session: Linkerd may close its HTTP/2
+    /// task while DMA completions for the still-open input are queued.
+    input_eof: bool,
     /// The datapath accepted the ordered FIN for this output direction.
     fin_published: bool,
     /// Extents handed to Linkerd and not released.
@@ -748,6 +752,17 @@ impl Session {
         self.backends
             .iter_mut()
             .find(|side| side.conn == Some(conn))
+    }
+
+    /// Every transport input which was actually attached has reached EOF.
+    /// A backend endpoint with no reply connection has no datapath input half
+    /// to wait for.
+    fn inputs_finished(&self) -> bool {
+        self.client.input_eof
+            && self
+                .backends
+                .iter()
+                .all(|side| side.conn.is_none() || side.input_eof)
     }
 
     #[cfg(not(test))]
@@ -1289,6 +1304,9 @@ impl Worker {
                 .and_then(|key| self.sessions.get_mut(&key))
                 .filter(|session| session.token == token);
             if let Some(session) = bound {
+                if session.client.input_eof {
+                    handle.close_rx();
+                }
                 session.client.handle = Some(handle);
                 did = true;
                 continue;
@@ -1397,7 +1415,12 @@ impl Worker {
             } else {
                 did |= progressed;
                 if finished {
-                    closed.push((key, false));
+                    /* A stack task can shut both output halves after an H2
+                     * reset while the transport input is still live. Removing
+                     * the session here makes the next queued DMA segment look
+                     * like rejected payload. Treat that as an early session
+                     * end so the datapath terminates the transport in order. */
+                    closed.push((key, !s.inputs_finished()));
                 }
             }
             if budget == 0 {
@@ -2277,6 +2300,7 @@ pub unsafe extern "C" fn l7_conn_eof(worker_id: c_int, conn: u64) {
             let Some(side) = s.side_of(conn) else {
                 return;
             };
+            side.input_eof = true;
             if let Some(h) = side.handle.as_ref() {
                 h.close_rx();
             }
@@ -3076,6 +3100,7 @@ mod tests {
             .build()
             .unwrap();
 
+        unsafe { l7_conn_eof(0, key) };
         rt.block_on(async { client.shutdown().await.unwrap() });
         assert_eq!(drain_worker(0), 1);
         assert_eq!(fins(), vec![(key, BACKEND_ORIGIN, None)]);
@@ -3090,6 +3115,32 @@ mod tests {
         assert_eq!(fins(), vec![(key, BACKEND_ORIGIN, None), (key, -1, None)]);
         with_test_worker(|w| assert!(!w.sessions.contains_key(&key)));
         assert!(failed_sessions().is_empty());
+    }
+
+    #[test]
+    fn output_shutdown_before_input_eof_reports_an_early_session_end() {
+        let tw = install_worker(0);
+        let flow = request_flow(23, 4, 4023);
+        let key = session_key(4, 4023);
+        assert_eq!(unsafe { l7_conn_open(0, key, &flow) }, 0);
+        let token = token_of(key);
+        let mut client = register_client(&tw, token);
+        let mut backend = take_backend(&tw, 23, key);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        rt.block_on(async {
+            client.shutdown().await.unwrap();
+            backend.shutdown().await.unwrap();
+        });
+        assert_eq!(drain_worker(0), 1);
+        assert_eq!(failed_sessions(), vec![key]);
+        with_test_worker(|w| {
+            assert!(w.sessions.is_empty());
+            assert!(w.by_conn.is_empty());
+        });
     }
 
     /// Sessions to different services run side by side, each with its own

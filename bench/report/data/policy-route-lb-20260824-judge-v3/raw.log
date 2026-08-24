@@ -1,0 +1,56 @@
+
+=== DPU admin endpoints: 4191 4192 4193 4194 4195 4196 4197 4198
+
+=== output: bench/report/data/policy-route-lb-20260824-judge-v3
+
+=== balancing — connection grain, endpoint changes, and the request grain
+
+=== L1 — how many of the three backends one client reaches
+    L1 [PASS] opaque, 1 threads, rep 1: backends={1} ready_endpoints=3 rcnt=97967 fail=0 dist=1:98067  
+    L1 [PASS] opaque, 1 threads, rep 2: backends={1} ready_endpoints=3 rcnt=182869 fail=0 dist=1:182969  
+    L1 [PASS] opaque, 1 threads, rep 3: backends={1} ready_endpoints=3 rcnt=140559 fail=0 dist=1:140659  
+    L1 [PASS] opaque, 2 threads, rep 1: backends={1 2} ready_endpoints=3 rcnt=207620 fail=0 dist=1:106657,2:101163  
+    L1 [PASS] opaque, 2 threads, rep 2: backends={0} ready_endpoints=3 rcnt=207045 fail=0 dist=0:207245  
+    L1 [PASS] opaque, 2 threads, rep 3: backends={0 2} ready_endpoints=3 rcnt=205146 fail=0 dist=0:105452,2:99894  
+    L1 [PASS] opaque, 4 threads, rep 1: backends={0 1 2} ready_endpoints=3 rcnt=476897 fail=0 dist=0:122040,1:243313,2:111944  
+    L1 [PASS] opaque, 4 threads, rep 2: backends={0 1 2} ready_endpoints=3 rcnt=505411 fail=0 dist=0:129490,1:257625,2:118696  
+    L1 [PASS] opaque, 4 threads, rep 3: backends={0 1 2} ready_endpoints=3 rcnt=498707 fail=0 dist=0:132872,1:133191,2:233044  
+    L1 [PASS] opaque, 6 threads, rep 1: backends={0 1 2} ready_endpoints=3 rcnt=845325 fail=0 dist=0:157820,1:314051,2:374054  
+    L1 [PASS] opaque, 6 threads, rep 2: backends={0 1 2} ready_endpoints=3 rcnt=777154 fail=0 dist=0:136260,1:404603,2:236891  
+    L1 [PASS] opaque, 6 threads, rep 3: backends={0 1 2} ready_endpoints=3 rcnt=716678 fail=0 dist=0:242399,1:362659,2:112220  
+
+=== L2 — one backend withdrawn from the Service
+deployment.apps/echo-dpumesh-14 scaled
+pod/echo-dpumesh-14-75f99869c5-kk7hb condition met
+    L2 [PASS] two backends, rep 1: backends={0 1} ready_endpoints=2 rcnt=636927 fail=0 dist=0:318313,1:319214  
+    L2 [PASS] two backends, rep 2: backends={0 1} ready_endpoints=2 rcnt=646497 fail=0 dist=0:323927,1:323170  
+    L2 [PASS] two backends, rep 3: backends={0 1} ready_endpoints=2 rcnt=627668 fail=0 dist=0:418949,1:209319  
+    L2 backend slots observed over three repetitions (p2c characterization, not a fairness gate): 0 1 
+
+=== L3 — the backend restored
+deployment.apps/echo-dpumesh-14 scaled
+deployment.apps/echo-dpumesh-14 condition met
+    L3 [PASS] three backends, rep 1: backends={0 1 2} ready_endpoints=3 rcnt=930732 fail=0 dist=0:324142,1:324382,2:282808  
+    L3 [PASS] three backends, rep 2: backends={0 2} ready_endpoints=3 rcnt=860758 fail=0 dist=0:594172,2:267186  
+    L3 [PASS] three backends, rep 3: backends={0 1 2} ready_endpoints=3 rcnt=752388 fail=0 dist=0:386122,1:129409,2:237457  
+    L3 backend slots observed over three repetitions (p2c characterization, not a fairness gate): 0 1 2 
+
+=== L4 — the request grain against two protocol-aware backends
+deployment.apps/echo-grpc-dpumesh scaled
+deployment.apps/echo-grpc-dpumesh condition met
+    L4a [PASS] grpc, 1 channel(s): ready_endpoints=2 rcnt=17454 fail=0 take_errors+=0 served: echo-grpc-dpumesh-84cbd4d65d-77qpr=7843 echo-grpc-dpumesh-84cbd4d65d-mjwxj=9719  
+    L4b [PASS] grpc, 4 channel(s): ready_endpoints=2 rcnt=101045 fail=0 take_errors+=0 served: echo-grpc-dpumesh-84cbd4d65d-77qpr=48288 echo-grpc-dpumesh-84cbd4d65d-mjwxj=53189  
+
+=== L5 — back to one backend
+deployment.apps/echo-grpc-dpumesh scaled
+deployment.apps/echo-grpc-dpumesh condition met
+    L5 [PASS] grpc, 1 channel(s): ready_endpoints=1 rcnt=16290 fail=0 take_errors+=0 served: echo-grpc-dpumesh-84cbd4d65d-77qpr=16398  
+
+=== stages: 21 pass, 0 fail
+
+=== csv: bench/report/data/policy-route-lb-20260824-judge-v3/stages.csv
+
+=== cleanup
+deployment.apps/echo-dpumesh-14 scaled
+deployment.apps/echo-grpc-dpumesh scaled
+    fixtures removed; replica counts restored

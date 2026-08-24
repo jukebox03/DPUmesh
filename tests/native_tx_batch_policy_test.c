@@ -797,8 +797,9 @@ int
 main(void)
 {
     /* Production defaults: a 64 MiB shared pool, 512 KiB contiguous extents,
-     * and eight lazily-owned extents (4 MiB/QP). The reclaim FIFO must cover
-     * all 512 possible 8 KiB transport units without a second admission point. */
+     * and eight lazily-owned extents (4 MiB/QP). Small-record provisioning is
+     * capped at half the forward ring so one QP reaches explicit admission
+     * before it can monopolize the shared publication ring. */
     struct dpumesh_ctx *defaults = calloc(1, sizeof(*defaults));
     assert(defaults != NULL);
     init_config(defaults, NULL, NULL);
@@ -807,7 +808,8 @@ main(void)
     assert(defaults->block_size == 512 * 1024);
     assert(defaults->n_blocks == 128);
     assert(defaults->blocks_per_conn == 8);
-    assert(defaults->su_depth == 512);
+    assert(defaults->su_depth == 2048);
+    assert(defaults->su_depth * 2u == DMA_RING_SIZE);
     free(defaults);
 
     struct dmesh_port_slot rx = {0};

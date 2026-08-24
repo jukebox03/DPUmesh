@@ -1,0 +1,177 @@
+2026-08-24T15:16:26,339045279+09:00
+[pod/bench-grpc-dpumesh-646d5dcc88-kf7f8/bench-grpc-dpumesh] [06:15:42:983889][1258280512][DOCA][WRN][dmesh_core.c:2666][dpumesh_enqueue] DMA ring 2 full (size=4096) [stuck x90113]
+[pod/bench-grpc-dpumesh-646d5dcc88-kf7f8/bench-grpc-dpumesh] [06:15:43:474932][847234624][DOCA][WRN][dmesh_core.c:2666][dpumesh_enqueue] DMA ring 2 full (size=4096) [stuck x94209]
+[pod/bench-grpc-dpumesh-646d5dcc88-kf7f8/bench-grpc-dpumesh] [06:15:43:816377][855627328][DOCA][WRN][dmesh_core.c:2666][dpumesh_enqueue] DMA ring 2 full (size=4096) [stuck x98305]
+[pod/bench-grpc-dpumesh-646d5dcc88-kf7f8/bench-grpc-dpumesh] [06:15:44:133377][864020032][DOCA][WRN][dmesh_core.c:2666][dpumesh_enqueue] DMA ring 2 full (size=4096) [stuck x102401]
+[pod/bench-grpc-dpumesh-646d5dcc88-kf7f8/bench-grpc-dpumesh] [06:15:44:445464][864020032][DOCA][WRN][dmesh_core.c:2666][dpumesh_enqueue] DMA ring 2 full (size=4096) [stuck x106497]
+[pod/bench-grpc-dpumesh-646d5dcc88-kf7f8/bench-grpc-dpumesh] [06:15:44:768266][847234624][DOCA][WRN][dmesh_core.c:2666][dpumesh_enqueue] DMA ring 2 full (size=4096) [stuck x110593]
+[pod/bench-grpc-dpumesh-646d5dcc88-kf7f8/bench-grpc-dpumesh] [06:15:45:080266][847234624][DOCA][WRN][dmesh_core.c:2666][dpumesh_enqueue] DMA ring 2 full (size=4096) [stuck x114689]
+[pod/bench-grpc-dpumesh-646d5dcc88-kf7f8/bench-grpc-dpumesh] [06:15:45:382805][989845056][DOCA][WRN][dmesh_core.c:2666][dpumesh_enqueue] DMA ring 2 full (size=4096) [stuck x118785]
+[pod/bench-grpc-dpumesh-646d5dcc88-kf7f8/bench-grpc-dpumesh] [06:15:45:690486][2005093888][DOCA][WRN][dmesh_core.c:2666][dpumesh_enqueue] DMA ring 2 full (size=4096) [stuck x122881]
+[pod/bench-grpc-dpumesh-646d5dcc88-kf7f8/bench-grpc-dpumesh] [06:15:46:006971][2005093888][DOCA][WRN][dmesh_core.c:2666][dpumesh_enqueue] DMA ring 2 full (size=4096) [stuck x126977]
+[pod/echo-grpc-dpumesh-84cbd4d65d-5fgfl/echo-grpc-dpumesh] [06:15:38:996824][1602217536][DOCA][WRN][dmesh_core.c:2666][dpumesh_enqueue] DMA ring 2 full (size=4096) [stuck x8193]
+[pod/echo-grpc-dpumesh-84cbd4d65d-5fgfl/echo-grpc-dpumesh] [06:15:39:478724][1602217536][DOCA][WRN][dmesh_core.c:2666][dpumesh_enqueue] DMA ring 2 full (size=4096) [stuck x12289]
+[pod/echo-grpc-dpumesh-84cbd4d65d-5fgfl/echo-grpc-dpumesh] [06:15:39:960745][1602217536][DOCA][WRN][dmesh_core.c:2666][dpumesh_enqueue] DMA ring 2 full (size=4096) [stuck x16385]
+[pod/echo-grpc-dpumesh-84cbd4d65d-5fgfl/echo-grpc-dpumesh] [06:15:40:442603][1602217536][DOCA][WRN][dmesh_core.c:2666][dpumesh_enqueue] DMA ring 2 full (size=4096) [stuck x20481]
+[pod/echo-grpc-dpumesh-84cbd4d65d-5fgfl/echo-grpc-dpumesh] [06:15:40:924742][1602217536][DOCA][WRN][dmesh_core.c:2666][dpumesh_enqueue] DMA ring 2 full (size=4096) [stuck x24577]
+[pod/echo-grpc-dpumesh-84cbd4d65d-5fgfl/echo-grpc-dpumesh] [06:15:41:406899][1602217536][DOCA][WRN][dmesh_core.c:2666][dpumesh_enqueue] DMA ring 2 full (size=4096) [stuck x28673]
+[pod/echo-grpc-dpumesh-84cbd4d65d-5fgfl/echo-grpc-dpumesh] [06:15:41:888859][1602217536][DOCA][WRN][dmesh_core.c:2666][dpumesh_enqueue] DMA ring 2 full (size=4096) [stuck x32769]
+[pod/echo-grpc-dpumesh-84cbd4d65d-5fgfl/echo-grpc-dpumesh] [06:15:42:370840][1602217536][DOCA][WRN][dmesh_core.c:2666][dpumesh_enqueue] DMA ring 2 full (size=4096) [stuck x36865]
+[pod/echo-grpc-dpumesh-84cbd4d65d-5fgfl/echo-grpc-dpumesh] [06:15:42:852861][1602217536][DOCA][WRN][dmesh_core.c:2666][dpumesh_enqueue] DMA ring 2 full (size=4096) [stuck x40961]
+[pod/echo-grpc-dpumesh-84cbd4d65d-5fgfl/echo-grpc-dpumesh] [06:15:43:032622][1602217536][DOCA][ERR][dmesh_core.c:2678][dpumesh_enqueue] DMA ring 2 stalled >5s (size=4096)
+[06:13:51:571055][3179679776][DOCA][INF][doca_log.cpp:628] DOCA version 3.1.0105
+[06:13:51:571511][3179679776][DOCA][INF][control_scope.c:61][dmesh_scope_configure] control-plane scope mediated by 192.168.100.1:28089
+[06:13:51:597906][3179679776][DOCA][WRN][dpu_worker.c:821][run_dpu_worker] Requested data topology: K/A=8/8 (N finalized after DPA query)
+[06:13:51:597948][3179679776][DOCA][WRN][dpu_worker.c:823][run_dpu_worker] ARM DATA WORKERS = 8
+[06:13:54:563391][3179679776][DOCA][WRN][dpa.c:465][init_dpa_objects] Connection-affine topology active: N/K/A=32/8/8 (EU%A == ring%A == port%A)
+[06:13:55:452051][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad30e3810: ctx DPA ops are empty
+[06:13:55:556154][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad31b0700: ctx DPA ops are empty
+[06:13:55:598376][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad31cc090: ctx DPA ops are empty
+[06:13:55:654733][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad31c46a0: ctx DPA ops are empty
+[06:13:55:697439][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad3286090: ctx DPA ops are empty
+[06:13:55:754110][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad333e1a0: ctx DPA ops are empty
+[06:13:55:796380][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad3341090: ctx DPA ops are empty
+[06:13:55:853029][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad33cf730: ctx DPA ops are empty
+[06:13:55:895390][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad33fc090: ctx DPA ops are empty
+[06:13:55:952147][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad33f9da0: ctx DPA ops are empty
+[06:13:55:994662][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad34b7090: ctx DPA ops are empty
+[06:13:56:051590][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad34b2530: ctx DPA ops are empty
+[06:13:56:094200][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad356fb80: ctx DPA ops are empty
+[06:13:56:151135][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad356d790: ctx DPA ops are empty
+[06:13:56:193879][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad362c6b0: ctx DPA ops are empty
+[06:13:56:250636][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad36df010: ctx DPA ops are empty
+[06:13:56:293451][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad36e1bc0: ctx DPA ops are empty
+[06:13:56:350467][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad3776cf0: ctx DPA ops are empty
+[06:13:56:393038][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad35719b0: ctx DPA ops are empty
+[06:13:56:525748][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad34b0090: ctx DPA ops are empty
+[06:13:56:568373][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad356bc70: ctx DPA ops are empty
+[06:13:56:625461][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad3854090: ctx DPA ops are empty
+[06:13:56:667965][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad327f090: ctx DPA ops are empty
+[06:13:56:725049][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad3947430: ctx DPA ops are empty
+[06:13:56:767864][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad3910050: ctx DPA ops are empty
+[06:13:56:824694][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad3a7c530: ctx DPA ops are empty
+[06:13:56:867110][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad3a80ca0: ctx DPA ops are empty
+[06:13:56:924075][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad3ab7500: ctx DPA ops are empty
+[06:13:56:966518][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad3b34c20: ctx DPA ops are empty
+[06:13:57:023464][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad3b6f4d0: ctx DPA ops are empty
+[06:13:57:065982][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad3beccd0: ctx DPA ops are empty
+[06:13:57:123318][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad3c27420: ctx DPA ops are empty
+[06:13:57:165986][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad3ca8050: ctx DPA ops are empty
+[06:13:57:223551][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad3d5c580: ctx DPA ops are empty
+[06:13:57:266245][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad36e5010: ctx DPA ops are empty
+[06:13:57:323295][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad3d97320: ctx DPA ops are empty
+[06:13:57:365814][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad3e14ba0: ctx DPA ops are empty
+[06:13:57:423281][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad3e4f320: ctx DPA ops are empty
+[06:13:57:540936][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad3ed0050: ctx DPA ops are empty
+[06:13:57:597980][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad3f07420: ctx DPA ops are empty
+[06:13:57:640677][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad3f88050: ctx DPA ops are empty
+[06:13:57:697436][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad3fbf420: ctx DPA ops are empty
+[06:13:57:740335][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad403cbf0: ctx DPA ops are empty
+[06:13:57:797261][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad40f45b0: ctx DPA ops are empty
+[06:13:57:839880][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad3b20010: ctx DPA ops are empty
+[06:13:57:897469][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad412f770: ctx DPA ops are empty
+[06:13:57:940099][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad41acc60: ctx DPA ops are empty
+[06:13:57:996971][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad41b0710: ctx DPA ops are empty
+[06:13:58:039707][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad4266d00: ctx DPA ops are empty
+[06:13:58:096888][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad42a1500: ctx DPA ops are empty
+[06:13:58:139678][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad431ec00: ctx DPA ops are empty
+[06:13:58:197264][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad43d6260: ctx DPA ops are empty
+[06:13:58:239950][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad43dab90: ctx DPA ops are empty
+[06:13:58:296621][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad448e550: ctx DPA ops are empty
+[06:13:58:339323][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad3e164a0: ctx DPA ops are empty
+[06:13:58:396329][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad4546580: ctx DPA ops are empty
+[06:13:58:438897][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad3f70010: ctx DPA ops are empty
+[06:13:58:496112][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad45814c0: ctx DPA ops are empty
+[06:13:58:614900][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad45feba0: ctx DPA ops are empty
+[06:13:58:672151][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad46b62c0: ctx DPA ops are empty
+[06:13:58:715145][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad40e0010: ctx DPA ops are empty
+[06:13:58:772489][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad46f1250: ctx DPA ops are empty
+[06:13:58:815184][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad4772050: ctx DPA ops are empty
+[06:13:58:872837][3179679776][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad47a9780: ctx DPA ops are empty
+[06:13:59:400930][3179679776][DOCA][WRN][dpu_proxy.c:5565][px_init] DPU PROXY MODE ON (run-to-completion SG-DMA, N/K/A=32/8/8; l7-mode-lists=2, l7-layer=attached, l7-worker=all, l7-policy=fail-closed, lb=round-robin; passthru=conn-pinned, sg_pieces=64)
+[l7_linkerd] worker 0: Service test-bench/echo-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 0: Service test-bench/echo-grpc-alt has no interned id yet; target pending
+[l7_linkerd] worker 0: Service test-bench/loopback-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 0: Service test-bench/http1-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 0: Service test-bench/preload-sock has no interned id yet; target pending
+[l7_linkerd] worker 0: Service test-bench/preload-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 0: Service test-bench/verbs-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 0: Service test-bench/echo-grpc-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 1: Service test-bench/loopback-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 1: Service test-bench/verbs-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 1: Service test-bench/echo-grpc-alt has no interned id yet; target pending
+[l7_linkerd] worker 1: Service test-bench/preload-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 1: Service test-bench/preload-sock has no interned id yet; target pending
+[l7_linkerd] worker 1: Service test-bench/http1-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 1: Service test-bench/echo-grpc-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 1: Service test-bench/echo-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 2: Service test-bench/echo-grpc-alt has no interned id yet; target pending
+[l7_linkerd] worker 2: Service test-bench/preload-sock has no interned id yet; target pending
+[l7_linkerd] worker 2: Service test-bench/loopback-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 2: Service test-bench/verbs-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 2: Service test-bench/http1-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 2: Service test-bench/echo-grpc-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 2: Service test-bench/preload-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 2: Service test-bench/echo-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 3: Service test-bench/echo-grpc-alt has no interned id yet; target pending
+[l7_linkerd] worker 3: Service test-bench/http1-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 3: Service test-bench/preload-sock has no interned id yet; target pending
+[l7_linkerd] worker 3: Service test-bench/echo-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 3: Service test-bench/verbs-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 3: Service test-bench/echo-grpc-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 3: Service test-bench/loopback-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 3: Service test-bench/preload-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 4: Service test-bench/echo-grpc-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 4: Service test-bench/verbs-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 4: Service test-bench/echo-grpc-alt has no interned id yet; target pending
+[l7_linkerd] worker 4: Service test-bench/preload-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 4: Service test-bench/echo-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 4: Service test-bench/http1-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 4: Service test-bench/preload-sock has no interned id yet; target pending
+[l7_linkerd] worker 4: Service test-bench/loopback-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 5: Service test-bench/preload-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 5: Service test-bench/verbs-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 5: Service test-bench/echo-grpc-alt has no interned id yet; target pending
+[l7_linkerd] worker 5: Service test-bench/echo-grpc-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 5: Service test-bench/preload-sock has no interned id yet; target pending
+[l7_linkerd] worker 5: Service test-bench/loopback-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 5: Service test-bench/echo-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 5: Service test-bench/http1-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 6: Service test-bench/http1-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 6: Service test-bench/echo-grpc-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 6: Service test-bench/echo-grpc-alt has no interned id yet; target pending
+[l7_linkerd] worker 6: Service test-bench/echo-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 6: Service test-bench/preload-sock has no interned id yet; target pending
+[l7_linkerd] worker 6: Service test-bench/verbs-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 6: Service test-bench/preload-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 6: Service test-bench/loopback-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 7: Service test-bench/loopback-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 7: Service test-bench/preload-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 7: Service test-bench/echo-grpc-alt has no interned id yet; target pending
+[l7_linkerd] worker 7: Service test-bench/preload-sock has no interned id yet; target pending
+[l7_linkerd] worker 7: Service test-bench/echo-grpc-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 7: Service test-bench/verbs-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 7: Service test-bench/http1-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 7: Service test-bench/echo-dpumesh has no interned id yet; target pending
+[06:13:59:492316][3179679776][DOCA][WRN][dpu_worker.c:932][run_dpu_worker] ARM DATA WORKER THREADS = 8
+[06:13:59:492394][3179679776][DOCA][WRN][dpu_worker.c:963][run_dpu_worker] MAIN CONTROL/DOORBELL: workers=8, notification-driven (1 ms backstop tick)
+[l7_linkerd] worker 1: Service test-bench/loopback-dpumesh now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/verbs-dpumesh now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/echo-grpc-alt now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/preload-dpumesh now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/preload-sock now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/http1-dpumesh now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/echo-grpc-dpumesh now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/echo-dpumesh now resolves in the held topology
+[06:14:09:445748][2751457696][DOCA][WRN][dpu_proxy.c:2518][px_peer_stats_report] proxy: worker 1 peer poison=0 refused=none inbound admitted=1 denied=0 no-policy=0 mixed-callee-unprotected=0 peer-pin-conflict=0
+[l7_linkerd] worker 2: Service test-bench/echo-grpc-alt now resolves in the held topology
+[l7_linkerd] worker 2: Service test-bench/preload-sock now resolves in the held topology
+[l7_linkerd] worker 2: Service test-bench/loopback-dpumesh now resolves in the held topology
+[l7_linkerd] worker 2: Service test-bench/verbs-dpumesh now resolves in the held topology
+[l7_linkerd] worker 2: Service test-bench/http1-dpumesh now resolves in the held topology
+[l7_linkerd] worker 2: Service test-bench/echo-grpc-dpumesh now resolves in the held topology
+[l7_linkerd] worker 2: Service test-bench/preload-dpumesh now resolves in the held topology
+[l7_linkerd] worker 2: Service test-bench/echo-dpumesh now resolves in the held topology
+[06:15:39:447232][2214586784][DOCA][WRN][dpu_proxy.c:2518][px_peer_stats_report] proxy: worker 7 peer poison=0 refused=none inbound admitted=2 denied=0 no-policy=0 mixed-callee-unprotected=0 peer-pin-conflict=0
+[06:15:48:885026][2743003552][DOCA][WRN][dpu_proxy.c:1011][px_drop_window] proxy: dropping 300452 buffered bytes of conn (2:2): source QP reset
+[06:15:49:052263][2743003552][DOCA][WRN][dpu_proxy.c:1011][px_drop_window] proxy: dropping 17 buffered bytes of conn (0:32770): stale upstream (client closed)

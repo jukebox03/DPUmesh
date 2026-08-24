@@ -1,0 +1,22 @@
+stage,fixture,arm,expected,observed,verdict,rcnt,fail,admitted,denied,route_hits,target_mismatch,note
+L1,opaque; 1 threads; rep 1,dpumesh,serve+ready=3+backends=1..1,rcnt=97967+fail=0+ready=3+backends=1,PASS,97967,0,,,,,backends={1} ready_endpoints=3 dist=1:98067  
+L1,opaque; 1 threads; rep 2,dpumesh,serve+ready=3+backends=1..1,rcnt=182869+fail=0+ready=3+backends=1,PASS,182869,0,,,,,backends={1} ready_endpoints=3 dist=1:182969  
+L1,opaque; 1 threads; rep 3,dpumesh,serve+ready=3+backends=1..1,rcnt=140559+fail=0+ready=3+backends=1,PASS,140559,0,,,,,backends={1} ready_endpoints=3 dist=1:140659  
+L1,opaque; 2 threads; rep 1,dpumesh,serve+ready=3+backends=1..2,rcnt=207620+fail=0+ready=3+backends=2,PASS,207620,0,,,,,backends={1 2} ready_endpoints=3 dist=1:106657;2:101163  
+L1,opaque; 2 threads; rep 2,dpumesh,serve+ready=3+backends=1..2,rcnt=207045+fail=0+ready=3+backends=1,PASS,207045,0,,,,,backends={0} ready_endpoints=3 dist=0:207245  
+L1,opaque; 2 threads; rep 3,dpumesh,serve+ready=3+backends=1..2,rcnt=205146+fail=0+ready=3+backends=2,PASS,205146,0,,,,,backends={0 2} ready_endpoints=3 dist=0:105452;2:99894  
+L1,opaque; 4 threads; rep 1,dpumesh,serve+ready=3+backends=1..3,rcnt=476897+fail=0+ready=3+backends=3,PASS,476897,0,,,,,backends={0 1 2} ready_endpoints=3 dist=0:122040;1:243313;2:111944  
+L1,opaque; 4 threads; rep 2,dpumesh,serve+ready=3+backends=1..3,rcnt=505411+fail=0+ready=3+backends=3,PASS,505411,0,,,,,backends={0 1 2} ready_endpoints=3 dist=0:129490;1:257625;2:118696  
+L1,opaque; 4 threads; rep 3,dpumesh,serve+ready=3+backends=1..3,rcnt=498707+fail=0+ready=3+backends=3,PASS,498707,0,,,,,backends={0 1 2} ready_endpoints=3 dist=0:132872;1:133191;2:233044  
+L1,opaque; 6 threads; rep 1,dpumesh,serve+ready=3+backends=1..3,rcnt=845325+fail=0+ready=3+backends=3,PASS,845325,0,,,,,backends={0 1 2} ready_endpoints=3 dist=0:157820;1:314051;2:374054  
+L1,opaque; 6 threads; rep 2,dpumesh,serve+ready=3+backends=1..3,rcnt=777154+fail=0+ready=3+backends=3,PASS,777154,0,,,,,backends={0 1 2} ready_endpoints=3 dist=0:136260;1:404603;2:236891  
+L1,opaque; 6 threads; rep 3,dpumesh,serve+ready=3+backends=1..3,rcnt=716678+fail=0+ready=3+backends=3,PASS,716678,0,,,,,backends={0 1 2} ready_endpoints=3 dist=0:242399;1:362659;2:112220  
+L2,two backends; rep 1,dpumesh,serve+ready=2+backends=1..2,rcnt=636927+fail=0+ready=2+backends=2,PASS,636927,0,,,,,backends={0 1} ready_endpoints=2 dist=0:318313;1:319214  
+L2,two backends; rep 2,dpumesh,serve+ready=2+backends=1..2,rcnt=646497+fail=0+ready=2+backends=2,PASS,646497,0,,,,,backends={0 1} ready_endpoints=2 dist=0:323927;1:323170  
+L2,two backends; rep 3,dpumesh,serve+ready=2+backends=1..2,rcnt=627668+fail=0+ready=2+backends=2,PASS,627668,0,,,,,backends={0 1} ready_endpoints=2 dist=0:418949;1:209319  
+L3,three backends; rep 1,dpumesh,serve+ready=3+backends=1..3,rcnt=930732+fail=0+ready=3+backends=3,PASS,930732,0,,,,,backends={0 1 2} ready_endpoints=3 dist=0:324142;1:324382;2:282808  
+L3,three backends; rep 2,dpumesh,serve+ready=3+backends=1..3,rcnt=860758+fail=0+ready=3+backends=2,PASS,860758,0,,,,,backends={0 2} ready_endpoints=3 dist=0:594172;2:267186  
+L3,three backends; rep 3,dpumesh,serve+ready=3+backends=1..3,rcnt=752388+fail=0+ready=3+backends=3,PASS,752388,0,,,,,backends={0 1 2} ready_endpoints=3 dist=0:386122;1:129409;2:237457  
+L4a,grpc 1 channels,grpc-dpumesh,serve+ready=2+backends=2,rcnt=17454+fail=0+ready=2+backends=2,PASS,17454,0,,,,,ready_endpoints=2 take_errors+=0 served: echo-grpc-dpumesh-84cbd4d65d-77qpr=7843 echo-grpc-dpumesh-84cbd4d65d-mjwxj=9719  
+L4b,grpc 4 channels,grpc-dpumesh,serve+ready=2+backends=2,rcnt=101045+fail=0+ready=2+backends=2,PASS,101045,0,,,,,ready_endpoints=2 take_errors+=0 served: echo-grpc-dpumesh-84cbd4d65d-77qpr=48288 echo-grpc-dpumesh-84cbd4d65d-mjwxj=53189  
+L5,grpc 1 channels,grpc-dpumesh,serve+ready=1+backends=1,rcnt=16290+fail=0+ready=1+backends=1,PASS,16290,0,,,,,ready_endpoints=1 take_errors+=0 served: echo-grpc-dpumesh-84cbd4d65d-77qpr=16398  

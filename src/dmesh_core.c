@@ -54,10 +54,16 @@ static void tx_timer_stop(struct dpumesh_ctx *ctx);
 #define RX_QUEUE_SIZE 65536
 
 /* Per-connection send-unit FIFOs are sized from the configured byte window.
- * Sequence arithmetic is 16-bit, so keep the live window strictly below half
- * the sequence space. */
+ * Small RPC records can each be flushed as their own descriptor, so provisioning
+ * only one entry per 8 KiB transport slot is not enough. 512 bytes is a sizing
+ * target, not a correctness assumption: reserve admission below handles still
+ * smaller records. A single QP is additionally capped at half a forward ring,
+ * leaving progress room for sibling streams and control traffic instead of
+ * moving the queueing point into the five-second ring fail-safe. */
 #define TX_SU_DEPTH_MIN 64u
 #define TX_SU_DEPTH_MAX 32768u
+#define TX_SU_TRACK_QUANTUM 512u
+#define TX_SU_FORWARD_SHARE_MAX (DMA_RING_SIZE / 2u)
 
 /* Per-connection TX block-chain defaults over the shared TX mapping. */
 #define TX_BLOCK_SIZE          (512 * 1024)
@@ -85,6 +91,7 @@ enum dmesh_tx_wait_reason {
     DMESH_TX_WAIT_NONE = 0,
     DMESH_TX_WAIT_QP_RECLAIM,
     DMESH_TX_WAIT_SHARED_POOL,
+    DMESH_TX_WAIT_SU_RECLAIM,
 };
 
 /* Full-duplex connections are indexed by local port; port zero denotes an accept.
@@ -155,6 +162,7 @@ struct dmesh_port_slot {
     atomic_uint_fast64_t tx_wait_tail_blk;    /* oldest block at the failed reserve */
     atomic_uint_fast64_t tx_wait_tx_w;        /* full-drain target at the failed reserve */
     atomic_uint_fast64_t tx_wait_pool_epoch;  /* shared-pool generation at pool-empty EAGAIN */
+    atomic_uint_fast16_t tx_wait_su_tail;      /* FIFO tail at send-unit-full EAGAIN */
 
     /* ---- PRODUCER (PE thread) cache line: fields the PE mutates every message ---- */
     char _cl_prod[64];
@@ -1084,6 +1092,13 @@ static int tx_wait_qp_retryable(dpumesh_ctx_t *ctx, struct dmesh_port_slot *psl)
     return f == wait_w && head == tail;
 }
 
+static int tx_wait_su_retryable(struct dmesh_port_slot *psl) {
+    uint16_t before = atomic_load_explicit(&psl->tx_wait_su_tail,
+                                            memory_order_relaxed);
+    uint16_t now = atomic_load_explicit(&psl->su_tail, memory_order_acquire);
+    return now != before;
+}
+
 /* Publish the failed-reserve snapshot, then recheck the relevant capacity source.
  * That final check closes the EAGAIN->ARM race: an ACK/block return concurrent with
  * arming either observes ARMED or changes the snapshot generation we inspect here. */
@@ -1095,6 +1110,10 @@ static void tx_wait_arm(dpumesh_ctx_t *ctx, struct dmesh_port_slot *psl,
     atomic_store_explicit(&psl->tx_wait_tx_w, psl->tx_w, memory_order_relaxed);
     uint64_t epoch = atomic_load_explicit(&ctx->pool_epoch, memory_order_acquire);
     atomic_store_explicit(&psl->tx_wait_pool_epoch, epoch, memory_order_relaxed);
+    atomic_store_explicit(&psl->tx_wait_su_tail,
+                          atomic_load_explicit(&psl->su_tail,
+                                               memory_order_acquire),
+                          memory_order_relaxed);
     atomic_store_explicit(&psl->tx_wait_reason, (uint_fast32_t)reason,
                           memory_order_relaxed);
     atomic_store_explicit(&psl->tx_wait_state, DMESH_TX_WAIT_ARMED,
@@ -1106,6 +1125,9 @@ static void tx_wait_arm(dpumesh_ctx_t *ctx, struct dmesh_port_slot *psl,
         uint64_t free_head = atomic_load_explicit(&ctx->block_free,
                                                   memory_order_acquire) & 0xFFFFFFFFu;
         if (now != epoch || free_head < (uint64_t)ctx->n_blocks)
+            (void)tx_wait_make_ready(ctx, port);
+    } else if (reason == DMESH_TX_WAIT_SU_RECLAIM) {
+        if (tx_wait_su_retryable(psl))
             (void)tx_wait_make_ready(ctx, port);
     } else if (tx_wait_qp_retryable(ctx, psl)) {
         (void)tx_wait_make_ready(ctx, port);
@@ -1376,16 +1398,22 @@ static void init_config(dpumesh_ctx_t *ctx, const dpumesh_config_t *config,
     if (mb > ctx->n_blocks) mb = ctx->n_blocks;
     ctx->blocks_per_conn = mb;
 
-    /* A QP can fill its complete byte window with <=slot_size descriptors. Size the
-     * reclaim FIFO to the next power of two so publication has no second admission
-     * point. Keep it below half the 16-bit sequence space for unambiguous ACK order. */
-    uint64_t need_su = ((uint64_t)ctx->block_size * (uint64_t)ctx->blocks_per_conn +
-                        (uint64_t)ctx->slot_size - 1) / (uint64_t)ctx->slot_size;
+    /* Provision for small records: gRPC commonly flushes one descriptor far below
+     * slot_size. Records smaller than the sizing quantum remain correct because
+     * reserve admission parks the QP before this FIFO can wrap. */
+    uint64_t tracking_quantum = (uint64_t)ctx->slot_size;
+    if (tracking_quantum > TX_SU_TRACK_QUANTUM)
+        tracking_quantum = TX_SU_TRACK_QUANTUM;
+    uint64_t need_su = ((uint64_t)ctx->block_size *
+                            (uint64_t)ctx->blocks_per_conn +
+                        tracking_quantum - 1) / tracking_quantum;
     uint32_t sd = TX_SU_DEPTH_MIN;
     while ((uint64_t)sd < need_su && sd < TX_SU_DEPTH_MAX)
         sd <<= 1;
     if ((uint64_t)sd < need_su)
         sd = TX_SU_DEPTH_MAX;
+    if (sd > TX_SU_FORWARD_SHARE_MAX)
+        sd = TX_SU_FORWARD_SHARE_MAX;
     ctx->su_depth = sd;
 
     int hh = TX_RECYCLED_CUSHION;
@@ -2112,6 +2140,7 @@ static void port_reset_tx(struct dmesh_port_slot *psl) {
                           memory_order_relaxed);
     atomic_store_explicit(&psl->tx_wait_reason, DMESH_TX_WAIT_NONE,
                           memory_order_relaxed);
+    atomic_store_explicit(&psl->tx_wait_su_tail, 0, memory_order_relaxed);
 }
 
 /* OWNER-only (live conn): recycle drained tail blocks into recyc, compact a
@@ -2201,6 +2230,46 @@ static int tx_tracking_ensure(dpumesh_ctx_t *ctx,
     return 0;
 }
 
+/* Conservative upper bound for descriptors created by one reservation. The
+ * first unaligned DPA copy can carry at least (COPY_MAX - ALIGN + 1) bytes;
+ * later copies start aligned. A block-boundary pad may seal one extra short
+ * tail, hence the final increment in that case. */
+static uint32_t tx_tracking_slots_needed(dpumesh_ctx_t *ctx,
+                                         struct dmesh_port_slot *psl,
+                                         uint32_t len)
+{
+    uint64_t sent = atomic_load_explicit(&psl->tx_s, memory_order_relaxed);
+    uint64_t pending = psl->tx_w >= sent ? psl->tx_w - sent : 0;
+    uint64_t min_payload = DPA_DMA_COPY_MAX - (DPA_DMA_COPY_ALIGN - 1u);
+    if ((uint64_t)ctx->slot_size < min_payload)
+        min_payload = (uint64_t)ctx->slot_size;
+    if (min_payload == 0)
+        return ctx->su_depth;
+    uint64_t bytes = pending + (uint64_t)len;
+    uint64_t needed = (bytes + min_payload - 1u) / min_payload;
+    uint64_t off = psl->tx_w % (uint64_t)ctx->block_size;
+    if (off + (uint64_t)len > (uint64_t)ctx->block_size)
+        needed++;
+    if (needed == 0)
+        needed = 1;
+    return needed > UINT32_MAX ? UINT32_MAX : (uint32_t)needed;
+}
+
+/* Keep one FIFO cell for an ordered FIN/abort marker. Data publication is
+ * admitted before bytes are reserved, so a successful post can never discover
+ * after commit that its reclaim metadata has nowhere to go. */
+static int tx_tracking_reserve_room(dpumesh_ctx_t *ctx,
+                                    struct dmesh_port_slot *psl,
+                                    uint32_t len)
+{
+    uint16_t head = atomic_load_explicit(&psl->su_head, memory_order_acquire);
+    uint16_t tail = atomic_load_explicit(&psl->su_tail, memory_order_acquire);
+    uint32_t outstanding = (uint16_t)(head - tail);
+    uint32_t capacity = ctx->su_depth > 0 ? ctx->su_depth - 1u : 0;
+    uint32_t needed = tx_tracking_slots_needed(ctx, psl, len);
+    return outstanding <= capacity && needed <= capacity - outstanding;
+}
+
 /* Reserve one contiguous message in the connection's TX block chain. The owner
  * thread receives EAGAIN for capacity pressure or EINVAL for invalid state. */
 uint8_t *dpumesh_tx_reserve(dpumesh_ctx_t *ctx, uint16_t port, uint32_t len) {
@@ -2220,6 +2289,13 @@ uint8_t *dpumesh_tx_reserve(dpumesh_ctx_t *ctx, uint16_t port, uint32_t len) {
     if (psl->resv_len != 0) { errno = EINVAL; return NULL; } /* one outstanding alloc/QP */
     if (tx_tracking_ensure(ctx, psl) != 0)                 /* lazy send-unit FIFO */
         return NULL;
+    if (!tx_tracking_reserve_room(ctx, psl, len)) {
+        atomic_fetch_add_explicit(&ctx->st_grow_waits, 1, memory_order_relaxed);
+        atomic_fetch_add_explicit(&ctx->st_wait_window, 1, memory_order_relaxed);
+        tx_wait_arm(ctx, psl, port, DMESH_TX_WAIT_SU_RECLAIM);
+        errno = EAGAIN;
+        return NULL;
+    }
 
     /* Probe the block window before mutating tx_w: on EAGAIN the conn's write head
      * is exactly where it was, so the caller's retry is a clean no-op. */
@@ -2409,10 +2485,18 @@ int dpumesh_tx_next_send(dpumesh_ctx_t *ctx, uint16_t port, int flush_partial,
 }
 
 /* Publish reclaim metadata before the forward descriptor. */
-void dpumesh_tx_track(dpumesh_ctx_t *ctx, uint16_t port, uint16_t seq, uint32_t len) {
+int dpumesh_tx_track(dpumesh_ctx_t *ctx, uint16_t port, uint16_t seq, uint32_t len) {
     struct dmesh_port_slot *psl = &ctx->ports[port];
-    if (!psl->su_seq) return;
+    if (!psl->su_seq || ctx->su_depth == 0) {
+        errno = EINVAL;
+        return -1;
+    }
     uint16_t h = atomic_load_explicit(&psl->su_head, memory_order_relaxed);
+    uint16_t t = atomic_load_explicit(&psl->su_tail, memory_order_acquire);
+    if ((uint16_t)(h - t) >= ctx->su_depth) {
+        errno = EAGAIN;
+        return -1;
+    }
     size_t idx = (size_t)(h & (ctx->su_depth - 1));
     uint64_t sent = atomic_load_explicit(&psl->tx_s, memory_order_relaxed) + len;
     atomic_store_explicit(&psl->tx_s, sent, memory_order_relaxed);
@@ -2420,6 +2504,7 @@ void dpumesh_tx_track(dpumesh_ctx_t *ctx, uint16_t port, uint16_t seq, uint32_t 
     psl->su_end[idx] = sent;                               /* end cursor after this unit */
     psl->su_done[idx] = 0;
     atomic_store_explicit(&psl->su_head, (uint_fast16_t)(h + 1), memory_order_release);
+    return 0;
 }
 
 /* Undo the newest unpublished entry after enqueue failure. */
@@ -2508,11 +2593,15 @@ static inline void tx_reclaim_ack(dpumesh_ctx_t *ctx, uint16_t port, uint16_t se
         atomic_store_explicit(&psl->tx_f, newf, memory_order_release);
         atomic_store_explicit(&psl->su_tail, (uint_fast16_t)tail, memory_order_release);
         if (atomic_load_explicit(&psl->tx_wait_state, memory_order_acquire) ==
-                DMESH_TX_WAIT_ARMED &&
-            atomic_load_explicit(&psl->tx_wait_reason, memory_order_relaxed) ==
-                DMESH_TX_WAIT_QP_RECLAIM &&
-            tx_wait_qp_retryable(ctx, psl))
-            (void)tx_wait_make_ready(ctx, port);
+                DMESH_TX_WAIT_ARMED) {
+            uint_fast32_t reason =
+                atomic_load_explicit(&psl->tx_wait_reason,
+                                     memory_order_relaxed);
+            if (reason == DMESH_TX_WAIT_SU_RECLAIM ||
+                (reason == DMESH_TX_WAIT_QP_RECLAIM &&
+                 tx_wait_qp_retryable(ctx, psl)))
+                (void)tx_wait_make_ready(ctx, port);
+        }
         tx_arm_idle_tail(psl, port, tail, head);
         try_return_blocks(ctx, psl);                       /* return blocks if this drained a CLOSED conn */
     }
@@ -2902,7 +2991,9 @@ static int emit_desc(dmesh_qp_t *c, size_t moff, uint32_t len,
     if (c->role == DMESH_ROLE_CLIENT) { d.dst_pod = DMESH_POD_BLANK; d.dst_port = DMESH_PORT_BLANK; }
     else                              { d.dst_pod = c->remote_pod;   d.dst_port = c->remote_port; }
     d.valid = 1;
-    dpumesh_tx_track(ctx, c->local_port, next_seq, physical_advance);
+    if (dpumesh_tx_track(ctx, c->local_port, next_seq,
+                         physical_advance) != 0)
+        return -1;
     if (dpumesh_enqueue(ctx, &d) < 0) {
         (void)dpumesh_tx_untrack(ctx, c->local_port, next_seq,
                                  physical_advance);
@@ -3240,7 +3331,8 @@ static int dmesh_drain_tx_upto_locked(dmesh_qp_t *c, int flush_partial,
                 atomic_store_explicit(&psl->tx_c, original_end,
                                       memory_order_release);
             }
-            errno = EBADMSG;
+            if (errno != EAGAIN)
+                errno = EBADMSG;
             return -1;                                     /* bytes stay committed */
         }
     }
@@ -3346,6 +3438,10 @@ int dmesh_tx_after_commit(dmesh_qp_t *c) {
         return 0;
 
     if (dmesh_drain_tx_locked(c, 0) != 0) {
+        if (errno == EAGAIN) {
+            tx_arm_tail(psl, c->local_port);
+            return 0;
+        }
         tx_disarm_tail(psl, c->local_port);
         return -1;
     }
@@ -3392,8 +3488,13 @@ void dmesh_tx_pressure(dmesh_qp_t *c) {
         errno = saved_errno;
         return;
     }
-    if (dmesh_drain_tx_locked(c, 1) != 0)
-        tx_error_publish(psl, c->local_port, EBADMSG);
+    int drain_result = dmesh_drain_tx_locked(c, 1);
+    if (drain_result != 0) {
+        if (errno == EAGAIN)
+            tx_arm_tail(psl, c->local_port);
+        else
+            tx_error_publish(psl, c->local_port, EBADMSG);
+    }
     errno = saved_errno;
 }
 
@@ -3421,8 +3522,12 @@ void dpumesh_publish_due_tails(struct dmesh_eq *eq) {
             atomic_load_explicit(&psl->tx_error, memory_order_acquire) == 0 &&
             atomic_load_explicit(&psl->tx_s, memory_order_relaxed) <
                 atomic_load_explicit(&psl->tx_c, memory_order_acquire) &&
-            dmesh_drain_tx_locked(c, 1) != 0)
-            tx_error_publish(psl, port, EBADMSG);
+            dmesh_drain_tx_locked(c, 1) != 0) {
+            if (errno == EAGAIN)
+                tx_arm_tail(psl, port);
+            else
+                tx_error_publish(psl, port, EBADMSG);
+        }
         tx_gate_release(psl);
     }
     eq_tx_armed_refresh(eq);
@@ -3472,7 +3577,8 @@ static int dmesh_send_fin_locked(dmesh_qp_t *c) {
     /* A close ACK is also the port-incarnation fence. Track this zero-byte
      * control descriptor before publication so a freed low port cannot be
      * recycled while the DPU still owns the old (pod, port) session key. */
-    dpumesh_tx_track(ctx, c->local_port, next_seq, 0);
+    if (dpumesh_tx_track(ctx, c->local_port, next_seq, 0) != 0)
+        return -1;
     /* Latch only after enqueue succeeds. A failed attempt must be observable and
      * must not suppress a later close path from trying again. */
     if (dpumesh_enqueue(ctx, &d) < 0) {
@@ -3505,7 +3611,8 @@ static int dmesh_send_abort_locked(dmesh_qp_t *c) {
     d.valid         = 1;
     if (tx_tracking_ensure(ctx, &ctx->ports[c->local_port]) != 0)
         return -1;
-    dpumesh_tx_track(ctx, c->local_port, next_seq, 0);
+    if (dpumesh_tx_track(ctx, c->local_port, next_seq, 0) != 0)
+        return -1;
     if (dpumesh_enqueue(ctx, &d) < 0) {
         (void)dpumesh_tx_untrack(ctx, c->local_port, next_seq, 0);
         if (errno != EAGAIN) errno = EBADMSG;

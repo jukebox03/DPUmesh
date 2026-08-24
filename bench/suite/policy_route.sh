@@ -23,6 +23,7 @@ SUITE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJ_ROOT="$(cd "$SUITE_DIR/../.." && pwd)"
 BENCH="$SUITE_DIR/../bench.sh"
 FIXTURES="$SUITE_DIR/../k8s/policy"
+source "$SUITE_DIR/policy_route_judge.sh"
 [ -f "$PROJ_ROOT/.env" ] && { set -a; source "$PROJ_ROOT/.env"; set +a; }
 
 NS="${NS:-test-bench}"
@@ -148,6 +149,7 @@ cleanup() {
     say "cleanup"
     drop_all_fixtures
     restore_replicas
+    [ -z "${ENDPOINT_FILE:-}" ] || rm -f "$ENDPOINT_FILE"
     note "fixtures removed; replica counts restored"
 }
 trap cleanup EXIT
@@ -359,9 +361,10 @@ backend_slots() { tr ',' '\n' <<<"$(field "$1" dist)" | sed -n 's/^\([0-9]\+\):.
 ENDPOINT_FILE="$OUT_DIR/.ready-endpoints"
 lb_endpoints() { cat "$ENDPOINT_FILE" 2>/dev/null || echo NA; }
 lb_point_sampled() {
-    local arm="$1" threads="$2" family="$3" service="$4" out port
+    local arm="$1" threads="$2" family="$3" service="$4" out port point_pid
     out=$(mktemp)
-    ( lb_point "$arm" "$threads" >"$out" 2>&1 & )
+    lb_point "$arm" "$threads" >"$out" 2>&1 &
+    point_pid=$!
     sleep $(( DUR / 3 + 3 ))
     local pattern
     pattern="^outbound_${family}_balancer_endpoints.*endpoint_state=\\\"ready\\\".*parent_name=\\\"${service}\\\""
@@ -369,21 +372,44 @@ lb_point_sampled() {
         for port in "${ADMIN_PORTS[@]}"; do
             ssh "${SSH_OPTS[@]}" -n "$DPU_HOST" \
                 "curl -sf --max-time 5 127.0.0.1:$port/metrics | grep -E \"$pattern\"" \
-                2>/dev/null
-        done | awk '{ if ($NF+0 > max) max = $NF+0 } END { print max+0 }'
+                2>/dev/null || true
+        done | awk '$NF+0 > 0 {
+                        value=$NF+0;
+                        if (!seen || value < min) min=value;
+                        if (!seen || value > max) max=value;
+                        seen=1
+                    }
+                    END {
+                        if (!seen) print "NA";
+                        else if (min != max) printf "mixed-%d-%d\n", min, max;
+                        else print max
+                    }'
     )" >"$ENDPOINT_FILE"
-    until grep -qE '^(OK|ERR)' "$out" 2>/dev/null; do sleep 2; done
+    if ! wait "$point_pid"; then :; fi
     tail -n1 "$out"; rm -f "$out"
 }
 
 lb_record() {
-    local id="$1" label="$2" arm="$3" result="$4" slots note_extra="${5:-}" dist
+    local id="$1" label="$2" arm="$3" result="$4" expected_ready="$5"
+    local min_backends="$6" max_backends="$7" note_extra="${8:-}"
+    local slots dist dist_csv ready backends expected verdict reason
     slots=$(backend_slots "$result" | tr '\n' ' ')
     dist=$(field "$result" dist)
-    note "$id $label: backends={${slots% }} ready_endpoints=$(lb_endpoints) fail=$(field "$result" fail) dist=$(field "$result" dist) $note_extra"
-    printf '%s,%s,%s,,,,%s,%s,,,,,backends={%s} ready_endpoints=%s dist=%s %s\n' \
-        "$id" "${label//,/;}" "$arm" "$(field "$result" rcnt)" "$(field "$result" fail)" \
-        "${slots% }" "$(lb_endpoints)" "${dist//,/;}" "${note_extra//,/;}" >>"$CSV"
+    dist_csv="${dist//,/;}"
+    ready=$(lb_endpoints)
+    backends=$(printf '%s\n' "$slots" | tr ' ' '\n' | grep -c '[0-9]' || true)
+    expected="serve+ready=$expected_ready+backends=$min_backends..$max_backends"
+    if policy_route_judge_lb "$result" "$ready" "$expected_ready" \
+                              "$backends" "$min_backends" "$max_backends"; then
+        verdict=PASS; PASSES=$((PASSES + 1)); reason=""
+    else
+        verdict=FAIL; FAILURES=$((FAILURES + 1)); reason="$LB_JUDGE_REASON"
+    fi
+    note "$id [$verdict] $label: backends={${slots% }} ready_endpoints=$ready rcnt=$LB_JUDGE_RCNT fail=$LB_JUDGE_FAIL dist=${dist:-NA} ${reason:+reason=$reason} $note_extra"
+    printf '%s,%s,%s,%s,%s,%s,%s,%s,,,,,%s\n' \
+        "$id" "${label//,/;}" "$arm" "$expected" "$LB_JUDGE_OBSERVED" "$verdict" \
+        "$LB_JUDGE_RCNT" "$LB_JUDGE_FAIL" \
+        "backends={${slots% }} ready_endpoints=$ready dist=${dist_csv:-NA} ${reason:+reason=$reason} ${note_extra//,/;}" >>"$CSV"
 }
 
 # Requests each destination Pod served over one point, as a delta: the metric
@@ -395,16 +421,45 @@ grpc_pod_requests() {
 }
 
 grpc_backends() {
-    local id="$1" channels="$2" before after result used
+    local id="$1" channels="$2" expected_backends="$3"
+    local before after result used ready backends verdict reason expected
+    local metrics take_before take_after take_delta
     before=$(grpc_pod_requests)
+    metrics=$(dpu_metrics)
+    take_before=$(metric_sum "$metrics" '^dmesh_backend_take_errors_total')
     result=$(lb_point_sampled grpc-dpumesh "$channels" http echo-grpc-dpumesh)
     after=$(grpc_pod_requests)
+    metrics=$(dpu_metrics)
+    take_after=$(metric_sum "$metrics" '^dmesh_backend_take_errors_total')
+    take_delta=$((take_after - take_before))
     used=$(join -a1 -a2 -e 0 -o 0,1.2,2.2 <(printf '%s\n' "$before") <(printf '%s\n' "$after") |
            awk '{ if ($3 - $2 > 0) printf "%s=%d ", $1, $3 - $2 }')
-    note "$id grpc, $channels channel(s): ready_endpoints=$(lb_endpoints) rcnt=$(field "$result" rcnt) fail=$(field "$result" fail) served: ${used}"
-    printf '%s,grpc %s channels,grpc-dpumesh,,,,%s,%s,,,,,ready_endpoints=%s served: %s\n' \
-        "$id" "$channels" "$(field "$result" rcnt)" "$(field "$result" fail)" \
-        "$(lb_endpoints)" "$used" >>"$CSV"
+    ready=$(lb_endpoints)
+    backends=$(printf '%s\n' "$used" | tr ' ' '\n' | grep -c '=' || true)
+    expected="serve+ready=$expected_backends+backends=$expected_backends"
+    if policy_route_judge_lb "$result" "$ready" "$expected_backends" \
+                              "$backends" "$expected_backends" "$expected_backends"; then
+        if [ "$take_delta" -eq 0 ]; then
+            verdict=PASS; PASSES=$((PASSES + 1)); reason=""
+        else
+            verdict=FAIL; FAILURES=$((FAILURES + 1))
+            reason="backend take errors increased by $take_delta"
+        fi
+    else
+        verdict=FAIL; FAILURES=$((FAILURES + 1)); reason="$LB_JUDGE_REASON"
+    fi
+    note "$id [$verdict] grpc, $channels channel(s): ready_endpoints=$ready rcnt=$LB_JUDGE_RCNT fail=$LB_JUDGE_FAIL take_errors+=$take_delta served: ${used:-none} ${reason:+reason=$reason}"
+    printf '%s,grpc %s channels,grpc-dpumesh,%s,%s,%s,%s,%s,,,,,ready_endpoints=%s take_errors+=%s served: %s %s\n' \
+        "$id" "$channels" "$expected" "$LB_JUDGE_OBSERVED" "$verdict" \
+        "$LB_JUDGE_RCNT" "$LB_JUDGE_FAIL" "$ready" "$take_delta" "${used:-none}" \
+        "${reason:+reason=$reason}" >>"$CSV"
+}
+
+wait_ready_replicas() {  # wait_ready_replicas <deployment> <count> <timeout>
+    local deployment="$1" count="$2" timeout="$3"
+    kubectl wait -n "$NS" \
+        --for="jsonpath={.status.readyReplicas}=$count" \
+        "deployment/$deployment" --timeout="$timeout" >>"$LOG" 2>&1
 }
 
 run_lb() {
@@ -414,9 +469,9 @@ run_lb() {
     say "L1 — how many of the three backends one client reaches"
     for threads in 1 2 4 6; do
         for rep in 1 2 3; do
-            rm -f "$ENDPOINT_FILE"
-            result=$(lb_point dpumesh "$threads")
-            lb_record "L1" "opaque, $threads threads, rep $rep" dpumesh "$result"
+            result=$(lb_point_sampled dpumesh "$threads" tcp echo-dpumesh)
+            lb_record "L1" "opaque, $threads threads, rep $rep" dpumesh \
+                "$result" 3 1 "$([ "$threads" -lt 3 ] && echo "$threads" || echo 3)"
         done
     done
 
@@ -430,41 +485,39 @@ run_lb() {
     union=""
     for rep in 1 2 3; do
         result=$(lb_point_sampled dpumesh 6 tcp echo-dpumesh)
-        lb_record "L2" "two backends, rep $rep" dpumesh "$result"
+        lb_record "L2" "two backends, rep $rep" dpumesh "$result" 2 1 2
         union="$union $(backend_slots "$result" | tr '\n' ' ')"
     done
-    note "L2 backend slots seen over three repetitions: $(tr ' ' '\n' <<<"$union" | sort -u | tr '\n' ' ')"
+    note "L2 backend slots observed over three repetitions (p2c characterization, not a fairness gate): $(tr ' ' '\n' <<<"$union" | sed -n '/^[0-9]\+$/p' | sort -u | tr '\n' ' ')"
 
     say "L3 — the backend restored"
     kubectl scale deployment/echo-dpumesh-14 -n "$NS" --replicas=1 >>"$LOG" 2>&1
-    kubectl wait --for=condition=Ready pod -n "$NS" -l app=echo-dpumesh-14 --timeout=120s >>"$LOG" 2>&1 || true
+    wait_ready_replicas echo-dpumesh-14 1 120s
     sleep 20
     union=""
     for rep in 1 2 3; do
         result=$(lb_point_sampled dpumesh 6 tcp echo-dpumesh)
-        lb_record "L3" "three backends, rep $rep" dpumesh "$result"
+        lb_record "L3" "three backends, rep $rep" dpumesh "$result" 3 1 3
         union="$union $(backend_slots "$result" | tr '\n' ' ')"
     done
-    note "L3 backend slots seen over three repetitions: $(tr ' ' '\n' <<<"$union" | sort -u | tr '\n' ' ')"
+    note "L3 backend slots observed over three repetitions (p2c characterization, not a fairness gate): $(tr ' ' '\n' <<<"$union" | sed -n '/^[0-9]\+$/p' | sort -u | tr '\n' ' ')"
 
     say "L4 — the request grain against two protocol-aware backends"
     kubectl scale deployment/echo-grpc-dpumesh -n "$NS" --replicas=2 >>"$LOG" 2>&1
-    kubectl wait --for=condition=Ready pod -n "$NS" -l app=echo-grpc-dpumesh --timeout=150s >>"$LOG" 2>&1 || true
+    wait_ready_replicas echo-grpc-dpumesh 2 150s
     sleep 25
     # One client channel is one DMA session, and a session owns one backend
     # channel. Offering the same load over one channel and over four is what
     # separates "the balancer holds both endpoints" from "one request may go
     # anywhere".
-    grpc_backends L4a 1
-    grpc_backends L4b 4
+    grpc_backends L4a 1 2
+    grpc_backends L4b 4 2
 
     say "L5 — back to one backend"
     kubectl scale deployment/echo-grpc-dpumesh -n "$NS" --replicas=1 >>"$LOG" 2>&1
-    kubectl wait --for=delete pod -n "$NS" -l app=echo-grpc-dpumesh --timeout=90s >>"$LOG" 2>&1 || true
+    wait_ready_replicas echo-grpc-dpumesh 1 90s
     sleep 20
-    rm -f "$ENDPOINT_FILE"
-    result=$(lb_point grpc-dpumesh 1)
-    lb_record "L5" "grpc, one backend" grpc-dpumesh "$result"
+    grpc_backends L5 1 1
 }
 
 # Linkerd features the DPU-hosted proxy has never been pointed at. Each stage
@@ -734,8 +787,7 @@ run_fanout() {
     drop_all_fixtures; sleep 6
 
     kubectl scale deployment/echo-grpc-dpumesh -n "$NS" --replicas=2 >>"$LOG" 2>&1
-    kubectl wait --for=condition=Ready pod -n "$NS" -l app=echo-grpc-dpumesh \
-        --timeout=180s >>"$LOG" 2>&1 || true
+    wait_ready_replicas echo-grpc-dpumesh 2 180s
     sleep 25
 
     local metrics take_before take_after before after served pods result channels
@@ -779,7 +831,7 @@ run_fanout() {
 
     say "F1 — back to one backend"
     kubectl scale deployment/echo-grpc-dpumesh -n "$NS" --replicas=1 >>"$LOG" 2>&1
-    kubectl wait --for=delete pod -n "$NS" -l app=echo-grpc-dpumesh --timeout=120s >>"$LOG" 2>&1 || true
+    wait_ready_replicas echo-grpc-dpumesh 1 120s
     sleep 20
     stage F1r "one backend restored" grpc-dpumesh serve 1 0 "the Service is healthy again"
 }
@@ -801,6 +853,10 @@ case "$SCOPE" in
     *) echo "usage: $0 [all|policy|route|cross|fanout|surfaces|lb]" >&2; exit 1 ;;
 esac
 
+if ! csv_error=$(policy_route_csv_valid "$CSV" 2>&1); then
+    note "CSV [FAIL]: $csv_error"
+    FAILURES=$((FAILURES + 1))
+fi
 say "stages: $PASSES pass, $FAILURES fail"
 say "csv: $CSV"
 [ "$FAILURES" -eq 0 ]

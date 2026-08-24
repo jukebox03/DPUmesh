@@ -1,0 +1,71 @@
+[06:23:06:365518][1535044000][DOCA][WRN][dpu_proxy.c:2518][px_peer_stats_report] proxy: worker 7 peer poison=0 refused=none inbound admitted=1 denied=0 no-policy=0 mixed-callee-unprotected=0 peer-pin-conflict=0
+[06:23:36:365879][2081733024][DOCA][WRN][dpu_proxy.c:2518][px_peer_stats_report] proxy: worker 0 peer poison=0 refused=none inbound admitted=3 denied=0 no-policy=0 mixed-callee-unprotected=0 peer-pin-conflict=0
+[06:23:47:814488][2049882528][DOCA][WRN][dpu_proxy.c:1011][px_drop_window] proxy: dropping 17738 buffered bytes of conn (2:3): source QP reset
+[06:23:47:823926][2049882528][DOCA][WRN][dpu_proxy.c:1011][px_drop_window] proxy: dropping 17 buffered bytes of conn (0:32771): stale upstream (client closed)
+[06:24:46:366876][2049882528][DOCA][WRN][dpu_proxy.c:2518][px_peer_stats_report] proxy: worker 3 peer poison=0 refused=none inbound admitted=4 denied=0 no-policy=0 mixed-callee-unprotected=0 peer-pin-conflict=0
+[06:24:55:221533][2028648864][DOCA][WRN][dpu_proxy.c:1011][px_drop_window] proxy: dropping 101 buffered bytes of conn (0:32773): stale upstream (client closed)
+[06:24:56:367042][1543498144][DOCA][WRN][dpu_proxy.c:2518][px_peer_stats_report] proxy: worker 6 peer poison=0 refused=none inbound admitted=5 denied=0 no-policy=0 mixed-callee-unprotected=0 peer-pin-conflict=0
+[06:25:16:367238][1535044000][DOCA][WRN][dpu_proxy.c:2518][px_peer_stats_report] proxy: worker 7 peer poison=0 refused=none inbound admitted=7 denied=0 no-policy=0 mixed-callee-unprotected=0 peer-pin-conflict=0
+[06:25:18:097203][1535044000][DOCA][ERR][dpu_proxy.c:1177][px_poison] proxy: poisoning conn (2:7): l7 layer rejected a segment
+[06:25:18:097256][1535044000][DOCA][WRN][dpu_proxy.c:1011][px_drop_window] proxy: dropping 227336 buffered bytes of conn (2:7): l7 layer rejected a segment
+[06:25:19:065839][1543498144][DOCA][ERR][dpu_proxy.c:1177][px_poison] proxy: poisoning conn (2:6): l7 layer rejected a segment
+[06:25:19:065896][1543498144][DOCA][WRN][dpu_proxy.c:1011][px_drop_window] proxy: dropping 910357 buffered bytes of conn (2:6): l7 layer rejected a segment
+[06:25:21:174029][2071116192][DOCA][ERR][dpu_proxy.c:1177][px_poison] proxy: poisoning conn (2:9): l7 layer rejected a segment
+[06:25:21:174091][2071116192][DOCA][WRN][dpu_proxy.c:1011][px_drop_window] proxy: dropping 206124 buffered bytes of conn (2:9): l7 layer rejected a segment
+[06:25:23:889706][2081733024][DOCA][ERR][dpu_proxy.c:1177][px_poison] proxy: poisoning conn (2:8): l7 layer rejected a segment
+[06:25:23:889761][2081733024][DOCA][WRN][dpu_proxy.c:1011][px_drop_window] proxy: dropping 8192 buffered bytes of conn (2:8): l7 layer rejected a segment
+[06:25:23:952440][2049882528][DOCA][ERR][dpu_proxy.c:1177][px_poison] proxy: poisoning conn (2:11): l7 layer rejected a segment
+[06:25:23:952501][2049882528][DOCA][WRN][dpu_proxy.c:1011][px_drop_window] proxy: dropping 372449 buffered bytes of conn (2:11): l7 layer rejected a segment
+[06:25:24:136547][2060499360][DOCA][ERR][dpu_proxy.c:1177][px_poison] proxy: poisoning conn (2:10): l7 layer rejected a segment
+[06:25:24:136725][2060499360][DOCA][WRN][dpu_proxy.c:1011][px_drop_window] proxy: dropping 344158 buffered bytes of conn (2:10): l7 layer rejected a segment
+[06:25:26:367745][2049882528][DOCA][WRN][dpu_proxy.c:2518][px_peer_stats_report] proxy: worker 3 peer poison=6 refused=none inbound admitted=12 denied=0 no-policy=0 mixed-callee-unprotected=0 peer-pin-conflict=0
+[06:25:29:826167][2039265696][DOCA][WRN][dpu_proxy.c:1011][px_drop_window] proxy: dropping 1094259 buffered bytes of conn (2:12): source QP reset
+[06:25:29:829341][2039265696][DOCA][WRN][dpu_proxy.c:1011][px_drop_window] proxy: dropping 1193 buffered bytes of conn (0:32780): stale upstream (client closed)
+[06:25:34:902264][2028648864][DOCA][ERR][dpu_proxy.c:1177][px_poison] proxy: poisoning conn (0:32781): l7 layer rejected a segment
+[06:25:34:902310][2028648864][DOCA][WRN][dpu_proxy.c:1011][px_drop_window] proxy: dropping 8161 buffered bytes of conn (0:32781): l7 layer rejected a segment
+[06:25:34:902326][2028648864][DOCA][ERR][dpu_proxy.c:1177][px_poison] proxy: poisoning conn (2:13): l7 layer rejected a segment
+[06:25:34:902329][2028648864][DOCA][WRN][dpu_proxy.c:1011][px_drop_window] proxy: dropping 891236 buffered bytes of conn (2:13): l7 layer rejected a segment
+[06:25:35:165366][2028648864][DOCA][WRN][dpu_proxy.c:1011][px_drop_window] proxy: dropping 6839 buffered bytes of conn (2:13): source QP reset
+[06:25:36:367860][2039265696][DOCA][WRN][dpu_proxy.c:2518][px_peer_stats_report] proxy: worker 4 peer poison=8 refused=none inbound admitted=17 denied=0 no-policy=0 mixed-callee-unprotected=0 peer-pin-conflict=0
+[06:25:36:453059][1543498144][DOCA][ERR][dpu_proxy.c:1177][px_poison] proxy: poisoning conn (2:14): l7 layer rejected a segment
+[06:25:36:453116][1543498144][DOCA][WRN][dpu_proxy.c:1011][px_drop_window] proxy: dropping 746901 buffered bytes of conn (2:14): l7 layer rejected a segment
+[06:25:36:768397][2081733024][DOCA][ERR][dpu_proxy.c:1177][px_poison] proxy: poisoning conn (2:16): l7 layer rejected a segment
+[06:25:36:768455][2081733024][DOCA][WRN][dpu_proxy.c:1011][px_drop_window] proxy: dropping 40339 buffered bytes of conn (2:16): l7 layer rejected a segment
+[06:25:36:802188][1535044000][DOCA][ERR][dpu_proxy.c:1177][px_poison] proxy: poisoning conn (0:32783): l7 layer rejected a segment
+[06:25:36:802220][1535044000][DOCA][WRN][dpu_proxy.c:1011][px_drop_window] proxy: dropping 166737 buffered bytes of conn (0:32783): l7 layer rejected a segment
+[06:25:36:802257][1535044000][DOCA][ERR][dpu_proxy.c:1177][px_poison] proxy: poisoning conn (2:15): l7 layer rejected a segment
+[06:25:36:802263][1535044000][DOCA][WRN][dpu_proxy.c:1011][px_drop_window] proxy: dropping 333664 buffered bytes of conn (2:15): l7 layer rejected a segment
+[06:25:40:298593][2071116192][DOCA][ERR][dpu_proxy.c:1177][px_poison] proxy: poisoning conn (2:17): l7 layer rejected a segment
+[06:25:40:298649][2071116192][DOCA][WRN][dpu_proxy.c:1011][px_drop_window] proxy: dropping 156995 buffered bytes of conn (2:17): l7 layer rejected a segment
+[06:25:41:385788][2060499360][DOCA][ERR][dpu_proxy.c:1177][px_poison] proxy: poisoning conn (2:18): l7 layer rejected a segment
+[06:25:41:385848][2060499360][DOCA][WRN][dpu_proxy.c:1011][px_drop_window] proxy: dropping 94437 buffered bytes of conn (2:18): l7 layer rejected a segment
+[06:25:42:043091][2049882528][DOCA][ERR][dpu_proxy.c:1177][px_poison] proxy: poisoning conn (2:19): l7 layer rejected a segment
+[06:25:42:043149][2049882528][DOCA][WRN][dpu_proxy.c:1011][px_drop_window] proxy: dropping 140654 buffered bytes of conn (2:19): l7 layer rejected a segment
+[06:25:43:237915][2039265696][DOCA][WRN][dpu_proxy.c:1011][px_drop_window] proxy: dropping 606303 buffered bytes of conn (2:20): source QP reset
+[06:25:43:325010][2039265696][DOCA][WRN][dpu_proxy.c:1011][px_drop_window] proxy: dropping 46 buffered bytes of conn (0:32788): stale upstream (client closed)
+[06:25:46:367919][2071116192][DOCA][WRN][dpu_proxy.c:2518][px_peer_stats_report] proxy: worker 1 peer poison=15 refused=none inbound admitted=20 denied=0 no-policy=0 mixed-callee-unprotected=0 peer-pin-conflict=0
+[06:25:51:388788][2028648864][DOCA][ERR][dpu_proxy.c:1177][px_poison] proxy: poisoning conn (0:32789): l7 layer rejected a segment
+[06:25:51:388833][2028648864][DOCA][WRN][dpu_proxy.c:1011][px_drop_window] proxy: dropping 17811 buffered bytes of conn (0:32789): l7 layer rejected a segment
+[06:25:51:388848][2028648864][DOCA][ERR][dpu_proxy.c:1177][px_poison] proxy: poisoning conn (2:21): l7 layer rejected a segment
+[06:25:51:388853][2028648864][DOCA][WRN][dpu_proxy.c:1011][px_drop_window] proxy: dropping 878248 buffered bytes of conn (2:21): l7 layer rejected a segment
+[06:25:52:695886][1543498144][DOCA][ERR][dpu_proxy.c:1177][px_poison] proxy: poisoning conn (2:22): l7 layer rejected a segment
+[06:25:52:695943][1543498144][DOCA][WRN][dpu_proxy.c:1011][px_drop_window] proxy: dropping 463911 buffered bytes of conn (2:22): l7 layer rejected a segment
+[06:25:53:166832][1535044000][DOCA][ERR][dpu_proxy.c:1177][px_poison] proxy: poisoning conn (0:32791): l7 layer rejected a segment
+[06:25:53:166869][1535044000][DOCA][WRN][dpu_proxy.c:1011][px_drop_window] proxy: dropping 51795 buffered bytes of conn (0:32791): l7 layer rejected a segment
+[06:25:53:166901][1535044000][DOCA][ERR][dpu_proxy.c:1177][px_poison] proxy: poisoning conn (2:23): l7 layer rejected a segment
+[06:25:53:166906][1535044000][DOCA][WRN][dpu_proxy.c:1011][px_drop_window] proxy: dropping 632436 buffered bytes of conn (2:23): l7 layer rejected a segment
+[06:25:56:100090][2071116192][DOCA][ERR][dpu_proxy.c:1177][px_poison] proxy: poisoning conn (2:25): l7 layer rejected a segment
+[06:25:56:100147][2071116192][DOCA][WRN][dpu_proxy.c:1011][px_drop_window] proxy: dropping 216506 buffered bytes of conn (2:25): l7 layer rejected a segment
+[06:25:56:368151][2039265696][DOCA][WRN][dpu_proxy.c:2518][px_peer_stats_report] proxy: worker 4 peer poison=21 refused=none inbound admitted=26 denied=0 no-policy=0 mixed-callee-unprotected=0 peer-pin-conflict=0
+[06:25:57:417367][2081733024][DOCA][ERR][dpu_proxy.c:1177][px_poison] proxy: poisoning conn (2:24): l7 layer rejected a segment
+[06:25:57:417421][2081733024][DOCA][WRN][dpu_proxy.c:1011][px_drop_window] proxy: dropping 8192 buffered bytes of conn (2:24): l7 layer rejected a segment
+[06:25:58:284345][2060499360][DOCA][ERR][dpu_proxy.c:1177][px_poison] proxy: poisoning conn (2:26): l7 layer rejected a segment
+[06:25:58:284401][2060499360][DOCA][WRN][dpu_proxy.c:1011][px_drop_window] proxy: dropping 505201 buffered bytes of conn (2:26): l7 layer rejected a segment
+[06:26:00:266179][2049882528][DOCA][WRN][dpu_proxy.c:1011][px_drop_window] proxy: dropping 1436629 buffered bytes of conn (2:27): source QP reset
+[06:26:00:271989][2049882528][DOCA][WRN][dpu_proxy.c:1011][px_drop_window] proxy: dropping 46 buffered bytes of conn (0:32795): stale upstream (client closed)
+[06:26:06:368288][1535044000][DOCA][WRN][dpu_proxy.c:2518][px_peer_stats_report] proxy: worker 7 peer poison=23 refused=none inbound admitted=28 denied=0 no-policy=0 mixed-callee-unprotected=0 peer-pin-conflict=0
+[06:26:46:368901][2071116192][DOCA][WRN][dpu_proxy.c:2518][px_peer_stats_report] proxy: worker 1 peer poison=23 refused=none inbound admitted=30 denied=0 no-policy=0 mixed-callee-unprotected=0 peer-pin-conflict=0
+[06:26:54:742202][1543498144][DOCA][ERR][dpu_proxy.c:1177][px_poison] proxy: poisoning conn (2:30): l7 layer rejected a segment
+[06:26:54:742253][1543498144][DOCA][WRN][dpu_proxy.c:1011][px_drop_window] proxy: dropping 13 buffered bytes of conn (2:30): l7 layer rejected a segment
+[06:26:54:743986][1543498144][DOCA][WRN][dpu_proxy.c:1011][px_drop_window] proxy: dropping 400 buffered bytes of conn (0:32798): stale upstream (client closed)
+[06:26:56:369112][1543498144][DOCA][WRN][dpu_proxy.c:2518][px_peer_stats_report] proxy: worker 6 peer poison=24 refused=none inbound admitted=30 denied=0 no-policy=0 mixed-callee-unprotected=0 peer-pin-conflict=0

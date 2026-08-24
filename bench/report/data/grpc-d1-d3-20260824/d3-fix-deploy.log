@@ -1,0 +1,398 @@
+[0;32m[INFO][0m Host NUMA: PCI 94:00.0 -> node 1, benchmark cores 18-35
+[0;34m[STEP][0m === Removing obsolete transport resources ===
+[sudo] password for jukebox: [sudo] password for jukebox: trusted registration keyring ready: host=/etc/dpumesh/registration.keys dpu=/etc/dpumesh/registration.keys
+[sudo] password for jukebox: trusted feed keyring ready: host=/etc/dpumesh/feed.keys dpu=/etc/dpumesh/feed.keys
+[0;34m[STEP][0m === Applying K8s manifest (replicas=0) ===
+deployment.apps/bench-dpumesh configured
+service/bench-dpumesh unchanged
+deployment.apps/echo-dpumesh unchanged
+deployment.apps/echo-dpumesh-13 unchanged
+deployment.apps/echo-dpumesh-14 unchanged
+service/echo-dpumesh unchanged
+deployment.apps/loopback-dpumesh unchanged
+service/loopback-dpumesh unchanged
+deployment.apps/verbs-dpumesh unchanged
+service/verbs-dpumesh unchanged
+deployment.apps/preload-dpumesh unchanged
+service/preload-dpumesh unchanged
+deployment.apps/preload-echo unchanged
+deployment.apps/preload-bench unchanged
+service/preload-bench unchanged
+service/preload-sock unchanged
+deployment.apps/http1-echo unchanged
+service/http1-dpumesh unchanged
+deployment.apps/http1-bench unchanged
+service/http1-bench unchanged
+deployment.apps/bench-grpc-dpumesh configured
+service/bench-grpc-dpumesh unchanged
+deployment.apps/echo-grpc-dpumesh configured
+service/echo-grpc-dpumesh unchanged
+deployment.apps/echo-grpc-alt configured
+service/echo-grpc-alt unchanged
+[0;32m[INFO][0m DPUmesh API resources applied
+[0;32m[INFO][0m sidecarless workload policy/discovery metadata validated
+[0;32m[INFO][0m L7 Service target feed carries: test-bench/echo-dpumesh,test-bench/echo-grpc-alt,test-bench/echo-grpc-dpumesh,test-bench/http1-dpumesh,test-bench/loopback-dpumesh,test-bench/preload-dpumesh,test-bench/preload-sock,test-bench/verbs-dpumesh
+Service list is well formed: test-bench/echo-dpumesh,test-bench/echo-grpc-alt,test-bench/echo-grpc-dpumesh,test-bench/http1-dpumesh,test-bench/loopback-dpumesh,test-bench/preload-dpumesh,test-bench/preload-sock,test-bench/verbs-dpumesh
+[0;34m[STEP][0m === Syncing sources to DPU (jukebox@192.168.100.2:~/DPUmesh) ===
+sending incremental file list
+buffer.c
+buffer.h
+build_dpacc.sh
+comch_client.c
+comch_client.h
+comch_common.c
+comch_common.h
+comch_msgq.c
+comch_msgq.h
+comch_server.c
+comch_server.h
+common.c
+common.h
+config.c
+config.h
+control_scope.c
+control_scope.h
+dpa.c
+dpa.h
+dpa_common.h
+dpa_resource_config.yaml
+dpu_main.c
+dpu_proxy.c
+dpu_proxy.h
+dpu_worker.c
+dpu_worker.h
+meson.build
+meson_options.txt
+object.c
+object.h
+peer_channel.c
+peer_channel.h
+pod_membership.c
+pod_membership.h
+ring.c
+ring.h
+topology.c
+topology.h
+workload_grant.c
+workload_grant.h
+device/dpa_kernel.c
+
+sent 2,774 bytes  received 7,170 bytes  6,629.33 bytes/sec
+total size is 728,676  speedup is 73.28
+sending incremental file list
+dpumesh/dmesh.h
+dpumesh/dmesh_common.h
+dpumesh/dmesh_topology.h
+
+sent 291 bytes  received 192 bytes  966.00 bytes/sec
+total size is 12,463  speedup is 25.80
+sending incremental file list
+dmesh_l7.h
+
+sent 134 bytes  received 117 bytes  502.00 bytes/sec
+total size is 8,887  speedup is 35.41
+[0;32m[INFO][0m Source sync complete
+[0;34m[STEP][0m === Building host libdpumesh.so (make lib) ===
+make: Entering directory '/home/jukebox/DPUmesh'
+make: Leaving directory '/home/jukebox/DPUmesh'
+[0;32m[INFO][0m Host build OK (/home/jukebox/DPUmesh/build/lib/libdpumesh.so)
+[0;34m[STEP][0m === Building bench/validator binaries (make bench) ===
+make: Entering directory '/home/jukebox/DPUmesh'
+cc -O2 -g -MMD -MP -MF build/dep/bench_dpumesh.d -Iinclude -Isrc -o build/bin/bench_dpumesh bench/apps/bench_dpumesh.c -Lbuild/lib -ldpumesh -lpthread -lm -Wl,-rpath,/usr/local/lib -Wl,-rpath,/home/jukebox/DPUmesh/build/lib -Wl,-rpath,/opt/mellanox/doca/lib/x86_64-linux-gnu -Wl,-rpath,/opt/mellanox/flexio/lib
+  -> build/bin/bench_dpumesh
+cc -O2 -g -MMD -MP -MF build/dep/echo_dpumesh.d -Iinclude -Isrc -o build/bin/echo_dpumesh bench/apps/echo_dpumesh.c -Lbuild/lib -ldpumesh -lpthread  -Wl,-rpath,/usr/local/lib -Wl,-rpath,/home/jukebox/DPUmesh/build/lib -Wl,-rpath,/opt/mellanox/doca/lib/x86_64-linux-gnu -Wl,-rpath,/opt/mellanox/flexio/lib
+  -> build/bin/echo_dpumesh
+cc -O2 -g -MMD -MP -MF build/dep/loopback_dpumesh.d -Iinclude -Isrc -o build/bin/loopback_dpumesh bench/validators/loopback_dpumesh.c -Lbuild/lib -ldpumesh -lpthread  -Wl,-rpath,/usr/local/lib -Wl,-rpath,/home/jukebox/DPUmesh/build/lib -Wl,-rpath,/opt/mellanox/doca/lib/x86_64-linux-gnu -Wl,-rpath,/opt/mellanox/flexio/lib
+  -> build/bin/loopback_dpumesh
+cc -O2 -g -MMD -MP -MF build/dep/verbs_dpumesh.d -Iinclude -Isrc -o build/bin/verbs_dpumesh bench/validators/verbs_dpumesh.c -Lbuild/lib -ldpumesh -lpthread  -Wl,-rpath,/usr/local/lib -Wl,-rpath,/home/jukebox/DPUmesh/build/lib -Wl,-rpath,/opt/mellanox/doca/lib/x86_64-linux-gnu -Wl,-rpath,/opt/mellanox/flexio/lib
+  -> build/bin/verbs_dpumesh
+cc -O2 -g -MMD -MP -MF build/dep/libdmesh_preload.so.d -fPIC -shared -Iinclude -Isrc -o build/lib/libdmesh_preload.so src/dmesh_preload.c \
+	-Lbuild/lib -ldpumesh -lpthread -ldl -Wl,-rpath,/usr/local/lib -Wl,-rpath,/home/jukebox/DPUmesh/build/lib -Wl,-rpath,/opt/mellanox/doca/lib/x86_64-linux-gnu -Wl,-rpath,/opt/mellanox/flexio/lib
+  -> build/lib/libdmesh_preload.so
+make: Leaving directory '/home/jukebox/DPUmesh'
+[0;32m[INFO][0m Bench binaries built (/home/jukebox/DPUmesh/build/bin + /home/jukebox/DPUmesh/build/lib/libdmesh_preload.so)
+[0;34m[STEP][0m === Building gRPC bench apps (bench_grpc, echo_grpc; server=release) ===
+[0;32m[INFO][0m gRPC apps built (build/grpc-release/bench_grpc, build/grpc-release/echo_grpc)
+[0;34m[STEP][0m === Building Docker images (scope=grpc) ===
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from workload_attest.Dockerfile
+#1 transferring dockerfile: 903B done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/python:3.12.5-slim-bookworm
+#2 DONE 1.2s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [1/7] FROM docker.io/library/python:3.12.5-slim-bookworm@sha256:c24c34b502635f1f7c4e99dc09a2cbd85d480b7dcfd077198c6b5af138906390
+#4 resolve docker.io/library/python:3.12.5-slim-bookworm@sha256:c24c34b502635f1f7c4e99dc09a2cbd85d480b7dcfd077198c6b5af138906390 0.0s done
+#4 DONE 0.0s
+
+#5 [internal] load build context
+#5 transferring context: 66.19kB done
+#5 DONE 0.0s
+
+#6 [6/7] COPY bench/dpumesh_feed_receiver.py /usr/local/bin/dpumesh_feed_receiver.py
+#6 CACHED
+
+#7 [2/7] RUN pip install --no-cache-dir cryptography
+#7 CACHED
+
+#8 [3/7] COPY bench/workload_attest_agent.py /usr/local/bin/dpumesh-workload-agent
+#8 CACHED
+
+#9 [4/7] COPY bench/feed_delivery.py /usr/local/bin/feed_delivery.py
+#9 CACHED
+
+#10 [5/7] COPY bench/linkerd_cp_relay.py /usr/local/bin/linkerd_cp_relay.py
+#10 CACHED
+
+#11 [7/7] RUN chmod 0555 /usr/local/bin/dpumesh-workload-agent                 /usr/local/bin/feed_delivery.py                 /usr/local/bin/linkerd_cp_relay.py                 /usr/local/bin/dpumesh_feed_receiver.py
+#11 CACHED
+
+#12 exporting to image
+#12 exporting layers done
+#12 exporting manifest sha256:3bdf0d031afb65c625b4992e8974ee907e1d0505596ce0dcc72d91819224c510 done
+#12 exporting config sha256:fd7ff96e5202d60af89d6818537f73130282a71d6369073e28ab15e5a0a9a4eb done
+#12 exporting attestation manifest sha256:5db169f408336deed6143b8873f1d75d17e361be1cf28fde89dbe8aaec7ae6e8 0.0s done
+#12 exporting manifest list sha256:b6d3761a3de0cf03479dccd53a5c8d5347805c11eae78d3bf621fcb031b5d0dc done
+#12 naming to docker.io/bench/dpumesh-workload-agent:latest done
+#12 unpacking to docker.io/bench/dpumesh-workload-agent:latest done
+#12 DONE 0.0s
+docker.io/bench/dpumesh-workload-agent:latest
+docker.io/bench/dpumesh workload agent:l	saved	
+application/vnd.oci.image.index.v1+json sha256:b6d3761a3de0cf03479dccd53a5c8d5347805c11eae78d3bf621fcb031b5d0dc
+Importing	elapsed: 0.9 s	total:   0.0 B	(0.0 B/s)	
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from dpumesh_controller.Dockerfile
+#1 DONE 0.0s
+
+#1 [internal] load build definition from dpumesh_controller.Dockerfile
+#1 transferring dockerfile: 521B done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/python:3.12.5-slim-bookworm
+#2 DONE 0.3s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [1/5] FROM docker.io/library/python:3.12.5-slim-bookworm@sha256:c24c34b502635f1f7c4e99dc09a2cbd85d480b7dcfd077198c6b5af138906390
+#4 resolve docker.io/library/python:3.12.5-slim-bookworm@sha256:c24c34b502635f1f7c4e99dc09a2cbd85d480b7dcfd077198c6b5af138906390 done
+#4 DONE 0.0s
+
+#5 [internal] load build context
+#5 transferring context: 56.88kB done
+#5 DONE 0.0s
+
+#6 [3/5] COPY controller/dpumesh_controller.py /usr/local/bin/dpumesh-controller
+#6 CACHED
+
+#7 [4/5] COPY controller/dpumesh_webhook.py /usr/local/bin/dpumesh-webhook
+#7 CACHED
+
+#8 [2/5] RUN pip install --no-cache-dir cryptography
+#8 CACHED
+
+#9 [5/5] RUN chmod 0555 /usr/local/bin/dpumesh-controller /usr/local/bin/dpumesh-webhook
+#9 CACHED
+
+#10 exporting to image
+#10 exporting layers done
+#10 exporting manifest sha256:af5cb976e5c668a0db31b4a22983cd56ec32c6e0c5b3a9ed8432b1abc1ff3c08 done
+#10 exporting config sha256:6517a7d47672bcc4e6f1d81cbec26090970a331106f51d73effbc74ad7f2cf98 done
+#10 exporting attestation manifest sha256:58bb626908d29cfbe6eae597e4d3b634fe97716ae661bbd99ea125c8ddabe208 0.0s done
+#10 exporting manifest list sha256:bdcefcfc51678b5220783d618b49573b5434b28c1eadc3a03c1e5cc6704df8f5 done
+#10 naming to docker.io/bench/dpumesh-controller:latest done
+#10 unpacking to docker.io/bench/dpumesh-controller:latest done
+#10 DONE 0.0s
+docker.io/bench/dpumesh-controller:latest
+docker.io/bench/dpumesh controller:lates	saved	
+application/vnd.oci.image.index.v1+json sha256:bdcefcfc51678b5220783d618b49573b5434b28c1eadc3a03c1e5cc6704df8f5
+Importing	elapsed: 0.8 s	total:   0.0 B	(0.0 B/s)	
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from bench_grpc.Dockerfile
+#1 DONE 0.0s
+
+#1 [internal] load build definition from bench_grpc.Dockerfile
+#1 transferring dockerfile: 1.08kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/ubuntu:22.04
+#2 DONE 0.0s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [1/7] FROM docker.io/library/ubuntu:22.04@sha256:3b06811b2afd352be909dd088a004166d665dc76d38b13eada33522a9d915c6f
+#4 resolve docker.io/library/ubuntu:22.04@sha256:3b06811b2afd352be909dd088a004166d665dc76d38b13eada33522a9d915c6f done
+#4 DONE 0.0s
+
+#5 [internal] load build context
+#5 transferring context: 25.48MB 0.1s done
+#5 DONE 0.1s
+
+#6 [2/7] RUN apt-get update &&     DEBIAN_FRONTEND=noninteractive apt-get install -y       ca-certificates       libibverbs1       libnl-3-200       libnl-route-3-200       libyaml-0-2       libsasl2-2       numactl       openssl       libasan6       libubsan1 &&     rm -rf /var/lib/apt/lists/*
+#6 CACHED
+
+#7 [3/7] COPY build/grpc-release/bench_grpc /usr/local/bin/bench_grpc
+#7 CACHED
+
+#8 [4/7] COPY doca-libs/ /usr/local/lib/
+#8 CACHED
+
+#9 [5/7] COPY build/lib/libdpumesh.so.5 /usr/local/lib/
+#9 DONE 0.0s
+
+#10 [6/7] COPY bench/docker/numa-entrypoint.sh /usr/local/bin/numa-entrypoint.sh
+#10 DONE 0.0s
+
+#11 [7/7] RUN ldconfig
+#11 DONE 0.2s
+
+#12 exporting to image
+#12 exporting layers 0.1s done
+#12 exporting manifest sha256:cc6e6d759c2e4d58d3e276529203dab2fcec945d76c594d1aa88fa9100c03c55 done
+#12 exporting config sha256:fa94fa47fe5475c3bec9e8981b1cc6f43de19fee5aee54fc1449757cf7357027 done
+#12 exporting attestation manifest sha256:166e849a7d91571f7039615ee85618f55cf6d828224d081c61fe07f33671a4dc 0.0s done
+#12 exporting manifest list sha256:f2a1f4c0b9f02d72254b0b0457bfa495525563d951ff4976e5b840b70976bd7e done
+#12 naming to docker.io/bench/bench-grpc:latest done
+#12 unpacking to docker.io/bench/bench-grpc:latest 0.0s done
+#12 DONE 0.1s
+docker.io/bench/bench-grpc:latest
+docker.io/bench/bench grpc:latest       	saved	
+application/vnd.oci.image.index.v1+json sha256:f2a1f4c0b9f02d72254b0b0457bfa495525563d951ff4976e5b840b70976bd7e
+Importing	elapsed: 0.7 s	total:   0.0 B	(0.0 B/s)	
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from echo_grpc.Dockerfile
+#1 transferring dockerfile: 1.04kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/ubuntu:22.04
+#2 DONE 0.0s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [1/7] FROM docker.io/library/ubuntu:22.04@sha256:3b06811b2afd352be909dd088a004166d665dc76d38b13eada33522a9d915c6f
+#4 resolve docker.io/library/ubuntu:22.04@sha256:3b06811b2afd352be909dd088a004166d665dc76d38b13eada33522a9d915c6f 0.0s done
+#4 DONE 0.0s
+
+#5 [internal] load build context
+#5 transferring context: 22.14MB 0.1s done
+#5 DONE 0.1s
+
+#6 [3/7] COPY build/grpc-release/echo_grpc /usr/local/bin/echo_grpc
+#6 CACHED
+
+#7 [2/7] RUN apt-get update &&     DEBIAN_FRONTEND=noninteractive apt-get install -y       ca-certificates       libibverbs1       libnl-3-200       libnl-route-3-200       libyaml-0-2       libsasl2-2       numactl       openssl       libasan6       libubsan1 &&     rm -rf /var/lib/apt/lists/*
+#7 CACHED
+
+#8 [4/7] COPY doca-libs/ /usr/local/lib/
+#8 CACHED
+
+#9 [5/7] COPY build/lib/libdpumesh.so.5 /usr/local/lib/
+#9 DONE 0.0s
+
+#10 [6/7] COPY bench/docker/numa-entrypoint.sh /usr/local/bin/numa-entrypoint.sh
+#10 DONE 0.0s
+
+#11 [7/7] RUN ldconfig
+#11 DONE 0.2s
+
+#12 exporting to image
+#12 exporting layers 0.1s done
+#12 exporting manifest sha256:d77c8787ddc56ceb0eaa4a83d81f4cdb658295049c524aad7d74ce89134fe50b done
+#12 exporting config sha256:de08d08ec17a0a110cac6e4836b3d80a2cf5c2214636efb4118555ba4c2140b3 done
+#12 exporting attestation manifest sha256:9b5ac7cc16356d49df298246bcaeed1551c85aeaefe764f64155bb93f3b4c7c1 0.0s done
+#12 exporting manifest list sha256:226909f5deffbb39815b23a326a20f5f30e2e3334aaf004ed894d8f1192391e5 done
+#12 naming to docker.io/bench/echo-grpc:latest done
+#12 unpacking to docker.io/bench/echo-grpc:latest 0.0s done
+#12 DONE 0.2s
+docker.io/bench/echo-grpc:latest
+docker.io/bench/echo grpc:latest        	saved	
+application/vnd.oci.image.index.v1+json sha256:226909f5deffbb39815b23a326a20f5f30e2e3334aaf004ed894d8f1192391e5
+Importing	elapsed: 0.7 s	total:   0.0 B	(0.0 B/s)	
+[0;32m[INFO][0m Scope images built and imported to containerd
+[sudo] password for jukebox: controller keyring ready: host=/etc/dpumesh/controller.keys dpu=/etc/dpumesh/controller.pub.keys (public only)
+serviceaccount/dpumesh-controller unchanged
+clusterrole.rbac.authorization.k8s.io/dpumesh-controller unchanged
+clusterrolebinding.rbac.authorization.k8s.io/dpumesh-controller unchanged
+service/dpumesh-controller unchanged
+configmap/dpumesh-controller-nodes unchanged
+deployment.apps/dpumesh-controller unchanged
+deployment.apps/dpumesh-controller restarted
+Waiting for deployment "dpumesh-controller" rollout to finish: 0 out of 1 new replicas have been updated...
+Waiting for deployment "dpumesh-controller" rollout to finish: 1 old replicas are pending termination...
+Waiting for deployment "dpumesh-controller" rollout to finish: 1 old replicas are pending termination...
+deployment "dpumesh-controller" successfully rolled out
+dpumesh-controller ready in namespace test-bench
+delivery hop ready at 192.168.100.2:4788 (user=dpumesh-feed root=/etc/dpumesh)
+serviceaccount/dpumesh-node-agent unchanged
+role.rbac.authorization.k8s.io/dpumesh-node-agent unchanged
+rolebinding.rbac.authorization.k8s.io/dpumesh-node-agent unchanged
+role.rbac.authorization.k8s.io/dpumesh-node-agent-relay unchanged
+rolebinding.rbac.authorization.k8s.io/dpumesh-node-agent-relay unchanged
+daemonset.apps/dpumesh-node-agent unchanged
+daemonset.apps/dpumesh-node-agent restarted
+Waiting for daemon set "dpumesh-node-agent" rollout to finish: 0 out of 1 new pods have been updated...
+Waiting for daemon set "dpumesh-node-agent" rollout to finish: 0 of 1 updated pods are available...
+daemon set "dpumesh-node-agent" successfully rolled out
+trusted workload node agent ready in namespace test-bench
+[0;34m[STEP][0m === Waiting for the node agent to deliver the DPU's feeds ===
+[0;32m[INFO][0m every feed delivered after 0s
+[0;34m[STEP][0m === Syncing linkerd sources to DPU (jukebox@192.168.100.2:/home/jukebox/l7build) ===
+[0;32m[INFO][0m linkerd source sync complete
+[0;34m[STEP][0m === Building Linkerd adapter on DPU (libdmesh_l7.a) ===
+[0;32m[INFO][0m libdmesh_l7.a built (/home/jukebox/l7build/rust/target/release/libdmesh_l7.a)
+[0;34m[STEP][0m === Building on DPU (ninja) ===
+[0;32m[INFO][0m control plane: deployed (dst=192.168.100.1:28086 policy=192.168.100.1:28087 identity=192.168.100.1:28088)
+[0;32m[INFO][0m linkerd preflight OK (staticlib exports the contract, identity material readable, deployed control plane required)
+[0;32m[INFO][0m DPU build OK (buildtype=debugoptimized, recompiled 18 C objects)
+[0;34m[STEP][0m === Starting dpumesh_dpu (l7_opaque='test-bench/echo-dpumesh,test-bench/loopback-dpumesh,test-bench/verbs-dpumesh,test-bench/preload-dpumesh,test-bench/preload-sock' l7_full='test-bench/echo-grpc-dpumesh,test-bench/echo-grpc-alt,test-bench/http1-dpumesh' dpa_threads='32' rings_per_pod='8' arm_workers='8') ===
+[0;32m[INFO][0m Stopping dpumesh_dpu...
+[0;32m[INFO][0m dpumesh_dpu running (PID: 1811251)
+[0;34m[STEP][0m === Starting pods (innermost first, scope=grpc) ===
+deployment.apps/echo-grpc-dpumesh scaled
+deployment.apps/echo-grpc-dpumesh scaled
+pod/echo-grpc-dpumesh-84cbd4d65d-5fgfl condition met
+[0;32m[INFO][0m echo-grpc-dpumesh pod Ready
+[0;32m[INFO][0m Waiting for DPUmesh init: echo-grpc-dpumesh (DPUmesh DOCA initialized)
+[0;32m[INFO][0m echo-grpc-dpumesh DPUmesh data-ready
+deployment.apps/echo-grpc-alt scaled
+deployment.apps/echo-grpc-alt scaled
+pod/echo-grpc-alt-774bbbccb5-22d5q condition met
+[0;32m[INFO][0m echo-grpc-alt pod Ready
+[0;32m[INFO][0m Waiting for DPUmesh init: echo-grpc-alt (DPUmesh DOCA initialized)
+[0;32m[INFO][0m echo-grpc-alt DPUmesh data-ready
+deployment.apps/bench-grpc-dpumesh scaled
+deployment.apps/bench-grpc-dpumesh scaled
+pod/bench-grpc-dpumesh-646d5dcc88-kf7f8 condition met
+[0;32m[INFO][0m bench-grpc-dpumesh pod Ready
+[0;32m[INFO][0m Waiting for DPUmesh init: bench-grpc-dpumesh (DPUmesh DOCA initialized)
+[0;32m[INFO][0m bench-grpc-dpumesh DPUmesh data-ready
+[0;34m[STEP][0m === Waiting for Linkerd identity and control-plane readiness ===
+[0;32m[INFO][0m Linkerd ready on admin port(s): 4191 4192 4193 4194 4195 4196 4197 4198
+[0;34m[STEP][0m === Pinning pods to dedicated cores (taskset, profile=fair) ===
+[0;32m[INFO][0m CPU governor=performance, fixed 2.5 GHz on cores 18-35
+[0;32m[INFO][0m bench-grpc-dpumesh → core(s) 27 (pod=ad32639a37ccf1823d632a39fee5c9a4d0c79f434e7e688d80513cf24a76c8a9)
+[0;32m[INFO][0m   bench-grpc-dpumesh (PID 3482967) → 27
+[0;32m[INFO][0m echo-grpc-dpumesh → core(s) 28 (pod=60d0a272534ed9f6655f77a3d02f5a741908360e14cf3414c50662e24ddf8ae5)
+[0;32m[INFO][0m   echo-grpc-dpumesh (PID 3481905) → 28
+[0;32m[INFO][0m Pinning done
+[0;34m[STEP][0m === Validating deployed API adapters through embedded Linkerd ===
+  grpc-dpumesh  OK mrps=0.000789 gbps=0.0067 req_gbps=0.0066 resp_gbps=0.0002 p50=1238.00 p95=1429.00 p99=1510.00 p999=4341.00 p9999=17173.00 avg=1266.56 min=780.09 max=67921.96 rcnt=4084 scheduled=4185 pending=0 fail=0 conc=1 threads=1 channels=1 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=5.000 offered_mrps=0.000789 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const batch=0 reconns=0 reconn_us=0.00 grabs=0 rets=0 recyc=9 waits=0 pads=0 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA
+[0;32m[INFO][0m all deployed API adapters passed the embedded-Linkerd smoke gate
+[0;32m[INFO][0m === Deploy complete ===
+  Run:  ./bench/bench.sh latency|bandwidth|rate|all [dpumesh|preload|grpc-dpumesh]
+        ./bench/bench.sh loopback|verbs|preload ...   (validators)
+  Re-pin:  ./bench/bench.sh pin [fair|native|preload|grpc|grpcmax]
