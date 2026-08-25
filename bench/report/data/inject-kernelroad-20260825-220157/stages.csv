@@ -1,0 +1,18 @@
+stage,subject,expected,observed,verdict,detail
+I0,caBundle published,present,present,PASS,
+I1,inject-echo,injected,injected,PASS,
+I2,plain-echo,bare,bare,PASS,
+I3,meshed traffic,serve,serve,PASS,rcnt=24804 fail=0 admitted+=1
+I3b,meshed verdict,yes,yes,PASS,
+I4,unmeshed traffic,serve,serve,PASS,rcnt=418897 fail=0 admitted+=0
+I4b,unmeshed verdict,no,no,PASS,
+I5a,creation while webhook is down,refuse,refuse,PASS,
+I5b,creation once it answers,admit,admit,PASS,
+I6a,meshed serve before the kill,serve,serve,PASS,rcnt=24942 fail=0
+I6b,dpumesh_dpu after the kill,absent,absent,PASS,
+I6c,warm meshed connect while the DPU is down,refuse,refuse,PASS,rcnt=0 fail=1 refusals=1 restarts=0:0
+I6d,meshed Pod born in the outage,refuse,refuse,PASS,rcnt=0 fail=1 refusals=1
+I6e,unmeshed pair while the DPU is down,serve,serve,PASS,rcnt=420120 fail=0
+I6f,meshed serve after restore,serve,serve,PASS,rcnt=26821 fail=0 admitted+=1
+I7a,kernel probe to the unmeshed port,connect,connect,PASS,
+I7b,kernel probe to the mesh-served port,refuse,refuse,PASS,settled=0s

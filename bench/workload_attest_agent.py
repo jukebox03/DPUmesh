@@ -29,6 +29,7 @@ import socket
 import ssl
 import stat
 import struct
+import subprocess
 import sys
 import threading
 import time
@@ -471,6 +472,118 @@ class GenerationCache:
             return self.document, self.version
 
 
+class IngressGuard:
+    """Closes the node's kernel road to what the mesh serves.
+
+    A meshed Pod's `DPUMESH_PORT` is served over DMA, so a kernel-TCP SYN to
+    it is by definition traffic around the mesh. The guard rejects exactly
+    those (address, port) pairs in a chain of its own on the FORWARD hook —
+    the only hook Pod-to-Pod traffic traverses. Host-sourced traffic (kubelet
+    probes, the harness control plane) travels OUTPUT and is untouched, and
+    replies to connections a meshed Pod opened itself arrive on ephemeral
+    ports, so neither needs an exemption rule.
+
+    The chain is replaced atomically — `iptables-restore --noflush` flushes
+    exactly the chains its payload declares — and only when the observed
+    chain differs from the desired one. The rules survive the agent:
+    enforcement outliving its manager is the direction fail-closed asks for,
+    and a deleted Pod's address stays closed for at most one publication
+    interval.
+    """
+
+    CHAIN = "DPUMESH-PROTECT"
+
+    def __init__(self, enabled: bool) -> None:
+        self.enabled = enabled
+        self.held: list[str] | None = None
+
+    @staticmethod
+    def mesh_served(pods: list[dict[str, Any]]) -> list[tuple[str, int]]:
+        """The (Pod address, port) pairs the mesh serves on this node.
+
+        The injection label marks a Pod the webhook meshed, and its
+        `DPUMESH_PORT` names the one port its shim converted to a DMA
+        listener. A Pod without both keeps whatever kernel listeners it has.
+        """
+        pairs: set[tuple[str, int]] = set()
+        for pod in pods:
+            metadata = pod.get("metadata") or {}
+            labels = metadata.get("labels") or {}
+            if metadata.get("deletionTimestamp") is not None:
+                continue
+            if labels.get("linkerd.io/control-plane-ns") != "linkerd":
+                continue
+            try:
+                address = pod_ipv4(pod)
+            except AttestationError:
+                continue
+            for container in (pod.get("spec") or {}).get("containers") or []:
+                for entry in container.get("env") or []:
+                    if entry.get("name") != "DPUMESH_PORT":
+                        continue
+                    value = str(entry.get("value") or "")
+                    if value.isdigit() and 0 < int(value) < 65536:
+                        pairs.add((address, int(value)))
+        return sorted(pairs)
+
+    def rules(self, pods: list[dict[str, Any]]) -> list[str]:
+        # Written in the normal form `iptables -S` prints, so the observed
+        # chain and the desired one compare as equal strings.
+        return [
+            f"-A {self.CHAIN} -d {address}/32 -p tcp -m tcp --dport {port}"
+            f" -j REJECT --reject-with tcp-reset"
+            for address, port in self.mesh_served(pods)
+        ]
+
+    @staticmethod
+    def _iptables(
+        argv: list[str], payload: str | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            argv, input=payload, text=True, capture_output=True, timeout=10
+        )
+
+    def reconcile(self, pods: list[dict[str, Any]]) -> None:
+        """Never raises: a guard failure is loud, and the next pass retries."""
+        if not self.enabled:
+            return
+        wanted = self.rules(pods)
+        try:
+            observed = self._iptables(["iptables", "-S", self.CHAIN])
+            if (observed.returncode != 0
+                    or observed.stdout.splitlines()[1:] != wanted):
+                payload = "\n".join(
+                    ["*filter", f":{self.CHAIN} - [0:0]", *wanted, "COMMIT", ""]
+                )
+                replaced = self._iptables(["iptables-restore", "--noflush"],
+                                          payload)
+                if replaced.returncode != 0:
+                    raise OSError(replaced.stderr.strip())
+            if self._iptables(
+                    ["iptables", "-C", "FORWARD", "-j", self.CHAIN]
+            ).returncode != 0:
+                inserted = self._iptables(
+                    ["iptables", "-I", "FORWARD", "1", "-j", self.CHAIN])
+                if inserted.returncode != 0:
+                    raise OSError(inserted.stderr.strip())
+        except (OSError, subprocess.SubprocessError) as exc:
+            print(
+                f"workload-attest-agent: ingress guard failed; the kernel road"
+                f" to {len(wanted)} mesh-served ports may be open: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+            self.held = None
+            return
+        if wanted != self.held:
+            print(
+                f"workload-attest-agent: ingress guard holds "
+                f"{len(wanted)} mesh-served ports closed to kernel TCP",
+                flush=True,
+            )
+            self.held = wanted
+
+
 class Agent:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
@@ -493,6 +606,7 @@ class Agent:
             args.controller_url and f"{args.controller_url.rstrip('/')}/topology.v1",
             feed_delivery_bound("topology"),
         )
+        self.ingress = IngressGuard(args.protect_ingress)
         self.service_targets_version = 0
         self.service_targets_feed: str | None = None
         self.reported: tuple[str, str] | None = None
@@ -660,7 +774,7 @@ class Agent:
         )
         linkerd_cp_relay.run_relay(self.args.relay_routes, kube)
 
-    def publish_membership(self) -> int:
+    def publish_membership(self) -> tuple[int, list[dict[str, Any]]]:
         """Install one membership generation for this node."""
         # The generation is stamped before the reads, so it names the world at
         # snapshot time rather than at publication time.
@@ -678,12 +792,13 @@ class Agent:
         os.chmod(temporary, 0o644)
         os.replace(temporary, path)
         self.membership_version = version
-        return version
+        return version, pods
 
     def publish_membership_forever(self) -> None:
         while True:
+            pods: list[dict[str, Any]] | None = None
             try:
-                version = self.publish_membership()
+                version, pods = self.publish_membership()
                 print(
                     f"workload-attest-agent: membership generation {version}",
                     flush=True,
@@ -694,6 +809,10 @@ class Agent:
                     file=sys.stderr,
                     flush=True,
                 )
+            # The same listing that grants and revokes membership closes the
+            # kernel road around what it granted.
+            if pods is not None:
+                self.ingress.reconcile(pods)
             time.sleep(self.args.membership_interval)
 
     def attest(self, connection: socket.socket) -> bytes:
@@ -836,6 +955,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--l7-service", action="append", default=[], dest="l7_services",
                         metavar="NAMESPACE/NAME",
                         help="Service the derived L7 target feed names (repeatable)")
+    parser.add_argument("--protect-ingress", action="store_true",
+                        help="reject kernel-TCP ingress to mesh-served Pod "
+                             "ports (FORWARD chain; needs CAP_NET_ADMIN)")
     # The absorbed control-plane relay: one Pod, two listeners.
     parser.add_argument("--route", action="append", type=linkerd_cp_relay.route,
                         default=[], dest="routes")

@@ -141,6 +141,47 @@ def main():
         mac, hmac.new(key, document.encode("ascii"), hashlib.sha256).hexdigest()
     )
 
+    # The ingress guard closes exactly the pairs the mesh serves: an injected
+    # Pod's DPUMESH_PORT, and nothing about any other Pod.
+    def meshed(uid, ip, port):
+        entry = {
+            "metadata": {
+                "uid": uid,
+                "namespace": "test-bench",
+                "name": f"pod-{uid[:8]}",
+                "labels": {"linkerd.io/control-plane-ns": "linkerd"},
+            },
+            "spec": {"nodeName": "worker-1", "containers": []},
+            "status": {"podIP": ip},
+        }
+        if port is not None:
+            entry["spec"]["containers"] = [
+                {"env": [{"name": "DPUMESH_PORT", "value": port}]}
+            ]
+        return entry
+
+    served = meshed("11111111-aaaa", "10.244.1.20", "9101")
+    client = meshed("22222222-bbbb", "10.244.1.21", None)
+    badport = meshed("33333333-cccc", "10.244.1.22", "not-a-port")
+    leaving = meshed("44444444-dddd", "10.244.1.23", "9101")
+    leaving["metadata"]["deletionTimestamp"] = "2026-08-25T00:00:00Z"
+    bare = pod()
+    bare["spec"]["containers"] = [
+        {"env": [{"name": "DPUMESH_PORT", "value": "9102"}]}
+    ]
+    guard = agent.IngressGuard(enabled=True)
+    assert guard.mesh_served([served, client, badport, leaving, bare]) == [
+        ("10.244.1.20", 9101)
+    ]
+    # The rule is emitted in the normal form `iptables -S` prints, which is
+    # what lets reconcile compare the observed chain by string equality.
+    assert guard.rules([served]) == [
+        "-A DPUMESH-PROTECT -d 10.244.1.20/32 -p tcp -m tcp --dport 9101"
+        " -j REJECT --reject-with tcp-reset"
+    ]
+    disabled = agent.IngressGuard(enabled=False)
+    disabled.reconcile([served])  # must not touch iptables when disabled
+
     # The peer is named by pid, so its start time has to be readable and stable.
     assert agent.process_start_time(os.getpid()) == agent.process_start_time(os.getpid())
     try:

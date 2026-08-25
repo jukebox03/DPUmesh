@@ -1,5 +1,11 @@
 FROM python:3.12.5-slim-bookworm
 
+# iptables carries the ingress guard: the agent rejects kernel-TCP SYNs to
+# mesh-served Pod ports from the host's FORWARD hook.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends iptables \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN pip install --no-cache-dir cryptography
 
 # The agent is the DPU's only control peer: the delivery loop and the absorbed

@@ -104,6 +104,10 @@ spec:
         - --identity-dir=/run/dpumesh/linkerd-identity
         - --identity-service-account=${LINKERD_IDENTITY_SERVICE_ACCOUNT}
         - --identity-trust-namespace=${LINKERD_CONTROL_NAMESPACE}
+        # The kernel road around the mesh: without this the node forwards a
+        # plain TCP SYN from any unmeshed Pod straight to a port the DPU
+        # serves over DMA.
+        - --protect-ingress
 ${DPUMESH_AGENT_SERVICE_ARGS}
         # The absorbed control-plane relay.
         - --kube-route=destination=${LINKERD_GATEWAY_BIND}:${LINKERD_GATEWAY_DST_PORT}->${LINKERD_CONTROL_NAMESPACE}/linkerd-dst:8086
@@ -121,11 +125,13 @@ ${DPUMESH_AGENT_SERVICE_ARGS}
           runAsGroup: 0
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true
-          # DAC_READ_SEARCH and nothing else: the identity staging key
-          # (key.p8, 0600, operator-owned) must be readable through the
-          # read-only hostPath mount, and a root uid alone does not bypass
-          # file modes once every capability is dropped.
-          capabilities: { drop: ["ALL"], add: ["DAC_READ_SEARCH"] }
+          # DAC_READ_SEARCH: the identity staging key (key.p8, 0600,
+          # operator-owned) must be readable through the read-only hostPath
+          # mount, and a root uid alone does not bypass file modes once every
+          # capability is dropped. NET_ADMIN: the ingress guard writes the
+          # host's FORWARD chain, and hostNetwork is what points iptables at
+          # the host rather than a Pod namespace.
+          capabilities: { drop: ["ALL"], add: ["DAC_READ_SEARCH", "NET_ADMIN"] }
         readinessProbe:
           exec: { command: ["python3", "-c", "import os; assert os.path.exists('/run/dpumesh/attest.sock')"] }
           initialDelaySeconds: 1
@@ -135,9 +141,14 @@ ${DPUMESH_AGENT_SERVICE_ARGS}
         - { name: keyring, mountPath: /etc/dpumesh/registration.keys, readOnly: true }
         - { name: feed-keyring, mountPath: /etc/dpumesh/feed.keys, readOnly: true }
         - { name: identity-stage, mountPath: /run/dpumesh/linkerd-identity, readOnly: true }
+        # The host's xtables lock, so the guard serializes with kube-proxy —
+        # and a writable path for it, since the root filesystem is read-only.
+        - { name: xtables-lock, mountPath: /run/xtables.lock }
       volumes:
       - name: socket
         hostPath: { path: /run/dpumesh, type: DirectoryOrCreate }
+      - name: xtables-lock
+        hostPath: { path: /run/xtables.lock, type: FileOrCreate }
       - name: keyring
         hostPath: { path: /etc/dpumesh/registration.keys, type: Directory }
       - name: feed-keyring

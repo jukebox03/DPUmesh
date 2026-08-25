@@ -45,8 +45,10 @@ item below names the arm that closes it.
 # Function
 
 Three items are open: a Go surface, the transport under the cross-node seam,
-and the kernel road around the mesh. Node density is settled at the wire
-ceiling; F7 keeps its two deeper levers, both unscheduled.
+and the device-plugin reduction of Pod privilege — the kernel road around the
+mesh is closed in both directions and F8 carries the receipts. Node density
+is settled at the wire ceiling; F7 keeps its two deeper levers, both
+unscheduled.
 
 ## F4 Workloads `LD_PRELOAD` cannot reach
 
@@ -162,26 +164,35 @@ about 8 GB at 127.
 
 ## F8 The kernel road around the mesh
 
-The meshed path is fail-closed: an injected Pod's shim refuses a connect it
-cannot route through the DPU — only a destination the DPU itself answers as
-not-meshed proceeds over kernel TCP — and the admission webhook refuses a Pod
-creation it cannot patch or decide (`bench/suite/inject.sh` I5 is that arm).
-What stays open is the road that never enters the mesh: a Pod without the
-annotation reaches a protected Service's backend over plain kernel TCP, and
-nothing on the node stops it.
+Both directions of the fail-closed claim now carry an arm, both in
+`bench/suite/inject.sh`. Outbound, the shim: an injected Pod refuses a
+connect it cannot route through the DPU — only a destination the DPU itself
+answers as not-meshed proceeds over kernel TCP — and stage I6 drives that
+refusal on hardware by killing the DPU under live meshed Pods. A warm Pod's
+connect dies at the resolve deadline, a Pod born into the outage dies at
+channel bring-up, both without a container restart; the unmeshed pair moves
+420 K requests through the same node in the same window; and the recycled
+pair serves again against the relaunched process. Two runs, twelve of twelve
+I6 judgments
+([`inject-dpudown-20260825-214159/`](bench/report/data/inject-dpudown-20260825-214159/),
+[`inject-kernelroad-20260825-220157/`](bench/report/data/inject-kernelroad-20260825-220157/)).
 
-- [ ] Block kernel-TCP ingress to protected backends at the host. The CNI
-  (flannel) enforces no NetworkPolicy, so the block is iptables-level
-  configuration owned by the node agent; the arm that closes it is an
-  unannotated Pod refused where an annotated one serves.
+Inbound, the node: flannel enforces no NetworkPolicy, so the workload agent
+owns an iptables chain (`IngressGuard`, `DPUMESH-PROTECT`) that rejects a
+kernel-TCP SYN to every (address, `DPUMESH_PORT`) pair the injection label
+marks. It hangs off the FORWARD hook — the only hook Pod-to-Pod traffic
+traverses, which is what exempts kubelet probes and the host-side harness
+without an exemption rule — and is rebuilt atomically on the membership
+cadence from the same Pod listing that grants and revokes membership. Stage
+I7 is the arm: one unannotated Pod's bare connect refused at the mesh-served
+port and connecting at the unmeshed one, with a recycled Pod's fresh address
+re-covered within one interval (same receipt). The admission webhook refuses
+a Pod creation it cannot patch or decide (I5).
+
 - [ ] Replace `privileged: true` in the webhook patch with the device access
   the transport actually opens. The container device cgroup blocks the char
   device without it, so this is an RDMA device-plugin deployment, not a
   manifest edit.
-- [ ] Exercise the shim's refusal on hardware: with the DPU down, a meshed
-  Pod's connect must fail rather than leave the mesh. No campaign arm drives
-  this today and `preload_api_contract_test` mocks the channel as available,
-  so the refusal is held by construction alone until an arm exists.
 
 ## Not a gap: per-hop encryption
 

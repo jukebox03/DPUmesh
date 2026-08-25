@@ -1,0 +1,94 @@
+
+=== webhook — deploy the registration and its serving certificate
+serviceaccount/dpumesh-webhook unchanged
+clusterrole.rbac.authorization.k8s.io/dpumesh-webhook unchanged
+clusterrolebinding.rbac.authorization.k8s.io/dpumesh-webhook unchanged
+service/dpumesh-webhook unchanged
+deployment.apps/dpumesh-webhook created
+mutatingwebhookconfiguration.admissionregistration.k8s.io/dpumesh-inject created
+Waiting for deployment "dpumesh-webhook" rollout to finish: 0 of 1 updated replicas are available...
+deployment "dpumesh-webhook" successfully rolled out
+    I0 [PASS] caBundle published: expected=present observed=present 
+
+=== workloads — the same Deployment, with and without the annotation
+deployment.apps/inject-echo unchanged
+service/inject-sock unchanged
+deployment.apps/plain-echo unchanged
+service/plain-sock unchanged
+deployment.apps/inject-bench unchanged
+service/inject-bench unchanged
+deployment.apps/plain-bench unchanged
+service/plain-bench unchanged
+deployment.apps/inject-echo scaled
+deployment.apps/plain-echo scaled
+deployment.apps/inject-bench scaled
+deployment.apps/plain-bench scaled
+    DPU admin ports: 4191 4192 4193 4194 4195 4196 4197 4198
+
+=== I1/I2 — what the admitted Pod objects carry
+    I1 [PASS] inject-echo: expected=injected observed=injected 
+    I2 [PASS] plain-echo: expected=bare observed=bare 
+
+=== I3 — the meshed pair
+I3 | OK mrps=0.002491 gbps=0.0212 req_gbps=0.0207 resp_gbps=0.0005 p50=380.00 p95=616.00 p99=757.00 p999=1033.00 p9999=2504.00 avg=399.41 min=128.15 max=5152.39 rcnt=24804 scheduled=24905 pending=1 fail=0 conc=1 threads=1 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.002491 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const grabs=1 rets=1 recyc=54 waits=0 pads=0 wwin=0 wpool=0
+    I3 [PASS] meshed traffic: expected=serve observed=serve rcnt=24804 fail=0 admitted+=1
+    I3b [PASS] meshed verdict: expected=yes observed=yes 
+
+=== I4 — the unmeshed control
+I4 | OK mrps=0.041906 gbps=0.3567 req_gbps=0.3487 resp_gbps=0.0080 p50=22.00 p95=27.00 p99=39.00 p999=213.00 p9999=275.00 avg=23.60 min=9.59 max=808.90 rcnt=418897 scheduled=418998 pending=1 fail=0 conc=1 threads=1 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.041906 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const grabs=NA rets=NA recyc=NA waits=NA pads=NA wwin=NA wpool=NA
+    I4 [PASS] unmeshed traffic: expected=serve observed=serve rcnt=418897 fail=0 admitted+=0
+    I4b [PASS] unmeshed verdict: expected=no observed=no 
+
+=== I5 — fail-closed: while the webhook cannot answer, the namespace creates no Pod
+deployment.apps/dpumesh-webhook scaled
+pod/dpumesh-webhook-54db6b87dd-cq6xp condition met
+probe | Error from server (InternalError): Internal error occurred: failed calling webhook "inject.dpumesh.io": failed to call webhook: Post "https://dpumesh-webhook.test-bench.svc:443/mutate?timeout=30s": dial tcp 10.98.72.55:443: connect: connection refused
+    I5a [PASS] creation while webhook is down: expected=refuse observed=refuse 
+deployment.apps/dpumesh-webhook scaled
+Waiting for deployment "dpumesh-webhook" rollout to finish: 0 of 1 updated replicas are available...
+deployment "dpumesh-webhook" successfully rolled out
+probe | pod/inject-probe created
+    I5b [PASS] creation once it answers: expected=admit observed=admit 
+pod "inject-probe" deleted
+
+=== I6 — fail-closed: while the DPU is down, a meshed Pod's connect refuses
+I6a | OK mrps=0.002505 gbps=0.0213 req_gbps=0.0208 resp_gbps=0.0005 p50=367.00 p95=607.00 p99=746.00 p999=1033.00 p9999=12783.00 avg=397.12 min=128.45 max=200498.78 rcnt=24942 scheduled=25043 pending=1 fail=0 conc=1 threads=1 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.002505 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const grabs=1 rets=1 recyc=55 waits=0 pads=0 wwin=0 wpool=0
+    I6a [PASS] meshed serve before the kill: expected=serve observed=serve rcnt=24942 fail=0
+[sudo] password for jukebox:     I6b [PASS] dpumesh_dpu after the kill: expected=absent observed=absent 
+I6c | ERR mrps=0.000000 gbps=0.0000 req_gbps=0.0000 resp_gbps=0.0000 p50=0.00 p95=0.00 p99=0.00 p999=0.00 p9999=0.00 avg=0.00 min=0.00 max=0.00 rcnt=0 scheduled=0 pending=0 fail=1 conc=1 threads=1 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.000000 drops=0 overflow=0 worker_fail=1 reorder=0 mode=closed arr=const grabs=0 rets=0 recyc=0 waits=0 pads=0 wwin=0 wpool=0
+    I6c [PASS] warm meshed connect while the DPU is down: expected=refuse observed=refuse rcnt=0 fail=1 refusals=1 restarts=0:0
+deployment.apps/inject-bench scaled
+pod/inject-bench-66bd76df9d-7t2wv condition met
+deployment.apps/inject-bench scaled
+I6d | ERR mrps=0.000000 gbps=0.0000 req_gbps=0.0000 resp_gbps=0.0000 p50=0.00 p95=0.00 p99=0.00 p999=0.00 p9999=0.00 avg=0.00 min=0.00 max=0.00 rcnt=0 scheduled=0 pending=0 fail=1 conc=1 threads=1 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.000000 drops=0 overflow=0 worker_fail=1 reorder=0 mode=closed arr=const grabs=0 rets=0 recyc=0 waits=0 pads=0 wwin=0 wpool=0
+    I6d [PASS] meshed Pod born in the outage: expected=refuse observed=refuse rcnt=0 fail=1 refusals=1
+I6e | OK mrps=0.042022 gbps=0.3577 req_gbps=0.3496 resp_gbps=0.0081 p50=22.00 p95=26.00 p99=38.00 p999=216.00 p9999=284.00 avg=23.53 min=9.62 max=1721.20 rcnt=420120 scheduled=420221 pending=1 fail=0 conc=1 threads=1 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.042022 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const grabs=NA rets=NA recyc=NA waits=NA pads=NA wwin=NA wpool=NA
+    I6e [PASS] unmeshed pair while the DPU is down: expected=serve observed=serve rcnt=420120 fail=0
+
+=== I6 — restore: a fresh DPU, then the meshed pair recycled against it
+deployment.apps/inject-bench scaled
+deployment.apps/inject-echo scaled
+pod/inject-bench-66bd76df9d-hcbpc condition met
+[sudo] password for jukebox:     dpumesh_dpu relaunched (PID: 3532472)
+    no startup banner within 90s
+deployment.apps/inject-echo scaled
+deployment.apps/inject-bench scaled
+I6f | OK mrps=0.002693 gbps=0.0229 req_gbps=0.0224 resp_gbps=0.0005 p50=359.00 p95=596.00 p99=728.00 p999=927.00 p9999=2360.00 avg=369.20 min=107.31 max=12172.06 rcnt=26821 scheduled=26922 pending=1 fail=0 conc=1 threads=1 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.002693 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const grabs=1 rets=1 recyc=59 waits=0 pads=0 wwin=0 wpool=0
+    I6f [PASS] meshed serve after restore: expected=serve observed=serve rcnt=26821 fail=0 admitted+=1
+
+=== I7 — the kernel road: an unannotated Pod cannot reach a mesh-served port
+    I7a [PASS] kernel probe to the unmeshed port: expected=connect observed=connect 
+    I7b [PASS] kernel probe to the mesh-served port: expected=refuse observed=refuse settled=0s
+
+=== summary
+    passes=17 failures=0
+    -> bench/report/data/inject-kernelroad-20260825-220157/stages.csv
+
+=== cleanup
+deployment.apps/inject-echo scaled
+deployment.apps/inject-bench scaled
+deployment.apps/plain-echo scaled
+deployment.apps/plain-bench scaled
+mutatingwebhookconfiguration.admissionregistration.k8s.io "dpumesh-inject" deleted
+deployment.apps "dpumesh-webhook" deleted
+    injected workloads scaled to zero; webhook and its registration removed

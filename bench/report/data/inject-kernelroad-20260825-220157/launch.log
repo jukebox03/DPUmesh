@@ -1,0 +1,45 @@
+
+=== webhook — deploy the registration and its serving certificate
+    I0 [PASS] caBundle published: expected=present observed=present 
+
+=== workloads — the same Deployment, with and without the annotation
+    DPU admin ports: 4191 4192 4193 4194 4195 4196 4197 4198
+
+=== I1/I2 — what the admitted Pod objects carry
+    I1 [PASS] inject-echo: expected=injected observed=injected 
+    I2 [PASS] plain-echo: expected=bare observed=bare 
+
+=== I3 — the meshed pair
+    I3 [PASS] meshed traffic: expected=serve observed=serve rcnt=24804 fail=0 admitted+=1
+    I3b [PASS] meshed verdict: expected=yes observed=yes 
+
+=== I4 — the unmeshed control
+    I4 [PASS] unmeshed traffic: expected=serve observed=serve rcnt=418897 fail=0 admitted+=0
+    I4b [PASS] unmeshed verdict: expected=no observed=no 
+
+=== I5 — fail-closed: while the webhook cannot answer, the namespace creates no Pod
+    I5a [PASS] creation while webhook is down: expected=refuse observed=refuse 
+    I5b [PASS] creation once it answers: expected=admit observed=admit 
+
+=== I6 — fail-closed: while the DPU is down, a meshed Pod's connect refuses
+    I6a [PASS] meshed serve before the kill: expected=serve observed=serve rcnt=24942 fail=0
+    I6b [PASS] dpumesh_dpu after the kill: expected=absent observed=absent 
+    I6c [PASS] warm meshed connect while the DPU is down: expected=refuse observed=refuse rcnt=0 fail=1 refusals=1 restarts=0:0
+    I6d [PASS] meshed Pod born in the outage: expected=refuse observed=refuse rcnt=0 fail=1 refusals=1
+    I6e [PASS] unmeshed pair while the DPU is down: expected=serve observed=serve rcnt=420120 fail=0
+
+=== I6 — restore: a fresh DPU, then the meshed pair recycled against it
+    dpumesh_dpu relaunched (PID: 3532472)
+    no startup banner within 90s
+    I6f [PASS] meshed serve after restore: expected=serve observed=serve rcnt=26821 fail=0 admitted+=1
+
+=== I7 — the kernel road: an unannotated Pod cannot reach a mesh-served port
+    I7a [PASS] kernel probe to the unmeshed port: expected=connect observed=connect 
+    I7b [PASS] kernel probe to the mesh-served port: expected=refuse observed=refuse settled=0s
+
+=== summary
+    passes=17 failures=0
+    -> bench/report/data/inject-kernelroad-20260825-220157/stages.csv
+
+=== cleanup
+    injected workloads scaled to zero; webhook and its registration removed

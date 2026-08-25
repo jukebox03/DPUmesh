@@ -13,13 +13,23 @@
 #   I4  the unmeshed pair still moves data, and the DPU records nothing
 #   I5  a webhook that cannot answer refuses the Pod, and admits again once
 #       it can
+#   I6  while the DPU is down, a meshed Pod's connect refuses — warm or born
+#       into the outage — the unmeshed road stays open, and a recycled pair
+#       serves again once a fresh DPU runs
+#   I7  the node refuses a kernel-TCP SYN from an unannotated Pod to a
+#       mesh-served port, while the same probe to an unmeshed port connects
 #
 # I4 is the half that makes the feature safe to turn on: a Pod nobody
 # annotated carries no shim and keeps working over kernel TCP. I5 is the half
 # that makes the annotation mean something: while the webhook is down the
 # namespace creates no Pod at all, because one born unpatched would keep
 # working over kernel TCP with no identity, no policy, and no sign anything
-# is missing.
+# is missing. I6 is the half that makes fail-closed mean the DPU rather than
+# the happy path: the mesh is a meshed Pod's only road, so the DPU's death
+# must close that road, not open a kernel-TCP detour around it. I7 is the
+# other direction of the same claim: the annotation protects the workload's
+# own port, so a Pod that never joined the mesh cannot walk around it over
+# plain kernel TCP.
 set -euo pipefail
 
 SUITE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -127,8 +137,16 @@ render() { envsubst <"$K8S_DIR/$1"; }
 apply()  { render "$1" | kubectl apply -n "$NS" -f - >>"$LOG" 2>&1; }
 scale()  { kubectl scale deployment/"$1" -n "$NS" --replicas="$2" >>"$LOG" 2>&1 || true; }
 
+DPU_DOWN=0
 cleanup() {
     say "cleanup"
+    # A campaign that dies between I6's kill and its restore would otherwise
+    # leave the rig without a DPU; every later campaign starts by reading its
+    # banner.
+    if [ "$DPU_DOWN" = 1 ]; then
+        note "the DPU this campaign killed is still down; relaunching"
+        dpu_start >>"$LOG" 2>&1 || true
+    fi
     local d
     for d in inject-echo inject-bench plain-echo plain-bench; do scale "$d" 0; done
     kubectl delete pod inject-probe -n "$NS" --ignore-not-found --wait=false >>"$LOG" 2>&1 || true
@@ -180,6 +198,73 @@ run_traffic() {  # run_traffic <app> <threads>
     to=$(( DUR + 90 ))
     printf 'RUN %s %s %s %s %s %s\n' "$REQ" 8 1 "$DUR" "$WARM" "${2:-1}" |
         timeout "${to}s" nc -N "$ip" "$CTRL_PORT" 2>/dev/null || echo "ERR nc"
+}
+classify() {  # classify <result> — serve | refuse | nodata
+    local fail rcnt
+    fail=$(field "$1" fail); rcnt=$(field "$1" rcnt)
+    : "${fail:=1}" "${rcnt:=0}"
+    if ! grep -q 'rcnt=' <<<"$1"; then echo nodata
+    elif [ "$fail" -eq 0 ] && [ "$rcnt" -gt 0 ]; then echo serve
+    else echo refuse; fi
+}
+restart_count() {  # container restarts of the app's first Pod, NA when unreadable
+    local n
+    n=$(kubectl get pod -n "$NS" -l "app=$1" \
+        -o jsonpath='{.items[0].status.containerStatuses[0].restartCount}' 2>/dev/null)
+    echo "${n:-NA}"
+}
+# The shim logs every refused connect to the Pod's stderr; the count tells a
+# refusal apart from a client that never reached its connect at all.
+refusal_lines() {
+    kubectl logs -n "$NS" -l "app=$1" --tail=300 2>/dev/null |
+        grep -c 'dmesh_preload.*refus' || true
+}
+# A bare TCP connect from inside a Pod: the kernel road itself, no shim, no
+# payload. Prints connect | refuse | timeout | nodata. An exec that cannot
+# run at all also reads refuse, which is why every use pairs with a control
+# probe that must connect.
+kernel_probe() {  # kernel_probe <src-app> <dst-ip> <dst-port>
+    local src status=0
+    src=$(kubectl get pod -n "$NS" -l "app=$1" \
+              -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+    { [ -n "$src" ] && [ -n "$2" ]; } || { echo nodata; return 0; }
+    kubectl exec -n "$NS" "$src" -- \
+        timeout 3 bash -c "exec 3<>/dev/tcp/$2/$3" >/dev/null 2>&1 || status=$?
+    case "$status" in
+        0)   echo connect;;
+        124) echo timeout;;
+        *)   echo refuse;;
+    esac
+}
+
+### ------------------------------------------------------------ the DPU process
+# The kill matches full command lines, exactly as bench.sh stop_dpu does, so a
+# renamed main thread cannot ride out the outage. The relaunch reuses the
+# launcher the deploy wrote to /tmp — the same file that started the process
+# being replaced — so the fresh DPU differs from the dead one in nothing but
+# its PID.
+dpu_pid() {
+    ssh "${SSH_OPTS[@]}" -n "$DPU_HOST" "pgrep -f '[d]pumesh_dpu' | head -1" \
+        2>/dev/null || true
+}
+dpu_kill() {
+    ssh "${SSH_OPTS[@]}" -n "$DPU_HOST" \
+        "echo '$DPU_PASS' | sudo -S bash -c \"pids=\\\$(pgrep -f '[d]pumesh_dpu'); [ -z \\\"\\\$pids\\\" ] || kill -9 \\\$pids\"" \
+        >>"$LOG" 2>&1 || true
+}
+dpu_start() {  # prints the fresh PID, or NO_PID
+    ssh "${SSH_OPTS[@]}" -n "$DPU_HOST" \
+        "echo '$DPU_PASS' | sudo -S bash /tmp/start_dpu_bench.sh" 2>>"$LOG" |
+        sed 's/^\[sudo\][^:]*: *//' | tail -n1
+}
+wait_dpu_banner() {  # the launcher truncates the log, so the banner is fresh
+    local deadline=$(( SECONDS + 360 ))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        (cd "$PROJ_ROOT" && timeout 60 bench/bench.sh dpulog 400 2>/dev/null) |
+            grep -q 'DPU PROXY MODE ON' && return 0
+        sleep 3
+    done
+    return 1
 }
 
 # What the patch is supposed to have put on a Pod, read back off the object the
@@ -305,6 +390,104 @@ scale dpumesh-webhook 1
 kubectl rollout status deployment/dpumesh-webhook -n "$NS" --timeout=120s >>"$LOG" 2>&1 || true
 record I5b "creation once it answers" admit "$(probe)"
 kubectl delete pod inject-probe -n "$NS" --ignore-not-found --wait=false >>"$LOG" 2>&1 || true
+
+say "I6 — fail-closed: while the DPU is down, a meshed Pod's connect refuses"
+# The kill is the scenario, not an accident: the DPU dies under Pods that hold
+# live channels into it. Two shapes of meshed Pod must both refuse — one whose
+# channel was up when the DPU died, and one born into the outage with no
+# channel to build — while the unmeshed pair keeps its ordinary kernel road,
+# which is what separates enforcement from a broken node.
+RESULT=$(run_traffic inject-bench 1)
+printf 'I6a | %s\n' "$RESULT" >>"$LOG"
+record I6a "meshed serve before the kill" serve "$(classify "$RESULT")" \
+       "rcnt=$(field "$RESULT" rcnt) fail=$(field "$RESULT" fail)"
+
+RESTARTS0=$(restart_count inject-bench)
+DPU_DOWN=1
+dpu_kill
+sleep 3
+record I6b "dpumesh_dpu after the kill" absent \
+       "$([ -z "$(dpu_pid)" ] && echo absent || echo present)"
+
+if [ -z "$(dpu_pid)" ]; then
+    RESULT=$(run_traffic inject-bench 1)
+    printf 'I6c | %s\n' "$RESULT" >>"$LOG"
+    record I6c "warm meshed connect while the DPU is down" refuse "$(classify "$RESULT")" \
+           "rcnt=$(field "$RESULT" rcnt) fail=$(field "$RESULT" fail) refusals=$(refusal_lines inject-bench) restarts=$RESTARTS0:$(restart_count inject-bench)"
+
+    scale inject-bench 0
+    kubectl wait pod -n "$NS" -l app=inject-bench --for=delete --timeout=90s >>"$LOG" 2>&1 || true
+    scale inject-bench 1
+    if wait_ready inject-bench 90; then
+        RESULT=$(run_traffic inject-bench 1)
+        printf 'I6d | %s\n' "$RESULT" >>"$LOG"
+        record I6d "meshed Pod born in the outage" refuse "$(classify "$RESULT")" \
+               "rcnt=$(field "$RESULT" rcnt) fail=$(field "$RESULT" fail) refusals=$(refusal_lines inject-bench)"
+    else
+        record I6d "meshed Pod born in the outage" refuse not-ready
+    fi
+
+    RESULT=$(run_traffic plain-bench 1)
+    printf 'I6e | %s\n' "$RESULT" >>"$LOG"
+    record I6e "unmeshed pair while the DPU is down" serve "$(classify "$RESULT")" \
+           "rcnt=$(field "$RESULT" rcnt) fail=$(field "$RESULT" fail)"
+fi
+
+say "I6 — restore: a fresh DPU, then the meshed pair recycled against it"
+# Order matters twice here. The Pods leave first: each one holds channel state
+# into a process that no longer exists, and the relaunch admits only what
+# registers with it. The serve check then proves the refusals above were
+# enforcement, not a rig this stage had already broken.
+scale inject-bench 0; scale inject-echo 0
+for a in inject-bench inject-echo; do
+    kubectl wait pod -n "$NS" -l "app=$a" --for=delete --timeout=120s >>"$LOG" 2>&1 || true
+done
+PID=$(dpu_start)
+case "$PID" in
+    ''|NO_PID)
+        # Without a fresh process the old log's old banner is still there, so
+        # waiting on it would vouch for a DPU that is not running.
+        note "dpumesh_dpu did not relaunch";;
+    *)
+        DPU_DOWN=0; note "dpumesh_dpu relaunched (PID: $PID)"
+        wait_dpu_banner || note "no startup banner before the deadline";;
+esac
+scale inject-echo 1; scale inject-bench 1
+for a in inject-echo inject-bench; do
+    wait_ready "$a" 180 || note "$a not Ready after the restore"
+done
+sleep "${SETTLE:-25}"
+ADMIN_PORTS=()
+discover_admin_ports
+D0=$(ctl_event inbound admitted)
+RESULT=$(run_traffic inject-bench 1)
+printf 'I6f | %s\n' "$RESULT" >>"$LOG"
+D1=$(ctl_event inbound admitted)
+record I6f "meshed serve after restore" serve "$(classify "$RESULT")" \
+       "rcnt=$(field "$RESULT" rcnt) fail=$(field "$RESULT" fail) admitted+=$(ctl_delta "$D0" "$D1")"
+
+say "I7 — the kernel road: an unannotated Pod cannot reach a mesh-served port"
+# inject-echo serves 9101 over DMA, and the node agent's ingress guard rejects
+# kernel-TCP SYNs to that (address, port) pair on its membership cadence.
+# plain-echo's 9102 is an ordinary kernel listener, so the same probe from the
+# same Pod is the method control: only the mesh-served pair may refuse. The
+# probe runs after the I6 restore, so a refusal here also shows the guard
+# re-covered a recycled Pod at its fresh address; the wait below is bounded by
+# that cadence, and how long it took is part of the record. That the guard
+# never touches the DMA road is what the whole campaign's meshed traffic
+# stages show.
+PLAIN_IP=$(running_pod_ip plain-echo)
+MESH_IP=$(running_pod_ip inject-echo)
+record I7a "kernel probe to the unmeshed port" connect \
+       "$(kernel_probe plain-bench "$PLAIN_IP" 9102)"
+GUARD_T0=$SECONDS
+OBS=$(kernel_probe plain-bench "$MESH_IP" 9101)
+while [ "$OBS" != refuse ] && [ $(( SECONDS - GUARD_T0 )) -lt 45 ]; do
+    sleep 5
+    OBS=$(kernel_probe plain-bench "$MESH_IP" 9101)
+done
+record I7b "kernel probe to the mesh-served port" refuse "$OBS" \
+       "settled=$(( SECONDS - GUARD_T0 ))s"
 
 say "summary"
 note "passes=$PASSES failures=$FAILURES"
