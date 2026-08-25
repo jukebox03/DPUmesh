@@ -162,6 +162,12 @@ $(TESTDIR)/peer_tls_test: tests/peer_tls_test.c doca/peer_tls.c doca/peer_tls.h 
 	$(CC) $(CFLAGS) -o $@ tests/peer_tls_test.c doca/peer_tls.c \
 		$(TLS_LIBS) $(CRYPTO_LIBS) $(RPATHS)
 
+$(TESTDIR)/peer_transport_test: tests/peer_transport_test.c doca/peer_transport.c \
+		doca/peer_wire_tcp.c doca/peer_tls.c doca/peer_channel.c $(LIB_HDRS) | dirs
+	$(CC) $(CFLAGS) -D_GNU_SOURCE -o $@ tests/peer_transport_test.c \
+		doca/peer_transport.c doca/peer_wire_tcp.c doca/peer_tls.c doca/peer_channel.c \
+		$(TLS_LIBS) $(CRYPTO_LIBS) $(RPATHS)
+
 $(TESTDIR)/topology_gen_test: tests/topology_gen_test.c doca/topology.c doca/workload_grant.c doca/control_scope.c $(LIB_HDRS) | dirs
 	$(CC) $(CFLAGS) -o $@ tests/topology_gen_test.c doca/topology.c doca/workload_grant.c \
 		doca/control_scope.c \
@@ -211,7 +217,7 @@ test: $(TESTDIR)/native_api_contract_test $(TESTDIR)/native_control_state_test \
 	$(TESTDIR)/lb_policy_test \
 	$(TESTDIR)/proxy_lane_queue_test $(TESTDIR)/worker_mpsc_queue_test \
 	$(TESTDIR)/topology_test $(TESTDIR)/topology_gen_test $(TESTDIR)/peer_channel_test \
-	$(TESTDIR)/peer_tls_test $(TESTDIR)/ring_counter_test \
+	$(TESTDIR)/peer_tls_test $(TESTDIR)/peer_transport_test $(TESTDIR)/ring_counter_test \
 	$(TESTDIR)/l7_abi_contract_test $(TESTDIR)/benchmark_result_contract_test $(PRELOAD) \
 	$(BINDIR)/bench_dpumesh $(BINDIR)/bench_sock
 	$(TESTDIR)/native_api_contract_test
@@ -229,6 +235,7 @@ test: $(TESTDIR)/native_api_contract_test $(TESTDIR)/native_control_state_test \
 	$(TESTDIR)/topology_gen_test
 	$(TESTDIR)/peer_channel_test
 	$(TESTDIR)/peer_tls_test
+	$(TESTDIR)/peer_transport_test
 	$(TESTDIR)/ring_counter_test
 	$(TESTDIR)/l7_abi_contract_test
 	$(TESTDIR)/benchmark_result_contract_test

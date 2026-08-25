@@ -537,6 +537,8 @@ dmesh_peer_accept(struct dmesh_peer_table *table, const char *node_name,
         channel = peer_channel_slot(table);
         if (!channel) {
             *reason = peer_refuse(table, NULL, DMESH_PEER_REFUSE_STATE);
+            if (table->transport && table->transport->close)
+                table->transport->close(conn);
             return NULL;
         }
         memset(channel, 0, sizeof(*channel));
