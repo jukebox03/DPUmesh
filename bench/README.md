@@ -125,7 +125,7 @@ not a routing result.
 | `fanout` | one client channel across two backends of one Service |
 | `surfaces` | timeouts, retries, matching, `GRPCRoute`, route authorization, failure accrual, HTTP/1.1 |
 | `lb` | connection grain, endpoint changes, and the request grain |
-| `inject.sh` | one annotation meshes a workload, and its absence leaves one alone |
+| `inject.sh` | one annotation meshes a workload, its absence leaves one alone, and a webhook that cannot answer creates no Pod |
 
 A stage whose client returns no reply is recorded as `nodata` and fails: a
 missing measurement is not a refusal. Stages that fail every request in flight

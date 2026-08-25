@@ -265,9 +265,9 @@ def test_a_conflicting_library_mount_is_refused():
     assert not response["response"]["allowed"]
 
 
-def test_an_unreadable_namespace_does_not_refuse_uninvolved_pods():
-    # Refusing here would refuse every Pod in the namespace, including the ones
-    # that never asked to be meshed.
+def test_an_unreadable_namespace_refuses_only_what_it_alone_decides():
+    # A Pod with no annotation of its own is meshed or not by the Namespace,
+    # and admitting it on a guess would decide that by API-server weather.
     class BrokenAPI:
         def namespace(self, name):
             raise webhook.WebhookError("the API server said no")
@@ -278,12 +278,16 @@ def test_an_unreadable_namespace_does_not_refuse_uninvolved_pods():
     injector = webhook.Injector(BrokenAPI(), config())
     plain = injector.review({"request": {"uid": "u", "namespace": "test-bench",
                                          "object": pod()}})
-    assert plain["response"]["allowed"]
-    assert "patch" not in plain["response"]
-    # A Pod that asked for it is still decided by its own annotation.
+    assert not plain["response"]["allowed"]
+    assert "could not be decided" in plain["response"]["status"]["message"]
+    # A Pod that states its own intent never needs the lookup: either way.
     asked = injector.review({"request": {"uid": "u", "namespace": "test-bench",
                                          "object": pod({"dpumesh.io/inject": "enabled"})}})
     assert asked["response"]["allowed"] and asked["response"].get("patch")
+    declined = injector.review({"request": {"uid": "u", "namespace": "test-bench",
+                                            "object": pod({"dpumesh.io/inject": "disabled"})}})
+    assert declined["response"]["allowed"]
+    assert "patch" not in declined["response"]
 
 
 def test_missing_pci_address_is_refused():

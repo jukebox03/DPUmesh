@@ -1018,6 +1018,19 @@ static ssize_t shim_send(pfd_t *e, const void *buf, size_t len, int flags) {
 
 /* ========================= socket-call surface ========================= */
 
+/* Comparison arm only (`DPUMESH_TCP_FALLBACK=1`): a failed channel or a failed
+ * resolve falls back to kernel TCP instead of refusing the connect. The
+ * webhook never sets it, so a meshed Pod's only path is the mesh; a bench arm
+ * sets it to measure the refusal against the old bypass. */
+static int tcp_fallback_allowed(void) {
+    static int allowed = -1;
+    if (allowed < 0) {
+        const char *value = getenv("DPUMESH_TCP_FALLBACK");
+        allowed = (value && *value && strcmp(value, "0") != 0) ? 1 : 0;
+    }
+    return allowed;
+}
+
 int connect(int fd, const struct sockaddr *addr, socklen_t alen) {
     ENSURE_REAL();
     pfd_t *existing = pfd_get(fd);
@@ -1031,36 +1044,66 @@ int connect(int fd, const struct sockaddr *addr, socklen_t alen) {
             so_type != SOCK_STREAM)
             return real_connect(fd, addr, alen);
         /* The DPU answers whether this destination is meshed, so the channel
-         * comes first. A Pod whose channel cannot come up keeps working over
-         * kernel TCP, retried with a backoff rather than per connect. */
+         * comes first. A meshed Pod has no path around the mesh: a channel
+         * that cannot come up refuses the connect, and the backoff only paces
+         * bring-up attempts, never a bypass. */
         static _Atomic long g_channel_retry_after;
         struct timespec mono;
         clock_gettime(CLOCK_MONOTONIC, &mono);
         if (mono.tv_sec < atomic_load_explicit(&g_channel_retry_after,
                                                memory_order_relaxed)) {
-            DBG("connect: channel unavailable; kernel TCP for %s:%d",
+            if (tcp_fallback_allowed()) {
+                DBG("connect: channel unavailable; kernel TCP for %s:%d",
+                    inet_ntoa(sin->sin_addr), ntohs(sin->sin_port));
+                return real_connect(fd, addr, alen);
+            }
+            DBG("connect: channel unavailable; refusing %s:%d",
                 inet_ntoa(sin->sin_addr), ntohs(sin->sin_port));
-            return real_connect(fd, addr, alen);
+            errno = ENETUNREACH;
+            return -1;
         }
         if (ensure_channel() < 0) {
             atomic_store_explicit(&g_channel_retry_after, mono.tv_sec + 5,
                                   memory_order_relaxed);
-            fprintf(stderr, "[dmesh_preload] channel unavailable; %s:%d "
-                    "leaves the mesh over kernel TCP\n",
+            if (tcp_fallback_allowed()) {
+                fprintf(stderr, "[dmesh_preload] channel unavailable; %s:%d "
+                        "leaves the mesh over kernel TCP\n",
+                        inet_ntoa(sin->sin_addr), ntohs(sin->sin_port));
+                return real_connect(fd, addr, alen);
+            }
+            fprintf(stderr, "[dmesh_preload] channel unavailable; refusing "
+                    "%s:%d — the mesh is this process's only path\n",
                     inet_ntoa(sin->sin_addr), ntohs(sin->sin_port));
-            return real_connect(fd, addr, alen);
+            errno = ENETUNREACH;
+            return -1;
         }
         int svc = dmesh_resolve_addr_via(g_ch->ctx, sin->sin_addr.s_addr,
                                          ntohs(sin->sin_port));
-        if (svc < 0) {
-            /* Leaving the mesh is an explicit, logged decision: the DPU said
-             * not-meshed (ENOENT), holds no generation yet, or the round trip
-             * failed (EAGAIN). */
-            fprintf(stderr, "[dmesh_preload] %s:%d is %s; kernel TCP\n",
-                    inet_ntoa(sin->sin_addr), ntohs(sin->sin_port),
-                    errno == ENOENT ? "not meshed"
-                                    : "unresolvable (no generation held)");
+        if (svc < 0 && errno == ENOENT) {
+            /* The DPU itself answered not-meshed: this destination lives
+             * outside the mesh, and kernel TCP is its ordinary path rather
+             * than a fallback. Leaving is still an explicit, logged decision. */
+            fprintf(stderr, "[dmesh_preload] %s:%d is not meshed; kernel TCP\n",
+                    inet_ntoa(sin->sin_addr), ntohs(sin->sin_port));
             return real_connect(fd, addr, alen);
+        }
+        if (svc < 0) {
+            /* No answer is not "not meshed": the round trip failed or no
+             * generation is held yet, so whether this destination is
+             * protected is unknown. Guessing kernel TCP here would route a
+             * protected Service around its policy exactly when the mesh is
+             * least healthy. */
+            if (tcp_fallback_allowed()) {
+                fprintf(stderr, "[dmesh_preload] %s:%d unresolvable "
+                        "(no generation held); kernel TCP\n",
+                        inet_ntoa(sin->sin_addr), ntohs(sin->sin_port));
+                return real_connect(fd, addr, alen);
+            }
+            fprintf(stderr, "[dmesh_preload] %s:%d unresolvable "
+                    "(no generation held); refusing\n",
+                    inet_ntoa(sin->sin_addr), ntohs(sin->sin_port));
+            errno = EHOSTUNREACH;
+            return -1;
         }
         {
             dmesh_qp_t *c = dmesh_qp_open(g_eq, svc);

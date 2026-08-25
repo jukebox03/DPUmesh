@@ -11,9 +11,15 @@
 #   I2  the unannotated server carries none of it
 #   I3  the meshed pair moves data, and the DPU records an inbound verdict
 #   I4  the unmeshed pair still moves data, and the DPU records nothing
+#   I5  a webhook that cannot answer refuses the Pod, and admits again once
+#       it can
 #
-# I4 is the half that makes the feature safe to turn on: the shim falls back to
-# kernel TCP, so a Pod nobody annotated is a working Pod.
+# I4 is the half that makes the feature safe to turn on: a Pod nobody
+# annotated carries no shim and keeps working over kernel TCP. I5 is the half
+# that makes the annotation mean something: while the webhook is down the
+# namespace creates no Pod at all, because one born unpatched would keep
+# working over kernel TCP with no identity, no policy, and no sign anything
+# is missing.
 set -euo pipefail
 
 SUITE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -125,7 +131,13 @@ cleanup() {
     say "cleanup"
     local d
     for d in inject-echo inject-bench plain-echo plain-bench; do scale "$d" 0; done
-    note "injected workloads scaled to zero; the webhook registration is left in place"
+    kubectl delete pod inject-probe -n "$NS" --ignore-not-found --wait=false >>"$LOG" 2>&1 || true
+    # The registration is fail-closed: left behind with no webhook running, it
+    # would refuse every Pod this namespace ever creates again. It leaves with
+    # the campaign that deployed it, and so does the webhook it points at.
+    kubectl delete mutatingwebhookconfiguration dpumesh-inject >>"$LOG" 2>&1 || true
+    kubectl delete deployment dpumesh-webhook -n "$NS" >>"$LOG" 2>&1 || true
+    note "injected workloads scaled to zero; webhook and its registration removed"
 }
 trap cleanup EXIT
 
@@ -269,6 +281,30 @@ if ! grep -q 'rcnt=' <<<"$RESULT"; then OBS=nodata
 elif [ "$FAIL" -eq 0 ] && [ "$RCNT" -gt 0 ]; then OBS=serve; else OBS=refuse; fi
 record I4 "unmeshed traffic" serve "$OBS" "rcnt=$RCNT fail=$FAIL admitted+=$(ctl_delta "$B0" "$B1")"
 record I4b "unmeshed verdict" no "$(d=$(ctl_delta "$B0" "$B1"); [ "$d" != NA ] && [ "$d" -gt 0 ] && echo yes || echo no)"
+
+say "I5 — fail-closed: while the webhook cannot answer, the namespace creates no Pod"
+probe() {  # probe — one unannotated Pod; prints admit or refuse, logs the server's words
+    local out
+    if out=$(kubectl run inject-probe -n "$NS" --image="docker.io/${IMG_PRELOAD_SOCK}" \
+                 --image-pull-policy=Never --restart=Never \
+                 --command -- sleep 300 2>&1); then
+        printf 'probe | %s\n' "$out" >>"$LOG"; echo admit
+    else
+        printf 'probe | %s\n' "$out" >>"$LOG"
+        # A refusal that does not name this webhook is some other failure
+        # wearing the expected verdict.
+        grep -q 'inject.dpumesh.io' <<<"$out" && echo refuse || echo refuse-other
+    fi
+}
+scale dpumesh-webhook 0
+kubectl wait pod -n "$NS" -l app=dpumesh-webhook --for=delete --timeout=60s >>"$LOG" 2>&1 || true
+record I5a "creation while webhook is down" refuse "$(probe)"
+kubectl delete pod inject-probe -n "$NS" --ignore-not-found --wait=true >>"$LOG" 2>&1 || true
+
+scale dpumesh-webhook 1
+kubectl rollout status deployment/dpumesh-webhook -n "$NS" --timeout=120s >>"$LOG" 2>&1 || true
+record I5b "creation once it answers" admit "$(probe)"
+kubectl delete pod inject-probe -n "$NS" --ignore-not-found --wait=false >>"$LOG" 2>&1 || true
 
 say "summary"
 note "passes=$PASSES failures=$FAILURES"

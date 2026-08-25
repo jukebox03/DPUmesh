@@ -2,6 +2,9 @@
 # gRPC workloads for the DPU-hosted Linkerd/DMA mesh. bench.sh applies this
 # alongside bench/k8s/pods.yaml. There is deliberately no Host sidecar or
 # kernel-TCP alternative in this deployment surface.
+# Harness arm, kept beside the deployment path for comparison: mounts, env and
+# privilege are hand-written here the way bench/k8s/pods.yaml writes them; a
+# production workload gets them from the injection annotation instead.
 # The control-plane label enrolls these sidecarless Pods in Linkerd policy;
 # skipped inbound ports keep destination discovery from expecting a Pod-local
 # proxy, while enforcement remains in the embedded DPU proxy.

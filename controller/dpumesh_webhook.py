@@ -45,7 +45,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 # The trigger, and the Pod-level override of it. A Pod annotation wins over
 # its Namespace so one workload can opt out of a meshed namespace.
@@ -167,15 +167,21 @@ class Config:
         self.require_dpu_node = not args.no_node_requirement
 
 
-def wants_injection(pod: dict[str, Any], namespace: dict[str, Any]) -> bool:
-    """The Pod's own annotation decides; the Namespace decides when it is silent."""
+def wants_injection(pod: dict[str, Any], namespace: Callable[[], dict[str, Any]]) -> bool:
+    """The Pod's own annotation decides; the Namespace decides when it is silent.
+
+    The Namespace is a callable so it is read only when the decision actually
+    depends on it: a Pod that states its own intent is decided without the
+    lookup, and a lookup that fails refuses only the Pods it alone could have
+    decided.
+    """
     pod_annotations = (pod.get("metadata") or {}).get("annotations") or {}
     value = str(pod_annotations.get(INJECT_ANNOTATION, "")).strip().lower()
     if value in ENABLED:
         return True
     if value in DISABLED:
         return False
-    namespace_annotations = (namespace.get("metadata") or {}).get("annotations") or {}
+    namespace_annotations = (namespace().get("metadata") or {}).get("annotations") or {}
     return str(namespace_annotations.get(INJECT_ANNOTATION, "")).strip().lower() in ENABLED
 
 
@@ -476,13 +482,15 @@ class Injector:
         self.namespaces: dict[str, tuple[float, dict[str, Any]]] = {}
 
     def namespace(self, name: str) -> dict[str, Any]:
-        """The Namespace carrying the trigger, or an empty one when it cannot
-        be read.
+        """The Namespace carrying the trigger.
 
-        A lookup that fails leaves the Pod's own annotation to decide. Refusing
-        instead would refuse every Pod in the namespace, including the ones that
-        never asked to be meshed — and an unpatched Pod is a working Pod, which
-        is the same trade `failurePolicy: Ignore` makes.
+        This is only called for a Pod whose own annotation is silent, so an
+        unreadable Namespace means the decision cannot be made — and a Pod
+        admitted on a guess would be meshed or not by API-server weather,
+        silently. The `WebhookError` this lets through becomes the same
+        "could not be decided" refusal every other undecidable admission gets,
+        which is the in-process half of the registration's
+        `failurePolicy: Fail`.
         """
         if self.api is None or not name:
             return {}
@@ -491,12 +499,7 @@ class Injector:
             cached = self.namespaces.get(name)
             if cached and now - cached[0] < NAMESPACE_CACHE_TTL:
                 return cached[1]
-        try:
-            document = self.api.namespace(name)
-        except WebhookError as exc:
-            sys.stderr.write(f"webhook: namespace {name} unreadable ({exc}); "
-                             "the Pod's own annotation decides\n")
-            return {}
+        document = self.api.namespace(name)
         with self.lock:
             self.namespaces[name] = (now, document)
         return document
@@ -510,7 +513,7 @@ class Injector:
         pod = request.get("object") or {}
         name = request.get("namespace") or ""
         try:
-            if not wants_injection(pod, self.namespace(name)) or already_injected(pod):
+            if not wants_injection(pod, lambda: self.namespace(name)) or already_injected(pod):
                 return response(uid, True)
             if self.config.require_dpu_node and not self.dpu_node_exists():
                 raise AdmissionRefused(

@@ -44,8 +44,8 @@ item below names the arm that closes it.
 
 # Function
 
-Three items are open: a Go surface, the transport under the cross-node seam, and
-node density.
+Four items are open: a Go surface, the transport under the cross-node seam,
+node density, and the kernel road around the mesh.
 
 ## F4 Workloads `LD_PRELOAD` cannot reach
 
@@ -156,6 +156,29 @@ per-Pod parallelism: a Pod spanning one EU has its forward traffic served by one
 EU's DMA budget. Which way that goes depends on whether the node's Pods are
 individually hot or collectively many. No number is published as supported until
 a node has been run at it; today's supportable claim is 32.
+
+## F8 The kernel road around the mesh
+
+The meshed path is fail-closed: an injected Pod's shim refuses a connect it
+cannot route through the DPU — only a destination the DPU itself answers as
+not-meshed proceeds over kernel TCP — and the admission webhook refuses a Pod
+creation it cannot patch or decide (`bench/suite/inject.sh` I5 is that arm).
+What stays open is the road that never enters the mesh: a Pod without the
+annotation reaches a protected Service's backend over plain kernel TCP, and
+nothing on the node stops it.
+
+- [ ] Block kernel-TCP ingress to protected backends at the host. The CNI
+  (flannel) enforces no NetworkPolicy, so the block is iptables-level
+  configuration owned by the node agent; the arm that closes it is an
+  unannotated Pod refused where an annotated one serves.
+- [ ] Replace `privileged: true` in the webhook patch with the device access
+  the transport actually opens. The container device cgroup blocks the char
+  device without it, so this is an RDMA device-plugin deployment, not a
+  manifest edit.
+- [ ] Exercise the shim's refusal on hardware: with the DPU down, a meshed
+  Pod's connect must fail rather than leave the mesh. No campaign arm drives
+  this today and `preload_api_contract_test` mocks the channel as available,
+  so the refusal is held by construction alone until an arm exists.
 
 ## Not a gap: per-hop encryption
 

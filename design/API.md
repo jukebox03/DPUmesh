@@ -362,5 +362,9 @@ Adapter-internal ownership and threading are specified in
   cached for one generation interval and re-resolved after that or on a
   connection error, so a Service that appears later is reachable without
   restarting the process.
+- The preload shim leaves the mesh only on the DPU's own not-meshed answer. A
+  channel that cannot come up or a resolve with no answer refuses the connect
+  (`ENETUNREACH`/`EHOSTUNREACH`) instead of falling back to kernel TCP;
+  `DPUMESH_TCP_FALLBACK=1` restores the fallback for comparison arms only.
 - Every Service terminates in the DPU-hosted Linkerd proxy, protocol-aware or
   opaque; unassigned L4 forwarding is not a supported deployment topology.

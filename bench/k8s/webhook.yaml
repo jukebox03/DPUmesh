@@ -1,12 +1,15 @@
 # The admission webhook that makes a workload meshed from one annotation.
 #
 # Registration is scoped to a single namespace by the automatic
-# `kubernetes.io/metadata.name` label. `failurePolicy: Ignore` is the safe
-# reading of a webhook that is down, because an unpatched Pod is not a broken
-# one: the shim finds no channel and the workload runs over kernel TCP, which
-# is the same state a Pod nobody annotated is in. Refusal is reserved for the
-# question this process can actually answer — a cluster with no DPU node — and
-# that refusal comes from the webhook itself, not from its absence.
+# `kubernetes.io/metadata.name` label, and inside that namespace the webhook
+# is load-bearing: a Pod admitted without it is born unpatched, carries no
+# shim, and keeps working over kernel TCP with no identity and no policy —
+# and nothing in the cluster shows anything is missing. `failurePolicy: Fail`
+# therefore refuses Pod creation while the webhook cannot answer; the
+# Deployment controller retries the Pod into existence once it can. What that
+# costs is creation of new Pods in this one namespace while the webhook is
+# down — never Pods already running, because admission is the only moment
+# this process touches.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -118,7 +121,11 @@ webhooks:
 - name: inject.dpumesh.io
   admissionReviewVersions: ["v1"]
   sideEffects: None
-  failurePolicy: Ignore
+  failurePolicy: Fail
+  # The decision may need two API reads (Namespace, then nodes) of up to 10 s
+  # each; the admission deadline must outlast both or a slow API server turns
+  # into a refusal the webhook never made.
+  timeoutSeconds: 30
   reinvocationPolicy: Never
   # The webhook's own Pod must not be gated by the webhook.
   objectSelector:

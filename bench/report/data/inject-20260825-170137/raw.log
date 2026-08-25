@@ -1,0 +1,65 @@
+
+=== webhook — deploy the registration and its serving certificate
+serviceaccount/dpumesh-webhook unchanged
+clusterrole.rbac.authorization.k8s.io/dpumesh-webhook unchanged
+clusterrolebinding.rbac.authorization.k8s.io/dpumesh-webhook unchanged
+service/dpumesh-webhook unchanged
+deployment.apps/dpumesh-webhook unchanged
+mutatingwebhookconfiguration.admissionregistration.k8s.io/dpumesh-inject configured
+deployment "dpumesh-webhook" successfully rolled out
+    I0 [PASS] caBundle published: expected=present observed=present 
+
+=== workloads — the same Deployment, with and without the annotation
+deployment.apps/inject-echo unchanged
+service/inject-sock unchanged
+deployment.apps/plain-echo unchanged
+service/plain-sock unchanged
+deployment.apps/inject-bench unchanged
+service/inject-bench unchanged
+deployment.apps/plain-bench unchanged
+service/plain-bench unchanged
+deployment.apps/inject-echo scaled
+deployment.apps/plain-echo scaled
+deployment.apps/inject-bench scaled
+deployment.apps/plain-bench scaled
+    DPU admin ports: 4191 4192 4193 4194 4195 4196 4197 4198
+
+=== I1/I2 — what the admitted Pod objects carry
+    I1 [PASS] inject-echo: expected=injected observed=injected 
+    I2 [PASS] plain-echo: expected=bare observed=bare 
+
+=== I3 — the meshed pair
+I3 | OK mrps=0.003063 gbps=0.0261 req_gbps=0.0255 resp_gbps=0.0006 p50=336.00 p95=571.00 p99=704.00 p999=903.00 p9999=1505.00 avg=324.57 min=132.97 max=1931.14 rcnt=30489 scheduled=30590 pending=1 fail=0 conc=1 threads=1 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.003063 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const grabs=1 rets=1 recyc=67 waits=0 pads=0 wwin=0 wpool=0
+    I3 [PASS] meshed traffic: expected=serve observed=serve rcnt=30489 fail=0 admitted+=1
+    I3b [PASS] meshed verdict: expected=yes observed=yes 
+
+=== I4 — the unmeshed control
+I4 | OK mrps=0.042922 gbps=0.3653 req_gbps=0.3571 resp_gbps=0.0082 p50=22.00 p95=25.00 p99=37.00 p999=206.00 p9999=276.00 avg=23.04 min=9.58 max=2218.66 rcnt=429101 scheduled=429202 pending=1 fail=0 conc=1 threads=1 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.042922 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const grabs=NA rets=NA recyc=NA waits=NA pads=NA wwin=NA wpool=NA
+    I4 [PASS] unmeshed traffic: expected=serve observed=serve rcnt=429101 fail=0 admitted+=0
+    I4b [PASS] unmeshed verdict: expected=no observed=no 
+
+=== I5 — fail-closed: while the webhook cannot answer, the namespace creates no Pod
+deployment.apps/dpumesh-webhook scaled
+pod/dpumesh-webhook-56b65ccf77-gpdvm condition met
+probe | Error from server (InternalError): Internal error occurred: failed calling webhook "inject.dpumesh.io": failed to call webhook: Post "https://dpumesh-webhook.test-bench.svc:443/mutate?timeout=30s": dial tcp 10.98.72.55:443: connect: connection refused
+    I5a [PASS] creation while webhook is down: expected=refuse observed=refuse 
+deployment.apps/dpumesh-webhook scaled
+Waiting for deployment "dpumesh-webhook" rollout to finish: 0 of 1 updated replicas are available...
+deployment "dpumesh-webhook" successfully rolled out
+probe | pod/inject-probe created
+    I5b [PASS] creation once it answers: expected=admit observed=admit 
+pod "inject-probe" deleted
+
+=== summary
+    passes=9 failures=0
+    -> /home/jukebox/DPUmesh/bench/suite/../report/data/inject-20260825-170137/stages.csv
+
+=== cleanup
+deployment.apps/inject-echo scaled
+deployment.apps/inject-bench scaled
+deployment.apps/plain-echo scaled
+deployment.apps/plain-bench scaled
+pod "inject-probe" deleted
+mutatingwebhookconfiguration.admissionregistration.k8s.io "dpumesh-inject" deleted
+deployment.apps "dpumesh-webhook" deleted
+    injected workloads scaled to zero; webhook and its registration removed

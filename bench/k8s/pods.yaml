@@ -1,6 +1,12 @@
 # Native and preload workloads for the DPU-hosted Linkerd/DMA mesh.
 # bench.sh substitutes image, port, PCI, library, and runtime variables before
 # applying the manifest. Deployments start with zero replicas.
+#
+# Harness arm, kept beside the deployment path for comparison: this manifest
+# hand-writes what the admission webhook (bench/k8s/webhook.yaml) injects from
+# one annotation, so a measurement never depends on the injection path the
+# inject campaign tests. A production workload gets all of this from the
+# annotation, not from a manifest like this one.
 # `linkerd.io/control-plane-ns` enrolls each sidecarless workload in Linkerd's
 # inbound policy index. The skip annotation keeps destination discovery from
 # expecting a Pod-local proxy on DMA ports; the embedded DPU proxy enforces it.

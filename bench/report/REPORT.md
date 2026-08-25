@@ -244,14 +244,19 @@ policy at all and the port keeps its deny-by-default.
 
 ## Automatic injection
 
-Seven stages. An annotated Pod carries every piece of the patch — control-plane
+Nine stages. An annotated Pod carries every piece of the patch — control-plane
 label, `skip-inbound-ports`, device and library and attestation mounts, PCI
 function, Service identity, preload shim, node affinity — and its traffic takes a
 DPU inbound verdict. The same Deployment without the annotation carries none of
-it and serves 393,425 requests over kernel TCP.
+it and serves 429,101 requests over kernel TCP.
 
-That second half is what makes the feature safe to turn on: an unpatched Pod is a
-working Pod.
+That second half is what makes the feature safe to turn on: a Pod nobody
+annotated carries no shim and is a working Pod. The last two stages are what
+make the annotation mean something: with the webhook scaled to zero the
+namespace refuses Pod creation — the API server's refusal names
+`inject.dpumesh.io` — and admits the same Pod again once the webhook answers.
+A Pod born unpatched would keep working over kernel TCP with no identity and no
+policy, so creation waits instead (`failurePolicy: Fail`).
 
 ## Round-trip latency, one outstanding request
 
