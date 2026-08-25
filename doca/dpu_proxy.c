@@ -395,6 +395,8 @@ struct px_remote_upstream {
     uint8_t backend_fin_sent;
 };
 
+#define PX_FIN_BITS_WORDS ((65536u - DMESH_UPORT_BASE) / 64u)
+
 /* A data worker owns its DOCA resources and regions where region % A == id.
  * There is exactly one engine per data worker (both counted by n_workers). */
 struct px_engine {
@@ -433,6 +435,11 @@ struct px_worker_state {
     int in_l7_parse;
     struct dmesh_peer_table *peers;
     struct px_remote_upstream *remote_upstreams; /* indexed by local uP */
+    /* Which upstream ports hold a peer FIN the landing lane could not take.
+     * Bit i stands for port DMESH_UPORT_BASE + i, so the retry pass walks the
+     * ports that are waiting rather than the whole port space. */
+    uint64_t *fin_pending_bits;
+    uint32_t  fin_pending_count;
     uint32_t next_peer_token;
     uint32_t next_peer_reply_key;
     uint32_t next_l7_generation;
@@ -2276,6 +2283,28 @@ static void px_peer_source_reset(void *ctx,
     }
 }
 
+static void px_remote_fin_mark(struct px_worker_state *worker, uint16_t port)
+{
+    struct px_remote_upstream *remote = &worker->remote_upstreams[port];
+    if (remote->fin_pending)
+        return;
+    remote->fin_pending = 1;
+    uint32_t bit = (uint32_t)port - DMESH_UPORT_BASE;
+    worker->fin_pending_bits[bit >> 6] |= 1ull << (bit & 63u);
+    worker->fin_pending_count++;
+}
+
+static void px_remote_fin_unmark(struct px_worker_state *worker, uint16_t port)
+{
+    struct px_remote_upstream *remote = &worker->remote_upstreams[port];
+    if (!remote->fin_pending)
+        return;
+    remote->fin_pending = 0;
+    uint32_t bit = (uint32_t)port - DMESH_UPORT_BASE;
+    worker->fin_pending_bits[bit >> 6] &= ~(1ull << (bit & 63u));
+    worker->fin_pending_count--;
+}
+
 static void px_peer_poison_handle(void *ctx,
                                   const struct dmesh_peer_handle *handle,
                                   const char *why)
@@ -2285,6 +2314,7 @@ static void px_peer_poison_handle(void *ctx,
         return;
     struct px_remote_upstream *remote =
         &worker->remote_upstreams[handle->up_port];
+    px_remote_fin_unmark(worker, handle->up_port);
     memset(remote, 0, sizeof(*remote));
     struct pod_state *dst = handle->dst_pod_idx >= 0 &&
                                     handle->dst_pod_idx < MAX_PODS
@@ -2335,7 +2365,7 @@ static int px_peer_destination_fin(void *ctx,
                            (int8_t)remote->src_service,
                            (int8_t)remote->dst_service,
                            handle->up_port, handle->up_port)) {
-        remote->fin_pending = 1;
+        px_remote_fin_mark(worker, handle->up_port);
         return 1;
     }
     (void)px_remote_upstream_finish(worker, handle->up_port);
@@ -5014,7 +5044,10 @@ px_worker_has_pending(struct px_engine *eng)
     if (eng->dma_stalled || eng->dma_tasks_inflight > 0 ||
         eng->retry_batches > 0 || eng->retry_probe != NULL)
         return 1;
-    struct dmesh_peer_table *peers = eng->objs->proxy->workers[eng->id].peers;
+    struct px_worker_state *worker = &eng->objs->proxy->workers[eng->id];
+    if (worker->fin_pending_count)
+        return 1;
+    struct dmesh_peer_table *peers = worker->peers;
     if (!peers || !peers->transport)
         return 0;
     for (uint32_t i = 0; i < DMESH_CHANNEL_MAX; i++) {
@@ -5026,40 +5059,56 @@ px_worker_has_pending(struct px_engine *eng)
     return 0;
 }
 
+/* EOF allocation may have been backpressured after the peer FIN was accepted.
+ * Retry it before more frames so DATA/FIN order on the landing lane remains
+ * the channel's order. A reset here poisons handles, which clears bits this
+ * pass has already read, so every port is re-checked before it is retried. */
+static int px_remote_fin_retry(struct px_worker_state *worker, int *budget)
+{
+    if (!worker->remote_upstreams || !worker->fin_pending_bits)
+        return 0;
+    int progressed = 0;
+    for (uint32_t word = 0;
+         worker->fin_pending_count && *budget > 0 && word < PX_FIN_BITS_WORDS;
+         word++) {
+        uint64_t bits = worker->fin_pending_bits[word];
+        while (bits && *budget > 0) {
+            uint16_t port = (uint16_t)(DMESH_UPORT_BASE + word * 64u +
+                                       (uint32_t)__builtin_ctzll(bits));
+            bits &= bits - 1;
+            struct px_remote_upstream *remote = &worker->remote_upstreams[port];
+            if (!remote->fin_pending)
+                continue;
+            struct dpu_upstream *up = &worker->ct->upstream[port];
+            struct pod_state *dst = up->in_use
+                                        ? find_pod_by_id(worker->objs,
+                                                         up->backend_pod)
+                                        : NULL;
+            if (!dst || !pod_data_ready(dst)) {
+                dmesh_peer_reset(worker->peers, remote->channel,
+                                 "peer FIN destination disappeared");
+                px_remote_fin_unmark(worker, port);
+            } else if (px_queue_eof_unit(worker->objs, dst, DMESH_POD_REMOTE,
+                                         (int8_t)remote->src_service,
+                                         (int8_t)remote->dst_service,
+                                         port, port)) {
+                px_remote_fin_unmark(worker, port);
+                (void)px_remote_upstream_finish(worker, port);
+            } else {
+                return progressed;      /* the landing lane has no room */
+            }
+            progressed = 1;
+            (*budget)--;
+        }
+    }
+    return progressed;
+}
+
 static int px_peer_progress_worker(struct px_worker_state *worker, int budget)
 {
     if (!worker->peers || !worker->peers->transport || budget <= 0)
         return 0;
-    int progressed = 0;
-    /* EOF allocation may have been backpressured after the peer FIN was
-     * accepted. Retry it before more frames so DATA/FIN order on the landing
-     * lane remains the channel's order. */
-    for (uint32_t port = DMESH_UPORT_BASE;
-         worker->remote_upstreams && port < 65536u && budget > 0; port++) {
-        struct px_remote_upstream *remote = &worker->remote_upstreams[port];
-        if (!remote->fin_pending)
-            continue;
-        struct dpu_upstream *up = &worker->ct->upstream[port];
-        struct pod_state *dst = up->in_use
-                                    ? find_pod_by_id(worker->objs,
-                                                     up->backend_pod)
-                                    : NULL;
-        if (!dst || !pod_data_ready(dst)) {
-            dmesh_peer_reset(worker->peers, remote->channel,
-                             "peer FIN destination disappeared");
-            remote->fin_pending = 0;
-        } else if (px_queue_eof_unit(worker->objs, dst, DMESH_POD_REMOTE,
-                                     (int8_t)remote->src_service,
-                                     (int8_t)remote->dst_service,
-                                     (uint16_t)port, (uint16_t)port)) {
-            remote->fin_pending = 0;
-            (void)px_remote_upstream_finish(worker, (uint16_t)port);
-        } else {
-            break;
-        }
-        progressed = 1;
-        budget--;
-    }
+    int progressed = px_remote_fin_retry(worker, &budget);
     for (uint32_t i = 0; i < DMESH_CHANNEL_MAX && budget > 0; i++) {
         struct dmesh_peer_channel *channel = &worker->peers->channels[i];
         if (!channel->in_use || channel->state == DMESH_PEER_CLOSED)
@@ -5429,7 +5478,10 @@ int px_init(struct objects *objs) {
         worker_state->peers = calloc(1, sizeof(*worker_state->peers));
         worker_state->remote_upstreams =
             calloc(65536u, sizeof(*worker_state->remote_upstreams));
-        if (!worker_state->peers || !worker_state->remote_upstreams)
+        worker_state->fin_pending_bits =
+            calloc(PX_FIN_BITS_WORDS, sizeof(*worker_state->fin_pending_bits));
+        if (!worker_state->peers || !worker_state->remote_upstreams ||
+            !worker_state->fin_pending_bits)
             goto oom;
         dmesh_peer_table_init(worker_state->peers, objs->node_name,
                               objs->node_key_ready ? objs->node_public_key : NULL,
@@ -5593,6 +5645,7 @@ fail:
             dmesh_peer_table_fini(px->workers[s].peers);
         free(px->workers[s].peers);
         free(px->workers[s].remote_upstreams);
+        free(px->workers[s].fin_pending_bits);
         free(px->workers[s].buckets);
         free(px->workers[s].ct);
     }
