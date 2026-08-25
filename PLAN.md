@@ -202,19 +202,14 @@ it until that transport binds.
 
 # Defects
 
-## D2 gRPC tail regime above the reported capacity
+None are open. The last — the gRPC p99 regime change above ~12.5 K rps —
+closed 2026-08-25: a five-repeat re-measurement on the post-D1 build found no
+stall shape at any rate
+([`grpc-tail-20260825-175740/`](bench/report/data/grpc-tail-20260825-175740/));
+the Findings entry under *The mesh* carries the shape.
 
-Above roughly 12.5 K rps the p99 changes regime while the p50 stays flat, with a
-periodic stall near 15 ms. Eight causes have been excluded. This is what sets
-the gRPC capacity that gets published, so it bounds a number already in print
-rather than a feature not yet built.
-
-- [ ] **This item carries no receipt in the tree.** Find the campaign data it
-  came from and attach it here, or re-run and replace the figures, before it is
-  cited anywhere else.
-- [ ] Then name the ninth cause, or close it.
-
-One neighbouring item is not on this list, because it has its arm. Clearing
+One item that looks like it belongs here is not on this list, because it has
+its arm. Clearing
 `dma_ready` on one Pod must not clear it on Pods that have nothing to do with it,
 and both clear sites are per Pod; `surfaces` `S13`/`S14` drives exactly that — a
 failing endpoint inside the Service under test, traffic through it until the
@@ -317,6 +312,16 @@ capture is guarded and the function answers `0` whatever happens, because it run
 on the way to a redeploy and nothing it collects is a reason to stop one.
 Evidence: [`dpu-exit-sigpipe.txt`](bench/report/data/f-spin-20260822/dpu-exit-sigpipe.txt)
 and [`dpu-exit2-evidence.txt`](bench/report/data/f-spin-20260822/dpu-exit2-evidence.txt).
+
+**The gRPC tail above capacity is queueing, not stalls.** The p99 regime change
+above ~12.5 K rps — a jump to 8–15 ms under a flat p50, sporadic in one run out
+of three to twelve — was measured through the synchronous benchmark server that
+D1 replaced, and its campaign data never reached the tree. On the current build
+the shape is absent: eight channels at 8–24 K rps, five repeats per rate, give
+a p50 and p99 that rise together toward the knee, no sustained run with a p99
+jump under a flat p50, and a residual tail only at the p999 level — sporadic
+9–22 ms outliers below 16 K rps, about 0.1 % of requests
+([`grpc-tail-20260825-175740/`](bench/report/data/grpc-tail-20260825-175740/)).
 
 ## The instrument
 

@@ -1,0 +1,44 @@
+[17:57:40] sweep: channels=[8] rates=[8000 10000 12000 13000 14000 16000 20000 24000] reps=5 frame=64B threads=8 reactors=8
+[17:57:40] client=bench-grpc-dpumesh(2716928) server=echo-grpc-dpumesh(2716166) out=/home/jukebox/DPUmesh/bench/report/data/grpc-tail-20260825-175740
+[17:57:40] restart baseline: client=0 server=0
+[17:57:51] [1/40] c=8 rate=8000 rep=1 -> achieved=7999.0 ratio=0.9999 p50=825.00 p99=1633.00 client=0.5121 server=0.8518 workers=4.125962
+[17:58:04] [2/40] c=8 rate=8000 rep=2 -> achieved=8000.0 ratio=1.0000 p50=824.00 p99=1564.00 client=0.5184 server=0.8611 workers=4.132981
+[17:58:18] [3/40] c=8 rate=8000 rep=3 -> achieved=8000.0 ratio=1.0000 p50=874.00 p99=1700.00 client=0.5160 server=0.9098 workers=4.128094
+[17:58:31] [4/40] c=8 rate=8000 rep=4 -> achieved=8000.0 ratio=1.0000 p50=850.00 p99=1716.00 client=0.5178 server=0.8179 workers=4.154729
+[17:58:45] [5/40] c=8 rate=8000 rep=5 -> achieved=8000.0 ratio=1.0000 p50=838.00 p99=1590.00 client=0.5135 server=0.8617 workers=4.146496
+[17:58:58] [6/40] c=8 rate=10000 rep=1 -> achieved=10000.0 ratio=1.0000 p50=806.00 p99=1636.00 client=0.6119 server=0.9916 workers=5.033154
+[17:59:12] [7/40] c=8 rate=10000 rep=2 -> achieved=10000.0 ratio=1.0000 p50=806.00 p99=1590.00 client=0.6056 server=1.0193 workers=5.012178
+[17:59:25] [8/40] c=8 rate=10000 rep=3 -> achieved=10000.0 ratio=1.0000 p50=833.00 p99=1641.00 client=0.6084 server=1.0645 workers=4.997303
+[17:59:39] [9/40] c=8 rate=10000 rep=4 -> achieved=10000.0 ratio=1.0000 p50=802.00 p99=1648.00 client=0.6111 server=0.9842 workers=5.019662
+[17:59:52] [10/40] c=8 rate=10000 rep=5 -> achieved=9999.0 ratio=0.9999 p50=816.00 p99=1629.00 client=0.6171 server=1.0318 workers=5.003539
+[18:00:06] [11/40] c=8 rate=12000 rep=1 -> achieved=11999.0 ratio=0.9999 p50=760.00 p99=1502.00 client=0.7097 server=1.0327 workers=5.914501
+[18:00:19] [12/40] c=8 rate=12000 rep=2 -> achieved=12000.0 ratio=1.0000 p50=778.00 p99=1521.00 client=0.7058 server=1.0953 workers=5.871089
+[18:00:33] [13/40] c=8 rate=12000 rep=3 -> achieved=12000.0 ratio=1.0000 p50=778.00 p99=1506.00 client=0.7073 server=1.1189 workers=5.867876
+[18:00:46] [14/40] c=8 rate=12000 rep=4 -> achieved=11999.0 ratio=0.9999 p50=819.00 p99=1594.00 client=0.7001 server=1.1338 workers=5.825154
+[18:01:00] [15/40] c=8 rate=12000 rep=5 -> achieved=12000.0 ratio=1.0000 p50=824.00 p99=1642.00 client=0.7042 server=1.1474 workers=5.826426
+[18:01:13] [16/40] c=8 rate=13000 rep=1 -> achieved=12999.0 ratio=0.9999 p50=792.00 p99=1520.00 client=0.7480 server=1.1534 workers=6.261209
+[18:01:27] [17/40] c=8 rate=13000 rep=2 -> achieved=12999.0 ratio=0.9999 p50=781.00 p99=1500.00 client=0.7516 server=1.1870 workers=6.262639
+[18:01:41] [18/40] c=8 rate=13000 rep=3 -> achieved=12999.0 ratio=0.9999 p50=818.00 p99=1532.00 client=0.7435 server=1.1798 workers=6.210836
+[18:01:54] [19/40] c=8 rate=13000 rep=4 -> achieved=13000.0 ratio=1.0000 p50=800.00 p99=1670.00 client=0.7484 server=1.1958 workers=6.232423
+[18:02:08] [20/40] c=8 rate=13000 rep=5 -> achieved=12999.0 ratio=0.9999 p50=821.00 p99=1560.00 client=0.7422 server=1.1458 workers=6.256636
+[18:02:21] [21/40] c=8 rate=14000 rep=1 -> achieved=14000.0 ratio=1.0000 p50=808.00 p99=1570.00 client=0.7880 server=1.1972 workers=6.602927
+[18:02:35] [22/40] c=8 rate=14000 rep=2 -> achieved=14000.0 ratio=1.0000 p50=835.00 p99=1647.00 client=0.7870 server=1.2731 workers=6.560720
+[18:02:48] [23/40] c=8 rate=14000 rep=3 -> achieved=13999.0 ratio=0.9999 p50=824.00 p99=1562.00 client=0.7890 server=1.1749 workers=6.587868
+[18:03:02] [24/40] c=8 rate=14000 rep=4 -> achieved=14000.0 ratio=1.0000 p50=818.00 p99=1747.00 client=0.7896 server=1.2661 workers=6.564399
+[18:03:15] [25/40] c=8 rate=14000 rep=5 -> achieved=14000.0 ratio=1.0000 p50=815.00 p99=1570.00 client=0.7897 server=1.2091 workers=6.605344
+[18:03:29] [26/40] c=8 rate=16000 rep=1 -> achieved=15999.0 ratio=0.9999 p50=971.00 p99=1849.00 client=0.8154 server=1.2753 workers=6.766051
+[18:03:43] [27/40] c=8 rate=16000 rep=2 -> achieved=15998.0 ratio=0.9999 p50=974.00 p99=1846.00 client=0.8689 server=1.3863 workers=7.136269
+[18:03:56] [28/40] c=8 rate=16000 rep=3 -> achieved=16000.0 ratio=1.0000 p50=908.00 p99=1827.00 client=0.8668 server=1.3163 workers=7.184162
+[18:04:10] [29/40] c=8 rate=16000 rep=4 -> achieved=16000.0 ratio=1.0000 p50=975.00 p99=1867.00 client=0.8691 server=1.3855 workers=7.142966
+[18:04:23] [30/40] c=8 rate=16000 rep=5 -> achieved=16000.0 ratio=1.0000 p50=951.00 p99=1833.00 client=0.8680 server=1.2886 workers=7.150221
+[18:04:37] [31/40] c=8 rate=20000 rep=1 -> achieved=19999.0 ratio=1.0000 p50=1187.00 p99=2690.00 client=0.9601 server=1.4635 workers=7.651099
+[18:04:51] [32/40] c=8 rate=20000 rep=2 -> achieved=15000.0 ratio=0.7500 p50=1333.00 p99=5034.00 client=0.8591 server=1.3738 workers=6.644411
+[18:05:05] [33/40] c=8 rate=20000 rep=3 -> achieved=20000.0 ratio=1.0000 p50=1155.00 p99=2708.00 client=0.9649 server=1.5451 workers=7.683780
+[18:05:18] [34/40] c=8 rate=20000 rep=4 -> achieved=19999.0 ratio=1.0000 p50=1158.00 p99=2636.00 client=0.9727 server=1.5337 workers=7.671717
+[18:05:32] [35/40] c=8 rate=20000 rep=5 -> achieved=19999.0 ratio=1.0000 p50=1185.00 p99=2803.00 client=0.9303 server=1.4568 workers=7.441465
+[18:05:46] [36/40] c=8 rate=24000 rep=1 -> achieved=23998.0 ratio=0.9999 p50=1931.00 p99=7222.00 client=1.0412 server=1.5727 workers=7.856123
+[18:05:59] [37/40] c=8 rate=24000 rep=2 -> achieved=23997.0 ratio=0.9999 p50=1932.00 p99=7103.00 client=1.0409 server=1.5561 workers=7.860668
+[18:06:13] [38/40] c=8 rate=24000 rep=3 -> achieved=23996.0 ratio=0.9998 p50=1970.00 p99=7238.00 client=1.0418 server=1.5364 workers=7.854236
+[18:06:26] [39/40] c=8 rate=24000 rep=4 -> achieved=24000.0 ratio=1.0000 p50=1949.00 p99=7160.00 client=1.0411 server=1.5520 workers=7.857682
+[18:06:40] [40/40] c=8 rate=24000 rep=5 -> achieved=24000.0 ratio=1.0000 p50=1965.00 p99=7303.00 client=1.0401 server=1.5644 workers=7.858710
+[18:06:43] done: /home/jukebox/DPUmesh/bench/report/data/grpc-tail-20260825-175740/points.csv
