@@ -68,7 +68,7 @@ static int peer_text_ok(const char *field, size_t size)
 
 static int peer_public_from_private(const uint8_t seed[32], uint8_t public_key[32])
 {
-    EVP_PKEY *key = EVP_PKEY_new_raw_private_key(EVP_PKEY_X25519, NULL, seed, 32);
+    EVP_PKEY *key = EVP_PKEY_new_raw_private_key(EVP_PKEY_ED25519, NULL, seed, 32);
     if (!key)
         return -1;
     size_t len = 32;
@@ -96,7 +96,7 @@ int dmesh_peer_node_key_load(const char *path, uint8_t public_key[32],
         /* First boot. The private half is generated here and never leaves;
          * only the public half travels, through the node agent, into the
          * generation's node= line. */
-        EVP_PKEY *key = EVP_PKEY_Q_keygen(NULL, NULL, "X25519");
+        EVP_PKEY *key = EVP_PKEY_Q_keygen(NULL, NULL, "ED25519");
         size_t len = sizeof(seed);
         if (!key || EVP_PKEY_get_raw_private_key(key, seed, &len) != 1 || len != sizeof(seed)) {
             EVP_PKEY_free(key);

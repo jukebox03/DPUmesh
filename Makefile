@@ -6,6 +6,7 @@ DOCA_PKGS := doca-common doca-comch doca-dpa
 DOCA_CFLAGS := $(shell pkg-config --cflags $(DOCA_PKGS))
 DOCA_LIBS   := $(shell pkg-config --libs   $(DOCA_PKGS))
 CRYPTO_LIBS := $(shell pkg-config --libs libcrypto)
+TLS_LIBS    := $(shell pkg-config --libs libssl)
 DOCA_LIBDIR := $(shell pkg-config --variable=libdir doca-common)
 FLEXIO_LIBDIR := /opt/mellanox/flexio/lib
 
@@ -157,6 +158,10 @@ $(TESTDIR)/peer_channel_test: tests/peer_channel_test.c doca/peer_channel.c $(LI
 	$(CC) $(CFLAGS) -D_GNU_SOURCE -o $@ tests/peer_channel_test.c doca/peer_channel.c \
 		$(CRYPTO_LIBS) $(RPATHS)
 
+$(TESTDIR)/peer_tls_test: tests/peer_tls_test.c doca/peer_tls.c doca/peer_tls.h | dirs
+	$(CC) $(CFLAGS) -o $@ tests/peer_tls_test.c doca/peer_tls.c \
+		$(TLS_LIBS) $(CRYPTO_LIBS) $(RPATHS)
+
 $(TESTDIR)/topology_gen_test: tests/topology_gen_test.c doca/topology.c doca/workload_grant.c doca/control_scope.c $(LIB_HDRS) | dirs
 	$(CC) $(CFLAGS) -o $@ tests/topology_gen_test.c doca/topology.c doca/workload_grant.c \
 		doca/control_scope.c \
@@ -177,7 +182,7 @@ $(TESTDIR)/benchmark_result_contract_test: tests/benchmark_result_contract_test.
 # hardware" is an explicit contract instead of tribal knowledge.
 HOSTFREE_TESTS := $(TESTDIR)/topology_test $(TESTDIR)/l7_abi_contract_test \
 	$(TESTDIR)/l4_pin_policy_test $(TESTDIR)/preload_api_contract_test \
-	$(TESTDIR)/benchmark_result_contract_test
+	$(TESTDIR)/benchmark_result_contract_test $(TESTDIR)/peer_tls_test
 
 test-hostfree: $(HOSTFREE_TESTS)
 	@case "$(CFLAGS)" in *-DNDEBUG*) \
@@ -188,6 +193,7 @@ test-hostfree: $(HOSTFREE_TESTS)
 	$(TESTDIR)/l4_pin_policy_test
 	$(TESTDIR)/preload_api_contract_test
 	$(TESTDIR)/benchmark_result_contract_test
+	$(TESTDIR)/peer_tls_test
 	sh tests/dma_fault_scope_test.sh
 	python3 tests/analyze_saturation_test.py
 	python3 tests/workload_attest_agent_test.py
@@ -205,7 +211,7 @@ test: $(TESTDIR)/native_api_contract_test $(TESTDIR)/native_control_state_test \
 	$(TESTDIR)/lb_policy_test \
 	$(TESTDIR)/proxy_lane_queue_test $(TESTDIR)/worker_mpsc_queue_test \
 	$(TESTDIR)/topology_test $(TESTDIR)/topology_gen_test $(TESTDIR)/peer_channel_test \
-	$(TESTDIR)/ring_counter_test \
+	$(TESTDIR)/peer_tls_test $(TESTDIR)/ring_counter_test \
 	$(TESTDIR)/l7_abi_contract_test $(TESTDIR)/benchmark_result_contract_test $(PRELOAD) \
 	$(BINDIR)/bench_dpumesh $(BINDIR)/bench_sock
 	$(TESTDIR)/native_api_contract_test
@@ -222,6 +228,7 @@ test: $(TESTDIR)/native_api_contract_test $(TESTDIR)/native_control_state_test \
 	$(TESTDIR)/topology_test
 	$(TESTDIR)/topology_gen_test
 	$(TESTDIR)/peer_channel_test
+	$(TESTDIR)/peer_tls_test
 	$(TESTDIR)/ring_counter_test
 	$(TESTDIR)/l7_abi_contract_test
 	$(TESTDIR)/benchmark_result_contract_test

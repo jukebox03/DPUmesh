@@ -8,7 +8,10 @@
  */
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include "doca/peer_channel.h"
 
@@ -961,6 +964,37 @@ static void test_simultaneous_open_converges(void)
     dmesh_peer_table_fini(&table);
 }
 
+/* The node credential is generated once and read on every later boot, and the
+ * public half travels to the controller. A key whose derivation is not stable
+ * across those two paths would publish one key and present another. */
+static void test_node_credential(void)
+{
+    char path[] = "/tmp/dmesh-node-key-XXXXXX";
+    int fd = mkstemp(path);
+    assert(fd >= 0);
+    close(fd);
+    assert(unlink(path) == 0);            /* the load generates it */
+
+    uint8_t born[32], reloaded[32], zero[32] = {0};
+    char err[160] = {0};
+    assert(dmesh_peer_node_key_load(path, born, err, sizeof(err)) == 0);
+    assert(memcmp(born, zero, sizeof(zero)) != 0);
+
+    struct stat st;
+    assert(stat(path, &st) == 0);
+    assert(st.st_size == 32);
+    assert((st.st_mode & 077) == 0);      /* the private half stays private */
+
+    assert(dmesh_peer_node_key_load(path, reloaded, err, sizeof(err)) == 0);
+    assert(memcmp(born, reloaded, sizeof(born)) == 0);
+
+    /* A credential the node did not write is refused rather than adopted. */
+    assert(chmod(path, 0644) == 0);
+    assert(dmesh_peer_node_key_load(path, reloaded, err, sizeof(err)) < 0);
+    assert(err[0] != '\0');
+    assert(unlink(path) == 0);
+}
+
 int main(void)
 {
     for (int i = 0; i < 32; i++) {
@@ -984,6 +1018,7 @@ int main(void)
     test_source_wire_runtime();
     test_pending_writer_and_accepted_channel();
     test_simultaneous_open_converges();
+    test_node_credential();
     printf("peer_channel_test: PASS\n");
     return 0;
 }
