@@ -456,11 +456,16 @@ still a trade: an audit requirement that reads "the proxy encrypts every hop" is
 not met by this deployment, and the same annotation that keeps the data path
 working is what makes discovery withhold the endpoint identity.
 
-**Thirty-two Pods per node.** A node serves the smaller of `MAX_PODS` and
-`MAX_DPA_RINGS × N / K`. This BlueField reports 32 execution units and the
-deployment runs eight rings per Pod, so the ring array offers exactly 32 slots
-and `MAX_PODS` is also 32; the two meet, and raising either alone buys nothing.
-The wire format itself reaches 127.
+**Pod density is the K dial.** A node serves the smaller of `MAX_PODS` — 127,
+the `int8` wire ceiling — and `MAX_DPA_RINGS × N / K`. This BlueField reports
+32 execution units, so eight rings per Pod seat 32 Pods and two seat 127; what
+a lower K trades away is per-Pod parallelism, including the ARM data workers it
+caps at A ≤ K. A `K = 2` deployment has been run at 48 Pods of one Service
+(`data/scale-20260825-172249/stages.csv`, 7 of 7): all 48 Ready in 26 s — under
+the fail-closed shim Ready is itself the registration proof — zero table
+refusals, 1.41 M requests without a failure, and a drain in steps of eight with
+no DPU error line. 127 itself has not been run, and near the ceiling ARM DRAM
+binds first: each live Pod holds 64 MB of DPU staging.
 
 **Cross-node destinations are refused.** The peer channel's RDMA transport is not
 bound, so every deployment measured here is one node and a Service whose only
@@ -482,7 +487,7 @@ replicas are elsewhere has no route.
   and `bench/suite/inject.sh`. Policy through surfaces decided 45 of 45 in
   `data/policy-route-20260824-095824/stages.csv`; the corrected balancing scope
   decided 21 of 21 in `data/policy-route-lb-20260824-judge-v3/stages.csv`; and
-  injection decided 7 of 7 in `data/inject-20260824-103742/stages.csv`. The LB
+  injection decided 9 of 9 in `data/inject-20260825-170137/stages.csv`. The LB
   rows in the earlier combined artifact carried no verdict and are not evidence.
 - Every one of the 99 performance points carried `fail=0 drops=0 overflow=0
   worker_fail=0 reorder=0`, and every session-cost point carried `fail=0 drops=0

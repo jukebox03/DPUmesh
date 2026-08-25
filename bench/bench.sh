@@ -583,7 +583,10 @@ wait_linkerd_ready() {
     local base_addr="${LINKERD_ADMIN_ADDR:-127.0.0.1:4191}"
     local base_port="${base_addr##*:}"
     local selection="${DPUMESH_L7_LINKERD_WORKER:-0}"
-    local workers="${DPUMESH_ARM_WORKERS:-1}"
+    # The DPU clamps A to K (A <= K, K % A == 0), so the Linkerd workers that
+    # will actually exist are the clamped count, not the requested env value.
+    local workers
+    workers=$(linkerd_worker_count)
     local timeout_s="${LINKERD_READY_TIMEOUT:-30}"
     local ports="$base_port"
     if [ "$selection" = all ]; then

@@ -28,7 +28,7 @@
 #define STOP_GRACE_SEC     15         /* watchdog kill margin past the run duration */
 #define DRAIN_GRACE_SEC    1.0        /* finish replies already issued at measurement end */
 #define REQ_FILL           42
-#define BENCH_MAX_BACKENDS 32         /* pod_id space we tally replies over (>= MAX_PODS) */
+#define BENCH_MAX_BACKENDS 128        /* pod_id space we tally replies over (>= MAX_PODS) */
 #define MAX_DST_SERVICES   MAX_THREADS /* at most one distinct destination per worker */
 #define INFLIGHT_RING      (1u << 16) /* seq-indexed outstanding requests */
 #define OPEN_CAP           (INFLIGHT_RING / 2)

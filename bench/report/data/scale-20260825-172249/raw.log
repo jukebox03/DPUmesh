@@ -1,0 +1,122 @@
+
+=== S0 — DPU banner
+    banner: [08:21:47:846529][2332987424][DOCA][WRN][dpu_proxy.c:5577][px_init] DPU PROXY MODE ON (run-to-completion SG-DMA, N/K/A=32/2/2; l7-mode-lists=2, l7-layer=attached, l7-worker=all, l7-policy=fail-closed, lb=round-robin; passthru=conn-pinned, sg_pieces=64)
+    S0 [PASS] deployed K: expected=2 observed=2 N/K/A=32/2/2
+
+=== S1 — webhook
+serviceaccount/dpumesh-webhook unchanged
+clusterrole.rbac.authorization.k8s.io/dpumesh-webhook unchanged
+clusterrolebinding.rbac.authorization.k8s.io/dpumesh-webhook unchanged
+service/dpumesh-webhook unchanged
+deployment.apps/dpumesh-webhook created
+mutatingwebhookconfiguration.admissionregistration.k8s.io/dpumesh-inject created
+Waiting for deployment "dpumesh-webhook" rollout to finish: 0 of 1 updated replicas are available...
+deployment "dpumesh-webhook" successfully rolled out
+    S1 [PASS] webhook serving: expected=ready observed=ready 
+
+=== S2 — scale inject-echo to 48
+deployment.apps/inject-echo unchanged
+service/inject-sock unchanged
+deployment.apps/plain-echo unchanged
+service/plain-sock unchanged
+deployment.apps/inject-bench unchanged
+service/inject-bench unchanged
+deployment.apps/plain-bench unchanged
+service/plain-bench unchanged
+deployment.apps/inject-bench scaled
+deployment.apps/inject-echo scaled
+    S2 [PASS] replicas Ready: expected=48 observed=48 elapsed=26s restarts=39
+NAME                          READY   STATUS    RESTARTS      AGE   IP             NODE      NOMINATED NODE   READINESS GATES
+inject-echo-6857bff6f-2hvs9   1/1     Running   1 (23s ago)   25s   10.244.0.197   rapids4   <none>           <none>
+inject-echo-6857bff6f-2xlnh   1/1     Running   2 (23s ago)   24s   10.244.0.211   rapids4   <none>           <none>
+inject-echo-6857bff6f-45l4h   1/1     Running   2 (23s ago)   25s   10.244.0.180   rapids4   <none>           <none>
+inject-echo-6857bff6f-4dkvl   1/1     Running   0             25s   10.244.0.175   rapids4   <none>           <none>
+inject-echo-6857bff6f-4fmz6   1/1     Running   2 (22s ago)   25s   10.244.0.185   rapids4   <none>           <none>
+inject-echo-6857bff6f-5xpxb   1/1     Running   2 (23s ago)   25s   10.244.0.171   rapids4   <none>           <none>
+inject-echo-6857bff6f-8cqbf   1/1     Running   0             25s   10.244.0.173   rapids4   <none>           <none>
+inject-echo-6857bff6f-8fkxc   1/1     Running   0             25s   10.244.0.168   rapids4   <none>           <none>
+inject-echo-6857bff6f-9smvd   1/1     Running   0             25s   10.244.0.172   rapids4   <none>           <none>
+inject-echo-6857bff6f-9z2gv   1/1     Running   1 (24s ago)   25s   10.244.0.181   rapids4   <none>           <none>
+inject-echo-6857bff6f-btsqn   1/1     Running   0             25s   10.244.0.174   rapids4   <none>           <none>
+inject-echo-6857bff6f-c57kc   1/1     Running   0             26s   10.244.0.164   rapids4   <none>           <none>
+inject-echo-6857bff6f-dqhjs   1/1     Running   1 (25s ago)   25s   10.244.0.176   rapids4   <none>           <none>
+inject-echo-6857bff6f-dt8tl   1/1     Running   1 (24s ago)   25s   10.244.0.192   rapids4   <none>           <none>
+inject-echo-6857bff6f-dvttw   1/1     Running   1 (24s ago)   25s   10.244.0.182   rapids4   <none>           <none>
+inject-echo-6857bff6f-dw7cp   1/1     Running   2 (23s ago)   24s   10.244.0.207   rapids4   <none>           <none>
+inject-echo-6857bff6f-fj8mk   1/1     Running   1 (24s ago)   25s   10.244.0.191   rapids4   <none>           <none>
+inject-echo-6857bff6f-g62c8   1/1     Running   1 (25s ago)   25s   10.244.0.177   rapids4   <none>           <none>
+inject-echo-6857bff6f-gpg75   1/1     Running   0             24s   10.244.0.210   rapids4   <none>           <none>
+inject-echo-6857bff6f-hqxjt   1/1     Running   0             25s   10.244.0.167   rapids4   <none>           <none>
+inject-echo-6857bff6f-j97dw   1/1     Running   2 (22s ago)   24s   10.244.0.200   rapids4   <none>           <none>
+inject-echo-6857bff6f-jkjbk   1/1     Running   1 (23s ago)   24s   10.244.0.208   rapids4   <none>           <none>
+inject-echo-6857bff6f-k67m2   1/1     Running   1 (24s ago)   25s   10.244.0.187   rapids4   <none>           <none>
+inject-echo-6857bff6f-kpghr   1/1     Running   0             25s   10.244.0.198   rapids4   <none>           <none>
+inject-echo-6857bff6f-ldgr7   1/1     Running   0             25s   10.244.0.196   rapids4   <none>           <none>
+inject-echo-6857bff6f-m2fmc   1/1     Running   0             25s   10.244.0.199   rapids4   <none>           <none>
+inject-echo-6857bff6f-m68m5   1/1     Running   1 (24s ago)   25s   10.244.0.186   rapids4   <none>           <none>
+inject-echo-6857bff6f-msv2b   1/1     Running   1 (24s ago)   25s   10.244.0.193   rapids4   <none>           <none>
+inject-echo-6857bff6f-p2d4s   1/1     Running   0             24s   10.244.0.203   rapids4   <none>           <none>
+inject-echo-6857bff6f-p54hc   1/1     Running   2 (22s ago)   24s   10.244.0.201   rapids4   <none>           <none>
+inject-echo-6857bff6f-p6ptm   1/1     Running   1 (24s ago)   25s   10.244.0.183   rapids4   <none>           <none>
+inject-echo-6857bff6f-pd6hb   1/1     Running   1 (23s ago)   24s   10.244.0.209   rapids4   <none>           <none>
+inject-echo-6857bff6f-pp49c   1/1     Running   1 (23s ago)   24s   10.244.0.205   rapids4   <none>           <none>
+inject-echo-6857bff6f-qvn45   1/1     Running   2 (23s ago)   25s   10.244.0.178   rapids4   <none>           <none>
+inject-echo-6857bff6f-rdq9t   1/1     Running   0             24s   10.244.0.204   rapids4   <none>           <none>
+inject-echo-6857bff6f-rh7ds   1/1     Running   1 (24s ago)   25s   10.244.0.179   rapids4   <none>           <none>
+inject-echo-6857bff6f-rssjw   1/1     Running   0             24s   10.244.0.202   rapids4   <none>           <none>
+inject-echo-6857bff6f-s6nhc   1/1     Running   0             25s   10.244.0.169   rapids4   <none>           <none>
+inject-echo-6857bff6f-sblth   1/1     Running   2 (23s ago)   25s   10.244.0.194   rapids4   <none>           <none>
+inject-echo-6857bff6f-szvmv   1/1     Running   1 (24s ago)   25s   10.244.0.184   rapids4   <none>           <none>
+inject-echo-6857bff6f-tj456   1/1     Running   2 (23s ago)   25s   10.244.0.188   rapids4   <none>           <none>
+inject-echo-6857bff6f-tmj97   1/1     Running   0             25s   10.244.0.189   rapids4   <none>           <none>
+inject-echo-6857bff6f-w5g7j   1/1     Running   0             25s   10.244.0.195   rapids4   <none>           <none>
+inject-echo-6857bff6f-xfjfw   1/1     Running   0             26s   10.244.0.166   rapids4   <none>           <none>
+inject-echo-6857bff6f-xzffm   1/1     Running   2 (22s ago)   24s   10.244.0.206   rapids4   <none>           <none>
+inject-echo-6857bff6f-zbf2b   1/1     Running   0             25s   10.244.0.170   rapids4   <none>           <none>
+inject-echo-6857bff6f-zrvng   1/1     Running   1 (24s ago)   25s   10.244.0.190   rapids4   <none>           <none>
+inject-echo-6857bff6f-zvpzt   1/1     Running   0             26s   10.244.0.165   rapids4   <none>           <none>
+    pod/inject-bench-66bd76df9d-mj8ts condition met
+
+=== S3 — table admission
+    S3 [PASS] table-full refusals: expected=0 observed=0 
+
+=== S4 — traffic (4 rounds x 16 conns, round-robin over 48 backends)
+    DPU admin ports: 4191 4192
+S4 round 1 | OK mrps=0.035413 gbps=0.3014 req_gbps=0.2946 resp_gbps=0.0068 p50=450.00 p95=559.00 p99=649.00 p999=1259.00 p9999=3148.00 avg=449.22 min=92.74 max=5852.54 rcnt=352503 scheduled=354119 pending=16 fail=0 conc=1 threads=16 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.035413 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const grabs=16 rets=16 recyc=768 waits=0 pads=0 wwin=0 wpool=0
+    round 1: rcnt=352503 fail=0
+S4 round 2 | OK mrps=0.035128 gbps=0.2990 req_gbps=0.2923 resp_gbps=0.0067 p50=449.00 p95=559.00 p99=655.00 p999=1159.00 p9999=2956.00 avg=452.86 min=95.14 max=13434.02 rcnt=349324 scheduled=350940 pending=16 fail=0 conc=1 threads=16 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.035128 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const grabs=16 rets=16 recyc=768 waits=0 pads=0 wwin=0 wpool=0
+    round 2: rcnt=349324 fail=0
+S4 round 3 | OK mrps=0.035483 gbps=0.3020 req_gbps=0.2952 resp_gbps=0.0068 p50=448.00 p95=558.00 p99=650.00 p999=1136.00 p9999=3004.00 avg=448.30 min=96.71 max=4606.92 rcnt=353752 scheduled=355368 pending=16 fail=0 conc=1 threads=16 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.035483 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const grabs=16 rets=16 recyc=768 waits=0 pads=0 wwin=0 wpool=0
+    round 3: rcnt=353752 fail=0
+S4 round 4 | OK mrps=0.035515 gbps=0.3023 req_gbps=0.2955 resp_gbps=0.0068 p50=449.00 p95=562.00 p99=652.00 p999=1316.00 p9999=4768.00 avg=447.95 min=93.29 max=9351.12 rcnt=353733 scheduled=355349 pending=16 fail=0 conc=1 threads=16 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.035515 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const grabs=16 rets=16 recyc=771 waits=0 pads=0 wwin=0 wpool=0
+    round 4: rcnt=353733 fail=0
+    S4 [PASS] traffic rounds clean: expected=0 observed=0 rcnt_total=1409312 admitted+=38
+
+=== S5 — data-path health at full scale
+    S5 [PASS] DPU error lines: expected=0 observed=0 
+
+=== S6 — drain in steps
+deployment.apps/inject-echo scaled
+    scaled to 40 (ready=48)
+deployment.apps/inject-echo scaled
+    scaled to 32 (ready=40)
+deployment.apps/inject-echo scaled
+    scaled to 24 (ready=32)
+deployment.apps/inject-echo scaled
+    scaled to 16 (ready=24)
+deployment.apps/inject-echo scaled
+    scaled to 8 (ready=16)
+deployment.apps/inject-echo scaled
+    scaled to 0 (ready=8)
+    S6 [PASS] drain error lines: expected=0 observed=0 
+
+=== receipts
+
+=== campaign: 7 pass, 0 fail (out: /home/jukebox/DPUmesh/bench/report/data/scale-20260825-172249)
+
+=== cleanup
+deployment.apps/inject-echo scaled
+deployment.apps/inject-bench scaled
+mutatingwebhookconfiguration.admissionregistration.k8s.io "dpumesh-inject" deleted
+deployment.apps "dpumesh-webhook" deleted
+    workloads scaled to zero; webhook and its registration removed

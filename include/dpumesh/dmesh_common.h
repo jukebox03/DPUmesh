@@ -13,8 +13,10 @@
 #error "MAX_DPA_EU exceeds the uint32_t DPA ADD/DEL ACK masks"
 #endif
 
-/* Pod-state table capacity. */
-#define MAX_PODS   32
+/* Pod-state table capacity: the full int8 wire ceiling. The live cap is
+ * min(MAX_PODS, MAX_DPA_RINGS * N / K), so ring capacity — K at deploy time —
+ * decides how much of this table a node can actually seat. */
+#define MAX_PODS   127
 
 /* Complete nonnegative int8 pod-id space. */
 #define POD_ID_SPACE        128

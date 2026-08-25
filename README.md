@@ -294,8 +294,9 @@ is the same access written by hand.
 ### What to expect from the mesh
 
 - A Service's Pods must be on a node running `dpumesh_dpu`. That node serves the
-  smaller of `MAX_PODS` and its forward-ring supply — execution units times eight
-  rings, divided by the rings each Pod spans. Both are 32 on this BlueField.
+  smaller of `MAX_PODS` (127, the wire ceiling) and its forward-ring supply —
+  execution units times eight rings, divided by the K rings each Pod spans: on
+  this BlueField 32 Pods at the benchmark's `K = 8`, 127 at `K = 2`.
 - The deployment assigns each Service a protocol treatment, and the surface its
   Pods use does not decide it: an opaque Service is a byte stream, and a
   protocol-aware one takes Linkerd's HTTP/1, HTTP/2 or gRPC path. Policy,

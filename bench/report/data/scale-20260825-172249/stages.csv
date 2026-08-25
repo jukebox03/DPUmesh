@@ -1,0 +1,8 @@
+stage,subject,expected,observed,verdict,detail
+S0,deployed K,2,2,PASS,N/K/A=32/2/2
+S1,webhook serving,ready,ready,PASS,
+S2,replicas Ready,48,48,PASS,elapsed=26s restarts=39
+S3,table-full refusals,0,0,PASS,
+S4,traffic rounds clean,0,0,PASS,rcnt_total=1409312 admitted+=38
+S5,DPU error lines,0,0,PASS,
+S6,drain error lines,0,0,PASS,

@@ -44,8 +44,9 @@ item below names the arm that closes it.
 
 # Function
 
-Four items are open: a Go surface, the transport under the cross-node seam,
-node density, and the kernel road around the mesh.
+Three items are open: a Go surface, the transport under the cross-node seam,
+and the kernel road around the mesh. Node density is settled at the wire
+ceiling; F7 keeps its two deeper levers, both unscheduled.
 
 ## F4 Workloads `LD_PRELOAD` cannot reach
 
@@ -94,24 +95,29 @@ transport. The remaining work is the half below the seam.
 ## F7 Node density
 
 A node serves the smaller of two caps, and they bind on different hardware and
-do not cost the same to move. Nodes routinely run more Pods than the 32 that
-answers today, so this is a real limit.
+do not cost the same to move. `MAX_PODS` sits at the wire ceiling of 127 — pod
+ids travel as `int8_t` with `-1` reserved, and `_Static_assert(MAX_PODS <= 127)`
+holds the line — so ring supply is what binds, and K sets it at deploy time. A
+`K = 2` deployment has been run at 48 Pods of one Service
+(`bench/report/data/scale-20260825-172249/stages.csv`, 7 of 7): all Ready in
+26 s, zero `table full` refusals, 1.41 M requests at fail=0, and a drain in
+steps of eight with zero DPU error lines.
 
 | Constant | Value | Where | What it bounds |
 |---|---:|---|---|
 | `MAX_DPA_RINGS` | 8 | `include/dpumesh/dmesh_common.h` | forward rings one execution unit can hold |
 | execution units (N) | 32 | device query at start-up | EUs the BlueField reports |
 | `DPUMESH_RINGS_PER_POD_DEFAULT` (K) | 2 | `include/dpumesh/dmesh_common.h` | EUs one Pod spans |
-| `MAX_PODS` | 32 | `include/dpumesh/dmesh_common.h` | registration slots the ARM holds |
+| `MAX_PODS` | 127 | `include/dpumesh/dmesh_common.h` | registration slots the ARM holds |
 | `POD_ID_SPACE` | 128 | `include/dpumesh/dmesh_common.h` | Service-id keyed tables |
 
 N is read from the device and `DPA_THREADS_DEFAULT = 8` is only the fallback
 when that query is unavailable, so N comes from the deploy log
 (`dpa_threads='32'`) and never from the constant. At the default K, `8 × 32 / 2 = 128` ring slots
-back 32 registration slots, so `MAX_PODS` is what binds. The bench deployment
-runs `K = 8`, which leaves exactly 32 ring slots for those 32 Pods: density and
-per-Pod throughput are the same dial, and the harness has it turned to
-throughput.
+back 127 registration slots — the two meet at the wire ceiling. The bench
+deployment runs `K = 8`, which leaves 32 ring slots and seats 32 Pods: density
+and per-Pod throughput are the same dial — K also caps the ARM data workers at
+A ≤ K — and the harness has it turned to throughput.
 
 **The ring array is not the constraint.** `MAX_DPA_RINGS` sizes five arrays in
 `struct dpa_thread_arg`, one copy per EU in device memory, at 68 bytes per ring
@@ -126,8 +132,8 @@ Two other things are.
   host memory, so an idle slot costs nothing and occupancy costs everything: at
   `K = 2`, 127 Pods put roughly eight rings on every EU, which is eight
   control-block reads per poll instead of the two a lightly loaded node does.
-  That figure cannot be measured off this deployment; it needs a node carrying
-  that many Pods.
+  That 48-Pod run put three rings on an EU; the eight a full 127 puts there is
+  still unmeasured.
 - **The DPA kernel is device code with its own toolchain.**
   `doca/device/dpa_kernel.c` is compiled by `dpacc` on the BlueField, not by the
   host build. Changing `MAX_DPA_RINGS` touches no wire format — `dpa_ring_info`
@@ -137,12 +143,6 @@ Two other things are.
 
 Ordered by cost:
 
-- [ ] **`MAX_PODS = 127`.** A host constant, no DPA change, no wire-format
-  change: pod ids travel as `int8_t` in `comch_dma_comp_msg` and `struct
-  px_unit` with `-1` reserved, and `_Static_assert(MAX_PODS <= 127)` holds the
-  line. `POD_ID_SPACE` is 128 and moves with it. At the default `K` this
-  hardware's 128 ring slots already back it, so this is the whole move up to 127
-  Pods.
 - [ ] `MAX_DPA_RINGS = 16` — 17 KiB more device memory, a `dpacc` rebuild, a
   paired redeploy, and a per-poll scan that doubles at full occupancy. Needed
   only for a device with fewer EUs than this one, or for `K` above 2.
@@ -155,7 +155,10 @@ Lowering `K` buys ring slots this hardware does not need, and what it costs is
 per-Pod parallelism: a Pod spanning one EU has its forward traffic served by one
 EU's DMA budget. Which way that goes depends on whether the node's Pods are
 individually hot or collectively many. No number is published as supported until
-a node has been run at it; today's supportable claim is 32.
+a node has been run at it; today's supportable claims are 32 at `K = 8` and 48
+at `K = 2`. Near the 127 ceiling ARM DRAM binds first: each live Pod holds
+64 MB of DPU staging that is not returned below the node's high-watermark,
+about 8 GB at 127.
 
 ## F8 The kernel road around the mesh
 
@@ -416,9 +419,6 @@ figure sits inside the synchronous call.**
 
 ## O1 Attribute what is left of a session
 
-- [x] Cache immutable templates and share per-workload stacks. Shipped and
-  measured; `dmesh_session_stack_cache_hits_total` climbs while
-  `dmesh_session_stack_builds_total` stays flat.
 - [ ] Instrument the untimed remainder of the **current** 0.4–0.5 ms: policy
   discovery, destination and profile discovery, reconnect layers, endpoint
   construction and balancer construction. Extend `SessionMetrics` rather than

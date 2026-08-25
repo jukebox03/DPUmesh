@@ -1,0 +1,150 @@
+[08:21:40:240178][2332987424][DOCA][INF][doca_log.cpp:628] DOCA version 3.1.0105
+[08:21:40:240639][2332987424][DOCA][INF][control_scope.c:61][dmesh_scope_configure] control-plane scope mediated by 192.168.100.1:28089
+[08:21:40:270707][2332987424][DOCA][WRN][dpu_worker.c:821][run_dpu_worker] Requested data topology: K/A=2/2 (N finalized after DPA query)
+[08:21:40:270749][2332987424][DOCA][WRN][dpu_worker.c:823][run_dpu_worker] ARM DATA WORKERS = 2
+[08:21:43:229877][2332987424][DOCA][WRN][dpa.c:465][init_dpa_objects] Connection-affine topology active: N/K/A=32/2/2 (EU%A == ring%A == port%A)
+[08:21:44:115110][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad5090090: ctx DPA ops are empty
+[08:21:44:220039][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad4fb5f20: ctx DPA ops are empty
+[08:21:44:262455][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad514d090: ctx DPA ops are empty
+[08:21:44:319184][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad5205110: ctx DPA ops are empty
+[08:21:44:361400][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad5208090: ctx DPA ops are empty
+[08:21:44:418555][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad5296d70: ctx DPA ops are empty
+[08:21:44:460774][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad52c3090: ctx DPA ops are empty
+[08:21:44:517391][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad537b1a0: ctx DPA ops are empty
+[08:21:44:559687][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad537e090: ctx DPA ops are empty
+[08:21:44:616324][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad5379340: ctx DPA ops are empty
+[08:21:44:658746][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad5436ce0: ctx DPA ops are empty
+[08:21:44:715446][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad546d930: ctx DPA ops are empty
+[08:21:44:757736][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad5377520: ctx DPA ops are empty
+[08:21:44:814237][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad5525b80: ctx DPA ops are empty
+[08:21:44:856418][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad55a64e0: ctx DPA ops are empty
+[08:21:44:912893][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad5659010: ctx DPA ops are empty
+[08:21:44:955083][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad565bbe0: ctx DPA ops are empty
+[08:21:45:011417][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad56f0b00: ctx DPA ops are empty
+[08:21:45:054209][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad5716680: ctx DPA ops are empty
+[08:21:45:186226][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad5660cc0: ctx DPA ops are empty
+[08:21:45:229038][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad57d25a0: ctx DPA ops are empty
+[08:21:45:285937][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad5809c30: ctx DPA ops are empty
+[08:21:45:328339][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad588a8c0: ctx DPA ops are empty
+[08:21:45:385443][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad593f2c0: ctx DPA ops are empty
+[08:21:45:428016][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad5943c30: ctx DPA ops are empty
+[08:21:45:485133][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad597a420: ctx DPA ops are empty
+[08:21:45:527811][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad59f7bc0: ctx DPA ops are empty
+[08:21:45:585151][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad5aaf2c0: ctx DPA ops are empty
+[08:21:45:627618][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad5ab3bd0: ctx DPA ops are empty
+[08:21:45:684572][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad5b67120: ctx DPA ops are empty
+[08:21:45:727131][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad57ba010: ctx DPA ops are empty
+[08:21:45:784656][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad5ba2480: ctx DPA ops are empty
+[08:21:45:827320][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad5c23050: ctx DPA ops are empty
+[08:21:45:884388][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad5cd7580: ctx DPA ops are empty
+[08:21:45:927278][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad5cdcbe0: ctx DPA ops are empty
+[08:21:45:984079][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad5d905a0: ctx DPA ops are empty
+[08:21:46:026566][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad5d944e0: ctx DPA ops are empty
+[08:21:46:083501][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad5dcc5a0: ctx DPA ops are empty
+[08:21:46:202105][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad5e4d4e0: ctx DPA ops are empty
+[08:21:46:259603][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad5f01520: ctx DPA ops are empty
+[08:21:46:302323][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad5f05050: ctx DPA ops are empty
+[08:21:46:359264][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad5f3c9c0: ctx DPA ops are empty
+[08:21:46:402194][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad5fbd4e0: ctx DPA ops are empty
+[08:21:46:459612][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad5ff4530: ctx DPA ops are empty
+[08:21:46:502299][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad6071cf0: ctx DPA ops are empty
+[08:21:46:560021][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad60ac770: ctx DPA ops are empty
+[08:21:46:602668][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad6129d20: ctx DPA ops are empty
+[08:21:46:659842][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad6166680: ctx DPA ops are empty
+[08:21:46:702817][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad61e3c90: ctx DPA ops are empty
+[08:21:46:760036][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad629b220: ctx DPA ops are empty
+[08:21:46:802821][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad629fbb0: ctx DPA ops are empty
+[08:21:46:860118][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad62d6290: ctx DPA ops are empty
+[08:21:46:903062][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad6353be0: ctx DPA ops are empty
+[08:21:46:960136][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad638e3c0: ctx DPA ops are empty
+[08:21:47:002972][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad640bc10: ctx DPA ops are empty
+[08:21:47:060082][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad64c3300: ctx DPA ops are empty
+[08:21:47:102645][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad64c7c60: ctx DPA ops are empty
+[08:21:47:160280][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad64fe320: ctx DPA ops are empty
+[08:21:47:278408][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad657bc00: ctx DPA ops are empty
+[08:21:47:336095][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad6632010: ctx DPA ops are empty
+[08:21:47:378934][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad6636750: ctx DPA ops are empty
+[08:21:47:436586][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad660e390: ctx DPA ops are empty
+[08:21:47:479318][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad66ee090: ctx DPA ops are empty
+[08:21:47:536758][2332987424][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaad6729420: ctx DPA ops are empty
+[08:21:47:846529][2332987424][DOCA][WRN][dpu_proxy.c:5577][px_init] DPU PROXY MODE ON (run-to-completion SG-DMA, N/K/A=32/2/2; l7-mode-lists=2, l7-layer=attached, l7-worker=all, l7-policy=fail-closed, lb=round-robin; passthru=conn-pinned, sg_pieces=64)
+[l7_linkerd] worker 0: Service test-bench/preload-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 0: Service test-bench/preload-sock has no interned id yet; target pending
+[l7_linkerd] worker 0: Service test-bench/loopback-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 0: Service test-bench/http1-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 0: Service test-bench/echo-grpc-alt has no interned id yet; target pending
+[l7_linkerd] worker 0: Service test-bench/echo-grpc-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 0: Service test-bench/verbs-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 0: Service test-bench/echo-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 1: Service test-bench/verbs-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 1: Service test-bench/preload-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 1: Service test-bench/preload-sock has no interned id yet; target pending
+[l7_linkerd] worker 1: Service test-bench/echo-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 1: Service test-bench/echo-grpc-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 1: Service test-bench/echo-grpc-alt has no interned id yet; target pending
+[l7_linkerd] worker 1: Service test-bench/http1-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 1: Service test-bench/loopback-dpumesh has no interned id yet; target pending
+[08:21:47:870164][2332987424][DOCA][WRN][dpu_worker.c:932][run_dpu_worker] ARM DATA WORKER THREADS = 2
+[08:21:47:870223][2332987424][DOCA][WRN][dpu_worker.c:963][run_dpu_worker] MAIN CONTROL/DOORBELL: workers=2, notification-driven (1 ms backstop tick)
+[l7_linkerd] worker 1: Service test-bench/verbs-dpumesh now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/preload-dpumesh now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/preload-sock now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/echo-dpumesh now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/echo-grpc-dpumesh now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/echo-grpc-alt now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/http1-dpumesh now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/loopback-dpumesh now resolves in the held topology
+[08:22:27:868293][1825749408][DOCA][WRN][dpu_proxy.c:2520][px_peer_stats_report] proxy: worker 0 peer poison=0 refused=none inbound admitted=2 denied=0 no-policy=0 mixed-callee-unprotected=0 peer-pin-conflict=0
+[08:22:37:868455][1825749408][DOCA][WRN][dpu_proxy.c:2520][px_peer_stats_report] proxy: worker 0 peer poison=0 refused=none inbound admitted=3 denied=0 no-policy=0 mixed-callee-unprotected=0 peer-pin-conflict=0
+[08:23:47:872706][1825749408][DOCA][WRN][dpu_proxy.c:2520][px_peer_stats_report] proxy: worker 0 peer poison=0 refused=none inbound admitted=19 denied=0 no-policy=0 mixed-callee-unprotected=0 peer-pin-conflict=0
+[08:23:57:873105][1744824736][DOCA][WRN][dpu_proxy.c:2520][px_peer_stats_report] proxy: worker 1 peer poison=0 refused=none inbound admitted=25 denied=0 no-policy=10 mixed-callee-unprotected=0 peer-pin-conflict=0
+[08:24:07:873384][1825749408][DOCA][WRN][dpu_proxy.c:2520][px_peer_stats_report] proxy: worker 0 peer poison=0 refused=none inbound admitted=25 denied=0 no-policy=26 mixed-callee-unprotected=0 peer-pin-conflict=0
+[08:24:17:873709][1744824736][DOCA][WRN][dpu_proxy.c:2520][px_peer_stats_report] proxy: worker 1 peer poison=0 refused=none inbound admitted=41 denied=0 no-policy=26 mixed-callee-unprotected=0 peer-pin-conflict=0
+[08:24:41:138550][2332987424][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=21 pod_id=21 service_id=20 pod_uid=0245c5c6-fb19-4aa7-bb8b-172796781c44 generation=1787646278796656068 revocations=1
+[08:24:41:138606][2332987424][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=24 pod_id=24 service_id=20 pod_uid=07d74529-062a-4fbb-97c6-1391d9c54444 generation=1787646278796656068 revocations=2
+[08:24:41:138620][2332987424][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=27 pod_id=27 service_id=20 pod_uid=07c727f7-d60e-4844-9666-8331be714168 generation=1787646278796656068 revocations=3
+[08:24:41:138636][2332987424][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=38 pod_id=38 service_id=20 pod_uid=0dd05b75-70ab-4331-8991-68a5538678b4 generation=1787646278796656068 revocations=4
+[08:24:41:138651][2332987424][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=45 pod_id=45 service_id=20 pod_uid=1b89a0c7-7f3f-4a4e-aab8-281bb3f4e36f generation=1787646278796656068 revocations=5
+[08:24:41:138661][2332987424][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=48 pod_id=48 service_id=20 pod_uid=33dcf83e-4152-43a0-9afa-e5d14961d425 generation=1787646278796656068 revocations=6
+[08:24:41:138730][2332987424][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=51 pod_id=51 service_id=20 pod_uid=12b32a51-5e46-4cc8-a349-dcba16d5b965 generation=1787646278796656068 revocations=7
+[08:24:41:138745][2332987424][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=53 pod_id=53 service_id=20 pod_uid=2a87dc00-5766-4cc3-84b7-48182f9a932a generation=1787646278796656068 revocations=8
+[08:25:00:985355][2332987424][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=14 pod_id=14 service_id=20 pod_uid=468a0ec8-6e24-46a7-b35f-1099f914f8e2 generation=1787646298836563252 revocations=9
+[08:25:00:985416][2332987424][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=28 pod_id=28 service_id=20 pod_uid=424f94c7-b5d1-4a3b-91d9-3fc01fb9cc80 generation=1787646298836563252 revocations=10
+[08:25:00:985432][2332987424][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=35 pod_id=35 service_id=20 pod_uid=1414a1a7-3c7a-4783-aa9e-e680f97d74f0 generation=1787646298836563252 revocations=11
+[08:25:00:985443][2332987424][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=37 pod_id=37 service_id=20 pod_uid=3cbd0817-6bcd-4e19-bc3f-2894b3701ab1 generation=1787646298836563252 revocations=12
+[08:25:00:985461][2332987424][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=52 pod_id=52 service_id=20 pod_uid=127df0da-4119-4724-b1ef-dbee5dba6a79 generation=1787646298836563252 revocations=13
+[08:25:00:985471][2332987424][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=56 pod_id=56 service_id=20 pod_uid=23674fc2-da56-425e-a226-531f11625595 generation=1787646298836563252 revocations=14
+[08:25:00:985481][2332987424][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=57 pod_id=57 service_id=20 pod_uid=4c535f82-8dcc-4182-8b64-7e33540c5e12 generation=1787646298836563252 revocations=15
+[08:25:00:985492][2332987424][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=60 pod_id=60 service_id=20 pod_uid=39d9ddf9-039b-4e44-82db-5c43150e50c1 generation=1787646298836563252 revocations=16
+[08:25:20:813436][2332987424][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=17 pod_id=17 service_id=20 pod_uid=51fbc0a6-e653-45f8-ac9a-750ed21c96ce generation=1787646318873880895 revocations=17
+[08:25:20:813490][2332987424][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=19 pod_id=19 service_id=20 pod_uid=236bf234-b07c-4565-bed0-a4c458c58c0e generation=1787646318873880895 revocations=18
+[08:25:20:813504][2332987424][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=23 pod_id=23 service_id=20 pod_uid=10be67c9-d74c-494e-b0b8-fd66027801f3 generation=1787646318873880895 revocations=19
+[08:25:20:813516][2332987424][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=31 pod_id=31 service_id=20 pod_uid=4ee3826b-93f0-437d-bb19-72c0815d2121 generation=1787646318873880895 revocations=20
+[08:25:20:813529][2332987424][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=39 pod_id=39 service_id=20 pod_uid=1798db13-028d-4fb5-9e53-cd1022b5e8ab generation=1787646318873880895 revocations=21
+[08:25:20:813535][2332987424][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=40 pod_id=40 service_id=20 pod_uid=5bbeb0d3-08c6-4322-9977-6ea384be1fb4 generation=1787646318873880895 revocations=22
+[08:25:20:813545][2332987424][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=43 pod_id=43 service_id=20 pod_uid=39500daa-daa2-4c6a-b595-391e304fa1ff generation=1787646318873880895 revocations=23
+[08:25:20:813617][2332987424][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=49 pod_id=49 service_id=20 pod_uid=5985659b-b87a-4196-8f35-ebef827b79f4 generation=1787646318873880895 revocations=24
+[08:25:39:918195][2332987424][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=20 pod_id=20 service_id=20 pod_uid=6d96fc5e-f608-4ccd-a5ec-3fcd9b5d7302 generation=1787646338907838354 revocations=25
+[08:25:39:918239][2332987424][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=29 pod_id=29 service_id=20 pod_uid=7bdfbd9e-7457-492e-a902-9caff247d762 generation=1787646338907838354 revocations=26
+[08:25:39:918251][2332987424][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=30 pod_id=30 service_id=20 pod_uid=ef2c6fa4-2809-491f-939f-0570e3b9ed19 generation=1787646338907838354 revocations=27
+[08:25:39:918263][2332987424][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=50 pod_id=50 service_id=20 pod_uid=c1d3aea1-02b1-437e-bcee-aabce62bedd4 generation=1787646338907838354 revocations=28
+[08:25:39:918275][2332987424][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=54 pod_id=54 service_id=20 pod_uid=8b3100e7-e578-4859-8635-d8a49d038379 generation=1787646338907838354 revocations=29
+[08:25:39:918285][2332987424][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=55 pod_id=55 service_id=20 pod_uid=d2438bbf-881d-481e-a96e-7e822f08dcbb generation=1787646338907838354 revocations=30
+[08:25:39:918294][2332987424][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=58 pod_id=58 service_id=20 pod_uid=c07ee25f-205b-46b2-94b0-29e4768045ab generation=1787646338907838354 revocations=31
+[08:25:39:918304][2332987424][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=59 pod_id=59 service_id=20 pod_uid=a9a736a2-2ca3-4ad5-8261-5e828cfcfba3 generation=1787646338907838354 revocations=32
+[08:26:00:962026][2332987424][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=13 pod_id=13 service_id=20 pod_uid=d8079c37-1202-44c7-b62e-3f91496c54ac generation=1787646358939330980 revocations=33
+[08:26:00:962081][2332987424][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=25 pod_id=25 service_id=20 pod_uid=611becb7-7b17-4282-b345-1dd7042729c9 generation=1787646358939330980 revocations=34
+[08:26:00:962093][2332987424][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=26 pod_id=26 service_id=20 pod_uid=bc82b479-6f1a-44a6-bf27-9eade269494b generation=1787646358939330980 revocations=35
+[08:26:00:962103][2332987424][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=32 pod_id=32 service_id=20 pod_uid=aab3f190-2372-4c49-b450-fc50997fc9b5 generation=1787646358939330980 revocations=36
+[08:26:00:962114][2332987424][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=33 pod_id=33 service_id=20 pod_uid=7e213503-c4ba-4d8b-ae4a-9a3c3042c2bc generation=1787646358939330980 revocations=37
+[08:26:00:962124][2332987424][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=36 pod_id=36 service_id=20 pod_uid=6595a5fd-4f53-4a53-9bb0-33f67c70d901 generation=1787646358939330980 revocations=38
+[08:26:00:962133][2332987424][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=41 pod_id=41 service_id=20 pod_uid=97ddeb93-8655-4545-af1d-5a490a437564 generation=1787646358939330980 revocations=39
+[08:26:00:962138][2332987424][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=42 pod_id=42 service_id=20 pod_uid=c3f8d43b-9486-4e23-aa14-d2e5ffec6049 generation=1787646358939330980 revocations=40
+[08:26:19:973919][2332987424][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=15 pod_id=15 service_id=20 pod_uid=ffdcdfaf-7c70-48fa-867d-ca34ab1c383c generation=1787646378967097442 revocations=41
+[08:26:19:974062][2332987424][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=16 pod_id=16 service_id=20 pod_uid=ef5f813b-2657-4fdd-8740-bff41150da43 generation=1787646378967097442 revocations=42
+[08:26:19:974082][2332987424][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=18 pod_id=18 service_id=20 pod_uid=d1dc46ba-289b-4b46-bdec-eeba472a6818 generation=1787646378967097442 revocations=43
+[08:26:19:974092][2332987424][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=22 pod_id=22 service_id=20 pod_uid=d9ced2d6-aa64-4177-8fc7-96f554f3326a generation=1787646378967097442 revocations=44
+[08:26:19:974104][2332987424][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=34 pod_id=34 service_id=20 pod_uid=e5d83794-f52c-48a4-adff-d052230672c1 generation=1787646378967097442 revocations=45
+[08:26:19:974109][2332987424][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=44 pod_id=44 service_id=20 pod_uid=ca7c29a8-6501-48e6-8594-8231e93289c4 generation=1787646378967097442 revocations=46
+[08:26:19:974118][2332987424][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=46 pod_id=46 service_id=20 pod_uid=87d6cfac-a2c0-4580-9763-895d806b4b39 generation=1787646378967097442 revocations=47
+[08:26:19:974127][2332987424][DOCA][WRN][comch_server.c:957][server_progress_membership] registration revoked: slot=47 pod_id=47 service_id=20 pod_uid=f1d7ca52-7df2-46f7-8311-8a2dc92ad0e7 generation=1787646378967097442 revocations=48
