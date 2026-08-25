@@ -48,7 +48,7 @@ client_app() { case "$1" in
 server_apps() { case "$1" in
         dpumesh) echo echo-dpumesh echo-dpumesh-13 echo-dpumesh-14 ;;
         preload) echo preload-echo ;;
-        grpc-dpumesh) echo echo-grpc-dpumesh ;; esac; }
+        grpc-dpumesh) echo echo-grpc-dpumesh echo-grpc-alt ;; esac; }
 
 field() { sed -n "s/.*[[:space:]]$2=\([^ ]*\).*/\1/p" <<<"$1"; }
 

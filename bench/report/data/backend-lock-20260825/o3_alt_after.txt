@@ -1,0 +1,2 @@
+dmesh_backend_lock_acquisitions_total 9291
+dmesh_backend_lock_contended_total 0

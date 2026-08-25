@@ -424,6 +424,27 @@ steady per-request point is unchanged, which is the expected result: the data
 path does not know the stacks are shared. The receipt is
 [`bench/report/REPORT.md`](bench/report/REPORT.md), *What a session costs*.
 
+Per-request backend selection is priced, and at a matched rate it costs the
+data path nothing measurable: 8,000/s gRPC reads 481–487 ARM µs/request with
+one backend and 489–496 alternating 50/50 across two Services — inside the
+rig's several-percent spread — with the split attributed at exactly 50.0/50.0,
+and the single-backend opaque prices reproduce the `1518aae` receipts. The
+closed-loop alternating arm completes 9% less at +10% µs/request, which is the
+route hop's latency turned into throughput by a closed loop, not a per-request
+cost. No pre-selection receipt exists on these arms — `px_conn_admitted` and
+`l7_conn_segment` are already in `1518aae` — so the price is bounded by
+reproduction and by the same-build A/B, not by an ablation
+([`api-l7-selcost-20260825-222604/`](bench/report/data/api-l7-selcost-20260825-222604/)).
+
+The backend registry lock never contends. A temporary counter pair in
+`Backends::registry()` — removed after the reading — counted 9,280
+acquisitions and zero contended takes across ~550 K requests and 3,081 session
+builds: three per session (publish, take, remove), none per request, on both
+session churn and the alternating-backend load. Endpoint locking is not
+material, and the Tokio `LocalSet` + `Rc<RefCell>` specialization that was
+conditioned on it stays unwritten
+([`backend-lock-20260825/`](bench/report/data/backend-lock-20260825/)).
+
 The synchronous half of a stack build is instrumented in
 `linkerd/app/src/lib.rs` and reported by `SessionMetrics::observe_stack_build`:
 8.7 µs to clone the outbound template and set `dmesh_session`, 107.7 µs of
@@ -464,39 +485,6 @@ which is what this item is for.
   `l7-tx-ab-20260817` arm predates the `DmeshIo` tx cursor, which removed the
   queue-tail move `consume_tx` performed on every publication, so its absolute
   µs/request is not the arm to subtract from.
-
-## O3 Conditional worker-local state
-
-Per-request backend selection put more through this registry: a session takes
-one channel per endpoint instead of one for its life, and every worker pass asks
-whether an endpoint was minted. That question is answered by an atomic rather
-than the registry lock, so an idle pass does not take it — but the take path
-itself is busier than the profile that last looked at it.
-
-- [ ] Re-profile; continue only if endpoint locking becomes material. Nothing
-  counts lock contention today — `Backends` holds one `parking_lot::Mutex` with
-  no instrumentation — so add a counter before drawing a conclusion.
-- [ ] If justified, prototype only the DPUmesh specialization on Tokio
-  `LocalSet` with `Rc<RefCell<_>>`; do not add unsafe `Send`/`Sync` claims or
-  modify stock TCP Linkerd behavior.
-
-## O4 What per-request selection costs the data path
-
-Backend selection per request adds work to paths that run per segment and per
-unit, and none of it has been priced. `l7_conn_segment` names the direction a
-segment belongs to instead of assuming it; `px_conn_admitted` scans a
-four-entry verdict cache instead of comparing one destination; `struct px_conn`
-carries that cache. The verdict cache is a net removal for a session that
-alternates backends — it replaces a policy re-entry per unit with four
-comparisons — and a net addition for one that does not.
-
-The deploy smoke gate shows p50 unchanged at concurrency 1 across the change,
-which bounds nothing: it is one operating point on a closed loop.
-
-- [ ] Price it with the core-attribution arms of `bench/suite/api_l7_cost.sh`,
-  run against a build that changes nothing else. Report ARM µs/request for a
-  single-backend opaque stream, where the additions are pure cost, and for a
-  protocol-aware stream alternating backends, where the cache is the saving.
 
 ## O5 Equivalent ARM/x86 study
 

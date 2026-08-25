@@ -353,6 +353,19 @@ regime for this rig — the fixed per-second work of eight worker runtimes is
 divided among few requests. Comparing a per-request cost across the two tables
 measures the load level, not the API.
 
+Per-request backend selection adds nothing measurable to these prices. With a
+50/50 weighted route alternating every gRPC session's requests across two
+Services, the ARM reads 489–496 µs/request at the same 8,000/s against 481–487
+with one backend — inside this rig's run-to-run spread — and the DPU attributes
+the split at exactly 50.0/50.0. A closed loop at concurrency 32 completes 9%
+less on the alternating arm at +10% µs/request; that is the route hop's latency
+converted into throughput by a closed loop, not a data-path cost. The registry
+that hands sessions their backend channels is a lifecycle cost only: an
+instrumented build counted three lock acquisitions per session, none per
+request, and zero contended takes across ~550 K requests and 3,081 session
+builds (`data/api-l7-selcost-20260825-222604/`,
+`data/backend-lock-20260825/`).
+
 ## What a session costs
 
 Building a Linkerd session is the largest single cost above the transport, and
@@ -482,6 +495,10 @@ replicas are elsewhere has no route.
 - Session cost: `bench/suite/l7_session_cost.sh --reps 2 --dur 15` over two
   deploys differing only in `DPUMESH_SHARED_STACKS`. Raw data in
   `data/l7-shared-off-20260821/` and `data/l7-shared-on-20260821/`.
+- Selection cost: `bench/suite/api_l7_cost.sh` closed and open-8K, 3
+  repetitions, single-backend and 50/50-weighted arms at `9d450b5`. Raw data in
+  `data/api-l7-selcost-20260825-222604/`; the registry-lock reading in
+  `data/backend-lock-20260825/`.
 - Function campaigns: `bench/suite/policy_route.sh` (policy, route, cross,
   fanout, surfaces, lb) with the resources it attaches in `bench/k8s/policy/`,
   and `bench/suite/inject.sh`. Policy through surfaces decided 45 of 45 in

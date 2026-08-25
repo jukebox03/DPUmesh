@@ -785,6 +785,7 @@ get_pod_cores() {
             case "$app" in
                 bench-grpc-dpumesh) rel="0,1,2,3,4,5";;
                 echo-grpc-dpumesh)  rel="6,7,8,9,10,11";;
+                echo-grpc-alt)      rel="12,13,14,15,16,17";;
             esac ;;
         grpcmax)
             case "$app" in
@@ -822,7 +823,7 @@ pin_pods() {
     fi
     for app in bench-dpumesh echo-dpumesh echo-dpumesh-13 echo-dpumesh-14 \
                loopback-dpumesh verbs-dpumesh preload-dpumesh preload-echo \
-               preload-bench bench-grpc-dpumesh echo-grpc-dpumesh; do
+               preload-bench bench-grpc-dpumesh echo-grpc-dpumesh echo-grpc-alt; do
         local cores pod_id desired
         cores=$(get_pod_cores "$app" "$profile"); [ -z "$cores" ] && continue
         # sed consumes the full stream. `head` can close early and make crictl

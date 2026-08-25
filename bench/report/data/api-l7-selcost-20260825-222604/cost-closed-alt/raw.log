@@ -1,0 +1,33 @@
+[0;32m[INFO][0m Host NUMA: PCI 94:00.0 -> node 1, benchmark cores 18-35
+[0;34m[STEP][0m === Pinning pods to dedicated cores (taskset, profile=grpc) ===
+[0;32m[INFO][0m CPU governor=performance, fixed 2.5 GHz on cores 18-35
+[0;32m[INFO][0m bench-grpc-dpumesh → core(s) 18,19,20,21,22,23 (pod=01dab2e741e164d77cd3be677feac1c81d14aa5debcf9bbceac06905d7f4b5e3)
+[0;32m[INFO][0m   bench-grpc-dpumesh (PID 3330914) → 18,19,20,21,22,23
+[0;32m[INFO][0m echo-grpc-dpumesh → core(s) 24,25,26,27,28,29 (pod=189a756474e013100ffcb1a72ab5f68b7b7f7ad38653fd822f63e99d763a5bf1)
+[0;32m[INFO][0m   echo-grpc-dpumesh (PID 3330148) → 24,25,26,27,28,29
+[0;32m[INFO][0m echo-grpc-alt → core(s) 30,31,32,33,34,35 (pod=1622f43de2004e637ba1e55acd11143ffffd7c4a9288015458b84c421c594e3f)
+[0;32m[INFO][0m   echo-grpc-alt (PID 3330550) → 30,31,32,33,34,35
+[0;32m[INFO][0m Pinning done
+grpc-dpumesh rep1 :: OK mrps=0.002062 gbps=0.0176 req_gbps=0.0172 resp_gbps=0.0004 p50=15487.00 p95=17584.00 p99=24054.00 p999=29525.00 p9999=34689.00 avg=15519.51 min=4285.07 max=34926.14 rcnt=40878 scheduled=41910 pending=0 fail=0 conc=32 threads=1 channels=1 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=20.000 offered_mrps=0.002062 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const batch=0 reconns=0 reconn_us=0.00 grabs=3 rets=2 recyc=89 waits=0 pads=72 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA
+[0;32m[INFO][0m Host NUMA: PCI 94:00.0 -> node 1, benchmark cores 18-35
+[0;34m[STEP][0m === Pinning pods to dedicated cores (taskset, profile=grpc) ===
+[0;32m[INFO][0m CPU governor=performance, fixed 2.5 GHz on cores 18-35
+[0;32m[INFO][0m bench-grpc-dpumesh → core(s) 18,19,20,21,22,23 (pod=01dab2e741e164d77cd3be677feac1c81d14aa5debcf9bbceac06905d7f4b5e3)
+[0;32m[INFO][0m   bench-grpc-dpumesh (PID 3330914) → 18,19,20,21,22,23
+[0;32m[INFO][0m echo-grpc-dpumesh → core(s) 24,25,26,27,28,29 (pod=189a756474e013100ffcb1a72ab5f68b7b7f7ad38653fd822f63e99d763a5bf1)
+[0;32m[INFO][0m   echo-grpc-dpumesh (PID 3330148) → 24,25,26,27,28,29
+[0;32m[INFO][0m echo-grpc-alt → core(s) 30,31,32,33,34,35 (pod=1622f43de2004e637ba1e55acd11143ffffd7c4a9288015458b84c421c594e3f)
+[0;32m[INFO][0m   echo-grpc-alt (PID 3330550) → 30,31,32,33,34,35
+[0;32m[INFO][0m Pinning done
+grpc-dpumesh rep2 :: OK mrps=0.002066 gbps=0.0176 req_gbps=0.0172 resp_gbps=0.0004 p50=15533.00 p95=17351.00 p99=17922.00 p999=22713.00 p9999=25918.00 avg=15488.61 min=4843.95 max=30292.53 rcnt=40954 scheduled=41986 pending=0 fail=0 conc=32 threads=1 channels=1 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=20.000 offered_mrps=0.002066 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const batch=0 reconns=0 reconn_us=0.00 grabs=3 rets=2 recyc=89 waits=0 pads=73 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA
+[0;32m[INFO][0m Host NUMA: PCI 94:00.0 -> node 1, benchmark cores 18-35
+[0;34m[STEP][0m === Pinning pods to dedicated cores (taskset, profile=grpc) ===
+[0;32m[INFO][0m CPU governor=performance, fixed 2.5 GHz on cores 18-35
+[0;32m[INFO][0m bench-grpc-dpumesh → core(s) 18,19,20,21,22,23 (pod=01dab2e741e164d77cd3be677feac1c81d14aa5debcf9bbceac06905d7f4b5e3)
+[0;32m[INFO][0m   bench-grpc-dpumesh (PID 3330914) → 18,19,20,21,22,23
+[0;32m[INFO][0m echo-grpc-dpumesh → core(s) 24,25,26,27,28,29 (pod=189a756474e013100ffcb1a72ab5f68b7b7f7ad38653fd822f63e99d763a5bf1)
+[0;32m[INFO][0m   echo-grpc-dpumesh (PID 3330148) → 24,25,26,27,28,29
+[0;32m[INFO][0m echo-grpc-alt → core(s) 30,31,32,33,34,35 (pod=1622f43de2004e637ba1e55acd11143ffffd7c4a9288015458b84c421c594e3f)
+[0;32m[INFO][0m   echo-grpc-alt (PID 3330550) → 30,31,32,33,34,35
+[0;32m[INFO][0m Pinning done
+grpc-dpumesh rep3 :: OK mrps=0.002161 gbps=0.0184 req_gbps=0.0180 resp_gbps=0.0004 p50=14800.00 p95=16584.00 p99=18878.00 p999=27502.00 p9999=29560.00 avg=14807.09 min=3566.64 max=30625.40 rcnt=42854 scheduled=43886 pending=0 fail=0 conc=32 threads=1 channels=1 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=20.000 offered_mrps=0.002161 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const batch=0 reconns=0 reconn_us=0.00 grabs=3 rets=2 recyc=93 waits=0 pads=78 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA
