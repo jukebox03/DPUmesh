@@ -6,6 +6,9 @@
 # the receiver unit. The control path itself — every feed the DPU consumes —
 # runs through the agent's delivery loop and holds no login shell, password or
 # sudo. Nothing in this script runs while the mesh is running.
+#
+# The key material and units placed here are the file surface of
+# design/CONTROL.md §5.5.4; the agent's flags are §5.5.3.
 set -euo pipefail
 
 BENCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

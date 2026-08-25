@@ -13,7 +13,7 @@ DPU-hosted Linkerd mesh.
 
 ## One-shot deployment
 
-Create the repository-root `.env` with the DPU/Host connection settings, then:
+Create the repository-root `.env` with the rig's connection settings, then:
 
 ```sh
 BENCH_DEPLOY_SCOPE=all ./bench/bench.sh deploy
@@ -23,6 +23,14 @@ The command deploys `N/K/A/L=32/8/8/8`. Each Pod has one ring and one RX
 landing stripe per ARM worker, and all eight workers host an embedded Linkerd
 runtime. Port affinity keeps each connection, proxy session, DMA engine, and
 reverse-ring producer on one worker.
+
+Everything the command provisions or exports is the configuration surface
+defined in [design/CONTROL.md §5.5](../design/CONTROL.md):
+`workload_attest.sh` places the §5.5.4 key material and feed receiver,
+`dpumesh_controller.sh` provisions and deploys the §5.5.3 daemons, and the DPU
+launcher exports the §5.5.1 environment. `.env` holds only the rig — machines,
+access, and the geometry this rig runs — so the harness is a worked example of
+that section, not a second definition of it.
 
 The command performs the complete lifecycle in order:
 

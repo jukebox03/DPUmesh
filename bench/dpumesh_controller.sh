@@ -2,7 +2,8 @@
 # Provision the controller signing key and deploy the dpumesh-controller Pod.
 # The generation reaches a DPU through that node's agent and through nothing
 # else: the controller serves it on the cluster network and the agent's
-# delivery loop installs it.
+# delivery loop installs it. The controller's flags and key files are
+# design/CONTROL.md §5.5.3 and §5.5.4.
 set -euo pipefail
 
 BENCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

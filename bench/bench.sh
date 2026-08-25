@@ -712,6 +712,8 @@ L7ENV
   echo '$DPU_PASS' | sudo -S cat $(linkerd_trust_anchors) 2>/dev/null; \
   printf '\"\n'; } >> /tmp/dpumesh-l7.env"
     l7_env='set -a; . /tmp/dpumesh-l7.env; set +a;'
+    # The environment assembled below is the DPU process's configuration
+    # surface (design/CONTROL.md §5.5.1), with this rig's defaults.
     local dpa_threads="${DPUMESH_DPA_THREADS:-}"
     local rings="${DPUMESH_RINGS_PER_POD:-}"
     local workers="${DPUMESH_ARM_WORKERS:-}"

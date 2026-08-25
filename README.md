@@ -272,10 +272,11 @@ metadata:
 ```
 
 An admission webhook turns that into the access the transport needs: the DOCA
-device, the transport library and the node agent's socket as mounts, the PCI
-function and the Pod's Service as environment, the preload shim for a workload
-that is not linked against the native API, and the two Linkerd markers that make
-the workload sidecarless. It also requires a node labelled `dpumesh.io/dpu=true`
+device, the transport library and the node agent's socket as mounts;
+`DPUMESH_PCI_ADDR`, `DPUMESH_RINGS_PER_POD`, `DPUMESH_ATTEST_SOCKET` and
+`DPUMESH_SERVICE` as environment, with `LD_PRELOAD` naming the shim for a
+workload that is not linked against the native API; and the two Linkerd markers
+that make the workload sidecarless. It also requires a node labelled `dpumesh.io/dpu=true`
 and refuses the Pod when the cluster has none, because a Pod holding part of the
 patch fails later and elsewhere.
 
@@ -289,7 +290,9 @@ together or applies neither.
 A Pod that declines the shim — one written against the native API — annotates
 `dpumesh.io/preload: disabled`. [bench/k8s/injected.yaml](bench/k8s/injected.yaml)
 is a workload carrying nothing else; [bench/k8s/pods.yaml](bench/k8s/pods.yaml)
-is the same access written by hand.
+is the same access written by hand. The complete configuration surface — every
+variable, flag and file, per consumer, including the two an author may set by
+hand — is [design/CONTROL.md §5.5](design/CONTROL.md).
 
 ### What to expect from the mesh
 

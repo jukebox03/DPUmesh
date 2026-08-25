@@ -43,7 +43,7 @@ after it.
    2-2   Identity across a boundary   the two bindings joined by one signed lookup
    3     Authorization                whether an established identity may enter
    4     Resources and lifetime       what an authenticated peer may consume
-   5     Operations and reference     naming, observability, parameters, decisions
+   5     Operations and reference     naming, configuration, observability, parameters
 ```
 
 Without 1 there is no key for 2-0 to verify; without 2-0 no channel 2-2 can
@@ -1542,7 +1542,162 @@ what is recordable differs by locality:
 The double-counting rule is a sidecar mesh's: a stream recorded by both is the
 client-side and the server-side view of one request.
 
-## 5.5 Operations
+## 5.5 Configuration
+
+Three mechanisms, each matched to who consumes it. Data-plane processes read
+environment: `dpumesh_dpu` once per node, and every workload process, whose
+environment the admission webhook writes. Control-plane daemons take flags,
+because each is deployed from a manifest and a manifest is where flags live.
+Key material and feeds are root-only files (§5.3), placed by bootstrap and by
+the agent's delivery loop, never by the processes that read them.
+
+The chain of custody is the point: the operator configures the daemons, the
+webhook configures the workloads, and an application author states at most two
+facts — the Service the process serves and the port it would have listened on.
+Nothing an application can set widens its access, because everything that
+grants access arrives signed, through the files and the attestation socket.
+
+`bench/bench.sh deploy` is this section mechanized for a two-machine rig:
+`bench/workload_attest.sh` provisions §5.5.4, `bench/dpumesh_controller.sh`
+provisions and deploys the §5.5.3 daemons, and the DPU launcher exports the
+§5.5.1 environment. The harness is the worked example of this section, not a
+second definition of it.
+
+### 5.5.1 The DPU process
+
+`dpumesh_dpu` runs once per node. The PCI functions arrive on its command line
+(`-p` Comch, `-r` RDMA, `-l` log level); everything else is environment.
+
+Two variables have no default, and the process refuses to start rather than
+guess, because a wrong guess is an identity error:
+
+| Name | What it decides |
+|---|---|
+| `DPUMESH_NODE_NAME` | the Kubernetes node this DPU serves; a grant minted for another node is refused (§2-1.3) |
+| `DPUMESH_REGISTRATION_KEY_DIR` | the keyring workload assertions are verified against |
+
+The rest default, and an unset feed disables that feed rather than the
+process — what then happens at runtime is §1.9 and §3.5:
+
+| Name | Default | What it decides |
+|---|---|---|
+| `DPUMESH_FEED_KEY_DIR` | unset | the feed keyring; the membership and admission feeds refuse to configure without it |
+| `DPUMESH_CONTROLLER_KEY_DIR` | unset | the controller's public keys; the topology feed refuses to configure without it |
+| `DPUMESH_NODE_KEY_FILE` | unset | the node credential (§2-0.1); without it this node has no peer identity |
+| `DPUMESH_NODE_KEY_PUBLIC_FILE` | unset | where the credential's public half is republished for the agent to report |
+| `DPUMESH_MEMBERSHIP_FILE` | unset | the membership feed; unset means no revocation input |
+| `DPUMESH_TOPOLOGY_FILE` | unset | the topology generation; unset means no cluster facts |
+| `DPUMESH_ADMISSION_FILE` | unset | the admission switch; an unreadable switch means open (§5.6) |
+| `DPUMESH_CONTROLLER_SCOPE_URL` | unset | the mediated scope lookup; unset puts every Pod in `NO_POLICY` (§3.5) |
+| `DPUMESH_IDENTITY_TRUST_DOMAIN` | `linkerd.cluster.local` | the trust domain source identities are spelled in (§2-2.2) |
+
+Geometry is DATA.md's `N/K/A`, clamped rather than refused:
+
+| Name | Default | Bounds |
+|---|---|---|
+| `DPUMESH_DPA_THREADS` | device-detected | `N`, 1–32 |
+| `DPUMESH_RINGS_PER_POD` | 2 | `K`, 1–8; host and DPU must agree, and the webhook's `--rings-per-pod` is how the host's side arrives |
+| `DPUMESH_ARM_WORKERS` | 1 | `A`, at most 8, lowered to the nearest divisor of `K` |
+| `DPUMESH_DPA_WAKE_US` | 0 (off) | periodic DPA wake, µs |
+
+The L7 layer:
+
+| Name | Default | What it decides |
+|---|---|---|
+| `DPUMESH_L7_SVC` | empty | Services on the protocol-aware path, `namespace/name`, comma- or space-separated |
+| `DPUMESH_L7_OPAQUE_SVC` | empty | Services on the opaque path; a Service named in both lists is a configuration error, not a precedence rule |
+| `DPUMESH_L7_LINKERD_WORKER` | 0 | which ARM worker hosts the Linkerd runtime: a worker index, or `all` |
+| `DPUMESH_L7_FAIL_CLOSED` | off | refuse rather than bypass when the proxy cannot answer; a deployment sets `1`, the off default exists for comparison arms |
+| `DPUMESH_L7_SERVICE_TARGETS_FILE` | unset | the Service-target feed; the embedded runtime requires it |
+
+The embedded proxy itself takes its stock `LINKERD2_PROXY_*` environment —
+control-plane addresses, identity directory and token, trust anchors — exactly
+as §3.7 lays out; the harness writes the complete working set into one file
+(`/tmp/dpumesh-l7.env`, from `bench/bench.sh`).
+
+### 5.5.2 The workload process
+
+A meshed Pod's environment is written by the webhook, not by its author:
+
+| Name | Injected value | Meaning |
+|---|---|---|
+| `DPUMESH_PCI_ADDR` | webhook `--pci-addr`, overridable per Pod by `dpumesh.io/pci-addr` | the host-side DOCA function |
+| `DPUMESH_RINGS_PER_POD` | webhook `--rings-per-pod` | the node's `K` |
+| `DPUMESH_ATTEST_SOCKET` | webhook `--attest-socket` | the node agent's socket, default `/run/dpumesh/attest.sock` |
+| `DPUMESH_SERVICE` | the `dpumesh.io/service` annotation or `dpumesh-service` label | the Service this Pod provides; absent for a pure client |
+| `LD_PRELOAD` | the mounted shim | absent under `dpumesh.io/preload: disabled` |
+
+The author states at most two facts, in the container spec or on the process:
+
+| Name | Meaning |
+|---|---|
+| `DPUMESH_SERVICE` | only outside a cluster, where no webhook writes it |
+| `DPUMESH_PORT` | the port a shim server would have listened on; unset means the process is not a server |
+
+Two more exist for diagnosis and comparison only, and the webhook never sets
+them: `DMESH_PRELOAD_DEBUG` turns on the shim's stderr diagnostics, and
+`DPUMESH_TCP_FALLBACK=1` restores the kernel-TCP bypass for a measurement arm
+(API.md §7).
+
+### 5.5.3 The control-plane daemons
+
+`controller/dpumesh_controller.py`, one per cluster:
+
+| Flag | Default | What it decides |
+|---|---|---|
+| `--key-dir` | required | the generation signing keys |
+| `--nodes-file` | required | the operator's statement of nodes and their RDMA addresses |
+| `--output` | `/run/dpumesh/topology.v1` | where the signed generation lands for delivery |
+| `--interval` | 5 s | `GENERATION_INTERVAL` (§5.7) |
+| `--listen`, `--listen-port` | `0.0.0.0:8080` | where node agents fetch |
+| `--protected` | none | `namespace/name` Services in the stricter class (§3.4) |
+| `--api-server`, `--api-token-file`, `--api-ca-file` | in-cluster serviceaccount | how the Kubernetes API is read |
+
+`controller/dpumesh_webhook.py`, the mutating admission webhook — README's
+*Making a workload meshed* is its author-facing half:
+
+| Flag | Default | What it decides |
+|---|---|---|
+| `--pci-addr` | none | the `DPUMESH_PCI_ADDR` it injects; a Pod with neither this nor its own annotation is refused |
+| `--rings-per-pod` | unset | the `K` it injects; must equal the node's |
+| `--attest-dir`, `--attest-socket` | `/run/dpumesh`, `…/attest.sock` | the agent socket it mounts and names |
+| `--library-dir`, `--library-soname`, `--preload-soname`, `--library-mount-dir` | `/opt/dpumesh/lib`, `libdpumesh.so.5`, `libdmesh_preload.so`, `/usr/local/lib` | what is mounted into the Pod, and where |
+| `--preload-var` | `LD_PRELOAD` | the variable the shim rides in on |
+| `--listen-port`, `--tls-cert`, `--tls-key` | 8443 | the webhook endpoint |
+| `--linkerd-namespace` | `linkerd` | the control-plane label it applies with the skip-ports marker |
+| `--no-node-requirement` | off | admit Pods with no `dpumesh.io/dpu=true` node — a test-only stance |
+| `--publish-ca-bundle`, `--service-dns`, `--api-server`, `--token-file`, `--ca-file` | in-cluster | registering its own `MutatingWebhookConfiguration` |
+
+`bench/workload_attest_agent.py`, the node agent, one per node:
+
+| Flag | Default | What it decides |
+|---|---|---|
+| `--socket`, `--socket-mode` | `/run/dpumesh/attest.sock`, `0666` | where workloads present themselves |
+| `--key-dir` | required | the assertion signing keyring; the DPU's `DPUMESH_REGISTRATION_KEY_DIR` verifies it |
+| `--feed-key-dir` | required | the feed keyring, disjoint from the assertion keyring |
+| `--node-name`, `--namespace` | `$NODE_NAME`, `$POD_NAMESPACE` | the node and namespace it asserts for |
+| `--ttl` | 60 s | the lifetime written into assertions, under §5.7's 300 s ceiling |
+| `--controller-url` | unset | where generations are fetched |
+| `--dpu-feed-host`, `--dpu-feed-port`, `--delivery-interval` | `192.168.100.2:4788`, 2 s | the delivery hop to the DPU's feed receiver |
+| `--membership-interval` | 10 s | how often membership is republished |
+| `--node-rdma-addr` | `192.168.100.2:4791` | the peer address published for this node |
+| `--identity-*` | serviceaccount `dpumesh-dpu`, audience `identity.l5d.io`, 3600 s | the token the embedded proxy certifies with (§3.7) |
+
+### 5.5.4 Files
+
+§5.3 names the classes; these are the paths. All are root-owned except the
+socket, and none is written by the process that reads it:
+
+| Path | Machine | Placed by |
+|---|---|---|
+| `/etc/dpumesh/registration.keys/` | host and DPU | bootstrap; the agent's signing half on the host, the DPU's verifying half on the DPU, `0700`/`0400` |
+| `/etc/dpumesh/feed.keys/` | host and DPU | bootstrap; the symmetric feed secret (§1.3), disjoint files from the registration keyring |
+| `/etc/dpumesh/controller.keys/` → `controller.pub.keys/` | host → DPU | bootstrap; the private half stays with the controller, the DPU holds public keys only |
+| `/etc/dpumesh/node-static.key`, `.pub` | DPU | generated on the DPU at first boot; the private half never leaves it |
+| `/etc/dpumesh/{membership.v1, topology.v1, admission, service targets}` | DPU | the feed receiver, an unprivileged unit the node agent delivers into |
+| `/run/dpumesh/attest.sock` | host | the node agent |
+
+## 5.6 Operations
 
 - `bench/linkerd_identity.sh status` reports systemd health, JWT issue and
   expiry timestamps, seconds remaining and consecutive token-renewal errors
@@ -1572,7 +1727,7 @@ client-side and the server-side view of one request.
   one image tag, so deployment restarts it explicitly. An apply alone leaves the
   previous binary running behind a successful rollout status.
 
-## 5.6 Parameters
+## 5.7 Parameters
 
 The ones marked ∎ change a security property; the rest change only cost.
 
@@ -1599,7 +1754,7 @@ The ones marked ∎ change a security property; the rest change only cost.
 | queue pairs per node pair | A | one per destination worker; no constant names it, it is the worker count |
 | `DMESH_STREAM_ACK_BATCH` | 64 | delivery acknowledgements staged before one is sent |
 
-## 5.7 Decisions taken
+## 5.8 Decisions taken
 
 | Question | Decision | Refused alternative |
 |---|---|---|
@@ -1618,7 +1773,7 @@ The ones marked ∎ change a security property; the rest change only cost.
 | Peer refused repeatedly? | bounded and reported; the controller evicts | tearing the channel down, which turns ordinary skew into an outage |
 | ClusterIP for the POSIX facade? | answered by the DPU from the generation; leaving the mesh is logged | a file in the Pod image, which fails open silently |
 
-## 5.8 Current bounds
+## 5.9 Current bounds
 
 **Node scope**
 - Service names resolve through the controller's topology generation;
@@ -1658,7 +1813,7 @@ The ones marked ∎ change a security property; the rest change only cost.
 - Sharing one DPU across tenants, and replacing Linkerd as the source of policy,
   are out of scope.
 
-## 5.9 Hardware validation
+## 5.10 Hardware validation
 
 **Node scope.** Initial Identity failure, token rotation and fresh
 certification; gateway and control-service loss and recovery; Linkerd control
