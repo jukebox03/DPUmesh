@@ -7,7 +7,8 @@ Each Service is deployed as an opaque byte stream or on Linkerd's
 protocol-aware HTTP/1, HTTP/2 or gRPC path, independently of the surface its
 Pods use. Endpoints on the node are reached by DMA, and endpoints on another
 node by the authenticated peer channel. That channel's transport is built and
-its carrier binds on hardware, but no deployment here has a second node, so the
+its TCP carrier runs in the host test. The current hardware deployment leaves
+the peer carrier unset, and no deployment here has had a second node, so the
 cross-node path has never run: a Service whose only replicas are elsewhere has
 no route yet.
 

@@ -44,11 +44,46 @@ item below names the arm that closes it.
 
 # Function
 
-Three items are open: a Go surface, the transport under the cross-node seam,
+Three items are open: a Go surface, two-node validation of the cross-node seam,
 and the device-plugin reduction of Pod privilege — the kernel road around the
-mesh is closed in both directions and F8 carries the receipts. Node density
-is settled at the wire ceiling; F7 keeps its two deeper levers, both
-unscheduled.
+mesh is closed in both directions and F8 carries the receipts. Node density is
+settled at the wire ceiling; F7 keeps its two deeper levers, both unscheduled.
+
+## Now — close the two-node receipt first (2026-08-26)
+
+The software path through the peer seam is complete: TLS 1.3 authentication,
+the TCP and RDMA carriers, DPU worker integration, operator-owned node records,
+and the controller/agent address binding all build and pass `make test`. A
+single-node rapids4 deployment is healthy at Kubernetes endpoint
+`147.46.78.169:6443`; native, preload, gRPC and HTTP/1 point tests all pass.
+
+The remaining work is ordered by the first gate that can fail:
+
+1. **Make the rapids4 management address persistent before another reboot.**
+   Kubernetes already uses `147.46.78.169`, but the installer cloud-init source
+   still records the former management subnet. This is rig maintenance, not a
+   DPUmesh code item, but another address rollback would stop every later gate.
+2. **Choose and gain access to node B.** Public-key SSH currently fails for both
+   `jet1.snu.ac.kr` and `stream10.snu.ac.kr`; the physical target must be named
+   before a deploy script can safely encode it.
+3. **Install or identify BlueField B and connect the fabric.** rapids4 DPU `p0`
+   is still `NO-CARRIER`, has no address, and has no `10.77.0.0/24` RoCE GID.
+   Cable the two DPU uplinks, assign persistent peer addresses, then require
+   `ethtool`, `show_gids`, ping, bidirectional `rping` and `ib_send_bw` to pass.
+4. **Provision node B and join it to Kubernetes.** Match the supported
+   BFB/DOCA and container runtime, apply the node prerequisites, join through
+   `147.46.78.169:6443`, label it `dpumesh.io/dpu=true`, and install the images,
+   keys, identity files and host paths.
+5. **Deploy one operator node file to both agents and the controller.** Generate
+   one row on each node with `bench/dpumesh_controller.sh node-record`, combine
+   the rows, and deploy both DPUs with `DPUMESH_PEER_TRANSPORT=rdma`, their own
+   bind address, the same base port and the same `A/K` geometry.
+6. **Attach receipts, in order:** handshake, bidirectional data, Pod churn,
+   channel loss/recovery, remote policy, then performance. The exact gates and
+   stop conditions are in [`RDMA_PLAN.md`](RDMA_PLAN.md).
+
+Do not schedule F4, F7, F8's device-plugin reduction, or the Cost items ahead
+of this sequence. None of them can produce the missing cross-node claim.
 
 ## F4 Workloads `LD_PRELOAD` cannot reach
 
@@ -65,7 +100,7 @@ Kubernetes ecosystem is Go.
 - [ ] Whichever surface is chosen, it registers the process the same way and
   under the same signed grant. No adapter gets its own admission path.
 
-## F6 The cross-node path: the transport under the seam
+## F6 The cross-node path: validate the transport under the seam
 
 The cluster scope is a layer split. `doca/peer_channel.c` owns everything above
 `struct dmesh_peer_transport` — handle namespaces, bounded parsing, the
@@ -77,12 +112,12 @@ byte carrier, and two carriers implement that inner seam: TCP for CI and
 bring-up, RDMA for the mesh. Both halves are built; what is missing is a second
 node to run them between.
 
-- [ ] **Bring up a second DPU node.** A link between the two BlueFields, node B
-  joined and provisioned, and a harness that stops assuming a rig has one of
-  everything. Until then the cross-node path is unexecuted: the RDMA carrier has
-  not run a line, and connect, handshake and every stream above them have not
-  run on either carrier. What has run on hardware is a carrier binding its
-  per-worker listener and idling at no cost.
+- [ ] **Bring up a second DPU node.** Follow `RDMA_PLAN.md` from management
+  access through the fabric and Kubernetes gates. Until then the cross-node
+  path is unexecuted. The TCP carrier runs in the host peer-wire test, while its
+  RDMA arm skips without a configured local RDMA address; neither carrier has
+  connected two DPU nodes or carried a remote application stream. A previous
+  hardware bring-up proved only that a per-worker listener could bind and idle.
 - [ ] Exercise the remote arm of every campaign that proves only the local one:
   policy verdicts at a remote destination, endpoint selection across the
   boundary, and peer-channel lifetime under Pod churn.

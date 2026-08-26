@@ -480,9 +480,11 @@ refusals, 1.41 M requests without a failure, and a drain in steps of eight with
 no DPU error line. 127 itself has not been run, and near the ceiling ARM DRAM
 binds first: each live Pod holds 64 MB of DPU staging.
 
-**Cross-node destinations are refused.** The peer channel's RDMA transport is not
-bound, so every deployment measured here is one node and a Service whose only
-replicas are elsewhere has no route.
+**Cross-node destinations are refused in these measurements.** Every campaign
+in this report intentionally used one node with the peer carrier unset. The
+TLS/TCP/RDMA peer implementation exists, but no second DPU was available to
+produce a cross-node receipt, so a Service whose only replicas are elsewhere
+had no route in the measured deployments.
 
 ## Method and limits
 

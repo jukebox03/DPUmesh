@@ -33,12 +33,13 @@ nothing binds, `px_peer_configure` is uncalled, and a remote destination is
 refused at the first branch of `px_peer_stream_ready`, which is what a
 single-node deployment still does.
 
-What has not happened is a second node. On hardware a carrier has been seen to
-bind, listen and idle at no cost; connect, handshake and every stream above them
-have not run, and the RDMA carrier has not executed a line. Node-to-node
-confidentiality and authentication are implemented and undemonstrated — read
-what follows as the design and the code, not as a deployment's measured
-properties.
+What has not happened is a second node. The TCP carrier runs in the host
+peer-wire test; its RDMA arm skips without a configured local RDMA address. A
+previous hardware bring-up proved only that a carrier could bind, listen and
+idle. Neither carrier has connected two DPU nodes or carried a remote
+application stream. Node-to-node confidentiality and authentication are
+implemented and undemonstrated — read what follows as the design and the code,
+not as a deployment's measured properties.
 
 ## How to read this
 

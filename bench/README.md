@@ -97,13 +97,14 @@ Do not copy a registration private key between nodes. Bootstrap each node, then
 run this locally on that node and collect the two output rows into one file:
 
 ```sh
-DPUMESH_NODE_NAME=jet1 \
+DPUMESH_NODE_NAME=rapids4 \
 DPUMESH_NODE_RDMA_ADDR=10.77.0.1:47900 \
   ./bench/dpumesh_controller.sh node-record
 ```
 
-Use the equivalent command on `rapids4` with its own RDMA address, save the
-rows as (for example) `/etc/dpumesh/nodes`, and set on the administrator host:
+Use the equivalent command on the selected node B with `10.77.0.2:47900`, save
+the rows as (for example) `/etc/dpumesh/nodes`, and set on the administrator
+host:
 
 ```sh
 DPUMESH_NODES_FILE=/etc/dpumesh/nodes
