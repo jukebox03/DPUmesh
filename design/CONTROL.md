@@ -17,19 +17,28 @@ path differs across a node boundary.
 ```
 
 The boundary is a layer split, not a special case. `struct dmesh_peer_transport`
-is the seam: the lower RDMA implementation supplies ordered reliable delivery
-within a handle and a mutually authenticated key agreement, and this tree owns
-every authenticated stream, routing, custody and lifetime rule above it —
-handle namespaces, bounded parsing, the node-name-to-key binding check, custody
-across the boundary, and the refusal accounting that answers for all of it.
-Chapters 2-0 and 4 define that upper half, which is built and driven end to end
-by `tests/peer_channel_test.c` through a recording transport.
+is the seam: the transport below it supplies ordered reliable delivery within a
+handle and a mutually authenticated key agreement, and this tree owns every
+authenticated stream, routing, custody and lifetime rule above it — handle
+namespaces, bounded parsing, the node-name-to-key binding check, custody across
+the boundary, and the refusal accounting that answers for all of it. Chapters
+2-0 and 4 define that upper half, which is built and driven end to end by
+`tests/peer_channel_test.c` through a recording transport.
 
-**Status.** The lower half is the remaining work. No transport binds today, so
-`px_peer_configure` is uncalled, the peer table holds none, and a remote
-destination is refused at the first branch of `px_peer_stream_ready`. Until one
-binds, node-to-node confidentiality and authentication are properties this
-design assigns to the transport rather than properties a deployment has.
+**Status.** Both halves are built. The lower one is a mutually authenticated
+TLS 1.3 session over a byte carrier, and two carriers implement that inner seam:
+TCP, which CI runs, and RDMA, which the mesh is meant to run. A deployment binds
+one by naming it in `DPUMESH_PEER_TRANSPORT` (§5.5.1); with the variable unset
+nothing binds, `px_peer_configure` is uncalled, and a remote destination is
+refused at the first branch of `px_peer_stream_ready`, which is what a
+single-node deployment still does.
+
+What has not happened is a second node. On hardware a carrier has been seen to
+bind, listen and idle at no cost; connect, handshake and every stream above them
+have not run, and the RDMA carrier has not executed a line. Node-to-node
+confidentiality and authentication are implemented and undemonstrated — read
+what follows as the design and the code, not as a deployment's measured
+properties.
 
 ## How to read this
 
@@ -187,7 +196,7 @@ Five keys exist; a Pod holds none of them.
 | controller issuing key | Ed25519 | the controller, one per cluster | public keys only, `DPUMESH_CONTROLLER_KEY_DIR` |
 | node agent registration key | Ed25519 | that node's agent | public key only, from the generation |
 | feed key | HMAC-SHA256, **symmetric** | node agent | the same secret, `DPUMESH_FEED_KEY_DIR` |
-| node credential | X25519 | **the DPU itself**, generated at first boot | its own; peers' public halves from the generation |
+| node credential | Ed25519 | **the DPU itself**, generated at first boot | its own; peers' public halves from the generation |
 | Linkerd identity | ECDSA P-256 | the DPU | its own key on disk, the certificate in memory |
 
 ---
@@ -434,23 +443,25 @@ safety-critical operation, and it survives losing the cluster-scoped component.
 
 # 2-0. Node authentication
 
-Which DPU is on the other end of a channel. Settled once per node pair, before
+Which DPU is on the other end of a channel. Settled on every channel, before
 any Pod identity is discussed.
 
 ## 2-0.1 The node credential
 
-One static X25519 keypair per DPU, generated on the DPU at first boot into a
-0400 file that never leaves it (`dmesh_peer_node_key_load`). It is a
-key-agreement key, not a signing key: it proves possession during a mutual
-handshake and derives the pairwise traffic key. First boot writes the private
-half with `O_CREAT|O_EXCL|O_NOFOLLOW`; later boots read it back only if the file
-is regular, owned by the effective uid, has no group or other bits, and is
-exactly 32 bytes. The public half goes to a separate readable file; the agent
-reports it to the controller, which publishes it in that node's `node=` line.
+One static Ed25519 keypair per DPU, generated on the DPU at first boot into a
+0400 file that never leaves it (`dmesh_peer_node_key_load`). It is a signing
+key: it signs the certificate the DPU presents and the handshake transcript
+under it, which is what proves possession. The traffic key is the session's own,
+agreed fresh on every connection and never derived from this one. First boot
+writes the private half with `O_CREAT|O_EXCL|O_NOFOLLOW`; later boots read it
+back only if the file is regular, owned by the effective uid, has no group or
+other bits, and is exactly 32 bytes. The public half goes to a separate readable
+file; the agent reports it to the controller, which publishes it in that node's
+`node=` line.
 
 ```text
    DPU A                                                          DPU B
-   X25519 private ──generated here, never leaves──                X25519 private
+   Ed25519 private ─generated here, never leaves──               Ed25519 private
         │ public half only                                             │
         ▼                                                              ▼
    node agent A ─────┐                                    ┌───── node agent B
@@ -468,8 +479,10 @@ has generated a credential; it binds nothing, so it is not a key.
 
 ## 2-0.2 One rule on top of a stock handshake
 
-The channel runs an existing mutually authenticated key-agreement protocol —
-Noise IK, or TLS 1.3 with raw public keys — with one rule added:
+The channel runs TLS 1.3, mutually authenticated: each end presents a
+self-signed certificate carrying its node static key, no certificate authority
+is trusted, and resumption is off, so every connection performs a fresh key
+agreement. One rule is added:
 
 > the peer's static public key must equal the one the held generation binds to
 > the peer's claimed node name. A name the generation does not bind, or a key
@@ -486,17 +499,20 @@ every conversation in the cluster. No per-workload key exists on this wire.
 
 ## 2-0.3 Incarnation
 
-The incarnation advances on every entry to `AUTHENTICATING` and is bound into
-the handshake — the Noise prologue, or the TLS exporter context:
+The incarnation advances on every entry to `AUTHENTICATING` and travels as the
+first thing the initiator writes into the completed session, ahead of any frame:
 
 ```text
    dpumesh-peer-v1\n<local node>\n<peer node>\n<incarnation>\n
 ```
 
-A completed handshake therefore authenticates the protocol version, both node
-names and the incarnation its handles will carry. Every frame carries it and it
-is matched on every path, because an asynchronous completion outlives the state
-that named it — the same arithmetic `dma_generation` applies to a Pod slot.
+The handshake settles the peer's key and this prologue settles a name against
+it, so the pair authenticates the protocol version, both node names and the
+incarnation the connection's handles will carry. A session key is never reused,
+so a prologue cannot be replayed into another connection. Every frame carries it
+and it is matched on every path, because an asynchronous completion outlives the
+state that named it — the same arithmetic `dma_generation` applies to a Pod
+slot.
 
 ## 2-0.4 Simultaneous open
 
@@ -545,11 +561,13 @@ connection never displaces live traffic — it is refused instead.
 ## 2-0.7 Channels and queue pairs
 
 To keep a completion on its owner the channel is one queue pair per (node pair,
-destination worker), while authentication and the pairwise key are established
-once per node pair — so `CHANNEL_MAX × PEER_QP_PER_NODE` is the number to check
-against RDMA resource limits, not `DMESH_CHANNEL_MAX` alone. `GENERATION_INTERVAL` and
-`DMESH_CHANNEL_IDLE_NS` interact: a channel evicted and reopened between two generations
-pays setup twice.
+destination worker), and authentication runs on each one: a worker holds its own
+credential context and settles the peer's key itself, so the pairwise key is per
+(node pair, worker) and none crosses a worker boundary. `CHANNEL_MAX ×
+PEER_QP_PER_NODE` is therefore the number to check against RDMA resource limits,
+not `DMESH_CHANNEL_MAX` alone. `GENERATION_INTERVAL` and `DMESH_CHANNEL_IDLE_NS`
+interact: a channel evicted and reopened between two generations pays setup
+twice.
 
 ## 2-0.8 What this layer establishes, and what it does not
 
@@ -1804,9 +1822,11 @@ The ones marked ∎ change a security property; the rest change only cost.
 
 **Cluster scope and the node boundary**
 - Each ARM worker instantiates a peer table, and `px_peer_configure` binds the
-  lower RDMA transport to it. Accepted lower connections enter through
-  `px_peer_accept`; the authenticated upper state owns them thereafter. This is
-  the contract the transport meets; no transport binds yet.
+  transport to it when `DPUMESH_PEER_TRANSPORT` names a carrier. Every worker
+  gets one or none: partial coverage would carry the streams that landed on one
+  worker and refuse the ones that landed on another, for the same pair of Pods.
+  Accepted lower connections enter through `px_peer_accept`; the authenticated
+  upper state owns them thereafter.
 - Linkerd-selected remote endpoints retain their exact topology Pod UID. The
   source opens that Pod on its node's channel, DATA lands through destination
   SG-DMA, and `STREAM_ACK` releases source custody only after `REV_DONE` was

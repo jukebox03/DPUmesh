@@ -712,10 +712,10 @@ TLS and tagged-transport layers. Their far end is a Pod, not a second Linkerd
 byte proxy: adding sidecar TLS there would deliver ciphertext and a transport
 header to the application. Node-local isolation is the registered DMA mapping;
 node-to-node confidentiality and mutual authentication belong to the peer
-channel's RDMA transport, whose authenticated node key the held topology binds.
-That transport is not yet bound, so this is what the design assigns rather than
-what a deployment provides — [`CONTROL.md`](CONTROL.md) carries the seam and its
-status.
+channel's transport, whose authenticated node key the held topology binds. That
+transport is implemented but has never run between two nodes, so this is still
+what the design assigns rather than what a deployment provides —
+[`CONTROL.md`](CONTROL.md) carries the seam and its status.
 
 ## The adapter ABI
 

@@ -72,27 +72,25 @@ The cluster scope is a layer split. `doca/peer_channel.c` owns everything above
 node-name-to-key binding check, custody across the boundary, refusal accounting
 — and `doca/dpu_proxy.c` carries the hooks that bind it to the datapath.
 `tests/peer_channel_test.c` drives that layer end to end through a recording
-transport. The remaining work is the half below the seam.
+transport. Below the seam a mutually authenticated TLS 1.3 session runs over a
+byte carrier, and two carriers implement that inner seam: TCP for CI and
+bring-up, RDMA for the mesh. Both halves are built; what is missing is a second
+node to run them between.
 
-- [ ] **Implement the RDMA transport.** Five callbacks — `connect` with a
-  prologue bound into the handshake, `peer_key` returning the peer's
-  authenticated static public key, `send`, `recv`, `close` — plus the accept
-  side that `dmesh_peer_accept` completes, and `px_peer_configure` called to
-  bind it. What the layer above requires of it is ordered reliable delivery
-  within a handle and a mutually authenticated key agreement whose peer static
-  key can be read back. Nothing above the seam can be exercised on hardware
-  until this binds: the peer table is initialised with no transport, so a remote
-  destination is refused at the first branch of `px_peer_stream_ready`.
-- [ ] Bring up a second DPU node and re-run the deploy against both.
+- [ ] **Bring up a second DPU node.** A link between the two BlueFields, node B
+  joined and provisioned, and a harness that stops assuming a rig has one of
+  everything. Until then the cross-node path is unexecuted: the RDMA carrier has
+  not run a line, and connect, handshake and every stream above them have not
+  run on either carrier. What has run on hardware is a carrier binding its
+  per-worker listener and idling at no cost.
 - [ ] Exercise the remote arm of every campaign that proves only the local one:
   policy verdicts at a remote destination, endpoint selection across the
   boundary, and peer-channel lifetime under Pod churn.
 - [ ] Widen the cross-node pin. `px_peer_pin_admits` refuses a stream's second
   remote destination and counts it; per-request fan-out across nodes needs a pin
   per destination, and that function is the one place that decides.
-- [ ] Until a transport binds, node-to-node confidentiality, authentication and
-  custody are properties the design assigns to it. Publish them as what the
-  design provides, with the status attached — not as what a deployment does.
+- [ ] Publish node-to-node confidentiality, authentication and custody with the
+  status attached: implemented, and not yet demonstrated between two nodes.
 
 ## F7 Node density
 
@@ -206,8 +204,8 @@ proxy, which is the arrangement this design exists to remove.
 What remains plaintext is the node-local hop, held inside registered DMA
 mappings the workload cannot address. That is a real difference from a sidecar
 mesh and should be published as the trade it is. The node-to-node half of the
-argument rests on the peer channel's transport, so it carries F6's status with
-it until that transport binds.
+argument rests on the peer channel's TLS 1.3 session, so it carries F6's status
+with it until that session has run between two nodes.
 
 ---
 

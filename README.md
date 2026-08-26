@@ -6,9 +6,10 @@ policy, discovery, backend selection, connection state, and Host↔DPU transfer.
 Each Service is deployed as an opaque byte stream or on Linkerd's
 protocol-aware HTTP/1, HTTP/2 or gRPC path, independently of the surface its
 Pods use. Endpoints on the node are reached by DMA, and endpoints on another
-node by the authenticated peer channel, whose RDMA transport is the one
-component still to be implemented — until it binds, a Service whose only
-replicas are elsewhere has no route.
+node by the authenticated peer channel. That channel's transport is built and
+its carrier binds on hardware, but no deployment here has a second node, so the
+cross-node path has never run: a Service whose only replicas are elsewhere has
+no route yet.
 
 This repository is a research prototype. The design documents below define its
 transport, proxy, control-plane, and API contracts.
@@ -314,8 +315,9 @@ hand — is [design/CONTROL.md §5.5](design/CONTROL.md).
   the inbound policy that grades the stream is the destination Pod's own.
 - Traffic between Pods on one node is plaintext inside registered DMA mappings
   the workload cannot address. There is no per-hop proxy TLS. Confidentiality
-  between nodes belongs to the peer channel's transport, which is not yet
-  bound, so it is a property of the design and not of a deployment.
+  between nodes is the peer channel's mutually authenticated TLS 1.3 session,
+  which is implemented but has never carried traffic between two nodes — a
+  property of the code, not yet of a deployment.
 
 Building the library and bringing up a cluster are covered in
 [bench/README.md](bench/README.md).
