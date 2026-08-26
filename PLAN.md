@@ -79,8 +79,8 @@ The remaining work is ordered by the first gate that can fail:
    the rows, and deploy both DPUs with `DPUMESH_PEER_TRANSPORT=rdma`, their own
    bind address, the same base port and the same `A/K` geometry.
 6. **Attach receipts, in order:** handshake, bidirectional data, Pod churn,
-   channel loss/recovery, remote policy, then performance. The exact gates and
-   stop conditions are in [`RDMA_PLAN.md`](RDMA_PLAN.md).
+   channel loss/recovery, remote policy, then performance. Stop at the first
+   failed hardware, identity, or lifecycle gate instead of weakening it.
 
 Do not schedule F4, F7, F8's device-plugin reduction, or the Cost items ahead
 of this sequence. None of them can produce the missing cross-node claim.
@@ -112,10 +112,10 @@ byte carrier, and two carriers implement that inner seam: TCP for CI and
 bring-up, RDMA for the mesh. Both halves are built; what is missing is a second
 node to run them between.
 
-- [ ] **Bring up a second DPU node.** Follow `RDMA_PLAN.md` from management
-  access through the fabric and Kubernetes gates. Until then the cross-node
-  path is unexecuted. The TCP carrier runs in the host peer-wire test, while its
-  RDMA arm skips without a configured local RDMA address; neither carrier has
+- [ ] **Bring up a second DPU node.** Follow the ordered management, fabric,
+  Kubernetes and receipt gates above. Until then the cross-node path is
+  unexecuted. The TCP carrier runs in the host peer-wire test, while its RDMA
+  arm skips without a configured local RDMA address; neither carrier has
   connected two DPU nodes or carried a remote application stream. A previous
   hardware bring-up proved only that a per-worker listener could bind and idle.
 - [ ] Exercise the remote arm of every campaign that proves only the local one:
