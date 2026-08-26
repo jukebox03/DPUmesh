@@ -119,7 +119,7 @@ int main(int argc, char **argv)
     const char *credential = getenv("DPUMESH_NODE_KEY_FILE");
     if (credential && *credential) {
         char credential_error[256] = {0};
-        if (dmesh_peer_node_key_load(credential, objs->node_public_key,
+        if (dmesh_peer_node_key_load(credential, objs->node_public_key, NULL,
                                      credential_error, sizeof(credential_error)) != 0) {
             DOCA_LOG_ERR("Node credential failed: %s", credential_error);
             result = DOCA_ERROR_INVALID_VALUE;

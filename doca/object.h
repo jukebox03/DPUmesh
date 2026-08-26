@@ -469,6 +469,10 @@ static inline void dpu_upstream_free(struct dpu_conntrack *ct, uint16_t uP) {
     ct->ht[hole].in_use = 0;
 }
 
+/* The inter-node carrier's runtime, created at bring-up and owned by the
+ * worker it serves. Opaque here: only dpu_worker.c drives it. */
+struct peer_transport_rt;
+
 struct dpu_data_worker {
     struct objects *objs;
     int id;
@@ -483,6 +487,12 @@ struct dpu_data_worker {
     atomic_ullong stat_cross_worker_out;
     atomic_ullong stat_cross_worker_in;
     int wake_fd;                 /* cross-worker eventfd */
+    /* Every source that may wake this worker, in one descriptor: the eventfd
+     * above and, once a peer carrier is configured, the descriptor that
+     * carrier's connections are waited on. -1 leaves wake_fd as the only one. */
+    int wake_epfd;
+    struct peer_transport_rt *peer_rt;  /* NULL when no peer carrier is configured */
+    uint64_t peer_evict_deadline;       /* next idle-channel sweep */
     uint64_t dpa_nudge_deadline; /* next optional DPA nudge; 0 while disabled */
     atomic_int parked;           /* worker is entering or blocked in epoll_wait */
     atomic_int init_state;       /* 0=pending, 1=epoll ready, -1=thread init failed */

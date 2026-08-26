@@ -15,6 +15,7 @@
 #include "dpu_worker.h"
 #include "comch_server.h"
 #include "peer_channel.h"
+#include "peer_transport.h"
 #include "control_scope.h"
 #include "dpa_common.h"
 #include "buffer.h"
@@ -1989,8 +1990,16 @@ static int px_peer_node_binding(void *ctx, const char *node_name,
                                 uint16_t *port)
 {
     struct px_worker_state *worker = ctx;
-    return worker && dmesh_topology_node_peer(worker->objs, node_name,
-                                               key, ip_be, port);
+    if (!worker || !dmesh_topology_node_peer(worker->objs, node_name,
+                                             key, ip_be, port))
+        return 0;
+    /* The generation binds one port per node, and each worker carries its own
+     * carrier on that port plus its index. A worker therefore reaches the peer
+     * worker with the same index, which is what keeps a channel's two ends on
+     * one connection instead of funnelling every worker into index 0. */
+    if (port)
+        *port = (uint16_t)(*port + worker->id);
+    return 1;
 }
 
 static int px_peer_pod_on_node(void *ctx, const char *pod_uid,
@@ -2429,6 +2438,33 @@ int px_peer_configure(struct objects *objs, int worker_id,
                           objs->node_public_key, transport, transport_ctx,
                           &PX_PEER_OPS, worker);
     return 0;
+}
+
+struct dmesh_peer_table *px_peer_table(struct objects *objs, int worker_id)
+{
+    struct dmesh_proxy *px = objs ? objs->proxy : NULL;
+    if (!px || worker_id < 0 || worker_id >= px->n_workers)
+        return NULL;
+    struct dmesh_peer_table *peers = px->workers[worker_id].peers;
+    return peers && peers->transport ? peers : NULL;
+}
+
+void px_peer_detach(struct objects *objs, int worker_id)
+{
+    struct dmesh_proxy *px = objs ? objs->proxy : NULL;
+    struct dmesh_peer_table *peers = px_peer_table(objs, worker_id);
+    if (!peers)
+        return;
+    dmesh_peer_table_fini(peers);
+    dmesh_peer_table_init(peers, objs->node_name, objs->node_public_key,
+                          NULL, NULL, &PX_PEER_OPS, &px->workers[worker_id]);
+}
+
+void px_peer_evict_idle(struct objects *objs, int worker_id)
+{
+    struct dmesh_peer_table *peers = px_peer_table(objs, worker_id);
+    if (peers)
+        dmesh_peer_evict_idle(peers);
 }
 
 struct dmesh_peer_channel *
@@ -5038,6 +5074,19 @@ static int px_engine_pump(struct objects *objs, struct px_engine *eng,
     return progressed;
 }
 
+/* The carrier runtime bound into a worker's peer table. The table holds it as
+ * an opaque context because `dmesh_peer_channel` only ever calls the five
+ * transport callbacks; the worker, which also has to drive connects and
+ * handshakes, needs the runtime itself. The vtable identity is what says the
+ * context is one. */
+static struct peer_transport_rt *px_peer_rt(struct px_worker_state *worker)
+{
+    struct dmesh_peer_table *peers = worker ? worker->peers : NULL;
+    if (!peers || peers->transport != dmesh_peer_transport_ops())
+        return NULL;
+    return peers->transport_ctx;
+}
+
 static int
 px_worker_has_pending(struct px_engine *eng)
 {
@@ -5050,6 +5099,9 @@ px_worker_has_pending(struct px_engine *eng)
     struct dmesh_peer_table *peers = worker->peers;
     if (!peers || !peers->transport)
         return 0;
+    struct peer_transport_rt *rt = px_peer_rt(worker);
+    if (rt && dmesh_peer_transport_pending(rt))
+        return 1;
     for (uint32_t i = 0; i < DMESH_CHANNEL_MAX; i++) {
         struct dmesh_peer_channel *channel = &peers->channels[i];
         if (channel->in_use &&
@@ -5108,7 +5160,15 @@ static int px_peer_progress_worker(struct px_worker_state *worker, int budget)
 {
     if (!worker->peers || !worker->peers->transport || budget <= 0)
         return 0;
-    int progressed = px_remote_fin_retry(worker, &budget);
+    /* Connects, handshakes and arriving connections first, then the channels.
+     * The two are sequential, never nested: the carrier's descriptor stays
+     * readable while an established connection holds unread bytes, and it is
+     * the channel's own recv below that consumes them. Gating the walk on the
+     * step above would leave those bytes unread and spin the worker between
+     * waking and finding nothing moved. */
+    struct peer_transport_rt *rt = px_peer_rt(worker);
+    int progressed = rt ? dmesh_peer_transport_progress(rt) : 0;
+    progressed |= px_remote_fin_retry(worker, &budget);
     for (uint32_t i = 0; i < DMESH_CHANNEL_MAX && budget > 0; i++) {
         struct dmesh_peer_channel *channel = &worker->peers->channels[i];
         if (!channel->in_use || channel->state == DMESH_PEER_CLOSED)

@@ -732,12 +732,17 @@ L7ENV
     # agent is what reports it to the controller.
     local node_key_file="${DPUMESH_NODE_KEY_FILE:-/etc/dpumesh/node-static.key}"
     local node_key_public="${DPUMESH_NODE_KEY_PUBLIC_FILE:-/etc/dpumesh/node-static.pub}"
+    # The inter-node carrier. Unset leaves the node without one, which is what
+    # a single-node rig runs: remote destinations are refused.
+    local peer_transport="${DPUMESH_PEER_TRANSPORT:-}"
+    local peer_bind="${DPUMESH_PEER_BIND:-}"
+    local peer_port="${DPUMESH_PEER_PORT:-}"
     # The mediated control-plane lookup, reached through this node's agent.
     local relay_bind="${LINKERD_GATEWAY_BIND:-192.168.100.1}"
     local relay_port="${DPUMESH_CONTROLLER_RELAY_PORT:-28089}"
     local scope_url="${DPUMESH_CONTROLLER_SCOPE_URL:-http://$relay_bind:$relay_port}"
     local trust_domain="${DPUMESH_IDENTITY_TRUST_DOMAIN:-linkerd.${LINKERD_TRUST_DOMAIN:-cluster.local}}"
-    step "=== Starting dpumesh_dpu (l7_opaque='$l7_opaque' l7_full='$l7_full' dpa_threads='$dpa_threads' rings_per_pod='$rings' arm_workers='$workers') ==="
+    step "=== Starting dpumesh_dpu (l7_opaque='$l7_opaque' l7_full='$l7_full' dpa_threads='$dpa_threads' rings_per_pod='$rings' arm_workers='$workers' peer='$peer_transport') ==="
     stop_dpu
     local dpu_home; dpu_home=$(dpu_home)
     # Start one DPU process.
@@ -746,7 +751,7 @@ L7ENV
 running=\$(pgrep -x dpumesh_dpu | head -1)
 if [ -n \"\$running\" ]; then echo \"\$running\"; exit 0; fi
 ulimit -c unlimited
-screen -dmS dpumesh-bench bash -c \"ulimit -c unlimited; cd $dpu_home/$DPU_BUILD && $l7_env DPUMESH_NODE_NAME=$node_name DPUMESH_REGISTRATION_KEY_DIR=$registration_key_dir DPUMESH_FEED_KEY_DIR=$feed_key_dir DPUMESH_MEMBERSHIP_FILE=$membership_file DPUMESH_ADMISSION_FILE=$admission_file DPUMESH_TOPOLOGY_FILE=$topology_file DPUMESH_CONTROLLER_KEY_DIR=$controller_key_dir DPUMESH_NODE_KEY_FILE=$node_key_file DPUMESH_NODE_KEY_PUBLIC_FILE=$node_key_public DPUMESH_CONTROLLER_SCOPE_URL=$scope_url DPUMESH_IDENTITY_TRUST_DOMAIN=$trust_domain DPUMESH_L7_OPAQUE_SVC=$l7_opaque DPUMESH_L7_SVC=$l7_full DPUMESH_DPA_THREADS=$dpa_threads DPUMESH_RINGS_PER_POD=$rings DPUMESH_ARM_WORKERS=$workers ./dpumesh_dpu $DPU_PCI -l $log_level > $DPU_LOG 2>&1\"
+screen -dmS dpumesh-bench bash -c \"ulimit -c unlimited; cd $dpu_home/$DPU_BUILD && $l7_env DPUMESH_NODE_NAME=$node_name DPUMESH_REGISTRATION_KEY_DIR=$registration_key_dir DPUMESH_FEED_KEY_DIR=$feed_key_dir DPUMESH_MEMBERSHIP_FILE=$membership_file DPUMESH_ADMISSION_FILE=$admission_file DPUMESH_TOPOLOGY_FILE=$topology_file DPUMESH_CONTROLLER_KEY_DIR=$controller_key_dir DPUMESH_NODE_KEY_FILE=$node_key_file DPUMESH_NODE_KEY_PUBLIC_FILE=$node_key_public DPUMESH_CONTROLLER_SCOPE_URL=$scope_url DPUMESH_IDENTITY_TRUST_DOMAIN=$trust_domain DPUMESH_L7_OPAQUE_SVC=$l7_opaque DPUMESH_L7_SVC=$l7_full DPUMESH_DPA_THREADS=$dpa_threads DPUMESH_RINGS_PER_POD=$rings DPUMESH_ARM_WORKERS=$workers DPUMESH_PEER_TRANSPORT=$peer_transport DPUMESH_PEER_BIND=$peer_bind DPUMESH_PEER_PORT=$peer_port ./dpumesh_dpu $DPU_PCI -l $log_level > $DPU_LOG 2>&1\"
 sleep 2
 pgrep -x dpumesh_dpu | head -1 || echo NO_PID
 LAUNCHER

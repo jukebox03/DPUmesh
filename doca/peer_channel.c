@@ -78,6 +78,7 @@ static int peer_public_from_private(const uint8_t seed[32], uint8_t public_key[3
 }
 
 int dmesh_peer_node_key_load(const char *path, uint8_t public_key[32],
+                             uint8_t seed_out[32],
                              char *error, size_t error_len)
 {
 #define PEER_KEY_ERROR(...)                                                    \
@@ -135,6 +136,8 @@ int dmesh_peer_node_key_load(const char *path, uint8_t public_key[32],
         }
     }
     int ok = peer_public_from_private(seed, public_key);
+    if (ok == 0 && seed_out)
+        memcpy(seed_out, seed, sizeof(seed));
     OPENSSL_cleanse(seed, sizeof(seed));
     if (ok != 0) {
         PEER_KEY_ERROR("%s does not derive a public key", path);

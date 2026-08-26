@@ -12,6 +12,9 @@
 #include "buffer.h"
 #include "ring.h"
 #include "dpu_proxy.h"
+#include "peer_channel.h"
+#include "peer_transport.h"
+#include "peer_wire.h"
 #include <dpumesh/dmesh_common.h>
 #include <dpumesh/dmesh_topology.h>
 #include <dmesh_l7.h>
@@ -29,6 +32,7 @@
 #include <stdint.h>
 #include <sched.h>
 #include <pthread.h>
+#include <arpa/inet.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 
@@ -604,7 +608,8 @@ dmesh_l7_driver_notification_fds(void *driver, int *completion_fd,
     px_bind_worker(worker_state->objs, worker_state->id);
     *completion_fd = (int)completion;
     *dma_fd = px_worker_notification_fd(worker_state->objs, worker_state->id);
-    *wake_fd = worker_state->wake_fd;
+    *wake_fd = worker_state->wake_epfd >= 0 ? worker_state->wake_epfd
+                                            : worker_state->wake_fd;
     return *wake_fd >= 0 ? 0 : -1;
 }
 
@@ -663,6 +668,16 @@ dmesh_l7_driver_maintenance(void *driver)
     if (!worker_state)
         return -1;
     dpu_dpa_nudge_due(worker_state);
+    /* Idle peer channels are swept on their own cadence: a channel is idle for
+     * a minute before it is worth closing, and maintenance runs every
+     * millisecond. */
+    if (worker_state->peer_rt) {
+        uint64_t now = dpu_wake_clock_now();
+        if ((int64_t)(now - worker_state->peer_evict_deadline) >= 0) {
+            px_peer_evict_idle(worker_state->objs, worker_state->id);
+            worker_state->peer_evict_deadline = now + dpu_wake_clock_hz();
+        }
+    }
     px_l7_stats_report(worker_state->objs, worker_state->id);
     px_peer_stats_report(worker_state->objs, worker_state->id);
     return 0;
@@ -702,14 +717,23 @@ stop_data_workers(struct objects *objs)
     }
     for (int s = 0; s < objs->n_data_workers; s++) {
         struct dpu_data_worker *worker_state = &objs->data_workers[s];
-        if (!worker_state->running)
-            continue;
-        pthread_join(worker_state->thread, NULL);
-        worker_state->running = 0;
+        if (worker_state->running) {
+            pthread_join(worker_state->thread, NULL);
+            worker_state->running = 0;
+        }
+        if (worker_state->wake_epfd >= 0) {
+            close(worker_state->wake_epfd);
+            worker_state->wake_epfd = -1;
+        }
         if (worker_state->wake_fd >= 0) {
             close(worker_state->wake_fd);
             worker_state->wake_fd = -1;
         }
+        /* Released whether or not the thread ever ran: bring-up takes the
+         * listening port before the threads are created. The runtime owns its
+         * carrier, so this closes that listener and every connection under it. */
+        dmesh_peer_transport_free(worker_state->peer_rt);
+        worker_state->peer_rt = NULL;
     }
 }
 
@@ -743,6 +767,170 @@ dpu_publish_ready_and_setup_pods(struct objects *objs)
         /* setup_pod_dma only arms the ACK barrier. READY is published by
          * dpu_finalize_pending_pod_inits after every target EU responds. */
     }
+}
+
+/* The port a node's first ARM worker listens on for peers. The generation
+ * binds one port per node and worker w takes that port plus w, so the two ends
+ * of a channel are always the same worker index on both nodes. */
+#define DPU_PEER_PORT_DEFAULT 47900
+
+static int
+dpu_peer_wire_new(const char *kind, uint32_t bind_ip_be, uint16_t port,
+                  const struct peer_wire_ops **ops, void **wctx,
+                  char *error, size_t error_len)
+{
+    if (strcmp(kind, "rdma") == 0)
+        return peer_wire_rdma_new(bind_ip_be, port, ops, wctx, error, error_len);
+    if (strcmp(kind, "tcp") == 0)
+        return peer_wire_tcp_new(bind_ip_be, port, ops, wctx, error, error_len);
+    snprintf(error, error_len, "DPUMESH_PEER_TRANSPORT='%s' names no carrier "
+                               "(rdma, tcp)", kind);
+    return -1;
+}
+
+/* Give every ARM worker its own carrier and authenticated-session runtime, so
+ * a peer connection is driven by the thread that already owns the streams it
+ * carries and no peer state crosses workers.
+ *
+ * Nothing here is required: a node with DPUMESH_PEER_TRANSPORT unset runs as
+ * it does today, with remote destinations refused. A node that asked for a
+ * carrier and could not get one keeps starting for the same reason — a fabric
+ * that is not up must not take the node's local traffic down with it. */
+static void
+dpu_peer_bringup(struct objects *objs)
+{
+    const char *kind = getenv("DPUMESH_PEER_TRANSPORT");
+    if (!kind || !*kind)
+        return;
+
+    const char *credential = getenv("DPUMESH_NODE_KEY_FILE");
+    if (!objs->node_key_ready || !credential || !*credential) {
+        DOCA_LOG_WARN("peer carrier '%s' not started: DPUMESH_NODE_KEY_FILE is "
+                      "unset, so this node holds no credential to authenticate "
+                      "with", kind);
+        return;
+    }
+    if (objs->node_name[0] == '\0') {
+        DOCA_LOG_WARN("peer carrier '%s' not started: this node has no name for "
+                      "a peer to bind", kind);
+        return;
+    }
+
+    /* The private half is read here rather than kept from startup: it is the
+     * one input the session layer needs and nothing else on the DPU does. */
+    uint8_t seed[32];
+    uint8_t public_key[32];
+    char error[256] = {0};
+    if (dmesh_peer_node_key_load(credential, public_key, seed,
+                                 error, sizeof(error)) != 0) {
+        DOCA_LOG_WARN("peer carrier '%s' not started: %s", kind, error);
+        return;
+    }
+    if (memcmp(public_key, objs->node_public_key, sizeof(public_key)) != 0) {
+        explicit_bzero(seed, sizeof(seed));
+        DOCA_LOG_WARN("peer carrier '%s' not started: %s no longer holds the "
+                      "credential this node published", kind, credential);
+        return;
+    }
+
+    uint32_t bind_ip_be = htonl(INADDR_ANY);
+    const char *bind = getenv("DPUMESH_PEER_BIND");
+    if (bind && *bind) {
+        struct in_addr address;
+        if (inet_pton(AF_INET, bind, &address) != 1) {
+            explicit_bzero(seed, sizeof(seed));
+            DOCA_LOG_WARN("peer carrier '%s' not started: DPUMESH_PEER_BIND='%s' "
+                          "is not an IPv4 address", kind, bind);
+            return;
+        }
+        bind_ip_be = address.s_addr;
+    }
+
+    unsigned port_base = DPU_PEER_PORT_DEFAULT;
+    const char *port_env = getenv("DPUMESH_PEER_PORT");
+    if (port_env && *port_env) {
+        unsigned long value = strtoul(port_env, NULL, 10);
+        if (value < 1 || value + (unsigned long)objs->n_data_workers > 65535) {
+            explicit_bzero(seed, sizeof(seed));
+            DOCA_LOG_WARN("peer carrier '%s' not started: DPUMESH_PEER_PORT='%s' "
+                          "leaves no room for %d worker ports", kind, port_env,
+                          objs->n_data_workers);
+            return;
+        }
+        port_base = (unsigned)value;
+    }
+
+    uint64_t handshake_timeout_ns = DMESH_PEER_HANDSHAKE_TIMEOUT_NS;
+    const char *timeout_env = getenv("DPUMESH_PEER_HANDSHAKE_TIMEOUT_MS");
+    if (timeout_env && *timeout_env) {
+        unsigned long ms = strtoul(timeout_env, NULL, 10);
+        if (ms >= 1 && ms <= 600000)
+            handshake_timeout_ns = (uint64_t)ms * 1000000ull;
+    }
+
+    /* Every worker or none: a node whose workers are only partly reachable
+     * would carry the streams that landed on one worker and refuse the ones
+     * that landed on another, for the same pair of Pods. The runtimes are
+     * therefore built first and bound into the proxy only once all of them
+     * stand. */
+    struct peer_transport_rt *runtimes[MAX_ARM_WORKERS] = {0};
+    int built = 0;
+    for (; built < objs->n_data_workers; built++) {
+        uint16_t port = (uint16_t)(port_base + (unsigned)built);
+        const struct peer_wire_ops *ops = NULL;
+        void *wire_ctx = NULL;
+        if (dpu_peer_wire_new(kind, bind_ip_be, port, &ops, &wire_ctx,
+                              error, sizeof(error)) != 0) {
+            snprintf(error + strlen(error), sizeof(error) - strlen(error),
+                     " (worker %d, port %u)", built, (unsigned)port);
+            break;
+        }
+        struct peer_transport_config config = {
+            .node_name = objs->node_name,
+            .seed = seed,
+            .wire = ops,
+            .wire_ctx = wire_ctx,
+            .handshake_timeout_ns = handshake_timeout_ns,
+        };
+        if (dmesh_peer_transport_new(&config, &runtimes[built],
+                                     error, sizeof(error)) != 0) {
+            ops->ctx_free(wire_ctx);
+            break;
+        }
+    }
+    explicit_bzero(seed, sizeof(seed));
+
+    if (built < objs->n_data_workers) {
+        for (int s = 0; s < built; s++)
+            dmesh_peer_transport_free(runtimes[s]);
+        DOCA_LOG_WARN("PEER CARRIER: %s did not come up, so this node refuses "
+                      "remote destinations: %s", kind, error);
+        return;
+    }
+
+    for (int s = 0; s < objs->n_data_workers; s++) {
+        if (px_peer_configure(objs, s, dmesh_peer_transport_ops(),
+                              runtimes[s]) != 0) {
+            /* The proxy refuses only what it refuses for every worker alike,
+             * so the first one decides for all of them. */
+            for (int t = s; t < objs->n_data_workers; t++)
+                dmesh_peer_transport_free(runtimes[t]);
+            for (int t = 0; t < s; t++) {
+                px_peer_detach(objs, t);
+                dmesh_peer_transport_free(objs->data_workers[t].peer_rt);
+                objs->data_workers[t].peer_rt = NULL;
+            }
+            DOCA_LOG_WARN("PEER CARRIER: %s could not be bound to the proxy, so "
+                          "this node refuses remote destinations", kind);
+            return;
+        }
+        dmesh_peer_transport_attach(runtimes[s], px_peer_table(objs, s));
+        objs->data_workers[s].peer_rt = runtimes[s];
+    }
+
+    DOCA_LOG_WARN("PEER CARRIER: %s, %d worker(s) on ports %u-%u",
+                  kind, objs->n_data_workers, port_base,
+                  port_base + (unsigned)objs->n_data_workers - 1);
 }
 
 void
@@ -795,6 +983,9 @@ run_dpu_worker(struct objects *objs)
         atomic_init(&worker_state->stat_cross_worker_in, 0);
         worker_state->num_deferred_recv = 0;
         worker_state->wake_fd = -1;
+        worker_state->wake_epfd = -1;
+        worker_state->peer_rt = NULL;
+        worker_state->peer_evict_deadline = 0;
         atomic_store_explicit(&worker_state->parked, 0, memory_order_relaxed);
         atomic_store_explicit(&worker_state->init_state, 0, memory_order_relaxed);
         worker_state->stop = 0;
@@ -898,6 +1089,10 @@ run_dpu_worker(struct objects *objs)
         return;
     }
 
+    /* The inter-node carrier, once the proxy holds the tables it binds into
+     * and before any worker thread can look for one. */
+    dpu_peer_bringup(objs);
+
     /* Each ARM data worker owns one consumer PE and wake fd. */
     {
         for (int s = 0; s < objs->n_data_workers; s++) {
@@ -909,6 +1104,25 @@ run_dpu_worker(struct objects *objs)
                 stop_data_workers(objs);
                 cleanup_objects(objs);
                 return;
+            }
+            /* A worker with a peer carrier has two things that wake it from
+             * outside its own engine, and its runtime waits on one descriptor.
+             * Collect both here rather than widening that contract. */
+            if (worker_state->peer_rt) {
+                int carrier = dmesh_peer_transport_epfd(worker_state->peer_rt);
+                struct epoll_event wake = { .events = EPOLLIN, .data = { .u32 = 1 } };
+                struct epoll_event peer = { .events = EPOLLIN, .data = { .u32 = 2 } };
+                worker_state->wake_epfd = epoll_create1(EPOLL_CLOEXEC);
+                if (worker_state->wake_epfd < 0 || carrier < 0 ||
+                    epoll_ctl(worker_state->wake_epfd, EPOLL_CTL_ADD,
+                              worker_state->wake_fd, &wake) != 0 ||
+                    epoll_ctl(worker_state->wake_epfd, EPOLL_CTL_ADD,
+                              carrier, &peer) != 0) {
+                    DOCA_LOG_ERR("ARM worker %d peer wake set-up failed", s);
+                    stop_data_workers(objs);
+                    cleanup_objects(objs);
+                    return;
+                }
             }
             if (pthread_create(&worker_state->thread, NULL, dpu_data_worker_main, worker_state) != 0) {
                 DOCA_LOG_ERR("ARM worker %d thread creation failed", s);

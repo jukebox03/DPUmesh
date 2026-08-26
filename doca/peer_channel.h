@@ -368,8 +368,11 @@ struct dmesh_peer_table {
 
 /* The node credential: one static keypair per DPU, generated at first boot
  * into a 0400 file that never leaves it. Loads it, or generates it when the
- * file is absent. Returns 0 and fills the 32-byte public half. */
+ * file is absent. Returns 0 and fills the 32-byte public half. `seed_out` is
+ * the private half, which only the session layer needs; pass NULL where the
+ * public half is the whole answer. */
 int dmesh_peer_node_key_load(const char *path, uint8_t public_key[32],
+                             uint8_t seed_out[32],
                              char *error, size_t error_len);
 /* Write the public half where the node agent reports it from. */
 int dmesh_peer_node_key_publish(const char *path, const uint8_t public_key[32]);

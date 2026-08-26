@@ -977,7 +977,7 @@ static void test_node_credential(void)
 
     uint8_t born[32], reloaded[32], zero[32] = {0};
     char err[160] = {0};
-    assert(dmesh_peer_node_key_load(path, born, err, sizeof(err)) == 0);
+    assert(dmesh_peer_node_key_load(path, born, NULL, err, sizeof(err)) == 0);
     assert(memcmp(born, zero, sizeof(zero)) != 0);
 
     struct stat st;
@@ -985,12 +985,12 @@ static void test_node_credential(void)
     assert(st.st_size == 32);
     assert((st.st_mode & 077) == 0);      /* the private half stays private */
 
-    assert(dmesh_peer_node_key_load(path, reloaded, err, sizeof(err)) == 0);
+    assert(dmesh_peer_node_key_load(path, reloaded, NULL, err, sizeof(err)) == 0);
     assert(memcmp(born, reloaded, sizeof(born)) == 0);
 
     /* A credential the node did not write is refused rather than adopted. */
     assert(chmod(path, 0644) == 0);
-    assert(dmesh_peer_node_key_load(path, reloaded, err, sizeof(err)) < 0);
+    assert(dmesh_peer_node_key_load(path, reloaded, NULL, err, sizeof(err)) < 0);
     assert(err[0] != '\0');
     assert(unlink(path) == 0);
 }

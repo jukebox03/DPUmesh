@@ -1600,6 +1600,20 @@ Geometry is DATA.md's `N/K/A`, clamped rather than refused:
 | `DPUMESH_ARM_WORKERS` | 1 | `A`, at most 8, lowered to the nearest divisor of `K` |
 | `DPUMESH_DPA_WAKE_US` | 0 (off) | periodic DPA wake, µs |
 
+The inter-node carrier — what a stream to a Pod on another node crosses. Unset
+leaves the node without one, and remote destinations are refused:
+
+| Name | Default | What it decides |
+|---|---|---|
+| `DPUMESH_PEER_TRANSPORT` | unset | the carrier: `rdma`, or `tcp` for a fabric that is not up yet |
+| `DPUMESH_PEER_BIND` | `0.0.0.0` | the local address the carrier binds; `rdma` refuses the wildcard, because the device its queue pairs come from is the one this address resolves to |
+| `DPUMESH_PEER_PORT` | 47900 | the first port; ARM worker `w` takes this plus `w`, and reaches the peer's worker `w` on the same offset from the port the generation binds for that node |
+| `DPUMESH_PEER_HANDSHAKE_TIMEOUT_MS` | 5000 | how long an inbound connection may stay unauthenticated before it is dropped |
+
+Every worker gets a carrier or none does: a node whose workers are only partly
+reachable would carry the streams that landed on one worker and refuse the ones
+that landed on another, for the same pair of Pods.
+
 The L7 layer:
 
 | Name | Default | What it decides |

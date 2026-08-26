@@ -7,6 +7,7 @@ DOCA_CFLAGS := $(shell pkg-config --cflags $(DOCA_PKGS))
 DOCA_LIBS   := $(shell pkg-config --libs   $(DOCA_PKGS))
 CRYPTO_LIBS := $(shell pkg-config --libs libcrypto)
 TLS_LIBS    := $(shell pkg-config --libs libssl)
+RDMA_LIBS   := $(shell pkg-config --libs librdmacm libibverbs)
 DOCA_LIBDIR := $(shell pkg-config --variable=libdir doca-common)
 FLEXIO_LIBDIR := /opt/mellanox/flexio/lib
 
@@ -142,11 +143,12 @@ $(TESTDIR)/lb_policy_test: tests/lb_policy_test.c doca/dpu_worker.c $(LIB_HDRS) 
 	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -Wl,--gc-sections \
 		-o $@ tests/lb_policy_test.c $(DOCA_LIBS) -lpthread $(RPATHS)
 
-$(TESTDIR)/proxy_lane_queue_test: tests/proxy_lane_queue_test.c doca/dpu_proxy.c doca/peer_channel.c doca/topology.c doca/workload_grant.c $(LIB_HDRS) | dirs
-	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -Wl,--gc-sections \
-		-o $@ tests/proxy_lane_queue_test.c doca/peer_channel.c doca/topology.c \
+$(TESTDIR)/proxy_lane_queue_test: tests/proxy_lane_queue_test.c doca/dpu_proxy.c doca/peer_channel.c doca/peer_transport.c doca/peer_tls.c doca/topology.c doca/workload_grant.c $(LIB_HDRS) | dirs
+	$(CC) $(CFLAGS) -D_GNU_SOURCE -ffunction-sections -fdata-sections -Wl,--gc-sections \
+		-o $@ tests/proxy_lane_queue_test.c doca/peer_channel.c \
+		doca/peer_transport.c doca/peer_tls.c doca/topology.c \
 		doca/workload_grant.c \
-		$(DOCA_LIBS) $(CRYPTO_LIBS) -lpthread $(RPATHS)
+		$(DOCA_LIBS) $(TLS_LIBS) $(CRYPTO_LIBS) -lpthread $(RPATHS)
 
 $(TESTDIR)/worker_mpsc_queue_test: tests/worker_mpsc_queue_test.c doca/object.h | dirs
 	$(CC) $(CFLAGS) -o $@ tests/worker_mpsc_queue_test.c -lpthread
@@ -167,6 +169,11 @@ $(TESTDIR)/peer_transport_test: tests/peer_transport_test.c doca/peer_transport.
 	$(CC) $(CFLAGS) -D_GNU_SOURCE -o $@ tests/peer_transport_test.c \
 		doca/peer_transport.c doca/peer_wire_tcp.c doca/peer_tls.c doca/peer_channel.c \
 		$(TLS_LIBS) $(CRYPTO_LIBS) $(RPATHS)
+
+$(TESTDIR)/peer_wire_test: tests/peer_wire_test.c doca/peer_wire_tcp.c \
+		doca/peer_wire_rdma.c doca/peer_wire.h | dirs
+	$(CC) $(CFLAGS) -D_GNU_SOURCE -o $@ tests/peer_wire_test.c \
+		doca/peer_wire_tcp.c doca/peer_wire_rdma.c $(RDMA_LIBS) $(RPATHS)
 
 $(TESTDIR)/topology_gen_test: tests/topology_gen_test.c doca/topology.c doca/workload_grant.c doca/control_scope.c $(LIB_HDRS) | dirs
 	$(CC) $(CFLAGS) -o $@ tests/topology_gen_test.c doca/topology.c doca/workload_grant.c \
@@ -217,7 +224,8 @@ test: $(TESTDIR)/native_api_contract_test $(TESTDIR)/native_control_state_test \
 	$(TESTDIR)/lb_policy_test \
 	$(TESTDIR)/proxy_lane_queue_test $(TESTDIR)/worker_mpsc_queue_test \
 	$(TESTDIR)/topology_test $(TESTDIR)/topology_gen_test $(TESTDIR)/peer_channel_test \
-	$(TESTDIR)/peer_tls_test $(TESTDIR)/peer_transport_test $(TESTDIR)/ring_counter_test \
+	$(TESTDIR)/peer_tls_test $(TESTDIR)/peer_transport_test \
+	$(TESTDIR)/peer_wire_test $(TESTDIR)/ring_counter_test \
 	$(TESTDIR)/l7_abi_contract_test $(TESTDIR)/benchmark_result_contract_test $(PRELOAD) \
 	$(BINDIR)/bench_dpumesh $(BINDIR)/bench_sock
 	$(TESTDIR)/native_api_contract_test
@@ -236,6 +244,7 @@ test: $(TESTDIR)/native_api_contract_test $(TESTDIR)/native_control_state_test \
 	$(TESTDIR)/peer_channel_test
 	$(TESTDIR)/peer_tls_test
 	$(TESTDIR)/peer_transport_test
+	$(TESTDIR)/peer_wire_test
 	$(TESTDIR)/ring_counter_test
 	$(TESTDIR)/l7_abi_contract_test
 	$(TESTDIR)/benchmark_result_contract_test

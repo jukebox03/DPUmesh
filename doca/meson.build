@@ -22,6 +22,10 @@ deps += dependency('doca-dpa')
 deps += dependency('doca-dma')   # ARM generic SG-DMA engine for the L7-proxy egress (dpu_proxy.c)
 deps += dependency('libflexio')
 deps += dependency('libcrypto')  # HMAC/RNG for trusted workload registration
+deps += dependency('libssl')     # mutually authenticated sessions between nodes (peer_tls.c)
+# The inter-node carrier: connection setup on librdmacm, data path on verbs.
+deps += dependency('librdmacm')
+deps += dependency('libibverbs')
 
 srcs = [
     'dpu_main.c',
@@ -39,6 +43,10 @@ srcs = [
     'pod_membership.c',
     'topology.c',
     'peer_channel.c',
+    'peer_tls.c',
+    'peer_transport.c',
+    'peer_wire_tcp.c',
+    'peer_wire_rdma.c',
     'control_scope.c',
     'dpa.c',
     'dpu_proxy.c',

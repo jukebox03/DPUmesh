@@ -53,4 +53,14 @@ int peer_wire_tcp_new(uint32_t bind_ip_be, uint16_t port,
  * for 0. */
 uint16_t peer_wire_tcp_port(void *wctx);
 
+/* The RDMA carrier: what the mesh runs on between nodes. The bind address must
+ * be the local address of an rdma device, because the protection domain and
+ * completion queue every connection shares are taken from the device that
+ * address resolves to. Like the TCP carrier it binds and listens before
+ * returning, so a fabric that cannot carry this is reported here. */
+int peer_wire_rdma_new(uint32_t bind_ip_be, uint16_t port,
+                       const struct peer_wire_ops **ops, void **wctx,
+                       char *error, size_t error_len);
+uint16_t peer_wire_rdma_port(void *wctx);
+
 #endif /* DMESH_PEER_WIRE_H */
