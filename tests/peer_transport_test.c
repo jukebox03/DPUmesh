@@ -832,6 +832,40 @@ static void test_handshake_deadline(void)
     node_stop(&b);
 }
 
+/* A carrier fault is terminal even before peer_key can answer. Treating the
+ * same negative answer as merely "not ready" would leave the channel in
+ * AUTHENTICATING forever and keep its worker awake forever. */
+static void test_handshake_carrier_fault(void)
+{
+    struct stub_ctx *sa = calloc(1, sizeof(*sa));
+    struct stub_ctx *sb = calloc(1, sizeof(*sb));
+    assert(sa && sb);
+    sa->remote = sb;
+    sb->remote = sa;
+
+    struct node a, b;
+    node_start(&a, NODE_A, 0xA1, &STUB_OPS, sa);
+    node_start(&b, NODE_B, 0xB2, &STUB_OPS, sb);
+    node_bind(&a, &b);
+    node_bind(&b, &a);
+
+    struct dmesh_peer_channel *ac = open_channel(&a, &b);
+    assert(sb->npending == 1);
+    stub_close(sb->pending[0]);
+    assert(dmesh_peer_transport_progress(a.rt) == 1);
+
+    assert(ac->state == DMESH_PEER_CLOSED);
+    assert(a.fake.resets == 1);
+    assert(a.table.refused[DMESH_PEER_REFUSE_TRANSPORT] == 1);
+    assert(dmesh_peer_transport_pending(a.rt) == 0);
+    struct peer_transport_stats stats;
+    dmesh_peer_transport_stats(a.rt, &stats);
+    assert(stats.faults == 1 && stats.live == 0);
+
+    node_stop(&a);
+    node_stop(&b);
+}
+
 int main(void)
 {
     test_handshake();
@@ -843,6 +877,7 @@ int main(void)
     test_simultaneous_open();
     test_send_backpressure();
     test_handshake_deadline();
+    test_handshake_carrier_fault();
     printf("peer_transport_test: PASS\n");
     return 0;
 }

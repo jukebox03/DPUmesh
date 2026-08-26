@@ -88,18 +88,22 @@ static void tcp_release(struct tcp_conn *c)
 /* Only what the connection is waiting for is armed. EPOLLOUT stays off unless
  * a connect is outstanding or a message is stuck, because a writable socket is
  * writable almost always and an event loop woken by that never sleeps. */
-static void tcp_arm(struct tcp_conn *c)
+static int tcp_arm(struct tcp_conn *c)
 {
     if (c->state == TCP_DEAD || c->fd < 0)
-        return;
+        return -1;
     uint32_t want = EPOLLIN | EPOLLRDHUP;
     if (c->state == TCP_CONNECTING || c->tx_pos < c->tx_len)
         want |= EPOLLOUT;
     if (want == c->armed)
-        return;
+        return 0;
     struct epoll_event ev = { .events = want, .data = { .ptr = c } };
-    if (epoll_ctl(c->ctx->epfd, EPOLL_CTL_MOD, c->fd, &ev) == 0)
-        c->armed = want;
+    if (epoll_ctl(c->ctx->epfd, EPOLL_CTL_MOD, c->fd, &ev) != 0) {
+        c->state = TCP_DEAD;
+        return -1;
+    }
+    c->armed = want;
+    return 0;
 }
 
 static int tcp_register(struct tcp_conn *c)
@@ -153,7 +157,8 @@ static int tcp_send_msg(void *wc, const void *buf, size_t len)
         if (tcp_flush(c) < 0)
             return -1;
         if (c->tx_pos < c->tx_len) {
-            tcp_arm(c);
+            if (tcp_arm(c) != 0)
+                return -1;
             return 0;                /* the one message in flight still is */
         }
     }
@@ -166,7 +171,8 @@ static int tcp_send_msg(void *wc, const void *buf, size_t len)
     c->tx_pos = 0;
     if (tcp_flush(c) < 0)
         return -1;
-    tcp_arm(c);
+    if (tcp_arm(c) != 0)
+        return -1;
     return 1;
 }
 
@@ -310,7 +316,7 @@ static int tcp_progress(void *wctx, void **accepted, int max, int *n_accepted)
         }
         if (c->state == TCP_READY && c->tx_pos < c->tx_len && tcp_flush(c) > 0)
             progressed = 1;
-        tcp_arm(c);
+        (void)tcp_arm(c);
     }
     return progressed;
 }

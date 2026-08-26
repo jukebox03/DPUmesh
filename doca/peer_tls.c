@@ -40,9 +40,11 @@ struct peer_tls_conn {
             snprintf(error, error_len, __VA_ARGS__);                           \
     } while (0)
 
-/* The chain is not the reason to believe a peer, so a self-signed certificate
- * is not an error here. Every other failure still is: a malformed or unusable
- * certificate cannot produce the key the caller needs to pin. */
+/* The chain and certificate lifetime are not the reason to believe a peer, so
+ * a self-signed certificate and clock skew are not errors here. Every other
+ * failure still is: a malformed or unusable certificate cannot produce the
+ * key the caller needs to pin. CertificateVerify proves possession, and the
+ * caller pins that key against the held topology generation. */
 static int peer_tls_verify(int preverified, X509_STORE_CTX *store)
 {
     if (preverified)
@@ -50,6 +52,8 @@ static int peer_tls_verify(int preverified, X509_STORE_CTX *store)
     switch (X509_STORE_CTX_get_error(store)) {
     case X509_V_ERR_DEPTH_ZERO_SELF_SIGNED_CERT:
     case X509_V_ERR_SELF_SIGNED_CERT_IN_CHAIN:
+    case X509_V_ERR_CERT_NOT_YET_VALID:
+    case X509_V_ERR_CERT_HAS_EXPIRED:
         return 1;
     default:
         return 0;

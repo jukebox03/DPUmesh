@@ -736,7 +736,7 @@ L7ENV
     # a single-node rig runs: remote destinations are refused.
     local peer_transport="${DPUMESH_PEER_TRANSPORT:-}"
     local peer_bind="${DPUMESH_PEER_BIND:-}"
-    local peer_port="${DPUMESH_PEER_PORT:-}"
+    local peer_port="${DPUMESH_PEER_PORT:-47900}"
     # The mediated control-plane lookup, reached through this node's agent.
     local relay_bind="${LINKERD_GATEWAY_BIND:-192.168.100.1}"
     local relay_port="${DPUMESH_CONTROLLER_RELAY_PORT:-28089}"
@@ -977,7 +977,12 @@ export_agent_channel() {
     export DPUMESH_CONTROLLER_RELAY_PORT="${DPUMESH_CONTROLLER_RELAY_PORT:-28089}"
     export DPUMESH_DPU_FEED_HOST="${DPUMESH_DPU_FEED_HOST:-192.168.100.2}"
     export DPUMESH_DPU_FEED_PORT="${DPUMESH_DPU_FEED_PORT:-4788}"
-    export DPUMESH_NODE_RDMA_ADDR="${DPUMESH_NODE_RDMA_ADDR:-192.168.100.2:4791}"
+    # What the agent publishes must be the base listener the DPU actually
+    # binds; keep an explicit override for deployments whose reported address
+    # differs from the bind address.
+    local peer_report_ip="${DPUMESH_PEER_BIND:-192.168.100.2}"
+    local peer_report_port="${DPUMESH_PEER_PORT:-47900}"
+    export DPUMESH_NODE_RDMA_ADDR="${DPUMESH_NODE_RDMA_ADDR:-$peer_report_ip:$peer_report_port}"
     export DPUMESH_IDENTITY_STAGE_DIR="${LINKERD_PROVISION_DIR:-$PROJ_ROOT/build/linkerd-identity}"
     local controller_ip
     controller_ip=$(kubectl get service dpumesh-controller -n "$NS" \

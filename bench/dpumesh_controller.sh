@@ -23,7 +23,7 @@ REGISTRATION_KEY_DIR="${DPUMESH_REGISTRATION_KEY_DIR_HOST:-/etc/dpumesh/registra
 TOPOLOGY_HOST="${DPUMESH_TOPOLOGY_FILE_HOST:-/run/dpumesh/topology.v1}"
 TOPOLOGY_DPU="${DPUMESH_TOPOLOGY_FILE:-/etc/dpumesh/topology.v1}"
 # The DPU-to-DPU transport address this node publishes.
-NODE_RDMA_ADDR="${DPUMESH_NODE_RDMA_ADDR:-192.168.100.2:4791}"
+NODE_RDMA_ADDR="${DPUMESH_NODE_RDMA_ADDR:-${DPUMESH_PEER_BIND:-192.168.100.2}:${DPUMESH_PEER_PORT:-47900}}"
 
 valid_key_id() {
     [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9_.:-]{0,30}[A-Za-z0-9]$ ]]

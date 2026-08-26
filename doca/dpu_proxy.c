@@ -1997,8 +1997,12 @@ static int px_peer_node_binding(void *ctx, const char *node_name,
      * carrier on that port plus its index. A worker therefore reaches the peer
      * worker with the same index, which is what keeps a channel's two ends on
      * one connection instead of funnelling every worker into index 0. */
-    if (port)
-        *port = (uint16_t)(*port + worker->id);
+    if (port) {
+        unsigned peer_port = (unsigned)*port + (unsigned)worker->id;
+        if (*port == 0 || peer_port > UINT16_MAX)
+            return 0;
+        *port = (uint16_t)peer_port;
+    }
     return 1;
 }
 

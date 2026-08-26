@@ -70,6 +70,8 @@ struct rdma_conn {
     int                state;
     uint8_t            in_use;
     uint8_t            inbound;
+    uint8_t            handout_queued;
+    uint8_t            handed_out;
     uint8_t            send_busy[RDMA_SEND_RING];
     uint32_t           send_next;    /* where the free-slot scan starts */
     /* Receives that completed and have not been handed up yet, oldest first. */
@@ -157,10 +159,10 @@ static void rdma_release(struct rdma_conn *c)
     if (!c->in_use)
         return;
     if (c->id) {
-        if (c->state == RC_READY)
-            rdma_disconnect(c->id);
-        /* The queue pair goes first: once it is gone nothing new can name this
-         * slot, and only then is the memory it was reading safe to give back. */
+        /* An explicit rdma_disconnect would create a DISCONNECTED event that
+         * must be read and acknowledged before rdma_destroy_id. This carrier
+         * closes synchronously, so destroy the QP instead; the peer observes
+         * that loss and no unacknowledged local event is manufactured here. */
         if (c->id->qp)
             rdma_destroy_qp(c->id);
         rdma_destroy_id(c->id);
@@ -352,7 +354,14 @@ static int rdma_poll_cq(struct rdma_ctx *ctx)
     int progressed = 0;
     for (;;) {
         int n = ibv_poll_cq(ctx->cq, RDMA_POLL_BATCH, wcs);
-        if (n <= 0)
+        if (n < 0) {
+            ctx->dead = 1;
+            for (uint32_t i = 0; i < RDMA_CONN_MAX; i++)
+                if (ctx->conns[i].in_use)
+                    ctx->conns[i].state = RC_DEAD;
+            return 1;
+        }
+        if (n == 0)
             break;
         for (int i = 0; i < n; i++) {
             uint64_t id = wcs[i].wr_id;
@@ -393,13 +402,15 @@ static int rdma_poll_cq(struct rdma_ctx *ctx)
 
 /* ---- connection manager ------------------------------------------------- */
 
-static void rdma_handout_push(struct rdma_ctx *ctx, struct rdma_conn *c)
+static int rdma_handout_push(struct rdma_ctx *ctx, struct rdma_conn *c)
 {
     if (ctx->handout_count >= RDMA_CONN_MAX)
-        return;
+        return -1;
     uint32_t tail = (ctx->handout_head + ctx->handout_count) % RDMA_CONN_MAX;
     ctx->handout[tail] = (uint16_t)c->index;
     ctx->handout_count++;
+    c->handout_queued = 1;
+    return 0;
 }
 
 static void rdma_on_connect_request(struct rdma_ctx *ctx,
@@ -477,8 +488,9 @@ static int rdma_drain_cm(struct rdma_ctx *ctx)
             if (!c)
                 break;
             c->state = RC_READY;
-            if (c->inbound)
-                rdma_handout_push(ctx, c);
+            if (c->inbound && !c->handout_queued && !c->handed_out &&
+                rdma_handout_push(ctx, c) != 0)
+                c->state = RC_DEAD;
             break;
         case RDMA_CM_EVENT_DEVICE_REMOVAL:
             progressed = 1;
@@ -568,10 +580,24 @@ static int rdma_progress(void *wctx, void **accepted, int max, int *n_accepted)
         struct rdma_conn *c = &ctx->conns[ctx->handout[ctx->handout_head]];
         ctx->handout_head = (ctx->handout_head + 1) % RDMA_CONN_MAX;
         ctx->handout_count--;
-        if (!c->in_use || c->state == RC_DEAD)
+        if (!c->in_use || !c->handout_queued)
             continue;
+        c->handout_queued = 0;
+        if (c->state == RC_DEAD) {
+            rdma_release(c);
+            continue;
+        }
+        c->handed_out = 1;
         accepted[(*n_accepted)++] = c;
         progressed = 1;
+    }
+    /* Inbound failures before ESTABLISHED never entered the handout queue and
+     * have no upper owner that could close them. Reclaim them here. */
+    for (uint32_t i = 0; i < RDMA_CONN_MAX; i++) {
+        struct rdma_conn *c = &ctx->conns[i];
+        if (c->in_use && c->inbound && c->state == RC_DEAD &&
+            !c->handout_queued && !c->handed_out)
+            rdma_release(c);
     }
     return progressed;
 }
@@ -610,6 +636,14 @@ static void rdma_ctx_free(void *wctx)
     rdma_flush_cm(ctx);
     for (uint32_t i = 0; i < RDMA_CONN_MAX; i++)
         rdma_release(&ctx->conns[i]);
+    /* Destroying QPs flushes their work requests and may produce one last CQ
+     * notification. A CQ destroy waits for every delivered event to be
+     * acknowledged, so consume and acknowledge those before tearing it down. */
+    if (ctx->cc && ctx->cq) {
+        rdma_drain_comp(ctx);
+        (void)rdma_poll_cq(ctx);
+        rdma_drain_comp(ctx);         /* an allowed extra event may have no WC */
+    }
     if (ctx->listener)
         rdma_destroy_id(ctx->listener);
     if (ctx->cq)

@@ -995,6 +995,22 @@ static void test_node_credential(void)
     assert(unlink(path) == 0);
 }
 
+static void test_max_node_names_fit_prologue(void)
+{
+    char local[DMESH_K8S_NAME_MAX];
+    char peer[DMESH_K8S_NAME_MAX];
+    memset(local, 'a', sizeof(local) - 1);
+    memset(peer, 'b', sizeof(peer) - 1);
+    local[sizeof(local) - 1] = '\0';
+    peer[sizeof(peer) - 1] = '\0';
+
+    uint8_t prologue[DMESH_PEER_PROLOGUE_MAX];
+    int len = dmesh_peer_prologue(local, peer, UINT32_MAX,
+                                  prologue, sizeof(prologue));
+    assert(len == (int)sizeof(prologue) - 1);
+    assert(prologue[len] == '\0');
+}
+
 int main(void)
 {
     for (int i = 0; i < 32; i++) {
@@ -1019,6 +1035,7 @@ int main(void)
     test_pending_writer_and_accepted_channel();
     test_simultaneous_open_converges();
     test_node_credential();
+    test_max_node_names_fit_prologue();
     printf("peer_channel_test: PASS\n");
     return 0;
 }

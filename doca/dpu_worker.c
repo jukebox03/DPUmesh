@@ -721,6 +721,12 @@ stop_data_workers(struct objects *objs)
             pthread_join(worker_state->thread, NULL);
             worker_state->running = 0;
         }
+        /* The table owns its connection handles; detach it before freeing the
+         * runtime whose connection pool those handles point into. */
+        if (worker_state->peer_rt) {
+            px_peer_detach(objs, s);
+            dmesh_peer_transport_attach(worker_state->peer_rt, NULL);
+        }
         if (worker_state->wake_epfd >= 0) {
             close(worker_state->wake_epfd);
             worker_state->wake_epfd = -1;
@@ -730,8 +736,7 @@ stop_data_workers(struct objects *objs)
             worker_state->wake_fd = -1;
         }
         /* Released whether or not the thread ever ran: bring-up takes the
-         * listening port before the threads are created. The runtime owns its
-         * carrier, so this closes that listener and every connection under it. */
+         * listening port before the threads are created. */
         dmesh_peer_transport_free(worker_state->peer_rt);
         worker_state->peer_rt = NULL;
     }
@@ -773,6 +778,22 @@ dpu_publish_ready_and_setup_pods(struct objects *objs)
  * binds one port per node and worker w takes that port plus w, so the two ends
  * of a channel are always the same worker index on both nodes. */
 #define DPU_PEER_PORT_DEFAULT 47900
+
+static int
+dpu_parse_ulong(const char *text, unsigned long minimum, unsigned long maximum,
+                unsigned long *out)
+{
+    if (!text || !*text || !out)
+        return -1;
+    errno = 0;
+    char *end = NULL;
+    unsigned long value = strtoul(text, &end, 10);
+    if (errno != 0 || end == text || *end != '\0' ||
+        value < minimum || value > maximum)
+        return -1;
+    *out = value;
+    return 0;
+}
 
 static int
 dpu_peer_wire_new(const char *kind, uint32_t bind_ip_be, uint16_t port,
@@ -849,8 +870,10 @@ dpu_peer_bringup(struct objects *objs)
     unsigned port_base = DPU_PEER_PORT_DEFAULT;
     const char *port_env = getenv("DPUMESH_PEER_PORT");
     if (port_env && *port_env) {
-        unsigned long value = strtoul(port_env, NULL, 10);
-        if (value < 1 || value + (unsigned long)objs->n_data_workers > 65535) {
+        unsigned long value = 0;
+        unsigned long max_base = UINT16_MAX -
+                                 (unsigned long)(objs->n_data_workers - 1);
+        if (dpu_parse_ulong(port_env, 1, max_base, &value) != 0) {
             explicit_bzero(seed, sizeof(seed));
             DOCA_LOG_WARN("peer carrier '%s' not started: DPUMESH_PEER_PORT='%s' "
                           "leaves no room for %d worker ports", kind, port_env,
@@ -863,9 +886,15 @@ dpu_peer_bringup(struct objects *objs)
     uint64_t handshake_timeout_ns = DMESH_PEER_HANDSHAKE_TIMEOUT_NS;
     const char *timeout_env = getenv("DPUMESH_PEER_HANDSHAKE_TIMEOUT_MS");
     if (timeout_env && *timeout_env) {
-        unsigned long ms = strtoul(timeout_env, NULL, 10);
-        if (ms >= 1 && ms <= 600000)
-            handshake_timeout_ns = (uint64_t)ms * 1000000ull;
+        unsigned long ms = 0;
+        if (dpu_parse_ulong(timeout_env, 1, 600000, &ms) != 0) {
+            explicit_bzero(seed, sizeof(seed));
+            DOCA_LOG_WARN("peer carrier '%s' not started: "
+                          "DPUMESH_PEER_HANDSHAKE_TIMEOUT_MS='%s' is outside "
+                          "1-600000", kind, timeout_env);
+            return;
+        }
+        handshake_timeout_ns = (uint64_t)ms * 1000000ull;
     }
 
     /* Every worker or none: a node whose workers are only partly reachable

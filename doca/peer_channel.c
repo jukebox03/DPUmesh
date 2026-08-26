@@ -299,6 +299,16 @@ void dmesh_peer_reset(struct dmesh_peer_table *table,
     channel->state = DMESH_PEER_CLOSED;
 }
 
+void dmesh_peer_transport_failed(struct dmesh_peer_table *table,
+                                 struct dmesh_peer_channel *channel,
+                                 const char *why)
+{
+    if (!table || !channel || !channel->in_use)
+        return;
+    peer_refuse(table, channel, DMESH_PEER_REFUSE_TRANSPORT);
+    dmesh_peer_reset(table, channel, why);
+}
+
 static int peer_channel_alloc_tables(struct dmesh_peer_channel *channel)
 {
     if (!channel->handles) {

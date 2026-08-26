@@ -942,7 +942,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--delivery-interval", type=float, default=2.0)
     parser.add_argument("--controller-url", default=None,
                         help="where the cluster controller serves the generation")
-    parser.add_argument("--node-rdma-addr", default="192.168.100.2:4791",
+    parser.add_argument("--node-rdma-addr", default="192.168.100.2:47900",
                         help="the peer-channel address this node publishes")
     parser.add_argument("--identity-dir", type=Path, default=None,
                         help="where the Linkerd key and certificate request are staged")

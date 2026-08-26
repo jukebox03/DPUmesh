@@ -319,14 +319,12 @@ static int conn_read_prologue(struct peer_transport_rt *rt, struct peer_conn *c,
 
 /* ---- the step ---------------------------------------------------------- */
 
-/* A connection that never finished authenticating holds a channel in
- * AUTHENTICATING forever, because the seam has no way to report a fault
- * through `peer_key` — it answers "not yet" and "never" the same way. The
- * deadline is what closes that door, and the channel it belongs to is found by
- * the connection it holds. */
-static void conn_expire(struct peer_transport_rt *rt, struct peer_conn *c)
+/* peer_key deliberately has only "ready" and "not ready" answers. Faults
+ * found below that seam therefore reset the channel here; otherwise a failed
+ * connect or handshake would look pending forever. */
+static void conn_reset_owner(struct peer_transport_rt *rt, struct peer_conn *c,
+                             const char *why)
 {
-    conn_fault(c);
     if (c->owner != CONN_OWNER_CHANNEL || !rt->table) {
         conn_free(c);
         return;
@@ -334,7 +332,7 @@ static void conn_expire(struct peer_transport_rt *rt, struct peer_conn *c)
     for (uint32_t i = 0; i < DMESH_CHANNEL_MAX; i++) {
         struct dmesh_peer_channel *channel = &rt->table->channels[i];
         if (channel->in_use && channel->conn == c) {
-            dmesh_peer_reset(rt->table, channel, "peer handshake timed out");
+            dmesh_peer_transport_failed(rt->table, channel, why);
             return;                  /* the reset closed it */
         }
     }
@@ -424,7 +422,8 @@ static int conn_step(struct peer_transport_rt *rt, struct peer_conn *c)
 deadline:
     if (c->state != PC_ESTABLISHED && c->state != PC_FAULTED &&
         rt_now(rt) >= c->deadline_ns) {
-        conn_expire(rt, c);
+        conn_fault(c);
+        conn_reset_owner(rt, c, "peer handshake timed out");
         return 1;
     }
     return moved;
@@ -620,9 +619,8 @@ int dmesh_peer_transport_progress(struct peer_transport_rt *rt)
             continue;
         if (conn_step(rt, c))
             progressed = 1;
-        /* A connection nothing above it owns has no one to clean it up. */
-        if (c->in_use && c->owner == CONN_OWNER_RT && c->state == PC_FAULTED)
-            conn_free(c);
+        if (c->in_use && c->state == PC_FAULTED)
+            conn_reset_owner(rt, c, "peer transport failed while authenticating");
         if (c->in_use)
             high = i + 1;
     }

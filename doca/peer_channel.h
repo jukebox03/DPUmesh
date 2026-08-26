@@ -46,9 +46,11 @@
  * the boundary, so the largest frame is the arrival coalescing bound. */
 #define DMESH_PEER_EXTENT_MAX       (64u * 1024u)
 #define DMESH_PEER_FRAME_MAX        (DMESH_PEER_EXTENT_MAX + 64u)
-/* The prologue the stock handshake is bound to: what a completed handshake
- * therefore authenticates. */
-#define DMESH_PEER_PROLOGUE_MAX     288u
+/* Serialized prologue plus its terminating NUL. A Kubernetes node name may
+ * occupy every byte before DMESH_K8S_NAME_MAX's terminator, so both names must
+ * be sized from that contract rather than from a shorter typical name. */
+#define DMESH_PEER_PROLOGUE_MAX                                           \
+    ((sizeof("dpumesh-peer-v1\n") - 1u) + 2u * DMESH_K8S_NAME_MAX + 11u + 1u)
 
 /* ---- wire ------------------------------------------------------------- */
 
@@ -409,6 +411,11 @@ enum dmesh_peer_refusal dmesh_peer_authenticated(struct dmesh_peer_table *table,
  * carried ends, and every extent it pinned at this source is released. */
 void dmesh_peer_reset(struct dmesh_peer_table *table,
                       struct dmesh_peer_channel *channel, const char *why);
+/* Report a fault discovered by a transport runtime before send/recv can
+ * surface it, then perform the same synchronous reset as an I/O fault. */
+void dmesh_peer_transport_failed(struct dmesh_peer_table *table,
+                                 struct dmesh_peer_channel *channel,
+                                 const char *why);
 void dmesh_peer_evict_idle(struct dmesh_peer_table *table);
 /* The held generation changed: a channel to a node it no longer binds, or
  * binds to a different static key, is reset — its streams end as a channel
