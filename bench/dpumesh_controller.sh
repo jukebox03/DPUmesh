@@ -24,6 +24,7 @@ TOPOLOGY_HOST="${DPUMESH_TOPOLOGY_FILE_HOST:-/run/dpumesh/topology.v1}"
 TOPOLOGY_DPU="${DPUMESH_TOPOLOGY_FILE:-/etc/dpumesh/topology.v1}"
 # The DPU-to-DPU transport address this node publishes.
 NODE_RDMA_ADDR="${DPUMESH_NODE_RDMA_ADDR:-${DPUMESH_PEER_BIND:-192.168.100.2}:${DPUMESH_PEER_PORT:-47900}}"
+NODES_FILE="${DPUMESH_NODES_FILE:-}"
 
 valid_key_id() {
     [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9_.:-]{0,30}[A-Za-z0-9]$ ]]
@@ -106,22 +107,34 @@ prepare() {
     echo "controller keyring ready: host=$HOST_KEY_DIR dpu=$DPU_KEY_DIR (public only)"
 }
 
-# The per-node identity records the controller publishes. The agent public key
-# is derived from the node's active registration seed, so the generation and
-# the verifier agree on the same key. The DPU static key is published all-zero
-# until the node's agent reports the one its DPU generated at first boot.
-nodes_config() {
+# Print this host's operator record. Run it once on each node when assembling a
+# cluster nodes file; private registration material never leaves that node.
+node_record() {
     need_host
     local node_name key_id agent_pub
-    node_name="${DPUMESH_NODE_NAME:-$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')}"
+    node_name="${1:-${DPUMESH_NODE_NAME:-$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')}}"
     [ -n "$node_name" ] || { echo "cannot resolve the Kubernetes node name" >&2; exit 1; }
     key_id=$(echo "$HOST_PASS" | sudo -S -p '' cat "$REGISTRATION_KEY_DIR/active" 2>/dev/null | tr -d '[:space:]')
     valid_key_id "$key_id" || { echo "no active registration key in $REGISTRATION_KEY_DIR" >&2; exit 1; }
     agent_pub=$(echo "$HOST_PASS" | sudo -S -p '' cat "$REGISTRATION_KEY_DIR/$key_id.key" 2>/dev/null |
         derive_public_hex)
     [ ${#agent_pub} -eq 64 ] || { echo "cannot derive the agent public key" >&2; exit 1; }
-    printf '%s %s %s %s %s\n' "$node_name" "$NODE_RDMA_ADDR" "$key_id" "$agent_pub" \
+    printf '%s %s %s %s %s\n' "$node_name" "${2:-$NODE_RDMA_ADDR}" "$key_id" "$agent_pub" \
         "0000000000000000000000000000000000000000000000000000000000000000"
+}
+
+# The same file is mounted into the controller and every node agent. Without
+# one, retain the single-node bench default by generating this host's record.
+nodes_config() {
+    if [ -n "$NODES_FILE" ]; then
+        [ -r "$NODES_FILE" ] && [ -s "$NODES_FILE" ] || {
+            echo "node configuration is empty or unreadable: $NODES_FILE" >&2
+            exit 1
+        }
+        cat "$NODES_FILE"
+    else
+        node_record
+    fi
 }
 
 deploy() {
@@ -153,6 +166,9 @@ case "${1:-status}" in
     nodes-config)
         nodes_config
         ;;
+    node-record)
+        node_record "${2:-}" "${3:-}"
+        ;;
     deploy)
         deploy
         ;;
@@ -172,7 +188,7 @@ case "${1:-status}" in
         kubectl get deployment,pod -n "$NS" -l app=dpumesh-controller -o wide
         ;;
     *)
-        echo "usage: $0 prepare|nodes-config|deploy|topology-published|topology-show|" >&2
+        echo "usage: $0 prepare|node-record [node address]|nodes-config|deploy|topology-published|topology-show|" >&2
         echo "       stop|status" >&2
         exit 2
         ;;

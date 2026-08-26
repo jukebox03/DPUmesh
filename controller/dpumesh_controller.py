@@ -68,7 +68,7 @@ TOPOLOGY_MAX_BYTES = 16 * 1024 * 1024
 NODE_REPORT_MAX = 4096
 ZERO_KEY = "0" * 64
 POD_UID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
-KEY_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,30}")
+KEY_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,30}[A-Za-z0-9]")
 DNS_RE = re.compile(r"[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*")
 HEX64_RE = re.compile(r"[0-9a-f]{64}")
 
@@ -154,23 +154,24 @@ def read_nodes_file(path: Path) -> dict[str, tuple[str, str, str, str]]:
         name, rdma, key_id, agent_pub, dpu_pub = fields
         if not valid_node_record(name, rdma, key_id, agent_pub, dpu_pub):
             raise ControllerError(f"{path}:{line_no}: malformed node record")
+        if name in records:
+            raise ControllerError(f"{path}:{line_no}: duplicate node {name}")
         records[name] = (rdma, key_id, agent_pub, dpu_pub)
     return records
 
 
 class NodeRegistry:
-    """The node set, and the half of it the agents report.
+    """The operator-owned node set and the DPU keys agents report.
 
     The file is the anchor: a node the operator did not configure is not
-    published, so a report can add nothing. What a report supplies is the DPU
-    static handshake key its node generated at first boot and the transport
-    address it listens on — the two facts no operator can know in advance and
-    the peer-channel handshake refuses a channel without.
+    published, so a report can add nothing. Addresses and agent identities are
+    deployment facts and cannot be changed by a node. A report supplies only
+    the DPU static handshake key generated at first boot.
     """
 
     def __init__(self, path: Path) -> None:
         self.path = path
-        self.reports: dict[str, tuple[str, str]] = {}
+        self.reports: dict[str, str] = {}
         self.lock = threading.Lock()
 
     def report(self, name: str, rdma: str, dpu_public_key: str) -> None:
@@ -178,8 +179,13 @@ class NodeRegistry:
             raise ControllerError("malformed node report")
         if dpu_public_key == ZERO_KEY:
             raise ControllerError("a node may not report an all-zero static key")
+        configured = read_nodes_file(self.path)
+        if name not in configured:
+            raise ControllerError("node is not configured")
+        if rdma != configured[name][0]:
+            raise ControllerError("reported RDMA address differs from operator config")
         with self.lock:
-            self.reports[name] = (rdma, dpu_public_key)
+            self.reports[name] = dpu_public_key
 
     def names(self) -> set[str]:
         return set(read_nodes_file(self.path))
@@ -196,7 +202,7 @@ class NodeRegistry:
             rdma, key_id, agent_pub, dpu_pub = configured[name]
             reported = reports.get(name)
             if reported is not None:
-                rdma, dpu_pub = reported
+                dpu_pub = reported
             lines.append(f"node={name},{rdma},{key_id},{agent_pub},{dpu_pub}")
         return lines
 

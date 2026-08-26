@@ -62,12 +62,15 @@ LIB_LINK := $(LIBDIR)/libdpumesh.so
 
 # ---- consumers of the library ------------------------------------------------
 # dmesh_* API clients (socket/epoll façade over dmesh.h)
-DMESH_BINS := bench_dpumesh echo_dpumesh loopback_dpumesh verbs_dpumesh
+DMESH_BINS := bench_dpumesh echo_dpumesh loopback_dpumesh verbs_dpumesh \
+	hello_dpumesh hello_dpumesh_server
 bench_dpumesh_SRC    := bench/apps/bench_dpumesh.c
 bench_dpumesh_LIBS   := -lm
 echo_dpumesh_SRC     := bench/apps/echo_dpumesh.c
 loopback_dpumesh_SRC := bench/validators/loopback_dpumesh.c
 verbs_dpumesh_SRC    := bench/validators/verbs_dpumesh.c
+hello_dpumesh_SRC    := bench/examples/hello_dpumesh.c
+hello_dpumesh_server_SRC := bench/examples/hello_dpumesh_server.c
 
 # LD_PRELOAD shim (interposes libc sockets → dmesh) + its vanilla-TCP validators
 PRELOAD := $(LIBDIR)/libdmesh_preload.so

@@ -11,6 +11,30 @@ gRPC ───────┘
 Native, preload, and gRPC workloads are application adapters over the same
 DPU-hosted Linkerd mesh.
 
+## Start here
+
+There is one operator entry point: `./bench/bench.sh`. The rest of the tree is
+grouped by role:
+
+| Path | Purpose |
+|---|---|
+| `examples/` | minimal native API program; read this first |
+| `apps/` | benchmark clients and long-lived echo servers |
+| `k8s/` | controller, node-agent, workload and policy manifests |
+| `system/` | one-time Kubernetes node prerequisites |
+| `docker/` | images used by those manifests |
+| `validators/` | API and transport correctness probes |
+| `suite/` | repeatable benchmark and policy campaigns |
+| `report/` | measured results, never runtime input |
+
+The top-level controller, attestation, identity and feed files implement the
+trusted deployment plumbing called by `bench.sh`; applications do not copy or
+invoke them. For a first application, read
+[`examples/hello_dpumesh.c`](examples/hello_dpumesh.c), then
+[`apps/echo_dpumesh.c`](apps/echo_dpumesh.c) for a backpressured multi-connection
+server. `apps/bench_dpumesh.c` is deliberately a load generator, not a minimal
+API tutorial.
+
 ## One-shot deployment
 
 Create the repository-root `.env` with the rig's connection settings, then:
@@ -22,7 +46,8 @@ BENCH_DEPLOY_SCOPE=all ./bench/bench.sh deploy
 The command deploys `N/K/A/L=32/8/8/8`. Each Pod has one ring and one RX
 landing stripe per ARM worker, and all eight workers host an embedded Linkerd
 runtime. Port affinity keeps each connection, proxy session, DMA engine, and
-reverse-ring producer on one worker.
+reverse-ring producer on one worker. The harness labels its Kubernetes node
+`dpumesh.io/dpu=true`, which is the admission webhook's scheduling contract.
 
 Everything the command provisions or exports is the configuration surface
 defined in [design/CONTROL.md §5.5](../design/CONTROL.md):
@@ -38,7 +63,7 @@ The command performs the complete lifecycle in order:
    target feeds;
 2. builds the Host library, preload shim, native workloads, and gRPC adapter;
 3. builds the embedded Linkerd static library and the DPU binary;
-4. starts the controller, node agent, DPU process, and API workloads;
+4. starts the controller, node agent, admission webhook, DPU process, and API workloads;
 5. pins the workloads to the BlueField-local NUMA node;
 6. runs a real request through native, preload, and gRPC and fails deployment if
    any adapter does not traverse the embedded Linkerd path.
@@ -59,6 +84,43 @@ brings up its control plane too:
   Service-target feed is what presents real ClusterIPs and ready endpoint
   addresses to Linkerd;
 - `DPUMESH_L7_FAIL_CLOSED=1`.
+
+## Two-node RDMA configuration
+
+The operator owns one node file. Each row is:
+
+```text
+<k8s-node> <dpu-rdma-ip>:<base-port> <agent-key-id> <agent-public-key> <dpu-public-key>
+```
+
+Do not copy a registration private key between nodes. Bootstrap each node, then
+run this locally on that node and collect the two output rows into one file:
+
+```sh
+DPUMESH_NODE_NAME=jet1 \
+DPUMESH_NODE_RDMA_ADDR=10.77.0.1:47900 \
+  ./bench/dpumesh_controller.sh node-record
+```
+
+Use the equivalent command on `rapids4` with its own RDMA address, save the
+rows as (for example) `/etc/dpumesh/nodes`, and set on the administrator host:
+
+```sh
+DPUMESH_NODES_FILE=/etc/dpumesh/nodes
+DPUMESH_PEER_TRANSPORT=rdma
+```
+
+`dpumesh_controller.sh deploy` puts that file in one ConfigMap. The controller
+and every node-agent DaemonSet Pod mount that exact ConfigMap; an agent selects
+its row from `spec.nodeName` and may report only the DPU public key. It cannot
+change the operator's address or agent identity.
+
+The address must belong to the RDMA device used by that node's DPU. Both DPUs
+must use the same `DPUMESH_ARM_WORKERS` and base port; worker `w` listens on
+`base-port + w`. Before deployment, verify carrier/link state on both ends with
+`rdma link show`, `ibv_devinfo`, and an RDMA-CM ping such as `rping`. These
+checks require the physical port, switch/VLAN/PFC or RoCE routing, and DPU
+ownership to have already been configured.
 
 Steps 2 and 3 of the lifecycle above are also available on their own, for
 rebuilding after a source change without redeploying:
@@ -155,9 +217,9 @@ does not survive that churn indefinitely.
   the sole proxy and enforcement point.
 - `DPUMESH_L7_SVC` selects HTTP/1 and HTTP/2 services and
   `DPUMESH_L7_OPAQUE_SVC` selects opaque TCP services.
-- Cross-node routing runs above the peer-channel seam; its RDMA transport is
-  not yet bound, so a destination the topology places on another node is
-  refused. Every deployment this harness drives is one node.
+- Cross-node routing uses the configured `rdma` or diagnostic `tcp` peer
+  carrier. A single-node deployment needs no peer carrier; a multi-node
+  deployment must provide the operator node file described above.
 - Meshed Pods may declare their own access or take it from the admission
   webhook; `bench/k8s/pods.yaml` is the first and `bench/k8s/injected.yaml` the
   second.

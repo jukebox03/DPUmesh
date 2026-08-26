@@ -93,6 +93,7 @@ struct rdma_ctx {
     uint16_t                   port;
     uint8_t                    armed;
     uint8_t                    dead;
+    uint8_t                    ec_nonblock;
     uint32_t                   epoch_next;
     /* Connections that finished arriving but did not fit the caller's batch. */
     uint16_t                   handout[RDMA_CONN_MAX];
@@ -460,6 +461,23 @@ static int rdma_drain_cm(struct rdma_ctx *ctx)
         struct rdma_cm_id *orphan = NULL;
         struct rdma_conn *c = conn_of(ctx, ev->id);
 
+        /* Shutdown still has to consume requests already queued on the event
+         * channel. Reject them and acknowledge every other event without
+         * starting more asynchronous work. */
+        if (ctx->dead) {
+            progressed = 1;
+            if (ev->event == RDMA_CM_EVENT_CONNECT_REQUEST) {
+                rdma_reject(ev->id, NULL, 0);
+                orphan = ev->id;
+            } else if (c) {
+                c->state = RC_DEAD;
+            }
+            rdma_ack_cm_event(ev);
+            if (orphan)
+                rdma_destroy_id(orphan);
+            continue;
+        }
+
         switch (ev->event) {
         case RDMA_CM_EVENT_ADDR_RESOLVED:
             progressed = 1;
@@ -515,13 +533,6 @@ static int rdma_drain_cm(struct rdma_ctx *ctx)
             rdma_destroy_id(orphan);
     }
     return progressed;
-}
-
-static void rdma_flush_cm(struct rdma_ctx *ctx)
-{
-    struct rdma_cm_event *ev = NULL;
-    while (ctx->ec && rdma_get_cm_event(ctx->ec, &ev) == 0)
-        rdma_ack_cm_event(ev);
 }
 
 /* ---- ops ---------------------------------------------------------------- */
@@ -632,8 +643,18 @@ static void rdma_ctx_free(void *wctx)
     struct rdma_ctx *ctx = wctx;
     if (!ctx)
         return;
-    /* Nothing may be destroyed while an event still names it. */
-    rdma_flush_cm(ctx);
+    /* Stop creating work, then reject requests already queued before removing
+     * the listener. A CONNECT_REQUEST owns a child id, so merely acknowledging
+     * it would leak that id. */
+    ctx->dead = 1;
+    if (ctx->ec && ctx->ec_nonblock)
+        (void)rdma_drain_cm(ctx);
+    if (ctx->listener) {
+        rdma_destroy_id(ctx->listener);
+        ctx->listener = NULL;
+    }
+    if (ctx->ec && ctx->ec_nonblock)
+        (void)rdma_drain_cm(ctx);
     for (uint32_t i = 0; i < RDMA_CONN_MAX; i++)
         rdma_release(&ctx->conns[i]);
     /* Destroying QPs flushes their work requests and may produce one last CQ
@@ -644,8 +665,6 @@ static void rdma_ctx_free(void *wctx)
         (void)rdma_poll_cq(ctx);
         rdma_drain_comp(ctx);         /* an allowed extra event may have no WC */
     }
-    if (ctx->listener)
-        rdma_destroy_id(ctx->listener);
     if (ctx->cq)
         ibv_destroy_cq(ctx->cq);
     if (ctx->cc)
@@ -728,6 +747,7 @@ int peer_wire_rdma_new(uint32_t bind_ip_be, uint16_t port,
                  strerror(errno));
         goto fail;
     }
+    ctx->ec_nonblock = 1;
     if (rdma_create_id(ctx->ec, &ctx->listener, NULL, RDMA_PS_TCP) != 0) {
         snprintf(error, error_len, "peer wire: rdma_create_id: %s",
                  strerror(errno));

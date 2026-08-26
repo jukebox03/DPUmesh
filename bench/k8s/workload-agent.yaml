@@ -100,7 +100,7 @@ spec:
         - --dpu-feed-host=${DPUMESH_DPU_FEED_HOST}
         - --dpu-feed-port=${DPUMESH_DPU_FEED_PORT}
         - --controller-url=${DPUMESH_CONTROLLER_URL}
-        - --node-rdma-addr=${DPUMESH_NODE_RDMA_ADDR}
+        - --nodes-file=/etc/dpumesh/nodes
         - --identity-dir=/run/dpumesh/linkerd-identity
         - --identity-service-account=${LINKERD_IDENTITY_SERVICE_ACCOUNT}
         - --identity-trust-namespace=${LINKERD_CONTROL_NAMESPACE}
@@ -140,6 +140,7 @@ ${DPUMESH_AGENT_SERVICE_ARGS}
         - { name: socket, mountPath: /run/dpumesh }
         - { name: keyring, mountPath: /etc/dpumesh/registration.keys, readOnly: true }
         - { name: feed-keyring, mountPath: /etc/dpumesh/feed.keys, readOnly: true }
+        - { name: nodes, mountPath: /etc/dpumesh/nodes, subPath: nodes, readOnly: true }
         - { name: identity-stage, mountPath: /run/dpumesh/linkerd-identity, readOnly: true }
         # The host's xtables lock, so the guard serializes with kube-proxy —
         # and a writable path for it, since the root filesystem is read-only.
@@ -153,6 +154,8 @@ ${DPUMESH_AGENT_SERVICE_ARGS}
         hostPath: { path: /etc/dpumesh/registration.keys, type: Directory }
       - name: feed-keyring
         hostPath: { path: /etc/dpumesh/feed.keys, type: Directory }
+      - name: nodes
+        configMap: { name: dpumesh-controller-nodes }
       # Identity material is provisioned on the host and delivered from here;
       # nothing on this path reaches the DPU except through the agent.
       - name: identity-stage

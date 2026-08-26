@@ -42,6 +42,42 @@ def main():
         "kubepods-burstable-pod12345678_1234_1234_1234_123456789abc.slice\n"
     ) == "12345678-1234-1234-1234-123456789abc"
 
+    # Every DaemonSet instance reads its own address from the same operator
+    # file as the controller. Ambiguous or incomplete cluster input fails.
+    with tempfile.TemporaryDirectory() as temporary:
+        nodes = Path(temporary) / "nodes"
+        pub = "ab" * 32
+        zero = "0" * 64
+        nodes.write_text(
+            f"jet1 10.77.0.1:47900 node-ed25519-v1 {pub} {zero}\n"
+            f"rapids4 10.77.0.2:47900 node-ed25519-v1 {pub} {zero}\n",
+            encoding="ascii",
+        )
+        assert agent.node_rdma_address(nodes, "jet1") == "10.77.0.1:47900"
+        assert agent.node_rdma_address(nodes, "rapids4") == "10.77.0.2:47900"
+        for bad in (
+            f"jet1 no-port node-ed25519-v1 {pub} {zero}\n",
+            f"jet1 10.77.0.1:47900 node-ed25519-v1 {pub} {zero}\n"
+            f"jet1 10.77.0.2:47900 node-ed25519-v1 {pub} {zero}\n",
+        ):
+            nodes.write_text(bad, encoding="ascii")
+            try:
+                agent.node_rdma_address(nodes, "jet1")
+            except agent.AttestationError:
+                pass
+            else:
+                raise AssertionError("invalid node configuration was accepted")
+        nodes.write_text(
+            f"jet1 10.77.0.1:47900 node-ed25519-v1 {pub} {zero}\n",
+            encoding="ascii",
+        )
+        try:
+            agent.node_rdma_address(nodes, "absent")
+        except agent.AttestationError:
+            pass
+        else:
+            raise AssertionError("an unconfigured node received an address")
+
     service = {
         "metadata": {"namespace": "test-bench", "name": "echo-dpumesh"},
         "spec": {"selector": {"app": "echo-dpumesh"}},

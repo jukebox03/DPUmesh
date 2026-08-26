@@ -1,0 +1,33 @@
+# Apply after `bench.sh deploy`. The admission webhook adds the device,
+# library, attestation socket and DPU-node affinity from one annotation.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hello-dpumesh
+  namespace: ${NS}
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: hello-dpumesh } }
+  template:
+    metadata:
+      annotations:
+        dpumesh.io/inject: "enabled"
+        dpumesh.io/preload: "disabled"
+      labels: { app: hello-dpumesh, dpumesh-service: hello-dpumesh }
+    spec:
+      containers:
+      - name: hello
+        image: docker.io/${IMG_BENCH_DPU}
+        imagePullPolicy: Never
+        command: ["/usr/local/bin/hello_dpumesh_server"]
+        ports: [{ name: stream, containerPort: 9099 }]
+        securityContext: { privileged: true }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hello-dpumesh
+  namespace: ${NS}
+spec:
+  selector: { app: hello-dpumesh }
+  ports: [{ name: stream, port: 9099, targetPort: stream }]

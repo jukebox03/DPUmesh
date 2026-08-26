@@ -59,6 +59,7 @@ assert REQUEST.size == 108
 assert ASSERT.size == 1134
 
 SERVICE_NAME_RE = re.compile(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?")
+DNS_RE = re.compile(r"[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*")
 
 POD_UID_RE = re.compile(r"(?:^|[-/_.])pod([0-9a-fA-F][0-9a-fA-F_-]{31,63})(?:[./]|$)")
 KEY_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,30}[A-Za-z0-9]")
@@ -67,6 +68,51 @@ HEX64_RE = re.compile(r"[0-9a-f]{64}")
 
 class AttestationError(RuntimeError):
     pass
+
+
+def valid_rdma_address(address: str) -> bool:
+    ip, separator, port = address.partition(":")
+    try:
+        socket.inet_aton(ip)
+    except OSError:
+        return False
+    parts = ip.split(".")
+    return (
+        bool(separator) and len(parts) == 4
+        and all(part.isdigit() and str(int(part)) == part for part in parts)
+        and port.isdigit() and 0 < int(port) < 65536
+    )
+
+
+def node_rdma_address(path: Path, node_name: str) -> str:
+    """Read this DaemonSet instance's address from the operator node file."""
+    try:
+        lines = path.read_text(encoding="ascii").splitlines()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise AttestationError(f"cannot read node configuration {path}") from exc
+    records: dict[str, str] = {}
+    for line_no, raw in enumerate(lines, 1):
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        fields = line.split()
+        if len(fields) != 5:
+            raise AttestationError(f"{path}:{line_no}: expected 5 fields")
+        name, rdma, key_id, agent_pub, dpu_pub = fields
+        if (
+            len(name) > 253 or DNS_RE.fullmatch(name) is None
+            or not valid_rdma_address(rdma)
+            or KEY_ID_RE.fullmatch(key_id) is None
+            or HEX64_RE.fullmatch(agent_pub) is None
+            or HEX64_RE.fullmatch(dpu_pub) is None
+        ):
+            raise AttestationError(f"{path}:{line_no}: malformed node record")
+        if name in records:
+            raise AttestationError(f"{path}:{line_no}: duplicate node {name}")
+        records[name] = rdma
+    if node_name not in records:
+        raise AttestationError(f"node {node_name!r} is absent from {path}")
+    return records[node_name]
 
 
 def fixed_text(value: str, size: int, field: str, allow_empty: bool = False) -> bytes:
@@ -942,8 +988,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--delivery-interval", type=float, default=2.0)
     parser.add_argument("--controller-url", default=None,
                         help="where the cluster controller serves the generation")
-    parser.add_argument("--node-rdma-addr", default="192.168.100.2:47900",
-                        help="the peer-channel address this node publishes")
+    parser.add_argument("--nodes-file", type=Path, default=None,
+                        help="operator node records shared with the controller")
+    parser.add_argument("--node-rdma-addr", default=None,
+                        help="single-node peer address (use --nodes-file in a cluster)")
     parser.add_argument("--identity-dir", type=Path, default=None,
                         help="where the Linkerd key and certificate request are staged")
     parser.add_argument("--identity-service-account", default="dpumesh-dpu")
@@ -977,6 +1025,19 @@ def parse_args() -> argparse.Namespace:
         parser.error("--dpu-feed-port out of range")
     if not 0.5 <= args.delivery_interval <= 300:
         parser.error("--delivery-interval must be between 0.5 and 300 seconds")
+    if args.nodes_file is not None:
+        if args.node_rdma_addr is not None:
+            parser.error("--nodes-file and --node-rdma-addr are mutually exclusive")
+        if not args.node_name:
+            parser.error("--nodes-file requires --node-name")
+        try:
+            args.node_rdma_addr = node_rdma_address(args.nodes_file, args.node_name)
+        except AttestationError as exc:
+            parser.error(str(exc))
+    elif args.node_rdma_addr is None:
+        args.node_rdma_addr = "192.168.100.2:47900"
+    if not valid_rdma_address(args.node_rdma_addr):
+        parser.error("--node-rdma-addr must be canonical IPv4:port")
     for key in args.l7_services:
         if len(key.split("/")) != 2:
             parser.error(f"--l7-service takes namespace/name, got {key!r}")

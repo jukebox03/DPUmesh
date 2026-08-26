@@ -868,6 +868,8 @@ ensure_namespace() {
         phase=""
     fi
     if [ "$phase" != "Active" ]; then info "Creating namespace $NS"; kubectl create ns "$NS"; fi
+    local node="${DPUMESH_NODE_NAME:-$(hostname -s)}"
+    kubectl label node "$node" dpumesh.io/dpu=true --overwrite >/dev/null
 }
 
 clean_failed_pods() {
@@ -977,12 +979,6 @@ export_agent_channel() {
     export DPUMESH_CONTROLLER_RELAY_PORT="${DPUMESH_CONTROLLER_RELAY_PORT:-28089}"
     export DPUMESH_DPU_FEED_HOST="${DPUMESH_DPU_FEED_HOST:-192.168.100.2}"
     export DPUMESH_DPU_FEED_PORT="${DPUMESH_DPU_FEED_PORT:-4788}"
-    # What the agent publishes must be the base listener the DPU actually
-    # binds; keep an explicit override for deployments whose reported address
-    # differs from the bind address.
-    local peer_report_ip="${DPUMESH_PEER_BIND:-192.168.100.2}"
-    local peer_report_port="${DPUMESH_PEER_PORT:-47900}"
-    export DPUMESH_NODE_RDMA_ADDR="${DPUMESH_NODE_RDMA_ADDR:-$peer_report_ip:$peer_report_port}"
     export DPUMESH_IDENTITY_STAGE_DIR="${LINKERD_PROVISION_DIR:-$PROJ_ROOT/build/linkerd-identity}"
     local controller_ip
     controller_ip=$(kubectl get service dpumesh-controller -n "$NS" \
@@ -1134,6 +1130,15 @@ start_pods() {
     fi
 }
 
+deploy_webhook() {
+    step "=== Deploying the workload admission webhook ==="
+    export NS IMG_CONTROLLER LIB_OUT HOST_PCI DPUMESH_RINGS_PER_POD
+    export DPUMESH_ATTEST_SOCKET
+    envsubst < "$BENCH_DIR/k8s/webhook.yaml" | kubectl apply -f -
+    kubectl rollout restart deployment/dpumesh-webhook -n "$NS"
+    kubectl rollout status deployment/dpumesh-webhook -n "$NS" --timeout=120s
+}
+
 deploy() {
     need_env
     configure_host_numa
@@ -1164,6 +1169,7 @@ deploy() {
     export_agent_channel
     IMG_WORKLOAD_AGENT="$IMG_WORKLOAD_AGENT" "$BENCH_DIR/workload_attest.sh" deploy
     await_feeds || exit 1
+    deploy_webhook
     # The staticlib the DPU binary links has to exist before it is linked.
     sync_linkerd_sources
     build_linkerd_artifacts
@@ -1788,8 +1794,9 @@ run_grpc_shutdown() {
 
     step "=== Re-registering the recycled pod slot ==="
     kubectl scale deployment/"$app" -n "$NS" --replicas=1 >/dev/null
-    kubectl wait --for=condition=Ready pod -n "$NS" -l "app=$app" --timeout=120s >/dev/null
-    pod=$(kubectl get pod -n "$NS" -l "app=$app" -o jsonpath='{.items[0].metadata.name}')
+    kubectl rollout status deployment/"$app" -n "$NS" --timeout=120s >/dev/null
+    pod=$(kubectl get pod -n "$NS" -l "app=$app" \
+        --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')
     local ready=0 logs reply
     for _ in $(seq 1 60); do
         logs=$(kubectl logs -n "$NS" "$pod" 2>&1 || true)

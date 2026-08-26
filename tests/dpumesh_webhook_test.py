@@ -240,6 +240,12 @@ def test_a_cluster_with_no_dpu_node_refuses():
     assert "dpumesh.io/dpu" in response["response"]["status"]["message"]
 
 
+def test_deploy_satisfies_the_webhook_node_contract():
+    script = (ROOT / "bench" / "bench.sh").read_text(encoding="utf-8")
+    assert f"{webhook.DPU_NODE_LABEL}=true" in script
+    assert "\n    deploy_webhook\n" in script
+
+
 def test_node_requirement_joins_every_existing_term():
     body = pod({"dpumesh.io/inject": "enabled"}, spec={"affinity": {"nodeAffinity": {
         "requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerms": [

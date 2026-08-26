@@ -13,6 +13,8 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 COPY build/bin/bench_dpumesh /usr/local/bin/bench_dpumesh
+COPY build/bin/hello_dpumesh /usr/local/bin/hello_dpumesh
+COPY build/bin/hello_dpumesh_server /usr/local/bin/hello_dpumesh_server
 COPY doca-libs/ /usr/local/lib/
 COPY build/lib/libdpumesh.so.5 /usr/local/lib/
 COPY bench/docker/numa-entrypoint.sh /usr/local/bin/numa-entrypoint.sh
