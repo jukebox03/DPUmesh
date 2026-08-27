@@ -519,6 +519,31 @@ which is what this item is for.
   queue-tail move `consume_tx` performed on every publication, so its absolute
   µs/request is not the arm to subtract from.
 
+## O6 Incremental topology generations
+
+A generation republishes whole: one Pod's churn re-signs the entire document and
+every DPU re-fetches, re-verifies and re-parses all of it — O(fleet) work for an
+O(1) change. Storage is not the pressure (~200 bytes per Pod against DPU DRAM,
+16 MiB publication bound in `TOPOLOGY_MAX_BYTES`); the republish amplification
+is, and it grows as cluster size times churn rate. Past the point where even
+deltas cannot keep up, the migration is forwarded assertions; this item is the
+step before that.
+
+- [ ] Publish a delta generation — records added and removed against a named
+  base version — signed with the same Ed25519 key under the same strictly
+  increasing version line. A consumer holding the base applies it; one that
+  does not, or that fails any check, falls back to fetching the full
+  generation. The security property is unchanged: nothing unsigned is adopted,
+  and a refused or missing delta leaves the last adopted generation standing.
+- [ ] Keep the periodic full generation as anchor and recovery path, so a delta
+  chain never becomes required state.
+- [ ] The wire grammar and consumer bounds are host+DPU ABI (`doca/topology.c`
+  and the feed hop), so both ends change together, with the ABI-Impact note.
+- [ ] Accept on measurement: bytes moved and DPU parse time per churn event,
+  before and after, at a cluster size where the full republish is the dominant
+  term. Below that size this stays unscheduled — the single-digit-node rig
+  cannot motivate it.
+
 ## O5 Equivalent ARM/x86 study
 
 This is a study, not an optimization: it answers what the ARM costs relative to
