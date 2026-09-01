@@ -15,7 +15,7 @@ box, container, arrow, terms = styled()
 
 
 def generate_control_plane():
-    fig, ax = setup_figure(20.0, 14.0, (0, 20.0), (-2.05, 12.0))
+    fig, ax = setup_figure(20.0, 14.0, (0, 20.0), (-2.55, 12.0))
     ax.text(
         0.1,
         11.62,
@@ -26,7 +26,7 @@ def generate_control_plane():
     ax.text(
         0.1,
         11.18,
-        "The Pod relays a signed identity; cluster placement is independently signed; the DPU enforces both.",
+        "The Pod's broker relays a signed identity; cluster placement is independently signed; the DPU enforces both.",
         fontsize=9.4,
         color="#555555",
         ha="left",
@@ -45,19 +45,34 @@ def generate_control_plane():
         ha="center",
     )
 
-    # Host: one trusted node agent now owns every host-side control role. There
-    # is no separate gateway DaemonSet, Service registry publisher or identity
-    # renewal agent in the deployed architecture.
+    # Host: one trusted node agent owns every host-side control role, and one
+    # broker per Pod owns that Pod's DOCA device and Comch connection. The
+    # workload holds sealed mappings only.
     box(
         ax,
         0.35,
         8.85,
-        4.85,
+        2.20,
         1.35,
         "Workload Pod",
-        ("application + DPUmesh client", "relays a grant it cannot alter"),
+        ("app + client", "unprivileged,", "no device"),
         edge=BLUE,
         face=BLUE_BG,
+        title_size=9.2,
+        body_size=7.2,
+    )
+    box(
+        ax,
+        3.00,
+        8.85,
+        2.20,
+        1.35,
+        "Per-Pod broker",
+        ("owns device", "+ Comch;", "Pod-charged"),
+        edge=PURPLE,
+        face=PURPLE_BG,
+        title_size=9.2,
+        body_size=7.2,
     )
     box(
         ax,
@@ -191,40 +206,65 @@ def generate_control_plane():
         body_size=7.65,
     )
 
-    # Local registration handshake.
+    # Local registration handshake. The workload's HELLO makes the agent spawn
+    # the broker; the broker is the registering process from then on, and the
+    # workload receives only the sealed attach set.
+    arrow(
+        ax,
+        (1.45, 8.85),
+        (1.45, 8.00),
+        label="1  HELLO + Service",
+        color=BLUE,
+        label_dx=0.72,
+        label_dy=0.30,
+    )
+    arrow(ax, (3.30, 8.00), (3.30, 8.85), color=PURPLE)
+    arrow(ax, (4.10, 8.85), (4.10, 8.00), color=BLUE)
+    arrow(ax, (4.90, 8.00), (4.90, 8.85), color=PURPLE)
+    for label_x, label_text in (
+        (3.30, "2 spawn"),
+        (4.10, "4 nonce"),
+        (4.90, "5 assertion"),
+    ):
+        ax.text(
+            label_x + 0.15,
+            8.425,
+            label_text,
+            fontsize=7.0,
+            color="#626262",
+            rotation=90,
+            ha="center",
+            va="center",
+            bbox=dict(fc="white", ec="none", pad=0.5),
+        )
     arrow(
         ax,
         (5.90, 9.92),
         (5.20, 9.92),
-        label="1  nonce",
+        label="3  nonce",
         color=ORANGE,
         label_dy=0.18,
     )
     arrow(
         ax,
-        (1.55, 8.85),
-        (1.55, 8.00),
-        label="2  nonce + Service",
-        color=BLUE,
-        label_dx=0.55,
-        label_dy=0.0,
-    )
-    arrow(
-        ax,
-        (4.05, 8.00),
-        (4.05, 8.85),
-        label="3  signed assertion",
-        color=PURPLE,
-        label_dx=0.15,
-        label_dy=0.0,
-    )
-    arrow(
-        ax,
         (5.20, 9.18),
         (5.90, 9.18),
-        label="4  assert + register",
+        label="6  assert + register",
         color=BLUE,
-        label_dy=-0.20,
+        label_dx=0.42,
+        label_dy=-0.24,
+    )
+    arrow(ax, (3.00, 9.80), (2.55, 9.80), color=PURPLE)
+    ax.text(
+        2.62,
+        9.22,
+        "7 sealed fds",
+        fontsize=7.0,
+        color="#626262",
+        rotation=90,
+        ha="center",
+        va="center",
+        bbox=dict(fc="white", ec="none", pad=0.5),
     )
 
     # The agent's single management hop carries all four documents. Their
@@ -252,11 +292,11 @@ def generate_control_plane():
     # visually separate.
     line(
         ax,
-        [(15.15, 10.30), (15.15, 10.48), (4.55, 10.48)],
+        [(15.15, 10.30), (15.15, 10.48), (2.75, 10.48)],
         color=PURPLE,
         dashed=True,
     )
-    arrow(ax, (4.55, 10.48), (4.55, 8.00), color=PURPLE, dashed=True)
+    arrow(ax, (2.75, 10.48), (2.75, 8.00), color=PURPLE, dashed=True)
     ax.text(
         10.0,
         10.57,
@@ -322,11 +362,12 @@ def generate_control_plane():
     terms(
         ax,
         0.35,
-        -1.90,
+        -2.42,
         19.25,
-        1.78,
+        2.15,
         [
             ("assertion", "node-agent-signed binding of one connection to a Pod and Service"),
+            ("broker", "per-Pod host process owning the device; the Pod maps sealed memory only"),
             ("topology", "controller-signed cluster placement, peer keys and protection class"),
             ("node feed", "HMAC-signed membership or target snapshot for one node"),
             ("relay", "node-agent byte forwarding; it terminates no Linkerd TLS"),

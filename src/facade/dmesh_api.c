@@ -1,6 +1,6 @@
 /* Native allocation, posting, event polling, and RX-buffer release API.
  * Operations run on the caller thread and expose registered RX/TX memory. */
-#include "dmesh_core.h"
+#include "src/core/dmesh_core.h"
 
 #include <errno.h>
 
@@ -87,6 +87,8 @@ int dmesh_poll_eq(dmesh_eq_t *eq, dmesh_event_t *events, int max_events) {
     dmesh_channel_t *s = eq->ch;
     int n = 0, drained;
 
+    (void)dpumesh_drain_assist(eq);
+
     /* 0. This thread owns every QP bound to this EQ: publish any tail whose
      * deadline expired. */
     dpumesh_publish_due_tails(eq);
@@ -147,7 +149,7 @@ int dmesh_poll_eq(dmesh_eq_t *eq, dmesh_event_t *events, int max_events) {
         n++;
     }
 
-    /* 5. This EQ's established conns with inbound (edge-armed by the PE). A spurious
+    /* 5. This EQ's established conns with inbound (edge-armed by the drain side). A spurious
      * entry (inbox already drained via 1/2) emits nothing — harmless. */
     while (n < max_events) {
         dmesh_qp_t *c = dmesh_next_ready(eq);

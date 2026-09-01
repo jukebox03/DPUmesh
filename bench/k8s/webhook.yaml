@@ -93,7 +93,6 @@ spec:
         - --library-soname=libdpumesh.so.5
         - --attest-dir=/run/dpumesh
         - --attest-socket=${DPUMESH_ATTEST_SOCKET}
-        - --pci-addr=${HOST_PCI}
         - --rings-per-pod=${DPUMESH_RINGS_PER_POD}
         securityContext:
           runAsUser: 0

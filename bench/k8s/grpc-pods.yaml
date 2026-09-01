@@ -2,9 +2,9 @@
 # gRPC workloads for the DPU-hosted Linkerd/DMA mesh. bench.sh applies this
 # alongside bench/k8s/pods.yaml. There is deliberately no Host sidecar or
 # kernel-TCP alternative in this deployment surface.
-# Harness arm, kept beside the deployment path for comparison: mounts, env and
-# privilege are hand-written here the way bench/k8s/pods.yaml writes them; a
-# production workload gets them from the injection annotation instead.
+# Harness arm, kept beside the deployment path for comparison: mounts and env
+# are hand-written here the way bench/k8s/pods.yaml writes them; a production
+# workload gets them from the injection annotation instead.
 # The control-plane label enrolls these sidecarless Pods in Linkerd policy;
 # skipped inbound ports keep destination discovery from expecting a Pod-local
 # proxy, while enforcement remains in the embedded DPU proxy.
@@ -29,18 +29,15 @@ spec:
         env:
         - { name: BENCH_NUMA_NODE, value: "${BENCH_NUMA_NODE}" }
         - { name: BENCH_TRANSPORT, value: "dmesh" }
-        - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
+        - { name: DPUMESH_DRAIN_NAP_US, value: "${DPUMESH_DRAIN_NAP_US}" }
         - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
         - { name: DPUMESH_ATTEST_SOCKET, value: "${DPUMESH_ATTEST_SOCKET}" }
         - { name: BENCH_DST_SERVICE, value: "echo-grpc-dpumesh" }
         - { name: BENCH_REACTORS, value: "${BENCH_REACTORS}" }
-        securityContext: { privileged: true }
         volumeMounts:
-        - { mountPath: /dev/infiniband, name: infiniband }
         - { mountPath: /usr/local/lib/libdpumesh.so.5, name: libdpumesh-so, subPath: libdpumesh.so.5 }
         - { mountPath: /run/dpumesh, name: dpumesh-attest, readOnly: true }
       volumes:
-      - { name: infiniband, hostPath: { path: /dev/infiniband } }
       - { name: libdpumesh-so, hostPath: { path: ${LIB_OUT}, type: Directory } }
       - { name: dpumesh-attest, hostPath: { path: /run/dpumesh, type: DirectoryOrCreate } }
 ---
@@ -71,7 +68,7 @@ spec:
         env:
         - { name: BENCH_NUMA_NODE, value: "${BENCH_NUMA_NODE}" }
         - { name: BENCH_TRANSPORT, value: "dmesh" }
-        - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
+        - { name: DPUMESH_DRAIN_NAP_US, value: "${DPUMESH_DRAIN_NAP_US}" }
         - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
         - { name: DPUMESH_ATTEST_SOCKET, value: "${DPUMESH_ATTEST_SOCKET}" }
         - { name: DPUMESH_SERVICE, value: "echo-grpc-dpumesh" }
@@ -83,14 +80,11 @@ spec:
         # host, because a container that dies takes its log with it.
         - { name: ASAN_OPTIONS, value: "log_path=/var/log/dpumesh-asan/echo,detect_leaks=0,print_stacktrace=1" }
         - { name: UBSAN_OPTIONS, value: "log_path=/var/log/dpumesh-asan/echo-ubsan,print_stacktrace=1" }
-        securityContext: { privileged: true }
         volumeMounts:
-        - { mountPath: /dev/infiniband, name: infiniband }
         - { mountPath: /usr/local/lib/libdpumesh.so.5, name: libdpumesh-so, subPath: libdpumesh.so.5 }
         - { mountPath: /run/dpumesh, name: dpumesh-attest, readOnly: true }
         - { mountPath: /var/log/dpumesh-asan, name: sanitizer-logs }
       volumes:
-      - { name: infiniband, hostPath: { path: /dev/infiniband } }
       - { name: libdpumesh-so, hostPath: { path: ${LIB_OUT}, type: Directory } }
       - { name: dpumesh-attest, hostPath: { path: /run/dpumesh, type: DirectoryOrCreate } }
       - { name: sanitizer-logs, hostPath: { path: ${ASAN_LOG_DIR}, type: DirectoryOrCreate } }
@@ -125,7 +119,7 @@ spec:
         env:
         - { name: BENCH_NUMA_NODE, value: "${BENCH_NUMA_NODE}" }
         - { name: BENCH_TRANSPORT, value: "dmesh" }
-        - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
+        - { name: DPUMESH_DRAIN_NAP_US, value: "${DPUMESH_DRAIN_NAP_US}" }
         - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
         - { name: DPUMESH_ATTEST_SOCKET, value: "${DPUMESH_ATTEST_SOCKET}" }
         - { name: DPUMESH_SERVICE, value: "echo-grpc-alt" }
@@ -133,14 +127,11 @@ spec:
         - { name: BENCH_FAIL_EVERY, value: "0" }
         - { name: ASAN_OPTIONS, value: "log_path=/var/log/dpumesh-asan/echo-alt,detect_leaks=0,print_stacktrace=1" }
         - { name: UBSAN_OPTIONS, value: "log_path=/var/log/dpumesh-asan/echo-alt-ubsan,print_stacktrace=1" }
-        securityContext: { privileged: true }
         volumeMounts:
-        - { mountPath: /dev/infiniband, name: infiniband }
         - { mountPath: /usr/local/lib/libdpumesh.so.5, name: libdpumesh-so, subPath: libdpumesh.so.5 }
         - { mountPath: /run/dpumesh, name: dpumesh-attest, readOnly: true }
         - { mountPath: /var/log/dpumesh-asan, name: sanitizer-logs }
       volumes:
-      - { name: infiniband, hostPath: { path: /dev/infiniband } }
       - { name: libdpumesh-so, hostPath: { path: ${LIB_OUT}, type: Directory } }
       - { name: dpumesh-attest, hostPath: { path: /run/dpumesh, type: DirectoryOrCreate } }
       - { name: sanitizer-logs, hostPath: { path: ${ASAN_LOG_DIR}, type: DirectoryOrCreate } }

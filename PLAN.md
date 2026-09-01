@@ -222,11 +222,6 @@ port and connecting at the unmeshed one, with a recycled Pod's fresh address
 re-covered within one interval (same receipt). The admission webhook refuses
 a Pod creation it cannot patch or decide (I5).
 
-- [ ] Replace `privileged: true` in the webhook patch with the device access
-  the transport actually opens. The container device cgroup blocks the char
-  device without it, so this is an RDMA device-plugin deployment, not a
-  manifest edit.
-
 ## Not a gap: per-hop encryption
 
 There is no endpoint mTLS, and this is a boundary rather than an omission. A

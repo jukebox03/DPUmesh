@@ -24,9 +24,8 @@ that may run on a different thread than its EQ's consumer — the POSIX shim
 transmits from application threads, the gRPC adapter from endpoint executors —
 and the caller serializes that stream against itself and against the QP's
 destruction. The library serializes that stream against the buffered-tail
-publication `dmesh_poll_eq()` performs. The library's own progress thread is the
-single producer of EQ readiness. `qp->user_data` belongs entirely to the
-application.
+publication `dmesh_poll_eq()` performs. The library's own drain threads produce
+EQ readiness. `qp->user_data` belongs entirely to the application.
 
 The public surface consists of nineteen calls:
 
@@ -53,6 +52,9 @@ control connection established
   → RING_ADD_ACK from every target EU     each accelerator unit confirms its ring
   → POD_INIT_RESULT(READY, L)             the channel is usable; L stripes granted
 ```
+
+These steps run in the Pod's broker, which owns the DOCA objects
+(CONTROL.md §2-1.9); the process split is invisible at this surface.
 
 A pod id — and the compact service id `POD_ASSIGNED` carries beside it — is a
 node-local transport identifier for one node's slot tables, never workload

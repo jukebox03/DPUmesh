@@ -149,7 +149,7 @@ int main(void) {
     signal(SIGHUP, on_hup); load_work();              /* app-work: env default, live via SIGHUP */
 
     g_s = dmesh_create_channel();                     /* advertises $DPUMESH_SERVICE (DPU assigns pod_id) */
-    if (!g_s) { fprintf(stderr, "[greeter] dmesh_create_channel failed\n"); return 1; }
+    if (!g_s) { perror("[greeter] dmesh_create_channel failed"); return 1; }
     g_post_max = (uint32_t)dmesh_post_max(g_s);
 
     g_eq = dmesh_create_eq(g_s);

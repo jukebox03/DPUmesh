@@ -88,9 +88,9 @@ struct dmesh_eq {
                                      * because dmesh_create_qp may run off the EQ's thread;
                                      * touched only at conn create/destroy, never on the
                                      * data path. */
-    /* TX readiness is multi-producer: the PE can reclaim a QP while any owner thread
-     * can return a surplus block to the channel pool. A bit per port therefore replaces
-     * the RX list's SPSC assumption. At most one bit is live per automatically armed QP. */
+    /* TX readiness is multi-producer: the drain side can reclaim a QP while any
+     * owner thread can return a surplus block to the channel pool, so it is a
+     * bit per port. At most one bit is live per automatically armed QP. */
     atomic_uint_fast64_t tx_ready[DMESH_TX_READY_WORDS];
     atomic_uint_fast32_t tx_ready_count;
     uint32_t             tx_ready_cursor; /* EQ-consumer round-robin word cursor */
@@ -110,15 +110,16 @@ struct dmesh_eq {
     /* Set by the timer when a retained tail may have come due. dmesh_poll_eq
      * consults the clock only after seeing it. */
     atomic_int           tx_due_hint;
-    /* PE-published ready list for this EQ's conns. The PE pushes a conn's port
-     * when its inbox goes empty->non-empty; the EQ thread drains it through
-     * dmesh_next_ready. SPSC: PE = sole producer (ready_tail), this EQ's thread =
-     * sole consumer (ready_head). Sized to the port space; the on_ready flag
-     * admits each live conn at most once. */
+    /* Ready list for this EQ's conns. The drain side pushes a conn's port when
+     * its inbox goes empty->non-empty; the EQ thread drains it through
+     * dmesh_next_ready. MPSC: drain shards and assisting EQ threads produce
+     * (CAS on ready_tail), this EQ's thread is the sole consumer (ready_head).
+     * Sized to the port space; the on_ready flag admits each live conn at most
+     * once. */
     char _rl_pad0[64];
     atomic_uint_fast32_t ready_head;   /* consumer (this EQ's thread) */
     char _rl_pad1[64];
-    atomic_uint_fast32_t ready_tail;   /* producer (PE) */
+    atomic_uint_fast32_t ready_tail;   /* producers (drain side, CAS) */
     char _rl_pad2[64];
     uint16_t ready_ring[DMESH_PORT_SPACE];
 };
@@ -212,7 +213,7 @@ int dpumesh_enqueue(dpumesh_ctx_t *ctx, const sw_descriptor_t *desc);
  * Both are stored before the port goes live, so a ready-list entry never dereferences
  * NULL. Release with dpumesh_free_port (reclaims undelivered inbound credits). */
 uint16_t dpumesh_alloc_port(dpumesh_ctx_t *ctx, int role, void *user, struct dmesh_eq *eq);
-/* Promote a PE-created DMESH_ROLE_SERVER_PENDING slot to a live SERVER conn: attach
+/* Promote a drain-created DMESH_ROLE_SERVER_PENDING slot to a live SERVER conn: attach
  * the app's conn handle `user` and bind it to the accepting `eq`. Returns `port` on
  * success, 0 if the slot is not pending (already accepted / freed / race). */
 uint16_t dpumesh_accept_port(dpumesh_ctx_t *ctx, uint16_t port, void *user, struct dmesh_eq *eq);
@@ -238,6 +239,10 @@ void *dpumesh_next_tx_error(struct dmesh_eq *eq);
  * the EQ's own thread, which owns these QPs. */
 void dpumesh_publish_due_tails(struct dmesh_eq *eq);
 
+/* In-line drain by an awake EQ thread: interprets already-published reverse
+ * entries under the stripe locks instead of waiting for a drain shard. */
+int dpumesh_drain_assist(struct dmesh_eq *eq);
+
 /* ====== Connection lifecycle — internal, shared by both surfaces ======
  *
  * Transport calls, with nothing socket- or verbs-specific, used by both
@@ -254,9 +259,9 @@ void dpumesh_publish_due_tails(struct dmesh_eq *eq);
  * each conn goes to exactly one of them, which owns it from then on. */
 dmesh_qp_t *dmesh_accept(dmesh_eq_t *eq);
 
-/* Pop the next conn that has inbound from this EQ's ready list, which the PE
- * publishes, so there is no scan and no per-conn fd. Returns the conn handle
- * created at accept/connect, or NULL when drained. Single-consumer. */
+/* Pop the next conn that has inbound from this EQ's ready list, which the
+ * drain side publishes, so there is no scan and no per-conn fd. Returns the
+ * conn handle created at accept/connect, or NULL when drained. Single-consumer. */
 dmesh_qp_t *dmesh_next_ready(dmesh_eq_t *eq);
 
 /* dmesh_tx_qp_valid() validates the handle and takes the QP's transmit gate,

@@ -27,8 +27,8 @@ Admission runs before scheduling, so this process cannot read the node a Pod
 will land on. It therefore injects a `nodeAffinity` term requiring the DPU
 node label and refuses the Pod when the cluster has no such node — which is
 the honest form of "refusing rather than half-injecting when the node has no
-DPU". Per-node facts that vary across a heterogeneous cluster (the DOCA PCI
-address) are configuration here, overridable per Pod.
+DPU". The Pod holds no device and no privilege: the DOCA objects live in the
+per-Pod broker the node agent launches.
 """
 
 from __future__ import annotations
@@ -61,7 +61,6 @@ SERVICE_ANNOTATION = "dpumesh.io/service"
 SERVICE_LABEL = "dpumesh-service"
 # The data ports, when the container's declared ports are not the whole set.
 PORTS_ANNOTATION = "dpumesh.io/data-ports"
-PCI_ANNOTATION = "dpumesh.io/pci-addr"
 # An unmodified workload reaches the mesh through the preload shim, so the
 # shim is injected by default. A workload written against the native API is
 # already linked against the transport and must not be preloaded as well.
@@ -75,10 +74,8 @@ DPU_NODE_LABEL = "dpumesh.io/dpu"
 LINKERD_CP_LABEL = "linkerd.io/control-plane-ns"
 LINKERD_SKIP_ANNOTATION = "config.linkerd.io/skip-inbound-ports"
 
-INFINIBAND_VOLUME = "dpumesh-infiniband"
 LIBRARY_VOLUME = "dpumesh-library"
 ATTEST_VOLUME = "dpumesh-attest"
-INFINIBAND_PATH = "/dev/infiniband"
 
 # A namespace lookup is one API call per admission without this; the trigger
 # changes about as often as the namespace itself.
@@ -162,7 +159,6 @@ class Config:
         self.preload_soname = args.preload_soname
         self.preload_mount = f"{args.library_mount_dir.rstrip('/')}/{args.preload_soname}"
         self.preload_var = args.preload_var
-        self.pci_addr = args.pci_addr
         self.rings_per_pod = args.rings_per_pod
         self.require_dpu_node = not args.no_node_requirement
 
@@ -241,13 +237,7 @@ def data_ports(pod: dict[str, Any]) -> str:
 
 
 def environment(pod: dict[str, Any], config: Config) -> list[tuple[str, str]]:
-    metadata = pod.get("metadata") or {}
-    annotations = metadata.get("annotations") or {}
-    pci = str(annotations.get(PCI_ANNOTATION, "") or config.pci_addr).strip()
-    if not pci:
-        raise AdmissionRefused(
-            f"no DOCA PCI address: set --pci-addr on the webhook or {PCI_ANNOTATION} on the Pod")
-    variables = [("DPUMESH_PCI_ADDR", pci)]
+    variables: list[tuple[str, str]] = []
     if config.rings_per_pod:
         variables.append(("DPUMESH_RINGS_PER_POD", str(config.rings_per_pod)))
     if config.attest_socket:
@@ -264,7 +254,7 @@ def environment(pod: dict[str, Any], config: Config) -> list[tuple[str, str]]:
 def container_patch(index: int, container: dict[str, Any], config: Config,
                     variables: list[tuple[str, str]],
                     preload: bool) -> list[dict[str, Any]]:
-    """Env, mounts and the privilege one container needs, added only if absent."""
+    """The env and mounts one container needs, added only if absent."""
     base = f"/spec/containers/{index}"
     operations: list[dict[str, Any]] = []
 
@@ -286,7 +276,6 @@ def container_patch(index: int, container: dict[str, Any], config: Config,
                 f"container {container.get('name')!r} already mounts {config.library_mount} "
                 "from another volume")
     wanted = [
-        {"mountPath": INFINIBAND_PATH, "name": INFINIBAND_VOLUME},
         {"mountPath": config.library_mount, "name": LIBRARY_VOLUME,
          "subPath": config.library_soname},
         {"mountPath": config.attest_dir, "name": ATTEST_VOLUME, "readOnly": True},
@@ -302,15 +291,6 @@ def container_patch(index: int, container: dict[str, Any], config: Config,
             operations.extend(
                 {"op": "add", "path": f"{base}/volumeMounts/-", "value": entry}
                 for entry in fresh_mounts)
-
-    # The transport opens the DOCA device directly, which is what this costs.
-    security = container.get("securityContext")
-    if security is None:
-        operations.append({"op": "add", "path": f"{base}/securityContext",
-                           "value": {"privileged": True}})
-    elif security.get("privileged") is not True:
-        operations.append({"op": "add", "path": f"{base}/securityContext/privileged",
-                           "value": True})
     return operations
 
 
@@ -318,7 +298,6 @@ def volumes_patch(pod: dict[str, Any], config: Config) -> list[dict[str, Any]]:
     existing = (pod.get("spec") or {}).get("volumes")
     named = {entry.get("name") for entry in existing or [] if isinstance(entry, dict)}
     wanted = [
-        {"name": INFINIBAND_VOLUME, "hostPath": {"path": INFINIBAND_PATH}},
         {"name": LIBRARY_VOLUME,
          "hostPath": {"path": config.library_dir, "type": "Directory"}},
         {"name": ATTEST_VOLUME,
@@ -577,7 +556,6 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--preload-var", default="LD_PRELOAD")
     parser.add_argument("--attest-dir", default="/run/dpumesh")
     parser.add_argument("--attest-socket", default="/run/dpumesh/attest.sock")
-    parser.add_argument("--pci-addr", default="")
     parser.add_argument("--rings-per-pod", type=int, default=0)
     parser.add_argument("--no-node-requirement", action="store_true",
                         help="skip the DPU node affinity and its cluster check")

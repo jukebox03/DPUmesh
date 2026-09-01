@@ -3,7 +3,7 @@
 #include <stdint.h>
 #include <stdio.h>
 
-#include "src/dmesh_core.h"
+#include "src/core/dmesh_core.h"
 
 static uint8_t reservation[64];
 static int reserve_calls;
@@ -49,6 +49,11 @@ int dmesh_tx_call_active(dmesh_qp_t *qp) { return qp != NULL && gate_depth > 0; 
 int dmesh_tx_after_commit(dmesh_qp_t *qp) { assert(qp != NULL); after_commit_calls++; return 0; }
 void dmesh_tx_pressure(dmesh_qp_t *qp) { assert(qp != NULL); pressure_calls++; }
 void dpumesh_publish_due_tails(struct dmesh_eq *eq) { assert(eq != NULL); publish_due_calls++; }
+int dpumesh_drain_assist(struct dmesh_eq *eq) { assert(eq != NULL); return 0; }
+void dmesh_eq_suppress_notify(dmesh_eq_t *eq, int delta)
+{
+    assert(eq != NULL && (delta == 1 || delta == -1));
+}
 
 dmesh_qp_t *dmesh_accept(dmesh_eq_t *eq)
 {

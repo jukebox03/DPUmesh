@@ -22,9 +22,7 @@ fi
 NS="${NS:-test-bench}"                 # k8s namespace
 CTRL_PORT="${CTRL_PORT:-9092}"
 MANIFEST="$BENCH_DIR/k8s/pods.yaml"
-# gRPC pods live with the integration that builds them.
-GRPC_BENCH_DIR="$PROJ_ROOT/integrations/grpc/bench"
-GRPC_MANIFEST="$GRPC_BENCH_DIR/k8s/pods.yaml"
+GRPC_MANIFEST="$BENCH_DIR/k8s/grpc-pods.yaml"
 
 # Every registration is attested. The deploy provisions a Host-only keyring and
 # a namespace-scoped node agent; no key or authoritative claims are mounted into
@@ -352,7 +350,8 @@ build_grpc_apps() {
     local grpc_src="${DPUMESH_GRPC_SOURCE_DIR:-/home/jukebox/deps/grpc-v1.80.0}"
     [ -d "$grpc_src" ] || { warn "gRPC source $grpc_src not found; skipping gRPC apps"; return 0; }
     step "=== Building gRPC bench apps (bench_grpc, echo_grpc; server=$BENCH_GRPC_BUILD) ==="
-    grpc_cmake_build "$GRPC_BENCH_BUILD_DIR" OFF bench_grpc echo_grpc
+    grpc_cmake_build "$GRPC_BENCH_BUILD_DIR" OFF bench_grpc echo_grpc \
+        hello_grpc_client hello_grpc_server
     if [ "$BENCH_GRPC_BUILD" = asan ]; then
         grpc_cmake_build "$GRPC_ECHO_BUILD_DIR" ON echo_grpc
     fi
@@ -380,9 +379,9 @@ build_images() {
     fi
     if { [ "$scope" = all ] || [ "$scope" = grpc ]; } &&
        [ -x "$PROJ_ROOT/$GRPC_BENCH_BUILD_DIR/bench_grpc" ]; then
-        build_image "$GRPC_BENCH_DIR/docker/bench_grpc.Dockerfile" "$IMG_BENCH_GRPC"   "$PROJ_ROOT" \
+        build_image "$BENCH_DIR/docker/bench_grpc.Dockerfile" "$IMG_BENCH_GRPC"   "$PROJ_ROOT" \
             --build-arg "GRPC_BUILD_DIR=$GRPC_BENCH_BUILD_DIR"
-        build_image "$GRPC_BENCH_DIR/docker/echo_grpc.Dockerfile"  "$IMG_ECHO_GRPC"    "$PROJ_ROOT" \
+        build_image "$BENCH_DIR/docker/echo_grpc.Dockerfile"  "$IMG_ECHO_GRPC"    "$PROJ_ROOT" \
             --build-arg "GRPC_BUILD_DIR=$GRPC_ECHO_BUILD_DIR"
     elif [ "$scope" = all ] || [ "$scope" = grpc ]; then
         warn "gRPC bench binaries missing; skipping grpc images (run: $0 grpcbuild)"
@@ -854,6 +853,24 @@ pin_pods() {
                 echo "$HOST_PASS" | sudo -S taskset -apc "$cores" "$child" >/dev/null 2>&1 || true
             done
         done
+        # The per-Pod broker is intentionally outside every container scope.
+        # Match it by the authoritative Pod UID embedded in its cgroup and pin
+        # it with the same allocation so legacy/broker A/B uses equal CPUs.
+        local pod_uid uid_token broker_pid
+        pod_uid=$(kubectl get pod -n "$NS" -l "app=$app" \
+            -o jsonpath='{.items[0].metadata.uid}' 2>/dev/null || true)
+        uid_token=${pod_uid//-/_}
+        if [ -n "$uid_token" ]; then
+            for broker_pid in $(pgrep -x dmesh_broker 2>/dev/null || true); do
+                if rg -q "pod${uid_token}.*dpumesh-broker" "/proc/$broker_pid/cgroup" 2>/dev/null; then
+                    info "  dmesh_broker (PID $broker_pid) → $cores"
+                    echo "$HOST_PASS" | sudo -S taskset -apc "$cores" "$broker_pid" >/dev/null
+                    for child in $(pgrep -P "$broker_pid" 2>/dev/null); do
+                        echo "$HOST_PASS" | sudo -S taskset -apc "$cores" "$child" >/dev/null 2>&1 || true
+                    done
+                fi
+            done
+        fi
     done
     info "Pinning done"
 }
@@ -1052,6 +1069,24 @@ apply_manifest() {
     info "DPUmesh API resources applied"
 }
 
+broker_data_ready() { # $1 = app label
+    local app="$1" pod_uid token pid uid caps nspid
+    pod_uid=$(kubectl get pod -n "$NS" -l "app=$app" \
+        --field-selector=status.phase=Running \
+        -o jsonpath='{.items[0].metadata.uid}' 2>/dev/null || true)
+    [ -n "$pod_uid" ] || return 1
+    token=${pod_uid//-/_}
+    for pid in $(pgrep -x dmesh_broker 2>/dev/null || true); do
+        rg -q "pod${token}.*dpumesh-broker" "/proc/$pid/cgroup" 2>/dev/null || continue
+        uid=$(awk '$1=="Uid:"{print $2}' "/proc/$pid/status" 2>/dev/null)
+        caps=$(awk '$1=="CapEff:"{print $2}' "/proc/$pid/status" 2>/dev/null)
+        nspid=$(awk '$1=="NSpid:"{print $NF}' "/proc/$pid/status" 2>/dev/null)
+        [ "$uid" = 65532 ] && [ "$caps" = 0000000000000000 ] &&
+            [ "$nspid" = 1 ] && return 0
+    done
+    return 1
+}
+
 scale_up_with_wait() {
     local app="$1" expected_log="$2" image="$3"
     kubectl scale deployment "$app" --replicas=0 -n "$NS" 2>/dev/null || true
@@ -1086,7 +1121,11 @@ scale_up_with_wait() {
         local attempts=0
         while [ $attempts -lt 35 ]; do
             local line; line=$(kubectl logs -n "$NS" -l "app=$app" --tail=80 2>/dev/null || true)
-            if echo "$line" | grep -q "$expected_log"; then
+            # A Pod names its own mode in the init line. Broker-attached Pods
+            # are ready only once their broker also holds the reduced identity.
+            if echo "$line" | grep -Eq "$expected_log" &&
+               { ! echo "$line" | grep -q "broker-attached" ||
+                 broker_data_ready "$app"; }; then
                 info "$app DPUmesh data-ready"
                 return 0
             fi
@@ -1800,7 +1839,10 @@ run_grpc_shutdown() {
     local ready=0 logs reply
     for _ in $(seq 1 60); do
         logs=$(kubectl logs -n "$NS" "$pod" 2>&1 || true)
-        if rg -q 'DPUmesh DOCA initialized' <<<"$logs"; then ready=1; break; fi
+        if rg -q 'DPUmesh DOCA initialized' <<<"$logs" &&
+           { ! rg -q 'broker-attached' <<<"$logs" || broker_data_ready "$app"; }; then
+            ready=1; break
+        fi
         sleep 1
     done
     [ "$ready" = 1 ] || { err "$app did not become DPUmesh data-ready after reuse"; return 1; }

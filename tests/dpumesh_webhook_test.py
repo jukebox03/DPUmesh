@@ -22,8 +22,14 @@ SPEC.loader.exec_module(webhook)
 
 
 def config(**overrides):
-    argv = ["--pci-addr=94:00.0", "--library-dir=/opt/dpumesh/lib", "--rings-per-pod=2"]
-    argv += [f"--{key.replace('_', '-')}={value}" for key, value in overrides.items()]
+    argv = ["--library-dir=/opt/dpumesh/lib", "--rings-per-pod=2"]
+    for key, value in overrides.items():
+        option = f"--{key.replace('_', '-')}"
+        if isinstance(value, bool):
+            if value:
+                argv.append(option)
+        else:
+            argv.append(f"{option}={value}")
     return webhook.Config(webhook.parse_args(argv))
 
 
@@ -123,18 +129,29 @@ def test_patch_carries_the_node_local_facts():
     patched = apply_patch(body, patch_of(review(body, namespace())))
     container = patched["spec"]["containers"][0]
     environment = {entry["name"]: entry["value"] for entry in container["env"]}
-    assert environment["DPUMESH_PCI_ADDR"] == "94:00.0"
     assert environment["DPUMESH_RINGS_PER_POD"] == "2"
     assert environment["DPUMESH_SERVICE"] == "echo-dpumesh"
-    assert container["securityContext"]["privileged"] is True
     mounts = {entry["mountPath"]: entry for entry in container["volumeMounts"]}
-    assert mounts["/dev/infiniband"]["name"] == "dpumesh-infiniband"
     assert mounts["/usr/local/lib/libdmesh_preload.so"]["subPath"] == "libdmesh_preload.so"
     assert mounts["/usr/local/lib/libdpumesh.so.5"]["subPath"] == "libdpumesh.so.5"
     assert mounts["/run/dpumesh"]["readOnly"] is True
     volumes = {entry["name"]: entry for entry in patched["spec"]["volumes"]}
     assert volumes["dpumesh-library"]["hostPath"]["path"] == "/opt/dpumesh/lib"
     assert volumes["dpumesh-attest"]["hostPath"]["type"] == "DirectoryOrCreate"
+
+
+def test_the_workload_gets_no_device_and_no_privilege():
+    body = pod({"dpumesh.io/inject": "enabled"},
+               labels={"dpumesh-service": "echo-dpumesh"})
+    patched = apply_patch(body, patch_of(review(body, namespace())))
+    container = patched["spec"]["containers"][0]
+    environment = {entry["name"]: entry["value"] for entry in container["env"]}
+    mounts = {entry["mountPath"] for entry in container["volumeMounts"]}
+    volumes = {entry["name"] for entry in patched["spec"]["volumes"]}
+    assert "DPUMESH_PCI_ADDR" not in environment
+    assert container.get("securityContext", {}).get("privileged") is not True
+    assert "/dev/infiniband" not in mounts
+    assert "dpumesh-infiniband" not in volumes
 
 
 def test_an_unmodified_workload_is_preloaded():
@@ -214,12 +231,12 @@ def test_injection_is_idempotent():
 def test_existing_environment_is_not_duplicated():
     body = pod({"dpumesh.io/inject": "enabled"}, containers=[{
         "name": "app", "image": "app:latest", "ports": [{"containerPort": 9091}],
-        "env": [{"name": "DPUMESH_PCI_ADDR", "value": "03:00.0"}],
+        "env": [{"name": "DPUMESH_RINGS_PER_POD", "value": "4"}],
     }])
     patched = apply_patch(body, patch_of(review(body, namespace())))
     values = [entry for entry in patched["spec"]["containers"][0]["env"]
-              if entry["name"] == "DPUMESH_PCI_ADDR"]
-    assert len(values) == 1 and values[0]["value"] == "03:00.0"
+              if entry["name"] == "DPUMESH_RINGS_PER_POD"]
+    assert len(values) == 1 and values[0]["value"] == "4"
 
 
 def test_every_container_is_patched():
@@ -229,8 +246,8 @@ def test_every_container_is_patched():
     ])
     patched = apply_patch(body, patch_of(review(body, namespace())))
     for container in patched["spec"]["containers"]:
-        assert container["securityContext"]["privileged"] is True
-        assert len(container["volumeMounts"]) == 4
+        assert "securityContext" not in container
+        assert len(container["volumeMounts"]) == 3
 
 
 def test_a_cluster_with_no_dpu_node_refuses():
@@ -294,13 +311,6 @@ def test_an_unreadable_namespace_refuses_only_what_it_alone_decides():
                                             "object": pod({"dpumesh.io/inject": "disabled"})}})
     assert declined["response"]["allowed"]
     assert "patch" not in declined["response"]
-
-
-def test_missing_pci_address_is_refused():
-    body = pod({"dpumesh.io/inject": "enabled"})
-    bare = webhook.Config(webhook.parse_args(["--library-dir=/opt/dpumesh/lib"]))
-    response = review(body, namespace(), injector_config=bare)
-    assert not response["response"]["allowed"]
 
 
 def main():

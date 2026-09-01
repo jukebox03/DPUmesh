@@ -1086,6 +1086,7 @@ dmesh_fill_dpa_ring_info(struct objects *objs, struct pod_state *pod, int j,
     ring_info->dpu_mmap = dpu_mmap;
     ring_info->dpu_addr = (uint64_t)pod->dma_buffer;  /* pod staging base */
     ring_info->region_off = 0;                        /* wire-ABI constant */
+    ring_info->host_buf_size = (uint32_t)pod->remote_buf_size;
     ring_info->pod_id = pod->pod_id;
 
     return DOCA_SUCCESS;

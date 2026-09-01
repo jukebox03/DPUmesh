@@ -17,6 +17,7 @@ cluster through the relay here. Nothing else on the host speaks to the DPU.
 from __future__ import annotations
 
 import argparse
+import array
 import concurrent.futures
 import hashlib
 import hmac
@@ -24,6 +25,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import signal
 import socket
 import ssl
@@ -52,10 +54,13 @@ MSG_WORKLOAD_ASSERT = 13
 NONCE_SIZE = 32
 MAX_TTL = 300
 REQUEST = struct.Struct("<8sB3x64s32s")
+BROKER_HELLO = struct.Struct("<8sBB2x64s")
+BROKER_IPC_VERSION = 3
 ASSERT = struct.Struct(
     "<BBBBQQ16s32s32s254s64s64s254s254s64s16s64s"
 )
 assert REQUEST.size == 108
+assert BROKER_HELLO.size == 76
 assert ASSERT.size == 1134
 
 SERVICE_NAME_RE = re.compile(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?")
@@ -213,6 +218,51 @@ def pod_uid_for_pid(pid: int) -> str:
         return pod_uid_from_cgroup(cgroup)
     except AttestationError as exc:
         raise AttestationError(f"pid {pid} is not in a Kubernetes Pod cgroup") from exc
+
+
+def pod_cgroup_for_pid(pid: int) -> str:
+    """Return the cgroup-v2 path through the Pod slice, excluding its
+    container scope. A broker placed here is charged to the Pod while remaining
+    outside every workload container cgroup."""
+    try:
+        cgroup = Path(f"/proc/{pid}/cgroup").read_text(encoding="ascii")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise AttestationError(f"cannot read peer cgroup for pid {pid}") from exc
+    unified = next((line.split(":", 2)[2] for line in cgroup.splitlines()
+                    if line.startswith("0::")), None)
+    if unified is None:
+        raise AttestationError("peer has no cgroup-v2 path")
+    # A cgroup namespace renders processes outside its root with leading
+    # `../` components. /host-cgroup is a bind of the host root, so rebuild
+    # from the first canonical kubepods component and never carry traversal
+    # components into the writable mount.
+    parts = Path(unified).parts
+    kube_index = next((index for index, part in enumerate(parts)
+                       if part == "kubepods.slice" or
+                       part.startswith("kubepods-")), None)
+    if kube_index is None:
+        raise AttestationError("peer is not below the Kubernetes cgroup root")
+    pod_index = next((index for index, part in enumerate(parts)
+                      if index >= kube_index and POD_UID_RE.search(part)), None)
+    if pod_index is None:
+        raise AttestationError("peer is not in a Kubernetes Pod cgroup")
+    selected = list(parts[kube_index:pod_index + 1])
+    pod_slice = selected[-1]
+    # With a private cgroup namespace the kernel may expose an external Pod as
+    # just ``../../<pod-slice>/<container-scope>``.  Reconstruct the systemd
+    # QoS parents that exist below the separately mounted host cgroup root.
+    # Do this from fixed prefixes only; no peer-controlled path component is
+    # ever used as traversal.
+    if len(selected) == 1 and pod_slice.startswith("kubepods-"):
+        if pod_slice.startswith("kubepods-besteffort-pod"):
+            selected = ["kubepods.slice", "kubepods-besteffort.slice", pod_slice]
+        elif pod_slice.startswith("kubepods-burstable-pod"):
+            selected = ["kubepods.slice", "kubepods-burstable.slice", pod_slice]
+        elif pod_slice.startswith("kubepods-pod"):
+            selected = ["kubepods.slice", pod_slice]
+        else:
+            raise AttestationError("unrecognized Kubernetes Pod slice")
+    return "/" + str(Path(*selected))
 
 
 class KubernetesAPI:
@@ -658,6 +708,83 @@ class Agent:
         self.reported: tuple[str, str] | None = None
         self.identity_material: tuple[str, str] | None = None
         self.identity_deadline = 0.0
+        self.broker_bin: Path | None = getattr(args, "broker_bin", None)
+        self.broker_lib: Path = getattr(
+            args, "broker_lib", Path("/usr/local/lib/libdpumesh.so.5")
+        )
+        self.broker_runtime_dir: Path = getattr(
+            args, "broker_runtime_dir", Path("/var/lib/dpumesh/broker-runtime")
+        )
+        self.broker_runtime_bin: Path | None = None
+        self.broker_runtime_lib: Path | None = None
+        self.spawned_lock = threading.Lock()
+        # final broker pid -> (launcher if still owned, starttime, Pod, Service)
+        # Re-adopted and PID-namespace children have no Popen parent here.
+        self.spawned: dict[int, tuple[subprocess.Popen[bytes] | None, str,
+                                      dict[str, Any], str]] = {}
+        # Pod UID is the singleton key.  A second workload thread can reach the
+        # node socket while the first host-supervised broker is still starting,
+        # and a crashing workload can reconnect before DPU teardown has
+        # quiesced.  Serialize both cases and back failed launches off instead
+        # of creating two Comch owners for one Pod identity.
+        self.spawning_pods: set[str] = set()
+        # pod UID -> (not-before monotonic time, next delay seconds)
+        self.broker_retry: dict[str, tuple[float, float]] = {}
+        self.broker_state_dir: Path = getattr(
+            args, "broker_state_dir", Path("/run/dpumesh/brokers")
+        )
+        self.broker_state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(self.broker_state_dir, 0o700)
+        # A broker's tmpfs mount exists only in its private namespace. The
+        # underlying hostPath directory is empty here and can be unlinked even
+        # while that private mount remains the broker's root.
+        for root in self.broker_state_dir.parent.glob(".broker-root.*"):
+            try:
+                root.rmdir()
+            except OSError:
+                pass
+        if self.broker_bin is not None:
+            self.install_broker_runtime()
+
+    def install_broker_runtime(self) -> None:
+        """Publish a content-addressed broker outside the agent rootfs.
+
+        A child orphaned by a container is adopted by that container's shim,
+        so double-fork alone cannot survive a DaemonSet rollout.  The host
+        service manager starts the steady process instead.  Keeping the
+        executable and project DSO on the hostPath means neither its parent nor
+        its executable mappings retain the old agent container.
+        """
+        assert self.broker_bin is not None
+        try:
+            broker_bytes = self.broker_bin.read_bytes()
+            library_bytes = self.broker_lib.read_bytes()
+        except OSError as exc:
+            raise AttestationError(f"cannot stage broker runtime: {exc}") from exc
+        digest = hashlib.sha256(broker_bytes + library_bytes).hexdigest()[:24]
+        runtime = self.broker_runtime_dir / digest
+        runtime.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(runtime, 0o700)
+
+        def publish(source: Path, target: Path) -> None:
+            try:
+                if target.read_bytes() == source.read_bytes():
+                    os.chmod(target, 0o555)
+                    return
+            except FileNotFoundError:
+                pass
+            temporary = runtime / f".{target.name}.{os.getpid()}.{secrets.token_hex(4)}"
+            try:
+                shutil.copyfile(source, temporary)
+                os.chmod(temporary, 0o555)
+                os.replace(temporary, target)
+            finally:
+                temporary.unlink(missing_ok=True)
+
+        publish(self.broker_bin, runtime / "dmesh_broker")
+        publish(self.broker_lib, runtime / "libdpumesh.so.5")
+        self.broker_runtime_bin = runtime / "dmesh_broker"
+        self.broker_runtime_lib = runtime / "libdpumesh.so.5"
 
     # ---- the DPU's only control peer -------------------------------------
 
@@ -861,22 +988,7 @@ class Agent:
                 self.ingress.reconcile(pods)
             time.sleep(self.args.membership_interval)
 
-    def attest(self, connection: socket.socket) -> bytes:
-        credentials = connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
-        pid, _uid, _gid = struct.unpack("3i", credentials)
-        request = connection.recv(REQUEST.size + 1)
-        if len(request) != REQUEST.size:
-            raise AttestationError("invalid request size")
-        magic, version, service_field, nonce = REQUEST.unpack(request)
-        if magic != b"DMESHAR1" or version != ASSERT_VERSION or not any(nonce):
-            raise AttestationError("invalid request framing or nonce")
-        try:
-            service_name = service_field.split(b"\0", 1)[0].decode("ascii")
-        except UnicodeDecodeError as exc:
-            raise AttestationError("requested Service name is not ASCII") from exc
-        if service_name and SERVICE_NAME_RE.fullmatch(service_name) is None:
-            raise AttestationError(f"invalid requested Service name {service_name!r}")
-
+    def authorized_pod(self, pid: int, service_name: str) -> dict[str, Any]:
         pod_uid = pod_uid_for_pid(pid)
         pods = self.kubernetes.pods(self.args.node_name)
         pod = resolve_pod(pod_uid, pods, self.args.node_name)
@@ -891,6 +1003,339 @@ class Agent:
             pod = resolve_pod(pod_uid, pods, self.args.node_name)
         services = self.kubernetes.services() if service_name else []
         authorize_service(service_name, pod, services)
+        return pod
+
+    def broker_spawn_claim(self, pod_uid: str, now: float | None = None) -> None:
+        if now is None:
+            now = time.monotonic()
+        with self.spawned_lock:
+            if pod_uid in self.spawning_pods:
+                raise AttestationError(
+                    f"broker launch is already in progress for Pod {pod_uid}"
+                )
+            for _pid, (_process, _started, pod, _service) in self.spawned.items():
+                if str(pod["metadata"]["uid"]) == pod_uid:
+                    raise AttestationError(
+                        f"a live broker already owns Pod {pod_uid}"
+                    )
+            not_before, _delay = self.broker_retry.get(pod_uid, (0.0, 5.0))
+            if now < not_before:
+                raise AttestationError(
+                    f"broker restart for Pod {pod_uid} is backed off for "
+                    f"{not_before - now:.2f}s"
+                )
+            self.spawning_pods.add(pod_uid)
+
+    def broker_spawn_release(self, pod_uid: str, success: bool,
+                             now: float | None = None) -> None:
+        if now is None:
+            now = time.monotonic()
+        with self.spawned_lock:
+            self.spawning_pods.discard(pod_uid)
+            if success:
+                # A completed launch starts a fresh lifecycle.  If that broker
+                # later exits, sweep_brokers applies the initial grace period.
+                self.broker_retry.pop(pod_uid, None)
+                return
+            _not_before, delay = self.broker_retry.get(pod_uid, (0.0, 5.0))
+            delay = max(5.0, min(delay, 30.0))
+            self.broker_retry[pod_uid] = (now + delay, min(delay * 2.0, 30.0))
+
+    def sweep_brokers(self) -> None:
+        stale: list[tuple[int, str]] = []
+        now = time.monotonic()
+        with self.spawned_lock:
+            for pid, (process, started, pod, _service) in self.spawned.items():
+                try:
+                    alive = ((process is None or process.poll() is None) and
+                             process_start_time(pid) == started)
+                except AttestationError:
+                    alive = False
+                if not alive:
+                    stale.append((pid, str(pod["metadata"]["uid"])))
+            for pid, pod_uid in stale:
+                self.spawned.pop(pid, None)
+                _not_before, delay = self.broker_retry.get(pod_uid, (0.0, 5.0))
+                delay = max(5.0, min(delay, 30.0))
+                self.broker_retry[pod_uid] = (
+                    now + delay, min(delay * 2.0, 30.0)
+                )
+
+        for pid, _pod_uid in stale:
+            for record in self.broker_state_dir.glob("*.state"):
+                try:
+                    document = json.loads(record.read_text(encoding="utf-8"))
+                    if int(document.get("pid", -1)) == pid:
+                        record.unlink(missing_ok=True)
+                except (OSError, ValueError, json.JSONDecodeError):
+                    continue
+
+    def write_broker_state(self, pid: int, started: str, pod: dict[str, Any],
+                           service_name: str, target_cgroup: str) -> None:
+        pod_uid = str(pod["metadata"]["uid"])
+        document = {
+            "pid": pid,
+            "starttime": started,
+            "pod_uid": pod_uid,
+            "service": service_name,
+            "cgroup": target_cgroup,
+        }
+        temporary = self.broker_state_dir / f".{pod_uid}.{pid}.tmp"
+        target = self.broker_state_dir / f"{pod_uid}.state"
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            os.write(fd, (json.dumps(document, sort_keys=True) + "\n").encode("utf-8"))
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(temporary, target)
+
+    def re_adopt_brokers(self) -> None:
+        if self.broker_bin is None:
+            return
+        adopted = 0
+        for record in self.broker_state_dir.glob("*.state"):
+            try:
+                if record.is_symlink() or stat.S_IMODE(record.stat().st_mode) & 0o077:
+                    raise AttestationError("broker state is not root-private")
+                document = json.loads(record.read_text(encoding="utf-8"))
+                pid = int(document["pid"])
+                started = str(document["starttime"])
+                pod_uid = str(document["pod_uid"])
+                service_name = str(document.get("service") or "")
+                if process_start_time(pid) != started:
+                    raise AttestationError("broker PID/starttime changed")
+                executable = os.readlink(f"/proc/{pid}/exe")
+                if Path(executable).name != self.broker_bin.name:
+                    raise AttestationError("state PID is not dmesh_broker")
+                if pod_uid_for_pid(pid) != pod_uid:
+                    raise AttestationError("broker state/cgroup Pod UID mismatch")
+                pods = self.kubernetes.pods(self.args.node_name)
+                pod = resolve_pod(pod_uid, pods, self.args.node_name)
+                authorize_service(
+                    service_name, pod,
+                    self.kubernetes.services() if service_name else [],
+                )
+                with self.spawned_lock:
+                    self.spawned[pid] = (None, started, pod, service_name)
+                adopted += 1
+                print(
+                    f"workload-attest-agent: re-adopted broker pid={pid} "
+                    f"pod={pod_uid} service={service_name or '-'}",
+                    flush=True,
+                )
+            except (AttestationError, KeyError, OSError, ValueError,
+                    json.JSONDecodeError) as exc:
+                print(
+                    f"workload-attest-agent: discarded broker state "
+                    f"{record.name}: {exc}", file=sys.stderr, flush=True,
+                )
+                record.unlink(missing_ok=True)
+        if adopted:
+            print(f"workload-attest-agent: re-adopted {adopted} broker(s)", flush=True)
+
+    def broker_claims(self, pid: int, uid: int) -> tuple[dict[str, Any], str] | None:
+        if uid not in (0, 65532):
+            return None
+        self.sweep_brokers()
+        with self.spawned_lock:
+            entry = self.spawned.get(pid)
+        if entry is None:
+            return None
+        process, started, pod, service_name = entry
+        if ((process is not None and process.poll() is not None) or
+                process_start_time(pid) != started):
+            with self.spawned_lock:
+                self.spawned.pop(pid, None)
+            raise AttestationError("stale broker registry entry")
+        if pod_uid_for_pid(pid) != pod["metadata"]["uid"]:
+            raise AttestationError("broker registry and cgroup Pod UID disagree")
+        return pod, service_name
+
+    def spawn_broker(self, connection: socket.socket) -> None:
+        if self.broker_bin is None or self.broker_runtime_bin is None:
+            raise AttestationError("broker mode is disabled")
+        credentials = connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
+        pid, _uid, _gid = struct.unpack("3i", credentials)
+        packet = connection.recv(BROKER_HELLO.size + 1, socket.MSG_PEEK)
+        if len(packet) != BROKER_HELLO.size:
+            raise AttestationError("invalid broker HELLO size")
+        magic, message_type, version, service_field = BROKER_HELLO.unpack(packet)
+        if (magic != b"DMESHBR1" or message_type != 1 or
+                version != BROKER_IPC_VERSION):
+            raise AttestationError("invalid broker HELLO framing")
+        try:
+            service_name = service_field.split(b"\0", 1)[0].decode("ascii")
+        except UnicodeDecodeError as exc:
+            raise AttestationError("broker Service name is not ASCII") from exc
+        if service_name and SERVICE_NAME_RE.fullmatch(service_name) is None:
+            raise AttestationError(f"invalid requested Service name {service_name!r}")
+        pod = self.authorized_pod(pid, service_name)
+        target_cgroup = pod_cgroup_for_pid(pid)
+        pod_uid = str(pod["metadata"]["uid"])
+        self.sweep_brokers()
+        self.broker_spawn_claim(pod_uid)
+        spawn_succeeded = False
+
+        try:
+            cgroup_root = self.args.host_cgroup_root.resolve()
+            target = (cgroup_root / target_cgroup.lstrip("/")).resolve()
+            if target == cgroup_root or cgroup_root not in target.parents:
+                raise AttestationError("resolved broker cgroup escaped host root")
+            if not target.is_dir():
+                raise AttestationError(
+                    f"Pod cgroup disappeared before broker start: {target_cgroup}"
+                )
+            # A cgroup with enabled domain controllers cannot hold processes while
+            # it also has container children.  The dedicated child remains inside
+            # recursive Pod accounting but outside all workload containers.
+            broker_cgroup = target / "dpumesh-broker"
+            broker_cgroup.mkdir(exist_ok=True)
+            cgroup_dir_fd = os.open(broker_cgroup, os.O_RDONLY | os.O_DIRECTORY)
+            token = secrets.token_hex(32)
+            launch_path = self.broker_state_dir.parent / f"launch.{token[:16]}.sock"
+            launch = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+            launch.settimeout(5.0)
+            launch.bind(str(launch_path))
+            os.chmod(launch_path, 0o600)
+            launch.listen(1)
+            unit = f"dpumesh-broker-{pod_uid.replace('-', '')[:12]}-{token[:8]}"
+            final_pid: int | None = None
+            try:
+                library_path = (
+                    f"{self.broker_runtime_bin.parent}:"
+                    "/opt/mellanox/doca/lib/x86_64-linux-gnu:"
+                    "/opt/mellanox/flexio/lib"
+                )
+                environment = [
+                    f"LD_LIBRARY_PATH={library_path}",
+                    f"DPUMESH_PCI_ADDR={os.getenv('DPUMESH_PCI_ADDR', '')}",
+                    f"DPUMESH_RINGS_PER_POD={os.getenv('DPUMESH_RINGS_PER_POD', '8')}",
+                ]
+                command = [
+                    "/usr/bin/systemd-run", "--quiet", "--collect",
+                    f"--unit={unit}", "--service-type=exec",
+                    "--property=Restart=no",
+                    "--property=KillMode=control-group",
+                    "--property=TimeoutStopSec=5s", "--property=UMask=0077",
+                    # Never inherit systemd-run's short-lived capture pipe.
+                    # DOCA emits diagnostics after launch; writing to the
+                    # closed pipe would otherwise deliver SIGPIPE and kill an
+                    # otherwise healthy long-lived broker.
+                    "--property=StandardOutput=journal",
+                    "--property=StandardError=journal",
+                    "--property=LimitMEMLOCK=infinity",
+                    "--property=CapabilityBoundingSet=CAP_SYS_ADMIN CAP_IPC_LOCK CAP_SETUID CAP_SETGID CAP_SETPCAP CAP_SYS_RESOURCE CAP_DAC_OVERRIDE CAP_KILL",
+                ]
+                command.extend(f"--setenv={entry}" for entry in environment)
+                command.extend([
+                    "/usr/bin/unshare", "--pid", "--fork", "--kill-child=SIGTERM",
+                    "--mount-proc", str(self.broker_runtime_bin),
+                    "--launch-sock", str(launch_path),
+                    "--launch-token", token, "--agent-sock", str(self.args.socket),
+                ])
+                started_unit = subprocess.run(
+                    command, check=False, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE, text=True, timeout=5.0,
+                )
+                if started_unit.returncode != 0:
+                    detail = started_unit.stderr.strip() or "unknown systemd error"
+                    raise AttestationError(
+                        f"host supervisor rejected broker: {detail}"
+                    )
+                peer, _ = launch.accept()
+                try:
+                    credentials = peer.getsockopt(
+                        socket.SOL_SOCKET, socket.SO_PEERCRED, 12
+                    )
+                    final_pid, peer_uid, _peer_gid = struct.unpack("3i", credentials)
+                    presented = peer.recv(65)
+                    if peer_uid != 0 or presented != token.encode("ascii"):
+                        raise AttestationError(
+                            "broker launch credential/token mismatch"
+                        )
+                    rights = array.array("i", [connection.fileno(), cgroup_dir_fd])
+                    peer.sendmsg(
+                        [b"F"],
+                        [(socket.SOL_SOCKET, socket.SCM_RIGHTS, rights.tobytes())],
+                    )
+                    if peer.recv(1) != b"M":
+                        raise AttestationError(
+                            "broker did not confirm cgroup migration"
+                        )
+                    if final_pid <= 1:
+                        raise AttestationError(
+                            "broker reported an invalid final PID"
+                        )
+                    started = process_start_time(final_pid)
+                    if pod_uid_for_pid(final_pid) != pod_uid:
+                        raise AttestationError(
+                            "final broker cgroup does not match Pod"
+                        )
+                    with self.spawned_lock:
+                        self.spawned[final_pid] = (
+                            None, started, pod, service_name
+                        )
+                    self.write_broker_state(
+                        final_pid, started, pod, service_name, target_cgroup
+                    )
+                    try:
+                        peer.sendall(b"G")
+                    except OSError as exc:
+                        with self.spawned_lock:
+                            self.spawned.pop(final_pid, None)
+                        raise AttestationError(
+                            "final broker exited before release"
+                        ) from exc
+                finally:
+                    peer.close()
+                print(
+                    f"workload-attest-agent: spawned broker pid={final_pid} "
+                    f"pod={pod_uid} service={service_name or '-'} unit={unit}",
+                    flush=True,
+                )
+                spawn_succeeded = True
+            except Exception:
+                if final_pid is not None:
+                    try:
+                        os.kill(final_pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
+                subprocess.run(
+                    ["/usr/bin/systemctl", "stop", unit], check=False,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+                raise
+            finally:
+                launch.close()
+                launch_path.unlink(missing_ok=True)
+                os.close(cgroup_dir_fd)
+        finally:
+            self.broker_spawn_release(pod_uid, spawn_succeeded)
+
+    def attest(self, connection: socket.socket) -> bytes:
+        credentials = connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
+        pid, uid, _gid = struct.unpack("3i", credentials)
+        request = connection.recv(REQUEST.size + 1)
+        if len(request) != REQUEST.size:
+            raise AttestationError("invalid request size")
+        magic, version, service_field, nonce = REQUEST.unpack(request)
+        if magic != b"DMESHAR1" or version != ASSERT_VERSION or not any(nonce):
+            raise AttestationError("invalid request framing or nonce")
+        try:
+            service_name = service_field.split(b"\0", 1)[0].decode("ascii")
+        except UnicodeDecodeError as exc:
+            raise AttestationError("requested Service name is not ASCII") from exc
+        if service_name and SERVICE_NAME_RE.fullmatch(service_name) is None:
+            raise AttestationError(f"invalid requested Service name {service_name!r}")
+
+        broker = self.broker_claims(pid, uid)
+        if broker is not None:
+            pod, registered_service = broker
+            if service_name != registered_service:
+                raise AttestationError("broker requested a Service outside its registry claim")
+        else:
+            pod = self.authorized_pod(pid, service_name)
         key_id, key = load_active_key(self.args.key_dir)
         return build_assert(
             key=key,
@@ -906,7 +1351,12 @@ class Agent:
             with connection:
                 connection.settimeout(self.args.request_timeout)
                 try:
-                    connection.sendall(self.attest(connection))
+                    peek = connection.recv(BROKER_HELLO.size + 1, socket.MSG_PEEK)
+                    if (len(peek) == BROKER_HELLO.size and
+                            peek.startswith(b"DMESHBR1")):
+                        self.spawn_broker(connection)
+                    else:
+                        connection.sendall(self.attest(connection))
                 except (AttestationError, OSError) as exc:
                     print(f"workload-attest-agent: reject: {exc}", file=sys.stderr, flush=True)
         finally:
@@ -924,6 +1374,10 @@ class Agent:
         listener.bind(str(path))
         os.chmod(path, self.args.socket_mode)
         listener.listen(128)
+        # Rebuild supervision before the accept loop can sign for a broker.
+        # Existing pod↔broker sockets do not depend on this listener and remain
+        # live across the DaemonSet rollout.
+        self.re_adopt_brokers()
         print(
             f"workload-attest-agent: listening on {path} "
             f"(concurrency={self.args.max_concurrency})",
@@ -978,6 +1432,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--socket-mode", type=lambda value: int(value, 8), default=0o666)
     parser.add_argument("--max-concurrency", type=int, default=8)
     parser.add_argument("--request-timeout", type=float, default=2.0)
+    parser.add_argument("--broker-bin", type=Path, default=None,
+                        help="per-Pod broker executable; unset keeps legacy mode")
+    parser.add_argument("--broker-lib", type=Path,
+                        default=Path("/usr/local/lib/libdpumesh.so.5"),
+                        help="project DSO staged with the host-supervised broker")
+    parser.add_argument("--broker-runtime-dir", type=Path,
+                        default=Path("/var/lib/dpumesh/broker-runtime"),
+                        help="host exec-enabled content-addressed broker runtime")
+    parser.add_argument("--host-cgroup-root", type=Path,
+                        default=Path("/host-cgroup"),
+                        help="writable host cgroup-v2 mount used for broker accounting")
+    parser.add_argument("--broker-state-dir", type=Path,
+                        default=Path("/run/dpumesh/brokers"),
+                        help="root-private supervision records for agent re-adoption")
     parser.add_argument(
         "--membership-file", type=Path, default=Path("/run/dpumesh/membership.v1")
     )

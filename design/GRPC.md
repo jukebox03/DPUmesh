@@ -357,8 +357,9 @@ in a `dpumesh:///` resolver inside the application process.
 
 ## Workloads
 
-`integrations/grpc/bench/` holds the programs the measurement harness drives
-over this adapter. Their wire stack is gRPC chttp2 → DPUmesh endpoint → Host↔DPU
+`bench/apps/` holds the gRPC programs the measurement harness drives over
+this adapter, beside their socket and native peers; `bench/k8s/grpc-pods.yaml`
+is their manifest. Their wire stack is gRPC chttp2 → DPUmesh endpoint → Host↔DPU
 DMA → embedded Linkerd, and the Kubernetes manifest contains only that path.
 
 - `bench_grpc` is the controlled client behind `bench.sh point grpc-dpumesh …`.

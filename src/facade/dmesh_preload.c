@@ -23,7 +23,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
-#include "dmesh_core.h"    /* The data/event plane uses the public native API.
+#include "src/core/dmesh_core.h"    /* The data/event plane uses the public native API.
                             * This in-tree adapter still needs narrow control-plane
                             * hooks for ClusterIP resolution, numeric QP open, and
                             * POSIX shutdown's transport FIN. */

@@ -2,7 +2,7 @@
  * shim is included directly so the test exercises its real POSIX state machine;
  * native calls are deterministic fakes and require no DOCA device. */
 #define DMESH_PRELOAD_TEST 1
-#include "../src/dmesh_preload.c"
+#include "../src/facade/dmesh_preload.c"
 
 #include <assert.h>
 #include <stdatomic.h>

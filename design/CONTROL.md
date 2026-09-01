@@ -131,7 +131,9 @@ reason: the DPU cannot read `SO_PEERCRED`, a peer cgroup or `/proc/<pid>/stat`,
 and those are the only evidence binding a connection to a Pod. Every
 shared-proxy mesh keeps a host-resident half for the same reason. What the split
 buys: the proxy runs on a CPU the workload cannot schedule on, so keys never
-enter host memory and counters are not falsifiable.
+enter host memory and counters are not falsifiable. The per-Pod broker (§2-1.9)
+is the same principle applied to the device: DOCA ownership stays in a host
+process the tenant cannot reach, and the workload container holds no device.
 
 Where a mesh proxy sits on one axis decides both consequences:
 
@@ -174,9 +176,14 @@ proxy the tenant cannot reach.
   │  │  SO_PEERCRED   │ │               │  │                │ │
   │  │  cgroup        │ │               │  │                │ │
   │  │  node priv key │ │               │  │                │ │
-  │  └────────┬───────┘ │               │  └────────┬───────┘ │
-  │ ══ PCIe ══╪════════ │               │ ══ PCIe ══╪════════ │
-  │  ┌────────▼───────┐ │               │  ┌────────▼───────┐ │
+  │  └──┬─────────┬───┘ │               │  └──┬─────────────┘ │
+  │     │ spawn   │     │               │     │ spawn         │
+  │  ┌──▼─────────▼───┐ │               │  ┌──▼─────────────┐ │
+  │  │ per-Pod brokers│ │               │  │ broker         │ │
+  │  │ device · Comch │ │               │  │                │ │
+  │  └──┬─────────┬───┘ │               │  └──┬─────────────┘ │
+  │ ════╪═ PCIe ══╪════ │               │ ════╪═ PCIe ═══════ │
+  │  ┌──▼─────────▼───┐ │               │  ┌──▼─────────────┐ │
   │  │ DPU (ARM)      │ │               │  │ DPU            │ │
   │  │  public keys   │ │               │  │                │ │
   │  │  node credent. │ │               │  │                │ │
@@ -398,14 +405,15 @@ directories stay disjoint for the reason *The node-scoped feeds* gives.
 
 ## 1.8 Resolution — the consumer side
 
-Names live outside, handles inside: the host asks, the DPU answers from the held
-generation, and the answer carries the DPU-interned compact id — a node-local
-transport identifier, never workload identity. No registry file exists anywhere.
+Names live outside, handles inside: the workload asks, its broker relays the
+round trip (§2-1.9), and the DPU answers from the held generation. The answer
+carries the DPU-interned compact id — a node-local transport identifier, never
+workload identity. No registry file exists anywhere.
 
 ```text
-Host Pod                                     DPU
-  │──── RESOLVE(name | ClusterIP:port) ─────▶│  answered from the adopted,
-  │◀─── RESOLVE_ACK(status, interned id) ────│  Ed25519-verified generation
+Host Pod            per-Pod broker                     DPU
+  │── RESOLVE ────▶│──── RESOLVE(name | ip:port) ────▶│  answered from the adopted,
+  │◀─ RESOLVE_ACK ─│◀─── RESOLVE_ACK(interned id) ────│  Ed25519-verified generation
 ```
 
 The native API resolves `"name"` (the Pod's own namespace) or `"name.namespace"`
@@ -415,7 +423,7 @@ registered backend here (the generation names unmeshed Services too),
 `status = not-meshed` makes leaving the mesh an explicit, logged kernel-TCP
 decision, and `status = no-generation` falls back the same way while a
 registration fails closed. Answers are cached per key for one generation
-interval (`src/dmesh_resolve.c`) and re-resolved after that or on a connection
+interval (`src/core/dmesh_resolve.c`) and re-resolved after that or on a connection
 error, so the cache is never staler than the generation.
 
 ## 1.9 When the controller is unavailable
@@ -595,8 +603,12 @@ agent can make, and the reason the node agent exists.
 `$DPUMESH_SERVICE` names the Service provided by the process. An unset or
 unknown value creates a client-only channel.
 
+The registering process — the flow's left column — is the Pod's broker
+(§2-1.9), which the agent has already attested and launched by the time this
+flow begins.
+
 ```text
-Host Pod                 trusted node agent                    DPU
+registering process      trusted node agent                    DPU
   │                               │                              │
   │◀──────────────────────── REG_CHALLENGE(nonce) ───────────────│
   │── nonce + requested service ─▶│                              │
@@ -610,9 +622,9 @@ Host Pod                 trusted node agent                    DPU
   │◀──────────────────────── POD_INIT_RESULT(READY) ─────────────│
 ```
 
-The Pod says two things: a Service name, and the nonce the DPU just gave it.
-Mappings are exported only after identity is settled, so a failed verification
-leaves the DPU holding nothing.
+The registering process says two things: a Service name, and the nonce the DPU
+just gave it. Mappings are exported only after identity is settled, so a failed
+verification leaves the DPU holding nothing.
 
 The DPU creates a fresh 32-byte nonce per Comch connection. The root-owned agent
 identifies the peer of its root-owned `AF_UNIX SOCK_SEQPACKET` socket with
@@ -633,7 +645,12 @@ identifies the peer of its root-owned `AF_UNIX SOCK_SEQPACKET` socket with
   signed claim, so the race is waited out rather than refused;
 - returns a canonical Ed25519-signed assertion.
 
-The application relays the assertion; it cannot change a claim.
+A broker's assert request is recognized by the agent's supervision registry
+instead — the pid, start time, Pod UID and Service recorded at its launch,
+re-checked against the live cgroup — and is refused any Service outside that
+registry claim.
+
+The registering process relays the assertion; it cannot change a claim.
 
 ## 2-1.2 The assertion
 
@@ -813,6 +830,59 @@ receive count, and each expected EU's posted receives, because the DPA drops a
 ring acknowledgement when the channel has no posted receive and receives are
 withheld while a worker's completion queue is above its backpressure mark. Until
 it passes, the slot and its imported mappings are held.
+
+## 2-1.9 The per-Pod broker
+
+The device is the boundary attestation cannot police: a workload that owns
+`/dev/infiniband` owns DMA. Every DOCA object — device, progress engine,
+Comch connection, and the memory registered for DMA — therefore lives in one
+trusted host process per Pod. The workload container runs unprivileged, with no device mount; the
+data path this leaves it is DATA.md's *Host memory and rings*.
+
+Launch is the attestation path run once more. The workload connects to the
+agent socket and sends a HELLO naming its Service. The agent attests the
+caller exactly as §2-1.1, then starts the broker under the host service
+manager, so a broker survives an agent rollout and no container shim adopts
+it. The launch hands the broker two descriptors: the Pod connection itself,
+and an fd naming a dedicated child cgroup inside the Pod slice — the broker
+is charged to the Pod it serves while sitting outside every workload
+container. The broker executable and the project DSO run from a root-private,
+content-addressed host directory, never from the agent image.
+
+Before consuming the untrusted HELLO the broker discards what it no longer
+needs: it enters private mount, cgroup, network and PID namespaces, pivots
+into an empty tmpfs root, drops to an unprivileged uid with an empty
+capability set, and installs a seccomp filter that denies exec. What remains
+is a process that can progress a PE and write one eventfd.
+
+Registration then runs §2-1.1 with the broker as the registering process. On
+READY the broker passes the workload its attach set over the socket: the ring
+and TX/RX memfds, sealed against shrink, growth and resealing, and one
+unsealed pod-global doorbell eventfd. Data never crosses this socket again;
+it carries only RESOLVE round trips, which the broker relays to the DPU, and
+a terminal TRANSPORT_DOWN. The DPU sees only pod-global rings, `arm_epoch`
+and `REV_DOORBELL`; nothing about the workload's EQs or threads reaches the
+device.
+
+What the assertion proves also shifts weight. The primary reason a Comch peer
+is believed is now the launch itself: the kernel checks device access at
+`open()`, and with the device node confined to infrastructure, every peer the
+DPU can have is an agent-launched broker. The nonce's cryptographic channel
+binding (§2-1.4) is therefore the second line of defense, not the first. It
+is kept because it costs one signature per Pod lifetime and nothing on the
+data path, and because the premise it backs is a host configuration the DPU
+cannot see: on a shared-HCA node — where storage or ML Pods legitimately
+mount `/dev/infiniband` — a Pod holding the device can open Comch itself, and
+there the agent's label check on the assertion is what refuses an arbitrary
+Service claim. The wire and the DPU's checks (§2-1.3) are unchanged.
+
+One broker owns one Pod identity. The agent serializes concurrent HELLOs per
+Pod UID, backs a failed launch off exponentially, records each broker in a
+root-private state file, and re-adopts recorded brokers when it restarts —
+the pod↔broker socket does not depend on the agent's listener. A dead broker
+takes its registered mappings with it, so the workload's recovery unit is the
+process: the library raises SIGTERM on TRANSPORT_DOWN and Kubernetes restarts
+the container into a fresh HELLO.
 
 ---
 
@@ -1564,9 +1634,11 @@ client-side and the server-side view of one request.
 ## 5.5 Configuration
 
 Three mechanisms, each matched to who consumes it. Data-plane processes read
-environment: `dpumesh_dpu` once per node, and every workload process, whose
-environment the admission webhook writes. Control-plane daemons take flags,
-because each is deployed from a manifest and a manifest is where flags live.
+environment: `dpumesh_dpu` once per node; every workload process, whose
+environment the admission webhook writes; and the per-Pod broker, whose
+environment the node agent supplies at launch (§2-1.9). Control-plane daemons
+take flags, because each is deployed from a manifest and a manifest is where
+flags live.
 Key material and feeds are root-only files (§5.3), placed by bootstrap and by
 the agent's delivery loop, never by the processes that read them.
 
@@ -1654,11 +1726,19 @@ A meshed Pod's environment is written by the webhook, not by its author:
 
 | Name | Injected value | Meaning |
 |---|---|---|
-| `DPUMESH_PCI_ADDR` | webhook `--pci-addr`, overridable per Pod by `dpumesh.io/pci-addr` | the host-side DOCA function |
 | `DPUMESH_RINGS_PER_POD` | webhook `--rings-per-pod` | the node's `K` |
 | `DPUMESH_ATTEST_SOCKET` | webhook `--attest-socket` | the node agent's socket, default `/run/dpumesh/attest.sock` |
 | `DPUMESH_SERVICE` | the `dpumesh.io/service` annotation or `dpumesh-service` label | the Service this Pod provides; absent for a pure client |
 | `LD_PRELOAD` | the mounted shim | absent under `dpumesh.io/preload: disabled` |
+
+Completion draining tunes in the workload's environment; the defaults are
+the deployed stance:
+
+| Name | Default | What it decides |
+|---|---|---|
+| `DPUMESH_DRAIN_NAP_US` | 10 | the polled regime's minimum sleep, µs; `0` disables polling — every wake is then a doorbell |
+| `DPUMESH_DRAIN_NAP_CAP_US` | 100 | the backoff cap; past it a drain shard publishes `arm_epoch` and blocks |
+| `DPUMESH_DRAIN_SHARDS` | `L` | the shard ceiling; shards also never exceed registered EQs or allowed cores |
 
 The author states at most two facts, in the container spec or on the process:
 
@@ -1691,7 +1771,6 @@ them: `DMESH_PRELOAD_DEBUG` turns on the shim's stderr diagnostics, and
 
 | Flag | Default | What it decides |
 |---|---|---|
-| `--pci-addr` | none | the `DPUMESH_PCI_ADDR` it injects; a Pod with neither this nor its own annotation is refused |
 | `--rings-per-pod` | unset | the `K` it injects; must equal the node's |
 | `--attest-dir`, `--attest-socket` | `/run/dpumesh`, `…/attest.sock` | the agent socket it mounts and names |
 | `--library-dir`, `--library-soname`, `--preload-soname`, `--library-mount-dir` | `/opt/dpumesh/lib`, `libdpumesh.so.5`, `libdmesh_preload.so`, `/usr/local/lib` | what is mounted into the Pod, and where |
@@ -1715,6 +1794,14 @@ them: `DMESH_PRELOAD_DEBUG` turns on the shim's stderr diagnostics, and
 | `--membership-interval` | 10 s | how often membership is republished |
 | `--node-rdma-addr` | `192.168.100.2:4791` | the peer address published for this node |
 | `--identity-*` | serviceaccount `dpumesh-dpu`, audience `identity.l5d.io`, 3600 s | the token the embedded proxy certifies with (§3.7) |
+| `--broker-bin` | unset | the per-Pod broker executable (§2-1.9); a mesh-serving node requires it — without it no workload can register |
+| `--broker-lib`, `--broker-runtime-dir` | `libdpumesh.so.5`, `/var/lib/dpumesh/broker-runtime` | what is staged into the content-addressed host runtime |
+| `--host-cgroup-root` | `/host-cgroup` | the writable host cgroup mount Pod-charged broker cgroups are created under |
+| `--broker-state-dir` | `/run/dpumesh/brokers` | root-private supervision records; what re-adoption reads |
+
+The broker's own environment — `DPUMESH_PCI_ADDR` naming the host-side DOCA
+function, and `DPUMESH_RINGS_PER_POD` — is the agent's, passed at launch; no
+workload ever holds a PCI address.
 
 ### 5.5.4 Files
 
@@ -1729,6 +1816,8 @@ socket, and none is written by the process that reads it:
 | `/etc/dpumesh/node-static.key`, `.pub` | DPU | generated on the DPU at first boot; the private half never leaves it |
 | `/etc/dpumesh/{membership.v1, topology.v1, admission, service targets}` | DPU | the feed receiver, an unprivileged unit the node agent delivers into |
 | `/run/dpumesh/attest.sock` | host | the node agent |
+| `/run/dpumesh/brokers/` | host | the node agent; one root-private record per live broker (§2-1.9) |
+| `/var/lib/dpumesh/broker-runtime/` | host | the node agent; the content-addressed broker executable and DSO |
 
 ## 5.6 Operations
 

@@ -1,0 +1,29 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: dmesh-broker-probe
+  namespace: ${NS}
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: dmesh-broker-probe
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: probe
+        image: docker.io/bench/bench-dpumesh:latest
+        imagePullPolicy: Never
+        command: ["/usr/local/bin/dmesh_broker_probe"]
+        env:
+        - { name: DPUMESH_RINGS_PER_POD, value: "8" }
+        - { name: DPUMESH_ATTEST_SOCKET, value: "/run/dpumesh/attest.sock" }
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities: { drop: ["ALL"] }
+        volumeMounts:
+        - { name: attest, mountPath: /run/dpumesh, readOnly: true }
+      volumes:
+      - name: attest
+        hostPath: { path: /run/dpumesh, type: DirectoryOrCreate }

@@ -8,7 +8,7 @@
 /* White-box coverage for the production EAGAIN -> TX_READY state machine. Keeping
  * the test at core level makes ACK and shared-pool transitions deterministic without
  * requiring a DPU or weakening the public API with test-only controls. */
-#include "../src/dmesh_core.c"
+#include "../src/core/dmesh_core.c"
 
 #define TEST_PORT 17
 

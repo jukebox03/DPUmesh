@@ -16,7 +16,7 @@ LIBDIR  := $(BUILD)/lib
 BINDIR  := $(BUILD)/bin
 TESTDIR := $(BUILD)/test
 
-# -Iinclude → <dpumesh/...> ; -I. → the "doca/..." includes from src/dmesh_core.c
+# -Iinclude → <dpumesh/...> ; -I. → the root-relative "doca/..." and "src/..." includes
 # -Ilinkerd/include → <dmesh_l7.h>, the L7 adapter contract the proxy compiles against
 # -Wextra minus the categories that only fire on deliberate patterns: callback
 # parameters fixed by DOCA's signatures, ring index arithmetic, and port-table
@@ -33,10 +33,11 @@ RPATHS  := -Wl,-rpath,/usr/local/lib \
 
 # ---- host transport library --------------------------------------------------
 LIB_SRCS := \
-	src/dmesh_core.c \
-	src/dmesh_api.c \
-	src/dmesh_attest.c \
-	src/dmesh_resolve.c \
+	src/core/dmesh_core.c \
+	src/facade/dmesh_api.c \
+	src/core/dmesh_attest.c \
+	src/broker/dmesh_brokerlink.c \
+	src/core/dmesh_resolve.c \
 	doca/common.c \
 	doca/object.c \
 	doca/buffer.c \
@@ -63,7 +64,7 @@ LIB_LINK := $(LIBDIR)/libdpumesh.so
 # ---- consumers of the library ------------------------------------------------
 # dmesh_* API clients (socket/epoll façade over dmesh.h)
 DMESH_BINS := bench_dpumesh echo_dpumesh loopback_dpumesh verbs_dpumesh \
-	hello_dpumesh hello_dpumesh_server
+	hello_dpumesh hello_dpumesh_server dmesh_broker_probe
 bench_dpumesh_SRC    := bench/apps/bench_dpumesh.c
 bench_dpumesh_LIBS   := -lm
 echo_dpumesh_SRC     := bench/apps/echo_dpumesh.c
@@ -71,6 +72,7 @@ loopback_dpumesh_SRC := bench/validators/loopback_dpumesh.c
 verbs_dpumesh_SRC    := bench/validators/verbs_dpumesh.c
 hello_dpumesh_SRC    := bench/examples/hello_dpumesh.c
 hello_dpumesh_server_SRC := bench/examples/hello_dpumesh_server.c
+dmesh_broker_probe_SRC := bench/validators/dmesh_broker_probe.c
 
 # LD_PRELOAD shim (interposes libc sockets → dmesh) + its vanilla-TCP validators
 PRELOAD := $(LIBDIR)/libdmesh_preload.so
@@ -104,13 +106,17 @@ $(LIB): $(LIB_SRCS) $(LIB_HDRS) | dirs
 $(LIB_LINK): $(LIB)
 	@ln -sf $(notdir $(LIB)) $@
 
-bench: lib $(addprefix $(BINDIR)/,$(DMESH_BINS)) $(PRELOAD) $(addprefix $(BINDIR)/,$(POSIX_BINS))
+bench: lib $(BINDIR)/dmesh_broker $(addprefix $(BINDIR)/,$(DMESH_BINS)) $(PRELOAD) $(addprefix $(BINDIR)/,$(POSIX_BINS))
+
+$(BINDIR)/dmesh_broker: src/broker/dmesh_broker.c src/broker/dmesh_broker_internal.h $(LIB) | dirs
+	$(CC) $(CFLAGS) $(DEPFLAGS) -o $@ src/broker/dmesh_broker.c -L$(LIBDIR) -ldpumesh \
+		$(DOCA_LIBS) -lpthread $(RPATHS)
 
 # Focused host-only contract tests. Function-section GC lets each test link the
 # production source that owns the state machine without constructing DOCA hardware.
-$(TESTDIR)/native_api_contract_test: tests/native_api_contract_test.c src/dmesh_api.c $(LIB_HDRS) | dirs
+$(TESTDIR)/native_api_contract_test: tests/native_api_contract_test.c src/facade/dmesh_api.c $(LIB_HDRS) | dirs
 	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -Wl,--gc-sections \
-		-o $@ tests/native_api_contract_test.c src/dmesh_api.c
+		-o $@ tests/native_api_contract_test.c src/facade/dmesh_api.c
 
 $(TESTDIR)/native_control_state_test: tests/native_control_state_test.c doca/comch_server.c doca/workload_grant.c doca/topology.c doca/control_scope.c $(LIB_HDRS) | dirs
 	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -Wl,--gc-sections \
@@ -128,15 +134,15 @@ $(TESTDIR)/pod_membership_test: tests/pod_membership_test.c doca/pod_membership.
 		doca/comch_server.c doca/workload_grant.c doca/topology.c doca/control_scope.c \
 		$(DOCA_LIBS) $(CRYPTO_LIBS) -lpthread $(RPATHS)
 
-$(TESTDIR)/native_tx_batch_policy_test: tests/native_tx_batch_policy_test.c src/dmesh_core.c $(LIB_HDRS) | dirs
+$(TESTDIR)/native_tx_batch_policy_test: tests/native_tx_batch_policy_test.c src/core/dmesh_core.c $(LIB_HDRS) | dirs
 	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -Wl,--gc-sections \
 		-o $@ tests/native_tx_batch_policy_test.c $(DOCA_LIBS) -lpthread $(RPATHS)
 
-$(TESTDIR)/native_writable_test: tests/native_writable_test.c src/dmesh_core.c $(LIB_HDRS) | dirs
+$(TESTDIR)/native_writable_test: tests/native_writable_test.c src/core/dmesh_core.c $(LIB_HDRS) | dirs
 	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -Wl,--gc-sections \
 		-o $@ tests/native_writable_test.c $(DOCA_LIBS) -lpthread $(RPATHS)
 
-$(TESTDIR)/preload_api_contract_test: tests/preload_api_contract_test.c src/dmesh_preload.c $(LIB_HDRS) | dirs
+$(TESTDIR)/preload_api_contract_test: tests/preload_api_contract_test.c src/facade/dmesh_preload.c $(LIB_HDRS) | dirs
 	$(CC) $(CFLAGS) -o $@ tests/preload_api_contract_test.c -lpthread -ldl
 
 $(TESTDIR)/l4_pin_policy_test: tests/l4_pin_policy_test.c doca/dpu_proxy.h | dirs
@@ -273,9 +279,9 @@ endef
 $(foreach b,$(DMESH_BINS),$(eval $(call DMESH_BIN_RULE,$(b))))
 
 # The shim's data/EQ plane is a client of the public native API. It also compiles
-# against src/dmesh_core.h for narrow in-tree address-resolution and FIN hooks.
-$(PRELOAD): src/dmesh_preload.c $(LIB_LINK) | dirs
-	$(CC) -O2 -g $(DEPFLAGS) -fPIC -shared -Iinclude -Isrc -o $@ src/dmesh_preload.c \
+# against src/core/dmesh_core.h for narrow in-tree address-resolution and FIN hooks.
+$(PRELOAD): src/facade/dmesh_preload.c $(LIB_LINK) | dirs
+	$(CC) -O2 -g $(DEPFLAGS) -fPIC -shared -Iinclude -I. -o $@ src/facade/dmesh_preload.c \
 		-L$(LIBDIR) -ldpumesh -lpthread -ldl $(RPATHS)
 	@echo "  -> $@"
 

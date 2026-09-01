@@ -432,12 +432,13 @@ has to accept in order to get it. None of it is a tuning knob.
 
 **A Pod is meshed by one annotation, and the webhook writes the rest.**
 `dpumesh.io/inject: "enabled"` on the Namespace or the Pod template, with the
-Pod's Service in a `dpumesh-service` label, and an admission webhook adds
-`privileged: true`, the `/dev/infiniband` hostPath, the transport-library and
-node-agent mounts, `DPUMESH_PCI_ADDR` and `DPUMESH_SERVICE`, the preload shim,
-node affinity, and the two Linkerd markers. It refuses the Pod when no node
-carries `dpumesh.io/dpu=true`, because a Pod holding part of the patch fails
-later and elsewhere.
+Pod's Service in a `dpumesh-service` label, and an admission webhook adds the
+transport-library and node-agent mounts, `DPUMESH_RINGS_PER_POD` and
+`DPUMESH_SERVICE`, the preload shim, node affinity, and the two Linkerd
+markers. The Pod stays unprivileged and mounts no device — the DOCA objects
+live in the per-Pod broker (design/CONTROL.md §2-1.9). It refuses the Pod
+when no node carries `dpumesh.io/dpu=true`, because a Pod holding part of the
+patch fails later and elsewhere.
 
 The second Linkerd marker — `config.linkerd.io/skip-inbound-ports` on the data
 port — is load-bearing, not cosmetic. Removing it from the three live backends,

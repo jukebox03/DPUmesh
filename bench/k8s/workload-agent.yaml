@@ -96,6 +96,10 @@ spec:
         - --feed-key-dir=/etc/dpumesh/feed.keys
         - --namespace=${NS}
         - --node-name=$(NODE_NAME)
+        - --broker-bin=/usr/local/bin/dmesh_broker
+        - --host-cgroup-root=/host-cgroup
+        - --broker-state-dir=/run/dpumesh/brokers
+        - --broker-runtime-dir=/var/lib/dpumesh/broker-runtime
         # The DPU's only control peer: the delivery hop and what travels on it.
         - --dpu-feed-host=${DPUMESH_DPU_FEED_HOST}
         - --dpu-feed-port=${DPUMESH_DPU_FEED_PORT}
@@ -120,18 +124,27 @@ ${DPUMESH_AGENT_SERVICE_ARGS}
         env:
         - name: NODE_NAME
           valueFrom: { fieldRef: { fieldPath: spec.nodeName } }
+        - { name: DPUMESH_PCI_ADDR, value: "${HOST_PCI}" }
+        - { name: DPUMESH_RINGS_PER_POD, value: "${DPUMESH_RINGS_PER_POD}" }
         securityContext:
           runAsUser: 0
           runAsGroup: 0
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true
+          # The node's default CRI AppArmor profile denies opening namespace
+          # handles even with the narrowly requested capabilities. This is the
+          # trusted node agent (not a workload); its children still drop into
+          # an attested Pod cgroup before any DOCA setup.
+          appArmorProfile: { type: Unconfined }
           # DAC_READ_SEARCH: the identity staging key (key.p8, 0600,
           # operator-owned) must be readable through the read-only hostPath
           # mount, and a root uid alone does not bypass file modes once every
           # capability is dropped. NET_ADMIN: the ingress guard writes the
           # host's FORWARD chain, and hostNetwork is what points iptables at
-          # the host rather than a Pod namespace.
-          capabilities: { drop: ["ALL"], add: ["DAC_READ_SEARCH", "NET_ADMIN"] }
+          # the host rather than a Pod namespace. SYS_ADMIN enters the host
+          # cgroup namespace only in a broker child; SYS_PTRACE permits opening
+          # PID 1's namespace handle under the kernel ptrace access check.
+          capabilities: { drop: ["ALL"], add: ["DAC_READ_SEARCH", "NET_ADMIN", "SYS_ADMIN", "SYS_PTRACE", "IPC_LOCK", "SETUID", "SETGID", "KILL"] }
         readinessProbe:
           exec: { command: ["python3", "-c", "import os; assert os.path.exists('/run/dpumesh/attest.sock')"] }
           initialDelaySeconds: 1
@@ -142,6 +155,13 @@ ${DPUMESH_AGENT_SERVICE_ARGS}
         - { name: feed-keyring, mountPath: /etc/dpumesh/feed.keys, readOnly: true }
         - { name: nodes, mountPath: /etc/dpumesh/nodes, subPath: nodes, readOnly: true }
         - { name: identity-stage, mountPath: /run/dpumesh/linkerd-identity, readOnly: true }
+        - { name: infiniband, mountPath: /dev/infiniband }
+        - { name: host-cgroup, mountPath: /host-cgroup }
+        # systemd owns the steady broker's parentage.  This is what lets an
+        # agent Pod roll without its container shim retaining/killing brokers.
+        - { name: host-systemd, mountPath: /run/systemd }
+        - { name: host-dbus, mountPath: /run/dbus }
+        - { name: broker-runtime, mountPath: /var/lib/dpumesh }
         # The host's xtables lock, so the guard serializes with kube-proxy —
         # and a writable path for it, since the root filesystem is read-only.
         - { name: xtables-lock, mountPath: /run/xtables.lock }
@@ -160,3 +180,13 @@ ${DPUMESH_AGENT_SERVICE_ARGS}
       # nothing on this path reaches the DPU except through the agent.
       - name: identity-stage
         hostPath: { path: ${DPUMESH_IDENTITY_STAGE_DIR}, type: DirectoryOrCreate }
+      - name: infiniband
+        hostPath: { path: /dev/infiniband, type: Directory }
+      - name: host-cgroup
+        hostPath: { path: /sys/fs/cgroup, type: Directory }
+      - name: host-systemd
+        hostPath: { path: /run/systemd, type: Directory }
+      - name: host-dbus
+        hostPath: { path: /run/dbus, type: Directory }
+      - name: broker-runtime
+        hostPath: { path: /var/lib/dpumesh, type: DirectoryOrCreate }

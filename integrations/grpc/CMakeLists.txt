@@ -197,7 +197,7 @@ if(DPUMESH_INCLUDE_DIR AND DPUMESH_LIBRARY)
     target_link_libraries(grpc_dpumesh_qps_proto PUBLIC gRPC::grpc++)
 
     add_executable(grpc_dpumesh_qps_benchmark
-      bench/qps_benchmark.cc)
+      "${CMAKE_CURRENT_LIST_DIR}/../../bench/apps/qps_benchmark.cc")
     target_compile_features(grpc_dpumesh_qps_benchmark PRIVATE cxx_std_17)
     target_compile_options(grpc_dpumesh_qps_benchmark PRIVATE -Wall -Wextra)
     target_include_directories(grpc_dpumesh_qps_benchmark PRIVATE
@@ -208,7 +208,7 @@ if(DPUMESH_INCLUDE_DIR AND DPUMESH_LIBRARY)
     # L4-harness peers: same control protocol and result line as bench_sock and
     # bench_dpumesh, so the DPUmesh collector drives gRPC unchanged.
     foreach(app bench_grpc echo_grpc)
-      add_executable(${app} "bench/${app}.cc")
+      add_executable(${app} "${CMAKE_CURRENT_LIST_DIR}/../../bench/apps/${app}.cc")
       target_compile_features(${app} PRIVATE cxx_std_17)
       target_compile_options(${app} PRIVATE -Wall -Wextra)
       target_include_directories(${app} PRIVATE
@@ -217,6 +217,11 @@ if(DPUMESH_INCLUDE_DIR AND DPUMESH_LIBRARY)
       target_link_libraries(${app} PRIVATE
         grpc_dpumesh grpc_dpumesh_qps_proto Threads::Threads)
     endforeach()
+
+    # The README's gRPC example compiles with the same toolchain so it cannot
+    # rot; its own CMakeLists.txt is the user-facing build recipe.
+    add_subdirectory("${CMAKE_CURRENT_LIST_DIR}/../../bench/examples/grpc"
+                     "${CMAKE_CURRENT_BINARY_DIR}/examples/grpc")
   endif()
 else()
   message(STATUS

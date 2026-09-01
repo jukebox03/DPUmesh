@@ -2,6 +2,7 @@
 #define COMCH_SERVER_H
 
 #include <stdbool.h>
+#include <stdint.h>
 #include <doca_comch.h>
 #include <doca_ctx.h>
 
@@ -9,6 +10,13 @@
 
 struct objects; /* Forward declaration */
 struct pod_state;
+
+#define DMESH_REGISTRATION_TIMEOUT_NS (30ull * 1000000000ull)
+
+/* Pure expiry predicate kept public for the host-only boundary test. */
+int dmesh_registration_should_expire(uint64_t connected_ns, uint64_t now_ns,
+                                     int registered, int disconnect_pending,
+                                     uint64_t timeout_ns);
 
 #define CC_SERVER_RECV_QUEUE_SIZE 1024 /* Size of CC receive queue (server side) */
 

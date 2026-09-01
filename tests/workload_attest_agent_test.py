@@ -31,6 +31,7 @@ def pod():
 
 
 def main():
+    assert agent.BROKER_IPC_VERSION == 3
     try:
         agent.pod_uid_from_cgroup("0::/user.slice/user-1000.slice/session-1.scope\n")
     except agent.AttestationError:
@@ -232,6 +233,37 @@ def main():
         pass
     else:
         raise AssertionError("a non-Pod peer process was attested")
+
+    # Per-Pod broker ownership is serialized across simultaneous HELLOs and
+    # failed launches use a bounded exponential delay.  Exercise the registry
+    # without constructing the Kubernetes/network portions of Agent.
+    registry = agent.Agent.__new__(agent.Agent)
+    registry.spawned_lock = agent.threading.Lock()
+    registry.spawned = {}
+    registry.spawning_pods = set()
+    registry.broker_retry = {}
+    uid = pod()["metadata"]["uid"]
+    registry.broker_spawn_claim(uid, now=100.0)
+    try:
+        registry.broker_spawn_claim(uid, now=100.0)
+    except agent.AttestationError:
+        pass
+    else:
+        raise AssertionError("two simultaneous brokers claimed one Pod")
+    registry.broker_spawn_release(uid, success=False, now=100.0)
+    assert registry.broker_retry[uid] == (105.0, 10.0)
+    try:
+        registry.broker_spawn_claim(uid, now=104.999)
+    except agent.AttestationError:
+        pass
+    else:
+        raise AssertionError("broker restart ignored the quiescence delay")
+    registry.broker_spawn_claim(uid, now=105.0)
+    registry.broker_spawn_release(uid, success=False, now=105.0)
+    assert registry.broker_retry[uid] == (115.0, 20.0)
+    registry.broker_spawn_claim(uid, now=115.0)
+    registry.broker_spawn_release(uid, success=True, now=115.0)
+    assert uid not in registry.broker_retry
 
     with tempfile.TemporaryDirectory() as temporary:
         key_dir = Path(temporary)

@@ -742,7 +742,7 @@ int main(int argc, char **argv) {
     }
 
     g_s = dmesh_create_channel();                     /* pure client ($DPUMESH_SERVICE unset) */
-    if (!g_s) { fprintf(stderr, "[bench] dmesh_create_channel failed\n"); return 1; }
+    if (!g_s) { perror("[bench] dmesh_create_channel failed"); return 1; }
     g_post_max = (uint32_t)dmesh_post_max(g_s);
     fprintf(stderr, "[bench] ready: pod_id=%d dst_services=%s slot=%d\n",
             dmesh_pod_id(g_s), g_dst_services_text, dmesh_msg_max(g_s));

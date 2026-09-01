@@ -57,6 +57,10 @@ static void client_send_task_completion_err_callback(struct doca_comch_task_send
 	void *payload_copy = task_user_data.ptr;
 
 	objs = (struct objects *)(ctx_user_data.ptr);
+	doca_error_t status = doca_task_get_status(
+		doca_comch_task_send_as_task(task));
+	DOCA_LOG_ERR("Comch client send completion failed: %s",
+	             doca_error_get_name(status));
 	doca_pool_release(&objs->send_tasks_in_flight);
 	if (payload_copy != NULL)
 		free(payload_copy);
@@ -97,6 +101,7 @@ static void client_message_recv_callback(struct doca_comch_event_msg_recv *event
 	case DMESH_MSG_REV_DOORBELL:
 		/* The Comch PE notification wakes the host progress thread. Reverse
 		 * entries are consumed from the exported rings after PE progress. */
+		__atomic_fetch_add(&objs->rev_doorbell_count, 1u, __ATOMIC_RELEASE);
 		break;
 
 	case DMESH_MSG_POD_ASSIGNED:

@@ -18,6 +18,8 @@ are `doca/dpu_worker.c`, `doca/dpu_proxy.c`, `linkerd/include/dmesh_l7.h` and
 | Term | Meaning |
 |---|---|
 | channel | one process's transport: its registration, its registered memory and its rings |
+| broker | the trusted per-Pod host process owning a channel's DOCA objects; the workload runs against shared mappings it hands over |
+| drain shard | one host drain thread; landing stripes partition across shards |
 | QP | one full-duplex byte stream on a channel |
 | EQ (event queue) | what one application thread polls for the events of the QPs it owns |
 | forward ring | host→DPU descriptor queue |
@@ -89,16 +91,25 @@ A ARM workers
 L reverse rings
           │ REV_DONE (bytes delivered) / TX_ACK (send capacity returned)
           ▼
-host progress thread
+host drain threads
 
 DPU main thread: registration, teardown, and host doorbells
 ```
 
 ## Host memory and rings
 
-One channel owns K forward rings, K reverse rings, registered TX/RX mappings,
-the TX block pool, the EQ registry, the progress thread, and a tail timer
+One channel owns K forward rings, L reverse rings, registered TX/RX mappings,
+the TX block pool, the EQ registry, its drain threads, and a tail timer
 thread. The 64 MiB RX mapping is divided into L equal landing stripes.
+
+A meshed Pod runs no DOCA object. The per-Pod broker owns the device, the
+progress engine, the Comch control connection and the memfds backing every
+ring and mapping; the workload maps the same pages and runs everything else —
+forward-ring production, reverse-ring interpretation, delivery, and event
+readiness. Two kinds of descriptor cross the process boundary at attach: the
+sealed memfds and one pod-global doorbell eventfd. The broker never reads a
+completion entry. [`CONTROL.md`](CONTROL.md) §2-1.9 owns the launch and trust
+story.
 
 The timer holds no transmit state. It writes the readiness fd of an EQ whose
 earliest retained tail has come due, and parks while no tail is retained on the
@@ -174,7 +185,8 @@ queues.
 | Thread | Work |
 |---|---|
 | Host application | API calls and QP operations |
-| Host progress | reverse-ring drain and event-queue readiness |
+| Host drain × D | reverse-ring interpretation, delivery, event-queue readiness |
+| Host broker | DOCA PE progress and the doorbell relay |
 | Host tail timer | deadlines of retained partial sends |
 | ARM main | registration, revocation, teardown and the messages that wake the host |
 | ARM data worker × A | DPA completions, routing, DMA and reverse publication |
@@ -233,11 +245,28 @@ on another worker, the handoff publishes to the reverse-ring owner's MPSC queue
 and wakes that owner after publication; the final ACK therefore cannot remain in
 a parked worker when the stream goes quiet.
 
-The host drains visible entries and writes one monotonic `consumer_head`. Before
-blocking, it increments `arm_epoch` — the counter that says the host is about to
-sleep — and rechecks the rings. After a publication the producing worker reads
-that control block and, on a new epoch, asks the DPU main thread to send one
-Comch message that wakes the host.
+The host consumer is the workload's drain side. Stripes partition across D
+drain shards (`stripe % D`); shards spawn one per registered EQ, bounded by L
+and by the cores the process may run on, and a per-stripe claim lock keeps a
+stripe on exactly one thread while the partition moves. An awake EQ thread
+also assists in line from `dmesh_poll_eq`, so a loaded consumer waits on no
+drain-shard handoff. Whoever claims a stripe drains its visible entries and
+writes one monotonic `consumer_head`.
+
+While completions keep arriving, a shard re-checks the rings on an
+exponentially backed-off sleep and publishes no `arm_epoch`, so the DPU stays
+silent and the cross-process wake chain is never entered: work resets the
+sleep to its minimum, each empty check doubles it, and past the cap the shard
+increments `arm_epoch` — the counter that says the host is about to sleep —
+re-checks once, and blocks. With more live EQs than allowed cores the polled
+regime is disabled, because every polling delay then lands directly in
+closed-loop RTT and the precise doorbell wake wins.
+
+After a publication the producing worker reads the ring's control block and,
+on a new epoch, asks the DPU main thread to send one Comch `REV_DOORBELL`.
+That message lands in the broker, which forwards each batch as one tick on
+the pod-global doorbell eventfd. Every shard watches the eventfd
+edge-triggered and never reads it, so one tick edges them all.
 
 ## Closing a stream
 

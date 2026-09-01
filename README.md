@@ -114,12 +114,14 @@ tearing its mappings down remains the control connection's decision.
 
 ```text
 include/dpumesh/       public C API
-src/                   host core, native facade, resolver, preload facade
+src/core/              host transport engine, resolver, attestation client
+src/facade/            the native and preload API surfaces over that core
+src/broker/            the per-Pod broker and its pod<->broker IPC
 doca/                  BlueField ARM process and DPA kernel
 controller/            cluster controller and the admission webhook
-integrations/grpc/     gRPC C++ runtime, reactor, tests, benchmark
+integrations/grpc/     gRPC C++ runtime, reactor, tests
 linkerd/               DPU-side L7 layer: adapter ABI, consumers, port submodule
-bench/                 deployment, workloads, validators, measurement records
+bench/                 deployment, examples, workloads, validators, measurement records
 tests/                 fast host-only ABI and state-machine regression tests
 design/                current API, data-plane, control-plane and gRPC whitepapers
 ```
@@ -232,6 +234,9 @@ Build against the installed header and link `libdpumesh.so.5`:
 cc app.c -I/path/to/include -ldpumesh -o app
 ```
 
+[bench/examples](bench/examples) is this section as complete programs — a
+client and a server of a few dozen lines each.
+
 ### gRPC C++
 
 Generated stubs, services, RPC semantics, metadata, deadlines and credentials
@@ -260,6 +265,8 @@ auto attachment = dpumesh::grpc::AttachDmeshGrpcServer(*runtime, listener.get())
 Create one runtime per process and share it across every channel and the server
 attachment. Link `grpc_dpumesh`; [design/GRPC.md](design/GRPC.md) covers the
 build, the runtime options and the connection lifecycle.
+[bench/examples/grpc](bench/examples/grpc) is this bootstrap as a complete
+program pair, proto and build file included.
 
 ### Making a workload meshed
 
@@ -273,12 +280,14 @@ metadata:
     dpumesh-service: echo-dpumesh      # this Pod's Service; a client-only Pod has none
 ```
 
-An admission webhook turns that into the access the transport needs: the DOCA
-device, the transport library and the node agent's socket as mounts;
-`DPUMESH_PCI_ADDR`, `DPUMESH_RINGS_PER_POD`, `DPUMESH_ATTEST_SOCKET` and
-`DPUMESH_SERVICE` as environment, with `LD_PRELOAD` naming the shim for a
-workload that is not linked against the native API; and the two Linkerd markers
-that make the workload sidecarless. It also requires a node labelled `dpumesh.io/dpu=true`
+An admission webhook turns that into the access the transport needs: the
+transport library and the node agent's socket as mounts;
+`DPUMESH_RINGS_PER_POD`, `DPUMESH_ATTEST_SOCKET` and `DPUMESH_SERVICE` as
+environment, with `LD_PRELOAD` naming the shim for a workload that is not
+linked against the native API; and the two Linkerd markers that make the
+workload sidecarless. The Pod stays unprivileged and mounts no device: the
+DOCA objects live in the per-Pod broker
+([design/CONTROL.md §2-1.9](design/CONTROL.md)). It also requires a node labelled `dpumesh.io/dpu=true`
 and refuses the Pod when the cluster has none, because a Pod holding part of the
 patch fails later and elsewhere.
 

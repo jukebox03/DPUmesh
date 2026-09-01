@@ -282,9 +282,14 @@ static int process_fwd_ring(struct dpa_thread_arg *thread_arg, uint32_t r,
         if (desc->publish_seq != thread_arg->consumer_head[r] + 1)
             break;
 
-        /* Host enforces desc->size <= slot_size (= DPA_DMA_COPY_MAX = 8KB) in
+        /* One read each of the fields the host process publishes, so every
+         * bound below is checked against the same value the DMA then uses. */
+        uint64_t host_off = desc->addr;
+        uint32_t dma_size = desc->size;
+
+        /* Host enforces size <= slot_size (= DPA_DMA_COPY_MAX = 8KB) in
          * dpumesh_enqueue. Anything larger is a caller bug; drop. */
-        if (desc->size > DPA_DMA_COPY_MAX) {
+        if (dma_size > DPA_DMA_COPY_MAX) {
             thread_arg->consumer_head[r]++;
             if (++desc_idx == ring->buf_arr_size)
                 desc_idx = 0;
@@ -299,19 +304,23 @@ static int process_fwd_ring(struct dpa_thread_arg *thread_arg, uint32_t r,
                 producer, dpu_consumer_id) == 1)
             break;
 
-        /* dma_copy requires 128B-aligned size. A FIN carries desc->size==0
+        /* dma_copy requires 128B-aligned size. A FIN carries size==0
          * (comp.length stays 0 → receiver reads EOF); still issue one min 128B
          * transfer so the DMA engine never sees a zero-length descriptor. */
-        /* Mirror each connection's host TX offset into contiguous DPU staging.
-         * The host ring bounds occupancy, and staging tail slack covers DMA size
-         * alignment. */
-        uint32_t moff = (uint32_t)(desc->addr - ring->host_addr);
+        /* desc->addr is a byte offset into the host TX buffer, mirrored into
+         * contiguous DPU staging. The producer is the workload process, which
+         * owns no DOCA object, so the aligned span is bounded against the
+         * registered host buffer before it names either endpoint. */
+        uint32_t moff = (uint32_t)host_off;
         uint64_t staging_base = ring->dpu_addr - (uint64_t)ring->region_off;
         uint32_t prefix = dpa_dma_copy_prefix(moff);
-        uint32_t chunk = dpa_dma_aligned_copy_len(moff, desc->size);
+        uint32_t chunk = dpa_dma_aligned_copy_len(moff, dma_size);
         if (chunk == 0)
             chunk = DPA_DMA_COPY_ALIGN;
-        if (chunk > DPA_DMA_COPY_MAX) {
+        if (chunk > DPA_DMA_COPY_MAX ||
+            host_off >= (uint64_t)ring->host_buf_size ||
+            (uint64_t)(moff - prefix) + chunk >
+                (uint64_t)ring->host_buf_size) {
             thread_arg->consumer_head[r]++;
             if (++desc_idx == ring->buf_arr_size)
                 desc_idx = 0;
@@ -321,7 +330,7 @@ static int process_fwd_ring(struct dpa_thread_arg *thread_arg, uint32_t r,
 
         comp.type = DPA_MSG_FWD_DONE;
         comp.pos = moff;                         /* staging offset == host TX offset */
-        comp.length = (uint16_t)desc->size;
+        comp.length = (uint16_t)dma_size;
         /* Endpoint tuple — opaque passthrough from the host-posted desc. src_service
          * is NOT carried; the DPU derives it from src_pod. */
         comp.seq = desc->seq;
@@ -341,7 +350,7 @@ static int process_fwd_ring(struct dpa_thread_arg *thread_arg, uint32_t r,
                                     ring->dpu_mmap,
                                     staging_base + moff - prefix,
                                     ring->host_mmap,
-                                    desc->addr - prefix,
+                                    ring->host_addr + (uint64_t)(moff - prefix),
                                     chunk,
                                     (uint8_t *)&comp,
                                     sizeof(struct comch_dma_comp_msg),

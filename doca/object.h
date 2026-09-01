@@ -199,6 +199,11 @@ struct dmesh_registration_key {
 /* Per-pod state (DPU only) */
 struct pod_state {
     struct doca_comch_connection *connection;
+    /* Admission deadline for a raw Comch peer. A connected peer that has not
+     * completed trusted registration is disconnected after the fixed bound;
+     * pending prevents duplicate submissions while its callback is pending. */
+    uint64_t connected_ns;
+    int registration_disconnect_pending;
     int32_t pod_id;
     int32_t service_id;     /* this pod's service id (an LB backend of that service; the live
                              * set is derived from pods[] by service_id); SVC_NONE if none */
@@ -537,6 +542,10 @@ struct objects {
      * callback publishes `resolve_ack_ready` last. */
     struct dmesh_resolve_ack_msg resolve_ack;
     int32_t resolve_ack_ready;
+    /* Host client callback increments this for each pod-global REV_DOORBELL.
+     * The broker uses it only to avoid rescanning reverse rings on unrelated
+     * PE progress; it carries no EQ information to or from the DPU. */
+    uint64_t rev_doorbell_count;
 
     /* DPU-only verifier configuration, installed by
      * dmesh_registration_configure() before the Comch server starts. */

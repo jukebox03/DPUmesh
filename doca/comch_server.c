@@ -22,6 +22,15 @@
 
 DOCA_LOG_REGISTER(COMCH_SERVER);
 
+int
+dmesh_registration_should_expire(uint64_t connected_ns, uint64_t now_ns,
+				    int registered, int disconnect_pending,
+				    uint64_t timeout_ns)
+{
+	return connected_ns != 0 && !registered && !disconnect_pending &&
+	       now_ns >= connected_ns && now_ns - connected_ns >= timeout_ns;
+}
+
 /* The L7 layer owns the metrics surface these outcomes are exported through.
  * A build that links no L7 layer — the Host transport library — resolves this
  * weak definition instead and drops the accounting. */
@@ -741,9 +750,39 @@ int
 server_flush_pod_init_results(struct objects *objs)
 {
 	int submitted = 0;
+	struct timespec now;
+	uint64_t now_ns = 0;
+	if (clock_gettime(CLOCK_MONOTONIC, &now) == 0)
+		now_ns = (uint64_t)now.tv_sec * 1000000000ull +
+		         (uint64_t)now.tv_nsec;
 	int n = __atomic_load_n(&objs->num_pods, __ATOMIC_ACQUIRE);
 	for (int i = 0; i < n; i++) {
 		struct pod_state *pod = &objs->pods[i];
+		if (pod->connection != NULL && now_ns != 0 &&
+		    dmesh_registration_should_expire(
+			    pod->connected_ns, now_ns,
+			    __atomic_load_n(&pod->registered, __ATOMIC_ACQUIRE),
+			    pod->registration_disconnect_pending,
+			    DMESH_REGISTRATION_TIMEOUT_NS)) {
+			doca_error_t result = doca_comch_server_disconnect(
+				objs->cc_server, pod->connection);
+			if (result == DOCA_SUCCESS) {
+				pod->registration_disconnect_pending = 1;
+				l7_control_event("registration-timeout", "disconnect");
+				DOCA_LOG_WARN("disconnecting unauthenticated Comch slot %d "
+				              "after 30s", i);
+			} else if (result == DOCA_ERROR_AGAIN ||
+			           result == DOCA_ERROR_IN_USE) {
+				/* Keep pending clear: the next PE iteration retries. */
+				l7_control_event("registration-timeout", "retry");
+			} else {
+				l7_control_event("registration-timeout", "error");
+				DOCA_LOG_WARN("unauthenticated Comch disconnect failed: %s",
+				              doca_error_get_name(result));
+			}
+		}
+		if (pod->registration_disconnect_pending)
+			continue;
 		if (pod->connection != NULL && !pod->registration_challenge_sent)
 			(void)server_send_registration_challenge(objs, pod);
 		if (pod->connection == NULL ||
@@ -798,6 +837,13 @@ pods_add_connection(struct objects *objs, struct doca_comch_connection *conn)
 	 * REUSED by setup_pod_dma. */
 
 	objs->pods[idx].connection = conn;
+	struct timespec connected;
+	objs->pods[idx].connected_ns =
+		clock_gettime(CLOCK_MONOTONIC, &connected) == 0
+			? (uint64_t)connected.tv_sec * 1000000000ull +
+			  (uint64_t)connected.tv_nsec
+			: 1;
+	objs->pods[idx].registration_disconnect_pending = 0;
 	objs->pods[idx].pod_id = -1;  /* not yet registered */
 	objs->pods[idx].service_id = DMESH_SVC_NONE;
 	objs->pods[idx].workload[0] = '\0';   /* the new tenant states its own */
@@ -1040,6 +1086,8 @@ pods_remove_connection(struct objects *objs, struct doca_comch_connection *conn)
 				                 __ATOMIC_RELEASE);
 		}
 		pod->connection = NULL;
+		pod->connected_ns = 0;
+		pod->registration_disconnect_pending = 0;
 		if (!__atomic_load_n(&pod->cleanup_pending, __ATOMIC_ACQUIRE))
 			pod->pod_id = -1;
 		return 0;
@@ -1303,6 +1351,10 @@ pods_register(struct objects *objs, struct doca_comch_connection *conn,
 		 * the node published before it existed. */
 		objs->pods[i].membership_generation = objs->membership_generation;
 		objs->pods[i].membership_absences = 0;
+		/* This timestamp belongs only to the unauthenticated handshake.  Clear
+		 * it before publishing registration so a later UNREGISTER/cleanup (which
+		 * clears registered) cannot be mistaken for a 30-second auth timeout. */
+		objs->pods[i].connected_ns = 0;
 		__atomic_store_n(&objs->pods[i].registered, 1, __ATOMIC_RELEASE);
 
 		/* Publish the O(1) pod_id->slot map after registered=1, so a reader

@@ -73,12 +73,17 @@ struct dpa_ring_info {
 	doca_dpa_dev_buf_arr_t buf_arr;
 	uint32_t buf_arr_size;
 	doca_dpa_dev_mmap_t host_mmap;   /* Host TX buffer mmap (forward DMA source) */
-	uint64_t host_addr;              /* Host TX buffer base VA (moff = desc->addr - host_addr) */
+	uint64_t host_addr;              /* Host TX buffer base VA (source = host_addr + desc->addr) */
 	doca_dpa_dev_mmap_t dpu_mmap;    /* DPU staging buffer mmap (forward DMA dest) */
 	uint64_t dpu_addr;               /* this ring's DPU staging region base VA */
 	int32_t pod_id;
 		/* Wire-ABI field fixed at zero. The staging base equals dpu_addr. */
 	uint32_t region_off;
+	/* Host TX buffer length. The descriptor producer is an unprivileged
+	 * workload process, so the DPA bounds every forward DMA span against
+	 * this before it names a host source or a DPU staging destination.
+	 * Occupies the struct's former tail padding; the size is unchanged. */
+	uint32_t host_buf_size;
 } __attribute__((__packed__, aligned(8)));
 
 struct dpa_thread_arg {
@@ -223,7 +228,7 @@ struct dma_ring_ctrl {
 /* Exactly 64 bytes = one cache line per descriptor. */
 struct dma_desc {
 	doca_dpa_dev_mmap_t mmap;      /* 4B */
-	uint64_t addr;                 /* 8B */
+	uint64_t addr;                 /* 8B byte offset into the host TX buffer */
 	uint32_t size;                 /* 4B (fixed width for Host/DPA ABI stability) */
 		/* Endpoint tuple copied verbatim into the completion. */
 		uint16_t seq;                  /* 2B per-conn sequence */

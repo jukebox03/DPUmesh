@@ -28,6 +28,24 @@ install_generation(struct objects *objs)
 int
 main(void)
 {
+	/* Exact boundary: an unauthenticated connection remains live just before
+	 * 30s, expires at 30s, and registered/pending connections never resubmit. */
+	const uint64_t connected = 1000000000ull;
+	assert(!dmesh_registration_should_expire(
+		connected, connected + DMESH_REGISTRATION_TIMEOUT_NS - 1,
+		0, 0, DMESH_REGISTRATION_TIMEOUT_NS));
+	assert(dmesh_registration_should_expire(
+		connected, connected + DMESH_REGISTRATION_TIMEOUT_NS,
+		0, 0, DMESH_REGISTRATION_TIMEOUT_NS));
+	assert(!dmesh_registration_should_expire(
+		connected, connected + DMESH_REGISTRATION_TIMEOUT_NS,
+		1, 0, DMESH_REGISTRATION_TIMEOUT_NS));
+	assert(!dmesh_registration_should_expire(
+		connected, connected + DMESH_REGISTRATION_TIMEOUT_NS,
+		0, 1, DMESH_REGISTRATION_TIMEOUT_NS));
+	assert(!dmesh_registration_should_expire(
+		0, UINT64_MAX, 0, 0, DMESH_REGISTRATION_TIMEOUT_NS));
+
 	char service_key[DMESH_K8S_NAMESPACE_MAX + DMESH_SVC_NAME_MAX];
 	assert(dmesh_resolve_service_key("test-bench", "echo-dpumesh",
 	                                 service_key, sizeof(service_key)) == 0);
@@ -73,6 +91,7 @@ main(void)
     int assigned = pods_register(objs, conn, -1, "echo-dpumesh");
     assert(assigned == 0);
     assert(objs->pods[0].registered == 1);
+    assert(objs->pods[0].connected_ns == 0);
     assert(objs->pods[0].service_id == interned);
     assert(objs->pod_id_to_slot[assigned] == 0);
     assert(objs->pods[0].landing_stripes == 2);

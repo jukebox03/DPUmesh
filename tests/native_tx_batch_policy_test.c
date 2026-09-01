@@ -5,7 +5,7 @@
 
 /* This focused white-box test includes the production cursor implementation so it
  * can seed the otherwise-private per-QP TX state without constructing DOCA hardware. */
-#include "../src/dmesh_core.c"
+#include "../src/core/dmesh_core.c"
 
 static void
 seed(struct dpumesh_ctx *ctx, struct dmesh_port_slot *ports, uint8_t *dma)
@@ -589,7 +589,7 @@ test_range_ack_reclaims_the_whole_run(void)
     entries[0].payload.ack.seq = 1;
     entries[0].payload.ack.seq_count = 4;
     __atomic_store_n(&entries[0].publish_seq, 1u, __ATOMIC_RELEASE);
-    assert(drain_rev_rings(f->ctx, 64) == 1);
+    assert(drain_rev_rings_span(f->ctx, 0, 1, 64) == 1);
     assert(atomic_load_explicit(&psl->tx_f, memory_order_acquire) == 4u * 8192u);
     assert(atomic_load_explicit(&psl->su_tail, memory_order_acquire) ==
            atomic_load_explicit(&psl->su_head, memory_order_acquire));
@@ -602,7 +602,7 @@ test_range_ack_reclaims_the_whole_run(void)
     entries[1].payload.ack.seq = 5;
     entries[1].payload.ack.seq_count = 0;
     __atomic_store_n(&entries[1].publish_seq, 2u, __ATOMIC_RELEASE);
-    assert(drain_rev_rings(f->ctx, 64) == 1);
+    assert(drain_rev_rings_span(f->ctx, 0, 1, 64) == 1);
     assert(atomic_load_explicit(&psl->tx_f, memory_order_acquire) == 5u * 8192u);
     assert((uint16_t)(atomic_load_explicit(&psl->su_head, memory_order_acquire) -
                       atomic_load_explicit(&psl->su_tail, memory_order_acquire)) == 1);
@@ -730,11 +730,10 @@ test_large_commits_preserve_stream_bytes(void)
                     ticket + 1)                                                \
                 break;                                                         \
             assert(desc->size > 0 && desc->size <= slot_size);                 \
-            assert(dpa_dma_aligned_copy_len(                                  \
-                       desc->addr - (uint64_t)(uintptr_t)                    \
-                           ctx->dma_buffer, desc->size) <=                    \
+            assert(dpa_dma_aligned_copy_len(desc->addr, desc->size) <=        \
                    DPA_DMA_COPY_MAX);                                         \
-            const uint8_t *src = (const uint8_t *)(uintptr_t)desc->addr;        \
+            const uint8_t *src = (const uint8_t *)ctx->dma_buffer +           \
+                                 (size_t)desc->addr;                          \
             for (uint32_t j = 0; j < desc->size; j++)                          \
                 assert(src[j] == stream_pattern(copied_offset + j));            \
             copied_offset += desc->size;                                       \
@@ -790,6 +789,41 @@ test_large_commits_preserve_stream_bytes(void)
     free(ctrl);
     free(descs);
     free(ports);
+    free(ctx);
+}
+
+static void
+test_broker_doorbell_forwarding(void)
+{
+    struct dpumesh_ctx *ctx = calloc(1, sizeof(*ctx));
+    assert(ctx != NULL);
+    ctx->broker_doorbell_efd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    assert(ctx->broker_doorbell_efd >= 0);
+
+    /* No new REV_DOORBELL since the last forward: no tick. */
+    ctx->broker_seen_doorbells = 0;
+    broker_forward_doorbells(ctx);
+    uint64_t count = 0;
+    errno = 0;
+    assert(read(ctx->broker_doorbell_efd, &count, sizeof(count)) < 0);
+    assert(errno == EAGAIN);
+
+    /* A batch of doorbells collapses into one tick, and forwarding is
+     * idempotent until the count moves again. */
+    __atomic_store_n(&ctx->doca_objs.rev_doorbell_count, 3, __ATOMIC_RELEASE);
+    broker_forward_doorbells(ctx);
+    broker_forward_doorbells(ctx);
+    assert(read(ctx->broker_doorbell_efd, &count, sizeof(count)) ==
+           (ssize_t)sizeof(count));
+    assert(count == 1);
+
+    __atomic_store_n(&ctx->doca_objs.rev_doorbell_count, 4, __ATOMIC_RELEASE);
+    broker_forward_doorbells(ctx);
+    assert(read(ctx->broker_doorbell_efd, &count, sizeof(count)) ==
+           (ssize_t)sizeof(count));
+    assert(count == 1);
+
+    close(ctx->broker_doorbell_efd);
     free(ctx);
 }
 
@@ -978,6 +1012,7 @@ main(void)
     test_sustained_commits_preserve_stream_bytes();
     test_large_commits_preserve_stream_bytes();
     test_range_ack_reclaims_the_whole_run();
+    test_broker_doorbell_forwarding();
     puts("native_tx_batch_policy_test: PASS");
     return 0;
 }

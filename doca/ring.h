@@ -13,6 +13,8 @@ struct objects;
 
 struct dma_ring {
     struct doca_mmap *mmap;
+    int memfd;
+    size_t map_bytes;
     uint32_t size;
     struct dma_desc *descs;
     struct dma_ring_ctrl *ctrl;
@@ -29,6 +31,8 @@ struct dma_ring {
 
 struct rev_ring {
     struct doca_mmap *mmap;
+    int memfd;
+    size_t map_bytes;
     uint32_t size;
     struct dmesh_rev_ring_entry *entries;
     struct dmesh_rev_ring_ctrl *ctrl;
@@ -70,4 +74,11 @@ int setup_dma_ring(struct objects *objs, size_t size, struct dma_ring **out_ring
 
 /* Create and export one DPU→host reverse completion ring. */
 int setup_rev_ring(struct objects *objs, struct rev_ring **out_ring);
+
+/* Workload-side views over broker-created memfds. These functions never open
+ * a DOCA device and never create/export a doca_mmap. */
+int attach_dma_ring(int fd, size_t size, struct dma_ring **out_ring);
+int attach_rev_ring(int fd, struct rev_ring **out_ring);
+void detach_dma_ring(struct dma_ring *ring);
+void detach_rev_ring(struct rev_ring *ring);
 #endif /* RING_H */

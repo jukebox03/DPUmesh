@@ -70,6 +70,12 @@ cgroup_usage_usec() {
     [ "${pid:-0}" -gt 0 ] 2>/dev/null || { echo 0; return; }
     rel=$(awk -F: '$1=="0"{print $3; exit}' "/proc/$pid/cgroup" 2>/dev/null) || true
     [ -n "$rel" ] || { echo 0; return; }
+    # Charge the recursive Pod parent, not only the application container.
+    # broker mode places dmesh_broker in a sibling child cgroup so this one
+    # counter includes app + broker exactly once and restores Pod accounting.
+    case "${rel##*/}" in
+        cri-containerd-*.scope|crio-*.scope|docker-*.scope) rel=${rel%/*} ;;
+    esac
     awk '$1=="usage_usec"{print $2; f=1} END{if(!f) print 0}' \
         "/sys/fs/cgroup$rel/cpu.stat" 2>/dev/null || echo 0
 }
