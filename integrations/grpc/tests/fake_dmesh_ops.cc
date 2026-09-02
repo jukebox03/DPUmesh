@@ -575,6 +575,12 @@ size_t FakeDmeshState::channel_destroy_count() const {
   return impl_->channel_destroys;
 }
 
+bool FakeDmeshState::WaitForChannelDestroyCount(
+    size_t count, std::chrono::milliseconds timeout) {
+  return WaitUntil(&impl_->mu, timeout,
+                   [this, count] { return impl_->channel_destroys >= count; });
+}
+
 size_t FakeDmeshState::eq_destroy_count() const {
   std::lock_guard<std::mutex> lock(impl_->mu);
   return impl_->eq_destroys;

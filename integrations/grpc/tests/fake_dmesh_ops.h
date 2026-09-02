@@ -44,6 +44,8 @@ class FakeDmeshState final {
                              std::chrono::milliseconds timeout);
   bool WaitForReleaseCount(size_t count, std::chrono::milliseconds timeout);
   bool WaitForDestroyCount(size_t count, std::chrono::milliseconds timeout);
+  bool WaitForChannelDestroyCount(size_t count,
+                                  std::chrono::milliseconds timeout);
 
   void InjectReceive(dmesh_qp_t* qp, const std::string& bytes);
   void InjectReceiveBatch(dmesh_qp_t* qp,

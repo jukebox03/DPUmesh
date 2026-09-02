@@ -346,15 +346,15 @@ class DmeshReactor::Impl final
     return PostResult::Accepted();
   }
 
-  /* A gRPC write boundary is explicit transport progress. libdpumesh owns the
-   * physical batch and publishes its retained tail here. */
+  /* PostSend transferred byte ownership to libdpumesh.  Do not turn every
+   * EventEngine Write boundary (headers, DATA, trailers) into a physical flush:
+   * the native transport already publishes an idle tail immediately and gives
+   * a busy tail a bounded 500 us coalescing deadline.  Calling dmesh_flush here
+   * defeated that policy and forced small descriptors per HTTP/2 write. */
   absl::Status Flush(const std::shared_ptr<Connection>& connection) {
     std::lock_guard<std::mutex> lock(connection->tx_mu);
     if (connection->closing || connection->qp == nullptr)
       return absl::UnavailableError("DPUmesh connection is closed");
-    errno = 0;
-    if (ops_->Flush(connection->qp) != 0)
-      return ErrnoStatus("dmesh_flush", errno);
     return absl::OkStatus();
   }
 

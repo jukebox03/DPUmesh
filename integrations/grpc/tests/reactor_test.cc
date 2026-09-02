@@ -248,7 +248,7 @@ void TestTxEagainRetriesFromEvent() {
   CHECK_TRUE(fixture.state->alloc_calls(fixture.qp) >= size_t{2});
 }
 
-void TestWriteBoundaryFlushesLibraryBatch() {
+void TestWriteBoundaryLeavesPhysicalBatchingToLibrary() {
   Fixture fixture;
 
   SliceBuffer data;
@@ -260,8 +260,7 @@ void TestWriteBoundaryFlushesLibraryBatch() {
       EventEngine::Endpoint::WriteArgs()));
 
   CHECK_TRUE(fixture.state->WaitForPostCount(fixture.qp, 1, 2s));
-  CHECK_TRUE(fixture.state->WaitForFlushCount(fixture.qp, 1, 2s));
-  CHECK_EQ(fixture.state->flush_calls(fixture.qp), size_t{1});
+  CHECK_EQ(fixture.state->flush_calls(fixture.qp), size_t{0});
   CHECK_TRUE(!status.HasValue());  // synchronous completion withholds callback
   CHECK_EQ(data.Length(), size_t{0});
 }
@@ -766,10 +765,13 @@ void TestGrpcServerBridgeInjectsAcceptedEndpoint() {
   runtime.reset();
 }
 
+// Public gRPC Channel destruction may retire its Endpoint after the last public
+// handle is gone. These lifecycle tests therefore exercise the runtime's owned
+// default executor; an UnownedExecutor backed by a test stack frame would not
+// satisfy its contract across gRPC's deferred teardown.
 void TestGrpcClientBridgeBuildsChannelFromNativeConnect() {
-  ManualExecutor callbacks;
   auto state = std::make_shared<FakeDmeshState>();
-  auto created = DmeshRuntime::Create(MakeFakeDmeshApiOps(state), UnownedExecutor(&callbacks));
+  auto created = DmeshRuntime::Create(MakeFakeDmeshApiOps(state));
   CHECK_TRUE(created.ok());
   auto runtime = std::move(*created);
   auto channel_result = CreateDmeshChannel(
@@ -783,9 +785,7 @@ void TestGrpcClientBridgeBuildsChannelFromNativeConnect() {
   (void)channel->GetState(true);
   CHECK_TRUE(state->WaitForClientQpCount(1, 2s));
   dmesh_qp_t* qp = state->ClientQps().front();
-  CHECK_TRUE(PumpUntil(&callbacks, [state, qp] {
-    return state->WaitForPostCount(qp, 1, 0ms);
-  }));
+  CHECK_TRUE(state->WaitForPostCount(qp, 1, 2s));
 
   // Copies share the DPUmesh channel owner. The native QP remains live until
   // the final public reference is released, then closes independently of
@@ -796,7 +796,6 @@ void TestGrpcClientBridgeBuildsChannelFromNativeConnect() {
   channel_copy.reset();
   CHECK_TRUE(state->WaitForDestroyCount(1, 2s));
   CHECK_EQ(state->abort_count(), size_t{1});
-  callbacks.RunAll();
   runtime.reset();
 }
 
@@ -816,9 +815,8 @@ void TestGrpcAuthorityIsDefaultedButNeverOverwritten() {
 }
 
 void TestGrpcClientReconnectCreatesFreshTargetedQp() {
-  ManualExecutor callbacks;
   auto state = std::make_shared<FakeDmeshState>();
-  auto created = DmeshRuntime::Create(MakeFakeDmeshApiOps(state), UnownedExecutor(&callbacks));
+  auto created = DmeshRuntime::Create(MakeFakeDmeshApiOps(state));
   CHECK_TRUE(created.ok());
   auto runtime = std::move(*created);
 
@@ -838,7 +836,6 @@ void TestGrpcClientReconnectCreatesFreshTargetedQp() {
   const auto first_ready_deadline = std::chrono::steady_clock::now() + 2s;
   while (std::chrono::steady_clock::now() < first_ready_deadline &&
          !state->WaitForPostCount(first, 1, 10ms)) {
-    callbacks.RunAll();  // Deliver pending endpoint work.
     std::this_thread::sleep_for(1ms);
   }
   CHECK_TRUE(state->WaitForPostCount(first, 1, 100ms));
@@ -847,15 +844,11 @@ void TestGrpcClientReconnectCreatesFreshTargetedQp() {
   const auto deadline = std::chrono::steady_clock::now() + 3s;
   while (std::chrono::steady_clock::now() < deadline &&
          !state->WaitForClientQpCount(2, 10ms)) {
-    callbacks.RunAll();
     std::this_thread::sleep_for(1ms);
   }
-  callbacks.RunAll();
   CHECK_TRUE(state->WaitForClientQpCount(2, 100ms));
   dmesh_qp_t* second = state->ClientQps().back();
-  CHECK_TRUE(PumpUntil(&callbacks, [state, second] {
-    return state->WaitForPostCount(second, 1, 0ms);
-  }));
+  CHECK_TRUE(state->WaitForPostCount(second, 1, 2s));
   const auto targets = state->ClientTargets();
   CHECK_EQ(targets.size(), size_t{2});
   CHECK_EQ(targets[0], std::string("greeter"));
@@ -866,15 +859,12 @@ void TestGrpcClientReconnectCreatesFreshTargetedQp() {
   // The first Endpoint was abandoned after remote EOF and the second by the
   // public Channel: both client-side terminal paths are prompt resets.
   CHECK_EQ(state->abort_count(), size_t{2});
-  callbacks.RunAll();
   runtime.reset();
 }
 
 void TestGrpcChannelChurnKeepsOneRuntime() {
-  ManualExecutor callbacks;
   auto state = std::make_shared<FakeDmeshState>();
-  auto created = DmeshRuntime::Create(MakeFakeDmeshApiOps(state),
-                                      UnownedExecutor(&callbacks));
+  auto created = DmeshRuntime::Create(MakeFakeDmeshApiOps(state));
   CHECK_TRUE(created.ok());
   auto runtime = std::move(*created);
 
@@ -888,14 +878,11 @@ void TestGrpcChannelChurnKeepsOneRuntime() {
     (void)channel->GetState(true);
     CHECK_TRUE(state->WaitForClientQpCount(cycle + 1, 2s));
     dmesh_qp_t* qp = state->ClientQps().back();
-    CHECK_TRUE(PumpUntil(&callbacks, [state, qp] {
-      return state->WaitForPostCount(qp, 1, 0ms);
-    }));
+    CHECK_TRUE(state->WaitForPostCount(qp, 1, 2s));
 
     channel.reset();
     CHECK_TRUE(state->WaitForDestroyCount(cycle + 1, 2s));
     CHECK_EQ(state->abort_count(), cycle + 1);
-    callbacks.RunAll();
     CHECK_EQ(runtime->stats().receive_credit_hold_dropped, uint64_t{0});
     CHECK_EQ(runtime->stats().eq_drain_budget_exhausted, uint64_t{0});
   }
@@ -906,18 +893,14 @@ void TestGrpcChannelChurnKeepsOneRuntime() {
   CHECK_EQ(targets.size(), kCycles);
   for (const auto& target : targets) CHECK_EQ(target, std::string("greeter"));
   runtime.reset();
-  CHECK_TRUE(PumpUntil(
-      &callbacks,
-      [state] { return state->channel_destroy_count() >= 1; }, 45s));
+  CHECK_TRUE(state->WaitForChannelDestroyCount(1, 45s));
   CHECK_EQ(state->eq_destroy_count(), size_t{1});
   CHECK_EQ(state->channel_destroy_count(), size_t{1});
 }
 
 void TestConcurrentGrpcChannelsSameServiceCloseIndependently() {
-  ManualExecutor callbacks;
   auto state = std::make_shared<FakeDmeshState>();
-  auto created = DmeshRuntime::Create(MakeFakeDmeshApiOps(state),
-                                      UnownedExecutor(&callbacks));
+  auto created = DmeshRuntime::Create(MakeFakeDmeshApiOps(state));
   CHECK_TRUE(created.ok());
   auto runtime = std::move(*created);
 
@@ -936,15 +919,12 @@ void TestConcurrentGrpcChannelsSameServiceCloseIndependently() {
   const auto qps = state->ClientQps();
   CHECK_EQ(qps.size(), kChannels);
   for (dmesh_qp_t* qp : qps) {
-    CHECK_TRUE(PumpUntil(&callbacks, [state, qp] {
-      return state->WaitForPostCount(qp, 1, 0ms);
-    }));
+    CHECK_TRUE(state->WaitForPostCount(qp, 1, 2s));
   }
 
   channels[1].reset();
   CHECK_TRUE(state->WaitForDestroyCount(1, 2s));
   CHECK_EQ(state->abort_count(), size_t{1});
-  callbacks.RunAll();
   for (size_t i = 0; i < channels.size(); ++i) {
     if (i != 1) CHECK_TRUE(channels[i] != nullptr);
   }
@@ -952,7 +932,6 @@ void TestConcurrentGrpcChannelsSameServiceCloseIndependently() {
   channels.clear();
   CHECK_TRUE(state->WaitForDestroyCount(kChannels, 2s));
   CHECK_EQ(state->abort_count(), kChannels);
-  callbacks.RunAll();
   CHECK_EQ(state->destroy_count(), kChannels);
   CHECK_EQ(runtime->stats().receive_credit_hold_dropped, uint64_t{0});
   CHECK_EQ(runtime->stats().eq_drain_budget_exhausted, uint64_t{0});
@@ -1074,8 +1053,8 @@ int main() {
        TestTxEagainRetriesFromEvent},
       {"RX copies before releasing credit", TestRxCopiesBeforeReleasingCredit},
       {"write completes synchronously", TestWriteCompletesSynchronously},
-      {"write boundary flushes library batch",
-       TestWriteBoundaryFlushesLibraryBatch},
+      {"write boundary leaves physical batching to library",
+       TestWriteBoundaryLeavesPhysicalBatchingToLibrary},
       {"async TX error fails and closes endpoint",
        TestAsyncTxErrorFailsAndClosesEndpoint},
       {"receive above high water holds credit until read",
