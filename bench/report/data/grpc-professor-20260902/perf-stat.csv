@@ -1,0 +1,3 @@
+state,frame_bytes,offered_rps,achieved_rps,p50_us,p99_us,duration_s,task_clock_ms,cores,cycles,instructions,ipc,cycles_per_rpc,instructions_per_rpc,dpu_cpu_us_per_rpc
+loaded,64,50000,50000,1507,2339,8.0026,60744.23,7.591,128640500985,72486886596,0.56,321601,181217,151.86
+idle,0,0,0,0,0,8.0019,344.39,0.043,687462266,894574692,1.30,0,0,0

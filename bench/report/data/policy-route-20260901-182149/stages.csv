@@ -1,0 +1,21 @@
+stage,fixture,arm,expected,observed,verdict,rcnt,fail,admitted,denied,route_hits,target_mismatch,note
+S0,no route,grpc-dpumesh,serve,serve,PASS,9159,0,1,0,0,0,baseline for the surfaces scope
+S1,timeout 10s,grpc-dpumesh,serve,serve,PASS,8916,0,1,0,9017,0,a generous timeout changes nothing
+S2,timeout 1ms,grpc-dpumesh,refuse,refuse,PASS,9032,15,1,0,9148,0,shorter than the proxy's own request
+S2v,the route timed requests out,grpc-dpumesh,fired,fired,PASS,,,,,,,REQUEST_TIMEOUT+=15
+S3a,1-in-50 failures; no retry policy,grpc-dpumesh,refuse,refuse,PASS,9259,190,1,0,0,0,the failures reach the client
+S3b,1-in-50 failures; retry limit 3,grpc-dpumesh,serve,serve,PASS,5148,0,1,0,0,0,the retry policy absorbs them
+S3v,the route retried the failures,grpc-dpumesh,fired,fired,PASS,,,,,,,retry_requests+=107
+S4,method POST,grpc-dpumesh,serve,serve,PASS,9433,0,1,0,9534,0,gRPC is POST
+S5,method GET,grpc-dpumesh,refuse,refuse,PASS,0,25640,1,0,0,0,no rule matches
+S6,header content-type: application/grpc,grpc-dpumesh,serve,serve,PASS,9577,0,1,0,9678,0,every gRPC request carries it
+S7,header content-type: application/json,grpc-dpumesh,refuse,refuse,PASS,0,31154,1,0,0,0,no rule matches
+S8,GRPCRoute on the called method,grpc-dpumesh,serve,serve,PASS,9569,0,1,0,0,0,grpc.testing.BenchmarkService/UnaryCall
+S9,GRPCRoute on another method,grpc-dpumesh,refuse,refuse,PASS,0,30253,1,0,0,0,no rule matches
+S10,Server on the protocol-aware Service; no authorization,grpc-dpumesh,refuse,refuse,PASS,0,514,0,514,0,0,deny by default
+S11,AuthorizationPolicy targeting the GRPCRoute,grpc-dpumesh,serve,serve,PASS,9545,0,1,0,0,0,the route authorizes the caller
+S12,the same policy naming another identity,grpc-dpumesh,refuse,refuse,PASS,0,514,0,514,0,0,negative control for route authorization
+S13,a failing endpoint beside a healthy one,grpc-dpumesh,serve,serve,PASS,9126,4,2,0,0,0,the breaker ejects it and the client keeps serving
+S13v,the breaker ejected the failing endpoint,grpc-dpumesh,ejected,ejected,PASS,,,,,,,healthy=9227 broken=4
+S14,the failing endpoint withdrawn,grpc-dpumesh,serve,serve,PASS,9258,0,1,0,0,0,the Service is healthy again
+S15,HTTP/1.1 request-response,http1,serve,error,FAIL,,,,,,,ERR no_pod(http1-bench)

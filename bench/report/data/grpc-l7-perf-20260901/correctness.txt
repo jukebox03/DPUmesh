@@ -1,0 +1,9 @@
+2026-09-01 optimized-build gates
+
+PASS make test-hostfree
+PASS proxy_lane_queue_test
+PASS release ctest: 4/4 (endpoint, real chttp2 channel, reactor/runtime, native linkage)
+PASS cargo test --manifest-path linkerd/rust/Cargo.toml: 38/38
+PASS bench/bench.sh grpcshutdown: opened=14 closed=14, four-channel exchange, fail=0, drops=0
+PASS post-profile accounting: every worker opened=closed, active=0, pending=0, tasks=0, orphaned=0
+PASS client and server Pod restart count: 0

@@ -1,0 +1,20 @@
+2026-09-02 DPU ARM scale deployment retry receipt
+
+Attempt 1, requested/resolved geometry N/K/A=30/6/6:
+- DPU topology validator and six embedded Linkerd runtimes became ready.
+- The first echo Pod did not reach data-ready.
+- Host log: Broker READY failed: receive broker READY: Connection reset by peer.
+- DPU cleanup diagnostic: gate=dpa-ring-del, del_expected=0x3f,
+  del_acked=0x0, recv_posted=1024 on EUs 0..5.
+- No performance point was attempted or retained.
+
+Attempt 2, a complete controller/agent/webhook/DPU/Pod redeploy with the same
+N/K/A=30/6/6:
+- Both gRPC Pods became data-ready with restart baseline 0/0.
+- 40k, 50k, 60k and 70k offered RPS each completed three clean repetitions.
+- 80k was the first overload observation and stopped the monotonic rate axis.
+
+Classification: the first attempt is a deployment-lifecycle failure, not a
+capacity sample and not a deterministic rejection of N/K/A=30/6/6. It is kept
+because a supported deployment still needs a quiescence/retry gate before
+performance collection.

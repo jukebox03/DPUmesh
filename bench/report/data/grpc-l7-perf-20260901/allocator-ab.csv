@@ -1,0 +1,10 @@
+allocator_scope,frame_bytes,total_concurrency,rep,achieved_rps,p50_us,p99_us,client_cores,server_cores,dpu_arm_cores
+glibc_rust_and_c,64,1024,1,70670,12317,23063,1.6402,3.4090,7.2773
+glibc_rust_and_c,64,1024,2,69286,12530,23447,1.6043,3.3745,7.3162
+glibc_rust_and_c,64,1024,3,71140,12216,22641,1.6477,3.4797,7.2015
+ld_preload_jemalloc_rust_and_c,64,1024,1,102520,10243,13953,2.3916,4.6444,7.3258
+ld_preload_jemalloc_rust_and_c,64,1024,2,101906,10342,13625,2.3693,4.6679,7.3485
+ld_preload_jemalloc_rust_and_c,64,1024,3,102027,10342,13325,2.3690,4.6670,7.3518
+rust_global_jemalloc_c_glibc,64,1024,1,97506,10783,14080,2.2722,4.4264,7.4036
+rust_global_jemalloc_c_glibc,64,1024,2,96450,10902,14237,2.2407,4.4633,7.3843
+rust_global_jemalloc_c_glibc,64,1024,3,96570,10894,14156,2.2393,4.4893,7.2847

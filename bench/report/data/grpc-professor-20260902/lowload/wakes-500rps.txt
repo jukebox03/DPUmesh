@@ -1,0 +1,6 @@
+# perf stat -t <tid> for 10 s during 64 B single-channel 500 RPS (baseline build)
+# busy worker (dmesh-w3, the thread carrying the channel):
+#   context-switches 10,821   task-clock 3,713 ms (0.371 CPU)   raw_syscalls:sys_enter 262,868
+# idle worker (no session):
+#   context-switches  4,912   task-clock    79 ms (0.008 CPU)   raw_syscalls:sys_enter  29,058
+# per RPC (5,000 RPCs in the window, idle-worker baseline subtracted): 1.2 wakes, 47 syscalls, 727 us

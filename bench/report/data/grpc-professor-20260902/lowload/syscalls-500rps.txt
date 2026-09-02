@@ -1,0 +1,8 @@
+# perf trace -s on the busy worker thread, 10 s, 64 B single channel at 500 RPS (baseline build); columns: syscall calls errors total_ms min max avg pct
+busy_tid=386180
+   epoll_pwait       144805      0  6164.877     0.000     0.043     2.137      1.05%
+   read               62281  42213   185.253     0.001     0.003     1.059      0.65%
+   write              35261      0   160.502     0.001     0.005     0.025      0.19%
+   madvise                6      0     0.054     0.004     0.009     0.029     45.00%
+   writev                 2      0     0.147     0.073     0.074     0.074      0.65%
+   recvfrom               2      0     0.026     0.013     0.013     0.013      1.68%

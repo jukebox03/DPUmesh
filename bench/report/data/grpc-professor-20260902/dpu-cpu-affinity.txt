@@ -1,0 +1,19 @@
+DPU thread affinity receipt — 2026-09-02, fresh N/K/A/L=32/8/8/8 deployment
+
+comm          Cpus_allowed_list
+dpumesh_dpu   13              # main thread
+SDK helper 1  0-15
+SDK helper 2  0-15
+dmesh-w0      4
+dmesh-w1      6
+dmesh-w2      2
+dmesh-w3      0
+dmesh-w4      14
+dmesh-w5      3
+dmesh-w6      5
+dmesh-w7      15
+admin w0..w7  same CPU as the corresponding data worker
+
+The eight-worker limit constrains dmesh-w0..7; it is not a process-wide cpuset.
+Therefore process CPU = data-worker CPU + main/admin/SDK-helper CPU can exceed
+8.0 while the data-worker sum remains below 8.0.

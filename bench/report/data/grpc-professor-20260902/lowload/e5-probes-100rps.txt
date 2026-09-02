@@ -1,0 +1,9 @@
+# uprobes on the running dpumesh_dpu (e5-1 build), busy worker thread, 10 s at 64 B single-channel 100 RPS
+# addresses taken from `nm` of the running binary; idle-worker maintenance baseline: drain 9,680 / clear 4,840 per 10 s
+drain (dmesh_l7_driver_drain)                                  30,558   -> 21 per RPC net
+clear (dmesh_l7_driver_clear_notifications)                     8,307   ->  3.5 per RPC net
+hyper::server::conn::http2::Connection poll (3 monomorphs)      2,007   ->  2.0 per RPC
+h2::client::Connection poll (5 monomorphs)                      4,009   ->  4.0 per RPC
+context-switches                                                6,066   ->  1.2 per RPC net
+# syscalls (perf trace -s, 8 s, same load, e5-1): epoll_pwait 34,222  write 8,782  read 6,443 (3,220 EAGAIN)
+# the wake-eventfd EAGAIN read per pass is gone; remaining EAGAIN reads are the DOCA notification clears of idle ticks

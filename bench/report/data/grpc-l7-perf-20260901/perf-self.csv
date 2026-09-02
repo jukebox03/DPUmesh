@@ -1,0 +1,22 @@
+self_pct,area,symbol,interpretation
+3.63,copy,__memcpy_generic,RX ReadBuf and TX or H2 buffer copies are mixed in this symbol
+2.96,atomic,__aarch64_ldadd8_relax,one of several Arc counter and runtime atomic primitives
+2.53,syscall,el0_svc_common.constprop.0,aggregate syscall entry
+2.32,atomic,__aarch64_ldadd8_rel,one of several Arc counter and runtime atomic primitives
+1.73,hpack,h2::hpack::encoder::Encoder::encode,backend-side HTTP2 header encoding
+1.20,dmesh,px_worker_drain,DPU worker publication and completion drain
+1.10,atomic,__aarch64_cas4_acq,one of several compare-and-swap primitives
+1.07,wakeup,eventfd_write,event notification
+0.92,h2,h2::proto::connection::DynConnection::recv_frame,HTTP2 frame receive state
+0.90,atomic,__aarch64_cas1_acq,one of several compare-and-swap primitives
+0.89,h2,h2::proto::connection::Connection::poll,HTTP2 connection state machine
+0.78,allocator,_rjem_malloc,Rust jemalloc allocation
+0.63,h2,h2::codec::framed_read::decode_frame,HTTP2 frame decoding
+0.63,h2,h2::proto::streams::prioritize::Prioritize::pop_frame,HTTP2 stream scheduling
+0.58,dmesh,ExternalBackend::drain,Rust adapter driver drain
+0.55,route,linkerd_router::OneshotRoute::call,request route selection
+0.52,hpack,h2::hpack::encoder::encode_str,HPACK string encoding
+0.35,timeout,EnforceTimeouts::call,per-request timeout layer
+0.34,http,http::header::name::parse_hdr,decoded header processing
+0.27,classify,linkerd_app_core::classify::grpc_code,gRPC response classification
+0.25,doca,doca_pe_progress,DOCA progress engine

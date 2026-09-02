@@ -1,5 +1,31 @@
 # DPUmesh Evaluation
 
+> **Current gRPC build note (2026-09-02).** The cross-adapter tables below are
+> retained receipts for their 2026-08-25 build. Commit `36d095d` subsequently
+> moved DOCA ownership into a per-Pod broker. Its unoptimized baseline is
+> [`grpc-broker-baseline-20260901/`](data/grpc-broker-baseline-20260901/FINAL.md),
+> and the same-build batching/CPU diagnosis plus retained optimization is
+> [`grpc-batching-20260901/`](data/grpc-batching-20260901/FINAL.md). The follow-up
+> [`grpc-l7-perf-20260901/`](data/grpc-l7-perf-20260901/FINAL.md) fixes the
+> embedded build's missing Linkerd jemalloc and release LTO, and profiles the final
+> DPU hot path. The independent professor-facing repetition in
+> [`grpc-professor-20260902/`](data/grpc-professor-20260902/ANALYSIS.md) is the
+> current receipt; its `FINAL.md` is the short professor-facing summary
+> (correctness gates, max RPS and 10k RPS latency against per-Pod Linkerd). Capacity carries two definitions there: delivery-clean
+> 64 B 90k / 1 KiB 75k / 8 KiB 29.75k RPC/s, and p99 ≤ 5 ms 80k / 70k / 20k.
+> Its central finding is that DPU worker CPU follows the number of requests in
+> flight (0.69 core per open request, 692 ARM µs/RPC at 500 RPS against 66–87 at
+> the knee); per-thread PMU counters trace this to a per-event fixed cost
+> (467k instructions, 4.9k cache misses and 747 µs per 64 B RPC at 100 RPS on
+> one worker against 173k / 1.7k / 154 µs at the knee), not a spin, a timer or
+> the Host coalescer. The single-request closed-loop p50 floor is 0.94 ms and
+> the 100 RPS open-loop p50 is 1.6 ms. Against the same application DPUmesh is
+> 0.39× direct-TCP and, per configured proxy core, level with a 1-core Linkerd
+> sidecar (13.3k vs 12.5k/s at 64 B). A=4/6/8/12 workers give 40k/70k/80k/130k.
+> The four pre-registered experiments that settle the open questions are in its
+> `EXPERIMENT.md`. These receipts do not replace the old native/preload
+> comparison arms.
+
 DPUmesh exposes three application adapters — the native API, the LD_PRELOAD
 socket shim, and gRPC — and all three reach a backend the same way: registered
 Host TX memory, DPA SG-DMA into DPU staging, the Linkerd outbound stack running

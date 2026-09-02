@@ -1,0 +1,5 @@
+[16:09:37] sweep: channels=[8] rates=[30000] reps=1 frame=8192B threads=8 reactors=8
+[16:09:37] client=bench-grpc-dpumesh(1596745) server=echo-grpc-dpumesh(1595360) out=/tmp/grpc-knee8k-bad-20260902
+[16:09:37] restart baseline: client=0 server=0
+[16:09:47] [1/1] c=8 rate=30000 rep=1 -> achieved=29961.0 ratio=0.9987 p50=3100.00 p99=135992.00 client=1.6745(app=1.6333 sidecar=0.0000) server=2.3636(app=2.3177 sidecar=0.0000) workers=7.958867
+[16:09:51] done: /tmp/grpc-knee8k-bad-20260902/points.csv

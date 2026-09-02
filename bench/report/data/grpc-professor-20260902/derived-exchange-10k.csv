@@ -1,0 +1,4 @@
+frame,linkerd_host_cores,dpumesh_host_cores,host_cores_saved,arm_worker_cores_spent,arm_per_host_core_saved,linkerd_p50_us,dpumesh_p50_us,p50_ratio_dpumesh_over_linkerd
+64,3.2356,1.8721,1.3635,4.1116,3.0155,403.0000,611.0000,1.5161
+1024,3.5198,1.9004,1.6194,4.2128,2.6015,433.0000,625.0000,1.4434
+8192,3.8033,2.3820,1.4213,5.2381,3.6854,514.0000,1552.0000,3.0195

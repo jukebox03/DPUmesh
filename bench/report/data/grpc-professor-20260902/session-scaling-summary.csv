@@ -1,0 +1,5 @@
+workers,channels,threads,offered,achieved_med,ratio_med,p50_med_us,p99_med_us,dpu_worker_med_cores,reps,clean,note
+8,8,8,80000,79999.0,1.0000,2181.0,4710.0,7.786671,3,yes,one_session_per_worker
+8,24,24,80000,43701.0,0.5463,5510706.3,5510706.3,7.997737,1,no,three_sessions_per_worker
+12,12,12,80000,79999.0,1.0000,1559.0,2446.0,10.811590,3,yes,one_session_per_worker
+12,24,24,80000,79997.0,1.0000,2680.0,8699.0,11.753514,3,yes,two_sessions_per_worker

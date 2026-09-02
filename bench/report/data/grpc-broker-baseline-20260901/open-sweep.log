@@ -1,0 +1,25 @@
+[16:39:45] sweep: channels=[8] rates=[8000 12000 16000 20000 24000 28000 32000] reps=3 frame=64B threads=8 reactors=8
+[16:39:45] client=bench-grpc-dpumesh(2442058) server=echo-grpc-dpumesh(2358910) out=/tmp/grpc-baseline-20260901
+[16:39:45] restart baseline: client=0 server=0
+[16:39:55] [1/21] c=8 rate=8000 rep=1 -> achieved=8000.0 ratio=1.0000 p50=731.00 p99=1281.00 client=0.9522 server=1.0566 workers=4.238589
+[16:40:09] [2/21] c=8 rate=8000 rep=2 -> achieved=7999.0 ratio=0.9999 p50=737.00 p99=1223.00 client=0.9566 server=1.0668 workers=4.280188
+[16:40:23] [3/21] c=8 rate=8000 rep=3 -> achieved=8000.0 ratio=1.0000 p50=737.00 p99=1199.00 client=0.9575 server=1.0834 workers=4.276704
+[16:40:36] [4/21] c=8 rate=12000 rep=1 -> achieved=11999.0 ratio=0.9999 p50=724.00 p99=1503.00 client=1.2671 server=1.3721 workers=6.127424
+[16:40:50] [5/21] c=8 rate=12000 rep=2 -> achieved=12000.0 ratio=1.0000 p50=715.00 p99=1441.00 client=1.2797 server=1.4122 workers=6.126084
+[16:41:04] [6/21] c=8 rate=12000 rep=3 -> achieved=11999.0 ratio=0.9999 p50=717.00 p99=1427.00 client=1.2691 server=1.3752 workers=6.117086
+[16:41:17] [7/21] c=8 rate=16000 rep=1 -> achieved=15999.0 ratio=0.9999 p50=818.00 p99=1874.00 client=1.4547 server=1.6371 workers=7.347428
+[16:41:31] [8/21] c=8 rate=16000 rep=2 -> achieved=16000.0 ratio=1.0000 p50=810.00 p99=1587.00 client=1.4634 server=1.6428 workers=7.375227
+[16:41:44] [9/21] c=8 rate=16000 rep=3 -> achieved=15999.0 ratio=0.9999 p50=817.00 p99=1790.00 client=1.4547 server=1.6257 workers=7.366507
+[16:41:58] [10/21] c=8 rate=20000 rep=1 -> achieved=19999.0 ratio=1.0000 p50=1225.00 p99=2895.00 client=1.4801 server=1.8324 workers=7.688882
+[16:42:12] [11/21] c=8 rate=20000 rep=2 -> achieved=19999.0 ratio=1.0000 p50=1232.00 p99=2942.00 client=1.4862 server=1.8569 workers=7.749783
+[16:42:26] [12/21] c=8 rate=20000 rep=3 -> achieved=20000.0 ratio=1.0000 p50=1224.00 p99=2885.00 client=1.4966 server=1.8479 workers=7.750214
+[16:42:39] [13/21] c=8 rate=24000 rep=1 -> achieved=23995.0 ratio=0.9998 p50=2161.00 p99=75646.00 client=1.3866 server=1.7518 workers=7.867155
+[16:42:53] [14/21] c=8 rate=24000 rep=2 -> achieved=23970.0 ratio=0.9988 p50=2195.00 p99=24650.00 client=1.3797 server=1.7545 workers=7.875480
+[16:43:07] [15/21] c=8 rate=24000 rep=3 -> achieved=23998.0 ratio=0.9999 p50=2156.00 p99=9313.00 client=1.4034 server=1.7778 workers=7.888959
+[16:43:21] [16/21] c=8 rate=28000 rep=1 -> achieved=25320.0 ratio=0.9043 p50=12186.00 p99=5114273.90 client=1.1122 server=1.3352 workers=7.738077
+[16:43:34] [17/21] c=8 rate=28000 rep=2 -> achieved=26874.0 ratio=0.9598 p50=11298.00 p99=2698863.32 client=1.1325 server=1.3523 workers=7.839733
+[16:43:48] [18/21] c=8 rate=28000 rep=3 -> achieved=27866.0 ratio=0.9952 p50=10162.00 p99=415136.00 client=1.1682 server=1.3976 workers=7.879521
+[16:44:02] [19/21] c=8 rate=32000 rep=1 -> achieved=30488.0 ratio=0.9527 p50=150071.00 p99=1473678.25 client=1.0884 server=1.1488 workers=7.798095
+[16:44:16] [20/21] c=8 rate=32000 rep=2 -> achieved=28729.0 ratio=0.8978 p50=146036.00 p99=3254283.71 client=1.0446 server=1.0731 workers=7.703422
+[16:44:30] [21/21] c=8 rate=32000 rep=3 -> achieved=30105.0 ratio=0.9408 p50=131290.00 p99=2627371.46 client=1.0854 server=1.1073 workers=7.746469
+[16:44:33] done: /tmp/grpc-baseline-20260901/points.csv

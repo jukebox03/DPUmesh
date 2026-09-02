@@ -1,0 +1,25 @@
+Feature-comparable Linkerd sidecar arm, 2026-09-02 KST
+
+Applications:
+  client image: docker.io/bench/bench-grpc:latest
+  server image: docker.io/bench/echo-grpc:latest
+  same bench_grpc and EchoService code as DPUmesh
+  BENCH_TRANSPORT=tcp; request and response sizes unchanged
+
+Injected proxy:
+  image: cr.l5d.io/linkerd/proxy:edge-26.8.1
+  proxy release log: 2.364.0 (e5de317)
+  LINKERD2_PROXY_CORES=1 (standard installed configuration)
+  client Pod: application + restartable linkerd-proxy sidecar, Ready 2/2
+  server Pod: application + restartable linkerd-proxy sidecar, Ready 2/2
+  both proxies certified as:
+    default.test-bench.serviceaccount.identity.linkerd.cluster.local
+  client proxy discovered echo-grpc-linkerd:9091 through linkerd-destination
+
+CPU placement:
+  client application and client linkerd-proxy: Host CPUs 18-26
+  server application and server linkerd-proxy: Host CPUs 27-35
+  CPU accounting: recursive Pod cgroup, checked against the sum of the
+  application-container and linkerd-proxy-container cgroups
+
+No direct-TCP result is used in the meeting comparison.

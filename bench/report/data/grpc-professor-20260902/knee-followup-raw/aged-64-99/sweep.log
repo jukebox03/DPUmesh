@@ -1,0 +1,7 @@
+[15:40:35] sweep: channels=[8] rates=[99000 101000 102000] reps=3 frame=64B threads=8 reactors=8
+[15:40:35] client=bench-grpc-dpumesh(1270390) server=echo-grpc-dpumesh(1269170) out=/tmp/grpc-knee64-20260902
+[15:40:35] restart baseline: client=0 server=0
+[15:40:45] [1/9] c=8 rate=99000 rep=1 -> achieved=98138.0 ratio=0.9913 p50=4519.00 p99=513376.00 client=3.7721(app=3.7049 sidecar=0.0000) server=4.6288(app=4.5566 sidecar=0.0000) workers=7.880586
+[15:40:59] [2/9] c=8 rate=99000 rep=2 -> achieved=97944.0 ratio=0.9893 p50=5059.00 p99=777100.00 client=3.7747(app=3.7130 sidecar=0.0000) server=4.7153(app=4.6470 sidecar=0.0000) workers=7.893409
+[15:40:59] OVERLOAD at c8_r99000_2; stopping higher rates for channels=8
+[15:41:02] done: /tmp/grpc-knee64-20260902/points.csv

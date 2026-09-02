@@ -1,0 +1,16 @@
+[15:59:42] sweep: channels=[8] rates=[25250 25500 25750 26000] reps=3 frame=8192B threads=8 reactors=8
+[15:59:42] client=bench-grpc-dpumesh(1596745) server=echo-grpc-dpumesh(1595360) out=/tmp/grpc-knee8k-20260902
+[15:59:42] restart baseline: client=0 server=0
+[15:59:53] [1/12] c=8 rate=25250 rep=1 -> achieved=25233.0 ratio=0.9993 p50=1572.00 p99=39765.00 client=1.8115(app=1.7878 sidecar=0.0000) server=2.3114(app=2.2808 sidecar=0.0000) workers=7.894937
+[16:00:06] [2/12] c=8 rate=25250 rep=2 -> achieved=25243.0 ratio=0.9997 p50=1592.00 p99=50208.00 client=1.8022(app=1.7774 sidecar=0.0000) server=2.2669(app=2.2356 sidecar=0.0000) workers=7.909594
+[16:00:20] [3/12] c=8 rate=25250 rep=3 -> achieved=25242.0 ratio=0.9997 p50=1591.00 p99=43864.00 client=1.8067(app=1.7836 sidecar=0.0000) server=2.2346(app=2.2071 sidecar=0.0000) workers=7.904363
+[16:00:34] [4/12] c=8 rate=25500 rep=1 -> achieved=25483.0 ratio=0.9993 p50=1607.00 p99=52160.00 client=1.7730(app=1.7462 sidecar=0.0000) server=2.2901(app=2.2521 sidecar=0.0000) workers=7.917724
+[16:00:47] [5/12] c=8 rate=25500 rep=2 -> achieved=25489.0 ratio=0.9996 p50=1625.00 p99=122844.00 client=1.7882(app=1.7638 sidecar=0.0000) server=2.2829(app=2.2541 sidecar=0.0000) workers=7.900209
+[16:01:01] [6/12] c=8 rate=25500 rep=3 -> achieved=25490.0 ratio=0.9996 p50=1605.00 p99=48434.00 client=1.7992(app=1.7765 sidecar=0.0000) server=2.2881(app=2.2601 sidecar=0.0000) workers=7.913304
+[16:01:15] [7/12] c=8 rate=25750 rep=1 -> achieved=25732.0 ratio=0.9993 p50=1626.00 p99=57547.00 client=1.8025(app=1.7777 sidecar=0.0000) server=2.3077(app=2.2751 sidecar=0.0000) workers=7.923317
+[16:01:28] [8/12] c=8 rate=25750 rep=2 -> achieved=25736.0 ratio=0.9995 p50=1639.00 p99=46046.00 client=1.8004(app=1.7754 sidecar=0.0000) server=2.3344(app=2.3017 sidecar=0.0000) workers=7.919307
+[16:01:42] [9/12] c=8 rate=25750 rep=3 -> achieved=25735.0 ratio=0.9994 p50=1636.00 p99=56892.00 client=1.7418(app=1.7113 sidecar=0.0000) server=2.2366(app=2.1972 sidecar=0.0000) workers=7.743762
+[16:01:56] [10/12] c=8 rate=26000 rep=1 -> achieved=25991.0 ratio=0.9997 p50=1659.00 p99=58812.00 client=1.7942(app=1.7668 sidecar=0.0000) server=2.2868(app=2.2540 sidecar=0.0000) workers=7.925420
+[16:02:10] [11/12] c=8 rate=26000 rep=2 -> achieved=25985.0 ratio=0.9994 p50=1713.00 p99=62968.00 client=1.7699(app=1.7415 sidecar=0.0000) server=2.2997(app=2.2651 sidecar=0.0000) workers=7.938767
+[16:02:23] [12/12] c=8 rate=26000 rep=3 -> achieved=25985.0 ratio=0.9994 p50=1653.00 p99=56902.00 client=1.8062(app=1.7787 sidecar=0.0000) server=2.3232(app=2.2885 sidecar=0.0000) workers=7.920232
+[16:02:26] done: /tmp/grpc-knee8k-20260902/points.csv

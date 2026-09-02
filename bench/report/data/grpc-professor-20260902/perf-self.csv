@@ -1,0 +1,14 @@
+category,symbol,self_percent
+copy,__memcpy_generic,3.41
+atomic,__aarch64_ldadd8_relax,3.35
+atomic,__aarch64_ldadd8_rel,2.16
+syscall,el0_svc_common,2.11
+HTTP2,h2_hpack_encode,1.80
+DPUmesh,px_worker_drain,1.59
+HTTP2,h2_recv_frame,1.13
+runtime,epoll_pwait,1.00
+allocator,_rjem_malloc,0.90
+HTTP2,h2_decode_frame,0.85
+DPUmesh,ExternalBackend_drain,0.70
+policy,OneshotRoute_call,0.60
+DPUmesh,doca_pe_progress,0.28

@@ -1,0 +1,2 @@
+channels,reactors,frame_bytes,highest_clean_rps,next_bad_rps,status,max_p50_us,highest_healthy_rps,next_unhealthy_rps,healthy_status,clean_reps,valid_reps,total_reps,achieved_rps,achieved_ratio,p50_us,p99_us,p999_us,client_cores,server_cores,dpu_arm_cores
+8,8,64,24000,28000,bracketed,1000.000,16000,20000,bracketed,3,3,3,23995.000,0.999792,2161.000,24650.000,123475.000,1.386600,1.754500,7.875480

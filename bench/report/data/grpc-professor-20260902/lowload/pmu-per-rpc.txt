@@ -1,0 +1,4 @@
+run          ch    rps rps/worker  p50us   GHz   IPC   cyc/rpc  ins/rpc miss/rpc  us/rpc sysc/rpc ctxsw/rpc
+base_c1_100   1    100        100   1611  2.09  0.30   1564285   467235     4926     747     76.2      6.07
+base_c8_10k   8  10000       1250    617  2.05  0.33   1065884   347858     4080     520     48.6      1.95
+base_c8_50k   8  50000       6250   1565  2.08  0.54    321147   173122     1672     154      8.3      0.13

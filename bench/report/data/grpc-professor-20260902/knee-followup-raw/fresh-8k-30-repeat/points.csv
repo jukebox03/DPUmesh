@@ -1,0 +1,2 @@
+channels,reactors,frame,rep,offered,achieved,ratio,p50_us,p99_us,p999_us,fail,drops,pending,worker_fail,credit_hold_dropped,eq_budget_exhausted,client_core,server_core,client_app_core,client_sidecar_core,server_app_core,server_sidecar_core,dpu_core_total,dpu_core_workers,w0,w1,w2,w3,w4,w5,w6,w7,w8,w9,w10,w11,w12,w13,w14,w15,window_s
+8,8,8192,1,30000,14715.0,0.4905,56009.00,442872.00,6225569.89,85911,0,0,0,0,0,1.7699,1.2162,1.7289,0.0000,1.2041,0.0000,5.566713,5.508455,0.006132,0.999586,0.763488,0.800282,0.999586,0.673034,0.266761,0.999586,0,0,0,0,0,0,0,0,6.5227

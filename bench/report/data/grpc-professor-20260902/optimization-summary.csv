@@ -1,0 +1,8 @@
+measurement,frame_bytes,build,value_rps
+open_capacity,64,broker-baseline,24000
+open_capacity,64,native-coalescing,45000
+closed_concurrency_1024,64,glibc,70670
+closed_concurrency_1024,64,rust-jemalloc,96570
+closed_concurrency_1024,64,LTO,104678
+closed_concurrency_1024,1024,rust-jemalloc,73932
+closed_concurrency_1024,1024,LTO,85178

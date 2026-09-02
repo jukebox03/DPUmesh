@@ -1,0 +1,3 @@
+build,offered_rps,profile_seconds,task_clock_ms,cpus,context_switches,migrations,cycles,instructions,ipc,cache_references,cache_misses,miss_pct,cycles_per_rpc,instructions_per_rpc,dpu_cpu_us_per_rpc
+rust_global_jemalloc_no_lto,50000,8.002,62832.95,7.852,145548,141,133234344887,74985803712,0.56,37297652727,692875491,1.858,333086,187465,157.08
+rust_global_jemalloc_lto,50000,8.002,61765.19,7.718,162393,181,130830088237,70644105157,0.54,35571964954,699410058,1.966,327075,176610,154.41

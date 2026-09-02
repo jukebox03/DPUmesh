@@ -1,0 +1,13 @@
+[16:02:41] sweep: channels=[8] rates=[27000 28000 29000] reps=3 frame=8192B threads=8 reactors=8
+[16:02:41] client=bench-grpc-dpumesh(1596745) server=echo-grpc-dpumesh(1595360) out=/tmp/grpc-knee8k-upper-20260902
+[16:02:41] restart baseline: client=0 server=0
+[16:02:52] [1/9] c=8 rate=27000 rep=1 -> achieved=26971.0 ratio=0.9989 p50=1851.00 p99=84301.00 client=1.7699(app=1.7339 sidecar=0.0000) server=2.2984(app=2.2556 sidecar=0.0000) workers=7.925707
+[16:03:05] [2/9] c=8 rate=27000 rep=2 -> achieved=26972.0 ratio=0.9990 p50=1863.00 p99=77898.00 client=1.7704(app=1.7387 sidecar=0.0000) server=2.3344(app=2.2976 sidecar=0.0000) workers=7.936291
+[16:03:19] [3/9] c=8 rate=27000 rep=3 -> achieved=26999.0 ratio=1.0000 p50=1847.00 p99=72193.00 client=1.7707(app=1.7402 sidecar=0.0000) server=2.3317(app=2.2952 sidecar=0.0000) workers=7.939710
+[16:03:33] [4/9] c=8 rate=28000 rep=1 -> achieved=27953.0 ratio=0.9983 p50=2065.00 p99=91670.00 client=1.7466(app=1.7108 sidecar=0.0000) server=2.3945(app=2.3532 sidecar=0.0000) workers=7.946868
+[16:03:46] [5/9] c=8 rate=28000 rep=2 -> achieved=27941.0 ratio=0.9979 p50=2096.00 p99=111797.00 client=1.7587(app=1.7183 sidecar=0.0000) server=2.3722(app=2.3231 sidecar=0.0000) workers=7.935887
+[16:04:00] [6/9] c=8 rate=28000 rep=3 -> achieved=28009.0 ratio=1.0003 p50=2066.00 p99=119888.00 client=1.7666(app=1.7306 sidecar=0.0000) server=2.3827(app=2.3396 sidecar=0.0000) workers=7.945360
+[16:04:14] [7/9] c=8 rate=29000 rep=1 -> achieved=28992.0 ratio=0.9997 p50=2653.00 p99=363853.00 client=1.7075(app=1.6686 sidecar=0.0000) server=2.3940(app=2.3472 sidecar=0.0000) workers=7.951004
+[16:04:28] [8/9] c=8 rate=29000 rep=2 -> achieved=28993.0 ratio=0.9998 p50=2436.00 p99=158799.00 client=1.7248(app=1.6890 sidecar=0.0000) server=2.3871(app=2.3444 sidecar=0.0000) workers=7.950859
+[16:04:41] [9/9] c=8 rate=29000 rep=3 -> achieved=29000.0 ratio=1.0000 p50=2508.00 p99=183438.00 client=1.7283(app=1.6915 sidecar=0.0000) server=2.4032(app=2.3572 sidecar=0.0000) workers=7.956820
+[16:04:44] done: /tmp/grpc-knee8k-upper-20260902/points.csv

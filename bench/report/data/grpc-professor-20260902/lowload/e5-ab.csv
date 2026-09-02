@@ -1,0 +1,13 @@
+arm,condition,p50_us,busy_worker_cores,arm_us_per_rpc
+baseline,1ch 100 RPS,1570,0.0695,695
+e5-1,1ch 100 RPS,1601,0.0680,680
+baseline,1ch 500 RPS,1199,0.3206,641
+e5-1,1ch 500 RPS,1155,0.3081,616
+baseline,1ch 1000 RPS,1015,0.6169,617
+e5-1,1ch 1000 RPS,989,0.6013,601
+baseline,8ch 10k RPS,611,4.1116,411
+e5-1,8ch 10k RPS,608,4.0643,406
+baseline,closed 1 in flight,936,0.6728,655
+e5-1,closed 1 in flight,930,0.6636,642
+baseline,8ch 90k RPS,2846,7.8455,87
+e5-1,8ch 90k RPS,2847,7.8563,87

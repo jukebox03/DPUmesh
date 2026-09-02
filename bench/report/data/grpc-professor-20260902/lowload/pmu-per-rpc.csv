@@ -1,0 +1,4 @@
+run,channels,rps,rps_per_worker,p50_us,ghz,ipc,cycles_per_rpc,instructions_per_rpc,cache_misses_per_rpc,us_per_rpc,syscalls_per_rpc,ctxsw_per_rpc
+c1_100,1,100,100,1611,2.09,0.30,1564285,467235,4926,747,76.2,6.07
+c8_10k,8,10000,1250,617,2.05,0.33,1065884,347858,4080,520,48.6,1.95
+c8_50k,8,50000,6250,1565,2.08,0.54,321147,173122,1672,154,8.3,0.13

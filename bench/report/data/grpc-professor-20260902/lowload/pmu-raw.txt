@@ -1,0 +1,27 @@
+== base_c1_100
+busy_tid=435248
+     1,564,284,616      cycles                    #    2.093 GHz                    
+       467,234,709      instructions              #    0.30  insn per cycle         
+       192,982,844      cache-references          #  258.262 M/sec                  
+         4,925,998      cache-misses              #    2.553 % of all cache refs    
+            747.24 msec task-clock                #    0.075 CPUs utilized          
+             6,066      context-switches          #    8.118 K/sec                  
+            76,214      raw_syscalls:sys_enter    #  101.994 K/sec                  
+== base_c8_10k
+busy_tid=435250
+    13,323,546,054      cycles                    #    2.051 GHz                    
+     4,348,219,560      instructions              #    0.33  insn per cycle         
+     1,892,125,657      cache-references          #  291.308 M/sec                  
+        50,997,547      cache-misses              #    2.695 % of all cache refs    
+          6,495.28 msec task-clock                #    0.649 CPUs utilized          
+            24,393      context-switches          #    3.755 K/sec                  
+           607,102      raw_syscalls:sys_enter    #   93.468 K/sec                  
+== base_c8_50k
+busy_tid=435250
+    20,071,660,459      cycles                    #    2.084 GHz                    
+    10,820,115,088      instructions              #    0.54  insn per cycle         
+     5,471,456,316      cache-references          #  568.173 M/sec                  
+       104,491,986      cache-misses              #    1.910 % of all cache refs    
+          9,629.92 msec task-clock                #    0.963 CPUs utilized          
+             8,115      context-switches          #  842.686 /sec                   
+           520,872      raw_syscalls:sys_enter    #   54.089 K/sec                  

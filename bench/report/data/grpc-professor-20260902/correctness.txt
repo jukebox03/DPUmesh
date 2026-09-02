@@ -1,0 +1,14 @@
+Evaluation date,2026-09-02
+Source base,36d095da4222e7076958140ee462a58d219b8d8f
+Host-free contract tests,PASS
+DPU proxy lane and SG-DMA queue contract,PASS
+Release cHTTP2 adapter CTest,4/4 PASS
+Clang ASAN+UBSAN cHTTP2 adapter CTest,4/4 PASS
+Embedded Rust adapter tests,38/38 PASS
+Real-DPU shutdown and slot reuse,PASS opened=closed 22/22
+Post-reuse four-channel exchange,PASS fail=0 drops=0 pending=0 internal-loss=0
+Policy and routing surfaces,19/19 PASS
+Final Pods,Running restart=0/0
+Final worker sessions,opened=closed on all 8 workers
+Final live state,active=0 pending=0 tasks=0 on all 8 workers
+Registration orphan counter,cumulative stale registrations aborted; not a live leak gauge

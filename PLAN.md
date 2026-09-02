@@ -140,7 +140,7 @@ steps of eight with zero DPU error lines.
 
 | Constant | Value | Where | What it bounds |
 |---|---:|---|---|
-| `MAX_DPA_RINGS` | 8 | `include/dpumesh/dmesh_common.h` | forward rings one execution unit can hold |
+| `MAX_DPA_RINGS` | 16 | `include/dpumesh/dmesh_common.h` | forward rings one execution unit can hold |
 | execution units (N) | 32 | device query at start-up | EUs the BlueField reports |
 | `DPUMESH_RINGS_PER_POD_DEFAULT` (K) | 2 | `include/dpumesh/dmesh_common.h` | EUs one Pod spans |
 | `MAX_PODS` | 127 | `include/dpumesh/dmesh_common.h` | registration slots the ARM holds |
@@ -148,17 +148,18 @@ steps of eight with zero DPU error lines.
 
 N is read from the device and `DPA_THREADS_DEFAULT = 8` is only the fallback
 when that query is unavailable, so N comes from the deploy log
-(`dpa_threads='32'`) and never from the constant. At the default K, `8 × 32 / 2 = 128` ring slots
-back 127 registration slots — the two meet at the wire ceiling. The bench
-deployment runs `K = 8`, which leaves 32 ring slots and seats 32 Pods: density
-and per-Pod throughput are the same dial — K also caps the ARM data workers at
-A ≤ K — and the harness has it turned to throughput.
+(`dpa_threads='32'`) and never from the constant. At the default K,
+`16 × 32 / 2 = 256` ring slots exceed the 127 registration slots, so the wire
+id now binds first. At the benchmark's `K = 8`, the structural ring supply is
+64 Pods, but only the previously exercised 32-Pod topology is a supported
+claim. Density and per-Pod throughput remain the same dial — K also caps the
+ARM data workers at A ≤ K — and the harness has it turned to throughput.
 
-**The ring array is not the constraint.** `MAX_DPA_RINGS` sizes five arrays in
-`struct dpa_thread_arg`, one copy per EU in device memory, at 68 bytes per ring
-slot over a fixed 68-byte remainder. Doubling it to 16 takes one EU's thread
-argument from 612 B to 1,156 B and the whole device-side cost from 19.1 KiB to
-36.1 KiB across 32 EUs.
+**The ring array is not the measured constraint.** `MAX_DPA_RINGS` sizes five
+arrays in `struct dpa_thread_arg`, one copy per EU in device memory, at 68 bytes
+per ring slot over a fixed 68-byte remainder. Its expansion from 8 to 16 took
+one EU's thread argument from 612 B to 1,156 B and the whole device-side cost
+from 19.1 KiB to 36.1 KiB across 32 EUs.
 
 Two other things are.
 
@@ -178,9 +179,9 @@ Two other things are.
 
 Ordered by cost:
 
-- [ ] `MAX_DPA_RINGS = 16` — 17 KiB more device memory, a `dpacc` rebuild, a
-  paired redeploy, and a per-poll scan that doubles at full occupancy. Needed
-  only for a device with fewer EUs than this one, or for `K` above 2.
+- [x] `MAX_DPA_RINGS = 16` — the paired DPA/DPU rebuild and A=12 hardware
+  deployment passed. It costs 17 KiB more device memory; the per-poll scan only
+  grows when those ring slots are actually occupied.
 - [ ] Above 127 those wire fields widen. That is a host-and-DPU ABI change of
   the kind the reverse ring's `struct dmesh_tx_ack_entry` is static-asserted
   against, because a count the two ends disagree on is silently lossy rather
@@ -442,6 +443,187 @@ is what makes these items independently schedulable — and what makes it a
 measurement error to run one across a build that also changes correctness
 behavior.
 
+## gRPC evaluation gate — baseline, diagnose and optimize the broker build (2026-09-01)
+
+Commit `36d095d` moved DOCA ownership into a per-Pod broker and changed Host
+completion progress after the last retained gRPC capacity campaign. The
+2026-08-25 gRPC results remain receipts for their build, but they are not the
+performance baseline of the current path. The current broker build is now
+baselined in
+[`grpc-broker-baseline-20260901/`](bench/report/data/grpc-broker-baseline-20260901/);
+the older numbers must not be substituted for it.
+
+The evaluation keeps three costs separate:
+
+1. **C++ adapter:** chttp2 ↔ `DmeshEndpoint` ↔ `DmeshReactor`, including
+   callback, ownership, backpressure and QP lifecycle.
+2. **Host transport:** `libdpumesh`, the shared rings and the per-Pod broker.
+   Host CPU is the recursive Pod cgroup, so application and broker are charged
+   exactly once.
+3. **Mesh L7:** the DPU ARM worker's embedded Linkerd HTTP/2 path. This is where
+   per-request routing and policy run, and it is the dominant term in the old
+   gRPC readings.
+
+The order is binding for this campaign:
+
+- [x] Restate the current process, thread and byte ownership in
+  [`design/GRPC.md`](design/GRPC.md), including the fact that the broker is not
+  a payload hop.
+- [x] Establish the unmodified release baseline: `make test-hostfree` and all
+  four CTest targets (endpoint, real chttp2 channel, reactor/runtime and native
+  symbol linkage) pass on `36d095d`.
+- [x] Run all four targets under Clang 14 Debug ASAN+UBSAN. The sanitizer found
+  a test-only lifetime violation: public gRPC Channel destruction is deferred,
+  but four lifecycle fixtures supplied a stack-backed `UnownedExecutor`. Those
+  fixtures now exercise the production owned executor and 4/4 pass with leak
+  detection disabled because LeakSanitizer cannot run under this ptrace policy.
+- [x] Run the current hardware correctness gates before retaining cost:
+  gRPC-scope deploy smoke, `grpcshutdown`, the gRPC policy/routing surfaces,
+  zero Pod restarts and quiescent DPU session/task/mapping counters.
+- [x] Freeze placement, `N/K/A/L`, reactor count and 2.5 GHz clock, then take a
+  repeated **before-change** baseline. The open-loop grid supplies
+  `highest_clean_rps`; the closed-loop concurrency/payload grid describes the
+  latency/throughput shape and must not be published as that capacity.
+- [x] Record p50/p99/p999, achieved/offered, failures/drops, total client and
+  server Pod CPU (application + broker), DPU ARM CPU and per-worker balance.
+  A point with a restart, a missing result, retained-credit loss or an
+  exhausted EQ budget is not clean.
+- [x] Separate the three meanings of batching. The adapter was forcing
+  `dmesh_flush` at every chttp2 logical Write boundary and defeating the native
+  bounded coalescer. Retain the same-build removal only after release,
+  ASAN+UBSAN, real-DPU lifecycle/policy gates and repeated payload A/B pass.
+- [x] Widen Host placement from 6+6 to 9+9 CPUs and measure process/cgroup CPU,
+  rather than inferring saturation from affinity. The unchanged binary gained
+  only 3.2--4.0% at 64 B/1 KiB while the server Pod consumed 1.35--1.86 cores;
+  Host core count was not the first limit.
+- [x] Instrument DPU drain state and SG-DMA grouping, sample quiescent and loaded
+  workers, and profile the loaded call tree. Workers fall to 0--1% with no
+  sessions and the loaded profile is flat (no symbol above 3.5% self). That
+  rules out a traffic-independent spin, not a worker that stays runnable while
+  a request is open; the in-flight CPU finding below is the open question.
+- [x] Restore the allocator used by the stock Linkerd executable. The embedded
+  staticlib was the final Rust artifact in a C executable and therefore never
+  inherited Linkerd's `#[global_allocator]`; it used glibc despite the upstream
+  proxy selecting jemalloc. A same-binary `LD_PRELOAD` experiment first proved
+  the cause, then a Rust-global jemalloc build retained a 36.7% closed-loop
+  improvement without changing C allocation semantics.
+- [x] Match the stock proxy's release profile by enabling LTO in the embedded
+  workspace. A same-allocator repeated A/B adds 8.4% at 64 B and 15.2% at
+  1 KiB. The final low-overhead profile sustains 49,999 request/s with zero
+  errors or drops while collecting 3,009 samples with none lost.
+- [ ] Use O1 only on the connection-churn arm: it attributes the remaining
+  0.4–0.5 ms session cost but cannot explain steady requests on an already-live
+  HTTP/2 channel.
+- [ ] Use O2 as a same-build A/B after the baseline. The measured
+  reservation-versus-copy improvement was only 0.265 ARM µs/request; that
+  proves the first copy lever is small beside the old 400–500 ARM µs/request
+  gRPC total, not that removing the remaining queue is worthless. Accept the
+  larger change only with copy-byte/arena evidence and no p99 or correctness
+  regression.
+- [x] Treat O3 as a separate topology campaign. Fixed ownership tables and
+  scratch layout were expanded together, and A=4/6/8/12 with one persistent
+  channel per worker measured 40k/70k/80k/130k clean RPC/s. A=16 still needs a
+  distinct main/control CPU before it can be supported.
+- [ ] Leave O6 out of this campaign: topology delta publication is control-plane
+  churn work and cannot change steady gRPC request cost. O5 is the later fair
+  ARM-versus-x86 full-stack comparison, not a prerequisite for establishing the
+  current DPUmesh number.
+
+This campaign is an explicit single-node evaluation and does not close F6 or
+change the product priority of obtaining the two-node receipt.
+
+The batching/Host diagnosis is retained in
+[`grpc-batching-20260901/`](bench/report/data/grpc-batching-20260901/FINAL.md),
+and the subsequent L7 profile, allocator/LTO A/B and final capacity receipt are
+in
+[`grpc-l7-perf-20260901/`](bench/report/data/grpc-l7-perf-20260901/FINAL.md).
+The earlier native-coalescing build's 64-byte open-loop bracket was 45k clean /
+48k bad. The first repetition after jemalloc and LTO reached 64 B 100k clean,
+1 KiB 75k clean and 8 KiB 25k clean. A later predeclared fine-knee repetition
+changes the operating claim: 64 B is cross-deployment-confirmed through 90k
+with a mixed 92k point and independent bad 98/99k points; 1 KiB is 75k clean /
+75.25k mixed; 8 KiB is 29.75k clean / 30k mixed. Near-knee p99 is deliberately
+not called healthy: it reaches 318 ms at the accepted 29.75k 8 KiB point. At
+total concurrency 1,024, independent closed-loop
+medians are 106.8k, 89.1k and 34.3k request/s. Closed-loop plateaus must not be
+relabelled as open-loop capacities. The full professor-facing receipt, including
+the standard-Linkerd-sidecar comparison, is in
+[`grpc-professor-20260902/`](bench/report/data/grpc-professor-20260902/ANALYSIS.md)
+(`FINAL.md` beside it is the short professor-facing summary).
+
+A follow-up concurrency sweep covers total concurrency 8 through 8,192, three
+repetitions each. The 64 B median rises 12.5k→118.9k request/s (9.5x) through
+concurrency 2,048, then falls to 115.8k/102.1k at 4,096/8,192. The 1 KiB median
+rises 12.2k→88.7k (7.3x) through 1,024, then falls to 85.8k/81.0k/77.4k.
+Every retained run has zero failure/drop/restart. At the apparent 8.02-process-
+core points, the new split counter records 7.98--7.99 data-worker cores and
+0.03--0.04 non-worker cores: the A=8 geometry limits that arm's data workers,
+not the whole process cpuset. This fixes the 64 B plateau at total concurrency 2,048 and
+the 1 KiB plateau at 1,024 while retaining the large rising region. The 8 KiB
+high-concurrency sequence produced RPC failures and backend-channel reuse
+warnings after overload cancellation; it is retained as rejected stress data,
+not averaged into the plateau. The harness must gate the next run on DPU
+session/task/backend quiescence before that arm is repeated.
+
+The original 64 B open-loop campaign has clean 92.5k/97.5k/100k points and a
+102.5k first bad point; isolated 110k/115k observations then plateau and decline.
+The independent knee repetition does not reproduce that upper envelope: 90k is
+3/3 clean, 92k is mixed after worker 5 stalls and drops 73,587 schedules, and
+fresh 98/99k observations are bad. These are displayed as individual hollow
+points instead of being averaged into one monotonic line. This is now a
+deployment/worker-progress stability issue, not merely a wider confidence
+interval around 100k.
+
+At equal total concurrency 256, removing the forced physical flush changes the
+three-run medians from 29.3k→58.2k (64 B), 27.9k→51.0k (1 KiB), and
+19.9k→22.3k (8 KiB). The remaining shape fits approximately
+`100.9 ARM us/request + 31.4 ns/frame-byte` on that pre-allocator build: fixed
+Linkerd/HTTP/2 per-request work still dominates small messages. DPU SG-DMA
+multi-unit tasks are rare, but 64-byte Linkerd output already carries 4.36 RPCs
+per DMA batch, so delaying the SG engine merely to increase its unit count is
+not justified by the profile. The 64/1 KiB/8 KiB open-loop knees remain clearly
+payload-dependent, while the dense 8 KiB curve now shows tail latency rising
+smoothly through 29.75k before the mixed 30k boundary. This still shows that
+fixed work dominates small frames. O2 remains the open direct-reservation lever
+for the residual copy and lock cost; O3 is the distinct capacity-scaling lever
+because the A=8 workers, rather than Host CPU, define that arm's knee.
+
+- [ ] Explain the observed deployment/worker-progress regression before calling
+  any single campaign's upper envelope an operating limit. An 11-hour 64-byte
+  probe regressed, and fresh deployments also produced a worker-5 stall at 92k
+  plus bad 98/99k observations, so age alone no longer explains the variance.
+  The historical 80k aged point fell to ratio 0.9878 and 904 ms p99, while one
+  full deploy restored its three-run median to ratio 1.0000 and 4.973 ms p99.
+  Run repeated fresh-deploy probes as well as 6/12/24-hour soaks and correlate
+  worker progress, session generations, allocator state, queue depth and DPU
+  counters. Do not publish a single-run maximum as a reproducible capacity.
+- [ ] Cut the per-event fixed cost of the ARM worker loop (E5). Measured on
+  one worker with one channel: a 64 B RPC costs 467k instructions, 4.9k cache
+  misses and 747 ARM µs at 100 RPS against 173k / 1.7k / 154 µs at the knee;
+  it is handled in ~8 drain passes (half of them Idle), 47 syscalls
+  (29 `epoll_pwait`) and 1.2 wakes, as two continuous on-CPU runs of ~450 and
+  ~320 µs. Not a spin, not DVFS, not session rebuilding, not the Host
+  coalescer (E2: `TX_TAIL_DELAY_NS` 50 µs left the 100 RPS p50 at 1.6 ms and
+  worsened 10k RPS from 611 to 1,456 µs; reverted). The levers are the pass
+  count (two drains around arming plus re-registering five `select` futures
+  per pass), the per-pass work (every session and both H2 connections are
+  polled on every pass) and the syscalls per pass. Target: 100 RPS ≤ 200 µs/RPC,
+  closed-loop single-request p50 < 0.7 ms (now 0.94 ms), no knee regression.
+  Receipts: [`grpc-professor-20260902/lowload/`](bench/report/data/grpc-professor-20260902/lowload/).
+  First build (Rust drain before the C engine drain; wake-eventfd read only
+  when a tick was posted) is in the tree: worker CPU −2–6% at ≤1k RPS/worker,
+  syscalls/RPC 47→32, latency unchanged, 90k clean, `grpcshutdown` passed.
+  Uprobes then showed the ceiling of loop work: per RPC the hyper server
+  connection is polled 2.0× and the h2 client connection 4.0×, and those six
+  cold polls are ~64% of the cost. The next levers are the h2 client poll count
+  (4→2), a bounded post-event spin to avoid the wake chain and cold re-entry,
+  and the depth of the linkerd service stack, each under the same A/B.
+- [ ] Repeat the sidecar comparison with matched cores (E3):
+  `config.linkerd.io/proxy-cpu-limit: "4"` on both Pods, plus a direct-TCP 10k
+  point, and report per-proxy-core figures beside the absolute ones. The
+  current 4.3× is against `LINKERD2_PROXY_CORES=1`; per configured core the two
+  meshes are level at 64 B and Linkerd leads at 8 KiB.
+
 ## What is known
 
 Per-session cost, not the transport, bounds L7 capacity, and per-workload stack
@@ -513,6 +695,35 @@ which is what this item is for.
   `l7-tx-ab-20260817` arm predates the `DmeshIo` tx cursor, which removed the
   queue-tail move `consume_tx` performed on every publication, so its absolute
   µs/request is not the arm to subtract from.
+
+## O3 Use more than eight ARM data cores
+
+The fixed arrays now admit `MAX_ARM_WORKERS=16` and `MAX_DPA_RINGS=16`.
+Reverse landing stripes are not an independent configuration: they are derived
+directly from A. The hot-service deploy harness exposes
+`DPUMESH_THROUGHPUT_WORKERS`, deriving A=K=W, the largest valid N≤32 and
+all-worker L7. The scale runner derives `threads=channels=workers` from that
+same value so session fan-in is held constant. On the expanded binary,
+A=4/6/8/12 reached 40k/70k/80k/130k 3/3 clean; at 130k the Host used only
+5.05/9 and 5.93/9 cores while DPU workers used 11.37/12. This is a measured
+capacity lever. Independent N/K/A remain for the distinct density deployment
+where K>A is intentional. Policy/injection fixtures share a deployment-geometry
+resolver: they consume canonical W or parse effective K/A from the live DPU,
+instead of retaining K=A=8 and inspecting only eight admin endpoints.
+
+- [x] Expand `K/A/L` geometry together across the public transport, broker
+  descriptor handoff, DPA ring tables, DPU completion PEs, reverse lanes,
+  scratch layout and peer-worker port ranges. A=12 deploy, smoke and traffic
+  passed; topology tests cover 12 and 16.
+- [ ] Reserve a distinct CPU for the DPU control/main thread. With all 16 CPUs
+  allowed, `A=16` would wrap the current `main=A` affinity back onto worker 0;
+  a larger worker geometry must not buy throughput by starving control progress.
+- [x] Compare 4/6/8/12-worker open-loop knees with the same 9+9 Host placement.
+  Their highest repeated clean points consume 3.97/4, 5.95/6, 7.79/8 and
+  11.37/12 worker cores. The accepted A=12 point has balanced 97.4–98.9%
+  worker use, clean ownership/loss counters and zero RPC failure through 130k.
+  A=16 remains outside the supported range until the preceding control-CPU
+  item is closed.
 
 ## O6 Incremental topology generations
 
