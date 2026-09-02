@@ -5,6 +5,17 @@
 //! `dmesh_doca::runtime`. One configured worker, or every worker under the
 //! `all` selection, carries Linkerd sessions.
 
+// Match the allocator used by the stock Linkerd executable. This crate is the
+// final Rust artifact in a C executable, so the executable's main.rs cannot
+// install Linkerd's normal global allocator for us.
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    target_env = "gnu"
+))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 #[cfg(not(test))]
@@ -542,13 +553,15 @@ impl dmesh_doca::runtime::RuntimeBackend for ExternalBackend {
 
     fn drain(&mut self, budget: usize) -> io::Result<dmesh_doca::runtime::Progress> {
         let budget = c_int::try_from(budget).unwrap_or(c_int::MAX);
+        // Publish what the stack wrote before the driver runs its engine, so
+        // the bytes are submitted for DMA in this pass rather than the next.
+        let linkerd = with_worker(self.worker_id, false, |worker| {
+            worker.collect_registrations() | worker.drain()
+        });
         let code = driver_result(
             unsafe { dmesh_l7_driver_drain(self.driver, budget) },
             "drain",
         )?;
-        let linkerd = with_worker(self.worker_id, false, |worker| {
-            worker.collect_registrations() | worker.drain()
-        });
         if linkerd || code == 2 {
             Ok(dmesh_doca::runtime::Progress::Progressed)
         } else if code == 1 {

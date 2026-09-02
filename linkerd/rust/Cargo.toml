@@ -25,12 +25,21 @@ tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
 # selects them: the target is `dmesh_l7`.
 tracing = "0.1"
 
+# Keep the embedded build's allocator aligned with the stock Linkerd proxy.
+# The proxy's request path is allocation-heavy, and glibc arena contention is
+# especially visible when every DPU ARM worker hosts its own runtime.
+[target.'cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64"), target_env = "gnu"))'.dependencies]
+tikv-jemallocator = "0.6"
+
 [dev-dependencies]
 # The tests drive the endpoints the way the stack does.
 tokio = { version = "1", features = ["rt", "sync", "time", "macros", "io-util"] }
 
 [profile.release]
 opt-level = 3
+# Match the stock proxy release profile so the embedded staticlib can inline
+# and devirtualize across Linkerd's many generic service crates.
+lto = true
 # No debug info: the archive carries the whole proxy, and the DPU's root
 # filesystem does not have room for a second copy of it in the linked binary.
 debug = 0
