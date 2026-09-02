@@ -1661,8 +1661,9 @@ int dpumesh_drain_assist(struct dmesh_eq *eq)
 static void init_config(dpumesh_ctx_t *ctx, const dpumesh_config_t *config,
                          const char *service_name) {
     /* Programmatic values override the fixed slot-count and slot-size defaults. */
-    ctx->num_slots = (config && config->num_slots > 0) ? config->num_slots
-                                                       : DPUMESH_NUM_SLOTS_DEFAULT;
+    int default_num_slots = !(config && config->num_slots > 0);
+    ctx->num_slots = default_num_slots ? DPUMESH_NUM_SLOTS_DEFAULT
+                                       : config->num_slots;
     ctx->slot_size = (config && config->slot_size > 0) ? config->slot_size
                                                        : DPUMESH_SLOT_SIZE_DEFAULT;
 
@@ -1671,6 +1672,20 @@ static void init_config(dpumesh_ctx_t *ctx, const dpumesh_config_t *config,
     { const char *ke = getenv("DPUMESH_RINGS_PER_POD");
       if (ke && *ke) { int v = atoi(ke);
                        if (v >= 1 && v <= MAX_EU_PER_POD) ctx->k_rings = v; } }
+
+    /* Reverse credits divide the RX byte pool evenly across K rings. Preserve
+     * an explicit caller size (the validator will reject a bad one), but make
+     * the public API's default usable for every supported K. For example,
+     * K=12 uses 8,184 rather than 8,192 8-KiB slots: eight slots (0.1%) are
+     * left outside the fixed 64-MiB DPU staging ceiling. */
+    if (default_num_slots) {
+        size_t bytes = (size_t)ctx->num_slots * (size_t)ctx->slot_size;
+        size_t quantum = (size_t)ctx->k_rings * DPUMESH_SLOT_SIZE;
+        while (ctx->num_slots > 0 && quantum > 0 && bytes % quantum != 0) {
+            ctx->num_slots--;
+            bytes -= (size_t)ctx->slot_size;
+        }
+    }
 
     /* Fixed-size TX extents are allocated from the shared host TX buffer. */
     int bsz = TX_BLOCK_SIZE;

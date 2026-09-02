@@ -258,7 +258,8 @@ owner_worker(struct objects *objs, const dpu_comp_entry_t *e)
 static void
 dpu_wake_worker(struct dpu_data_worker *worker_state)
 {
-    dpu_wake_eventfd(&worker_state->parked, worker_state->wake_fd);
+    dpu_wake_data_worker(&worker_state->parked, &worker_state->wake_posted,
+                         worker_state->wake_fd);
 }
 
 /* Hand a reply to its owner worker. Returns -1 when the inbox is full. */
@@ -652,8 +653,13 @@ dmesh_l7_driver_clear_notifications(void *driver)
         doca_pe_get_notification_handle(worker_state->pe, &completion) != DOCA_SUCCESS)
         return -1;
     atomic_store_explicit(&worker_state->parked, 0, memory_order_release);
-    uint64_t value;
-    while (read(worker_state->wake_fd, &value, sizeof(value)) == sizeof(value)) {}
+    /* The eventfd holds a tick only after a waker posted one; an empty read
+     * costs a syscall per pass. */
+    if (atomic_exchange_explicit(&worker_state->wake_posted, 0,
+                                 memory_order_acq_rel)) {
+        uint64_t value;
+        while (read(worker_state->wake_fd, &value, sizeof(value)) == sizeof(value)) {}
+    }
     (void)doca_pe_clear_notification(worker_state->pe, completion);
     int dma_fd = px_worker_notification_fd(worker_state->objs, worker_state->id);
     if (dma_fd >= 0)
@@ -1016,6 +1022,7 @@ run_dpu_worker(struct objects *objs)
         worker_state->peer_rt = NULL;
         worker_state->peer_evict_deadline = 0;
         atomic_store_explicit(&worker_state->parked, 0, memory_order_relaxed);
+        atomic_store_explicit(&worker_state->wake_posted, 0, memory_order_relaxed);
         atomic_store_explicit(&worker_state->init_state, 0, memory_order_relaxed);
         worker_state->stop = 0;
         worker_state->running = 0;

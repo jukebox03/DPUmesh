@@ -4,7 +4,7 @@
 /* DPA capacity. Ring/EU/ARM ownership is defined in dmesh_topology.h. */
 #define MAX_DPA_EU          32  /* DPUMESH_DPA_THREADS limit */
 #define DPA_THREADS_AUTO_CAP 32 /* automatic selection cap */
-#define MAX_DPA_RINGS       8   /* per-EU forward-ring capacity (rings[] per EU) */
+#define MAX_DPA_RINGS       16  /* per-EU forward-ring capacity (rings[] per EU) */
 #define DPA_THREADS_DEFAULT 8   /* fallback N when the device query is unavailable */
 #define DPUMESH_RINGS_PER_POD_DEFAULT 2   /* default K; env DPUMESH_RINGS_PER_POD */
 #define MAX_EU_PER_POD      MAX_DPA_RINGS  /* per-pod ring array (a pod spans <= K <= this EUs) */

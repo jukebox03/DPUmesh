@@ -33,6 +33,9 @@ main(void)
     check_topology(16, 4, 4);
     check_topology(32, 8, 4);
     check_topology(32, 8, 8);
+    check_topology(24, 12, 12);
+    check_topology(32, 16, 8);
+    check_topology(32, 16, 16);
 
     assert(!dmesh_topology_valid(2, 8, 4));
     assert(!dmesh_topology_valid(4, 10, 4));

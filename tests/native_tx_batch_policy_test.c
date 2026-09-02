@@ -846,6 +846,18 @@ main(void)
     assert(defaults->su_depth * 2u == DMA_RING_SIZE);
     free(defaults);
 
+    /* The public channel uses the default slot count. A non-power-of-two K
+     * must still yield a valid whole-credit geometry without exceeding 64 MiB. */
+    assert(setenv("DPUMESH_RINGS_PER_POD", "12", 1) == 0);
+    defaults = calloc(1, sizeof(*defaults));
+    assert(defaults != NULL);
+    init_config(defaults, NULL, NULL);
+    assert(defaults->num_slots == 8184);
+    assert((defaults->num_slots * defaults->slot_size) %
+           (12 * DPUMESH_SLOT_SIZE) == 0);
+    free(defaults);
+    assert(unsetenv("DPUMESH_RINGS_PER_POD") == 0);
+
     struct dmesh_port_slot rx = {0};
     sw_descriptor_t d = { .seq = 7, .body_buf_slot = 100, .body_len = 10 };
     assert(rx_seq_accept(&rx, &d));

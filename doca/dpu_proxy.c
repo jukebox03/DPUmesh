@@ -421,6 +421,19 @@ struct px_engine {
     struct px_unit  *emit_head, *emit_tail;
     struct px_ack_release_queue ack_releases;
     struct px_arrival *ack_retry_head, *ack_retry_tail;
+    /* Worker-local performance accounting. These are deliberately plain
+     * integers: exactly one ARM worker owns an engine. They let a retained
+     * hardware run distinguish useful progress and multi-unit SG-DMA batches
+     * from an accidental busy loop without putting atomics in the hot path. */
+    uint64_t perf_drain_calls;
+    uint64_t perf_drain_progressed;
+    uint64_t perf_drain_pending;
+    uint64_t perf_drain_idle;
+    uint64_t perf_dma_batches;
+    uint64_t perf_dma_multi_batches;
+    uint64_t perf_dma_units;
+    uint64_t perf_dma_bytes;
+    uint64_t perf_report_ns;
 };
 
 /* Per-ARM-worker routing state. */
@@ -466,6 +479,7 @@ struct dmesh_proxy {
     int      l7_fail_closed;             /* a declined L7 connection is refused, not forwarded */
     uint32_t sg_pieces_max;
     uint32_t dma_bytes_max;              /* device limit for one memcpy task */
+    int perf_stats;                      /* DPUMESH_PERF_STATS diagnostic log */
 
     /* Per-worker connection and routing tables. */
     struct px_worker_state workers[MAX_ARM_WORKERS];
@@ -558,8 +572,9 @@ px_rev_owner(const struct dmesh_proxy *px, const struct pod_state *pod,
     return (port % (uint16_t)px_landing_stripes(pod)) % px->n_workers;
 }
 
-/* One cell holds every credit shard of a landing stripe (at most K counters). */
-#define PX_SCRATCH_CELL 64
+/* One cell holds every credit shard of a landing stripe (at most K counters).
+ * Keep each cell 128-byte aligned as K grows to the supported 16 rings. */
+#define PX_SCRATCH_CELL 128
 #define PX_SCRATCH_OFF(pi, r) (((size_t)(pi) * MAX_EU_PER_POD + (size_t)(r)) * PX_SCRATCH_CELL)
 _Static_assert(MAX_EU_PER_POD * sizeof(uint64_t) <= PX_SCRATCH_CELL,
                "credit shard cell must hold K counters");
@@ -570,7 +585,8 @@ static void px_engine_wake(struct px_engine *eng) {
         eng->id >= eng->objs->n_data_workers)
         return;
     struct dpu_data_worker *worker_state = &eng->objs->data_workers[eng->id];
-    dpu_wake_eventfd(&worker_state->parked, worker_state->wake_fd);
+    dpu_wake_data_worker(&worker_state->parked, &worker_state->wake_posted,
+                         worker_state->wake_fd);
 }
 
 /* Routing state for the current ARM data worker. */
@@ -1952,6 +1968,30 @@ void px_l7_stats_report(struct objects *objs, int worker_id)
     if (!px || !px->l7_attached)
         return;
     uint64_t now = px_monotonic_ns();
+
+    /* Opt-in, cumulative counters. Successive lines can be subtracted around a
+     * benchmark window; cumulative values avoid a racy reset surface. */
+    if (px->perf_stats && worker_id >= 0 && worker_id < px->n_workers) {
+        struct px_engine *eng = &px->engines[worker_id];
+        if (eng->perf_report_ns == 0) {
+            eng->perf_report_ns = now;
+        } else if (now - eng->perf_report_ns >= PX_L7_REPORT_NS) {
+            eng->perf_report_ns = now;
+            DOCA_LOG_WARN("proxy perf: worker=%d drains=%llu progressed=%llu "
+                          "pending=%llu idle=%llu dma_batches=%llu "
+                          "dma_multi=%llu dma_units=%llu dma_bytes=%llu",
+                          worker_id,
+                          (unsigned long long)eng->perf_drain_calls,
+                          (unsigned long long)eng->perf_drain_progressed,
+                          (unsigned long long)eng->perf_drain_pending,
+                          (unsigned long long)eng->perf_drain_idle,
+                          (unsigned long long)eng->perf_dma_batches,
+                          (unsigned long long)eng->perf_dma_multi_batches,
+                          (unsigned long long)eng->perf_dma_units,
+                          (unsigned long long)eng->perf_dma_bytes);
+        }
+    }
+
     uint64_t last = atomic_load_explicit(&px->l7_report_ns, memory_order_relaxed);
     if (last && now - last < PX_L7_REPORT_NS)
         return;
@@ -5237,7 +5277,18 @@ px_worker_drain(struct objects *objs, int worker_id) {
     struct dmesh_proxy *px = objs ? objs->proxy : NULL;
     if (!px || px->n_workers < 1 || worker_id < 0 || worker_id >= px->n_workers)
         return PX_PROGRESS_IDLE;
-    return px_worker_progress(&px->engines[worker_id]);
+    struct px_engine *eng = &px->engines[worker_id];
+    enum px_progress_state state = px_worker_progress(eng);
+    if (px->perf_stats) {
+        eng->perf_drain_calls++;
+        if (state == PX_PROGRESS_PROGRESSED)
+            eng->perf_drain_progressed++;
+        else if (state == PX_PROGRESS_PENDING)
+            eng->perf_drain_pending++;
+        else
+            eng->perf_drain_idle++;
+    }
+    return state;
 }
 
 void px_bind_worker(struct objects *objs, int worker_id) {
@@ -5382,6 +5433,13 @@ static int px_lane_submit(struct objects *objs, struct px_engine *eng, int pod_i
                     px_engine_latch_bad_state(eng, ret);
                 break;
             }
+            if (px->perf_stats) {
+                eng->perf_dma_batches++;
+                eng->perf_dma_units += (uint64_t)nunits;
+                eng->perf_dma_bytes += (uint64_t)bytes;
+                if (nunits > 1)
+                    eng->perf_dma_multi_batches++;
+            }
         }
 
         ln->cursor += bytes;
@@ -5524,6 +5582,8 @@ int px_init(struct objects *objs) {
       } }
     { const char *fc = getenv("DPUMESH_L7_FAIL_CLOSED");
       px->l7_fail_closed = (fc && *fc && *fc != '0'); }
+    { const char *perf = getenv("DPUMESH_PERF_STATS");
+      px->perf_stats = (perf && *perf && *perf != '0'); }
 
     /* Each ARM data worker owns its connection and routing tables. */
     px->n_workers = objs->n_data_workers >= 1 ? objs->n_data_workers : 1;

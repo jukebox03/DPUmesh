@@ -180,7 +180,7 @@ CQ_INLINE int mpsc_comp_queue_empty(dpu_mpsc_comp_queue_t *q) {
 #define TASK_POOL_MARGIN 8
 
 /* ARM workers own completion progress, connection state, and SG-DMA. */
-#define MAX_ARM_WORKERS 8
+#define MAX_ARM_WORKERS 16
 
 /* Cache-line-isolated per-worker counter: each worker mutates only its own
  * element on the DMA hot path, so elements must not share a line. */
@@ -500,6 +500,7 @@ struct dpu_data_worker {
     uint64_t peer_evict_deadline;       /* next idle-channel sweep */
     uint64_t dpa_nudge_deadline; /* next optional DPA nudge; 0 while disabled */
     atomic_int parked;           /* worker is entering or blocked in epoll_wait */
+    atomic_int wake_posted;      /* a wake tick is in the eventfd and must be read */
     atomic_int init_state;       /* 0=pending, 1=epoll ready, -1=thread init failed */
     pthread_t thread;
     volatile int stop;
@@ -698,6 +699,28 @@ static inline void dpu_wake_eventfd(atomic_int *parked, int wake_fd) {
         n = write(wake_fd, &one, sizeof(one));
     } while (n < 0 && errno == EINTR);
     (void)n;
+}
+
+/* Wake a data worker and record that its eventfd now holds a tick. The flag
+ * is set after the write lands, so a clear that sees it clear may skip the
+ * read; the tick it might miss is read by the pass that the readable eventfd
+ * triggers next. */
+static inline void dpu_wake_data_worker(atomic_int *parked, atomic_int *posted,
+                                        int wake_fd) {
+    if (wake_fd < 0)
+        return;
+    int expected = 1;
+    if (!atomic_compare_exchange_strong_explicit(parked, &expected, 0,
+                                                 memory_order_acq_rel,
+                                                 memory_order_acquire))
+        return;
+    uint64_t one = 1;
+    ssize_t n;
+    do {
+        n = write(wake_fd, &one, sizeof(one));
+    } while (n < 0 && errno == EINTR);
+    (void)n;
+    atomic_store_explicit(posted, 1, memory_order_release);
 }
 
 void
