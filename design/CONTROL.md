@@ -849,14 +849,24 @@ is charged to the Pod it serves while sitting outside every workload
 container. The broker executable and the project DSO run from a root-private,
 content-addressed host directory, never from the agent image.
 
-Before consuming the untrusted HELLO the broker discards what it no longer
-needs: it enters private mount, cgroup, network and PID namespaces, pivots
-into an empty tmpfs root, drops to an unprivileged uid with an empty
-capability set, and installs a seccomp filter that denies exec. What remains
-is a process that can progress a PE and write one eventfd.
+Confinement runs in two stages, one on each side of the device setup,
+because opening the device reads what the confined process must no longer
+reach. Before the HELLO the broker joins the Pod cgroup and enters private
+mount, cgroup, network and PID namespaces holding a private tmpfs; the agent
+releases it only after recording its PID and start time. It reads the HELLO
+as root: a fixed 76-byte record the agent has already validated with
+`MSG_PEEK` on the same socket, carrying the Service name registration needs.
+With the name it opens the device, which enumerates `/sys/class/infiniband`
+and loads the provider library, and runs §2-1.1 as the registering process:
+the Comch connection, the assertion, `POD_REGISTER`, and the ring, TX and RX
+registrations. Everything the broker needs from the filesystem — the
+device's sysfs and provider library, the agent socket — is consumed here.
+The broker then discards what it no longer needs: it pivots into the empty
+tmpfs root, drops to an unprivileged uid with an empty capability set, and
+installs a seccomp filter that denies exec. What answers READY is a process
+that can progress a PE and write one eventfd.
 
-Registration then runs §2-1.1 with the broker as the registering process. On
-READY the broker passes the workload its attach set over the socket: the ring
+On READY the broker passes the workload its attach set over the socket: the ring
 and TX/RX memfds, sealed against shrink, growth and resealing, and one
 unsealed pod-global doorbell eventfd. Data never crosses this socket again;
 it carries only RESOLVE round trips, which the broker relays to the DPU, and
@@ -1687,9 +1697,20 @@ Geometry is DATA.md's `N/K/A`, clamped rather than refused:
 | Name | Default | Bounds |
 |---|---|---|
 | `DPUMESH_DPA_THREADS` | device-detected | `N`, 1–32 |
-| `DPUMESH_RINGS_PER_POD` | 2 | `K`, 1–8; host and DPU must agree, and the webhook's `--rings-per-pod` is how the host's side arrives |
-| `DPUMESH_ARM_WORKERS` | 1 | `A`, at most 8, lowered to the nearest divisor of `K` |
+| `DPUMESH_RINGS_PER_POD` | 2 | `K`, 1–16; host and DPU must agree, and the webhook's `--rings-per-pod` is how the host's side arrives |
+| `DPUMESH_ARM_WORKERS` | 1 | `A`, at most 16, lowered to the nearest divisor of `K`; reserve a CPU for the control/main thread in production |
 | `DPUMESH_DPA_WAKE_US` | 0 (off) | periodic DPA wake, µs |
+
+The benchmark deployment has one higher-level hot-service knob:
+`DPUMESH_THROUGHPUT_WORKERS=W`. It derives `A=K=W`, the largest multiple of W
+not above N=32, and `DPUMESH_L7_LINKERD_WORKER=all`, then passes the resolved
+values to the DPU, webhook and workload agent together. This prevents a Host K
+from disagreeing with the DPU geometry. It does not replace N/K/A for density
+deployments, where K>A is intentional. The measured presets are W=4/6/8/12;
+W=16 is refused because the current main-thread affinity would share worker 0.
+Validation fixtures resolve the same W, or read effective K/A from the live DPU
+startup banner, so their webhook K and admin-port count cannot silently remain
+at eight after a different supported preset is deployed.
 
 The inter-node carrier — what a stream to a Pod on another node crosses. Unset
 leaves the node without one, and remote destinations are refused:
@@ -1719,6 +1740,11 @@ The embedded proxy itself takes its stock `LINKERD2_PROXY_*` environment —
 control-plane addresses, identity directory and token, trust anchors — exactly
 as §3.7 lays out; the harness writes the complete working set into one file
 (`/tmp/dpumesh-l7.env`, from `bench/bench.sh`).
+
+For allocator profiling only, the harness accepts
+`DPUMESH_DPU_LD_PRELOAD=<absolute-DPU-path>` and writes that value as the DPU
+process's `LD_PRELOAD`. It is empty by default and is not a deployment contract;
+it exists so the same binary and traffic can make a controlled allocator A/B.
 
 ### 5.5.2 The workload process
 

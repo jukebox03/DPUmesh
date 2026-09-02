@@ -336,14 +336,16 @@ gRPC's own endpoint cleanup. The supported deployment assigns the gRPC Service
 to the DPU-hosted Linkerd gRPC path, which picks a backend per request, so one
 channel spreads across the Service's endpoints.
 
-The adapter uses `dmesh_alloc`/`dmesh_post_send` for TX, calls `dmesh_flush`
-once at each EventEngine Write boundary, and consumes
+The adapter uses `dmesh_alloc`/`dmesh_post_send` for TX, leaves physical
+publication to the native idle/deadline policy rather than calling
+`dmesh_flush` at each EventEngine Write boundary, and consumes
 `DMESH_EVENT_RECV`, `DMESH_EVENT_RECV_FIN`, `DMESH_EVENT_CONN_REQ`,
 `DMESH_EVENT_TX_READY`, and `DMESH_EVENT_TX_ERROR` from `dmesh_poll_eq`. One
 EventEngine Write commits every slice; consecutive slices share one reservation.
-The flush is a logical force operation; physical batch state and deadlines remain
-in libdpumesh, and the reactor bounds its poll wait with
-`dmesh_eq_next_deadline_ns()`. Receives are copied
+`PostSend` transfers custody, so logical Write completion does not require a
+physical flush; close still forces the ordered tail before FIN. Physical batch
+state and deadlines remain in libdpumesh, and the reactor bounds its poll wait
+with `dmesh_eq_next_deadline_ns()`. Receives are copied
 out before `dmesh_release_rx_buffer`, and the credit is withheld, up to a
 per-connection cap, while the endpoint's queued bytes exceed its high-water mark.
 On `EAGAIN` the adapter parks the write and resumes it from

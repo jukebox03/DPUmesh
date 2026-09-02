@@ -902,9 +902,9 @@ quiesces, active sessions, pending registrations and live tasks are zero.
 | Forward ring | 4,096 descriptors |
 | Reverse ring | 8,192 entries |
 | Reverse entry | 32 B |
-| DPA EUs | 32 |
-| Rings per Pod | 8 |
-| ARM data workers | 8 |
+| DPA EUs | 1–32; N=32/30/32/24 measured for A=4/6/8/12 |
+| Rings per Pod | 1–16; K=4/6/8/12 measured in the core-scale arm |
+| ARM data workers | 1–16 structural; A=4/6/8/12 measured, A=16 control affinity pending |
 | Payload DMA retries | 1 |
 | Payload DMA batch bytes | queried device memcpy limit |
 | Egress arena | 1,024 chunks of 64 KiB |

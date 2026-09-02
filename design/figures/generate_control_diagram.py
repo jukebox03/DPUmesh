@@ -100,7 +100,7 @@ def generate_control_plane():
         4.85,
         1.25,
         "Backend Pod",
-        ("live local registration", "application memory is the TLS endpoint"),
+        ("live local registration", "DMA lands in application memory; no proxy hop"),
         edge=RED,
         face=RED_BG,
     )
@@ -153,7 +153,7 @@ def generate_control_plane():
         6.25,
         1.55,
         "DPU-held credentials",
-        ("X25519 static node key never leaves the DPU", "Linkerd P-256 key + certificate watch"),
+        ("Ed25519 static node key never leaves the DPU", "Linkerd P-256 key + certificate watch"),
         edge=ORANGE,
         face=ORANGE_BG,
     )
@@ -347,13 +347,13 @@ def generate_control_plane():
     arrow(ax, (16.25, 8.00), (16.25, 8.75), label="watch cluster objects",
           color=GRAY, dashed=True, label_dx=0.80, label_dy=0.0)
 
-    # The upper peer protocol and its security checks exist; the RDMA transport
-    # that carries it is intentionally marked as next work, not as deployed.
+    # The peer protocol, its checks and the TLS 1.3 carrier are implemented;
+    # no two-node deployment has carried traffic over it yet.
     arrow(
         ax,
         (12.15, 2.08),
         (15.10, 2.08),
-        label="binding / framing / custody ✓\nauthenticated + encrypted RDMA: TODO",
+        label="binding / framing / custody ✓\nTLS 1.3 over RDMA: built, no 2-node run",
         color=BLUE,
         label_dy=0.42,
     )
