@@ -43,11 +43,26 @@ Create the repository-root `.env` with the rig's connection settings, then:
 BENCH_DEPLOY_SCOPE=all ./bench/bench.sh deploy
 ```
 
-The command deploys `N/K/A/L=32/8/8/8`. Each Pod has one ring and one RX
+The default command deploys `N/K/A/L=32/8/8/8`. Each Pod has one ring and one RX
 landing stripe per ARM worker, and all eight workers host an embedded Linkerd
 runtime. Port affinity keeps each connection, proxy session, DMA engine, and
 reverse-ring producer on one worker. The harness labels its Kubernetes node
 `dpumesh.io/dpu=true`, which is the admission webhook's scheduling contract.
+
+For a hot-service deployment, select worker geometry with one external value:
+
+```sh
+DPUMESH_THROUGHPUT_WORKERS=12 ./bench/bench.sh geometry
+DPUMESH_THROUGHPUT_WORKERS=12 BENCH_DEPLOY_SCOPE=grpc ./bench/bench.sh deploy
+```
+
+The first command prints `throughput_workers=12 N=24 K=12 A=12 l7_workers=all`;
+the second passes that
+resolved geometry to the DPU, webhook, agent and workloads together. Measured
+presets are 4/6/8/12. Independent N/K/A variables remain only for density
+experiments where K>A is intentional.
+Policy/injection validators consume this same value; when it is absent they
+read effective K/A from the running DPU instead of defaulting to eight workers.
 
 Everything the command provisions or exports is the configuration surface
 defined in [design/CONTROL.md §5.5](../design/CONTROL.md):
@@ -117,8 +132,9 @@ its row from `spec.nodeName` and may report only the DPU public key. It cannot
 change the operator's address or agent identity.
 
 The address must belong to the RDMA device used by that node's DPU. Both DPUs
-must use the same `DPUMESH_ARM_WORKERS` and base port; worker `w` listens on
-`base-port + w`. Before deployment, verify carrier/link state on both ends with
+must use the same `DPUMESH_THROUGHPUT_WORKERS` preset (or the same resolved A)
+and base port; worker `w` listens on `base-port + w`. Before deployment, verify
+carrier/link state on both ends with
 `rdma link show`, `ibv_devinfo`, and an RDMA-CM ping such as `rping`. These
 checks require the physical port, switch/VLAN/PFC or RoCE routing, and DPU
 ownership to have already been configured.
@@ -239,5 +255,6 @@ benchmark cores. Pinning follows the PID, so anything that recreates a Pod —
 next point measures the scheduler instead of its subject. Re-pin before
 believing a number taken after one of those.
 
-Operational commands are `status`, `logs`, `dpulog`, `dpucpu`,
-`armbalance`, `rotate-identity`, `admission`, and `cleanup`.
+Operational commands are `status`, `logs`, `dpulog`, `dpubanner` (the DPU's
+startup line with its effective N/K/A), `dpucpu`, `armbalance`,
+`rotate-identity`, `admission`, and `cleanup`.

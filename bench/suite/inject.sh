@@ -35,6 +35,7 @@ set -euo pipefail
 SUITE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJ_ROOT="$(cd "$SUITE_DIR/../.." && pwd)"
 K8S_DIR="$SUITE_DIR/../k8s"
+source "$SUITE_DIR/deployed_geometry.sh"
 [ -f "$PROJ_ROOT/.env" ] && { set -a; source "$PROJ_ROOT/.env"; set +a; }
 
 NS="${NS:-test-bench}"
@@ -44,10 +45,11 @@ IMG_PRELOAD_SOCK="${IMG_PRELOAD_SOCK:-bench/preload-sock:latest}"
 IMG_CONTROLLER="${IMG_CONTROLLER:-bench/dpumesh-controller:latest}"
 BENCH_NUMA_NODE="${BENCH_NUMA_NODE:-0}"
 HOST_PCI="${HOST_PCI:-}"
-DPUMESH_RINGS_PER_POD="${DPUMESH_RINGS_PER_POD:-}"
+DEPLOYED_GEOMETRY=$(resolve_deployed_geometry "$PROJ_ROOT")
+read -r DPUMESH_RINGS_PER_POD DPUMESH_ARM_WORKERS <<<"$DEPLOYED_GEOMETRY"
 DPUMESH_ATTEST_SOCKET="${DPUMESH_ATTEST_SOCKET:-/run/dpumesh/attest.sock}"
 export NS CTRL_PORT LIB_OUT IMG_PRELOAD_SOCK IMG_CONTROLLER BENCH_NUMA_NODE
-export HOST_PCI DPUMESH_RINGS_PER_POD DPUMESH_ATTEST_SOCKET
+export HOST_PCI DPUMESH_RINGS_PER_POD DPUMESH_ARM_WORKERS DPUMESH_ATTEST_SOCKET
 
 DUR="${DUR:-10}"
 WARM="${WARM:-100}"
@@ -61,27 +63,6 @@ LOG="$OUT_DIR/raw.log"
 SSH_OPTS=(-o ServerAliveInterval=15 -o ServerAliveCountMax=4
           -o ConnectTimeout=10 -o BatchMode=yes)
 
-# The webhook stamps every injected Pod with the rings it must register with,
-# and the host refuses a channel whose K is below the DPU's landing stripes. So
-# K is read from the DPU that will serve these Pods — its startup banner — and
-# never defaulted, because a default that disagrees with the running DPU
-# crash-loops every Pod the webhook admits.
-deployed_rings_per_pod() {
-    local banner lines
-    # The banner is written once per DPU start, so a long-running node buries
-    # it under the campaigns since; widen until it is found.
-    for lines in 4000 40000 200000; do
-        banner=$(cd "$PROJ_ROOT" && timeout 180 bench/bench.sh dpulog "$lines" 2>/dev/null |
-                     grep 'DPU PROXY MODE ON' | tail -1)
-        [ -n "$banner" ] && break
-    done
-    printf '%s' "$banner" | sed -n 's/.*N\/K\/A=[0-9]*\/\([0-9]*\)\/[0-9]*.*/\1/p'
-}
-if [ -z "$DPUMESH_RINGS_PER_POD" ]; then
-    DPUMESH_RINGS_PER_POD=$(deployed_rings_per_pod)
-    [ -n "$DPUMESH_RINGS_PER_POD" ] || {
-        echo "cannot read K from the DPU's startup banner; is the DPU up?" >&2; exit 1; }
-fi
 say()  { printf '\n=== %s\n' "$*" | tee -a "$LOG"; }
 note() { printf '    %s\n' "$*" | tee -a "$LOG"; }
 field() { sed -n "s/.*[[:space:]]$2=\([^ ]*\).*/\1/p" <<<"$1"; }
@@ -100,7 +81,7 @@ ADMIN_PORTS=()
 discover_admin_ports() {
     local base="${LINKERD_ADMIN_ADDR:-127.0.0.1:4191}" port
     base="${base##*:}"
-    for ((port = base; port < base + 8; port++)); do
+    for ((port = base; port < base + DPUMESH_ARM_WORKERS; port++)); do
         ssh "${SSH_OPTS[@]}" -n "$DPU_HOST" \
             "curl -sf --max-time 3 127.0.0.1:$port/metrics >/dev/null" 2>/dev/null &&
             ADMIN_PORTS+=("$port")

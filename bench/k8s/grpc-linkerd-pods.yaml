@@ -1,0 +1,76 @@
+---
+# Feature-comparable Host-sidecar arm for the DPUmesh gRPC benchmark.
+#
+# These Pods run the exact same bench_grpc/echo_grpc images as the DPUmesh arm.
+# Only the transport attachment changes: the applications use ordinary gRPC/TCP
+# and Linkerd injects one proxy into each Pod.  The control port bypasses the
+# proxy; the gRPC data port does not.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bench-grpc-linkerd
+spec:
+  replicas: 0
+  selector: { matchLabels: { app: bench-grpc-linkerd } }
+  template:
+    metadata:
+      annotations:
+        linkerd.io/inject: enabled
+        config.linkerd.io/skip-inbound-ports: "${CTRL_PORT}"
+      labels: { app: bench-grpc-linkerd }
+    spec:
+      hostname: bench-grpc-linkerd
+      containers:
+      - name: bench-grpc-linkerd
+        image: docker.io/${IMG_BENCH_GRPC}
+        imagePullPolicy: Never
+        ports: [{ name: control, containerPort: ${CTRL_PORT} }]
+        env:
+        - { name: BENCH_NUMA_NODE, value: "${BENCH_NUMA_NODE}" }
+        - { name: BENCH_TRANSPORT, value: "tcp" }
+        - { name: BENCH_TARGET, value: "echo-grpc-linkerd:9091" }
+        - { name: BENCH_REACTORS, value: "${BENCH_REACTORS}" }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: bench-grpc-linkerd }
+spec:
+  selector: { app: bench-grpc-linkerd }
+  ports: [{ name: control, port: ${CTRL_PORT}, targetPort: ${CTRL_PORT} }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-grpc-linkerd
+spec:
+  replicas: 0
+  selector: { matchLabels: { app: echo-grpc-linkerd } }
+  template:
+    metadata:
+      annotations:
+        linkerd.io/inject: enabled
+        config.linkerd.io/skip-inbound-ports: "${CTRL_PORT}"
+      labels: { app: echo-grpc-linkerd }
+    spec:
+      hostname: echo-grpc-linkerd
+      containers:
+      - name: echo-grpc-linkerd
+        image: docker.io/${IMG_ECHO_GRPC}
+        imagePullPolicy: Never
+        ports:
+        - { name: grpc, containerPort: 9091 }
+        - { name: control, containerPort: ${CTRL_PORT} }
+        env:
+        - { name: BENCH_NUMA_NODE, value: "${BENCH_NUMA_NODE}" }
+        - { name: BENCH_TRANSPORT, value: "tcp" }
+        - { name: ECHO_PORT, value: "9091" }
+        - { name: BENCH_REACTORS, value: "${BENCH_REACTORS}" }
+        - { name: BENCH_FAIL_EVERY, value: "0" }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: echo-grpc-linkerd }
+spec:
+  selector: { app: echo-grpc-linkerd }
+  ports:
+  - { name: grpc, port: 9091, targetPort: 9091, appProtocol: kubernetes.io/h2c }

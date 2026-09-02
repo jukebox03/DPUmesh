@@ -24,6 +24,7 @@ PROJ_ROOT="$(cd "$SUITE_DIR/../.." && pwd)"
 BENCH="$SUITE_DIR/../bench.sh"
 FIXTURES="$SUITE_DIR/../k8s/policy"
 source "$SUITE_DIR/policy_route_judge.sh"
+source "$SUITE_DIR/deployed_geometry.sh"
 [ -f "$PROJ_ROOT/.env" ] && { set -a; source "$PROJ_ROOT/.env"; set +a; }
 
 NS="${NS:-test-bench}"
@@ -34,10 +35,11 @@ IMG_ECHO_GRPC="${IMG_ECHO_GRPC:-bench/echo-grpc:latest}"
 BENCH_REACTORS="${BENCH_REACTORS:-8}"
 BENCH_NUMA_NODE="${BENCH_NUMA_NODE:-}"
 HOST_PCI="${HOST_PCI:-}"
-DPUMESH_RINGS_PER_POD="${DPUMESH_RINGS_PER_POD:-8}"
+DEPLOYED_GEOMETRY=$(resolve_deployed_geometry "$PROJ_ROOT")
+read -r DPUMESH_RINGS_PER_POD DPUMESH_ARM_WORKERS <<<"$DEPLOYED_GEOMETRY"
 DPUMESH_ATTEST_SOCKET="${DPUMESH_ATTEST_SOCKET:-/run/dpumesh/attest.sock}"
 export NS CTRL_PORT LIB_OUT IMG_ECHO_GRPC BENCH_REACTORS BENCH_NUMA_NODE
-export HOST_PCI DPUMESH_RINGS_PER_POD DPUMESH_ATTEST_SOCKET
+export HOST_PCI DPUMESH_RINGS_PER_POD DPUMESH_ARM_WORKERS DPUMESH_ATTEST_SOCKET
 SCOPE="${1:-all}"
 OUT_DIR="${OUT_DIR:-$SUITE_DIR/../report/data/policy-route-$(date +%Y%m%d-%H%M%S)}"
 DUR="${DUR:-10}"
@@ -75,7 +77,7 @@ ADMIN_PORTS=()
 discover_admin_ports() {
     local base="${LINKERD_ADMIN_ADDR:-127.0.0.1:4191}" port
     base="${base##*:}"
-    for ((port = base; port < base + 8; port++)); do
+    for ((port = base; port < base + DPUMESH_ARM_WORKERS; port++)); do
         ssh "${SSH_OPTS[@]}" -n "$DPU_HOST" \
             "curl -sf --max-time 3 127.0.0.1:$port/metrics >/dev/null" 2>/dev/null &&
             ADMIN_PORTS+=("$port")
@@ -533,7 +535,8 @@ grpc_fail_every_on() {  # grpc_fail_every_on <deployment> <n>
 }
 grpc_fail_every() { grpc_fail_every_on echo-grpc-dpumesh "$1"; }
 
-run_surfaces() {
+run_surfaces() {  # run_surfaces [grpc-only]
+    local surface_scope="${1:-all}"
     say "surfaces — Linkerd features running in a proxy nobody has aimed at them"
     export ROUTE_PATH ROUTE_BACKEND ROUTE_TIMEOUT ROUTE_RETRY_LIMIT
     export ROUTE_METHOD ROUTE_HEADER_NAME ROUTE_HEADER_VALUE
@@ -682,6 +685,8 @@ run_surfaces() {
         balancer.linkerd.io/failure-accrual- \
         balancer.linkerd.io/failure-accrual-consecutive-max-failures- \
         balancer.linkerd.io/failure-accrual-consecutive-min-penalty- >>"$LOG" 2>&1 || true
+
+    [ "$surface_scope" = grpc-only ] && return 0
 
     say "S15 — HTTP/1.1 through the protocol-aware path"
     # The stack has always handled HTTP/1; nothing in this tree had ever sent
@@ -847,10 +852,11 @@ case "$SCOPE" in
     route)  run_route ;;
     lb)     run_lb ;;
     surfaces) run_surfaces ;;
+    grpc-surfaces) run_surfaces grpc-only ;;
     cross)  run_cross ;;
     fanout) run_fanout ;;
     all)    run_policy; run_route; run_cross; run_fanout; run_surfaces; run_lb ;;
-    *) echo "usage: $0 [all|policy|route|cross|fanout|surfaces|lb]" >&2; exit 1 ;;
+    *) echo "usage: $0 [all|policy|route|cross|fanout|surfaces|grpc-surfaces|lb]" >&2; exit 1 ;;
 esac
 
 if ! csv_error=$(policy_route_csv_valid "$CSV" 2>&1); then

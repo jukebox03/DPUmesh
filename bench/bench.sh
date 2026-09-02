@@ -23,6 +23,7 @@ NS="${NS:-test-bench}"                 # k8s namespace
 CTRL_PORT="${CTRL_PORT:-9092}"
 MANIFEST="$BENCH_DIR/k8s/pods.yaml"
 GRPC_MANIFEST="$BENCH_DIR/k8s/grpc-pods.yaml"
+GRPC_LINKERD_MANIFEST="$BENCH_DIR/k8s/grpc-linkerd-pods.yaml"
 
 # Every registration is attested. The deploy provisions a Host-only keyring and
 # a namespace-scoped node agent; no key or authoritative claims are mounted into
@@ -83,15 +84,31 @@ BENCH_DEPLOY_SCOPE="${BENCH_DEPLOY_SCOPE:-all}"
 BENCH_DST_SERVICES="${BENCH_DST_SERVICES:-}"
 ECHO_13_SERVICE="${ECHO_13_SERVICE:-echo-dpumesh}"
 ECHO_14_SERVICE="${ECHO_14_SERVICE:-echo-dpumesh}"
-# Canonical DPU geometry. N=32 DPA EUs are partitioned across A=8 ARM data
-# workers; every Pod contributes K=8 rings, one to each worker. Every worker
-# hosts its own Linkerd runtime so meshed flows retain the same sharding.
-DPUMESH_DPA_THREADS="${DPUMESH_DPA_THREADS:-32}"
-DPUMESH_RINGS_PER_POD="${DPUMESH_RINGS_PER_POD:-8}"
-DPUMESH_ARM_WORKERS="${DPUMESH_ARM_WORKERS:-8}"
-DPUMESH_L7_LINKERD_WORKER="${DPUMESH_L7_LINKERD_WORKER:-all}"
+# Hot-service deployments should not independently spell N/K/A and the Linkerd
+# worker selection. DPUMESH_THROUGHPUT_WORKERS is the canonical one-knob
+# geometry: A=K=W, every worker owns one landing stripe/runtime, and N is the
+# largest multiple of W no greater than the 32-EU device cap. The independent
+# variables remain available when node density (K>A) is deliberately studied;
+# they are constraints, not aliases, in that deployment class.
+DPUMESH_THROUGHPUT_WORKERS="${DPUMESH_THROUGHPUT_WORKERS:-}"
+if [ -n "$DPUMESH_THROUGHPUT_WORKERS" ]; then
+    case "$DPUMESH_THROUGHPUT_WORKERS" in
+        4|6|8|12) ;;
+        *) err "DPUMESH_THROUGHPUT_WORKERS must be a measured preset: 4, 6, 8 or 12"
+           exit 2 ;;
+    esac
+    DPUMESH_ARM_WORKERS="$DPUMESH_THROUGHPUT_WORKERS"
+    DPUMESH_RINGS_PER_POD="$DPUMESH_THROUGHPUT_WORKERS"
+    DPUMESH_DPA_THREADS=$((32 / DPUMESH_THROUGHPUT_WORKERS * DPUMESH_THROUGHPUT_WORKERS))
+    DPUMESH_L7_LINKERD_WORKER=all
+else
+    DPUMESH_DPA_THREADS="${DPUMESH_DPA_THREADS:-32}"
+    DPUMESH_RINGS_PER_POD="${DPUMESH_RINGS_PER_POD:-8}"
+    DPUMESH_ARM_WORKERS="${DPUMESH_ARM_WORKERS:-8}"
+    DPUMESH_L7_LINKERD_WORKER="${DPUMESH_L7_LINKERD_WORKER:-all}"
+fi
 export DPUMESH_DPA_THREADS DPUMESH_RINGS_PER_POD DPUMESH_ARM_WORKERS
-export DPUMESH_L7_LINKERD_WORKER
+export DPUMESH_L7_LINKERD_WORKER DPUMESH_THROUGHPUT_WORKERS
 # Every deployed data Service is assigned to the one supported embedded-Linkerd
 # topology. Native/preload protocols are opaque streams; gRPC is HTTP/2. These
 # are architecture, not benchmark knobs: an environment override must not
@@ -680,9 +697,17 @@ start_dpu() {
     local policy_workload="${LINKERD_WORKLOAD:-$default_policy_workload}"
     local default_destination_context="{\"ns\":\"default\",\"nodeName\":\"$node_name\",\"pod\":\"dpumesh-dpu\"}"
     local destination_context="${LINKERD_DESTINATION_CONTEXT:-$default_destination_context}"
-    local policy_workload_q destination_context_q
+    # Benchmark-only allocator A/B hook. Keep the production/default launch
+    # unchanged unless an explicit absolute DPU path is supplied.
+    local dpu_ld_preload="${DPUMESH_DPU_LD_PRELOAD:-}"
+    case "$dpu_ld_preload" in
+        ""|/*) ;;
+        *) err "DPUMESH_DPU_LD_PRELOAD must be an absolute DPU path"; exit 1 ;;
+    esac
+    local policy_workload_q destination_context_q dpu_ld_preload_q
     printf -v policy_workload_q '%q' "$policy_workload"
     printf -v destination_context_q '%q' "$destination_context"
+    printf -v dpu_ld_preload_q '%q' "$dpu_ld_preload"
     ssh_dpu "cat > /tmp/dpumesh-l7.env << 'L7ENV'
 LINKERD2_PROXY_DESTINATION_SVC_ADDR=$LINKERD_DST_ADDR
 LINKERD2_PROXY_DESTINATION_SVC_NAME=$LINKERD_DST_NAME
@@ -706,6 +731,8 @@ LINKERD2_PROXY_LOG=${LINKERD_LOG:-warn}
 DPUMESH_L7_LINKERD_WORKER=${DPUMESH_L7_LINKERD_WORKER:-0}
 DPUMESH_L7_SERVICE_TARGETS_FILE=$(linkerd_service_target_file)
 DPUMESH_L7_FAIL_CLOSED=$DPUMESH_L7_FAIL_CLOSED
+DPUMESH_PERF_STATS=${DPUMESH_PERF_STATS:-0}
+LD_PRELOAD=$dpu_ld_preload_q
 L7ENV
 { printf 'LINKERD2_PROXY_IDENTITY_TRUST_ANCHORS=\"'; \
   echo '$DPU_PASS' | sudo -S cat $(linkerd_trust_anchors) 2>/dev/null; \
@@ -793,8 +820,8 @@ get_pod_cores() {
             esac ;;
         grpcmax)
             case "$app" in
-                bench-grpc-dpumesh) rel="0,1,2,3,4,5,6,7,8";;
-                echo-grpc-dpumesh)  rel="9,10,11,12,13,14,15,16,17";;
+                bench-grpc-dpumesh|bench-grpc-linkerd) rel="0,1,2,3,4,5,6,7,8";;
+                echo-grpc-dpumesh|echo-grpc-linkerd)  rel="9,10,11,12,13,14,15,16,17";;
             esac ;;
         fair|*)
             case "$app" in
@@ -827,13 +854,24 @@ pin_pods() {
     fi
     for app in bench-dpumesh echo-dpumesh echo-dpumesh-13 echo-dpumesh-14 \
                loopback-dpumesh verbs-dpumesh preload-dpumesh preload-echo \
-               preload-bench bench-grpc-dpumesh echo-grpc-dpumesh echo-grpc-alt; do
-        local cores pod_id desired
+               preload-bench bench-grpc-dpumesh echo-grpc-dpumesh echo-grpc-alt \
+               bench-grpc-linkerd echo-grpc-linkerd; do
+        local cores pod_id desired pod_uid uid_token broker_pid pod_json
         cores=$(get_pod_cores "$app" "$profile"); [ -z "$cores" ] && continue
-        # sed consumes the full stream. `head` can close early and make crictl
-        # exit with SIGPIPE under this script's `set -o pipefail`.
-        pod_id=$(echo "$HOST_PASS" | sudo -S crictl pods --label "app=$app" -q 2>/dev/null |
-            sed -n '1p')
+        # A rollout can leave a stale CRI sandbox with the same app label. Pin
+        # the sandbox whose UID is the current Ready Kubernetes Pod, not the
+        # first label match returned by containerd.
+        pod_json=$(kubectl get pods -n "$NS" -l "app=$app" -o json 2>/dev/null || true)
+        pod_uid=$(printf '%s' "$pod_json" | jq -r '
+            [.items[] | select(
+                .metadata.deletionTimestamp == null and
+                .status.phase == "Running" and
+                any(.status.conditions[]?; .type == "Ready" and .status == "True"))]
+            | .[0].metadata.uid // empty' 2>/dev/null)
+        pod_id=$(echo "$HOST_PASS" | sudo -S crictl pods -o json 2>/dev/null |
+            jq -r --arg uid "$pod_uid" '
+                [.items[] | select(.labels["io.kubernetes.pod.uid"] == $uid)]
+                | .[0].id // empty' 2>/dev/null)
         if [ -z "$pod_id" ]; then
             desired=$(kubectl get deployment "$app" -n "$NS" \
                 -o jsonpath='{.spec.replicas}' 2>/dev/null || true)
@@ -856,9 +894,6 @@ pin_pods() {
         # The per-Pod broker is intentionally outside every container scope.
         # Match it by the authoritative Pod UID embedded in its cgroup and pin
         # it with the same allocation so legacy/broker A/B uses equal CPUs.
-        local pod_uid uid_token broker_pid
-        pod_uid=$(kubectl get pod -n "$NS" -l "app=$app" \
-            -o jsonpath='{.items[0].metadata.uid}' 2>/dev/null || true)
         uid_token=${pod_uid//-/_}
         if [ -n "$uid_token" ]; then
             for broker_pid in $(pgrep -x dmesh_broker 2>/dev/null || true); do
@@ -906,7 +941,6 @@ prune_obsolete_transports() {
         bench-tcp echo-tcp bench-tcp-strict echo-tcp-strict
         bench-grpc-envoy echo-grpc-envoy bench-grpc-tcp echo-grpc-tcp
         bench-grpc-envoy-strict echo-grpc-envoy-strict
-        bench-grpc-linkerd echo-grpc-linkerd
         bench-grpc-linkerd-opaque echo-grpc-linkerd-opaque
     )
     local configs=(
@@ -1064,7 +1098,7 @@ apply_manifest() {
     # host to survive the process it describes. The mount is DirectoryOrCreate,
     # so kubelet creates the directory and the privileged container can write it.
     export ASAN_LOG_DIR="${ASAN_LOG_DIR:-/var/log/dpumesh-asan}"
-    { cat "$MANIFEST"; echo ---; cat "$GRPC_MANIFEST"; } |
+    { cat "$MANIFEST"; echo ---; cat "$GRPC_MANIFEST"; echo ---; cat "$GRPC_LINKERD_MANIFEST"; } |
         envsubst | kubectl apply -n "$NS" -f -
     info "DPUmesh API resources applied"
 }
@@ -1691,7 +1725,7 @@ linkerd_worker_count() {
     [[ "$workers" =~ ^[0-9]+$ ]] || workers=1
     [[ "$rings" =~ ^[0-9]+$ ]] || rings=2
     [ "$workers" -ge 1 ] || workers=1
-    [ "$workers" -le 8 ] || workers=8
+    [ "$workers" -le 16 ] || workers=16
     while [ "$workers" -gt 1 ] &&
           { [ "$workers" -gt "$rings" ] || [ $((rings % workers)) -ne 0 ]; }; do
         workers=$((workers - 1))
@@ -1890,6 +1924,10 @@ run_grpc_shutdown() {
 ### ------------------------------------------------------------ dispatch
 CMD="${1:-help}"; shift || true
 case "$CMD" in
+    geometry) printf 'throughput_workers=%s N=%s K=%s A=%s l7_workers=%s\n' \
+                    "${DPUMESH_THROUGHPUT_WORKERS:-custom}" \
+                    "$DPUMESH_DPA_THREADS" "$DPUMESH_RINGS_PER_POD" \
+                    "$DPUMESH_ARM_WORKERS" "$DPUMESH_L7_LINKERD_WORKER" ;;
     deploy)    deploy ;;
     build)     need_env; sync_sources; build_dpu ;;
     restart)   need_env; start_dpu ;;
@@ -1918,6 +1956,7 @@ case "$CMD" in
     logs)      show_logs ;;
     cleanup)   cleanup ;;
     dpulog)    ssh_dpu "echo '$DPU_PASS' | sudo -S tail -${1:-40} $DPU_LOG" 2>&1 | sed 's/^\[sudo\][^:]*: *//' ;;
+    dpubanner) ssh_dpu "echo '$DPU_PASS' | sudo -S grep -h 'DPU PROXY MODE ON' $DPU_LOG | tail -1" 2>&1 | sed 's/^\[sudo\][^:]*: *//' ;;
     dpucpu)    dpu_sudo 'pid=$(pgrep -x dpumesh_dpu | head -1); [ -z "$pid" ] && { echo "dpumesh_dpu not running"; exit 0; }; echo "=== dpumesh_dpu pid=$pid per-thread %CPU ==="; top -bH -d 1 -n 2 -p "$pid" | awk "/ PID +USER/{n++} n==2{print}"' ;;
     armbalance) arm_balance "$@" ;;
     l7metrics)  show_linkerd_metrics ;;
@@ -1926,6 +1965,7 @@ case "$CMD" in
 Usage: $0 <command> [args]
 
   deploy                                     build + DPU + images + pods + pin (the ONLY bring-up path)
+  geometry                                   print the resolved DPU N/K/A/L7 geometry
   build | restart                            rebuild the DPU binary | restart the DPU alone (no pod may be meshed)
   linkerdbuild                               sync + build libdmesh_l7.a on the DPU
                                              (deploy does this itself)
@@ -1938,9 +1978,10 @@ Usage: $0 <command> [args]
   verbs <N> <size> <zc> <window> <pipeline>  native-API loopback validator: window conns x pipeline outstanding
   pin [fair|native|preload|grpc|grpcmax]      (re)pin supported API pods to cores
   armbalance [req reply conc dur threads [csv]]   DPU main/worker per-core CPU during one point
-  status | logs | cleanup | dpulog [n] | dpucpu | l7metrics
+  status | logs | cleanup | dpulog [n] | dpubanner | dpucpu | l7metrics
 
 Deploy knobs (env): BENCH_NUMA_POLICY=local|auto BENCH_DEPLOY_SCOPE=all|native|preload|grpc
+                    DPUMESH_THROUGHPUT_WORKERS=W derives A=K=W, valid N, L7=all
                     Every deploy brings up the root Host workload agent; grants
                     are signed and DPU admission is fail-closed
                     BENCH_DST_SERVICES=a,b,... assigns native client threads round-robin

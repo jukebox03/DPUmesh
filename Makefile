@@ -218,6 +218,7 @@ test-hostfree: $(HOSTFREE_TESTS)
 	$(TESTDIR)/peer_tls_test
 	sh tests/dma_fault_scope_test.sh
 	python3 tests/analyze_saturation_test.py
+	python3 tests/analyze_grpc_sweep_test.py
 	python3 tests/workload_attest_agent_test.py
 	python3 tests/dpumesh_controller_test.py
 	python3 tests/dpumesh_webhook_test.py
@@ -225,6 +226,7 @@ test-hostfree: $(HOSTFREE_TESTS)
 	python3 tests/feed_delivery_test.py
 	python3 tests/health_page_test.py
 	bash tests/policy_route_judge_test.sh
+	bash tests/bench_geometry_test.sh
 
 test: $(TESTDIR)/native_api_contract_test $(TESTDIR)/native_control_state_test \
 	$(TESTDIR)/workload_grant_test $(TESTDIR)/pod_membership_test \
@@ -261,6 +263,7 @@ test: $(TESTDIR)/native_api_contract_test $(TESTDIR)/native_control_state_test \
 	sh tests/abi_contract_test.sh $(LIB) $(PRELOAD) $(ABI_MAJOR)
 	sh tests/generator_selftest_test.sh $(BINDIR)/bench_dpumesh $(BINDIR)/bench_sock
 	python3 tests/analyze_saturation_test.py
+	python3 tests/analyze_grpc_sweep_test.py
 	python3 tests/workload_attest_agent_test.py
 	python3 tests/dpumesh_controller_test.py
 	python3 tests/dpumesh_webhook_test.py
@@ -268,6 +271,7 @@ test: $(TESTDIR)/native_api_contract_test $(TESTDIR)/native_control_state_test \
 	python3 tests/feed_delivery_test.py
 	python3 tests/health_page_test.py
 	bash tests/policy_route_judge_test.sh
+	bash tests/bench_geometry_test.sh
 
 # dmesh API binaries link the transport library. One explicit rule each so the
 # source is a tracked prerequisite (rebuilds on edit).

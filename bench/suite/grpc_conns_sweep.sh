@@ -47,11 +47,15 @@ SAMPLE="${SAMPLE:-6}"
 # Lets the previous run's connections drain before the next one dials.
 GAP="${GAP:-3}"
 OUT="${OUT:-/tmp/grpc-conns-sweep}"
-REACTORS_TAG="${REACTORS_TAG:-8}"
+REACTORS_TAG="${REACTORS_TAG:-}"
 PIN_PROFILE="${PIN_PROFILE:-grpc}"
 # Overload can kill an endpoint. Redeploying is the only way to clear the DPU
 # afterwards, so the sweep does it itself rather than stopping at the first one.
 MAX_RECOVERIES="${MAX_RECOVERIES:-6}"
+# Once a point demonstrably overruns the path, higher rates cannot be retained
+# and can poison H2/native sessions while their queued calls are cancelled.
+# Stop that channel's monotonic rate axis at the first such point.
+STOP_ON_OVERLOAD="${STOP_ON_OVERLOAD:-1}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -110,13 +114,47 @@ container_pid() {
   printf '%s\n' "$HOST_PASS" |
     sudo -S crictl inspect "$cid" 2>/dev/null | jq -r '.info.pid'
 }
-cgroup_usage_usec() {
+sidecar_pid() {
+  local app="$1" pod cid
+  pod=$(pod_name "$app"); [ -n "$pod" ] || return
+  cid=$(kubectl get pod -n "$NS" "$pod" -o json |
+    jq -r '((.status.containerStatuses // []) +
+            (.status.initContainerStatuses // []))[] |
+           select(.name == "linkerd-proxy") | .containerID' | sed -n '1p')
+  cid="${cid#*://}"
+  [ -n "$cid" ] && [ "$cid" != null ] || return
+  printf '%s\n' "$HOST_PASS" |
+    sudo -S crictl inspect "$cid" 2>/dev/null | jq -r '.info.pid'
+}
+container_cgroup_usec() {
   local pid="$1" rel
   [ "${pid:-0}" -gt 0 ] || { echo 0; return; }
   rel=$(awk -F: '$1=="0"{print $3; exit}' "/proc/$pid/cgroup" 2>/dev/null) || true
   [ -n "$rel" ] || { echo 0; return; }
   awk '$1=="usage_usec"{print $2; found=1} END{if(!found) print 0}' \
     "/sys/fs/cgroup$rel/cpu.stat" 2>/dev/null || echo 0
+}
+cgroup_usage_usec() {
+  local pid="$1" rel
+  [ "${pid:-0}" -gt 0 ] || { echo 0; return; }
+  rel=$(awk -F: '$1=="0"{print $3; exit}' "/proc/$pid/cgroup" 2>/dev/null) || true
+  [ -n "$rel" ] || { echo 0; return; }
+  # Charge the recursive Pod parent. The broker is in its own sibling child
+  # cgroup, so a container-only reading silently omits part of this transport.
+  case "${rel##*/}" in
+    cri-containerd-*.scope|crio-*.scope|docker-*.scope) rel=${rel%/*} ;;
+  esac
+  awk '$1=="usage_usec"{print $2; found=1} END{if(!found) print 0}' \
+    "/sys/fs/cgroup$rel/cpu.stat" 2>/dev/null || echo 0
+}
+
+configured_reactors() {
+  local app="$1"
+  kubectl get pod -n "$NS" -l "app=$app" -o json 2>/dev/null |
+    jq -r --arg app "$app" \
+      '.items[] | select(.metadata.deletionTimestamp == null) |
+       .spec.containers[] | select(.name == $app) | .env[]? |
+       select(.name == "BENCH_REACTORS") | .value' | sed -n '1p'
 }
 
 # One ssh round trip returns the DPU clock, the tick rate, the data-path pid and
@@ -141,17 +179,37 @@ dpu_worker_snapshot() {
 # which corrupts every later run. Stop at the first restart rather than collect
 # through it.
 restart_count() {
-  kubectl get pod -n "$NS" -l "app=$1" \
-    -o go-template='{{range .items}}{{range .status.containerStatuses}}{{.restartCount}}{{end}}{{end}}' \
-    2>/dev/null || echo ""
+  # During a rollout, do not concatenate the terminating Pod's restart count
+  # with the replacement Pod's count. The comparison below needs one numeric
+  # value for the live label selection.
+  kubectl get pods -n "$NS" -l "app=$1" -o json 2>/dev/null |
+    jq -r '[.items[] | select(.metadata.deletionTimestamp == null) |
+            ((.status.containerStatuses // []) +
+             (.status.initContainerStatuses // []))[]?.restartCount] |
+           add // 0' || echo ""
 }
 
 CLIENT_IP=$(control_ip "$CLIENT_APP")
 [ -n "$CLIENT_IP" ] || { echo "no running pod for $CLIENT_APP" >&2; exit 1; }
 CLIENT_PID=$(container_pid "$CLIENT_APP" || true)
 SERVER_PID=$(container_pid "$SERVER_APP" || true)
+CLIENT_SIDECAR_PID=$(sidecar_pid "$CLIENT_APP" || true)
+SERVER_SIDECAR_PID=$(sidecar_pid "$SERVER_APP" || true)
 [[ "${CLIENT_PID:-}" =~ ^[0-9]+$ ]] || { echo "cannot resolve $CLIENT_APP PID" >&2; exit 1; }
 [[ "${SERVER_PID:-}" =~ ^[0-9]+$ ]] || { echo "cannot resolve $SERVER_APP PID" >&2; exit 1; }
+
+CLIENT_REACTORS=$(configured_reactors "$CLIENT_APP")
+SERVER_REACTORS=$(configured_reactors "$SERVER_APP")
+[[ "$CLIENT_REACTORS" =~ ^[1-9][0-9]*$ ]] &&
+  [ "$CLIENT_REACTORS" = "$SERVER_REACTORS" ] || {
+    echo "cannot establish one reactor count: client=${CLIENT_REACTORS:-NA} server=${SERVER_REACTORS:-NA}" >&2
+    exit 1
+  }
+if [ -n "$REACTORS_TAG" ] && [ "$REACTORS_TAG" != "$CLIENT_REACTORS" ]; then
+  echo "--tag $REACTORS_TAG disagrees with deployed BENCH_REACTORS=$CLIENT_REACTORS" >&2
+  exit 1
+fi
+REACTORS_TAG="$CLIENT_REACTORS"
 
 reply=$(printf 'PING\n' | timeout 10s nc -N "$CLIENT_IP" "$CTRL_PORT" 2>/dev/null || true)
 [ "${reply%%$'\n'*}" = PONG ] || { echo "client control port not answering: $reply" >&2; exit 1; }
@@ -159,8 +217,10 @@ reply=$(printf 'PING\n' | timeout 10s nc -N "$CLIENT_IP" "$CTRL_PORT" 2>/dev/nul
 if [ ! -s "$CSV" ]; then
   {
     printf 'channels,reactors,frame,rep,offered,achieved,ratio,p50_us,p99_us,p999_us,'
-    printf 'fail,drops,client_core,server_core,dpu_core_total,dpu_core_workers,'
-    printf 'w0,w1,w2,w3,w4,w5,w6,w7,window_s\n'
+    printf 'fail,drops,pending,worker_fail,credit_hold_dropped,eq_budget_exhausted,'
+    printf 'client_core,server_core,client_app_core,client_sidecar_core,'
+    printf 'server_app_core,server_sidecar_core,dpu_core_total,dpu_core_workers,'
+    printf 'w0,w1,w2,w3,w4,w5,w6,w7,w8,w9,w10,w11,w12,w13,w14,w15,window_s\n'
   } >"$CSV"
 fi
 
@@ -168,6 +228,8 @@ resolve_endpoints() {
   CLIENT_IP=$(control_ip "$CLIENT_APP")
   CLIENT_PID=$(container_pid "$CLIENT_APP" || true)
   SERVER_PID=$(container_pid "$SERVER_APP" || true)
+  CLIENT_SIDECAR_PID=$(sidecar_pid "$CLIENT_APP" || true)
+  SERVER_SIDECAR_PID=$(sidecar_pid "$SERVER_APP" || true)
   CLIENT_RESTARTS=$(restart_count "$CLIENT_APP")
   SERVER_RESTARTS=$(restart_count "$SERVER_APP")
   [ -n "$CLIENT_IP" ] && [[ "${CLIENT_PID:-}" =~ ^[0-9]+$ ]] &&
@@ -185,7 +247,6 @@ recover_deploy() {
   log "recovery $RECOVERIES/$MAX_RECOVERIES: full redeploy"
   (
     cd "$PROJ_ROOT" &&
-    DPUMESH_DPA_THREADS=32 DPUMESH_RINGS_PER_POD=8 DPUMESH_ARM_WORKERS=8 \
     BENCH_NUMA_POLICY=local BENCH_DEPLOY_SCOPE=grpc \
       bash bench/bench.sh deploy
   ) >>"$OUT/recover.log" 2>&1 || { log "redeploy failed"; return 1; }
@@ -225,6 +286,10 @@ for channels in $CHANNELS; do
       snap0=$(dpu_worker_snapshot || true)
       cg_c0=$(cgroup_usage_usec "$CLIENT_PID")
       cg_s0=$(cgroup_usage_usec "$SERVER_PID")
+      cg_ca0=$(container_cgroup_usec "$CLIENT_PID")
+      cg_sa0=$(container_cgroup_usec "$SERVER_PID")
+      cg_cs0=$(container_cgroup_usec "${CLIENT_SIDECAR_PID:-0}")
+      cg_ss0=$(container_cgroup_usec "${SERVER_SIDECAR_PID:-0}")
       host_t0=$(date +%s.%N)
 
       sleep "$SAMPLE"
@@ -232,6 +297,10 @@ for channels in $CHANNELS; do
       snap1=$(dpu_worker_snapshot || true)
       cg_c1=$(cgroup_usage_usec "$CLIENT_PID")
       cg_s1=$(cgroup_usage_usec "$SERVER_PID")
+      cg_ca1=$(container_cgroup_usec "$CLIENT_PID")
+      cg_sa1=$(container_cgroup_usec "$SERVER_PID")
+      cg_cs1=$(container_cgroup_usec "${CLIENT_SIDECAR_PID:-0}")
+      cg_ss1=$(container_cgroup_usec "${SERVER_SIDECAR_PID:-0}")
       host_t1=$(date +%s.%N)
 
       wait "$ncpid" || true
@@ -267,14 +336,14 @@ for channels in $CHANNELS; do
         deltas=""
       fi
 
-      w=(0 0 0 0 0 0 0 0)
+      w=(0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0)
       dpu_workers_total=0
       dpu_total=0
       while read -r name val; do
         [ -n "$name" ] || continue
         dpu_total=$(awk -v a="$dpu_total" -v b="$val" 'BEGIN{printf "%.6f", a+b}')
         case "$name" in
-          dmesh-w[0-7])
+          dmesh-w[0-9]|dmesh-w1[0-5])
             idx="${name#dmesh-w}"
             w[$idx]="$val"
             dpu_workers_total=$(awk -v a="$dpu_workers_total" -v b="$val" 'BEGIN{printf "%.6f", a+b}')
@@ -286,22 +355,37 @@ for channels in $CHANNELS; do
         'BEGIN{if(d>0) printf "%.4f", (b-a)/1e6/d; else print "NA"}')
       server_core=$(awk -v a="$cg_s0" -v b="$cg_s1" -v d="$window" \
         'BEGIN{if(d>0) printf "%.4f", (b-a)/1e6/d; else print "NA"}')
+      client_app_core=$(awk -v a="$cg_ca0" -v b="$cg_ca1" -v d="$window" \
+        'BEGIN{if(d>0) printf "%.4f", (b-a)/1e6/d; else print "NA"}')
+      server_app_core=$(awk -v a="$cg_sa0" -v b="$cg_sa1" -v d="$window" \
+        'BEGIN{if(d>0) printf "%.4f", (b-a)/1e6/d; else print "NA"}')
+      client_sidecar_core=$(awk -v a="$cg_cs0" -v b="$cg_cs1" -v d="$window" \
+        'BEGIN{if(d>0) printf "%.4f", (b-a)/1e6/d; else print "NA"}')
+      server_sidecar_core=$(awk -v a="$cg_ss0" -v b="$cg_ss1" -v d="$window" \
+        'BEGIN{if(d>0) printf "%.4f", (b-a)/1e6/d; else print "NA"}')
 
       achieved=$(field "$result" mrps)
       achieved=$(awk -v m="${achieved:-0}" 'BEGIN{printf "%.1f", m*1e6}')
       p50=$(field "$result" p50); p99=$(field "$result" p99); p999=$(field "$result" p999)
       fail=$(field "$result" fail); drops=$(field "$result" drops)
+      pending=$(field "$result" pending); worker_fail=$(field "$result" worker_fail)
+      credit_hold_dropped=$(field "$result" credit_hold_dropped)
+      eq_budget_exhausted=$(field "$result" eq_budget_exhausted)
       ratio=$(awk -v a="${achieved:-0}" -v o="$rate" 'BEGIN{if(o>0) printf "%.4f", a/o; else print 0}')
 
-      printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+      printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
         "$channels" "$REACTORS_TAG" "$FRAME" "$rep" "$rate" "$achieved" "$ratio" \
         "${p50:-NA}" "${p99:-NA}" "${p999:-NA}" "${fail:-NA}" "${drops:-NA}" \
-        "$client_core" "$server_core" "$dpu_total" "$dpu_workers_total" \
+        "${pending:-NA}" "${worker_fail:-NA}" "${credit_hold_dropped:-NA}" \
+        "${eq_budget_exhausted:-NA}" \
+        "$client_core" "$server_core" "$client_app_core" "$client_sidecar_core" \
+        "$server_app_core" "$server_sidecar_core" "$dpu_total" "$dpu_workers_total" \
         "${w[0]}" "${w[1]}" "${w[2]}" "${w[3]}" "${w[4]}" "${w[5]}" "${w[6]}" "${w[7]}" \
+        "${w[8]}" "${w[9]}" "${w[10]}" "${w[11]}" "${w[12]}" "${w[13]}" "${w[14]}" "${w[15]}" \
         "$dpu_window" >>"$CSV"
 
       done_n=$((done_n + 1))
-      log "[$done_n/$total] c=$channels rate=$rate rep=$rep -> achieved=$achieved ratio=$ratio p50=${p50:-NA} p99=${p99:-NA} client=$client_core server=$server_core workers=$dpu_workers_total"
+      log "[$done_n/$total] c=$channels rate=$rate rep=$rep -> achieved=$achieved ratio=$ratio p50=${p50:-NA} p99=${p99:-NA} client=$client_core(app=$client_app_core sidecar=$client_sidecar_core) server=$server_core(app=$server_app_core sidecar=$server_sidecar_core) workers=$dpu_workers_total"
 
       now_c=$(restart_count "$CLIENT_APP"); now_s=$(restart_count "$SERVER_APP")
       if [ "$now_c" != "$CLIENT_RESTARTS" ] || [ "$now_s" != "$SERVER_RESTARTS" ]; then
@@ -312,6 +396,19 @@ for channels in $CHANNELS; do
         echo "$channels,$REACTORS_TAG,$FRAME,$rate,$rep" >>"$CRASHES"
         recover_deploy || exit 3
         done_n=$((done_n + REPS - rep))
+        break 2
+      fi
+
+      overloaded=$(awk -v ratio="$ratio" -v fail="${fail:-0}" -v drops="${drops:-0}" \
+        -v worker_fail="${worker_fail:-0}" -v credit="${credit_hold_dropped:-0}" \
+        -v budget="${eq_budget_exhausted:-0}" '
+          BEGIN {
+            print (ratio < 0.99 || fail + 0 > 0 || drops + 0 > 0 ||
+                   worker_fail + 0 > 0 || credit + 0 > 0 || budget + 0 > 0) ? 1 : 0
+          }')
+      if [ "$STOP_ON_OVERLOAD" = 1 ] && [ "$overloaded" = 1 ]; then
+        log "OVERLOAD at $run_id; stopping higher rates for channels=$channels"
+        sleep "$GAP"
         break 2
       fi
 
