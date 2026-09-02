@@ -1,22 +1,42 @@
 #!/bin/bash
 # Benchmark build, deployment, measurement, validation, pinning, and diagnostics.
 # Use `deploy` to start the DPU and pods as one registration lifecycle. Deployment
-# and pinning read repository-root `.env`; live runs require kubectl and nc.
+# and pinning read configuration from the environment and, when present, the
+# repository-root `.env`; live runs require kubectl and nc.
 set -euo pipefail
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
-info()  { echo -e "${GREEN}[INFO]${NC} $*"; }
-warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
-err()   { echo -e "${RED}[ERR]${NC} $*"; }
-step()  { echo -e "${BLUE}[STEP]${NC} $*"; }
+info()  { echo -e "${GREEN}[INFO]${NC} $*" >&2; }
+warn()  { echo -e "${YELLOW}[WARN]${NC} $*" >&2; }
+err()   { echo -e "${RED}[ERR]${NC} $*" >&2; }
+step()  { echo -e "${BLUE}[STEP]${NC} $*" >&2; }
 
 ### ------------------------------------------------------------ config
 BENCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"     # .../bench
 PROJ_ROOT="$(cd "$BENCH_DIR/.." && pwd)"                      # repo root
-if [ -f "$PROJ_ROOT/.env" ]; then
-    set -a; source "$PROJ_ROOT/.env"; set +a
+if [[ -v DPUMESH_ENV_FILE ]]; then
+    [ -n "$DPUMESH_ENV_FILE" ] || {
+        err "DPUMESH_ENV_FILE must not be empty"
+        exit 1
+    }
+    BENCH_ENV_FILE="$DPUMESH_ENV_FILE"
+    BENCH_ENV_EXPLICIT=1
 else
-    warn ".env not found at $PROJ_ROOT/.env (deploy/pin need it; runs work without)"
+    BENCH_ENV_FILE="$PROJ_ROOT/.env"
+    BENCH_ENV_EXPLICIT=0
+fi
+if [ -e "$BENCH_ENV_FILE" ] || [ -L "$BENCH_ENV_FILE" ]; then
+    [ -f "$BENCH_ENV_FILE" ] && [ -r "$BENCH_ENV_FILE" ] || {
+        err "configuration file is not a readable regular file: $BENCH_ENV_FILE"
+        exit 1
+    }
+    set -a; source "$BENCH_ENV_FILE"; set +a
+elif [ "$BENCH_ENV_EXPLICIT" -eq 1 ]; then
+    # The default file is optional because pure commands and workload drivers
+    # need no rig credentials. An explicit path is an operator assertion and a
+    # typo in it must not silently fall back to an unconfigured environment.
+    err "DPUMESH_ENV_FILE does not exist: $BENCH_ENV_FILE"
+    exit 1
 fi
 
 NS="${NS:-test-bench}"                 # k8s namespace

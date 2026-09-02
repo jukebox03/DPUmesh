@@ -3,10 +3,15 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT/bench/suite/deployed_geometry.sh"
+scratch=$(mktemp -d)
+trap 'rm -rf "$scratch"' EXIT
+empty_env="$scratch/empty.env"
+: >"$empty_env"
 
 check_geometry() {
     local workers="$1" expected="$2" got
-    got=$(DPUMESH_THROUGHPUT_WORKERS="$workers" \
+    got=$(DPUMESH_ENV_FILE="$empty_env" \
+          DPUMESH_THROUGHPUT_WORKERS="$workers" \
           DPUMESH_DPA_THREADS=7 DPUMESH_RINGS_PER_POD=3 \
           DPUMESH_ARM_WORKERS=2 DPUMESH_L7_LINKERD_WORKER=0 \
           bash "$ROOT/bench/bench.sh" geometry)
@@ -23,8 +28,27 @@ check_geometry 6  "throughput_workers=6 N=30 K=6 A=6 l7_workers=all"
 check_geometry 8  "throughput_workers=8 N=32 K=8 A=8 l7_workers=all"
 check_geometry 12 "throughput_workers=12 N=24 K=12 A=12 l7_workers=all"
 
+# The repository default is optional. Exercise a copy with no adjacent .env so
+# a developer's local file cannot hide stdout/stderr noise from a clean CI run.
+clean_root="$scratch/clean"
+mkdir -p "$clean_root/bench"
+cp "$ROOT/bench/bench.sh" "$clean_root/bench/bench.sh"
+env -u DPUMESH_ENV_FILE \
+    DPUMESH_THROUGHPUT_WORKERS=4 \
+    DPUMESH_DPA_THREADS=7 DPUMESH_RINGS_PER_POD=3 \
+    DPUMESH_ARM_WORKERS=2 DPUMESH_L7_LINKERD_WORKER=0 \
+    bash "$clean_root/bench/bench.sh" geometry \
+    >"$scratch/clean.out" 2>"$scratch/clean.err"
+got=$(<"$scratch/clean.out")
+[ "$got" = "throughput_workers=4 N=32 K=4 A=4 l7_workers=all" ] &&
+    [ ! -s "$scratch/clean.err" ] || {
+        echo "optional default environment file polluted geometry output" >&2
+        exit 1
+    }
+
 set +e
-DPUMESH_THROUGHPUT_WORKERS=16 bash "$ROOT/bench/bench.sh" geometry \
+DPUMESH_ENV_FILE="$empty_env" DPUMESH_THROUGHPUT_WORKERS=16 \
+    bash "$ROOT/bench/bench.sh" geometry \
     >/dev/null 2>&1
 rc=$?
 set -e
@@ -34,7 +58,8 @@ set -e
 }
 
 set +e
-DPUMESH_THROUGHPUT_WORKERS=5 bash "$ROOT/bench/bench.sh" geometry \
+DPUMESH_ENV_FILE="$empty_env" DPUMESH_THROUGHPUT_WORKERS=5 \
+    bash "$ROOT/bench/bench.sh" geometry \
     >/dev/null 2>&1
 rc=$?
 set -e
@@ -42,6 +67,31 @@ set -e
     echo "unmeasured throughput preset A=5 must fail (got rc=$rc)" >&2
     exit 1
 }
+
+# A caller-selected configuration file is an assertion, unlike the optional
+# repository default. Refuse a misspelt path instead of silently using defaults.
+set +e
+DPUMESH_ENV_FILE="$scratch/missing.env" \
+    bash "$ROOT/bench/bench.sh" geometry \
+    >"$scratch/missing.out" 2>"$scratch/missing.err"
+rc=$?
+set -e
+[ "$rc" -eq 1 ] && [ ! -s "$scratch/missing.out" ] &&
+    grep -q "DPUMESH_ENV_FILE does not exist" "$scratch/missing.err" || {
+        echo "missing explicit environment file was not rejected cleanly" >&2
+        exit 1
+    }
+
+set +e
+DPUMESH_ENV_FILE= bash "$ROOT/bench/bench.sh" geometry \
+    >"$scratch/empty.out" 2>"$scratch/empty.err"
+rc=$?
+set -e
+[ "$rc" -eq 1 ] && [ ! -s "$scratch/empty.out" ] &&
+    grep -q "DPUMESH_ENV_FILE must not be empty" "$scratch/empty.err" || {
+        echo "empty explicit environment file was not rejected cleanly" >&2
+        exit 1
+    }
 
 # Validation fixtures consume the same canonical deployment value. A stale
 # legacy K/A must not make them inspect only part of a 12-worker deployment.
@@ -63,8 +113,7 @@ got=$(DPUMESH_THROUGHPUT_WORKERS= DPUMESH_RINGS_PER_POD=12 \
 # The DPU banner path, against a stub bench.sh: a half geometry is announced
 # and ignored in favour of the effective K/A the DPU printed, and a DPU that
 # cannot be read fails at once instead of being retried with longer tails.
-fake=$(mktemp -d)
-trap 'rm -rf "$fake"' EXIT
+fake="$scratch/fake"
 mkdir -p "$fake/bench"
 cat >"$fake/bench/bench.sh" <<'EOS'
 #!/usr/bin/env bash

@@ -43,6 +43,13 @@ Create the repository-root `.env` with the rig's connection settings, then:
 BENCH_DEPLOY_SCOPE=all ./bench/bench.sh deploy
 ```
 
+The file is optional for pure commands and workload drivers. Configuration may
+also be supplied directly in the process environment. To select a file outside
+the checkout, set `DPUMESH_ENV_FILE`; unlike the optional repository default,
+an explicitly selected file must exist and be readable.
+Command results intended for scripts are written to standard output; progress,
+warnings, and errors are written to standard error.
+
 The default command deploys `N/K/A/L=32/8/8/8`. Each Pod has one ring and one RX
 landing stripe per ARM worker, and all eight workers host an embedded Linkerd
 runtime. Port affinity keeps each connection, proxy session, DMA engine, and
