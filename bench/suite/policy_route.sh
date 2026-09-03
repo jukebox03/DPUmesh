@@ -333,7 +333,7 @@ run_route() {
     fixture_apply httproute.yaml; sleep 6
     stage R2 "HTTPRoute matching nothing" grpc-dpumesh refuse 1 0 "no rule matches"
 
-    # A route may cross Services now, so the backend has to be one that speaks
+    # A route may cross Services, so the backend has to be one that speaks
     # the same protocol — otherwise the arm measures the application, not the
     # route. The policy half of this is the cross scope's X2.
     ROUTE_PATH="$GRPC_METHOD_PREFIX"; ROUTE_BACKEND=echo-grpc-alt
@@ -508,10 +508,10 @@ run_lb() {
     kubectl scale deployment/echo-grpc-dpumesh -n "$NS" --replicas=2 >>"$LOG" 2>&1
     wait_ready_replicas echo-grpc-dpumesh 2 150s
     sleep 25
-    # One client channel is one DMA session, and a session owns one backend
-    # channel. Offering the same load over one channel and over four is what
-    # separates "the balancer holds both endpoints" from "one request may go
-    # anywhere".
+    # One client channel is one DMA session whose requests are balanced per request
+    # across the Service's backends. Offering the same load over one channel and over
+    # four is what shows the spread comes from the balancer, not from how many
+    # channels the client opens.
     grpc_backends L4a 1 2
     grpc_backends L4b 4 2
 
@@ -522,9 +522,9 @@ run_lb() {
     grpc_backends L5 1 1
 }
 
-# Linkerd features the DPU-hosted proxy has never been pointed at. Each stage
-# is a claim the stack already makes; the arm either closes it or turns it into
-# an open item. The two protocol-aware stages that need a failing backend get
+# Linkerd features beyond policy and routing. Each stage is a claim the stack makes;
+# the arm either confirms it on the DPU-hosted proxy or turns it into an open item.
+# The two protocol-aware stages that need a failing backend get
 # one: BENCH_FAIL_EVERY makes the echo server answer INTERNAL on a schedule,
 # because a retry policy and a circuit breaker are both statements about what
 # happens when a backend fails.
@@ -537,7 +537,7 @@ grpc_fail_every() { grpc_fail_every_on echo-grpc-dpumesh "$1"; }
 
 run_surfaces() {  # run_surfaces [grpc-only]
     local surface_scope="${1:-all}"
-    say "surfaces — Linkerd features running in a proxy nobody has aimed at them"
+    say "surfaces — Linkerd features beyond policy and routing"
     export ROUTE_PATH ROUTE_BACKEND ROUTE_TIMEOUT ROUTE_RETRY_LIMIT
     export ROUTE_METHOD ROUTE_HEADER_NAME ROUTE_HEADER_VALUE
     export GRPC_SERVICE GRPC_METHOD POLICY_IDENTITY
@@ -689,8 +689,8 @@ run_surfaces() {  # run_surfaces [grpc-only]
     [ "$surface_scope" = grpc-only ] && return 0
 
     say "S15 — HTTP/1.1 through the protocol-aware path"
-    # The stack has always handled HTTP/1; nothing in this tree had ever sent
-    # it any. A verdict is what separates "the bytes arrived" from "the
+    # http1_bench/http1_echo are the one workload in this tree that sends the stack
+    # HTTP/1. A verdict is what separates "the bytes arrived" from "the
     # protocol-aware path carried them".
     stage S15 "HTTP/1.1 request-response" http1 serve 1 0 \
         "the only HTTP/1 workload in the tree"
@@ -783,10 +783,8 @@ run_cross() {
     stage X4 "no route" grpc-dpumesh serve 1 0 "returned to the default route"
 }
 
-# Per-request backend selection. The negative result this replaces is in the
-# balancing scope: one client channel reached one Pod and four channels split
-# unevenly, because a session owned one backend channel and spread came from
-# how many channels the client happened to open.
+# Per-request backend selection: one client channel must reach both backends of a
+# Service, so spread comes from the route, not from how many channels the client opens.
 run_fanout() {
     say "fan-out — one client channel across two backends of one Service"
     drop_all_fixtures; sleep 6

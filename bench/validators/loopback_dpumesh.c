@@ -42,8 +42,8 @@ static int cmp_d(const void *a, const void *b) {
     return (x > y) - (x < y);
 }
 /* 2us idle backoff, taken only when a pump found NO work: the EQ is the one wake
- * source, and SQ space frees silently (there are no send events), so both
- * kinds of wait re-poll rather than sleep on the fd. */
+ * source and TX_READY is only a one-shot armed by an EAGAIN, so both kinds of wait
+ * re-poll rather than sleep on the fd. */
 static void idle_wait(void) { struct timespec t = {0, 2000}; nanosleep(&t, NULL); }
 
 /* Per-server-conn echo backlog (dmesh_qp_t::user_data). Empty in steady state —

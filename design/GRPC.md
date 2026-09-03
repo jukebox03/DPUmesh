@@ -336,10 +336,11 @@ Above the Endpoint's high-water mark the reactor keeps the receive credit
 instead of returning it, and the DPU lands no further bytes for that connection
 until a read drains the queue and the Endpoint asks its reactor to release what
 it holds. Retention is capped per connection, the credits belonging to a landing
-ring shared across the shard; past that cap the credit returns with the copy and
-`Stats::receive_credit_hold_dropped` advances. Receive backpressure therefore has
-no tunable, and there is no busy poll, retry timer, connection scan, or per-RPC
-wrapper dispatch.
+ring shared across the shard; past that cap the credit returns with the copy,
+`Stats::receive_credit_hold_dropped` advances and the connection is failed
+closed, so a non-cooperating peer cannot grow the slice queue. Receive
+backpressure therefore has no tunable, and there is no busy poll, retry timer,
+connection scan, or per-RPC wrapper dispatch.
 
 Peer FIN ends the read half. Transport failure or Endpoint destruction completes
 both pending directions once with an error. Each Endpoint QP is one byte stream;
@@ -371,8 +372,9 @@ gRPC Endpoint lifetime rule in the Ownership section.
 
 `DmeshRuntime::stats()` sums each shard's `DmeshReactor::Stats`. Both counters
 report a bound being reached rather than an error:
-`receive_credit_hold_dropped` rises when backpressure stops applying to a stalled
-connection, and `eq_drain_budget_exhausted` rises when a shard is saturated.
+`receive_credit_hold_dropped` rises when a stalled connection exceeds its
+credit-retention cap and is failed closed, and `eq_drain_budget_exhausted` rises
+when a shard is saturated.
 
 ## Connection lifecycle
 
@@ -553,59 +555,30 @@ ordering and cancellation. A worker-local/non-atomic specialization is a later,
 riskier lever because the Linkerd stack's generic I/O contracts require
 `Send + Sync` even though each current worker runs a single-thread Tokio runtime.
 
-The retained 49 Hz frame-pointer profile is intentionally low overhead: its
-50k open-loop load delivered 49,999 request/s with 1.727 ms p50, 2.733 ms p99,
-zero errors/drops and no lost samples. Self samples are spread across memcpy,
-atomics, syscalls, H2/HPACK, routing and Tokio rather than one hot function.
-`px_worker_drain` is 1.20%, `ExternalBackend::drain` 0.58% and
-`doca_pe_progress` 0.25%; workers also fall to 0--1% when idle. This rules out an
-accidental polling loop. DWARF call-graph collection perturbed the workload in a
-diagnostic trial and is not retained; inclusive call-tree percentages overlap
-and must not be summed.
+Under load the self-time profile is flat — memcpy, atomics, syscalls, H2/HPACK,
+routing and Tokio, no single hot function; `px_worker_drain`,
+`ExternalBackend::drain` and `doca_pe_progress` are each below 2 % and workers
+idle at 0--1 %, which rules out a polling loop. The frame-pointer profile is
+the retained instrument; inclusive call-tree percentages overlap and must not
+be summed.
 
-The independent 2026-09-02 professor-facing repetition is
+Capacity carries two definitions — open-loop `highest_clean_rps` and a
+closed-loop plateau — and a closed-loop plateau must not be relabelled as
+open-loop capacity. The current numbers, the sidecar comparison arm and the
+Host-offload accounting are in [`REPORT.md`](../bench/report/REPORT.md) and
 [`grpc-professor-20260902`](../bench/report/data/grpc-professor-20260902/ANALYSIS.md).
-Its fine-knee follow-up confirms 64 B through 90k across deployments, with a
-mixed 92k point and independent bad 98/99k observations; 1 KiB brackets 75k
-clean / 75.25k mixed; 8 KiB brackets 29.75k clean / 30k mixed. The earlier
-64 B campaign did reach 100k clean, but it is retained as a single-campaign
-upper envelope rather than a reproducible operating limit. Its matched
-total-concurrency-1,024 medians are 106.8k, 89.1k and 34.3k request/s. The fair comparison arm uses the same
-gRPC application with standard Linkerd sidecars on both Pods and obtains
-25.0k, 19.3k and 15.2k request/s. At matched 10k load, DPUmesh reduces Host
-CPU/RPC by 42.1%, 46.0% and 37.4%; this is Host offload, not a claim that x86
-and ARM CPU time are directly additive. The repeated CPU windows put the DPU
-at its A=8 worker ceiling before either nine-core Host Pod.
 
-The same receipt includes a clean closed-loop curve from total concurrency 8
-through 8,192. 64 B rises 12.5k→118.9k/s (9.5x) through concurrency 2,048 and
-then falls to 115.8k/102.1k; 1 KiB rises 12.2k→88.7k/s (7.3x) through 1,024
-and then falls to 85.8k/81.0k/77.4k. All points have three clean repetitions.
-At the points where the process reading is about 8.02 cores, the eight
-`dmesh-w0..7` threads account for 7.98--7.99 and non-worker threads for
-0.03--0.04 core. A=8 is a data-worker geometry, not a whole-process CPU limit.
-The 8 KiB overload sequence failed the clean contract and is retained
-separately rather than presented as plateau performance.
+At the plateau the eight `dmesh-w0..7` threads account for essentially the
+whole process reading and non-worker threads for a few hundredths of a core:
+A=8 is a data-worker geometry, not a whole-process CPU limit.
 
-That repetition's new 50k profile reports 321.6k cycles and 181.2k instructions
-per RPC at IPC 0.56. The complete DPU process uses 7.591 cores under load and
-0.043 cores after every session and task quiesces. `px_worker_drain` is 1.59%
-self and `doca_pe_progress` 0.28%; the loaded CPU is useful distributed L7 work,
-not one accidental spin. An 11-hour deployment failed the otherwise clean 64 B
-80k point and recovered after a full deploy, so fresh capacity is not yet a
-24-hour stability claim; PLAN records the required soak campaign separately.
-
-The same expanded binary was deployed at A=4/6/8/12 while holding one
-persistent client channel per worker. The repeated clean open-loop boundaries
-were 40k/70k/80k/130k request/s; at 130k the 12 workers consume 11.37/12 cores
-while the Host Pods consume only 5.05/9 and 5.93/9. Increasing
-channels without increasing workers is not equivalent: at A=8 and offered 80k,
-8 channels deliver 80k while 24 channels deliver 43.7k and saturate all eight
-workers. Therefore hot-service deployment exposes one
+Capacity scales with the data-worker count A and not with client channels
+alone: adding channels at fixed A saturates the workers and lowers delivered
+rate. Therefore hot-service deployment exposes one
 `DPUMESH_THROUGHPUT_WORKERS` knob and derives A=K, a valid N and all-worker L7;
 the scale runner also derives threads and channels from it. Client channel count
 remains a workload property in the product interface and is not globally
 equated with A. Independent N/K/A remain available for density deployments in
 which K>A is intentional. Policy and injection fixtures use the same canonical
-W when supplied, or parse effective K/A from the running DPU banner; they do
-not retain an eight-runtime assumption after a 12-worker deployment.
+W when supplied, or parse effective K/A from the running DPU banner
+(`bench/suite/deployed_geometry.sh`).

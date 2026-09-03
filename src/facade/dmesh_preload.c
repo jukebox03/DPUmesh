@@ -23,10 +23,11 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
-#include "src/core/dmesh_core.h"    /* The data/event plane uses the public native API.
-                            * This in-tree adapter still needs narrow control-plane
-                            * hooks for ClusterIP resolution, numeric QP open, and
-                            * POSIX shutdown's transport FIN. */
+#include "src/core/dmesh_core.h"    /* The data/event plane uses the public native API;
+                            * the internal header adds ClusterIP resolution and
+                            * invalidation, numeric QP open, the transport FIN, EQ
+                            * notify suppression for in-line drains, and the
+                            * wait-split counters. */
 
 /* ================= real libc entry points (lazy dlsym) ================= */
 
@@ -90,10 +91,10 @@ static void preload_atfork_child(void);
 #define DBG(...) do { if (g_debug) { fprintf(stderr, "[dmesh_preload] " __VA_ARGS__); fputc('\n', stderr); } } while (0)
 
 /* Identity ($DPUMESH_SERVICE) is a Kubernetes Service name and routing is
- * answered by the DPU from the held topology generation (src/dmesh_resolve.c)
- * — the shim types no integer and carries no registry file. connect() keys on
- * IP:port; listen() converts the port named by $DPUMESH_PORT
- * (dmesh_config_listen_port). */
+ * answered by the DPU from the held topology generation
+ * (src/core/dmesh_resolve.c) — the shim types no integer and carries no
+ * registry file. connect() keys on IP:port; listen() converts the port named
+ * by $DPUMESH_PORT (dmesh_config_listen_port). */
 #ifndef DMESH_PRELOAD_TEST
 __attribute__((constructor))
 static void preload_ctor(void) {
@@ -257,9 +258,10 @@ static void fd_unblock_tx_locked(pfd_t *e) {
 /* ===================== channel + dispatcher thread ===================== */
 
 static dmesh_channel_t *g_ch;
-static dmesh_eq_t *g_eq;                 /* the ONE EQ: the dispatcher is the single
-                                          * consumer for every shim conn (see THREAD
-                                          * MODEL), so one is exactly right here. */
+static dmesh_eq_t *g_eq;                 /* the ONE EQ: every shim conn is bound to it,
+                                          * and whoever holds g_poll_mu (the dispatcher,
+                                          * or an app thread in shim_try_drain) drains
+                                          * it, so one is exactly right here. */
 static int  g_wake_fd = -1;              /* wakes the dispatcher for the close queue */
 /* The (single) dmesh listener entry and whether one was ever closed. Written by
  * listen()/close() on app threads and read by the dispatcher. Reading the pair
@@ -670,8 +672,8 @@ static void preload_atfork_child(void) {
 /* Create the channel + dispatcher. Called under g_ch_mu; leaves g_ch NULL on
  * failure, so a later mapped socket operation retries the registration. */
 static void channel_init(void) {
-    /* Identity is injected: dmesh_create_channel() resolves $DPUMESH_SERVICE via the
-     * registry (a server/mixed process) or opens a pure client if unset. One channel
+    /* Identity is injected: dmesh_create_channel() registers $DPUMESH_SERVICE with
+     * the DPU (a server/mixed process) or opens a pure client if unset. One channel
      * per process, created on first mapped socket op. */
     dmesh_channel_t *ch = dmesh_create_channel();
     if (!ch) { DBG("dmesh_create_channel() FAILED (will retry)"); return; }
@@ -1021,7 +1023,7 @@ static ssize_t shim_send(pfd_t *e, const void *buf, size_t len, int flags) {
 /* Comparison arm only (`DPUMESH_TCP_FALLBACK=1`): a failed channel or a failed
  * resolve falls back to kernel TCP instead of refusing the connect. The
  * webhook never sets it, so a meshed Pod's only path is the mesh; a bench arm
- * sets it to measure the refusal against the old bypass. */
+ * sets it to compare the refusal against a kernel-TCP bypass. */
 static int tcp_fallback_allowed(void) {
     static int allowed = -1;
     if (allowed < 0) {
@@ -1037,8 +1039,8 @@ int connect(int fd, const struct sockaddr *addr, socklen_t alen) {
     if (existing) { pfd_put(existing); errno = EISCONN; return -1; }
     if (addr && addr->sa_family == AF_INET && alen >= sizeof(struct sockaddr_in)) {
         const struct sockaddr_in *sin = (const struct sockaddr_in *)addr;
-        /* AF_INET SOCK_STREAM only (design/API.md §7) — a UDP connect() to a
-         * mapped port must stay kernel. */
+        /* AF_INET SOCK_STREAM only — a UDP connect() to a mapped port must stay
+         * kernel. */
         int so_type = 0; socklen_t tl = sizeof so_type;
         if (real_getsockopt(fd, SOL_SOCKET, SO_TYPE, &so_type, &tl) < 0 ||
             so_type != SOCK_STREAM)

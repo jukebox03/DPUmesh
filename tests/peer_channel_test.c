@@ -1,7 +1,8 @@
 /* The peer channel: what one DPU is allowed to believe from another.
  *
- * Every case here is a clause of S7's gate. A peer is authenticated, not
- * trusted, so the tests are about refusals: a node the generation does not
+ * Every case here is a clause of the node-authentication gate (CONTROL.md
+ * §2-0). A peer is authenticated, not trusted, so the tests are about
+ * refusals: a node the generation does not
  * bind, a key that is not the bound one, a handle from a previous
  * incarnation, a destination bound exceeded, a stalled peer at a source, and
  * the two ways a stream's custody ends without delivery.

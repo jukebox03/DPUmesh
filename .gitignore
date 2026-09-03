@@ -19,8 +19,6 @@
 *.so.*
 __pycache__/
 *.py[cod]
-# ...but keep the checked-in bench data
-!bench/*.csv
 
 # what the nightly health job leaves in the checkout: the record it just took,
 # and the gh-pages clone it appends to. The log itself lives on that branch.

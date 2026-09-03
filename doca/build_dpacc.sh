@@ -27,11 +27,9 @@
 set -e
 
 # This script uses the dpacc tool (located in /opt/mellanox/doca/tools/dpacc) to compile DPA kernels device code.
-# This script takes 4 arguments:
-# arg1: The project's build path (for the DPA Device build)
-# arg2: Absolute paths of all DPA (kernel) device source code *files* (our code)
-# arg3: The sample name
-# arg4: The output DPACC sample program name
+# This script takes 7 arguments:
+# arg1: build directory  arg2: source directory  arg3: DPA kernel source file
+# arg4: program name  arg5: dpacc -mcpu flag  arg6: DOCA lib dir  arg7: output archive path
 
 ####################
 ## Configurations ##

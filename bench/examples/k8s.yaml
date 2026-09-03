@@ -1,5 +1,6 @@
-# Apply after `bench.sh deploy`. The admission webhook adds the device,
-# library, attestation socket and DPU-node affinity from one annotation.
+# Apply after `bench.sh deploy`. The admission webhook adds the library,
+# attestation socket, Service identity, Linkerd markers and DPU-node affinity
+# from one annotation.
 apiVersion: apps/v1
 kind: Deployment
 metadata:

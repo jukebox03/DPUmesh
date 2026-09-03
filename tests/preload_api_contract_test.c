@@ -516,7 +516,7 @@ static void test_retire_waits_for_active_wrapper(void) {
     fake_qp.user_data = NULL;
     pfd_retire(e);
     assert(e->retired == 1);               /* storage is still live for `held` */
-    pfd_put(held);                         /* sanitizer verifies the final free */
+    pfd_put(held);                         /* drops the last reference; frees */
 }
 
 static void test_rx_fragments_preserve_order(void) {

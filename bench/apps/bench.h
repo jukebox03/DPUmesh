@@ -46,11 +46,8 @@ static inline void bench_reframe_reset(bench_reframer_t *rf) {
 }
 
 /* Returns 0, or -1 on DESYNC: the bytes where a frame must begin do not carry
- * `want_magic` (BENCH_REQ_MAGIC on a server, BENCH_REP_MAGIC on a client). Desync is
- * unrecoverable — the boundary is lost, so every later length is read out of whatever
- * happens to sit there and the stream never resyncs. Kill the conn; do not scan for a
- * new boundary. Without this check that failure is SILENT: the reframer keeps counting
- * garbage lengths, no frame ever completes, and the conn simply stops. */
+ * `want_magic` (BENCH_REQ_MAGIC on a server, BENCH_REP_MAGIC on a client). The boundary is
+ * lost and never resyncs, so the caller kills the conn rather than scanning for one. */
 static inline int bench_reframe_feed(bench_reframer_t *rf, const uint8_t *buf, size_t len,
                                      uint32_t want_magic, bench_frame_cb cb, void *user) {
     while (len > 0) {

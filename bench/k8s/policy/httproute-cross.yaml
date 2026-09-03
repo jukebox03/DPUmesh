@@ -1,5 +1,4 @@
-# A route whose backend is a different Service — the ordinary shape of a
-# canary, and the thing a Service-scoped session used to refuse outright.
+# A route whose backend is a different Service — the ordinary shape of a canary.
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:

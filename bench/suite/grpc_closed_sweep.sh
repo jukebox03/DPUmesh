@@ -188,8 +188,8 @@ for config in $CONFIGS; do
     body=$((frame - HEADER_BYTES))
     for conc in $CONCS; do
       for rep in $(seq 1 "$REPS"); do
-        # A dead Pod can leave the DPU holding its RX mapping. Stop instead of
-        # continuing with new PIDs against stale DPU state.
+        # A restarted Pod changes the PIDs the CPU window is charged to. Stop instead of
+        # continuing against a data path in an unknown state.
         now_rs="$(restart_count "$capp")/$(restart_count "$sapp")"
         if [ "$now_rs" != "$base_rs" ]; then
           log "CRASH before ${config}/${frame}B/conc=${conc} (restarts $base_rs -> $now_rs); stopping"

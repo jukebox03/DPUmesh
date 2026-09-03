@@ -1073,9 +1073,10 @@ dmesh_peer_pod_gone(struct dmesh_peer_table *table,
         if (table->ops->poison)
             table->ops->poison(table->ops_ctx, slot, "peer source Pod is gone");
         channel->poisoned++;
-        /* The source destroys this Pod's local custody before sending
-         * POD_GONE, so neither incomplete nor already-landed extents need an
-         * ACK. Reclaim every RX slot before invalidating the handle. */
+        /* The source drops this Pod's local custody itself, in the same sweep
+         * that sends POD_GONE, so neither incomplete nor already-landed
+         * extents need an ACK. Reclaim every RX slot before invalidating the
+         * handle. */
         peer_rx_abandon_handle(channel, slot->wire_handle, 1);
         peer_handle_release(channel, slot);
     }
@@ -1183,7 +1184,7 @@ static void peer_tx_uncharge(struct dmesh_peer_channel *channel,
         if (!slot->in_use || slot->handle != handle || slot->seq != seq ||
             slot->cookie != cookie)
             continue;
-        peer_tx_free_slot(channel, slot); /* caller retains custody on retry */
+        peer_tx_free_slot(channel, slot); /* the cookie stays with the caller */
         return;
     }
 }

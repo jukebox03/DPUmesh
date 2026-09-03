@@ -427,17 +427,10 @@ build_images() {
 }
 
 ### ------------------------------------------------------------ DPU process
-# A DPU that is already gone is the one case where the evidence for why is
-# still on the machine, and a redeploy destroys all of it: the `screen` session
-# it ran under, the kernel ring buffer that outlived it, and the core pattern
-# that says where a core would have been written. Snapshot before the kill, and
-# only when the process is absent — a running DPU has nothing to explain.
-# Nothing here may fail its caller. It runs on the way to a redeploy, where a
-# missing `screen` session, an unreadable kernel log or a full disk is not a
-# reason to stop one -- and `screen -ls` alone answers non-zero whenever no
-# session exists, which is the normal case for a process that is already gone.
-# The presence probe asks with the DPU's own privileges, the way every other
-# probe of that process in this script does.
+# When dpumesh_dpu is already gone, snapshot what a redeploy would destroy (its `screen`
+# session, the kernel ring buffer, the core pattern, the log tail) before stop_dpu kills
+# anything. Never fails its caller: `screen -ls` alone exits non-zero whenever no session
+# exists, and the presence probe runs with the DPU's own privileges like every other probe here.
 capture_absent_dpu() {
     local snapshot="$OUT/dpu-absent-$(date +%Y%m%d-%H%M%S).log"
     dpu_sudo 'pgrep -x dpumesh_dpu >/dev/null' >/dev/null 2>&1 && return 0
@@ -911,9 +904,8 @@ pin_pods() {
                 echo "$HOST_PASS" | sudo -S taskset -apc "$cores" "$child" >/dev/null 2>&1 || true
             done
         done
-        # The per-Pod broker is intentionally outside every container scope.
-        # Match it by the authoritative Pod UID embedded in its cgroup and pin
-        # it with the same allocation so legacy/broker A/B uses equal CPUs.
+        # The per-Pod broker is intentionally outside every container scope. Match it by
+        # the authoritative Pod UID embedded in its cgroup and pin it with its Pod's allocation.
         uid_token=${pod_uid//-/_}
         if [ -n "$uid_token" ]; then
             for broker_pid in $(pgrep -x dmesh_broker 2>/dev/null || true); do
@@ -976,8 +968,8 @@ prune_obsolete_transports() {
         --ignore-not-found=true >/dev/null
     kubectl delete secret envoy-mtls -n "$NS" \
         --ignore-not-found=true >/dev/null
-    # The relay now lives in the trusted node agent. Retire the former
-    # standalone Linkerd-namespace gateway and only its exact RBAC names.
+    # The relay lives in the trusted node agent; delete the standalone Linkerd-namespace
+    # gateway and only its exact RBAC names.
     local linkerd_ns="${LINKERD_CONTROL_NAMESPACE:-linkerd}"
     kubectl delete daemonset,serviceaccount,role,rolebinding \
         dpumesh-linkerd-cp-gateway -n "$linkerd_ns" \
@@ -1061,8 +1053,8 @@ export_agent_channel() {
 }
 
 # The feeds the DPU consumes, as the DPU holds them. What is waited on is the
-# agent's delivery landing, because after S6 that is the only way any of them
-# arrives — and the DPU build's preflight reads them.
+# agent's delivery landing, because that is the only way any of them arrives —
+# and the DPU build's preflight reads them.
 await_feeds() {
     local waited=0 deadline="${FEED_DELIVERY_DEADLINE:-90}" want
     want="${DPUMESH_MEMBERSHIP_FILE:-/etc/dpumesh/membership.v1} ${DPUMESH_TOPOLOGY_FILE:-/etc/dpumesh/topology.v1}"
@@ -1101,7 +1093,8 @@ await_identity_delivery() {
     return 1
 }
 
-# Render bench/k8s/pods.yaml with envsubst and apply it (replicas: 0).
+# Render pods.yaml, grpc-pods.yaml and grpc-linkerd-pods.yaml with envsubst and
+# apply them (replicas: 0).
 apply_manifest() {
     configure_host_numa
     step "=== Applying K8s manifest (replicas=0) ==="
@@ -1170,13 +1163,14 @@ scale_up_with_wait() {
     fi
     info "$app pod Ready"
     if [ -n "$expected_log" ]; then
-        # POD_INIT_READY confirms the DPUmesh registration and mmap/DPA setup.
+        # The 'DPUmesh DOCA initialized' line is printed once POD_INIT_READY has
+        # confirmed the registration and mmap/DPA setup.
         info "Waiting for DPUmesh init: $app ($expected_log)"
         local attempts=0
         while [ $attempts -lt 35 ]; do
             local line; line=$(kubectl logs -n "$NS" -l "app=$app" --tail=80 2>/dev/null || true)
-            # A Pod names its own mode in the init line. Broker-attached Pods
-            # are ready only once their broker also holds the reduced identity.
+            # The init line comes from a broker-attached context; the Pod is ready only once
+            # its broker also holds the reduced identity.
             if echo "$line" | grep -Eq "$expected_log" &&
                { ! echo "$line" | grep -q "broker-attached" ||
                  broker_data_ready "$app"; }; then
@@ -1251,9 +1245,9 @@ deploy() {
     fi
     build_images
     # The control plane comes up before anything that reads what it publishes.
-    # The DPU build's preflight checks the feeds the DPU will consume, and
-    # every one of them now arrives through the agent, so the agent has to be
-    # running — with its image built — before that preflight.
+    # The DPU build's preflight checks the feeds the DPU will consume, and every one
+    # of them arrives through the agent, so the agent has to be running — with its
+    # image built — before that preflight.
     "$BENCH_DIR/dpumesh_controller.sh" prepare
     IMG_CONTROLLER="$IMG_CONTROLLER" "$BENCH_DIR/dpumesh_controller.sh" deploy
     # After every root-owned keyring is provisioned: the hop's account owns the
@@ -1306,7 +1300,7 @@ admission_events() {
     control_events admission "$1"
 }
 
-# S9's observation gate. Enforcement must not stand on an unobserved
+# The policy observation gate. Enforcement must not stand on an unobserved
 # dependency, so what the policy controller actually serves to a caller
 # authenticated as `dpumesh-dpu` is recorded before enforcement is trusted:
 # whether it serves a policy, denies the request, or serves an empty one.
@@ -1583,9 +1577,9 @@ arm_balance() {
 }
 
 ### ------------------------------------------------------------ benchmark (RUN)
-# The client Pod behind a `point` target. The gRPC clients answer the same RUN
-# line on the same control port; their parser reads the first six fields and
-# ignores the churn period, which only the L4 client implements.
+# The client Pod behind a `point` target. Every client answers the same RUN line on
+# the same control port; all but the native client read six fields and ignore the
+# churn period, which only bench_dpumesh implements.
 app_of()     { case "$1" in
                  dpumesh)      echo bench-dpumesh ;;
                  preload)      echo preload-bench ;;
@@ -1663,7 +1657,7 @@ bench_bandwidth() {
 bench_rate() {
     local sol="$1"; mkdir -p "$OUT"; local csv="$OUT/rate_${sol}.csv"
     step "RATE ($sol): req=32, concurrency=$RATE_CONC, threads={$RATE_THREADS}, dur=${RATE_DUR}s"
-    [ "$sol" = dpumesh ] && warn "server is single-consumer; only CLIENT threads scale. Pin more cores first ($0 pin hw6) for a real curve."
+    [ "$sol" = dpumesh ] && warn "server is single-consumer; only CLIENT threads scale. Pin more cores first ($0 pin native) for a real curve."
     echo "solution,threads,mrps,gbps,p50_us,p99_us" >"$csv"
     printf "  %-8s %12s %10s %10s %10s\n" threads Mrps Gb/s p50us p99us
     local t r
@@ -1677,7 +1671,7 @@ bench_rate() {
 }
 
 ### ------------------------------------------------------------ validators
-run_loopback() {  # self-routing: pod 12 is client + server of its own service
+run_loopback() {  # self-routing: the loopback-dpumesh Pod is client + server of its own service
     local N="${1:-50000}" size="${2:-8192}" zc="${3:-0}" ip resp
     ip=$(running_pod_ip loopback-dpumesh || true)
     [ -z "$ip" ] && { err "loopback-dpumesh pod not found — run '$0 deploy'"; return 1; }
@@ -1693,7 +1687,7 @@ run_loopback() {  # self-routing: pod 12 is client + server of its own service
     }
 }
 
-run_verbs() {  # verbs-façade self-routing: pod 17 is client + server of its own service
+run_verbs() {  # verbs-façade self-routing: the verbs-dpumesh Pod is client + server of its own service
     local N="${1:-50000}" size="${2:-8192}" zc="${3:-0}" window="${4:-1}" pipe="${5:-1}" ip resp
     ip=$(running_pod_ip verbs-dpumesh || true)
     [ -z "$ip" ] && { err "verbs-dpumesh pod not running — run '$0 deploy' (the validator waits for a RUN command)"; return 1; }

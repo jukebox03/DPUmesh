@@ -22,8 +22,9 @@ a callback-service server behind a `PassiveListener`, and a client whose
 channel target is a Service name. Its `CMakeLists.txt` is the complete build
 recipe — generate the proto, compile, link `grpc_dpumesh`. The pair builds
 with `bench/bench.sh grpcbuild` (as `hello_grpc_client` /
-`hello_grpc_server`) and runs under the same meshed-Pod arrangement as the
-gRPC benchmark workloads (`bench/k8s/grpc-pods.yaml`);
+`hello_grpc_server`); to run it, package the two binaries into an image and
+deploy them with the meshed-Pod arrangement of `bench/k8s/grpc-pods.yaml` —
+no image or manifest in this tree carries them.
 [design/GRPC.md](../../design/GRPC.md) covers the runtime options and
 lifecycle.
 

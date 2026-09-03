@@ -5,8 +5,8 @@ metadata:
   namespace: ${NS}
 automountServiceAccountToken: true
 ---
-# The controller is the one component with cluster-wide read: each node agent
-# keeps its namespaced, node-scoped Role instead.
+# The controller reads Pods, Services, EndpointSlices and Nodes cluster-wide;
+# each node agent keeps its namespaced, node-scoped Role instead.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:

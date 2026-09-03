@@ -24,8 +24,8 @@ struct doca_dpa;
 /* Deferred completion queue — DPU only.
  * Consumer callback enqueues; the owning data worker drains.
  * Each queue has one producer PE and one worker consumer.
- * Sized with headroom so in-flight recv tasks across all active EUs cannot
- * overflow it above BP_HIGH even at MAX_DPA_RINGS active EUs. */
+ * Headroom above COMP_QUEUE_BP_HIGH for the receives still posted on this
+ * worker's DPA channels (CC_DPA_MAX_MSG_NUM each) once backpressure trips. */
 #define DPU_COMP_QUEUE_SIZE 16384
 
 /* One forward-DMA completion (CPU→DPU), handed from the DPA callback to the
@@ -173,7 +173,8 @@ CQ_INLINE int mpsc_comp_queue_empty(dpu_mpsc_comp_queue_t *q) {
 
 /* Max deferred recv tasks. When comp_queue ≥ BP_HIGH the DPA recv-cb stashes
  * completed recv tasks here for the PE owner to resubmit once it drains below
- * BP_LOW. Sized to hold every in-flight recv task across all EUs. */
+ * BP_LOW. Holds the receives of eight DPA channels (CC_DPA_MAX_MSG_NUM each);
+ * with the list full the callback resubmits instead of deferring. */
 #define MAX_DEFERRED_RECV  8192
 
 /* Mirrored DOCA task counts gate submissions. */
@@ -631,8 +632,9 @@ struct objects {
     /* DPA channel k binds to consumer_pes[k % A]. */
     struct doca_pe *consumer_pes[MAX_ARM_WORKERS];
 
-    /* Append-only DPU pod table. `registered` is the release/acquire publication
-     * gate; slots remain stable for the process lifetime. */
+    /* DPU pod table; pods_add_connection appends or recycles a freed slot.
+     * `registered` is the release/acquire publication gate; slots remain
+     * stable for the process lifetime. */
     struct pod_state pods[MAX_PODS];
     int num_pods;
 

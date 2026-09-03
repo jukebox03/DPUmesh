@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Derive saturation and retained-knee stability from an L4 dataset.
 
-The collector's raw CSV files are read-only inputs.  Repetitions at the same
-offered rate are collapsed to a median point before saturation detection and
-regression, so an interrupted run cannot give one rate disproportionate weight.
+Input is an L4 open-loop dataset directory (results.csv, rates.csv, optional
+knees.csv and generator_limits.csv); the files are read-only.  Repetitions at
+the same offered rate are collapsed to a median point before saturation
+detection and regression, so an interrupted run cannot give one rate
+disproportionate weight.
 """
 
 import argparse

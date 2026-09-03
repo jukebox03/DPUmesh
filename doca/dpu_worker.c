@@ -38,7 +38,7 @@
 
 DOCA_LOG_REGISTER(DPU_WORKER);
 
-/* ARM worker selected by the DPA receive callback. */
+/* The calling ARM worker's id; the DPA receive callback routes completions by it. */
 extern __thread int dpu_worker_id;
 
 static int g_arm_affinity_ready = 0;
@@ -382,7 +382,7 @@ dpu_finalize_pending_pod_inits(struct objects *objs)
 static int
 dpu_drain_iteration(struct objects *objs)
 {
-    uint8_t did_ctrl     = doca_pe_progress(objs->pe);  /* new conns, REGISTER, TX_DATA */
+    uint8_t did_ctrl     = doca_pe_progress(objs->pe);  /* new conns, REGISTER, MMAP_EXPORT, RESOLVE */
     int finalized_init   = dpu_finalize_pending_pod_inits(objs);
     int sent_init_result = server_flush_pod_init_results(objs);
     int sent_doorbell    = dpu_flush_host_doorbells(objs);
@@ -819,8 +819,8 @@ dpu_peer_wire_new(const char *kind, uint32_t bind_ip_be, uint16_t port,
  * a peer connection is driven by the thread that already owns the streams it
  * carries and no peer state crosses workers.
  *
- * Nothing here is required: a node with DPUMESH_PEER_TRANSPORT unset runs as
- * it does today, with remote destinations refused. A node that asked for a
+ * Nothing here is required: a node with DPUMESH_PEER_TRANSPORT unset runs
+ * without a carrier, with remote destinations refused. A node that asked for a
  * carrier and could not get one keeps starting for the same reason — a fabric
  * that is not up must not take the node's local traffic down with it. */
 static void
@@ -1116,7 +1116,7 @@ run_dpu_worker(struct objects *objs)
     /* Pin workers to [0,A) and main to A when available. */
     dpu_arm_pin_current("main", objs->n_data_workers);
 
-    /* SG-DMA DPU-to-host path and request parser. */
+    /* SG-DMA DPU-to-host path and the per-connection byte-stream proxy. */
     result = px_init(objs);
     if (result != DOCA_SUCCESS) {
         DOCA_LOG_ERR("Failed to init L7-proxy L4 engine: %s",
@@ -1208,8 +1208,8 @@ run_dpu_worker(struct objects *objs)
         }
 
         dpu_publish_ready_and_setup_pods(objs);
-        /* The 1 ms backstop remains for control/membership progress. DPA live
-         * EUs use a same-EU helper for watchdog handoff and need no ARM tick. */
+        /* The 1 ms tick is a backstop for control/membership progress only; a
+         * live DPA EU hands its watchdog to a same-EU helper and needs no ARM tick. */
         DOCA_LOG_WARN("MAIN CONTROL/DOORBELL: workers=%d, notification-driven "
                       "(1 ms backstop tick)", objs->n_data_workers);
         uint64_t health_period = dpu_wake_clock_hz();

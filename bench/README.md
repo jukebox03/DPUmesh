@@ -207,7 +207,7 @@ matching verdict is not a policy result, and traffic that flows without one is
 not a routing result.
 
 ```sh
-./bench/suite/policy_route.sh [policy|route|cross|fanout|surfaces|lb|all]
+./bench/suite/policy_route.sh [policy|route|cross|fanout|surfaces|grpc-surfaces|lb|all]
 ./bench/suite/inject.sh
 ```
 
@@ -223,8 +223,9 @@ not a routing result.
 
 A stage whose client returns no reply is recorded as `nodata` and fails: a
 missing measurement is not a refusal. Stages that fail every request in flight
-restart the gRPC client before the next stage reads anything, because the client
-does not survive that churn indefinitely.
+run back to back without restarting the gRPC client; the client's run-bounding
+rules (a call joins the live set before gRPC, issuance closes under the
+shutdown sweep's lock, a run exits on its own deadline) keep it answering.
 
 ## Lifecycle invariants
 

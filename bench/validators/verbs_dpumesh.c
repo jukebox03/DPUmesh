@@ -2,8 +2,8 @@
  *
  * One thread and EQ drive client and echo roles. Byte markers detect truncation,
  * misrouting, and reordering across configurable connection and pipeline depth.
- * Command: RUN <count> <size> [zero-copy] [window] [pipeline].
- * DMESH_EQ_BATCH controls event batch size. */
+ * Command: RUN <count> <size> [zero-copy] [window] [pipeline] [batch]; batch is the
+ * event batch size (default 16). */
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -225,7 +225,7 @@ static void run_verbs(int conn_fd, long N, uint32_t size, int zc,
     long ok = 0, fail = 0, served = 0, nlat = 0;
     long completed = 0;                 /* ok + fail (client round-trips finished) */
 
-    /* Open `window` CLIENT conns and pin each (RC-like ordered replies). Distribute N
+    /* Open `window` CLIENT conns, each a byte stream with ordered replies. Distribute N
      * round-trips across the conns; the sweep below primes every pipeline on the first
      * pass, so a conn backpressured at prime time is topped up rather than failed. */
     for (int i = 0; i < window; i++) {
@@ -342,8 +342,8 @@ static void run_verbs(int conn_fd, long N, uint32_t size, int zc,
 
         /* Sweep, every pass: ship what backpressure refused — client pipes below their
          * window, echoes the server SQ turned away — and retire the conns flagged during
-         * the batch. Coming back here IS the EAGAIN retry: SQ space frees silently (there
-         * are no send events), so allocating again is the only way to find out. */
+         * the batch. Coming back here IS the EAGAIN retry: TX_READY is a one-shot, so
+         * allocating again is the only way to find out. */
         int posted = 0;
         for (int i = 0; i < window; i++) {
             dmesh_qp_t *c = clients[i];

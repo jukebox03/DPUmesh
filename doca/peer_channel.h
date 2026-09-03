@@ -12,13 +12,13 @@
  * stream opens, lengths, handles, and the rate of all of them — so every rule
  * here is a bound or a check, and every refusal is counted by reason.
  *
- * The transport is deliberately not here. The RDMA layer supplies ordered,
- * reliable delivery within a handle and a mutually authenticated key
- * agreement; this module supplies the one rule that stock authentication
- * cannot know — that the peer's static key must be the one the held topology
- * generation binds to the node name it claims — together with the handle
- * namespace, the custody that crosses the boundary, and the lifetime that ends
- * both. `struct dmesh_peer_transport` is the seam between them.
+ * The transport is deliberately not here. The transport seam supplies ordered,
+ * reliable delivery within a handle and a mutually authenticated key agreement
+ * (TLS over a TCP or RDMA carrier); this module supplies the one rule the
+ * handshake cannot know — that the peer's static key must be the one the held
+ * topology generation binds to the node name it claims — together with the
+ * handle namespace, the custody that crosses the boundary, and the lifetime
+ * that ends both. `struct dmesh_peer_transport` is the seam between them.
  */
 
 /* Parameters. The two that interact are the idle eviction and the generation
@@ -92,8 +92,8 @@ struct dmesh_peer_stream_open {
     /* Source-local correlation token. The destination never interprets it;
      * STREAM_OPEN_ACK returns it so several opens may be in flight together. */
     uint32_t source_token;
-    /* Not an identity input. It lets a destination notice it is behind and
-     * adopt sooner, which shortens ordinary generation skew. */
+    /* Not an identity input; carried on the wire and not yet consulted by the
+     * destination. */
     uint64_t src_generation;
 };
 _Static_assert(sizeof(struct dmesh_peer_stream_open) == 272,
@@ -220,8 +220,9 @@ struct dmesh_peer_txslot {
  * mutually authenticated key agreement whose peer static key this module can
  * read back. Reordering across handles is permitted and wanted. */
 struct dmesh_peer_transport {
-    /* Begin a connection to `ip_be:port`, binding `prologue` into the stock
-     * handshake. Returns 0 and sets *conn, or a negative errno. */
+    /* Begin a connection to `ip_be:port`; `prologue` is sent as the first
+     * bytes inside the authenticated session. Returns 0 and sets *conn, or a
+     * negative errno. */
     int  (*connect)(void *ctx, uint32_t ip_be, uint16_t port,
                     const uint8_t *prologue, size_t prologue_len, void **conn);
     /* The peer's authenticated static public key once the handshake completed;
@@ -317,9 +318,11 @@ struct dmesh_peer_channel {
     uint16_t port;
     uint8_t  in_use;
     uint8_t  state;                  /* enum dmesh_peer_state */
-    uint8_t  initiated_local;        /* deterministic simultaneous-open winner */
-    /* Advanced on every entry to AUTHENTICATING, so a completion belonging to
-     * the previous incarnation is refused rather than applied to this one. */
+    /* This end dialled; it picks the simultaneous-open winner. */
+    uint8_t  initiated_local;
+    /* Advanced on every local open and taken from the prologue on accept, so a
+     * completion belonging to the previous incarnation is refused rather than
+     * applied to this one. */
     uint32_t incarnation;
     uint64_t last_active_ns;
     void    *conn;                   /* the transport's own object */
@@ -344,7 +347,7 @@ struct dmesh_peer_channel {
     uint32_t ack_staged;
 
     /* Ordered transport framing. Allocated only for a live channel, avoiding
-     * 16 MiB of inline buffers in the fixed 256-channel table. */
+     * 32 MiB of inline buffers in the fixed 256-channel table. */
     uint8_t *rx_frame;
     uint8_t *tx_frame;
     uint32_t rx_len;
@@ -386,9 +389,9 @@ void dmesh_peer_table_init(struct dmesh_peer_table *table, const char *node_name
                            const struct dmesh_peer_ops *ops, void *ops_ctx);
 void dmesh_peer_table_fini(struct dmesh_peer_table *table);
 
-/* Bind the incarnation into the stock handshake, so a completed handshake
- * authenticates the incarnation its handles will carry. Returns the length
- * written, or -1 when the names do not fit. */
+/* Format the prologue that names both nodes and the incarnation; the transport
+ * sends it as the first bytes inside the authenticated session. Returns the
+ * length written, or -1 when the names do not fit. */
 int dmesh_peer_prologue(const char *local_node, const char *peer_node,
                         uint32_t incarnation, uint8_t *out, size_t out_len);
 
@@ -396,8 +399,9 @@ int dmesh_peer_prologue(const char *local_node, const char *peer_node,
 struct dmesh_peer_channel *dmesh_peer_open(struct dmesh_peer_table *table,
                                            const char *node_name,
                                            enum dmesh_peer_refusal *reason);
-/* Adopt the connection accepted by the lower RDMA transport. The handshake
- * supplies the peer node, incarnation, and authenticated static key. */
+/* Adopt a connection the transport runtime accepted and authenticated. The
+ * prologue supplies the peer node and incarnation; the session supplies the
+ * static key. */
 struct dmesh_peer_channel *
 dmesh_peer_accept(struct dmesh_peer_table *table, const char *node_name,
                   uint32_t incarnation, void *conn, const uint8_t peer_key[32],
@@ -479,9 +483,10 @@ dmesh_peer_tx_ack(struct dmesh_peer_table *table, struct dmesh_peer_channel *cha
 void dmesh_peer_tx_drop(struct dmesh_peer_table *table,
                         struct dmesh_peer_channel *channel, uint32_t handle);
 
-/* Source-side wire operations. DATA takes custody only after a complete frame
- * is accepted by the ordered transport; a failed/would-block send leaves the
- * caller's cookie untouched so it can retry. */
+/* Source-side wire operations. DATA takes custody as soon as the frame is
+ * built: a would-block send retains the whole frame in the channel and the
+ * next progress pass flushes it; a failed send releases the charge, leaves the
+ * cookie with the caller and resets the channel. */
 enum dmesh_peer_refusal
 dmesh_peer_stream_request(struct dmesh_peer_table *table,
                           struct dmesh_peer_channel *channel,

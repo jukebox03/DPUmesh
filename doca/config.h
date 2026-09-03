@@ -1,9 +1,8 @@
 /*
  * config.h - DPUmesh DOCA configuration
  *
- * PCI addresses are parsed from command-line arguments via doca_argp
- * (init_argp), for both host and DPU mode. The only mode-dependent
- * behavior is that the representor PCI address (-r) is mandatory on the DPU.
+ * PCI addresses are parsed from the DPU binary's command line via doca_argp
+ * (init_argp); the representor PCI address (-r) is mandatory there.
  */
 
 #ifndef CONFIG_H_

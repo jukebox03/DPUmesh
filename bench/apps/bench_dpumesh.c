@@ -48,10 +48,9 @@ static int              g_dst_service_count = 1;
 static const char      *g_dst_services_text = "echo-dpumesh";
 static char            *g_dst_services_storage;
 
-/* BENCH_DST_SERVICES distributes benchmark threads round-robin over a strict
- * comma-separated service list. It makes one client pod sufficient for
- * simultaneous multi-service L7 placement tests while preserving the existing
- * BENCH_DST_SERVICE single-destination interface. */
+/* BENCH_DST_SERVICES distributes benchmark threads round-robin over a comma-separated
+ * service list, so one client pod can drive several Services at once; BENCH_DST_SERVICE
+ * names a single destination. */
 static int configure_dst_services(void) {
     const char *csv = getenv("BENCH_DST_SERVICES");
     const char *single = getenv("BENCH_DST_SERVICE");
@@ -95,10 +94,8 @@ typedef struct {
     const char  *dst_service;  /* this worker's backend service NAME */
     atomic_int  *stop;         /* watchdog / abort flag */
 
-    /* per-thread transport + pipeline state. ALL of it — issue side and reply side
-     * alike — is owned by this one thread: the conn lives on this thread's own EQ, so
-     * only this thread can ever poll its events. No cross-thread state, hence no
-     * lock and no atomics below. */
+    /* Per-thread transport + pipeline state, owned by this thread alone: the conn lives
+     * on this thread's own EQ, so only this thread polls its events. */
     dmesh_eq_t      *eq;        /* this thread's EQ (single-consumer, polled here only) */
     dmesh_qp_t    *c;
     /* Outstanding requests, direct-mapped by seq % INFLIGHT_RING (see above). */

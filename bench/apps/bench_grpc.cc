@@ -1,5 +1,5 @@
-/* gRPC client for the shared benchmark harness. One issuer owns the arrival
- * timeline; one completer per channel records latency from intended arrival. */
+/* gRPC client for the shared benchmark harness. Issuers split the arrival
+ * timeline; one completer per worker records latency from intended arrival. */
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -107,7 +107,7 @@ std::atomic<int> g_stop{0};
 std::shared_ptr<::grpc::Channel> MakeChannel(int index) {
   ::grpc::ChannelArguments args;
   args.SetInt(GRPC_ARG_ENABLE_HTTP_PROXY, 0);
-  /* One transport connection per worker. */
+  /* One transport connection per channel. */
   args.SetInt(GRPC_ARG_USE_LOCAL_SUBCHANNEL_POOL, 1);
   args.SetInt("bench.channel_index", index);
 
@@ -272,7 +272,7 @@ int SelfTest(char* reply, size_t reply_size, int payload, int threads,
     const double now = bench_now_sec();
     if (now > stop_at) break;
     while (now >= sched_next) {
-      /* Same per-arrival work the issuer does before handing off to gRPC. */
+      /* Stand-in for the issuer's per-arrival work before the hand-off to gRPC. */
       bench_put_hdr(frame.data(), BENCH_REQ_MAGIC,
                     static_cast<uint32_t>(scheduled),
                     static_cast<uint32_t>(payload),

@@ -16,9 +16,9 @@
 #
 # What is deliberately NOT here is a number. The smoke request exists to prove
 # the path carries bytes; its latency is a single sample against whatever
-# happens to be deployed, and recording it would rebuild the performance series
-# this file replaced. Performance is measured by hand, from bench/suite/, by
-# someone who chose the configuration.
+# happens to be deployed, and recording it would start a performance series
+# that says nothing about a chosen configuration. Performance is measured by
+# hand, from bench/suite/, by someone who chose the configuration.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

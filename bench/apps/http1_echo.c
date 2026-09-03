@@ -1,10 +1,9 @@
 /* HTTP/1.1 echo server for the protocol-aware path.
  *
  * The DPU's protocol-aware treatment decides what it is looking at from the
- * bytes, and every workload in this tree speaks either the binary Greeter
- * frame or gRPC, so the HTTP/1 branch of that decision has never carried
- * traffic. This server exists to drive it and nothing else: one request, one
- * response, keep-alive, no routing of its own.
+ * bytes; every other workload in this tree speaks either the binary Greeter
+ * frame or gRPC, so this server is the one that drives the HTTP/1 branch of
+ * that decision: one request, one response, keep-alive, no routing of its own.
  *
  * The reply size is a request header rather than a build-time constant, so one
  * server serves every point the client offers.

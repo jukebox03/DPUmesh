@@ -11,7 +11,7 @@
 #include "dpu_proxy.h"
 #include "workload_grant.h"
 #include "control_scope.h"
-#include "dmesh_l7.h"   /* l7_control_event: admission accounting */
+#include "dmesh_l7.h"   /* l7_control_event, l7_inbound_forget */
 
 #include <doca_pe.h>
 #include <doca_comch.h>
@@ -831,10 +831,10 @@ pods_add_connection(struct objects *objs, struct doca_comch_connection *conn)
 		idx = n;
 	}
 
-	/* Nothing to release here: pods_remove_connection already unpublished every
-	 * host-exported handle on this slot, and a never-used slot is memset to 0.
-	 * The DPU-local staging (local_mmap/dma_buffer) is deliberately kept and
-	 * REUSED by setup_pod_dma. */
+	/* Nothing to release here: a recyclable slot has cleanup_pending clear, so
+	 * server_progress_pod_cleanup has already destroyed every imported handle,
+	 * and a never-used slot is zeroed. The DPU-local staging
+	 * (local_mmap/dma_buffer) is kept and reused by setup_pod_dma. */
 
 	objs->pods[idx].connection = conn;
 	struct timespec connected;
@@ -1365,12 +1365,9 @@ pods_register(struct objects *objs, struct doca_comch_connection *conn,
 
 		/* The load balancer derives live backends from published pod fields. */
 
-		/* Which interaction rules this registration carries. Every
-		 * registration is assertion-verified either way; what the
-		 * generation grades is the rules, and it is graded here so the
-		 * decision is never taken from Pod input. */
-		/* The mediated lookup, asked once here on the control thread. A
-		 * data worker never asks: it reads the answer. */
+		/* Both are decided here on the control thread and never from Pod
+		 * input: the mediated scope lookup (a data worker only reads the
+		 * answer) and the generation's protection grading. */
 		objs->pods[i].scope_state =
 			(int8_t)dmesh_scope_query(objs, objs->pods[i].pod_uid);
 		int protection = dmesh_topology_service_protection(objs, (int16_t)service_id);
@@ -1394,7 +1391,7 @@ find_pod_by_id(struct objects *objs, int32_t pod_id)
 	/* Lock-free O(1) lookup via the pod_id->slot map. The map is only an
 	 * accelerator: the registered ACQUIRE + pod_id re-check below remain the
 	 * authority, so a stale/torn map entry can only yield a re-validated hit
-	 * or NULL — never a wrong pod. See object.h pods[] concurrency model. */
+	 * or NULL — never a wrong pod. */
 	if (pod_id < 0 || pod_id >= POD_ID_SPACE)
 		return NULL;
 	int idx = __atomic_load_n(&objs->pod_id_to_slot[pod_id], __ATOMIC_ACQUIRE);

@@ -1,4 +1,4 @@
-# The F3 arm: what a workload looks like when the mesh injects itself.
+# The injection arm: what a workload looks like when the mesh injects itself.
 #
 # Nothing here names a device, a library, a shim, a socket or a policy. Both
 # server Deployments are identical apart from the injection annotations and the

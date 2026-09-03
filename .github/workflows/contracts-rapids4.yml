@@ -49,7 +49,7 @@ jobs:
         run: |
           {
             echo "### rapids4"
-            echo "- hosted CI covers \`make test-hostfree\` (14 of 28 contracts)"
+            echo "- hosted CI covers \`make test-hostfree\` (the contracts that need no DOCA)"
             echo "- this job runs \`make test\`: the DOCA-linked tests, \`abi_contract_test\`"
             echo "  (needs the built .so) and \`generator_selftest_test\` (needs the binaries)"
             echo "- not covered anywhere: the DPA/ARM meson build, which happens on the DPU"

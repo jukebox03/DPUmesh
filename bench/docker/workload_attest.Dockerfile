@@ -9,7 +9,7 @@ RUN apt-get update \
 
 RUN pip install --no-cache-dir cryptography
 
-# The agent is the DPU's only control peer: the delivery loop and the absorbed
+# The agent is the DPU's only control peer: the delivery loop and the
 # control-plane relay travel with it, and the receiver module is copied for the
 # one table both ends of the hop read their bounds from.
 COPY bench/workload_attest_agent.py /usr/local/bin/dpumesh-workload-agent

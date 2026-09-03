@@ -89,8 +89,8 @@ int dmesh_poll_eq(dmesh_eq_t *eq, dmesh_event_t *events, int max_events) {
 
     (void)dpumesh_drain_assist(eq);
 
-    /* 0. This thread owns every QP bound to this EQ: publish any tail whose
-     * deadline expired. */
+    /* 0. Publish any tail whose deadline expired; each QP's transmit gate
+     * serializes this against its owner. */
     dpumesh_publish_due_tails(eq);
 
     /* 1. Resume the conn cut off by events[] filling up last call. Its inbox never went
@@ -103,7 +103,7 @@ int dmesh_poll_eq(dmesh_eq_t *eq, dmesh_event_t *events, int max_events) {
         eq->drain_cur = NULL;
     }
 
-    /* 2. New inbound conns off the SHARED accept queue (SPMC — sibling EQs may be
+    /* 2. New inbound conns off the SHARED accept queue (MPMC — sibling EQs may be
      * popping it too; whichever wins one owns it). One CONN_REQ, then the conn's
      * already-landed messages (held first message + any pipelined ones coalesced while
      * it was SERVER_PENDING — those predate the promote, so they too never re-edge). */

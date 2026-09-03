@@ -14,11 +14,7 @@
 _Static_assert(DPA_DMA_COPY_MAX <= DPUMESH_SLOT_SIZE,
                "DPA_DMA_COPY_MAX must not exceed DPUMESH_SLOT_SIZE");
 
-/* Alignment requirements for doca_dpa_dev_comch_producer_dma_copy:
- * - Source and destination addresses: 64B aligned
- *   (ensured by CACHE_ALIGN=128 buffer allocation + 128B-aligned offsets)
- * - Transfer size per call: 128B aligned, max 8KB */
-/* Max consecutive descriptors drained from one ring per process_*_desc call.
+/* Max consecutive descriptors drained from one ring per process_fwd_ring call.
  * Bounds per-ring work so a busy ring can't starve the others within a single
  * drain_all_rings inner iter. */
 #define RING_BATCH_CAP  32
@@ -200,7 +196,7 @@ static void handle_dpu_msg(struct dpa_thread_arg *thread_arg, const struct comch
 }
 
 /* Returns the number of consumer-completion messages drained this call (WAKE,
- * RING_ADD, RING_DEL). The pre-park re-scan in run_dma_manager uses this:
+ * RING_ADD, RING_DEL). The pre-park re-scan in park_or_yield uses this:
  * a nonzero return after arming means a signal landed in the arm→reschedule
  * race window, so the EU must NOT park (it would do so with a consumed
  * one-shot notification → lost wakeup). */
@@ -355,7 +351,6 @@ static int process_fwd_ring(struct dpa_thread_arg *thread_arg, uint32_t r,
                                     (uint8_t *)&comp,
                                     sizeof(struct comch_dma_comp_msg),
                                     submit_flags);
-        /* no pos[r] advance — the staging offset is host-driven (mirror) */
 
         thread_arg->consumer_head[r]++;
         if (++desc_idx == ring->buf_arr_size)
@@ -409,7 +404,7 @@ static int drain_all_rings(struct dpa_thread_arg *thread_arg, uint32_t budget)
     return total_dma_calls;
 }
 
-/* Consecutive empty drains before the EU releases its EU. */
+/* Consecutive empty drains before the thread releases its EU. */
 #define IDLE_SPINS_BEFORE_PARK  262144u
 
 /* This helper and its data thread have the same fixed EU affinity, so the DPA

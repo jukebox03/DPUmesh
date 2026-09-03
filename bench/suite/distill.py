@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reduce a collector run to the per-point CSV the report figures read.
+"""Reduce an L4 open-loop dataset (results.csv + rates.csv) to one per-point CSV.
 
 Joins results.csv with rates.csv so every retained load point carries the rate
 family it came from, then takes the median across repetitions. Host CPU is the

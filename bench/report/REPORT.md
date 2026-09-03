@@ -271,9 +271,9 @@ policy at all and the port keeps its deny-by-default.
 ## Automatic injection
 
 Nine stages. An annotated Pod carries every piece of the patch — control-plane
-label, `skip-inbound-ports`, device and library and attestation mounts, PCI
-function, Service identity, preload shim, node affinity — and its traffic takes a
-DPU inbound verdict. The same Deployment without the annotation carries none of
+label, `skip-inbound-ports`, library and attestation mounts,
+`DPUMESH_RINGS_PER_POD`, Service identity, preload shim, node affinity — and its
+traffic takes a DPU inbound verdict. The same Deployment without the annotation carries none of
 it and serves 429,101 requests over kernel TCP.
 
 That second half is what makes the feature safe to turn on: a Pod nobody
@@ -396,8 +396,10 @@ builds (`data/api-l7-selcost-20260825-222604/`,
 
 Building a Linkerd session is the largest single cost above the transport, and
 sharing one stack per workload is what removes most of it. The arm is two full
-deploys of the same arrangement differing only in `DPUMESH_SHARED_STACKS`, driven
-by a closed loop that reconnects after every N completions:
+deploys of the same arrangement differing only in whether per-workload stack
+sharing was compiled in (that build's `DPUMESH_SHARED_STACKS` switch; sharing
+has since become unconditional), driven by a closed loop that reconnects after
+every N completions:
 
 | Reconnect period | OFF µs/req | ON µs/req | OFF reconnects/15 s | ON reconnects/15 s | OFF p99 µs | ON p99 µs |
 |---|---:|---:|---:|---:|---:|---:|
@@ -498,7 +500,7 @@ working is what makes discovery withhold the endpoint identity.
 
 **Pod density is the K dial.** A node serves the smaller of `MAX_PODS` — 127,
 the `int8` wire ceiling — and `MAX_DPA_RINGS × N / K`. This BlueField reports
-32 execution units, so eight rings per Pod seat 32 Pods and two seat 127; what
+32 execution units, so eight rings per Pod seat 64 Pods and two seat 127; what
 a lower K trades away is per-Pod parallelism, including the ARM data workers it
 caps at A ≤ K. A `K = 2` deployment has been run at 48 Pods of one Service
 (`data/scale-20260825-172249/stages.csv`, 7 of 7): all 48 Ready in 26 s — under
@@ -522,8 +524,9 @@ had no route in the measured deployments.
   points, 3 repetitions) and `bench/suite/api_l7_cost.sh` (closed and open-loop
   CPU, 3 repetitions each) at `1518aae`. Raw data in `data/api-l7-20260821/`.
 - Session cost: `bench/suite/l7_session_cost.sh --reps 2 --dur 15` over two
-  deploys differing only in `DPUMESH_SHARED_STACKS`. Raw data in
-  `data/l7-shared-off-20260821/` and `data/l7-shared-on-20260821/`.
+  deploys differing only in that build's stack-sharing switch
+  (`DPUMESH_SHARED_STACKS`, since removed — sharing is unconditional). Raw data
+  in `data/l7-shared-off-20260821/` and `data/l7-shared-on-20260821/`.
 - Selection cost: `bench/suite/api_l7_cost.sh` closed and open-8K, 3
   repetitions, single-backend and 50/50-weighted arms at `9d450b5`. Raw data in
   `data/api-l7-selcost-20260825-222604/`; the registry-lock reading in

@@ -219,11 +219,8 @@ deploy_agent() {
 # account, a system unit so a node reboot restores it with no operator session,
 # and a root directory the receiver may write the four feeds into. After this
 # the agent is the DPU's only control peer and nothing here runs again.
-# The user units the delivery hop replaces. A unit started by an earlier deploy
-# keeps running the copy of the script it read at start, so it survives the
-# script losing the code — and it pushes feeds as root, taking the feed
-# directory back from the hop's account every cycle. Retiring them is part of
-# installing the hop, not a separate cleanup.
+# User units that push feeds as root and take the feed directory back from the
+# hop's account every cycle; they are stopped before the hop is installed.
 LEGACY_UNITS="dpumesh-membership.service dpumesh-topology.service \
 dpumesh-linkerd-service-registry.service dpumesh-linkerd-identity-agent.service"
 
@@ -250,8 +247,8 @@ install_hop() {
                 --shell /usr/sbin/nologin '$FEED_USER'
         echo '$DPU_PASS' | sudo -S install -d -o '$FEED_USER' -g '$FEED_USER' -m 0755 '$FEED_ROOT'
         # The identity bundle installs into a directory, and a directory the
-        # hop's account does not own (the pre-hop root-installed one) refuses
-        # every install silently on the agent side. install -d re-owns it.
+        # hop's account does not own refuses every install silently on the
+        # agent side. install -d re-owns it.
         echo '$DPU_PASS' | sudo -S install -d -o '$FEED_USER' -g '$FEED_USER' -m 0700 \
             '$FEED_ROOT/linkerd-identity'
         echo '$DPU_PASS' | sudo -S install -o root -g root -m 0555 \

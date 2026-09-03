@@ -15,8 +15,7 @@ rules:
   resources: ["pods", "services"]
   verbs: ["get", "list"]
 # The identity bundle the DPU presents to the Linkerd control plane is minted
-# here, on the cadence the token's lifetime asks for, rather than by a user
-# unit on an operator's login path.
+# here, on the cadence the token's lifetime asks for.
 - apiGroups: [""]
   resources: ["serviceaccounts/token"]
   verbs: ["create"]
@@ -35,9 +34,8 @@ subjects:
   name: dpumesh-node-agent
   namespace: ${NS}
 ---
-# The absorbed control-plane relay resolves the Linkerd Services it forwards
-# to. This is the gateway DaemonSet's former Role, rebound to the agent: one
-# Pod with two listeners, and the same namespaced read it always had.
+# The control-plane relay resolves the Linkerd Services it forwards to, and
+# the identity bundle reads the trust-anchor ConfigMap in the same namespace.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -113,7 +111,7 @@ spec:
         # serves over DMA.
         - --protect-ingress
 ${DPUMESH_AGENT_SERVICE_ARGS}
-        # The absorbed control-plane relay.
+        # The control-plane relay.
         - --kube-route=destination=${LINKERD_GATEWAY_BIND}:${LINKERD_GATEWAY_DST_PORT}->${LINKERD_CONTROL_NAMESPACE}/linkerd-dst:8086
         - --kube-route=policy=${LINKERD_GATEWAY_BIND}:${LINKERD_GATEWAY_POLICY_PORT}->${LINKERD_CONTROL_NAMESPACE}/linkerd-policy:8090
         - --kube-route=identity=${LINKERD_GATEWAY_BIND}:${LINKERD_GATEWAY_IDENTITY_PORT}->${LINKERD_CONTROL_NAMESPACE}/linkerd-identity:8080
@@ -141,9 +139,10 @@ ${DPUMESH_AGENT_SERVICE_ARGS}
           # mount, and a root uid alone does not bypass file modes once every
           # capability is dropped. NET_ADMIN: the ingress guard writes the
           # host's FORWARD chain, and hostNetwork is what points iptables at
-          # the host rather than a Pod namespace. SYS_ADMIN enters the host
-          # cgroup namespace only in a broker child; SYS_PTRACE permits opening
-          # PID 1's namespace handle under the kernel ptrace access check.
+          # the host rather than a Pod namespace. SYS_ADMIN is held for the
+          # broker launch path. SYS_PTRACE: reading /proc/<pid>/cgroup and
+          # /proc/<pid>/exe of workload processes owned by other uids passes
+          # the kernel ptrace access check.
           capabilities: { drop: ["ALL"], add: ["DAC_READ_SEARCH", "NET_ADMIN", "SYS_ADMIN", "SYS_PTRACE", "IPC_LOCK", "SETUID", "SETGID", "KILL"] }
         readinessProbe:
           exec: { command: ["python3", "-c", "import os; assert os.path.exists('/run/dpumesh/attest.sock')"] }

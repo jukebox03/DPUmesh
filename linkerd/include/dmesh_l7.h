@@ -110,8 +110,10 @@ int  l7_inbound_verdict(int worker_id, const struct dmesh_l7_flow *flow);
  * `dmesh_l7_workloads`. */
 void l7_inbound_forget(int worker_id, const char *workload);
 /* Control-plane admission accounting. `kind` is the decision surface
- * (`grant`, `membership`, `revocation`, `peer`) and `reason` a stable
- * lowercase slug, `ok` for the accepting outcome. Registration decisions are
+ * (`assert`, `registration`, `registration-timeout`, `membership`,
+ * `revocation`, `admission`, `topology`, `peer`, `inbound`) and `reason` a
+ * stable lowercase slug, `ok` for the accepting outcome. Registration
+ * decisions are
  * taken on the Comch control thread and peer refusals on a data worker, so the
  * counters are process-global and this is called from several threads. */
 void l7_control_event(const char *kind, const char *reason);
@@ -159,17 +161,13 @@ struct dmesh_l7_workload {
     uint16_t port;            /* the port its Service publishes */
 };
 
-/* Every registered, data-ready Pod, written into `out` up to `max`; returns how
- * many were written, or -1 when the caller does not own this worker.
+/* Every registered, data-ready Pod inside the controller's scope whose Service
+ * publishes a port, written into `out` up to `max`; returns how many were
+ * written, or -1 when the caller does not own this worker.
  *
- * An inbound policy watch is held for as long as its destination Pod is served,
- * rather than asked for per stream: a watch the store evicted comes back
- * holding the configured default, and a verdict taken against that default is
- * not a verdict about the port. Holding one means nothing expires it and
- * nothing starts it either, so a worker reconciles what it holds against this
- * list — starting a watch when a Pod registers, which is what puts the answer
- * in place before the Pod's first caller arrives, and dropping one whose Pod is
- * gone, which is what bounds the held set across Pod churn. */
+ * A worker reconciles the watches it holds against this list on its maintenance
+ * pass: starting one when a Pod registers, so the answer is in place before its
+ * first caller, and dropping one whose Pod is gone, which bounds the held set. */
 int dmesh_l7_workloads(int worker_id, struct dmesh_l7_workload *out, int max);
 
 /* Persistent runtime backend implemented by DPUmesh. */

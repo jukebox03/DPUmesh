@@ -117,7 +117,8 @@ int64_t dmesh_eq_next_deadline_ns(dmesh_eq_t *eq);
 
 /* ===== Connection setup (rdma_cm) ===== */
 
-/* Create a client QP for a registered service name. Returns ENOENT or ENOMEM. */
+/* Create a client QP for a registered service name. Returns ENOENT (not meshed),
+ * EAGAIN (no generation held — retry), or ENOMEM. */
 dmesh_qp_t *dmesh_create_qp(dmesh_eq_t *eq, const char *service_name);
 
 /* Flush, send FIN, release RX credit, and destroy the QP. The pointer is invalid

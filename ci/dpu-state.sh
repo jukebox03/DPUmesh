@@ -47,8 +47,8 @@ pod_count="$(printf '%s\n' "$pods" | grep -c .)"
 pods_id="$(printf '%s\n' "$pods" | sha1sum | cut -c1-8)"
 
 # --- where the client processes sit ------------------------------------------
-# The pods run on this node, so their affinity is readable here. Pinning is the
-# knob that moved these numbers the most in past campaigns.
+# The pods run on this node, so their affinity is readable here. Pinning is a
+# knob the numbers depend on.
 # The set of affinities the load generators sit on, not one of them: a campaign
 # runs several clients and a single number would name whichever process pgrep
 # happened to return first.

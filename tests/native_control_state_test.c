@@ -28,8 +28,9 @@ install_generation(struct objects *objs)
 int
 main(void)
 {
-	/* Exact boundary: an unauthenticated connection remains live just before
-	 * 30s, expires at 30s, and registered/pending connections never resubmit. */
+	/* Exact boundary: an unauthenticated connection remains live just before 30s and
+	 * expires at 30s; a registered connection, or one whose disconnect is already
+	 * pending, never expires. */
 	const uint64_t connected = 1000000000ull;
 	assert(!dmesh_registration_should_expire(
 		connected, connected + DMESH_REGISTRATION_TIMEOUT_NS - 1,

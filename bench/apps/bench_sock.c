@@ -424,9 +424,9 @@ static void run_bench(int conn_fd, int mode, int req_size, int reply_size, int c
         if (atomic_load(&w[i].broken)) { worker_fail++; total_fail++; }
         total_scheduled += (long)w[i].next_seq + w[i].drops;
         total_pending += w[i].pending;
-        /* Preserve completed work in an overload point's achieved rate. The
-         * point remains ERR through worker_fail, but no longer reports zero
-         * throughput merely because its final drain did not quiesce. */
+        /* Preserve completed work in an overload point's achieved rate: the point
+         * stays ERR through worker_fail, and a drain that did not quiesce does not
+         * zero its throughput. */
         if (w[i].dura > 1e-9 && measured > 0) {
             mrps += (double)measured / w[i].dura * 1e-6;
             double rps = (double)measured / w[i].dura;

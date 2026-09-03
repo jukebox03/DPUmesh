@@ -25,8 +25,8 @@ using MemoryRequest = grpc_event_engine::experimental::MemoryRequest;
 using Slice = grpc_event_engine::experimental::Slice;
 using SliceBuffer = grpc_event_engine::experimental::SliceBuffer;
 
-// Posts one pump run may issue before yielding its thread and rescheduling
-// itself for the remainder.
+// Posts one pump pass issues under the endpoint lock before dropping it;
+// RunPumpLoop re-enters on the same thread for the remainder.
 constexpr size_t kReservationBudget = 16;
 
 struct Completion {

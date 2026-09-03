@@ -54,11 +54,11 @@ NAME_RE = re.compile(r"[a-z][a-z0-9-]{0,31}")
 MEMBER_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,31}")
 HEX64_RE = re.compile(r"[0-9a-f]{64}")
 
-# Feed name -> (relative target, byte bound, mode). The bounds are the
-# consumers' own: membership is one node's 256 KiB document, the topology
-# generation carries the whole cluster, and the Service-target feed is a
-# per-Service list. A payload over the bound is refused at the door rather than
-# written and rejected later.
+# Feed name -> (relative target, byte bound, mode). Membership (256 KiB,
+# doca/pod_membership.c) and topology (16 MiB, doca/topology.h) carry their
+# consumers' own bounds; the Service-target feed is bounded here at 1 MiB, above
+# the adapter's 256 KiB. A payload over the bound is refused at the door rather
+# than written and rejected later.
 FEEDS: dict[str, tuple[str, int, int]] = {
     "membership": ("membership.v1", 256 * 1024, 0o644),
     "topology": ("topology.v1", 16 * 1024 * 1024, 0o644),

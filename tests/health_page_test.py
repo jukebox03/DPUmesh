@@ -68,9 +68,9 @@ assert marks(render([
     record("2026-08-20T19:00:00Z", "ok", workers=8),
 ])) == 0
 
-# The regression this test exists for: a night that states no topology is a gap
-# in the comparison, not the end of it. Idle nights are ordinary on a research
-# machine, and a redeploy across one used to go unmarked.
+# A night that states no topology is a gap in the comparison, not the end of it:
+# idle nights are ordinary on a research machine, and a redeploy across one is
+# still marked.
 assert marks(render([
     record("2026-08-19T19:00:00Z", "ok", workers=8),
     record("2026-08-20T19:00:00Z", "idle"),

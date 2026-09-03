@@ -2,9 +2,9 @@
 """DPUmesh mutating admission webhook.
 
 A meshed Pod needs a fixed set of node-local facts before its first byte:
-the DOCA device, the transport library, the attestation socket the node agent
-listens on, its Service identity, and the two Linkerd markers that make the
-workload sidecarless. Written by hand that is eight edits per Deployment.
+the transport library, the attestation socket the node agent listens on, its
+Service identity, and the two Linkerd markers that make the workload
+sidecarless. Written by hand that is eight edits per Deployment.
 This webhook applies all of them from one annotation.
 
     dpumesh.io/inject: enabled      on the Namespace, or on the Pod template
@@ -20,8 +20,8 @@ later and elsewhere:
     it every session ends before carrying a byte, so it is part of the data
     path and not a cosmetic default. The two are applied together or not at
     all.
-  * The device, library and attestation mounts are what the transport opens at
-    startup; a Pod holding some of them fails at `dpumesh_init`.
+  * The library and attestation mounts are what the transport opens at
+    startup; a Pod holding one without the other fails at `dpumesh_init`.
 
 Admission runs before scheduling, so this process cannot read the node a Pod
 will land on. It therefore injects a `nodeAffinity` term requiring the DPU

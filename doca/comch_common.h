@@ -27,8 +27,8 @@ dmesh_consumer_expired(struct doca_comch_event_consumer *event,
 /* Host ↔ DPU ARM control messages. Values are wire ABI and remain below 256. */
 enum dmesh_msg_type {
     DMESH_MSG_INVALID      = 0, /* reserved: zeroed buffer is never a live type */
-    DMESH_MSG_POD_REGISTER = 1, /* Host→DPU: register (service_id; pod_id=-1 → DPU assigns) */
-    DMESH_MSG_MMAP_EXPORT  = 2, /* Host→DPU: export an mmap region (ring / TX buf / RX buf) */
+    DMESH_MSG_POD_REGISTER = 1, /* Host→DPU: register (service_name; pod_id=-1 → DPU assigns) */
+    DMESH_MSG_MMAP_EXPORT  = 2, /* Host→DPU: export an mmap region (forward ring / TX buf / RX buf / reverse ring) */
     DMESH_MSG_POD_ASSIGNED = 5, /* DPU→Host: the pod_id the DPU allocated for this registration */
     DMESH_MSG_POD_INIT_RESULT=6,/* DPU→Host: all pod DMA resources are READY, or init failed */
     DMESH_MSG_POD_UNREGISTER=7, /* Host→DPU: stop routing and quiesce every remote DMA reference */
@@ -294,8 +294,8 @@ _Static_assert(sizeof(struct dmesh_resolve_msg) == 140,
 
 /* DPU→Host answer. `status`: 0 = meshed (interned_svc valid), 1 = not meshed
  * (leaving the mesh is the caller's explicit, logged decision), 2 = the DPU
- * holds no generation (a facade connect falls back; a registration fails
- * closed). */
+ * holds no generation (a facade connect refuses unless DPUMESH_TCP_FALLBACK
+ * allows kernel TCP; a registration fails closed). */
 struct dmesh_resolve_ack_msg {
     uint8_t  type;                  /* = DMESH_MSG_RESOLVE_ACK */
     uint8_t  status;

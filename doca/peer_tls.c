@@ -11,10 +11,10 @@
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
 
-/* The credential is a key, not a name or a date, so the certificate carries
- * the longest life the encoding allows rather than a renewal schedule. A node
- * whose key is withdrawn stops being believed when the generation stops
- * binding it, which is a control-plane event and not an expiry. */
+/* The credential is a key, not a name or a date, so the certificate carries a
+ * hundred-year life rather than a renewal schedule. A node whose key is
+ * withdrawn stops being believed when the generation stops binding it, which
+ * is a control-plane event and not an expiry. */
 #define PEER_TLS_CERT_DAYS   36525
 /* X.509 bounds a common name at 64 characters and a Kubernetes node name may
  * be longer. The name is descriptive, so it is truncated rather than refused. */

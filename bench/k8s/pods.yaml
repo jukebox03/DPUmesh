@@ -79,8 +79,8 @@ spec:
       - { name: libdpumesh-so, hostPath: { path: ${LIB_OUT}, type: Directory } }
       - { name: dpumesh-attest, hostPath: { path: /run/dpumesh, type: DirectoryOrCreate } }
 ---
-# echo-dpumesh-13 / -14 (pod_id=13,14): extra backends for the weighted-LB demo
-# (DPU LBs service 11 across pods 11,13,14). Same echo image, different id.
+# echo-dpumesh-13 / -14: extra backends of echo-dpumesh, or of their own Services
+# via ECHO_13_SERVICE/ECHO_14_SERVICE, for the multi-backend LB arm. Same echo image.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -149,7 +149,7 @@ spec:
   selector: { dpumesh-service: echo-dpumesh }
   ports: [{ port: ${CTRL_PORT}, targetPort: ${CTRL_PORT} }]
 ---
-# loopback-dpumesh (pod_id=12): one pod that is both client and server of its own
+# loopback-dpumesh: one pod that is both client and server of its own
 # service — proves self-routing + oriented-tuple demux on a single host.
 apiVersion: apps/v1
 kind: Deployment
@@ -189,9 +189,10 @@ spec:
   selector: { app: loopback-dpumesh }
   ports: [{ port: ${CTRL_PORT}, targetPort: ${CTRL_PORT} }]
 ---
-# verbs-dpumesh (pod_id=17): RDMA-verbs-façade counterpart of loopback-dpumesh —
-# same self-routing proof, but the whole data path goes through dmesh_verbs.h
-# (dmesh_post_send / dmesh_poll_eq / dmesh_release_rx_buffer / dmesh_eq_fd).
+# verbs-dpumesh: RDMA-verbs-façade counterpart of loopback-dpumesh — same
+# self-routing proof, but the whole data path goes through the verbs half of
+# include/dpumesh/dmesh.h (dmesh_post_send / dmesh_poll_eq /
+# dmesh_release_rx_buffer / dmesh_eq_fd).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -230,7 +231,7 @@ spec:
   selector: { app: verbs-dpumesh }
   ports: [{ port: ${CTRL_PORT}, targetPort: ${CTRL_PORT} }]
 ---
-# preload-dpumesh (service_id=15): LD_PRELOAD shim validator. Runs vanilla TCP
+# preload-dpumesh: LD_PRELOAD shim validator. Runs vanilla TCP
 # binaries (tcp_echo + tcp_client) under LD_PRELOAD=libdmesh_preload.so.
 apiVersion: apps/v1
 kind: Deployment
@@ -277,9 +278,7 @@ spec:
 ---
 # preload-sock: bench_sock/echo_sock workload over LD_PRELOAD. The
 # control listener is ordinary kernel TCP; only BENCH_TARGET data connections
-# are intercepted. The client resolves the Service's ClusterIP through the DPU
-# (kubelet injects it as PRELOAD_DPUMESH_SERVICE_HOST), so nothing is baked
-# into the image.
+# are intercepted, and the shim resolves that fixed ClusterIP through the DPU.
 apiVersion: apps/v1
 kind: Deployment
 metadata:

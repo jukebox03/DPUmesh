@@ -81,8 +81,7 @@ struct dpa_ring_info {
 	uint32_t region_off;
 	/* Host TX buffer length. The descriptor producer is an unprivileged
 	 * workload process, so the DPA bounds every forward DMA span against
-	 * this before it names a host source or a DPU staging destination.
-	 * Occupies the struct's former tail padding; the size is unchanged. */
+	 * this before it names a host source or a DPU staging destination. */
 	uint32_t host_buf_size;
 } __attribute__((__packed__, aligned(8)));
 
@@ -168,7 +167,7 @@ struct comch_dma_comp_msg {
 	uint16_t dst_port;    /* dest port; PORT_BLANK -> accept queue */
 	uint16_t seq;         /* per-conn sequence (match key with port) */
 	uint16_t length;      /* payload length (<= DPUMESH_SLOT_SIZE) */
-	uint32_t pos;         /* buffer offset (forward: DPU dpu_buf; reverse: Host RX) */
+	uint32_t pos;         /* offset into the source pod's DPU staging (== host TX byte offset) */
 	uint32_t generation;  /* source pod's dma_generation */
 };
 /* Sent as immediate via doca_dpa_dev_comch_producer_dma_copy() — HW max 32 bytes.
@@ -203,7 +202,7 @@ struct comch_msg {
 } __attribute__((__packed__, aligned(4)));
 
 /* These structs cross the host(x86) / DPU-ARM / DPA-EU toolchain boundary
- * (dpa_ring_info is the RING_ADD/REV_RING_ADD payload and is also h2d_memcpy'd
+ * (dpa_ring_info is the RING_ADD payload and is also h2d_memcpy'd
  * inside dpa_thread_arg; comch_msg is the configured msgq imm_data_len). Lock
  * their layout so any ABI drift between toolchains fails the build instead of
  * silently corrupting the wire. */
@@ -230,7 +229,7 @@ struct dma_desc {
 	doca_dpa_dev_mmap_t mmap;      /* 4B */
 	uint64_t addr;                 /* 8B byte offset into the host TX buffer */
 	uint32_t size;                 /* 4B (fixed width for Host/DPA ABI stability) */
-		/* Endpoint tuple copied verbatim into the completion. */
+		/* Endpoint tuple; all but src_service are copied into the completion. */
 		uint16_t seq;                  /* 2B per-conn sequence */
 	uint16_t src_port;             /* 2B sender port */
 	uint16_t dst_port;             /* 2B dest port (PORT_BLANK=0 -> accept queue) */

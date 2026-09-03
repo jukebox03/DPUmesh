@@ -10,7 +10,7 @@ Every push, on a hosted x86 runner. Under a minute.
 
 | | what it protects |
 |---|---|
-| `contracts-hostfree` | the 14 contracts that need no DOCA and no BlueField (`make test-hostfree`) |
+| `contracts-hostfree` | the contracts that need no DOCA and no BlueField (`make test-hostfree`) |
 | `headers-standalone` | the four public headers compile alone as C99 and C++17, and pull in no DOCA |
 | `abi-guard` | a changed public header carries either an `ABI_MAJOR` bump or an explicit `ABI-Impact:` line |
 | `docs-links` | every relative link in the repository's Markdown resolves |
@@ -19,10 +19,10 @@ On a path change only.
 
 | | what it protects | where |
 |---|---|---|
-| `contracts-arm64` | the same 14 contracts plus the crate's 38 unit tests | aarch64 hosted |
+| `contracts-arm64` | the same contracts plus the crate's unit tests | aarch64 hosted |
 | `rust-build` | `dmesh-l7` builds, tests, and passes clippy | hosted |
 | `rust-fmt` | `linkerd/rust/src/lib.rs` formatting | hosted |
-| `contracts-rapids4` | **all 28 contracts** (`make test`) | rapids4, needs DOCA |
+| `contracts-rapids4` | **every contract** (`make test`) | rapids4, needs DOCA |
 
 On a schedule.
 
@@ -50,8 +50,8 @@ call is missing.
 ## The two Makefile targets
 
 ```
-make test-hostfree     14 contracts, no DOCA and no BlueField
-make test              all 28
+make test-hostfree     the contracts that need no DOCA and no BlueField
+make test              every contract
 ```
 
 The difference between them is the definition of "needs the DOCA SDK". Hosted CI
@@ -102,7 +102,8 @@ Constraints on anything added to those jobs:
 
 - **No `pull_request` trigger.** This repository is public, and a pull request
   from a fork carries its own workflow code. The rapids4 jobs trigger on
-  `workflow_dispatch` and on `push` to `main` only.
+  `workflow_dispatch`, on `push` to `main`, or on a schedule — never on
+  `pull_request`.
 - **One job at a time.** Every rapids4 workflow shares
   `concurrency: group: rapids4` with `cancel-in-progress: false`. A build beside
   a measurement invalidates the measurement.

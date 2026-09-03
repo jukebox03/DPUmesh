@@ -106,7 +106,7 @@ dmesh_resolve_name_via(dpumesh_ctx_t *ctx, const char *name)
 
     struct dmesh_resolve_ack_msg ack;
     if (dpumesh_resolve(ctx, 1, name, 0, 0, &ack) != 0)
-        return -1;                        /* errno = EAGAIN, uncached */
+        return -1;                        /* errno from dpumesh_resolve, uncached */
     if (ack.status > 1)
         return answer(ack.status, -1);    /* no generation held: retry soon */
     pthread_mutex_lock(&g_mu);

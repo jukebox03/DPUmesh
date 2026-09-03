@@ -399,9 +399,9 @@ the egress chunk arena is not.
 
 [PDF](figures/dpumesh_threads.pdf)
 
-The DPU binary always links the adapter archive `linkerd/rust/libdmesh_l7.a`
-and, through it, the pinned proxy fork in `linkerd/port/linkerd2-proxy/`; Meson
-refuses a configuration without them. There is no reference consumer and no
+The DPU binary always links `libdmesh_l7.a`, the adapter archive `linkerd/rust/`
+builds, and, through it, the pinned proxy fork in `linkerd/port/linkerd2-proxy/`;
+Meson refuses a configuration without them. There is no reference consumer and no
 runtime bypass for a Service the deployment assigned to Linkerd. The ordered L4
 machinery of the first half of this document is the substrate those sessions and
 the peer channel run on, not an alternative to them.
@@ -437,7 +437,7 @@ initialize or destroy DOCA resources. The flow and byte-transfer ABI belongs to
 
 ## Service modes
 
-Services are assigned at DPU startup.
+Services are named at DPU startup and resolved against each adopted generation.
 
 | Variable | Mode | Payload path |
 |---|---|---|
@@ -741,10 +741,9 @@ TLS and tagged-transport layers. Their far end is a Pod, not a second Linkerd
 byte proxy: adding sidecar TLS there would deliver ciphertext and a transport
 header to the application. Node-local isolation is the registered DMA mapping;
 node-to-node confidentiality and mutual authentication belong to the peer
-channel's transport, whose authenticated node key the held topology binds. That
-transport is implemented but has never run between two nodes, so this is still
-what the design assigns rather than what a deployment provides —
-[`CONTROL.md`](CONTROL.md) carries the seam and its status.
+channel's transport, whose authenticated node key the held topology binds.
+[`CONTROL.md`](CONTROL.md) carries that transport, the seam, and its deployment
+status.
 
 ## The adapter ABI
 
@@ -858,11 +857,12 @@ Meson links the archive supplied by `-Dl7_lib_path` and defines
 ## Control plane
 
 Destination, policy and identity addresses, the identity directory, the token
-file and the trust anchors are startup configuration (`LINKERD_DST_ADDR`,
-`LINKERD_POLICY_ADDR`, `LINKERD_IDENTITY_ADDR`, `LINKERD_IDENTITY_DIR`,
-`LINKERD_TRUST_ANCHORS`). A deployed Linkerd control plane is mandatory:
-missing addresses, identity material or a versioned Service target feed fail
-preflight, and no mock fallback exists.
+file and the trust anchors are the proxy's stock startup environment
+(`LINKERD2_PROXY_DESTINATION_SVC_ADDR`, `LINKERD2_PROXY_POLICY_SVC_ADDR`,
+`LINKERD2_PROXY_IDENTITY_SVC_ADDR`, `LINKERD2_PROXY_IDENTITY_DIR`,
+`LINKERD2_PROXY_IDENTITY_TRUST_ANCHORS`; [`CONTROL.md`](CONTROL.md) §5.5.1). A
+deployed Linkerd control plane is mandatory: missing addresses, identity material
+or a versioned Service target feed fail preflight, and no mock fallback exists.
 
 The Service target feed names Services by `namespace/name`; the adapter
 verifies it through `dmesh_l7_verify_feed` (feed keyring), parses only the
@@ -902,9 +902,9 @@ quiesces, active sessions, pending registrations and live tasks are zero.
 | Forward ring | 4,096 descriptors |
 | Reverse ring | 8,192 entries |
 | Reverse entry | 32 B |
-| DPA EUs | 1–32; N=32/30/32/24 measured for A=4/6/8/12 |
-| Rings per Pod | 1–16; K=4/6/8/12 measured in the core-scale arm |
-| ARM data workers | 1–16 structural; A=4/6/8/12 measured, A=16 control affinity pending |
+| DPA EUs | 1–32 |
+| Rings per Pod | 1–16 |
+| ARM data workers | 1–16; 16 is outside the supported range ([`CONTROL.md`](CONTROL.md) §5.5.1) |
 | Payload DMA retries | 1 |
 | Payload DMA batch bytes | queried device memcpy limit |
 | Egress arena | 1,024 chunks of 64 KiB |

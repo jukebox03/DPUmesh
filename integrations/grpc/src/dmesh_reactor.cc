@@ -346,11 +346,9 @@ class DmeshReactor::Impl final
     return PostResult::Accepted();
   }
 
-  /* PostSend transferred byte ownership to libdpumesh.  Do not turn every
-   * EventEngine Write boundary (headers, DATA, trailers) into a physical flush:
-   * the native transport already publishes an idle tail immediately and gives
-   * a busy tail a bounded 500 us coalescing deadline.  Calling dmesh_flush here
-   * defeated that policy and forced small descriptors per HTTP/2 write. */
+  /* PostSend already transferred custody. A Write boundary (headers, DATA,
+   * trailers) is not a physical flush: libdpumesh publishes an idle tail
+   * immediately and holds a busy tail to its own bounded deadline. */
   absl::Status Flush(const std::shared_ptr<Connection>& connection) {
     std::lock_guard<std::mutex> lock(connection->tx_mu);
     if (connection->closing || connection->qp == nullptr)
@@ -810,9 +808,9 @@ class DmeshReactor::Impl final
   }
 
   void DrainCommands() {
-    /* One batch per loop cycle: tasks enqueued while this batch runs (e.g. a
-     * write pump yielding to EQ processing) execute on the next cycle, after
-     * their empty→non-empty wake is observed by poll(). */
+    /* One batch per loop cycle: tasks enqueued while this batch runs execute
+     * on the next cycle, after their empty→non-empty wake is observed by
+     * poll(). */
     std::deque<absl::AnyInvocable<void()>> batch;
     {
       std::lock_guard<std::mutex> lock(command_mu_);

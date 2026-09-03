@@ -406,9 +406,8 @@ static void test_default_four_mib_window_and_dynamic_fifo(void)
     assert(dpumesh_tx_next_send(ctx, TEST_PORT, 0, &moff, &len) == 0);
     assert(atomic_load(&psl->su_head) == 512);
 
-    /* The DPU batches these exact ACKs into four control messages. Once the
-     * complete 512 KiB prefix is acknowledged, the next reserve recycles that
-     * extent while the remaining 3.5 MiB stays in flight. */
+    /* Once the complete 512 KiB prefix is acknowledged, the next reserve recycles
+     * that extent while the remaining 3.5 MiB stays in flight. */
     for (uint16_t seq = 1; seq <= 64; seq++)
         tx_reclaim_ack(ctx, TEST_PORT, seq);
     assert(atomic_load(&psl->tx_f) == 512u * 1024u);

@@ -175,9 +175,9 @@ dpu_worker_snapshot() {
       done'" 2>/dev/null
 }
 
-# A pod that dies mid-campaign leaves the DPU unable to reclaim its RX mmap,
-# which corrupts every later run. Stop at the first restart rather than collect
-# through it.
+# A pod that dies mid-campaign measured a dying process, and its replacement
+# changes the PIDs the CPU window is charged to. Stop at the first restart
+# rather than collect through it.
 restart_count() {
   # During a rollout, do not concatenate the terminating Pod's restart count
   # with the replacement Pod's count. The comparison below needs one numeric
@@ -236,8 +236,8 @@ resolve_endpoints() {
     [[ "${SERVER_PID:-}" =~ ^[0-9]+$ ]]
 }
 
-# A dead pod leaves the DPU holding its RX mmap, and only a full deploy releases
-# it. A pod-only restart would leave the DPU blocked on its first connection.
+# After a crash the sweep redeploys the whole grpc scope rather than restarting one
+# Pod, so every later point runs against a data path in a known state.
 recover_deploy() {
   RECOVERIES=$((RECOVERIES + 1))
   [ "$RECOVERIES" -le "$MAX_RECOVERIES" ] || {

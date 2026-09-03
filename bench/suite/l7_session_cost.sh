@@ -1,9 +1,9 @@
 #!/bin/bash
 # Price a DMesh session on the target hardware, from two directions.
 #
-# Every DMesh frontend connection builds its own complete outbound stack: the
-# per-target closure in `Config::build` calls `outbound.mk`, so a session
-# constructs its own discovery, policy, endpoint and reconnect caches. Two other
+# A DMesh frontend connection takes its outbound stack from a per-target cache; a
+# miss builds a complete one (the per-target closure in `Config::build` calls
+# `outbound.mk`, constructing discovery, policy, endpoint and reconnect caches). Two other
 # paths are linear in live sessions: `Worker::poll_internal` walks every session
 # on each runtime poll, and `Backends::take_session` scans the published
 # services. A steady one-connection point hides all three, because it builds one

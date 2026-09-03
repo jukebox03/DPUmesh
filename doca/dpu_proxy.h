@@ -69,12 +69,13 @@ typedef struct dmesh_proxy_conn {
 
 /* ---- engine lifecycle / hooks (called from dpu_worker.c) ---- */
 
-/* Create the engine. It is the sole DPU→host reverse path. */
+/* Create the engine: the SG-DMA DPU→host data path. */
 int px_init(struct objects *objs);
 
-/* Re-derive the interned-id → L7 mode table from the DPUMESH_L7_*_SVC name
- * lists against the held generation. Called by px_init and after every
- * topology adoption. Returns -1 when one Service is named by two lists. */
+/* Re-derive the interned-id → L7 mode table from the DPUMESH_L7_SVC and
+ * DPUMESH_L7_OPAQUE_SVC name lists against the held generation. Called by
+ * px_init and after every topology adoption. Returns -1 when one Service is
+ * named by two lists. */
 int px_l7_resolve_modes(struct objects *objs);
 
 /* Process one forward completion on its connection owner. */
@@ -97,16 +98,17 @@ void px_bind_worker(struct objects *objs, int worker_id);
 int px_l7_request_owner(struct objects *objs, int32_t dst_pod_id,
                         int16_t dst_service);
 
-/* Report the L7 audit counters: fallbacks by cause, custody violations and
- * shared-pool lock traffic. Rate-limited internally, and silent while nothing
- * has changed. */
+/* Report the L7 audit counters: fallbacks by cause and custody violations,
+ * plus the engine's drain/DMA counters under DPUMESH_PERF_STATS. Rate-limited
+ * internally, and silent while nothing has changed. */
 void px_l7_stats_report(struct objects *objs, int worker_id);
-/* Peer refusals and poisoned connections, counted by reason. `px_peer_event`
- * is what `dmesh_peer_ops.event` is bound to. */
+/* Peer refusals and poisoned connections, counted by reason.
+ * `dmesh_peer_ops.event` reaches this through `px_peer_event_cb`. */
 void px_peer_event(struct objects *objs, const char *reason);
 void px_peer_stats_report(struct objects *objs, int worker_id);
 /* Release one extent whose destination was remote, now that its STREAM_ACK
- * says the bytes landed. `dmesh_peer_ops.release` is bound to this. */
+ * says the bytes landed. `dmesh_peer_ops.release` reaches this through
+ * `px_peer_release_cb`. */
 void px_peer_release(struct objects *objs, uint8_t kind, void *cookie, uint32_t bytes);
 /* Reset peer channels the adopted generation no longer binds, or binds to a
  * different static key. Runs on the control thread on every adoption. */

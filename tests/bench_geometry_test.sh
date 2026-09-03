@@ -21,7 +21,7 @@ check_geometry() {
     }
 }
 
-# The canonical deployment knob overrides every independently supplied legacy
+# The canonical deployment knob overrides every independently supplied N/K/A
 # value, so Host K and DPU N/K/A/L7 cannot silently disagree.
 check_geometry 4  "throughput_workers=4 N=32 K=4 A=4 l7_workers=all"
 check_geometry 6  "throughput_workers=6 N=30 K=6 A=6 l7_workers=all"
@@ -94,7 +94,7 @@ set -e
     }
 
 # Validation fixtures consume the same canonical deployment value. A stale
-# legacy K/A must not make them inspect only part of a 12-worker deployment.
+# explicit K/A must not make them inspect only part of a 12-worker deployment.
 got=$(DPUMESH_THROUGHPUT_WORKERS=12 DPUMESH_RINGS_PER_POD=3 \
       DPUMESH_ARM_WORKERS=2 resolve_deployed_geometry "$ROOT")
 [ "$got" = "12 12" ] || {

@@ -64,7 +64,7 @@ GEN_POD_MAX = 65536
 GEN_SERVICE_MAX = 4096
 GEN_ENDPOINT_MAX = 65536
 TOPOLOGY_MAX_BYTES = 16 * 1024 * 1024
-# A node registration is five short fields; nothing an agent reports is large.
+# A node report is three short JSON fields; nothing an agent reports is large.
 NODE_REPORT_MAX = 4096
 ZERO_KEY = "0" * 64
 POD_UID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
@@ -546,7 +546,7 @@ class ControllerHandler(http.server.BaseHTTPRequestHandler):
     server_version = "dpumesh-controller"
 
     def log_message(self, fmt: str, *args: Any) -> None:
-        pass                                    # one line per request is noise at 5 s
+        pass                                    # one line per request is noise at the delivery cadence
 
     def reply(self, status: int, body: bytes, content_type: str = "text/plain") -> None:
         self.send_response(status)

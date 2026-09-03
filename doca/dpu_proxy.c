@@ -97,8 +97,9 @@ static const char *const px_l7_fallback_name[PX_L7_FB_KINDS] = {
     "single-session-limit", "unknown-reply",
 };
 
-/* The decline codes are wire ABI with the layer: a value it returns is looked
- * up here, so an unknown one is counted rather than mistaken for a known one. */
+/* The decline codes are the FFI contract with the layer: a value it returns is
+ * looked up here, so an unknown one is counted rather than mistaken for a
+ * known one. */
 static inline enum px_l7_fallback_reason px_l7_reason_of(int rc) {
     switch (rc) {
     case DMESH_L7_DECLINE_NOT_ATTACHED:  return PX_L7_FB_NOT_ATTACHED;
@@ -134,7 +135,8 @@ static inline int px_l7_carries_bytes(uint8_t mode) {
 #define PX_CREDIT_REFRESH_RETRY_NS (100u * 1000u)
 
 /* Pool sizes. Arrivals are bounded by total in-flight sender slots
- * (MAX_PODS x DPU_BUFFER_SIZE/slot); units/pieces match pass-through 1:1. */
+ * (MAX_PODS x DPU_BUFFER_SIZE/slot); units match arrivals 1:1, pieces are
+ * twice that. */
 #define PX_ARRIVAL_POOL  (MAX_PODS * (DPU_BUFFER_SIZE / DPUMESH_SLOT_SIZE))
 #define PX_UNIT_POOL     PX_ARRIVAL_POOL
 #define PX_PIECE_POOL    (2 * PX_ARRIVAL_POOL)
@@ -409,7 +411,7 @@ struct px_engine {
     struct doca_buf_inventory *inv;
     int      dma_tasks_inflight;
     /* Set when the doca_dma ctx faults: gates every submit on this engine and
-     * tells px_engine_pump/px_drain to run px_engine_recover, which restarts the
+     * tells px_engine_pump to run px_engine_recover, which restarts the
      * ctx and clears it. Every path that can observe the fault latches it —
      * px_dma_err_cb, the SG-batch submit, and px_lane_refresh_credit. */
     int      dma_stalled;
@@ -502,7 +504,8 @@ struct dmesh_proxy {
     /* ARM SG-DMA engines, one per data worker; ownership is region % n_workers. */
     struct px_engine engines[MAX_ARM_WORKERS];
 
-    /* credit-read landing cells: one 64B cell per lane, DPU-local mmap */
+    /* credit-read landing cells: one PX_SCRATCH_CELL-byte cell per lane in a
+     * DPU-local mmap */
     struct doca_mmap *scratch_mmap;
     uint8_t *scratch;
     struct doca_mmap *rev_scratch_mmap;
@@ -1588,7 +1591,7 @@ static int px_unit_prepare(struct objects *objs, struct px_conn *c,
                            uint32_t len, int32_t route_dst, int reverse,
                            struct px_unit_slot *out) {
     struct dmesh_proxy *px = objs->proxy;
-    struct dpu_conntrack *ct = px_cur_worker->ct;   /* private or locked shared state */
+    struct dpu_conntrack *ct = px_cur_worker->ct;   /* worker-private */
     int32_t dst_pod;
     uint16_t out_src_port = 0, out_dst_port = 0;
     uint16_t *seq_counter = NULL;
@@ -1618,7 +1621,7 @@ static int px_unit_prepare(struct objects *objs, struct px_conn *c,
     } else {
         dst_pod = route_dst;
         if (dst_pod == PX_DST_DEFER)
-            /* No codec named a destination → byte stream → conn-pinned LB. */
+            /* Nothing named a destination → byte stream → conn-pinned LB. */
             dst_pod = px_resolve_backend(objs, c, c->pub.dst_service);
         if (dst_pod == PX_DST_REMOTE) {
             /* The Service is healthy somewhere else. Carrying it needs a peer
@@ -1699,9 +1702,7 @@ static int px_unit_prepare(struct objects *objs, struct px_conn *c,
     return 1;
 }
 
-/* Gather the front stream range into one egress unit without publishing it.
- * This separation lets the L7 parser collapse complete, already-arrived frames
- * before the egress worker can observe them; L4 publishes immediately below. */
+/* Gather the front stream range into one egress unit; px_ship_range publishes it. */
 static int px_build_range(struct objects *objs, struct px_conn *c,
                           uint32_t len, int32_t route_dst,
                           struct px_unit **out_unit) {
@@ -1956,7 +1957,7 @@ static void px_l7_log_fallbacks(struct dmesh_proxy *px, int worker_id) {
                   (unsigned long long)px_stat_get(&px->stat_l7_stray_release));
 }
 
-/* Report the L7 audit and shared-pool lock counters when they move, at most every
+/* Report the L7 audit counters when they move, at most every
  * 10 s. The linkerd backend owns the worker thread for the process's lifetime and
  * reaches no detach point, so the maintenance tick is where a deployed run reports
  * them. */
@@ -2671,7 +2672,6 @@ static void px_l7_close(struct objects *objs, struct px_conn *c, int eof) {
     c->l7_closed = 1;
 }
 
-/* The identity DPUmesh can state about a connection. */
 /* The trust domain the source identity is spelled in. Linkerd names a
  * workload `<sa>.<ns>.serviceaccount.identity.<trust-domain>`, and the same
  * spelling has to come out of here or an `AuthorizationPolicy` naming a
@@ -2990,9 +2990,9 @@ static int px_l7_open_conn(struct objects *objs, struct px_conn *c) {
     if (rc < 0) {
         enum px_l7_fallback_reason why = px_l7_reason_of(rc);
         uint64_t n = px_l7_fallback(objs->proxy, why);
-        /* The caller decides what a decline means, so say what will happen
-         * rather than what the relaxed configuration would do: the deployed
-         * configuration is fail-closed and ends the stream here. */
+        /* The caller decides what a decline means, so say what will happen to
+         * this stream: refused where its Service is protected, forwarded at L4
+         * otherwise. */
         if (((n - 1u) & 0xFFFu) == 0)
             DOCA_LOG_WARN("proxy: L7 layer declined conn (%d:%u) svc %d reason=%s — %s "
                           "(total %llu)",
@@ -3030,8 +3030,8 @@ static void px_l7_apply_release(struct objects *objs, struct px_conn *c) {
         px_advance(objs, c, n);
 }
 
-/* The staging extent holding a stream offset. Unlike px_view this never uses the
- * seam: the L7 layer takes a segment list, so extents go over as they lie and
+/* The staging extent holding a stream offset. Like px_view it extends across
+ * physically abutting arrivals; the L7 layer takes the extent as it lies, so
  * nothing is linearized. Returns the pod's staging base, with the offset in
  * *pos — the (base, pos, len) triple the contract passes. */
 static const uint8_t *px_stage_view(struct objects *objs, struct px_conn *c,
@@ -4236,7 +4236,7 @@ static void px_dma_done_cb(struct doca_dma_task_memcpy *t, union doca_data tud,
     if (b->src_head) { doca_buf_dec_refcount(b->src_head, NULL); b->src_head = NULL; }
     if (b->dst_buf)  { doca_buf_dec_refcount(b->dst_buf, NULL);  b->dst_buf = NULL; }
     px_batch_leave_retry(eng, b);
-    b->state = PX_BATCH_DONE;                  /* retired in px_drain (in order) */
+    b->state = PX_BATCH_DONE;                  /* retired by px_lane_retire (in order) */
     px_pod_inflight_sub(eng, &objs->pods[b->pod_idx]);
 }
 

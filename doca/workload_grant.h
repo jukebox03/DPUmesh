@@ -82,13 +82,12 @@ int dmesh_grant_load_key(const char *path, uint8_t key[DMESH_GRANT_KEY_SIZE],
                          char *error, size_t error_len);
 
 /* Derive the raw Ed25519 public key of a 32-byte private seed. Used by unit
- * tests and by deploy tooling that installs the DPU-side public half. */
+ * tests. */
 int dmesh_assert_public_key(const uint8_t seed[DMESH_GRANT_KEY_SIZE],
                             uint8_t public_key[DMESH_GRANT_KEY_SIZE]);
 
-/* Used by unit tests and trusted-agent implementations. The caller must fill a
- * canonical v2 message before signing; `seed` is the node's raw Ed25519
- * private key. */
+/* Used by unit tests to mint assertions. The caller must fill a canonical v2
+ * message before signing; `seed` is the node's raw Ed25519 private key. */
 int dmesh_assert_sign_v2(struct dmesh_workload_assert_msg *assertion,
                          const uint8_t seed[DMESH_GRANT_KEY_SIZE]);
 

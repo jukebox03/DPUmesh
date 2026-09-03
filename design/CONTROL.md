@@ -34,10 +34,9 @@ refused at the first branch of `px_peer_stream_ready`, which is what a
 single-node deployment still does.
 
 What has not happened is a second node. The TCP carrier runs in the host
-peer-wire test; its RDMA arm skips without a configured local RDMA address. A
-previous hardware bring-up proved only that a carrier could bind, listen and
-idle. Neither carrier has connected two DPU nodes or carried a remote
-application stream. Node-to-node confidentiality and authentication are
+peer-wire test; its RDMA arm skips without a configured local RDMA address.
+Neither carrier has connected two DPU nodes or carried a remote application
+stream. Node-to-node confidentiality and authentication are
 implemented and undemonstrated — read what follows as the design and the code,
 not as a deployment's measured properties.
 
@@ -288,9 +287,9 @@ Field syntax, enforced before anything is adopted:
 
 ## 1.3 The node-scoped feeds
 
-Two more feeds carry authority. Identity material is not one of them: it is
-root-only files installed atomically, authenticated by the certificate the
-control plane issues against them.
+Two more feeds carry authority. Identity material is not one of them: the
+delivery hop installs it unsigned as a directory bundle, and the certificate
+the control plane issues against it is what authenticates it.
 
 | Feed | Published by | Scope | Signed with | Carries |
 |---|---|---|---|---|
@@ -572,9 +571,9 @@ connection never displaces live traffic — it is refused instead.
 To keep a completion on its owner the channel is one queue pair per (node pair,
 destination worker), and authentication runs on each one: a worker holds its own
 credential context and settles the peer's key itself, so the pairwise key is per
-(node pair, worker) and none crosses a worker boundary. `CHANNEL_MAX ×
-PEER_QP_PER_NODE` is therefore the number to check against RDMA resource limits,
-not `DMESH_CHANNEL_MAX` alone. `GENERATION_INTERVAL` and `DMESH_CHANNEL_IDLE_NS`
+(node pair, worker) and none crosses a worker boundary. `DMESH_CHANNEL_MAX × A`
+is therefore the number to check against RDMA resource limits, not
+`DMESH_CHANNEL_MAX` alone. `GENERATION_INTERVAL` and `DMESH_CHANNEL_IDLE_NS`
 interact: a channel evicted and reopened between two generations pays setup
 twice.
 
@@ -701,17 +700,16 @@ the caller, before the message-body checks.
 | 5 | `nonce` equals the challenge this connection issued (constant-time compare) | `bad-nonce` |
 | 6 | signature verifies over `[0, offsetof(sig))` | `bad-sig` |
 | 7 | `assert_id` not in the consumed ring (`DMESH_REGISTRATION_REPLAY_SLOTS`, evicting) | `replay` |
-| 8 | `(namespace_name, service_name)` equals the Service this registration requests | `bad-service` |
 
 Everything arithmetic comes before the asymmetric verification, so a Pod that
 floods the channel with garbage does not spend the DPU's cycles on Ed25519. The
 skew grace is one-sided because the agent's clock may lead the DPU's; grace on
 expiry would let an assertion outlive the lifetime it declares.
 
-**Checks 3 and 8 are what a registration cannot talk its way around**: the Pod
-relays the assertion, and the assertion names both the node and the Service.
-Verification happens once per Comch connection; nothing on the data path
-verifies assertions.
+**Check 3 and the `POD_REGISTER` name gate (§2-1.6) are what a registration
+cannot talk its way around**: the Pod relays the assertion, and the assertion
+names both the node and the Service. Verification happens once per Comch
+connection; nothing on the data path verifies assertions.
 
 For check 0 the held generation is authoritative for this node's agent key, and
 the installed registration keyring is the bring-up fallback for a DPU that has
@@ -874,17 +872,16 @@ a terminal TRANSPORT_DOWN. The DPU sees only pod-global rings, `arm_epoch`
 and `REV_DOORBELL`; nothing about the workload's EQs or threads reaches the
 device.
 
-What the assertion proves also shifts weight. The primary reason a Comch peer
-is believed is now the launch itself: the kernel checks device access at
-`open()`, and with the device node confined to infrastructure, every peer the
-DPU can have is an agent-launched broker. The nonce's cryptographic channel
-binding (§2-1.4) is therefore the second line of defense, not the first. It
-is kept because it costs one signature per Pod lifetime and nothing on the
-data path, and because the premise it backs is a host configuration the DPU
-cannot see: on a shared-HCA node — where storage or ML Pods legitimately
-mount `/dev/infiniband` — a Pod holding the device can open Comch itself, and
-there the agent's label check on the assertion is what refuses an arbitrary
-Service claim. The wire and the DPU's checks (§2-1.3) are unchanged.
+What the assertion proves carries less weight. The primary reason a Comch peer
+is believed is the launch itself: the kernel checks device access at `open()`,
+and with the device node confined to infrastructure, every peer the DPU can
+have is an agent-launched broker. The nonce's cryptographic channel binding
+(§2-1.4) is the second line of defense. It costs one signature per Pod
+lifetime and nothing on the data path, and the premise it backs is a host
+configuration the DPU cannot see: on a shared-HCA node — where storage or ML
+Pods legitimately mount `/dev/infiniband` — a Pod holding the device can open
+Comch itself, and there the agent's label check on the assertion is what
+refuses an arbitrary Service claim.
 
 One broker owns one Pod identity. The agent serializes concurrent HELLOs per
 Pod UID, backs a failed launch off exponentially, records each broker in a
@@ -953,7 +950,7 @@ In the channel layer (`dmesh_peer_stream_open`):
 ```text
    1  the channel is OPEN and the incarnation matches      incarnation / state
    2  canonical text, reserved zero, port non-zero         malformed
-   3  the peer's open-rate token bucket allows it     ⟨T⟩  rate
+   3  the peer's open-rate token bucket allows it     ⟨T⟩  open-rate
    4  the peer holds fewer than PEER_STREAMS_MAX      ⟨T⟩  streams
    5  the generation places src_pod_uid on this channel's node ⟨T⟩  not-on-peer
    6  dst_pod_uid names a live local registration          no-pod
@@ -1016,8 +1013,8 @@ frame.
 
 Rows two and three deny the same thing and differ only in whether the
 destination spends memory or cycles. A DPU is memory-rich and cycle-poor
-relative to what it protects — a connection costs 73 ARM core-µs to build and
-tear down, an asymmetric verification is the same order of magnitude, and a
+relative to what it protects — a connection costs tens of ARM core-µs to build
+and tear down, an asymmetric verification is the same order of magnitude, and a
 `pod=` line is under two hundred bytes, so ten thousand meshed Pods are a couple
 of megabytes. If a cluster grows a Pod table a DPU should not hold, the
 forwarded assertion is the migration: same bound, cost back in computation.
@@ -1187,7 +1184,7 @@ return 1;                                        /* an ungraded Service carries 
 An ungraded Service carries the stream so that enabling enforcement cannot
 refuse traffic no policy ever named; a protected caller reaching an unprotected
 callee is refused and counted `mixed-callee-unprotected` unless the callee's own
-policy admitted it. `DPUMESH_L7_FAIL_CLOSED` survives only as the default for a
+policy admitted it. `DPUMESH_L7_FAIL_CLOSED` is the default only for a
 Service no generation grades — the deployment with no controller — and the
 deployment script pins it to `1` and refuses any other value.
 
@@ -1234,7 +1231,7 @@ The Linkerd static library creates destination, identity and policy clients from
 `LINKERD2_PROXY_*` environment variables. Deployment requires the stock Linkerd
 control plane, its three management-link gateway addresses, provisioned identity
 material and a signed Service target feed. Missing configuration fails
-preflight; no mock control-plane path exists. The remaining `mock-identity`,
+preflight; no mock control-plane path exists. The `mock-identity`,
 `mock-policy` and `mock-destination` sources belong to the upstream
 `linkerd-app-integration` test crate and are neither linked nor deployed.
 
@@ -1361,7 +1358,7 @@ refusal is counted by reason.
 namespaces, the five control messages plus DATA, bounded parsing and both sides'
 bounds; `doca/dpu_proxy.c` carries the hooks it binds to.
 `tests/peer_channel_test.c` drives the module end to end through a recording
-transport, which stands in for the RDMA implementation until it lands.
+transport that stands in for a carrier.
 
 ## 4.1 Custody across the boundary
 
@@ -1481,7 +1478,7 @@ space is per peer, so nothing cluster-wide has to allocate it.
 ```c
 /* One per (peer, handle). Self-contained by value, as px_unit is, so it
  * survives the teardown of anything that named it. */
-struct peer_handle {
+struct dmesh_peer_handle {
     uint32_t incarnation;      /* the channel incarnation that issued it */
     uint32_t wire_handle;      /* owner bit plus allocator-local index */
     int32_t  dst_pod_idx;      /* destination slot; validated against pod generation */
@@ -1489,6 +1486,7 @@ struct peer_handle {
     uint16_t dst_port;
     uint16_t up_port;          /* the intra-node upstream this stream feeds */
     char     src_pod_uid[64];  /* the key POD_GONE and peer loss sweep on */
+    uint8_t  in_use, reserved[3];
     uint32_t staging_bytes;
     uint32_t rx_seq;
     uint8_t  rx_seq_valid, rx_fin, tx_fin;
@@ -1605,7 +1603,8 @@ injection API. Protobuf messages, stubs and handlers are unchanged.
 |---|---|
 | DOCA Comch | pod registration, resolution, mappings, readiness, teardown, doorbells |
 | signed feeds | node membership; Service targets and ready endpoints; the topology generation |
-| root-only files | the registration, feed and controller keyrings; the DPU's own node credential; Linkerd identity material; the admission switch |
+| root-only files | the registration, feed and controller keyrings; the DPU's own node credential; the admission switch |
+| delivered files | Linkerd identity material, authenticated by the certificate issued against it |
 
 Resolution answers follow the topology generation, so nothing reloads out of
 band. Dynamic instances of an existing Service join and leave through Comch
@@ -1667,7 +1666,7 @@ second definition of it.
 ### 5.5.1 The DPU process
 
 `dpumesh_dpu` runs once per node. The PCI functions arrive on its command line
-(`-p` Comch, `-r` RDMA, `-l` log level); everything else is environment.
+(`-p` device, `-r` representor, `-l` log level); everything else is environment.
 
 Two variables have no default, and the process refuses to start rather than
 guess, because a wrong guess is an identity error:
@@ -1682,15 +1681,15 @@ process — what then happens at runtime is §1.9 and §3.5:
 
 | Name | Default | What it decides |
 |---|---|---|
-| `DPUMESH_FEED_KEY_DIR` | unset | the feed keyring; the membership and admission feeds refuse to configure without it |
+| `DPUMESH_FEED_KEY_DIR` | unset | the feed keyring; the membership feed refuses to configure without it |
 | `DPUMESH_CONTROLLER_KEY_DIR` | unset | the controller's public keys; the topology feed refuses to configure without it |
 | `DPUMESH_NODE_KEY_FILE` | unset | the node credential (§2-0.1); without it this node has no peer identity |
 | `DPUMESH_NODE_KEY_PUBLIC_FILE` | unset | where the credential's public half is republished for the agent to report |
 | `DPUMESH_MEMBERSHIP_FILE` | unset | the membership feed; unset means no revocation input |
 | `DPUMESH_TOPOLOGY_FILE` | unset | the topology generation; unset means no cluster facts |
 | `DPUMESH_ADMISSION_FILE` | unset | the admission switch; an unreadable switch means open (§5.6) |
-| `DPUMESH_CONTROLLER_SCOPE_URL` | unset | the mediated scope lookup; unset puts every Pod in `NO_POLICY` (§3.5) |
-| `DPUMESH_IDENTITY_TRUST_DOMAIN` | `linkerd.cluster.local` | the trust domain source identities are spelled in (§2-2.2) |
+| `DPUMESH_CONTROLLER_SCOPE_URL` | unset | the mediated scope lookup; unset leaves every Pod `UNKNOWN` (§3.5) |
+| `DPUMESH_IDENTITY_TRUST_DOMAIN` | `linkerd.cluster.local` | the trust domain source identities are spelled in (§3.3) |
 
 Geometry is DATA.md's `N/K/A`, clamped rather than refused:
 
@@ -1709,8 +1708,7 @@ from disagreeing with the DPU geometry. It does not replace N/K/A for density
 deployments, where K>A is intentional. The measured presets are W=4/6/8/12;
 W=16 is refused because the current main-thread affinity would share worker 0.
 Validation fixtures resolve the same W, or read effective K/A from the live DPU
-startup banner, so their webhook K and admin-port count cannot silently remain
-at eight after a different supported preset is deployed.
+startup banner.
 
 The inter-node carrier — what a stream to a Pod on another node crosses. Unset
 leaves the node without one, and remote destinations are refused:
@@ -1818,10 +1816,10 @@ them: `DMESH_PRELOAD_DEBUG` turns on the shim's stderr diagnostics, and
 | `--controller-url` | unset | where generations are fetched |
 | `--dpu-feed-host`, `--dpu-feed-port`, `--delivery-interval` | `192.168.100.2:4788`, 2 s | the delivery hop to the DPU's feed receiver |
 | `--membership-interval` | 10 s | how often membership is republished |
-| `--node-rdma-addr` | `192.168.100.2:4791` | the peer address published for this node |
+| `--nodes-file`, `--node-rdma-addr` | unset | the peer address published for this node: the operator's node records, or one address for a single node |
 | `--identity-*` | serviceaccount `dpumesh-dpu`, audience `identity.l5d.io`, 3600 s | the token the embedded proxy certifies with (§3.7) |
 | `--broker-bin` | unset | the per-Pod broker executable (§2-1.9); a mesh-serving node requires it — without it no workload can register |
-| `--broker-lib`, `--broker-runtime-dir` | `libdpumesh.so.5`, `/var/lib/dpumesh/broker-runtime` | what is staged into the content-addressed host runtime |
+| `--broker-lib`, `--broker-runtime-dir` | `/usr/local/lib/libdpumesh.so.5`, `/var/lib/dpumesh/broker-runtime` | what is staged into the content-addressed host runtime |
 | `--host-cgroup-root` | `/host-cgroup` | the writable host cgroup mount Pod-charged broker cgroups are created under |
 | `--broker-state-dir` | `/run/dpumesh/brokers` | root-private supervision records; what re-adoption reads |
 
@@ -1832,7 +1830,8 @@ workload ever holds a PCI address.
 ### 5.5.4 Files
 
 §5.3 names the classes; these are the paths. All are root-owned except the
-socket, and none is written by the process that reads it:
+socket and what the feed receiver installs, and none is written by the process
+that reads it:
 
 | Path | Machine | Placed by |
 |---|---|---|
@@ -1840,7 +1839,8 @@ socket, and none is written by the process that reads it:
 | `/etc/dpumesh/feed.keys/` | host and DPU | bootstrap; the symmetric feed secret (§1.3), disjoint files from the registration keyring |
 | `/etc/dpumesh/controller.keys/` → `controller.pub.keys/` | host → DPU | bootstrap; the private half stays with the controller, the DPU holds public keys only |
 | `/etc/dpumesh/node-static.key`, `.pub` | DPU | generated on the DPU at first boot; the private half never leaves it |
-| `/etc/dpumesh/{membership.v1, topology.v1, admission, service targets}` | DPU | the feed receiver, an unprivileged unit the node agent delivers into |
+| `/etc/dpumesh/{membership.v1, topology.v1, service-targets.v1, linkerd-identity/}` | DPU | the feed receiver, an unprivileged unit the node agent delivers into |
+| `/etc/dpumesh/admission` | DPU | the operator, root-owned (`bench/bench.sh admission open\|drain`, §5.6) |
 | `/run/dpumesh/attest.sock` | host | the node agent |
 | `/run/dpumesh/brokers/` | host | the node agent; one root-private record per live broker (§2-1.9) |
 | `/var/lib/dpumesh/broker-runtime/` | host | the node agent; the content-addressed broker executable and DSO |

@@ -203,8 +203,9 @@ static int conn_feed(struct peer_conn *c)
 /* ---- prologue ---------------------------------------------------------- */
 
 /* `dpumesh-peer-v1\n<initiator>\n<responder>\n<incarnation>\n`, exactly as
- * dmesh_peer_prologue writes it. Parsed rather than compared so a mismatched
- * responder name is refused with the reason it deserves. */
+ * dmesh_peer_prologue writes it. Parsed rather than compared so the
+ * initiator's name and incarnation can be handed to the table; a mismatched
+ * responder name faults the connection. */
 static int prologue_parse(const uint8_t *buf, uint32_t len,
                           char *initiator, size_t initiator_len,
                           char *responder, size_t responder_len,
@@ -249,8 +250,8 @@ static int prologue_parse(const uint8_t *buf, uint32_t len,
 }
 
 /* The connection authenticated and named itself. Hand it to the table, which
- * decides whether this node will talk to it — and which closes it when it will
- * not, so the slot must not be touched afterwards. */
+ * decides whether this node will talk to it and closes it when it will not;
+ * conn_free zeroes the slot, so only `in_use` may be read afterwards. */
 static void conn_adopt(struct peer_transport_rt *rt, struct peer_conn *c)
 {
     char initiator[DMESH_K8S_NAME_MAX];

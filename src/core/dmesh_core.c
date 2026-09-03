@@ -137,7 +137,7 @@ enum dmesh_tx_wait_reason {
  * owner-local read-mostly setup first, then a producer (drain-side) write line,
  * then the shared arm flag on its own line, then a consumer (owner) write line. */
 struct dmesh_port_slot {
-    uint8_t          role;            /* FREE / CLIENT / SERVER */
+    uint8_t          role;            /* DMESH_ROLE_FREE / CLIENT / SERVER / SERVER_PENDING */
     int16_t          peer_pod;        /* established peer pod, DMESH_POD_BLANK = not yet learned */
     uint16_t         peer_port;       /* established peer port, 0 = not yet learned */
     void            *user;            /* app's conn handle (returned by dmesh_next_ready);
@@ -160,8 +160,9 @@ struct dmesh_port_slot {
      * Invariant: tx_f <= tx_s <= tx_c <= tx_w. Messages remain within one block.
      * The owner manages live blocks; the drain side advances atomic tx_f on ACK. */
     uint64_t         tx_w;                  /* owner logical write cursor */
-    _Atomic uint64_t tx_s;                  /* owner/worker publication cursor */
-    _Atomic uint64_t tx_c;                  /* commit publication for tail worker */
+    _Atomic uint64_t tx_s;                  /* send cursor, advanced under tx_gate */
+    _Atomic uint64_t tx_c;                  /* commit cursor, read by the EQ deadline pass
+                                             * and the drain side */
     uint32_t         resv_len;              /* live reserve length (owner); 0 = none */
     uint64_t         resv_moff;             /* exact TX-mmap offset returned to the caller */
     uint64_t         tail_blk;              /* oldest live logical block index (owner) */
@@ -216,7 +217,7 @@ struct dmesh_port_slot {
     /* ---- CONSUMER (owner app thread) cache line: fields the owner mutates ---- */
     char _cl_cons[64];
     atomic_uint_fast32_t in_head;     /* inbound SPSC consumer (app) */
-    atomic_uint_fast16_t su_head;     /* send-unit FIFO head (owner writes/release, PE reads) */
+    atomic_uint_fast16_t su_head;     /* send-unit FIFO head (owner writes/release, drain side reads) */
     char _cl_end[64];                 /* isolate this slot's consumer line from the next slot */
 };
 /* Ready-list MPSC ops (monotonic counters; drain-side producers, EQ thread consumer). Each
@@ -393,7 +394,8 @@ struct dpumesh_ctx {
      * which is what lets N threads receive in parallel. The registry serves the ONE
      * delivery that has no conn yet: a NEW conn goes on the shared accept queue, so
      * every EQ is notified and whichever one accepts it owns it. The lock also
-     * excludes dmesh_destroy_eq's unregister against the PE. */
+     * excludes dmesh_destroy_eq's unregister against the drain side's
+     * notify_all_eqs walk and the timer. */
     struct dmesh_eq *eqs[DMESH_MAX_EQ];
     int              n_eqs;            /* high-water mark of eqs[]; slots may be NULL */
     atomic_int       n_live_eqs;       /* currently registered EQs (not high-water) */
@@ -415,10 +417,10 @@ struct dpumesh_ctx {
 /* ====================================================================
  * Retained-tail scheduling
  *
- * A QP's transmit state has one mutator: the thread that owns the QP. A post
- * leaving a fillable partial unit arms a bit on that QP's EQ and stamps a
- * deadline. The owner publishes the tail from its next transmit call or from
- * dmesh_poll_eq. The timer wakes an EQ that still holds armed bits.
+ * A QP's transmit state is mutated only under its transmit gate: by the
+ * owner's TX calls and by the EQ thread's deadline pass in dmesh_poll_eq. A
+ * post leaving a fillable partial unit arms a bit on that QP's EQ and stamps a
+ * deadline. The timer wakes an EQ that still holds armed bits.
  * ==================================================================== */
 
 static void tx_error_publish(struct dmesh_port_slot *psl,
@@ -1000,10 +1002,9 @@ static inline void rx_credit_return(dpumesh_ctx_t *ctx, int pos)
     }
 }
 
-/* Lock-free SPMC dequeue. Multiple worker consumers race via CAS on
- * rx_deq; producers (drain shards, assisting EQ threads) race via CAS on
- * rx_enq. Returns 1 and fills *out on
- * success, 0 if the ring is empty. Never blocks. */
+/* Lock-free MPMC dequeue. Consumers (EQ threads) race via CAS on rx_deq;
+ * producers (drain shards, assisting EQ threads) race via CAS on rx_enq.
+ * Returns 1 and fills *out on success, 0 if the ring is empty. Never blocks. */
 static inline int rxq_try_pop(dpumesh_ctx_t *ctx, sw_descriptor_t *out)
 {
     for (;;) {
@@ -1217,7 +1218,7 @@ static int eq_tx_error_pop(struct dmesh_eq *eq, uint16_t *port) {
 }
 
 /* The event is one-shot; tx_error itself remains sticky. Publication may come
- * from the caller or the claimed deadline worker. */
+ * from the caller or from the EQ's deadline pass (dpumesh_publish_due_tails). */
 static void tx_error_publish(struct dmesh_port_slot *psl,
                              uint16_t port, int error_number) {
     int expected = 0;
@@ -2220,9 +2221,8 @@ static int broker_relay_resolve(dpumesh_ctx_t *ctx, int socket_fd,
                ? 0 : -1;
 }
 
-/* Entry point used only by the host-side per-Pod broker executable. It owns
- * the device, Comch client, registered mmaps and their backing memfds. No data
- * bytes cross the Unix socket. */
+/* Drop to an unprivileged uid/gid, clear every capability, and install the
+ * no-exec seccomp filter. */
 static int broker_harden_process(void)
 {
     const uid_t broker_uid = 65532;
@@ -2287,6 +2287,9 @@ static int broker_enter_private_root(void)
     return 0;
 }
 
+/* Entry point used only by the host-side per-Pod broker executable. It owns
+ * the device, Comch client, registered mmaps and their backing memfds. No data
+ * bytes cross the Unix socket. */
 int dmesh_broker_run(int socket_fd, const char *agent_socket,
                      volatile sig_atomic_t *stop_requested)
 {
@@ -2557,7 +2560,7 @@ int dpumesh_init(dpumesh_ctx_t **out, const char *service_name,
     if (prc != 0) { errno = prc; goto fail; }
     ctx->block_lock_initialized = 1;
 
-    /* Lock-free SPMC RX ring: seq[i] = i (cell i first writable at enq
+    /* Lock-free MPMC RX ring: seq[i] = i (cell i first writable at enq
      * position i), enq = deq = 0. */
     ctx->rx_ring = (struct rxq_cell *)malloc((size_t)RX_QUEUE_SIZE * sizeof(struct rxq_cell));
     if (!ctx->rx_ring) { errno = ENOMEM; goto fail; }
@@ -2904,7 +2907,8 @@ void dpumesh_destroy(dpumesh_ctx_t *ctx) {
 
 /* ---- Shared lock-free Treiber block pool (grab on grow / return on shrink+close) ---- */
 /* Pop a free block id (ABA-safe: block_free = tag<<32 | head; head==n_blocks = empty).
- * -1 if the pool is empty (caller backs off + retries). MPMC (conn owners + the PE). */
+ * -1 if the pool is empty (the caller arms TX_READY and returns EAGAIN). MPMC (conn
+ * owners + the drain side). */
 static int32_t block_pool_grab(dpumesh_ctx_t *ctx) {
     uint_fast64_t old = atomic_load_explicit(&ctx->block_free, memory_order_acquire);
     for (;;) {
@@ -3003,7 +3007,7 @@ static void tx_refresh_blocks(dpumesh_ctx_t *ctx, struct dmesh_port_slot *psl) {
 }
 
 /* Return a CLOSED conn's remaining blocks once fully drained (tx_f == tx_w). Called by
- * free_port (owner, after publishing role=FREE) and tx_reclaim_ack (PE, on the last ACK).
+ * free_port (owner, after publishing role=FREE) and tx_reclaim_ack (drain side, on the last ACK).
  * role==FREE is loaded with acquire first, so the owner's final writes are visible;
  * the block_lock and the nblk_owned>0 recheck make exactly one caller return them.
  * Until then the port stays FREE-but-draining and the alloc paths skip it. */
@@ -3541,7 +3545,7 @@ int dpumesh_enqueue(dpumesh_ctx_t *ctx, const sw_descriptor_t *desc) {
  * RX functions
  * ==================================================================== */
 
-/* Pop one connection descriptor from the SPMC accept ring. Returns -1 when empty. */
+/* Pop one connection descriptor from the MPMC accept ring. Returns -1 when empty. */
 int dpumesh_dequeue(dpumesh_ctx_t *ctx, sw_descriptor_t *desc) {
     return rxq_try_pop(ctx, desc) ? 0 : -1;
 }
@@ -3680,7 +3684,7 @@ void dpumesh_free_port(dpumesh_ctx_t *ctx, uint16_t port) {
     if (port == 0) return;
     struct dmesh_port_slot *psl = &ctx->ports[port];
     /* Lifecycle changes also take port_lock, matching both client allocation and
-     * PE-side SERVER_PENDING creation. */
+     * drain-side SERVER_PENDING creation. */
     pthread_mutex_lock(&ctx->port_lock);
     /* Mark FREE, then return the TX blocks without blocking. With data still
      * un-ACKed the blocks stay until the last ACK returns them. The alloc
@@ -3774,7 +3778,7 @@ void *dpumesh_next_tx_ready(struct dmesh_eq *eq) {
 }
 
 /* Pop one asynchronous tail-publication failure. Removing the bitmap bit only
- * consumes the notification; dmesh_tx_call_begin keeps rejecting the QP with
+ * consumes the notification; dmesh_tx_qp_valid keeps rejecting the QP with
  * its original sticky errno until the QP is destroyed. */
 void *dpumesh_next_tx_error(struct dmesh_eq *eq) {
     dpumesh_ctx_t *ctx = eq->ch->ctx;
@@ -4365,7 +4369,7 @@ void dmesh_tx_pressure(dmesh_qp_t *c) {
 }
 
 /* Publish every retained tail on this EQ whose deadline expired. Runs on the
- * EQ's thread, which owns these QPs. */
+ * EQ's thread under each QP's transmit gate. */
 void dpumesh_publish_due_tails(struct dmesh_eq *eq) {
     dpumesh_ctx_t *ctx = eq->ch->ctx;
     if (atomic_load_explicit(&eq->tx_armed_count, memory_order_acquire) == 0)

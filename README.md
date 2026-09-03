@@ -6,11 +6,10 @@ policy, discovery, backend selection, connection state, and Host↔DPU transfer.
 Each Service is deployed as an opaque byte stream or on Linkerd's
 protocol-aware HTTP/1, HTTP/2 or gRPC path, independently of the surface its
 Pods use. Endpoints on the node are reached by DMA, and endpoints on another
-node by the authenticated peer channel. That channel's transport is built and
-its TCP carrier runs in the host test. The current hardware deployment leaves
-the peer carrier unset, and no deployment here has had a second node, so the
-cross-node path has never run: a Service whose only replicas are elsewhere has
-no route yet.
+node by the authenticated peer channel. That channel is implemented and not yet
+demonstrated between two nodes; [design/CONTROL.md](design/CONTROL.md) states
+its status, and a Service whose only replicas are elsewhere has no route until
+it is.
 
 This repository is a research prototype. The design documents below define its
 transport, proxy, control-plane, and API contracts.
@@ -120,7 +119,7 @@ src/broker/            the per-Pod broker and its pod<->broker IPC
 doca/                  BlueField ARM process and DPA kernel
 controller/            cluster controller and the admission webhook
 integrations/grpc/     gRPC C++ runtime, reactor, tests
-linkerd/               DPU-side L7 layer: adapter ABI, consumers, port submodule
+linkerd/               DPU-side L7 layer: adapter ABI, the Rust adapter, port submodule
 bench/                 deployment, examples, workloads, validators, measurement records
 tests/                 fast host-only ABI and state-machine regression tests
 design/                current API, data-plane, control-plane and gRPC whitepapers
@@ -235,7 +234,7 @@ cc app.c -I/path/to/include -ldpumesh -o app
 ```
 
 [bench/examples](bench/examples) is this section as complete programs — a
-client and a server of a few dozen lines each.
+client and a server of about a hundred lines each.
 
 ### gRPC C++
 
@@ -309,8 +308,8 @@ hand — is [design/CONTROL.md §5.5](design/CONTROL.md).
 
 - A Service's Pods must be on a node running `dpumesh_dpu`. That node serves the
   smaller of `MAX_PODS` (127, the wire ceiling) and its forward-ring supply —
-  execution units times eight rings, divided by the K rings each Pod spans: on
-  this BlueField 32 Pods at the benchmark's `K = 8`, 127 at `K = 2`.
+  execution units times sixteen rings, divided by the K rings each Pod spans: on
+  this BlueField 64 Pods at the benchmark's `K = 8`, 127 at `K = 2`.
 - The deployment assigns each Service a protocol treatment, and the surface its
   Pods use does not decide it: an opaque Service is a byte stream, and a
   protocol-aware one takes Linkerd's HTTP/1, HTTP/2 or gRPC path. Policy,
@@ -325,9 +324,8 @@ hand — is [design/CONTROL.md §5.5](design/CONTROL.md).
   the inbound policy that grades the stream is the destination Pod's own.
 - Traffic between Pods on one node is plaintext inside registered DMA mappings
   the workload cannot address. There is no per-hop proxy TLS. Confidentiality
-  between nodes is the peer channel's mutually authenticated TLS 1.3 session,
-  which is implemented but has never carried traffic between two nodes — a
-  property of the code, not yet of a deployment.
+  between nodes is the peer channel's mutually authenticated TLS 1.3 session;
+  its deployment status is [design/CONTROL.md](design/CONTROL.md)'s.
 
 Building the library and bringing up a cluster are covered in
 [bench/README.md](bench/README.md).

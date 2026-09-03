@@ -3,8 +3,7 @@
  * Serves BenchmarkService::UnaryCall, returning `response_size` bytes, and is
  * the server-side peer of bench_grpc. BENCH_TRANSPORT selects the listener:
  * `dmesh` accepts native connections through the DPUmesh passive listener,
- * `tcp` binds a socket. The process runs until killed; the harness restarts
- * pods between configurations, never the server between runs.
+ * `tcp` binds a socket. The process runs until killed.
  *
  * BENCH_FAIL_EVERY makes the server fail on purpose: every Nth call answers
  * INTERNAL instead of a payload. A retry policy and a failure-accrual policy
@@ -101,11 +100,9 @@ int main() {
 
   EchoService service(fail_every);
   ::grpc::ServerBuilder builder;
-  // A synchronous Service grows one OS worker per active RPC. Under the open-
-  // loop overload arm, queued calls therefore create thousands of workers and
-  // exhaust the process before it can shed load. This handler is immediate and
-  // needs no blocking worker, so the callback API keeps execution on gRPC's
-  // bounded callback engine while preserving the same wire service.
+  // CallbackService keeps this immediate handler on gRPC's bounded callback
+  // engine; a synchronous Service would spawn one OS worker per queued call
+  // under overload.
   builder.RegisterService(&service);
   int selected_port = 0;
   std::unique_ptr<::grpc::experimental::PassiveListener> listener;

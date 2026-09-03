@@ -195,10 +195,10 @@ main(void)
                                   now, &claims) == DMESH_GRANT_OK);
     assert(claims.service_name[0] == '\0');
 
-    /* A v1-era message presented to the v2 verifier is refused before any
-     * cryptography: wrong type, then wrong version. */
+    /* A message of the wrong type, then of the wrong version, is refused before
+     * any cryptography. */
     fill_assert(&changed, nonce, now);
-    changed.type = 12; /* retired DMESH_MSG_WORKLOAD_GRANT */
+    changed.type = 12; /* not DMESH_MSG_WORKLOAD_ASSERT */
     assert(dmesh_assert_verify_v2(&changed, public_key, "worker-1", nonce,
                                   now, &claims) == DMESH_GRANT_BAD_TYPE);
     fill_assert(&changed, nonce, now);

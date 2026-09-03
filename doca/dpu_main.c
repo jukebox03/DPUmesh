@@ -28,16 +28,10 @@ DOCA_LOG_REGISTER(DPU_MAIN);
 
 int main(int argc, char **argv)
 {
-    /* A write to a socket whose peer has gone must be an `EPIPE` return, not the
-     * end of this process. SIGPIPE's default action terminates without a core
-     * file, and this kernel does not report fatal signals, so taking it looks
-     * exactly like a clean exit: the log stops mid-run on whatever line it had
-     * reached and nothing anywhere says why.
-     *
-     * A Rust binary gets this from the runtime start-up its `main` runs. The
-     * embedded proxy is a static library linked into this `main`, so that
-     * start-up never runs and the default stands unless it is replaced here,
-     * before anything opens a socket. */
+    /* A write to a socket whose peer has gone must return EPIPE, not end the
+     * process. The embedded Rust proxy is a static library, so the runtime
+     * start-up that would ignore SIGPIPE never runs; do it here, before
+     * anything opens a socket. */
     signal(SIGPIPE, SIG_IGN);
 
     /* Heap-allocated (struct objects is large); never freed — the process runs

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Root-owned DPUmesh workload attestation agent.
 
-The request deliberately contains only a DPU nonce and requested compact
-Service id. The agent obtains the caller PID from SO_PEERCRED, resolves its
+The request deliberately contains only a DPU nonce and the requested Service
+name. The agent obtains the caller PID from SO_PEERCRED, resolves its
 Kubernetes Pod UID from the host cgroup, reads authoritative Pod/Service
 objects, and signs the resulting immutable claims. It does not accept workload
 names, labels, namespace, ServiceAccount, or node name from the caller.
@@ -718,8 +718,8 @@ class Agent:
         self.broker_runtime_bin: Path | None = None
         self.broker_runtime_lib: Path | None = None
         self.spawned_lock = threading.Lock()
-        # final broker pid -> (launcher if still owned, starttime, Pod, Service)
-        # Re-adopted and PID-namespace children have no Popen parent here.
+        # final broker pid -> (None, starttime, Pod, Service). The broker is a
+        # systemd unit, never this process's child, so no Popen is ever held.
         self.spawned: dict[int, tuple[subprocess.Popen[bytes] | None, str,
                                       dict[str, Any], str]] = {}
         # Pod UID is the singleton key.  A second workload thread can reach the
@@ -1474,7 +1474,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--protect-ingress", action="store_true",
                         help="reject kernel-TCP ingress to mesh-served Pod "
                              "ports (FORWARD chain; needs CAP_NET_ADMIN)")
-    # The absorbed control-plane relay: one Pod, two listeners.
+    # The control-plane relay: one listener per route, beside the attest socket.
     parser.add_argument("--route", action="append", type=linkerd_cp_relay.route,
                         default=[], dest="routes")
     parser.add_argument("--kube-route", action="append", type=linkerd_cp_relay.kube_route,

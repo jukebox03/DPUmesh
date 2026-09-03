@@ -1,5 +1,5 @@
 # Build the host transport library and benchmark/validator binaries. DPU ARM and
-# DPA components use doca/meson.build. Targets: all, lib, bench, go, clean.
+# DPA components use doca/meson.build. Targets: all, lib, bench, test, test-hostfree, clean.
 
 CC      ?= gcc
 DOCA_PKGS := doca-common doca-comch doca-dpa

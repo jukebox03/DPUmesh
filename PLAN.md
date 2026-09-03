@@ -45,12 +45,7 @@ item below names the arm that closes it.
 # Function
 
 Two items are open: two-node validation of the cross-node seam, and a Go
-surface. The Pod-privilege item closed with the per-Pod broker: a meshed Pod
-runs unprivileged and mounts no device, every DOCA object lives in the broker
-the node agent launches, and the webhook injects nothing else
-([`design/CONTROL.md`](design/CONTROL.md) §2-1.9). The kernel road around the
-mesh is closed in both directions; *Findings* carries it. Node density is
-settled at the wire ceiling; F7 keeps one lever, unscheduled.
+surface. F7 keeps one density lever, unscheduled.
 
 ## F6 The cross-node path — close the two-node receipt first
 
@@ -66,9 +61,7 @@ controller/agent address binding are in. All of it builds and passes
 `make test`; the TCP carrier runs in the host peer-wire test and the RDMA arm
 skips without a configured local RDMA address. Neither carrier has connected
 two DPU nodes or carried a remote application stream — a previous hardware
-bring-up proved only that a per-worker listener could bind and idle. The
-single-node rapids4 deployment is healthy at Kubernetes endpoint
-`147.46.78.169:6443` (2026-08-26).
+bring-up proved only that a per-worker listener could bind and idle.
 
 What is missing is the second node, ordered by the first gate that can fail:
 
@@ -188,12 +181,7 @@ high-watermark, about 8 GB at 127.
 
 # Defects
 
-Two are open. The gRPC p99 regime change closed 2026-08-25 — the Findings
-entry under *The mesh* carries its shape — and the `dma_ready` collateral
-question has its arm: `S13`/`S14` eject a failing endpoint and withdraw its
-Deployment under traffic while the healthy endpoint keeps serving, and the
-current build passes both
-([`policy-route-20260902-212705/stages.csv`](bench/report/data/policy-route-20260902-212705/stages.csv)).
+Two are open.
 
 ## D3 The broker's failure paths are built and unwatched
 
@@ -320,9 +308,17 @@ every one. `dmesh_registrations_orphaned_total` is cumulative and counts late
 endpoint registrations the generation fence safely aborted — it is not live
 residue.
 
-**A fatal signal on this DPU leaves nothing behind.** Nothing under `doca/` or
-`src/` calls `exit()`, `_exit()` or `abort()`, and no Rust in the adapter calls
-`process::exit`, so a process that is gone was ended from outside. SIGPIPE's
+**Ejecting a failing endpoint under traffic leaves the healthy one serving.**
+`S13`/`S14` eject a failing endpoint and withdraw its Deployment under traffic
+while the healthy endpoint keeps serving — the `dma_ready` collateral arm — and
+the current build passes both
+([`policy-route-20260902-212705/stages.csv`](bench/report/data/policy-route-20260902-212705/stages.csv)).
+
+**A fatal signal on this DPU leaves nothing behind.** Nothing under `doca/`
+calls `exit()`, `_exit()` or `abort()` (the workload library's `_exit(75)` in
+`src/core/dmesh_core.c` follows its own SIGTERM on `TRANSPORT_DOWN`), and no
+Rust in the adapter calls `process::exit`, so a DPU process that is gone was
+ended from outside. SIGPIPE's
 default action terminates without a core file, and this kernel reports no fatal
 signals (`kernel/print-fatal-signals` and `debug/exception-trace` are both `0`),
 so taking one leaves no core, no kernel line and a log frozen wherever it had
@@ -396,6 +392,16 @@ ABA runs ([`broker-design-20260828/SUMMARY.md`](bench/report/data/broker-design-
 together or the agent refuses every HELLO and no broker starts; and the
 broker's argv is assembled by the agent's `systemd-run` command, so a flag
 changes in both places at once.
+
+**The ARM worker's per-request fixed cost is loop passes, not a hot function.**
+Two E5 builds are in the tree: draining the Rust side before the C engine and
+reading the wake eventfd only when a tick was posted took syscalls/RPC 47→32
+for worker CPU −2–6 % at ≤1k RPS/worker; two edits in the vendored `h2`
+0.4.15 — a `pending_open` stream given no send capacity, so HEADERS and DATA
+left in two polls, and a closed stream's last handle waking the connection for
+nothing — took h2 client connection polls/RPC 4.0→2.0 for −2–6 % below 1k
+RPS/worker and −5.8 % closed-loop, nothing at the knee, 90k 3/3 clean
+([`e5-h2-20260902/`](bench/report/data/e5-h2-20260902/SUMMARY.md)).
 
 ## The instrument
 
@@ -556,24 +562,16 @@ comparison, not a prerequisite for the current number.
   polled on every pass) and the syscalls per pass. Target: 100 RPS ≤ 200 µs/RPC,
   closed-loop single-request p50 < 0.7 ms (now 0.94 ms), no knee regression.
   Receipts: [`grpc-professor-20260902/lowload/`](bench/report/data/grpc-professor-20260902/lowload/).
-  Two builds are in the tree. The first (Rust drain before the C engine drain;
-  wake-eventfd read only when a tick was posted) took syscalls/RPC 47→32 for
-  worker CPU −2–6 % at ≤1k RPS/worker. The second names and removes two of
-  the four h2 client connection polls a request cost — one because `h2` gave
-  a `pending_open` stream no send capacity, so HEADERS and DATA left in two
-  polls, one because a closed stream's last handle woke the connection for
-  nothing — through two small edits in a vendored `h2` 0.4.15
+  Done so far and folded into *Findings*: the Rust-drain-first pass order and
+  tick-gated wake read, and the vendored `h2` 0.4.15 patch
   (`linkerd/port/linkerd2-proxy/h2/`, `[patch.crates-io]` in
-  `linkerd/rust/Cargo.toml`). Polls/RPC 4.0→2.0, worker µs/RPC −2–6 % below
-  1k RPS/worker and −5.8 % closed-loop, nothing at the knee, 90k 3/3 clean
+  `linkerd/rust/Cargo.toml`) that halves h2 connection polls per request
   ([`e5-h2-20260902/`](bench/report/data/e5-h2-20260902/SUMMARY.md)). What
-  remains per request is the stack itself (request in → outbound send, and
-  response in → server write, ≈ 350 µs probe-inflated of ≈ 1.2 ms) and the
-  ~21 runtime passes, each a session walk plus `doca_pe_progress`, that seven
-  consecutive `Progressed` results after every publication produce. The next
-  levers are those passes — which progress step each of the seven is, and
-  whether the engine can report them as one — and the depth of the linkerd
-  service stack, each under the same A/B.
+  remains per request is the stack itself (≈ 350 µs probe-inflated of
+  ≈ 1.2 ms) and the ~21 runtime passes — a session walk plus
+  `doca_pe_progress` each — that seven consecutive `Progressed` results after
+  every publication produce. The next levers are those passes and the depth of
+  the linkerd service stack, each under the same A/B.
 - [ ] Gate the next high-concurrency arm on DPU quiescence. `grpc_closed_sweep.sh`
   does not yet check session, task and backend-channel counters between
   points, so a run started on top of the residue an overload cancellation
@@ -611,8 +609,9 @@ material, and the Tokio `LocalSet` + `Rc<RefCell>` specialization that was
 conditioned on it stays unwritten
 ([`backend-lock-20260825/`](bench/report/data/backend-lock-20260825/)).
 
-The synchronous half of a stack build is instrumented in
-`linkerd/app/src/lib.rs` and reported by `SessionMetrics::observe_stack_build`:
+The synchronous half of a stack build is instrumented in the proxy fork
+(`linkerd/port/linkerd2-proxy/linkerd/app/src/lib.rs`) and reported by
+`SessionMetrics::observe_stack_build`:
 8.7 µs to clone the outbound template and set `dmesh_session`, 107.7 µs of
 layers (`build_policies` + `outbound.mk`), 32.0 µs of `NewService::new_service`,
 **148.4 µs** in total. The remainder is lazy discovery and policy work, task
@@ -629,8 +628,8 @@ figure sits inside the synchronous call.**
 - [ ] Keep session-local what must be: `SessionToken`, backend channel,
   workload, target generation, cancellation and metrics. The connector binds to
   `dmesh_session`, so a shared service would take another session's channel —
-  `two_same_service_sessions_take_their_own_channels` in
-  `outbound/src/tcp/connect.rs` is the regression test for exactly that.
+  `two_same_service_sessions_take_their_own_channels` in the fork's
+  `linkerd/app/outbound/src/tcp/connect.rs` is the regression test for exactly that.
 - [ ] Accept only a repeated hardware improvement with no p99 or correctness
   regression.
 
@@ -648,9 +647,9 @@ beside the per-request L7 total, not that the remaining queue is worthless.
   intermediate tx queue, preserving partial-write and output ordering.
 - [ ] Define capacity wakeup, cancellation, shutdown and task-drop semantics.
 - [ ] Compare copy bytes, ARM CPU/request, arena stalls, publication rate and
-  p50/p99 against the reservation baseline. **Re-baseline first.** The published
-  `l7-tx-ab-20260817` arm predates the `DmeshIo` tx cursor, which removed the
-  queue-tail move `consume_tx` performed on every publication, so its absolute
+  p50/p99 against the reservation baseline. **Re-baseline first.** The
+  reservation-versus-copy figures above were taken before the `DmeshIo` tx
+  cursor and their receipt is not in `bench/report/data/`, so their absolute
   µs/request is not the arm to subtract from. Accept only with copy-byte/arena
   evidence and no p99 or correctness regression.
 

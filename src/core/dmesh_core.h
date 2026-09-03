@@ -77,18 +77,17 @@ struct dmesh_eq {
                                   * inbox never went empty, so the ready list holds no fresh
                                   * edge — this is the only path back to it). Owned by this
                                   * EQ's thread; dmesh_destroy_qp clears it on a matching conn. */
-    int                notify_efd;  /* this EQ's readiness fd; ALWAYS armed (created live —
-                                     * dmesh_eq_fd only hands it out, it never enables it). */
+    int                notify_efd;  /* this EQ's readiness fd, created live; eventfd writes
+                                     * begin when dmesh_eq_fd hands it out (wants_notify). */
     /* Set when dmesh_eq_fd exposes notify_efd. Poll-only EQs skip eventfd writes. */
     atomic_int         wants_notify;
     atomic_int         suppress_notify;
     int                reg_idx;     /* slot in ctx->eqs[], for destroy */
-    atomic_int         nqp;         /* live QPs bound here. Enforces destroy_eq's EBUSY
-                                     * rule instead of only documenting it: a conn outliving
-                                     * its EQ reports events into freed memory. Atomic
-                                     * because dmesh_create_qp may run off the EQ's thread;
-                                     * touched only at conn create/destroy, never on the
-                                     * data path. */
+    atomic_int         nqp;         /* live QPs bound here; enforces destroy_eq's EBUSY
+                                     * rule (a conn outliving its EQ reports events into
+                                     * freed memory). Atomic because dmesh_create_qp may
+                                     * run off the EQ's thread; touched only at conn
+                                     * create/destroy, never on the data path. */
     /* TX readiness is multi-producer: the drain side can reclaim a QP while any
      * owner thread can return a surplus block to the channel pool, so it is a
      * bit per port. At most one bit is live per automatically armed QP. */
@@ -146,7 +145,8 @@ int dmesh_resolve_name_via(dpumesh_ctx_t *ctx, const char *name);
 int dmesh_resolve_addr_via(dpumesh_ctx_t *ctx, uint32_t ip_net, uint16_t port_host);
 void dmesh_resolve_invalidate(uint32_t ip_net, uint16_t port_host);
 /* One resolution round trip over the control channel (no cache). Fills `ack`
- * (doca/comch_common.h); -1 + EAGAIN on timeout or send failure. */
+ * (doca/comch_common.h); -1 + EAGAIN on timeout, EPIPE on send failure,
+ * ECONNRESET when the broker link is down. */
 struct dmesh_resolve_ack_msg;
 int dpumesh_resolve(dpumesh_ctx_t *ctx, int by_name, const char *name,
                     uint32_t ip_net, uint16_t port_host,
@@ -176,7 +176,7 @@ int         dpumesh_get_pod_id(dpumesh_ctx_t *ctx);
 
 /* Pop one new-connection descriptor off the accept ring. Nonblocking: 0 + *desc,
  * or -1 when empty. Readiness comes from any EQ's fd (dmesh_eq_fd): the ring is
- * SPMC, so every EQ is woken and may pop. */
+ * MPMC, so every EQ is woken and may pop. */
 int dpumesh_dequeue(dpumesh_ctx_t *ctx, sw_descriptor_t *desc);
 
 /* Get pointer to RX buffer data for a slot (zero-copy read). */
@@ -237,7 +237,8 @@ void *dpumesh_next_tx_ready(struct dmesh_eq *eq);
 void *dpumesh_next_tx_error(struct dmesh_eq *eq);
 
 /* Publish every retained tail on this EQ whose deadline has expired. Runs on
- * the EQ's own thread, which owns these QPs. */
+ * the EQ's thread and takes each QP's transmit gate, so it never races the
+ * QP's owner. */
 void dpumesh_publish_due_tails(struct dmesh_eq *eq);
 
 /* In-line drain by an awake EQ thread: interprets already-published reverse
@@ -247,17 +248,18 @@ int dpumesh_drain_assist(struct dmesh_eq *eq);
 /* ====== Connection lifecycle — internal, shared by both surfaces ======
  *
  * Transport calls, with nothing socket- or verbs-specific, used by both
- * src/dmesh_api.c and src/dmesh_preload.c. The public half of the lifecycle
+ * src/facade/dmesh_api.c and src/facade/dmesh_preload.c. The public half of the
+ * lifecycle
  * (dmesh_create_channel / dmesh_create_qp / dmesh_destroy_qp) is declared in
  * <dpumesh/dmesh.h>. */
 
 /* Pop the next inbound connection off the channel-wide accept queue and bind it to
  * `eq`: allocate a SERVER conn that learns its peer (pod,port) and holds the first
  * fragment (c->rx_slot). NULL+EAGAIN if none pending; NULL+ENOMEM on alloc failure,
- * which drops the message and reclaims its RX credit. The native API folds this
- * into dmesh_poll_eq as DMESH_EVENT_CONN_REQ; the shim drives it from its
- * dispatcher thread. The queue is SPMC: several EQs may call this concurrently and
- * each conn goes to exactly one of them, which owns it from then on. */
+ * which drops the message and reclaims its RX credit. dmesh_poll_eq folds this
+ * in as DMESH_EVENT_CONN_REQ for both the native API and the shim's dispatcher.
+ * The queue is MPMC: several EQs may call this concurrently and each conn goes
+ * to exactly one of them, which owns it from then on. */
 dmesh_qp_t *dmesh_accept(dmesh_eq_t *eq);
 
 /* Pop the next conn that has inbound from this EQ's ready list, which the

@@ -25,7 +25,7 @@ DOCA_LOG_REGISTER(DPA);
 
 #ifdef DOCA_ARCH_DPU
 
-/* Kernel function declaration (resolved from dpa_program.a stubs, DPU only) */
+/* Kernel function declaration (resolved from dpa_kernel.a stubs, DPU only) */
 extern doca_dpa_func_t run_dma_manager;
 extern doca_dpa_func_t run_dma_yield_helper;
 extern doca_dpa_func_t thread_init_rpc;
@@ -137,8 +137,8 @@ static void dmesh_doca_dpa_msgq_recv_cb(struct doca_comch_consumer_task_post_rec
 
             if (comp_queue_enqueue(q, &entry) != 0) {
                 /* Throttled: the first drop, then one in 65536 with a running
-                 * total. Single-threaded (consumer_pe owner), so the counter
-                 * needs no atomic. */
+                 * total. Shared by the A worker PE threads without atomics: a lost
+                 * increment only mis-throttles a diagnostic. */
                 static uint64_t cq_full_drops;
                 if ((cq_full_drops++ & 0xFFFFu) == 0)
                     DOCA_LOG_ERR("Completion queue full, dropping (total %llu) seq=%u (src=%d, dst=%d)",
@@ -227,9 +227,9 @@ static void dmesh_doca_dpa_msgq_recv_cb(struct doca_comch_consumer_task_post_rec
 
 resubmit_recv_task:
     /* Backpressure: if comp_queue is nearly full, defer recv task resubmission
-     * so DPA sees consumer_empty and pauses; main loop resubmits when the queue
-     * drops below BP_LOW. On submit failure also stash for the main loop to
-     * retry rather than losing the task.
+     * so DPA sees consumer_empty and pauses; the owning data worker's PE pass
+     * resubmits when the queue drops below BP_LOW. On submit failure also stash
+     * for that pass to retry rather than losing the task.
      *
      * A floor of receives stays posted through soft backpressure: the DPA sends
      * ring ACKs on this same channel and drops them when it has no receive, so
@@ -946,7 +946,7 @@ dmesh_fill_dpa_thread_arg(struct objects *objs, int idx, struct dpa_thread_arg *
     }
 
     memset(arg, 0, sizeof(*arg));
-    arg->eu_index = (uint32_t)idx;   /* selects this EU's row in the per-EU admission globals */
+    arg->eu_index = (uint32_t)idx;   /* stamped into every ring ACK so ARM can attribute it */
     arg->dpa_consumer_comp = dpa_consumer_comp;
     arg->dpa_producer_comp = dpa_producer_comp;
     arg->dpa_consumer = dpa_consumer;
@@ -1141,7 +1141,8 @@ setup_pod_dma(struct objects *objs, struct pod_state *pod)
     pod->dpa_add_last_send_ns = 0;
 
     /* One staging buffer per pod mirrors host TX offsets across all forward rings.
-     * The 128-byte tail covers ALIGN_UP_128 at the buffer boundary. */
+     * The 128-byte tail covers the 128 B copy rounding
+     * (dpa_dma_aligned_copy_len) at the buffer boundary. */
     /* Allocated once per slot and reused across incarnations: it is DPU-local, so
      * a reconnecting pod lands in the same staging. It is never freed — it is the
      * egress SG-DMA read source, and destroying it faults the engine's shared

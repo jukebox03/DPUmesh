@@ -1,4 +1,5 @@
-//! Embedded Linkerd outbound adapter for DPUmesh.
+//! Embedded Linkerd adapter for DPUmesh: sessions run through the outbound
+//! stack, and inbound policy verdicts are answered for the Pods this DPU serves.
 //!
 //! DPUmesh owns DOCA, progress engines, DMA rings and worker threads. Each ARM
 //! worker hosts a Tokio `current_thread` runtime and the persistent driver in
@@ -56,8 +57,9 @@ use dmesh_doca::{
 };
 use tokio::sync::mpsc;
 
-/// Bound on the destinations one worker holds policy watches for. It is the
-/// Pod-state table's capacity, so a full table is listed in one call.
+/// Bound on the destinations one worker holds policy watches for. The C Pod
+/// table holds `MAX_PODS` (127) entries; a Pod listed past this bound is never
+/// watched.
 #[cfg(not(test))]
 const MAX_POLICY_SUBJECTS: usize = 32;
 
@@ -463,9 +465,9 @@ mod datapath {
 }
 
 // Length of the signed prefix of an authoritative feed document, or -1 when it
-// is unsigned or its signature does not verify against the registration keyring
-// the DPU already holds. The crypto stays on the C side, so the adapter keeps no
-// key material of its own.
+// is unsigned or its signature does not verify against the feed keyring the DPU
+// holds (`DPUMESH_FEED_KEY_DIR`, disjoint from the registration keyring). The
+// crypto stays on the C side, so the adapter keeps no key material of its own.
 #[cfg(not(test))]
 extern "C" {
     fn dmesh_l7_verify_feed(document: *const u8, length: usize) -> isize;
@@ -580,9 +582,6 @@ impl dmesh_doca::runtime::RuntimeBackend for ExternalBackend {
     }
 
     fn maintenance(&mut self) -> io::Result<()> {
-        // Held policy watches neither start nor end on their own, so the
-        // maintenance pass is where they do both — on its own cadence, because
-        // registrations do not change as often as maintenance runs.
         match self.policy_refresh_in.checked_sub(1) {
             Some(remaining) => self.policy_refresh_in = remaining,
             None => {
@@ -1743,9 +1742,9 @@ fn parse_service_targets(value: &str) -> Result<NamedServiceTargets, String> {
 
 /// Adopt only the signed prefix of a feed generation.
 ///
-/// The feed carries the same authority as a registration grant, so it is signed
-/// by the same keyring. An unsigned or badly signed generation is refused
-/// exactly like a malformed one: nothing after the envelope is ever parsed.
+/// The feed is authoritative, so it is signed by the feed keyring. An unsigned
+/// or badly signed generation is refused exactly like a malformed one: nothing
+/// after the envelope is ever parsed.
 fn parse_signed_service_targets(document: &str) -> Result<ServiceFeed, String> {
     let signed = unsafe { dmesh_l7_verify_feed(document.as_ptr(), document.len()) };
     if signed < 0 {
@@ -2521,8 +2520,8 @@ mod tests {
 
     #[test]
     fn an_unsigned_service_target_feed_is_refused() {
-        // The feed carries the same authority as a grant, so an unsigned or
-        // badly signed generation is refused exactly like a malformed one.
+        // The feed is authoritative, so an unsigned or badly signed generation
+        // is refused exactly like a malformed one.
         assert!(
             parse_signed_service_targets("version=4\ntest-bench/echo-a=10.0.0.11:9092\n").is_err()
         );
