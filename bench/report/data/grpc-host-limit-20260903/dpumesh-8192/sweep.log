@@ -1,0 +1,6 @@
+[16:26:33] closed-loop sweep: configs=[grpc-dpumesh] frames=[8192] concs=[128] reps=3 threads=8
+[16:26:34] grpc-dpumesh: client=bench-grpc-dpumesh(2622114) server=echo-grpc-dpumesh(2629912) restarts=0/0
+[16:26:45] [1/3] grpc-dpumesh 8192B conc=128 -> ach=25903.0 p50=37915.00 p99=79044.00 cli=0.7788(app=0.7534 sidecar=0.0000) srv=0.9802(app=0.9491 sidecar=0.0000) arm=6.6453 workers=6.5923 nonworkers=0.0530
+[16:26:57] [2/3] grpc-dpumesh 8192B conc=128 -> ach=25105.0 p50=35289.00 p99=116763.00 cli=0.7579(app=0.7308 sidecar=0.0000) srv=0.9911(app=0.9601 sidecar=0.0000) arm=6.5681 workers=6.5151 nonworkers=0.0530
+[16:27:10] [3/3] grpc-dpumesh 8192B conc=128 -> ach=24989.0 p50=34323.00 p99=126137.00 cli=0.7219(app=0.6955 sidecar=0.0000) srv=0.9929(app=0.9625 sidecar=0.0000) arm=6.5784 workers=6.5266 nonworkers=0.0518
+[16:27:12] closed-loop sweep complete: bench/report/data/grpc-host-limit-20260903/dpumesh-8192/points.csv

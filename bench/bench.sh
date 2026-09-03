@@ -836,6 +836,18 @@ get_pod_cores() {
                 bench-grpc-dpumesh|bench-grpc-linkerd) rel="0,1,2,3,4,5,6,7,8";;
                 echo-grpc-dpumesh|echo-grpc-linkerd)  rel="9,10,11,12,13,14,15,16,17";;
             esac ;;
+        grpclimit1)
+            # Host-bottleneck comparison: one physical Host CPU for each
+            # application+transport Pod. Keep the two transport arms on
+            # separate CPUs so their idle control processes cannot contend
+            # with the arm under measurement. The per-Pod broker and Linkerd
+            # sidecar are pinned with their application below.
+            case "$app" in
+                bench-grpc-dpumesh) rel="0";;
+                echo-grpc-dpumesh)  rel="1";;
+                bench-grpc-linkerd) rel="2";;
+                echo-grpc-linkerd)  rel="3";;
+            esac ;;
         fair|*)
             case "$app" in
                 bench-dpumesh) rel="0";; echo-dpumesh) rel="1";;
@@ -1269,7 +1281,7 @@ deploy() {
     info "=== Deploy complete ==="
     echo "  Run:  $0 latency|bandwidth|rate|all [dpumesh|preload|grpc-dpumesh]"
     echo "        $0 loopback|verbs|preload ...   (validators)"
-    echo "  Re-pin:  $0 pin [fair|native|preload|grpc|grpcmax]"
+    echo "  Re-pin:  $0 pin [fair|native|preload|grpc|grpcmax|grpclimit1]"
 }
 
 # Protected admission is a file the DPU control thread polls, so it can be set
@@ -1990,7 +2002,8 @@ Usage: $0 <command> [args]
   loopback|preload [args]                    feature validators
   grpcshutdown                              real-DPU HTTP/2 process-stop + slot-reuse gate
   verbs <N> <size> <zc> <window> <pipeline>  native-API loopback validator: window conns x pipeline outstanding
-  pin [fair|native|preload|grpc|grpcmax]      (re)pin supported API pods to cores
+  pin [fair|native|preload|grpc|grpcmax|grpclimit1]
+                                             (re)pin supported API pods to cores
   armbalance [req reply conc dur threads [csv]]   DPU main/worker per-core CPU during one point
   status | logs | cleanup | dpulog [n] | dpubanner | dpucpu | l7metrics
 

@@ -1,0 +1,4 @@
+config,frame,threads,channels,window_per_worker,total_concurrency,rep,achieved,p50_us,p99_us,p999_us,avg_us,fail,drops,pending,worker_fail,credit_hold_dropped,eq_budget_exhausted,client_core,server_core,client_app_core,client_sidecar_core,server_app_core,server_sidecar_core,dpu_arm_cores,dpu_worker_cores,dpu_nonworker_cores,window_s
+grpc-linkerd,1024,8,8,64,512,1,13570.0,36730.00,53496.00,60044.00,37784.45,0,0,0,0,0,0,0.9872,0.9017,0.2935,0.6931,0.2853,0.6163,0.0470,0.0349,0.0121,6.0699
+grpc-linkerd,1024,8,8,64,512,2,13532.0,36889.00,53063.00,59761.00,37869.89,0,0,0,0,0,0,0.9820,0.8978,0.2921,0.6911,0.2830,0.6159,0.0408,0.0317,0.0091,6.0729
+grpc-linkerd,1024,8,8,64,512,3,13480.0,37121.00,53204.00,60450.00,38054.39,0,0,0,0,0,0,0.9694,0.8880,0.2887,0.6806,0.2794,0.6078,0.0469,0.0379,0.0090,6.0667

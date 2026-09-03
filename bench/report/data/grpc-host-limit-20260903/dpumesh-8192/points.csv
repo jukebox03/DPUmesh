@@ -1,0 +1,4 @@
+config,frame,threads,channels,window_per_worker,total_concurrency,rep,achieved,p50_us,p99_us,p999_us,avg_us,fail,drops,pending,worker_fail,credit_hold_dropped,eq_budget_exhausted,client_core,server_core,client_app_core,client_sidecar_core,server_app_core,server_sidecar_core,dpu_arm_cores,dpu_worker_cores,dpu_nonworker_cores,window_s
+grpc-dpumesh,8192,8,8,128,1024,1,25903.0,37915.00,79044.00,118130.00,39531.20,0,0,0,0,0,1,0.7788,0.9802,0.7534,0.0000,0.9491,0.0000,6.6453,6.5923,0.0530,6.0502
+grpc-dpumesh,8192,8,8,128,1024,2,25105.0,35289.00,116763.00,158166.00,40812.28,0,0,0,0,0,2,0.7579,0.9911,0.7308,0.0000,0.9601,0.0000,6.5681,6.5151,0.0530,6.0539
+grpc-dpumesh,8192,8,8,128,1024,3,24989.0,34323.00,126137.00,182013.00,40909.36,0,0,0,0,0,0,0.7219,0.9929,0.6955,0.0000,0.9625,0.0000,6.5784,6.5266,0.0518,6.0528

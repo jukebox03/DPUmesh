@@ -1,0 +1,6 @@
+[16:27:20] closed-loop sweep: configs=[grpc-linkerd] frames=[64] concs=[32] reps=3 threads=8
+[16:27:21] grpc-linkerd: client=bench-grpc-linkerd(415091) server=echo-grpc-linkerd(415103) restarts=0/0
+[16:27:32] [1/3] grpc-linkerd 64B conc=32 -> ach=16056.0 p50=15179.00 p99=27676.00 cli=0.9620(app=0.3299 sidecar=0.6326) srv=0.8594(app=0.3096 sidecar=0.5502) arm=0.0576 workers=0.0424 nonworkers=0.0152
+[16:27:44] [2/3] grpc-linkerd 64B conc=32 -> ach=16131.0 p50=15146.00 p99=27385.00 cli=0.9499(app=0.3269 sidecar=0.6239) srv=0.8514(app=0.3063 sidecar=0.5452) arm=0.0470 workers=0.0348 nonworkers=0.0122
+[16:27:57] [3/3] grpc-linkerd 64B conc=32 -> ach=15681.0 p50=15392.00 p99=24563.00 cli=0.9604(app=0.3307 sidecar=0.6307) srv=0.8607(app=0.3095 sidecar=0.5529) arm=0.0440 workers=0.0333 nonworkers=0.0107
+[16:27:59] closed-loop sweep complete: bench/report/data/grpc-host-limit-20260903/linkerd-64/points.csv
