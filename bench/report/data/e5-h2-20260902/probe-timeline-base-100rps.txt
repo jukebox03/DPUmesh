@@ -1,0 +1,137 @@
+# uprobe event order on the busy worker thread, 100 RPS, one channel, 64 B (e5-1 build, 2026-09-02)
+# columns: us since the request segment arrived, gap to previous event (us), event. Probe overhead inflates gaps.
+# 151 requests in the 1.5 s recording; three shown.
+---- request 0
+    -8.0  +  -8.0  drain
+     0.0  +   8.0  segment-in
+    10.0  +  10.0  hyper-server-conn.poll
+   243.0  + 233.0  h2 release_connection_capacity
+   272.0  +  29.0  h2-client-conn.poll
+   319.0  +  47.0  h2-client-conn.poll
+   339.0  +  20.0  tx-commit
+   346.0  +   7.0  drain
+   364.0  +  18.0  drain
+   371.0  +   7.0  drain
+   375.0  +   4.0  drain
+   378.0  +   3.0  drain
+   390.0  +  12.0  drain
+   394.0  +   4.0  drain
+   397.0  +   3.0  arm
+   402.0  +   5.0  drain
+   409.0  +   7.0  clear
+   420.0  +  11.0  drain
+   422.0  +   2.0  arm
+   424.0  +   2.0  drain
+   943.0  + 519.0  clear
+   954.0  +  11.0  drain
+   962.0  +   8.0  segment-in
+   968.0  +   6.0  h2-client-conn.poll
+  1085.0  + 117.0  h2 release_connection_capacity
+  1133.0  +  48.0  hyper-server-conn.poll
+  1169.0  +  36.0  h2-client-conn.poll
+  1184.0  +  15.0  tx-commit
+  1189.0  +   5.0  drain
+  1206.0  +  17.0  drain
+  1213.0  +   7.0  drain
+  1216.0  +   3.0  drain
+  1227.0  +  11.0  drain
+  1230.0  +   3.0  drain
+  1235.0  +   5.0  drain
+  1238.0  +   3.0  arm
+  1245.0  +   7.0  drain
+  1250.0  +   5.0  clear
+  1260.0  +  10.0  drain
+  1262.0  +   2.0  arm
+  1263.0  +   1.0  drain
+  1268.0  +   5.0  clear
+  1271.0  +   3.0  drain
+  1273.0  +   2.0  arm
+  1274.0  +   1.0  drain
+---- request 1
+    -8.0  +  -8.0  drain
+     0.0  +   8.0  segment-in
+    11.0  +  11.0  hyper-server-conn.poll
+   231.0  + 220.0  h2 release_connection_capacity
+   260.0  +  29.0  h2-client-conn.poll
+   308.0  +  48.0  h2-client-conn.poll
+   327.0  +  19.0  tx-commit
+   333.0  +   6.0  drain
+   353.0  +  20.0  drain
+   360.0  +   7.0  drain
+   364.0  +   4.0  drain
+   368.0  +   4.0  drain
+   380.0  +  12.0  drain
+   384.0  +   4.0  drain
+   387.0  +   3.0  arm
+   392.0  +   5.0  drain
+   397.0  +   5.0  clear
+   408.0  +  11.0  drain
+   411.0  +   3.0  arm
+   413.0  +   2.0  drain
+   734.0  + 321.0  clear
+   745.0  +  11.0  drain
+   753.0  +   8.0  segment-in
+   759.0  +   6.0  h2-client-conn.poll
+   873.0  + 114.0  h2 release_connection_capacity
+   920.0  +  47.0  hyper-server-conn.poll
+   957.0  +  37.0  h2-client-conn.poll
+   972.0  +  15.0  tx-commit
+   978.0  +   6.0  drain
+   992.0  +  14.0  drain
+  1003.0  +  11.0  drain
+  1007.0  +   4.0  drain
+  1019.0  +  12.0  drain
+  1022.0  +   3.0  drain
+  1030.0  +   8.0  drain
+  1034.0  +   4.0  arm
+  1039.0  +   5.0  drain
+  1047.0  +   8.0  clear
+  1057.0  +  10.0  drain
+  1059.0  +   2.0  arm
+  1060.0  +   1.0  drain
+  1063.0  +   3.0  clear
+  1066.0  +   3.0  drain
+  1068.0  +   2.0  arm
+  1069.0  +   1.0  drain
+---- request 2
+    -8.0  +  -8.0  drain
+     0.0  +   8.0  segment-in
+    14.0  +  14.0  hyper-server-conn.poll
+   244.0  + 230.0  h2 release_connection_capacity
+   276.0  +  32.0  h2-client-conn.poll
+   324.0  +  48.0  h2-client-conn.poll
+   343.0  +  19.0  tx-commit
+   349.0  +   6.0  drain
+   369.0  +  20.0  drain
+   376.0  +   7.0  drain
+   380.0  +   4.0  drain
+   384.0  +   4.0  drain
+   398.0  +  14.0  drain
+   401.0  +   3.0  drain
+   404.0  +   3.0  arm
+   409.0  +   5.0  drain
+   415.0  +   6.0  clear
+   425.0  +  10.0  drain
+   427.0  +   2.0  arm
+   428.0  +   1.0  drain
+   736.0  + 308.0  clear
+   746.0  +  10.0  drain
+   754.0  +   8.0  segment-in
+   759.0  +   5.0  h2-client-conn.poll
+   878.0  + 119.0  h2 release_connection_capacity
+   927.0  +  49.0  hyper-server-conn.poll
+   959.0  +  32.0  h2-client-conn.poll
+   975.0  +  16.0  tx-commit
+   980.0  +   5.0  drain
+   995.0  +  15.0  drain
+  1006.0  +  11.0  drain
+  1011.0  +   5.0  drain
+  1021.0  +  10.0  drain
+  1026.0  +   5.0  drain
+  1029.0  +   3.0  drain
+  1032.0  +   3.0  arm
+  1037.0  +   5.0  drain
+  1042.0  +   5.0  clear
+  1051.0  +   9.0  drain
+  1053.0  +   2.0  arm
+  1055.0  +   2.0  drain

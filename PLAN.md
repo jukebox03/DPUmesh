@@ -44,46 +44,85 @@ item below names the arm that closes it.
 
 # Function
 
-Three items are open: a Go surface, two-node validation of the cross-node seam,
-and the device-plugin reduction of Pod privilege — the kernel road around the
-mesh is closed in both directions and F8 carries the receipts. Node density is
-settled at the wire ceiling; F7 keeps its two deeper levers, both unscheduled.
+Two items are open: two-node validation of the cross-node seam, and a Go
+surface. The Pod-privilege item closed with the per-Pod broker: a meshed Pod
+runs unprivileged and mounts no device, every DOCA object lives in the broker
+the node agent launches, and the webhook injects nothing else
+([`design/CONTROL.md`](design/CONTROL.md) §2-1.9). The kernel road around the
+mesh is closed in both directions; *Findings* carries it. Node density is
+settled at the wire ceiling; F7 keeps one lever, unscheduled.
 
-## Now — close the two-node receipt first (2026-08-26)
+## F6 The cross-node path — close the two-node receipt first
 
-The software path through the peer seam is complete: TLS 1.3 authentication,
-the TCP and RDMA carriers, DPU worker integration, operator-owned node records,
-and the controller/agent address binding all build and pass `make test`. A
+The cluster scope is a layer split. `doca/peer_channel.c` owns everything above
+`struct dmesh_peer_transport` — handle namespaces, bounded parsing, the
+node-name-to-key binding check, custody across the boundary, refusal accounting
+— and `doca/dpu_proxy.c` carries the hooks that bind it to the datapath.
+`tests/peer_channel_test.c` drives that layer end to end through a recording
+transport. Below the seam a mutually authenticated TLS 1.3 session runs over a
+byte carrier, and two carriers implement that inner seam: TCP for CI and
+bring-up, RDMA for the mesh. Operator-owned node records and the
+controller/agent address binding are in. All of it builds and passes
+`make test`; the TCP carrier runs in the host peer-wire test and the RDMA arm
+skips without a configured local RDMA address. Neither carrier has connected
+two DPU nodes or carried a remote application stream — a previous hardware
+bring-up proved only that a per-worker listener could bind and idle. The
 single-node rapids4 deployment is healthy at Kubernetes endpoint
-`147.46.78.169:6443`; native, preload, gRPC and HTTP/1 point tests all pass.
+`147.46.78.169:6443` (2026-08-26).
 
-The remaining work is ordered by the first gate that can fail:
+What is missing is the second node, ordered by the first gate that can fail:
 
 1. **Make the rapids4 management address persistent before another reboot.**
-   Kubernetes already uses `147.46.78.169`, but the installer cloud-init source
-   still records the former management subnet. This is rig maintenance, not a
-   DPUmesh code item, but another address rollback would stop every later gate.
-2. **Choose and gain access to node B.** Public-key SSH currently fails for both
-   `jet1.snu.ac.kr` and `stream10.snu.ac.kr`; the physical target must be named
-   before a deploy script can safely encode it.
+   Kubernetes already uses `147.46.78.169`; the installer cloud-init source
+   still records the former subnet. Rig maintenance, but a rollback stops
+   every later gate.
+2. **Choose and gain access to node B.** Public-key SSH fails for both
+   `jet1.snu.ac.kr` and `stream10.snu.ac.kr`.
 3. **Install or identify BlueField B and connect the fabric.** rapids4 DPU `p0`
-   is still `NO-CARRIER`, has no address, and has no `10.77.0.0/24` RoCE GID.
-   Cable the two DPU uplinks, assign persistent peer addresses, then require
-   `ethtool`, `show_gids`, ping, bidirectional `rping` and `ib_send_bw` to pass.
-4. **Provision node B and join it to Kubernetes.** Match the supported
-   BFB/DOCA and container runtime, apply the node prerequisites, join through
-   `147.46.78.169:6443`, label it `dpumesh.io/dpu=true`, and install the images,
-   keys, identity files and host paths.
-5. **Deploy one operator node file to both agents and the controller.** Generate
-   one row on each node with `bench/dpumesh_controller.sh node-record`, combine
-   the rows, and deploy both DPUs with `DPUMESH_PEER_TRANSPORT=rdma`, their own
-   bind address, the same base port and the same `A/K` geometry.
+   is `NO-CARRIER` with no address and no `10.77.0.0/24` RoCE GID. Cable the
+   two uplinks, assign persistent peer addresses, then require `ethtool`,
+   `show_gids`, ping, bidirectional `rping` and `ib_send_bw` to pass.
+4. **Provision node B and join it.** Matching BFB/DOCA and container runtime,
+   the node prerequisites, join through `147.46.78.169:6443`, the
+   `dpumesh.io/dpu=true` label, images, keys, identity files and host paths.
+5. **Deploy one operator node file to both agents and the controller.** One
+   row per node from `bench/dpumesh_controller.sh node-record`, combined, and
+   both DPUs started with `DPUMESH_PEER_TRANSPORT=rdma`, their own bind
+   address, the same base port and the same `A/K` geometry.
 6. **Attach receipts, in order:** handshake, bidirectional data, Pod churn,
    channel loss/recovery, remote policy, then performance. Stop at the first
-   failed hardware, identity, or lifecycle gate instead of weakening it.
+   failed hardware, identity or lifecycle gate instead of weakening it.
 
-Do not schedule F4, F7, F8's device-plugin reduction, or the Cost items ahead
-of this sequence. None of them can produce the missing cross-node claim.
+- [ ] Bring up the second DPU node through those gates.
+- [ ] Exercise the remote arm of every campaign that proves only the local one:
+  policy verdicts at a remote destination, endpoint selection across the
+  boundary, and peer-channel lifetime under Pod churn.
+- [ ] Prove the encryption contract between two DPUs: a payload marker is not
+  observable in plaintext under the carrier; on the TCP carrier a ciphertext
+  bit-flip, truncation or replay ends as a channel fault with no byte delivered
+  to the destination application; a topology key mismatch, an unset peer
+  transport and a failed handshake are each a remote refusal, never a plaintext
+  fallback; a node-key rotation resets the live channel and resumes only under
+  the new key. Fix the traffic-secret refresh policy of the long-lived pair
+  channel here (TLS KeyUpdate or a bounded reconnect) and test its boundary.
+- [ ] Widen the cross-node pin. `px_peer_pin_admits` refuses a stream's second
+  remote destination and counts it; per-request fan-out across nodes needs a pin
+  per destination, and that function is the one place that decides.
+- [ ] Publish node-to-node confidentiality, authentication and custody with the
+  status attached: implemented, and not yet demonstrated between two nodes.
+
+Per-hop encryption is a boundary, not a gap. A DMA-session endpoint answers
+`ConditionalClientTls::None(Disabled)` in both the TCP and HTTP stacks, and
+discovery offers no identity for it, because the backend is deliberately
+advertised as unmeshed: terminating TLS at the destination would need the
+destination DPU to run the second byte-stream proxy this design removes. The
+node-local hop is plaintext held inside registered DMA mappings the workload
+cannot address; the node-to-node half rests on the peer channel's TLS 1.3
+session and carries this item's status with it.
+
+F4, F7 and every *Cost* item stay behind this sequence: none of them produces
+the missing cross-node claim. The 2026-09-01 gRPC campaign is a single-node
+evaluation and does not close it.
 
 ## F4 Workloads `LD_PRELOAD` cannot reach
 
@@ -100,43 +139,12 @@ Kubernetes ecosystem is Go.
 - [ ] Whichever surface is chosen, it registers the process the same way and
   under the same signed grant. No adapter gets its own admission path.
 
-## F6 The cross-node path: validate the transport under the seam
-
-The cluster scope is a layer split. `doca/peer_channel.c` owns everything above
-`struct dmesh_peer_transport` — handle namespaces, bounded parsing, the
-node-name-to-key binding check, custody across the boundary, refusal accounting
-— and `doca/dpu_proxy.c` carries the hooks that bind it to the datapath.
-`tests/peer_channel_test.c` drives that layer end to end through a recording
-transport. Below the seam a mutually authenticated TLS 1.3 session runs over a
-byte carrier, and two carriers implement that inner seam: TCP for CI and
-bring-up, RDMA for the mesh. Both halves are built; what is missing is a second
-node to run them between.
-
-- [ ] **Bring up a second DPU node.** Follow the ordered management, fabric,
-  Kubernetes and receipt gates above. Until then the cross-node path is
-  unexecuted. The TCP carrier runs in the host peer-wire test, while its RDMA
-  arm skips without a configured local RDMA address; neither carrier has
-  connected two DPU nodes or carried a remote application stream. A previous
-  hardware bring-up proved only that a per-worker listener could bind and idle.
-- [ ] Exercise the remote arm of every campaign that proves only the local one:
-  policy verdicts at a remote destination, endpoint selection across the
-  boundary, and peer-channel lifetime under Pod churn.
-- [ ] Widen the cross-node pin. `px_peer_pin_admits` refuses a stream's second
-  remote destination and counts it; per-request fan-out across nodes needs a pin
-  per destination, and that function is the one place that decides.
-- [ ] Publish node-to-node confidentiality, authentication and custody with the
-  status attached: implemented, and not yet demonstrated between two nodes.
-
 ## F7 Node density
 
-A node serves the smaller of two caps, and they bind on different hardware and
-do not cost the same to move. `MAX_PODS` sits at the wire ceiling of 127 — pod
-ids travel as `int8_t` with `-1` reserved, and `_Static_assert(MAX_PODS <= 127)`
-holds the line — so ring supply is what binds, and K sets it at deploy time. A
-`K = 2` deployment has been run at 48 Pods of one Service
-(`bench/report/data/scale-20260825-172249/stages.csv`, 7 of 7): all Ready in
-26 s, zero `table full` refusals, 1.41 M requests at fail=0, and a drain in
-steps of eight with zero DPU error lines.
+A node serves the smaller of two caps. `MAX_PODS` sits at the wire ceiling of
+127 — pod ids travel as `int8_t` with `-1` reserved, and
+`_Static_assert(MAX_PODS <= 127)` holds the line — so ring supply is what
+binds, and K sets it at deploy time.
 
 | Constant | Value | Where | What it bounds |
 |---|---:|---|---|
@@ -146,118 +154,101 @@ steps of eight with zero DPU error lines.
 | `MAX_PODS` | 127 | `include/dpumesh/dmesh_common.h` | registration slots the ARM holds |
 | `POD_ID_SPACE` | 128 | `include/dpumesh/dmesh_common.h` | Service-id keyed tables |
 
-N is read from the device and `DPA_THREADS_DEFAULT = 8` is only the fallback
-when that query is unavailable, so N comes from the deploy log
-(`dpa_threads='32'`) and never from the constant. At the default K,
-`16 × 32 / 2 = 256` ring slots exceed the 127 registration slots, so the wire
-id now binds first. At the benchmark's `K = 8`, the structural ring supply is
-64 Pods, but only the previously exercised 32-Pod topology is a supported
-claim. Density and per-Pod throughput remain the same dial — K also caps the
-ARM data workers at A ≤ K — and the harness has it turned to throughput.
+N is read from the device — `DPA_THREADS_DEFAULT = 8` is only the fallback when
+the query is unavailable — so it comes from the deploy log (`dpa_threads='32'`)
+and never from the constant. At the default K, `16 × 32 / 2 = 256` ring slots
+exceed the 127 registration slots, so the wire id binds first. Supported claims
+are the ones a node has been run at: 32 Pods at the benchmark's `K = 8`, and 48
+Pods of one Service at `K = 2`
+([`scale-20260825-172249/stages.csv`](bench/report/data/scale-20260825-172249/stages.csv),
+7 of 7: all Ready in 26 s, zero `table full` refusals, 1.41 M requests at
+fail=0, a drain in steps of eight with zero DPU error lines). Density and
+per-Pod throughput are the same dial — K also caps the ARM data workers at
+A ≤ K — and the harness has it turned to throughput.
 
-**The ring array is not the measured constraint.** `MAX_DPA_RINGS` sizes five
-arrays in `struct dpa_thread_arg`, one copy per EU in device memory, at 68 bytes
-per ring slot over a fixed 68-byte remainder. Its expansion from 8 to 16 took
-one EU's thread argument from 612 B to 1,156 B and the whole device-side cost
-from 19.1 KiB to 36.1 KiB across 32 EUs.
+Two things bind before the ring array does. The per-poll scan is linear in the
+rings an EU holds: `run_dma_manager` walks `num_rings` on every pass and reads
+each ring's control block out of host memory, so at `K = 2` a full 127 puts
+about eight control-block reads on every EU per poll where the 48-Pod run put
+three — still unmeasured. And the DPA kernel is device code with its own
+toolchain: `doca/device/dpa_kernel.c` is compiled by `dpacc` on the BlueField,
+so a `MAX_DPA_RINGS` change touches no wire format (`dpa_ring_info` stays 48
+bytes, `comch_add_ring_msg` 56, `comch_msg` 60) but both sides must be rebuilt
+against the same header and redeployed together, or the ARM writes `rings[12]`
+into an EU that allocated eight. Near the ceiling ARM DRAM binds first: each
+live Pod holds 64 MB of DPU staging that is not returned below the node's
+high-watermark, about 8 GB at 127.
 
-Two other things are.
-
-- **The per-poll scan is linear in the rings an EU holds.** `run_dma_manager`
-  walks `num_rings` on every pass and reads each ring's control block out of
-  host memory, so an idle slot costs nothing and occupancy costs everything: at
-  `K = 2`, 127 Pods put roughly eight rings on every EU, which is eight
-  control-block reads per poll instead of the two a lightly loaded node does.
-  That 48-Pod run put three rings on an EU; the eight a full 127 puts there is
-  still unmeasured.
-- **The DPA kernel is device code with its own toolchain.**
-  `doca/device/dpa_kernel.c` is compiled by `dpacc` on the BlueField, not by the
-  host build. Changing `MAX_DPA_RINGS` touches no wire format — `dpa_ring_info`
-  stays 48 bytes, `comch_add_ring_msg` 56, `comch_msg` 60 — but both sides must
-  be recompiled against the same header and redeployed together, or the ARM
-  writes `rings[12]` into an EU that allocated eight.
-
-Ordered by cost:
-
-- [x] `MAX_DPA_RINGS = 16` — the paired DPA/DPU rebuild and A=12 hardware
-  deployment passed. It costs 17 KiB more device memory; the per-poll scan only
-  grows when those ring slots are actually occupied.
-- [ ] Above 127 those wire fields widen. That is a host-and-DPU ABI change of
-  the kind the reverse ring's `struct dmesh_tx_ack_entry` is static-asserted
+- [ ] Above 127 the wire fields widen. That is a host-and-DPU ABI change of the
+  kind the reverse ring's `struct dmesh_tx_ack_entry` is static-asserted
   against, because a count the two ends disagree on is silently lossy rather
   than a failure. Not worth scheduling until a deployment needs it.
-
-Lowering `K` buys ring slots this hardware does not need, and what it costs is
-per-Pod parallelism: a Pod spanning one EU has its forward traffic served by one
-EU's DMA budget. Which way that goes depends on whether the node's Pods are
-individually hot or collectively many. No number is published as supported until
-a node has been run at it; today's supportable claims are 32 at `K = 8` and 48
-at `K = 2`. Near the 127 ceiling ARM DRAM binds first: each live Pod holds
-64 MB of DPU staging that is not returned below the node's high-watermark,
-about 8 GB at 127.
-
-## F8 The kernel road around the mesh
-
-Both directions of the fail-closed claim now carry an arm, both in
-`bench/suite/inject.sh`. Outbound, the shim: an injected Pod refuses a
-connect it cannot route through the DPU — only a destination the DPU itself
-answers as not-meshed proceeds over kernel TCP — and stage I6 drives that
-refusal on hardware by killing the DPU under live meshed Pods. A warm Pod's
-connect dies at the resolve deadline, a Pod born into the outage dies at
-channel bring-up, both without a container restart; the unmeshed pair moves
-420 K requests through the same node in the same window; and the recycled
-pair serves again against the relaunched process. Two runs, twelve of twelve
-I6 judgments
-([`inject-dpudown-20260825-214159/`](bench/report/data/inject-dpudown-20260825-214159/),
-[`inject-kernelroad-20260825-220157/`](bench/report/data/inject-kernelroad-20260825-220157/)).
-
-Inbound, the node: flannel enforces no NetworkPolicy, so the workload agent
-owns an iptables chain (`IngressGuard`, `DPUMESH-PROTECT`) that rejects a
-kernel-TCP SYN to every (address, `DPUMESH_PORT`) pair the injection label
-marks. It hangs off the FORWARD hook — the only hook Pod-to-Pod traffic
-traverses, which is what exempts kubelet probes and the host-side harness
-without an exemption rule — and is rebuilt atomically on the membership
-cadence from the same Pod listing that grants and revokes membership. Stage
-I7 is the arm: one unannotated Pod's bare connect refused at the mesh-served
-port and connecting at the unmeshed one, with a recycled Pod's fresh address
-re-covered within one interval (same receipt). The admission webhook refuses
-a Pod creation it cannot patch or decide (I5).
-
-## Not a gap: per-hop encryption
-
-There is no endpoint mTLS, and this is a boundary rather than an omission. A
-DMA-session endpoint answers `ConditionalClientTls::None(Disabled)` in both the
-TCP and HTTP stacks, and discovery offers no identity for these endpoints
-because the backend is deliberately advertised as unmeshed. Terminating TLS at
-the destination would require the destination DPU to run a second byte-stream
-proxy, which is the arrangement this design exists to remove.
-
-What remains plaintext is the node-local hop, held inside registered DMA
-mappings the workload cannot address. That is a real difference from a sidecar
-mesh and should be published as the trade it is. The node-to-node half of the
-argument rests on the peer channel's TLS 1.3 session, so it carries F6's status
-with it until that session has run between two nodes.
 
 ---
 
 # Defects
 
-None are open. The last — the gRPC p99 regime change above ~12.5 K rps —
-closed 2026-08-25: a five-repeat re-measurement on the post-D1 build found no
-stall shape at any rate
-([`grpc-tail-20260825-175740/`](bench/report/data/grpc-tail-20260825-175740/));
-the Findings entry under *The mesh* carries the shape.
+Two are open. The gRPC p99 regime change closed 2026-08-25 — the Findings
+entry under *The mesh* carries its shape — and the `dma_ready` collateral
+question has its arm: `S13`/`S14` eject a failing endpoint and withdraw its
+Deployment under traffic while the healthy endpoint keeps serving, and the
+current build passes both
+([`policy-route-20260902-212705/stages.csv`](bench/report/data/policy-route-20260902-212705/stages.csv)).
 
-One item that looks like it belongs here is not on this list, because it has
-its arm. Clearing
-`dma_ready` on one Pod must not clear it on Pods that have nothing to do with it,
-and both clear sites are per Pod; `surfaces` `S13`/`S14` drives exactly that — a
-failing endpoint inside the Service under test, traffic through it until the
-breaker ejects it, then the Deployment deleted while the campaign continues — and
-the reductions in [`bench/report/data/f-spin-20260822/`](bench/report/data/f-spin-20260822/)
-repeat it against a freshly deployed DPU. The healthy endpoint keeps serving
-across the withdrawal in every one of them, and the native and opaque arms are
-untouched.
+## D3 The broker's failure paths are built and unwatched
+
+The per-Pod broker (`36d095d`) carries the lifecycle
+[`design/CONTROL.md`](design/CONTROL.md) §2-1.9 describes. A dead broker takes
+its registered mappings with it, so the workload's recovery unit is the
+process: the library's control thread raises SIGTERM on `TRANSPORT_DOWN`
+(`src/core/dmesh_core.c`) and Kubernetes restarts the container into a fresh
+HELLO. The agent serializes HELLOs per Pod UID, backs a failed launch off,
+records each broker in a root-private state file and re-adopts recorded
+brokers when it restarts. The DPU disconnects a Comch slot that has not
+registered within 30 s (`doca/comch_server.c`, `registration-timeout`). The
+broker's confinement — private mount, cgroup and network namespaces, the
+Pod-slice child cgroup, `pivot_root` into an empty tmpfs, uid drop, empty
+capability set, `no_new_privs` and a seccomp filter — is in
+`src/core/dmesh_core.c` behind the broker's registration.
+
+None of it has an arm in `bench/suite/` or a receipt in `bench/report/data/`.
+The only observation is incidental: after a broker is killed, the first
+re-HELLO lands in a 5 s backoff because the agent sweeps dead brokers lazily —
+a restart loop absorbs it, a one-shot client must retry. The DPU's side of a
+dead mapping owner is recorded on the pre-broker build — a SIGKILL under c32
+load left two `px_poison` entries, no wedge, and re-registration within
+seconds ([`broker-design-20260828/SUMMARY.md`](bench/report/data/broker-design-20260828/SUMMARY.md)
+§A.3) — but that was the workload dying, not a broker.
+
+- [ ] Add the arm, under load (`point dpumesh 1024 8 32 60 5 1` in the
+  background), with the judgment `inject.sh` uses: broker SIGKILL — the Pod
+  restarts and re-registers, a later point at fail=0, an unrelated pair
+  untouched; workload SIGKILL — the broker exits and the DPU reaches
+  quiescence; node-agent rollout — running traffic untouched, broker PID and
+  start time unchanged, re-adoption logged, new registrations resume; DPU
+  restart — every workload restarts through `TRANSPORT_DOWN`, no duplicate
+  broker per Pod UID.
+- [ ] Verify the confinement from outside on a sacrificial Pod: `/proc/1` is
+  the broker itself, no host PID visible, a network namespace different from
+  the agent's, no host cgroup RW mount in `mountinfo`, a dedicated uid/gid,
+  `CapEff` 0, exec refused. Drive a CPU throttle and an OOM and show each is
+  charged to the served Pod alone.
+- [ ] Hold an unauthenticated Comch client past 30 s on hardware: the timeout
+  counter, the disconnect callback and the slot's reuse.
+
+## D4 Worker progress regresses with deployment age, and sporadically on fresh deploys
+
+An 11-hour 64-byte probe regressed, and fresh deployments also produced a
+worker-5 stall at 92k that dropped 73,587 schedules plus bad 98/99k
+observations, so age alone does not explain the variance. The historical 80k
+aged point fell to ratio 0.9878 and 904 ms p99, while one full deploy restored
+its three-run median to ratio 1.0000 and 4.973 ms p99
+([`grpc-professor-20260902/`](bench/report/data/grpc-professor-20260902/ANALYSIS.md)).
+
+- [ ] Run repeated fresh-deploy probes as well as 6/12/24-hour soaks and
+  correlate worker progress, session generations, allocator state, queue depth
+  and DPU counters. Until it is explained, no single campaign's upper envelope
+  is an operating limit and no single-run maximum is a reproducible capacity.
 
 ---
 
@@ -286,9 +277,7 @@ progresses, or the maintenance deadline says something moved. Two conditions of
 the same shape stay reachable — a refused `tx_finish`, and queued bytes no arena
 chunk can carry — and the guard bounds both to the millisecond maintenance
 period instead of a spin. Nothing is dropped: every pass drains before it waits.
-`unpublishable_internal_work_does_not_spin` is the regression test — a backend
-that reports work on every ask and publishes none of it must still reach its
-wait.
+`unpublishable_internal_work_does_not_spin` is the regression test.
 
 The diagnostic signature is worth carrying: a wedged worker's admin port is
 *bound and unanswered*, not refused. The socket is bound, the kernel has
@@ -362,6 +351,51 @@ a p50 and p99 that rise together toward the knee, no sustained run with a p99
 jump under a flat p50, and a residual tail only at the p999 level — sporadic
 9–22 ms outliers below 16 K rps, about 0.1 % of requests
 ([`grpc-tail-20260825-175740/`](bench/report/data/grpc-tail-20260825-175740/)).
+
+**The kernel road around the mesh is closed in both directions.** Outbound, the
+shim refuses a connect it cannot route through the DPU; only a destination the
+DPU itself answers as not-meshed proceeds over kernel TCP. Stage I6 of
+`bench/suite/inject.sh` kills the DPU under live meshed Pods: a warm Pod's
+connect dies at the resolve deadline, a Pod born into the outage dies at channel
+bring-up, both without a container restart; the unmeshed pair moves 420 K
+requests through the same node in the same window; and the recycled pair serves
+again against the relaunched process. Inbound, flannel enforces no
+NetworkPolicy, so the workload agent owns an iptables chain (`IngressGuard`,
+`DPUMESH-PROTECT`) that rejects a kernel-TCP SYN to every (address,
+`DPUMESH_PORT`) pair the injection label marks. It hangs off the FORWARD hook —
+the only hook Pod-to-Pod traffic traverses, which is what exempts kubelet probes
+and the host-side harness without an exemption rule — and is rebuilt atomically
+on the membership cadence from the same Pod listing that grants and revokes
+membership. Stage I7 is the arm: one unannotated Pod refused at the mesh-served
+port and connecting at the unmeshed one, with a recycled Pod's fresh address
+re-covered within one interval. The admission webhook refuses a Pod creation it
+cannot patch or decide (I5). Two runs, twelve of twelve judgments
+([`inject-dpudown-20260825-214159/`](bench/report/data/inject-dpudown-20260825-214159/),
+[`inject-kernelroad-20260825-220157/`](bench/report/data/inject-kernelroad-20260825-220157/)).
+
+**The broker is a relay, and its wake count is the only lever.** A broker wake
+costs ~7 µs whatever it does — the profile shows PSI accounting, scheduler
+enqueue, epoll and syscall entry and no DOCA symbol, and removing the
+reverse-entry peek changed nothing. So the broker forwards one pod-global
+eventfd tick per `REV_DOORBELL` batch and the workload's drain thread owns ring
+interpretation, EQ selection and `arm_epoch`, publishing it only before it
+sleeps. While completions keep arriving it re-checks the rings on an
+exponential backoff (`DPUMESH_DRAIN_NAP_US`, min 10 µs, doubling per empty
+check up to `DPUMESH_DRAIN_NAP_CAP_US` 100 µs, then arm and block), so the DPU
+sends no doorbell and the broker sleeps through the busy period; polling turns
+itself off when live EQs outnumber the affinity's CPUs. Against the in-process
+PE it replaced: conc32 host 2.47–2.55 µs/request at p50 259–261 µs and
+102–104 K rps versus 2.82 µs at 296 µs and 97 K, conc1 p50 136 µs, ARM −26 %
+because the polled regime sends no doorbell Comch messages
+([`doorbell-relay-20260901/SUMMARY.md`](bench/report/data/doorbell-relay-20260901/SUMMARY.md)).
+The per-Pod choice rests on a shared relay's burst serialization — p50 wake
+delay +12/+38/+57 µs at 8/32/64 simultaneous wakes through one shared relay
+against a flat 13–15 µs per Pod — and the memfd handoff is neutral over 13
+ABA runs ([`broker-design-20260828/SUMMARY.md`](bench/report/data/broker-design-20260828/SUMMARY.md)
+§A.5, §A.2). Two traps: `DMESH_IPC_VERSION` and the agent's `BROKER_IPC_VERSION` move
+together or the agent refuses every HELLO and no broker starts; and the
+broker's argv is assembled by the agent's `systemd-run` command, so a flag
+changes in both places at once.
 
 ## The instrument
 
@@ -443,182 +477,109 @@ is what makes these items independently schedulable — and what makes it a
 measurement error to run one across a build that also changes correctness
 behavior.
 
-## gRPC evaluation gate — baseline, diagnose and optimize the broker build (2026-09-01)
+## The gRPC path on the broker build
 
-Commit `36d095d` moved DOCA ownership into a per-Pod broker and changed Host
-completion progress after the last retained gRPC capacity campaign. The
-2026-08-25 gRPC results remain receipts for their build, but they are not the
-performance baseline of the current path. The current broker build is now
-baselined in
+Commit `36d095d` moved DOCA ownership into the per-Pod broker and changed Host
+completion progress, so the 2026-08-25 gRPC results are receipts for their
+build and not the baseline of the current path. The baseline is
 [`grpc-broker-baseline-20260901/`](bench/report/data/grpc-broker-baseline-20260901/);
-the older numbers must not be substituted for it.
-
-The evaluation keeps three costs separate:
+the batching and Host diagnosis is
+[`grpc-batching-20260901/`](bench/report/data/grpc-batching-20260901/FINAL.md);
+the L7 profile, allocator and LTO A/B and the capacity receipt are
+[`grpc-l7-perf-20260901/`](bench/report/data/grpc-l7-perf-20260901/FINAL.md);
+the independent professor-facing repetition, with the sidecar comparison, is
+[`grpc-professor-20260902/`](bench/report/data/grpc-professor-20260902/ANALYSIS.md)
+(`FINAL.md` beside it is the short summary). The evaluation keeps three costs
+separate and every reading names which one it is:
 
 1. **C++ adapter:** chttp2 ↔ `DmeshEndpoint` ↔ `DmeshReactor`, including
    callback, ownership, backpressure and QP lifecycle.
 2. **Host transport:** `libdpumesh`, the shared rings and the per-Pod broker.
    Host CPU is the recursive Pod cgroup, so application and broker are charged
    exactly once.
-3. **Mesh L7:** the DPU ARM worker's embedded Linkerd HTTP/2 path. This is where
-   per-request routing and policy run, and it is the dominant term in the old
-   gRPC readings.
+3. **Mesh L7:** the DPU ARM worker's embedded Linkerd HTTP/2 path, where
+   per-request routing and policy run. It is the dominant term.
 
-The order is binding for this campaign:
+What the campaign established, in the order it was found:
 
-- [x] Restate the current process, thread and byte ownership in
-  [`design/GRPC.md`](design/GRPC.md), including the fact that the broker is not
-  a payload hop.
-- [x] Establish the unmodified release baseline: `make test-hostfree` and all
-  four CTest targets (endpoint, real chttp2 channel, reactor/runtime and native
-  symbol linkage) pass on `36d095d`.
-- [x] Run all four targets under Clang 14 Debug ASAN+UBSAN. The sanitizer found
-  a test-only lifetime violation: public gRPC Channel destruction is deferred,
-  but four lifecycle fixtures supplied a stack-backed `UnownedExecutor`. Those
-  fixtures now exercise the production owned executor and 4/4 pass with leak
-  detection disabled because LeakSanitizer cannot run under this ptrace policy.
-- [x] Run the current hardware correctness gates before retaining cost:
-  gRPC-scope deploy smoke, `grpcshutdown`, the gRPC policy/routing surfaces,
-  zero Pod restarts and quiescent DPU session/task/mapping counters.
-- [x] Freeze placement, `N/K/A/L`, reactor count and 2.5 GHz clock, then take a
-  repeated **before-change** baseline. The open-loop grid supplies
-  `highest_clean_rps`; the closed-loop concurrency/payload grid describes the
-  latency/throughput shape and must not be published as that capacity.
-- [x] Record p50/p99/p999, achieved/offered, failures/drops, total client and
-  server Pod CPU (application + broker), DPU ARM CPU and per-worker balance.
-  A point with a restart, a missing result, retained-credit loss or an
-  exhausted EQ budget is not clean.
-- [x] Separate the three meanings of batching. The adapter was forcing
-  `dmesh_flush` at every chttp2 logical Write boundary and defeating the native
-  bounded coalescer. Retain the same-build removal only after release,
-  ASAN+UBSAN, real-DPU lifecycle/policy gates and repeated payload A/B pass.
-- [x] Widen Host placement from 6+6 to 9+9 CPUs and measure process/cgroup CPU,
-  rather than inferring saturation from affinity. The unchanged binary gained
-  only 3.2--4.0% at 64 B/1 KiB while the server Pod consumed 1.35--1.86 cores;
-  Host core count was not the first limit.
-- [x] Instrument DPU drain state and SG-DMA grouping, sample quiescent and loaded
-  workers, and profile the loaded call tree. Workers fall to 0--1% with no
-  sessions and the loaded profile is flat (no symbol above 3.5% self). That
-  rules out a traffic-independent spin, not a worker that stays runnable while
-  a request is open; the in-flight CPU finding below is the open question.
-- [x] Restore the allocator used by the stock Linkerd executable. The embedded
-  staticlib was the final Rust artifact in a C executable and therefore never
-  inherited Linkerd's `#[global_allocator]`; it used glibc despite the upstream
-  proxy selecting jemalloc. A same-binary `LD_PRELOAD` experiment first proved
-  the cause, then a Rust-global jemalloc build retained a 36.7% closed-loop
-  improvement without changing C allocation semantics.
-- [x] Match the stock proxy's release profile by enabling LTO in the embedded
-  workspace. A same-allocator repeated A/B adds 8.4% at 64 B and 15.2% at
-  1 KiB. The final low-overhead profile sustains 49,999 request/s with zero
-  errors or drops while collecting 3,009 samples with none lost.
-- [ ] Use O1 only on the connection-churn arm: it attributes the remaining
-  0.4–0.5 ms session cost but cannot explain steady requests on an already-live
-  HTTP/2 channel.
-- [ ] Use O2 as a same-build A/B after the baseline. The measured
-  reservation-versus-copy improvement was only 0.265 ARM µs/request; that
-  proves the first copy lever is small beside the old 400–500 ARM µs/request
-  gRPC total, not that removing the remaining queue is worthless. Accept the
-  larger change only with copy-byte/arena evidence and no p99 or correctness
-  regression.
-- [x] Treat O3 as a separate topology campaign. Fixed ownership tables and
-  scratch layout were expanded together, and A=4/6/8/12 with one persistent
-  channel per worker measured 40k/70k/80k/130k clean RPC/s. A=16 still needs a
-  distinct main/control CPU before it can be supported.
-- [ ] Leave O6 out of this campaign: topology delta publication is control-plane
-  churn work and cannot change steady gRPC request cost. O5 is the later fair
-  ARM-versus-x86 full-stack comparison, not a prerequisite for establishing the
-  current DPUmesh number.
+- **The adapter was defeating the transport's coalescer.** It forced
+  `dmesh_flush` at every chttp2 logical write boundary. Removing it, at equal
+  total concurrency 256, moved three-run medians from 29.3k→58.2k (64 B),
+  27.9k→51.0k (1 KiB) and 19.9k→22.3k (8 KiB) request/s.
+- **The embedded proxy ran on glibc.** The staticlib is the final Rust artifact
+  in a C executable and never inherited Linkerd's `#[global_allocator]`; a
+  Rust-global jemalloc build retained +36.7 % closed-loop, and LTO on the
+  embedded workspace a further +8.4 % at 64 B and +15.2 % at 1 KiB.
+- **Host core count is not the first limit.** Widening placement from 6+6 to
+  9+9 CPUs gained 3.2–4.0 % while the server Pod used 1.35–1.86 cores. The knee
+  is the ARM data workers: at the apparent 8.02-process-core points the split
+  counter reads 7.98–7.99 data-worker cores and 0.03–0.04 non-worker, so the
+  `A=8` geometry limits that arm, not the process cpuset. O3 is the lever.
+- **Fixed per-request work dominates small frames.** The pre-allocator build
+  fits ≈ `100.9 ARM µs/request + 31.4 ns/frame-byte`. SG-DMA multi-unit tasks
+  are rare, but 64-byte Linkerd output already carries 4.36 RPCs per DMA batch,
+  so delaying the SG engine to raise its unit count is not justified. Workers
+  fall to 0–1 % with no sessions and the loaded profile is flat (no symbol
+  above 3.5 % self); what remains is the per-event fixed cost E5 targets.
+- **Capacity carries two definitions.** Open loop (`highest_clean_rps`): 64 B
+  is confirmed through 90k across deployments, with a mixed 92k point and bad
+  98/99k points; 1 KiB 75k clean / 75.25k mixed; 8 KiB 29.75k clean / 30k
+  mixed, and near-knee p99 is not called healthy — 318 ms at the accepted 8 KiB
+  point. Closed loop at total concurrency 1,024: medians 106.8k, 89.1k and
+  34.3k request/s, which must not be relabelled as open-loop capacity. The
+  concurrency sweep 8 → 8,192 plateaus 64 B at 2,048 (118.9k) and 1 KiB at
+  1,024 (88.7k) with zero failure, drop or restart on every retained run; the
+  8 KiB high-concurrency sequence produced RPC failures and backend-channel
+  reuse warnings after overload cancellation and is retained as rejected
+  stress data, not averaged into the plateau.
+- **Against a per-Pod Linkerd sidecar** (`edge-26.8.1`, `LINKERD2_PROXY_CORES=1`):
+  max RPS 4.3× / 4.6× / 2.2× at 64 B / 1 KiB / 8 KiB with zero failures on
+  both arms; at 10k rps p50 is +0.2 ms at 64 B and 1 KiB with p99 below
+  Linkerd's, and 8 KiB p50 is 3× (1.55 vs 0.51 ms) at p99 +10 %.
 
-This campaign is an explicit single-node evaluation and does not close F6 or
-change the product priority of obtaining the two-node receipt.
+O1 belongs to the connection-churn arm: it attributes the remaining 0.4–0.5 ms
+session cost and cannot explain steady requests on a live HTTP/2 channel. O2 is
+a same-build A/B against this baseline. O6 is control-plane churn work and
+cannot change steady request cost; O5 is the later fair ARM-versus-x86
+comparison, not a prerequisite for the current number.
 
-The batching/Host diagnosis is retained in
-[`grpc-batching-20260901/`](bench/report/data/grpc-batching-20260901/FINAL.md),
-and the subsequent L7 profile, allocator/LTO A/B and final capacity receipt are
-in
-[`grpc-l7-perf-20260901/`](bench/report/data/grpc-l7-perf-20260901/FINAL.md).
-The earlier native-coalescing build's 64-byte open-loop bracket was 45k clean /
-48k bad. The first repetition after jemalloc and LTO reached 64 B 100k clean,
-1 KiB 75k clean and 8 KiB 25k clean. A later predeclared fine-knee repetition
-changes the operating claim: 64 B is cross-deployment-confirmed through 90k
-with a mixed 92k point and independent bad 98/99k points; 1 KiB is 75k clean /
-75.25k mixed; 8 KiB is 29.75k clean / 30k mixed. Near-knee p99 is deliberately
-not called healthy: it reaches 318 ms at the accepted 29.75k 8 KiB point. At
-total concurrency 1,024, independent closed-loop
-medians are 106.8k, 89.1k and 34.3k request/s. Closed-loop plateaus must not be
-relabelled as open-loop capacities. The full professor-facing receipt, including
-the standard-Linkerd-sidecar comparison, is in
-[`grpc-professor-20260902/`](bench/report/data/grpc-professor-20260902/ANALYSIS.md)
-(`FINAL.md` beside it is the short professor-facing summary).
-
-A follow-up concurrency sweep covers total concurrency 8 through 8,192, three
-repetitions each. The 64 B median rises 12.5k→118.9k request/s (9.5x) through
-concurrency 2,048, then falls to 115.8k/102.1k at 4,096/8,192. The 1 KiB median
-rises 12.2k→88.7k (7.3x) through 1,024, then falls to 85.8k/81.0k/77.4k.
-Every retained run has zero failure/drop/restart. At the apparent 8.02-process-
-core points, the new split counter records 7.98--7.99 data-worker cores and
-0.03--0.04 non-worker cores: the A=8 geometry limits that arm's data workers,
-not the whole process cpuset. This fixes the 64 B plateau at total concurrency 2,048 and
-the 1 KiB plateau at 1,024 while retaining the large rising region. The 8 KiB
-high-concurrency sequence produced RPC failures and backend-channel reuse
-warnings after overload cancellation; it is retained as rejected stress data,
-not averaged into the plateau. The harness must gate the next run on DPU
-session/task/backend quiescence before that arm is repeated.
-
-The original 64 B open-loop campaign has clean 92.5k/97.5k/100k points and a
-102.5k first bad point; isolated 110k/115k observations then plateau and decline.
-The independent knee repetition does not reproduce that upper envelope: 90k is
-3/3 clean, 92k is mixed after worker 5 stalls and drops 73,587 schedules, and
-fresh 98/99k observations are bad. These are displayed as individual hollow
-points instead of being averaged into one monotonic line. This is now a
-deployment/worker-progress stability issue, not merely a wider confidence
-interval around 100k.
-
-At equal total concurrency 256, removing the forced physical flush changes the
-three-run medians from 29.3k→58.2k (64 B), 27.9k→51.0k (1 KiB), and
-19.9k→22.3k (8 KiB). The remaining shape fits approximately
-`100.9 ARM us/request + 31.4 ns/frame-byte` on that pre-allocator build: fixed
-Linkerd/HTTP/2 per-request work still dominates small messages. DPU SG-DMA
-multi-unit tasks are rare, but 64-byte Linkerd output already carries 4.36 RPCs
-per DMA batch, so delaying the SG engine merely to increase its unit count is
-not justified by the profile. The 64/1 KiB/8 KiB open-loop knees remain clearly
-payload-dependent, while the dense 8 KiB curve now shows tail latency rising
-smoothly through 29.75k before the mixed 30k boundary. This still shows that
-fixed work dominates small frames. O2 remains the open direct-reservation lever
-for the residual copy and lock cost; O3 is the distinct capacity-scaling lever
-because the A=8 workers, rather than Host CPU, define that arm's knee.
-
-- [ ] Explain the observed deployment/worker-progress regression before calling
-  any single campaign's upper envelope an operating limit. An 11-hour 64-byte
-  probe regressed, and fresh deployments also produced a worker-5 stall at 92k
-  plus bad 98/99k observations, so age alone no longer explains the variance.
-  The historical 80k aged point fell to ratio 0.9878 and 904 ms p99, while one
-  full deploy restored its three-run median to ratio 1.0000 and 4.973 ms p99.
-  Run repeated fresh-deploy probes as well as 6/12/24-hour soaks and correlate
-  worker progress, session generations, allocator state, queue depth and DPU
-  counters. Do not publish a single-run maximum as a reproducible capacity.
-- [ ] Cut the per-event fixed cost of the ARM worker loop (E5). Measured on
+- [ ] **E5 Cut the per-event fixed cost of the ARM worker loop.** Measured on
   one worker with one channel: a 64 B RPC costs 467k instructions, 4.9k cache
   misses and 747 ARM µs at 100 RPS against 173k / 1.7k / 154 µs at the knee;
   it is handled in ~8 drain passes (half of them Idle), 47 syscalls
   (29 `epoll_pwait`) and 1.2 wakes, as two continuous on-CPU runs of ~450 and
   ~320 µs. Not a spin, not DVFS, not session rebuilding, not the Host
-  coalescer (E2: `TX_TAIL_DELAY_NS` 50 µs left the 100 RPS p50 at 1.6 ms and
+  coalescer (`TX_TAIL_DELAY_NS` 50 µs left the 100 RPS p50 at 1.6 ms and
   worsened 10k RPS from 611 to 1,456 µs; reverted). The levers are the pass
   count (two drains around arming plus re-registering five `select` futures
   per pass), the per-pass work (every session and both H2 connections are
   polled on every pass) and the syscalls per pass. Target: 100 RPS ≤ 200 µs/RPC,
   closed-loop single-request p50 < 0.7 ms (now 0.94 ms), no knee regression.
   Receipts: [`grpc-professor-20260902/lowload/`](bench/report/data/grpc-professor-20260902/lowload/).
-  First build (Rust drain before the C engine drain; wake-eventfd read only
-  when a tick was posted) is in the tree: worker CPU −2–6% at ≤1k RPS/worker,
-  syscalls/RPC 47→32, latency unchanged, 90k clean, `grpcshutdown` passed.
-  Uprobes then showed the ceiling of loop work: per RPC the hyper server
-  connection is polled 2.0× and the h2 client connection 4.0×, and those six
-  cold polls are ~64% of the cost. The next levers are the h2 client poll count
-  (4→2), a bounded post-event spin to avoid the wake chain and cold re-entry,
-  and the depth of the linkerd service stack, each under the same A/B.
-- [ ] Repeat the sidecar comparison with matched cores (E3):
+  Two builds are in the tree. The first (Rust drain before the C engine drain;
+  wake-eventfd read only when a tick was posted) took syscalls/RPC 47→32 for
+  worker CPU −2–6 % at ≤1k RPS/worker. The second names and removes two of
+  the four h2 client connection polls a request cost — one because `h2` gave
+  a `pending_open` stream no send capacity, so HEADERS and DATA left in two
+  polls, one because a closed stream's last handle woke the connection for
+  nothing — through two small edits in a vendored `h2` 0.4.15
+  (`linkerd/port/linkerd2-proxy/h2/`, `[patch.crates-io]` in
+  `linkerd/rust/Cargo.toml`). Polls/RPC 4.0→2.0, worker µs/RPC −2–6 % below
+  1k RPS/worker and −5.8 % closed-loop, nothing at the knee, 90k 3/3 clean
+  ([`e5-h2-20260902/`](bench/report/data/e5-h2-20260902/SUMMARY.md)). What
+  remains per request is the stack itself (request in → outbound send, and
+  response in → server write, ≈ 350 µs probe-inflated of ≈ 1.2 ms) and the
+  ~21 runtime passes, each a session walk plus `doca_pe_progress`, that seven
+  consecutive `Progressed` results after every publication produce. The next
+  levers are those passes — which progress step each of the seven is, and
+  whether the engine can report them as one — and the depth of the linkerd
+  service stack, each under the same A/B.
+- [ ] Gate the next high-concurrency arm on DPU quiescence. `grpc_closed_sweep.sh`
+  does not yet check session, task and backend-channel counters between
+  points, so a run started on top of the residue an overload cancellation
+  leaves measures that residue; add the check before the 8 KiB sequence at
+  total concurrency ≥ 4,096 is repeated.
+- [ ] **E3 Repeat the sidecar comparison with matched cores:**
   `config.linkerd.io/proxy-cpu-limit: "4"` on both Pods, plus a direct-TCP 10k
   point, and report per-proxy-core figures beside the absolute ones. The
   current 4.3× is against `LINKERD2_PROXY_CORES=1`; per configured core the two
@@ -637,20 +598,15 @@ path does not know the stacks are shared. The receipt is
 Per-request backend selection is priced, and at a matched rate it costs the
 data path nothing measurable: 8,000/s gRPC reads 481–487 ARM µs/request with
 one backend and 489–496 alternating 50/50 across two Services — inside the
-rig's several-percent spread — with the split attributed at exactly 50.0/50.0,
-and the single-backend opaque prices reproduce the `1518aae` receipts. The
-closed-loop alternating arm completes 9% less at +10% µs/request, which is the
-route hop's latency turned into throughput by a closed loop, not a per-request
-cost. No pre-selection receipt exists on these arms — `px_conn_admitted` and
-`l7_conn_segment` are already in `1518aae` — so the price is bounded by
-reproduction and by the same-build A/B, not by an ablation
+rig's several-percent spread — with the split attributed at exactly 50.0/50.0.
+The closed-loop alternating arm completes 9 % less at +10 % µs/request, which
+is the route hop's latency turned into throughput by a closed loop, not a
+per-request cost
 ([`api-l7-selcost-20260825-222604/`](bench/report/data/api-l7-selcost-20260825-222604/)).
 
-The backend registry lock never contends. A temporary counter pair in
-`Backends::registry()` — removed after the reading — counted 9,280
-acquisitions and zero contended takes across ~550 K requests and 3,081 session
-builds: three per session (publish, take, remove), none per request, on both
-session churn and the alternating-backend load. Endpoint locking is not
+The backend registry lock never contends: 9,280 acquisitions and zero
+contended takes across ~550 K requests and 3,081 session builds — three per
+session (publish, take, remove), none per request. Endpoint locking is not
 material, and the Tokio `LocalSet` + `Rc<RefCell>` specialization that was
 conditioned on it stays unwritten
 ([`backend-lock-20260825/`](bench/report/data/backend-lock-20260825/)).
@@ -683,7 +639,8 @@ figure sits inside the synchronous call.**
 The reservation-versus-copy A/B is measured: the reservation path costs 0.265
 ARM µs/request less at concurrency 128, with the three-run ranges disjoint at 32
 and 128. That fixed the default, but it did not remove the intermediate queue,
-which is what this item is for.
+which is what this item is for. The figure proves the first copy lever is small
+beside the per-request L7 total, not that the remaining queue is worthless.
 
 - [ ] Inject a worker-local egress reservation interface while keeping all
   `dmesh_l7_*` FFI in the adapter.
@@ -694,53 +651,47 @@ which is what this item is for.
   p50/p99 against the reservation baseline. **Re-baseline first.** The published
   `l7-tx-ab-20260817` arm predates the `DmeshIo` tx cursor, which removed the
   queue-tail move `consume_tx` performed on every publication, so its absolute
-  µs/request is not the arm to subtract from.
+  µs/request is not the arm to subtract from. Accept only with copy-byte/arena
+  evidence and no p99 or correctness regression.
 
 ## O3 Use more than eight ARM data cores
 
-The fixed arrays now admit `MAX_ARM_WORKERS=16` and `MAX_DPA_RINGS=16`.
-Reverse landing stripes are not an independent configuration: they are derived
-directly from A. The hot-service deploy harness exposes
-`DPUMESH_THROUGHPUT_WORKERS`, deriving A=K=W, the largest valid N≤32 and
-all-worker L7. The scale runner derives `threads=channels=workers` from that
-same value so session fan-in is held constant. On the expanded binary,
-A=4/6/8/12 reached 40k/70k/80k/130k 3/3 clean; at 130k the Host used only
-5.05/9 and 5.93/9 cores while DPU workers used 11.37/12. This is a measured
-capacity lever. Independent N/K/A remain for the distinct density deployment
-where K>A is intentional. Policy/injection fixtures share a deployment-geometry
-resolver: they consume canonical W or parse effective K/A from the live DPU,
-instead of retaining K=A=8 and inspecting only eight admin endpoints.
+The fixed arrays admit `MAX_ARM_WORKERS=16` and `MAX_DPA_RINGS=16`, expanded
+together across the public transport, broker descriptor handoff, DPA ring
+tables, DPU completion PEs, reverse lanes, scratch layout and peer-worker port
+ranges; reverse landing stripes are derived from A, not configured. The deploy
+harness exposes `DPUMESH_THROUGHPUT_WORKERS` (4, 6, 8 or 12), deriving
+A=K=W, the largest valid N ≤ 32 and all-worker L7, and the scale runner derives
+`threads=channels=workers` from it so session fan-in is held constant; policy
+and injection fixtures read effective K/A from the live DPU
+(`bench/suite/deployed_geometry.sh`) instead of assuming eight. With the same
+9+9 Host placement, A=4/6/8/12 reach 40k/70k/80k/130k clean RPC/s, 3 of 3,
+consuming 3.97/4, 5.95/6, 7.79/8 and 11.37/12 worker cores; at 130k the Host
+used 5.05/9 and 5.93/9 cores, and the A=12 point has balanced 97.4–98.9 %
+worker use, clean ownership and loss counters and zero RPC failure. This is a
+measured capacity lever. Independent N/K/A remain for the density deployment
+where K > A is intentional.
 
-- [x] Expand `K/A/L` geometry together across the public transport, broker
-  descriptor handoff, DPA ring tables, DPU completion PEs, reverse lanes,
-  scratch layout and peer-worker port ranges. A=12 deploy, smoke and traffic
-  passed; topology tests cover 12 and 16.
-- [ ] Reserve a distinct CPU for the DPU control/main thread. With all 16 CPUs
-  allowed, `A=16` would wrap the current `main=A` affinity back onto worker 0;
-  a larger worker geometry must not buy throughput by starving control progress.
-- [x] Compare 4/6/8/12-worker open-loop knees with the same 9+9 Host placement.
-  Their highest repeated clean points consume 3.97/4, 5.95/6, 7.79/8 and
-  11.37/12 worker cores. The accepted A=12 point has balanced 97.4–98.9%
-  worker use, clean ownership/loss counters and zero RPC failure through 130k.
-  A=16 remains outside the supported range until the preceding control-CPU
-  item is closed.
+- [ ] Reserve a distinct CPU for the DPU control/main thread. `dpu_worker.c`
+  pins the main thread to CPU index A (`dpu_arm_pin_current("main",
+  n_data_workers)`), so with all 16 CPUs allowed `A=16` wraps it onto worker 0;
+  a larger worker geometry must not buy throughput by starving control
+  progress. A=16 stays outside the supported range until this closes.
 
 ## O6 Incremental topology generations
 
 A generation republishes whole: one Pod's churn re-signs the entire document and
 every DPU re-fetches, re-verifies and re-parses all of it — O(fleet) work for an
 O(1) change. Storage is not the pressure (~200 bytes per Pod against DPU DRAM,
-16 MiB publication bound in `TOPOLOGY_MAX_BYTES`); the republish amplification
-is, and it grows as cluster size times churn rate. Past the point where even
-deltas cannot keep up, the migration is forwarded assertions; this item is the
-step before that.
+16 MiB publication bound in `DMESH_TOPOLOGY_MAX_BYTES`); the republish
+amplification is, and it grows as cluster size times churn rate.
 
 - [ ] Publish a delta generation — records added and removed against a named
   base version — signed with the same Ed25519 key under the same strictly
   increasing version line. A consumer holding the base applies it; one that
   does not, or that fails any check, falls back to fetching the full
-  generation. The security property is unchanged: nothing unsigned is adopted,
-  and a refused or missing delta leaves the last adopted generation standing.
+  generation. Nothing unsigned is adopted, and a refused or missing delta
+  leaves the last adopted generation standing.
 - [ ] Keep the periodic full generation as anchor and recovery path, so a delta
   chain never becomes required state.
 - [ ] The wire grammar and consumer bounds are host+DPU ABI (`doca/topology.c`

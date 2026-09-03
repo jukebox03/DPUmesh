@@ -44,3 +44,7 @@ lto = true
 # filesystem does not have room for a second copy of it in the linked binary.
 debug = 0
 strip = "debuginfo"
+
+# h2 with the two send-path changes described in its Cargo.toml.
+[patch.crates-io]
+h2 = { path = "../port/linkerd2-proxy/h2" }

@@ -1,0 +1,66 @@
+
+=== real-DPU shutdown, quiescence, slot reuse and four-channel exchange ===
+[0;34m[STEP][0m === gRPC process shutdown with one live HTTP/2 channel ===
+[0;34m[STEP][0m === Re-registering the recycled pod slot ===
+[0;32m[INFO][0m gRPC shutdown/re-register gate passed: opened=55 closed=55; OK mrps=0.010594 gbps=0.0902 req_gbps=0.0881 resp_gbps=0.0020 p50=1457.00 p95=2014.00 p99=2212.00 p999=2822.00 p9999=88339.00 avg=1510.02 min=466.14 max=90784.73 rcnt=105189 scheduled=109205 pending=0 fail=0 conc=4 threads=4 channels=4 reqsz=1024 repsz=8 reqframe=1040 respframe=24 durs=10.000 offered_mrps=0.010594 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const batch=0 reconns=0 reconn_us=0.00 grabs=30 rets=27 recyc=205 waits=0 pads=189 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA
+
+=== gRPC policy and routing surfaces ===
+
+=== DPU admin endpoints: 4191 4192 4193 4194 4195 4196 4197 4198
+
+=== output: /home/jukebox/DPUmesh/bench/report/data/policy-route-20260902-233507
+
+=== surfaces — Linkerd features running in a proxy nobody has aimed at them
+    S0 [PASS] no route: expected=serve observed=serve rcnt=10305 fail=0 admitted+=1 denied+=0 route_hits+=0 mismatch+=0
+
+=== S1/S2 — HTTPRoute request timeouts
+    S1 [PASS] timeout 10s: expected=serve observed=serve rcnt=10327 fail=0 admitted+=1 denied+=0 route_hits+=10428 mismatch+=0
+    S2 [PASS] timeout 1ms: expected=refuse observed=refuse rcnt=10293 fail=8 admitted+=1 denied+=0 route_hits+=10401 mismatch+=0
+    S2v [PASS] the route timed requests out: REQUEST_TIMEOUT+=8
+
+=== S3 — retries, against a backend that fails on purpose
+    S3a [PASS] 1-in-50 failures; no retry policy: expected=refuse observed=refuse rcnt=10362 fail=213 admitted+=1 denied+=0 route_hits+=0 mismatch+=0
+    S3b [PASS] 1-in-50 failures; retry limit 3: expected=serve observed=serve rcnt=5323 fail=0 admitted+=1 denied+=0 route_hits+=0 mismatch+=0
+    S3v [PASS] the route retried the failures: retry_requests+=111
+
+=== S4/S5 — method matching
+    S4 [PASS] method POST: expected=serve observed=serve rcnt=10407 fail=0 admitted+=1 denied+=0 route_hits+=10507 mismatch+=0
+    S5 [PASS] method GET: expected=refuse observed=refuse rcnt=0 fail=32232 admitted+=1 denied+=0 route_hits+=0 mismatch+=0
+
+=== S6/S7 — header matching
+    S6 [PASS] header content-type: application/grpc: expected=serve observed=serve rcnt=10105 fail=0 admitted+=1 denied+=0 route_hits+=10206 mismatch+=0
+    S7 [PASS] header content-type: application/json: expected=refuse observed=refuse rcnt=0 fail=34195 admitted+=1 denied+=0 route_hits+=0 mismatch+=0
+
+=== S8/S9 — GRPCRoute
+    S8 [PASS] GRPCRoute on the called method: expected=serve observed=serve rcnt=10182 fail=0 admitted+=1 denied+=0 route_hits+=0 mismatch+=0
+    S9 [PASS] GRPCRoute on another method: expected=refuse observed=refuse rcnt=0 fail=32835 admitted+=1 denied+=0 route_hits+=0 mismatch+=0
+
+=== S10-S12 — authorization whose subject is a route
+    caller identity: default.test-bench.serviceaccount.identity.linkerd.cluster.local
+    S10 [PASS] Server on the protocol-aware Service; no authorization: expected=refuse observed=refuse rcnt=0 fail=513 admitted+=0 denied+=514 route_hits+=0 mismatch+=0
+    S11 [PASS] AuthorizationPolicy targeting the GRPCRoute: expected=serve observed=serve rcnt=9979 fail=0 admitted+=1 denied+=0 route_hits+=0 mismatch+=0
+    S12 [PASS] the same policy naming another identity: expected=refuse observed=refuse rcnt=0 fail=514 admitted+=0 denied+=514 route_hits+=0 mismatch+=0
+
+=== S13/S14 — failure accrual
+    S13 [PASS] a failing endpoint beside a healthy one: expected=serve observed=serve rcnt=10460 fail=4 admitted+=2 denied+=0 route_hits+=0 mismatch+=0
+    S13v ejected: healthy=10561 broken=4
+    S14 [PASS] the failing endpoint withdrawn: expected=serve observed=serve rcnt=9805 fail=0 admitted+=1 denied+=0 route_hits+=0 mismatch+=0
+
+=== stages: 19 pass, 0 fail
+
+=== csv: /home/jukebox/DPUmesh/bench/report/data/policy-route-20260902-233507/stages.csv
+
+=== cleanup
+    fixtures removed; replica counts restored
+
+=== final DPU session/task accounting ===
+WORKER       OPENED     CLOSED   ACTIVE  PENDING    TASKS   ORPHANED
+0               259        259        0        0        0          0
+1               268        268        0        0        0          0
+2               268        268        0        0        0          0
+3               268        268        0        0        0          0
+4               265        265        0        0        0          0
+5               266        266        0        0        0          0
+6               266        266        0        0        0          0
+7               266        266        0        0        0          0
+hardware receipt: /home/jukebox/DPUmesh/bench/report/data/policy-route-20260902-233507

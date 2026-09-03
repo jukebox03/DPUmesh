@@ -1,0 +1,27 @@
+
+ Performance counter stats for thread id '578784':
+
+                 0      probe_dpumesh_dpu:h2_relcap                                   
+                 0      probe_dpumesh_dpu:hs_poll_7                                   
+                 0      probe_dpumesh_dpu:hs_poll_6                                   
+                 0      probe_dpumesh_dpu:hs_poll_5                                   
+                 0      probe_dpumesh_dpu:hs_poll_4                                   
+                 0      probe_dpumesh_dpu:hs_poll_3                                   
+                 0      probe_dpumesh_dpu:hs_poll_2                                   
+                 0      probe_dpumesh_dpu:hs_poll_1                                   
+                 2      probe_dpumesh_dpu:h2c_poll_5                                   
+                 0      probe_dpumesh_dpu:h2c_poll_4                                   
+                 0      probe_dpumesh_dpu:h2c_poll_3                                   
+                 0      probe_dpumesh_dpu:h2c_poll_2                                   
+                 0      probe_dpumesh_dpu:h2c_poll_1                                   
+             4,844      probe_dpumesh_dpu:dmesh_l7_driver_clear_notifications                                   
+             4,844      probe_dpumesh_dpu:dmesh_l7_driver_arm                                   
+             9,688      probe_dpumesh_dpu:dmesh_l7_driver_drain                                   
+                 0      probe_dpumesh_dpu:dmesh_l7_tx_fin                                   
+                 0      probe_dpumesh_dpu:dmesh_l7_tx_commit                                   
+                 0      probe_dpumesh_dpu:l7_conn_segment                                   
+             4,916      context-switches                                            
+            24,291      raw_syscalls:sys_enter                                      
+
+      10.001604231 seconds time elapsed
+
