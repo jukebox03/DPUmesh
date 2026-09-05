@@ -144,7 +144,7 @@ static void reclaim(dmesh_qp_t *c) {
 }
 
 int main(void) {
-    const char *service = getenv("DPUMESH_SERVICE");  /* identity injected via env → registry */
+    const char *service = getenv("DPUMESH_SERVICE");  /* request; controller authorizes */
     if (!service) service = "(none)";
     signal(SIGHUP, on_hup); load_work();              /* app-work: env default, live via SIGHUP */
 

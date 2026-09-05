@@ -1,4 +1,6 @@
 import argparse
+import hashlib
+import hmac
 import importlib.util
 import json
 import sys
@@ -26,9 +28,30 @@ PUB_HEX = "62b8205a7e8ee63039adca07a1e9aa6d069605ce54648314ee77ca74b457b5bd"
 def pods():
     return [
         {
-            "metadata": {"uid": UID_A, "namespace": "test-bench"},
-            "spec": {"nodeName": "rapids4", "serviceAccountName": "default"},
-            "status": {"podIP": "10.244.0.5"},
+            "metadata": {
+                "uid": UID_A,
+                "namespace": "test-bench",
+                "labels": {"app": "echo-dpumesh"},
+            },
+            "spec": {
+                "nodeName": "rapids4",
+                "serviceAccountName": "default",
+                "automountServiceAccountToken": False,
+                "containers": [{
+                    "name": "app",
+                    "resources": {
+                        "requests": {"dpumesh.io/channel": 1},
+                        "limits": {"dpumesh.io/channel": 1},
+                    },
+                }],
+            },
+            "status": {
+                "podIP": "10.244.0.5",
+                "containerStatuses": [{
+                    "name": "app",
+                    "containerID": f"containerd://{'a' * 64}",
+                }],
+            },
         },
         {   # no IP yet: not placeable, silently held for the next generation
             "metadata": {"uid": UID_B, "namespace": "test-bench"},
@@ -42,7 +65,11 @@ def services():
     return [
         {
             "metadata": {"namespace": "test-bench", "name": "echo-dpumesh"},
-            "spec": {"clusterIP": "10.96.0.11", "ports": [{"port": 9091}]},
+            "spec": {
+                "clusterIP": "10.96.0.11",
+                "ports": [{"port": 9091}],
+                "selector": {"app": "echo-dpumesh"},
+            },
         },
         {   # headless: no dialable ClusterIP, so no service= record
             "metadata": {"namespace": "test-bench", "name": "headless"},
@@ -69,15 +96,8 @@ def slices():
 
 
 class FakeKube:
-    """Stands in for KubernetesAPI; the routes and publish logic never know."""
-
     def __init__(self):
         self.pod_list = pods()
-        self.node_list = [
-            {"metadata": {"name": "rapids4"},
-             "spec": {"podCIDR": "10.244.0.0/24"},
-             "status": {"addresses": [{"address": "127.0.0.1"}]}},
-        ]
 
     def pods(self):
         return self.pod_list
@@ -88,12 +108,8 @@ class FakeKube:
     def endpoint_slices(self):
         return slices()
 
-    def nodes(self):
-        return self.node_list
-
-
-def http_status(url, data=None, headers=None):
-    request = urllib.request.Request(url, data=data, headers=headers or {})
+def http_status(url, data=None):
+    request = urllib.request.Request(url, data=data)
     try:
         with urllib.request.urlopen(request, timeout=5) as response:
             return response.status, response.read()
@@ -102,25 +118,30 @@ def http_status(url, data=None, headers=None):
 
 
 def routes_and_publishing(temporary):
-    """The listener's three routes, and publish's refuse/skip decisions,
-    driven through a real Controller over a real socket."""
     key_dir = Path(temporary) / "keys"
     key_dir.mkdir()
     (key_dir / "active").write_text("controller-v1", encoding="ascii")
     key_file = key_dir / "controller-v1.key"
     key_file.write_bytes(bytes(range(1, 33)))
     key_file.chmod(0o600)
+    feed_key_dir = Path(temporary) / "feed-keys"
+    feed_key_dir.mkdir()
+    (feed_key_dir / "active").write_text("feed-v1", encoding="ascii")
+    feed_key = bytes(range(33, 65))
+    (feed_key_dir / "feed-v1.key").write_bytes(feed_key)
+    (feed_key_dir / "feed-v1.key").chmod(0o600)
     nodes_file = Path(temporary) / "nodes"
     nodes_file.write_text(
         f"rapids4 192.168.100.2:4791 node-ed25519-v1 {PUB_HEX} {'0' * 64}\n",
         encoding="ascii",
     )
     args = argparse.Namespace(
-        key_dir=key_dir, nodes_file=nodes_file,
+        key_dir=key_dir, feed_key_dir=feed_key_dir, nodes_file=nodes_file,
         output=Path(temporary) / "topology.v1", protected=[],
+        resource_name="dpumesh.io/channel", cluster_id="test-cluster",
         api_server="", api_token_file=Path("/nonexistent"), api_ca_file=Path("/nonexistent"),
     )
-    real_kube, controller.KubernetesAPI = controller.KubernetesAPI, lambda *a: FakeKube()
+    real_kube, controller.KubernetesAPI = controller.KubernetesAPI, lambda *_args: FakeKube()
     try:
         ctl = controller.Controller(args)
     finally:
@@ -130,31 +151,54 @@ def routes_and_publishing(temporary):
     assert version is not None
     published = args.output.read_text(encoding="ascii")
 
-    # An unchanged cluster publishes nothing: same document on disk, no
-    # version bump — but the node binding still refreshed.
-    ctl.kubernetes.node_list[0]["status"]["addresses"].append({"address": "10.0.0.4"})
+    # An unchanged cluster retains the same signed document and version.
     assert ctl.publish() is None
     assert args.output.read_text(encoding="ascii") == published
-    assert ctl.held()[2].of("10.0.0.4") == "rapids4"
 
     # A restart serves the installed generation before any publication.
-    controller.KubernetesAPI = lambda *a: FakeKube()
+    controller.KubernetesAPI = lambda *_args: FakeKube()
     try:
         again = controller.Controller(args)
     finally:
         controller.KubernetesAPI = real_kube
     assert again.held()[0] == published
 
+    reporter = controller.ControllerHandler.reporter
+    controller.ControllerHandler.reporter = lambda _self: "rapids4"
     server = controller.ControllerServer(("127.0.0.1", 0), ctl)
+    assert controller.CONTROLLER_REQUEST_TIMEOUT == 10.0
+    for _index in range(controller.CONTROLLER_REQUEST_MAX):
+        assert server.request_slots.acquire(blocking=False)
+    assert not server.request_slots.acquire(blocking=False)
+    for _index in range(controller.CONTROLLER_REQUEST_MAX):
+        server.request_slots.release()
     threading.Thread(target=server.serve_forever, daemon=True).start()
     base = f"http://127.0.0.1:{server.server_address[1]}"
     try:
+        status, membership = http_status(f"{base}/membership.v1")
+        assert status == 200
+        prefix, envelope = membership.rsplit(b"signature=", 1)
+        key_id, mac = envelope.strip().split(b",", 1)
+        assert key_id == b"feed-v1"
+        assert hmac.new(feed_key, prefix, hashlib.sha256).hexdigest().encode() == mac
+        assert f"member={UID_A},-\n".encode() in membership
+        assert f"member={UID_A},echo-dpumesh\n".encode() in membership
+
+        assert http_status(f"{base}/healthz")[0] == 200
+
+        status, targets = http_status(f"{base}/service-targets.v1")
+        assert status == 200
+        prefix, envelope = targets.rsplit(b"signature=", 1)
+        key_id, mac = envelope.strip().split(b",", 1)
+        assert key_id == b"feed-v1"
+        assert hmac.new(feed_key, prefix, hashlib.sha256).hexdigest().encode() == mac
+        assert b"test-bench/echo-dpumesh=10.96.0.11:9091\n" in targets
+        assert f"endpoint=test-bench/echo-dpumesh,10.244.0.5:9091,{UID_A}\n".encode() in targets
+
         status, body = http_status(f"{base}/topology.v1")
         assert status == 200 and body.decode("ascii") == published
 
-        # The mediated lookup: 200 placed here, 403 placed elsewhere, 404
-        # placed nowhere, 400 malformed — the caller resolved from its source
-        # address, never from anything it says.
+        # The mTLS caller can query only workloads placed on its node.
         status, body = http_status(f"{base}/workload-scope?pod_uid={UID_A}")
         assert status == 200 and json.loads(body) == {"pod_uid": UID_A, "node": "rapids4"}
         elsewhere = dict(ctl.kubernetes.pod_list[0], metadata={"uid": UID_B, "namespace": "x"})
@@ -180,13 +224,6 @@ def routes_and_publishing(temporary):
         assert ctl.publish() is not None
         assert f"{'ab' * 32}" in args.output.read_text(encoding="ascii")
 
-        # A caller the cluster places on no node is refused every question.
-        ctl.kubernetes.node_list[0]["status"]["addresses"] = [{"address": "10.0.0.9"}]
-        ctl.kubernetes.node_list[0]["spec"]["podCIDR"] = "10.9.0.0/24"
-        assert ctl.publish() is None      # addresses are not generation content
-        assert http_status(f"{base}/workload-scope?pod_uid={UID_A}")[0] == 403
-        assert http_status(f"{base}/node", data=report)[0] == 403
-
         # A rotated signing key republishes even an unchanged cluster: the
         # held document must never outlive the key that signed it.
         rotated = key_dir / "controller-v2.key"
@@ -199,9 +236,29 @@ def routes_and_publishing(temporary):
     finally:
         server.shutdown()
         server.server_close()
+        controller.ControllerHandler.reporter = reporter
 
 
 def main():
+    class Peer:
+        def __init__(self, certificate):
+            self.certificate = certificate
+
+        def getpeercert(self):
+            return self.certificate
+
+    assert controller.node_from_peer_certificate(Peer(None)) is None
+    assert controller.node_from_peer_certificate(Peer({})) is None
+    assert controller.node_from_peer_certificate(Peer({
+        "subjectAltName": (("URI", "spiffe://dpumesh.io/node/rapids4"),)
+    })) == "rapids4"
+    assert controller.node_from_peer_certificate(Peer({
+        "subjectAltName": (
+            ("URI", "spiffe://dpumesh.io/node/rapids4"),
+            ("URI", "spiffe://example.test/extra"),
+        )
+    })) is None
+
     node_line = f"node=rapids4,192.168.100.2:4791,node-ed25519-v1,{PUB_HEX},{'0' * 64}"
     body = controller.build_body(
         7,
@@ -268,8 +325,8 @@ def main():
         assert registry.lines() == [node_line]
         assert registry.names() == {"rapids4"}
 
-        # A report supplies only the static handshake key generated by the DPU.
-        # The operator's address and agent identity remain authoritative.
+        # A report supplies the DPU static key; operator configuration owns the
+        # address and host-runtime identity.
         registry.report("rapids4", "192.168.100.2:4791", "ab" * 32)
         assert registry.lines() == [
             f"node=rapids4,192.168.100.2:4791,node-ed25519-v1,{PUB_HEX},{'ab' * 32}"
@@ -308,24 +365,6 @@ def main():
     # The mediated lookup answers from the same document every DPU holds.
     placements = controller.pod_placements(document)
     assert placements == {UID_A: "rapids4"}
-
-    binding = controller.NodeBinding([
-        {"metadata": {"name": "rapids4"},
-         "spec": {"podCIDR": "10.244.0.0/24"},
-         "status": {"addresses": [{"address": "10.0.0.4"}, {"address": "rapids4"}]}},
-        {"metadata": {"name": "rapids5"},
-         "spec": {"podCIDRs": ["10.244.1.0/24"]},
-         "status": {"addresses": [{"address": "10.0.0.5"}]}},
-    ])
-    assert binding.of("10.0.0.4") == "rapids4"
-    assert binding.of("10.0.0.5") == "rapids5"
-    # A host-network agent reaching a ClusterIP is source-translated to its
-    # node's CNI address, which lies in that node's Pod CIDR and no other's.
-    assert binding.of("10.244.0.1") == "rapids4"
-    assert binding.of("10.244.1.1") == "rapids5"
-    # Anything the cluster does not place on a node speaks for none.
-    assert binding.of("10.9.9.9") is None
-    assert binding.of("rapids4") is None
 
     with tempfile.TemporaryDirectory() as temporary:
         routes_and_publishing(temporary)

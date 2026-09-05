@@ -159,7 +159,16 @@ int dmesh_broker_send_ready(int socket_fd,
     cmsg->cmsg_type = SCM_RIGHTS;
     cmsg->cmsg_len = CMSG_LEN(fd_count * sizeof(int));
     memcpy(CMSG_DATA(cmsg), fds, fd_count * sizeof(int));
-    return sendmsg(socket_fd, &msg, MSG_NOSIGNAL) == sizeof(*ready) ? 0 : -1;
+    ssize_t sent = sendmsg(socket_fd, &msg, MSG_NOSIGNAL);
+    if (sent != sizeof(*ready)) {
+        fprintf(stderr, "dmesh_broker: READY send failed: sent=%zd expected=%zu "
+                "fds=%zu error=%s\n", sent, sizeof(*ready), fd_count,
+                strerror(errno));
+        return -1;
+    }
+    fprintf(stderr, "dmesh_broker: READY sent pod_id=%d fds=%zu\n",
+            ready->pod_id, fd_count);
+    return 0;
 }
 
 int dmesh_broker_recv_hello(int socket_fd, struct dmesh_ipc_hello *hello)
@@ -185,6 +194,8 @@ int dmesh_broker_send_error(int socket_fd, int code, const char *message)
     };
     snprintf(reply.text, sizeof(reply.text), "%s",
              message != NULL ? message : "broker error");
+    fprintf(stderr, "dmesh_broker: initialization failed: %s (code=%d)\n",
+            reply.text, code);
     return send(socket_fd, &reply, sizeof(reply), MSG_NOSIGNAL) == sizeof(reply)
                ? 0 : -1;
 }

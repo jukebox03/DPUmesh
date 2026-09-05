@@ -1,0 +1,89 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-dpumesh-native
+  namespace: ${NS}
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: echo-dpumesh-native }
+  template:
+    metadata:
+      labels: { app: echo-dpumesh-native }
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+      - name: app
+        image: docker.io/${IMG_ECHO}
+        imagePullPolicy: Never
+        env:
+        - { name: DPUMESH_SERVICE, value: echo-dpumesh-native }
+        - { name: DPUMESH_RINGS_PER_POD, value: "${RINGS}" }
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities: { drop: ["ALL"] }
+        resources:
+          requests:
+            dpumesh.io/channel: 1
+            cpu: 10m
+            memory: 32Mi
+          limits:
+            dpumesh.io/channel: 1
+            memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-dpumesh-native
+  namespace: ${NS}
+spec:
+  selector: { app: echo-dpumesh-native }
+  ports:
+  - { name: dmesh, port: 9092, targetPort: 9092 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bench-dpumesh-native
+  namespace: ${NS}
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: bench-dpumesh-native }
+  template:
+    metadata:
+      labels: { app: bench-dpumesh-native }
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+      - name: app
+        image: docker.io/${IMG_BENCH}
+        imagePullPolicy: Never
+        env:
+        - { name: BENCH_DST_SERVICE, value: echo-dpumesh-native }
+        - { name: DPUMESH_RINGS_PER_POD, value: "${RINGS}" }
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities: { drop: ["ALL"] }
+        resources:
+          requests:
+            dpumesh.io/channel: 1
+            cpu: 10m
+            memory: 32Mi
+          limits:
+            dpumesh.io/channel: 1
+            memory: 256Mi

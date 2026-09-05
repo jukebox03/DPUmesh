@@ -9,10 +9,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mount.h>
-#include <sys/stat.h>
+#include <sys/prctl.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/uio.h>
+#include <sys/wait.h>
 #include <sys/un.h>
 #include <unistd.h>
 
@@ -41,20 +42,18 @@ static int move_to_cgroup(int cgroup_dir_fd)
     return rc;
 }
 
-static int setup_steady_namespaces(void)
+static int setup_steady_namespaces(const char *private_root)
 {
-    /* The PID namespace and its private procfs are created by the host
-     * supervisor.  Everything else is made private here, after the broker has
-     * entered the attested Pod cgroup but before it consumes the Pod HELLO. */
+    /* The host supervisor creates the PID namespace and private procfs. The
+     * broker enters its bounded worker cgroup before consuming the Pod HELLO,
+     * then isolates the remaining namespaces here. */
     if (unshare(CLONE_NEWNS) != 0 ||
         mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) != 0 ||
         unshare(CLONE_NEWCGROUP | CLONE_NEWNET) != 0)
         return -1;
-    char private_root[] = "/run/dpumesh/.broker-root.XXXXXX";
-    if (mkdtemp(private_root) == NULL || chmod(private_root, 0700) != 0 ||
+    if (private_root == NULL || private_root[0] != '/' ||
         mount("tmpfs", private_root, "tmpfs", MS_NOSUID | MS_NODEV,
-              "mode=0700,size=4m") != 0 ||
-        setenv("DPUMESH_BROKER_PRIVATE_ROOT", private_root, 1) != 0)
+              "mode=0700,size=4m") != 0)
         return -1;
     return 0;
 }
@@ -93,10 +92,9 @@ static int recv_launch_fds(int launch_fd, int *socket_fd, int *cgroup_dir_fd)
     return 0;
 }
 
-static int connect_launch_socket(const char *path, const char *token,
-                                 int *socket_fd)
+static int connect_launch_socket(const char *path, int *socket_fd)
 {
-    if (path == NULL || token == NULL || strlen(token) != 64 ||
+    if (path == NULL ||
         strlen(path) >= sizeof(((struct sockaddr_un *)0)->sun_path)) {
         errno = EINVAL;
         return -1;
@@ -107,7 +105,7 @@ static int connect_launch_socket(const char *path, const char *token,
     struct sockaddr_un address = { .sun_family = AF_UNIX };
     memcpy(address.sun_path, path, strlen(path) + 1);
     if (connect(fd, (struct sockaddr *)&address, sizeof(address)) != 0 ||
-        send(fd, token, 64, MSG_NOSIGNAL) != 64) {
+        send(fd, "B", 1, MSG_NOSIGNAL) != 1) {
         close(fd);
         return -1;
     }
@@ -115,17 +113,16 @@ static int connect_launch_socket(const char *path, const char *token,
     return 0;
 }
 
-/* The node agent starts the broker under the host service manager, inside a
- * fresh PID namespace with a private procfs. The launch socket carries the
- * Pod connection and the broker child-cgroup fd; both barriers keep the agent
- * in control until isolation is complete. */
-static int run_launch(const char *launch_socket, const char *launch_token,
-                      const char *agent_socket)
+/* dpumeshd starts the broker inside a fresh PID namespace with private procfs.
+ * The launch socket carries the Pod connection and worker-cgroup fd; both
+ * barriers keep dpumeshd in control until isolation is complete. */
+static int run_launch(const char *launch_socket, const char *manager_socket,
+                      const char *private_root)
 {
     int launch_fd = -1;
     int socket_fd = -1;
     int cgroup_dir_fd = -1;
-    if (connect_launch_socket(launch_socket, launch_token, &launch_fd) != 0) {
+    if (connect_launch_socket(launch_socket, &launch_fd) != 0) {
         fprintf(stderr, "dmesh_broker: launch socket failed: %s\n", strerror(errno));
         return 1;
     }
@@ -137,7 +134,7 @@ static int run_launch(const char *launch_socket, const char *launch_token,
         return 1;
     }
     if (send(launch_fd, "M", 1, MSG_NOSIGNAL) != 1 ||
-        setup_steady_namespaces() != 0) {
+        setup_steady_namespaces(private_root) != 0) {
         fprintf(stderr, "dmesh_broker: namespace isolation failed: %s\n",
                 strerror(errno));
         close(launch_fd);
@@ -163,29 +160,121 @@ static int run_launch(const char *launch_socket, const char *launch_token,
         close(socket_fd);
         return 1;
     }
-    return dmesh_broker_run(socket_fd, agent_socket, &stop_requested) == 0 ? 0 : 1;
+    return dmesh_broker_run(socket_fd, manager_socket, private_root,
+                            &stop_requested) == 0 ? 0 : 1;
+}
+
+/* The short-lived supervisor is a direct child of dpumeshd. Both parent-death
+ * edges are armed before the worker may touch a device, and the socketpair
+ * closes the fork/prctl race. The root-only launch endpoint and verified
+ * SO_PEERCRED/parent PID need no command-line bootstrap secret. */
+static int run_supervised(const char *launch_socket, const char *manager_socket,
+                          const char *private_root, pid_t expected_parent)
+{
+    if (expected_parent <= 1 || getppid() != expected_parent ||
+        prctl(PR_SET_PDEATHSIG, SIGKILL) != 0 || getppid() != expected_parent) {
+        fprintf(stderr, "dmesh_broker: supervisor parent identity changed\n");
+        return 1;
+    }
+    if (unshare(CLONE_NEWPID | CLONE_NEWNS) != 0 ||
+        mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) != 0) {
+        fprintf(stderr, "dmesh_broker: supervisor namespace setup failed: %s\n",
+                strerror(errno));
+        return 1;
+    }
+    int barrier[2];
+    if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, barrier) != 0) {
+        fprintf(stderr, "dmesh_broker: supervisor barrier failed: %s\n",
+                strerror(errno));
+        return 1;
+    }
+    pid_t child = fork();
+    if (child < 0) {
+        fprintf(stderr, "dmesh_broker: supervisor fork failed: %s\n",
+                strerror(errno));
+        close(barrier[0]);
+        close(barrier[1]);
+        return 1;
+    }
+    if (child == 0) {
+        close(barrier[0]);
+        char go = 0;
+        if (prctl(PR_SET_PDEATHSIG, SIGKILL) != 0 ||
+            send(barrier[1], "R", 1, MSG_NOSIGNAL) != 1 ||
+            recv(barrier[1], &go, 1, 0) != 1 || go != 'G')
+            _exit(126);
+        close(barrier[1]);
+        /* This process is PID 1 in the new namespace. Replace inherited host
+         * procfs so the steady broker cannot enumerate host processes. */
+        if ((umount2("/proc", MNT_DETACH) != 0 && errno != EINVAL) ||
+            mount("proc", "/proc", "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC,
+                  NULL) != 0) {
+            fprintf(stderr, "dmesh_broker: private procfs failed: %s\n",
+                    strerror(errno));
+            _exit(126);
+        }
+        _exit(run_launch(launch_socket, manager_socket, private_root));
+    }
+
+    close(barrier[1]);
+    char ready = 0;
+    if (recv(barrier[0], &ready, 1, 0) != 1 || ready != 'R' ||
+        send(barrier[0], "G", 1, MSG_NOSIGNAL) != 1) {
+        kill(child, SIGKILL);
+        close(barrier[0]);
+        (void)waitpid(child, NULL, 0);
+        return 1;
+    }
+    close(barrier[0]);
+    int status = 0;
+    while (waitpid(child, &status, 0) < 0) {
+        if (errno != EINTR)
+            return 1;
+    }
+    if (WIFEXITED(status))
+        return WEXITSTATUS(status);
+    return 128 + (WIFSIGNALED(status) ? WTERMSIG(status) : 0);
 }
 
 int main(int argc, char **argv)
 {
     const char *launch_socket = NULL;
-    const char *launch_token = NULL;
-    const char *agent_socket = "/run/dpumesh/attest.sock";
+    const char *manager_socket = "/run/dpumesh/manager.sock";
+    const char *private_root = NULL;
+    pid_t expected_parent = -1;
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--agent-sock") == 0 && i + 1 < argc)
-            agent_socket = argv[++i];
+        if (strcmp(argv[i], "--manager-sock") == 0 && i + 1 < argc)
+            manager_socket = argv[++i];
         else if (strcmp(argv[i], "--launch-sock") == 0 && i + 1 < argc)
             launch_socket = argv[++i];
-        else if (strcmp(argv[i], "--launch-token") == 0 && i + 1 < argc)
-            launch_token = argv[++i];
+        else if (strcmp(argv[i], "--private-root") == 0 && i + 1 < argc)
+            private_root = argv[++i];
+        else if (strcmp(argv[i], "--expected-parent") == 0 && i + 1 < argc) {
+            char *end = NULL;
+            long value = strtol(argv[++i], &end, 10);
+            if (end == argv[i] || *end != '\0' || value <= 1) {
+                fprintf(stderr, "dmesh_broker: invalid expected parent\n");
+                return 2;
+            }
+            expected_parent = (pid_t)value;
+        }
         else {
             fprintf(stderr, "dmesh_broker: invalid argument '%s'\n", argv[i]);
             return 2;
         }
     }
-    if (launch_socket == NULL || launch_token == NULL) {
-        fprintf(stderr, "dmesh_broker: launch socket/token required\n");
+    if (launch_socket == NULL) {
+        fprintf(stderr, "dmesh_broker: launch socket required\n");
         return 2;
     }
-    return run_launch(launch_socket, launch_token, agent_socket);
+    if (private_root == NULL || private_root[0] != '/') {
+        fprintf(stderr, "dmesh_broker: private root required\n");
+        return 2;
+    }
+    if (expected_parent <= 1) {
+        fprintf(stderr, "dmesh_broker: expected parent required\n");
+        return 2;
+    }
+    return run_supervised(launch_socket, manager_socket, private_root,
+                          expected_parent);
 }

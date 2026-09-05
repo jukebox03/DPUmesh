@@ -36,7 +36,7 @@ enum dmesh_msg_type {
     DMESH_MSG_REV_DOORBELL=9,  /* DPU→Host: reverse-ring wake notification */
     DMESH_MSG_REG_CHALLENGE=11,/* DPU→Host: connection-bound trusted-registration nonce */
     /* 12 is reserved and must never be assigned to a new type. */
-    DMESH_MSG_WORKLOAD_ASSERT=13,/* Host→DPU: node-agent-signed workload assertion */
+    DMESH_MSG_WORKLOAD_ASSERT=13,/* Host→DPU: controller-signed workload grant */
     DMESH_MSG_RESOLVE      = 14, /* Host→DPU: name/ClusterIP → interned service id */
     DMESH_MSG_RESOLVE_ACK  = 15, /* DPU→Host: the answer, from the held generation */
 };
@@ -157,9 +157,10 @@ _Static_assert(sizeof(struct dmesh_register_msg) == 72,
 #define DMESH_WORKLOAD_MAX 384
 
 /* Trusted workload registration is the only way a Pod enters the mesh. The DPU
- * creates a fresh challenge for every Comch connection. The Host relays it to a
- * root-owned node agent; it holds no signing key and cannot alter the claims. */
-#define DMESH_ASSERT_VERSION 2u
+ * creates a fresh challenge for every Comch connection. The Host relays it to
+ * the controller through dpumeshd; neither the workload nor broker holds a
+ * signing key. */
+#define DMESH_ASSERT_VERSION 3u
 #define DMESH_REG_NONCE_SIZE 32u
 #define DMESH_GRANT_ID_SIZE 16u
 #define DMESH_GRANT_MAC_SIZE 32u
@@ -170,6 +171,9 @@ _Static_assert(sizeof(struct dmesh_register_msg) == 72,
 #define DMESH_K8S_NAME_MAX 254u
 #define DMESH_SVC_NAME_MAX 64u
 #define DMESH_POD_IP_MAX 16u
+#define DMESH_CLUSTER_ID_MAX 64u
+#define DMESH_CONTAINER_ID_MAX 65u
+#define DMESH_DAEMON_INCARNATION_SIZE 16u
 
 struct dmesh_registration_challenge_msg {
     uint8_t type;               /* = DMESH_MSG_REG_CHALLENGE */
@@ -181,11 +185,10 @@ struct dmesh_registration_challenge_msg {
 _Static_assert(sizeof(struct dmesh_registration_challenge_msg) == 36,
                "dmesh_registration_challenge_msg ABI drift");
 
-/* Canonical v2 local assertion: the node agent binds the Pod it resolved from
- * host-kernel evidence to this connection's challenge nonce. Numeric fields
- * are explicit little-endian byte strings; all text fields are NUL-terminated
- * and zero-padded. The Ed25519 signature covers every byte before `sig`. The
- * issuer is implied by (node_name, key_id); the DPU can only verify. */
+/* Canonical v3 WorkloadGrant. The controller binds its Kubernetes snapshot,
+ * host-kernel evidence and allocation lifecycle to this connection's nonce.
+ * Numeric fields are explicit little-endian byte strings; text fields are
+ * NUL-terminated/zero-padded. Ed25519 covers every byte before `sig`. */
 struct dmesh_workload_assert_msg {
     uint8_t  type;                     /* = DMESH_MSG_WORKLOAD_ASSERT */
     uint8_t  version;                  /* = DMESH_ASSERT_VERSION */
@@ -195,33 +198,39 @@ struct dmesh_workload_assert_msg {
     uint8_t  expires_at_le[8];
     uint8_t  assert_id[DMESH_GRANT_ID_SIZE];   /* replay window key */
     uint8_t  nonce[DMESH_REG_NONCE_SIZE];      /* the DPU's connection challenge */
+    uint8_t  channel_slot_le[4];
+    uint8_t  channel_generation_le[8];
+    uint8_t  daemon_incarnation[DMESH_DAEMON_INCARNATION_SIZE];
     char     key_id[DMESH_GRANT_KEY_ID_MAX];   /* selects this node's public key */
+    char     cluster_id[DMESH_CLUSTER_ID_MAX];
     char     node_name[DMESH_K8S_NAME_MAX];    /* checked against the verifier's node */
     char     pod_uid[DMESH_POD_UID_MAX];       /* RFC 4122 text, 36 used */
     char     namespace_name[DMESH_K8S_NAMESPACE_MAX]; /* also qualifies service_name */
     char     pod_name[DMESH_K8S_NAME_MAX];
     char     service_account[DMESH_K8S_NAME_MAX];
+    char     container_name[DMESH_K8S_NAME_MAX];
+    char     container_id[DMESH_CONTAINER_ID_MAX];
     char     service_name[DMESH_SVC_NAME_MAX]; /* label; empty = no Service */
     char     pod_ip[DMESH_POD_IP_MAX];         /* dotted IPv4, e.g. "10.244.1.17" */
     uint8_t  sig[DMESH_ASSERT_SIG_SIZE];       /* Ed25519 over every preceding byte */
 };
-_Static_assert(sizeof(struct dmesh_workload_assert_msg) == 1134,
+_Static_assert(sizeof(struct dmesh_workload_assert_msg) == 1545,
                "dmesh_workload_assert_msg ABI drift");
 
-/* Host→trusted-node-agent request, transported over a root-owned AF_UNIX
+/* Broker→dpumeshd request, transported over a root-owned AF_UNIX
  * SOCK_SEQPACKET socket. SO_PEERCRED, not request data, identifies the caller.
- * The Service is requested by name; the agent authorizes it against the Pod's
+ * The Service is requested by name; the controller authorizes it against the Pod's
  * labels and the authoritative Service object. */
-#define DMESH_ATTEST_MAGIC "DMESHAR1"
-struct dmesh_attest_request {
+#define DMESH_GRANT_REQUEST_MAGIC "DMESHGR1"
+struct dmesh_grant_request {
     uint8_t magic[8];
     uint8_t version;
     uint8_t reserved[3];
     char    service_name[DMESH_SVC_NAME_MAX];  /* empty = client-only */
     uint8_t nonce[DMESH_REG_NONCE_SIZE];
 };
-_Static_assert(sizeof(struct dmesh_attest_request) == 108,
-               "dmesh_attest_request ABI drift");
+_Static_assert(sizeof(struct dmesh_grant_request) == 108,
+               "dmesh_grant_request ABI drift");
 
 /* DPU→Host: the pod_id the DPU allocated for a pod_id==-1 registration. Byte
  * `type` at offset 0 (the host dispatches DPU→host messages by recv_buffer[0]).

@@ -26,8 +26,8 @@ struct dmesh_gen_node {
     char name[DMESH_K8S_NAME_MAX];
     uint32_t rdma_ip_be;
     uint16_t rdma_port;
-    char agent_key_id[DMESH_GRANT_KEY_ID_MAX];
-    uint8_t agent_public_key[32];
+    char grant_key_id[DMESH_GRANT_KEY_ID_MAX];
+    uint8_t grant_public_key[32];
     uint8_t dpu_static_public_key[32];
 };
 
@@ -162,8 +162,8 @@ int dmesh_topology_remote_endpoint(const struct objects *objs, int16_t svc,
 /* The protection class of the Service interned as `svc`: 1 when the held
  * generation's `protected=` set names it, 0 when the generation names the
  * Service and does not protect it, -1 when no generation decides. What the
- * feed grades is the interaction rules, not whether a Pod is attested — every
- * registration is assertion-verified either way — and no Pod input reaches
+ * feed grades is the interaction rules, not registration validity — every
+ * registration is grant-verified either way — and no Pod input reaches
  * this, so a Pod cannot opt its Service out. */
 int dmesh_topology_service_protection(const struct objects *objs, int16_t svc);
 
@@ -191,12 +191,12 @@ int dmesh_topology_node_peer(const struct objects *objs, const char *node_name,
                              const uint8_t **static_key, uint32_t *ip_be,
                              uint16_t *port);
 
-/* Resolve the agent public key for an assertion. Returns 1 when the held
- * generation names `node_name` — then *key is its agent key when key_id
+/* Resolve the controller grant public key. Returns 1 when the held
+ * generation names `node_name` — then *key is its grant key when key_id
  * matches, NULL otherwise (refuse as bad-key-id). Returns 0 when no held
  * generation decides, and the caller falls back to the installed keyring. */
-int dmesh_topology_node_key(const struct objects *objs, const char *node_name,
-                            const char *key_id, const uint8_t **key);
+int dmesh_topology_grant_key(const struct objects *objs, const char *node_name,
+                             const char *key_id, const uint8_t **key);
 
 /* Parse one verified document body into freshly allocated tables. Exposed for
  * unit tests; `interned` carries the stable-id state across adoptions. */

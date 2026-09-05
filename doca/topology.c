@@ -474,7 +474,7 @@ dmesh_topology_parse(const char *document, size_t length,
             continue;
         }
         if (memcmp(line, "node=", 5) == 0) {
-            /* node-name,rdma-ip:port,agent-key-id,agent-pub,dpu-static-pub */
+            /* node-name,rdma-ip:port,grant-key-id,grant-pub,dpu-static-pub */
             if (split_fields(body, body_len, f, fl, 8) != 5)
                 goto malformed;
             struct dmesh_gen_node *node = &tables->nodes[tables->node_count];
@@ -486,10 +486,10 @@ dmesh_topology_parse(const char *document, size_t length,
                 !span_port(colon + 1, fl[1] - (size_t)(colon - f[1]) - 1,
                            &node->rdma_port) ||
                 !span_key_id(f[2], fl[2]) ||
-                !span_copy(node->agent_key_id, sizeof(node->agent_key_id),
+                !span_copy(node->grant_key_id, sizeof(node->grant_key_id),
                            f[2], fl[2]) ||
-                !span_hex_bytes(f[3], fl[3], node->agent_public_key,
-                                sizeof(node->agent_public_key)) ||
+                !span_hex_bytes(f[3], fl[3], node->grant_public_key,
+                                sizeof(node->grant_public_key)) ||
                 !span_hex_bytes(f[4], fl[4], node->dpu_static_public_key,
                                 sizeof(node->dpu_static_public_key)))
                 goto malformed;
@@ -1038,7 +1038,7 @@ dmesh_topology_node_peer(const struct objects *objs, const char *node_name,
         if (strcmp(node->name, node_name) != 0)
             continue;
         /* An all-zero static key is the placeholder a node carries until its
-         * DPU has generated a credential and its agent has reported it. It
+         * DPU has generated a credential and its host runtime has reported it. It
          * binds nothing, so it is not a key. */
         if (memcmp(node->dpu_static_public_key, zero, sizeof(zero)) == 0)
             return 0;
@@ -1054,8 +1054,8 @@ dmesh_topology_node_peer(const struct objects *objs, const char *node_name,
 }
 
 int
-dmesh_topology_node_key(const struct objects *objs, const char *node_name,
-                        const char *key_id, const uint8_t **key)
+dmesh_topology_grant_key(const struct objects *objs, const char *node_name,
+                         const char *key_id, const uint8_t **key)
 {
     *key = NULL;
     const struct dmesh_topology_tables *tables = topology_tables_acquire(objs);
@@ -1064,8 +1064,8 @@ dmesh_topology_node_key(const struct objects *objs, const char *node_name,
     for (size_t n = 0; n < tables->node_count; n++) {
         if (strcmp(tables->nodes[n].name, node_name) != 0)
             continue;
-        if (strcmp(tables->nodes[n].agent_key_id, key_id) == 0)
-            *key = tables->nodes[n].agent_public_key;
+        if (strcmp(tables->nodes[n].grant_key_id, key_id) == 0)
+            *key = tables->nodes[n].grant_public_key;
         return 1;
     }
     return 0;

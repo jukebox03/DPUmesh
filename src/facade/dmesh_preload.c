@@ -672,9 +672,9 @@ static void preload_atfork_child(void) {
 /* Create the channel + dispatcher. Called under g_ch_mu; leaves g_ch NULL on
  * failure, so a later mapped socket operation retries the registration. */
 static void channel_init(void) {
-    /* Identity is injected: dmesh_create_channel() registers $DPUMESH_SERVICE with
-     * the DPU (a server/mixed process) or opens a pure client if unset. One channel
-     * per process, created on first mapped socket op. */
+    /* dmesh_create_channel() requests the PodSpec's $DPUMESH_SERVICE or opens
+     * a pure client when unset; the controller authorizes the request. The
+     * process has one channel, created on its first mapped socket operation. */
     dmesh_channel_t *ch = dmesh_create_channel();
     if (!ch) { DBG("dmesh_create_channel() FAILED (will retry)"); return; }
     dmesh_eq_t *eq = dmesh_create_eq(ch);

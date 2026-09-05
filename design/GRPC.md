@@ -8,6 +8,7 @@ The source contract is gRPC v1.80.0, C++17, and `libdpumesh.so.5`. The endpoint
 injection APIs are experimental. Generated messages, stubs, services, RPC
 semantics, metadata, deadlines, HTTP/2, credentials and TLS are unchanged;
 DPUmesh is a byte-stream transport, not an RPC wrapper or an HTTP/2 parser.
+The adapter preserves those semantics while replacing the EventEngine transport.
 
 ## Model
 
@@ -25,7 +26,7 @@ generated stub / handler
  DmeshEndpoint ─ DmeshReactor ─ public C API / native EQ+QP
                                       │ shared rings and mappings
                                       ▼
-                       DPA ─ ARM worker / embedded Linkerd
+                       DPA ─ Arm worker ─ optional embedded Linkerd
 ```
 
 The adapter uses only the public native C API. Everything above the Endpoint is
@@ -39,14 +40,16 @@ stock gRPC; only what is below it changes:
   connection. It hands sealed ring/mapping descriptors to the workload and
   relays an idle doorbell, but request and response bytes do not copy through
   it.
-- The DPU-hosted Linkerd stack is where HTTP/2 and gRPC-aware routing and policy
-  run. Its per-request cost is therefore a mesh cost, not C++ adapter work.
+- For Services selected into the L7 mode, the DPU-hosted Linkerd stack owns
+  HTTP/2 and gRPC-aware routing and policy. Its per-request cost is therefore a
+  mesh cost, not C++ adapter work.
 
-The broker split is invisible to the public C API but material to accounting:
-Host CPU for this path means the complete Pod cgroup (application plus broker),
-while DPU CPU means the ARM data-path process. [`DATA.md`](DATA.md) specifies
-the rings and steady-state path; [`CONTROL.md`](CONTROL.md) §2-1.9 specifies
-broker launch, isolation and ownership.
+The broker split is invisible to the public C API but material to accounting.
+Application CPU belongs to the Pod cgroup; broker CPU belongs to the bounded
+`dpumeshd.service/workers` subtree covered by kubelet's system reservation; DPU
+CPU belongs to the Arm data-path process. [`DATA.md`](DATA.md) specifies the
+rings and steady-state path; [`CONTROL.md`](CONTROL.md) §2-1.9 specifies broker
+launch, isolation and ownership.
 
 ![Where DPUmesh enters gRPC, on both directions](figures/grpc_vs_stock.png)
 
@@ -183,7 +186,7 @@ The threads one connection and then one RPC cross:
 | EQ owner thread | `DmeshReactor` | one per shard | `ppoll` on two fds | `dmesh_poll_eq`, QP lifecycle, receive delivery and TX-ready write resumption |
 | callback dispatcher thread | `DmeshRuntime` | one per runtime by default | condition variable | connect/accept delivery and deliberately deferred Endpoint callbacks |
 | native drain shard | `libdpumesh` | one per live EQ, bounded by landing stripes and CPU affinity | reverse rings or broker doorbell | completion interpretation and EQ readiness; an awake EQ owner may assist inline |
-| per-Pod broker | node agent | one process per meshed Pod | DOCA PE and control channel | DOCA ownership, registration/control and idle doorbell relay; no payload copy |
+| per-Pod broker | `dpumeshd` | one process per meshed Pod | DOCA PE and control channel | DOCA ownership, registration/control and idle doorbell relay; no payload copy |
 
 `EQ owner thread` and `callback dispatcher thread` are names local to this
 adapter, not gRPC thread-role names. `DmeshReactor` is an EQ poller and is
@@ -242,7 +245,7 @@ TX_READY run their completions on the EQ owner thread that delivered the event.
 A write accepted completely by its initial pump returns `true` to its caller
 and does not invoke its callback. Peer EOF, transport error and Endpoint
 destruction instead enqueue affected pending callbacks on the callback
-executor. A future read or write that encounters an already-terminal Endpoint
+executor. A subsequent read or write that encounters an already-terminal Endpoint
 also enqueues its callback so it does not run inside that Endpoint call. The
 executor claims its whole queue per wake, and a completion is queued as a
 callback beside the status it completes with. An endpoint holds a shared
@@ -257,7 +260,7 @@ the referenced executor outlives that deferred Endpoint teardown; keeping it
 alive merely until `Channel::reset()` returns is insufficient.
 `DmeshRuntime::Create` returns a shared pointer, and the client EventEngine and
 the server attachment each hold one, so the reactors and their threads outlive
-every channel and listener gRPC has not yet released.
+every channel and listener still retained by gRPC.
 
 Transmit is serialized by a per-connection lock. One post — reserve, fill and
 submit — holds it, as does the native close-time flush, and the reactor takes
@@ -348,9 +351,10 @@ HTTP/2 framing and multiplexing remain entirely inside chttp2.
 
 ## Runtime configuration
 
-Each `DmeshRuntime` opens one native channel. Channel creation connects to the
-Pod's root-owned broker, which performs the attested DPU registration and hands
-back the sealed ring/TX/RX descriptors plus the Pod-global doorbell eventfd.
+Each `DmeshRuntime` opens one native channel. Channel creation connects through
+the allocated slot socket to the Pod's supervised host broker. The broker
+performs controller-granted DPU registration and hands back the sealed
+ring/TX/RX descriptors plus the channel doorbell eventfd.
 The workload maps those objects and starts the native drain side; the runtime
 still sees the same public `dmesh_create_channel()` contract. `$DPUMESH_SERVICE`
 names the server identity, or is absent for a client-only process.
@@ -383,7 +387,7 @@ instances form a separate live set, so instances may join or leave without
 changing client channels or registry rows.
 
 Each HTTP/2 connection remains pinned to one backend. Backend loss terminates
-that stream; a later gRPC connection creates a QP and selects from the current
+that stream; a subsequent gRPC connection creates a QP and selects from the current
 live set. In-flight RPCs retain normal gRPC deadline, retry, idempotency and
 `wait_for_ready` semantics. New Service names require registry updates.
 
@@ -391,32 +395,33 @@ live set. In-flight RPCs retain normal gRPC deadline, retry, idempotency and
 DPU-assigned pod id and the connection's native port. A client stream has no
 peer pod until the DPU pins one, and reads as `127.0.0.0:0`.
 
-In the supported deployment the adapter's Service is always assigned to the
-DPU-hosted Linkerd HTTP/2 path, so destination discovery, endpoint generation
-updates, admission and workload identity are owned there rather than duplicated
-in a `dpumesh:///` resolver inside the application process.
+When the adapter's Service is listed in `DPUMESH_L7_SVC`, the DPU-hosted
+Linkerd HTTP/2 path owns destination discovery, endpoint generation updates,
+admission and workload identity. The application process does not install a
+`dpumesh:///` resolver. With no L7 Service selection, chttp2 remains unchanged
+and its byte stream follows the native L4 connection path.
 
-## Workloads
+## Workload programs
 
-`bench/apps/` holds the gRPC programs the measurement harness drives over
-this adapter, beside their socket and native peers; `bench/k8s/grpc-pods.yaml`
-is their manifest. Their wire stack is gRPC chttp2 → DPUmesh endpoint →
-shared host rings → Host↔DPU DMA → embedded Linkerd. The broker owns setup
-and idle wakeup but is not a byte hop. The Kubernetes manifest contains only
-that path.
+The integration build produces three benchmark programs when
+`DPUMESH_GRPC_BUILD_QPS_BENCHMARK=ON` and an exact gRPC v1.80.0 source tree is
+provided:
 
-- `bench_grpc` is the controlled client behind `bench.sh point grpc-dpumesh …`.
-- `echo_grpc` serves the benchmark service through the DPUmesh endpoint.
-- `grpc_dpumesh_qps_benchmark` is the standalone closed-loop harness.
+- `bench_grpc` is a controlled unary client;
+- `echo_grpc` serves `grpc.testing.BenchmarkService` through a passive DPUmesh
+  listener;
+- `grpc_dpumesh_qps_benchmark` is a standalone closed-loop harness.
 
-The deployed programs set `BENCH_TRANSPORT=dmesh`; `BENCH_DST_SERVICE` and
-`DPUMESH_SERVICE` are Kubernetes Service identities resolved by the signed DPU
-topology, and no TCP address is used for the data path. `bench.sh grpcbuild`
-performs the workload build with `-DDPUMESH_GRPC_BUILD_QPS_BENCHMARK=ON`, and
-`BENCH_DEPLOY_SCOPE=grpc bench.sh deploy` performs the complete DPU,
-control-plane, image, Pod and smoke-test lifecycle.
+`BENCH_TRANSPORT=dmesh` selects the adapter. `BENCH_DST_SERVICE` names the
+client target, `DPUMESH_SERVICE` names the server's Kubernetes Service and
+`DPUMESH_GRPC_REACTORS` selects reactor count. A Kubernetes workload packages
+`grpc_dpumesh`, `libdpumesh.so.5` and the application in its image, requests and
+limits one `dpumesh.io/channel`, disables ServiceAccount-token mounting and
+uses the socket that the Device Plugin mounts at `/run/dpumesh/channel.sock`.
+No TCP address is used for the DPUmesh data path.
 
-`bench_grpc` accepts:
+`bench_grpc` accepts this control protocol on its ordinary benchmark control
+socket:
 
 ```text
 PING
@@ -425,14 +430,14 @@ OPEN     <req> <reply> <threads> <dur> <warmup> <rate> [const|poisson] [channels
 SELFTEST <payload> <threads> <dur> <rate> <const|poisson>
 ```
 
-Each issued RPC joins the worker's live set before it reaches gRPC, so shutdown
-cancels every one of them, and issuance closes under the lock the sweep takes.
-A run bounded by its own duration plus its channels' connect budget reports the
-fault and exits rather than holding the control port. The result line reports
-RPC failures, outstanding calls, latency percentiles, retained-credit drops and
-EQ budget exhaustion.
+Each issued RPC joins the worker's live set before reaching gRPC, so shutdown
+cancels all live calls. Issuance closes under the same lock used by a sweep. A
+run bounded by its duration and channel-connect budget reports a fault and
+returns instead of holding the control socket. Its result reports RPC failures,
+outstanding calls, latency percentiles, retained-credit drops and exhausted EQ
+budgets.
 
-The standalone harness takes:
+The standalone QPS harness syntax is:
 
 ```text
 grpc_dpumesh_qps_benchmark server dmesh SERVICE DURATION_S [REACTORS=1]
@@ -441,88 +446,88 @@ grpc_dpumesh_qps_benchmark client dmesh SERVICE WARMUP_S DURATION_S \
     [WAIT_FOR_READY=0]
 ```
 
-The benchmark syntax, the rules a retained point must satisfy and the index of
-every evaluation are in [`../bench/README.md`](../bench/README.md).
+`bench/examples/grpc` contains a complete generated-proto client and server.
+Its CMake target uses the same `grpc_dpumesh` interface target as applications,
+so the example validates the documented bootstrap and link contract.
 
 ## Verification contract
 
-The one-command entry point is
-[`bench/suite/grpc_correctness.sh`](../bench/suite/grpc_correctness.sh). Run
-`grpc_correctness.sh local` for host-only and release chttp2 checks,
-`grpc_correctness.sh sanitizer` for Clang ASAN+UBSAN, and
-`grpc_correctness.sh hardware` against an already deployed gRPC scope. `all`
-runs them in that order. The hardware mode kills and recreates the client Pod
-and temporarily applies policy/route fixtures; its cleanup removes those
-fixtures.
+The adapter's maintained verification surface is its CMake/CTest graph. Build
+`libdpumesh`, configure against gRPC v1.80.0 and run:
 
-The checklist below is the contract checked before a performance point is
-retained. The linked script is the executable owner of each item.
+```bash
+make lib
+cmake -S integrations/grpc -B build/grpc \
+  -DDPUMESH_GRPC_SOURCE_DIR=/path/to/grpc-v1.80.0 \
+  -DDPUMESH_GRPC_ENABLE_SANITIZERS=ON \
+  -DBUILD_TESTING=ON
+cmake --build build/grpc -j2
+ASAN_OPTIONS=detect_leaks=0 \
+  ctest --test-dir build/grpc --output-on-failure
+```
 
-| Check | Required observation | Executable owner |
-|---|---|---|
-| Host transport invariants | allocation/commit, bounded tail, EQ wake and lifecycle unit tests all pass | `grpc_correctness.sh local` → `make test-hostfree` |
-| DPU egress queue | lane ownership, partial submission, SG-DMA grouping and error completion pass | `grpc_correctness.sh local` → `proxy_lane_queue_test` when the DOCA SDK is installed |
-| Adapter state machines | byte-exact reads/writes, backpressure, EOF/error and callback ownership pass | `grpc_correctness.sh local` → release CTest `endpoint` and `reactor` targets |
-| Real chttp2 interoperability | unary exchange uses stock chttp2 over paired DPUmesh Endpoints, including four independent channels | `grpc_correctness.sh local` → release CTest channel target |
-| Public ABI | the adapter links only the public `libdpumesh.so.5` symbols | `grpc_correctness.sh local` → release CTest native-link target |
-| Memory/UB safety | the same four targets pass Clang ASAN+UBSAN; no stack-backed executor is used across deferred gRPC teardown | `grpc_correctness.sh sanitizer` |
-| Real-DPU teardown and reuse | a live HTTP/2 client is killed; sessions, tasks and imported mappings quiesce; the recycled slot re-registers and four channels exchange bytes | `grpc_correctness.sh hardware` → [`bench.sh grpcshutdown`](../bench/bench.sh) |
-| Policy/routing semantics | traffic result and the DPU's own verdict counters agree for every gRPC surface | `grpc_correctness.sh hardware` → [`policy_route.sh`](../bench/suite/policy_route.sh) `grpc-surfaces` |
-| Clean measurement precondition | client/server restarts are zero; `opened == closed`; active sessions, registrations and tasks are zero before/after a campaign | hardware gate plus `bench.sh l7metrics`; the sweep scripts reject restarts and dirty result fields |
+The targets divide responsibility as follows:
 
-Within those gates, the maintained tests require:
+| Target | Contract checked |
+|---|---|
+| `grpc_dpumesh_endpoint_test` | byte-exact reads and writes, synchronous/asynchronous callbacks, backpressure, EOF and error state |
+| `grpc_dpumesh_channel_test` | EventEngine channel ownership, authority handling, cancellation and chttp2 exchange |
+| `grpc_dpumesh_reactor_test` | EQ ownership, command fairness, TX-ready resume, RX-credit bounds, accept injection and QP lifecycle |
+| `grpc_dpumesh_native_link_test` | the wrapper links only through the public `libdpumesh.so.5` surface |
+| `make test-hostfree` | native allocation, batching, event, topology, peer and ABI contracts without hardware |
 
-- byte-exact split writes and logical-boundary completion without forcing a
-  native physical flush;
-- consecutive slices coalesced into one post;
-- no callback before the final post of a logical Write is accepted;
-- exact cursor resume only after `DMESH_EVENT_TX_READY`, with no timer retry;
-- peer FIN failing a parked write, and post-FIN backpressure failing a write;
-- byte-exact completion of writes that span multiple pump runs;
-- an asynchronous native TX error failing and closing the endpoint;
-- one EQ polling thread and no mid-batch QP destruction;
-- a batch run coalesced into one slice, ended by any other event for that QP;
-- RX copy before release, credit held above the queue mark and released on read;
-- inbound QP conversion and pre-bind event replay;
-- real chttp2 unary exchange over paired Endpoints, including four concurrent
-  same-service channels;
-- the last public channel reference retiring its QPs by reset, while a surviving
-  copy of that handle holds them live;
-- ten gRPC channel create/drop cycles sharing one runtime, each cycle's QP
-  retired at its drop and runtime statistics returning to zero;
-- the runtime-owned default callback executor remaining valid across gRPC's
-  deferred Endpoint teardown during channel churn;
-- four concurrent channels for one Service using distinct QPs and closing
-  independently;
-- graceful server GOAWAY retiring the existing HTTP/2 channel;
-- reconnect creating a fresh targeted QP, its abandoned predecessor reset rather
-  than left to a FIN custody wait;
-- public-symbol linkage against `libdpumesh.so.5`.
+A separate build with `-DDPUMESH_GRPC_ENABLE_TSAN=ON` instruments both the
+adapter and supplied gRPC source. ASAN/UBSAN and TSAN options are mutually
+exclusive.
 
-Hardware validation additionally checks the native register/readiness barrier,
-real byte exchange, FIN, `POD_QUIESCED`, and slot reuse; `bench.sh
-grpcshutdown` kills a client with a live HTTP/2 session, requires Linkerd
-sessions/tasks and imported mappings to quiesce, re-registers the recycled slot
-and runs another request. Those observations show the exercised graceful path;
-they do not prove forced-death DMA isolation.
+The tests enforce these state-machine invariants:
 
-The complete fairness effect of the bounded poll budget under sustained real
-hardware overload is not proved by the maintained tests. Default shared
-executor ownership, shared runtime ownership and the return of
-`DmeshReactor::Stats` to zero are covered by the channel churn tests; the
-hardware runtime smoke additionally reports those statistics with real QPs.
+- split and multi-slice Writes are byte exact and do not force a physical flush;
+- a logical Write callback runs only after its final post is accepted;
+- `EAGAIN` preserves the exact cursor and resumes only on
+  `DMESH_EVENT_TX_READY`;
+- peer FIN, asynchronous TX failure and destruction complete pending operations
+  exactly once;
+- each EQ has one polling thread and QPs are destroyed only after the current
+  event batch;
+- consecutive RX events for one QP are coalesced into one gRPC slice, copied
+  before native credit release and bounded by per-connection credit retention;
+- an inbound QP is converted to an Endpoint and events received before binding
+  are replayed in order;
+- real chttp2 unary exchange runs over paired adapter Endpoints, including four
+  independent channels for one Service;
+- releasing the last public channel reference resets its QPs, while a retained
+  channel reference keeps them alive;
+- repeated channel creation/destruction returns runtime counters and ownership
+  to zero despite deferred gRPC Endpoint teardown;
+- reconnect creates a fresh targeted QP and resets its abandoned predecessor;
+- graceful server GOAWAY retires its HTTP/2 channel;
+- the public adapter target links against the versioned native ABI.
 
-Performance is deliberately a separate gate. Repeated open-loop capacity is
-run by [`grpc_conns_sweep.sh`](../bench/suite/grpc_conns_sweep.sh) and judged by
-[`analyze_grpc_sweep.py`](../bench/suite/analyze_grpc_sweep.py); the closed-loop
-payload/concurrency shape and complete Pod/DPU CPU accounting are run by
-[`grpc_closed_sweep.sh`](../bench/suite/grpc_closed_sweep.sh). A closed-loop
-plateau must not be relabelled as open-loop clean capacity. The current
-batching and Host-headroom receipt is
-[`grpc-batching-20260901`](../bench/report/data/grpc-batching-20260901/FINAL.md);
-the allocator/LTO A/B, low-overhead DPU `perf` profile and current payload knees
-are in
-[`grpc-l7-perf-20260901`](../bench/report/data/grpc-l7-perf-20260901/FINAL.md).
+Two hardware executables are built but intentionally not registered with CTest,
+because they require allocated Device Plugin sockets and a running BlueField
+path:
+
+```text
+grpc_dpumesh_native_runtime_smoke \
+    SERVICE [ROUNDS=1] [CONNECTIONS=1] [REACTORS=1] [PROTOCOL=raw]
+
+grpc_dpumesh_native_grpc_smoke server CALLS [REACTORS=1]
+grpc_dpumesh_native_grpc_smoke client TARGET CALLS \
+    [PAYLOAD=4096] [REACTORS=1] [AUTHORITY=TARGET]
+```
+
+The runtime smoke checks register/readiness, exact request/reply bytes across
+multiple connections, FIN cleanup and zero retained-credit/EQ-budget counters.
+The gRPC smoke passes real unary chttp2 messages through a PassiveListener and
+requires payload equality. Slot lifecycle, DPU quiescence and reuse remain the
+native control/data-plane invariants described in `CONTROL.md` and `DATA.md`.
+
+Performance is a separate acceptance surface. The repository retains open-loop
+and closed-loop measurements under `bench/report/data`; the interpretation rule
+is fixed: an open-loop `highest_clean_rps` and a closed-loop plateau are
+separate quantities. CPU accounting separates the workload Pod, the host
+broker worker subtree and the DPU Arm workers.
 
 ## DPU L7 request cost
 
@@ -543,17 +548,15 @@ connection; an inclusive `Detect` call-tree percentage is therefore an ancestor
 of the long-lived connection task, not that percentage of steady per-RPC self
 CPU.
 
-The remaining DPUmesh-specific byte path has concrete optimization room. RX
-performs the one copy from DMA staging into Hyper's `ReadBuf`. TX first extends
-the `DmeshIo` `Vec`, then the driver copies that queue into the DPU egress arena.
-Every `DmeshIo` and driver-handle operation also takes the same per-connection
-`Arc<parking_lot::Mutex<Inner>>`; publication currently observes queue length,
-copies, consumes and reads drain state through separate calls. Direct
-`AsyncWrite` reservation (PLAN O2) can remove the TX queue copy and fuse some of
-those lock transitions, but it must preserve partial writes, backpressure,
-ordering and cancellation. A worker-local/non-atomic specialization is a later,
-riskier lever because the Linkerd stack's generic I/O contracts require
-`Send + Sync` even though each current worker runs a single-thread Tokio runtime.
+The DPUmesh-specific byte path has explicit copy and synchronization points. RX
+copies once from DMA staging into Hyper's `ReadBuf`. TX extends the `DmeshIo`
+`Vec`, and the driver copies that queue into the DPU egress arena. Every
+`DmeshIo` and driver-handle operation takes the same per-connection
+`Arc<parking_lot::Mutex<Inner>>`; publication observes queue length, copies,
+consumes and reads drain state through separate calls. Partial writes,
+backpressure, ordering and cancellation are preserved across these operations.
+The Linkerd generic I/O contracts require `Send + Sync`, while each selected
+worker runs a single-thread Tokio runtime.
 
 Under load the self-time profile is flat — memcpy, atomics, syscalls, H2/HPACK,
 routing and Tokio, no single hot function; `px_worker_drain`,
@@ -563,10 +566,10 @@ the retained instrument; inclusive call-tree percentages overlap and must not
 be summed.
 
 Capacity carries two definitions — open-loop `highest_clean_rps` and a
-closed-loop plateau — and a closed-loop plateau must not be relabelled as
-open-loop capacity. The current numbers, the sidecar comparison arm and the
-Host-offload accounting are in [`REPORT.md`](../bench/report/REPORT.md) and
-[`grpc-professor-20260902`](../bench/report/data/grpc-professor-20260902/ANALYSIS.md).
+closed-loop plateau — and a closed-loop plateau is not an open-loop capacity
+result. Measurement records, comparison arms and CPU-accounting receipts are
+kept under `bench/report`; they are evidence artifacts rather than API or
+deployment contracts.
 
 At the plateau the eight `dmesh-w0..7` threads account for essentially the
 whole process reading and non-worker threads for a few hundredths of a core:
@@ -575,10 +578,9 @@ A=8 is a data-worker geometry, not a whole-process CPU limit.
 Capacity scales with the data-worker count A and not with client channels
 alone: adding channels at fixed A saturates the workers and lowers delivered
 rate. Therefore hot-service deployment exposes one
-`DPUMESH_THROUGHPUT_WORKERS` knob and derives A=K, a valid N and all-worker L7;
-the scale runner also derives threads and channels from it. Client channel count
-remains a workload property in the product interface and is not globally
-equated with A. Independent N/K/A remain available for density deployments in
-which K>A is intentional. Policy and injection fixtures use the same canonical
-W when supplied, or parse effective K/A from the running DPU banner
-(`bench/suite/deployed_geometry.sh`).
+`DPUMESH_THROUGHPUT_WORKERS` knob and derives A=K, a valid N and all-worker L7.
+Client channel count remains a workload property in the product interface and
+is not globally equated with A. Independent N/K/A remain available for density
+deployments in which K>A is intentional. `bench/bench.sh geometry` and
+`bench/suite/deployed_geometry.sh` expose the effective values used by the
+runtime and validation scripts.

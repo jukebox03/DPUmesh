@@ -1,0 +1,28 @@
+[Unit]
+Description=DPUmesh DPU feed receiver
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=dpumesh-feed
+Group=dpumesh-feed
+EnvironmentFile=/etc/dpumesh/feed-receiver.env
+ExecStart=/usr/bin/python3 /usr/local/bin/dpumesh-feed-receiver \
+  --bind=${DPUMESH_FEED_BIND} \
+  --port=${DPUMESH_FEED_PORT}
+Restart=on-failure
+RestartSec=2s
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+ReadWritePaths=/etc/dpumesh/feeds
+
+[Install]
+WantedBy=multi-user.target

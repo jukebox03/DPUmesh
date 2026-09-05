@@ -5,7 +5,6 @@ from diagram_kit import (  # noqa: F401  (palette names read by the figures)
     BLACK, BLUE, BLUE_BG, GRAY, GRAY_BG, GREEN, GREEN_BG, ORANGE, ORANGE_BG,
     PURPLE, PURPLE_BG,
     Style,
-    line,
     save,
     setup_figure,
     styled,

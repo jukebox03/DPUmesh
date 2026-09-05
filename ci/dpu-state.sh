@@ -52,7 +52,7 @@ pods_id="$(printf '%s\n' "$pods" | sha1sum | cut -c1-8)"
 # The set of affinities the load generators sit on, not one of them: a campaign
 # runs several clients and a single number would name whichever process pgrep
 # happened to return first.
-pins="$(for name in bench_dpumesh bench_sock bench_grpc; do
+pins="$(for name in bench_dpumesh; do
             for pid in $(pgrep -x "$name" 2>/dev/null); do
                 taskset -pc "$pid" 2>/dev/null | sed 's/.*: //'
             done

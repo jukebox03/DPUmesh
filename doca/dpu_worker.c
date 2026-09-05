@@ -178,7 +178,7 @@ dpu_arm_name_current(const char *role, int logical_id)
  * than generation-derived, and that is deliberate: a Pod that registered
  * between a generation's snapshot and its publication is absent from that one
  * generation without having stopped serving, and a node's own registrations
- * are the node's own attested truth. What the generation adds is the half a
+ * are the node's own grant-verified truth. What the generation adds is the half a
  * node cannot see for itself — the replicas somewhere else. */
 int
 collect_live_hosts(struct objects *objs, int16_t svc, int32_t *out)

@@ -4,13 +4,14 @@
 Publishes one signed, versioned topology generation carrying every
 cluster-wide fact a DPU needs: node identities and keys, Pod placements,
 Services with their ClusterIPs, ready endpoints, and the protected-Service
-set. It performs no attestation — it has no host-local evidence and never
-asks for it. The generation is Ed25519-signed; DPUs hold public keys only.
+set. It does not infer host-local evidence; `dpumeshd` supplies the kernel
+binding used for a WorkloadGrant. The generation is Ed25519-signed; DPUs hold
+public keys only.
 
 The document grammar is design/CONTROL.md's, one record per line:
 
     version=<u64, strictly increasing>
-    node=<name>,<rdma-ip>:<port>,<agent-key-id>,<agent-pub-hex64>,<dpu-pub-hex64>
+    node=<name>,<rdma-ip>:<port>,<grant-key-id>,<grant-pub-hex64>,<dpu-pub-hex64>
     pod=<pod-uid>,<node>,<namespace>,<service-account>,<pod-ipv4>
     service=<namespace>/<name>,<cluster-ipv4>:<port>
     endpoint=<namespace>/<name>,<pod-uid>
@@ -25,17 +26,16 @@ generation standing, which is the fail-static rule. A cluster whose facts
 have not changed republishes nothing, so consumers re-adopt only when there
 is something to adopt.
 
-The controller never speaks to a DPU: a DPU has no route into the cluster
-CIDRs, so its node agent relays. The listener is therefore addressed to
-agents, and serves three things — the current generation, the node
-registration each agent reports for its own node, and the mediated workload
-lookup that keeps a DPU's questions inside the node the generation places it
-on.
+The controller is reached only by each host's ``dpumeshd`` over node mTLS.
+The runtime relays signed feeds to its DPU and forwards the DPU's scoped
+control-plane queries without interpreting them.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
+import hmac
 import http.server
 import json
 import os
@@ -55,6 +55,9 @@ from typing import Any
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import workload_grant                                      # noqa: E402
+
 GENERATION_INTERVAL = 5.0
 # The consumer's generation bounds (doca/topology.h), enforced at the
 # publisher too so an over-bound cluster fails loudly here instead of
@@ -64,8 +67,13 @@ GEN_POD_MAX = 65536
 GEN_SERVICE_MAX = 4096
 GEN_ENDPOINT_MAX = 65536
 TOPOLOGY_MAX_BYTES = 16 * 1024 * 1024
-# A node report is three short JSON fields; nothing an agent reports is large.
+# A node report is three short JSON fields.
 NODE_REPORT_MAX = 4096
+WORKLOAD_GRANT_REQUEST_MAX = 8192
+MEMBERSHIP_MAX_BYTES = 256 * 1024
+SERVICE_TARGETS_MAX_BYTES = 1024 * 1024
+CONTROLLER_REQUEST_MAX = 32
+CONTROLLER_REQUEST_TIMEOUT = 10.0
 ZERO_KEY = "0" * 64
 POD_UID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 KEY_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,30}[A-Za-z0-9]")
@@ -78,15 +86,32 @@ class ControllerError(RuntimeError):
 
 
 def load_key(path: Path) -> bytes:
-    st = path.lstat()
+    try:
+        base = path.parent.resolve(strict=True)
+        resolved = path.resolve(strict=True)
+        st = resolved.stat()
+    except OSError as exc:
+        raise ControllerError(f"cannot resolve private key {path}") from exc
+    # Kubernetes projected Secrets use an atomic symlink into a timestamped
+    # directory below the mount. Follow that one bounded indirection, but never
+    # accept a target that escaped the mounted key directory.
+    if resolved != base / path.name and base not in resolved.parents:
+        raise ControllerError(f"private key {path} escaped its key directory")
+    mode = stat.S_IMODE(st.st_mode)
+    owner_readable = st.st_uid == os.geteuid() and bool(mode & stat.S_IRUSR)
+    group_readable = (
+        st.st_uid == 0 and st.st_gid in {os.getegid(), *os.getgroups()}
+        and bool(mode & stat.S_IRGRP) and not mode & (stat.S_IWGRP | stat.S_IXGRP)
+    )
     if (
         not stat.S_ISREG(st.st_mode)
-        or st.st_uid != os.geteuid()
-        or st.st_mode & 0o077
-        or not st.st_mode & stat.S_IRUSR
+        or st.st_uid not in (0, os.geteuid())
+        or mode & 0o007
+        or not (owner_readable or group_readable)
+        or mode & (stat.S_IXUSR | stat.S_IWGRP | stat.S_IXGRP)
     ):
         raise ControllerError(
-            f"{path} must be a regular file owned by uid {os.geteuid()} with mode 0600/0400"
+            f"{path} must be a private regular file readable by uid/gid {os.geteuid()}:{os.getegid()}"
         )
     data = path.read_bytes()
     if len(data) == 32:
@@ -124,24 +149,23 @@ def valid_rdma(address: str) -> bool:
     return bool(separator) and valid_ipv4(ip) and port.isdigit() and 0 < int(port) < 65536
 
 
-def valid_node_record(name: str, rdma: str, key_id: str, agent_pub: str, dpu_pub: str) -> bool:
+def valid_node_record(name: str, rdma: str, key_id: str, grant_pub: str, dpu_pub: str) -> bool:
     return (
         DNS_RE.fullmatch(name) is not None and len(name) <= 253
+        and all(len(label) <= 63 for label in name.split("."))
         and valid_rdma(rdma)
         and KEY_ID_RE.fullmatch(key_id) is not None
-        and HEX64_RE.fullmatch(agent_pub) is not None
+        and HEX64_RE.fullmatch(grant_pub) is not None
         and HEX64_RE.fullmatch(dpu_pub) is not None
     )
 
 
 def read_nodes_file(path: Path) -> dict[str, tuple[str, str, str, str]]:
     """The operator's per-node input, keyed by node name:
-    `<node-name> <rdma-ip:port> <agent-key-id> <agent-pub-hex64> <dpu-pub-hex64>`.
+    `<node-name> <rdma-ip:port> <grant-key-id> <grant-pub-hex64> <dpu-pub-hex64>`.
 
-    The agent key is deployment-time material and stays that way — it is the
-    key that binds Pods to this node, and a node reporting its own would be
-    reporting its own identity. What an agent may report is the half its DPU
-    generates at first boot, which is the `dpu-pub` placeholder here.
+    The grant key is operator material that binds grants to this node. The host
+    runtime may report only the public half of the static key its DPU generated.
     """
     records: dict[str, tuple[str, str, str, str]] = {}
     for line_no, raw in enumerate(path.read_text(encoding="ascii").splitlines(), 1):
@@ -151,21 +175,21 @@ def read_nodes_file(path: Path) -> dict[str, tuple[str, str, str, str]]:
         fields = line.split()
         if len(fields) != 5:
             raise ControllerError(f"{path}:{line_no}: expected 5 fields")
-        name, rdma, key_id, agent_pub, dpu_pub = fields
-        if not valid_node_record(name, rdma, key_id, agent_pub, dpu_pub):
+        name, rdma, key_id, grant_pub, dpu_pub = fields
+        if not valid_node_record(name, rdma, key_id, grant_pub, dpu_pub):
             raise ControllerError(f"{path}:{line_no}: malformed node record")
         if name in records:
             raise ControllerError(f"{path}:{line_no}: duplicate node {name}")
-        records[name] = (rdma, key_id, agent_pub, dpu_pub)
+        records[name] = (rdma, key_id, grant_pub, dpu_pub)
     return records
 
 
 class NodeRegistry:
-    """The operator-owned node set and the DPU keys agents report.
+    """The operator-owned node set and the DPU keys host runtimes report.
 
     The file is the anchor: a node the operator did not configure is not
-    published, so a report can add nothing. Addresses and agent identities are
-    deployment facts and cannot be changed by a node. A report supplies only
+    published, so a report can add nothing. Addresses and grant keys are
+    operator facts and cannot be changed by a node. A report supplies only
     the DPU static handshake key generated at first boot.
     """
 
@@ -199,11 +223,11 @@ class NodeRegistry:
             reports = dict(self.reports)
         lines: list[str] = []
         for name in sorted(configured):
-            rdma, key_id, agent_pub, dpu_pub = configured[name]
+            rdma, key_id, grant_pub, dpu_pub = configured[name]
             reported = reports.get(name)
             if reported is not None:
                 dpu_pub = reported
-            lines.append(f"node={name},{rdma},{key_id},{agent_pub},{dpu_pub}")
+            lines.append(f"node={name},{rdma},{key_id},{grant_pub},{dpu_pub}")
         return lines
 
 
@@ -240,71 +264,6 @@ class KubernetesAPI:
 
     def endpoint_slices(self) -> list[dict[str, Any]]:
         return self.items("/apis/discovery.k8s.io/v1/endpointslices")
-
-    def nodes(self) -> list[dict[str, Any]]:
-        return self.items("/api/v1/nodes")
-
-
-def ipv4_int(address: str) -> int | None:
-    if not valid_ipv4(address):
-        return None
-    a, b, c, d = (int(part) for part in address.split("."))
-    return (a << 24) | (b << 16) | (c << 8) | d
-
-
-def parse_cidr(cidr: str) -> tuple[int, int] | None:
-    prefix, separator, bits = cidr.partition("/")
-    base = ipv4_int(prefix)
-    if not separator or base is None or not bits.isdigit():
-        return None
-    width = int(bits)
-    if not 0 <= width <= 32:
-        return None
-    mask = 0 if width == 0 else (0xFFFFFFFF << (32 - width)) & 0xFFFFFFFF
-    return base & mask, mask
-
-
-class NodeBinding:
-    """Which node a request came from.
-
-    This is what binds a report to its reporter, and a node agent may speak
-    only for the node it runs on. Two facts decide it, and both are the
-    cluster's rather than the caller's: the addresses Kubernetes records for a
-    node, and the Pod CIDR it allocates to that node. The second is needed
-    because a host-network agent reaching a ClusterIP is source-translated to
-    its node's CNI address, which is inside that node's Pod CIDR and inside no
-    other's.
-    """
-
-    def __init__(self, nodes: list[dict[str, Any]]) -> None:
-        self.exact: dict[str, str] = {}
-        self.ranges: list[tuple[int, int, str]] = []
-        for node in nodes:
-            name = str(node.get("metadata", {}).get("name") or "")
-            if not name:
-                continue
-            for address in node.get("status", {}).get("addresses") or []:
-                value = str(address.get("address") or "")
-                if valid_ipv4(value):
-                    self.exact[value] = name
-            spec = node.get("spec", {}) or {}
-            for cidr in [spec.get("podCIDR")] + list(spec.get("podCIDRs") or []):
-                parsed = parse_cidr(str(cidr or ""))
-                if parsed is not None:
-                    self.ranges.append((parsed[0], parsed[1], name))
-
-    def of(self, address: str) -> str | None:
-        name = self.exact.get(address)
-        if name is not None:
-            return name
-        value = ipv4_int(address)
-        if value is None:
-            return None
-        for base, mask, node in self.ranges:
-            if value & mask == base:
-                return node
-        return None
-
 
 def build_body(
     version: int,
@@ -372,7 +331,7 @@ def build_body(
         if not service_name or key not in service_keys:
             continue
         for endpoint in endpoint_slice.get("endpoints") or []:
-            if (endpoint.get("conditions") or {}).get("ready") is False:
+            if (endpoint.get("conditions") or {}).get("ready") is not True:
                 continue
             target = endpoint.get("targetRef") or {}
             uid = str(target.get("uid", ""))
@@ -402,6 +361,88 @@ def build_body(
 def sign_document(body: str, key_id: str, key: bytes) -> str:
     signature = Ed25519PrivateKey.from_private_bytes(key).sign(body.encode("ascii"))
     return f"{body}signature={key_id},{signature.hex()}\n"
+
+
+def sign_feed(body: str, key_id: str, key: bytes) -> str:
+    signature = hmac.new(key, body.encode("ascii"), hashlib.sha256).hexdigest()
+    return f"{body}signature={key_id},{signature}\n"
+
+
+def membership_body(version: int, node_name: str,
+                    pods: list[dict[str, Any]],
+                    services: list[dict[str, Any]],
+                    endpoint_slices: list[dict[str, Any]],
+                    resource_name: str) -> str:
+    """Controller-authorized (Pod UID, Service) pairs for exactly one node."""
+    lines = [f"version={version}"]
+    for pod in sorted(pods, key=lambda item: str(item.get("metadata", {}).get("uid") or "")):
+        metadata = pod.get("metadata", {}) or {}
+        if (metadata.get("deletionTimestamp") or
+                pod.get("spec", {}).get("nodeName") != node_name or
+                workload_grant.POD_UID_RE.fullmatch(str(metadata.get("uid") or "")) is None or
+                not workload_grant.service_account_token_disabled(pod)):
+            continue
+        try:
+            target = workload_grant.resource_target(pod, resource_name)
+            workload_grant.running_container_id(pod, str(target.get("name") or ""))
+            workload_grant.pod_ipv4(pod)
+        except workload_grant.GrantError:
+            continue
+        uid = str(metadata["uid"])
+        lines.append(f"member={uid},-")
+        names = {
+            str(service.get("metadata", {}).get("name") or "")
+            for service in services
+            if service.get("metadata", {}).get("namespace") == metadata.get("namespace")
+        }
+        for name in sorted(names):
+            if workload_grant.SERVICE_NAME_RE.fullmatch(name) is None:
+                continue
+            try:
+                workload_grant.authorize_service(name, pod, services)
+                workload_grant.require_ready_endpoint(name, pod, endpoint_slices)
+            except workload_grant.GrantError:
+                continue
+            lines.append(f"member={uid},{name}")
+    return "".join(line + "\n" for line in lines)
+
+
+def service_targets_body(version: int, topology: str) -> str:
+    """Build the Linkerd adapter's Service map from one signed topology."""
+    services: dict[str, str] = {}
+    pod_ips: dict[str, str] = {}
+    endpoints: list[tuple[str, str]] = []
+    for line in topology.splitlines():
+        if line.startswith("service="):
+            key, separator, address = line[len("service="):].partition(",")
+            if separator:
+                services[key] = address
+        elif line.startswith("pod="):
+            fields = line[len("pod="):].split(",")
+            if len(fields) == 5:
+                pod_ips[fields[0]] = fields[4]
+        elif line.startswith("endpoint="):
+            key, separator, uid = line[len("endpoint="):].partition(",")
+            if separator:
+                endpoints.append((key, uid))
+        elif line.startswith("signature="):
+            break
+    lines = [f"version={version}"]
+    for key in sorted(services):
+        lines.append(f"{key}={services[key]}")
+    seen: set[tuple[str, str]] = set()
+    for key, uid in sorted(endpoints):
+        address = services.get(key)
+        ip = pod_ips.get(uid)
+        if address is None or ip is None:
+            continue
+        port = address.rpartition(":")[2]
+        endpoint = (key, ip)
+        if endpoint in seen:
+            continue
+        seen.add(endpoint)
+        lines.append(f"endpoint={key},{ip}:{port},{uid}")
+    return "".join(line + "\n" for line in lines)
 
 
 def published_version(path: Path) -> int:
@@ -462,7 +503,11 @@ class Controller:
         self.state_lock = threading.Lock()
         self.document = ""
         self.placements: dict[str, str] = {}
-        self.binding = NodeBinding([])
+        self.pod_snapshot: list[dict[str, Any]] = []
+        self.service_snapshot: list[dict[str, Any]] = []
+        self.slice_snapshot: list[dict[str, Any]] = []
+        self.membership_cache: dict[str, tuple[str, str, str, int]] = {}
+        self.service_targets_cache: tuple[str, str, str, int] | None = None
         try:
             installed = args.output.read_text(encoding="ascii")
         except (OSError, UnicodeDecodeError):
@@ -472,21 +517,21 @@ class Controller:
             self.placements = pod_placements(installed)
 
     def publish(self) -> int | None:
-        """Publish a new generation, or return None when the cluster's facts
-        are unchanged — the node binding still refreshes, because node
-        addresses are not generation content."""
+        """Publish a new generation, or return None when facts are unchanged."""
         version = max(time.time_ns(), self.version + 1)
         node_lines = self.nodes.lines()
+        pods = self.kubernetes.pods()
+        services = self.kubernetes.services()
+        slices = self.kubernetes.endpoint_slices()
         body = build_body(
             version,
             node_lines,
-            self.kubernetes.pods(),
-            self.kubernetes.services(),
-            self.kubernetes.endpoint_slices(),
+            pods,
+            services,
+            slices,
             self.args.protected,
             log=lambda message: print(f"dpumesh-controller: {message}", file=sys.stderr, flush=True),
         )
-        binding = NodeBinding(self.kubernetes.nodes())
         key_id, key = load_active_key(self.args.key_dir)
         with self.state_lock:
             held = self.document
@@ -495,7 +540,9 @@ class Controller:
         if held and generation_records(body) == generation_records(held) \
                 and signature_key_id(held) == key_id:
             with self.state_lock:
-                self.binding = binding
+                self.pod_snapshot = pods
+                self.service_snapshot = services
+                self.slice_snapshot = slices
             return None
         document = sign_document(body, key_id, key)
         if len(document) > TOPOLOGY_MAX_BYTES:
@@ -513,12 +560,109 @@ class Controller:
         with self.state_lock:
             self.document = document
             self.placements = pod_placements(document)
-            self.binding = binding
+            self.pod_snapshot = pods
+            self.service_snapshot = services
+            self.slice_snapshot = slices
         return version
 
-    def held(self) -> tuple[str, dict[str, str], NodeBinding]:
+    def held(self) -> tuple[str, dict[str, str]]:
         with self.state_lock:
-            return self.document, self.placements, self.binding
+            return self.document, dict(self.placements)
+
+    def objects(self) -> tuple[
+        list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]
+    ]:
+        with self.state_lock:
+            return (
+                list(self.pod_snapshot),
+                list(self.service_snapshot),
+                list(self.slice_snapshot),
+            )
+
+    def issue_workload_grant(self, node_name: str, request: dict[str, Any]) -> bytes:
+        try:
+            pod_uid = str(request["pod_uid"])
+            container_id = str(request["container_id"])
+            service_name = str(request.get("service") or "")
+            nonce = bytes.fromhex(str(request["nonce"]))
+            channel_slot = int(request["slot"])
+            channel_generation = int(request["generation"])
+            daemon_incarnation = bytes.fromhex(str(request["daemon_incarnation"]))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise workload_grant.GrantError("malformed workload grant request") from exc
+        if workload_grant.POD_UID_RE.fullmatch(pod_uid) is None:
+            raise workload_grant.GrantError("malformed Pod UID")
+        pods, services, endpoint_slices = self.objects()
+        pod = workload_grant.resolve_authorized_pod(
+            pod_uid=pod_uid,
+            node_name=node_name,
+            container_id=container_id,
+            service_name=service_name,
+            pods=pods,
+            services=services,
+            endpoint_slices=endpoint_slices,
+            resource_name=self.args.resource_name,
+        )
+        container = workload_grant.resource_target(pod, self.args.resource_name)
+        key_id, key = workload_grant.load_private_seed(
+            self.args.registration_key_dir, node_name, load_active_key
+        )
+        configured = read_nodes_file(self.args.nodes_file).get(node_name)
+        if configured is None or configured[1] != key_id:
+            raise workload_grant.GrantError(
+                "registration signing key does not match the configured node key id"
+            )
+        return workload_grant.build_grant(
+            key=key,
+            key_id=key_id,
+            cluster_id=self.args.cluster_id,
+            service_name=service_name,
+            nonce=nonce,
+            pod=pod,
+            container=container,
+            container_id=container_id,
+            channel_slot=channel_slot,
+            channel_generation=channel_generation,
+            daemon_incarnation=daemon_incarnation,
+            ttl=self.args.grant_ttl,
+        )
+
+    def membership(self, node_name: str) -> str:
+        # Compare only semantic records. A fetch does not advance a generation
+        # unless membership changed or the signing key rotated.
+        key_id, key = load_active_key(self.args.feed_key_dir)
+        with self.state_lock:
+            records = membership_body(
+                1, node_name, self.pod_snapshot, self.service_snapshot,
+                self.slice_snapshot, self.args.resource_name,
+            ).partition("\n")[2]
+            held = self.membership_cache.get(node_name)
+            if held is not None and held[0] == records and held[1] == key_id:
+                return held[2]
+            previous = 0 if held is None else held[3]
+            version = max(time.time_ns(), previous + 1)
+            document = sign_feed(f"version={version}\n{records}", key_id, key)
+            if len(document) > MEMBERSHIP_MAX_BYTES:
+                raise ControllerError("node membership exceeds its protocol bound")
+            self.membership_cache[node_name] = (records, key_id, document, version)
+            return document
+
+    def service_targets(self) -> str:
+        key_id, key = load_active_key(self.args.feed_key_dir)
+        with self.state_lock:
+            if not self.document:
+                raise ControllerError("no topology generation is available")
+            records = service_targets_body(1, self.document).partition("\n")[2]
+            held = self.service_targets_cache
+            if held is not None and held[0] == records and held[1] == key_id:
+                return held[2]
+            previous = 0 if held is None else held[3]
+            version = max(time.time_ns(), previous + 1)
+            document = sign_feed(f"version={version}\n{records}", key_id, key)
+            if len(document) > SERVICE_TARGETS_MAX_BYTES:
+                raise ControllerError("Service target feed exceeds its protocol bound")
+            self.service_targets_cache = (records, key_id, document, version)
+            return document
 
     def run(self) -> None:
         while True:
@@ -532,10 +676,10 @@ class Controller:
 
 
 class ControllerHandler(http.server.BaseHTTPRequestHandler):
-    """The face the node agents see. Three routes and no more.
+    """The mTLS API exposed to configured node runtimes.
 
-    `GET /topology.v1` is the generation every agent delivers to its DPU.
-    `POST /node` is the report an agent makes for its own node.
+    `GET /topology.v1` is the generation each runtime delivers to its DPU.
+    `POST /node` reports the DPU key for the runtime's node.
     `GET /workload-scope` is the mediated lookup of *Scope of the control-plane
     credential*: it answers only for Pods the generation places on the asking
     node, so a DPU asking about a Pod somewhere else is refused by the
@@ -545,8 +689,12 @@ class ControllerHandler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "dpumesh-controller"
 
-    def log_message(self, fmt: str, *args: Any) -> None:
-        pass                                    # one line per request is noise at the delivery cadence
+    def setup(self) -> None:
+        self.request.settimeout(CONTROLLER_REQUEST_TIMEOUT)
+        super().setup()
+
+    def log_message(self, _format: str, *_args: Any) -> None:
+        return                                  # one line per request is noise at the delivery cadence
 
     def reply(self, status: int, body: bytes, content_type: str = "text/plain") -> None:
         self.send_response(status)
@@ -557,18 +705,45 @@ class ControllerHandler(http.server.BaseHTTPRequestHandler):
 
     def reporter(self) -> str | None:
         """The node the caller may speak for, or None."""
-        _document, _placements, binding = self.server.controller.held()
-        return binding.of(self.client_address[0])
+        node = node_from_peer_certificate(self.connection)
+        return node if node in self.server.controller.nodes.names() else None
 
     def do_GET(self) -> None:                   # noqa: N802 - BaseHTTPRequestHandler
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/healthz":
-            self.reply(200, b"ok\n")
+            document, _placements = self.server.controller.held()
+            self.reply(200 if document else 503, b"ok\n" if document else b"not ready\n")
             return
         if parsed.path == "/topology.v1":
-            document, _placements, _binding = self.server.controller.held()
+            if self.reporter() is None:
+                self.reply(403, b"a node client certificate is required\n")
+                return
+            document, _placements = self.server.controller.held()
             if not document:
                 self.reply(503, b"no generation published yet\n")
+                return
+            self.reply(200, document.encode("ascii"))
+            return
+        if parsed.path == "/membership.v1":
+            node = self.reporter()
+            if node is None:
+                self.reply(403, b"a configured node client certificate is required\n")
+                return
+            try:
+                document = self.server.controller.membership(node)
+            except (ControllerError, OSError) as exc:
+                self.reply(503, f"{exc}\n".encode("ascii", "replace"))
+                return
+            self.reply(200, document.encode("ascii"))
+            return
+        if parsed.path == "/service-targets.v1":
+            if self.reporter() is None:
+                self.reply(403, b"a configured node client certificate is required\n")
+                return
+            try:
+                document = self.server.controller.service_targets()
+            except (ControllerError, OSError) as exc:
+                self.reply(503, f"{exc}\n".encode("ascii", "replace"))
                 return
             self.reply(200, document.encode("ascii"))
             return
@@ -586,7 +761,7 @@ class ControllerHandler(http.server.BaseHTTPRequestHandler):
         if len(uids) != 1 or POD_UID_RE.fullmatch(uids[0]) is None:
             self.reply(400, b"one well-formed pod_uid is required\n")
             return
-        _document, placements, _binding = self.server.controller.held()
+        _document, placements = self.server.controller.held()
         placed = placements.get(uids[0])
         if placed is None:
             self.reply(404, b"no generation places that Pod\n")
@@ -598,7 +773,11 @@ class ControllerHandler(http.server.BaseHTTPRequestHandler):
                    "application/json")
 
     def do_POST(self) -> None:                  # noqa: N802 - BaseHTTPRequestHandler
-        if urllib.parse.urlparse(self.path).path != "/node":
+        path = urllib.parse.urlparse(self.path).path
+        if path == "/workload-grant":
+            self.workload_grant()
+            return
+        if path != "/node":
             self.reply(404, b"no such route\n")
             return
         node = self.reporter()
@@ -636,6 +815,58 @@ class ControllerHandler(http.server.BaseHTTPRequestHandler):
               flush=True)
         self.reply(200, b"ok\n")
 
+    def workload_grant(self) -> None:
+        node = self.reporter()
+        if node is None:
+            self.reply(403, b"a node client certificate is required\n")
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            self.reply(400, b"malformed Content-Length\n")
+            return
+        if not 0 < length <= WORKLOAD_GRANT_REQUEST_MAX:
+            self.reply(413, b"grant request over bound\n")
+            return
+        try:
+            request = json.loads(self.rfile.read(length))
+            if not isinstance(request, dict):
+                raise TypeError
+            grant = self.server.controller.issue_workload_grant(node, request)
+        except (json.JSONDecodeError, UnicodeDecodeError, TypeError) as exc:
+            self.reply(400, f"malformed grant request: {exc}\n".encode("ascii", "replace"))
+            return
+        except workload_grant.GrantError as exc:
+            self.reply(403, f"{exc}\n".encode("ascii", "replace"))
+            return
+        except (ControllerError, OSError) as exc:
+            self.reply(503, f"{exc}\n".encode("ascii", "replace"))
+            return
+        self.reply(200, grant, "application/octet-stream")
+
+
+def node_from_peer_certificate(connection: Any) -> str | None:
+    """Return the node named by ``spiffe://dpumesh.io/node/<name>``."""
+    try:
+        certificate = connection.getpeercert()
+    except (AttributeError, ValueError, ssl.SSLError):
+        return None
+    # With CERT_OPTIONAL, a probe/client that supplies no certificate returns
+    # None here.  Treat that as an unauthenticated caller; never let it escape
+    # as a handler exception and an ambiguous EOF.
+    if not isinstance(certificate, dict):
+        return None
+    prefix = "spiffe://dpumesh.io/node/"
+    uris = [
+        value
+        for kind, value in certificate.get("subjectAltName", ())
+        if kind == "URI"
+    ]
+    if len(uris) != 1 or not uris[0].startswith(prefix):
+        return None
+    name = uris[0][len(prefix):]
+    return name if DNS_RE.fullmatch(name) is not None else None
+
 
 class ControllerServer(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
@@ -643,12 +874,35 @@ class ControllerServer(socketserver.ThreadingTCPServer):
 
     def __init__(self, address: tuple[str, int], controller: Controller) -> None:
         self.controller = controller
+        self.request_slots = threading.BoundedSemaphore(CONTROLLER_REQUEST_MAX)
         super().__init__(address, ControllerHandler)
+
+    def process_request(self, request: socket.socket,
+                        client_address: tuple[str, int]) -> None:
+        if not self.request_slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self.request_slots.release()
+            raise
+
+    def process_request_thread(self, request: socket.socket,
+                               client_address: tuple[str, int]) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.request_slots.release()
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--key-dir", type=Path, required=True)
+    parser.add_argument("--registration-key-dir", type=Path, required=True,
+                        help="per-node Ed25519 grant key directories")
+    parser.add_argument("--feed-key-dir", type=Path, required=True,
+                        help="controller-only HMAC keys for node-scoped feeds")
     parser.add_argument("--nodes-file", type=Path, required=True)
     parser.add_argument("--output", type=Path, default=Path("/run/dpumesh/topology.v1"))
     parser.add_argument("--interval", type=float, default=GENERATION_INTERVAL)
@@ -658,8 +912,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Service carrying the strict interaction rules (repeatable)",
     )
     parser.add_argument("--listen", default="0.0.0.0",
-                        help="address the node agents reach the controller on")
+                        help="address node runtimes reach over mTLS")
     parser.add_argument("--listen-port", type=int, default=8080)
+    parser.add_argument("--tls-cert", type=Path, required=True)
+    parser.add_argument("--tls-key", type=Path, required=True)
+    parser.add_argument("--client-ca", type=Path, required=True)
+    parser.add_argument("--resource-name", default="dpumesh.io/channel")
+    parser.add_argument("--cluster-id", required=True)
+    parser.add_argument("--grant-ttl", type=int, default=60)
     parser.add_argument("--api-server", default="https://kubernetes.default.svc")
     parser.add_argument(
         "--api-token-file", type=Path,
@@ -674,8 +934,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--interval must be between 1 and 300 seconds")
     if not 1 <= args.listen_port <= 65535:
         parser.error("--listen-port out of range")
+    if not 1 <= args.grant_ttl <= workload_grant.MAX_TTL:
+        parser.error(f"--grant-ttl must be between 1 and {workload_grant.MAX_TTL}")
+    if (len(args.cluster_id) > 63 or
+            workload_grant.CLUSTER_ID_RE.fullmatch(args.cluster_id) is None):
+        parser.error("--cluster-id must be a DNS subdomain of at most 63 bytes")
     for key in args.protected:
-        if len(key.split("/")) != 2:
+        fields = key.split("/")
+        if (len(fields) != 2 or any(
+                workload_grant.SERVICE_NAME_RE.fullmatch(field) is None
+                for field in fields)):
             parser.error(f"--protected takes namespace/name, got {key!r}")
     return args
 
@@ -683,15 +951,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     controller = Controller(args)
-    # Publish once before the listener opens, so an agent's first fetch is
+    # Publish once before the listener opens, so the first fetch is
     # answered with a generation rather than with the fail-static 503.
     try:
         controller.publish()
     except (ControllerError, OSError) as exc:
         print(f"dpumesh-controller: first publish failed: {exc}", file=sys.stderr, flush=True)
     server = ControllerServer((args.listen, args.listen_port), controller)
+    context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+    context.load_cert_chain(str(args.tls_cert), str(args.tls_key))
+    context.load_verify_locations(cafile=str(args.client_ca))
+    # Health probes need no certificate; every data-bearing route checks the
+    # URI SAN after the TLS handshake.
+    context.verify_mode = ssl.CERT_OPTIONAL
+    context.minimum_version = ssl.TLSVersion.TLSv1_3
+    server.socket = context.wrap_socket(
+        server.socket, server_side=True, do_handshake_on_connect=False,
+    )
     threading.Thread(target=server.serve_forever, name="listener", daemon=True).start()
-    print(f"dpumesh-controller: serving agents on {args.listen}:{args.listen_port}", flush=True)
+    print(f"dpumesh-controller: serving node mTLS on {args.listen}:{args.listen_port}",
+          flush=True)
     controller.run()
     return 0
 

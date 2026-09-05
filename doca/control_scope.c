@@ -1,5 +1,5 @@
 /* The mediated control-plane lookup. One bounded HTTP request per Pod, on the
- * control thread, answered by the controller through this node's agent. */
+ * control thread, answered by the controller through the host mTLS tunnel. */
 #include "control_scope.h"
 
 #include <errno.h>

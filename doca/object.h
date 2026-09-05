@@ -574,6 +574,9 @@ struct objects {
      * node_name must equal it, so an assertion minted for another node's Pods
      * is refused here. */
     char node_name[DMESH_K8S_NAME_MAX];
+    char cluster_id[DMESH_CLUSTER_ID_MAX];
+    uint8_t active_daemon_incarnation[DMESH_DAEMON_INCARNATION_SIZE];
+    uint64_t channel_generations[MAX_PODS];
     uint8_t consumed_grant_ids[DMESH_REGISTRATION_REPLAY_SLOTS][DMESH_GRANT_ID_SIZE];
     size_t consumed_grant_count;
     size_t consumed_grant_cursor;
@@ -600,13 +603,13 @@ struct objects {
 
     /* The node credential's public half. The private half is generated at
      * first boot into a 0400 file and never leaves the DPU; this is what the
-     * node agent reports and the generation publishes, and what a peer checks
+     * host runtime reports and the generation publishes, and what a peer checks
      * a handshake against. Zero until DPUMESH_NODE_KEY_FILE is configured. */
     uint8_t node_public_key[32];
     int node_key_ready;
 
     /* Where the controller answers the mediated control-plane lookup, reached
-     * through this node's agent. Empty leaves mediation disabled. */
+     * through this node's host runtime. Empty leaves mediation disabled. */
     char scope_host[256];
     uint16_t scope_port;
 

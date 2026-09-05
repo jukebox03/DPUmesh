@@ -39,8 +39,8 @@ struct dmesh_l7_flow {
     /* The verified source identity, as Linkerd names one:
      * `<service-account>.<namespace>.serviceaccount.identity.<trust-domain>`.
      * Built from the retained registration within a node and from the
-     * generation across one; empty when the source is not attested. No Pod
-     * supplies any part of it. */
+     * generation across one; empty when the source has no verified identity.
+     * No Pod supplies any part of it. */
     char     source_identity[254];
 };
 

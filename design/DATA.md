@@ -1,11 +1,11 @@
 # DPUmesh Data Plane
 
 DPUmesh is a BlueField service mesh. A sending application writes into mapped
-host memory, the DPA moves it into DPU staging, an ARM worker runs the embedded
-Linkerd path, and DMA lands the result in the receiving application's mapped
-memory, or the peer channel carries it to the DPU that holds the destination.
-Each Service is deployed in one of two modes, which decides what Linkerd runs
-for it: an opaque byte stream, or an HTTP/1, HTTP/2 or gRPC stack. The first
+host memory, the DPA moves it into DPU staging, and an Arm worker routes it.
+Configured L7 Services traverse the embedded Linkerd path. DMA then lands the
+result in the receiving application's mapped memory, or the peer channel
+carries it to the DPU that holds the destination. Each L7 Service selects an
+opaque byte stream or an HTTP/1, HTTP/2 or gRPC stack. The first
 half of this document is the DMA transport and the second is Linkerd and the C
 ABI where they meet (`linkerd/include/dmesh_l7.h`). The normative definitions
 are `doca/dpu_worker.c`, `doca/dpu_proxy.c`, `linkerd/include/dmesh_l7.h` and
@@ -17,8 +17,8 @@ are `doca/dpu_worker.c`, `doca/dpu_proxy.c`, `linkerd/include/dmesh_l7.h` and
 
 | Term | Meaning |
 |---|---|
-| channel | one process's transport: its registration, its registered memory and its rings |
-| broker | the trusted per-Pod host process owning a channel's DOCA objects; the workload runs against shared mappings it hands over |
+| channel | one active application process and its per-Pod broker: one registration, one mapping set and its rings |
+| broker | the trusted per-Pod child of `dpumeshd` owning a channel's DOCA objects outside every Pod and container |
 | drain shard | one host drain thread; landing stripes partition across shards |
 | QP | one full-duplex byte stream on a channel |
 | EQ (event queue) | what one application thread polls for the events of the QPs it owns |
@@ -34,13 +34,121 @@ are `doca/dpu_worker.c`, `doca/dpu_proxy.c`, `linkerd/include/dmesh_l7.h` and
 | landing stripe | one disjoint region of the receiving pod's RX mapping, written by one worker |
 | lane | the queue of pending deliveries for one (destination pod, landing stripe) pair |
 | egress arena | DPU buffers holding bytes the L7 layer produced, until DMA sends them |
-| L7 layer | the embedded Linkerd proxy on every ARM data worker |
+| L7 layer | the embedded Linkerd proxy instantiated on selected Arm workers when an L7 Service list is configured |
 | session | one client connection together with the Linkerd outbound stack built for it |
 | `DmeshIo` | the byte-stream endpoint the Linkerd stack reads from and writes to |
 | session token | `(worker, slot, generation)`, which names a session for its whole lifetime |
 | backend registry | the per-worker map from a session to the DPUmesh channel serving it |
 | backend channel | the DPUmesh path a session's bytes take to the backend Pod |
 | decline | the layer refusing a connection, by code, instead of taking it |
+
+## Runtime placement and address spaces
+
+Kubernetes schedules only the controller and application workloads. The
+BlueField runtime is an Arm-OS process, and the host runtime is a systemd
+service. Containment and data ownership are:
+
+```text
+Kubernetes
+├─ controller Deployment
+└─ workload Pod P                           Pod network namespace / Pod IP
+   └─ application container
+      └─ application process
+         ├─ libdpumesh or POSIX/gRPC adapter
+         ├─ K forward-ring mappings
+         ├─ L reverse-ring mappings
+         ├─ TX/RX mappings
+         └─ drain shards and tail timer
+            │
+            └─ /run/dpumesh/channel.sock    only mounted DPUmesh capability
+
+host Linux / systemd
+└─ dpumeshd.service                         root manager
+   ├─ Kubernetes Device Plugin
+   ├─ slot listeners and generation state
+   ├─ controller mTLS and DPU feed delivery
+   ├─ kernel cgroup evidence reader
+   ├─ delegated workers/ cgroup subtree
+   └─ direct broker child for Pod P
+      └─ broker process                     outside Kubernetes
+         ├─ private PID, mount and network namespaces
+         ├─ empty pivot root, uid/gid 65532, no capabilities
+         ├─ ring and TX/RX memfds
+         └─ DOCA device, PE, Comch and mmap exports
+
+                        PCIe / registered-memory DMA
+                                  │
+BlueField Arm OS                  ▼
+├─ dpumesh-feed-receiver.service
+└─ dpumesh_dpu
+   ├─ main/control thread
+   ├─ A Arm data-worker threads
+   │  └─ optional embedded Linkerd current-thread runtime
+   └─ N DPA execution contexts                    not Linux processes
+```
+
+The kubelet Device Plugin allocation response bind-mounts one slot socket into
+one regular container. The workload receives no host directory, device node,
+PCI identifier, Kubernetes token or broker process. `dpumeshd` accepts the
+application connection, obtains `SO_PEERCRED`, resolves Pod UID and container
+ID from cgroup v2 with a PID-starttime fence, obtains a controller grant, then
+launches the broker as its direct child.
+
+The address spaces are:
+
+| Context | Virtual address ownership | Network address |
+|---|---|---|
+| application process | application page table | workload Pod IP |
+| broker process | separate broker page table | none; private network namespace |
+| `dpumeshd` | host service page table | host management and controller addresses |
+| DPU Arm process | BlueField Linux page table | DPU management and peer addresses |
+| DPA context | accelerator mappings installed by Arm | none |
+
+The application and broker do not share a process address space. The broker
+creates each memfd and maps it; `SCM_RIGHTS` gives the application another fd
+for the same pages, which it maps at an unrelated virtual address. DOCA exports
+the underlying registered range and Arm installs its opaque handle in trusted
+per-ring DPA state. The 64-byte forward descriptor retains an `mmap` field for
+the fixed Host/DPA ABI, but the DPA copy path does not trust or select it:
+`ring->host_mmap`, `ring->host_addr` and `ring->host_buf_size` select and
+bound the source. The descriptor supplies only an offset and length to that
+registered range. No host virtual address is a wire field or a DPA-selected
+pointer.
+
+```text
+same physical memfd pages
+   ├─ application VA: app_base    + checked offset
+   ├─ broker VA:      broker_base + checked offset
+   └─ DPA mapping:    handle H    + checked offset
+
+separate memory
+   └─ DPU staging / egress arena in BlueField memory
+```
+
+A broker runs in
+`/sys/fs/cgroup/system.slice/dpumeshd.service/workers/pod<uid>.g<generation>`.
+Its `cpu.max`, `memory.high`, `memory.max` and `pids.max` are written before the
+child enters it. This is a system-service worker leaf accounted by kubelet's
+system reservation. It is not an application container cgroup and does not
+inherit the Pod network or CRI lifecycle.
+
+## Boundary contracts
+
+| Boundary | Lifetime/ownership fence | Consumer validation | Failure result |
+|---|---|---|---|
+| application → broker | socket message is immutable after send | HELLO and RESOLVE have the IPC v3 type, exact size and required padding; RESOLVE carries the active request id | channel setup fails or transport becomes terminal |
+| broker → application | broker retains each exported object for the channel lifetime; application receives another fd reference | READY geometry, fd order, seals and sizes validate; RESOLVE_ACK validates exact size/version/request id; an ERROR or TRANSPORT_DOWN type is terminal | all received fds are closed on attach failure; no partial attach or same-channel recovery |
+| application → DPA | descriptor slot transfers at publish; TX bytes remain reserved until `TX_ACK` | sequence is next; offset/length fit the ring's trusted Pod mapping | the host library rejects before publish; DPA consumes a malformed raw slot without DMA or ACK, so only that channel can strand its credit |
+| DPA → ARM worker | completion metadata is enqueued | ring generation and source Pod state still match | stale completion is discarded |
+| ARM worker → local destination | source staging or arena custody is held | destination Pod generation and RX credit are current | stream is poisoned; held custody is released |
+| ARM → DPA control | Pod/ring record remains installed | `RING_ADD_ACK` identifies its Pod generation | Pod never becomes READY |
+| DPA → ARM teardown | deleted ring and pending producer work are fenced | every expected `RING_DEL_ACK` arrives | mappings remain retained |
+| source DPU → peer DPU | extent remains charged to its source/peer | TLS channel, incarnation, handle, sequence and bounds validate | peer channel and its streams fail |
+| peer DPU → source DPU | destination staging charge remains held | `STREAM_ACK` names data already landed in destination host RX | no source credit is returned |
+
+These are ownership contracts, not retry promises. A terminal stream or channel
+failure may be retried by the application, but the data plane does not provide
+exactly-once replay.
 
 ## Topology
 
@@ -62,6 +170,16 @@ RX landing stripe  = destination port % L
 reverse ring       = destination port % L
 ```
 
+A Pod consumes K of the DPA ring seats. Each EU holds at most
+`MAX_DPA_RINGS=16`, and `pod_id` occupies the nonnegative signed-byte space.
+The live registration capacity is therefore:
+
+```text
+min(127, MAX_DPA_RINGS × N / K)
+
+for N/K = 32/8:  min(127, 16 × 32 / 8) = 64 Pods
+```
+
 A connection remains on one ARM worker. Each worker owns its connection tables,
 DPA completion PE, SG-DMA context, DMA callbacks, destination lanes, and reverse
 ring producers. Every Pod contributes one ring to each worker. The 32 EUs form
@@ -71,45 +189,99 @@ DPU-local mappings shared across workers are made thread-safe before they start.
 
 ## Data path
 
-```text
-host QP
-  │
-  ▼
-K forward rings
-  │
-  ▼
-DPA EUs
-  │ completion metadata
-  ▼
-A ARM workers
-  ├─ connection state and the upstream-port map
-  ├─ Linkerd opaque or protocol-aware routing
-  ├─ payload SG-DMA, from arrival staging or the egress arena
-  └─ reverse publication
-          │
-          ▼
-L reverse rings
-          │ REV_DONE (bytes delivered) / TX_ACK (send capacity returned)
-          ▼
-host drain threads
+The broker owns and progresses the hardware objects, but it is not a payload
+hop. The registered pages let DPA and ARM move bytes directly between the
+application mappings and DPU memory.
 
-DPU main thread: registration, teardown, and host doorbells
+```text
+same-node
+
+workload Pod P / application process
+  TX mmap ── publish descriptor on one of K forward rings
+                  │
+                  │ broker owns registration; it does not copy the payload
+══════════════════╪════════════════ PCIe ═══════════════════════════════════
+                  ▼
+source Pod's trusted DPA ring state ── bounds check ── DMA read
+                  │
+                  ▼
+             DPU staging
+                  │
+                  ▼
+          owning ARM worker
+          ├─ connection and upstream-port state
+          ├─ embedded Linkerd opaque/protocol-aware path
+          └─ destination selection and SG-DMA
+                  │
+                  ▼
+══════════════════╪════════════════ PCIe ═══════════════════════════════════
+                  ▼
+workload Pod Q / application process
+  RX mmap ◀── REV_DONE on Q's reverse ring
+
+TX_ACK returns to P only at the custody release point described below.
 ```
+
+```text
+cross-node middle hop
+
+P TX mmap → source DPA → staging A → ARM worker A
+                                      │
+                         TLS 1.3 peer channel
+                           over TCP or RDMA
+                                      │
+                                      ▼
+                                staging B
+                                      │
+                       ARM worker B → SG-DMA → Q RX mmap
+                                      │
+                           STREAM_ACK after landing
+                                      └──────────────────────▶ source custody release
+```
+
+The DPU main thread owns registration, teardown and host doorbells. ARM data
+workers own stream state and payload progress; DPA execution contexts own
+forward-ring consumption.
 
 ## Host memory and rings
 
 One channel owns K forward rings, L reverse rings, registered TX/RX mappings,
 the TX block pool, the EQ registry, its drain threads, and a tail timer
-thread. The 64 MiB RX mapping is divided into L equal landing stripes.
+thread. The 64 MiB RX mapping is divided into L equal landing stripes. One
+broker and one attached application process share that channel.
 
 A meshed Pod runs no DOCA object. The per-Pod broker owns the device, the
 progress engine, the Comch control connection and the memfds backing every
 ring and mapping; the workload maps the same pages and runs everything else —
 forward-ring production, reverse-ring interpretation, delivery, and event
-readiness. Two kinds of descriptor cross the process boundary at attach: the
-sealed memfds and one pod-global doorbell eventfd. The broker never reads a
-completion entry. [`CONTROL.md`](CONTROL.md) §2-1.9 owns the launch and trust
-story.
+readiness. The attach message carries one ordered fd set:
+
+```text
+0                    … K-1                    forward-ring memfds
+K                    … K+L-1                  reverse-ring memfds
+K+L                                            TX memfd
+K+L+1                                          RX memfd
+K+L+2                                          pod-global doorbell eventfd
+                                                total K + L + 3
+```
+
+Every memfd has `F_SEAL_SHRINK|F_SEAL_GROW|F_SEAL_SEAL`; `F_SEAL_WRITE`
+is absent because producer and consumer must modify the mapping. The
+application checks the fd count, seals, geometry and exact mapping sizes before
+attaching. It cannot supply a memory fd to the broker. The broker keeps its
+mapping and DOCA ownership but never interprets a forward descriptor,
+completion entry or payload. It relays RESOLVE control messages and converts a
+DPU doorbell count into one eventfd tick.
+[`CONTROL.md`](CONTROL.md) §2-1.9 owns the launch and trust story.
+
+The workload can write every byte in its own shared mappings, so all
+application-produced descriptor fields are untrusted. DPA takes source
+`pod_id`, mapping handle and generation from the ring record installed by
+ARM, ignores the descriptor's source identity and mmap selection, and checks
+offset/length against that Pod's TX mapping. ARM treats destination identifiers
+and ports as routing requests and resolves them through live registration,
+service, conntrack and generation state. A descriptor cannot select another
+Pod's registered mapping.
 
 The timer holds no transmit state. It writes the readiness fd of an EQ whose
 earliest retained tail has come due, and parks while no tail is retained on the
@@ -184,13 +356,13 @@ queues.
 
 | Thread | Work |
 |---|---|
-| Host application | API calls and QP operations |
-| Host drain × D | reverse-ring interpretation, delivery, event-queue readiness |
-| Host broker | DOCA PE progress and the doorbell relay |
-| Host tail timer | deadlines of retained partial sends |
-| ARM main | registration, revocation, teardown and the messages that wake the host |
-| ARM data worker × A | DPA completions, routing, DMA and reverse publication |
-| DPA EU × N | forward-ring drain and completion metadata |
+| workload application process | API calls and QP operations; runs in the application container |
+| host drain × D | reverse-ring interpretation, delivery and EQ readiness; threads of that application process |
+| host tail timer | retained partial-send deadlines; thread of that application process |
+| host broker | DOCA PE progress and doorbell relay; one supervised host process per channel outside Pods |
+| ARM main | registration, revocation, teardown and host-wake messages; thread of `dpumesh_dpu` |
+| ARM data worker × A | DPA completions, routing, DMA, Linkerd and reverse publication; threads of `dpumesh_dpu` |
+| DPA EU × N | forward-ring drain and completion metadata; accelerator execution contexts |
 
 The ARM main thread owns the control connection and the messages that wake the
 host; no other thread sends them. Every row above exists in both builds — what
@@ -286,21 +458,28 @@ keep their immediate acknowledgement.
 ## Registration and teardown
 
 ```text
-Host                                      BlueField ARM / DPA
- |-- POD_REGISTER -------------------------->|
- |<---------------- POD_ASSIGNED ------------|
- |-- forward rings, TX/RX, reverse rings --->|
- |                              RING_ADD to EUs
- |<------ POD_INIT_RESULT(READY, L) ----------|
-
- |-- POD_UNREGISTER ------------------------>|
- |                              stop routing
- |                              RING_DEL to EUs
- |                              close worker-owned sessions and ports
- |                              drain DMA and reverse publishers
- |                              second progress pass: DOCA buffers released
- |                              destroy imported mappings
- |<---------------- POD_QUIESCED -------------|
+application        dpumeshd          broker             DPU ARM / DPA
+    | HELLO ---------->|                |                       |
+    |                  | kernel evidence, slot generation      |
+    |                  |-- launch + connected fd -->|           |
+    |                  |                |-- Comch connect ----->|
+    |                  |                |<-- nonce challenge ---|
+    |                  |<-- grant request|                       |
+    |                  |-- mTLS request to controller           |
+    |                  |--- signed grant -->|                    |
+    |                  |                |-- grant + REGISTER --->|
+    |                  |                |<------ POD_ASSIGNED ---|
+    |                  |                |-- export mappings ---->|
+    |                  |                |       RING_ADD to EUs   |
+    |                  |                |<-- INIT_RESULT READY --|
+    |<--------- READY + K+L+3 fds ------|                       |
+    |                  |                |                       |
+    | socket close -------------------->|-- POD_UNREGISTER ----->|
+    |                  |                |       stop routing     |
+    |                  |                |       RING_DEL to EUs  |
+    |                  |                |       drain and fence  |
+    |                  |                |<------ POD_QUIESCED ---|
+    |                  |                | destroy exports/fds   |
 ```
 
 Control messages are idempotent. Pod generations bind imported mappings, DPA
@@ -324,7 +503,7 @@ afterwards, is [`CONTROL.md`](CONTROL.md).
 
 ## Custody: two domains
 
-Custody has **two** semantics in this tree, not one, and they differ in what
+Custody has **two** semantics, and they differ in what
 event returns the sender's capacity. The second is the L7 layer's, so the calls
 it turns on — `dmesh_l7_release`, the egress arena, `DmeshIo` — are specified in
 *The adapter ABI* below; they are named here because the contrast between the
@@ -395,10 +574,6 @@ the egress chunk arena is not.
 
 # The L7 layer
 
-![DPUmesh with embedded Linkerd thread model](figures/dpumesh_threads.png)
-
-[PDF](figures/dpumesh_threads.pdf)
-
 The DPU binary always links `libdmesh_l7.a`, the adapter archive `linkerd/rust/`
 builds, and, through it, the pinned proxy fork in `linkerd/port/linkerd2-proxy/`;
 Meson refuses a configuration without them. There is no reference consumer and no
@@ -446,10 +621,11 @@ Services are named at DPU startup and resolved against each adopted generation.
 
 Every data Service is assigned exactly once, by name rather than by the surface
 its Pods use: an HTTP/1.1 Service under the shim is protocol-aware, and a gRPC
-Service assigned opaque is not. Duplicate assignments are rejected, and a
-declined session is terminated under fail-closed policy. Which Services are
-graded protected, and what decides fail-closed for a Service no generation
-grades, is [`CONTROL.md`](CONTROL.md).
+Service assigned opaque is not. Duplicate assignments are rejected. If the
+Linkerd adapter declines a session, a protected or generation-unknown Service
+is terminated; a generation-known relaxed Service may continue as L4.
+[`CONTROL.md`](CONTROL.md) defines the protection classes and the separate
+inbound-verdict rule.
 
 ## Worker runtime
 
@@ -489,6 +665,7 @@ DPUmesh implements the driver backend consumed by `dmesh_doca::runtime::run`:
 | `dmesh_l7_driver_stopped` | expose the DPUmesh worker stop state |
 | `dmesh_l7_driver_ready` | publish successful worker initialization |
 | `dmesh_l7_driver_failed` | publish failed worker initialization |
+| `dmesh_l7_driver_stats` | copy the versioned worker-owned progress counters and queue/DMA gauges into one read-only snapshot |
 
 The driver iteration is:
 
@@ -670,14 +847,10 @@ port, shared by every stream arriving at it. A stream therefore costs an
 evaluation, not a session build, and the cost scales with destination Pods and
 ports rather than with sessions. Both are dropped when the registration ends.
 
-The sidecarless Pod template carries `linkerd.io/control-plane-ns=linkerd` so
-the stock policy controller indexes that workload. Its DMA service ports are
-also listed in `config.linkerd.io/skip-inbound-ports`: destination discovery
-must publish the Kubernetes endpoint without looking for a Pod-local proxy,
-because the proxy and enforcement point are on the DPU. Omitting either half
-is invalid: without the label `WatchPort` returns `unknown server`; without the
-skip list destination translation rejects the endpoint for lacking injected
-proxy metadata.
+The controller builds Service targets from its latest Pod, Service and
+EndpointSlice snapshot. The DPU binds a registered destination Pod to that signed
+state before opening its `build_policies(workload)` store and shared
+`WatchPort`. No Pod-local proxy metadata participates in this binding.
 
 The verdict is the stock evaluation, reached through `connection_verdict` in
 the fork's `linkerd/app/inbound/src/policy.rs`; the authorization types and
@@ -732,9 +905,9 @@ forwarded without the policy the service selected.
 Node-local DPUmesh traffic is plaintext. A session's bytes travel Pod
 registration memory, PCIe and DPU memory; what separates one Pod from another
 is the DPU's per-Pod mapping and routing, not a wire an attacker could reach.
-The source workload used for policy comes from the registration path, which
-makes it node-agent-attested, connection-bound authorization. Node-to-node
-mTLS terminates on the DPU and is [`CONTROL.md`](CONTROL.md)'s peer channel.
+The source workload used for policy comes from the controller-signed,
+DPU-nonce-bound registration grant. Node-to-node mTLS terminates on the DPU and
+is [`CONTROL.md`](CONTROL.md)'s peer channel.
 
 DMA sessions override endpoint `ConditionalClientTls` to `Disabled` before the
 TLS and tagged-transport layers. Their far end is a Pod, not a second Linkerd
@@ -742,8 +915,7 @@ byte proxy: adding sidecar TLS there would deliver ciphertext and a transport
 header to the application. Node-local isolation is the registered DMA mapping;
 node-to-node confidentiality and mutual authentication belong to the peer
 channel's transport, whose authenticated node key the held topology binds.
-[`CONTROL.md`](CONTROL.md) carries that transport, the seam, and its deployment
-status.
+[`CONTROL.md`](CONTROL.md) carries that transport and the authenticated seam.
 
 ## The adapter ABI
 
@@ -774,11 +946,12 @@ assigned would make every realistic policy refuse every connection.
 
 `source_identity` is
 `<service-account>.<namespace>.serviceaccount.identity.<trust-domain>`, built
-from the same signed claims. It is empty when the source is not attested,
-which the evaluation reads as an established connection carrying no client
-identity. No part of either field comes from a Pod: the workload is bound to
-the Pod registration, whose node-agent-signed assertion is the only thing that
-names it. The registration contract is [`CONTROL.md`](CONTROL.md).
+from the same signed claims. It is empty when the source has no verified
+identity, which the evaluation reads as an established connection carrying no
+client identity. A Pod-supplied Service request has no authority over either
+field: the controller binds them to its latest Kubernetes snapshot and the DPU
+verifies the grant for the current connection. The registration contract is
+[`CONTROL.md`](CONTROL.md).
 
 The connection handle's low 24 bits are:
 
@@ -839,9 +1012,9 @@ The Linkerd consumer accepts both modes.
 | `-4` | the session already holds a reply direction, or its backend key is live |
 | `-5` | reply has no matching request session |
 
-DPUmesh counts each decline by cause and reports the totals in the DPU log.
-A declined connection is refused because every supported Service requires the
-policy and routing state of its Linkerd mode.
+DPUmesh counts each decline by cause and reports the totals in the DPU log. A
+protected or generation-unknown Service is refused after a decline; a
+generation-known relaxed Service may continue on the L4 path.
 
 ## Build contract
 
@@ -886,6 +1059,15 @@ the Comch control thread rather than on a worker, so they are process-global
 and every worker's admin endpoint reports the same values. After traffic
 quiesces, active sessions, pending registrations and live tasks are zero.
 
+The 1 ms maintenance pass also calls the version-1
+`dmesh_l7_driver_stats` ABI on the same worker thread. Monotonic drain,
+progress, arm, completion and cross-worker totals are exported by delta.
+Completion/cross-worker queue depth, deferred receives, DMA tasks/retries,
+stalled connections, ACK/FIN backlog and parked/wake state are exported as
+gauges. The hot drain path updates worker-owned plain counters. The snapshot
+also reads the pre-existing atomic cross-thread counters and producer
+positions; it introduces no metric atomics into that path.
+
 ---
 
 # Bounds
@@ -904,7 +1086,7 @@ quiesces, active sessions, pending registrations and live tasks are zero.
 | Reverse entry | 32 B |
 | DPA EUs | 1–32 |
 | Rings per Pod | 1–16 |
-| ARM data workers | 1–16; 16 is outside the supported range ([`CONTROL.md`](CONTROL.md) §5.5.1) |
+| ARM data workers | process configuration accepts 1–16; the benchmark's `W` preset refuses 16 because its main-thread affinity would share worker 0 ([`CONTROL.md`](CONTROL.md) §5.5.1) |
 | Payload DMA retries | 1 |
 | Payload DMA batch bytes | queried device memcpy limit |
 | Egress arena | 1,024 chunks of 64 KiB |
@@ -917,16 +1099,17 @@ nonblocking backpressure.
 The L7 layer adds:
 
 - outbound opaque and protocol-aware streams;
-- one worker-local Linkerd runtime on every ARM data worker;
+- one worker-local Linkerd runtime on every selected Arm data worker;
 - protocol-aware sessions own a session-local stack; opaque sessions share a
   workload stack but retain distinct backend channels and session tokens;
 - the Linkerd-selected endpoint is preserved as an exact local Pod or remote
   topology Pod UID;
-- the deployed Linkerd destination, identity and policy services are reached
-  through the node agent's control-plane relay; identity material and the
-  signed Service target feed are required configuration;
+- when L7 is enabled, configured Linkerd destination, identity and policy
+  endpoints and identity material supply its control inputs; the signed
+  Service-target feed reaches the DPU through `dpumeshd`;
 - endpoint TLS/tagged transport is disabled for DMA sessions; node-local
   isolation is the registered mapping and node-to-node security is the peer
   channel's transport;
 - Linkerd output is copied once, into the DPUmesh egress arena;
-- a declined session is counted by cause and refused fail-closed.
+- a declined session is counted by cause; protected and unknown Services are
+  refused, while a generation-known relaxed Service may continue as L4.

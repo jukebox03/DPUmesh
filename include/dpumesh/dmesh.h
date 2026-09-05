@@ -101,7 +101,7 @@ int dmesh_post_max(dmesh_channel_t *s);    /* max length of one alloc/post (bloc
 
 /* ===== Event queue lifecycle ===== */
 
-/* Create an EQ for one polling thread. Returns ENOMEM or EMFILE on failure. */
+/* Create an EQ for one polling thread. Returns EINVAL, ENOMEM or EMFILE on failure. */
 dmesh_eq_t *dmesh_create_eq(dmesh_channel_t *ch);
 
 /* Destroy an idle EQ. Returns EBUSY while a QP remains. Safe on NULL. */
@@ -117,8 +117,8 @@ int64_t dmesh_eq_next_deadline_ns(dmesh_eq_t *eq);
 
 /* ===== Connection setup (rdma_cm) ===== */
 
-/* Create a client QP for a registered service name. Returns ENOENT (not meshed),
- * EAGAIN (no generation held — retry), or ENOMEM. */
+/* Create a client QP for a registered service name. Returns EINVAL, ENOENT
+ * (not meshed), EAGAIN (no generation held — retry), or ENOMEM. */
 dmesh_qp_t *dmesh_create_qp(dmesh_eq_t *eq, const char *service_name);
 
 /* Flush, send FIN, release RX credit, and destroy the QP. The pointer is invalid

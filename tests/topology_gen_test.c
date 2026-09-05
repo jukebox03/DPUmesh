@@ -229,16 +229,16 @@ main(void)
     int bench_id = dmesh_topology_interned_id(objs, "ns-a/bench");
     assert(echo_id >= 0 && bench_id >= 0 && echo_id != bench_id);
 
-    /* The generation resolves this node's agent key by key id. */
-    const uint8_t *agent_key = NULL;
-    assert(dmesh_topology_node_key(objs, "rapids4", "node-ed25519-v1",
-                                   &agent_key) == 1);
-    assert(agent_key != NULL && agent_key[0] == 0x62);
-    assert(dmesh_topology_node_key(objs, "rapids4", "unknown-key",
-                                   &agent_key) == 1);
-    assert(agent_key == NULL);
-    assert(dmesh_topology_node_key(objs, "worker-9", "node-ed25519-v1",
-                                   &agent_key) == 0);
+    /* The generation resolves this node's grant key by key id. */
+    const uint8_t *grant_key = NULL;
+    assert(dmesh_topology_grant_key(objs, "rapids4", "node-ed25519-v1",
+                                    &grant_key) == 1);
+    assert(grant_key != NULL && grant_key[0] == 0x62);
+    assert(dmesh_topology_grant_key(objs, "rapids4", "unknown-key",
+                                    &grant_key) == 1);
+    assert(grant_key == NULL);
+    assert(dmesh_topology_grant_key(objs, "worker-9", "node-ed25519-v1",
+                                    &grant_key) == 0);
 
     /* Reach: a Service with replicas elsewhere is routable across the boundary
      * rather than unroutable. The local half stays this node's own live
@@ -329,7 +329,7 @@ main(void)
     assert(fresh_id == bench_id);   /* the freed id is the lowest free one */
     assert(dmesh_topology_service(objs, "ns-a/bench") == NULL);
 
-    /* Once a node's DPU has generated a credential and its agent has reported
+    /* Once a node's DPU has generated a credential and its runtime has reported
      * it, the generation binds a key and a transport address, and that pair is
      * what a handshake is checked against. */
     n = snprintf(body, sizeof(body),

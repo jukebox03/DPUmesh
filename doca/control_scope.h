@@ -15,10 +15,8 @@ struct objects;
  * answers only for Pods the generation places on the asking node.
  *
  * The DPU has no route into the cluster CIDRs, so the question travels the one
- * channel every other control message takes — its node agent's relay. That is
- * also what binds the question to its asker: the controller sees the node's
- * own address and answers for that node, and nothing the DPU says can change
- * which node it is asking as.
+ * channel every other control message takes: the host runtime's mTLS tunnel.
+ * The client certificate binds the request to its node.
  */
 
 enum dmesh_scope_state {

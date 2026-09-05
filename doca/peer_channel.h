@@ -379,7 +379,7 @@ struct dmesh_peer_table {
 int dmesh_peer_node_key_load(const char *path, uint8_t public_key[32],
                              uint8_t seed_out[32],
                              char *error, size_t error_len);
-/* Write the public half where the node agent reports it from. */
+/* Write the public half where the host runtime reads it. */
 int dmesh_peer_node_key_publish(const char *path, const uint8_t public_key[32]);
 
 void dmesh_peer_table_init(struct dmesh_peer_table *table, const char *node_name,

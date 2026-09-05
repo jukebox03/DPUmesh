@@ -23,7 +23,12 @@ fill_assert(struct dmesh_workload_assert_msg *assertion,
     for (size_t i = 0; i < sizeof(assertion->assert_id); i++)
         assertion->assert_id[i] = (uint8_t)(i + 1);
     memcpy(assertion->nonce, nonce, sizeof(assertion->nonce));
+    dmesh_grant_put_u32_le(assertion->channel_slot_le, 3);
+    dmesh_grant_put_u64_le(assertion->channel_generation_le, 7);
+    for (size_t i = 0; i < sizeof(assertion->daemon_incarnation); i++)
+        assertion->daemon_incarnation[i] = (uint8_t)(0x80 + i);
     snprintf(assertion->key_id, sizeof(assertion->key_id), "node-ed25519-v1");
+    snprintf(assertion->cluster_id, sizeof(assertion->cluster_id), "test-cluster");
     snprintf(assertion->node_name, sizeof(assertion->node_name), "worker-1");
     snprintf(assertion->pod_uid, sizeof(assertion->pod_uid),
              "12345678-1234-1234-1234-123456789abc");
@@ -33,6 +38,10 @@ fill_assert(struct dmesh_workload_assert_msg *assertion,
              "bench-dpumesh-abc123");
     snprintf(assertion->service_account, sizeof(assertion->service_account),
              "default");
+    snprintf(assertion->container_name, sizeof(assertion->container_name),
+             "app");
+    snprintf(assertion->container_id, sizeof(assertion->container_id),
+             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
     snprintf(assertion->service_name, sizeof(assertion->service_name),
              "echo-dpumesh");
     snprintf(assertion->pod_ip, sizeof(assertion->pod_ip), "10.244.1.17");
@@ -126,12 +135,13 @@ main(void)
     struct dmesh_assert_claims claims;
 
     fill_assert(&assertion, nonce, now);
-    assert(dmesh_assert_sign_v2(&assertion, seed) == 0);
-    assert(dmesh_assert_verify_v2(&assertion, public_key, "worker-1", nonce,
+    assert(dmesh_assert_sign_v3(&assertion, seed) == 0);
+    assert(dmesh_assert_verify_v3(&assertion, public_key, "test-cluster", "worker-1", nonce,
                                   now, &claims) == DMESH_GRANT_OK);
     assert(strcmp(claims.workload,
                   "{\"ns\":\"test-bench\",\"pod\":\"bench-dpumesh-abc123\"}") == 0);
     assert(strcmp(claims.pod_uid, "12345678-1234-1234-1234-123456789abc") == 0);
+    assert(claims.channel_slot == 3 && claims.channel_generation == 7);
     assert(strcmp(claims.namespace_name, "test-bench") == 0);
     assert(strcmp(claims.service_account, "default") == 0);
     assert(strcmp(claims.service_name, "echo-dpumesh") == 0);
@@ -141,25 +151,25 @@ main(void)
      * cannot sign. */
     struct dmesh_workload_assert_msg changed = assertion;
     changed.pod_name[0] = 'x';
-    assert(dmesh_assert_verify_v2(&changed, public_key, "worker-1", nonce,
+    assert(dmesh_assert_verify_v3(&changed, public_key, "test-cluster", "worker-1", nonce,
                                   now, &claims) == DMESH_GRANT_BAD_SIG);
     changed = assertion;
     changed.sig[0] ^= 1;
-    assert(dmesh_assert_verify_v2(&changed, public_key, "worker-1", nonce,
+    assert(dmesh_assert_verify_v3(&changed, public_key, "test-cluster", "worker-1", nonce,
                                   now, &claims) == DMESH_GRANT_BAD_SIG);
 
     /* An assertion minted for another node's Pod is refused on this node even
      * though its signature is genuine: the Pod relays the assertion, and the
      * assertion names the node it may register on. */
-    assert(dmesh_assert_verify_v2(&assertion, public_key, "worker-2", nonce,
+    assert(dmesh_assert_verify_v3(&assertion, public_key, "test-cluster", "worker-2", nonce,
                                   now, &claims) == DMESH_GRANT_WRONG_NODE);
-    assert(dmesh_assert_verify_v2(&assertion, public_key, "", nonce,
+    assert(dmesh_assert_verify_v3(&assertion, public_key, "test-cluster", "", nonce,
                                   now, &claims) == DMESH_GRANT_WRONG_NODE);
 
     uint8_t wrong_nonce[DMESH_REG_NONCE_SIZE];
     memcpy(wrong_nonce, nonce, sizeof(wrong_nonce));
     wrong_nonce[0] ^= 1;
-    assert(dmesh_assert_verify_v2(&assertion, public_key, "worker-1",
+    assert(dmesh_assert_verify_v3(&assertion, public_key, "test-cluster", "worker-1",
                                   wrong_nonce, now,
                                   &claims) == DMESH_GRANT_BAD_NONCE);
 
@@ -167,31 +177,31 @@ main(void)
     fill_assert(&changed, nonce, now);
     dmesh_grant_put_u64_le(changed.issued_at_le, now - 400);
     dmesh_grant_put_u64_le(changed.expires_at_le, now - 100);
-    assert(dmesh_assert_sign_v2(&changed, seed) == 0);
-    assert(dmesh_assert_verify_v2(&changed, public_key, "worker-1", nonce,
+    assert(dmesh_assert_sign_v3(&changed, seed) == 0);
+    assert(dmesh_assert_verify_v3(&changed, public_key, "test-cluster", "worker-1", nonce,
                                   now, &claims) == DMESH_GRANT_BAD_TIME);
     fill_assert(&changed, nonce, now);
     dmesh_grant_put_u64_le(changed.expires_at_le,
                            now + DMESH_ASSERT_MAX_LIFETIME_SEC + 60);
-    assert(dmesh_assert_sign_v2(&changed, seed) == 0);
-    assert(dmesh_assert_verify_v2(&changed, public_key, "worker-1", nonce,
+    assert(dmesh_assert_sign_v3(&changed, seed) == 0);
+    assert(dmesh_assert_verify_v3(&changed, public_key, "test-cluster", "worker-1", nonce,
                                   now, &claims) == DMESH_GRANT_BAD_TIME);
 
     /* A Pod IP that is not a dotted quad never reaches the policy input. */
     fill_assert(&changed, nonce, now);
     snprintf(changed.pod_ip, sizeof(changed.pod_ip), "10.244.1.");
-    assert(dmesh_assert_sign_v2(&changed, seed) == -1);
-    assert(dmesh_assert_verify_v2(&changed, public_key, "worker-1", nonce,
+    assert(dmesh_assert_sign_v3(&changed, seed) == -1);
+    assert(dmesh_assert_verify_v3(&changed, public_key, "test-cluster", "worker-1", nonce,
                                   now, &claims) == DMESH_GRANT_NONCANONICAL);
     snprintf(changed.pod_ip, sizeof(changed.pod_ip), "10.244.1.256");
-    assert(dmesh_assert_verify_v2(&changed, public_key, "worker-1", nonce,
+    assert(dmesh_assert_verify_v3(&changed, public_key, "test-cluster", "worker-1", nonce,
                                   now, &claims) == DMESH_GRANT_NONCANONICAL);
 
     /* An empty Service claim is canonical: a client-only Pod serves nothing. */
     fill_assert(&changed, nonce, now);
     memset(changed.service_name, 0, sizeof(changed.service_name));
-    assert(dmesh_assert_sign_v2(&changed, seed) == 0);
-    assert(dmesh_assert_verify_v2(&changed, public_key, "worker-1", nonce,
+    assert(dmesh_assert_sign_v3(&changed, seed) == 0);
+    assert(dmesh_assert_verify_v3(&changed, public_key, "test-cluster", "worker-1", nonce,
                                   now, &claims) == DMESH_GRANT_OK);
     assert(claims.service_name[0] == '\0');
 
@@ -199,17 +209,17 @@ main(void)
      * any cryptography. */
     fill_assert(&changed, nonce, now);
     changed.type = 12; /* not DMESH_MSG_WORKLOAD_ASSERT */
-    assert(dmesh_assert_verify_v2(&changed, public_key, "worker-1", nonce,
+    assert(dmesh_assert_verify_v3(&changed, public_key, "test-cluster", "worker-1", nonce,
                                   now, &claims) == DMESH_GRANT_BAD_TYPE);
     fill_assert(&changed, nonce, now);
     changed.version = 1;
-    assert(dmesh_assert_verify_v2(&changed, public_key, "worker-1", nonce,
+    assert(dmesh_assert_verify_v3(&changed, public_key, "test-cluster", "worker-1", nonce,
                                   now, &claims) == DMESH_GRANT_BAD_VERSION);
 
     /* Text after the terminating NUL is hidden input, so it is refused. */
     changed = assertion;
     changed.namespace_name[strlen(changed.namespace_name) + 1] = 'x';
-    assert(dmesh_assert_verify_v2(&changed, public_key, "worker-1", nonce,
+    assert(dmesh_assert_verify_v3(&changed, public_key, "test-cluster", "worker-1", nonce,
                                   now, &claims) == DMESH_GRANT_NONCANONICAL);
 
     /* The keyring lookup and the replay window bound reuse. */

@@ -1,20 +1,35 @@
 # DPUmesh
 
-DPUmesh is a BlueField service mesh built with DOCA Comch, DPA, DMA, and an
+DPUmesh is a BlueField service mesh built with DOCA Comch, DPA, DMA and an
 embedded Linkerd proxy. Applications address a Kubernetes Service; the DPU owns
-policy, discovery, backend selection, connection state, and Host↔DPU transfer.
-Each Service is deployed as an opaque byte stream or on Linkerd's
-protocol-aware HTTP/1, HTTP/2 or gRPC path, independently of the surface its
-Pods use. Endpoints on the node are reached by DMA, and endpoints on another
-node by the authenticated peer channel. That channel is implemented and not yet
-demonstrated between two nodes; [design/CONTROL.md](design/CONTROL.md) states
-its status, and a Service whose only replicas are elsewhere has no route until
-it is.
+discovery, backend selection, connection state and Host↔DPU transfer. Services
+use the native L4 path unless selected for Linkerd's opaque or protocol-aware
+HTTP/1, HTTP/2 and gRPC processing. Endpoints on the node are reached by DMA;
+when the peer carrier is configured, endpoints on another node use its
+authenticated channel.
 
 This repository is a research prototype. The design documents below define its
 transport, proxy, control-plane, and API contracts.
 
 ## Architecture
+
+Kubernetes runs the read-only controller and application Pods. The BlueField
+process, feed receiver and the single host service `dpumeshd` run as system
+services. Workloads declare one Device Plugin resource in their PodSpec and
+receive one allocated Unix socket.
+
+```text
+Kubernetes: controller(read-only) + workload Pods
+                                  │ dpumesh.io/channel=1
+Host:       kubelet Device Plugin ─┤─ dpumeshd ─ per-Pod broker
+                                                    │ PCIe/DOCA
+BlueField:                                      dpumesh_dpu
+```
+
+The workload image contains `libdpumesh.so.5`, disables its ServiceAccount
+token, and requests and limits exactly one `dpumesh.io/channel`. The Device
+Plugin mounts only that allocation's Unix socket at
+`/run/dpumesh/channel.sock`; the PodSpec has no `hostPath` or host device.
 
 A sending application writes into memory the transport registered with the DPU
 and publishes a descriptor. The DPU reads those bytes, chooses the backend, and
@@ -64,12 +79,12 @@ at a bounded deadline unless `dmesh_flush()` forces it earlier. The size of that
 unit and its timing are internal, not application tuning parameters, and the
 preload and gRPC layers keep no batch queue or timer of their own.
 
-Every QP is one full-duplex byte stream into the DPU-hosted Linkerd proxy and
-does not expose backend or proxy-session ids through native events. An opaque
-Service enters Linkerd as a byte stream and a protocol-aware one as HTTP/1,
-HTTP/2 or gRPC. Linkerd's selected backend is reached through DMA into that
-Pod's registered memory, or across the peer channel when the generation places
-it on another node.
+Every QP is one full-duplex byte stream through the DPU and does not expose
+backend or proxy-session ids through native events. A native L4 Service pins
+the connection directly. An opaque Service enters Linkerd as a byte stream and
+a protocol-aware one as HTTP/1, HTTP/2 or gRPC. The selected backend is reached
+through DMA into that Pod's registered memory, or across the peer channel when
+the generation places it on another node.
 
 Backpressure is nonblocking. `dmesh_alloc()` returning `NULL/EAGAIN` arms that QP
 itself, and returned capacity produces one `DMESH_EVENT_TX_READY` on its EQ:
@@ -85,8 +100,11 @@ POD_REGISTER → POD_ASSIGNED → memory and ring import → all DPA RING_ADD_AC
              → POD_INIT_RESULT(READY, L)
 ```
 
-A node agent's signed grant precedes every `POD_REGISTER`, and the DPU admits
-only the Service that grant authorizes.
+Before every `POD_REGISTER`, `dpumeshd` presents kernel-derived Pod/container
+evidence to the controller over node mTLS. The controller checks live
+Kubernetes state and signs the grant; neither `dpumeshd`, the broker, nor the
+workload has a Kubernetes bearer token. The DPU admits only the Service that
+grant authorizes.
 [design/CONTROL.md](design/CONTROL.md) is the contract.
 
 The host retries registration while either assignment or readiness is pending;
@@ -113,11 +131,13 @@ tearing its mappings down remains the control connection's decision.
 
 ```text
 include/dpumesh/       public C API
-src/core/              host transport engine, resolver, attestation client
+src/core/              host transport engine, resolver, grant and broker IPC
 src/facade/            the native and preload API surfaces over that core
 src/broker/            the per-Pod broker and its pod<->broker IPC
 doca/                  BlueField ARM process and DPA kernel
-controller/            cluster controller and the admission webhook
+controller/            read-only cluster controller and WorkloadGrant encoder
+node/                  host dpumeshd and Kubernetes Device Plugin API
+packaging/             host systemd unit, installer, and fixed node reserve
 integrations/grpc/     gRPC C++ runtime, reactor, tests
 linkerd/               DPU-side L7 layer: adapter ABI, the Rust adapter, port submodule
 bench/                 deployment, examples, workloads, validators, measurement records
@@ -269,40 +289,43 @@ program pair, proto and build file included.
 
 ### Making a workload meshed
 
-One annotation, on the Namespace or the Pod template:
+A workload declares the transport directly in its PodSpec. Exactly one regular
+container requests and limits one `dpumesh.io/channel`; kubelet then mounts the
+allocated slot socket at `/run/dpumesh/channel.sock`. The Pod does not name a
+host path or device.
 
 ```yaml
-metadata:
-  annotations:
-    dpumesh.io/inject: "enabled"
-  labels:
-    dpumesh-service: echo-dpumesh      # this Pod's Service; a client-only Pod has none
+spec:
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    seccompProfile: { type: RuntimeDefault }
+  containers:
+  - name: app
+    image: example/application:latest
+    env:
+    - { name: DPUMESH_SERVICE, value: echo-dpumesh }
+    - { name: DPUMESH_RINGS_PER_POD, value: "8" }
+    securityContext:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      capabilities: { drop: ["ALL"] }
+    resources:
+      requests: { dpumesh.io/channel: 1 }
+      limits: { dpumesh.io/channel: 1 }
 ```
 
-An admission webhook turns that into the access the transport needs: the
-transport library and the node agent's socket as mounts;
-`DPUMESH_RINGS_PER_POD`, `DPUMESH_ATTEST_SOCKET` and `DPUMESH_SERVICE` as
-environment, with `LD_PRELOAD` naming the shim for a workload that is not
-linked against the native API; and the two Linkerd markers that make the
-workload sidecarless. The Pod stays unprivileged and mounts no device: the
-DOCA objects live in the per-Pod broker
-([design/CONTROL.md §2-1.9](design/CONTROL.md)). It also requires a node labelled `dpumesh.io/dpu=true`
-and refuses the Pod when the cluster has none, because a Pod holding part of the
-patch fails later and elsewhere.
-
-The second Linkerd marker is `config.linkerd.io/skip-inbound-ports` on the data
-ports. It is part of the data path, not a tuning choice: it keeps the
-destination controller advertising the backend as unmeshed, and without it the
-controller offers an endpoint that expects a second proxy, so sessions end
-before carrying a byte. The webhook applies it and the control-plane label
-together or applies neither.
-
-A Pod that declines the shim — one written against the native API — annotates
-`dpumesh.io/preload: disabled`. [bench/k8s/injected.yaml](bench/k8s/injected.yaml)
-is a workload carrying nothing else; [bench/k8s/pods.yaml](bench/k8s/pods.yaml)
-is the same access written by hand. The complete configuration surface — every
-variable, flag and file, per consumer, including the two an author may set by
-hand — is [design/CONTROL.md §5.5](design/CONTROL.md).
+`DPUMESH_SERVICE` is required only for a server and must name a Service whose
+selector matches the Pod. `DPUMESH_RINGS_PER_POD` must equal the host and DPU
+geometry. A native or gRPC image links its adapter; a POSIX image additionally
+sets `LD_PRELOAD=/usr/local/lib/libdmesh_preload.so`. The controller rejects a
+registration when the token is mounted, the resource request/limit is not
+exactly one, the requesting process is not the resource-owning container, or
+the Service does not select that Pod. The complete contract is
+[design/CONTROL.md §5.5](design/CONTROL.md#55-configuration), and
+[bench/k8s/native-hw.yaml](bench/k8s/native-hw.yaml) is an executable PodSpec.
 
 ### What to expect from the mesh
 
@@ -310,11 +333,10 @@ hand — is [design/CONTROL.md §5.5](design/CONTROL.md).
   smaller of `MAX_PODS` (127, the wire ceiling) and its forward-ring supply —
   execution units times sixteen rings, divided by the K rings each Pod spans: on
   this BlueField 64 Pods at the benchmark's `K = 8`, 127 at `K = 2`.
-- The deployment assigns each Service a protocol treatment, and the surface its
-  Pods use does not decide it: an opaque Service is a byte stream, and a
-  protocol-aware one takes Linkerd's HTTP/1, HTTP/2 or gRPC path. Policy,
-  discovery and balancing run either way; per-request routing needs the
-  protocol-aware path.
+- The DPU assigns each Service a protocol treatment independently of the API
+  its Pods use. Native L4 performs connection routing and balancing. An opaque
+  L7 Service is a byte stream, while a protocol-aware one takes Linkerd's
+  HTTP/1, HTTP/2 or gRPC discovery, policy and per-request routing path.
 - On the protocol-aware path a backend is chosen per request, so one client
   channel spreads across a Service's endpoints. An opaque stream carries no
   message boundaries and stays on the backend it was pinned to.
@@ -324,16 +346,16 @@ hand — is [design/CONTROL.md §5.5](design/CONTROL.md).
   the inbound policy that grades the stream is the destination Pod's own.
 - Traffic between Pods on one node is plaintext inside registered DMA mappings
   the workload cannot address. There is no per-hop proxy TLS. Confidentiality
-  between nodes is the peer channel's mutually authenticated TLS 1.3 session;
-  its deployment status is [design/CONTROL.md](design/CONTROL.md)'s.
+  between nodes is the peer channel's mutually authenticated TLS 1.3 session.
 
 Building the library and bringing up a cluster are covered in
 [bench/README.md](bench/README.md).
 
 ## Documentation
 
-Four design documents define the contracts, one report states what the
-deployment measures, and one plan holds what is still open.
+Four design documents define the contracts, reports retain measurement
+evidence, and `PLAN.md` alone contains future work. The design documents are
+whitepapers for the code and manifests in this tree.
 
 **Design**
 
@@ -350,5 +372,5 @@ deployment measures, and one plan holds what is still open.
 |---|---|
 | [bench/README.md](bench/README.md) | deployment, the experiment commands, the measurement rules, and the host-only and hardware validation gates |
 | [bench/report/REPORT.md](bench/report/REPORT.md) | what the deployment measures: policy, routing, balancing, latency, throughput and cost |
-| [PLAN.md](PLAN.md) | open function, defect and cost items, and what the campaigns established |
+| [PLAN.md](PLAN.md) | the selected target architecture, migration gates, open function/defect/cost items, and what campaigns established |
 | [ci/README.md](ci/README.md) | which checks run where, and what each one protects |

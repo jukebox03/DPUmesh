@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 fail=0
 for md in $(git ls-files '*.md'); do
+  case "$md" in bench/report/*) continue ;; esac
   dir=$(dirname "$md")
   links=$(grep -oE '\]\([^)#][^)]*\)' "$md" | sed 's/^](//; s/)$//')
   for link in $links; do

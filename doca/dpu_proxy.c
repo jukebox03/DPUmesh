@@ -2700,7 +2700,7 @@ static uint32_t px_pod_ipv4(const struct pod_state *pod) {
 }
 
 /* The verified source identity, from the signed claims a registration
- * retained. Every part of it is the node agent's; a Pod states none of it. */
+ * retained. Every part comes from the controller-signed grant. */
 static void px_fill_source_identity(const struct pod_state *pod, char *out, size_t len) {
     out[0] = '\0';
     if (!pod || pod->service_account[0] == '\0' || pod->namespace_name[0] == '\0')
@@ -2749,8 +2749,8 @@ void px_protection_refresh(struct objects *objs)
 
 /* Is this Service protected?
  *
- * Every registration is attested, so protection grades the interaction rules
- * rather than whether a Pod is attested. A Service the generation grades
+ * Every registration is grant-verified, so protection grades the interaction
+ * rules rather than registration validity. A Service the generation grades
  * carries its own class; one it does not grade is strict. No Pod input reaches
  * here, so a Pod cannot place its Service on the relaxed side. */
 static int px_service_protected(struct objects *objs, int16_t svc)
@@ -2852,8 +2852,7 @@ static int px_l7_inbound_admits(struct objects *objs, const struct px_conn *c,
  *
  * A policy change does not disturb an established stream — the gate is that
  * admission changes within one watch update and nothing is admitted while the
- * rule denies, which is a statement about new streams and is what a sidecar
- * mesh does. Caching the verdict per (connection, destination) is that rule.
+ * rule denies. The verdict is cached per (connection, destination).
  */
 static int px_conn_admitted(struct objects *objs, struct px_conn *c, int32_t dst_pod) {
     for (unsigned i = 0; i < PX_INBOUND_CACHE; i++)

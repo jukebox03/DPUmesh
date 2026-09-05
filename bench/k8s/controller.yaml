@@ -5,8 +5,6 @@ metadata:
   namespace: ${NS}
 automountServiceAccountToken: true
 ---
-# The controller reads Pods, Services, EndpointSlices and Nodes cluster-wide;
-# each node agent keeps its namespaced, node-scoped Role instead.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -14,9 +12,6 @@ metadata:
 rules:
 - apiGroups: [""]
   resources: ["pods", "services"]
-  verbs: ["get", "list"]
-- apiGroups: [""]
-  resources: ["nodes"]
   verbs: ["get", "list"]
 - apiGroups: ["discovery.k8s.io"]
   resources: ["endpointslices"]
@@ -35,9 +30,6 @@ subjects:
   name: dpumesh-controller
   namespace: ${NS}
 ---
-# The face the node agents see: the generation, the node report and the
-# mediated workload lookup. A DPU has no route into the cluster CIDRs, so its
-# agent is what reaches this.
 apiVersion: v1
 kind: Service
 metadata:
@@ -46,10 +38,8 @@ metadata:
 spec:
   selector: { app: dpumesh-controller }
   ports:
-  - { name: agents, port: 8080, targetPort: 8080 }
+  - { name: node-mtls, port: 8443, targetPort: 8443 }
 ---
-# The agent key that binds Pods to a node is deployment-time material; what an
-# agent reports is the static handshake key its DPU generates at first boot.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -73,37 +63,79 @@ spec:
       labels: { app: dpumesh-controller }
     spec:
       serviceAccountName: dpumesh-controller
-      terminationGracePeriodSeconds: 5
+      automountServiceAccountToken: true
+      terminationGracePeriodSeconds: 10
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: { type: RuntimeDefault }
       containers:
       - name: controller
         image: docker.io/${IMG_CONTROLLER}
         imagePullPolicy: Never
         args:
         - --key-dir=/etc/dpumesh/controller.keys
+        - --registration-key-dir=/etc/dpumesh/registration.keys
+        - --feed-key-dir=/etc/dpumesh/feed.keys
         - --nodes-file=/etc/dpumesh/nodes
         - --output=/run/dpumesh/topology.v1
-        - --listen-port=8080
+        - --cluster-id=${DPUMESH_CLUSTER_ID}
+        - --listen-port=8443
+        - --tls-cert=/etc/dpumesh/tls/tls.crt
+        - --tls-key=/etc/dpumesh/tls/tls.key
+        - --client-ca=/etc/dpumesh/node-ca/ca.crt
 ${DPUMESH_CONTROLLER_PROTECTED_ARGS}
         securityContext:
-          runAsUser: 0
-          runAsGroup: 0
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true
           capabilities: { drop: ["ALL"] }
         ports:
-        - { name: agents, containerPort: 8080 }
+        - { name: node-mtls, containerPort: 8443 }
         readinessProbe:
-          httpGet: { path: /healthz, port: 8080 }
+          httpGet: { path: /healthz, port: 8443, scheme: HTTPS }
           initialDelaySeconds: 2
           periodSeconds: 5
+        resources:
+          requests: { cpu: 50m, memory: 64Mi }
+          limits: { cpu: 500m, memory: 256Mi }
         volumeMounts:
         - { name: output, mountPath: /run/dpumesh }
-        - { name: keyring, mountPath: /etc/dpumesh/controller.keys, readOnly: true }
+        - { name: signing, mountPath: /etc/dpumesh/controller.keys, readOnly: true }
+        - { name: registration, mountPath: /etc/dpumesh/registration.keys, readOnly: true }
+        - { name: feed, mountPath: /etc/dpumesh/feed.keys, readOnly: true }
+        - { name: tls, mountPath: /etc/dpumesh/tls, readOnly: true }
+        - { name: node-ca, mountPath: /etc/dpumesh/node-ca, readOnly: true }
         - { name: nodes, mountPath: /etc/dpumesh/nodes, subPath: nodes, readOnly: true }
       volumes:
       - name: output
-        hostPath: { path: /run/dpumesh, type: DirectoryOrCreate }
-      - name: keyring
-        hostPath: { path: /etc/dpumesh/controller.keys, type: Directory }
+        emptyDir: {}
+      - name: signing
+        secret:
+          secretName: dpumesh-controller-signing
+          defaultMode: 0440
+          items:
+          - { key: active, path: active }
+          - { key: signing-key, path: ${DPUMESH_CONTROLLER_KEY_ID}.key }
+      - name: registration
+        secret:
+          secretName: dpumesh-registration-signing
+          defaultMode: 0440
+          items:
+          - { key: active, path: ${DPUMESH_NODE_NAME}/active }
+          - { key: signing-key, path: ${DPUMESH_NODE_NAME}/${DPUMESH_REGISTRATION_KEY_ID}.key }
+      - name: feed
+        secret:
+          secretName: dpumesh-feed-signing
+          defaultMode: 0440
+          items:
+          - { key: active, path: active }
+          - { key: signing-key, path: ${DPUMESH_FEED_KEY_ID}.key }
+      - name: tls
+        secret: { secretName: dpumesh-controller-tls, defaultMode: 0440 }
+      - name: node-ca
+        configMap: { name: dpumesh-node-ca, defaultMode: 0444 }
       - name: nodes
-        configMap: { name: dpumesh-controller-nodes }
+        configMap: { name: dpumesh-controller-nodes, defaultMode: 0444 }

@@ -1,4 +1,6 @@
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 /* Host DOCA transport engine for control, DMA data, connections, and buffers. */
 
 #include "dmesh_core.h"
@@ -44,7 +46,7 @@
 #include "doca/comch_common.h"
 #include "doca/comch_msgq.h"
 #include "doca/dpa_common.h"
-#include "dmesh_attest.h"
+#include "dmesh_grant.h"
 #include "src/broker/dmesh_broker_internal.h"
 #include "src/broker/dmesh_brokerlink.h"
 #include <dpumesh/dmesh_topology.h>
@@ -1850,7 +1852,8 @@ static doca_error_t wait_for_pod_init_result(dpumesh_ctx_t *ctx) {
     }
 }
 
-static doca_error_t init_control_path(dpumesh_ctx_t *ctx) {
+static doca_error_t init_control_path(dpumesh_ctx_t *ctx,
+                                     const char *manager_socket) {
     doca_error_t result;
 
     /* Initialize challenge publication before connecting: the DPU may submit
@@ -1875,12 +1878,8 @@ static doca_error_t init_control_path(dpumesh_ctx_t *ctx) {
     __atomic_store_n(&ctx->doca_objs.landing_stripes, 0,
                      __ATOMIC_RELAXED);
     __atomic_store_n(&ctx->doca_objs.pod_quiesced, 0, __ATOMIC_RELEASE);
-    const char *attest_socket = getenv("DPUMESH_ATTEST_SOCKET");
-    if (attest_socket == NULL || *attest_socket == '\0')
-        attest_socket = DMESH_DEFAULT_ATTEST_SOCKET;
-
-    /* The process relays the connection-bound nonce; only the node agent reads
-     * SO_PEERCRED and holds the signing key. */
+    /* The broker relays the connection-bound nonce. dpumeshd authenticated the
+     * workload from kernel evidence; the controller signs the grant. */
     struct timespec challenge_start, challenge_now;
     struct timespec challenge_pause = { .tv_sec = 0, .tv_nsec = 10000 };
     clock_gettime(CLOCK_MONOTONIC, &challenge_start);
@@ -1903,13 +1902,13 @@ static doca_error_t init_control_path(dpumesh_ctx_t *ctx) {
     }
 
     struct dmesh_workload_assert_msg assertion;
-    char attest_error[256] = {0};
-    if (dmesh_attest_request_assert(
-            attest_socket, ctx->service_name,
+    char grant_error[256] = {0};
+    if (dmesh_request_workload_grant(
+            manager_socket, ctx->service_name,
             ctx->doca_objs.registration_challenge, &assertion,
-            attest_error, sizeof(attest_error)) != 0) {
-        DOCA_LOG_ERR("Trusted node agent rejected registration: %s",
-                     attest_error);
+            grant_error, sizeof(grant_error)) != 0) {
+        DOCA_LOG_ERR("Host runtime rejected registration: %s",
+                     grant_error);
         return DOCA_ERROR_INITIALIZATION;
     }
     result = client_send_msg(&ctx->doca_objs, (const char *)&assertion,
@@ -2074,11 +2073,9 @@ static int map_broker_buffer(int fd, size_t bytes, void **out)
 
 static int init_broker_datapath(dpumesh_ctx_t *ctx)
 {
-    const char *path = getenv("DPUMESH_ATTEST_SOCKET");
-    if (path == NULL || *path == '\0')
-        path = DMESH_DEFAULT_ATTEST_SOCKET;
     char error[256] = {0};
-    int socket_fd = dmesh_broker_connect(path, ctx->service_name,
+    int socket_fd = dmesh_broker_connect(DMESH_DEFAULT_CHANNEL_SOCKET,
+                                         ctx->service_name,
                                          error, sizeof(error));
     if (socket_fd < 0) {
         DOCA_LOG_ERR("Broker HELLO failed: %s", error);
@@ -2108,6 +2105,16 @@ static int init_broker_datapath(dpumesh_ctx_t *ctx)
         ready.rev_ring_bytes != DMA_REV_RING_BYTES ||
         ready.tx_bytes != expected_bytes || ready.rx_bytes != expected_bytes ||
         ready.pod_id < 0) {
+        DOCA_LOG_ERR("Broker READY contract mismatch: app(K=%d bytes=%zu) "
+                     "broker(K=%u L=%u fds=%u/%d reserved=%u ring=%u/%u "
+                     "rev=%u/%u tx=%lu rx=%lu pod=%d)",
+                     ctx->k_rings, expected_bytes, ready.k_rings,
+                     ready.landing_stripes, ready.fd_count, expected_fds,
+                     ready.reserved, ready.ring_slots,
+                     (unsigned)DMA_RING_SIZE, ready.rev_ring_bytes,
+                     (unsigned)DMA_REV_RING_BYTES,
+                     (unsigned long)ready.tx_bytes,
+                     (unsigned long)ready.rx_bytes, ready.pod_id);
         errno = EBADMSG;
         goto fail;
     }
@@ -2118,25 +2125,35 @@ static int init_broker_datapath(dpumesh_ctx_t *ctx)
     for (int i = 0; i < ready.k_rings; i++, at++) {
         int fd = fds[at];
         fds[at] = -1;
-        if (attach_dma_ring(fd, ready.ring_slots, &ctx->dma_rings[i]) != 0)
+        if (attach_dma_ring(fd, ready.ring_slots, &ctx->dma_rings[i]) != 0) {
+            DOCA_LOG_ERR("Broker DMA ring %d attachment failed: %s", i,
+                         strerror(errno));
             goto fail;
+        }
     }
     for (int i = 0; i < ready.landing_stripes; i++, at++) {
         int fd = fds[at];
         fds[at] = -1;
-        if (attach_rev_ring(fd, &ctx->rev_rings[i]) != 0)
+        if (attach_rev_ring(fd, &ctx->rev_rings[i]) != 0) {
+            DOCA_LOG_ERR("Broker reverse ring %d attachment failed: %s", i,
+                         strerror(errno));
             goto fail;
+        }
     }
     ctx->tx_memfd = fds[at];
     fds[at++] = -1;
     if (map_broker_buffer(ctx->tx_memfd, ready.tx_bytes,
-                          &ctx->dma_buffer) != 0)
+                          &ctx->dma_buffer) != 0) {
+        DOCA_LOG_ERR("Broker TX buffer attachment failed: %s", strerror(errno));
         goto fail;
+    }
     ctx->rx_memfd = fds[at];
     fds[at++] = -1;
     if (map_broker_buffer(ctx->rx_memfd, ready.rx_bytes,
-                          &ctx->rx_dma_buffer) != 0)
+                          &ctx->rx_dma_buffer) != 0) {
+        DOCA_LOG_ERR("Broker RX buffer attachment failed: %s", strerror(errno));
         goto fail;
+    }
 
     ctx->broker_doorbell_efd = fds[at];
     fds[at++] = -1;
@@ -2147,6 +2164,9 @@ static int init_broker_datapath(dpumesh_ctx_t *ctx)
     ctx->service_id = ready.service_id;
     ctx->landing_stripes = ready.landing_stripes;
     if (configure_landing_geometry(ctx, ready.landing_stripes) != DOCA_SUCCESS) {
+        DOCA_LOG_ERR("Broker landing geometry attachment failed: K=%d L=%u "
+                     "rx=%zu", ctx->k_rings, ready.landing_stripes,
+                     ctx->rx_dma_buf_size);
         errno = EBADMSG;
         goto fail;
     }
@@ -2265,9 +2285,8 @@ static int broker_harden_process(void)
     return 0;
 }
 
-static int broker_enter_private_root(void)
+static int broker_enter_private_root(const char *root)
 {
-    const char *root = getenv("DPUMESH_BROKER_PRIVATE_ROOT");
     if (root == NULL || root[0] != '/' || strlen(root) >= PATH_MAX - 16) {
         errno = EINVAL;
         return -1;
@@ -2282,14 +2301,14 @@ static int broker_enter_private_root(void)
         syscall(SYS_pivot_root, root, old_path) != 0 || chdir("/") != 0 ||
         umount2("/.oldroot", MNT_DETACH) != 0 || rmdir("/.oldroot") != 0)
         return -1;
-    unsetenv("DPUMESH_BROKER_PRIVATE_ROOT");
     return 0;
 }
 
 /* Entry point used only by the host-side per-Pod broker executable. It owns
  * the device, Comch client, registered mmaps and their backing memfds. No data
  * bytes cross the Unix socket. */
-int dmesh_broker_run(int socket_fd, const char *agent_socket,
+int dmesh_broker_run(int socket_fd, const char *manager_socket,
+                     const char *private_root,
                      volatile sig_atomic_t *stop_requested)
 {
     int rc = -1;
@@ -2320,15 +2339,12 @@ int dmesh_broker_run(int socket_fd, const char *agent_socket,
         dmesh_broker_send_error(socket_fd, EINVAL, "invalid DMA geometry");
         goto out;
     }
-    if (agent_socket != NULL && *agent_socket != '\0')
-        setenv("DPUMESH_ATTEST_SOCKET", agent_socket, 1);
-
     doca_error_t result = init_doca_device(ctx);
     if (result != DOCA_SUCCESS) {
         dmesh_broker_send_error(socket_fd, EIO, "DOCA device open failed");
         goto out;
     }
-    result = init_control_path(ctx);
+    result = init_control_path(ctx, manager_socket);
     if (result != DOCA_SUCCESS) {
         dmesh_broker_send_error(socket_fd, EACCES, "DPU registration failed");
         goto out;
@@ -2343,7 +2359,7 @@ int dmesh_broker_run(int socket_fd, const char *agent_socket,
         dmesh_broker_send_error(socket_fd, errno, "doorbell eventfd failed");
         goto out;
     }
-    if (broker_enter_private_root() != 0) {
+    if (broker_enter_private_root(private_root) != 0) {
         dmesh_broker_send_error(socket_fd, errno, "broker root isolation failed");
         goto out;
     }
@@ -2457,6 +2473,9 @@ int dmesh_broker_run(int socket_fd, const char *agent_socket,
                 continue;
             }
             if (events[i].events & (EPOLLRDHUP | EPOLLHUP)) {
+                fprintf(stderr, "dmesh_broker: application socket closed "
+                        "events=0x%x pod_id=%d\n", events[i].events,
+                        ctx->pod_id);
                 running = 0;
                 continue;
             }
@@ -3908,10 +3927,9 @@ int dpumesh_resolve(dpumesh_ctx_t *ctx, int by_name, const char *name,
 dmesh_channel_t *dmesh_create_channel(void) {
     dmesh_channel_t *s = (dmesh_channel_t *)calloc(1, sizeof(*s));
     if (!s) return NULL;
-    /* Identity is injected, not declared: $DPUMESH_SERVICE names the
-     * Kubernetes Service this Pod serves; the DPU authenticates the name
-     * against the connection assertion and interns the id itself. Unset =
-     * pure client. */
+    /* $DPUMESH_SERVICE names the Kubernetes Service this Pod serves. The DPU
+     * authenticates it against the controller grant and interns the id. An
+     * unset value creates a pure-client channel. */
     dpumesh_config_t cfg = DPUMESH_CONFIG_DEFAULT;
     if (dpumesh_init(&s->ctx, getenv("DPUMESH_SERVICE"), &cfg) != 0 || !s->ctx) {
         int saved_errno = errno != 0 ? errno : EIO;

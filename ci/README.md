@@ -13,7 +13,7 @@ Every push, on a hosted x86 runner. Under a minute.
 | `contracts-hostfree` | the contracts that need no DOCA and no BlueField (`make test-hostfree`) |
 | `headers-standalone` | the four public headers compile alone as C99 and C++17, and pull in no DOCA |
 | `abi-guard` | a changed public header carries either an `ABI_MAJOR` bump or an explicit `ABI-Impact:` line |
-| `docs-links` | every relative link in the repository's Markdown resolves |
+| `docs-links` | every relative link in active Markdown outside immutable measurement reports resolves |
 
 On a path change only.
 
@@ -41,7 +41,7 @@ call is missing.
 | | |
 |---|---|
 | `check-abi-bump.sh` | the ABI decision, called by `abi-guard` |
-| `check-doc-links.sh` | relative links, called by `docs-links` |
+| `check-doc-links.sh` | active-document relative links, called by `docs-links` |
 | `check-submodule-pin.sh` | submodule pin reachability, called by `submodule-watch` |
 | `dpu-state.sh` | what the DPU and the deployed campaign currently are |
 | `health-check.sh` | does the campaign answer; prints one JSON record |
@@ -81,8 +81,9 @@ wedged rather than occupied is silent in exactly the same way, and what separate
 them is that a wedged one is still silent the next night. A run of consecutive
 `busy` records is the signal to go and look.
 
-Performance campaigns are run by hand from `bench/suite/` by someone who chose
-the configuration. `ci/dpu-state.sh` says what that configuration currently is.
+Performance campaigns are run by hand with `bench/bench.sh` by someone who
+chose the configuration. `ci/dpu-state.sh` reports the live DPU geometry and
+deployed Pod-set identity recorded with that run.
 
 ## The rapids4 runner
 
@@ -111,8 +112,8 @@ Constraints on anything added to those jobs:
   keeps a stale object from turning a broken build green is `actions/checkout`,
   which cleans the tree every run. If a job passes or fails inexplicably, clear
   `~/actions-runner/_work/DPUmesh` before believing it.
-- **No deploy from CI.** `bench/bench.sh deploy` rebuilds the DPU and restarts
-  every Pod; it stays a deliberate act at a terminal.
+- **No deploy from CI.** `bench/native_deploy.sh all` rebuilds the DPU, host
+  runtime, controller and workloads; it stays a deliberate terminal operation.
 - **The DPU build stays out.** `doca/meson.build` is compiled on the BlueField
   over ssh, which would put `DPU_PASS` into the runner environment.
 - **The runner service does not read `~/.bashrc`.** A job sees only what the
@@ -120,18 +121,16 @@ Constraints on anything added to those jobs:
 
 ## Hardware deployment profile
 
-The self-hosted node uses the repository deployment profile:
+The self-hosted node uses the repository's one-node deployment profile:
 
 ```sh
-BENCH_NUMA_POLICY=local BENCH_DEPLOY_SCOPE=all bash bench/bench.sh deploy
-BENCH_NUMA_POLICY=local bash bench/bench.sh pin fair
+./bench/native_deploy.sh all
+./bench/native_deploy.sh status
 ci/dpu-state.sh
 ```
 
-The profile is `N/K/A/L=32/8/8/8` with a Linkerd runtime on every ARM worker.
-`ci/dpu-state.sh` records the active geometry with each measurement.
-
-`BENCH_DEPLOY_SCOPE` is `all`, `native`, `preload`, or `grpc`. Each scope uses
-the same Host↔DPU DMA path and embedded Linkerd proxy. Set
-`DPUMESH_L7_SVC=<ns>/<service>` for HTTP/1 or HTTP/2 and
-`DPUMESH_L7_OPAQUE_SVC=<ns>/<service>` for opaque TCP.
+The profile is `N/K/A/L=32/8/8/8`, with two allocatable native channels and
+empty L7 Service lists. `ci/dpu-state.sh` reads the DPU's startup banner and
+records effective geometry, L7 mode, load-balancer mode, deployed Pod count and
+client CPU affinity. `ci/health-check.sh` uses `bench.sh ping` and one bounded
+native `point`; it does not deploy, restart or modify the system.

@@ -1,0 +1,72 @@
+[Unit]
+Description=DPUmesh host runtime and Kubernetes Device Plugin
+After=network-online.target kubelet.service
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=root
+Group=root
+EnvironmentFile=/etc/dpumesh/dpumeshd.env
+ExecStart=/opt/dpumesh/venv/bin/python -m node.dpumeshd \
+  --node-name=${DPUMESH_NODE_NAME} \
+  --slots=${DPUMESH_SLOTS} \
+  --cgroup-root=/sys/fs/cgroup/system.slice/dpumeshd.service \
+  --controller-url=${DPUMESH_CONTROLLER_URL} \
+  --controller-ca=/etc/dpumesh/tls/controller-ca.crt \
+  --controller-cert=/etc/dpumesh/tls/node.crt \
+  --controller-key=/etc/dpumesh/tls/node.key \
+  --dpu-feed-host=${DPUMESH_DPU_FEED_HOST} \
+  --dpu-feed-port=${DPUMESH_DPU_FEED_PORT} \
+  --node-rdma-addr=${DPUMESH_NODE_RDMA_ADDR} \
+  --pci-addr=${DPUMESH_PCI_ADDR} \
+  --rings-per-pod=${DPUMESH_RINGS_PER_POD} \
+  --worker-cpu-max=${DPUMESH_WORKER_CPU_MAX} \
+  --worker-memory-high=${DPUMESH_WORKER_MEMORY_HIGH} \
+  --worker-memory-max=${DPUMESH_WORKER_MEMORY_MAX} \
+  --worker-pids-max=${DPUMESH_WORKER_PIDS_MAX}
+WorkingDirectory=/opt/dpumesh/python
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=10s
+KillMode=control-group
+Delegate=yes
+TasksMax=infinity
+LimitMEMLOCK=infinity
+UMask=0077
+
+# The manager needs namespace/cgroup setup and the DOCA device. It receives no
+# Kubernetes credential and cannot write the immutable package/config trees.
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_IPC_LOCK CAP_KILL CAP_SETGID CAP_SETPCAP CAP_SETUID CAP_SYS_ADMIN CAP_SYS_RESOURCE
+AmbientCapabilities=
+NoNewPrivileges=no
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=no
+ProtectKernelTunables=no
+ProtectControlGroups=no
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/run/dpumesh /var/lib/kubelet/device-plugins
+DevicePolicy=closed
+DeviceAllow=/dev/infiniband/rdma_cm rw
+DeviceAllow=/dev/infiniband/uverbs0 rw
+DeviceAllow=/dev/infiniband/uverbs1 rw
+DeviceAllow=/dev/vfio/vfio rw
+
+# This set must be inside kubelet reservedSystemCPUs. The install receipt checks
+# the exact node configuration before the service is enabled.
+AllowedCPUs=0-2
+CPUQuota=100%
+CPUAccounting=yes
+MemoryAccounting=yes
+MemoryMax=2560M
+
+[Install]
+WantedBy=multi-user.target

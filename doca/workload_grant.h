@@ -23,14 +23,16 @@ enum dmesh_grant_result {
     DMESH_GRANT_BAD_NONCE,
     DMESH_GRANT_BAD_SIG,
     DMESH_GRANT_REPLAY,
+    DMESH_GRANT_WRONG_CHANNEL,
+    DMESH_GRANT_WRONG_INCARNATION,
     DMESH_GRANT_INTERNAL,
 };
 
 const char *dmesh_grant_result_name(enum dmesh_grant_result result);
 
 /* Authoritative feeds are signed by the feed keyring (DPUMESH_FEED_KEY_DIR),
- * which is disjoint from the registration keyring so a feed publisher holds no
- * key that can mint identity. The envelope is a final line
+ * which is disjoint from the registration keyring so each signature has one
+ * protocol role. The envelope is a final line
  * `signature=<key-id>,<64 hex>`; the MAC covers every byte before it. */
 enum dmesh_feed_result {
     DMESH_FEED_OK = 0,
@@ -74,6 +76,8 @@ int dmesh_registration_consume_grant(struct objects *objs,
 
 void dmesh_grant_put_u64_le(uint8_t out[8], uint64_t value);
 uint64_t dmesh_grant_get_u64_le(const uint8_t in[8]);
+void dmesh_grant_put_u32_le(uint8_t out[4], uint32_t value);
+uint32_t dmesh_grant_get_u32_le(const uint8_t in[4]);
 
 /* Key files are either 32 raw bytes or 64 lowercase/uppercase hexadecimal
  * digits (an optional final newline is accepted). They must be regular,
@@ -86,9 +90,9 @@ int dmesh_grant_load_key(const char *path, uint8_t key[DMESH_GRANT_KEY_SIZE],
 int dmesh_assert_public_key(const uint8_t seed[DMESH_GRANT_KEY_SIZE],
                             uint8_t public_key[DMESH_GRANT_KEY_SIZE]);
 
-/* Used by unit tests to mint assertions. The caller must fill a canonical v2
+/* Used by unit tests to mint assertions. The caller must fill a canonical v3
  * message before signing; `seed` is the node's raw Ed25519 private key. */
-int dmesh_assert_sign_v2(struct dmesh_workload_assert_msg *assertion,
+int dmesh_assert_sign_v3(struct dmesh_workload_assert_msg *assertion,
                          const uint8_t seed[DMESH_GRANT_KEY_SIZE]);
 
 /* Claims a successful verification hands to the registration. The Service pair
@@ -101,6 +105,9 @@ struct dmesh_assert_claims {
     char service_account[DMESH_K8S_NAME_MAX];
     char service_name[DMESH_SVC_NAME_MAX];
     char pod_ip[DMESH_POD_IP_MAX];
+    uint8_t daemon_incarnation[DMESH_DAEMON_INCARNATION_SIZE];
+    uint32_t channel_slot;
+    uint64_t channel_generation;
 };
 
 /* Verify an assertion for one exact connection challenge. `public_key` is the
@@ -111,8 +118,9 @@ struct dmesh_assert_claims {
  * assertion, so it cannot present another node's. Replay of assert_id is the
  * caller's check, after this one succeeds. */
 enum dmesh_grant_result
-dmesh_assert_verify_v2(const struct dmesh_workload_assert_msg *assertion,
+dmesh_assert_verify_v3(const struct dmesh_workload_assert_msg *assertion,
                        const uint8_t public_key[DMESH_GRANT_KEY_SIZE],
+                       const char *expected_cluster,
                        const char *expected_node,
                        const uint8_t expected_nonce[DMESH_REG_NONCE_SIZE],
                        uint64_t now_sec,

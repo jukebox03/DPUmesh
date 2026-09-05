@@ -93,13 +93,29 @@ static int
 pod_uid_text(const char *text, size_t cap)
 {
     size_t len;
-    if (!canonical_text(text, cap, &len) || len < 8)
+    if (!canonical_text(text, cap, &len) || len != 36)
         return 0;
     for (size_t i = 0; i < len; i++) {
         unsigned char c = (unsigned char)text[i];
-        if (!((c >= 'a' && c <= 'f') || (c >= '0' && c <= '9') || c == '-'))
+        int hyphen = i == 8 || i == 13 || i == 18 || i == 23;
+        if ((hyphen && c != '-') ||
+            (!hyphen && !((c >= 'a' && c <= 'f') ||
+                           (c >= '0' && c <= '9'))))
             return 0;
     }
+    return 1;
+}
+
+static int
+container_id_text(const char *text, size_t cap)
+{
+    size_t len;
+    if (!canonical_text(text, cap, &len) || len != 64)
+        return 0;
+    for (size_t i = 0; i < len; i++)
+        if (!((text[i] >= '0' && text[i] <= '9') ||
+              (text[i] >= 'a' && text[i] <= 'f')))
+            return 0;
     return 1;
 }
 
@@ -158,13 +174,22 @@ validate_canonical(const struct dmesh_workload_assert_msg *assertion)
     if (assertion->flags != 0 || assertion->reserved != 0 ||
         all_zero(assertion->assert_id, sizeof(assertion->assert_id)) ||
         all_zero(assertion->nonce, sizeof(assertion->nonce)) ||
+        all_zero(assertion->daemon_incarnation,
+                 sizeof(assertion->daemon_incarnation)) ||
+        dmesh_grant_get_u64_le(assertion->channel_generation_le) == 0 ||
         !identifier_text(assertion->key_id, sizeof(assertion->key_id)) ||
+        !dns_subdomain(assertion->cluster_id,
+                       sizeof(assertion->cluster_id), 63) ||
         !pod_uid_text(assertion->pod_uid, sizeof(assertion->pod_uid)) ||
         !dns_subdomain(assertion->namespace_name,
                        sizeof(assertion->namespace_name), 63) ||
         !dns_subdomain(assertion->pod_name, sizeof(assertion->pod_name), 253) ||
         !dns_subdomain(assertion->service_account,
                        sizeof(assertion->service_account), 253) ||
+        !dns_subdomain(assertion->container_name,
+                       sizeof(assertion->container_name), 253) ||
+        !container_id_text(assertion->container_id,
+                           sizeof(assertion->container_id)) ||
         !dns_subdomain(assertion->node_name,
                        sizeof(assertion->node_name), 253) ||
         !service_name_text(assertion->service_name,
@@ -190,6 +215,8 @@ dmesh_grant_result_name(enum dmesh_grant_result result)
     case DMESH_GRANT_BAD_NONCE: return "bad-nonce";
     case DMESH_GRANT_BAD_SIG: return "bad-sig";
     case DMESH_GRANT_REPLAY: return "replay";
+    case DMESH_GRANT_WRONG_CHANNEL: return "wrong-channel";
+    case DMESH_GRANT_WRONG_INCARNATION: return "wrong-incarnation";
     case DMESH_GRANT_INTERNAL: return "internal";
     }
     return "unknown";
@@ -538,6 +565,22 @@ dmesh_grant_get_u64_le(const uint8_t in[8])
     return v;
 }
 
+void
+dmesh_grant_put_u32_le(uint8_t out[4], uint32_t value)
+{
+    for (size_t i = 0; i < 4; i++)
+        out[i] = (uint8_t)(value >> (8u * i));
+}
+
+uint32_t
+dmesh_grant_get_u32_le(const uint8_t in[4])
+{
+    uint32_t value = 0;
+    for (size_t i = 0; i < 4; i++)
+        value |= (uint32_t)in[i] << (8u * i);
+    return value;
+}
+
 static int
 hex_nibble(unsigned char c)
 {
@@ -640,7 +683,7 @@ dmesh_assert_public_key(const uint8_t seed[DMESH_GRANT_KEY_SIZE],
 }
 
 int
-dmesh_assert_sign_v2(struct dmesh_workload_assert_msg *assertion,
+dmesh_assert_sign_v3(struct dmesh_workload_assert_msg *assertion,
                      const uint8_t seed[DMESH_GRANT_KEY_SIZE])
 {
     int rc = -1;
@@ -667,8 +710,9 @@ dmesh_assert_sign_v2(struct dmesh_workload_assert_msg *assertion,
 }
 
 enum dmesh_grant_result
-dmesh_assert_verify_v2(const struct dmesh_workload_assert_msg *assertion,
+dmesh_assert_verify_v3(const struct dmesh_workload_assert_msg *assertion,
                        const uint8_t public_key[DMESH_GRANT_KEY_SIZE],
+                       const char *expected_cluster,
                        const char *expected_node,
                        const uint8_t expected_nonce[DMESH_REG_NONCE_SIZE],
                        uint64_t now_sec,
@@ -677,7 +721,9 @@ dmesh_assert_verify_v2(const struct dmesh_workload_assert_msg *assertion,
     enum dmesh_grant_result result = validate_canonical(assertion);
     if (result != DMESH_GRANT_OK)
         return result;
-    if (expected_node == NULL || *expected_node == '\0' ||
+    if (expected_cluster == NULL || *expected_cluster == '\0' ||
+        strcmp(assertion->cluster_id, expected_cluster) != 0 ||
+        expected_node == NULL || *expected_node == '\0' ||
         strcmp(assertion->node_name, expected_node) != 0)
         return DMESH_GRANT_WRONG_NODE;
 
@@ -727,5 +773,10 @@ dmesh_assert_verify_v2(const struct dmesh_workload_assert_msg *assertion,
     memcpy(claims->service_name, assertion->service_name,
            sizeof(claims->service_name));
     memcpy(claims->pod_ip, assertion->pod_ip, sizeof(claims->pod_ip));
+    memcpy(claims->daemon_incarnation, assertion->daemon_incarnation,
+           sizeof(claims->daemon_incarnation));
+    claims->channel_slot = dmesh_grant_get_u32_le(assertion->channel_slot_le);
+    claims->channel_generation =
+        dmesh_grant_get_u64_le(assertion->channel_generation_le);
     return DMESH_GRANT_OK;
 }

@@ -18,6 +18,7 @@
 #include <doca_buf_array.h>
 #include <doca_mmap.h>
 #include <doca_log.h>
+#include <openssl/crypto.h>
 #include <openssl/rand.h>
 
 DOCA_LOG_REGISTER(COMCH_SERVER);
@@ -59,6 +60,50 @@ static int resolve_dns_label(const char *text, size_t len)
 			return 0;
 	}
 	return 1;
+}
+
+static int bytes_are_zero(const uint8_t *bytes, size_t length)
+{
+	uint8_t value = 0;
+	for (size_t i = 0; i < length; i++)
+		value |= bytes[i];
+	return value == 0;
+}
+
+/* The controller signs allocation lifecycle claims supplied by the trusted
+ * node runtime. Keep one incarnation fence and one monotonic generation per
+ * advertised slot. A new daemon cannot overlap registrations from the old
+ * daemon, and a slot generation can never be replayed even with a fresh nonce. */
+static enum dmesh_grant_result
+grant_lifecycle_accept(struct objects *objs, struct pod_state *current,
+			 const struct dmesh_assert_claims *claims)
+{
+	if (claims->channel_slot >= MAX_PODS)
+		return DMESH_GRANT_WRONG_CHANNEL;
+	if (bytes_are_zero(objs->active_daemon_incarnation,
+	                   sizeof(objs->active_daemon_incarnation)) ||
+	    CRYPTO_memcmp(objs->active_daemon_incarnation,
+	                  claims->daemon_incarnation,
+	                  sizeof(objs->active_daemon_incarnation)) != 0) {
+		for (int i = 0; i < __atomic_load_n(&objs->num_pods,
+		                                      __ATOMIC_ACQUIRE); i++) {
+			struct pod_state *other = &objs->pods[i];
+			if (other != current && other->connection != NULL &&
+			    other->registration_grant_verified)
+				return DMESH_GRANT_WRONG_INCARNATION;
+		}
+		memcpy(objs->active_daemon_incarnation,
+		       claims->daemon_incarnation,
+		       sizeof(objs->active_daemon_incarnation));
+		memset(objs->channel_generations, 0,
+		       sizeof(objs->channel_generations));
+	}
+	if (claims->channel_generation <=
+	    objs->channel_generations[claims->channel_slot])
+		return DMESH_GRANT_WRONG_CHANNEL;
+	objs->channel_generations[claims->channel_slot] =
+		claims->channel_generation;
+	return DMESH_GRANT_OK;
 }
 
 int dmesh_resolve_service_key(const char *namespace_name, const char *query,
@@ -189,17 +234,17 @@ static void server_message_recv_callback(struct doca_comch_event_msg_recv *event
 		}
 
 		struct dmesh_assert_claims claims;
-		/* The held generation is authoritative for this node's agent key;
+		/* The held generation is authoritative for this node's grant key;
 		 * the installed keyring is only the bring-up fallback for a DPU
 		 * that has not adopted any generation yet. */
 		const uint8_t *node_public_key = NULL;
-		if (!dmesh_topology_node_key(objs, objs->node_name,
+		if (!dmesh_topology_grant_key(objs, objs->node_name,
 		                             assertion->key_id, &node_public_key))
 			node_public_key =
 				dmesh_registration_find_key(objs, assertion->key_id);
 		enum dmesh_grant_result vr = node_public_key == NULL ?
-			DMESH_GRANT_BAD_KEY_ID : dmesh_assert_verify_v2(
-				assertion, node_public_key, objs->node_name,
+			DMESH_GRANT_BAD_KEY_ID : dmesh_assert_verify_v3(
+				assertion, node_public_key, objs->cluster_id, objs->node_name,
 				pod->registration_nonce, (uint64_t)time(NULL),
 				&claims);
 		if (vr == DMESH_GRANT_OK &&
@@ -207,6 +252,8 @@ static void server_message_recv_callback(struct doca_comch_event_msg_recv *event
 			vr = DMESH_GRANT_REPLAY;
 			objs->registration_grants_replayed++;
 		}
+		if (vr == DMESH_GRANT_OK)
+			vr = grant_lifecycle_accept(objs, pod, &claims);
 		if (vr != DMESH_GRANT_OK) {
 			objs->registration_grants_rejected++;
 			l7_control_event("assert", dmesh_grant_result_name(vr));

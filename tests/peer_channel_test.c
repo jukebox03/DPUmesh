@@ -961,7 +961,7 @@ static void test_simultaneous_open_converges(void)
         &table, NODE_B, 92, &wire.object, KEY_B, &reason);
     assert(accepted == outbound && accepted->state == DMESH_PEER_OPEN);
     assert(!accepted->initiated_local && accepted->incarnation == 92);
-    assert(wire.closes == 1);                  /* superseded local transport */
+    assert(wire.closes == 1);                  /* replaced local transport */
     dmesh_peer_table_fini(&table);
 }
 

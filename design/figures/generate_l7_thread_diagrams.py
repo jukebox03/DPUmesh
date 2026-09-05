@@ -2,9 +2,8 @@
 """Generate the DPUmesh L7 thread-model diagrams in PNG and PDF form."""
 
 from diagram_kit import (  # noqa: F401  (palette names read by the figures)
-    BLACK, BLUE, BLUE_BG, GRAY, GRAY_BG, GREEN, GREEN_BG, ORANGE, ORANGE_BG,
+    BLUE, BLUE_BG, GRAY, GRAY_BG, GREEN, GREEN_BG, ORANGE, ORANGE_BG,
     PURPLE, PURPLE_BG, RED, RED_BG,
-    Style,
     line,
     save,
     setup_figure,
@@ -609,7 +608,7 @@ def generate_linkerd_driven():
         4.85,
         1.65,
         "Control-plane clients",
-        ("deployed destination, identity and policy", "node-agent TCP relay", "service target → backend connector"),
+        ("configured destination, identity and policy", "DPU-reachable control endpoints", "service target → backend connector"),
         edge=GREEN,
         face=GREEN_BG,
     )

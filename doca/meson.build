@@ -1,7 +1,7 @@
 project('dpumesh_dpu', 'c',
   version : '1.0.0',
   # ARM control-plane binaries use optimized code with debug symbols.
-  default_options : ['buildtype=debugoptimized'],
+  default_options : ['buildtype=debugoptimized', 'warning_level=2'],
   meson_version : '>=0.61.2'
 )
 

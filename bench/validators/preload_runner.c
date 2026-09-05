@@ -72,8 +72,8 @@ int main(void) {
     if (!svc_ip || !*svc_ip)
         svc_ip = env_or("PRELOAD_DPUMESH_SERVICE_HOST", "10.96.0.15");
 
-    /* echo server (persistent): identity + listen port injected via env; the
-     * name is authenticated by the node agent and interned by the DPU. */
+    /* echo server (persistent): identity + listen port supplied via env; the
+     * name is authorized by the controller and interned by the DPU. */
     const char *echo_env[][2] = {
         { "LD_PRELOAD", lib },
         { "DPUMESH_SERVICE", svc_name },

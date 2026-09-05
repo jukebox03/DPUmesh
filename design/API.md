@@ -19,6 +19,11 @@ Create objects in channel → EQ → QP order and destroy them in reverse order.
 Destroying an EQ with live QPs, or a channel with live EQs, returns `EBUSY`
 without partially tearing the object down.
 
+Pointer-returning constructors report failure as `NULL` with `errno`. Lifecycle
+and transmit operations return zero on success and `-1` with `errno` on failure;
+the property and diagnostic calls are exceptions described in their sections.
+Destroying a null channel, EQ or QP succeeds as a no-op.
+
 An EQ has exactly one consumer. A QP's transmit calls form one serial stream
 that may run on a different thread than its EQ's consumer — the POSIX shim
 transmits from application threads, the gRPC adapter from endpoint executors —
@@ -31,12 +36,80 @@ The public surface consists of nineteen calls:
 
 | Group | Calls |
 |---|---|
-| Channel | `create_channel`, `destroy_channel`, `pod_id`, `msg_max`, `post_max` |
-| EQ | `create_eq`, `destroy_eq`, `eq_fd`, `eq_next_deadline_ns` |
-| QP | `create_qp`, `destroy_qp`, `abort_qp` |
-| TX | `alloc`, `post_send`, `flush`, `tx_inflight` |
-| Events | `poll_eq`, `release_rx_buffer` |
-| Diagnostics | `get_tx_stats` |
+| Channel | `dmesh_create_channel`, `dmesh_destroy_channel`, `dmesh_pod_id`, `dmesh_msg_max`, `dmesh_post_max` |
+| EQ | `dmesh_create_eq`, `dmesh_destroy_eq`, `dmesh_eq_fd`, `dmesh_eq_next_deadline_ns` |
+| QP | `dmesh_create_qp`, `dmesh_destroy_qp`, `dmesh_abort_qp` |
+| TX | `dmesh_alloc`, `dmesh_post_send`, `dmesh_flush`, `dmesh_tx_inflight` |
+| Events | `dmesh_poll_eq`, `dmesh_release_rx_buffer` |
+| Diagnostics | `dmesh_get_tx_stats` |
+
+## Using the API
+
+Build the library with `make lib`. Consumers include `<dpumesh/dmesh.h>` and
+link the unversioned development name; the resulting executable records
+`libdpumesh.so.5` as its runtime dependency.
+
+```bash
+cc -Iinclude client.c -Lbuild/lib -ldpumesh -o client
+LD_LIBRARY_PATH=build/lib ./client
+```
+
+The following lifecycle is the smallest blocking-style client shape. It shows
+object ownership and RX-credit release; a real loop handles every event type as
+specified in §5 and parks an `EAGAIN` send until `DMESH_EVENT_TX_READY`.
+
+```c
+#include <dpumesh/dmesh.h>
+#include <errno.h>
+#include <string.h>
+
+dmesh_channel_t *channel = dmesh_create_channel();
+dmesh_eq_t *eq = channel ? dmesh_create_eq(channel) : NULL;
+dmesh_qp_t *qp = eq ? dmesh_create_qp(eq, "echo") : NULL;
+if (!qp)
+    handle_setup_error(errno);
+
+const char request[] = "ping";
+void *tx = dmesh_alloc(qp, sizeof(request));
+if (!tx && errno == EAGAIN)          /* retry only after TX_READY */
+    tx = wait_ready_and_alloc(eq, qp, sizeof(request));
+if (!tx)
+    handle_send_error(errno);
+memcpy(tx, request, sizeof(request));
+if (dmesh_post_send(qp, tx, sizeof(request)) != 0 ||
+    dmesh_flush(qp) != 0)
+    handle_send_error(errno);
+
+int peer_eof = 0;
+while (!peer_eof) {
+    wait_for_eq_fd(dmesh_eq_fd(eq));
+    dmesh_event_t events[32];
+    int count = dmesh_poll_eq(eq, events, 32);
+    if (count < 0)
+        handle_poll_error(errno);
+    for (int i = 0; i < count; ++i) {
+        if (events[i].type == DMESH_EVENT_RECV) {
+            consume(events[i].buf, events[i].len);
+            dmesh_release_rx_buffer(channel, &events[i]);
+        } else if (events[i].type == DMESH_EVENT_RECV_FIN) {
+            peer_eof = 1;
+        } else {
+            dispatch_control_event(&events[i]);
+        }
+    }                                   /* finish batch before destroying qp */
+}
+
+dmesh_destroy_qp(qp);
+dmesh_destroy_eq(eq);
+dmesh_destroy_channel(channel);
+```
+
+For a server, set `DPUMESH_SERVICE` in the PodSpec and create the channel and
+EQ without a client QP. Each `DMESH_EVENT_CONN_REQ` supplies an accepted QP;
+store per-connection state in `event.qp->user_data` and process it through the
+same send, receive and close calls. The controller grants the declared Service
+only when its latest Kubernetes snapshot contains the Pod as a ready selected
+endpoint.
 
 ## 2. Channel lifecycle
 
@@ -58,9 +131,9 @@ These steps run in the Pod's broker, which owns the DOCA objects
 
 A pod id — and the compact service id `POD_ASSIGNED` carries beside it — is a
 node-local transport identifier for one node's slot tables, never workload
-identity. Identity is the Service *name*, authenticated by the registration
-assertion and resolved against the cluster topology generation; the numbers
-are the DPU's own interning of it and travel only on this node's wire.
+identity. Identity is the Service *name*, authenticated by WorkloadGrant v3
+and resolved against the cluster topology generation; the numbers are the
+DPU's own interning of it and travel only on this node's wire.
 
 Registration is idempotent. While assignment or readiness is pending, the host
 replays `POD_REGISTER` every 100 ms; the DPU returns the same pod id and replays
@@ -80,6 +153,26 @@ does not poll registration state or emit periodic control messages. Unregister i
 not required for data transfer; it is the graceful remote-reclaim barrier when
 the channel is destroyed.
 
+Three accessors expose immutable properties of a live channel:
+
+| Call | Result |
+|---|---|
+| `dmesh_pod_id(channel)` | the DPU-assigned, node-local pod id for this channel |
+| `dmesh_msg_max(channel)` | maximum bytes in one `DMESH_EVENT_RECV` fragment |
+| `dmesh_post_max(channel)` | maximum `len` accepted by one `dmesh_alloc` reservation |
+
+The two size limits describe different boundaries. One allocation may be larger
+than an RX fragment and consequently arrive as several ordered `RECV` events.
+All three calls require a successfully created channel and remain constant until
+`dmesh_destroy_channel()` invalidates it.
+
+`dmesh_create_eq(channel)` creates the queue and its optional readiness eventfd.
+A null channel fails with `EINVAL`, allocation failure with `ENOMEM`, and the
+65th live EQ on one channel with `EMFILE`. Eventfd creation failure does not
+invalidate the EQ: polling remains available and `dmesh_eq_fd()` returns `-1`.
+`dmesh_destroy_eq()` returns `EBUSY` while any accepted or client QP remains
+attached; otherwise it closes the eventfd and invalidates the EQ.
+
 ## 3. Connections and naming
 
 `dmesh_create_qp(eq, service_name)` resolves a Kubernetes Service name — `"name"`
@@ -91,14 +184,21 @@ what causes DPU routing and backend connection creation. Inbound connections
 arrive as `DMESH_EVENT_CONN_REQ`; their `event.qp` is already usable and permanently
 bound to the EQ that accepted it.
 
-Every QP is one reliable full-duplex byte stream through the DPU-hosted Linkerd
-proxy. What the proxy does with it is the Service's deployed protocol treatment,
-not the calling surface's: an opaque Service stays pinned to the backend its
-first bytes selected, and a protocol-aware Service routes each request through a
-session-local HTTP/1, HTTP/2 or gRPC stack and may reach a different endpoint
-with each one. Either way the application receives one ordered sequence of byte
-fragments and owns framing and request correlation. DPUmesh exposes no numeric
-service, backend, proxy-session, or upstream id through this API.
+A null EQ, null name, empty name, or name of 128 bytes or more fails with
+`EINVAL`. A name absent from the held mesh generation fails with `ENOENT`; no
+usable generation fails with retryable `EAGAIN`; and local QP/port bookkeeping
+exhaustion fails with `ENOMEM`. The call does not create a partially visible QP
+on any failure.
+
+Every QP is one reliable full-duplex byte stream through the DPU. The Service's
+configured data-plane mode, not this calling surface, decides its treatment.
+The native L4 path pins a connection to its resolved backend. An opaque L7
+Service stays pinned to the backend its first bytes select, while a
+protocol-aware Service routes requests through a session-local HTTP/1, HTTP/2
+or gRPC stack and may select a different endpoint for each request. In every
+mode the application receives one ordered sequence of byte fragments and owns
+framing and request correlation. DPUmesh exposes no numeric Service, backend,
+proxy-session or upstream id through this API.
 
 `dmesh_destroy_qp()` is graceful close: it submits the buffered tail, waits until
 the DPU has released every submitted byte, and then sends FIN. If submission or
@@ -211,7 +311,8 @@ flight also arms a tail that is still retained, so a stream that stops writing
 still reaches its deadline. Explicit flush, allocation pressure, and graceful
 close force it.
 
-`dmesh_eq_next_deadline_ns()` reports when the loop must next run. A channel
+`dmesh_eq_next_deadline_ns()` returns the relative nanoseconds the loop may wait:
+zero means a tail is due, and `-1` means no tail is retained or the EQ is null. A channel
 timer writes the readiness fd of an EQ whose earliest tail has come due, at most
 once per tick per EQ; it touches no transmit state and parks while no tail is
 retained.
@@ -220,6 +321,17 @@ A synchronous submission fault is returned by `dmesh_post_send()` or
 `dmesh_flush()`. A deferred tail fault latches a sticky error on the QP and
 emits one `DMESH_EVENT_TX_ERROR`; subsequent TX calls fail with that error until
 the QP is destroyed.
+
+`dmesh_get_tx_stats(channel, out)` copies cumulative channel-wide allocation
+counters into `dmesh_tx_stats_t`. `pool_grabs` and `pool_returns` count transfers
+between QPs and the shared block pool; `recycle_hits` counts QP-local block
+reuse; `grow_waits` counts reservations refused by a QP window or the shared
+pool; and `block_pads` counts reservations advanced to the next block because
+the current tail was too short. The counters are diagnostics, may change while
+they are read, and do not form a mutually atomic snapshot. Passing a null
+channel or output pointer performs no write. Taking two samples and subtracting
+each field yields activity over an interval; wraparound follows unsigned
+arithmetic.
 
 ## 5. RX and EQ notification
 
@@ -359,6 +471,7 @@ Adapter-internal ownership and threading are specified in
 ## 7. Explicit limits
 
 - No arbitrary memory registration, rkey, one-sided READ, or one-sided WRITE.
+- One channel admits at most 64 live EQs.
 - No application-visible send completion; protocol ACKs reclaim internal TX
   capacity.
 - A name the held generation does not define does not resolve, and a Service
@@ -368,7 +481,7 @@ Adapter-internal ownership and threading are specified in
   restarting the process.
 - The preload shim leaves the mesh only on the DPU's own not-meshed answer. A
   channel that cannot come up or a resolve with no answer refuses the connect
-  (`ENETUNREACH`/`EHOSTUNREACH`) instead of falling back to kernel TCP;
-  `DPUMESH_TCP_FALLBACK=1` restores the fallback for comparison arms only.
-- Every Service terminates in the DPU-hosted Linkerd proxy, protocol-aware or
-  opaque; unassigned L4 forwarding is not a supported deployment topology.
+  (`ENETUNREACH`/`EHOSTUNREACH`) instead of falling back to kernel TCP. There
+  is no runtime switch that restores that fallback.
+- Services named by `DPUMESH_L7_SVC` or `DPUMESH_L7_OPAQUE_SVC` enter the
+  corresponding Linkerd path. Other Services use the native L4 path.

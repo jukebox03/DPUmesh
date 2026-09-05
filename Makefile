@@ -15,13 +15,12 @@ BUILD   := build
 LIBDIR  := $(BUILD)/lib
 BINDIR  := $(BUILD)/bin
 TESTDIR := $(BUILD)/test
+DPUMESHD_PYTHON ?= python3
 
 # -Iinclude → <dpumesh/...> ; -I. → the root-relative "doca/..." and "src/..." includes
 # -Ilinkerd/include → <dmesh_l7.h>, the L7 adapter contract the proxy compiles against
-# -Wextra minus the categories that only fire on deliberate patterns: callback
-# parameters fixed by DOCA's signatures, ring index arithmetic, and port-table
-# bound checks a uint16_t index already satisfies.
-WARNFLAGS := -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare
+# Compile every host component with the full standard warning set.
+WARNFLAGS := -Wall -Wextra
 CFLAGS  := -O2 -g $(WARNFLAGS) -fPIC -DDOCA_ALLOW_EXPERIMENTAL_API -Iinclude -I. -Ilinkerd/include $(DOCA_CFLAGS)
 
 # Runtime search paths. In a container everything is copied to /usr/local/lib;
@@ -35,7 +34,7 @@ RPATHS  := -Wl,-rpath,/usr/local/lib \
 LIB_SRCS := \
 	src/core/dmesh_core.c \
 	src/facade/dmesh_api.c \
-	src/core/dmesh_attest.c \
+	src/core/dmesh_grant.c \
 	src/broker/dmesh_brokerlink.c \
 	src/core/dmesh_resolve.c \
 	doca/common.c \
@@ -64,7 +63,7 @@ LIB_LINK := $(LIBDIR)/libdpumesh.so
 # ---- consumers of the library ------------------------------------------------
 # dmesh_* API clients (socket/epoll façade over dmesh.h)
 DMESH_BINS := bench_dpumesh echo_dpumesh loopback_dpumesh verbs_dpumesh \
-	hello_dpumesh hello_dpumesh_server dmesh_broker_probe
+	hello_dpumesh hello_dpumesh_server
 bench_dpumesh_SRC    := bench/apps/bench_dpumesh.c
 bench_dpumesh_LIBS   := -lm
 echo_dpumesh_SRC     := bench/apps/echo_dpumesh.c
@@ -72,7 +71,6 @@ loopback_dpumesh_SRC := bench/validators/loopback_dpumesh.c
 verbs_dpumesh_SRC    := bench/validators/verbs_dpumesh.c
 hello_dpumesh_SRC    := bench/examples/hello_dpumesh.c
 hello_dpumesh_server_SRC := bench/examples/hello_dpumesh_server.c
-dmesh_broker_probe_SRC := bench/validators/dmesh_broker_probe.c
 
 # LD_PRELOAD shim (interposes libc sockets → dmesh) + its vanilla-TCP validators
 PRELOAD := $(LIBDIR)/libdmesh_preload.so
@@ -135,11 +133,11 @@ $(TESTDIR)/pod_membership_test: tests/pod_membership_test.c doca/pod_membership.
 		$(DOCA_LIBS) $(CRYPTO_LIBS) -lpthread $(RPATHS)
 
 $(TESTDIR)/native_tx_batch_policy_test: tests/native_tx_batch_policy_test.c src/core/dmesh_core.c $(LIB_HDRS) | dirs
-	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -Wl,--gc-sections \
+	$(CC) $(CFLAGS) -D_GNU_SOURCE -ffunction-sections -fdata-sections -Wl,--gc-sections \
 		-o $@ tests/native_tx_batch_policy_test.c $(DOCA_LIBS) -lpthread $(RPATHS)
 
 $(TESTDIR)/native_writable_test: tests/native_writable_test.c src/core/dmesh_core.c $(LIB_HDRS) | dirs
-	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -Wl,--gc-sections \
+	$(CC) $(CFLAGS) -D_GNU_SOURCE -ffunction-sections -fdata-sections -Wl,--gc-sections \
 		-o $@ tests/native_writable_test.c $(DOCA_LIBS) -lpthread $(RPATHS)
 
 $(TESTDIR)/preload_api_contract_test: tests/preload_api_contract_test.c src/facade/dmesh_preload.c $(LIB_HDRS) | dirs
@@ -217,15 +215,11 @@ test-hostfree: $(HOSTFREE_TESTS)
 	$(TESTDIR)/benchmark_result_contract_test
 	$(TESTDIR)/peer_tls_test
 	sh tests/dma_fault_scope_test.sh
-	python3 tests/analyze_saturation_test.py
-	python3 tests/analyze_grpc_sweep_test.py
-	python3 tests/workload_attest_agent_test.py
 	python3 tests/dpumesh_controller_test.py
-	python3 tests/dpumesh_webhook_test.py
-	python3 tests/linkerd_cp_relay_test.py
-	python3 tests/feed_delivery_test.py
+	python3 tests/workload_grant_controller_test.py
+	$(DPUMESHD_PYTHON) tests/dpumeshd_test.py
+	$(DPUMESHD_PYTHON) tests/dpu_feed_test.py
 	python3 tests/health_page_test.py
-	bash tests/policy_route_judge_test.sh
 	bash tests/bench_geometry_test.sh
 
 test: $(TESTDIR)/native_api_contract_test $(TESTDIR)/native_control_state_test \
@@ -262,15 +256,11 @@ test: $(TESTDIR)/native_api_contract_test $(TESTDIR)/native_control_state_test \
 	sh tests/dma_fault_scope_test.sh
 	sh tests/abi_contract_test.sh $(LIB) $(PRELOAD) $(ABI_MAJOR)
 	sh tests/generator_selftest_test.sh $(BINDIR)/bench_dpumesh $(BINDIR)/bench_sock
-	python3 tests/analyze_saturation_test.py
-	python3 tests/analyze_grpc_sweep_test.py
-	python3 tests/workload_attest_agent_test.py
 	python3 tests/dpumesh_controller_test.py
-	python3 tests/dpumesh_webhook_test.py
-	python3 tests/linkerd_cp_relay_test.py
-	python3 tests/feed_delivery_test.py
+	python3 tests/workload_grant_controller_test.py
+	$(DPUMESHD_PYTHON) tests/dpumeshd_test.py
+	$(DPUMESHD_PYTHON) tests/dpu_feed_test.py
 	python3 tests/health_page_test.py
-	bash tests/policy_route_judge_test.sh
 	bash tests/bench_geometry_test.sh
 
 # dmesh API binaries link the transport library. One explicit rule each so the

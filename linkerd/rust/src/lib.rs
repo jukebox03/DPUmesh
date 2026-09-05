@@ -2062,6 +2062,12 @@ fn shared_trace() -> Result<linkerd_app::trace::Handle, String> {
 /// ordinary port policy, so each worker serves the connections its ports name.
 #[cfg(not(test))]
 async fn build_worker(worker_id: c_int) -> Result<Option<Worker>, String> {
+    let enabled = ["DPUMESH_L7_OPAQUE_SVC", "DPUMESH_L7_SVC"]
+        .iter()
+        .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()));
+    if !enabled {
+        return Ok(None);
+    }
     let selection =
         parse_worker_selection(&std::env::var("DPUMESH_L7_LINKERD_WORKER").unwrap_or_default())?;
     let every_worker = selection == WorkerSelection::All;

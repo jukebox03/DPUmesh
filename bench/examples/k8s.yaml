@@ -1,6 +1,5 @@
-# Apply after `bench.sh deploy`. The admission webhook adds the library,
-# attestation socket, Service identity, Linkerd markers and DPU-node affinity
-# from one annotation.
+# The image contains the native adapter. Requesting one channel makes kubelet
+# mount only the allocated slot socket at /run/dpumesh/channel.sock.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -11,18 +10,30 @@ spec:
   selector: { matchLabels: { app: hello-dpumesh } }
   template:
     metadata:
-      annotations:
-        dpumesh.io/inject: "enabled"
-        dpumesh.io/preload: "disabled"
-      labels: { app: hello-dpumesh, dpumesh-service: hello-dpumesh }
+      labels: { app: hello-dpumesh }
     spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
       containers:
       - name: hello
         image: docker.io/${IMG_BENCH_DPU}
         imagePullPolicy: Never
         command: ["/usr/local/bin/hello_dpumesh_server"]
+        env:
+        - { name: DPUMESH_SERVICE, value: hello-dpumesh }
+        - { name: DPUMESH_RINGS_PER_POD, value: "${RINGS}" }
         ports: [{ name: stream, containerPort: 9099 }]
-        securityContext: { privileged: true }
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities: { drop: ["ALL"] }
+        resources:
+          requests: { dpumesh.io/channel: 1 }
+          limits: { dpumesh.io/channel: 1 }
 ---
 apiVersion: v1
 kind: Service

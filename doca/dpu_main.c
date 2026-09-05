@@ -59,16 +59,20 @@ int main(int argc, char **argv)
     if (result != DOCA_SUCCESS)
         goto exit;
 
-    /* A grant's signed node_name is checked against this DPU's own node, so a
-     * DPU that does not know its node cannot verify any registration. */
+    /* A grant is scoped to one cluster and node. A DPU that does not know both
+     * refuses every registration. */
+    const char *cluster_id = getenv("DPUMESH_CLUSTER_ID");
     const char *node_name = getenv("DPUMESH_NODE_NAME");
-    if (node_name == NULL || *node_name == '\0' ||
+    if (cluster_id == NULL || *cluster_id == '\0' ||
+        strlen(cluster_id) >= sizeof(objs->cluster_id) ||
+        node_name == NULL || *node_name == '\0' ||
         strlen(node_name) >= sizeof(objs->node_name)) {
         DOCA_LOG_ERR("Trusted registration configuration failed: "
-                     "DPUMESH_NODE_NAME must name this Kubernetes node");
+                     "DPUMESH_CLUSTER_ID and DPUMESH_NODE_NAME are required");
         result = DOCA_ERROR_INVALID_VALUE;
         goto exit;
     }
+    snprintf(objs->cluster_id, sizeof(objs->cluster_id), "%s", cluster_id);
     snprintf(objs->node_name, sizeof(objs->node_name), "%s", node_name);
 
     char registration_error[256] = {0};
@@ -107,7 +111,7 @@ int main(int argc, char **argv)
 
     /* The node credential: one static keypair per DPU, generated here at first
      * boot into a 0400 file that never leaves it. Only the public half travels
-     * — the node agent reports it and the controller publishes it in this
+     * — the host runtime reports it and the controller publishes it in this
      * node's `node=` line, so a peer authenticates this DPU with a key it took
      * from the generation rather than from this DPU. */
     const char *credential = getenv("DPUMESH_NODE_KEY_FILE");

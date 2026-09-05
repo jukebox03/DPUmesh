@@ -1,3 +1,5 @@
-# Runtime dependencies of the host-side tools exercised by the test suite.
-# bench/workload_attest_agent.py signs workload attestations with Ed25519.
+# Runtime dependencies of the controller and host runtime tests.
 cryptography>=42.0
+# node/dpumeshd.py serves Kubernetes' Device Plugin v1beta1 API.
+grpcio>=1.83,<2
+protobuf>=7.35,<8

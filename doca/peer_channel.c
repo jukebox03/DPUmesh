@@ -95,7 +95,7 @@ int dmesh_peer_node_key_load(const char *path, uint8_t public_key[32],
             return -1;
         }
         /* First boot. The private half is generated here and never leaves;
-         * only the public half travels, through the node agent, into the
+         * only the public half travels, through the host runtime, into the
          * generation's node= line. */
         EVP_PKEY *key = EVP_PKEY_Q_keygen(NULL, NULL, "ED25519");
         size_t len = sizeof(seed);

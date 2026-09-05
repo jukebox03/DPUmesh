@@ -1,268 +1,301 @@
 # DPUmesh deployment and validation
 
-This directory is the deployment surface for the supported architecture:
+This directory contains the runnable deployment, application examples,
+benchmark programs and hardware validation surface for DPUmesh. The supplied
+one-node profile uses the native L4 data path:
 
 ```text
-native API ─┐
-LD_PRELOAD ─┼─ Host↔DPU DMA ─ embedded Linkerd proxy ─ DMA/RDMA ─ backend
-gRPC ───────┘
+Kubernetes controller                 Kubernetes workload Pods
+(read-only cluster objects)           (unprivileged, no token)
+          │                                      │
+          │ mTLS                         allocated Unix socket
+          ▼                                      ▼
+ host dpumeshd.service ── broker children ── Host↔DPU DMA ── DPU routing
+          │                                      │
+          └──── signed feed delivery ─────► BlueField Arm OS services
 ```
 
-Native, preload, and gRPC workloads are application adapters over the same
-DPU-hosted Linkerd mesh.
+The DPU and `dpumeshd` are system services outside Kubernetes. Kubernetes runs
+the controller and workloads. The DPU binary also contains the optional Linkerd
+adapter; it starts only when an L7 Service list is configured.
 
-## Start here
-
-There is one operator entry point: `./bench/bench.sh`. The rest of the tree is
-grouped by role:
+## Directory map
 
 | Path | Purpose |
 |---|---|
-| `examples/` | minimal native API program; read this first |
-| `apps/` | benchmark clients and long-lived echo servers |
-| `k8s/` | controller, node-agent, workload and policy manifests |
-| `system/` | one-time Kubernetes node prerequisites |
-| `docker/` | images used by those manifests |
-| `validators/` | API and transport correctness probes |
-| `suite/` | repeatable benchmark and policy campaigns |
-| `report/` | measured results, never runtime input |
+| `native_deploy.sh` | complete one-node build, deployment and smoke test |
+| `bench.sh` | DPU build/restart, geometry, diagnostics and native measurements |
+| `dpumesh_controller.sh` | keys, node PKI, feed receiver and controller deployment |
+| `examples/` | native C and gRPC C++ application examples |
+| `apps/` | native, POSIX, HTTP/1 and gRPC workload programs |
+| `k8s/` | controller and native hardware manifests |
+| `docker/` | workload and controller images |
+| `system/` | Kubernetes host prerequisites |
+| `validators/` | native, POSIX and verbs correctness programs |
+| `suite/deployed_geometry.sh` | live DPU geometry reader |
+| `report/` | measurement evidence; never runtime input |
 
-The top-level controller, attestation, identity and feed files implement the
-trusted deployment plumbing called by `bench.sh`; applications do not copy or
-invoke them. For a first application, read
-[`examples/hello_dpumesh.c`](examples/hello_dpumesh.c), then
-[`apps/echo_dpumesh.c`](apps/echo_dpumesh.c) for a backpressured multi-connection
-server. `apps/bench_dpumesh.c` is deliberately a load generator, not a minimal
-API tutorial.
+The native application contract is [`design/API.md`](../design/API.md), the
+transport is [`design/DATA.md`](../design/DATA.md), and control/security is
+[`design/CONTROL.md`](../design/CONTROL.md).
 
-## One-shot deployment
+## Host prerequisites
 
-Create the repository-root `.env` with the rig's connection settings, then:
+Install the kernel settings in [`system/README.md`](system/README.md), disable
+swap and provide a working Kubernetes node, containerd, Docker, DOCA SDK, SSH
+to the paired BlueField Arm OS, and `kubectl`, `envsubst`, `rsync`, `nc`, `rg`
+and OpenSSL. The host service uses cgroup v2 and requires systemd delegation of
+`cpu`, `memory` and `pids`.
 
-```sh
-BENCH_DEPLOY_SCOPE=all ./bench/bench.sh deploy
-```
-
-The file is optional for pure commands and workload drivers. Configuration may
-also be supplied directly in the process environment. To select a file outside
-the checkout, set `DPUMESH_ENV_FILE`; unlike the optional repository default,
-an explicitly selected file must exist and be readable.
-Command results intended for scripts are written to standard output; progress,
-warnings, and errors are written to standard error.
-
-The default command deploys `N/K/A/L=32/8/8/8`. Each Pod has one ring and one RX
-landing stripe per ARM worker, and all eight workers host an embedded Linkerd
-runtime. Port affinity keeps each connection, proxy session, DMA engine, and
-reverse-ring producer on one worker. The harness labels its Kubernetes node
-`dpumesh.io/dpu=true`, which is the admission webhook's scheduling contract.
-
-For a hot-service deployment, select worker geometry with one external value:
-
-```sh
-DPUMESH_THROUGHPUT_WORKERS=12 ./bench/bench.sh geometry
-DPUMESH_THROUGHPUT_WORKERS=12 BENCH_DEPLOY_SCOPE=grpc ./bench/bench.sh deploy
-```
-
-The first command prints `throughput_workers=12 N=24 K=12 A=12 l7_workers=all`;
-the second passes that
-resolved geometry to the DPU, webhook, agent and workloads together. Measured
-presets are 4/6/8/12. Independent N/K/A variables remain only for density
-experiments where K>A is intentional.
-Policy/injection validators consume this same value; when it is absent they
-read effective K/A from the running DPU instead of defaulting to eight workers.
-
-Everything the command provisions or exports is the configuration surface
-defined in [design/CONTROL.md §5.5](../design/CONTROL.md):
-`workload_attest.sh` places the §5.5.4 key material and feed receiver,
-`dpumesh_controller.sh` provisions and deploys the §5.5.3 daemons, and the DPU
-launcher exports the §5.5.1 environment. `.env` holds only the rig — machines,
-access, and the geometry this rig runs — so the harness is a worked example of
-that section, not a second definition of it.
-
-The command performs the complete lifecycle in order:
-
-1. provisions the signed registration, topology, policy, identity, and service
-   target feeds;
-2. builds the Host library, preload shim, native workloads, and gRPC adapter;
-3. builds the embedded Linkerd static library and the DPU binary;
-4. starts the controller, node agent, admission webhook, DPU process, and API workloads;
-5. pins the workloads to the BlueField-local NUMA node;
-6. runs a real request through native, preload, and gRPC and fails deployment if
-   any adapter does not traverse the embedded Linkerd path.
-
-Narrow diagnostic scopes are `native`, `preload`, and `grpc`; each deploys the
-corresponding application adapter over the same mesh.
-
-## What a deployment needs
-
-The DPU binary always links the embedded Linkerd adapter, so the deployment
-brings up its control plane too:
-
-- the pinned proxy fork, `git submodule update --init linkerd/port/linkerd2-proxy`;
-- Linkerd destination, policy and identity services, reached through the node
-  agent's authenticated management-link relay;
-- DPU identity material and trust anchors;
-- signed membership, topology, workload-scope and Service-target feeds — the
-  Service-target feed is what presents real ClusterIPs and ready endpoint
-  addresses to Linkerd;
-- declined L7 sessions for protected or ungraded Services are always refused.
-
-## Two-node RDMA configuration
-
-The operator owns one node file. Each row is:
+Copy [`.env.example`](../.env.example) to `.env` and set the rig values:
 
 ```text
-<k8s-node> <dpu-rdma-ip>:<base-port> <agent-key-id> <agent-public-key> <dpu-public-key>
+DPU_HOST       SSH destination for the BlueField Arm OS
+DPU_PASS       DPU sudo password used by the local harness
+HOST_PASS      host sudo password used by the local harness
+DPU_PCI        "-p <device> -r <representor>" for dpumesh_dpu
+HOST_PCI       host-side DOCA PCI function
 ```
 
-Do not copy a registration private key between nodes. Bootstrap each node, then
-run this locally on that node and collect the two output rows into one file:
+`.env` is optional for commands that do not touch the rig. Set
+`DPUMESH_ENV_FILE=/absolute/path` to choose another file; an explicitly selected
+file must be a readable regular file. Password variables are a test-rig
+interface, not a service configuration or production secret-delivery pattern.
+Progress is written to stderr and machine-readable command results to stdout.
 
-```sh
-DPUMESH_NODE_NAME=rapids4 \
-DPUMESH_NODE_RDMA_ADDR=10.77.0.1:47900 \
-  ./bench/dpumesh_controller.sh node-record
+## One-node deployment
+
+Run the complete path with:
+
+```bash
+./bench/native_deploy.sh all
 ```
 
-Use the equivalent command on the selected node B with `10.77.0.2:47900`, save
-the rows as (for example) `/etc/dpumesh/nodes`, and set on the administrator
-host:
+`all` performs these gates in order:
 
-```sh
+1. builds `libdpumesh.so.5`, `dmesh_broker`, native applications and the
+   controller/workload images;
+2. imports the images into the local containerd namespace;
+3. creates separate topology, WorkloadGrant and feed keys plus node mTLS PKI;
+4. installs and starts `dpumesh-feed-receiver.service` on the DPU;
+5. configures kubelet system reservation and installs `dpumeshd.service`;
+6. builds and starts `dpumesh_dpu` on the BlueField Arm OS;
+7. applies the Restricted controller and workload manifests;
+8. waits for both native workloads and requires a real DPU request to return
+   `OK`, `fail=0` and `drops=0`.
+
+The profile is fixed at `N/K/A/L=32/8/8/8`, two Device Plugin slots, reserved
+host CPUs `0-2`, 3 GiB kubelet system memory and per-broker limits of 0.5 CPU,
+768 MiB `memory.high`, 1 GiB `memory.max` and 64 PIDs.
+
+Narrow operations reuse the same workflow:
+
+```bash
+./bench/native_deploy.sh build
+./bench/native_deploy.sh deploy
+./bench/native_deploy.sh smoke
+./bench/native_deploy.sh status
+```
+
+`build` builds/imports images and the DPU binary. `deploy` provisions trust,
+installs services and applies workloads. `smoke` performs readiness and real
+byte-path checks against the deployed objects. `status` prints Kubernetes
+Deployment state and the complete host service status.
+
+## Workload contract
+
+A workload image contains its selected adapter and `libdpumesh.so.5`. Exactly
+one regular container requests and limits one channel:
+
+```yaml
+spec:
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+  - name: app
+    image: registry.example/application-with-dpumesh:tag
+    env:
+    - {name: DPUMESH_SERVICE, value: echo}       # omit for a pure client
+    - {name: DPUMESH_RINGS_PER_POD, value: "8"}
+    securityContext:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      capabilities: {drop: ["ALL"]}
+    resources:
+      requests: {dpumesh.io/channel: 1}
+      limits: {dpumesh.io/channel: 1}
+```
+
+Kubelet mounts only the assigned socket at `/run/dpumesh/channel.sock`. The Pod
+receives no Kubernetes token, DPU device, PCI address, host directory, signing
+key, privileged init container or added capability. The controller grants
+`DPUMESH_SERVICE` only when its latest Kubernetes snapshot contains the Pod as
+a ready selected endpoint of that Service.
+The complete worked manifest is [`k8s/native-hw.yaml`](k8s/native-hw.yaml); the
+minimal server is [`examples/k8s.yaml`](examples/k8s.yaml).
+
+## Controller and trust provisioning
+
+The controller helper exposes each stage independently:
+
+```bash
+./bench/dpumesh_controller.sh prepare
+IMG_CONTROLLER=bench/dpumesh-controller:native \
+  ./bench/dpumesh_controller.sh deploy
+./bench/dpumesh_controller.sh node-record [NODE [RDMA_ADDRESS]]
+./bench/dpumesh_controller.sh nodes-config
+./bench/dpumesh_controller.sh topology-show
+./bench/dpumesh_controller.sh receiver-status
+./bench/dpumesh_controller.sh status
+```
+
+`prepare` creates or reuses three distinct root-owned keyrings, copies only
+verification material needed by the DPU, and installs the unprivileged feed
+receiver. `deploy` creates a TLS 1.3 server identity, a node client certificate
+whose URI SAN is `spiffe://dpumesh.io/node/<node>`, Kubernetes Secrets and the
+controller Deployment. The controller's ServiceAccount may only get/list Pods,
+Services and EndpointSlices.
+
+A node-file row is:
+
+```text
+<k8s-node> <dpu-rdma-ip>:<base-port> <grant-key-id> \
+<grant-public-key> <dpu-public-key>
+```
+
+The operator supplies name, address and grant public key. `dpumeshd` reads the
+DPU public key from the paired feed receiver and reports it over node mTLS. The
+controller accepts that report only for the certificate's node and only when
+name and RDMA address match the configured row.
+
+## DPU build, geometry and measurements
+
+`bench.sh` operates on the runtime and the deployed native benchmark pair:
+
+```bash
+./bench/bench.sh geometry
+./bench/bench.sh build
+./bench/bench.sh restart
+./bench/bench.sh ping
+./bench/bench.sh point REQ REPLY CONC DUR WARMUP THREADS [RECONNECT]
+./bench/bench.sh latency
+./bench/bench.sh bandwidth
+./bench/bench.sh rate
+./bench/bench.sh all
+./bench/bench.sh dpulog [LINES]
+./bench/bench.sh dpubanner
+./bench/bench.sh dpucpu
+```
+
+`build` synchronizes DPU sources, builds the pinned Linkerd static library and
+links `dpumesh_dpu`. `restart` starts that binary with the configured keys,
+feeds and geometry. The native hardware profile sets both L7 Service lists
+empty, so the linked L7 runtime is inactive.
+
+The `point` command sends:
+
+```text
+RUN <request-bytes> <reply-bytes> <concurrency> <duration-seconds> \
+    <warmup-requests> <threads> [reconnect]
+```
+
+A successful result begins with `OK` and includes throughput, latency,
+`fail`, `drops` and transport statistics. `latency`, `bandwidth` and `rate`
+write `latency_native.csv`, `bandwidth_native.csv` and `rate_native.csv` under
+`OUT`, default `/tmp/dpumesh-bench`.
+
+Geometry may be selected directly with `DPUMESH_DPA_THREADS=N`,
+`DPUMESH_RINGS_PER_POD=K` and `DPUMESH_ARM_WORKERS=A`. For hot-service profiles,
+`DPUMESH_THROUGHPUT_WORKERS=W` accepts 4, 6, 8 or 12, sets `K=A=W`, selects the
+largest `N≤32` divisible by `W`, and selects all workers for L7. The host and DPU
+must receive the same `K`. `bench.sh geometry` prints the resolved values;
+`suite/deployed_geometry.sh` reads the live DPU banner.
+
+## Two-node carrier configuration
+
+Create one row per node with `dpumesh_controller.sh node-record`, combine the
+rows into one operator-owned file, and set:
+
+```bash
 DPUMESH_NODES_FILE=/etc/dpumesh/nodes
 DPUMESH_PEER_TRANSPORT=rdma
+DPUMESH_PEER_BIND=10.77.0.1
+DPUMESH_PEER_PORT=47900
+DPUMESH_NODE_RDMA_ADDR=10.77.0.1:47900
 ```
 
-`dpumesh_controller.sh deploy` puts that file in one ConfigMap. The controller
-and every node-agent DaemonSet Pod mount that exact ConfigMap; an agent selects
-its row from `spec.nodeName` and may report only the DPU public key. It cannot
-change the operator's address or agent identity.
+Each node has its own WorkloadGrant private key and DPU static private key; do
+not copy private keys between nodes. Both DPUs use the same Arm-worker count and
+base port. Worker `w` listens at `base-port+w`. `DPUMESH_PEER_BIND` must resolve
+to the RDMA device used by that DPU. Validate each physical/RoCE path with
+`rdma link show`, `ibv_devinfo` and an RDMA-CM exchange before enabling the
+carrier. A single-node deployment leaves `DPUMESH_PEER_TRANSPORT` unset.
 
-The address must belong to the RDMA device used by that node's DPU. Both DPUs
-must use the same `DPUMESH_THROUGHPUT_WORKERS` preset (or the same resolved A)
-and base port; worker `w` listens on `base-port + w`. Before deployment, verify
-carrier/link state on both ends with
-`rdma link show`, `ibv_devinfo`, and an RDMA-CM ping such as `rping`. These
-checks require the physical port, switch/VLAN/PFC or RoCE routing, and DPU
-ownership to have already been configured.
+## Application and adapter programs
 
-Steps 2 and 3 of the lifecycle above are also available on their own, for
-rebuilding after a source change without redeploying:
-
-```sh
-./bench/bench.sh linkerdbuild     # the embedded Linkerd static library
-./bench/bench.sh build            # host library, shim, workloads, DPU binary
-./bench/bench.sh grpcbuild        # the gRPC workloads
-```
-
-## Supported workloads
-
-| API | Client/server | Deployment |
+| Surface | Programs | Role |
 |---|---|---|
-| native | `bench_dpumesh` / `echo_dpumesh` | `bench-dpumesh`, `echo-dpumesh` |
-| preload | `bench_sock` / `echo_sock` under `libdmesh_preload.so` | `preload-bench`, `preload-echo` |
-| gRPC | `bench_grpc` / `echo_grpc` using the DPUmesh endpoint | `bench-grpc-dpumesh`, `echo-grpc-dpumesh`, `echo-grpc-alt` |
-| HTTP/1.1 | `http1_bench` / `http1_echo` under `libdmesh_preload.so` | `http1-bench`, `http1-echo` |
+| native C | `hello_dpumesh`, `hello_dpumesh_server` | minimal lifecycle and byte stream |
+| native benchmark | `bench_dpumesh`, `echo_dpumesh` | framing, concurrency, backpressure and metrics |
+| POSIX preload | `bench_sock`, `echo_sock`, `tcp_client`, `tcp_echo` | ordinary socket applications for `libdmesh_preload.so` |
+| HTTP/1 | `http1_bench`, `http1_echo` | protocol-aware POSIX workload |
+| gRPC | `bench_grpc`, `echo_grpc`, `grpc_dpumesh_qps_benchmark` | EventEngine and PassiveListener integration |
+| validators | `loopback_dpumesh`, `verbs_dpumesh`, `preload_runner` | transport and facade contracts |
 
-The loopback, verbs, and preload validator deployments exercise supported API
-contracts on the same DMA mesh. Extra native echo pods validate Service
-fan-out and endpoint pinning. `echo-grpc-alt` is a second Service speaking the
-same protocol, which is what a route crossing Services needs on both ends.
-`echo_grpc` answers `INTERNAL` on every `BENCH_FAIL_EVERY`-th call, because a
-retry policy and a circuit breaker are statements about a backend that fails.
+The supplied hardware manifest deploys `bench_dpumesh` and `echo_dpumesh`.
+Other binaries are buildable implementation surfaces and are packaged/deployed
+by an application using the same explicit resource contract. gRPC build and use
+are documented in [`design/GRPC.md`](../design/GRPC.md).
 
-The native and preload workloads preserve the same application submission
-boundary. Each client submits one logical request per native post or POSIX
-`write()`, and each server submits one logical response the same way. A partial
-POSIX write retains only the unfinished suffix of that frame. Complete transport
-units and partial-tail deadlines are formed exclusively by the shared native
-transport batching policy below both adapters.
+Native and POSIX programs preserve the same logical submission boundary: one
+request or response enters one native post or POSIX `write`. Partial POSIX
+writes retain only the unfinished suffix. The native transport alone owns
+physical units, partial-tail deadlines, capacity reclamation and TX-ready
+notification.
 
-## Validation commands
+## Optional L7 configuration
 
-```sh
-./bench/bench.sh point dpumesh 1024 8 1 5 100 1
-./bench/bench.sh point preload 1024 8 1 5 100 1
-./bench/bench.sh point grpc-dpumesh 1024 8 1 5 100 1
-./bench/bench.sh point http1 1024 8 1 5 100 1
+Set namespace-qualified Services in `DPUMESH_L7_SVC` for HTTP/1, HTTP/2 or gRPC,
+or `DPUMESH_L7_OPAQUE_SVC` for opaque byte-stream handling. A Service cannot be
+in both lists. L7 requires `DPUMESH_L7_SERVICE_TARGETS_FILE`, reachable Linkerd
+destination/identity/policy endpoints, the standard `LINKERD2_PROXY_*` identity
+and trust inputs, and the controller-produced Service-target feed. Protected or
+unknown L7 Services fail closed. Empty lists select the native L4 path and need
+no Linkerd control endpoints.
 
-./bench/bench.sh loopback
-./bench/bench.sh verbs
-./bench/bench.sh preload
-./bench/bench.sh grpcshutdown
-./bench/bench.sh l7metrics
+## Validation and lifecycle
+
+Use the following layers in order:
+
+```bash
+make test-hostfree
+make DPUMESHD_PYTHON=build/dpumeshd-venv/bin/python test
+./bench/native_deploy.sh smoke
+ci/health-check.sh
 ```
 
-The standard latency, bandwidth, and rate families accept exactly one of
-`dpumesh`, `preload`, or `grpc-dpumesh` and write CSVs under
-`$OUT` (default `/tmp/dpumesh-bench`). `http1` is a functional driver for the
-protocol-aware path's HTTP/1 branch, not a capacity instrument.
+The Make targets validate C/Python contracts, protocol layouts, topology,
+WorkloadGrant signing, Device Plugin behavior, feed delivery, facades and
+transport state machines. `native_deploy.sh all` installs and starts the
+controller, host runtime, DPU services and workloads before requiring a live DPU
+byte exchange. `ci/health-check.sh` records DPU geometry, deployed workloads and
+client CPU affinity, then exercises the live native path without treating one
+smoke latency as a performance series.
 
-## Function campaigns
+Lifecycle invariants are:
 
-What the control plane decides is judged separately from what the transport
-carries, and by two readings: what the client completed, and what the DPU's own
-counters say the enforcement point decided. Traffic that stops without a
-matching verdict is not a policy result, and traffic that flows without one is
-not a routing result.
-
-```sh
-./bench/suite/policy_route.sh [policy|route|cross|fanout|surfaces|grpc-surfaces|lb|all]
-./bench/suite/inject.sh
-```
-
-| Scope | Judges |
-|---|---|
-| `policy` | inbound authorization by caller identity and address |
-| `route` | an `HTTPRoute` on the protocol-aware Service |
-| `cross` | a route into another Service, and the destination's own policy |
-| `fanout` | one client channel across two backends of one Service |
-| `surfaces` | timeouts, retries, matching, `GRPCRoute`, route authorization, failure accrual, HTTP/1.1 |
-| `lb` | connection grain, endpoint changes, and the request grain |
-| `inject.sh` | one annotation meshes a workload, its absence leaves one alone, and a webhook that cannot answer creates no Pod |
-
-A stage whose client returns no reply is recorded as `nodata` and fails: a
-missing measurement is not a refusal. Stages that fail every request in flight
-run back to back without restarting the gRPC client; the client's run-bounding
-rules (a call joins the live set before gRPC, issuance closes under the
-shutdown sweep's lock, a run exits on its own deadline) keep it answering.
-
-## Lifecycle invariants
-
-- `deploy` is the only supported way to bring up meshed Pods. It starts the
-  DPU and all selected Pods as one registration lifecycle.
-- `restart` is only for a quiescent deployment with no meshed Pod.
-- DPU admission is fail-closed. Applications receive no signing keys or
-  authoritative placement claims.
-- Linkerd policy, destination, and identity services are reached through the
-  node-agent relay. Linkerd is linked into `dpumesh_dpu`; it is never injected
-  beside a workload.
-- Workload templates carry Linkerd's control-plane label for policy indexing
-  and skip their DMA ports for Pod-local inbound interception; the DPU remains
-  the sole proxy and enforcement point.
-- `DPUMESH_L7_SVC` selects HTTP/1 and HTTP/2 services and
-  `DPUMESH_L7_OPAQUE_SVC` selects opaque TCP services.
-- Cross-node routing uses the configured `rdma` or diagnostic `tcp` peer
-  carrier. A single-node deployment needs no peer carrier; a multi-node
-  deployment must provide the operator node file described above.
-- Meshed Pods may declare their own access or take it from the admission
-  webhook; `bench/k8s/pods.yaml` is the first and `bench/k8s/injected.yaml` the
-  second.
-
-## Useful controls
-
-```text
-BENCH_DEPLOY_SCOPE=all|native|preload|grpc
-BENCH_NUMA_POLICY=local|auto
-BENCH_GRPC_BUILD=release|asan
-```
-
-`bench.sh pin [fair|native|preload|grpc|grpcmax]` places the workloads on the
-benchmark cores. Pinning follows the PID, so anything that recreates a Pod —
-`grpcshutdown`, a campaign stage that rolls a Deployment — drops it, and the
-next point measures the scheduler instead of its subject. Re-pin before
-believing a number taken after one of those.
-
-Operational commands are `status`, `logs`, `dpulog`, `dpubanner` (the DPU's
-startup line with its effective N/K/A), `dpucpu`, `armbalance`,
-`rotate-identity`, `admission`, and `cleanup`.
+- `dpumeshd` advertises slots Healthy only while controller-to-DPU delivery and
+  node registration succeed;
+- one slot generation owns at most one connected workload and one broker;
+- broker exit completes DPU unregister/quiescence before the slot is reused;
+- a DPU or controller delivery failure closes admission for new allocations;
+- workloads never receive authority beyond their allocated socket;
+- restarting `dpumeshd` terminates its direct broker children through the
+  systemd control group;
+- L7 selection changes only DPU processing; no workload-side proxy is added;
+- measurement output is retained only with its exact geometry, deployed object
+  set and separated Pod/host-service/DPU CPU accounting.

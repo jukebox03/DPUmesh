@@ -4,14 +4,15 @@
 point. They show one client QP, one server accept path, byte-stream send,
 zero-copy receive, backpressure, and ownership-ordered teardown.
 
-Deploy DPUmesh, then apply the example:
+Deploy DPUmesh, then apply the example. `RINGS` must equal the host and DPU
+geometry; the native hardware profile uses eight.
 
 ```sh
-./bench/bench.sh deploy
-NS=test-bench IMG_BENCH_DPU=bench/bench-dpumesh:latest \
+./bench/native_deploy.sh deploy
+NS=test-bench RINGS=8 IMG_BENCH_DPU=bench/bench-dpumesh:native \
   envsubst < bench/examples/k8s.yaml | kubectl apply -f -
 kubectl rollout status -n test-bench deploy/hello-dpumesh
-kubectl exec -n test-bench deploy/bench-dpumesh -- \
+kubectl exec -n test-bench deploy/bench-dpumesh-native -- \
   /usr/local/bin/hello_dpumesh hello-dpumesh 'hello'
 ```
 
@@ -19,12 +20,22 @@ kubectl exec -n test-bench deploy/bench-dpumesh -- \
 
 `grpc/` is the same starting point for a gRPC C++ application: `echo.proto`,
 a callback-service server behind a `PassiveListener`, and a client whose
-channel target is a Service name. Its `CMakeLists.txt` is the complete build
-recipe — generate the proto, compile, link `grpc_dpumesh`. The pair builds
-with `bench/bench.sh grpcbuild` (as `hello_grpc_client` /
-`hello_grpc_server`); to run it, package the two binaries into an image and
-deploy them with the meshed-Pod arrangement of `bench/k8s/grpc-pods.yaml` —
-no image or manifest in this tree carries them.
+channel target is a Service name. Its `CMakeLists.txt` generates the proto,
+compiles both programs and links `grpc_dpumesh`. Configure the parent adapter
+build with an exact gRPC v1.80.0 source tree; the default
+`DPUMESH_GRPC_BUILD_QPS_BENCHMARK=ON` build produces `hello_grpc_client` and
+`hello_grpc_server`:
+
+```sh
+make lib
+cmake -S integrations/grpc -B build/grpc \
+  -DDPUMESH_GRPC_SOURCE_DIR=/path/to/grpc-v1.80.0
+cmake --build build/grpc -j2 --target hello_grpc_client hello_grpc_server
+```
+
+Package the two binaries and `libdpumesh.so.5` into an image, then deploy them
+with the explicit `dpumesh.io/channel: 1` resource and security contract in
+`k8s.yaml`.
 [design/GRPC.md](../../design/GRPC.md) covers the runtime options and
 lifecycle.
 

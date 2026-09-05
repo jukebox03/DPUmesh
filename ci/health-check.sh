@@ -18,7 +18,7 @@
 # the path carries bytes; its latency is a single sample against whatever
 # happens to be deployed, and recording it would start a performance series
 # that says nothing about a chosen configuration. Performance is measured by
-# hand, from bench/suite/, by someone who chose the configuration.
+# hand, with bench/bench.sh, by someone who chose the configuration.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -26,9 +26,6 @@ NS="${NS:-test-bench}"
 # Above this 1-minute load average the machine is taken to be working, and this
 # run records that instead of adding to it.
 HEALTH_MAX_LOAD="${HEALTH_MAX_LOAD:-3.0}"
-# The order paths are tried in. The first one that is part of the deployed
-# campaign answers for it; the rest are simply not in this campaign.
-PATHS="${HEALTH_PATHS:-grpc-dpumesh dpumesh preload}"
 
 say() { echo "$*" >&2; }
 fields=()
@@ -103,49 +100,32 @@ else
     emit 1
 fi
 
-for sol in $PATHS; do
-    # Second guard. A client already serving a RUN leaves this connection in its
-    # backlog and says nothing, which from here is indistinguishable from a
-    # wedged one -- so silence is recorded, not failed. A client that is really
-    # wedged stays silent, and reads on the page as consecutive busy runs.
-    case "$("$ROOT/bench/bench.sh" ping "$sol" 2>&1 </dev/null | tail -1)" in
-        *"ERR no_pod("*)
-            say "$sol is not part of this campaign"
-            continue ;;
-        OK*) ;;
-        *"ERR silent"*)
-            say "$sol did not answer PING: it is occupied, or it is wedged"
-            add status busy
-            add busy_path "$sol"
-            emit 0 ;;
-        *)
-            # The port refused the connection, or the target is not a name this
-            # harness knows. Neither is ambiguous, and neither is busy.
-            say "$sol is deployed and its control port is not usable"
-            add status no_answer
-            add answered "$sol"
-            emit 1 ;;
-    esac
+# A client serving RUN cannot answer another request on its serial control
+# socket. Treat that timeout as occupied state; a refused connection is a fault.
+case "$("$ROOT/bench/bench.sh" ping 2>&1 </dev/null | tail -1)" in
+    OK*) ;;
+    *"ERR silent"*)
+        say "the native client is occupied or not progressing"
+        add status busy
+        add busy_path native
+        emit 0 ;;
+    *)
+        say "the native client control port is not usable"
+        add status no_answer
+        add answered native
+        emit 1 ;;
+esac
 
-    # The window between the PING and this line is small and unguarded: a
-    # campaign started inside it is reported as a fault.
-    raw="$("$ROOT/bench/bench.sh" point "$sol" 48 48 1 3 100 1 2>&1 </dev/null | tail -1)"
-    case "$raw" in
-        OK*)
-            say "$sol answered"
-            add status ok
-            add answered "$sol"
-            emit 0 ;;
-        *"ERR no_pod("*)
-            say "$sol is not part of this campaign" ;;
-        *)
-            say "$sol is deployed and did not answer: $raw"
-            add status no_answer
-            add answered "$sol"
-            emit 1 ;;
-    esac
-done
-
-say "a campaign is deployed but no known path is part of it"
-add status no_path
-emit 1
+raw="$("$ROOT/bench/bench.sh" point 48 48 1 3 100 1 2>&1 </dev/null | tail -1)"
+case "$raw" in
+    OK*)
+        say "native path answered"
+        add status ok
+        add answered native
+        emit 0 ;;
+    *)
+        say "native path did not answer: $raw"
+        add status no_answer
+        add answered native
+        emit 1 ;;
+esac
