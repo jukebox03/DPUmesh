@@ -59,6 +59,19 @@ runs the first; only rapids4 can run the second. `test-hostfree` refuses to run
 under `-DNDEBUG`, because these tests are built on `assert()` and would all pass
 silently without it.
 
+Both targets require the Python packages in `tests/requirements.txt`. To run
+them locally in an isolated environment:
+
+```sh
+python3 -m venv build/ci-python
+. build/ci-python/bin/activate
+python -m pip install -r tests/requirements.txt
+make test
+```
+
+`contracts-rapids4` creates this environment on each run and adds its `bin`
+directory to the job's `PATH` before testing.
+
 ## What runs unattended
 
 `rapids4-health`, and it does not measure performance. What is deployed on

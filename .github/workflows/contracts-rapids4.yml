@@ -36,6 +36,14 @@ jobs:
       - name: DOCA must be present, or nothing below means anything
         run: pkg-config --modversion doca-common doca-comch doca-dpa
 
+      # Keep test dependencies separate from the persistent runner's system
+      # Python and deployed dpumeshd environment. checkout cleans build/.
+      - name: Install Python test dependencies
+        run: |
+          python3 -m venv build/ci-python
+          build/ci-python/bin/python -m pip install --no-cache-dir -r tests/requirements.txt
+          echo "$GITHUB_WORKSPACE/build/ci-python/bin" >> "$GITHUB_PATH"
+
       - name: Library, shim, and benchmark binaries
         run: make -j"$(nproc)" all
 
