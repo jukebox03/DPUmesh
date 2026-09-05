@@ -294,8 +294,7 @@ _Static_assert(sizeof(struct dmesh_resolve_msg) == 140,
 
 /* DPU→Host answer. `status`: 0 = meshed (interned_svc valid), 1 = not meshed
  * (leaving the mesh is the caller's explicit, logged decision), 2 = the DPU
- * holds no generation (a facade connect refuses unless DPUMESH_TCP_FALLBACK
- * allows kernel TCP; a registration fails closed). */
+ * holds no generation (a facade connect and registration both fail closed). */
 struct dmesh_resolve_ack_msg {
     uint8_t  type;                  /* = DMESH_MSG_RESOLVE_ACK */
     uint8_t  status;

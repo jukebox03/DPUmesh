@@ -1,0 +1,4 @@
+[2026-09-04T15:23:25+09:00] scenario=b4-dpu-restart receipt=/home/jukebox/DPUmesh/bench/report/data/broker-lifecycle-20260904T062325Z-b4-dpu-restart
+[2026-09-04T15:23:41+09:00] background load pid=4160300 duration=20s
+[2026-09-04T15:23:42+09:00] SIGKILL dpumesh_dpu pid=2049689
+[2026-09-04T15:24:37+09:00] PASS: DPU restart produced fresh registrations and clean traffic

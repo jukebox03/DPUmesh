@@ -105,7 +105,7 @@ brings up its control plane too:
 - signed membership, topology, workload-scope and Service-target feeds — the
   Service-target feed is what presents real ClusterIPs and ready endpoint
   addresses to Linkerd;
-- `DPUMESH_L7_FAIL_CLOSED=1`.
+- declined L7 sessions for protected or ungraded Services are always refused.
 
 ## Two-node RDMA configuration
 

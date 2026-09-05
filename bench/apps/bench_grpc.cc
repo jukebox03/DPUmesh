@@ -540,7 +540,7 @@ void RunBench(int conn_fd, int mode, int req_size, int reply_size, int window,
       "avg=%.2f min=%.2f max=%.2f rcnt=%ld scheduled=%ld pending=%ld fail=%ld "
       "conc=%d threads=%d channels=%d reqsz=%d repsz=%d reqframe=%u respframe=%u "
       "durs=%.3f offered_mrps=%.6f drops=%ld overflow=%llu worker_fail=%d "
-      "reorder=0 mode=%s arr=%s batch=0 reconns=0 reconn_us=0.00 "
+      "reorder=0 mode=%s arr=%s "
       "grabs=%llu rets=%llu recyc=%llu waits=%llu pads=%llu "
       "credit_hold_dropped=%llu eq_budget_exhausted=%llu dist=NA\n",
       mrps, gbps, request_gbps, response_gbps, p50, p95, p99, p999, p9999, avg,
@@ -598,8 +598,6 @@ void HandleControl(int fd) {
     int req = 32, rep = 8, conc = 1, threads = 1;
     double dur = 10.0;
     long warm = 1000;
-    /* Trailing harness fields (reconnect churn, batch) are TCP-generator
-     * knobs with no gRPC equivalent; the reply reports them as zero. */
     std::sscanf(buf, "%*s %d %d %d %lf %ld %d", &req, &rep, &conc, &dur,
                 &warm, &threads);
     RunBench(fd, kModeClosed, req, rep, conc, dur, warm, threads, 0.0, kArrConst,

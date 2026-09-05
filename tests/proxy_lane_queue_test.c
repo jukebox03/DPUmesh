@@ -747,6 +747,18 @@ int main(void)
     assert(!fresh->dead && !fresh->l7_session_failed && !fresh->input_fin);
     px_conn_del(objs, fresh);
 
+    /* Deleting a parked connection unlinks both the list node and its O(1)
+     * observability gauge. A stale nonzero gauge makes an idle worker look
+     * permanently wedged even though the list itself is empty. */
+    struct px_conn *parked = px_conn_get(px, 5, 4445, 0, 1);
+    assert(parked != NULL);
+    px_stall(parked);
+    assert(px->workers[0].stall_head == parked);
+    assert(px->workers[0].stalled_count == 1);
+    px_conn_del(objs, parked);
+    assert(px->workers[0].stall_head == NULL);
+    assert(px->workers[0].stalled_count == 0);
+
     /* Reclaim the EOF queued to pod 5 before tearing down the fixture. */
     assert(tx_lane->qhead != NULL && tx_lane->qhead == tx_lane->qtail);
     tx_unit = tx_lane->qhead;

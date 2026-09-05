@@ -1,0 +1,5 @@
+[2026-09-04T15:11:45+09:00] scenario=b1-broker-sigkill receipt=/home/jukebox/DPUmesh/bench/report/data/broker-lifecycle-20260904T061145Z-b1-broker-sigkill
+[2026-09-04T15:12:00+09:00] background load pid=4124397 duration=30s
+[2026-09-04T15:12:00+09:00] SIGKILL broker pid=4122115 starttime=69182960 pod_uid=4379e32b-b2ef-426c-aff2-5154c1840ad4
+[2026-09-04T15:12:12+09:00] recovered app=echo-grpc-dpumesh restarts=0->1 broker=4122115/69182960->4125062/69186667 stable=5s
+[2026-09-04T15:12:48+09:00] PASS: broker SIGKILL was contained and recovered

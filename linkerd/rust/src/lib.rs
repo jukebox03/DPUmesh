@@ -499,6 +499,78 @@ extern "C" {
     fn dmesh_l7_driver_stopped(driver: *mut c_void) -> c_int;
     fn dmesh_l7_driver_ready(driver: *mut c_void);
     fn dmesh_l7_driver_failed(driver: *mut c_void);
+    fn dmesh_l7_driver_stats(driver: *mut c_void, out: *mut DriverStats) -> c_int;
+}
+
+/// Version 1 of `struct dmesh_l7_driver_stats` from `dmesh_l7.h`.
+#[cfg(not(test))]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct DriverStats {
+    version: u32,
+    size: u32,
+    drain_calls_total: u64,
+    drain_progressed_total: u64,
+    drain_pending_total: u64,
+    drain_idle_total: u64,
+    pe_progressed_total: u64,
+    data_progressed_total: u64,
+    arm_calls_total: u64,
+    notification_clears_total: u64,
+    maintenance_calls_total: u64,
+    local_completions_total: u64,
+    cross_worker_out_total: u64,
+    cross_worker_in_total: u64,
+    completion_queue_depth: u64,
+    cross_worker_queue_depth: u64,
+    deferred_receives: u64,
+    dma_tasks_inflight: u64,
+    dma_retry_batches: u64,
+    ack_release_depth: u64,
+    stalled_connections: u64,
+    remote_fin_pending: u64,
+    dma_stalled: u32,
+    emit_pending: u32,
+    ack_retry_pending: u32,
+    parked: u32,
+    wake_posted: u32,
+    reserved: u32,
+}
+
+#[cfg(not(test))]
+impl Default for DriverStats {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            size: std::mem::size_of::<Self>() as u32,
+            drain_calls_total: 0,
+            drain_progressed_total: 0,
+            drain_pending_total: 0,
+            drain_idle_total: 0,
+            pe_progressed_total: 0,
+            data_progressed_total: 0,
+            arm_calls_total: 0,
+            notification_clears_total: 0,
+            maintenance_calls_total: 0,
+            local_completions_total: 0,
+            cross_worker_out_total: 0,
+            cross_worker_in_total: 0,
+            completion_queue_depth: 0,
+            cross_worker_queue_depth: 0,
+            deferred_receives: 0,
+            dma_tasks_inflight: 0,
+            dma_retry_batches: 0,
+            ack_release_depth: 0,
+            stalled_connections: 0,
+            remote_fin_pending: 0,
+            dma_stalled: 0,
+            emit_pending: 0,
+            ack_retry_pending: 0,
+            parked: 0,
+            wake_posted: 0,
+            reserved: 0,
+        }
+    }
 }
 
 #[cfg(not(test))]
@@ -513,6 +585,11 @@ struct ExternalBackend {
     /// walk of the Pod table. It is counted down rather than timed because the
     /// period is already the runtime's clock.
     policy_refresh_in: u32,
+    /// Last C-side totals copied into the Prometheus counters. The worker owns
+    /// both structures, so publishing deltas requires no lock in the hot path.
+    published_driver_stats: DriverStats,
+    /// Overall progress includes both the Linkerd task graph and the C driver.
+    last_progress: std::time::Instant,
 }
 
 /// Maintenance passes between policy reconciliations. At the runtime's
@@ -565,6 +642,7 @@ impl dmesh_doca::runtime::RuntimeBackend for ExternalBackend {
             "drain",
         )?;
         if linkerd || code == 2 {
+            self.last_progress = std::time::Instant::now();
             Ok(dmesh_doca::runtime::Progress::Progressed)
         } else if code == 1 {
             Ok(dmesh_doca::runtime::Progress::Pending)
@@ -592,8 +670,98 @@ impl dmesh_doca::runtime::RuntimeBackend for ExternalBackend {
         driver_result(
             unsafe { dmesh_l7_driver_maintenance(self.driver) },
             "maintenance",
-        )
-        .map(|_| ())
+        )?;
+
+        let mut current = DriverStats::default();
+        driver_result(
+            unsafe { dmesh_l7_driver_stats(self.driver, &mut current) },
+            "stats",
+        )?;
+        let previous = self.published_driver_stats;
+        let age_ms = self
+            .last_progress
+            .elapsed()
+            .as_millis()
+            .min(i64::MAX as u128) as i64;
+        let gauge = |value: u64| value.min(i64::MAX as u64) as i64;
+        with_worker(self.worker_id, (), |worker| {
+            macro_rules! add_delta {
+                ($metric:ident, $field:ident) => {
+                    worker
+                        .metrics
+                        .$metric
+                        .inc_by(current.$field.saturating_sub(previous.$field))
+                };
+            }
+            add_delta!(worker_drain_calls, drain_calls_total);
+            add_delta!(worker_drain_progressed, drain_progressed_total);
+            add_delta!(worker_drain_pending, drain_pending_total);
+            add_delta!(worker_drain_idle, drain_idle_total);
+            add_delta!(worker_pe_progressed, pe_progressed_total);
+            add_delta!(worker_data_progressed, data_progressed_total);
+            add_delta!(worker_arms, arm_calls_total);
+            add_delta!(worker_notification_clears, notification_clears_total);
+            add_delta!(worker_maintenances, maintenance_calls_total);
+            add_delta!(worker_local_completions, local_completions_total);
+            add_delta!(worker_cross_out, cross_worker_out_total);
+            add_delta!(worker_cross_in, cross_worker_in_total);
+
+            worker
+                .metrics
+                .worker_last_progress_age_milliseconds
+                .set(age_ms);
+            worker
+                .metrics
+                .worker_completion_queue_depth
+                .set(gauge(current.completion_queue_depth));
+            worker
+                .metrics
+                .worker_cross_queue_depth
+                .set(gauge(current.cross_worker_queue_depth));
+            worker
+                .metrics
+                .worker_deferred_receives
+                .set(gauge(current.deferred_receives));
+            worker
+                .metrics
+                .worker_dma_tasks_inflight
+                .set(gauge(current.dma_tasks_inflight));
+            worker
+                .metrics
+                .worker_dma_retry_batches
+                .set(gauge(current.dma_retry_batches));
+            worker
+                .metrics
+                .worker_dma_stalled
+                .set(i64::from(current.dma_stalled));
+            worker
+                .metrics
+                .worker_stalled_connections
+                .set(gauge(current.stalled_connections));
+            worker
+                .metrics
+                .worker_emit_pending
+                .set(i64::from(current.emit_pending));
+            worker
+                .metrics
+                .worker_ack_release_depth
+                .set(gauge(current.ack_release_depth));
+            worker
+                .metrics
+                .worker_ack_retry_pending
+                .set(i64::from(current.ack_retry_pending));
+            worker
+                .metrics
+                .worker_remote_fin_pending
+                .set(gauge(current.remote_fin_pending));
+            worker.metrics.worker_parked.set(i64::from(current.parked));
+            worker
+                .metrics
+                .worker_wake_posted
+                .set(i64::from(current.wake_posted));
+        });
+        self.published_driver_stats = current;
+        Ok(())
     }
 
     fn poll_internal(&mut self, cx: &mut Context<'_>) -> Poll<()> {
@@ -2031,6 +2199,8 @@ pub unsafe extern "C" fn l7_worker_run(worker_id: c_int, driver: *mut c_void) ->
             driver,
             // Reconcile on the first pass, before any Pod carries traffic.
             policy_refresh_in: 0,
+            published_driver_stats: DriverStats::default(),
+            last_progress: std::time::Instant::now(),
         })
         .await
     });

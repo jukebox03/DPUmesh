@@ -1,0 +1,2 @@
+[06:23:00:890074][1930127168][DOCA][WRN][dmesh_core.c:2636][dpumesh_init] DPUmesh DOCA initialized: broker-attached worker=svc:(client) pod_id=3 inbox_ring=1024 K=8 L=8
+dmesh_broker_probe: READY pod_id=3 teardown=ok

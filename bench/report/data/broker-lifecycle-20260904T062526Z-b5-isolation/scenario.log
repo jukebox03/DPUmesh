@@ -1,0 +1,2 @@
+[2026-09-04T15:25:26+09:00] scenario=b5-isolation receipt=/home/jukebox/DPUmesh/bench/report/data/broker-lifecycle-20260904T062526Z-b5-isolation
+[2026-09-04T15:25:44+09:00] BLOCKED: namespace/capability/device isolation passed; cgroup CPU/OOM pressure arm requires B5_PRESSURE_COMMAND

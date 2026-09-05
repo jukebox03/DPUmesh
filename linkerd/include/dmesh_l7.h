@@ -181,6 +181,54 @@ int dmesh_l7_driver_stopped(void *driver);
 void dmesh_l7_driver_ready(void *driver);
 void dmesh_l7_driver_failed(void *driver);
 
+/*
+ * A read-only, versioned worker snapshot for the admin metrics surface.
+ *
+ * The worker that owns `driver` is the only writer of the plain counters and
+ * queue consumer positions below. The embedded runtime calls this from that
+ * same worker during its maintenance pass, so collecting a snapshot adds no
+ * atomics to the request path. Producers that run on other threads already
+ * publish their positions/counters atomically.
+ *
+ * Fields ending in `_total` are monotonic for one DPU process incarnation.
+ * All other fields are instantaneous gauges. A caller must zero the structure,
+ * set `version` and `size`, and reject a negative return value.
+ */
+#define DMESH_L7_DRIVER_STATS_VERSION 1u
+struct dmesh_l7_driver_stats {
+    uint32_t version;
+    uint32_t size;
+
+    uint64_t drain_calls_total;
+    uint64_t drain_progressed_total;
+    uint64_t drain_pending_total;
+    uint64_t drain_idle_total;
+    uint64_t pe_progressed_total;
+    uint64_t data_progressed_total;
+    uint64_t arm_calls_total;
+    uint64_t notification_clears_total;
+    uint64_t maintenance_calls_total;
+    uint64_t local_completions_total;
+    uint64_t cross_worker_out_total;
+    uint64_t cross_worker_in_total;
+
+    uint64_t completion_queue_depth;
+    uint64_t cross_worker_queue_depth;
+    uint64_t deferred_receives;
+    uint64_t dma_tasks_inflight;
+    uint64_t dma_retry_batches;
+    uint64_t ack_release_depth;
+    uint64_t stalled_connections;
+    uint64_t remote_fin_pending;
+    uint32_t dma_stalled;
+    uint32_t emit_pending;
+    uint32_t ack_retry_pending;
+    uint32_t parked;
+    uint32_t wake_posted;
+    uint32_t reserved;
+};
+int dmesh_l7_driver_stats(void *driver, struct dmesh_l7_driver_stats *out);
+
 #ifdef __cplusplus
 }
 #endif

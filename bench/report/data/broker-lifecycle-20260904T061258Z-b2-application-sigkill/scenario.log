@@ -1,0 +1,5 @@
+[2026-09-04T15:12:58+09:00] scenario=b2-application-sigkill receipt=/home/jukebox/DPUmesh/bench/report/data/broker-lifecycle-20260904T061258Z-b2-application-sigkill
+[2026-09-04T15:13:13+09:00] background load pid=4129100 duration=30s
+[2026-09-04T15:13:13+09:00] SIGKILL application pid=4124723 pod_uid=4379e32b-b2ef-426c-aff2-5154c1840ad4
+[2026-09-04T15:13:38+09:00] recovered app=echo-grpc-dpumesh restarts=1->2 broker=4125062/69186667->4130753/69195258 stable=5s
+[2026-09-04T15:14:01+09:00] PASS: application SIGKILL removed the old broker and registered a fresh one

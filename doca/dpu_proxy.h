@@ -88,6 +88,23 @@ int px_drain_stalled(struct objects *objs, int worker_id);
 /* Progress one ARM worker's SG-DMA engine. */
 enum px_progress_state px_worker_drain(struct objects *objs, int worker_id);
 
+/* Constant-time worker state copied by the embedded runtime's maintenance
+ * pass. This is intentionally narrower than the proxy's internal structures:
+ * it exposes enough state to classify a progress loss without turning the
+ * private queue layout into an ABI. */
+struct px_worker_stats {
+    uint64_t dma_tasks_inflight;
+    uint64_t dma_retry_batches;
+    uint64_t ack_release_depth;
+    uint64_t stalled_connections;
+    uint64_t remote_fin_pending;
+    uint32_t dma_stalled;
+    uint32_t emit_pending;
+    uint32_t ack_retry_pending;
+};
+int px_worker_stats(struct objects *objs, int worker_id,
+                    struct px_worker_stats *out);
+
 /* Bind the calling ARM thread to one proxy worker. */
 void px_bind_worker(struct objects *objs, int worker_id);
 

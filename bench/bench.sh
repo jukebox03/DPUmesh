@@ -646,21 +646,6 @@ exit 1"; then
     info "Linkerd ready on admin port(s): $ports"
 }
 
-# Trusted registration protects every Service, so a declined L7 session has to
-# end instead of continuing as unobserved L4. Both the deploy path and a bare
-# `restart` resolve the switch here.
-resolve_l7_fail_closed() {
-    case "${DPUMESH_L7_FAIL_CLOSED:-1}" in
-        1) ;;
-        *) err "DPUMESH_L7_FAIL_CLOSED=$DPUMESH_L7_FAIL_CLOSED forwards declined"
-           err "  protected sessions as plain L4, which trusted registration"
-           err "  does not allow"
-           exit 1 ;;
-    esac
-    DPUMESH_L7_FAIL_CLOSED=1
-    export DPUMESH_L7_FAIL_CLOSED
-}
-
 # The target feed carries every Service assigned to the L7 layer: one the feed
 # omits is a withdrawn target, which fail-closed refuses. The `namespace/name`
 # list is derived from the canonical mode assignment.
@@ -691,7 +676,6 @@ resolve_l7_services() {
 
 start_dpu() {
     local log_level="${DPUMESH_LOG_LEVEL:-40}"
-    resolve_l7_fail_closed
     # Cluster locality is part of Linkerd's destination context. Resolve it
     # before writing the DPU environment so endpoint translation never asks
     # Kubernetes for the empty node name.
@@ -743,7 +727,6 @@ LINKERD2_PROXY_ADMIN_LISTEN_ADDR=${LINKERD_ADMIN_ADDR:-127.0.0.1:4191}
 LINKERD2_PROXY_LOG=${LINKERD_LOG:-warn}
 DPUMESH_L7_LINKERD_WORKER=${DPUMESH_L7_LINKERD_WORKER:-0}
 DPUMESH_L7_SERVICE_TARGETS_FILE=$(linkerd_service_target_file)
-DPUMESH_L7_FAIL_CLOSED=$DPUMESH_L7_FAIL_CLOSED
 DPUMESH_PERF_STATS=${DPUMESH_PERF_STATS:-0}
 LD_PRELOAD=$dpu_ld_preload_q
 L7ENV
@@ -956,38 +939,6 @@ clean_failed_pods() {
     fi
 }
 
-# `kubectl apply` does not remove objects that disappeared from a manifest.
-# Retire the old comparison transports by exact name so an upgraded namespace
-# contains only the DPUmesh native, preload, and gRPC surfaces.
-prune_obsolete_transports() {
-    local workloads=(
-        bench-dpumesh-2 bench-dpumesh-3 echo-direct stream-dpumesh
-        bench-tcp echo-tcp bench-tcp-strict echo-tcp-strict
-        bench-grpc-envoy echo-grpc-envoy bench-grpc-tcp echo-grpc-tcp
-        bench-grpc-envoy-strict echo-grpc-envoy-strict
-        bench-grpc-linkerd-opaque echo-grpc-linkerd-opaque
-    )
-    local configs=(
-        sidecar1-config sidecar2-config strict-client-config strict-server-config
-        grpc-sidecar1-config grpc-strict-client-config
-    )
-    step "=== Removing obsolete transport resources ==="
-    kubectl delete deployment -n "$NS" "${workloads[@]}" \
-        --ignore-not-found=true >/dev/null
-    kubectl delete service -n "$NS" "${workloads[@]}" \
-        --ignore-not-found=true >/dev/null
-    kubectl delete configmap -n "$NS" "${configs[@]}" \
-        --ignore-not-found=true >/dev/null
-    kubectl delete secret envoy-mtls -n "$NS" \
-        --ignore-not-found=true >/dev/null
-    # The relay lives in the trusted node agent; delete the standalone Linkerd-namespace
-    # gateway and only its exact RBAC names.
-    local linkerd_ns="${LINKERD_CONTROL_NAMESPACE:-linkerd}"
-    kubectl delete daemonset,serviceaccount,role,rolebinding \
-        dpumesh-linkerd-cp-gateway -n "$linkerd_ns" \
-        --ignore-not-found=true >/dev/null
-}
-
 # A sidecarless workload still has to be visible to Linkerd's policy index,
 # while its DMA port must not make destination discovery expect an injected
 # proxy container. Keep the paired metadata an enforced deployment contract.
@@ -1028,8 +979,6 @@ prepare_trusted_registration() {
         *) err "benchmark attestation socket must be under /run/dpumesh"; exit 1 ;;
     esac
     export DPUMESH_ATTEST_SOCKET
-    # Settle the protected-service policy before provisioning anything.
-    resolve_l7_fail_closed
     "$BENCH_DIR/workload_attest.sh" prepare
 }
 
@@ -1243,7 +1192,6 @@ deploy() {
     configure_host_numa
     ensure_namespace
     clean_failed_pods
-    prune_obsolete_transports
     prepare_trusted_registration
     apply_manifest
     validate_mesh_metadata || exit 1
@@ -1351,7 +1299,6 @@ await_admission() {
 # nothing new is admitted until the new certificate is installed.
 rotate_identity() {
     need_env
-    resolve_l7_fail_closed
     local deadline="${LINKERD_DRAIN_TIMEOUT:-60}"
     local admin="${LINKERD_ADMIN_ADDR:-127.0.0.1:4191}"
 

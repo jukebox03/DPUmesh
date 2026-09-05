@@ -1,0 +1,3 @@
+[2026-09-04T15:22:18+09:00] scenario=b3-agent-re-adoption receipt=/home/jukebox/DPUmesh/bench/report/data/broker-lifecycle-20260904T062218Z-b3-agent-re-adoption
+[2026-09-04T15:22:35+09:00] background load pid=4155866 duration=20s
+[2026-09-04T15:23:20+09:00] PASS: node-agent rollout retained and re-adopted brokers, rejected forged state

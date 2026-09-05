@@ -1020,19 +1020,6 @@ static ssize_t shim_send(pfd_t *e, const void *buf, size_t len, int flags) {
 
 /* ========================= socket-call surface ========================= */
 
-/* Comparison arm only (`DPUMESH_TCP_FALLBACK=1`): a failed channel or a failed
- * resolve falls back to kernel TCP instead of refusing the connect. The
- * webhook never sets it, so a meshed Pod's only path is the mesh; a bench arm
- * sets it to compare the refusal against a kernel-TCP bypass. */
-static int tcp_fallback_allowed(void) {
-    static int allowed = -1;
-    if (allowed < 0) {
-        const char *value = getenv("DPUMESH_TCP_FALLBACK");
-        allowed = (value && *value && strcmp(value, "0") != 0) ? 1 : 0;
-    }
-    return allowed;
-}
-
 int connect(int fd, const struct sockaddr *addr, socklen_t alen) {
     ENSURE_REAL();
     pfd_t *existing = pfd_get(fd);
@@ -1054,11 +1041,6 @@ int connect(int fd, const struct sockaddr *addr, socklen_t alen) {
         clock_gettime(CLOCK_MONOTONIC, &mono);
         if (mono.tv_sec < atomic_load_explicit(&g_channel_retry_after,
                                                memory_order_relaxed)) {
-            if (tcp_fallback_allowed()) {
-                DBG("connect: channel unavailable; kernel TCP for %s:%d",
-                    inet_ntoa(sin->sin_addr), ntohs(sin->sin_port));
-                return real_connect(fd, addr, alen);
-            }
             DBG("connect: channel unavailable; refusing %s:%d",
                 inet_ntoa(sin->sin_addr), ntohs(sin->sin_port));
             errno = ENETUNREACH;
@@ -1067,12 +1049,6 @@ int connect(int fd, const struct sockaddr *addr, socklen_t alen) {
         if (ensure_channel() < 0) {
             atomic_store_explicit(&g_channel_retry_after, mono.tv_sec + 5,
                                   memory_order_relaxed);
-            if (tcp_fallback_allowed()) {
-                fprintf(stderr, "[dmesh_preload] channel unavailable; %s:%d "
-                        "leaves the mesh over kernel TCP\n",
-                        inet_ntoa(sin->sin_addr), ntohs(sin->sin_port));
-                return real_connect(fd, addr, alen);
-            }
             fprintf(stderr, "[dmesh_preload] channel unavailable; refusing "
                     "%s:%d — the mesh is this process's only path\n",
                     inet_ntoa(sin->sin_addr), ntohs(sin->sin_port));
@@ -1095,12 +1071,6 @@ int connect(int fd, const struct sockaddr *addr, socklen_t alen) {
              * protected is unknown. Guessing kernel TCP here would route a
              * protected Service around its policy exactly when the mesh is
              * least healthy. */
-            if (tcp_fallback_allowed()) {
-                fprintf(stderr, "[dmesh_preload] %s:%d unresolvable "
-                        "(no generation held); kernel TCP\n",
-                        inet_ntoa(sin->sin_addr), ntohs(sin->sin_port));
-                return real_connect(fd, addr, alen);
-            }
             fprintf(stderr, "[dmesh_preload] %s:%d unresolvable "
                     "(no generation held); refusing\n",
                     inet_ntoa(sin->sin_addr), ntohs(sin->sin_port));

@@ -90,7 +90,6 @@ typedef struct {
     double       duration;     /* run length in seconds */
     double       start_at;     /* shared barrier: all threads begin at this time */
     long         reconn;       /* events per conn before close+reconnect (0 = never) */
-    int          batch;        /* control/result layout field */
     const char  *dst_service;  /* this worker's backend service NAME */
     atomic_int  *stop;         /* watchdog / abort flag */
 
@@ -476,7 +475,7 @@ static void *watchdog_fn(void *arg) {
 /* ------------------------------------------------------------ one benchmark run */
 static void run_bench(int conn_fd, int mode, int req_size, int reply_size,
                       int concurrency, double duration, long warmup, int threads,
-                      double rate, int arrival, long reconn, int batch) {
+                      double rate, int arrival, long reconn) {
     char reply[1024];
     if (req_size < 0 || reply_size < 1 || duration <= 0 || threads < 1 ||
         (mode == MODE_CLOSED && concurrency < 1) ||
@@ -492,7 +491,6 @@ static void run_bench(int conn_fd, int mode, int req_size, int reply_size,
                         "measurement window may be empty\n",
                 rate * duration / (double)threads, warmup);
 
-    (void)batch; /* wire-compatibility field; transport batching is automatic */
     char load[32];
     if (mode == MODE_OPEN) snprintf(load, sizeof load, "rate=%.0f", rate);
     else                   snprintf(load, sizeof load, "conc=%d", concurrency);
@@ -525,7 +523,6 @@ static void run_bench(int conn_fd, int mode, int req_size, int reply_size,
         w[i].duration   = duration;
         w[i].start_at   = start_at;
         w[i].reconn     = reconn;
-        w[i].batch      = 1;
         w[i].dst_service = g_dst_services[i % g_dst_service_count];
         w[i].stop       = &stop;
         w[i].prng       = 0x9e3779b97f4a7c15ULL ^
@@ -602,7 +599,7 @@ static void run_bench(int conn_fd, int mode, int req_size, int reply_size,
         "avg=%.2f min=%.2f max=%.2f rcnt=%ld scheduled=%ld pending=%ld fail=%ld "
         "conc=%d threads=%d reqsz=%d repsz=%d reqframe=%u respframe=%u "
         "durs=%.3f offered_mrps=%.6f "
-        "drops=%ld overflow=%llu worker_fail=%d mode=%s arr=%s batch=%d "
+        "drops=%ld overflow=%llu worker_fail=%d mode=%s arr=%s "
         "reconns=%ld reconn_us=%.2f grabs=%llu rets=%llu recyc=%llu waits=%llu pads=%llu "
         "reorder=%ld",
         bench_result_status(total_ok, total_fail, worker_fail),
@@ -614,7 +611,7 @@ static void run_bench(int conn_fd, int mode, int req_size, int reply_size,
         BENCH_HDR_LEN + (uint32_t)reply_size, duration, offered_mrps,
         total_drops, (unsigned long long)overflow, worker_fail,
         mode == MODE_OPEN ? "open" : "closed",
-        arrival == ARR_POISSON ? "poisson" : "const", 1,
+        arrival == ARR_POISSON ? "poisson" : "const",
         total_reconns, reconn_us,
         st1.pool_grabs - st0.pool_grabs, st1.pool_returns - st0.pool_returns,
         st1.recycle_hits - st0.recycle_hits, st1.grow_waits - st0.grow_waits,
@@ -649,13 +646,13 @@ static void handle_ctrl(int fd) {
 
     char cmd[16] = {0};
     if (sscanf(buf, "%15s", cmd) == 1 && strcmp(cmd, "RUN") == 0) {
-        int req = 32, rep = 8, conc = 1, threads = 1, batch = 0;
+        int req = 32, rep = 8, conc = 1, threads = 1;
         double dur = 10.0; long warm = 1000, reconn = 0;
-        /* RUN <req_size> <reply_size> <concurrency> <duration> <warmup> <threads> [reconn] [batch] */
-        sscanf(buf, "%*s %d %d %d %lf %ld %d %ld %d", &req, &rep, &conc,
-               &dur, &warm, &threads, &reconn, &batch);
+        /* RUN <req_size> <reply_size> <concurrency> <duration> <warmup> <threads> [reconn] */
+        sscanf(buf, "%*s %d %d %d %lf %ld %d %ld", &req, &rep, &conc,
+               &dur, &warm, &threads, &reconn);
         run_bench(fd, MODE_CLOSED, req, rep, conc, dur, warm, threads,
-                  0.0, ARR_CONST, reconn, batch);
+                  0.0, ARR_CONST, reconn);
         close(fd); return;
     }
     if (sscanf(buf, "%15s", cmd) == 1 && strcmp(cmd, "OPEN") == 0) {
@@ -668,7 +665,7 @@ static void handle_ctrl(int fd) {
                &req, &rep, &threads, &dur, &warm, &rate, arr);
         int arrival = (strcmp(arr, "poisson") == 0) ? ARR_POISSON : ARR_CONST;
         run_bench(fd, MODE_OPEN, req, rep, 0, dur, warm, threads,
-                  rate, arrival, 0, 0);
+                  rate, arrival, 0);
         close(fd); return;
     }
     if (sscanf(buf, "%15s", cmd) == 1 && strcmp(cmd, "SELFTEST") == 0) {
@@ -691,7 +688,7 @@ static void handle_ctrl(int fd) {
         close(fd); return;
     }
     const char *u =
-        "ERR use: RUN <req> <reply> <conc> <dur> <warmup> <threads> [reconn] [batch] | "
+        "ERR use: RUN <req> <reply> <conc> <dur> <warmup> <threads> [reconn] | "
         "OPEN <req> <reply> <threads> <dur> <warmup> <rate> [const|poisson] | "
         "SELFTEST <payload> <threads> <dur> <rate> <const|poisson> | PING\n";
     if (write(fd, u, strlen(u)) < 0) {}

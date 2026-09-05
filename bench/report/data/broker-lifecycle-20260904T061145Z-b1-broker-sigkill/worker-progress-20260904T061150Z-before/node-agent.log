@@ -1,0 +1,50 @@
+[pod/dpumesh-node-agent-f68l8/workload-agent] workload-attest-agent: listening on /run/dpumesh/attest.sock (concurrency=8)
+[pod/dpumesh-node-agent-f68l8/workload-agent] workload-attest-agent: discarded broker state e1ceaba7-ed1f-44db-9d63-0c4a835805ec.state: cannot read peer state for pid 4077039
+[pod/dpumesh-node-agent-f68l8/workload-agent] workload-attest-agent: discarded broker state 8c6ca326-d55b-4d53-870b-a32280309ba8.state: cannot read peer state for pid 4059678
+[pod/dpumesh-node-agent-f68l8/workload-agent] workload-attest-agent: discarded broker state 2578ecc1-71cb-4d28-9a7f-d894c16ad95b.state: cannot read peer state for pid 4059205
+[pod/dpumesh-node-agent-f68l8/workload-agent] destination: 192.168.100.1:28086 -> linkerd/linkerd-dst:8086
+[pod/dpumesh-node-agent-f68l8/workload-agent] policy: 192.168.100.1:28087 -> linkerd/linkerd-policy:8090
+[pod/dpumesh-node-agent-f68l8/workload-agent] identity: 192.168.100.1:28088 -> linkerd/linkerd-identity:8080
+[pod/dpumesh-node-agent-f68l8/workload-agent] controller: 192.168.100.1:28089 -> test-bench/dpumesh-controller:8080
+[pod/dpumesh-node-agent-f68l8/workload-agent] workload-attest-agent: membership generation 1788501994049642848
+[pod/dpumesh-node-agent-f68l8/workload-agent] workload-attest-agent: ingress guard holds 0 mesh-served ports closed to kernel TCP
+[pod/dpumesh-node-agent-f68l8/workload-agent] workload-attest-agent: reported node key 42ec1c5fb7ab2a6b... to the controller
+[pod/dpumesh-node-agent-f68l8/workload-agent] workload-attest-agent: membership generation 1788502004091302900
+[pod/dpumesh-node-agent-f68l8/workload-agent] workload-attest-agent: membership generation 1788502014130721482
+[pod/dpumesh-node-agent-f68l8/workload-agent] workload-attest-agent: membership generation 1788502024170396870
+[pod/dpumesh-node-agent-f68l8/workload-agent] workload-attest-agent: spawned broker pid=4102645 pod=00b6aa4e-b68e-49d1-811a-d125c8024143 service=echo-grpc-dpumesh unit=dpumesh-broker-00b6aa4eb68e-d13b7c2c
+[pod/dpumesh-node-agent-f68l8/workload-agent] workload-attest-agent: membership generation 1788502034200914273
+[pod/dpumesh-node-agent-f68l8/workload-agent] workload-attest-agent: spawned broker pid=4103493 pod=9f2c03ed-1f1d-4f5b-b9ce-1798e7cb81b8 service=echo-grpc-alt unit=dpumesh-broker-9f2c03ed1f1d-6adbc36d
+[pod/dpumesh-node-agent-f68l8/workload-agent] workload-attest-agent: spawned broker pid=4103958 pod=87ff16bc-c4b7-400c-9cc4-c69cc5b4e274 service=- unit=dpumesh-broker-87ff16bcc4b7-49f8af4a
+[pod/dpumesh-node-agent-f68l8/workload-agent] workload-attest-agent: membership generation 1788502044232824251
+[pod/dpumesh-node-agent-f68l8/workload-agent] workload-attest-agent: membership generation 1788502054277839317
+[pod/dpumesh-node-agent-f68l8/workload-agent] workload-attest-agent: membership generation 1788502064323797991
+[pod/dpumesh-node-agent-f68l8/workload-agent] workload-attest-agent: membership generation 1788502074365696111
+[pod/dpumesh-node-agent-f68l8/workload-agent] workload-attest-agent: membership generation 1788502084405438636
+[pod/dpumesh-node-agent-f68l8/workload-agent] workload-attest-agent: waiting 5.00s for the previous broker of Pod 00b6aa4e-b68e-49d1-811a-d125c8024143 to quiesce
+[pod/dpumesh-node-agent-f68l8/workload-agent] workload-attest-agent: membership generation 1788502094438244417
+[pod/dpumesh-node-agent-f68l8/workload-agent] workload-attest-agent: spawned broker pid=4110437 pod=00b6aa4e-b68e-49d1-811a-d125c8024143 service=echo-grpc-dpumesh unit=dpumesh-broker-00b6aa4eb68e-8438b19a
+[pod/dpumesh-node-agent-f68l8/workload-agent] workload-attest-agent: membership generation 1788502104467868450
+[pod/dpumesh-node-agent-f68l8/workload-agent] workload-attest-agent: membership generation 1788502114507079844
+[pod/dpumesh-node-agent-f68l8/workload-agent] workload-attest-agent: membership generation 1788502124537148281
+[pod/dpumesh-node-agent-f68l8/workload-agent] workload-attest-agent: membership generation 1788502134579776437
+[pod/dpumesh-node-agent-f68l8/workload-agent] workload-attest-agent: membership generation 1788502144619464515
+[pod/dpumesh-node-agent-f68l8/workload-agent] workload-attest-agent: membership generation 1788502154658527965
+[pod/dpumesh-node-agent-f68l8/workload-agent] workload-attest-agent: membership generation 1788502164700260054
+[pod/dpumesh-node-agent-f68l8/workload-agent] workload-attest-agent: membership generation 1788502174735557256
+[pod/dpumesh-node-agent-f68l8/workload-agent] workload-attest-agent: waiting 5.00s for the previous broker of Pod 00b6aa4e-b68e-49d1-811a-d125c8024143 to quiesce
+[pod/dpumesh-node-agent-f68l8/workload-agent] workload-attest-agent: spawned broker pid=4116857 pod=00b6aa4e-b68e-49d1-811a-d125c8024143 service=echo-grpc-dpumesh unit=dpumesh-broker-00b6aa4eb68e-72a1ab58
+[pod/dpumesh-node-agent-f68l8/workload-agent] workload-attest-agent: membership generation 1788502184781156262
+[pod/dpumesh-node-agent-f68l8/workload-agent] workload-attest-agent: membership generation 1788502194822541669
+[pod/dpumesh-node-agent-f68l8/workload-agent] workload-attest-agent: membership generation 1788502204864540797
+[pod/dpumesh-node-agent-f68l8/workload-agent] workload-attest-agent: membership generation 1788502214908722234
+[pod/dpumesh-node-agent-f68l8/workload-agent] workload-attest-agent: membership generation 1788502224949994586
+[pod/dpumesh-node-agent-f68l8/workload-agent] workload-attest-agent: membership generation 1788502234979600480
+[pod/dpumesh-node-agent-f68l8/workload-agent] workload-attest-agent: membership generation 1788502245023360393
+[pod/dpumesh-node-agent-f68l8/workload-agent] workload-attest-agent: membership generation 1788502255063863124
+[pod/dpumesh-node-agent-f68l8/workload-agent] workload-attest-agent: membership generation 1788502265107254065
+[pod/dpumesh-node-agent-f68l8/workload-agent] workload-attest-agent: membership generation 1788502275145031008
+[pod/dpumesh-node-agent-f68l8/workload-agent] workload-attest-agent: membership generation 1788502285180616263
+[pod/dpumesh-node-agent-f68l8/workload-agent] workload-attest-agent: spawned broker pid=4122115 pod=4379e32b-b2ef-426c-aff2-5154c1840ad4 service=echo-grpc-dpumesh unit=dpumesh-broker-4379e32bb2ef-43a7fcd8
+[pod/dpumesh-node-agent-f68l8/workload-agent] workload-attest-agent: membership generation 1788502295219102642
+[pod/dpumesh-node-agent-f68l8/workload-agent] workload-attest-agent: membership generation 1788502305250010639

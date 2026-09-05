@@ -1,0 +1,4 @@
+[0;34m[STEP][0m === Starting dpumesh_dpu (l7_opaque='test-bench/echo-dpumesh,test-bench/loopback-dpumesh,test-bench/verbs-dpumesh,test-bench/preload-dpumesh,test-bench/preload-sock' l7_full='test-bench/echo-grpc-dpumesh,test-bench/echo-grpc-alt,test-bench/http1-dpumesh' dpa_threads='32' rings_per_pod='8' arm_workers='8' peer='') ===
+[1;33m[WARN][0m dpumesh_dpu was already absent; evidence captured in /tmp/dpumesh-bench/dpu-absent-20260904-152400.log
+[0;32m[INFO][0m Stopping dpumesh_dpu...
+[0;32m[INFO][0m dpumesh_dpu running (PID: 2075096)

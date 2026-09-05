@@ -954,8 +954,7 @@ static void *broker_control_fn(void *arg)
      * is the workload process: Kubernetes restarts it in the same Pod, which
      * reconnects with a fresh HELLO and broker. Normal dpumesh_destroy clears
      * broker_control_running first and never takes this path. */
-    const char *restart = getenv("DPUMESH_BROKER_RESTART_PROCESS");
-    if (unexpected && (restart == NULL || strcmp(restart, "0") != 0)) {
+    if (unexpected) {
         (void)kill(getpid(), SIGTERM);
         _exit(75);
     }

@@ -1,0 +1,26 @@
+[pod/dpumesh-node-agent-4nmjm/workload-agent] workload-attest-agent: discarded broker state 00000000-0000-0000-0000-000000000000.state: broker PID/starttime changed
+[pod/dpumesh-node-agent-4nmjm/workload-agent] workload-attest-agent: re-adopted broker pid=4130753 pod=4379e32b-b2ef-426c-aff2-5154c1840ad4 service=echo-grpc-dpumesh
+[pod/dpumesh-node-agent-4nmjm/workload-agent] workload-attest-agent: re-adopted broker pid=4103958 pod=87ff16bc-c4b7-400c-9cc4-c69cc5b4e274 service=-
+[pod/dpumesh-node-agent-4nmjm/workload-agent] workload-attest-agent: re-adopted broker pid=4103493 pod=9f2c03ed-1f1d-4f5b-b9ce-1798e7cb81b8 service=echo-grpc-alt
+[pod/dpumesh-node-agent-4nmjm/workload-agent] workload-attest-agent: re-adopted 3 broker(s)
+[pod/dpumesh-node-agent-4nmjm/workload-agent] workload-attest-agent: listening on /run/dpumesh/attest.sock (concurrency=8)
+[pod/dpumesh-node-agent-4nmjm/workload-agent] destination: 192.168.100.1:28086 -> linkerd/linkerd-dst:8086
+[pod/dpumesh-node-agent-4nmjm/workload-agent] policy: 192.168.100.1:28087 -> linkerd/linkerd-policy:8090
+[pod/dpumesh-node-agent-4nmjm/workload-agent] identity: 192.168.100.1:28088 -> linkerd/linkerd-identity:8080
+[pod/dpumesh-node-agent-4nmjm/workload-agent] controller: 192.168.100.1:28089 -> test-bench/dpumesh-controller:8080
+[pod/dpumesh-node-agent-4nmjm/workload-agent] workload-attest-agent: membership generation 1788502811049010106
+[pod/dpumesh-node-agent-4nmjm/workload-agent] workload-attest-agent: ingress guard holds 0 mesh-served ports closed to kernel TCP
+[pod/dpumesh-node-agent-4nmjm/workload-agent] workload-attest-agent: reported node key 42ec1c5fb7ab2a6b... to the controller
+[pod/dpumesh-node-agent-4nmjm/workload-agent] workload-attest-agent: membership generation 1788502821085673816
+[pod/dpumesh-node-agent-4nmjm/workload-agent] workload-attest-agent: membership generation 1788502831127605819
+[pod/dpumesh-node-agent-4nmjm/workload-agent] workload-attest-agent: membership generation 1788502841158483702
+[pod/dpumesh-node-agent-4nmjm/workload-agent] workload-attest-agent: membership generation 1788502851198446760
+[pod/dpumesh-node-agent-4nmjm/workload-agent] workload-attest-agent: membership generation 1788502861230011502
+[pod/dpumesh-node-agent-4nmjm/workload-agent] workload-attest-agent: membership generation 1788502871264107400
+[pod/dpumesh-node-agent-4nmjm/workload-agent] workload-attest-agent: membership generation 1788502881304663379
+[pod/dpumesh-node-agent-4nmjm/workload-agent] workload-attest-agent: membership generation 1788502891350734140
+[pod/dpumesh-node-agent-4nmjm/workload-agent] workload-attest-agent: membership generation 1788502901392621203
+[pod/dpumesh-node-agent-4nmjm/workload-agent] workload-attest-agent: membership generation 1788502911431201964
+[pod/dpumesh-node-agent-4nmjm/workload-agent] workload-attest-agent: membership generation 1788502921461080292
+[pod/dpumesh-node-agent-4nmjm/workload-agent] workload-attest-agent: membership generation 1788502931505286340
+[pod/dpumesh-node-agent-4nmjm/workload-agent] workload-attest-agent: membership generation 1788502941552703694

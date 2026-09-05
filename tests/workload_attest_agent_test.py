@@ -265,6 +265,46 @@ def main():
     registry.broker_spawn_release(uid, success=True, now=115.0)
     assert uid not in registry.broker_retry
 
+    # The real request path waits through the bounded quiescence interval
+    # instead of failing the workload's first restart and entering kubelet
+    # CrashLoopBackOff.  Supplying `now=` above remains the nonblocking probe.
+    registry.broker_retry[uid] = (205.0, 10.0)
+    monotonic_values = iter((200.0, 205.0))
+    sleeps = []
+    original_monotonic = agent.time.monotonic
+    original_sleep = agent.time.sleep
+    agent.time.monotonic = lambda: next(monotonic_values)
+    agent.time.sleep = lambda seconds: sleeps.append(seconds)
+    try:
+        registry.broker_spawn_claim(uid)
+    finally:
+        agent.time.monotonic = original_monotonic
+        agent.time.sleep = original_sleep
+    assert sleeps == [5.0]
+    assert uid in registry.spawning_pods
+    registry.broker_spawn_release(uid, success=True, now=205.0)
+
+    # A workload process cannot request an assertion directly.  Only a broker
+    # that the agent spawned and registered may cross the attestation boundary.
+    class DirectRequest:
+        def getsockopt(self, _level, _option, _length):
+            return agent.struct.pack("3i", os.getpid(), 0, 0)
+
+        def recv(self, _length):
+            return agent.REQUEST.pack(
+                b"DMESHAR1", agent.ASSERT_VERSION,
+                agent.fixed_text("echo-dpumesh", 64, "service"), nonce,
+            )
+
+    direct = agent.Agent.__new__(agent.Agent)
+    direct.broker_claims = lambda _pid, _uid: None
+    try:
+        direct.attest(DirectRequest())
+    except agent.AttestationError as exc:
+        assert "registered broker" in str(exc)
+    else:
+        raise AssertionError("a workload obtained an assertion without a broker")
+
     with tempfile.TemporaryDirectory() as temporary:
         key_dir = Path(temporary)
         os.chmod(key_dir, 0o700)

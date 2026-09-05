@@ -708,15 +708,15 @@ class Agent:
         self.reported: tuple[str, str] | None = None
         self.identity_material: tuple[str, str] | None = None
         self.identity_deadline = 0.0
-        self.broker_bin: Path | None = getattr(args, "broker_bin", None)
+        self.broker_bin: Path = args.broker_bin
         self.broker_lib: Path = getattr(
             args, "broker_lib", Path("/usr/local/lib/libdpumesh.so.5")
         )
         self.broker_runtime_dir: Path = getattr(
             args, "broker_runtime_dir", Path("/var/lib/dpumesh/broker-runtime")
         )
-        self.broker_runtime_bin: Path | None = None
-        self.broker_runtime_lib: Path | None = None
+        self.broker_runtime_bin: Path
+        self.broker_runtime_lib: Path
         self.spawned_lock = threading.Lock()
         # final broker pid -> (None, starttime, Pod, Service). The broker is a
         # systemd unit, never this process's child, so no Popen is ever held.
@@ -743,8 +743,7 @@ class Agent:
                 root.rmdir()
             except OSError:
                 pass
-        if self.broker_bin is not None:
-            self.install_broker_runtime()
+        self.install_broker_runtime()
 
     def install_broker_runtime(self) -> None:
         """Publish a content-addressed broker outside the agent rootfs.
@@ -755,7 +754,6 @@ class Agent:
         executable and project DSO on the hostPath means neither its parent nor
         its executable mappings retain the old agent container.
         """
-        assert self.broker_bin is not None
         try:
             broker_bytes = self.broker_bin.read_bytes()
             library_bytes = self.broker_lib.read_bytes()
@@ -1006,25 +1004,43 @@ class Agent:
         return pod
 
     def broker_spawn_claim(self, pod_uid: str, now: float | None = None) -> None:
-        if now is None:
-            now = time.monotonic()
-        with self.spawned_lock:
-            if pod_uid in self.spawning_pods:
-                raise AttestationError(
-                    f"broker launch is already in progress for Pod {pod_uid}"
-                )
-            for _pid, (_process, _started, pod, _service) in self.spawned.items():
-                if str(pod["metadata"]["uid"]) == pod_uid:
+        # A workload restart is already waiting for this HELLO to finish.  Do
+        # not reject that first attempt merely because the previous broker's
+        # Comch resources are still inside their bounded quiescence window:
+        # exiting here turns a five-second data-plane guard into kubelet's much
+        # longer CrashLoopBackOff.  Production callers wait outside the lock;
+        # tests that supply an explicit clock retain a nonblocking probe.
+        probe_only = now is not None
+        logged_wait = False
+        while True:
+            current = time.monotonic() if now is None else now
+            with self.spawned_lock:
+                if pod_uid in self.spawning_pods:
                     raise AttestationError(
-                        f"a live broker already owns Pod {pod_uid}"
+                        f"broker launch is already in progress for Pod {pod_uid}"
                     )
-            not_before, _delay = self.broker_retry.get(pod_uid, (0.0, 5.0))
-            if now < not_before:
+                for _pid, (_process, _started, pod, _service) in self.spawned.items():
+                    if str(pod["metadata"]["uid"]) == pod_uid:
+                        raise AttestationError(
+                            f"a live broker already owns Pod {pod_uid}"
+                        )
+                not_before, _delay = self.broker_retry.get(pod_uid, (0.0, 5.0))
+                wait = not_before - current
+                if wait <= 0:
+                    self.spawning_pods.add(pod_uid)
+                    return
+            if probe_only:
                 raise AttestationError(
-                    f"broker restart for Pod {pod_uid} is backed off for "
-                    f"{not_before - now:.2f}s"
+                    f"broker restart for Pod {pod_uid} is quiescing for {wait:.2f}s"
                 )
-            self.spawning_pods.add(pod_uid)
+            if not logged_wait:
+                print(
+                    f"workload-attest-agent: waiting {wait:.2f}s for the previous "
+                    f"broker of Pod {pod_uid} to quiesce",
+                    flush=True,
+                )
+                logged_wait = True
+            time.sleep(wait)
 
     def broker_spawn_release(self, pod_uid: str, success: bool,
                              now: float | None = None) -> None:
@@ -1091,8 +1107,6 @@ class Agent:
         os.replace(temporary, target)
 
     def re_adopt_brokers(self) -> None:
-        if self.broker_bin is None:
-            return
         adopted = 0
         for record in self.broker_state_dir.glob("*.state"):
             try:
@@ -1153,8 +1167,6 @@ class Agent:
         return pod, service_name
 
     def spawn_broker(self, connection: socket.socket) -> None:
-        if self.broker_bin is None or self.broker_runtime_bin is None:
-            raise AttestationError("broker mode is disabled")
         credentials = connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
         pid, _uid, _gid = struct.unpack("3i", credentials)
         packet = connection.recv(BROKER_HELLO.size + 1, socket.MSG_PEEK)
@@ -1330,12 +1342,13 @@ class Agent:
             raise AttestationError(f"invalid requested Service name {service_name!r}")
 
         broker = self.broker_claims(pid, uid)
-        if broker is not None:
-            pod, registered_service = broker
-            if service_name != registered_service:
-                raise AttestationError("broker requested a Service outside its registry claim")
-        else:
-            pod = self.authorized_pod(pid, service_name)
+        if broker is None:
+            raise AttestationError(
+                "attestation requests are accepted only from a registered broker"
+            )
+        pod, registered_service = broker
+        if service_name != registered_service:
+            raise AttestationError("broker requested a Service outside its registry claim")
         key_id, key = load_active_key(self.args.key_dir)
         return build_assert(
             key=key,
@@ -1432,8 +1445,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--socket-mode", type=lambda value: int(value, 8), default=0o666)
     parser.add_argument("--max-concurrency", type=int, default=8)
     parser.add_argument("--request-timeout", type=float, default=2.0)
-    parser.add_argument("--broker-bin", type=Path, default=None,
-                        help="per-Pod broker executable; unset keeps legacy mode")
+    parser.add_argument("--broker-bin", type=Path, required=True,
+                        help="required per-Pod broker executable")
     parser.add_argument("--broker-lib", type=Path,
                         default=Path("/usr/local/lib/libdpumesh.so.5"),
                         help="project DSO staged with the host-supervised broker")

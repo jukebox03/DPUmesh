@@ -445,6 +445,7 @@ struct px_worker_state {
     struct objects *objs;          /* the L7 entry points reach the proxy through this */
     int id;
     struct px_conn *stall_head;    /* conns parked by px_stall; drained by px_drain_stalled */
+    uint32_t stalled_count;        /* O(1) diagnostic gauge for stall_head */
     /* Set while px_parse_l7 walks the window. A release reported from inside
      * that walk is applied at its end instead of parking the conn, because
      * applying it there would unlink arrivals the walk still holds. */
@@ -475,10 +476,8 @@ struct dmesh_proxy {
     uint8_t  svc_protected[POD_ID_SPACE];/* service id → enum px_protection */
     int      l7_attached;                /* some service selects a mode with an L7 layer */
     int      l7_worker;                  /* ARM worker owning the L7 layer's session state */
-    /* The default for a Service the generation does not grade. A Service it
-     * grades carries its own class, which is what makes the choice
-     * un-inferable from Pod input. */
-    int      l7_fail_closed;             /* a declined L7 connection is refused, not forwarded */
+    /* A Service the generation grades carries its own class. Unknown Services
+     * are strict, so loss of authority cannot silently remove protection. */
     uint32_t sg_pieces_max;
     uint32_t dma_bytes_max;              /* device limit for one memcpy task */
     int perf_stats;                      /* DPUMESH_PERF_STATS diagnostic log */
@@ -953,9 +952,13 @@ static void px_conn_del(struct objects *objs, struct px_conn *c) {
         struct px_conn **sl = &px_cur_worker->stall_head;
         while (*sl && *sl != c)
             sl = &(*sl)->stall_next;
-        if (*sl)
+        if (*sl) {
             *sl = c->stall_next;
+            if (px_cur_worker->stalled_count > 0)
+                px_cur_worker->stalled_count--;
+        }
         c->stalled = 0;
+        c->stall_next = NULL;
     }
     struct px_conn **link = &px_cur_worker->buckets[px_conn_hash(c->pub.src_pod, c->pub.src_port)];
     while (*link && *link != c)
@@ -1812,6 +1815,7 @@ static void px_stall(struct px_conn *c) {
     c->stalled = 1;
     c->stall_next = px_cur_worker->stall_head;
     px_cur_worker->stall_head = c;
+    px_cur_worker->stalled_count++;
 }
 
 /* ====== parse loop ====== */
@@ -2728,8 +2732,8 @@ static void px_l7_fill_flow(struct objects *objs, const struct px_conn *c,
 }
 
 /* Adopt the generation's protection grading. Called by the control thread on
- * each adoption; a Service the generation stops naming falls back to the
- * process-wide default rather than silently changing class. */
+ * each adoption; a Service the generation stops naming becomes unknown and
+ * therefore strict rather than silently losing protection. */
 void px_protection_refresh(struct objects *objs)
 {
     struct dmesh_proxy *px = objs ? objs->proxy : NULL;
@@ -2747,30 +2751,26 @@ void px_protection_refresh(struct objects *objs)
  *
  * Every registration is attested, so protection grades the interaction rules
  * rather than whether a Pod is attested. A Service the generation grades
- * carries its own class; one it does not grade falls back to the process-wide
- * default, which is what a deployment without a controller has. No Pod input
- * reaches here, so a Pod cannot place its Service on the relaxed side. */
+ * carries its own class; one it does not grade is strict. No Pod input reaches
+ * here, so a Pod cannot place its Service on the relaxed side. */
 static int px_service_protected(struct objects *objs, int16_t svc)
 {
     struct dmesh_proxy *px = objs->proxy;
     if (svc < 0 || svc >= POD_ID_SPACE)
-        return px->l7_fail_closed;
+        return 1;
     uint8_t class = __atomic_load_n(&px->svc_protected[svc], __ATOMIC_ACQUIRE);
     if (class == PX_PROTECT_STRICT)
         return 1;
     if (class == PX_PROTECT_RELAXED)
         return 0;
-    return px->l7_fail_closed;
+    return 1;
 }
 
 /* Does inbound enforcement apply to this Service?
  *
- * Only where the generation grades it. This is deliberately not the fallback
- * above: a deployment with no controller holds no cluster authority to grade
- * with, and refusing streams there would refuse traffic no policy ever named.
- * The process-wide default answers a different question — whether a stream the
- * L7 layer declined may be carried without the policy its Service selected —
- * and that question exists whether or not a generation is held. */
+ * Only where the generation grades it. A deployment with no controller holds
+ * no cluster authority to apply inbound policy, even though an L7 decline for
+ * an unknown outbound Service remains fail-closed. */
 static int px_inbound_strict(struct objects *objs, int16_t svc)
 {
     struct dmesh_proxy *px = objs->proxy;
@@ -3825,6 +3825,7 @@ int px_drain_stalled(struct objects *objs, int worker_id) {
     if (!c)
         return 0;
     px_cur_worker->stall_head = NULL;           /* pop all; px_parse re-parks what still stalls */
+    px_cur_worker->stalled_count = 0;
     int did = 0;
     while (c) {
         struct px_conn *next = c->stall_next;
@@ -5298,6 +5299,32 @@ void px_bind_worker(struct objects *objs, int worker_id) {
     px_cur_worker = &px->workers[worker_id];
 }
 
+int px_worker_stats(struct objects *objs, int worker_id,
+                    struct px_worker_stats *out)
+{
+    struct dmesh_proxy *px = objs ? objs->proxy : NULL;
+    if (!out || !px || worker_id < 0 || worker_id >= px->n_workers)
+        return -1;
+
+    struct px_engine *eng = &px->engines[worker_id];
+    struct px_worker_state *worker = &px->workers[worker_id];
+    size_t ack_in = atomic_load_explicit(&eng->ack_releases.enqueue_pos,
+                                         memory_order_acquire);
+    size_t ack_out = eng->ack_releases.dequeue_pos;
+
+    memset(out, 0, sizeof(*out));
+    out->dma_tasks_inflight = eng->dma_tasks_inflight > 0
+                                  ? (uint64_t)eng->dma_tasks_inflight : 0;
+    out->dma_retry_batches = eng->retry_batches;
+    out->ack_release_depth = ack_in >= ack_out ? ack_in - ack_out : 0;
+    out->stalled_connections = worker->stalled_count;
+    out->remote_fin_pending = worker->fin_pending_count;
+    out->dma_stalled = eng->dma_stalled != 0;
+    out->emit_pending = eng->emit_head != NULL;
+    out->ack_retry_pending = eng->ack_retry_head != NULL;
+    return 0;
+}
+
 /* Submit queued units of one lane as SG batches while credits, region space,
  * pieces and task slots allow. */
 static int px_lane_submit(struct objects *objs, struct px_engine *eng, int pod_idx,
@@ -5580,8 +5607,6 @@ int px_init(struct objects *objs) {
               px->l7_worker = (int)v;
           }
       } }
-    { const char *fc = getenv("DPUMESH_L7_FAIL_CLOSED");
-      px->l7_fail_closed = (fc && *fc && *fc != '0'); }
     { const char *perf = getenv("DPUMESH_PERF_STATS");
       px->perf_stats = (perf && *perf && *perf != '0'); }
 
@@ -5755,7 +5780,7 @@ int px_init(struct objects *objs) {
                   "lb=round-robin; passthru=conn-pinned, sg_pieces=%u)",
                   objs->num_dpa_threads, objs->k_rings, objs->n_data_workers,
                   n_l7_svc, px->l7_attached ? "attached" : "off", l7_worker_name,
-                  px->l7_fail_closed ? "fail-closed" : "fallback-to-l4",   /* ungraded default */
+                  "fail-closed",
                   px->sg_pieces_max);
     return DOCA_SUCCESS;
 

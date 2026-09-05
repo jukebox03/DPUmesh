@@ -10,10 +10,11 @@ spec:
       labels:
         app: dmesh-broker-probe
     spec:
+      nodeName: ${NODE_NAME}
       restartPolicy: Never
       containers:
       - name: probe
-        image: docker.io/bench/bench-dpumesh:latest
+        image: docker.io/${IMG_BROKER_PROBE}
         imagePullPolicy: Never
         command: ["/usr/local/bin/dmesh_broker_probe"]
         env:

@@ -492,6 +492,18 @@ struct dpu_data_worker {
     atomic_ullong stat_local_completions;
     atomic_ullong stat_cross_worker_out;
     atomic_ullong stat_cross_worker_in;
+    /* Worker-loop observability. Only this worker writes these counters; the
+     * embedded runtime copies them into its metrics registry on a maintenance
+     * pass instead of doing metric atomics in the hot drain loop. */
+    uint64_t stat_drain_calls;
+    uint64_t stat_drain_progressed;
+    uint64_t stat_drain_pending;
+    uint64_t stat_drain_idle;
+    uint64_t stat_pe_progressed;
+    uint64_t stat_data_progressed;
+    uint64_t stat_arm_calls;
+    uint64_t stat_notification_clears;
+    uint64_t stat_maintenance_calls;
     int wake_fd;                 /* cross-worker eventfd */
     /* Every source that may wake this worker, in one descriptor: the eventfd
      * above and, once a peer carrier is configured, the descriptor that

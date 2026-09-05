@@ -55,8 +55,8 @@ typedef struct dmesh_qp {
     uint8_t   fin_sent;        /* OUTBOUND: our FIN is on the wire (sticky) */
     uint16_t  seq;             /* per-QP outbound descriptor counter */
 
-    /* inbound view (rx_slot>=0 => one fragment is held on the conn; the compat
-     * layer's partial-read cursor lives here too) */
+    /* inbound view (rx_slot>=0 => one fragment is held on the conn; the socket
+     * facade's partial-read cursor lives here too) */
     int            rx_slot;    /* landing byte-offset in host RX buffer; -1 = none */
     const uint8_t *rx_buf;
     uint32_t       rx_len;

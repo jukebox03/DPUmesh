@@ -1,0 +1,8 @@
+=== /run/dpumesh/brokers/ea130b00-055b-4df9-9710-32f223e58d43.state
+{"cgroup": "/kubepods.slice/kubepods-besteffort.slice/kubepods-besteffort-podea130b00_055b_4df9_9710_32f223e58d43.slice", "pid": 4157904, "pod_uid": "ea130b00-055b-4df9-9710-32f223e58d43", "service": "", "starttime": "69252086"}
+=== /run/dpumesh/brokers/4379e32b-b2ef-426c-aff2-5154c1840ad4.state
+{"cgroup": "/kubepods.slice/kubepods-besteffort.slice/kubepods-besteffort-pod4379e32b_b2ef_426c_aff2_5154c1840ad4.slice", "pid": 4130753, "pod_uid": "4379e32b-b2ef-426c-aff2-5154c1840ad4", "service": "echo-grpc-dpumesh", "starttime": "69195258"}
+=== /run/dpumesh/brokers/87ff16bc-c4b7-400c-9cc4-c69cc5b4e274.state
+{"cgroup": "/kubepods.slice/kubepods-besteffort.slice/kubepods-besteffort-pod87ff16bc_c4b7_400c_9cc4_c69cc5b4e274.slice", "pid": 4103958, "pod_uid": "87ff16bc-c4b7-400c-9cc4-c69cc5b4e274", "service": "", "starttime": "69157957"}
+=== /run/dpumesh/brokers/9f2c03ed-1f1d-4f5b-b9ce-1798e7cb81b8.state
+{"cgroup": "/kubepods.slice/kubepods-besteffort.slice/kubepods-besteffort-pod9f2c03ed_1f1d_4f5b_b9ce_1798e7cb81b8.slice", "pid": 4103493, "pod_uid": "9f2c03ed-1f1d-4f5b-b9ce-1798e7cb81b8", "service": "echo-grpc-alt", "starttime": "69157682"}

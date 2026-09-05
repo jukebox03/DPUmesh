@@ -623,6 +623,7 @@ dmesh_l7_driver_arm(void *driver)
         return -1;
     (void)px_worker_arm_notification(worker_state->objs, worker_state->id);
     atomic_store_explicit(&worker_state->parked, 1, memory_order_release);
+    worker_state->stat_arm_calls++;
     return 0;
 }
 
@@ -636,11 +637,21 @@ dmesh_l7_driver_drain(void *driver, int budget)
     enum px_progress_state pe = dpu_progress_worker_pe(worker_state);
     enum px_progress_state run = dpu_worker_run_budget(worker_state->objs,
                                                        worker_state, budget);
-    if (pe == PX_PROGRESS_PROGRESSED || run == PX_PROGRESS_PROGRESSED)
+    worker_state->stat_drain_calls++;
+    if (pe == PX_PROGRESS_PROGRESSED)
+        worker_state->stat_pe_progressed++;
+    if (run == PX_PROGRESS_PROGRESSED)
+        worker_state->stat_data_progressed++;
+    if (pe == PX_PROGRESS_PROGRESSED || run == PX_PROGRESS_PROGRESSED) {
+        worker_state->stat_drain_progressed++;
         return PX_PROGRESS_PROGRESSED;
+    }
     if (run == PX_PROGRESS_PENDING ||
-        !mpsc_comp_queue_empty(&worker_state->cross_worker))
+        !mpsc_comp_queue_empty(&worker_state->cross_worker)) {
+        worker_state->stat_drain_pending++;
         return PX_PROGRESS_PENDING;
+    }
+    worker_state->stat_drain_idle++;
     return PX_PROGRESS_IDLE;
 }
 
@@ -664,6 +675,7 @@ dmesh_l7_driver_clear_notifications(void *driver)
     int dma_fd = px_worker_notification_fd(worker_state->objs, worker_state->id);
     if (dma_fd >= 0)
         px_worker_clear_notification(worker_state->objs, worker_state->id, dma_fd);
+    worker_state->stat_notification_clears++;
     return 0;
 }
 
@@ -673,6 +685,7 @@ dmesh_l7_driver_maintenance(void *driver)
     struct dpu_data_worker *worker_state = driver;
     if (!worker_state)
         return -1;
+    worker_state->stat_maintenance_calls++;
     dpu_dpa_nudge_due(worker_state);
     /* Idle peer channels are swept on their own cadence: a channel is idle for
      * a minute before it is worth closing, and maintenance runs every
@@ -686,6 +699,62 @@ dmesh_l7_driver_maintenance(void *driver)
     }
     px_l7_stats_report(worker_state->objs, worker_state->id);
     px_peer_stats_report(worker_state->objs, worker_state->id);
+    return 0;
+}
+
+int
+dmesh_l7_driver_stats(void *driver, struct dmesh_l7_driver_stats *out)
+{
+    struct dpu_data_worker *worker_state = driver;
+    if (!worker_state || !out ||
+        out->version != DMESH_L7_DRIVER_STATS_VERSION ||
+        out->size < sizeof(*out))
+        return -1;
+
+    struct px_worker_stats proxy;
+    if (px_worker_stats(worker_state->objs, worker_state->id, &proxy) != 0)
+        return -1;
+
+    size_t cross_in = atomic_load_explicit(
+        &worker_state->cross_worker.enqueue_pos, memory_order_acquire);
+    size_t cross_out = worker_state->cross_worker.dequeue_pos;
+    struct dmesh_l7_driver_stats snapshot = {
+        .version = DMESH_L7_DRIVER_STATS_VERSION,
+        .size = sizeof(snapshot),
+        .drain_calls_total = worker_state->stat_drain_calls,
+        .drain_progressed_total = worker_state->stat_drain_progressed,
+        .drain_pending_total = worker_state->stat_drain_pending,
+        .drain_idle_total = worker_state->stat_drain_idle,
+        .pe_progressed_total = worker_state->stat_pe_progressed,
+        .data_progressed_total = worker_state->stat_data_progressed,
+        .arm_calls_total = worker_state->stat_arm_calls,
+        .notification_clears_total = worker_state->stat_notification_clears,
+        .maintenance_calls_total = worker_state->stat_maintenance_calls,
+        .local_completions_total = atomic_load_explicit(
+            &worker_state->stat_local_completions, memory_order_relaxed),
+        .cross_worker_out_total = atomic_load_explicit(
+            &worker_state->stat_cross_worker_out, memory_order_relaxed),
+        .cross_worker_in_total = atomic_load_explicit(
+            &worker_state->stat_cross_worker_in, memory_order_relaxed),
+        .completion_queue_depth = comp_queue_usage(&worker_state->queue),
+        .cross_worker_queue_depth = cross_in >= cross_out
+                                      ? cross_in - cross_out : 0,
+        .deferred_receives = worker_state->num_deferred_recv > 0
+                                 ? (uint64_t)worker_state->num_deferred_recv : 0,
+        .dma_tasks_inflight = proxy.dma_tasks_inflight,
+        .dma_retry_batches = proxy.dma_retry_batches,
+        .ack_release_depth = proxy.ack_release_depth,
+        .stalled_connections = proxy.stalled_connections,
+        .remote_fin_pending = proxy.remote_fin_pending,
+        .dma_stalled = proxy.dma_stalled,
+        .emit_pending = proxy.emit_pending,
+        .ack_retry_pending = proxy.ack_retry_pending,
+        .parked = atomic_load_explicit(&worker_state->parked,
+                                        memory_order_relaxed) != 0,
+        .wake_posted = atomic_load_explicit(&worker_state->wake_posted,
+                                             memory_order_relaxed) != 0,
+    };
+    *out = snapshot;
     return 0;
 }
 
@@ -1016,6 +1085,15 @@ run_dpu_worker(struct objects *objs)
         atomic_init(&worker_state->stat_local_completions, 0);
         atomic_init(&worker_state->stat_cross_worker_out, 0);
         atomic_init(&worker_state->stat_cross_worker_in, 0);
+        worker_state->stat_drain_calls = 0;
+        worker_state->stat_drain_progressed = 0;
+        worker_state->stat_drain_pending = 0;
+        worker_state->stat_drain_idle = 0;
+        worker_state->stat_pe_progressed = 0;
+        worker_state->stat_data_progressed = 0;
+        worker_state->stat_arm_calls = 0;
+        worker_state->stat_notification_clears = 0;
+        worker_state->stat_maintenance_calls = 0;
         worker_state->num_deferred_recv = 0;
         worker_state->wake_fd = -1;
         worker_state->wake_epfd = -1;

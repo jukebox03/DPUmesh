@@ -219,25 +219,8 @@ deploy_agent() {
 # account, a system unit so a node reboot restores it with no operator session,
 # and a root directory the receiver may write the four feeds into. After this
 # the agent is the DPU's only control peer and nothing here runs again.
-# User units that push feeds as root and take the feed directory back from the
-# hop's account every cycle; they are stopped before the hop is installed.
-LEGACY_UNITS="dpumesh-membership.service dpumesh-topology.service \
-dpumesh-linkerd-service-registry.service dpumesh-linkerd-identity-agent.service"
-
-retire_legacy_units() {
-    local unit
-    for unit in $LEGACY_UNITS; do
-        if systemctl --user is-active --quiet "$unit" 2>/dev/null; then
-            systemctl --user stop "$unit" >/dev/null 2>&1 || true
-            echo "retired the pre-hop user unit $unit"
-        fi
-        systemctl --user reset-failed "$unit" >/dev/null 2>&1 || true
-    done
-}
-
 install_hop() {
     need_dpu
-    retire_legacy_units
     local stage="/tmp/dpumesh-feed-receiver.py"
     scp -o ConnectTimeout=8 -q "$BENCH_DIR/dpumesh_feed_receiver.py" "$DPU_HOST:$stage"
     ssh -o ConnectTimeout=8 "$DPU_HOST" "
@@ -359,9 +342,6 @@ case "${1:-status}" in
     install-hop)
         install_hop
         ;;
-    retire-legacy-units)
-        retire_legacy_units
-        ;;
     membership-show)
         : "${DPU_HOST:?DPU_HOST is required}"
         ssh "$DPU_HOST" "cat '$FEED_ROOT/membership.v1'"
@@ -371,14 +351,13 @@ case "${1:-status}" in
         ssh "$DPU_HOST" "systemctl status '$FEED_UNIT' --no-pager" || true
         ;;
     stop)
-        retire_legacy_units
         kubectl delete daemonset/dpumesh-node-agent -n "$NS" --ignore-not-found=true
         ;;
     status)
         kubectl get daemonset,pod -n "$NS" -l app=dpumesh-node-agent -o wide
         ;;
     *)
-        echo "usage: $0 prepare|install-hop|retire-legacy-units|deploy|" >&2
+        echo "usage: $0 prepare|install-hop|deploy|" >&2
         echo "       rotate-stage KEY_ID|activate KEY_ID|" >&2
         echo "       prune KEY_ID|feed-rotate-stage KEY_ID|feed-activate KEY_ID|" >&2
         echo "       feed-prune KEY_ID|membership-show|hop-status|stop|status" >&2
