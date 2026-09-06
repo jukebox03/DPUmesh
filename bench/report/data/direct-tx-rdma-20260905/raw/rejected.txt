@@ -1,0 +1,7 @@
+before-opaque: rejected, CPU task name filter matched no threads; concurrent DPU compilation.
+before-opaque-cpu: rejected, concurrent DPU compilation; baseline DPU heap corruption during 65536-byte capacity rep 2. Failure preserved, not counted as successful capacity.
+port-forward: rejected setup, direct target port bypassed Linkerd inbound TLS; replaced by the historical TCP relay via Service/Pod addresses.
+after-grpc-scalar: correctness PASS 24/24 but not final performance acceptance; capacity -0.6% to -4.9%, 467881 quota waits. Replaced by vectored direct writer under identical quota bounds.
+rdma-primitive-*-host.csv: preliminary mock benchmark included a redundant receive post; v2 and DPU files use one initial post and release/repost thereafter.
+before-{opaque,grpc}-unpinned and after-grpc-scalar: preliminary arms; final clean arms pin client CPU 4-9 and server CPU 10-17 from process start.
+raw/after-grpc-clean-arena.txt: first debugger script lacked explicit C symbol casts; superseded by after-opaque-clean-arena.txt and after-grpc-diagnostic-arena.txt using compiled C layout offsets.

@@ -1,0 +1,29 @@
+{
+  "stage": "before-opaque-cpu",
+  "size": 65536,
+  "mode": "capacity",
+  "rep": 2,
+  "command": "RUN 65536 65536 64 5 200 8",
+  "elapsed": 2.05545711517334,
+  "cpu_before": {
+    "/proc/2928157/task/2928526/stat": 6227,
+    "/proc/2928157/task/2928528/stat": 6512,
+    "/proc/2928157/task/2928530/stat": 6778,
+    "/proc/2928157/task/2928532/stat": 6548,
+    "/proc/2928157/task/2928534/stat": 6603,
+    "/proc/2928157/task/2928536/stat": 6684,
+    "/proc/2928157/task/2928538/stat": 6548,
+    "/proc/2928157/task/2928540/stat": 6479
+  },
+  "cpu_after": {
+    "/proc/2928157/task/2928526/stat": 6227,
+    "/proc/2928157/task/2928528/stat": 6512,
+    "/proc/2928157/task/2928530/stat": 6778,
+    "/proc/2928157/task/2928532/stat": 6562,
+    "/proc/2928157/task/2928534/stat": 6603,
+    "/proc/2928157/task/2928536/stat": 6684,
+    "/proc/2928157/task/2928538/stat": 6548,
+    "/proc/2928157/task/2928540/stat": 6479
+  },
+  "reply": ""
+}

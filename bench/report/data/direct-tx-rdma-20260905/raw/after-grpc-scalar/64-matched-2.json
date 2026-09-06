@@ -1,0 +1,29 @@
+{
+  "stage": "after-grpc-clean",
+  "size": 64,
+  "mode": "matched",
+  "rep": 2,
+  "command": "OPEN 64 64 8 5 200 20000 const",
+  "elapsed": 5.3980841636657715,
+  "cpu_before": {
+    "/proc/2954684/task/2954691/stat": 698,
+    "/proc/2954684/task/2954693/stat": 702,
+    "/proc/2954684/task/2954695/stat": 699,
+    "/proc/2954684/task/2954697/stat": 667,
+    "/proc/2954684/task/2954699/stat": 697,
+    "/proc/2954684/task/2954701/stat": 690,
+    "/proc/2954684/task/2954703/stat": 664,
+    "/proc/2954684/task/2954705/stat": 693
+  },
+  "cpu_after": {
+    "/proc/2954684/task/2954691/stat": 1120,
+    "/proc/2954684/task/2954693/stat": 1127,
+    "/proc/2954684/task/2954695/stat": 1124,
+    "/proc/2954684/task/2954697/stat": 1072,
+    "/proc/2954684/task/2954699/stat": 1121,
+    "/proc/2954684/task/2954701/stat": 1110,
+    "/proc/2954684/task/2954703/stat": 1065,
+    "/proc/2954684/task/2954705/stat": 1117
+  },
+  "reply": "OK mrps=0.019998 gbps=0.0256 req_gbps=0.0128 resp_gbps=0.0128 p50=933.00 p95=1451.00 p99=1804.00 p999=2728.00 p9999=4390.00 avg=963.76 min=439.42 max=5727.36 rcnt=98378 scheduled=99999 pending=0 fail=0 conc=0 threads=8 channels=8 reqsz=64 repsz=64 reqframe=80 respframe=80 durs=5.000 offered_mrps=0.020000 drops=0 overflow=0 worker_fail=0 reorder=0 mode=open arr=const grabs=3 rets=1 recyc=21 waits=0 pads=1 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA\n"
+}

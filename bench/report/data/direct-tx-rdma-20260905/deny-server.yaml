@@ -1,0 +1,12 @@
+apiVersion: policy.linkerd.io/v1beta3
+kind: Server
+metadata:
+  name: direct-tx-receipt
+  namespace: test-bench
+spec:
+  podSelector:
+    matchLabels:
+      app: echo-dpumesh-native
+  port: 9091
+  proxyProtocol: gRPC
+  accessPolicy: deny

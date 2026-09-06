@@ -1,0 +1,13 @@
+deployment.apps/bench-dpumesh-native scaled
+deployment.apps/echo-dpumesh-native scaled
+pod/bench-dpumesh-native-68995f6f8c-lcxqg condition met
+pod/echo-dpumesh-native-7f77987674-8g9b9 condition met
+[0;34m[STEP][0m Starting DPU runtime
+[0;32m[INFO][0m DPU runtime started
+deployment.apps/echo-dpumesh-native configured
+service/echo-dpumesh-native configured
+deployment.apps/bench-dpumesh-native configured
+Waiting for deployment "echo-dpumesh-native" rollout to finish: 0 of 1 updated replicas are available...
+deployment "echo-dpumesh-native" successfully rolled out
+deployment "bench-dpumesh-native" successfully rolled out
+sha256sum: /proc/2986280/exe: Permission denied

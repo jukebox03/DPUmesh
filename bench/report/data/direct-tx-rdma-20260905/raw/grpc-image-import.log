@@ -1,0 +1,8 @@
+docker.io/bench/echo grpc:direct tx     	saved	
+application/vnd.oci.image.index.v1+json sha256:65eb792b693b02026e744988c101d77ebe74082c1584d3657222651226ec88e5
+Importing	elapsed: 1.9 s	total:   0.0 B	(0.0 B/s)	
+docker.io/bench/echo grpc:direct tx     	saved	
+docker.io/bench/bench grpc:direct tx    	saved	
+application/vnd.oci.image.index.v1+json sha256:65eb792b693b02026e744988c101d77ebe74082c1584d3657222651226ec88e5
+application/vnd.oci.image.index.v1+json sha256:eb610bdd671d4a974f7ba7ce019b79df5c214c9fafe496bb9502815175b1f606
+Importing	elapsed: 1.9 s	total:   0.0 B	(0.0 B/s)	

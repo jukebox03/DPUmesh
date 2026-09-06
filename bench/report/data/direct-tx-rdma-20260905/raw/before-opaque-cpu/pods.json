@@ -1,0 +1,764 @@
+{
+    "apiVersion": "v1",
+    "items": [
+        {
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {
+                "annotations": {
+                    "config.linkerd.io/skip-inbound-ports": "9092",
+                    "kubectl.kubernetes.io/restartedAt": "2026-09-05T18:27:26+09:00"
+                },
+                "creationTimestamp": "2026-09-05T12:56:32Z",
+                "generateName": "bench-dpumesh-native-76db476f6-",
+                "labels": {
+                    "app": "bench-dpumesh-native",
+                    "linkerd.io/control-plane-ns": "linkerd",
+                    "pod-template-hash": "76db476f6"
+                },
+                "name": "bench-dpumesh-native-76db476f6-g4xdl",
+                "namespace": "test-bench",
+                "ownerReferences": [
+                    {
+                        "apiVersion": "apps/v1",
+                        "blockOwnerDeletion": true,
+                        "controller": true,
+                        "kind": "ReplicaSet",
+                        "name": "bench-dpumesh-native-76db476f6",
+                        "uid": "20f58412-be11-4243-a560-021a1ede93fd"
+                    }
+                ],
+                "resourceVersion": "39261345",
+                "uid": "1341020b-aa86-4b85-b28a-484de5523cd9"
+            },
+            "spec": {
+                "automountServiceAccountToken": false,
+                "containers": [
+                    {
+                        "env": [
+                            {
+                                "name": "BENCH_DST_SERVICE",
+                                "value": "echo-dpumesh-native"
+                            },
+                            {
+                                "name": "DPUMESH_RINGS_PER_POD",
+                                "value": "8"
+                            }
+                        ],
+                        "image": "docker.io/bench/bench-dpumesh:native",
+                        "imagePullPolicy": "Never",
+                        "name": "app",
+                        "resources": {
+                            "limits": {
+                                "dpumesh.io/channel": "1",
+                                "memory": "256Mi"
+                            },
+                            "requests": {
+                                "cpu": "10m",
+                                "dpumesh.io/channel": "1",
+                                "memory": "32Mi"
+                            }
+                        },
+                        "securityContext": {
+                            "allowPrivilegeEscalation": false,
+                            "capabilities": {
+                                "drop": [
+                                    "ALL"
+                                ]
+                            },
+                            "readOnlyRootFilesystem": true
+                        },
+                        "terminationMessagePath": "/dev/termination-log",
+                        "terminationMessagePolicy": "File"
+                    }
+                ],
+                "dnsPolicy": "ClusterFirst",
+                "enableServiceLinks": true,
+                "nodeName": "rapids4",
+                "preemptionPolicy": "PreemptLowerPriority",
+                "priority": 0,
+                "restartPolicy": "Always",
+                "schedulerName": "default-scheduler",
+                "securityContext": {
+                    "runAsGroup": 65532,
+                    "runAsNonRoot": true,
+                    "runAsUser": 65532,
+                    "seccompProfile": {
+                        "type": "RuntimeDefault"
+                    }
+                },
+                "serviceAccount": "default",
+                "serviceAccountName": "default",
+                "terminationGracePeriodSeconds": 30,
+                "tolerations": [
+                    {
+                        "effect": "NoExecute",
+                        "key": "node.kubernetes.io/not-ready",
+                        "operator": "Exists",
+                        "tolerationSeconds": 300
+                    },
+                    {
+                        "effect": "NoExecute",
+                        "key": "node.kubernetes.io/unreachable",
+                        "operator": "Exists",
+                        "tolerationSeconds": 300
+                    }
+                ]
+            },
+            "status": {
+                "conditions": [
+                    {
+                        "lastProbeTime": null,
+                        "lastTransitionTime": "2026-09-05T12:56:51Z",
+                        "status": "True",
+                        "type": "PodReadyToStartContainers"
+                    },
+                    {
+                        "lastProbeTime": null,
+                        "lastTransitionTime": "2026-09-05T12:56:50Z",
+                        "status": "True",
+                        "type": "Initialized"
+                    },
+                    {
+                        "lastProbeTime": null,
+                        "lastTransitionTime": "2026-09-05T12:57:36Z",
+                        "status": "True",
+                        "type": "Ready"
+                    },
+                    {
+                        "lastProbeTime": null,
+                        "lastTransitionTime": "2026-09-05T12:57:36Z",
+                        "status": "True",
+                        "type": "ContainersReady"
+                    },
+                    {
+                        "lastProbeTime": null,
+                        "lastTransitionTime": "2026-09-05T12:56:50Z",
+                        "status": "True",
+                        "type": "PodScheduled"
+                    }
+                ],
+                "containerStatuses": [
+                    {
+                        "containerID": "containerd://83c220448d60e42e6d4d9a1bdf641687d86a327eb0e2feef575c3241a8942c40",
+                        "image": "docker.io/bench/bench-dpumesh:native",
+                        "imageID": "sha256:a953df667b3d6b553c729efa467103a16c0d3877954f373bd48fdd8d264042d7",
+                        "lastState": {
+                            "terminated": {
+                                "containerID": "containerd://d94e80a44ba272148b21a09844263ea652fecff132beae6818b8934a400e6d6c",
+                                "exitCode": 1,
+                                "finishedAt": "2026-09-05T12:57:06Z",
+                                "reason": "Error",
+                                "startedAt": "2026-09-05T12:57:06Z"
+                            }
+                        },
+                        "name": "app",
+                        "ready": true,
+                        "restartCount": 3,
+                        "started": true,
+                        "state": {
+                            "running": {
+                                "startedAt": "2026-09-05T12:57:36Z"
+                            }
+                        }
+                    }
+                ],
+                "hostIP": "147.46.78.169",
+                "hostIPs": [
+                    {
+                        "ip": "147.46.78.169"
+                    }
+                ],
+                "phase": "Running",
+                "podIP": "10.244.0.49",
+                "podIPs": [
+                    {
+                        "ip": "10.244.0.49"
+                    }
+                ],
+                "qosClass": "Burstable",
+                "startTime": "2026-09-05T12:56:50Z"
+            }
+        },
+        {
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {
+                "annotations": {
+                    "kubectl.kubernetes.io/restartedAt": "2026-09-05T18:38:09+09:00"
+                },
+                "creationTimestamp": "2026-09-05T09:38:09Z",
+                "generateName": "dpumesh-controller-68c67ffd64-",
+                "labels": {
+                    "app": "dpumesh-controller",
+                    "pod-template-hash": "68c67ffd64"
+                },
+                "name": "dpumesh-controller-68c67ffd64-8qxcp",
+                "namespace": "test-bench",
+                "ownerReferences": [
+                    {
+                        "apiVersion": "apps/v1",
+                        "blockOwnerDeletion": true,
+                        "controller": true,
+                        "kind": "ReplicaSet",
+                        "name": "dpumesh-controller-68c67ffd64",
+                        "uid": "57825b61-48ba-4b34-a908-7532267ebf7f"
+                    }
+                ],
+                "resourceVersion": "39230700",
+                "uid": "0d56866f-c7c2-4b82-98df-b01689cca770"
+            },
+            "spec": {
+                "automountServiceAccountToken": true,
+                "containers": [
+                    {
+                        "args": [
+                            "--key-dir=/etc/dpumesh/controller.keys",
+                            "--registration-key-dir=/etc/dpumesh/registration.keys",
+                            "--feed-key-dir=/etc/dpumesh/feed.keys",
+                            "--nodes-file=/etc/dpumesh/nodes",
+                            "--output=/run/dpumesh/topology.v1",
+                            "--cluster-id=dpumesh-test",
+                            "--listen-port=8443",
+                            "--tls-cert=/etc/dpumesh/tls/tls.crt",
+                            "--tls-key=/etc/dpumesh/tls/tls.key",
+                            "--client-ca=/etc/dpumesh/node-ca/ca.crt"
+                        ],
+                        "image": "docker.io/bench/dpumesh-controller:native",
+                        "imagePullPolicy": "Never",
+                        "name": "controller",
+                        "ports": [
+                            {
+                                "containerPort": 8443,
+                                "name": "node-mtls",
+                                "protocol": "TCP"
+                            }
+                        ],
+                        "readinessProbe": {
+                            "failureThreshold": 3,
+                            "httpGet": {
+                                "path": "/healthz",
+                                "port": 8443,
+                                "scheme": "HTTPS"
+                            },
+                            "initialDelaySeconds": 2,
+                            "periodSeconds": 5,
+                            "successThreshold": 1,
+                            "timeoutSeconds": 1
+                        },
+                        "resources": {
+                            "limits": {
+                                "cpu": "500m",
+                                "memory": "256Mi"
+                            },
+                            "requests": {
+                                "cpu": "50m",
+                                "memory": "64Mi"
+                            }
+                        },
+                        "securityContext": {
+                            "allowPrivilegeEscalation": false,
+                            "capabilities": {
+                                "drop": [
+                                    "ALL"
+                                ]
+                            },
+                            "readOnlyRootFilesystem": true
+                        },
+                        "terminationMessagePath": "/dev/termination-log",
+                        "terminationMessagePolicy": "File",
+                        "volumeMounts": [
+                            {
+                                "mountPath": "/run/dpumesh",
+                                "name": "output"
+                            },
+                            {
+                                "mountPath": "/etc/dpumesh/controller.keys",
+                                "name": "signing",
+                                "readOnly": true
+                            },
+                            {
+                                "mountPath": "/etc/dpumesh/registration.keys",
+                                "name": "registration",
+                                "readOnly": true
+                            },
+                            {
+                                "mountPath": "/etc/dpumesh/feed.keys",
+                                "name": "feed",
+                                "readOnly": true
+                            },
+                            {
+                                "mountPath": "/etc/dpumesh/tls",
+                                "name": "tls",
+                                "readOnly": true
+                            },
+                            {
+                                "mountPath": "/etc/dpumesh/node-ca",
+                                "name": "node-ca",
+                                "readOnly": true
+                            },
+                            {
+                                "mountPath": "/etc/dpumesh/nodes",
+                                "name": "nodes",
+                                "readOnly": true,
+                                "subPath": "nodes"
+                            },
+                            {
+                                "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount",
+                                "name": "kube-api-access-s72cd",
+                                "readOnly": true
+                            }
+                        ]
+                    }
+                ],
+                "dnsPolicy": "ClusterFirst",
+                "enableServiceLinks": true,
+                "nodeName": "rapids4",
+                "preemptionPolicy": "PreemptLowerPriority",
+                "priority": 0,
+                "restartPolicy": "Always",
+                "schedulerName": "default-scheduler",
+                "securityContext": {
+                    "fsGroup": 65532,
+                    "fsGroupChangePolicy": "OnRootMismatch",
+                    "runAsGroup": 65532,
+                    "runAsNonRoot": true,
+                    "runAsUser": 65532,
+                    "seccompProfile": {
+                        "type": "RuntimeDefault"
+                    }
+                },
+                "serviceAccount": "dpumesh-controller",
+                "serviceAccountName": "dpumesh-controller",
+                "terminationGracePeriodSeconds": 10,
+                "tolerations": [
+                    {
+                        "effect": "NoExecute",
+                        "key": "node.kubernetes.io/not-ready",
+                        "operator": "Exists",
+                        "tolerationSeconds": 300
+                    },
+                    {
+                        "effect": "NoExecute",
+                        "key": "node.kubernetes.io/unreachable",
+                        "operator": "Exists",
+                        "tolerationSeconds": 300
+                    }
+                ],
+                "volumes": [
+                    {
+                        "emptyDir": {},
+                        "name": "output"
+                    },
+                    {
+                        "name": "signing",
+                        "secret": {
+                            "defaultMode": 288,
+                            "items": [
+                                {
+                                    "key": "active",
+                                    "path": "active"
+                                },
+                                {
+                                    "key": "signing-key",
+                                    "path": "controller-v1.key"
+                                }
+                            ],
+                            "secretName": "dpumesh-controller-signing"
+                        }
+                    },
+                    {
+                        "name": "registration",
+                        "secret": {
+                            "defaultMode": 288,
+                            "items": [
+                                {
+                                    "key": "active",
+                                    "path": "rapids4/active"
+                                },
+                                {
+                                    "key": "signing-key",
+                                    "path": "rapids4/node-hmac-v2.key"
+                                }
+                            ],
+                            "secretName": "dpumesh-registration-signing"
+                        }
+                    },
+                    {
+                        "name": "feed",
+                        "secret": {
+                            "defaultMode": 288,
+                            "items": [
+                                {
+                                    "key": "active",
+                                    "path": "active"
+                                },
+                                {
+                                    "key": "signing-key",
+                                    "path": "feed-hmac-v1.key"
+                                }
+                            ],
+                            "secretName": "dpumesh-feed-signing"
+                        }
+                    },
+                    {
+                        "name": "tls",
+                        "secret": {
+                            "defaultMode": 288,
+                            "secretName": "dpumesh-controller-tls"
+                        }
+                    },
+                    {
+                        "configMap": {
+                            "defaultMode": 292,
+                            "name": "dpumesh-node-ca"
+                        },
+                        "name": "node-ca"
+                    },
+                    {
+                        "configMap": {
+                            "defaultMode": 292,
+                            "name": "dpumesh-controller-nodes"
+                        },
+                        "name": "nodes"
+                    },
+                    {
+                        "name": "kube-api-access-s72cd",
+                        "projected": {
+                            "defaultMode": 420,
+                            "sources": [
+                                {
+                                    "serviceAccountToken": {
+                                        "expirationSeconds": 3607,
+                                        "path": "token"
+                                    }
+                                },
+                                {
+                                    "configMap": {
+                                        "items": [
+                                            {
+                                                "key": "ca.crt",
+                                                "path": "ca.crt"
+                                            }
+                                        ],
+                                        "name": "kube-root-ca.crt"
+                                    }
+                                },
+                                {
+                                    "downwardAPI": {
+                                        "items": [
+                                            {
+                                                "fieldRef": {
+                                                    "apiVersion": "v1",
+                                                    "fieldPath": "metadata.namespace"
+                                                },
+                                                "path": "namespace"
+                                            }
+                                        ]
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+            "status": {
+                "conditions": [
+                    {
+                        "lastProbeTime": null,
+                        "lastTransitionTime": "2026-09-05T09:38:10Z",
+                        "status": "True",
+                        "type": "PodReadyToStartContainers"
+                    },
+                    {
+                        "lastProbeTime": null,
+                        "lastTransitionTime": "2026-09-05T09:38:09Z",
+                        "status": "True",
+                        "type": "Initialized"
+                    },
+                    {
+                        "lastProbeTime": null,
+                        "lastTransitionTime": "2026-09-05T09:38:15Z",
+                        "status": "True",
+                        "type": "Ready"
+                    },
+                    {
+                        "lastProbeTime": null,
+                        "lastTransitionTime": "2026-09-05T09:38:15Z",
+                        "status": "True",
+                        "type": "ContainersReady"
+                    },
+                    {
+                        "lastProbeTime": null,
+                        "lastTransitionTime": "2026-09-05T09:38:09Z",
+                        "status": "True",
+                        "type": "PodScheduled"
+                    }
+                ],
+                "containerStatuses": [
+                    {
+                        "containerID": "containerd://a2b7c8dd990e4b2d83dc36114a904d64acd604a0c6daaecf02814efd73e4ead0",
+                        "image": "docker.io/bench/dpumesh-controller:native",
+                        "imageID": "sha256:7acd1e76113a981630f9e87bdbc0810d4a120188140bf468b64192363bd6943a",
+                        "lastState": {},
+                        "name": "controller",
+                        "ready": true,
+                        "restartCount": 0,
+                        "started": true,
+                        "state": {
+                            "running": {
+                                "startedAt": "2026-09-05T09:38:10Z"
+                            }
+                        },
+                        "volumeMounts": [
+                            {
+                                "mountPath": "/run/dpumesh",
+                                "name": "output"
+                            },
+                            {
+                                "mountPath": "/etc/dpumesh/controller.keys",
+                                "name": "signing",
+                                "readOnly": true,
+                                "recursiveReadOnly": "Disabled"
+                            },
+                            {
+                                "mountPath": "/etc/dpumesh/registration.keys",
+                                "name": "registration",
+                                "readOnly": true,
+                                "recursiveReadOnly": "Disabled"
+                            },
+                            {
+                                "mountPath": "/etc/dpumesh/feed.keys",
+                                "name": "feed",
+                                "readOnly": true,
+                                "recursiveReadOnly": "Disabled"
+                            },
+                            {
+                                "mountPath": "/etc/dpumesh/tls",
+                                "name": "tls",
+                                "readOnly": true,
+                                "recursiveReadOnly": "Disabled"
+                            },
+                            {
+                                "mountPath": "/etc/dpumesh/node-ca",
+                                "name": "node-ca",
+                                "readOnly": true,
+                                "recursiveReadOnly": "Disabled"
+                            },
+                            {
+                                "mountPath": "/etc/dpumesh/nodes",
+                                "name": "nodes",
+                                "readOnly": true,
+                                "recursiveReadOnly": "Disabled"
+                            },
+                            {
+                                "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount",
+                                "name": "kube-api-access-s72cd",
+                                "readOnly": true,
+                                "recursiveReadOnly": "Disabled"
+                            }
+                        ]
+                    }
+                ],
+                "hostIP": "147.46.78.169",
+                "hostIPs": [
+                    {
+                        "ip": "147.46.78.169"
+                    }
+                ],
+                "phase": "Running",
+                "podIP": "10.244.0.44",
+                "podIPs": [
+                    {
+                        "ip": "10.244.0.44"
+                    }
+                ],
+                "qosClass": "Burstable",
+                "startTime": "2026-09-05T09:38:09Z"
+            }
+        },
+        {
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {
+                "annotations": {
+                    "config.linkerd.io/skip-inbound-ports": "9092",
+                    "kubectl.kubernetes.io/restartedAt": "2026-09-05T18:27:26+09:00"
+                },
+                "creationTimestamp": "2026-09-05T12:56:32Z",
+                "generateName": "echo-dpumesh-native-6f95cb5db8-",
+                "labels": {
+                    "app": "echo-dpumesh-native",
+                    "linkerd.io/control-plane-ns": "linkerd",
+                    "pod-template-hash": "6f95cb5db8"
+                },
+                "name": "echo-dpumesh-native-6f95cb5db8-6ks7w",
+                "namespace": "test-bench",
+                "ownerReferences": [
+                    {
+                        "apiVersion": "apps/v1",
+                        "blockOwnerDeletion": true,
+                        "controller": true,
+                        "kind": "ReplicaSet",
+                        "name": "echo-dpumesh-native-6f95cb5db8",
+                        "uid": "7dd113a1-6cb1-479a-83b1-711cdbf33bee"
+                    }
+                ],
+                "resourceVersion": "39261346",
+                "uid": "17dfa460-4545-4bed-a5a4-b26a5a597f4b"
+            },
+            "spec": {
+                "automountServiceAccountToken": false,
+                "containers": [
+                    {
+                        "env": [
+                            {
+                                "name": "DPUMESH_SERVICE",
+                                "value": "echo-dpumesh-native"
+                            },
+                            {
+                                "name": "DPUMESH_RINGS_PER_POD",
+                                "value": "8"
+                            }
+                        ],
+                        "image": "docker.io/bench/echo-dpumesh:native",
+                        "imagePullPolicy": "Never",
+                        "name": "app",
+                        "resources": {
+                            "limits": {
+                                "dpumesh.io/channel": "1",
+                                "memory": "256Mi"
+                            },
+                            "requests": {
+                                "cpu": "10m",
+                                "dpumesh.io/channel": "1",
+                                "memory": "32Mi"
+                            }
+                        },
+                        "securityContext": {
+                            "allowPrivilegeEscalation": false,
+                            "capabilities": {
+                                "drop": [
+                                    "ALL"
+                                ]
+                            },
+                            "readOnlyRootFilesystem": true
+                        },
+                        "terminationMessagePath": "/dev/termination-log",
+                        "terminationMessagePolicy": "File"
+                    }
+                ],
+                "dnsPolicy": "ClusterFirst",
+                "enableServiceLinks": true,
+                "nodeName": "rapids4",
+                "preemptionPolicy": "PreemptLowerPriority",
+                "priority": 0,
+                "restartPolicy": "Always",
+                "schedulerName": "default-scheduler",
+                "securityContext": {
+                    "runAsGroup": 65532,
+                    "runAsNonRoot": true,
+                    "runAsUser": 65532,
+                    "seccompProfile": {
+                        "type": "RuntimeDefault"
+                    }
+                },
+                "serviceAccount": "default",
+                "serviceAccountName": "default",
+                "terminationGracePeriodSeconds": 30,
+                "tolerations": [
+                    {
+                        "effect": "NoExecute",
+                        "key": "node.kubernetes.io/not-ready",
+                        "operator": "Exists",
+                        "tolerationSeconds": 300
+                    },
+                    {
+                        "effect": "NoExecute",
+                        "key": "node.kubernetes.io/unreachable",
+                        "operator": "Exists",
+                        "tolerationSeconds": 300
+                    }
+                ]
+            },
+            "status": {
+                "conditions": [
+                    {
+                        "lastProbeTime": null,
+                        "lastTransitionTime": "2026-09-05T12:56:49Z",
+                        "status": "True",
+                        "type": "PodReadyToStartContainers"
+                    },
+                    {
+                        "lastProbeTime": null,
+                        "lastTransitionTime": "2026-09-05T12:56:48Z",
+                        "status": "True",
+                        "type": "Initialized"
+                    },
+                    {
+                        "lastProbeTime": null,
+                        "lastTransitionTime": "2026-09-05T12:57:34Z",
+                        "status": "True",
+                        "type": "Ready"
+                    },
+                    {
+                        "lastProbeTime": null,
+                        "lastTransitionTime": "2026-09-05T12:57:34Z",
+                        "status": "True",
+                        "type": "ContainersReady"
+                    },
+                    {
+                        "lastProbeTime": null,
+                        "lastTransitionTime": "2026-09-05T12:56:48Z",
+                        "status": "True",
+                        "type": "PodScheduled"
+                    }
+                ],
+                "containerStatuses": [
+                    {
+                        "containerID": "containerd://e10013953cb74fe9e290bf8bf5f7db95f2e9def936ddc502d093a01e3f1e6496",
+                        "image": "docker.io/bench/echo-dpumesh:native",
+                        "imageID": "sha256:79a760a11b849b7f9cb7ff68ddcebd7e9aefeb7b342cade394d16dd4b0405972",
+                        "lastState": {
+                            "terminated": {
+                                "containerID": "containerd://26523bbfb1573cd72deab3cffa4d1601eed08391a0115445b1f2c35879b7a9bb",
+                                "exitCode": 1,
+                                "finishedAt": "2026-09-05T12:57:05Z",
+                                "reason": "Error",
+                                "startedAt": "2026-09-05T12:57:05Z"
+                            }
+                        },
+                        "name": "app",
+                        "ready": true,
+                        "restartCount": 3,
+                        "started": true,
+                        "state": {
+                            "running": {
+                                "startedAt": "2026-09-05T12:57:34Z"
+                            }
+                        }
+                    }
+                ],
+                "hostIP": "147.46.78.169",
+                "hostIPs": [
+                    {
+                        "ip": "147.46.78.169"
+                    }
+                ],
+                "phase": "Running",
+                "podIP": "10.244.0.48",
+                "podIPs": [
+                    {
+                        "ip": "10.244.0.48"
+                    }
+                ],
+                "qosClass": "Burstable",
+                "startTime": "2026-09-05T12:56:48Z"
+            }
+        }
+    ],
+    "kind": "List",
+    "metadata": {
+        "resourceVersion": ""
+    }
+}

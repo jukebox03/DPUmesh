@@ -1,0 +1,514 @@
+[14:08:10:065380][2197106720][DOCA][INF][doca_log.cpp:628] DOCA version 3.1.0105
+[14:08:10:065901][2197106720][DOCA][INF][control_scope.c:61][dmesh_scope_configure] control-plane scope mediated by 192.168.100.1:28089
+[14:08:13:903571][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaae97f3810: ctx DPA ops are empty
+[14:08:14:007458][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaae98f72e0: ctx DPA ops are empty
+[14:08:14:049719][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaae98f8da0: ctx DPA ops are empty
+[14:08:14:106364][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaae99afb90: ctx DPA ops are empty
+[14:08:14:148740][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaae99b4090: ctx DPA ops are empty
+[14:08:14:205168][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaae99ad640: ctx DPA ops are empty
+[14:08:14:248007][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaae9a6f090: ctx DPA ops are empty
+[14:08:14:305055][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaae9a6ce00: ctx DPA ops are empty
+[14:08:14:347396][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaae9b2a090: ctx DPA ops are empty
+[14:08:14:403881][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaae9b257b0: ctx DPA ops are empty
+[14:08:14:446342][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaae9be4770: ctx DPA ops are empty
+[14:08:14:503316][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaae9c9a300: ctx DPA ops are empty
+[14:08:14:545827][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaae9c9cd40: ctx DPA ops are empty
+[14:08:14:603021][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaae9cd3980: ctx DPA ops are empty
+[14:08:14:645387][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaae9d50520: ctx DPA ops are empty
+[14:08:14:702206][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaae9d54a30: ctx DPA ops are empty
+[14:08:14:744571][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaae9e0c5a0: ctx DPA ops are empty
+[14:08:14:801189][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaae9e43a20: ctx DPA ops are empty
+[14:08:14:843594][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaae9ec44e0: ctx DPA ops are empty
+[14:08:14:976431][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaae9efbb00: ctx DPA ops are empty
+[14:08:15:019366][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaae9f7c510: ctx DPA ops are empty
+[14:08:15:076446][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaea0305b0: ctx DPA ops are empty
+[14:08:15:119141][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaea034d00: ctx DPA ops are empty
+[14:08:15:176004][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaea06b4c0: ctx DPA ops are empty
+[14:08:15:218650][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaea0ec050: ctx DPA ops are empty
+[14:08:15:275436][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaea1a05b0: ctx DPA ops are empty
+[14:08:15:317928][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaae9f7a4a0: ctx DPA ops are empty
+[14:08:15:375611][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaea1dba20: ctx DPA ops are empty
+[14:08:15:418033][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaea25c4e0: ctx DPA ops are empty
+[14:08:15:475087][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaea2934c0: ctx DPA ops are empty
+[14:08:15:517580][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaea314050: ctx DPA ops are empty
+[14:08:15:574770][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaea34b710: ctx DPA ops are empty
+[14:08:15:617206][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaea3cc4e0: ctx DPA ops are empty
+[14:08:15:674211][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaea4037b0: ctx DPA ops are empty
+[14:08:15:716578][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaea486220: ctx DPA ops are empty
+[14:08:15:773320][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaea4bd680: ctx DPA ops are empty
+[14:08:15:815654][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaea53e4e0: ctx DPA ops are empty
+[14:08:15:872599][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaea5f2540: ctx DPA ops are empty
+[14:08:15:989961][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaea5f6b90: ctx DPA ops are empty
+[14:08:16:046802][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaea62d770: ctx DPA ops are empty
+[14:08:16:089569][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaea6b0770: ctx DPA ops are empty
+[14:08:16:146871][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaea6e7640: ctx DPA ops are empty
+[14:08:16:189229][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaea764bc0: ctx DPA ops are empty
+[14:08:16:245854][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaea79f320: ctx DPA ops are empty
+[14:08:16:288261][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaea81cd40: ctx DPA ops are empty
+[14:08:16:345095][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaea857490: ctx DPA ops are empty
+[14:08:16:387631][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaea8d4cc0: ctx DPA ops are empty
+[14:08:16:444645][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaea98c300: ctx DPA ops are empty
+[14:08:16:487390][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaea5de010: ctx DPA ops are empty
+[14:08:16:544196][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaea9c7250: ctx DPA ops are empty
+[14:08:16:586748][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaeaa48050: ctx DPA ops are empty
+[14:08:16:643951][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaeaafb120: ctx DPA ops are empty
+[14:08:16:686683][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaeaaffd00: ctx DPA ops are empty
+[14:08:16:744349][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaea8c0c50: ctx DPA ops are empty
+[14:08:16:787166][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaeabb3ad0: ctx DPA ops are empty
+[14:08:16:844180][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaea25a1d0: ctx DPA ops are empty
+[14:08:16:886564][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaeac6f050: ctx DPA ops are empty
+[14:08:16:943646][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaeaca62e0: ctx DPA ops are empty
+[14:08:17:061065][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaead27050: ctx DPA ops are empty
+[14:08:17:118454][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaead5e2e0: ctx DPA ops are empty
+[14:08:17:161524][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaeaddf050: ctx DPA ops are empty
+[14:08:17:218854][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaeae93300: ctx DPA ops are empty
+[14:08:17:261721][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaeaafd010: ctx DPA ops are empty
+[14:08:17:319088][2197106720][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaeaece420: ctx DPA ops are empty
+[l7_linkerd] worker 0: Service test-bench/loopback-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 0: Service test-bench/dpumesh-controller has no interned id yet; target pending
+[l7_linkerd] worker 0: Service linkerd/linkerd-identity has no interned id yet; target pending
+[l7_linkerd] worker 0: Service test-bench/inject-sock has no interned id yet; target pending
+[l7_linkerd] worker 0: Service test-bench/preload-bench has no interned id yet; target pending
+[l7_linkerd] worker 0: Service test-bench/http1-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 0: Service test-bench/echo-grpc-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 0: Service test-bench/inject-bench has no interned id yet; target pending
+[l7_linkerd] worker 0: Service test-bench/http1-bench has no interned id yet; target pending
+[l7_linkerd] worker 0: Service test-bench/bench-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 0: Service test-bench/echo-dpumesh-native has no interned id yet; target pending
+[l7_linkerd] worker 0: Service linkerd/linkerd-sp-validator has no interned id yet; target pending
+[l7_linkerd] worker 0: Service istio-system/istiod-revision-tag-default has no interned id yet; target pending
+[l7_linkerd] worker 0: Service test-bench/echo-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 0: Service istio-system/istiod has no interned id yet; target pending
+[l7_linkerd] worker 0: Service test-bench/echo-grpc-alt has no interned id yet; target pending
+[l7_linkerd] worker 0: Service test-bench/preload-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 0: Service kube-system/metrics-server has no interned id yet; target pending
+[l7_linkerd] worker 0: Service test-bench/bench-grpc-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 0: Service test-bench/preload-sock has no interned id yet; target pending
+[l7_linkerd] worker 0: Service test-bench/verbs-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 0: Service test-bench/plain-sock has no interned id yet; target pending
+[l7_linkerd] worker 0: Service linkerd/linkerd-policy-validator has no interned id yet; target pending
+[l7_linkerd] worker 0: Service linkerd/linkerd-dst has no interned id yet; target pending
+[l7_linkerd] worker 0: Service linkerd/linkerd-proxy-injector has no interned id yet; target pending
+[l7_linkerd] worker 0: Service default/kubernetes has no interned id yet; target pending
+[l7_linkerd] worker 0: Service test-bench/plain-bench has no interned id yet; target pending
+[l7_linkerd] worker 0: Service kube-system/kube-dns has no interned id yet; target pending
+[l7_linkerd] worker 1: Service test-bench/bench-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 1: Service test-bench/preload-bench has no interned id yet; target pending
+[l7_linkerd] worker 1: Service linkerd/linkerd-proxy-injector has no interned id yet; target pending
+[l7_linkerd] worker 1: Service test-bench/echo-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 1: Service test-bench/http1-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 1: Service test-bench/bench-grpc-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 1: Service linkerd/linkerd-policy-validator has no interned id yet; target pending
+[l7_linkerd] worker 1: Service kube-system/metrics-server has no interned id yet; target pending
+[l7_linkerd] worker 1: Service test-bench/http1-bench has no interned id yet; target pending
+[l7_linkerd] worker 1: Service test-bench/inject-bench has no interned id yet; target pending
+[l7_linkerd] worker 1: Service test-bench/loopback-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 1: Service test-bench/echo-grpc-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 1: Service test-bench/preload-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 1: Service istio-system/istiod-revision-tag-default has no interned id yet; target pending
+[l7_linkerd] worker 1: Service kube-system/kube-dns has no interned id yet; target pending
+[l7_linkerd] worker 1: Service default/kubernetes has no interned id yet; target pending
+[l7_linkerd] worker 1: Service linkerd/linkerd-sp-validator has no interned id yet; target pending
+[l7_linkerd] worker 1: Service test-bench/plain-bench has no interned id yet; target pending
+[l7_linkerd] worker 1: Service test-bench/dpumesh-controller has no interned id yet; target pending
+[l7_linkerd] worker 1: Service test-bench/inject-sock has no interned id yet; target pending
+[l7_linkerd] worker 1: Service linkerd/linkerd-identity has no interned id yet; target pending
+[l7_linkerd] worker 1: Service test-bench/preload-sock has no interned id yet; target pending
+[l7_linkerd] worker 1: Service linkerd/linkerd-dst has no interned id yet; target pending
+[l7_linkerd] worker 1: Service test-bench/plain-sock has no interned id yet; target pending
+[l7_linkerd] worker 1: Service test-bench/echo-dpumesh-native has no interned id yet; target pending
+[l7_linkerd] worker 1: Service istio-system/istiod has no interned id yet; target pending
+[l7_linkerd] worker 1: Service test-bench/echo-grpc-alt has no interned id yet; target pending
+[l7_linkerd] worker 1: Service test-bench/verbs-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 2: Service linkerd/linkerd-dst has no interned id yet; target pending
+[l7_linkerd] worker 2: Service test-bench/dpumesh-controller has no interned id yet; target pending
+[l7_linkerd] worker 2: Service test-bench/verbs-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 2: Service default/kubernetes has no interned id yet; target pending
+[l7_linkerd] worker 2: Service istio-system/istiod has no interned id yet; target pending
+[l7_linkerd] worker 2: Service test-bench/echo-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 2: Service test-bench/plain-sock has no interned id yet; target pending
+[l7_linkerd] worker 2: Service test-bench/preload-sock has no interned id yet; target pending
+[l7_linkerd] worker 2: Service test-bench/plain-bench has no interned id yet; target pending
+[l7_linkerd] worker 2: Service test-bench/echo-grpc-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 2: Service test-bench/bench-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 2: Service linkerd/linkerd-identity has no interned id yet; target pending
+[l7_linkerd] worker 2: Service test-bench/echo-grpc-alt has no interned id yet; target pending
+[l7_linkerd] worker 2: Service istio-system/istiod-revision-tag-default has no interned id yet; target pending
+[l7_linkerd] worker 2: Service kube-system/metrics-server has no interned id yet; target pending
+[l7_linkerd] worker 2: Service test-bench/inject-sock has no interned id yet; target pending
+[l7_linkerd] worker 2: Service test-bench/preload-bench has no interned id yet; target pending
+[l7_linkerd] worker 2: Service test-bench/echo-dpumesh-native has no interned id yet; target pending
+[l7_linkerd] worker 2: Service test-bench/preload-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 2: Service test-bench/bench-grpc-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 2: Service test-bench/loopback-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 2: Service test-bench/inject-bench has no interned id yet; target pending
+[l7_linkerd] worker 2: Service linkerd/linkerd-policy-validator has no interned id yet; target pending
+[l7_linkerd] worker 2: Service test-bench/http1-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 2: Service kube-system/kube-dns has no interned id yet; target pending
+[l7_linkerd] worker 2: Service test-bench/http1-bench has no interned id yet; target pending
+[l7_linkerd] worker 2: Service linkerd/linkerd-proxy-injector has no interned id yet; target pending
+[l7_linkerd] worker 2: Service linkerd/linkerd-sp-validator has no interned id yet; target pending
+[l7_linkerd] worker 3: Service test-bench/bench-grpc-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 3: Service test-bench/dpumesh-controller has no interned id yet; target pending
+[l7_linkerd] worker 3: Service test-bench/preload-bench has no interned id yet; target pending
+[l7_linkerd] worker 3: Service test-bench/http1-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 3: Service test-bench/bench-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 3: Service istio-system/istiod-revision-tag-default has no interned id yet; target pending
+[l7_linkerd] worker 3: Service test-bench/plain-sock has no interned id yet; target pending
+[l7_linkerd] worker 3: Service linkerd/linkerd-dst has no interned id yet; target pending
+[l7_linkerd] worker 3: Service default/kubernetes has no interned id yet; target pending
+[l7_linkerd] worker 3: Service kube-system/metrics-server has no interned id yet; target pending
+[l7_linkerd] worker 3: Service test-bench/plain-bench has no interned id yet; target pending
+[l7_linkerd] worker 3: Service test-bench/http1-bench has no interned id yet; target pending
+[l7_linkerd] worker 3: Service test-bench/loopback-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 3: Service linkerd/linkerd-sp-validator has no interned id yet; target pending
+[l7_linkerd] worker 3: Service linkerd/linkerd-proxy-injector has no interned id yet; target pending
+[l7_linkerd] worker 3: Service test-bench/echo-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 3: Service test-bench/verbs-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 3: Service test-bench/echo-dpumesh-native has no interned id yet; target pending
+[l7_linkerd] worker 3: Service linkerd/linkerd-policy-validator has no interned id yet; target pending
+[l7_linkerd] worker 3: Service test-bench/echo-grpc-alt has no interned id yet; target pending
+[l7_linkerd] worker 3: Service test-bench/preload-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 3: Service kube-system/kube-dns has no interned id yet; target pending
+[l7_linkerd] worker 3: Service test-bench/echo-grpc-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 3: Service test-bench/inject-sock has no interned id yet; target pending
+[l7_linkerd] worker 3: Service test-bench/inject-bench has no interned id yet; target pending
+[l7_linkerd] worker 3: Service istio-system/istiod has no interned id yet; target pending
+[l7_linkerd] worker 3: Service test-bench/preload-sock has no interned id yet; target pending
+[l7_linkerd] worker 3: Service linkerd/linkerd-identity has no interned id yet; target pending
+[l7_linkerd] worker 4: Service test-bench/http1-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 4: Service linkerd/linkerd-sp-validator has no interned id yet; target pending
+[l7_linkerd] worker 4: Service test-bench/inject-bench has no interned id yet; target pending
+[l7_linkerd] worker 4: Service linkerd/linkerd-policy-validator has no interned id yet; target pending
+[l7_linkerd] worker 4: Service test-bench/bench-grpc-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 4: Service test-bench/preload-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 4: Service linkerd/linkerd-identity has no interned id yet; target pending
+[l7_linkerd] worker 4: Service test-bench/preload-bench has no interned id yet; target pending
+[l7_linkerd] worker 4: Service default/kubernetes has no interned id yet; target pending
+[l7_linkerd] worker 4: Service kube-system/metrics-server has no interned id yet; target pending
+[l7_linkerd] worker 4: Service test-bench/echo-dpumesh-native has no interned id yet; target pending
+[l7_linkerd] worker 4: Service test-bench/echo-grpc-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 4: Service test-bench/echo-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 4: Service istio-system/istiod has no interned id yet; target pending
+[l7_linkerd] worker 4: Service linkerd/linkerd-dst has no interned id yet; target pending
+[l7_linkerd] worker 4: Service test-bench/preload-sock has no interned id yet; target pending
+[l7_linkerd] worker 4: Service test-bench/dpumesh-controller has no interned id yet; target pending
+[l7_linkerd] worker 4: Service test-bench/inject-sock has no interned id yet; target pending
+[l7_linkerd] worker 4: Service istio-system/istiod-revision-tag-default has no interned id yet; target pending
+[l7_linkerd] worker 4: Service test-bench/loopback-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 4: Service test-bench/plain-bench has no interned id yet; target pending
+[l7_linkerd] worker 4: Service test-bench/http1-bench has no interned id yet; target pending
+[l7_linkerd] worker 4: Service test-bench/plain-sock has no interned id yet; target pending
+[l7_linkerd] worker 4: Service test-bench/bench-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 4: Service linkerd/linkerd-proxy-injector has no interned id yet; target pending
+[l7_linkerd] worker 4: Service test-bench/verbs-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 4: Service test-bench/echo-grpc-alt has no interned id yet; target pending
+[l7_linkerd] worker 4: Service kube-system/kube-dns has no interned id yet; target pending
+[l7_linkerd] worker 5: Service test-bench/echo-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 5: Service test-bench/http1-bench has no interned id yet; target pending
+[l7_linkerd] worker 5: Service test-bench/bench-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 5: Service test-bench/plain-bench has no interned id yet; target pending
+[l7_linkerd] worker 5: Service test-bench/loopback-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 5: Service test-bench/http1-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 5: Service linkerd/linkerd-policy-validator has no interned id yet; target pending
+[l7_linkerd] worker 5: Service test-bench/inject-sock has no interned id yet; target pending
+[l7_linkerd] worker 5: Service test-bench/echo-dpumesh-native has no interned id yet; target pending
+[l7_linkerd] worker 5: Service test-bench/inject-bench has no interned id yet; target pending
+[l7_linkerd] worker 5: Service kube-system/metrics-server has no interned id yet; target pending
+[l7_linkerd] worker 5: Service istio-system/istiod-revision-tag-default has no interned id yet; target pending
+[l7_linkerd] worker 5: Service test-bench/echo-grpc-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 5: Service test-bench/dpumesh-controller has no interned id yet; target pending
+[l7_linkerd] worker 5: Service test-bench/preload-bench has no interned id yet; target pending
+[l7_linkerd] worker 5: Service test-bench/plain-sock has no interned id yet; target pending
+[l7_linkerd] worker 5: Service istio-system/istiod has no interned id yet; target pending
+[l7_linkerd] worker 5: Service kube-system/kube-dns has no interned id yet; target pending
+[l7_linkerd] worker 5: Service linkerd/linkerd-dst has no interned id yet; target pending
+[l7_linkerd] worker 5: Service test-bench/bench-grpc-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 5: Service default/kubernetes has no interned id yet; target pending
+[l7_linkerd] worker 5: Service linkerd/linkerd-identity has no interned id yet; target pending
+[l7_linkerd] worker 5: Service linkerd/linkerd-proxy-injector has no interned id yet; target pending
+[l7_linkerd] worker 5: Service test-bench/echo-grpc-alt has no interned id yet; target pending
+[l7_linkerd] worker 5: Service test-bench/verbs-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 5: Service test-bench/preload-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 5: Service linkerd/linkerd-sp-validator has no interned id yet; target pending
+[l7_linkerd] worker 5: Service test-bench/preload-sock has no interned id yet; target pending
+[l7_linkerd] worker 6: Service kube-system/metrics-server has no interned id yet; target pending
+[l7_linkerd] worker 6: Service test-bench/inject-sock has no interned id yet; target pending
+[l7_linkerd] worker 6: Service test-bench/verbs-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 6: Service test-bench/plain-bench has no interned id yet; target pending
+[l7_linkerd] worker 6: Service test-bench/preload-bench has no interned id yet; target pending
+[l7_linkerd] worker 6: Service test-bench/echo-grpc-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 6: Service test-bench/loopback-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 6: Service linkerd/linkerd-policy-validator has no interned id yet; target pending
+[l7_linkerd] worker 6: Service linkerd/linkerd-sp-validator has no interned id yet; target pending
+[l7_linkerd] worker 6: Service test-bench/plain-sock has no interned id yet; target pending
+[l7_linkerd] worker 6: Service test-bench/echo-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 6: Service test-bench/echo-grpc-alt has no interned id yet; target pending
+[l7_linkerd] worker 6: Service test-bench/bench-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 6: Service linkerd/linkerd-identity has no interned id yet; target pending
+[l7_linkerd] worker 6: Service test-bench/echo-dpumesh-native has no interned id yet; target pending
+[l7_linkerd] worker 6: Service linkerd/linkerd-proxy-injector has no interned id yet; target pending
+[l7_linkerd] worker 6: Service test-bench/http1-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 6: Service linkerd/linkerd-dst has no interned id yet; target pending
+[l7_linkerd] worker 6: Service test-bench/bench-grpc-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 6: Service istio-system/istiod has no interned id yet; target pending
+[l7_linkerd] worker 6: Service kube-system/kube-dns has no interned id yet; target pending
+[l7_linkerd] worker 6: Service test-bench/inject-bench has no interned id yet; target pending
+[l7_linkerd] worker 6: Service test-bench/http1-bench has no interned id yet; target pending
+[l7_linkerd] worker 6: Service test-bench/preload-sock has no interned id yet; target pending
+[l7_linkerd] worker 6: Service default/kubernetes has no interned id yet; target pending
+[l7_linkerd] worker 6: Service test-bench/dpumesh-controller has no interned id yet; target pending
+[l7_linkerd] worker 6: Service istio-system/istiod-revision-tag-default has no interned id yet; target pending
+[l7_linkerd] worker 6: Service test-bench/preload-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 7: Service kube-system/kube-dns has no interned id yet; target pending
+[l7_linkerd] worker 7: Service linkerd/linkerd-policy-validator has no interned id yet; target pending
+[l7_linkerd] worker 7: Service test-bench/preload-bench has no interned id yet; target pending
+[l7_linkerd] worker 7: Service default/kubernetes has no interned id yet; target pending
+[l7_linkerd] worker 7: Service test-bench/plain-sock has no interned id yet; target pending
+[l7_linkerd] worker 7: Service test-bench/plain-bench has no interned id yet; target pending
+[l7_linkerd] worker 7: Service test-bench/loopback-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 7: Service test-bench/bench-grpc-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 7: Service linkerd/linkerd-proxy-injector has no interned id yet; target pending
+[l7_linkerd] worker 7: Service test-bench/http1-bench has no interned id yet; target pending
+[l7_linkerd] worker 7: Service linkerd/linkerd-sp-validator has no interned id yet; target pending
+[l7_linkerd] worker 7: Service linkerd/linkerd-dst has no interned id yet; target pending
+[l7_linkerd] worker 7: Service test-bench/inject-sock has no interned id yet; target pending
+[l7_linkerd] worker 7: Service test-bench/dpumesh-controller has no interned id yet; target pending
+[l7_linkerd] worker 7: Service test-bench/http1-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 7: Service istio-system/istiod has no interned id yet; target pending
+[l7_linkerd] worker 7: Service kube-system/metrics-server has no interned id yet; target pending
+[l7_linkerd] worker 7: Service test-bench/echo-grpc-alt has no interned id yet; target pending
+[l7_linkerd] worker 7: Service test-bench/inject-bench has no interned id yet; target pending
+[l7_linkerd] worker 7: Service linkerd/linkerd-identity has no interned id yet; target pending
+[l7_linkerd] worker 7: Service test-bench/preload-sock has no interned id yet; target pending
+[l7_linkerd] worker 7: Service test-bench/bench-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 7: Service test-bench/echo-dpumesh-native has no interned id yet; target pending
+[l7_linkerd] worker 7: Service test-bench/echo-grpc-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 7: Service test-bench/verbs-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 7: Service test-bench/preload-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 7: Service test-bench/echo-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 7: Service istio-system/istiod-revision-tag-default has no interned id yet; target pending
+[l7_linkerd] worker 1: Service test-bench/bench-dpumesh now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/preload-bench now resolves in the held topology
+[l7_linkerd] worker 1: Service linkerd/linkerd-proxy-injector now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/echo-dpumesh now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/http1-dpumesh now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/bench-grpc-dpumesh now resolves in the held topology
+[l7_linkerd] worker 1: Service linkerd/linkerd-policy-validator now resolves in the held topology
+[l7_linkerd] worker 1: Service kube-system/metrics-server now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/http1-bench now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/inject-bench now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/loopback-dpumesh now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/echo-grpc-dpumesh now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/preload-dpumesh now resolves in the held topology
+[l7_linkerd] worker 1: Service istio-system/istiod-revision-tag-default now resolves in the held topology
+[l7_linkerd] worker 1: Service kube-system/kube-dns now resolves in the held topology
+[l7_linkerd] worker 1: Service default/kubernetes now resolves in the held topology
+[l7_linkerd] worker 1: Service linkerd/linkerd-sp-validator now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/plain-bench now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/dpumesh-controller now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/inject-sock now resolves in the held topology
+[l7_linkerd] worker 1: Service linkerd/linkerd-identity now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/preload-sock now resolves in the held topology
+[l7_linkerd] worker 1: Service linkerd/linkerd-dst now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/plain-sock now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/echo-dpumesh-native now resolves in the held topology
+[l7_linkerd] worker 1: Service istio-system/istiod now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/echo-grpc-alt now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/verbs-dpumesh now resolves in the held topology
+[l7_linkerd] worker 2: Service linkerd/linkerd-dst now resolves in the held topology
+[l7_linkerd] worker 2: Service test-bench/dpumesh-controller now resolves in the held topology
+[l7_linkerd] worker 2: Service test-bench/verbs-dpumesh now resolves in the held topology
+[l7_linkerd] worker 2: Service default/kubernetes now resolves in the held topology
+[l7_linkerd] worker 2: Service istio-system/istiod now resolves in the held topology
+[l7_linkerd] worker 2: Service test-bench/echo-dpumesh now resolves in the held topology
+[l7_linkerd] worker 2: Service test-bench/plain-sock now resolves in the held topology
+[l7_linkerd] worker 2: Service test-bench/preload-sock now resolves in the held topology
+[l7_linkerd] worker 2: Service test-bench/plain-bench now resolves in the held topology
+[l7_linkerd] worker 2: Service test-bench/echo-grpc-dpumesh now resolves in the held topology
+[l7_linkerd] worker 2: Service test-bench/bench-dpumesh now resolves in the held topology
+[l7_linkerd] worker 2: Service linkerd/linkerd-identity now resolves in the held topology
+[l7_linkerd] worker 2: Service test-bench/echo-grpc-alt now resolves in the held topology
+[l7_linkerd] worker 2: Service istio-system/istiod-revision-tag-default now resolves in the held topology
+[l7_linkerd] worker 2: Service kube-system/metrics-server now resolves in the held topology
+[l7_linkerd] worker 2: Service test-bench/inject-sock now resolves in the held topology
+[l7_linkerd] worker 2: Service test-bench/preload-bench now resolves in the held topology
+[l7_linkerd] worker 2: Service test-bench/echo-dpumesh-native now resolves in the held topology
+[l7_linkerd] worker 2: Service test-bench/preload-dpumesh now resolves in the held topology
+[l7_linkerd] worker 2: Service test-bench/bench-grpc-dpumesh now resolves in the held topology
+[l7_linkerd] worker 2: Service test-bench/loopback-dpumesh now resolves in the held topology
+[l7_linkerd] worker 2: Service test-bench/inject-bench now resolves in the held topology
+[l7_linkerd] worker 2: Service linkerd/linkerd-policy-validator now resolves in the held topology
+[l7_linkerd] worker 2: Service test-bench/http1-dpumesh now resolves in the held topology
+[l7_linkerd] worker 2: Service kube-system/kube-dns now resolves in the held topology
+[l7_linkerd] worker 2: Service test-bench/http1-bench now resolves in the held topology
+[l7_linkerd] worker 2: Service linkerd/linkerd-proxy-injector now resolves in the held topology
+[l7_linkerd] worker 2: Service linkerd/linkerd-sp-validator now resolves in the held topology
+[l7_linkerd] worker 3: Service test-bench/bench-grpc-dpumesh now resolves in the held topology
+[l7_linkerd] worker 3: Service test-bench/dpumesh-controller now resolves in the held topology
+[l7_linkerd] worker 3: Service test-bench/preload-bench now resolves in the held topology
+[l7_linkerd] worker 3: Service test-bench/http1-dpumesh now resolves in the held topology
+[l7_linkerd] worker 3: Service test-bench/bench-dpumesh now resolves in the held topology
+[l7_linkerd] worker 3: Service istio-system/istiod-revision-tag-default now resolves in the held topology
+[l7_linkerd] worker 3: Service test-bench/plain-sock now resolves in the held topology
+[l7_linkerd] worker 3: Service linkerd/linkerd-dst now resolves in the held topology
+[l7_linkerd] worker 3: Service default/kubernetes now resolves in the held topology
+[l7_linkerd] worker 3: Service kube-system/metrics-server now resolves in the held topology
+[l7_linkerd] worker 3: Service test-bench/plain-bench now resolves in the held topology
+[l7_linkerd] worker 3: Service test-bench/http1-bench now resolves in the held topology
+[l7_linkerd] worker 3: Service test-bench/loopback-dpumesh now resolves in the held topology
+[l7_linkerd] worker 3: Service linkerd/linkerd-sp-validator now resolves in the held topology
+[l7_linkerd] worker 3: Service linkerd/linkerd-proxy-injector now resolves in the held topology
+[l7_linkerd] worker 3: Service test-bench/echo-dpumesh now resolves in the held topology
+[l7_linkerd] worker 3: Service test-bench/verbs-dpumesh now resolves in the held topology
+[l7_linkerd] worker 3: Service test-bench/echo-dpumesh-native now resolves in the held topology
+[l7_linkerd] worker 3: Service linkerd/linkerd-policy-validator now resolves in the held topology
+[l7_linkerd] worker 3: Service test-bench/echo-grpc-alt now resolves in the held topology
+[l7_linkerd] worker 3: Service test-bench/preload-dpumesh now resolves in the held topology
+[l7_linkerd] worker 3: Service kube-system/kube-dns now resolves in the held topology
+[l7_linkerd] worker 3: Service test-bench/echo-grpc-dpumesh now resolves in the held topology
+[l7_linkerd] worker 3: Service test-bench/inject-sock now resolves in the held topology
+[l7_linkerd] worker 3: Service test-bench/inject-bench now resolves in the held topology
+[l7_linkerd] worker 3: Service istio-system/istiod now resolves in the held topology
+[l7_linkerd] worker 3: Service test-bench/preload-sock now resolves in the held topology
+[l7_linkerd] worker 3: Service linkerd/linkerd-identity now resolves in the held topology
+[l7_linkerd] worker 4: Service test-bench/http1-dpumesh now resolves in the held topology
+[l7_linkerd] worker 4: Service linkerd/linkerd-sp-validator now resolves in the held topology
+[l7_linkerd] worker 4: Service test-bench/inject-bench now resolves in the held topology
+[l7_linkerd] worker 4: Service linkerd/linkerd-policy-validator now resolves in the held topology
+[l7_linkerd] worker 4: Service test-bench/bench-grpc-dpumesh now resolves in the held topology
+[l7_linkerd] worker 4: Service test-bench/preload-dpumesh now resolves in the held topology
+[l7_linkerd] worker 4: Service linkerd/linkerd-identity now resolves in the held topology
+[l7_linkerd] worker 4: Service test-bench/preload-bench now resolves in the held topology
+[l7_linkerd] worker 4: Service default/kubernetes now resolves in the held topology
+[l7_linkerd] worker 4: Service kube-system/metrics-server now resolves in the held topology
+[l7_linkerd] worker 4: Service test-bench/echo-dpumesh-native now resolves in the held topology
+[l7_linkerd] worker 4: Service test-bench/echo-grpc-dpumesh now resolves in the held topology
+[l7_linkerd] worker 4: Service test-bench/echo-dpumesh now resolves in the held topology
+[l7_linkerd] worker 4: Service istio-system/istiod now resolves in the held topology
+[l7_linkerd] worker 4: Service linkerd/linkerd-dst now resolves in the held topology
+[l7_linkerd] worker 4: Service test-bench/preload-sock now resolves in the held topology
+[l7_linkerd] worker 4: Service test-bench/dpumesh-controller now resolves in the held topology
+[l7_linkerd] worker 4: Service test-bench/inject-sock now resolves in the held topology
+[l7_linkerd] worker 4: Service istio-system/istiod-revision-tag-default now resolves in the held topology
+[l7_linkerd] worker 4: Service test-bench/loopback-dpumesh now resolves in the held topology
+[l7_linkerd] worker 4: Service test-bench/plain-bench now resolves in the held topology
+[l7_linkerd] worker 4: Service test-bench/http1-bench now resolves in the held topology
+[l7_linkerd] worker 4: Service test-bench/plain-sock now resolves in the held topology
+[l7_linkerd] worker 4: Service test-bench/bench-dpumesh now resolves in the held topology
+[l7_linkerd] worker 4: Service linkerd/linkerd-proxy-injector now resolves in the held topology
+[l7_linkerd] worker 4: Service test-bench/verbs-dpumesh now resolves in the held topology
+[l7_linkerd] worker 4: Service test-bench/echo-grpc-alt now resolves in the held topology
+[l7_linkerd] worker 4: Service kube-system/kube-dns now resolves in the held topology
+[l7_linkerd] worker 5: Service test-bench/echo-dpumesh now resolves in the held topology
+[l7_linkerd] worker 5: Service test-bench/http1-bench now resolves in the held topology
+[l7_linkerd] worker 5: Service test-bench/bench-dpumesh now resolves in the held topology
+[l7_linkerd] worker 5: Service test-bench/plain-bench now resolves in the held topology
+[l7_linkerd] worker 5: Service test-bench/loopback-dpumesh now resolves in the held topology
+[l7_linkerd] worker 5: Service test-bench/http1-dpumesh now resolves in the held topology
+[l7_linkerd] worker 5: Service linkerd/linkerd-policy-validator now resolves in the held topology
+[l7_linkerd] worker 5: Service test-bench/inject-sock now resolves in the held topology
+[l7_linkerd] worker 5: Service test-bench/echo-dpumesh-native now resolves in the held topology
+[l7_linkerd] worker 5: Service test-bench/inject-bench now resolves in the held topology
+[l7_linkerd] worker 5: Service kube-system/metrics-server now resolves in the held topology
+[l7_linkerd] worker 5: Service istio-system/istiod-revision-tag-default now resolves in the held topology
+[l7_linkerd] worker 5: Service test-bench/echo-grpc-dpumesh now resolves in the held topology
+[l7_linkerd] worker 5: Service test-bench/dpumesh-controller now resolves in the held topology
+[l7_linkerd] worker 5: Service test-bench/preload-bench now resolves in the held topology
+[l7_linkerd] worker 5: Service test-bench/plain-sock now resolves in the held topology
+[l7_linkerd] worker 5: Service istio-system/istiod now resolves in the held topology
+[l7_linkerd] worker 5: Service kube-system/kube-dns now resolves in the held topology
+[l7_linkerd] worker 5: Service linkerd/linkerd-dst now resolves in the held topology
+[l7_linkerd] worker 5: Service test-bench/bench-grpc-dpumesh now resolves in the held topology
+[l7_linkerd] worker 5: Service default/kubernetes now resolves in the held topology
+[l7_linkerd] worker 5: Service linkerd/linkerd-identity now resolves in the held topology
+[l7_linkerd] worker 5: Service linkerd/linkerd-proxy-injector now resolves in the held topology
+[l7_linkerd] worker 5: Service test-bench/echo-grpc-alt now resolves in the held topology
+[l7_linkerd] worker 5: Service test-bench/verbs-dpumesh now resolves in the held topology
+[l7_linkerd] worker 5: Service test-bench/preload-dpumesh now resolves in the held topology
+[l7_linkerd] worker 5: Service linkerd/linkerd-sp-validator now resolves in the held topology
+[l7_linkerd] worker 5: Service test-bench/preload-sock now resolves in the held topology
+[l7_linkerd] worker 6: Service kube-system/metrics-server now resolves in the held topology
+[l7_linkerd] worker 6: Service test-bench/inject-sock now resolves in the held topology
+[l7_linkerd] worker 6: Service test-bench/verbs-dpumesh now resolves in the held topology
+[l7_linkerd] worker 6: Service test-bench/plain-bench now resolves in the held topology
+[l7_linkerd] worker 6: Service test-bench/preload-bench now resolves in the held topology
+[l7_linkerd] worker 6: Service test-bench/echo-grpc-dpumesh now resolves in the held topology
+[l7_linkerd] worker 6: Service test-bench/loopback-dpumesh now resolves in the held topology
+[l7_linkerd] worker 6: Service linkerd/linkerd-policy-validator now resolves in the held topology
+[l7_linkerd] worker 6: Service linkerd/linkerd-sp-validator now resolves in the held topology
+[l7_linkerd] worker 6: Service test-bench/plain-sock now resolves in the held topology
+[l7_linkerd] worker 6: Service test-bench/echo-dpumesh now resolves in the held topology
+[l7_linkerd] worker 6: Service test-bench/echo-grpc-alt now resolves in the held topology
+[l7_linkerd] worker 6: Service test-bench/bench-dpumesh now resolves in the held topology
+[l7_linkerd] worker 6: Service linkerd/linkerd-identity now resolves in the held topology
+[l7_linkerd] worker 6: Service test-bench/echo-dpumesh-native now resolves in the held topology
+[l7_linkerd] worker 6: Service linkerd/linkerd-proxy-injector now resolves in the held topology
+[l7_linkerd] worker 6: Service test-bench/http1-dpumesh now resolves in the held topology
+[l7_linkerd] worker 6: Service linkerd/linkerd-dst now resolves in the held topology
+[l7_linkerd] worker 6: Service test-bench/bench-grpc-dpumesh now resolves in the held topology
+[l7_linkerd] worker 6: Service istio-system/istiod now resolves in the held topology
+[l7_linkerd] worker 6: Service kube-system/kube-dns now resolves in the held topology
+[l7_linkerd] worker 6: Service test-bench/inject-bench now resolves in the held topology
+[l7_linkerd] worker 6: Service test-bench/http1-bench now resolves in the held topology
+[l7_linkerd] worker 6: Service test-bench/preload-sock now resolves in the held topology
+[l7_linkerd] worker 6: Service default/kubernetes now resolves in the held topology
+[l7_linkerd] worker 6: Service test-bench/dpumesh-controller now resolves in the held topology
+[l7_linkerd] worker 6: Service istio-system/istiod-revision-tag-default now resolves in the held topology
+[l7_linkerd] worker 6: Service test-bench/preload-dpumesh now resolves in the held topology
+[l7_linkerd] worker 7: Service kube-system/kube-dns now resolves in the held topology
+[l7_linkerd] worker 7: Service linkerd/linkerd-policy-validator now resolves in the held topology
+[l7_linkerd] worker 7: Service test-bench/preload-bench now resolves in the held topology
+[l7_linkerd] worker 7: Service default/kubernetes now resolves in the held topology
+[l7_linkerd] worker 7: Service test-bench/plain-sock now resolves in the held topology
+[l7_linkerd] worker 7: Service test-bench/plain-bench now resolves in the held topology
+[l7_linkerd] worker 7: Service test-bench/loopback-dpumesh now resolves in the held topology
+[l7_linkerd] worker 7: Service test-bench/bench-grpc-dpumesh now resolves in the held topology
+[l7_linkerd] worker 7: Service linkerd/linkerd-proxy-injector now resolves in the held topology
+[l7_linkerd] worker 7: Service test-bench/http1-bench now resolves in the held topology
+[l7_linkerd] worker 7: Service linkerd/linkerd-sp-validator now resolves in the held topology
+[l7_linkerd] worker 7: Service linkerd/linkerd-dst now resolves in the held topology
+[l7_linkerd] worker 7: Service test-bench/inject-sock now resolves in the held topology
+[l7_linkerd] worker 7: Service test-bench/dpumesh-controller now resolves in the held topology
+[l7_linkerd] worker 7: Service test-bench/http1-dpumesh now resolves in the held topology
+[l7_linkerd] worker 7: Service istio-system/istiod now resolves in the held topology
+[l7_linkerd] worker 7: Service kube-system/metrics-server now resolves in the held topology
+[l7_linkerd] worker 7: Service test-bench/echo-grpc-alt now resolves in the held topology
+[l7_linkerd] worker 7: Service test-bench/inject-bench now resolves in the held topology
+[l7_linkerd] worker 7: Service linkerd/linkerd-identity now resolves in the held topology
+[l7_linkerd] worker 7: Service test-bench/preload-sock now resolves in the held topology
+[l7_linkerd] worker 7: Service test-bench/bench-dpumesh now resolves in the held topology
+[l7_linkerd] worker 7: Service test-bench/echo-dpumesh-native now resolves in the held topology
+[l7_linkerd] worker 7: Service test-bench/echo-grpc-dpumesh now resolves in the held topology
+[l7_linkerd] worker 7: Service test-bench/verbs-dpumesh now resolves in the held topology
+[l7_linkerd] worker 7: Service test-bench/preload-dpumesh now resolves in the held topology
+[l7_linkerd] worker 7: Service test-bench/echo-dpumesh now resolves in the held topology
+[l7_linkerd] worker 7: Service istio-system/istiod-revision-tag-default now resolves in the held topology
+[l7_linkerd] worker 0: Service test-bench/loopback-dpumesh now resolves in the held topology
+[l7_linkerd] worker 0: Service test-bench/dpumesh-controller now resolves in the held topology
+[l7_linkerd] worker 0: Service linkerd/linkerd-identity now resolves in the held topology
+[l7_linkerd] worker 0: Service test-bench/inject-sock now resolves in the held topology
+[l7_linkerd] worker 0: Service test-bench/preload-bench now resolves in the held topology
+[l7_linkerd] worker 0: Service test-bench/http1-dpumesh now resolves in the held topology
+[l7_linkerd] worker 0: Service test-bench/echo-grpc-dpumesh now resolves in the held topology
+[l7_linkerd] worker 0: Service test-bench/inject-bench now resolves in the held topology
+[l7_linkerd] worker 0: Service test-bench/http1-bench now resolves in the held topology
+[l7_linkerd] worker 0: Service test-bench/bench-dpumesh now resolves in the held topology
+[l7_linkerd] worker 0: Service test-bench/echo-dpumesh-native now resolves in the held topology
+[l7_linkerd] worker 0: Service linkerd/linkerd-sp-validator now resolves in the held topology
+[l7_linkerd] worker 0: Service istio-system/istiod-revision-tag-default now resolves in the held topology
+[l7_linkerd] worker 0: Service test-bench/echo-dpumesh now resolves in the held topology
+[l7_linkerd] worker 0: Service istio-system/istiod now resolves in the held topology
+[l7_linkerd] worker 0: Service test-bench/echo-grpc-alt now resolves in the held topology
+[l7_linkerd] worker 0: Service test-bench/preload-dpumesh now resolves in the held topology
+[l7_linkerd] worker 0: Service kube-system/metrics-server now resolves in the held topology
+[l7_linkerd] worker 0: Service test-bench/bench-grpc-dpumesh now resolves in the held topology
+[l7_linkerd] worker 0: Service test-bench/preload-sock now resolves in the held topology
+[l7_linkerd] worker 0: Service test-bench/verbs-dpumesh now resolves in the held topology
+[l7_linkerd] worker 0: Service test-bench/plain-sock now resolves in the held topology
+[l7_linkerd] worker 0: Service linkerd/linkerd-policy-validator now resolves in the held topology
+[l7_linkerd] worker 0: Service linkerd/linkerd-dst now resolves in the held topology
+[l7_linkerd] worker 0: Service linkerd/linkerd-proxy-injector now resolves in the held topology
+[l7_linkerd] worker 0: Service default/kubernetes now resolves in the held topology
+[l7_linkerd] worker 0: Service test-bench/plain-bench now resolves in the held topology
+[l7_linkerd] worker 0: Service kube-system/kube-dns now resolves in the held topology

@@ -1,0 +1,50 @@
+[package]
+name = "dmesh-l7"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "linkerd2-proxy behind the DPUmesh L7 adapter contract"
+
+# Own workspace: the port's workspace stays the port's.
+[workspace]
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+# The proxy itself. `doca` brings in the dmesh acceptor that feeds DMA-received
+# connections through the outbound stack.
+linkerd-app = { path = "../port/linkerd2-proxy/linkerd/app", features = ["doca"] }
+linkerd-metrics = { path = "../port/linkerd2-proxy/linkerd/metrics" }
+linkerd-rustls = { path = "../port/linkerd2-proxy/linkerd/rustls" }
+# The IO endpoint and the acceptor's types, without the datapath the port ships:
+# DPUmesh is the datapath here.
+dmesh-doca = { path = "../port/linkerd2-proxy/linkerd/doca", default-features = false }
+tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
+# Session events go through the proxy's own subscriber, so `LINKERD2_PROXY_LOG`
+# selects them: the target is `dmesh_l7`.
+tracing = "0.1"
+
+# Keep the embedded build's allocator aligned with the stock Linkerd proxy.
+# The proxy's request path is allocation-heavy, and glibc arena contention is
+# especially visible when every DPU ARM worker hosts its own runtime.
+[target.'cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64"), target_env = "gnu"))'.dependencies]
+tikv-jemallocator = "0.6"
+
+[dev-dependencies]
+# The tests drive the endpoints the way the stack does.
+tokio = { version = "1", features = ["rt", "sync", "time", "macros", "io-util"] }
+
+[profile.release]
+opt-level = 3
+# Match the stock proxy release profile so the embedded staticlib can inline
+# and devirtualize across Linkerd's many generic service crates.
+lto = true
+# No debug info: the archive carries the whole proxy, and the DPU's root
+# filesystem does not have room for a second copy of it in the linked binary.
+debug = 0
+strip = "debuginfo"
+
+# h2 with the two send-path changes described in its Cargo.toml.
+[patch.crates-io]
+h2 = { path = "../port/linkerd2-proxy/h2" }

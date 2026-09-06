@@ -1,0 +1,49 @@
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from bench_grpc.Dockerfile
+#1 transferring dockerfile: 1.08kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/ubuntu:22.04
+#2 DONE 0.0s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [1/7] FROM docker.io/library/ubuntu:22.04@sha256:3b06811b2afd352be909dd088a004166d665dc76d38b13eada33522a9d915c6f
+#4 resolve docker.io/library/ubuntu:22.04@sha256:3b06811b2afd352be909dd088a004166d665dc76d38b13eada33522a9d915c6f 0.0s done
+#4 DONE 0.0s
+
+#5 [internal] load build context
+#5 transferring context: 22.26MB 0.2s done
+#5 DONE 0.2s
+
+#6 [2/7] RUN apt-get update &&     DEBIAN_FRONTEND=noninteractive apt-get install -y       ca-certificates       libibverbs1       libnl-3-200       libnl-route-3-200       libyaml-0-2       libsasl2-2       numactl       openssl       libasan6       libubsan1 &&     rm -rf /var/lib/apt/lists/*
+#6 CACHED
+
+#7 [3/7] COPY build/grpc-release/bench_grpc /usr/local/bin/bench_grpc
+#7 CACHED
+
+#8 [4/7] COPY doca-libs/ /usr/local/lib/
+#8 CACHED
+
+#9 [5/7] COPY build/lib/libdpumesh.so.5 /usr/local/lib/
+#9 DONE 0.0s
+
+#10 [6/7] COPY bench/docker/numa-entrypoint.sh /usr/local/bin/numa-entrypoint.sh
+#10 DONE 0.0s
+
+#11 [7/7] RUN ldconfig
+#11 DONE 0.4s
+
+#12 exporting to image
+#12 exporting layers 0.1s done
+#12 exporting manifest sha256:4624bb7575315425b7d2c8efbc825c32dec6bf047cb1152d33a83bd165bfd22f done
+#12 exporting config sha256:64134a06a4c3d9202447541201c9001d42690236f6ca5e9bf42f174e67dc23fc done
+#12 exporting attestation manifest sha256:e4cb33840a0908f4256e2dfd1589bb704de62c82ae74829279087b2d4ea60a0c 0.0s done
+#12 exporting manifest list sha256:eb610bdd671d4a974f7ba7ce019b79df5c214c9fafe496bb9502815175b1f606 done
+#12 naming to docker.io/bench/bench-grpc:direct-tx done
+#12 unpacking to docker.io/bench/bench-grpc:direct-tx
+#12 unpacking to docker.io/bench/bench-grpc:direct-tx 0.3s done
+#12 DONE 0.6s

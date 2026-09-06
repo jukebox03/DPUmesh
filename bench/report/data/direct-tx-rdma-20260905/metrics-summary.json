@@ -1,0 +1,234 @@
+{
+  "after-grpc-clean": {
+    "dmesh_tx_accepted_bytes_total": {
+      "workers": 8,
+      "sum": 39823706798.0
+    },
+    "dmesh_tx_arena_copy_bytes_total": {
+      "workers": 8,
+      "sum": 39823706798.0
+    },
+    "dmesh_tx_retries_total": {
+      "workers": 8,
+      "sum": 0.0
+    },
+    "dmesh_tx_budget_wait_total": {
+      "workers": 8,
+      "sum": 89944.0
+    },
+    "dmesh_tx_writer_wakes_total": {
+      "workers": 8,
+      "sum": 89944.0
+    },
+    "dmesh_tx_errors_total": {
+      "workers": 8,
+      "sum": 0.0
+    },
+    "dmesh_sessions_active": {
+      "workers": 8,
+      "sum": 0.0
+    },
+    "dmesh_registrations_pending": {
+      "workers": 8,
+      "sum": 0.0
+    },
+    "dmesh_tasks_live": {
+      "workers": 8,
+      "sum": 0.0
+    },
+    "dmesh_worker_completion_queue_depth": {
+      "workers": 8,
+      "sum": 0.0
+    },
+    "dmesh_worker_cross_queue_depth": {
+      "workers": 8,
+      "sum": 0.0
+    },
+    "dmesh_worker_dma_tasks_inflight": {
+      "workers": 8,
+      "sum": 0.0
+    },
+    "dmesh_worker_stalled_connections": {
+      "workers": 8,
+      "sum": 0.0
+    },
+    "dmesh_worker_emit_pending": {
+      "workers": 8,
+      "sum": 0.0
+    },
+    "dmesh_worker_ack_release_depth": {
+      "workers": 8,
+      "sum": 0.0
+    },
+    "dmesh_worker_ack_retry_pending": {
+      "workers": 8,
+      "sum": 0.0
+    },
+    "dmesh_worker_remote_fin_pending": {
+      "workers": 8,
+      "sum": 0.0
+    }
+  },
+  "after-opaque-clean": {
+    "dmesh_tx_accepted_bytes_total": {
+      "workers": 8,
+      "sum": 190569151088.0
+    },
+    "dmesh_tx_arena_copy_bytes_total": {
+      "workers": 8,
+      "sum": 190569151088.0
+    },
+    "dmesh_tx_retries_total": {
+      "workers": 8,
+      "sum": 0.0
+    },
+    "dmesh_tx_budget_wait_total": {
+      "workers": 8,
+      "sum": 2084.0
+    },
+    "dmesh_tx_writer_wakes_total": {
+      "workers": 8,
+      "sum": 1042.0
+    },
+    "dmesh_tx_errors_total": {
+      "workers": 8,
+      "sum": 0.0
+    },
+    "dmesh_sessions_active": {
+      "workers": 8,
+      "sum": 0.0
+    },
+    "dmesh_registrations_pending": {
+      "workers": 8,
+      "sum": 0.0
+    },
+    "dmesh_tasks_live": {
+      "workers": 8,
+      "sum": 0.0
+    },
+    "dmesh_worker_completion_queue_depth": {
+      "workers": 8,
+      "sum": 0.0
+    },
+    "dmesh_worker_cross_queue_depth": {
+      "workers": 8,
+      "sum": 0.0
+    },
+    "dmesh_worker_dma_tasks_inflight": {
+      "workers": 8,
+      "sum": 0.0
+    },
+    "dmesh_worker_stalled_connections": {
+      "workers": 8,
+      "sum": 0.0
+    },
+    "dmesh_worker_emit_pending": {
+      "workers": 8,
+      "sum": 0.0
+    },
+    "dmesh_worker_ack_release_depth": {
+      "workers": 8,
+      "sum": 0.0
+    },
+    "dmesh_worker_ack_retry_pending": {
+      "workers": 8,
+      "sum": 0.0
+    },
+    "dmesh_worker_remote_fin_pending": {
+      "workers": 8,
+      "sum": 0.0
+    }
+  },
+  "before-opaque-clean": {
+    "dmesh_sessions_active": {
+      "workers": 8,
+      "sum": 0.0
+    },
+    "dmesh_registrations_pending": {
+      "workers": 8,
+      "sum": 0.0
+    },
+    "dmesh_tasks_live": {
+      "workers": 8,
+      "sum": 0.0
+    },
+    "dmesh_worker_completion_queue_depth": {
+      "workers": 8,
+      "sum": 0.0
+    },
+    "dmesh_worker_cross_queue_depth": {
+      "workers": 8,
+      "sum": 0.0
+    },
+    "dmesh_worker_dma_tasks_inflight": {
+      "workers": 8,
+      "sum": 0.0
+    },
+    "dmesh_worker_stalled_connections": {
+      "workers": 8,
+      "sum": 0.0
+    },
+    "dmesh_worker_emit_pending": {
+      "workers": 8,
+      "sum": 0.0
+    },
+    "dmesh_worker_ack_release_depth": {
+      "workers": 8,
+      "sum": 0.0
+    },
+    "dmesh_worker_ack_retry_pending": {
+      "workers": 8,
+      "sum": 0.0
+    },
+    "dmesh_worker_remote_fin_pending": {
+      "workers": 8,
+      "sum": 0.0
+    }
+  },
+  "before-grpc-clean": {
+    "dmesh_sessions_active": {
+      "workers": 8,
+      "sum": 0.0
+    },
+    "dmesh_registrations_pending": {
+      "workers": 8,
+      "sum": 0.0
+    },
+    "dmesh_tasks_live": {
+      "workers": 8,
+      "sum": 0.0
+    },
+    "dmesh_worker_completion_queue_depth": {
+      "workers": 8,
+      "sum": 0.0
+    },
+    "dmesh_worker_cross_queue_depth": {
+      "workers": 8,
+      "sum": 0.0
+    },
+    "dmesh_worker_dma_tasks_inflight": {
+      "workers": 8,
+      "sum": 0.0
+    },
+    "dmesh_worker_stalled_connections": {
+      "workers": 8,
+      "sum": 0.0
+    },
+    "dmesh_worker_emit_pending": {
+      "workers": 8,
+      "sum": 0.0
+    },
+    "dmesh_worker_ack_release_depth": {
+      "workers": 8,
+      "sum": 0.0
+    },
+    "dmesh_worker_ack_retry_pending": {
+      "workers": 8,
+      "sum": 0.0
+    },
+    "dmesh_worker_remote_fin_pending": {
+      "workers": 8,
+      "sum": 0.0
+    }
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "stage": "before-opaque",
+  "size": 64,
+  "mode": "capacity",
+  "rep": 3,
+  "command": "RUN 64 64 64 5 200 8",
+  "elapsed": 5.140727519989014,
+  "cpu_before": {},
+  "cpu_after": {},
+  "reply": "OK mrps=1.177381 gbps=1.5070 req_gbps=0.7535 resp_gbps=0.7535 p50=406.00 p95=676.00 p99=897.00 p999=1104.00 p9999=1890.00 avg=427.56 min=72.23 max=5072.90 rcnt=5867307 scheduled=5869405 pending=498 fail=0 conc=64 threads=8 reqsz=64 repsz=64 reqframe=80 respframe=80 durs=5.000 offered_mrps=1.177381 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=17 rets=17 recyc=902 waits=0 pads=675 reorder=0 dist=0:5868907\n"
+}

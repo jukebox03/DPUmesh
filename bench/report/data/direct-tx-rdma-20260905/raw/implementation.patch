@@ -1,0 +1,1087 @@
+diff --git a/Makefile b/Makefile
+index 94c5233..bf78f92 100644
+--- a/Makefile
++++ b/Makefile
+@@ -182,6 +182,9 @@ $(TESTDIR)/peer_wire_test: tests/peer_wire_test.c doca/peer_wire_tcp.c \
+ 	$(CC) $(CFLAGS) -D_GNU_SOURCE -o $@ tests/peer_wire_test.c \
+ 		doca/peer_wire_tcp.c doca/peer_wire_rdma.c $(RDMA_LIBS) $(RPATHS)
+ 
++$(TESTDIR)/peer_wire_lease_test: tests/peer_wire_lease_test.c doca/peer_wire_rdma.c doca/peer_wire.h | dirs
++	$(CC) $(CFLAGS) -D_GNU_SOURCE -o $@ tests/peer_wire_lease_test.c $(RDMA_LIBS) $(RPATHS)
++
+ $(TESTDIR)/topology_gen_test: tests/topology_gen_test.c doca/topology.c doca/workload_grant.c doca/control_scope.c $(LIB_HDRS) | dirs
+ 	$(CC) $(CFLAGS) -o $@ tests/topology_gen_test.c doca/topology.c doca/workload_grant.c \
+ 		doca/control_scope.c \
+@@ -230,7 +233,7 @@ test: $(TESTDIR)/native_api_contract_test $(TESTDIR)/native_control_state_test \
+ 	$(TESTDIR)/proxy_lane_queue_test $(TESTDIR)/worker_mpsc_queue_test \
+ 	$(TESTDIR)/topology_test $(TESTDIR)/topology_gen_test $(TESTDIR)/peer_channel_test \
+ 	$(TESTDIR)/peer_tls_test $(TESTDIR)/peer_transport_test \
+-	$(TESTDIR)/peer_wire_test $(TESTDIR)/ring_counter_test \
++	$(TESTDIR)/peer_wire_test $(TESTDIR)/peer_wire_lease_test $(TESTDIR)/ring_counter_test \
+ 	$(TESTDIR)/l7_abi_contract_test $(TESTDIR)/benchmark_result_contract_test $(PRELOAD) \
+ 	$(BINDIR)/bench_dpumesh $(BINDIR)/bench_sock
+ 	$(TESTDIR)/native_api_contract_test
+@@ -250,6 +253,7 @@ test: $(TESTDIR)/native_api_contract_test $(TESTDIR)/native_control_state_test \
+ 	$(TESTDIR)/peer_tls_test
+ 	$(TESTDIR)/peer_transport_test
+ 	$(TESTDIR)/peer_wire_test
++	$(TESTDIR)/peer_wire_lease_test
+ 	$(TESTDIR)/ring_counter_test
+ 	$(TESTDIR)/l7_abi_contract_test
+ 	$(TESTDIR)/benchmark_result_contract_test
+diff --git a/doca/dpu_proxy.c b/doca/dpu_proxy.c
+index c21fc22..2e5a7c5 100644
+--- a/doca/dpu_proxy.c
++++ b/doca/dpu_proxy.c
+@@ -3260,23 +3260,31 @@ int dmesh_l7_workloads(int worker_id, struct dmesh_l7_workload *out, int max) {
+     return written;
+ }
+ 
+-uint8_t *dmesh_l7_tx_reserve(int worker_id, uint64_t conn, uint32_t *cap) {
++int dmesh_l7_tx_try_reserve(int worker_id, uint64_t conn,
++                            uint8_t **out, uint32_t *cap) {
++    if (out) *out = NULL;
++    if (cap) *cap = 0;
++    if (!out || !cap)
++        return -1;
+     struct objects *objs;
+     struct px_conn *c = px_l7_caller_conn(worker_id, conn, &objs);
+-    if (!c || !cap)
+-        return NULL;
+-    *cap = 0;
+-    if (c->l7_tx_chunk)                        /* one reservation at a time */
+-        return NULL;
++    if (!c || c->l7_tx_chunk)
++        return -1;
+     struct dmesh_proxy *px = objs->proxy;
+     struct px_chunk *ch = px_chunk_alloc(px);
+     if (!ch) {
+         px_stat_inc(&px->stat_stall_arena);
+-        return NULL;
++        return 0;
+     }
+     c->l7_tx_chunk = ch;
+     *cap = PX_ARENA_CHUNK;
+-    return px->arena + ch->off;                /* already DMA-able: no second copy */
++    *out = px->arena + ch->off;
++    return 1;
++}
++
++uint8_t *dmesh_l7_tx_reserve(int worker_id, uint64_t conn, uint32_t *cap) {
++    uint8_t *out = NULL;
++    return dmesh_l7_tx_try_reserve(worker_id, conn, &out, cap) == 1 ? out : NULL;
+ }
+ 
+ int dmesh_l7_tx_commit(int worker_id, uint64_t conn, int32_t backend_pod,
+diff --git a/doca/peer_transport.c b/doca/peer_transport.c
+index 9c3a93c..91967b9 100644
+--- a/doca/peer_transport.c
++++ b/doca/peer_transport.c
+@@ -547,7 +547,7 @@ int dmesh_peer_transport_new(const struct peer_transport_config *config,
+         return -1;
+     *out = NULL;
+     if (!config || !config->node_name || !*config->node_name || !config->seed ||
+-        !config->wire || !config->wire_ctx) {
++        !peer_wire_ops_valid(config->wire) || !config->wire_ctx) {
+         snprintf(error, error_len, "peer transport: incomplete configuration");
+         return -1;
+     }
+diff --git a/doca/peer_wire.h b/doca/peer_wire.h
+index a9f762d..d6b711f 100644
+--- a/doca/peer_wire.h
++++ b/doca/peer_wire.h
+@@ -19,6 +19,26 @@
+  * tags, and slack. */
+ #define PEER_WIRE_MSG_MAX 73728u
+ 
++/* Worker-confined synchronous leases. Never access a pointer or call an op
++ * after wire close. Each direction permits one outstanding lease. */
++enum { PEER_WIRE_TX = 1, PEER_WIRE_RX = 2 };
++struct peer_wire_token {
++    uint64_t conn_epoch;
++    uint64_t lease_generation;
++    uint32_t slot;
++    uint32_t kind;
++};
++struct peer_wire_tx_lease {
++    uint8_t *data;
++    size_t cap;
++    struct peer_wire_token token;
++};
++struct peer_wire_rx_lease {
++    const uint8_t *data;
++    size_t len;
++    struct peer_wire_token token;
++};
++
+ struct peer_wire_ops {
+     /* Start a connection. Returns 0 with *wc set even when the connect has not
+      * completed, which is the common case: `established` reports when it has. */
+@@ -41,8 +61,28 @@ struct peer_wire_ops {
+      * this carrier holds, or -1 when it has none. */
+     int  (*epfd)(void *wctx);
+     void (*ctx_free)(void *wctx);
++    /* Optional complete groups: TX three ops, RX two ops. Reserve/acquire:
++     * 1 grants ownership, 0 unavailable, -1 fault; outputs cleared on 0/-1.
++     * Commit: 1 posts the whole nonempty prefix, -1 terminal, never 0.
++     * Valid commit/cancel/release consume and clear the lease, even on fault.
++     * Invalid tokens return -1 without touching another owner's slot.
++     * Cancel/release: 0 success, -1 fault. SEND CQ returns posted TX memory;
++     * RX is reposted only on release, never while borrowed. */
++    int (*tx_reserve)(void *wc, struct peer_wire_tx_lease *out);
++    int (*tx_commit)(void *wc, struct peer_wire_tx_lease *lease, size_t len);
++    int (*tx_cancel)(void *wc, struct peer_wire_tx_lease *lease);
++    int (*rx_acquire)(void *wc, struct peer_wire_rx_lease *out);
++    int (*rx_release)(void *wc, struct peer_wire_rx_lease *lease);
+ };
+ 
++static inline int peer_wire_ops_valid(const struct peer_wire_ops *ops)
++{
++    if (!ops) return 0;
++    int tx = !!ops->tx_reserve + !!ops->tx_commit + !!ops->tx_cancel;
++    int rx = !!ops->rx_acquire + !!ops->rx_release;
++    return (tx == 0 || tx == 3) && (rx == 0 || rx == 2);
++}
++
+ /* The TCP carrier: what CI runs and what bring-up falls back to. It binds and
+  * listens before returning, so a port that cannot be taken is reported here
+  * rather than surfacing later as connections that never arrive. */
+diff --git a/doca/peer_wire_rdma.c b/doca/peer_wire_rdma.c
+index ba00283..24b7845 100644
+--- a/doca/peer_wire_rdma.c
++++ b/doca/peer_wire_rdma.c
+@@ -25,6 +25,7 @@
+ #include <netinet/in.h>
+ #include <rdma/rdma_cma.h>
+ #include <stdio.h>
++#include <stdatomic.h>
+ #include <stdlib.h>
+ #include <string.h>
+ #include <sys/epoll.h>
+@@ -58,6 +59,9 @@
+ 
+ enum { RC_FREE = 0, RC_RESOLVING, RC_CONNECTING, RC_READY, RC_DEAD };
+ 
++enum { TX_FREE, TX_RESERVED, TX_POSTED };
++enum { RX_EMPTY, RX_POSTED, RX_READY, RX_LEASED };
++static atomic_uint_fast64_t lease_epoch_next = 1;
+ struct rdma_ctx;
+ 
+ struct rdma_conn {
+@@ -72,7 +76,13 @@ struct rdma_conn {
+     uint8_t            inbound;
+     uint8_t            handout_queued;
+     uint8_t            handed_out;
+-    uint8_t            send_busy[RDMA_SEND_RING];
++    uint8_t            send_busy[RDMA_SEND_RING]; /* TX state */
++    uint8_t            recv_state[RDMA_RECV_RING];
++    uint64_t           lease_epoch;
++    uint64_t           tx_generation[RDMA_SEND_RING];
++    uint64_t           rx_generation[RDMA_RECV_RING];
++    uint8_t            tx_leased, rx_leased;
++    uint32_t           rx_lease_slot, rx_lease_len;
+     uint32_t           send_next;    /* where the free-slot scan starts */
+     /* Receives that completed and have not been handed up yet, oldest first. */
+     uint16_t           rq_slot[RDMA_RECV_RING];
+@@ -140,6 +150,15 @@ static struct rdma_conn *rdma_slot_take(struct rdma_ctx *ctx)
+         struct rdma_conn *c = &ctx->conns[i];
+         if (c->in_use)
+             continue;
++        if (ctx->epoch_next == WR_EPOCH_MASK) {
++            ctx->dead = 1; /* Never let old CQ epochs name a replacement. */
++            return NULL;
++        }
++        uint64_t lease_epoch = atomic_load(&lease_epoch_next);
++        for (;;) {
++            if (lease_epoch == UINT64_MAX) return NULL;
++            if (atomic_compare_exchange_weak(&lease_epoch_next, &lease_epoch, lease_epoch + 1)) break;
++        }
+         uint8_t *buf = malloc((size_t)(RDMA_SEND_RING + RDMA_RECV_RING) * RDMA_SLOT);
+         if (!buf)
+             return NULL;
+@@ -147,6 +166,7 @@ static struct rdma_conn *rdma_slot_take(struct rdma_ctx *ctx)
+         c->ctx = ctx;
+         c->index = i;
+         c->epoch = (++ctx->epoch_next) & WR_EPOCH_MASK;
++        c->lease_epoch = lease_epoch;
+         c->buf = buf;
+         c->in_use = 1;
+         c->state = RC_RESOLVING;
+@@ -204,7 +224,9 @@ static int rdma_post_recv(struct rdma_conn *c, uint32_t slot)
+         .num_sge = 1,
+     };
+     struct ibv_recv_wr *bad = NULL;
+-    return ibv_post_recv(c->id->qp, &wr, &bad) == 0 ? 0 : -1;
++    if (ibv_post_recv(c->id->qp, &wr, &bad) != 0) return -1;
++    c->recv_state[slot] = RX_POSTED;
++    return 0;
+ }
+ 
+ /* Build the queue pair and fill its receive ring. Both sides do this before
+@@ -259,73 +281,151 @@ static void rdma_set_ack_timeout(struct rdma_cm_id *id)
+ 
+ /* ---- transfer ----------------------------------------------------------- */
+ 
+-static int rdma_send_msg(void *wc, const void *buf, size_t len)
++static int rdma_tx_reserve(void *wc, struct peer_wire_tx_lease *out)
+ {
+     struct rdma_conn *c = wc;
+-    if (!c || !c->in_use || c->state == RC_DEAD)
+-        return -1;
+-    if (len == 0 || len > PEER_WIRE_MSG_MAX)
+-        return -1;
+-    if (c->state != RC_READY)
+-        return 0;
+-
+-    uint32_t slot = RDMA_SEND_RING;
++    if (!out) return -1;
++    memset(out, 0, sizeof(*out));
++    if (!c || !c->in_use || c->state == RC_DEAD) return -1;
++    if (c->state != RC_READY || c->tx_leased) return 0;
+     for (uint32_t i = 0; i < RDMA_SEND_RING; i++) {
+-        uint32_t s = (c->send_next + i) % RDMA_SEND_RING;
+-        if (!c->send_busy[s]) {
+-            slot = s;
+-            break;
+-        }
++        uint32_t slot = (c->send_next + i) % RDMA_SEND_RING;
++        if (c->send_busy[slot] != TX_FREE) continue;
++        if (c->tx_generation[slot] == UINT64_MAX) { c->state = RC_DEAD; return -1; }
++        c->send_busy[slot] = TX_RESERVED;
++        c->tx_leased = 1;
++        *out = (struct peer_wire_tx_lease) {
++            .data = send_slot(c, slot), .cap = RDMA_SLOT,
++            .token = { c->lease_epoch, ++c->tx_generation[slot], slot, PEER_WIRE_TX },
++        };
++        return 1;
+     }
+-    if (slot == RDMA_SEND_RING)
+-        return 0;                    /* every slot is still with the adapter */
++    return 0;
++}
++
++static int valid_tx(struct rdma_conn *c, const struct peer_wire_tx_lease *l)
++{
++    return c && c->in_use && l && l->token.kind == PEER_WIRE_TX &&
++        l->token.conn_epoch == c->lease_epoch && l->token.slot < RDMA_SEND_RING &&
++        c->tx_leased && c->send_busy[l->token.slot] == TX_RESERVED &&
++        c->tx_generation[l->token.slot] == l->token.lease_generation &&
++        l->data == send_slot(c, l->token.slot) && l->cap == RDMA_SLOT;
++}
++
++static int rdma_tx_cancel(void *wc, struct peer_wire_tx_lease *l)
++{
++    struct rdma_conn *c = wc;
++    if (!valid_tx(c, l)) return -1;
++    c->send_busy[l->token.slot] = TX_FREE;
++    c->tx_leased = 0;
++    memset(l, 0, sizeof(*l));
++    return c->state == RC_DEAD ? -1 : 0;
++}
+ 
+-    uint8_t *p = send_slot(c, slot);
+-    memcpy(p, buf, len);
++static int rdma_tx_commit(void *wc, struct peer_wire_tx_lease *l, size_t len)
++{
++    struct rdma_conn *c = wc;
++    if (!valid_tx(c, l)) return -1;
++    uint32_t slot = l->token.slot;
++    c->tx_leased = 0;
++    memset(l, 0, sizeof(*l));
++    if (!len || len > RDMA_SLOT || c->state != RC_READY) {
++        c->send_busy[slot] = TX_FREE;
++        c->state = RC_DEAD;
++        return -1;
++    }
+     struct ibv_sge sge = {
+-        .addr   = (uintptr_t)p,
+-        .length = (uint32_t)len,
+-        .lkey   = c->mr->lkey,
++        .addr = (uintptr_t)send_slot(c, slot), .length = (uint32_t)len,
++        .lkey = c->mr->lkey,
+     };
+     struct ibv_send_wr wr = {
+-        .wr_id      = wr_pack(0, c->epoch, c->index, slot),
+-        .sg_list    = &sge,
+-        .num_sge    = 1,
+-        .opcode     = IBV_WR_SEND,
+-        /* Signalled because the completion is what returns the slot. */
++        .wr_id = wr_pack(0, c->epoch, c->index, slot),
++        .sg_list = &sge, .num_sge = 1, .opcode = IBV_WR_SEND,
+         .send_flags = IBV_SEND_SIGNALED,
+     };
+     struct ibv_send_wr *bad = NULL;
+     if (ibv_post_send(c->id->qp, &wr, &bad) != 0) {
++        c->send_busy[slot] = TX_FREE;
+         c->state = RC_DEAD;
+         return -1;
+     }
+-    c->send_busy[slot] = 1;
++    c->send_busy[slot] = TX_POSTED;
+     c->send_next = (slot + 1) % RDMA_SEND_RING;
+     return 1;
+ }
+ 
+-static long rdma_recv_msg(void *wc, void *buf, size_t cap)
++static int rdma_rx_acquire(void *wc, struct peer_wire_rx_lease *out)
+ {
+     struct rdma_conn *c = wc;
+-    if (!c || !c->in_use || c->state == RC_DEAD)
+-        return -1;
+-    if (c->rq_count == 0)
+-        return 0;
+-    uint32_t slot = c->rq_slot[c->rq_head];
+-    uint32_t len  = c->rq_len[c->rq_head];
+-    if (len > cap) {
++    if (!out) return -1;
++    memset(out, 0, sizeof(*out));
++    if (!c || !c->in_use || c->state == RC_DEAD) return -1;
++    if (c->rx_leased || !c->rq_count) return 0;
++    uint32_t slot = c->rq_slot[c->rq_head], len = c->rq_len[c->rq_head];
++    if (slot >= RDMA_RECV_RING || c->recv_state[slot] != RX_READY ||
++        !len || len > RDMA_SLOT || c->rx_generation[slot] == UINT64_MAX) {
+         c->state = RC_DEAD;
+         return -1;
+     }
+-    memcpy(buf, recv_slot(c, slot), len);
++    c->recv_state[slot] = RX_LEASED;
++    c->rx_leased = 1;
++    *out = (struct peer_wire_rx_lease) {
++        .data = recv_slot(c, slot), .len = len,
++        .token = { c->lease_epoch, ++c->rx_generation[slot], slot, PEER_WIRE_RX },
++    };
++    c->rx_lease_slot = slot;
++    c->rx_lease_len = len;
+     c->rq_head = (c->rq_head + 1) % RDMA_RECV_RING;
+     c->rq_count--;
+-    if (rdma_post_recv(c, slot) != 0) {
++    return 1;
++}
++
++static int rdma_rx_release(void *wc, struct peer_wire_rx_lease *l)
++{
++    struct rdma_conn *c = wc;
++    if (!c || !c->in_use || !l || l->token.kind != PEER_WIRE_RX ||
++        l->token.conn_epoch != c->lease_epoch || l->token.slot >= RDMA_RECV_RING ||
++        !c->rx_leased || c->recv_state[l->token.slot] != RX_LEASED ||
++        c->rx_generation[l->token.slot] != l->token.lease_generation ||
++        l->data != recv_slot(c, l->token.slot) ||
++        c->rx_lease_slot != l->token.slot || c->rx_lease_len != l->len)
++        return -1;
++    uint32_t slot = l->token.slot;
++    memset(l, 0, sizeof(*l));
++    c->rx_leased = 0;
++    c->rx_lease_len = 0;
++    c->recv_state[slot] = RX_EMPTY;
++    if (c->state == RC_DEAD || rdma_post_recv(c, slot) != 0) {
+         c->state = RC_DEAD;
+         return -1;
+     }
+-    return (long)len;
++    return 0;
++}
++
++/* Legacy callers retain copy-in/copy-out ownership and message ordering. */
++static int rdma_send_msg(void *wc, const void *buf, size_t len)
++{
++    if (!buf || !len || len > PEER_WIRE_MSG_MAX) return -1;
++    struct peer_wire_tx_lease l;
++    int r = rdma_tx_reserve(wc, &l);
++    if (r != 1) return r;
++    memcpy(l.data, buf, len);
++    return rdma_tx_commit(wc, &l, len);
++}
++
++static long rdma_recv_msg(void *wc, void *buf, size_t cap)
++{
++    struct peer_wire_rx_lease l;
++    int r = rdma_rx_acquire(wc, &l);
++    if (r != 1) return r;
++    if (!buf || l.len > cap) {
++        ((struct rdma_conn *)wc)->state = RC_DEAD;
++        (void)rdma_rx_release(wc, &l);
++        return -1;
++    }
++    size_t len = l.len;
++    memcpy(buf, l.data, len);
++    return rdma_rx_release(wc, &l) == 0 ? (long)len : -1;
+ }
+ 
+ /* ---- completions -------------------------------------------------------- */
+@@ -383,7 +483,7 @@ static int rdma_poll_cq(struct rdma_ctx *ctx)
+             if (recv) {
+                 if (slot >= RDMA_RECV_RING || wcs[i].byte_len == 0 ||
+                     wcs[i].byte_len > RDMA_SLOT ||
+-                    c->rq_count >= RDMA_RECV_RING) {
++                    c->rq_count >= RDMA_RECV_RING || c->recv_state[slot] != RX_POSTED) {
+                     c->state = RC_DEAD;
+                     continue;
+                 }
+@@ -391,8 +491,11 @@ static int rdma_poll_cq(struct rdma_ctx *ctx)
+                 c->rq_slot[tail] = (uint16_t)slot;
+                 c->rq_len[tail] = wcs[i].byte_len;
+                 c->rq_count++;
+-            } else if (slot < RDMA_SEND_RING) {
+-                c->send_busy[slot] = 0;
++                c->recv_state[slot] = RX_READY;
++            } else if (slot < RDMA_SEND_RING && c->send_busy[slot] == TX_POSTED) {
++                c->send_busy[slot] = TX_FREE;
++            } else {
++                c->state = RC_DEAD;
+             }
+         }
+         if (n < RDMA_POLL_BATCH)
+@@ -688,6 +791,11 @@ static const struct peer_wire_ops RDMA_OPS = {
+     .close       = rdma_close,
+     .epfd        = rdma_epfd,
+     .ctx_free    = rdma_ctx_free,
++    .tx_reserve  = rdma_tx_reserve,
++    .tx_commit   = rdma_tx_commit,
++    .tx_cancel   = rdma_tx_cancel,
++    .rx_acquire  = rdma_rx_acquire,
++    .rx_release  = rdma_rx_release,
+ };
+ 
+ /* ---- construction ------------------------------------------------------- */
+diff --git a/linkerd/include/dmesh_l7.h b/linkerd/include/dmesh_l7.h
+index 4c961f3..bbd55f8 100644
+--- a/linkerd/include/dmesh_l7.h
++++ b/linkerd/include/dmesh_l7.h
+@@ -119,6 +119,10 @@ void l7_inbound_forget(int worker_id, const char *workload);
+ void l7_control_event(const char *kind, const char *reason);
+ 
+ /* DPUmesh data-path entry points. */
++/* 1: reservation; 0: arena exhausted; -1: invalid handle/worker or nested
++ * reservation. Outputs are cleared on failure. Commit/cancel exactly once. */
++int dmesh_l7_tx_try_reserve(int worker_id, uint64_t conn,
++                          uint8_t **out, uint32_t *cap);
+ uint8_t *dmesh_l7_tx_reserve(int worker_id, uint64_t conn, uint32_t *cap);
+ int dmesh_l7_tx_commit(int worker_id, uint64_t conn, int32_t backend_pod,
+                        uint32_t len);
+diff --git a/linkerd/rust/src/lib.rs b/linkerd/rust/src/lib.rs
+index 01404f2..1fea3da 100644
+--- a/linkerd/rust/src/lib.rs
++++ b/linkerd/rust/src/lib.rs
+@@ -21,7 +21,6 @@ use std::cell::Cell;
+ use std::collections::{HashMap, HashSet};
+ #[cfg(not(test))]
+ use std::ffi::c_void;
+-#[cfg(not(test))]
+ use std::io;
+ use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+ use std::os::raw::{c_char, c_int};
+@@ -237,7 +236,12 @@ mod datapath {
+     #[cfg(not(test))]
+     extern "C" {
+         fn dmesh_l7_release(worker_id: c_int, conn: u64, pos: u32, len: u32);
+-        fn dmesh_l7_tx_reserve(worker_id: c_int, conn: u64, cap: *mut u32) -> *mut u8;
++        fn dmesh_l7_tx_try_reserve(
++            worker_id: c_int,
++            conn: u64,
++            out: *mut *mut u8,
++            cap: *mut u32,
++        ) -> c_int;
+         fn dmesh_l7_tx_commit(worker_id: c_int, conn: u64, backend_pod: i32, len: u32) -> c_int;
+         fn dmesh_l7_tx_commit_remote(
+             worker_id: c_int,
+@@ -291,14 +295,38 @@ mod datapath {
+         fill: impl FnOnce(&mut [u8]) -> usize,
+     ) -> Option<c_int> {
+         let mut cap: u32 = 0;
+-        let base = unsafe { dmesh_l7_tx_reserve(worker_id, conn, &mut cap) };
+-        if base.is_null() || cap == 0 {
++        let mut base = std::ptr::null_mut();
++        let status = unsafe { dmesh_l7_tx_try_reserve(worker_id, conn, &mut base, &mut cap) };
++        if status == 0 {
+             return None;
+         }
++        if status != 1 || base.is_null() || cap == 0 {
++            return Some(-1);
++        }
++        struct Reservation {
++            worker: c_int,
++            conn: u64,
++            committed: bool,
++        }
++        impl Drop for Reservation {
++            fn drop(&mut self) {
++                if !self.committed {
++                    unsafe {
++                        dmesh_l7_tx_commit(self.worker, self.conn, -1, 0);
++                    }
++                }
++            }
++        }
++        let mut guard = Reservation {
++            worker: worker_id,
++            conn,
++            committed: false,
++        };
+         // SAFETY: the datapath lends `cap` writable bytes of its egress arena
+         // until the commit below, and this thread owns the reservation.
+         let reservation = unsafe { std::slice::from_raw_parts_mut(base, cap as usize) };
+         let len = fill(reservation).min(cap as usize) as u32;
++        guard.committed = true;
+         Some(unsafe {
+             match route {
+                 dmesh_doca::BackendRoute::Any => dmesh_l7_tx_commit(worker_id, conn, -1, len),
+@@ -356,6 +384,7 @@ mod datapath {
+         #[derive(Default)]
+         pub struct Recorded {
+             pub sent: Vec<(u64, i32, Vec<u8>)>,
++            pub remote_sent: Vec<(u64, String, Vec<u8>)>,
+             pub fins: Vec<(u64, i32, Option<String>)>,
+             pub failed_sessions: Vec<u64>,
+             pub released: Vec<(u64, u32, u32)>,
+@@ -432,6 +461,10 @@ mod datapath {
+                     dmesh_doca::BackendRoute::Local(pod) => *pod,
+                     dmesh_doca::BackendRoute::Remote(_) => -3,
+                 };
++                if let dmesh_doca::BackendRoute::Remote(uid) = route {
++                    s.remote_sent
++                        .push((conn, uid.clone(), reservation[..len].to_vec()));
++                }
+                 s.sent.push((conn, backend, reservation[..len].to_vec()));
+                 len as c_int
+             }))
+@@ -641,6 +674,11 @@ impl dmesh_doca::runtime::RuntimeBackend for ExternalBackend {
+             unsafe { dmesh_l7_driver_drain(self.driver, budget) },
+             "drain",
+         )?;
++        if code == 2 {
++            with_worker(self.worker_id, (), |w| {
++                w.tx_grant_at = std::time::Instant::now()
++            });
++        }
+         if linkerd || code == 2 {
+             self.last_progress = std::time::Instant::now();
+             Ok(dmesh_doca::runtime::Progress::Progressed)
+@@ -794,6 +832,9 @@ struct Counters {
+     bytes_to_backend: u64,
+     bytes_to_origin: u64,
+     segments_released: u64,
++    tx_arena_copy_bytes: u64,
++    tx_budget_wait: u64,
++    tx_writer_wakes: u64,
+     send_retries: u64,
+     send_errors: u64,
+     registrations_orphaned: u64,
+@@ -945,7 +986,6 @@ impl Session {
+                 .all(|side| side.conn.is_none() || side.input_eof)
+     }
+ 
+-    #[cfg(not(test))]
+     fn sides(&self) -> impl Iterator<Item = &Side> {
+         std::iter::once(&self.client).chain(self.backends.iter())
+     }
+@@ -985,6 +1025,8 @@ struct Worker {
+     /// Fair drain order and cursor.
+     order: Vec<u64>,
+     drain_next: usize,
++    tx_budget: Arc<dmesh_doca::TxBudget>,
++    tx_grant_at: std::time::Instant,
+     /// Session tokens, and the sessions awaiting their client endpoint.
+     slots: Slots,
+     pending: HashMap<SessionToken, u64>,
+@@ -1130,44 +1172,28 @@ fn with_worker<R: Copy>(worker_id: c_int, refused: R, f: impl FnOnce(&mut Worker
+     result
+ }
+ 
+-/// Copy queued output straight into the egress arena.
+-///
+-/// One copy: from the endpoint's queue into the chunk the datapath will DMA.
+-/// A reservation the datapath refuses to publish is cancelled and the bytes
+-/// stay queued, so nothing is offered twice and nothing is lost.
+-fn publish_reserved(
+-    worker_id: c_int,
+-    handle: &DmeshIoHandle,
+-    out: u64,
+-    route: &dmesh_doca::BackendRoute,
+-    want: usize,
+-    counters: &mut Counters,
+-) -> Result<Option<usize>, ()> {
+-    let mut copied = 0usize;
+-    let Some(rc) = datapath::tx_publish(worker_id, out, route, |chunk| {
+-        let room = chunk.len().min(want);
+-        copied = handle.copy_tx_into(&mut chunk[..room]);
+-        copied
+-    }) else {
+-        // No chunk to lend: the arena is dry. Retry on a later pass.
+-        return Ok(None);
+-    };
+-    if rc < 0 || rc as usize > copied {
+-        counters.send_errors += 1;
+-        return Err(());
+-    }
+-    let accepted = rc as usize;
+-    if accepted == 0 {
+-        if copied > 0 {
+-            counters.send_retries += 1;
++/// Only the endpoint's owner thread calls this bridge; it never reborrows WORKER.
++struct DirectWriter {
++    worker: c_int,
++    request: u64,
++}
++impl dmesh_doca::TxWriter for DirectWriter {
++    fn try_write(&self, route: &dmesh_doca::BackendRoute, bytes: &[u8]) -> dmesh_doca::TxAttempt {
++        let mut copied = 0;
++        let result = datapath::tx_publish(self.worker, self.request, route, |chunk| {
++            copied = bytes.len().min(chunk.len());
++            chunk[..copied].copy_from_slice(&bytes[..copied]);
++            copied
++        });
++        match result {
++            Some(n) if n > 0 && n as usize == copied => dmesh_doca::TxAttempt::Accepted(copied),
++            None | Some(0) => dmesh_doca::TxAttempt::Retry { copied },
++            _ => dmesh_doca::TxAttempt::Failed {
++                error: io::Error::other("direct TX publication failed"),
++                copied,
++            },
+         }
+-        return Ok(Some(0));
+-    }
+-    handle.consume_tx(accepted);
+-    if accepted < copied {
+-        counters.send_retries += 1;
+     }
+-    Ok(Some(accepted))
+ }
+ 
+ /// What one pass over an endpoint did, and what the caller must decide on next.
+@@ -1196,37 +1222,19 @@ fn pump_side(
+                 finished: false,
+             });
+         };
+-        if let Some(out) = out_conn {
+-            let want = TX_DRAIN_MAX.min(*budget);
+-            let accepted = if want == 0 || handle.tx_len() == 0 {
+-                0
+-            } else {
+-                let mut total = 0;
+-                for _ in 0..TX_RESERVATIONS_MAX {
+-                    if total == want || handle.tx_len() == 0 {
+-                        break;
+-                    }
+-                    // `None` is an arena with no chunk to lend, so the bytes
+-                    // wait for the next pass. `Some(0)` is a refused
+-                    // publication.
+-                    match publish_reserved(worker_id, handle, out, &route, want - total, counters)?
+-                    {
+-                        Some(n) if n > 0 => total += n,
+-                        _ => break,
+-                    }
+-                }
+-                total
+-            };
+-            if accepted > 0 {
+-                *budget -= accepted;
+-                if route == dmesh_doca::BackendRoute::Origin {
+-                    counters.bytes_to_origin += accepted as u64;
+-                } else {
+-                    counters.bytes_to_backend += accepted as u64;
+-                }
+-                did = true;
+-            }
++        let stats = handle.take_tx_stats();
++        counters.send_retries += stats.retries;
++        counters.send_errors += stats.errors;
++        counters.tx_arena_copy_bytes += stats.copied;
++        counters.tx_budget_wait += stats.budget_wait;
++        counters.tx_writer_wakes += stats.wakes;
++        if route == dmesh_doca::BackendRoute::Origin {
++            counters.bytes_to_origin += stats.accepted;
++        } else {
++            counters.bytes_to_backend += stats.accepted;
+         }
++        *budget = budget.saturating_sub(stats.accepted as usize);
++        did |= stats.accepted > 0;
+         // Both answers are read after publishing, so one lock serves both.
+         handle.drain_state()
+     };
+@@ -1487,6 +1495,15 @@ impl Worker {
+                 if session.client.input_eof {
+                     handle.close_rx();
+                 }
++                handle.bind_writer(
++                    Arc::new(DirectWriter {
++                        worker: self.id,
++                        request: session.client.conn.unwrap(),
++                    }),
++                    self.tx_budget.clone(),
++                    true,
++                );
++                self.tx_grant_at = std::time::Instant::now();
+                 session.client.handle = Some(handle);
+                 did = true;
+                 continue;
+@@ -1510,6 +1527,15 @@ impl Worker {
+                 .filter(|session| session.token == token);
+             match bound {
+                 Some(session) => {
++                    handle.bind_writer(
++                        Arc::new(DirectWriter {
++                            worker: self.id,
++                            request: session.client.conn.unwrap(),
++                        }),
++                        self.tx_budget.clone(),
++                        false,
++                    );
++                    self.tx_grant_at = std::time::Instant::now();
+                     session.backends.push(Side {
+                         handle: Some(handle),
+                         ..Side::default()
+@@ -1532,6 +1558,21 @@ impl Worker {
+ 
+     /// Publish what the stack wrote, and return custody for what it has read.
+     fn drain(&mut self) -> bool {
++        let grant = std::time::Instant::now() >= self.tx_grant_at;
++        let epoch = if grant {
++            self.tx_grant_at = std::time::Instant::now() + std::time::Duration::from_millis(1);
++            Some(self.tx_budget.refill(DRAIN_MAX))
++        } else {
++            None
++        };
++        let before = (
++            self.counters.bytes_to_origin + self.counters.bytes_to_backend,
++            self.counters.tx_arena_copy_bytes,
++            self.counters.send_retries,
++            self.counters.tx_budget_wait,
++            self.counters.tx_writer_wakes,
++            self.counters.send_errors,
++        );
+         let Worker {
+             id,
+             sessions,
+@@ -1557,6 +1598,13 @@ impl Worker {
+             // Both endpoints publish on the request connection: what the proxy
+             // writes to the backend travels onward on it, what it writes to the
+             // client returns along it.
++            if let Some(epoch) = epoch {
++                for side in s.sides() {
++                    if let Some(h) = &side.handle {
++                        h.grant(epoch, TX_DRAIN_MAX, TX_RESERVATIONS_MAX);
++                    }
++                }
++            }
+             let request = s.client.conn;
+             let client = pump_side(
+                 worker_id,
+@@ -1607,6 +1655,27 @@ impl Worker {
+                 break;
+             }
+         }
++        self.metrics
++            .tx_accepted_bytes
++            .inc_by(counters.bytes_to_origin + counters.bytes_to_backend - before.0);
++        self.metrics
++            .tx_arena_copy_bytes
++            .inc_by(counters.tx_arena_copy_bytes - before.1);
++        self.metrics
++            .tx_retries
++            .inc_by(counters.send_retries - before.2);
++        self.metrics
++            .tx_budget_wait
++            .inc_by(counters.tx_budget_wait - before.3);
++        self.metrics
++            .tx_writer_wakes
++            .inc_by(counters.tx_writer_wakes - before.4);
++        self.metrics
++            .tx_errors
++            .inc_by(counters.send_errors - before.5);
++        if did {
++            self.tx_grant_at = std::time::Instant::now();
++        }
+         for (key, failed) in closed {
+             if failed {
+                 datapath::session_failed(worker_id, key);
+@@ -1776,6 +1845,15 @@ impl Worker {
+ 
+         // Publish the DPUmesh backend endpoint for the Linkerd connector.
+         let (backend_io, backend_handle) = dmesh_doca::dmesh_io_pair(backend_addr, Some(token));
++        backend_handle.bind_writer(
++            Arc::new(DirectWriter {
++                worker: self.id,
++                request: conn,
++            }),
++            self.tx_budget.clone(),
++            false,
++        );
++        self.tx_grant_at = std::time::Instant::now();
+         let session = Session {
+             token,
+             request_route,
+@@ -2145,6 +2223,8 @@ async fn build_worker(worker_id: c_int) -> Result<Option<Worker>, String> {
+         by_token: HashMap::new(),
+         order: Vec::new(),
+         drain_next: 0,
++        tx_budget: Arc::default(),
++        tx_grant_at: std::time::Instant::now(),
+         slots: Slots::new(worker_id.max(0) as u16),
+         pending: HashMap::new(),
+         backends,
+@@ -2597,7 +2677,8 @@ mod tests {
+     use super::datapath::fake;
+     use super::*;
+     use dmesh_doca::DmeshIo;
+-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
++    use std::task::{Context, Poll};
++    use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
+ 
+     #[test]
+     fn worker_selection_is_strict_and_supports_all() {
+@@ -2874,6 +2955,8 @@ mod tests {
+             by_token: HashMap::new(),
+             order: Vec::new(),
+             drain_next: 0,
++            tx_budget: Arc::default(),
++            tx_grant_at: std::time::Instant::now(),
+             slots: Slots::new(id.max(0) as u16),
+             pending: HashMap::new(),
+             backends: backends.clone(),
+@@ -2970,7 +3053,24 @@ mod tests {
+             .enable_all()
+             .build()
+             .unwrap();
+-        rt.block_on(async { io.write_all(bytes).await.unwrap() });
++        rt.block_on(async {
++            let mut at = 0;
++            while at < bytes.len() {
++                with_test_worker(|w| {
++                    w.tx_grant_at = std::time::Instant::now();
++                    w.collect_registrations();
++                    w.drain();
++                });
++                match std::future::poll_fn(|cx| {
++                    Poll::Ready(std::pin::Pin::new(&mut *io).poll_write(cx, &bytes[at..]))
++                })
++                .await
++                {
++                    Poll::Ready(Ok(n)) if n > 0 => at += n,
++                    other => panic!("write_to unexpectedly blocked or failed: {other:?}"),
++                }
++            }
++        });
+     }
+ 
+     fn read_eof(io: &mut DmeshIo) {
+@@ -3466,6 +3566,64 @@ mod tests {
+         });
+     }
+ 
++    #[test]
++    fn direct_writer_binds_origin_first_and_minted_remote_routes_before_reply() {
++        let tw = install_worker(0);
++        let key = (7u64 << 24) | session_key(3, 4003);
++        let flow = request_flow(21, 3, 4003);
++        assert_eq!(unsafe { l7_conn_open(0, key, &flow) }, 0);
++        let token = token_of(key);
++        let mut client = register_client(&tw, token);
++        tw.backends.set_endpoint_resolver(Arc::new(|addr, _| {
++            if addr.port() == 9001 {
++                dmesh_doca::EndpointVerdict::Live(7)
++            } else {
++                dmesh_doca::EndpointVerdict::Remote(format!("pod-{}", addr.port()))
++            }
++        }));
++        let mut first = tw
++            .backends
++            .take_session(token, "10.244.0.11:9001".parse().unwrap())
++            .unwrap();
++        let mut remote = tw
++            .backends
++            .take_session(token, "10.244.0.12:9002".parse().unwrap())
++            .unwrap();
++        write_to(&mut client, b"reply");
++        write_to(&mut first, b"local");
++        write_to(&mut remote, b"remote");
++        assert_eq!(
++            sent(),
++            vec![
++                (key, BACKEND_ORIGIN, b"reply".to_vec()),
++                (key, 7, b"local".to_vec()),
++                (key, -3, b"remote".to_vec())
++            ]
++        );
++        fake::STATE.with(|state| {
++            assert_eq!(
++                state.borrow().remote_sent,
++                vec![(key, "pod-9002".to_string(), b"remote".to_vec())]
++            )
++        });
++        with_test_worker(|w| {
++            assert!(w.sessions[&key]
++                .backends
++                .iter()
++                .all(|side| side.conn.is_none()));
++            // Publication must not reborrow WORKER, even if the driver holds it.
++            let mut cx = Context::from_waker(std::task::Waker::noop());
++            assert!(matches!(
++                std::pin::Pin::new(&mut first).poll_write(&mut cx, b"nested"),
++                Poll::Ready(Ok(6))
++            ));
++            w.close_session(key);
++        });
++        read_eof(&mut first);
++        read_eof(&mut remote);
++        read_eof(&mut client);
++    }
++
+     #[test]
+     fn each_backend_gets_its_own_reply_direction() {
+         // Several backends reply to one client on one route. Keyed by the
+@@ -3576,10 +3734,21 @@ mod tests {
+         let flow = request_flow(service, 5, 5000);
+         assert_eq!(unsafe { l7_conn_open(0, conn, &flow) }, 0);
+         let mut io = take_backend(tw, service, conn);
+-        write_to(&mut io, bytes);
++        if !bytes.is_empty() {
++            write_to(&mut io, bytes);
++        }
+         io
+     }
+ 
++    fn poll_write_test(io: &mut DmeshIo, data: &[u8]) -> Poll<io::Result<usize>> {
++        with_test_worker(|w| {
++            w.tx_grant_at = std::time::Instant::now();
++            w.drain();
++        });
++        let mut cx = Context::from_waker(std::task::Waker::noop());
++        std::pin::Pin::new(io).poll_write(&mut cx, data)
++    }
++
+     #[test]
+     fn full_send_does_not_requeue() {
+         let tw = install_worker(0);
+@@ -3596,18 +3765,19 @@ mod tests {
+         });
+     }
+ 
+-    /// A refused publication cancels the reservation and leaves every byte
+-    /// queued, in order, for the next pass.
++    /// A refused publication leaves caller ownership and retains no cancelled input.
+     #[test]
+-    fn a_refused_reservation_requeues_every_byte() {
++    fn a_refused_reservation_retains_no_cancelled_bytes() {
+         let tw = install_worker(0);
+-        let _io = session_with_backend_output(&tw, 25, 1, b"0123456789");
++        let mut io = session_with_backend_output(&tw, 25, 1, b"");
+         fake::STATE.with(|s| s.borrow_mut().accept = Some(0));
++        assert!(poll_write_test(&mut io, b"cancelled-old").is_pending());
+         drain_worker(0);
+         assert!(sent().is_empty());
+         assert_eq!(cancels(), 0, "the datapath refused, it was not cancelled");
+ 
+         fake::STATE.with(|s| s.borrow_mut().accept = None);
++        write_to(&mut io, b"0123456789");
+         drain_worker(0);
+         assert_eq!(sent(), vec![(1, BACKEND_ANY, b"0123456789".to_vec())]);
+         with_test_worker(|w| {
+@@ -3653,10 +3823,11 @@ mod tests {
+ 
+     /// A chunk the arena cannot lend is a stall, not a loss.
+     #[test]
+-    fn an_exhausted_arena_keeps_the_bytes() {
++    fn an_exhausted_arena_keeps_no_cancelled_bytes() {
+         let tw = install_worker(0);
+-        let _io = session_with_backend_output(&tw, 44, 1, b"0123456789");
++        let mut io = session_with_backend_output(&tw, 44, 1, b"");
+         fake::STATE.with(|s| s.borrow_mut().no_chunk = true);
++        assert!(poll_write_test(&mut io, b"cancelled-old").is_pending());
+         drain_worker(0);
+         assert!(sent().is_empty());
+         with_test_worker(|w| {
+@@ -3665,6 +3836,7 @@ mod tests {
+         });
+ 
+         fake::STATE.with(|s| s.borrow_mut().no_chunk = false);
++        write_to(&mut io, b"0123456789");
+         drain_worker(0);
+         assert_eq!(sent(), vec![(1, BACKEND_ANY, b"0123456789".to_vec())]);
+         with_test_worker(|w| w.close_session(1));
+@@ -3673,8 +3845,12 @@ mod tests {
+     #[test]
+     fn over_accept_is_terminal() {
+         let tw = install_worker(0);
+-        let _io = session_with_backend_output(&tw, 27, 1, b"0123456789");
++        let mut io = session_with_backend_output(&tw, 27, 1, b"");
+         fake::STATE.with(|s| s.borrow_mut().over_accept = true);
++        assert!(matches!(
++            poll_write_test(&mut io, b"invalid"),
++            Poll::Ready(Err(_))
++        ));
+         drain_worker(0);
+         with_test_worker(|w| {
+             assert_eq!(w.counters.send_errors, 1);
+diff --git a/tests/l7_abi_contract_test.c b/tests/l7_abi_contract_test.c
+index 276feb3..a473192 100644
+--- a/tests/l7_abi_contract_test.c
++++ b/tests/l7_abi_contract_test.c
+@@ -75,6 +75,8 @@ CHECK_FN(l7_conn_segment,
+          int (*)(int, uint64_t, const uint8_t *, uint32_t, uint32_t));
+ CHECK_FN(l7_conn_eof, void (*)(int, uint64_t));
+ CHECK_FN(l7_conn_close, void (*)(int, uint64_t));
++CHECK_FN(dmesh_l7_tx_try_reserve,
++         int (*)(int, uint64_t, uint8_t **, uint32_t *));
+ CHECK_FN(dmesh_l7_tx_reserve,
+          uint8_t *(*)(int, uint64_t, uint32_t *));
+ CHECK_FN(dmesh_l7_tx_commit, int (*)(int, uint64_t, int32_t, uint32_t));
+diff --git a/tests/peer_transport_test.c b/tests/peer_transport_test.c
+index 7964148..ee07256 100644
+--- a/tests/peer_transport_test.c
++++ b/tests/peer_transport_test.c
+@@ -866,8 +866,23 @@ static void test_handshake_carrier_fault(void)
+     node_stop(&b);
+ }
+ 
++static int incomplete_reserve(void *wc, struct peer_wire_tx_lease *out)
++{ (void)wc; (void)out; assert(0 && "must reject before entering carrier"); return -1; }
++static void test_incomplete_lease_group(void)
++{
++    const uint8_t seed[32] = {1};
++    struct peer_wire_ops wire = {.tx_reserve = incomplete_reserve};
++    struct peer_transport_config config = {.node_name = NODE_A, .seed = seed,
++        .wire = &wire, .wire_ctx = &wire};
++    struct peer_transport_rt *rt = (void *)(uintptr_t)1;
++    char error[256];
++    assert(dmesh_peer_transport_new(&config, &rt, error, sizeof(error)) == -1);
++    assert(rt == NULL && error[0]);
++}
++
+ int main(void)
+ {
++    test_incomplete_lease_group();
+     test_handshake();
+     test_stream_roundtrip();
+     test_fin_and_pod_gone();
+diff --git a/tests/proxy_lane_queue_test.c b/tests/proxy_lane_queue_test.c
+index 3654e2d..8028a4a 100644
+--- a/tests/proxy_lane_queue_test.c
++++ b/tests/proxy_lane_queue_test.c
+@@ -483,12 +483,27 @@ int main(void)
+ 
+     uint64_t tx_handle = px_conn_handle(downstream);
+     uint32_t cap = 123;
++    uint8_t *probe = (void *)(uintptr_t)1;
++    assert(dmesh_l7_tx_try_reserve(1, tx_handle, &probe, &cap) == -1);
++    assert(probe == NULL && cap == 0);
++    assert(dmesh_l7_tx_try_reserve(0, tx_handle, NULL, &cap) == -1);
++    struct px_chunk *held0 = px_chunk_alloc(px);
++    struct px_chunk *held1 = px_chunk_alloc(px);
++    assert(held0 && held1);
++    assert(dmesh_l7_tx_try_reserve(0, tx_handle, &probe, &cap) == 0);
++    assert(probe == NULL && cap == 0);
++    px_chunk_free(px, held0);
++    px_chunk_free(px, held1);
++
+     assert(dmesh_l7_tx_reserve(1, tx_handle, &cap) == NULL);
+     assert(dmesh_l7_tx_reserve(0, UINT64_C(0x001f0001), &cap) == NULL);
+ 
+     uint8_t *reserved = dmesh_l7_tx_reserve(0, tx_handle, &cap);
+     assert(reserved != NULL && cap == PX_ARENA_CHUNK);
+     assert(downstream->l7_tx_chunk != NULL);
++    assert(dmesh_l7_tx_try_reserve(0, tx_handle, &probe, &cap) == -1);
++    assert(probe == NULL && cap == 0);
++
+     assert(dmesh_l7_tx_reserve(0, tx_handle, &cap) == NULL);
+     assert(dmesh_l7_tx_commit(0, tx_handle, DMESH_L7_ORIGIN, 0) == 0);
+     assert(downstream->l7_tx_chunk == NULL);

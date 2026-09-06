@@ -1,0 +1,9 @@
+[0;34m[STEP][0m Syncing DPU sources
+[0;34m[STEP][0m Building DPU runtime
+   Compiling dmesh-doca v0.1.0 (/home/jukebox/l7build/port/linkerd2-proxy/linkerd/doca)
+   Compiling linkerd-app-outbound v0.1.0 (/home/jukebox/l7build/port/linkerd2-proxy/linkerd/app/outbound)
+   Compiling linkerd-app-gateway v0.1.0 (/home/jukebox/l7build/port/linkerd2-proxy/linkerd/app/gateway)
+   Compiling linkerd-app v0.1.0 (/home/jukebox/l7build/port/linkerd2-proxy/linkerd/app)
+   Compiling dmesh-l7 v0.1.0 (/home/jukebox/l7build/rust)
+    Finished `release` profile [optimized] target(s) in 12m 17s
+[0;32m[INFO][0m DPU build complete

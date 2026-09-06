@@ -1,0 +1,14 @@
+Forwarding from 192.168.100.1:28088 -> 8080
+Handling connection for 28088
+Handling connection for 28088
+Handling connection for 28088
+Handling connection for 28088
+Handling connection for 28088
+Handling connection for 28088
+Handling connection for 28088
+Handling connection for 28088
+E0905 21:57:39.613532 3864189 portforward.go:413] "Unhandled Error" err="an error occurred forwarding 28088 -> 8080: error forwarding port 8080 to pod cc0981486ffdbd6c87f8b5b9861eeafe9167c7ad22b3c45124922f9d52cbf671, uid : failed to execute portforward in network namespace \"/var/run/netns/cni-a036587b-87ce-ae11-87ab-f55ae7901146\": writeto tcp4 127.0.0.1:56906->127.0.0.1:8080: read tcp4 127.0.0.1:56906->127.0.0.1:8080: read: connection reset by peer"
+E0905 21:57:39.613540 3864189 portforward.go:413] "Unhandled Error" err="an error occurred forwarding 28088 -> 8080: error forwarding port 8080 to pod cc0981486ffdbd6c87f8b5b9861eeafe9167c7ad22b3c45124922f9d52cbf671, uid : failed to execute portforward in network namespace \"/var/run/netns/cni-a036587b-87ce-ae11-87ab-f55ae7901146\": writeto tcp4 127.0.0.1:56922->127.0.0.1:8080: read tcp4 127.0.0.1:56922->127.0.0.1:8080: read: connection reset by peer"
+E0905 21:57:39.613548 3864189 portforward.go:413] "Unhandled Error" err="an error occurred forwarding 28088 -> 8080: error forwarding port 8080 to pod cc0981486ffdbd6c87f8b5b9861eeafe9167c7ad22b3c45124922f9d52cbf671, uid : failed to execute portforward in network namespace \"/var/run/netns/cni-a036587b-87ce-ae11-87ab-f55ae7901146\": writeto tcp4 127.0.0.1:56898->127.0.0.1:8080: read tcp4 127.0.0.1:56898->127.0.0.1:8080: read: connection reset by peer"
+E0905 21:57:39.613554 3864189 portforward.go:413] "Unhandled Error" err="an error occurred forwarding 28088 -> 8080: error forwarding port 8080 to pod cc0981486ffdbd6c87f8b5b9861eeafe9167c7ad22b3c45124922f9d52cbf671, uid : failed to execute portforward in network namespace \"/var/run/netns/cni-a036587b-87ce-ae11-87ab-f55ae7901146\": writeto tcp4 127.0.0.1:56882->127.0.0.1:8080: read tcp4 127.0.0.1:56882->127.0.0.1:8080: read: connection reset by peer"
+error: lost connection to pod

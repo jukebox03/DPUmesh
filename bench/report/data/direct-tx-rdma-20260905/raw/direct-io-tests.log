@@ -1,0 +1,44 @@
+   Compiling dmesh-doca v0.1.0 (/home/jukebox/DPUmesh/linkerd/port/linkerd2-proxy/linkerd/doca)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.80s
+     Running unittests src/lib.rs (linkerd/port/linkerd2-proxy/target/debug/deps/dmesh_doca-49b81217c18f8133)
+
+running 30 tests
+test backend::tests::a_duplicate_live_key_is_refused ... ok
+test api::tests::reuse_advances_the_generation ... ok
+test backend::tests::a_closed_generation_evicts_only_itself ... ok
+test api::tests::late_release_does_not_free_the_live_session ... ok
+test backend::tests::a_route_may_cross_services_when_the_endpoint_is_live ... ok
+test backend::tests::a_foreign_service_address_is_not_this_session ... ok
+test api::tests::a_slot_out_of_generations_is_retired ... ok
+test backend::tests::a_crossing_route_still_needs_a_live_endpoint ... ok
+test backend::tests::a_second_endpoint_is_minted_rather_than_refused ... ok
+test backend::tests::an_unpublished_session_has_no_channel ... ok
+test backend::tests::an_unplaced_endpoint_is_this_session ... ok
+test backend::tests::a_later_generation_governs_a_live_session ... ok
+test backend::tests::discovery_address_does_not_replace_session_ownership ... ok
+test backend::tests::one_session_cannot_publish_under_two_services ... ok
+test backend::tests::session_lookup_uses_the_direct_service_index ... ok
+test backend::tests::take_names_the_publishing_session ... ok
+test io::tests::abort_discards_buffers_and_closes_both_halves ... ok
+test io::tests::attempt_budget_and_one_shot_progress_allow_parking ... ok
+test io::tests::eof_after_close ... ok
+test io::tests::empty_write_and_shared_quota_are_bounded ... ok
+test io::tests::writer_callback_can_reenter_endpoint_without_deadlock ... ok
+test io::tests::direct_partial_write_owns_prefix_and_never_republishes ... ok
+test io::tests::peer_addr_reports_flow_src ... ok
+test io::tests::pending_cancellation_does_not_keep_old_bytes ... ok
+test io::tests::read_waits_then_delivers ... ok
+test io::tests::wrong_thread_never_enters_writer ... ok
+test runtime::tests::progresses_before_waiting ... ok
+test metrics::tests::registration_shares_the_counters ... ok
+test io::tests::zero_copy_staging_read ... ok
+test runtime::tests::unpublishable_internal_work_does_not_spin ... ok
+
+test result: ok. 30 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+   Doc-tests dmesh_doca
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

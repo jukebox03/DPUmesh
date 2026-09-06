@@ -1,0 +1,28 @@
+[New LWP 2970135]
+[New LWP 2970136]
+[New LWP 2970139]
+[New LWP 2970140]
+[New LWP 2970141]
+[New LWP 2970142]
+[New LWP 2970143]
+[New LWP 2970144]
+[New LWP 2970145]
+[New LWP 2970146]
+[New LWP 2970147]
+[New LWP 2970148]
+[New LWP 2970149]
+[New LWP 2970150]
+[New LWP 2970151]
+[New LWP 2970152]
+[New LWP 2970153]
+[New LWP 2970154]
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/aarch64-linux-gnu/libthread_db.so.1".
+0x0000ffff8263a03c in __GI_epoll_pwait (epfd=epfd@entry=158, events=events@entry=0xffffe52bd908, maxevents=maxevents@entry=2, timeout=timeout@entry=1, set=set@entry=0x0) at ../sysdeps/unix/sysv/linux/epoll_pwait.c:40
+40	../sysdeps/unix/sysv/linux/epoll_pwait.c: No such file or directory.
+Traceback (most recent call last):
+  File "<string>", line 16, in <module>
+gdb[Inferior 1 (process 2970132) detached]
+.error: 'px_cur_worker' has unknown type; cast it to its declared type
+/tmp/arena_quiescence.gdb:31: Error in sourced command file:
+Error while executing Python code.

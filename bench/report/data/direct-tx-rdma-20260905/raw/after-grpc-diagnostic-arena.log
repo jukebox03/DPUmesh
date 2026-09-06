@@ -1,0 +1,1 @@
+ARENA_QUIESCENCE {"free_total": 1024, "live_chunks": 0, "pool_chunks": 1024, "shared_free": 512, "thread_magazines": {"2984890": 64, "2984892": 64, "2984894": 64, "2984896": 64, "2984898": 64, "2984900": 64, "2984902": 64, "2984904": 64}}

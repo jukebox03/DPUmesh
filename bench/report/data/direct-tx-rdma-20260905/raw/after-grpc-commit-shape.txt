@@ -1,0 +1,30 @@
+[New LWP 2984886]
+[New LWP 2984887]
+[New LWP 2984890]
+[New LWP 2984891]
+[New LWP 2984892]
+[New LWP 2984893]
+[New LWP 2984894]
+[New LWP 2984895]
+[New LWP 2984896]
+[New LWP 2984897]
+[New LWP 2984898]
+[New LWP 2984899]
+[New LWP 2984900]
+[New LWP 2984901]
+[New LWP 2984902]
+[New LWP 2984903]
+[New LWP 2984904]
+[New LWP 2984905]
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/aarch64-linux-gnu/libthread_db.so.1".
+0x0000ffffaa91a03c in __GI_epoll_pwait (epfd=epfd@entry=158, events=events@entry=0xffffd60a4548, maxevents=maxevents@entry=2, timeout=timeout@entry=1, set=set@entry=0x0) at ../sysdeps/unix/sysv/linux/epoll_pwait.c:40
+40	../sysdeps/unix/sysv/linux/epoll_pwait.c: No such file or directory.
+Breakpoint 1 at 0xaaaae9a24cf0: file ../dpu_proxy.c, line 3291.
+Breakpoint 2 at 0xaaaae9a24ff0: file ../dpu_proxy.c, line 3353.
+[Switching to Thread 0xffff651ee060 (LWP 2984902)]
+
+Thread 16 "dmesh-w6" hit Breakpoint 1, dmesh_l7_tx_commit (worker_id=6, conn=16842758, backend_pod=0, len=16393) at ../dpu_proxy.c:3291
+3291	                       uint32_t len) {
+COMMIT_SHAPE {"9": 7, "13": 22, "22": 8, "24": 8, "26": 1, "27": 8, "40": 8, "47": 10, "153": 7, "16392": 8, "16393": 40, "16593": 1}
+[Inferior 1 (process 2984881) detached]

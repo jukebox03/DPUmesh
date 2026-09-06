@@ -1,0 +1,12 @@
+    Checking dmesh-doca v0.1.0 (/home/jukebox/DPUmesh/linkerd/port/linkerd2-proxy/linkerd/doca)
+    Checking linkerd-rustls v0.1.0 (/home/jukebox/DPUmesh/linkerd/port/linkerd2-proxy/linkerd/rustls)
+    Checking linkerd-meshtls v0.1.0 (/home/jukebox/DPUmesh/linkerd/port/linkerd2-proxy/linkerd/meshtls)
+    Checking linkerd-proxy-tap v0.1.0 (/home/jukebox/DPUmesh/linkerd/port/linkerd2-proxy/linkerd/proxy/tap)
+    Checking linkerd-app-core v0.1.0 (/home/jukebox/DPUmesh/linkerd/port/linkerd2-proxy/linkerd/app/core)
+    Checking linkerd-app-inbound v0.1.0 (/home/jukebox/DPUmesh/linkerd/port/linkerd2-proxy/linkerd/app/inbound)
+    Checking linkerd-app-outbound v0.1.0 (/home/jukebox/DPUmesh/linkerd/port/linkerd2-proxy/linkerd/app/outbound)
+    Checking linkerd-app-admin v0.1.0 (/home/jukebox/DPUmesh/linkerd/port/linkerd2-proxy/linkerd/app/admin)
+    Checking linkerd-app-gateway v0.1.0 (/home/jukebox/DPUmesh/linkerd/port/linkerd2-proxy/linkerd/app/gateway)
+    Checking linkerd-app v0.1.0 (/home/jukebox/DPUmesh/linkerd/port/linkerd2-proxy/linkerd/app)
+    Checking dmesh-l7 v0.1.0 (/home/jukebox/DPUmesh/linkerd/rust)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 6.01s

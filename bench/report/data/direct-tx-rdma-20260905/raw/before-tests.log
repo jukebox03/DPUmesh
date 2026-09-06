@@ -1,0 +1,62 @@
+build/test/native_api_contract_test
+native_api_contract_test: PASS
+build/test/native_control_state_test
+native_control_state_test: PASS
+build/test/workload_grant_test
+workload_grant_test: PASS
+build/test/pod_membership_test
+pod_membership_test: PASS
+build/test/native_tx_batch_policy_test
+native_tx_batch_policy_test: PASS
+build/test/native_writable_test
+native_writable_test: PASS
+build/test/preload_api_contract_test
+preload_api_contract_test: PASS
+build/test/l4_pin_policy_test
+l4_pin_policy_test: PASS
+build/test/lb_policy_test
+lb_policy_test: PASS
+build/test/proxy_lane_queue_test
+proxy_lane_queue_test: PASS
+build/test/worker_mpsc_queue_test
+worker_mpsc_queue_test: PASS
+build/test/topology_test
+topology_test: PASS
+build/test/topology_gen_test
+topology_gen_test: PASS
+build/test/peer_channel_test
+peer_channel_test: PASS
+build/test/peer_tls_test
+peer_tls_test: PASS
+build/test/peer_transport_test
+peer_transport_test: PASS
+build/test/peer_wire_test
+peer_wire_test
+  tcp: roundtrip max burst backpressure close reuse ok
+  rdma: skipped (no local address resolves to an rdma device)
+peer_wire_test: PASS
+build/test/ring_counter_test
+ring_counter_test: PASS
+build/test/l7_abi_contract_test
+l7_abi_contract_test: PASS
+build/test/benchmark_result_contract_test
+benchmark_result_contract_test: PASS
+sh tests/dma_fault_scope_test.sh
+dma_fault_scope_test: PASS
+sh tests/abi_contract_test.sh build/lib/libdpumesh.so.5 build/lib/libdmesh_preload.so 5
+abi_contract_test: PASS
+sh tests/generator_selftest_test.sh build/bin/bench_dpumesh build/bin/bench_sock
+generator_selftest_test: PASS
+python3 tests/dpumesh_controller_test.py
+dpumesh-controller: skipping endpoint test-bench/echo-dpumesh -> abcdef01-2345-6789-abcd-ef0123456789: pod not placed yet
+dpumesh-controller: skipping endpoint test-bench/echo-dpumesh -> abcdef01-2345-6789-abcd-ef0123456789: pod not placed yet
+dpumesh-controller: node rapids4 reported 192.168.100.2:4791 abababababababab...
+dpumesh_controller_test: PASS
+python3 tests/workload_grant_controller_test.py
+workload_grant_controller_test: PASS
+python3 tests/dpumeshd_test.py
+Traceback (most recent call last):
+  File "/home/jukebox/DPUmesh/tests/dpumeshd_test.py", line 16, in <module>
+    import grpc
+ModuleNotFoundError: No module named 'grpc'
+make: *** [Makefile:261: test] Error 1

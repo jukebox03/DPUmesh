@@ -1,0 +1,10 @@
+deployment.apps/bench-dpumesh-native scaled
+deployment.apps/echo-dpumesh-native scaled
+pod/bench-dpumesh-native-76db476f6-g4xdl condition met
+pod/echo-dpumesh-native-6f95cb5db8-6ks7w condition met
+deployment.apps/echo-dpumesh-native configured
+service/echo-dpumesh-native unchanged
+deployment.apps/bench-dpumesh-native configured
+Waiting for deployment "echo-dpumesh-native" rollout to finish: 0 of 1 updated replicas are available...
+deployment "echo-dpumesh-native" successfully rolled out
+deployment "bench-dpumesh-native" successfully rolled out

@@ -1,0 +1,7 @@
+2200fc9207e01b7e07e3aa0d45f26d55fef6f9aee07fb4a61cdfd3169389422e  /home/jukebox/DPUmesh/doca/build/dpumesh_dpu
+4273f0148b78346c83a2922db86d5a6a981fa8217fdd3cf148eb980faa76b62e  /tmp/dpumesh-before-direct-tx
+cc -Idpumesh_dpu.p -I. -I.. -I/opt/mellanox/doca/include -I../../include -I../../linkerd/include -I/usr/include/libnl3 -I/opt/mellanox/flexio/include -fdiagnostics-color=always -D_FILE_OFFSET_BITS=64 -Wall -Winvalid-pch -Wextra -O2 -g -DDOCA_ALLOW_EXPERIMENTAL_API -DDMESH_L7_RUNTIME_OWNER=1 -DFLEXIO_ALLOW_EXPERIMENTAL_API -DALLOW_EXPERIMENTAL_API -MD -MQ dpumesh_dpu.p/dpu_proxy.c.o -MF dpumesh_dpu.p/dpu_proxy.c.o.d -o dpumesh_dpu.p/dpu_proxy.c.o -c ../dpu_proxy.c
+0000000000174b00 T dmesh_l7_tx_try_reserve
+0000000000167340 t rdma_rx_acquire
+0000000000167010 t rdma_tx_reserve
+0000000000166f30 t rdma_tx_reserve.part.0

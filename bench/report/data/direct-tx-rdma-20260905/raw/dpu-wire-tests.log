@@ -1,0 +1,5 @@
+peer_wire_lease_test: PASS
+peer_wire_test
+  tcp: roundtrip max burst backpressure close reuse ok
+  rdma: skipped (no local address resolves to an rdma device)
+peer_wire_test: PASS

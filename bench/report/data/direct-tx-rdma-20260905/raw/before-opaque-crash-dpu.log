@@ -1,0 +1,1099 @@
+[12:57:13:476906][2572742688][DOCA][INF][doca_log.cpp:628] DOCA version 3.1.0105
+[12:57:13:477234][2572742688][DOCA][INF][control_scope.c:61][dmesh_scope_configure] control-plane scope mediated by 192.168.100.1:28089
+[12:57:35:378166][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaba5e4810: ctx DPA ops are empty
+[12:57:35:482565][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaba6e8250: ctx DPA ops are empty
+[12:57:35:524677][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaba6ea3d0: ctx DPA ops are empty
+[12:57:35:580903][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaba79ec60: ctx DPA ops are empty
+[12:57:35:622848][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaba7a5090: ctx DPA ops are empty
+[12:57:35:678983][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaba7a0750: ctx DPA ops are empty
+[12:57:35:720907][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaba860090: ctx DPA ops are empty
+[12:57:35:777328][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaba85de00: ctx DPA ops are empty
+[12:57:35:819537][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaba91b090: ctx DPA ops are empty
+[12:57:35:876398][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaba916660: ctx DPA ops are empty
+[12:57:35:918609][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaba9d1560: ctx DPA ops are empty
+[12:57:35:975168][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaabaa0adc0: ctx DPA ops are empty
+[12:57:36:017764][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaabaa89990: ctx DPA ops are empty
+[12:57:36:074355][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaabab3f010: ctx DPA ops are empty
+[12:57:36:116780][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaabab48250: ctx DPA ops are empty
+[12:57:36:173600][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaababfb010: ctx DPA ops are empty
+[12:57:36:215977][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaabac046e0: ctx DPA ops are empty
+[12:57:36:272734][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaabac92a40: ctx DPA ops are empty
+[12:57:36:315485][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaabacbc5d0: ctx DPA ops are empty
+[12:57:36:446932][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaabab47810: ctx DPA ops are empty
+[12:57:36:489556][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaabaa87520: ctx DPA ops are empty
+[12:57:36:546552][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaabad70a00: ctx DPA ops are empty
+[12:57:36:589015][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaba859520: ctx DPA ops are empty
+[12:57:36:645506][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaabae63720: ctx DPA ops are empty
+[12:57:36:687776][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaabaee44e0: ctx DPA ops are empty
+[12:57:36:744290][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaabaf1ba70: ctx DPA ops are empty
+[12:57:36:786548][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaabaf9c4e0: ctx DPA ops are empty
+[12:57:36:843336][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaabafd3770: ctx DPA ops are empty
+[12:57:36:885787][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaabb0544e0: ctx DPA ops are empty
+[12:57:36:943103][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaabb108540: ctx DPA ops are empty
+[12:57:36:985458][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaabb10cc50: ctx DPA ops are empty
+[12:57:37:042523][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaabb143480: ctx DPA ops are empty
+[12:57:37:084968][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaabb1c0c90: ctx DPA ops are empty
+[12:57:37:142176][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaabb1fb500: ctx DPA ops are empty
+[12:57:37:184629][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaabb27c050: ctx DPA ops are empty
+[12:57:37:241970][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaabb2b3730: ctx DPA ops are empty
+[12:57:37:284570][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaabb3344e0: ctx DPA ops are empty
+[12:57:37:341563][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaabb3e8820: ctx DPA ops are empty
+[12:57:37:458869][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaabaf844a0: ctx DPA ops are empty
+[12:57:37:515916][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaabb423500: ctx DPA ops are empty
+[12:57:37:558568][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaabb4a0cf0: ctx DPA ops are empty
+[12:57:37:615485][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaabb558580: ctx DPA ops are empty
+[12:57:37:658228][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaabb55cd00: ctx DPA ops are empty
+[12:57:37:714942][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaabb593500: ctx DPA ops are empty
+[12:57:37:757416][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaabb614050: ctx DPA ops are empty
+[12:57:37:814622][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaabb64b480: ctx DPA ops are empty
+[12:57:37:857155][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaabb6cc050: ctx DPA ops are empty
+[12:57:37:913801][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaabb703320: ctx DPA ops are empty
+[12:57:37:956298][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaabb784050: ctx DPA ops are empty
+[12:57:38:013236][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaabb838300: ctx DPA ops are empty
+[12:57:38:055739][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaabb3d4010: ctx DPA ops are empty
+[12:57:38:112746][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaabb873250: ctx DPA ops are empty
+[12:57:38:155500][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaabb8f0d00: ctx DPA ops are empty
+[12:57:38:212472][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaabaa73300: ctx DPA ops are empty
+[12:57:38:254992][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaabb9ac050: ctx DPA ops are empty
+[12:57:38:312327][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaabba60300: ctx DPA ops are empty
+[12:57:38:354903][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaabb5fc010: ctx DPA ops are empty
+[12:57:38:412012][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaabbaf2e70: ctx DPA ops are empty
+[12:57:38:529405][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaabbb1cac0: ctx DPA ops are empty
+[12:57:38:586771][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaabbb53db0: ctx DPA ops are empty
+[12:57:38:629355][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaabbbd48d0: ctx DPA ops are empty
+[12:57:38:686352][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaabbc88230: ctx DPA ops are empty
+[12:57:38:729425][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaabbc8cba0: ctx DPA ops are empty
+[12:57:38:786863][2572742688][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaabbcc3500: ctx DPA ops are empty
+[l7_linkerd] worker 0: Service test-bench/echo-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 0: Service test-bench/echo-grpc-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 0: Service test-bench/echo-grpc-alt has no interned id yet; target pending
+[l7_linkerd] worker 0: Service default/kubernetes has no interned id yet; target pending
+[l7_linkerd] worker 0: Service test-bench/loopback-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 0: Service linkerd/linkerd-policy-validator has no interned id yet; target pending
+[l7_linkerd] worker 0: Service kube-system/kube-dns has no interned id yet; target pending
+[l7_linkerd] worker 0: Service test-bench/bench-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 0: Service test-bench/inject-sock has no interned id yet; target pending
+[l7_linkerd] worker 0: Service test-bench/echo-dpumesh-native has no interned id yet; target pending
+[l7_linkerd] worker 0: Service linkerd/linkerd-identity has no interned id yet; target pending
+[l7_linkerd] worker 0: Service test-bench/plain-bench has no interned id yet; target pending
+[l7_linkerd] worker 0: Service test-bench/inject-bench has no interned id yet; target pending
+[l7_linkerd] worker 0: Service test-bench/preload-bench has no interned id yet; target pending
+[l7_linkerd] worker 0: Service kube-system/metrics-server has no interned id yet; target pending
+[l7_linkerd] worker 0: Service test-bench/http1-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 0: Service istio-system/istiod-revision-tag-default has no interned id yet; target pending
+[l7_linkerd] worker 0: Service linkerd/linkerd-sp-validator has no interned id yet; target pending
+[l7_linkerd] worker 0: Service test-bench/plain-sock has no interned id yet; target pending
+[l7_linkerd] worker 0: Service test-bench/verbs-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 0: Service linkerd/linkerd-proxy-injector has no interned id yet; target pending
+[l7_linkerd] worker 0: Service test-bench/bench-grpc-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 0: Service test-bench/dpumesh-controller has no interned id yet; target pending
+[l7_linkerd] worker 0: Service test-bench/preload-sock has no interned id yet; target pending
+[l7_linkerd] worker 0: Service test-bench/preload-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 0: Service istio-system/istiod has no interned id yet; target pending
+[l7_linkerd] worker 0: Service test-bench/http1-bench has no interned id yet; target pending
+[l7_linkerd] worker 0: Service linkerd/linkerd-dst has no interned id yet; target pending
+[l7_linkerd] worker 1: Service test-bench/inject-bench has no interned id yet; target pending
+[l7_linkerd] worker 1: Service istio-system/istiod-revision-tag-default has no interned id yet; target pending
+[l7_linkerd] worker 1: Service linkerd/linkerd-proxy-injector has no interned id yet; target pending
+[l7_linkerd] worker 1: Service test-bench/preload-bench has no interned id yet; target pending
+[l7_linkerd] worker 1: Service default/kubernetes has no interned id yet; target pending
+[l7_linkerd] worker 1: Service test-bench/dpumesh-controller has no interned id yet; target pending
+[l7_linkerd] worker 1: Service test-bench/inject-sock has no interned id yet; target pending
+[l7_linkerd] worker 1: Service linkerd/linkerd-sp-validator has no interned id yet; target pending
+[l7_linkerd] worker 1: Service test-bench/http1-bench has no interned id yet; target pending
+[l7_linkerd] worker 1: Service test-bench/http1-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 1: Service test-bench/echo-grpc-alt has no interned id yet; target pending
+[l7_linkerd] worker 1: Service test-bench/plain-bench has no interned id yet; target pending
+[l7_linkerd] worker 1: Service linkerd/linkerd-policy-validator has no interned id yet; target pending
+[l7_linkerd] worker 1: Service test-bench/loopback-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 1: Service test-bench/plain-sock has no interned id yet; target pending
+[l7_linkerd] worker 1: Service linkerd/linkerd-dst has no interned id yet; target pending
+[l7_linkerd] worker 1: Service test-bench/preload-sock has no interned id yet; target pending
+[l7_linkerd] worker 1: Service kube-system/kube-dns has no interned id yet; target pending
+[l7_linkerd] worker 1: Service test-bench/echo-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 1: Service linkerd/linkerd-identity has no interned id yet; target pending
+[l7_linkerd] worker 1: Service test-bench/echo-grpc-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 1: Service test-bench/verbs-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 1: Service istio-system/istiod has no interned id yet; target pending
+[l7_linkerd] worker 1: Service kube-system/metrics-server has no interned id yet; target pending
+[l7_linkerd] worker 1: Service test-bench/echo-dpumesh-native has no interned id yet; target pending
+[l7_linkerd] worker 1: Service test-bench/preload-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 1: Service test-bench/bench-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 1: Service test-bench/bench-grpc-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 2: Service linkerd/linkerd-proxy-injector has no interned id yet; target pending
+[l7_linkerd] worker 2: Service test-bench/inject-bench has no interned id yet; target pending
+[l7_linkerd] worker 2: Service test-bench/loopback-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 2: Service test-bench/bench-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 2: Service linkerd/linkerd-sp-validator has no interned id yet; target pending
+[l7_linkerd] worker 2: Service test-bench/plain-bench has no interned id yet; target pending
+[l7_linkerd] worker 2: Service test-bench/echo-dpumesh-native has no interned id yet; target pending
+[l7_linkerd] worker 2: Service linkerd/linkerd-dst has no interned id yet; target pending
+[l7_linkerd] worker 2: Service default/kubernetes has no interned id yet; target pending
+[l7_linkerd] worker 2: Service test-bench/echo-grpc-alt has no interned id yet; target pending
+[l7_linkerd] worker 2: Service linkerd/linkerd-identity has no interned id yet; target pending
+[l7_linkerd] worker 2: Service kube-system/metrics-server has no interned id yet; target pending
+[l7_linkerd] worker 2: Service test-bench/echo-grpc-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 2: Service test-bench/preload-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 2: Service istio-system/istiod-revision-tag-default has no interned id yet; target pending
+[l7_linkerd] worker 2: Service test-bench/dpumesh-controller has no interned id yet; target pending
+[l7_linkerd] worker 2: Service test-bench/http1-bench has no interned id yet; target pending
+[l7_linkerd] worker 2: Service test-bench/plain-sock has no interned id yet; target pending
+[l7_linkerd] worker 2: Service test-bench/preload-bench has no interned id yet; target pending
+[l7_linkerd] worker 2: Service linkerd/linkerd-policy-validator has no interned id yet; target pending
+[l7_linkerd] worker 2: Service test-bench/echo-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 2: Service test-bench/bench-grpc-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 2: Service kube-system/kube-dns has no interned id yet; target pending
+[l7_linkerd] worker 2: Service test-bench/inject-sock has no interned id yet; target pending
+[l7_linkerd] worker 2: Service test-bench/http1-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 2: Service test-bench/verbs-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 2: Service istio-system/istiod has no interned id yet; target pending
+[l7_linkerd] worker 2: Service test-bench/preload-sock has no interned id yet; target pending
+[l7_linkerd] worker 3: Service istio-system/istiod-revision-tag-default has no interned id yet; target pending
+[l7_linkerd] worker 3: Service test-bench/preload-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 3: Service test-bench/inject-bench has no interned id yet; target pending
+[l7_linkerd] worker 3: Service test-bench/preload-sock has no interned id yet; target pending
+[l7_linkerd] worker 3: Service test-bench/bench-grpc-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 3: Service linkerd/linkerd-sp-validator has no interned id yet; target pending
+[l7_linkerd] worker 3: Service test-bench/echo-grpc-alt has no interned id yet; target pending
+[l7_linkerd] worker 3: Service default/kubernetes has no interned id yet; target pending
+[l7_linkerd] worker 3: Service linkerd/linkerd-identity has no interned id yet; target pending
+[l7_linkerd] worker 3: Service kube-system/kube-dns has no interned id yet; target pending
+[l7_linkerd] worker 3: Service test-bench/echo-grpc-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 3: Service linkerd/linkerd-policy-validator has no interned id yet; target pending
+[l7_linkerd] worker 3: Service kube-system/metrics-server has no interned id yet; target pending
+[l7_linkerd] worker 3: Service test-bench/plain-bench has no interned id yet; target pending
+[l7_linkerd] worker 3: Service test-bench/preload-bench has no interned id yet; target pending
+[l7_linkerd] worker 3: Service test-bench/http1-bench has no interned id yet; target pending
+[l7_linkerd] worker 3: Service test-bench/dpumesh-controller has no interned id yet; target pending
+[l7_linkerd] worker 3: Service test-bench/plain-sock has no interned id yet; target pending
+[l7_linkerd] worker 3: Service test-bench/http1-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 3: Service test-bench/bench-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 3: Service linkerd/linkerd-proxy-injector has no interned id yet; target pending
+[l7_linkerd] worker 3: Service test-bench/loopback-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 3: Service linkerd/linkerd-dst has no interned id yet; target pending
+[l7_linkerd] worker 3: Service test-bench/verbs-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 3: Service test-bench/echo-dpumesh-native has no interned id yet; target pending
+[l7_linkerd] worker 3: Service test-bench/echo-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 3: Service istio-system/istiod has no interned id yet; target pending
+[l7_linkerd] worker 3: Service test-bench/inject-sock has no interned id yet; target pending
+[l7_linkerd] worker 4: Service test-bench/loopback-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 4: Service test-bench/verbs-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 4: Service test-bench/http1-bench has no interned id yet; target pending
+[l7_linkerd] worker 4: Service linkerd/linkerd-policy-validator has no interned id yet; target pending
+[l7_linkerd] worker 4: Service test-bench/bench-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 4: Service test-bench/echo-dpumesh-native has no interned id yet; target pending
+[l7_linkerd] worker 4: Service linkerd/linkerd-dst has no interned id yet; target pending
+[l7_linkerd] worker 4: Service linkerd/linkerd-proxy-injector has no interned id yet; target pending
+[l7_linkerd] worker 4: Service test-bench/preload-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 4: Service default/kubernetes has no interned id yet; target pending
+[l7_linkerd] worker 4: Service test-bench/plain-bench has no interned id yet; target pending
+[l7_linkerd] worker 4: Service test-bench/echo-grpc-alt has no interned id yet; target pending
+[l7_linkerd] worker 4: Service istio-system/istiod-revision-tag-default has no interned id yet; target pending
+[l7_linkerd] worker 4: Service kube-system/metrics-server has no interned id yet; target pending
+[l7_linkerd] worker 4: Service test-bench/bench-grpc-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 4: Service test-bench/echo-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 4: Service test-bench/inject-bench has no interned id yet; target pending
+[l7_linkerd] worker 4: Service test-bench/inject-sock has no interned id yet; target pending
+[l7_linkerd] worker 4: Service test-bench/http1-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 4: Service test-bench/plain-sock has no interned id yet; target pending
+[l7_linkerd] worker 4: Service test-bench/preload-bench has no interned id yet; target pending
+[l7_linkerd] worker 4: Service test-bench/dpumesh-controller has no interned id yet; target pending
+[l7_linkerd] worker 4: Service kube-system/kube-dns has no interned id yet; target pending
+[l7_linkerd] worker 4: Service istio-system/istiod has no interned id yet; target pending
+[l7_linkerd] worker 4: Service linkerd/linkerd-identity has no interned id yet; target pending
+[l7_linkerd] worker 4: Service test-bench/preload-sock has no interned id yet; target pending
+[l7_linkerd] worker 4: Service linkerd/linkerd-sp-validator has no interned id yet; target pending
+[l7_linkerd] worker 4: Service test-bench/echo-grpc-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 5: Service test-bench/plain-sock has no interned id yet; target pending
+[l7_linkerd] worker 5: Service test-bench/echo-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 5: Service test-bench/echo-grpc-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 5: Service test-bench/preload-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 5: Service linkerd/linkerd-sp-validator has no interned id yet; target pending
+[l7_linkerd] worker 5: Service test-bench/bench-grpc-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 5: Service test-bench/dpumesh-controller has no interned id yet; target pending
+[l7_linkerd] worker 5: Service test-bench/inject-bench has no interned id yet; target pending
+[l7_linkerd] worker 5: Service test-bench/bench-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 5: Service test-bench/echo-grpc-alt has no interned id yet; target pending
+[l7_linkerd] worker 5: Service kube-system/metrics-server has no interned id yet; target pending
+[l7_linkerd] worker 5: Service istio-system/istiod-revision-tag-default has no interned id yet; target pending
+[l7_linkerd] worker 5: Service linkerd/linkerd-identity has no interned id yet; target pending
+[l7_linkerd] worker 5: Service test-bench/preload-sock has no interned id yet; target pending
+[l7_linkerd] worker 5: Service linkerd/linkerd-proxy-injector has no interned id yet; target pending
+[l7_linkerd] worker 5: Service istio-system/istiod has no interned id yet; target pending
+[l7_linkerd] worker 5: Service kube-system/kube-dns has no interned id yet; target pending
+[l7_linkerd] worker 5: Service test-bench/http1-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 5: Service linkerd/linkerd-dst has no interned id yet; target pending
+[l7_linkerd] worker 5: Service linkerd/linkerd-policy-validator has no interned id yet; target pending
+[l7_linkerd] worker 5: Service test-bench/inject-sock has no interned id yet; target pending
+[l7_linkerd] worker 5: Service test-bench/plain-bench has no interned id yet; target pending
+[l7_linkerd] worker 5: Service test-bench/preload-bench has no interned id yet; target pending
+[l7_linkerd] worker 5: Service test-bench/echo-dpumesh-native has no interned id yet; target pending
+[l7_linkerd] worker 5: Service test-bench/loopback-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 5: Service default/kubernetes has no interned id yet; target pending
+[l7_linkerd] worker 5: Service test-bench/http1-bench has no interned id yet; target pending
+[l7_linkerd] worker 5: Service test-bench/verbs-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 6: Service istio-system/istiod has no interned id yet; target pending
+[l7_linkerd] worker 6: Service test-bench/dpumesh-controller has no interned id yet; target pending
+[l7_linkerd] worker 6: Service test-bench/verbs-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 6: Service kube-system/kube-dns has no interned id yet; target pending
+[l7_linkerd] worker 6: Service linkerd/linkerd-dst has no interned id yet; target pending
+[l7_linkerd] worker 6: Service test-bench/echo-grpc-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 6: Service test-bench/preload-sock has no interned id yet; target pending
+[l7_linkerd] worker 6: Service kube-system/metrics-server has no interned id yet; target pending
+[l7_linkerd] worker 6: Service test-bench/inject-bench has no interned id yet; target pending
+[l7_linkerd] worker 6: Service test-bench/bench-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 6: Service linkerd/linkerd-policy-validator has no interned id yet; target pending
+[l7_linkerd] worker 6: Service test-bench/loopback-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 6: Service test-bench/echo-dpumesh-native has no interned id yet; target pending
+[l7_linkerd] worker 6: Service test-bench/preload-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 6: Service linkerd/linkerd-proxy-injector has no interned id yet; target pending
+[l7_linkerd] worker 6: Service test-bench/echo-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 6: Service test-bench/http1-bench has no interned id yet; target pending
+[l7_linkerd] worker 6: Service test-bench/preload-bench has no interned id yet; target pending
+[l7_linkerd] worker 6: Service test-bench/plain-sock has no interned id yet; target pending
+[l7_linkerd] worker 6: Service test-bench/http1-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 6: Service linkerd/linkerd-identity has no interned id yet; target pending
+[l7_linkerd] worker 6: Service test-bench/bench-grpc-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 6: Service linkerd/linkerd-sp-validator has no interned id yet; target pending
+[l7_linkerd] worker 6: Service test-bench/plain-bench has no interned id yet; target pending
+[l7_linkerd] worker 6: Service test-bench/echo-grpc-alt has no interned id yet; target pending
+[l7_linkerd] worker 6: Service default/kubernetes has no interned id yet; target pending
+[l7_linkerd] worker 6: Service test-bench/inject-sock has no interned id yet; target pending
+[l7_linkerd] worker 6: Service istio-system/istiod-revision-tag-default has no interned id yet; target pending
+[l7_linkerd] worker 7: Service kube-system/kube-dns has no interned id yet; target pending
+[l7_linkerd] worker 7: Service test-bench/bench-grpc-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 7: Service test-bench/echo-dpumesh-native has no interned id yet; target pending
+[l7_linkerd] worker 7: Service test-bench/http1-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 7: Service test-bench/echo-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 7: Service test-bench/inject-sock has no interned id yet; target pending
+[l7_linkerd] worker 7: Service istio-system/istiod has no interned id yet; target pending
+[l7_linkerd] worker 7: Service test-bench/http1-bench has no interned id yet; target pending
+[l7_linkerd] worker 7: Service test-bench/preload-sock has no interned id yet; target pending
+[l7_linkerd] worker 7: Service default/kubernetes has no interned id yet; target pending
+[l7_linkerd] worker 7: Service linkerd/linkerd-policy-validator has no interned id yet; target pending
+[l7_linkerd] worker 7: Service test-bench/loopback-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 7: Service test-bench/inject-bench has no interned id yet; target pending
+[l7_linkerd] worker 7: Service test-bench/preload-bench has no interned id yet; target pending
+[l7_linkerd] worker 7: Service test-bench/verbs-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 7: Service test-bench/echo-grpc-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 7: Service linkerd/linkerd-sp-validator has no interned id yet; target pending
+[l7_linkerd] worker 7: Service test-bench/bench-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 7: Service linkerd/linkerd-dst has no interned id yet; target pending
+[l7_linkerd] worker 7: Service test-bench/preload-dpumesh has no interned id yet; target pending
+[l7_linkerd] worker 7: Service test-bench/plain-bench has no interned id yet; target pending
+[l7_linkerd] worker 7: Service kube-system/metrics-server has no interned id yet; target pending
+[l7_linkerd] worker 7: Service linkerd/linkerd-proxy-injector has no interned id yet; target pending
+[l7_linkerd] worker 7: Service test-bench/echo-grpc-alt has no interned id yet; target pending
+[l7_linkerd] worker 7: Service test-bench/plain-sock has no interned id yet; target pending
+[l7_linkerd] worker 7: Service linkerd/linkerd-identity has no interned id yet; target pending
+[l7_linkerd] worker 7: Service istio-system/istiod-revision-tag-default has no interned id yet; target pending
+[l7_linkerd] worker 7: Service test-bench/dpumesh-controller has no interned id yet; target pending
+[     0.094957s]  WARN ThreadId(06) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: received corrupt message of type InvalidContentType error.sources=[received corrupt message of type InvalidContentType]
+[     0.094863s]  WARN ThreadId(04) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: received corrupt message of type InvalidContentType error.sources=[received corrupt message of type InvalidContentType]
+[     0.095014s]  WARN ThreadId(09) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: received corrupt message of type InvalidContentType error.sources=[received corrupt message of type InvalidContentType]
+[     0.095155s]  WARN ThreadId(01) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: received corrupt message of type InvalidContentType error.sources=[received corrupt message of type InvalidContentType]
+[     0.095192s]  WARN ThreadId(07) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: received corrupt message of type InvalidContentType error.sources=[received corrupt message of type InvalidContentType]
+[     0.095252s]  WARN ThreadId(07) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: received corrupt message of type InvalidContentType error.sources=[received corrupt message of type InvalidContentType]
+[     0.095182s]  WARN ThreadId(09) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: received corrupt message of type InvalidContentType error.sources=[received corrupt message of type InvalidContentType]
+[     0.095367s]  WARN ThreadId(01) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: received corrupt message of type InvalidContentType error.sources=[received corrupt message of type InvalidContentType]
+[     0.095399s]  WARN ThreadId(08) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: received corrupt message of type InvalidContentType error.sources=[received corrupt message of type InvalidContentType]
+[     0.095700s]  WARN ThreadId(02) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: received corrupt message of type InvalidContentType error.sources=[received corrupt message of type InvalidContentType]
+[     0.095857s]  WARN ThreadId(03) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: received corrupt message of type InvalidContentType error.sources=[received corrupt message of type InvalidContentType]
+[     0.095859s]  WARN ThreadId(05) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: received corrupt message of type InvalidContentType error.sources=[received corrupt message of type InvalidContentType]
+[     0.096052s]  WARN ThreadId(03) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: received corrupt message of type InvalidContentType error.sources=[received corrupt message of type InvalidContentType]
+[     0.096073s]  WARN ThreadId(05) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: received corrupt message of type InvalidContentType error.sources=[received corrupt message of type InvalidContentType]
+[     0.108219s]  WARN ThreadId(14) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: received corrupt message of type InvalidContentType error.sources=[received corrupt message of type InvalidContentType]
+[     0.108248s]  WARN ThreadId(10) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: received corrupt message of type InvalidContentType error.sources=[received corrupt message of type InvalidContentType]
+[     0.108278s]  WARN ThreadId(12) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: received corrupt message of type InvalidContentType error.sources=[received corrupt message of type InvalidContentType]
+[     0.108378s]  WARN ThreadId(15) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: received corrupt message of type InvalidContentType error.sources=[received corrupt message of type InvalidContentType]
+[     0.108484s]  WARN ThreadId(13) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: received corrupt message of type InvalidContentType error.sources=[received corrupt message of type InvalidContentType]
+[     0.108560s]  WARN ThreadId(15) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: received corrupt message of type InvalidContentType error.sources=[received corrupt message of type InvalidContentType]
+[     0.108831s]  WARN ThreadId(16) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: received corrupt message of type InvalidContentType error.sources=[received corrupt message of type InvalidContentType]
+[     0.109075s]  WARN ThreadId(11) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: received corrupt message of type InvalidContentType error.sources=[received corrupt message of type InvalidContentType]
+[     0.109298s]  WARN ThreadId(11) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: received corrupt message of type InvalidContentType error.sources=[received corrupt message of type InvalidContentType]
+[     0.109333s]  WARN ThreadId(13) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: received corrupt message of type InvalidContentType error.sources=[received corrupt message of type InvalidContentType]
+[     0.206090s]  WARN ThreadId(01) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.206142s]  WARN ThreadId(05) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.206184s]  WARN ThreadId(01) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.206193s]  WARN ThreadId(09) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.206222s]  WARN ThreadId(05) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.206161s]  WARN ThreadId(03) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.206236s]  WARN ThreadId(02) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.206255s]  WARN ThreadId(07) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.206226s]  WARN ThreadId(04) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.206324s]  WARN ThreadId(07) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.206297s]  WARN ThreadId(03) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.206272s]  WARN ThreadId(06) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.206370s]  WARN ThreadId(08) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.206272s]  WARN ThreadId(09) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.215770s]  WARN ThreadId(15) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.215794s]  WARN ThreadId(13) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.215776s]  WARN ThreadId(10) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.215869s]  WARN ThreadId(16) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.215874s]  WARN ThreadId(13) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.225731s]  WARN ThreadId(11) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.225762s]  WARN ThreadId(14) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.225773s]  WARN ThreadId(15) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.225802s]  WARN ThreadId(11) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.225862s]  WARN ThreadId(12) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.415675s]  WARN ThreadId(06) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.415685s]  WARN ThreadId(03) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.416254s]  WARN ThreadId(01) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.417686s]  WARN ThreadId(09) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.425909s]  WARN ThreadId(04) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.426020s]  WARN ThreadId(16) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.425975s]  WARN ThreadId(01) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.425973s]  WARN ThreadId(15) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.426091s]  WARN ThreadId(08) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.426009s]  WARN ThreadId(03) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.425949s]  WARN ThreadId(09) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.426020s]  WARN ThreadId(05) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.426048s]  WARN ThreadId(07) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.425953s]  WARN ThreadId(02) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.426225s]  WARN ThreadId(07) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.426233s]  WARN ThreadId(05) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.435660s]  WARN ThreadId(10) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.435705s]  WARN ThreadId(11) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.435708s]  WARN ThreadId(15) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.435679s]  WARN ThreadId(12) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.435848s]  WARN ThreadId(13) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.445618s]  WARN ThreadId(13) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.445637s]  WARN ThreadId(11) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.445706s]  WARN ThreadId(14) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.826980s]  WARN ThreadId(01) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.836680s]  WARN ThreadId(03) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.836677s]  WARN ThreadId(05) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.836773s]  WARN ThreadId(07) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.836823s]  WARN ThreadId(07) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.846590s]  WARN ThreadId(12) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.846634s]  WARN ThreadId(04) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.846601s]  WARN ThreadId(09) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.846680s]  WARN ThreadId(15) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.846686s]  WARN ThreadId(06) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.846644s]  WARN ThreadId(05) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.846690s]  WARN ThreadId(08) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.846763s]  WARN ThreadId(16) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.856604s]  WARN ThreadId(03) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.856601s]  WARN ThreadId(09) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.856664s]  WARN ThreadId(11) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.856658s]  WARN ThreadId(02) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.856652s]  WARN ThreadId(13) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.856788s]  WARN ThreadId(13) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.866456s]  WARN ThreadId(14) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.866472s]  WARN ThreadId(01) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.866489s]  WARN ThreadId(10) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.876735s]  WARN ThreadId(15) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     0.886491s]  WARN ThreadId(11) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     1.646498s]  WARN ThreadId(03) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     1.656731s]  WARN ThreadId(08) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     1.666175s]  WARN ThreadId(13) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     1.666197s]  WARN ThreadId(15) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     1.667331s]  WARN ThreadId(01) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     1.676271s]  WARN ThreadId(16) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     1.676303s]  WARN ThreadId(11) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     1.676320s]  WARN ThreadId(07) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     1.688072s]  WARN ThreadId(05) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     1.696219s]  WARN ThreadId(06) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     1.696253s]  WARN ThreadId(09) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     1.706261s]  WARN ThreadId(05) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     1.706272s]  WARN ThreadId(13) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     1.716406s]  WARN ThreadId(10) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     1.716413s]  WARN ThreadId(07) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     1.726199s]  WARN ThreadId(04) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     1.726202s]  WARN ThreadId(12) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     1.736267s]  WARN ThreadId(03) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     1.736288s]  WARN ThreadId(14) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     1.736315s]  WARN ThreadId(01) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     1.736300s]  WARN ThreadId(09) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     1.736399s]  WARN ThreadId(02) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     1.746714s]  WARN ThreadId(15) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     1.757223s]  WARN ThreadId(11) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     3.276918s]  WARN ThreadId(13) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     3.286714s]  WARN ThreadId(16) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     3.286739s]  WARN ThreadId(11) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     3.286744s]  WARN ThreadId(08) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     3.286771s]  WARN ThreadId(01) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     3.306694s]  WARN ThreadId(06) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     3.306701s]  WARN ThreadId(03) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     3.306868s]  WARN ThreadId(05) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     3.326711s]  WARN ThreadId(15) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     3.326710s]  WARN ThreadId(09) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     3.336714s]  WARN ThreadId(07) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     3.336762s]  WARN ThreadId(07) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     3.348055s]  WARN ThreadId(04) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     3.356609s]  WARN ThreadId(09) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     3.356617s]  WARN ThreadId(01) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     3.366619s]  WARN ThreadId(15) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     3.366637s]  WARN ThreadId(05) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     3.366640s]  WARN ThreadId(13) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     3.377152s]  WARN ThreadId(10) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     3.386734s]  WARN ThreadId(03) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     3.386746s]  WARN ThreadId(14) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     3.396645s]  WARN ThreadId(12) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     3.396650s]  WARN ThreadId(02) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     3.416799s]  WARN ThreadId(11) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     6.498053s]  WARN ThreadId(01) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     6.498059s]  WARN ThreadId(11) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     6.498065s]  WARN ThreadId(16) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     6.498114s]  WARN ThreadId(13) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     6.509207s]  WARN ThreadId(08) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     6.517921s]  WARN ThreadId(03) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     6.517934s]  WARN ThreadId(05) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     6.528013s]  WARN ThreadId(06) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     6.538431s]  WARN ThreadId(15) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     6.547947s]  WARN ThreadId(07) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     6.547962s]  WARN ThreadId(09) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     6.559730s]  WARN ThreadId(07) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     6.567919s]  WARN ThreadId(01) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     6.568244s]  WARN ThreadId(04) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     6.577895s]  WARN ThreadId(15) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     6.577899s]  WARN ThreadId(05) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     6.577916s]  WARN ThreadId(09) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     6.588906s]  WARN ThreadId(13) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     6.597825s]  WARN ThreadId(10) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     6.607863s]  WARN ThreadId(02) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     6.607889s]  WARN ThreadId(14) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     6.607874s]  WARN ThreadId(03) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     6.617871s]  WARN ThreadId(12) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[     6.638606s]  WARN ThreadId(11) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    12.912033s]  WARN ThreadId(11) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    12.922390s]  WARN ThreadId(16) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    12.941246s]  WARN ThreadId(05) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    12.941245s]  WARN ThreadId(03) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    12.941275s]  WARN ThreadId(13) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    12.941283s]  WARN ThreadId(08) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    12.941284s]  WARN ThreadId(01) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    12.951326s]  WARN ThreadId(06) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    12.961162s]  WARN ThreadId(09) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    12.981116s]  WARN ThreadId(07) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    12.981116s]  WARN ThreadId(15) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    12.991241s]  WARN ThreadId(07) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    12.991241s]  WARN ThreadId(01) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    13.011209s]  WARN ThreadId(13) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    13.011253s]  WARN ThreadId(10) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    13.011248s]  WARN ThreadId(04) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    13.011257s]  WARN ThreadId(05) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    13.011212s]  WARN ThreadId(09) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    13.021085s]  WARN ThreadId(14) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    13.021083s]  WARN ThreadId(15) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    13.032647s]  WARN ThreadId(02) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    13.041990s]  WARN ThreadId(03) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    13.062648s]  WARN ThreadId(12) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    13.081232s]  WARN ThreadId(11) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    15.036051s]  WARN ThreadId(01) linkerd_app: Waiting for identity to be initialized...
+[    15.038249s]  WARN ThreadId(03) linkerd_app: Waiting for identity to be initialized...
+[    15.040826s]  WARN ThreadId(05) linkerd_app: Waiting for identity to be initialized...
+[    15.043397s]  WARN ThreadId(07) linkerd_app: Waiting for identity to be initialized...
+[    15.045742s]  WARN ThreadId(09) linkerd_app: Waiting for identity to be initialized...
+[    15.086571s]  WARN ThreadId(11) linkerd_app: Waiting for identity to be initialized...
+[    15.089786s]  WARN ThreadId(13) linkerd_app: Waiting for identity to be initialized...
+[    15.091212s]  WARN ThreadId(15) linkerd_app: Waiting for identity to be initialized...
+[    25.724223s]  WARN ThreadId(11) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    25.734594s]  WARN ThreadId(16) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    25.772615s]  WARN ThreadId(13) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    25.772615s]  WARN ThreadId(08) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    25.782672s]  WARN ThreadId(01) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    25.782679s]  WARN ThreadId(05) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    25.784396s]  WARN ThreadId(09) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    25.802607s]  WARN ThreadId(03) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    25.803185s]  WARN ThreadId(07) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    25.812639s]  WARN ThreadId(06) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    25.812643s]  WARN ThreadId(07) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    25.812646s]  WARN ThreadId(15) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    25.842577s]  WARN ThreadId(01) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    25.842582s]  WARN ThreadId(05) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    25.854063s]  WARN ThreadId(02) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    25.864410s]  WARN ThreadId(10) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    25.872554s]  WARN ThreadId(09) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    25.872561s]  WARN ThreadId(13) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    25.884090s]  WARN ThreadId(12) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    25.892521s]  WARN ThreadId(14) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    25.892538s]  WARN ThreadId(15) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    25.902678s]  WARN ThreadId(11) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    25.914206s]  WARN ThreadId(03) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    26.892783s]  WARN ThreadId(04) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    30.036870s]  WARN ThreadId(01) linkerd_app: Waiting for identity to be initialized...
+[    30.038616s] ERROR ThreadId(02) linkerd_proxy_identity_client::certify: Failed to obtain identity error=code: 'Unknown error', message: "controller 192.168.100.1:28088: service in fail-fast", source: ControlError { addr: Socket(192.168.100.1:28088), source: FailFastError(()) } error.sources=[controller 192.168.100.1:28088: service in fail-fast, service in fail-fast]
+[    30.038626s] ERROR ThreadId(04) linkerd_proxy_identity_client::certify: Failed to obtain identity error=code: 'Unknown error', message: "controller 192.168.100.1:28088: service in fail-fast", source: ControlError { addr: Socket(192.168.100.1:28088), source: FailFastError(()) } error.sources=[controller 192.168.100.1:28088: service in fail-fast, service in fail-fast]
+[    30.039041s]  WARN ThreadId(03) linkerd_app: Waiting for identity to be initialized...
+[    30.041766s] ERROR ThreadId(06) linkerd_proxy_identity_client::certify: Failed to obtain identity error=code: 'Unknown error', message: "controller 192.168.100.1:28088: service in fail-fast", source: ControlError { addr: Socket(192.168.100.1:28088), source: FailFastError(()) } error.sources=[controller 192.168.100.1:28088: service in fail-fast, service in fail-fast]
+[    30.042134s]  WARN ThreadId(05) linkerd_app: Waiting for identity to be initialized...
+[    30.043760s] ERROR ThreadId(08) linkerd_proxy_identity_client::certify: Failed to obtain identity error=code: 'Unknown error', message: "controller 192.168.100.1:28088: service in fail-fast", source: ControlError { addr: Socket(192.168.100.1:28088), source: FailFastError(()) } error.sources=[controller 192.168.100.1:28088: service in fail-fast, service in fail-fast]
+[    30.044202s]  WARN ThreadId(07) linkerd_app: Waiting for identity to be initialized...
+[    30.046218s]  WARN ThreadId(09) linkerd_app: Waiting for identity to be initialized...
+[    30.085879s] ERROR ThreadId(10) linkerd_proxy_identity_client::certify: Failed to obtain identity error=code: 'Unknown error', message: "controller 192.168.100.1:28088: service in fail-fast", source: ControlError { addr: Socket(192.168.100.1:28088), source: FailFastError(()) } error.sources=[controller 192.168.100.1:28088: service in fail-fast, service in fail-fast]
+[    30.087231s] ERROR ThreadId(12) linkerd_proxy_identity_client::certify: Failed to obtain identity error=code: 'Unknown error', message: "controller 192.168.100.1:28088: service in fail-fast", source: ControlError { addr: Socket(192.168.100.1:28088), source: FailFastError(()) } error.sources=[controller 192.168.100.1:28088: service in fail-fast, service in fail-fast]
+[    30.087601s]  WARN ThreadId(11) linkerd_app: Waiting for identity to be initialized...
+[    30.089603s] ERROR ThreadId(14) linkerd_proxy_identity_client::certify: Failed to obtain identity error=code: 'Unknown error', message: "controller 192.168.100.1:28088: service in fail-fast", source: ControlError { addr: Socket(192.168.100.1:28088), source: FailFastError(()) } error.sources=[controller 192.168.100.1:28088: service in fail-fast, service in fail-fast]
+[    30.090454s]  WARN ThreadId(13) linkerd_app: Waiting for identity to be initialized...
+[    30.092304s] ERROR ThreadId(16) linkerd_proxy_identity_client::certify: Failed to obtain identity error=code: 'Unknown error', message: "controller 192.168.100.1:28088: service in fail-fast", source: ControlError { addr: Socket(192.168.100.1:28088), source: FailFastError(()) } error.sources=[controller 192.168.100.1:28088: service in fail-fast, service in fail-fast]
+[    30.092687s]  WARN ThreadId(15) linkerd_app: Waiting for identity to be initialized...
+[    31.111742s]  WARN ThreadId(01) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Unknown error grpc.message="controller 192.168.100.1:28087: service in fail-fast"
+[    31.111814s]  WARN ThreadId(01) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Unknown error grpc.message="controller 192.168.100.1:28087: service in fail-fast"
+[    31.112854s]  WARN ThreadId(09) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Unknown error grpc.message="controller 192.168.100.1:28087: service in fail-fast"
+[    31.112897s]  WARN ThreadId(09) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Unknown error grpc.message="controller 192.168.100.1:28087: service in fail-fast"
+[    31.114278s]  WARN ThreadId(11) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Unknown error grpc.message="controller 192.168.100.1:28087: service in fail-fast"
+[    31.114316s]  WARN ThreadId(11) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Unknown error grpc.message="controller 192.168.100.1:28087: service in fail-fast"
+[    31.116161s]  WARN ThreadId(03) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Unknown error grpc.message="controller 192.168.100.1:28087: service in fail-fast"
+[    31.116202s]  WARN ThreadId(03) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Unknown error grpc.message="controller 192.168.100.1:28087: service in fail-fast"
+[    31.118278s]  WARN ThreadId(13) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Unknown error grpc.message="controller 192.168.100.1:28087: service in fail-fast"
+[    31.118318s]  WARN ThreadId(13) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Unknown error grpc.message="controller 192.168.100.1:28087: service in fail-fast"
+[    31.120657s]  WARN ThreadId(05) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Unknown error grpc.message="controller 192.168.100.1:28087: service in fail-fast"
+[    31.120701s]  WARN ThreadId(05) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Unknown error grpc.message="controller 192.168.100.1:28087: service in fail-fast"
+[    31.126185s]  WARN ThreadId(15) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Unknown error grpc.message="controller 192.168.100.1:28087: service in fail-fast"
+[    31.126225s]  WARN ThreadId(15) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Unknown error grpc.message="controller 192.168.100.1:28087: service in fail-fast"
+[    31.135325s]  WARN ThreadId(07) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Unknown error grpc.message="controller 192.168.100.1:28087: service in fail-fast"
+[    31.135354s]  WARN ThreadId(07) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Unknown error grpc.message="controller 192.168.100.1:28087: service in fail-fast"
+[    40.048716s]  WARN ThreadId(02) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    40.048773s]  WARN ThreadId(06) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    40.048717s]  WARN ThreadId(04) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    40.048795s]  WARN ThreadId(08) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    40.088786s]  WARN ThreadId(10) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    40.098680s]  WARN ThreadId(14) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    40.098680s]  WARN ThreadId(12) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    40.100135s]  WARN ThreadId(16) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    40.158664s]  WARN ThreadId(06) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    40.158720s]  WARN ThreadId(04) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    40.158742s]  WARN ThreadId(08) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    40.158729s]  WARN ThreadId(02) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    40.200410s]  WARN ThreadId(10) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    40.208544s]  WARN ThreadId(12) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    40.208551s]  WARN ThreadId(16) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    40.219043s]  WARN ThreadId(14) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    40.368552s]  WARN ThreadId(04) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    40.368564s]  WARN ThreadId(06) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    40.368576s]  WARN ThreadId(08) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    40.379880s]  WARN ThreadId(02) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    40.418730s]  WARN ThreadId(12) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    40.418764s]  WARN ThreadId(10) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    40.418730s]  WARN ThreadId(16) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    40.439025s]  WARN ThreadId(14) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    40.779386s]  WARN ThreadId(06) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    40.789973s]  WARN ThreadId(08) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    40.798449s]  WARN ThreadId(04) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    40.819164s]  WARN ThreadId(02) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    40.838365s]  WARN ThreadId(12) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    40.838366s]  WARN ThreadId(16) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    40.858414s]  WARN ThreadId(10) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    40.868803s]  WARN ThreadId(14) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    41.608300s]  WARN ThreadId(06) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    41.608300s]  WARN ThreadId(08) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    41.659127s]  WARN ThreadId(12) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    41.668235s]  WARN ThreadId(04) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    41.668246s]  WARN ThreadId(02) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    41.718179s]  WARN ThreadId(10) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    41.719029s]  WARN ThreadId(16) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    41.749982s]  WARN ThreadId(14) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    43.247753s]  WARN ThreadId(08) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    43.247751s]  WARN ThreadId(06) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    43.279440s]  WARN ThreadId(12) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    43.298049s]  WARN ThreadId(02) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    43.327702s]  WARN ThreadId(04) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    43.327718s]  WARN ThreadId(10) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    43.378439s]  WARN ThreadId(16) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    43.399074s]  WARN ThreadId(14) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    45.038512s]  WARN ThreadId(01) linkerd_app: Waiting for identity to be initialized...
+[    45.040428s]  WARN ThreadId(03) linkerd_app: Waiting for identity to be initialized...
+[    45.043270s]  WARN ThreadId(05) linkerd_app: Waiting for identity to be initialized...
+[    45.044815s]  WARN ThreadId(07) linkerd_app: Waiting for identity to be initialized...
+[    45.047528s]  WARN ThreadId(09) linkerd_app: Waiting for identity to be initialized...
+[    45.089535s]  WARN ThreadId(11) linkerd_app: Waiting for identity to be initialized...
+[    45.091271s]  WARN ThreadId(13) linkerd_app: Waiting for identity to be initialized...
+[    45.094074s]  WARN ThreadId(15) linkerd_app: Waiting for identity to be initialized...
+[    46.458935s]  WARN ThreadId(06) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    46.469519s]  WARN ThreadId(08) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    46.500657s]  WARN ThreadId(12) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    46.508984s]  WARN ThreadId(02) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    46.550889s]  WARN ThreadId(04) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    46.550896s]  WARN ThreadId(10) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    46.601873s]  WARN ThreadId(16) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    46.612229s]  WARN ThreadId(14) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    51.390635s]  WARN ThreadId(09) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    51.400408s]  WARN ThreadId(01) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    51.400426s]  WARN ThreadId(05) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    51.431381s]  WARN ThreadId(07) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    51.461615s]  WARN ThreadId(05) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    51.471971s]  WARN ThreadId(01) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    51.521438s]  WARN ThreadId(11) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    52.372545s]  WARN ThreadId(11) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    52.411796s]  WARN ThreadId(13) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    52.442098s]  WARN ThreadId(07) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    52.512341s]  WARN ThreadId(09) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    52.522537s]  WARN ThreadId(13) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    52.531279s]  WARN ThreadId(15) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    52.871507s]  WARN ThreadId(06) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    52.882089s]  WARN ThreadId(08) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    52.911207s]  WARN ThreadId(12) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    52.941156s]  WARN ThreadId(02) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    52.972115s]  WARN ThreadId(10) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    52.982575s]  WARN ThreadId(04) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    53.021869s]  WARN ThreadId(16) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    53.032232s]  WARN ThreadId(14) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    53.461278s]  WARN ThreadId(03) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    53.471654s]  WARN ThreadId(15) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28087: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    53.581114s]  WARN ThreadId(03) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28086: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    60.038966s]  WARN ThreadId(01) linkerd_app: Waiting for identity to be initialized...
+[    60.041182s]  WARN ThreadId(03) linkerd_app: Waiting for identity to be initialized...
+[    60.045049s]  WARN ThreadId(05) linkerd_app: Waiting for identity to be initialized...
+[    60.046513s]  WARN ThreadId(07) linkerd_app: Waiting for identity to be initialized...
+[    60.048666s]  WARN ThreadId(09) linkerd_app: Waiting for identity to be initialized...
+[    60.091040s]  WARN ThreadId(11) linkerd_app: Waiting for identity to be initialized...
+[    60.092330s]  WARN ThreadId(13) linkerd_app: Waiting for identity to be initialized...
+[    60.094260s]  WARN ThreadId(15) linkerd_app: Waiting for identity to be initialized...
+[    65.715450s]  WARN ThreadId(06) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    65.715450s]  WARN ThreadId(08) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    65.826535s]  WARN ThreadId(04) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    65.836912s]  WARN ThreadId(10) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    65.865782s]  WARN ThreadId(16) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    66.795126s]  WARN ThreadId(12) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    66.815124s]  WARN ThreadId(02) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    66.915642s]  WARN ThreadId(14) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    70.040905s] ERROR ThreadId(04) linkerd_proxy_identity_client::certify: Failed to obtain identity error=code: 'Unknown error', message: "controller 192.168.100.1:28088: service in fail-fast", source: ControlError { addr: Socket(192.168.100.1:28088), source: FailFastError(()) } error.sources=[controller 192.168.100.1:28088: service in fail-fast, service in fail-fast]
+[    70.041432s] ERROR ThreadId(02) linkerd_proxy_identity_client::certify: Failed to obtain identity error=code: 'Unknown error', message: "controller 192.168.100.1:28088: service in fail-fast", source: ControlError { addr: Socket(192.168.100.1:28088), source: FailFastError(()) } error.sources=[controller 192.168.100.1:28088: service in fail-fast, service in fail-fast]
+[    70.043011s] ERROR ThreadId(06) linkerd_proxy_identity_client::certify: Failed to obtain identity error=code: 'Unknown error', message: "controller 192.168.100.1:28088: service in fail-fast", source: ControlError { addr: Socket(192.168.100.1:28088), source: FailFastError(()) } error.sources=[controller 192.168.100.1:28088: service in fail-fast, service in fail-fast]
+[    70.046587s] ERROR ThreadId(08) linkerd_proxy_identity_client::certify: Failed to obtain identity error=code: 'Unknown error', message: "controller 192.168.100.1:28088: service in fail-fast", source: ControlError { addr: Socket(192.168.100.1:28088), source: FailFastError(()) } error.sources=[controller 192.168.100.1:28088: service in fail-fast, service in fail-fast]
+[    70.089462s] ERROR ThreadId(10) linkerd_proxy_identity_client::certify: Failed to obtain identity error=code: 'Unknown error', message: "controller 192.168.100.1:28088: service in fail-fast", source: ControlError { addr: Socket(192.168.100.1:28088), source: FailFastError(()) } error.sources=[controller 192.168.100.1:28088: service in fail-fast, service in fail-fast]
+[    70.089793s] ERROR ThreadId(12) linkerd_proxy_identity_client::certify: Failed to obtain identity error=code: 'Unknown error', message: "controller 192.168.100.1:28088: service in fail-fast", source: ControlError { addr: Socket(192.168.100.1:28088), source: FailFastError(()) } error.sources=[controller 192.168.100.1:28088: service in fail-fast, service in fail-fast]
+[    70.092103s] ERROR ThreadId(14) linkerd_proxy_identity_client::certify: Failed to obtain identity error=code: 'Unknown error', message: "controller 192.168.100.1:28088: service in fail-fast", source: ControlError { addr: Socket(192.168.100.1:28088), source: FailFastError(()) } error.sources=[controller 192.168.100.1:28088: service in fail-fast, service in fail-fast]
+[    70.093856s] ERROR ThreadId(16) linkerd_proxy_identity_client::certify: Failed to obtain identity error=code: 'Unknown error', message: "controller 192.168.100.1:28088: service in fail-fast", source: ControlError { addr: Socket(192.168.100.1:28088), source: FailFastError(()) } error.sources=[controller 192.168.100.1:28088: service in fail-fast, service in fail-fast]
+[    75.040103s]  WARN ThreadId(01) linkerd_app: Waiting for identity to be initialized...
+[    75.042554s]  WARN ThreadId(03) linkerd_app: Waiting for identity to be initialized...
+[    75.045554s]  WARN ThreadId(05) linkerd_app: Waiting for identity to be initialized...
+[    75.047534s]  WARN ThreadId(07) linkerd_app: Waiting for identity to be initialized...
+[    75.050011s]  WARN ThreadId(09) linkerd_app: Waiting for identity to be initialized...
+[    75.092569s]  WARN ThreadId(11) linkerd_app: Waiting for identity to be initialized...
+[    75.093809s]  WARN ThreadId(13) linkerd_app: Waiting for identity to be initialized...
+[    75.095948s]  WARN ThreadId(15) linkerd_app: Waiting for identity to be initialized...
+[    80.049355s]  WARN ThreadId(04) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    80.049355s]  WARN ThreadId(02) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    80.049393s]  WARN ThreadId(06) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    80.049404s]  WARN ThreadId(08) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    80.099385s]  WARN ThreadId(10) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    80.099382s]  WARN ThreadId(12) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    80.099405s]  WARN ThreadId(14) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    80.100772s]  WARN ThreadId(16) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    80.159220s]  WARN ThreadId(02) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    80.159216s]  WARN ThreadId(06) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    80.169255s]  WARN ThreadId(04) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    80.169262s]  WARN ThreadId(08) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    80.209217s]  WARN ThreadId(12) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    80.209252s]  WARN ThreadId(10) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    80.209222s]  WARN ThreadId(14) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    80.219217s]  WARN ThreadId(16) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    80.369283s]  WARN ThreadId(02) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    80.379094s]  WARN ThreadId(06) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    80.379095s]  WARN ThreadId(08) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    80.400306s]  WARN ThreadId(04) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    80.419217s]  WARN ThreadId(12) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    80.419216s]  WARN ThreadId(14) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    80.419238s]  WARN ThreadId(10) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    80.450004s]  WARN ThreadId(16) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    80.780280s]  WARN ThreadId(02) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    80.790874s]  WARN ThreadId(06) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    80.809045s]  WARN ThreadId(04) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    80.809055s]  WARN ThreadId(08) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    80.830176s]  WARN ThreadId(12) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    80.840522s]  WARN ThreadId(10) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    80.859234s]  WARN ThreadId(14) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    80.879932s]  WARN ThreadId(16) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    81.611511s]  WARN ThreadId(02) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    81.639795s]  WARN ThreadId(06) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    81.639795s]  WARN ThreadId(08) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    81.650775s]  WARN ThreadId(04) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    81.661160s]  WARN ThreadId(12) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    81.679739s]  WARN ThreadId(14) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    81.709769s]  WARN ThreadId(16) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    81.709773s]  WARN ThreadId(10) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    83.265330s]  WARN ThreadId(02) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    83.283352s]  WARN ThreadId(04) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    83.283352s]  WARN ThreadId(08) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    83.293290s]  WARN ThreadId(06) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    83.314013s]  WARN ThreadId(12) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    83.334657s]  WARN ThreadId(16) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    83.345261s]  WARN ThreadId(14) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    83.353576s]  WARN ThreadId(10) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    86.484554s]  WARN ThreadId(02) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    86.494406s]  WARN ThreadId(04) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    86.503620s]  WARN ThreadId(08) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    86.523404s]  WARN ThreadId(12) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    86.523406s]  WARN ThreadId(06) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    86.563382s]  WARN ThreadId(10) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    86.563383s]  WARN ThreadId(16) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    86.563405s]  WARN ThreadId(14) linkerd_reconnect: Failed to connect error=endpoint 192.168.100.1:28088: Connection refused (os error 111) error.sources=[Connection refused (os error 111)]
+[    90.040827s]  WARN ThreadId(01) linkerd_app: Waiting for identity to be initialized...
+[    90.043599s]  WARN ThreadId(03) linkerd_app: Waiting for identity to be initialized...
+[    90.046422s]  WARN ThreadId(05) linkerd_app: Waiting for identity to be initialized...
+[    90.048391s]  WARN ThreadId(07) linkerd_app: Waiting for identity to be initialized...
+[    90.051190s]  WARN ThreadId(09) linkerd_app: Waiting for identity to be initialized...
+[    90.093630s]  WARN ThreadId(11) linkerd_app: Waiting for identity to be initialized...
+[    90.094123s]  WARN ThreadId(13) linkerd_app: Waiting for identity to be initialized...
+[    90.097068s]  WARN ThreadId(15) linkerd_app: Waiting for identity to be initialized...
+[l7_linkerd] worker 1: Service test-bench/inject-bench now resolves in the held topology
+[l7_linkerd] worker 1: Service istio-system/istiod-revision-tag-default now resolves in the held topology
+[l7_linkerd] worker 1: Service linkerd/linkerd-proxy-injector now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/preload-bench now resolves in the held topology
+[l7_linkerd] worker 1: Service default/kubernetes now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/dpumesh-controller now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/inject-sock now resolves in the held topology
+[l7_linkerd] worker 1: Service linkerd/linkerd-sp-validator now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/http1-bench now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/http1-dpumesh now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/echo-grpc-alt now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/plain-bench now resolves in the held topology
+[l7_linkerd] worker 1: Service linkerd/linkerd-policy-validator now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/loopback-dpumesh now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/plain-sock now resolves in the held topology
+[l7_linkerd] worker 1: Service linkerd/linkerd-dst now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/preload-sock now resolves in the held topology
+[l7_linkerd] worker 1: Service kube-system/kube-dns now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/echo-dpumesh now resolves in the held topology
+[l7_linkerd] worker 1: Service linkerd/linkerd-identity now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/echo-grpc-dpumesh now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/verbs-dpumesh now resolves in the held topology
+[l7_linkerd] worker 1: Service istio-system/istiod now resolves in the held topology
+[l7_linkerd] worker 1: Service kube-system/metrics-server now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/echo-dpumesh-native now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/preload-dpumesh now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/bench-dpumesh now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/bench-grpc-dpumesh now resolves in the held topology
+[   103.639234s]  WARN ThreadId(01) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   103.639298s]  WARN ThreadId(01) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   103.847770s]  WARN ThreadId(01) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   103.866332s]  WARN ThreadId(01) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   104.256270s]  WARN ThreadId(01) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   104.287249s]  WARN ThreadId(01) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   104.677347s]  WARN ThreadId(07) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   104.677412s]  WARN ThreadId(07) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   104.887581s]  WARN ThreadId(07) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   104.896109s]  WARN ThreadId(07) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   105.096637s]  WARN ThreadId(01) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   105.177237s]  WARN ThreadId(01) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   105.315864s]  WARN ThreadId(07) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   105.337188s]  WARN ThreadId(07) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   105.607041s]  WARN ThreadId(11) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   105.607170s]  WARN ThreadId(11) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   105.708637s]  WARN ThreadId(15) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   105.708708s]  WARN ThreadId(15) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   105.708771s]  WARN ThreadId(05) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   105.708828s]  WARN ThreadId(05) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   105.746567s]  WARN ThreadId(09) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   105.747426s]  WARN ThreadId(09) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   105.825958s]  WARN ThreadId(11) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   105.826014s]  WARN ThreadId(11) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   105.924287s]  WARN ThreadId(05) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   105.924291s]  WARN ThreadId(15) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   105.924441s]  WARN ThreadId(15) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   105.924941s]  WARN ThreadId(05) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   105.954456s]  WARN ThreadId(09) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   105.954547s]  WARN ThreadId(09) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   106.125233s]  WARN ThreadId(07) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   106.224769s]  WARN ThreadId(07) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   106.237384s]  WARN ThreadId(11) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   106.245714s]  WARN ThreadId(11) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   106.346696s]  WARN ThreadId(05) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   106.365348s]  WARN ThreadId(15) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   106.366280s]  WARN ThreadId(05) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   106.376654s]  WARN ThreadId(15) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   106.397290s]  WARN ThreadId(09) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   106.405604s]  WARN ThreadId(09) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   106.708808s]  WARN ThreadId(01) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   106.819511s]  WARN ThreadId(01) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   107.099622s]  WARN ThreadId(11) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   107.118468s]  WARN ThreadId(11) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   107.168031s]  WARN ThreadId(05) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   107.199058s]  WARN ThreadId(05) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   107.228026s]  WARN ThreadId(15) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   107.228051s]  WARN ThreadId(09) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   107.228136s]  WARN ThreadId(09) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   107.239480s]  WARN ThreadId(15) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   107.660711s]  WARN ThreadId(13) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   107.660773s]  WARN ThreadId(13) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   107.739927s]  WARN ThreadId(07) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   107.879362s]  WARN ThreadId(13) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   107.879450s]  WARN ThreadId(07) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   107.879493s]  WARN ThreadId(13) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   108.319897s]  WARN ThreadId(13) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   108.330215s]  WARN ThreadId(13) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   108.711039s]  WARN ThreadId(03) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   108.711713s]  WARN ThreadId(03) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   108.750156s]  WARN ThreadId(11) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   108.768840s]  WARN ThreadId(11) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   108.820518s]  WARN ThreadId(05) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   108.838452s]  WARN ThreadId(05) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   108.838484s]  WARN ThreadId(09) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   108.870124s]  WARN ThreadId(15) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   108.878408s]  WARN ThreadId(09) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   108.899059s]  WARN ThreadId(15) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   108.930133s]  WARN ThreadId(03) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   108.938421s]  WARN ThreadId(03) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   109.130758s]  WARN ThreadId(13) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   109.220727s]  WARN ThreadId(13) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   109.371603s]  WARN ThreadId(03) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   109.379975s]  WARN ThreadId(03) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   109.941261s]  WARN ThreadId(01) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   110.050585s]  WARN ThreadId(01) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   110.180476s]  WARN ThreadId(03) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   110.209380s]  WARN ThreadId(03) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   110.792851s]  WARN ThreadId(13) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   110.860899s]  WARN ThreadId(13) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   110.952096s]  WARN ThreadId(07) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   111.112587s]  WARN ThreadId(07) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   111.811666s]  WARN ThreadId(03) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   111.850695s]  WARN ThreadId(03) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   111.971575s]  WARN ThreadId(11) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   111.991259s]  WARN ThreadId(11) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   112.040847s]  WARN ThreadId(05) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   112.060812s]  WARN ThreadId(05) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   112.060825s]  WARN ThreadId(09) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   112.092424s]  WARN ThreadId(15) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   112.100724s]  WARN ThreadId(09) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   112.121440s]  WARN ThreadId(15) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   114.020835s]  WARN ThreadId(13) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   114.091556s]  WARN ThreadId(13) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   115.030754s]  WARN ThreadId(03) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   115.070108s]  WARN ThreadId(03) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   116.381860s]  WARN ThreadId(01) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   116.469635s]  WARN ThreadId(01) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   117.400612s]  WARN ThreadId(07) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   117.519780s]  WARN ThreadId(07) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   118.410399s]  WARN ThreadId(11) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   118.420805s]  WARN ThreadId(11) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   118.460236s]  WARN ThreadId(05) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   118.499520s]  WARN ThreadId(05) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   118.509966s]  WARN ThreadId(09) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   118.529462s]  WARN ThreadId(15) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   118.539032s]  WARN ThreadId(09) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   118.559697s]  WARN ThreadId(15) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   120.468873s]  WARN ThreadId(13) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   120.508169s]  WARN ThreadId(13) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   121.439246s]  WARN ThreadId(03) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   121.508131s]  WARN ThreadId(03) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   129.205777s]  WARN ThreadId(01) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   129.325466s]  WARN ThreadId(01) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   130.247383s]  WARN ThreadId(07) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   130.335742s]  WARN ThreadId(07) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   131.276958s]  WARN ThreadId(11) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   131.277896s]  WARN ThreadId(11) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   131.327343s]  WARN ThreadId(05) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   131.366676s]  WARN ThreadId(15) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   131.377053s]  WARN ThreadId(15) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   131.408006s]  WARN ThreadId(09) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   132.337584s]  WARN ThreadId(05) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   132.398595s]  WARN ThreadId(09) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   133.327394s]  WARN ThreadId(13) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   133.345955s]  WARN ThreadId(13) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   134.286394s]  WARN ThreadId(03) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   135.386804s]  WARN ThreadId(03) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   154.822726s]  WARN ThreadId(01) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   156.895097s]  WARN ThreadId(11) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   156.896788s]  WARN ThreadId(07) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   156.985735s]  WARN ThreadId(01) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   157.925087s]  WARN ThreadId(11) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   157.975895s]  WARN ThreadId(05) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   157.994865s]  WARN ThreadId(07) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   158.005517s]  WARN ThreadId(15) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   158.034360s]  WARN ThreadId(15) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   158.064778s]  WARN ThreadId(09) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   158.984871s]  WARN ThreadId(05) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   159.896450s]  WARN ThreadId(03) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   159.975451s]  WARN ThreadId(13) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   160.067469s]  WARN ThreadId(09) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   161.006708s]  WARN ThreadId(13) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[   162.024895s]  WARN ThreadId(03) linkerd_app_inbound::policy::api: Unexpected policy controller response; retrying with a backoff grpc.status=Some requested entity was not found grpc.message="unknown server"
+[l7_linkerd] worker 2: Service linkerd/linkerd-proxy-injector now resolves in the held topology
+[l7_linkerd] worker 2: Service test-bench/inject-bench now resolves in the held topology
+[l7_linkerd] worker 2: Service test-bench/loopback-dpumesh now resolves in the held topology
+[l7_linkerd] worker 2: Service test-bench/bench-dpumesh now resolves in the held topology
+[l7_linkerd] worker 2: Service linkerd/linkerd-sp-validator now resolves in the held topology
+[l7_linkerd] worker 2: Service test-bench/plain-bench now resolves in the held topology
+[l7_linkerd] worker 2: Service test-bench/echo-dpumesh-native now resolves in the held topology
+[l7_linkerd] worker 2: Service linkerd/linkerd-dst now resolves in the held topology
+[l7_linkerd] worker 2: Service default/kubernetes now resolves in the held topology
+[l7_linkerd] worker 2: Service test-bench/echo-grpc-alt now resolves in the held topology
+[l7_linkerd] worker 2: Service linkerd/linkerd-identity now resolves in the held topology
+[l7_linkerd] worker 2: Service kube-system/metrics-server now resolves in the held topology
+[l7_linkerd] worker 2: Service test-bench/echo-grpc-dpumesh now resolves in the held topology
+[l7_linkerd] worker 2: Service test-bench/preload-dpumesh now resolves in the held topology
+[l7_linkerd] worker 2: Service istio-system/istiod-revision-tag-default now resolves in the held topology
+[l7_linkerd] worker 2: Service test-bench/dpumesh-controller now resolves in the held topology
+[l7_linkerd] worker 2: Service test-bench/http1-bench now resolves in the held topology
+[l7_linkerd] worker 2: Service test-bench/plain-sock now resolves in the held topology
+[l7_linkerd] worker 2: Service test-bench/preload-bench now resolves in the held topology
+[l7_linkerd] worker 2: Service linkerd/linkerd-policy-validator now resolves in the held topology
+[l7_linkerd] worker 2: Service test-bench/echo-dpumesh now resolves in the held topology
+[l7_linkerd] worker 2: Service test-bench/bench-grpc-dpumesh now resolves in the held topology
+[l7_linkerd] worker 2: Service kube-system/kube-dns now resolves in the held topology
+[l7_linkerd] worker 2: Service test-bench/inject-sock now resolves in the held topology
+[l7_linkerd] worker 2: Service test-bench/http1-dpumesh now resolves in the held topology
+[l7_linkerd] worker 2: Service test-bench/verbs-dpumesh now resolves in the held topology
+[l7_linkerd] worker 2: Service istio-system/istiod now resolves in the held topology
+[l7_linkerd] worker 2: Service test-bench/preload-sock now resolves in the held topology
+[l7_linkerd] worker 7: Service kube-system/kube-dns now resolves in the held topology
+[l7_linkerd] worker 7: Service test-bench/bench-grpc-dpumesh now resolves in the held topology
+[l7_linkerd] worker 7: Service test-bench/echo-dpumesh-native now resolves in the held topology
+[l7_linkerd] worker 7: Service test-bench/http1-dpumesh now resolves in the held topology
+[l7_linkerd] worker 7: Service test-bench/echo-dpumesh now resolves in the held topology
+[l7_linkerd] worker 3: Service istio-system/istiod-revision-tag-default now resolves in the held topology
+[l7_linkerd] worker 3: Service test-bench/preload-dpumesh now resolves in the held topology
+[l7_linkerd] worker 3: Service test-bench/inject-bench now resolves in the held topology
+[l7_linkerd] worker 3: Service test-bench/preload-sock now resolves in the held topology
+[l7_linkerd] worker 3: Service test-bench/bench-grpc-dpumesh now resolves in the held topology
+[l7_linkerd] worker 3: Service linkerd/linkerd-sp-validator now resolves in the held topology
+[l7_linkerd] worker 3: Service test-bench/echo-grpc-alt now resolves in the held topology
+[l7_linkerd] worker 3: Service default/kubernetes now resolves in the held topology
+[l7_linkerd] worker 3: Service linkerd/linkerd-identity now resolves in the held topology
+[l7_linkerd] worker 3: Service kube-system/kube-dns now resolves in the held topology
+[l7_linkerd] worker 3: Service test-bench/echo-grpc-dpumesh now resolves in the held topology
+[l7_linkerd] worker 3: Service linkerd/linkerd-policy-validator now resolves in the held topology
+[l7_linkerd] worker 3: Service kube-system/metrics-server now resolves in the held topology
+[l7_linkerd] worker 3: Service test-bench/plain-bench now resolves in the held topology
+[l7_linkerd] worker 3: Service test-bench/preload-bench now resolves in the held topology
+[l7_linkerd] worker 3: Service test-bench/http1-bench now resolves in the held topology
+[l7_linkerd] worker 3: Service test-bench/dpumesh-controller now resolves in the held topology
+[l7_linkerd] worker 3: Service test-bench/plain-sock now resolves in the held topology
+[l7_linkerd] worker 3: Service test-bench/http1-dpumesh now resolves in the held topology
+[l7_linkerd] worker 3: Service test-bench/bench-dpumesh now resolves in the held topology
+[l7_linkerd] worker 3: Service linkerd/linkerd-proxy-injector now resolves in the held topology
+[l7_linkerd] worker 3: Service test-bench/loopback-dpumesh now resolves in the held topology
+[l7_linkerd] worker 3: Service linkerd/linkerd-dst now resolves in the held topology
+[l7_linkerd] worker 3: Service test-bench/verbs-dpumesh now resolves in the held topology
+[l7_linkerd] worker 3: Service test-bench/echo-dpumesh-native now resolves in the held topology
+[l7_linkerd] worker 3: Service test-bench/echo-dpumesh now resolves in the held topology
+[l7_linkerd] worker 3: Service istio-system/istiod now resolves in the held topology
+[l7_linkerd] worker 3: Service test-bench/inject-sock now resolves in the held topology
+[l7_linkerd] worker 0: Service test-bench/echo-dpumesh now resolves in the held topology
+[l7_linkerd] worker 0: Service test-bench/echo-grpc-dpumesh now resolves in the held topology
+[l7_linkerd] worker 0: Service test-bench/echo-grpc-alt now resolves in the held topology
+[l7_linkerd] worker 0: Service default/kubernetes now resolves in the held topology
+[l7_linkerd] worker 0: Service test-bench/loopback-dpumesh now resolves in the held topology
+[l7_linkerd] worker 0: Service linkerd/linkerd-policy-validator now resolves in the held topology
+[l7_linkerd] worker 0: Service kube-system/kube-dns now resolves in the held topology
+[l7_linkerd] worker 0: Service test-bench/bench-dpumesh now resolves in the held topology
+[l7_linkerd] worker 0: Service test-bench/inject-sock now resolves in the held topology
+[l7_linkerd] worker 0: Service test-bench/echo-dpumesh-native now resolves in the held topology
+[l7_linkerd] worker 0: Service linkerd/linkerd-identity now resolves in the held topology
+[l7_linkerd] worker 0: Service test-bench/plain-bench now resolves in the held topology
+[l7_linkerd] worker 0: Service test-bench/inject-bench now resolves in the held topology
+[l7_linkerd] worker 0: Service test-bench/preload-bench now resolves in the held topology
+[l7_linkerd] worker 0: Service kube-system/metrics-server now resolves in the held topology
+[l7_linkerd] worker 0: Service test-bench/http1-dpumesh now resolves in the held topology
+[l7_linkerd] worker 0: Service istio-system/istiod-revision-tag-default now resolves in the held topology
+[l7_linkerd] worker 0: Service linkerd/linkerd-sp-validator now resolves in the held topology
+[l7_linkerd] worker 0: Service test-bench/plain-sock now resolves in the held topology
+[l7_linkerd] worker 0: Service test-bench/verbs-dpumesh now resolves in the held topology
+[l7_linkerd] worker 0: Service linkerd/linkerd-proxy-injector now resolves in the held topology
+[l7_linkerd] worker 0: Service test-bench/bench-grpc-dpumesh now resolves in the held topology
+[l7_linkerd] worker 0: Service test-bench/dpumesh-controller now resolves in the held topology
+[l7_linkerd] worker 0: Service test-bench/preload-sock now resolves in the held topology
+[l7_linkerd] worker 0: Service test-bench/preload-dpumesh now resolves in the held topology
+[l7_linkerd] worker 0: Service istio-system/istiod now resolves in the held topology
+[l7_linkerd] worker 0: Service test-bench/http1-bench now resolves in the held topology
+[l7_linkerd] worker 0: Service linkerd/linkerd-dst now resolves in the held topology
+[l7_linkerd] worker 5: Service test-bench/plain-sock now resolves in the held topology
+[l7_linkerd] worker 5: Service test-bench/echo-dpumesh now resolves in the held topology
+[l7_linkerd] worker 5: Service test-bench/echo-grpc-dpumesh now resolves in the held topology
+[l7_linkerd] worker 5: Service test-bench/preload-dpumesh now resolves in the held topology
+[l7_linkerd] worker 5: Service linkerd/linkerd-sp-validator now resolves in the held topology
+[l7_linkerd] worker 5: Service test-bench/bench-grpc-dpumesh now resolves in the held topology
+[l7_linkerd] worker 5: Service test-bench/dpumesh-controller now resolves in the held topology
+[l7_linkerd] worker 5: Service test-bench/inject-bench now resolves in the held topology
+[l7_linkerd] worker 5: Service test-bench/bench-dpumesh now resolves in the held topology
+[l7_linkerd] worker 5: Service test-bench/echo-grpc-alt now resolves in the held topology
+[l7_linkerd] worker 5: Service kube-system/metrics-server now resolves in the held topology
+[l7_linkerd] worker 5: Service istio-system/istiod-revision-tag-default now resolves in the held topology
+[l7_linkerd] worker 5: Service linkerd/linkerd-identity now resolves in the held topology
+[l7_linkerd] worker 5: Service test-bench/preload-sock now resolves in the held topology
+[l7_linkerd] worker 5: Service linkerd/linkerd-proxy-injector now resolves in the held topology
+[l7_linkerd] worker 5: Service istio-system/istiod now resolves in the held topology
+[l7_linkerd] worker 5: Service kube-system/kube-dns now resolves in the held topology
+[l7_linkerd] worker 5: Service test-bench/http1-dpumesh now resolves in the held topology
+[l7_linkerd] worker 5: Service linkerd/linkerd-dst now resolves in the held topology
+[l7_linkerd] worker 5: Service linkerd/linkerd-policy-validator now resolves in the held topology
+[l7_linkerd] worker 5: Service test-bench/inject-sock now resolves in the held topology
+[l7_linkerd] worker 5: Service test-bench/plain-bench now resolves in the held topology
+[l7_linkerd] worker 5: Service test-bench/preload-bench now resolves in the held topology
+[l7_linkerd] worker 5: Service test-bench/echo-dpumesh-native now resolves in the held topology
+[l7_linkerd] worker 5: Service test-bench/loopback-dpumesh now resolves in the held topology
+[l7_linkerd] worker 5: Service default/kubernetes now resolves in the held topology
+[l7_linkerd] worker 5: Service test-bench/http1-bench now resolves in the held topology
+[l7_linkerd] worker 5: Service test-bench/verbs-dpumesh now resolves in the held topology
+[l7_linkerd] worker 6: Service istio-system/istiod now resolves in the held topology
+[l7_linkerd] worker 6: Service test-bench/dpumesh-controller now resolves in the held topology
+[l7_linkerd] worker 6: Service test-bench/verbs-dpumesh now resolves in the held topology
+[l7_linkerd] worker 6: Service kube-system/kube-dns now resolves in the held topology
+[l7_linkerd] worker 6: Service linkerd/linkerd-dst now resolves in the held topology
+[l7_linkerd] worker 6: Service test-bench/echo-grpc-dpumesh now resolves in the held topology
+[l7_linkerd] worker 6: Service test-bench/preload-sock now resolves in the held topology
+[l7_linkerd] worker 6: Service kube-system/metrics-server now resolves in the held topology
+[l7_linkerd] worker 6: Service test-bench/inject-bench now resolves in the held topology
+[l7_linkerd] worker 6: Service test-bench/bench-dpumesh now resolves in the held topology
+[l7_linkerd] worker 6: Service linkerd/linkerd-policy-validator now resolves in the held topology
+[l7_linkerd] worker 6: Service test-bench/loopback-dpumesh now resolves in the held topology
+[l7_linkerd] worker 6: Service test-bench/echo-dpumesh-native now resolves in the held topology
+[l7_linkerd] worker 6: Service test-bench/preload-dpumesh now resolves in the held topology
+[l7_linkerd] worker 6: Service linkerd/linkerd-proxy-injector now resolves in the held topology
+[l7_linkerd] worker 6: Service test-bench/echo-dpumesh now resolves in the held topology
+[l7_linkerd] worker 6: Service test-bench/http1-bench now resolves in the held topology
+[l7_linkerd] worker 6: Service test-bench/preload-bench now resolves in the held topology
+[l7_linkerd] worker 6: Service test-bench/plain-sock now resolves in the held topology
+[l7_linkerd] worker 6: Service test-bench/http1-dpumesh now resolves in the held topology
+[l7_linkerd] worker 6: Service linkerd/linkerd-identity now resolves in the held topology
+[l7_linkerd] worker 6: Service test-bench/bench-grpc-dpumesh now resolves in the held topology
+[l7_linkerd] worker 6: Service linkerd/linkerd-sp-validator now resolves in the held topology
+[l7_linkerd] worker 6: Service test-bench/plain-bench now resolves in the held topology
+[l7_linkerd] worker 6: Service test-bench/echo-grpc-alt now resolves in the held topology
+[l7_linkerd] worker 6: Service default/kubernetes now resolves in the held topology
+[l7_linkerd] worker 6: Service test-bench/inject-sock now resolves in the held topology
+[l7_linkerd] worker 6: Service istio-system/istiod-revision-tag-default now resolves in the held topology
+[l7_linkerd] worker 7: Service test-bench/inject-sock now resolves in the held topology
+[l7_linkerd] worker 7: Service istio-system/istiod now resolves in the held topology
+[l7_linkerd] worker 7: Service test-bench/http1-bench now resolves in the held topology
+[l7_linkerd] worker 7: Service test-bench/preload-sock now resolves in the held topology
+[l7_linkerd] worker 7: Service default/kubernetes now resolves in the held topology
+[l7_linkerd] worker 7: Service linkerd/linkerd-policy-validator now resolves in the held topology
+[l7_linkerd] worker 7: Service test-bench/loopback-dpumesh now resolves in the held topology
+[l7_linkerd] worker 7: Service test-bench/inject-bench now resolves in the held topology
+[l7_linkerd] worker 7: Service test-bench/preload-bench now resolves in the held topology
+[l7_linkerd] worker 7: Service test-bench/verbs-dpumesh now resolves in the held topology
+[l7_linkerd] worker 7: Service test-bench/echo-grpc-dpumesh now resolves in the held topology
+[l7_linkerd] worker 7: Service linkerd/linkerd-sp-validator now resolves in the held topology
+[l7_linkerd] worker 7: Service test-bench/bench-dpumesh now resolves in the held topology
+[l7_linkerd] worker 7: Service linkerd/linkerd-dst now resolves in the held topology
+[l7_linkerd] worker 7: Service test-bench/preload-dpumesh now resolves in the held topology
+[l7_linkerd] worker 7: Service test-bench/plain-bench now resolves in the held topology
+[l7_linkerd] worker 7: Service kube-system/metrics-server now resolves in the held topology
+[l7_linkerd] worker 7: Service linkerd/linkerd-proxy-injector now resolves in the held topology
+[l7_linkerd] worker 7: Service test-bench/echo-grpc-alt now resolves in the held topology
+[l7_linkerd] worker 7: Service test-bench/plain-sock now resolves in the held topology
+[l7_linkerd] worker 7: Service linkerd/linkerd-identity now resolves in the held topology
+[l7_linkerd] worker 7: Service istio-system/istiod-revision-tag-default now resolves in the held topology
+[l7_linkerd] worker 7: Service test-bench/dpumesh-controller now resolves in the held topology
+[l7_linkerd] worker 4: Service test-bench/loopback-dpumesh now resolves in the held topology
+[l7_linkerd] worker 4: Service test-bench/verbs-dpumesh now resolves in the held topology
+[l7_linkerd] worker 4: Service test-bench/http1-bench now resolves in the held topology
+[l7_linkerd] worker 4: Service linkerd/linkerd-policy-validator now resolves in the held topology
+[l7_linkerd] worker 4: Service test-bench/bench-dpumesh now resolves in the held topology
+[l7_linkerd] worker 4: Service test-bench/echo-dpumesh-native now resolves in the held topology
+[l7_linkerd] worker 4: Service linkerd/linkerd-dst now resolves in the held topology
+[l7_linkerd] worker 4: Service linkerd/linkerd-proxy-injector now resolves in the held topology
+[l7_linkerd] worker 4: Service test-bench/preload-dpumesh now resolves in the held topology
+[l7_linkerd] worker 4: Service default/kubernetes now resolves in the held topology
+[l7_linkerd] worker 4: Service test-bench/plain-bench now resolves in the held topology
+[l7_linkerd] worker 4: Service test-bench/echo-grpc-alt now resolves in the held topology
+[l7_linkerd] worker 4: Service istio-system/istiod-revision-tag-default now resolves in the held topology
+[l7_linkerd] worker 4: Service kube-system/metrics-server now resolves in the held topology
+[l7_linkerd] worker 4: Service test-bench/bench-grpc-dpumesh now resolves in the held topology
+[l7_linkerd] worker 4: Service test-bench/echo-dpumesh now resolves in the held topology
+[l7_linkerd] worker 4: Service test-bench/inject-bench now resolves in the held topology
+[l7_linkerd] worker 4: Service test-bench/inject-sock now resolves in the held topology
+[l7_linkerd] worker 4: Service test-bench/http1-dpumesh now resolves in the held topology
+[l7_linkerd] worker 4: Service test-bench/plain-sock now resolves in the held topology
+[l7_linkerd] worker 4: Service test-bench/preload-bench now resolves in the held topology
+[l7_linkerd] worker 4: Service test-bench/dpumesh-controller now resolves in the held topology
+[l7_linkerd] worker 4: Service kube-system/kube-dns now resolves in the held topology
+[l7_linkerd] worker 4: Service istio-system/istiod now resolves in the held topology
+[l7_linkerd] worker 4: Service linkerd/linkerd-identity now resolves in the held topology
+[l7_linkerd] worker 4: Service test-bench/preload-sock now resolves in the held topology
+[l7_linkerd] worker 4: Service linkerd/linkerd-sp-validator now resolves in the held topology
+[l7_linkerd] worker 4: Service test-bench/echo-grpc-dpumesh now resolves in the held topology
+corrupted size vs. prev_size while consolidating

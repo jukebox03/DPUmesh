@@ -1,0 +1,2 @@
+cc -O2 -g -Wall -Wextra -fPIC -DDOCA_ALLOW_EXPERIMENTAL_API -Iinclude -I. -Ilinkerd/include -DFLEXIO_ALLOW_EXPERIMENTAL_API -DALLOW_EXPERIMENTAL_API -I/opt/mellanox/flexio/include -I/opt/mellanox/doca/include -I/usr/include/libnl3 -I/opt/mellanox/doca/include -D_GNU_SOURCE -o build/test/peer_wire_lease_test tests/peer_wire_lease_test.c -lrdmacm -libverbs -Wl,-rpath,/usr/local/lib -Wl,-rpath,/home/jukebox/DPUmesh/build/lib -Wl,-rpath,/opt/mellanox/doca/lib/x86_64-linux-gnu -Wl,-rpath,/opt/mellanox/flexio/lib
+peer_wire_lease_test: PASS

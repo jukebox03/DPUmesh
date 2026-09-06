@@ -1,0 +1,8 @@
+[bench_grpc] RUN req=8192 reply=8192 dur=5.0s warmup=200 conns=8 channels=8 transport=dmesh target=echo-dpumesh-native
+[bench_grpc] RUN req=8192 reply=8192 dur=5.0s warmup=200 conns=8 channels=8 transport=dmesh target=echo-dpumesh-native
+[bench_grpc] OPEN req=65536 reply=65536 dur=5.0s warmup=200 conns=8 channels=8 transport=dmesh target=echo-dpumesh-native
+[bench_grpc] OPEN req=65536 reply=65536 dur=5.0s warmup=200 conns=8 channels=8 transport=dmesh target=echo-dpumesh-native
+[bench_grpc] OPEN req=65536 reply=65536 dur=5.0s warmup=200 conns=8 channels=8 transport=dmesh target=echo-dpumesh-native
+[bench_grpc] RUN req=65536 reply=65536 dur=5.0s warmup=200 conns=8 channels=8 transport=dmesh target=echo-dpumesh-native
+[bench_grpc] RUN req=65536 reply=65536 dur=5.0s warmup=200 conns=8 channels=8 transport=dmesh target=echo-dpumesh-native
+[bench_grpc] RUN req=65536 reply=65536 dur=5.0s warmup=200 conns=8 channels=8 transport=dmesh target=echo-dpumesh-native

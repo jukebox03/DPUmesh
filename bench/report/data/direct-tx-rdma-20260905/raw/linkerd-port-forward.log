@@ -1,0 +1,29 @@
+Forwarding from 192.168.100.1:28086 -> 8086
+Forwarding from 192.168.100.1:28087 -> 8090
+Handling connection for 28086
+Handling connection for 28086
+Handling connection for 28087
+Handling connection for 28087
+Handling connection for 28086
+Handling connection for 28086
+Handling connection for 28087
+Handling connection for 28087
+Handling connection for 28086
+Handling connection for 28087
+Handling connection for 28087
+Handling connection for 28086
+Handling connection for 28087
+Handling connection for 28086
+Handling connection for 28086
+Handling connection for 28087
+E0905 21:57:39.613530 3864125 portforward.go:413] "Unhandled Error" err="an error occurred forwarding 28087 -> 8090: error forwarding port 8090 to pod 3634539acf0b23efa1cfc89df230c2ddf4416d7c9e8f35fefa798b99178bf67b, uid : failed to execute portforward in network namespace \"/var/run/netns/cni-665135b6-bc44-9cc8-2c3b-ee9f4d0a5254\": writeto tcp4 127.0.0.1:38336->127.0.0.1:8090: read tcp4 127.0.0.1:38336->127.0.0.1:8090: read: connection reset by peer"
+E0905 21:57:39.613561 3864125 portforward.go:413] "Unhandled Error" err="an error occurred forwarding 28086 -> 8086: error forwarding port 8086 to pod 3634539acf0b23efa1cfc89df230c2ddf4416d7c9e8f35fefa798b99178bf67b, uid : failed to execute portforward in network namespace \"/var/run/netns/cni-665135b6-bc44-9cc8-2c3b-ee9f4d0a5254\": writeto tcp4 127.0.0.1:43486->127.0.0.1:8086: read tcp4 127.0.0.1:43486->127.0.0.1:8086: read: connection reset by peer"
+E0905 21:57:39.613591 3864125 portforward.go:413] "Unhandled Error" err="an error occurred forwarding 28087 -> 8090: error forwarding port 8090 to pod 3634539acf0b23efa1cfc89df230c2ddf4416d7c9e8f35fefa798b99178bf67b, uid : failed to execute portforward in network namespace \"/var/run/netns/cni-665135b6-bc44-9cc8-2c3b-ee9f4d0a5254\": writeto tcp4 127.0.0.1:38314->127.0.0.1:8090: read tcp4 127.0.0.1:38314->127.0.0.1:8090: read: connection reset by peer"
+E0905 21:57:39.613623 3864125 portforward.go:413] "Unhandled Error" err="an error occurred forwarding 28087 -> 8090: error forwarding port 8090 to pod 3634539acf0b23efa1cfc89df230c2ddf4416d7c9e8f35fefa798b99178bf67b, uid : failed to execute portforward in network namespace \"/var/run/netns/cni-665135b6-bc44-9cc8-2c3b-ee9f4d0a5254\": writeto tcp4 127.0.0.1:38316->127.0.0.1:8090: read tcp4 127.0.0.1:38316->127.0.0.1:8090: read: connection reset by peer"
+E0905 21:57:39.613534 3864125 portforward.go:413] "Unhandled Error" err="an error occurred forwarding 28086 -> 8086: error forwarding port 8086 to pod 3634539acf0b23efa1cfc89df230c2ddf4416d7c9e8f35fefa798b99178bf67b, uid : failed to execute portforward in network namespace \"/var/run/netns/cni-665135b6-bc44-9cc8-2c3b-ee9f4d0a5254\": writeto tcp4 127.0.0.1:43434->127.0.0.1:8086: read tcp4 127.0.0.1:43434->127.0.0.1:8086: read: connection reset by peer"
+E0905 21:57:39.613565 3864125 portforward.go:413] "Unhandled Error" err="an error occurred forwarding 28087 -> 8090: error forwarding port 8090 to pod 3634539acf0b23efa1cfc89df230c2ddf4416d7c9e8f35fefa798b99178bf67b, uid : failed to execute portforward in network namespace \"/var/run/netns/cni-665135b6-bc44-9cc8-2c3b-ee9f4d0a5254\": writeto tcp4 127.0.0.1:38306->127.0.0.1:8090: read tcp4 127.0.0.1:38306->127.0.0.1:8090: read: connection reset by peer"
+E0905 21:57:39.613541 3864125 portforward.go:413] "Unhandled Error" err="an error occurred forwarding 28086 -> 8086: error forwarding port 8086 to pod 3634539acf0b23efa1cfc89df230c2ddf4416d7c9e8f35fefa798b99178bf67b, uid : failed to execute portforward in network namespace \"/var/run/netns/cni-665135b6-bc44-9cc8-2c3b-ee9f4d0a5254\": readfrom tcp4 127.0.0.1:43458->127.0.0.1:8086: write tcp4 127.0.0.1:43458->127.0.0.1:8086: write: connection reset by peer"
+E0905 21:57:39.613574 3864125 portforward.go:413] "Unhandled Error" err="an error occurred forwarding 28087 -> 8090: error forwarding port 8090 to pod 3634539acf0b23efa1cfc89df230c2ddf4416d7c9e8f35fefa798b99178bf67b, uid : failed to execute portforward in network namespace \"/var/run/netns/cni-665135b6-bc44-9cc8-2c3b-ee9f4d0a5254\": writeto tcp4 127.0.0.1:38332->127.0.0.1:8090: read tcp4 127.0.0.1:38332->127.0.0.1:8090: read: connection reset by peer"
+E0905 21:57:39.613579 3864125 portforward.go:413] "Unhandled Error" err="an error occurred forwarding 28086 -> 8086: error forwarding port 8086 to pod 3634539acf0b23efa1cfc89df230c2ddf4416d7c9e8f35fefa798b99178bf67b, uid : failed to execute portforward in network namespace \"/var/run/netns/cni-665135b6-bc44-9cc8-2c3b-ee9f4d0a5254\": writeto tcp4 127.0.0.1:43444->127.0.0.1:8086: read tcp4 127.0.0.1:43444->127.0.0.1:8086: read: connection reset by peer"
+E0905 21:57:39.613663 3864125 portforward.go:413] "Unhandled Error" err="an error occurred forwarding 28086 -> 8086: error forwarding port 8086 to pod 3634539acf0b23efa1cfc89df230c2ddf4416d7c9e8f35fefa798b99178bf67b, uid : failed to execute portforward in network namespace \"/var/run/netns/cni-665135b6-bc44-9cc8-2c3b-ee9f4d0a5254\": writeto tcp4 127.0.0.1:43470->127.0.0.1:8086: read tcp4 127.0.0.1:43470->127.0.0.1:8086: read: connection reset by peer"
+error: lost connection to pod

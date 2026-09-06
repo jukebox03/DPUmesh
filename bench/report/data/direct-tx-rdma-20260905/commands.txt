@@ -1,0 +1,40 @@
+Repository baseline: git rev-parse HEAD = 4e43056.
+The user's existing PLAN.md changes were preserved before edits.
+
+Software gates:
+make test DPUMESHD_PYTHON=/opt/dpumesh/venv/bin/python
+cargo test --locked --manifest-path linkerd/rust/Cargo.toml
+cargo test --locked --manifest-path linkerd/port/linkerd2-proxy/Cargo.toml -p dmesh-doca
+ctest --test-dir build/grpc-release --output-on-failure
+ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 ctest --test-dir build/grpc-asan-clang --output-on-failure
+cc -g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer -o /tmp/peer-wire-lease-asan tests/peer_wire_lease_test.c -lrdmacm -libverbs
+/tmp/peer-wire-lease-asan
+
+DPU builds (release rustc 1.90.0, LTO, jemalloc; C debugoptimized):
+./bench/bench.sh build
+Raw logs: direct-dpu-build.log, final-dpu-build.log, vectored-dpu-build.log.
+
+Final measured cases, sequentially (no DPU compiler during measurements):
+bench/report/data/direct-tx-rdma-20260905/deploy_stage.sh before grpc
+python3 bench/report/data/direct-tx-rdma-20260905/run_points.py before-grpc-clean
+bench/report/data/direct-tx-rdma-20260905/deploy_stage.sh after grpc
+python3 bench/report/data/direct-tx-rdma-20260905/run_points.py after-grpc-clean
+bench/report/data/direct-tx-rdma-20260905/deploy_stage.sh before opaque
+python3 bench/report/data/direct-tx-rdma-20260905/run_points.py before-opaque-clean
+bench/report/data/direct-tx-rdma-20260905/deploy_stage.sh after opaque
+python3 bench/report/data/direct-tx-rdma-20260905/run_points.py after-opaque-clean
+python3 bench/report/data/direct-tx-rdma-20260905/summarize.py
+
+Policy and quiescence checks run outside timed performance points:
+bench/report/data/direct-tx-rdma-20260905/check_policy.sh
+bench/report/data/direct-tx-rdma-20260905/arena_quiescence.sh STAGE
+
+RDMA CPU benchmark: rdma_primitive_bench.c compiled with cc -O2 -g -lrdmacm -libverbs.
+Original source selected using -DPEER_RDMA_SOURCE='"raw/rdma-before/peer_wire_rdma.c"'.
+Changed source is the default. On BlueField both runs were pinned with taskset -c 10.
+This uses mock verbs, not physical fabric traffic. Actual peer_wire_test reports RDMA skipped.
+
+Post-campaign diagnostics (excluded from throughput table):
+bash bench/report/data/direct-tx-rdma-20260905/build_arena_offsets.sh
+bash bench/report/data/direct-tx-rdma-20260905/commit_shape.sh STAGE
+bash bench/report/data/direct-tx-rdma-20260905/restore_native.sh
