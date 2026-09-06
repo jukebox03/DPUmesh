@@ -5,10 +5,12 @@
  * Usage: dpumesh_dpu -p <pci-addr> -r <rep-pci-addr>
  */
 
+#include <execinfo.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include <doca_dev.h>
 #include <doca_log.h>
@@ -26,8 +28,43 @@
 
 DOCA_LOG_REGISTER(DPU_MAIN);
 
+/* The process log is the only record of how this process ended: a fatal
+ * signal leaves its frames here before the default action runs, and a
+ * termination request or an exit call leaves a line. */
+static void trace_fatal_signal(int sig)
+{
+    void *frames[64];
+    int n = backtrace(frames, 64);
+    char line[64];
+    int len = snprintf(line, sizeof(line), "dpumesh_dpu: fatal signal %d\n", sig);
+    if (len > 0)
+        (void)!write(STDERR_FILENO, line, (size_t)len);
+    backtrace_symbols_fd(frames, n, STDERR_FILENO);
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+static void trace_exit(void)
+{
+    static const char line[] = "dpumesh_dpu: exit() called\n";
+    (void)!write(STDERR_FILENO, line, sizeof(line) - 1);
+}
+
+static void install_exit_traces(void)
+{
+    struct sigaction sa = {0};
+    sa.sa_handler = trace_fatal_signal;
+    sa.sa_flags = SA_RESETHAND | SA_NODEFER;
+    sigemptyset(&sa.sa_mask);
+    const int fatal[] = {SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT, SIGTERM, SIGHUP, SIGINT};
+    for (size_t i = 0; i < sizeof(fatal) / sizeof(fatal[0]); i++)
+        sigaction(fatal[i], &sa, NULL);
+    atexit(trace_exit);
+}
+
 int main(int argc, char **argv)
 {
+    install_exit_traces();
     /* A write to a socket whose peer has gone must return EPIPE, not end the
      * process. The embedded Rust proxy is a static library, so the runtime
      * start-up that would ignore SIGPIPE never runs; do it here, before
