@@ -1,0 +1,118 @@
+{
+  "arm": "lean2",
+  "protocol": "grpc",
+  "size": 64,
+  "mode": "matched",
+  "kind": "clean",
+  "rep": 1,
+  "command": "OPEN 64 64 8 8 200 20000 const",
+  "elapsed": 2.3371560169616714,
+  "cpu_before": {
+    "clock_hz": 100,
+    "workers": [
+      {
+        "tid": 3492978,
+        "pid": 3492825,
+        "name": "dmesh-w0",
+        "ticks": 8511
+      },
+      {
+        "tid": 3492980,
+        "pid": 3492825,
+        "name": "dmesh-w1",
+        "ticks": 8758
+      },
+      {
+        "tid": 3492982,
+        "pid": 3492825,
+        "name": "dmesh-w2",
+        "ticks": 6622
+      },
+      {
+        "tid": 3492984,
+        "pid": 3492825,
+        "name": "dmesh-w3",
+        "ticks": 8818
+      },
+      {
+        "tid": 3492986,
+        "pid": 3492825,
+        "name": "dmesh-w4",
+        "ticks": 8750
+      },
+      {
+        "tid": 3492988,
+        "pid": 3492825,
+        "name": "dmesh-w5",
+        "ticks": 8504
+      },
+      {
+        "tid": 3492990,
+        "pid": 3492825,
+        "name": "dmesh-w6",
+        "ticks": 8759
+      },
+      {
+        "tid": 3492992,
+        "pid": 3492825,
+        "name": "dmesh-w7",
+        "ticks": 8781
+      }
+    ]
+  },
+  "cpu_after": {
+    "clock_hz": 100,
+    "workers": [
+      {
+        "tid": 3492978,
+        "pid": 3492825,
+        "name": "dmesh-w0",
+        "ticks": 8652
+      },
+      {
+        "tid": 3492980,
+        "pid": 3492825,
+        "name": "dmesh-w1",
+        "ticks": 8908
+      },
+      {
+        "tid": 3492982,
+        "pid": 3492825,
+        "name": "dmesh-w2",
+        "ticks": 6724
+      },
+      {
+        "tid": 3492984,
+        "pid": 3492825,
+        "name": "dmesh-w3",
+        "ticks": 8970
+      },
+      {
+        "tid": 3492986,
+        "pid": 3492825,
+        "name": "dmesh-w4",
+        "ticks": 8900
+      },
+      {
+        "tid": 3492988,
+        "pid": 3492825,
+        "name": "dmesh-w5",
+        "ticks": 8647
+      },
+      {
+        "tid": 3492990,
+        "pid": 3492825,
+        "name": "dmesh-w6",
+        "ticks": 8909
+      },
+      {
+        "tid": 3492992,
+        "pid": 3492825,
+        "name": "dmesh-w7",
+        "ticks": 8932
+      }
+    ]
+  },
+  "reply": "",
+  "valid": false
+}

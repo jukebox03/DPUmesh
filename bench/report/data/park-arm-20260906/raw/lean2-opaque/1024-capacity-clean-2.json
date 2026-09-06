@@ -1,0 +1,118 @@
+{
+  "arm": "lean2",
+  "protocol": "opaque",
+  "size": 1024,
+  "mode": "capacity",
+  "kind": "clean",
+  "rep": 2,
+  "command": "RUN 1024 1024 8 8 200 8",
+  "elapsed": 8.200399706955068,
+  "cpu_before": {
+    "clock_hz": 100,
+    "workers": [
+      {
+        "tid": 3527309,
+        "pid": 3527154,
+        "name": "dmesh-w0",
+        "ticks": 1353
+      },
+      {
+        "tid": 3527311,
+        "pid": 3527154,
+        "name": "dmesh-w1",
+        "ticks": 1405
+      },
+      {
+        "tid": 3527313,
+        "pid": 3527154,
+        "name": "dmesh-w2",
+        "ticks": 1401
+      },
+      {
+        "tid": 3527315,
+        "pid": 3527154,
+        "name": "dmesh-w3",
+        "ticks": 1388
+      },
+      {
+        "tid": 3527317,
+        "pid": 3527154,
+        "name": "dmesh-w4",
+        "ticks": 1331
+      },
+      {
+        "tid": 3527319,
+        "pid": 3527154,
+        "name": "dmesh-w5",
+        "ticks": 1278
+      },
+      {
+        "tid": 3527321,
+        "pid": 3527154,
+        "name": "dmesh-w6",
+        "ticks": 1356
+      },
+      {
+        "tid": 3527323,
+        "pid": 3527154,
+        "name": "dmesh-w7",
+        "ticks": 1367
+      }
+    ]
+  },
+  "cpu_after": {
+    "clock_hz": 100,
+    "workers": [
+      {
+        "tid": 3527309,
+        "pid": 3527154,
+        "name": "dmesh-w0",
+        "ticks": 1656
+      },
+      {
+        "tid": 3527311,
+        "pid": 3527154,
+        "name": "dmesh-w1",
+        "ticks": 1724
+      },
+      {
+        "tid": 3527313,
+        "pid": 3527154,
+        "name": "dmesh-w2",
+        "ticks": 1722
+      },
+      {
+        "tid": 3527315,
+        "pid": 3527154,
+        "name": "dmesh-w3",
+        "ticks": 1706
+      },
+      {
+        "tid": 3527317,
+        "pid": 3527154,
+        "name": "dmesh-w4",
+        "ticks": 1636
+      },
+      {
+        "tid": 3527319,
+        "pid": 3527154,
+        "name": "dmesh-w5",
+        "ticks": 1562
+      },
+      {
+        "tid": 3527321,
+        "pid": 3527154,
+        "name": "dmesh-w6",
+        "ticks": 1653
+      },
+      {
+        "tid": 3527323,
+        "pid": 3527154,
+        "name": "dmesh-w7",
+        "ticks": 1682
+      }
+    ]
+  },
+  "reply": "OK mrps=0.125647 gbps=2.0908 req_gbps=1.0454 resp_gbps=1.0454 p50=467.00 p95=923.00 p99=1149.00 p999=1633.00 p9999=5304.00 avg=505.82 min=76.58 max=15869.36 rcnt=999362 scheduled=1001026 pending=64 fail=0 conc=8 threads=8 reqsz=1024 repsz=1024 reqframe=1040 respframe=1040 durs=8.000 offered_mrps=0.125647 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=79 rets=79 recyc=1956 waits=0 pads=1963 reorder=0 dist=0:1000962\n",
+  "valid": true
+}

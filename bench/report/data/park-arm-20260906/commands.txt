@@ -1,0 +1,33 @@
+Working directory: /home/jukebox/DPUmesh. Credentials are read from .env in memory only.
+
+Diagnosis (lean, syscall profile; rig restored afterwards):
+python3 bench/report/data/park-arm-20260906/diag.py prepare|deploy|trace 64|trace 65536|restore
+  raw/strace-{64,65536}.txt (perf trace -s), raw/clean-*.json
+  the tracepoint capture in diag.py failed (arm64 has no epoll_wait tracepoint);
+  campaign.py syscalls fixed the event list.
+
+lean2 build and first A/B (lean vs lean2):
+bash bench/bench.sh build                       -> raw/dpu-build.log
+bash bench/report/data/park-arm-20260906/run_matrix.sh   -> raw/matrix.log
+  ended at lean2 64 B matched: the lean2 runtime exited silently
+  (raw/lean2-grpc/dpu-log-died.txt). lean2 64 KiB capacity reps 1-3 were taken while
+  cargo test/check ran on rapids4 and are set aside as *.json.contaminated.
+
+lean3 build and resumed A/B (lean2 completion, lean3, opaque, lean re-baseline, restore):
+bash bench/bench.sh build                       -> raw/dpu-build-lean3.log
+bash bench/report/data/park-arm-20260906/run_matrix3.sh  -> raw/matrix.log (after "=== MATRIX3")
+
+Aggregation (local, after the rig work):
+python3 bench/report/data/park-arm-20260906/summarize.py
+python3 bench/report/data/park-arm-20260906/compare.py      (lean vs lean2)
+python3 bench/report/data/park-arm-20260906/syscalls.py     -> syscalls.csv
+comparison3.csv and the three-arm tables were produced with the inline scripts in the
+session transcript; plot.py renders comparison.png from comparison3.csv.
+
+Software gates for the lean3 tree (host, run before the rig work):
+cargo test --locked --manifest-path linkerd/port/linkerd2-proxy/Cargo.toml -p dmesh-doca   35/35
+cargo test --locked --manifest-path linkerd/rust/Cargo.toml                             41/41
+cargo check --locked --manifest-path linkerd/rust/Cargo.toml
+make build/test/l7_abi_contract_test && ./build/test/l7_abi_contract_test             PASS
+
+Large raw texts and perf data are gzip-compressed; summarize.py reads both forms.

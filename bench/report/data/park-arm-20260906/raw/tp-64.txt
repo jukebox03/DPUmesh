@@ -1,0 +1,13 @@
+event syntax error: 'syscalls:sys_enter_epoll_wait'
+                     \___ unknown tracepoint
+
+Error:	File /sys/kernel/tracing/events/syscalls/sys_enter_epoll_wait not found.
+Hint:	Perhaps this kernel misses some CONFIG_ setting to enable this feature?.
+
+Run 'perf list' for a list of valid events
+
+ Usage: perf record [<options>] [<command>]
+    or: perf record [<options>] -- <command> [<options>]
+
+    -e, --event <event>   event selector. use 'perf list' to list available events
+failed to open /tmp/park-arm-20260906/tp-64.data: No such file or directory

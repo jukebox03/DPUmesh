@@ -1,0 +1,33 @@
+prepared
+deployment.apps/bench-dpumesh-native scaled
+deployment.apps/echo-dpumesh-native scaled
+pod/bench-dpumesh-native-68487f64cf-w2dpq condition met
+pod/echo-dpumesh-native-56cbc46f79-sjkwd condition met
+deployment.apps/echo-dpumesh-native configured
+service/echo-dpumesh-native configured
+deployment.apps/bench-dpumesh-native configured
+Waiting for deployment "echo-dpumesh-native" rollout to finish: 0 of 1 updated replicas are available...
+deployment "echo-dpumesh-native" successfully rolled out
+Waiting for deployment "bench-dpumesh-native" rollout to finish: 0 of 1 updated replicas are available...
+deployment "bench-dpumesh-native" successfully rolled out
+WARMUP lean grpc 1 OK mrps=0.035893 gbps=0.0459 req_gbps=0.0230 resp_gbps=0.0230 p50=1796.00 p95=2390.00 p99=2639.00 p999=4334.00 p9999=8558.00 avg=1782.70 min=531.14 max=9035.18 rcnt=116319 scheduled=117983 pending=0 fail=0 conc=8 threads=8 channels=8 reqsz=64 repsz=64 reqframe=80 respframe=80 durs=3.000 offered_mrps=0.035893 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const grabs=8 rets=3 recyc=16 waits=0 pads=15 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA
+
+strace-64 OK mrps=0.033500 gbps=0.0429 req_gbps=0.0214 resp_gbps=0.0214 p50=1890.00 p95=2510.00 p99=4484.00 p9
+tp-64 OK mrps=0.035723 gbps=0.0457 req_gbps=0.0229 resp_gbps=0.0229 p50=1791.00 p95=2352.00 p99=2762.00 p9
+clean OK mrps=0.036228 gbps=0.0464 req_gbps=0.0232 resp_gbps=0.0232 p50=1787.00 p95=23
+strace-65536 OK mrps=0.011708 gbps=12.2799 req_gbps=6.1400 resp_gbps=6.1400 p50=5327.00 p95=7461.00 p99=9078.00 p
+tp-65536 OK mrps=0.013181 gbps=13.8249 req_gbps=6.9124 resp_gbps=6.9124 p50=4835.00 p95=6255.00 p99=7356.00 p
+clean OK mrps=0.013155 gbps=13.7974 req_gbps=6.8987 resp_gbps=6.8987 p50=4861.00 p95=6
+deployment.apps/bench-dpumesh-native scaled
+deployment.apps/echo-dpumesh-native scaled
+pod/bench-dpumesh-native-69b7dcdc89-px5jt condition met
+pod/echo-dpumesh-native-b5d6dcf9b-d2f7l condition met
+deployment.apps/bench-dpumesh-native configured
+deployment.apps/echo-dpumesh-native configured
+service/echo-dpumesh-native configured
+Waiting for deployment "echo-dpumesh-native" rollout to finish: 0 of 1 updated replicas are available...
+deployment "echo-dpumesh-native" successfully rolled out
+deployment "bench-dpumesh-native" successfully rolled out
+Restored original native workload templates, Service and direct binary. OK mrps=0.179883 gbps=0.2303 req_gbps=0.1151 resp_gbps=0.1151 p50=386.00 p95=584.00 p99=856.00 p999=1067.00 p9999=1832.00 avg=353.68 min=61.44 max=2802.87 rcnt=538554 scheduled=539417 pending=63 fail=0 conc=8 threads=8 reqsz=64 repsz=64 reqframe=80 respframe=80 durs=3.000 offered_mrps=0.179883 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=21 rets=21 recyc=80 waits=0 pads=38 reorder=0 dist=1:539354
+
+diag rc=0

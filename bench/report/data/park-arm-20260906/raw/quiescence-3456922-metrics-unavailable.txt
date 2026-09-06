@@ -1,0 +1,1 @@
+Initial L4 runtime has no Linkerd admin metrics listener. Arena is checked separately.

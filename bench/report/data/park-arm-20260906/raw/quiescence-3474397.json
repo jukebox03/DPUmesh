@@ -1,0 +1,15 @@
+{
+  "dmesh_sessions_active": [],
+  "dmesh_registrations_pending": [],
+  "dmesh_tasks_live": [],
+  "dmesh_worker_completion_queue_depth": [],
+  "dmesh_worker_cross_queue_depth": [],
+  "dmesh_worker_dma_tasks_inflight": [],
+  "dmesh_worker_dma_retry_batches": [],
+  "dmesh_worker_dma_stalled": [],
+  "dmesh_worker_stalled_connections": [],
+  "dmesh_worker_emit_pending": [],
+  "dmesh_worker_ack_release_depth": [],
+  "dmesh_worker_ack_retry_pending": [],
+  "dmesh_worker_remote_fin_pending": []
+}

@@ -1,0 +1,361 @@
+{
+    "apiVersion": "v1",
+    "items": [
+        {
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {
+                "annotations": {
+                    "config.linkerd.io/skip-inbound-ports": "9091,9092"
+                },
+                "creationTimestamp": "2026-09-06T12:13:01Z",
+                "generateName": "bench-dpumesh-native-744f68bbf-",
+                "labels": {
+                    "app": "bench-dpumesh-native",
+                    "linkerd.io/control-plane-ns": "linkerd",
+                    "pod-template-hash": "744f68bbf"
+                },
+                "name": "bench-dpumesh-native-744f68bbf-4w4gn",
+                "namespace": "test-bench",
+                "ownerReferences": [
+                    {
+                        "apiVersion": "apps/v1",
+                        "blockOwnerDeletion": true,
+                        "controller": true,
+                        "kind": "ReplicaSet",
+                        "name": "bench-dpumesh-native-744f68bbf",
+                        "uid": "78bfb306-ab33-40d1-a289-ff8d0e99956d"
+                    }
+                ],
+                "resourceVersion": "39473381",
+                "uid": "0cbcbc58-7e56-4e43-b5a3-367b003cafa4"
+            },
+            "spec": {
+                "automountServiceAccountToken": false,
+                "containers": [
+                    {
+                        "command": [
+                            "/usr/bin/taskset",
+                            "-c",
+                            "4-9",
+                            "/usr/local/bin/bench_dpumesh"
+                        ],
+                        "env": [
+                            {
+                                "name": "BENCH_DST_SERVICE",
+                                "value": "echo-dpumesh-native"
+                            },
+                            {
+                                "name": "DPUMESH_RINGS_PER_POD",
+                                "value": "8"
+                            }
+                        ],
+                        "image": "docker.io/bench/bench-dpumesh:native",
+                        "imagePullPolicy": "Never",
+                        "name": "app",
+                        "resources": {
+                            "limits": {
+                                "dpumesh.io/channel": "1",
+                                "memory": "256Mi"
+                            },
+                            "requests": {
+                                "cpu": "10m",
+                                "dpumesh.io/channel": "1",
+                                "memory": "32Mi"
+                            }
+                        },
+                        "securityContext": {
+                            "allowPrivilegeEscalation": false,
+                            "capabilities": {
+                                "drop": [
+                                    "ALL"
+                                ]
+                            },
+                            "readOnlyRootFilesystem": true
+                        },
+                        "terminationMessagePath": "/dev/termination-log",
+                        "terminationMessagePolicy": "File"
+                    }
+                ],
+                "dnsPolicy": "ClusterFirst",
+                "enableServiceLinks": true,
+                "nodeName": "rapids4",
+                "preemptionPolicy": "PreemptLowerPriority",
+                "priority": 0,
+                "restartPolicy": "Always",
+                "schedulerName": "default-scheduler",
+                "securityContext": {
+                    "runAsGroup": 65532,
+                    "runAsNonRoot": true,
+                    "runAsUser": 65532,
+                    "seccompProfile": {
+                        "type": "RuntimeDefault"
+                    }
+                },
+                "serviceAccount": "default",
+                "serviceAccountName": "default",
+                "terminationGracePeriodSeconds": 30,
+                "tolerations": [
+                    {
+                        "effect": "NoExecute",
+                        "key": "node.kubernetes.io/not-ready",
+                        "operator": "Exists",
+                        "tolerationSeconds": 300
+                    },
+                    {
+                        "effect": "NoExecute",
+                        "key": "node.kubernetes.io/unreachable",
+                        "operator": "Exists",
+                        "tolerationSeconds": 300
+                    }
+                ]
+            },
+            "status": {
+                "conditions": [
+                    {
+                        "lastProbeTime": null,
+                        "lastTransitionTime": "2026-09-06T12:13:02Z",
+                        "status": "True",
+                        "type": "PodReadyToStartContainers"
+                    },
+                    {
+                        "lastProbeTime": null,
+                        "lastTransitionTime": "2026-09-06T12:13:01Z",
+                        "status": "True",
+                        "type": "Initialized"
+                    },
+                    {
+                        "lastProbeTime": null,
+                        "lastTransitionTime": "2026-09-06T12:13:02Z",
+                        "status": "True",
+                        "type": "Ready"
+                    },
+                    {
+                        "lastProbeTime": null,
+                        "lastTransitionTime": "2026-09-06T12:13:02Z",
+                        "status": "True",
+                        "type": "ContainersReady"
+                    },
+                    {
+                        "lastProbeTime": null,
+                        "lastTransitionTime": "2026-09-06T12:13:01Z",
+                        "status": "True",
+                        "type": "PodScheduled"
+                    }
+                ],
+                "containerStatuses": [
+                    {
+                        "containerID": "containerd://1667c8450fad942ae80c98aa226c443e2daa721301f79ecb9522e3e9c71471b3",
+                        "image": "docker.io/bench/bench-dpumesh:native",
+                        "imageID": "sha256:a953df667b3d6b553c729efa467103a16c0d3877954f373bd48fdd8d264042d7",
+                        "lastState": {},
+                        "name": "app",
+                        "ready": true,
+                        "restartCount": 0,
+                        "started": true,
+                        "state": {
+                            "running": {
+                                "startedAt": "2026-09-06T12:13:01Z"
+                            }
+                        }
+                    }
+                ],
+                "hostIP": "147.46.78.169",
+                "hostIPs": [
+                    {
+                        "ip": "147.46.78.169"
+                    }
+                ],
+                "phase": "Running",
+                "podIP": "10.244.0.127",
+                "podIPs": [
+                    {
+                        "ip": "10.244.0.127"
+                    }
+                ],
+                "qosClass": "Burstable",
+                "startTime": "2026-09-06T12:13:01Z"
+            }
+        },
+        {
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {
+                "annotations": {
+                    "config.linkerd.io/skip-inbound-ports": "9091,9092"
+                },
+                "creationTimestamp": "2026-09-06T12:13:00Z",
+                "generateName": "echo-dpumesh-native-7d4ccbf99d-",
+                "labels": {
+                    "app": "echo-dpumesh-native",
+                    "linkerd.io/control-plane-ns": "linkerd",
+                    "pod-template-hash": "7d4ccbf99d"
+                },
+                "name": "echo-dpumesh-native-7d4ccbf99d-q5lnt",
+                "namespace": "test-bench",
+                "ownerReferences": [
+                    {
+                        "apiVersion": "apps/v1",
+                        "blockOwnerDeletion": true,
+                        "controller": true,
+                        "kind": "ReplicaSet",
+                        "name": "echo-dpumesh-native-7d4ccbf99d",
+                        "uid": "8f4fa899-9f7e-451e-8c6d-ba2f25c929b5"
+                    }
+                ],
+                "resourceVersion": "39473377",
+                "uid": "f55b0c67-ad08-4524-a47f-fc39d1ea7e31"
+            },
+            "spec": {
+                "automountServiceAccountToken": false,
+                "containers": [
+                    {
+                        "command": [
+                            "/usr/bin/taskset",
+                            "-c",
+                            "10-17",
+                            "/usr/local/bin/echo_dpumesh"
+                        ],
+                        "env": [
+                            {
+                                "name": "DPUMESH_SERVICE",
+                                "value": "echo-dpumesh-native"
+                            },
+                            {
+                                "name": "DPUMESH_RINGS_PER_POD",
+                                "value": "8"
+                            }
+                        ],
+                        "image": "docker.io/bench/echo-dpumesh:native",
+                        "imagePullPolicy": "Never",
+                        "name": "app",
+                        "resources": {
+                            "limits": {
+                                "dpumesh.io/channel": "1",
+                                "memory": "256Mi"
+                            },
+                            "requests": {
+                                "cpu": "10m",
+                                "dpumesh.io/channel": "1",
+                                "memory": "32Mi"
+                            }
+                        },
+                        "securityContext": {
+                            "allowPrivilegeEscalation": false,
+                            "capabilities": {
+                                "drop": [
+                                    "ALL"
+                                ]
+                            },
+                            "readOnlyRootFilesystem": true
+                        },
+                        "terminationMessagePath": "/dev/termination-log",
+                        "terminationMessagePolicy": "File"
+                    }
+                ],
+                "dnsPolicy": "ClusterFirst",
+                "enableServiceLinks": true,
+                "nodeName": "rapids4",
+                "preemptionPolicy": "PreemptLowerPriority",
+                "priority": 0,
+                "restartPolicy": "Always",
+                "schedulerName": "default-scheduler",
+                "securityContext": {
+                    "runAsGroup": 65532,
+                    "runAsNonRoot": true,
+                    "runAsUser": 65532,
+                    "seccompProfile": {
+                        "type": "RuntimeDefault"
+                    }
+                },
+                "serviceAccount": "default",
+                "serviceAccountName": "default",
+                "terminationGracePeriodSeconds": 30,
+                "tolerations": [
+                    {
+                        "effect": "NoExecute",
+                        "key": "node.kubernetes.io/not-ready",
+                        "operator": "Exists",
+                        "tolerationSeconds": 300
+                    },
+                    {
+                        "effect": "NoExecute",
+                        "key": "node.kubernetes.io/unreachable",
+                        "operator": "Exists",
+                        "tolerationSeconds": 300
+                    }
+                ]
+            },
+            "status": {
+                "conditions": [
+                    {
+                        "lastProbeTime": null,
+                        "lastTransitionTime": "2026-09-06T12:13:02Z",
+                        "status": "True",
+                        "type": "PodReadyToStartContainers"
+                    },
+                    {
+                        "lastProbeTime": null,
+                        "lastTransitionTime": "2026-09-06T12:13:00Z",
+                        "status": "True",
+                        "type": "Initialized"
+                    },
+                    {
+                        "lastProbeTime": null,
+                        "lastTransitionTime": "2026-09-06T12:13:02Z",
+                        "status": "True",
+                        "type": "Ready"
+                    },
+                    {
+                        "lastProbeTime": null,
+                        "lastTransitionTime": "2026-09-06T12:13:02Z",
+                        "status": "True",
+                        "type": "ContainersReady"
+                    },
+                    {
+                        "lastProbeTime": null,
+                        "lastTransitionTime": "2026-09-06T12:13:00Z",
+                        "status": "True",
+                        "type": "PodScheduled"
+                    }
+                ],
+                "containerStatuses": [
+                    {
+                        "containerID": "containerd://7f942c2d8c9cca8d38a83a91aa4b4839656fc611858ef1b81cc33c603bc26007",
+                        "image": "docker.io/bench/echo-dpumesh:native",
+                        "imageID": "sha256:79a760a11b849b7f9cb7ff68ddcebd7e9aefeb7b342cade394d16dd4b0405972",
+                        "lastState": {},
+                        "name": "app",
+                        "ready": true,
+                        "restartCount": 0,
+                        "started": true,
+                        "state": {
+                            "running": {
+                                "startedAt": "2026-09-06T12:13:01Z"
+                            }
+                        }
+                    }
+                ],
+                "hostIP": "147.46.78.169",
+                "hostIPs": [
+                    {
+                        "ip": "147.46.78.169"
+                    }
+                ],
+                "phase": "Running",
+                "podIP": "10.244.0.126",
+                "podIPs": [
+                    {
+                        "ip": "10.244.0.126"
+                    }
+                ],
+                "qosClass": "Burstable",
+                "startTime": "2026-09-06T12:13:00Z"
+            }
+        }
+    ],
+    "kind": "List",
+    "metadata": {
+        "resourceVersion": ""
+    }
+}

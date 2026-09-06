@@ -1,0 +1,16 @@
+[New LWP 3456925]
+[New LWP 3456926]
+[New LWP 3456929]
+[New LWP 3456930]
+[New LWP 3456931]
+[New LWP 3456932]
+[New LWP 3456933]
+[New LWP 3456934]
+[New LWP 3456935]
+[New LWP 3456936]
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/aarch64-linux-gnu/libthread_db.so.1".
+0x0000ffff9841a03c in __GI_epoll_pwait (epfd=epfd@entry=92, events=events@entry=0xffffcdb96298, maxevents=maxevents@entry=2, timeout=timeout@entry=1, set=set@entry=0x0) at ../sysdeps/unix/sysv/linux/epoll_pwait.c:40
+40	../sysdeps/unix/sysv/linux/epoll_pwait.c: No such file or directory.
+ARENA_QUIESCENCE {"free_total": 1024, "live_chunks": 0, "pool_chunks": 1024, "shared_free": 1024, "thread_magazines": {}}
+[Inferior 1 (process 3456922) detached]

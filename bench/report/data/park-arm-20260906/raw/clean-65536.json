@@ -1,0 +1,109 @@
+{
+  "reply": "OK mrps=0.013155 gbps=13.7974 req_gbps=6.8987 resp_gbps=6.8987 p50=4861.00 p95=6210.00 p99=7190.00 p999=9808.00 p9999=12437.00 avg=4864.34 min=1811.13 max=13179.45 rcnt=107542 scheduled=109206 pending=0 fail=0 conc=8 threads=8 channels=8 reqsz=65536 repsz=65536 reqframe=65552 respframe=65552 durs=8.000 offered_mrps=0.013155 drops=0 overflow=0 worker_fail=0 reorder=0 mode=closed arr=const grabs=1932 rets=1924 recyc=13692 waits=0 pads=13573 credit_hold_dropped=0 eq_budget_exhausted=0 dist=NA\n",
+  "cpu_before": {
+    "clock_hz": 100,
+    "workers": [
+      {
+        "tid": 3472199,
+        "pid": 3472082,
+        "name": "dmesh-w0",
+        "ticks": 5214
+      },
+      {
+        "tid": 3472201,
+        "pid": 3472082,
+        "name": "dmesh-w1",
+        "ticks": 5349
+      },
+      {
+        "tid": 3472203,
+        "pid": 3472082,
+        "name": "dmesh-w2",
+        "ticks": 5379
+      },
+      {
+        "tid": 3472205,
+        "pid": 3472082,
+        "name": "dmesh-w3",
+        "ticks": 5385
+      },
+      {
+        "tid": 3472207,
+        "pid": 3472082,
+        "name": "dmesh-w4",
+        "ticks": 5353
+      },
+      {
+        "tid": 3472209,
+        "pid": 3472082,
+        "name": "dmesh-w5",
+        "ticks": 5193
+      },
+      {
+        "tid": 3472230,
+        "pid": 3472082,
+        "name": "dmesh-w6",
+        "ticks": 5332
+      },
+      {
+        "tid": 3472234,
+        "pid": 3472082,
+        "name": "dmesh-w7",
+        "ticks": 5370
+      }
+    ]
+  },
+  "cpu_after": {
+    "clock_hz": 100,
+    "workers": [
+      {
+        "tid": 3472199,
+        "pid": 3472082,
+        "name": "dmesh-w0",
+        "ticks": 6013
+      },
+      {
+        "tid": 3472201,
+        "pid": 3472082,
+        "name": "dmesh-w1",
+        "ticks": 6150
+      },
+      {
+        "tid": 3472203,
+        "pid": 3472082,
+        "name": "dmesh-w2",
+        "ticks": 6183
+      },
+      {
+        "tid": 3472205,
+        "pid": 3472082,
+        "name": "dmesh-w3",
+        "ticks": 6188
+      },
+      {
+        "tid": 3472207,
+        "pid": 3472082,
+        "name": "dmesh-w4",
+        "ticks": 6154
+      },
+      {
+        "tid": 3472209,
+        "pid": 3472082,
+        "name": "dmesh-w5",
+        "ticks": 5986
+      },
+      {
+        "tid": 3472230,
+        "pid": 3472082,
+        "name": "dmesh-w6",
+        "ticks": 6139
+      },
+      {
+        "tid": 3472234,
+        "pid": 3472082,
+        "name": "dmesh-w7",
+        "ticks": 6170
+      }
+    ]
+  }
+}

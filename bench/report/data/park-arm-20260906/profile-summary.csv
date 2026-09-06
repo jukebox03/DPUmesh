@@ -1,0 +1,5 @@
+arm,protocol,size,mode,rep,copy_all_layers,atomic_helpers_all_layers,kernel,other,allocator,runtime,reported_sum
+lean,grpc,64,capacity,1,3.1,9.72,11.57,67.44,2.25,5.7,99.78
+lean,grpc,65536,capacity,1,6.04,10.28,5.97,68.35,2.84,5.73,99.21
+lean3,grpc,64,capacity,1,3.13,9.65,11.46,67.93,2.29,5.24,99.7
+lean3,grpc,65536,capacity,1,5.77,10.3,6.01,68.85,3.2,5.21,99.34

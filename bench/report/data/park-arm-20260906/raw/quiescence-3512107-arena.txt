@@ -1,0 +1,24 @@
+[New LWP 3512112]
+[New LWP 3512113]
+[New LWP 3512262]
+[New LWP 3512263]
+[New LWP 3512264]
+[New LWP 3512265]
+[New LWP 3512266]
+[New LWP 3512267]
+[New LWP 3512268]
+[New LWP 3512269]
+[New LWP 3512270]
+[New LWP 3512271]
+[New LWP 3512272]
+[New LWP 3512273]
+[New LWP 3512274]
+[New LWP 3512275]
+[New LWP 3512276]
+[New LWP 3512277]
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/aarch64-linux-gnu/libthread_db.so.1".
+0x0000ffff9dbea03c in __GI_epoll_pwait (epfd=epfd@entry=158, events=events@entry=0xffffe5dc2068, maxevents=maxevents@entry=2, timeout=timeout@entry=1, set=set@entry=0x0) at ../sysdeps/unix/sysv/linux/epoll_pwait.c:40
+40	../sysdeps/unix/sysv/linux/epoll_pwait.c: No such file or directory.
+ARENA_QUIESCENCE {"free_total": 1024, "live_chunks": 0, "pool_chunks": 1024, "shared_free": 512, "thread_magazines": {"3512262": 64, "3512264": 64, "3512266": 64, "3512268": 64, "3512270": 64, "3512272": 64, "3512274": 64, "3512276": 64}}
+[Inferior 1 (process 3512107) detached]

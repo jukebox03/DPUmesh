@@ -1,0 +1,124 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-dpumesh-native
+  namespace: test-bench
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: echo-dpumesh-native
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      annotations:
+        config.linkerd.io/skip-inbound-ports: 9091,9092
+      labels:
+        app: echo-dpumesh-native
+        linkerd.io/control-plane-ns: linkerd
+    spec:
+      automountServiceAccountToken: false
+      containers:
+      - command:
+        - /usr/bin/taskset
+        - -c
+        - 10-17
+        - /usr/local/bin/echo_dpumesh
+        env:
+        - name: DPUMESH_SERVICE
+          value: echo-dpumesh-native
+        - name: DPUMESH_RINGS_PER_POD
+          value: '8'
+        image: docker.io/bench/echo-dpumesh:native
+        imagePullPolicy: Never
+        name: app
+        resources:
+          limits:
+            dpumesh.io/channel: 1
+            memory: 256Mi
+          requests:
+            cpu: 10m
+            dpumesh.io/channel: 1
+            memory: 32Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+      securityContext:
+        runAsGroup: 65532
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-dpumesh-native
+  namespace: test-bench
+spec:
+  ports:
+  - name: dmesh
+    port: 9092
+    targetPort: 9092
+  selector:
+    app: echo-dpumesh-native
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bench-dpumesh-native
+  namespace: test-bench
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: bench-dpumesh-native
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      annotations:
+        config.linkerd.io/skip-inbound-ports: 9091,9092
+      labels:
+        app: bench-dpumesh-native
+        linkerd.io/control-plane-ns: linkerd
+    spec:
+      automountServiceAccountToken: false
+      containers:
+      - command:
+        - /usr/bin/taskset
+        - -c
+        - 4-9
+        - /usr/local/bin/bench_dpumesh
+        env:
+        - name: BENCH_DST_SERVICE
+          value: echo-dpumesh-native
+        - name: DPUMESH_RINGS_PER_POD
+          value: '8'
+        image: docker.io/bench/bench-dpumesh:native
+        imagePullPolicy: Never
+        name: app
+        resources:
+          limits:
+            dpumesh.io/channel: 1
+            memory: 256Mi
+          requests:
+            cpu: 10m
+            dpumesh.io/channel: 1
+            memory: 32Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+      securityContext:
+        runAsGroup: 65532
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault

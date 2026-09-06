@@ -1,0 +1,136 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 47K of event 'syscalls:sys_enter_write'
+# Event count (approx.): 47082
+#
+# Overhead  Symbol               
+# ........  .....................
+#
+   100.00%  [.] __GI___libc_write
+            |          
+            |--74.38%--dpu_request_host_doorbell
+            |          px_dma_done_cb
+            |          0xffff9e206f64
+            |          0xffff9e376888
+            |          doca_pe_progress
+            |          px_worker_drain
+            |          dmesh_l7_driver_drain
+            |          <dmesh_l7::ExternalBackend as dmesh_doca::runtime::RuntimeBackend>::drain
+            |          dmesh_l7::l7_worker_run::{{closure}}
+            |          l7_worker_run
+            |          dpu_data_worker_main
+            |          start_thread
+            |          thread_start
+            |          
+            |--18.91%--eventfd_write
+            |          0xffff9e377098
+            |          |          
+            |          |--10.64%--dmesh_l7_driver_arm
+            |          |          dmesh_l7::l7_worker_run::{{closure}}
+            |          |          l7_worker_run
+            |          |          dpu_data_worker_main
+            |          |          start_thread
+            |          |          thread_start
+            |          |          
+            |           --8.27%--px_worker_arm_notification
+            |                     dmesh_l7_driver_arm
+            |                     dmesh_l7::l7_worker_run::{{closure}}
+            |                     l7_worker_run
+            |                     dpu_data_worker_main
+            |                     start_thread
+            |                     thread_start
+            |          
+             --6.71%--mio::sys::unix::waker::Waker::wake
+                       tokio::runtime::time::<impl tokio::runtime::time::handle::Handle>::reregister
+                       tokio::runtime::Timer::reset
+                       dmesh_l7::l7_worker_run::{{closure}}
+                       l7_worker_run
+                       dpu_data_worker_main
+                       start_thread
+                       thread_start
+
+
+
+# Samples: 88K of event 'syscalls:sys_enter_read'
+# Event count (approx.): 88743
+#
+# Overhead  Symbol  
+# ........  ........
+#
+   100.00%  [.] read
+            |          
+            |--89.97%--mlx5dv_devx_get_event
+            |          0xffff9e3b6e74
+            |          0xffff9e3b7a80
+            |          |          
+            |          |--63.86%--dmesh_l7_driver_clear_notifications
+            |          |          dmesh_l7::l7_worker_run::{{closure}}
+            |          |          l7_worker_run
+            |          |          dpu_data_worker_main
+            |          |          start_thread
+            |          |          thread_start
+            |          |          
+            |           --26.10%--doca_pe_request_notification
+            |                     px_worker_arm_notification
+            |                     dmesh_l7_driver_arm
+            |                     dmesh_l7::l7_worker_run::{{closure}}
+            |                     l7_worker_run
+            |                     dpu_data_worker_main
+            |                     start_thread
+            |                     thread_start
+            |          
+             --10.03%--eventfd_read
+                       0xffff9e377060
+                       |          
+                       |--5.64%--dmesh_l7_driver_arm
+                       |          dmesh_l7::l7_worker_run::{{closure}}
+                       |          l7_worker_run
+                       |          dpu_data_worker_main
+                       |          start_thread
+                       |          thread_start
+                       |          
+                        --4.39%--px_worker_arm_notification
+                                  dmesh_l7_driver_arm
+                                  dmesh_l7::l7_worker_run::{{closure}}
+                                  l7_worker_run
+                                  dpu_data_worker_main
+                                  start_thread
+                                  thread_start
+
+
+
+# Samples: 1M of event 'syscalls:sys_enter_epoll_pwait'
+# Event count (approx.): 1023300
+#
+# Overhead  Symbol         
+# ........  ...............
+#
+   100.00%  [.] epoll_pwait
+            |          
+            |--94.07%--tokio::runtime::io::driver::Driver::turn
+            |          tokio::runtime::time::Driver::park_internal
+            |          tokio::runtime::scheduler::current_thread::Context::park_internal
+            |          |          
+            |           --92.84%--tokio::runtime::scheduler::current_thread::Context::park_yield
+            |                     l7_worker_run
+            |                     dpu_data_worker_main
+            |                     start_thread
+            |                     thread_start
+            |          
+             --5.93%--0xffff9e3b7a40
+                       |          
+                        --4.07%--dmesh_l7_driver_clear_notifications
+                                  dmesh_l7::l7_worker_run::{{closure}}
+                                  l7_worker_run
+                                  dpu_data_worker_main
+                                  start_thread
+                                  thread_start
+
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#
