@@ -1,0 +1,14 @@
+Traceback (most recent call last):
+  File "/home/jukebox/DPUmesh/bench/report/data/tx-fixed-overhead-20260906/campaign.py", line 198, in <module>
+    if a.action=='setup':setup()
+  File "/home/jukebox/DPUmesh/bench/report/data/tx-fixed-overhead-20260906/campaign.py", line 58, in setup
+    layout=d.remote(f'cd {DPU_REPO} && cc -O2 -D_GNU_SOURCE -DDOCA_ALLOW_EXPERIMENTAL_API -DDMESH_L7_RUNTIME_OWNER=1 '
+  File "/home/jukebox/DPUmesh/bench/report/data/direct-tx-diagnosis-20260906/diagnose.py", line 37, in remote
+    raise RuntimeError(f'remote failed ({p.returncode}): {p.stdout}')
+RuntimeError: remote failed (1): /usr/bin/ld: cannot open output file /tmp/tx-fixed-overhead-20260906/arena-offsets: Permission denied
+collect2: error: ld returned 1 exit status
+
+
+real	0m13.207s
+user	0m1.218s
+sys	0m0.473s

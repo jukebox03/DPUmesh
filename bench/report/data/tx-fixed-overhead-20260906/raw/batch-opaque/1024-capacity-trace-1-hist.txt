@@ -1,0 +1,91 @@
+EVENT=commit
+# event histogram
+#
+# trigger info: hist:keys=len,common_pid:vals=hitcount:sort=hitcount:size=4096 [paused]
+#
+
+{ len:       1168, common_pid:    3449770 } hitcount:          7
+{ len:       1168, common_pid:    3449774 } hitcount:         10
+{ len:       1168, common_pid:    3449780 } hitcount:         11
+{ len:       1168, common_pid:    3449778 } hitcount:         14
+{ len:       1168, common_pid:    3449782 } hitcount:         14
+{ len:        128, common_pid:    3449774 } hitcount:         15
+{ len:       1168, common_pid:    3449772 } hitcount:         17
+{ len:       1168, common_pid:    3449784 } hitcount:         18
+{ len:        128, common_pid:    3449772 } hitcount:         18
+{ len:        128, common_pid:    3449780 } hitcount:         21
+{ len:        128, common_pid:    3449776 } hitcount:         21
+{ len:        128, common_pid:    3449782 } hitcount:         22
+{ len:       1168, common_pid:    3449776 } hitcount:         22
+{ len:        128, common_pid:    3449770 } hitcount:         24
+{ len:        128, common_pid:    3449778 } hitcount:         25
+{ len:       8192, common_pid:    3449774 } hitcount:         25
+{ len:        128, common_pid:    3449784 } hitcount:         29
+{ len:       8192, common_pid:    3449770 } hitcount:         31
+{ len:       8192, common_pid:    3449780 } hitcount:         32
+{ len:       8192, common_pid:    3449772 } hitcount:         35
+{ len:       8192, common_pid:    3449782 } hitcount:         36
+{ len:       8192, common_pid:    3449778 } hitcount:         39
+{ len:       8192, common_pid:    3449776 } hitcount:         43
+{ len:       8192, common_pid:    3449784 } hitcount:         47
+{ len:       7280, common_pid:    3449780 } hitcount:       3052
+{ len:       7280, common_pid:    3449772 } hitcount:       3543
+{ len:       7280, common_pid:    3449784 } hitcount:       3561
+{ len:       7280, common_pid:    3449770 } hitcount:       3819
+{ len:       7280, common_pid:    3449778 } hitcount:       3897
+{ len:       7280, common_pid:    3449782 } hitcount:       4204
+{ len:       7280, common_pid:    3449776 } hitcount:       4464
+{ len:       7280, common_pid:    3449774 } hitcount:       4792
+{ len:       6240, common_pid:    3449780 } hitcount:       5060
+{ len:       6240, common_pid:    3449772 } hitcount:       5085
+{ len:       6240, common_pid:    3449778 } hitcount:       5239
+{ len:       6240, common_pid:    3449776 } hitcount:       5268
+{ len:       6240, common_pid:    3449774 } hitcount:       5394
+{ len:       6240, common_pid:    3449782 } hitcount:       5578
+{ len:       6240, common_pid:    3449784 } hitcount:       5765
+{ len:       6240, common_pid:    3449770 } hitcount:       5775
+{ len:       5200, common_pid:    3449780 } hitcount:       6276
+{ len:       5200, common_pid:    3449770 } hitcount:       6499
+{ len:       5200, common_pid:    3449782 } hitcount:       6562
+{ len:       5200, common_pid:    3449774 } hitcount:       6997
+{ len:       5200, common_pid:    3449776 } hitcount:       7379
+{ len:       5200, common_pid:    3449778 } hitcount:       7494
+{ len:       5200, common_pid:    3449784 } hitcount:       7501
+{ len:       5200, common_pid:    3449772 } hitcount:       7962
+{ len:       4160, common_pid:    3449774 } hitcount:       8447
+{ len:       4160, common_pid:    3449776 } hitcount:       8707
+{ len:       4160, common_pid:    3449784 } hitcount:       8852
+{ len:       4160, common_pid:    3449778 } hitcount:       9052
+{ len:       1040, common_pid:    3449780 } hitcount:       9550
+{ len:       4160, common_pid:    3449782 } hitcount:       9599
+{ len:       1040, common_pid:    3449784 } hitcount:       9943
+{ len:       1040, common_pid:    3449778 } hitcount:      10351
+{ len:       4160, common_pid:    3449770 } hitcount:      10564
+{ len:       4160, common_pid:    3449780 } hitcount:      10576
+{ len:       4160, common_pid:    3449772 } hitcount:      10890
+{ len:       1040, common_pid:    3449772 } hitcount:      10911
+{ len:       1040, common_pid:    3449774 } hitcount:      10999
+{ len:       1040, common_pid:    3449770 } hitcount:      11014
+{ len:       3120, common_pid:    3449784 } hitcount:      11094
+{ len:       1040, common_pid:    3449782 } hitcount:      11194
+{ len:       3120, common_pid:    3449776 } hitcount:      11228
+{ len:       3120, common_pid:    3449774 } hitcount:      11385
+{ len:       2080, common_pid:    3449780 } hitcount:      11639
+{ len:       3120, common_pid:    3449782 } hitcount:      11647
+{ len:       3120, common_pid:    3449778 } hitcount:      11687
+{ len:       1040, common_pid:    3449776 } hitcount:      11739
+{ len:       3120, common_pid:    3449772 } hitcount:      12463
+{ len:       2080, common_pid:    3449770 } hitcount:      13334
+{ len:       2080, common_pid:    3449772 } hitcount:      13945
+{ len:       2080, common_pid:    3449776 } hitcount:      13997
+{ len:       2080, common_pid:    3449782 } hitcount:      14096
+{ len:       3120, common_pid:    3449770 } hitcount:      14386
+{ len:       2080, common_pid:    3449778 } hitcount:      14927
+{ len:       2080, common_pid:    3449774 } hitcount:      15708
+{ len:       2080, common_pid:    3449784 } hitcount:      15835
+{ len:       3120, common_pid:    3449780 } hitcount:      16306
+
+Totals:
+    Hits: 507807
+    Entries: 80
+    Dropped: 0

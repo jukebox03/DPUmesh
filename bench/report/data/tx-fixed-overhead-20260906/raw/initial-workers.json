@@ -1,0 +1,53 @@
+{
+  "clock_hz": 100,
+  "workers": [
+    {
+      "tid": 3383816,
+      "pid": 3383809,
+      "name": "dmesh-w0",
+      "ticks": 2586
+    },
+    {
+      "tid": 3383817,
+      "pid": 3383809,
+      "name": "dmesh-w1",
+      "ticks": 2557
+    },
+    {
+      "tid": 3383818,
+      "pid": 3383809,
+      "name": "dmesh-w2",
+      "ticks": 2675
+    },
+    {
+      "tid": 3383819,
+      "pid": 3383809,
+      "name": "dmesh-w3",
+      "ticks": 2768
+    },
+    {
+      "tid": 3383820,
+      "pid": 3383809,
+      "name": "dmesh-w4",
+      "ticks": 2554
+    },
+    {
+      "tid": 3383821,
+      "pid": 3383809,
+      "name": "dmesh-w5",
+      "ticks": 2548
+    },
+    {
+      "tid": 3383822,
+      "pid": 3383809,
+      "name": "dmesh-w6",
+      "ticks": 2576
+    },
+    {
+      "tid": 3383823,
+      "pid": 3383809,
+      "name": "dmesh-w7",
+      "ticks": 2548
+    }
+  ]
+}

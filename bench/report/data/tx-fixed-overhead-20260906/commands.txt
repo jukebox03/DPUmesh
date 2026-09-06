@@ -1,0 +1,28 @@
+Working directory: /home/jukebox/DPUmesh. Credentials are read from .env in memory only.
+
+Build (BlueField, release LTO Rust + debugoptimized C; log raw/dpu-build.log):
+bash bench/bench.sh build
+
+Matrix:
+bash bench/report/data/tx-fixed-overhead-20260906/run_matrix.sh
+  attempt 1 failed in setup (root-owned scratch directory blocked the arena
+  layout compile; nothing was deployed) -> raw/matrix-attempt1-setup-permission.log
+  attempt 2 ran setup, batch/grpc, lean/grpc, lean/opaque, then failed at the
+  batch/opaque deploy warmup (see SUMMARY.md, raw/batch-opaque/dpu-log-3447022-died.txt)
+bash bench/report/data/tx-fixed-overhead-20260906/resume_matrix.sh
+  batch/opaque, batch/grpc 64 KiB re-baseline (reps 4-6), restore, aggregation
+  (campaign.py deploy now waits 5 s and retries the warmup up to 4 times)
+
+Aggregation (local):
+python3 bench/report/data/tx-fixed-overhead-20260906/summarize.py
+python3 bench/report/data/tx-fixed-overhead-20260906/compare.py
+taskset -c 0 python3 bench/report/data/tx-fixed-overhead-20260906/plot.py
+python3 bench/report/data/tx-fixed-overhead-20260906/write_report.py > report-tables.md
+
+Software gates for the lean tree (host):
+cargo test --locked --manifest-path linkerd/rust/Cargo.toml                       41/41
+cargo test --locked --manifest-path linkerd/port/linkerd2-proxy/Cargo.toml -p dmesh-doca   35/35
+cargo check --locked --manifest-path linkerd/rust/Cargo.toml
+
+Large raw texts (symbols, ELF headers, perf reports) and perf.data files are gzip-compressed;
+summarize.py reads both forms.

@@ -1,0 +1,7 @@
+arm,protocol,size,mode,rep,atomic_helpers_all_layers,copy_all_layers,kernel,other,allocator,runtime,dmesh_poll_write_self,reported_sum
+batch,grpc,1024,capacity,1,10.56,2.91,10.93,68.18,2.18,4.91,0.17,99.84
+batch,grpc,64,capacity,1,10.75,2.78,11.07,67.81,2.21,4.95,0.17,99.74
+batch,grpc,65536,capacity,1,11.09,5.23,5.78,68.7,2.68,5.59,0.35,99.42
+lean,grpc,1024,capacity,1,9.69,3.58,12.04,66.94,2.3,5.35,,99.9
+lean,grpc,64,capacity,1,10.4,2.88,12.54,65.76,2.48,5.62,,99.68
+lean,grpc,65536,capacity,1,10.17,5.94,5.49,68.3,3.14,6.19,,99.23
