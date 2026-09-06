@@ -529,58 +529,34 @@ is fixed: an open-loop `highest_clean_rps` and a closed-loop plateau are
 separate quantities. CPU accounting separates the workload Pod, the host
 broker worker subtree and the DPU Arm workers.
 
-## DPU L7 request cost
+## DPU L7 execution
 
-A protocol-aware session is a full L7 proxy, not a framed DMA relay. Hyper
-terminates the client-side HTTP/2 connection, decodes its frame and HPACK state,
-and presents a request to the outbound stack. The stack then matches the gRPC
-route, applies filters/retry/timeout policy, chooses a backend, classifies and
-records the stream, and Hyper encodes the request into a distinct backend-side
-HTTP/2 connection. The response traverses the corresponding reverse path.
-Client- and backend-side HPACK dynamic tables are independent, and routing needs
-decoded headers, so compressed header blocks cannot be forwarded unchanged.
+A protocol-aware session terminates the client-side HTTP/2 connection in Hyper,
+decodes frame and HPACK state, applies Linkerd route and policy, selects a
+backend, and encodes a distinct backend-side HTTP/2 connection. Client and
+backend HPACK tables remain independent because routing operates on decoded
+headers.
 
-Discovery, protocol detection, stack construction and HTTP/2 handshakes are
-connection/session work. They matter under churn, but they are not charged once
-per RPC on the persistent eight-channel capacity workload. In particular,
-`DmeshIo::peek` returning zero makes detection read and replay a prefix once per
-connection; an inclusive `Detect` call-tree percentage is therefore an ancestor
-of the long-lived connection task, not that percentage of steady per-RPC self
-CPU.
+The DPUmesh byte path has one explicit adapter copy in each direction. RX copies
+from DMA staging directly into Hyper's `ReadBuf`. TX copies scalar or vectored
+Linkerd output directly into an endpoint-owned 64 KiB DPU arena batch. The C
+data plane owns accepted bytes; Rust retains the token, length, exact route, and
+sealed state.
 
-The DPUmesh-specific byte path has explicit copy and synchronization points. RX
-copies once from DMA staging into Hyper's `ReadBuf`. TX extends the `DmeshIo`
-`Vec`, and the driver copies that queue into the DPU egress arena. Every
-`DmeshIo` and driver-handle operation takes the same per-connection
-`Arc<parking_lot::Mutex<Inner>>`; publication observes queue length, copies,
-consumes and reads drain state through separate calls. Partial writes,
-backpressure, ordering and cancellation are preserved across these operations.
-The Linkerd generic I/O contracts require `Send + Sync`, while each selected
-worker runs a single-thread Tokio runtime.
+A full batch is published before another write. The worker drain publishes a
+partial batch, while `poll_flush` returns at once: accepted bytes already belong
+to the transport. A refused publication keeps the sealed batch for a later
+driver pass. `poll_shutdown` closes admission and the driver publishes buffered
+DATA before FIN; abort cancels the unpublished token. Publication runs on the
+owning worker under the endpoint lock.
 
-Under load the self-time profile is flat — memcpy, atomics, syscalls, H2/HPACK,
-routing and Tokio, no single hot function; `px_worker_drain`,
-`ExternalBackend::drain` and `doca_pe_progress` are each below 2 % and workers
-idle at 0--1 %, which rules out a polling loop. The frame-pointer profile is
-the retained instrument; inclusive call-tree percentages overlap and must not
-be summed.
+The driver visits only endpoints the stack touched or that owe a retry, and
+clears only the notification sources that fired. The adapter reports arena-copy
+bytes, accepted bytes, publications, retries, and terminal errors. These
+counters distinguish bytes owned by the arena from bytes transferred to DMA or
+peer custody.
 
-Capacity carries two definitions — open-loop `highest_clean_rps` and a
-closed-loop plateau — and a closed-loop plateau is not an open-loop capacity
-result. Measurement records, comparison arms and CPU-accounting receipts are
-kept under `bench/report`; they are evidence artifacts rather than API or
-deployment contracts.
-
-At the plateau the eight `dmesh-w0..7` threads account for essentially the
-whole process reading and non-worker threads for a few hundredths of a core:
-A=8 is a data-worker geometry, not a whole-process CPU limit.
-
-Capacity scales with the data-worker count A and not with client channels
-alone: adding channels at fixed A saturates the workers and lowers delivered
-rate. Therefore hot-service deployment exposes one
-`DPUMESH_THROUGHPUT_WORKERS` knob and derives A=K, a valid N and all-worker L7.
-Client channel count remains a workload property in the product interface and
-is not globally equated with A. Independent N/K/A remain available for density
-deployments in which K>A is intentional. `bench/bench.sh geometry` and
-`bench/suite/deployed_geometry.sh` expose the effective values used by the
-runtime and validation scripts.
+Capacity and matched-rate results are evaluated separately. Instrumented trace
+runs establish publication shape, while clean runs establish throughput,
+latency, and CPU/RPC. Measurement records and derivation scripts live under
+`bench/report/data`.

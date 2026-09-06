@@ -72,19 +72,20 @@ The host exposes three integration surfaces — the native
 integration. [Using it from an application](#using-it-from-an-application) is
 where to start; the rest of this section is what sits underneath all three.
 
-The shared libdpumesh send core batches all three surfaces. `dmesh_alloc()`
-reserves registered bytes and `dmesh_post_send()` commits them into one ordered
-stream: complete transport units submit at once, and a partial tail is published
-at a bounded deadline unless `dmesh_flush()` forces it earlier. The size of that
-unit and its timing are internal, not application tuning parameters, and the
-preload and gRPC layers keep no batch queue or timer of their own.
+The workload-side send core batches all three API surfaces. `dmesh_alloc()`
+reserves registered bytes and `dmesh_post_send()` commits them to one ordered
+stream. Complete transport units submit immediately; a partial tail is
+published at a bounded deadline or by `dmesh_flush()`. The preload and gRPC
+facades own no transport batch queue or timer.
 
-Every QP is one full-duplex byte stream through the DPU and does not expose
-backend or proxy-session ids through native events. A native L4 Service pins
-the connection directly. An opaque Service enters Linkerd as a byte stream and
-a protocol-aware one as HTTP/1, HTTP/2 or gRPC. The selected backend is reached
-through DMA into that Pod's registered memory, or across the peer channel when
-the generation places it on another node.
+Every QP is one full-duplex byte stream. A native L4 Service pins the connection
+in the C data plane. An opaque Service enters Linkerd as a byte stream and a
+protocol-aware Service enters its HTTP/1, HTTP/2 or gRPC stack. Linkerd scalar
+and vectored writes append directly into a tokenized 64 KiB DPU arena batch.
+The batch fixes its route on the first accepted write and is published by the
+worker to local DMA or the authenticated peer channel. DATA publication
+precedes FIN, and a blocked publication retains the same accepted bytes for a
+bounded retry.
 
 Backpressure is nonblocking. `dmesh_alloc()` returning `NULL/EAGAIN` arms that QP
 itself, and returned capacity produces one `DMESH_EVENT_TX_READY` on its EQ:
@@ -372,5 +373,5 @@ whitepapers for the code and manifests in this tree.
 |---|---|
 | [bench/README.md](bench/README.md) | deployment, the experiment commands, the measurement rules, and the host-only and hardware validation gates |
 | [bench/report/REPORT.md](bench/report/REPORT.md) | what the deployment measures: policy, routing, balancing, latency, throughput and cost |
-| [PLAN.md](PLAN.md) | the selected target architecture, migration gates, open function/defect/cost items, and what campaigns established |
+| [PLAN.md](PLAN.md) | implementation gates, open function/defect/cost items, and validation receipts |
 | [ci/README.md](ci/README.md) | which checks run where, and what each one protects |
