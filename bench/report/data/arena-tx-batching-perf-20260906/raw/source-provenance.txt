@@ -1,0 +1,19 @@
+Arena TX batching source provenance
+Date: 2026-09-06
+
+The local production sources and the BlueField build-staging sources were compared
+byte-for-byte after the campaign.  Their SHA256 values matched:
+
+8bfe71465f829cfc5c83cb601aca6922fb5b570f7008a12d2aff38883ac88854  linkerd/rust/src/lib.rs
+9f25e25e9af8a823cdf3bd302c3309f192db6954ba69be2d68952f3856f52f72  linkerd/port/linkerd2-proxy/linkerd/doca/src/io.rs
+3bb6f030130881620d5e3d2f68a4ac4678d4c7a12d2df950f168a196500cfbcc  linkerd/port/linkerd2-proxy/linkerd/doca/src/metrics.rs
+ddfd39169343d3d9eef573cdb7d5f8184cebd5304f8e244b37e72c9bb80cdc37  doca/dpu_proxy.c
+09285fbe51e808702e1238b6428dec0f24306a0cb9d33662d48b4c074bc8afd9  linkerd/include/dmesh_l7.h
+
+Measured binaries:
+
+direct  2200fc9207e01b7e07e3aa0d45f26d55fef6f9aee07fb4a61cdfd3169389422e
+batch   b62194f1ba65886438c1b380e8346518c4fd4ad148afaca38f59ddaf77af36eb
+
+The restored running DPU binary matched the direct binary.  See
+restored-binary.txt and RESTORATION.md for the runtime restoration evidence.

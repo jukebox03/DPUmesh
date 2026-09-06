@@ -1,0 +1,14 @@
+Internal ctest changing into directory: /home/jukebox/DPUmesh/build/grpc-release
+Test project /home/jukebox/DPUmesh/build/grpc-release
+    Start 1: grpc_dpumesh_endpoint_test
+1/4 Test #1: grpc_dpumesh_endpoint_test .......   Passed    0.00 sec
+    Start 2: grpc_dpumesh_channel_test
+2/4 Test #2: grpc_dpumesh_channel_test ........   Passed    0.03 sec
+    Start 3: grpc_dpumesh_reactor_test
+3/4 Test #3: grpc_dpumesh_reactor_test ........   Passed   20.20 sec
+    Start 4: grpc_dpumesh_native_link_test
+4/4 Test #4: grpc_dpumesh_native_link_test ....   Passed    0.00 sec
+
+100% tests passed, 0 tests failed out of 4
+
+Total Test time (real) =  20.25 sec

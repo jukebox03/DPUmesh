@@ -1,0 +1,78 @@
+EVENT=commit
+# event histogram
+#
+# trigger info: hist:keys=len,common_pid:vals=hitcount:sort=hitcount:size=4096 [paused]
+#
+
+{ len:         36, common_pid:    3350404 } hitcount:          8
+{ len:         36, common_pid:    3350408 } hitcount:          8
+{ len:         36, common_pid:    3350414 } hitcount:          8
+{ len:         36, common_pid:    3350400 } hitcount:          8
+{ len:         36, common_pid:    3350412 } hitcount:          8
+{ len:         36, common_pid:    3350402 } hitcount:          8
+{ len:         36, common_pid:    3350406 } hitcount:          8
+{ len:         36, common_pid:    3350410 } hitcount:          8
+{ len:         17, common_pid:    3350410 } hitcount:         16
+{ len:         17, common_pid:    3350408 } hitcount:         17
+{ len:         17, common_pid:    3350400 } hitcount:         17
+{ len:         17, common_pid:    3350404 } hitcount:         17
+{ len:         17, common_pid:    3350412 } hitcount:         17
+{ len:         17, common_pid:    3350406 } hitcount:         17
+{ len:         17, common_pid:    3350402 } hitcount:         17
+{ len:         17, common_pid:    3350414 } hitcount:         18
+{ len:         47, common_pid:    3350412 } hitcount:      17209
+{ len:       8215, common_pid:    3350412 } hitcount:      17209
+{ len:         10, common_pid:    3350412 } hitcount:      17214
+{ len:       8212, common_pid:    3350412 } hitcount:      17215
+{ len:         47, common_pid:    3350406 } hitcount:      17242
+{ len:       8215, common_pid:    3350406 } hitcount:      17242
+{ len:       8212, common_pid:    3350406 } hitcount:      17243
+{ len:         10, common_pid:    3350406 } hitcount:      17243
+{ len:         47, common_pid:    3350404 } hitcount:      17265
+{ len:       8215, common_pid:    3350404 } hitcount:      17266
+{ len:         10, common_pid:    3350404 } hitcount:      17268
+{ len:       8212, common_pid:    3350404 } hitcount:      17268
+{ len:         47, common_pid:    3350402 } hitcount:      17604
+{ len:       8215, common_pid:    3350402 } hitcount:      17604
+{ len:       8212, common_pid:    3350402 } hitcount:      17608
+{ len:         10, common_pid:    3350402 } hitcount:      17608
+{ len:         13, common_pid:    3350412 } hitcount:      18007
+{ len:         13, common_pid:    3350406 } hitcount:      18038
+{ len:         13, common_pid:    3350404 } hitcount:      18064
+{ len:         13, common_pid:    3350402 } hitcount:      18420
+{ len:         47, common_pid:    3350414 } hitcount:      19807
+{ len:       8215, common_pid:    3350414 } hitcount:      19807
+{ len:         10, common_pid:    3350414 } hitcount:      19807
+{ len:       8212, common_pid:    3350414 } hitcount:      19807
+{ len:         47, common_pid:    3350400 } hitcount:      19816
+{ len:       8215, common_pid:    3350400 } hitcount:      19816
+{ len:       8212, common_pid:    3350410 } hitcount:      19820
+{ len:         10, common_pid:    3350410 } hitcount:      19820
+{ len:         10, common_pid:    3350400 } hitcount:      19823
+{ len:       8212, common_pid:    3350400 } hitcount:      19823
+{ len:         47, common_pid:    3350410 } hitcount:      19826
+{ len:       8215, common_pid:    3350410 } hitcount:      19826
+{ len:         47, common_pid:    3350408 } hitcount:      19892
+{ len:       8215, common_pid:    3350408 } hitcount:      19893
+{ len:       8212, common_pid:    3350408 } hitcount:      19900
+{ len:         10, common_pid:    3350408 } hitcount:      19900
+{ len:         13, common_pid:    3350414 } hitcount:      20719
+{ len:         13, common_pid:    3350410 } hitcount:      20734
+{ len:         13, common_pid:    3350400 } hitcount:      20736
+{ len:         13, common_pid:    3350408 } hitcount:      20818
+
+Totals:
+    Hits: 750427
+    Entries: 56
+    Dropped: 0
+EVENT=commit_remote
+# event histogram
+#
+# trigger info: hist:keys=len,common_pid:vals=hitcount:sort=hitcount:size=4096 [paused]
+#
+
+
+Totals:
+    Hits: 0
+    Entries: 0
+    Dropped: 0

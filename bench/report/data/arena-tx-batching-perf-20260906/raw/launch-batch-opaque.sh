@@ -1,0 +1,5 @@
+#!/bin/bash
+ulimit -c unlimited
+screen -dmS dpumesh bash -c "set -a; source /tmp/direct-tx-l7.env; set +a; cd '/home/jukebox/DPUmesh/doca/build' && DPUMESH_CLUSTER_ID='dpumesh-test' DPUMESH_NODE_NAME='rapids4' DPUMESH_REGISTRATION_KEY_DIR='/etc/dpumesh/registration.keys' DPUMESH_FEED_KEY_DIR='/etc/dpumesh/feed.keys' DPUMESH_MEMBERSHIP_FILE='/etc/dpumesh/feeds/membership.v1' DPUMESH_TOPOLOGY_FILE='/etc/dpumesh/feeds/topology.v1' DPUMESH_CONTROLLER_KEY_DIR='/etc/dpumesh/controller.pub.keys' DPUMESH_NODE_KEY_FILE='/etc/dpumesh/node-static.key' DPUMESH_NODE_KEY_PUBLIC_FILE='/etc/dpumesh/node-static.pub' DPUMESH_CONTROLLER_SCOPE_URL='http://192.168.100.1:28089' DPUMESH_IDENTITY_TRUST_DOMAIN='linkerd.cluster.local' DPUMESH_L7_OPAQUE_SVC=test-bench/echo-dpumesh-native DPUMESH_L7_SVC= DPUMESH_L7_LINKERD_WORKER='all' DPUMESH_DPA_THREADS='32' DPUMESH_RINGS_PER_POD='8' DPUMESH_ARM_WORKERS='8' DPUMESH_PEER_TRANSPORT='' DPUMESH_PEER_BIND='' DPUMESH_PEER_PORT='47900' /tmp/arena-tx-batching-perf-20260906/batch -p 03:00.0 -r 94:00.0 -l '30' >'/tmp/dpumesh_dpu_bench.log' 2>&1"
+sleep 2
+pgrep -x dpumesh_dpu | head -1

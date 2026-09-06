@@ -1,0 +1,3 @@
+2200fc9207e01b7e07e3aa0d45f26d55fef6f9aee07fb4a61cdfd3169389422e  /proc/3331009/exe
+2200fc9207e01b7e07e3aa0d45f26d55fef6f9aee07fb4a61cdfd3169389422e  /tmp/arena-tx-batching-perf-20260906/direct
+/home/jukebox/DPUmesh/doca/build/dpumesh_dpu

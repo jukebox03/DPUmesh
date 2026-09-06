@@ -1,0 +1,5 @@
+cc -fsanitize=address,undefined -fno-omit-frame-pointer -O2 -g -Wall -Wextra -fPIC -DDOCA_ALLOW_EXPERIMENTAL_API -Iinclude -I. -Ilinkerd/include -DFLEXIO_ALLOW_EXPERIMENTAL_API -DALLOW_EXPERIMENTAL_API -I/opt/mellanox/flexio/include -I/opt/mellanox/doca/include -I/usr/include/libnl3 -I/opt/mellanox/doca/include -D_GNU_SOURCE -ffunction-sections -fdata-sections -Wl,--gc-sections \
+	-o /tmp/dmesh-batch-asan/test/proxy_lane_queue_test tests/proxy_lane_queue_test.c doca/peer_channel.c \
+	doca/peer_transport.c doca/peer_tls.c doca/topology.c \
+	doca/workload_grant.c \
+	-L/opt/mellanox/doca/lib/x86_64-linux-gnu -ldoca_common -ldoca_comch -ldoca_dpa -lssl -lcrypto -lpthread -Wl,-rpath,/usr/local/lib -Wl,-rpath,/tmp/dmesh-batch-asan/lib -Wl,-rpath,/opt/mellanox/doca/lib/x86_64-linux-gnu -Wl,-rpath,/opt/mellanox/flexio/lib

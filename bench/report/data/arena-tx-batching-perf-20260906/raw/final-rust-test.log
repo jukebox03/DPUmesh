@@ -1,0 +1,52 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on build directory
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.10s
+     Running unittests src/lib.rs (linkerd/rust/target/debug/deps/dmesh_l7-86663043c5f9e15e)
+
+running 41 tests
+test abi::workload_layout_matches_c ... ok
+test tests::ConnReady_failure_rolls_back_registry_and_maps ... ok
+test abi::flow_layout_matches_c ... ok
+test tests::all_mode_assigns_one_admin_port_per_worker ... ok
+test tests::a_selected_endpoint_must_resolve_to_a_live_destination ... ok
+test tests::a_duplicate_live_handle_is_refused ... ok
+test tests::a_pass_fills_several_reservations_in_order ... ok
+test abi::constants_match_c ... ok
+test tests::a_stale_registration_never_binds_to_the_next_generation ... ok
+test tests::an_unsigned_service_target_feed_is_refused ... ok
+test tests::another_services_address_is_resolved_rather_than_owned ... ok
+test tests::an_empty_pass_holds_no_reservation ... ok
+test tests::detach_releases_outstanding_custody ... ok
+test tests::an_exhausted_arena_keeps_no_cancelled_bytes ... ok
+test tests::each_backend_gets_its_own_reply_direction ... ok
+test tests::close_releases_every_outstanding_extent_once ... ok
+test tests::full_send_does_not_requeue ... ok
+test tests::concurrent_sessions_hold_distinct_tokens_and_keys ... ok
+test tests::direct_writer_binds_origin_first_and_minted_remote_routes_before_reply ... ok
+test tests::stack_endpoint_drop_closes_session_and_allows_reopen ... ok
+test tests::retained_feed_resolves_after_topology_arrives_without_republication ... ok
+test tests::many_small_writes_share_one_chunk_and_one_reservation_attempt ... ok
+test tests::normal_drain_then_close_does_not_double_release ... ok
+test tests::output_shutdown_before_input_eof_reports_an_early_session_end ... ok
+test tests::reply_attaches_to_existing_session ... ok
+test tests::output_half_closes_are_ordered_retried_and_both_required ... ok
+test tests::closing_is_idempotent_however_it_arrives ... ok
+test tests::over_accept_is_terminal ... ok
+test tests::registration_after_close_is_aborted ... ok
+test tests::session_uses_real_policy_target_and_registered_workload ... ok
+test tests::service_target_feed_rejects_rollback_and_applies_withdrawal ... ok
+test tests::session_key_matches_c_handle ... ok
+test tests::worker_selection_is_strict_and_supports_all ... ok
+test tests::shutdown_waits_for_buffered_data_before_fin_and_abort_returns_lease ... ok
+test tests::service_targets_are_strict_and_per_service ... ok
+test tests::reply_close_aborts_session_and_allows_same_service_to_reopen ... ok
+test tests::service_target_feed_refuses_an_oversized_generation ... ok
+test tests::wrong_worker_id_is_rejected ... ok
+test tests::unknown_reply_is_rejected ... ok
+test tests::vectored_batch_owns_prefix_and_flush_retries_without_copying ... ok
+test tests::same_service_sessions_have_distinct_backend_keys_and_close_independently ... ok
+
+test result: ok. 41 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+

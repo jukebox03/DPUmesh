@@ -1,0 +1,377 @@
+{
+    "apiVersion": "v1",
+    "items": [
+        {
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {
+                "annotations": {
+                    "config.linkerd.io/skip-inbound-ports": "9091,9092"
+                },
+                "creationTimestamp": "2026-09-06T07:55:21Z",
+                "generateName": "bench-dpumesh-native-69b7dcdc89-",
+                "labels": {
+                    "app": "bench-dpumesh-native",
+                    "linkerd.io/control-plane-ns": "linkerd",
+                    "pod-template-hash": "69b7dcdc89"
+                },
+                "name": "bench-dpumesh-native-69b7dcdc89-4p2c9",
+                "namespace": "test-bench",
+                "ownerReferences": [
+                    {
+                        "apiVersion": "apps/v1",
+                        "blockOwnerDeletion": true,
+                        "controller": true,
+                        "kind": "ReplicaSet",
+                        "name": "bench-dpumesh-native-69b7dcdc89",
+                        "uid": "3c5abf62-220f-4035-9b57-e7869bd2741d"
+                    }
+                ],
+                "resourceVersion": "39433272",
+                "uid": "987eb970-3c84-4d00-a5be-a6b630fdb921"
+            },
+            "spec": {
+                "automountServiceAccountToken": false,
+                "containers": [
+                    {
+                        "command": [
+                            "/usr/bin/taskset",
+                            "-c",
+                            "4-9",
+                            "/usr/local/bin/bench_grpc"
+                        ],
+                        "env": [
+                            {
+                                "name": "BENCH_DST_SERVICE",
+                                "value": "echo-dpumesh-native"
+                            },
+                            {
+                                "name": "DPUMESH_RINGS_PER_POD",
+                                "value": "8"
+                            },
+                            {
+                                "name": "BENCH_TRANSPORT",
+                                "value": "dmesh"
+                            },
+                            {
+                                "name": "BENCH_REACTORS",
+                                "value": "8"
+                            }
+                        ],
+                        "image": "docker.io/bench/bench-grpc:direct-tx",
+                        "imagePullPolicy": "Never",
+                        "name": "app",
+                        "resources": {
+                            "limits": {
+                                "dpumesh.io/channel": "1",
+                                "memory": "256Mi"
+                            },
+                            "requests": {
+                                "cpu": "10m",
+                                "dpumesh.io/channel": "1",
+                                "memory": "32Mi"
+                            }
+                        },
+                        "securityContext": {
+                            "allowPrivilegeEscalation": false,
+                            "capabilities": {
+                                "drop": [
+                                    "ALL"
+                                ]
+                            },
+                            "readOnlyRootFilesystem": true
+                        },
+                        "terminationMessagePath": "/dev/termination-log",
+                        "terminationMessagePolicy": "File"
+                    }
+                ],
+                "dnsPolicy": "ClusterFirst",
+                "enableServiceLinks": true,
+                "nodeName": "rapids4",
+                "preemptionPolicy": "PreemptLowerPriority",
+                "priority": 0,
+                "restartPolicy": "Always",
+                "schedulerName": "default-scheduler",
+                "securityContext": {
+                    "runAsGroup": 65532,
+                    "runAsNonRoot": true,
+                    "runAsUser": 65532,
+                    "seccompProfile": {
+                        "type": "RuntimeDefault"
+                    }
+                },
+                "serviceAccount": "default",
+                "serviceAccountName": "default",
+                "terminationGracePeriodSeconds": 30,
+                "tolerations": [
+                    {
+                        "effect": "NoExecute",
+                        "key": "node.kubernetes.io/not-ready",
+                        "operator": "Exists",
+                        "tolerationSeconds": 300
+                    },
+                    {
+                        "effect": "NoExecute",
+                        "key": "node.kubernetes.io/unreachable",
+                        "operator": "Exists",
+                        "tolerationSeconds": 300
+                    }
+                ]
+            },
+            "status": {
+                "conditions": [
+                    {
+                        "lastProbeTime": null,
+                        "lastTransitionTime": "2026-09-06T07:55:23Z",
+                        "status": "True",
+                        "type": "PodReadyToStartContainers"
+                    },
+                    {
+                        "lastProbeTime": null,
+                        "lastTransitionTime": "2026-09-06T07:55:21Z",
+                        "status": "True",
+                        "type": "Initialized"
+                    },
+                    {
+                        "lastProbeTime": null,
+                        "lastTransitionTime": "2026-09-06T07:55:23Z",
+                        "status": "True",
+                        "type": "Ready"
+                    },
+                    {
+                        "lastProbeTime": null,
+                        "lastTransitionTime": "2026-09-06T07:55:23Z",
+                        "status": "True",
+                        "type": "ContainersReady"
+                    },
+                    {
+                        "lastProbeTime": null,
+                        "lastTransitionTime": "2026-09-06T07:55:21Z",
+                        "status": "True",
+                        "type": "PodScheduled"
+                    }
+                ],
+                "containerStatuses": [
+                    {
+                        "containerID": "containerd://3390eb36285ccea5b7e5b021dd0433534218852e5199ae44a5c108f8a4a63af5",
+                        "image": "docker.io/bench/bench-grpc:direct-tx",
+                        "imageID": "sha256:64134a06a4c3d9202447541201c9001d42690236f6ca5e9bf42f174e67dc23fc",
+                        "lastState": {},
+                        "name": "app",
+                        "ready": true,
+                        "restartCount": 0,
+                        "started": true,
+                        "state": {
+                            "running": {
+                                "startedAt": "2026-09-06T07:55:22Z"
+                            }
+                        }
+                    }
+                ],
+                "hostIP": "147.46.78.169",
+                "hostIPs": [
+                    {
+                        "ip": "147.46.78.169"
+                    }
+                ],
+                "phase": "Running",
+                "podIP": "10.244.0.91",
+                "podIPs": [
+                    {
+                        "ip": "10.244.0.91"
+                    }
+                ],
+                "qosClass": "Burstable",
+                "startTime": "2026-09-06T07:55:21Z"
+            }
+        },
+        {
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {
+                "annotations": {
+                    "config.linkerd.io/skip-inbound-ports": "9091,9092"
+                },
+                "creationTimestamp": "2026-09-06T07:55:21Z",
+                "generateName": "echo-dpumesh-native-b5d6dcf9b-",
+                "labels": {
+                    "app": "echo-dpumesh-native",
+                    "linkerd.io/control-plane-ns": "linkerd",
+                    "pod-template-hash": "b5d6dcf9b"
+                },
+                "name": "echo-dpumesh-native-b5d6dcf9b-wjgj5",
+                "namespace": "test-bench",
+                "ownerReferences": [
+                    {
+                        "apiVersion": "apps/v1",
+                        "blockOwnerDeletion": true,
+                        "controller": true,
+                        "kind": "ReplicaSet",
+                        "name": "echo-dpumesh-native-b5d6dcf9b",
+                        "uid": "d9fa0acf-df8f-410d-8139-32f73fdea54b"
+                    }
+                ],
+                "resourceVersion": "39433263",
+                "uid": "a41969f6-94c1-4675-934a-356eac7055f0"
+            },
+            "spec": {
+                "automountServiceAccountToken": false,
+                "containers": [
+                    {
+                        "command": [
+                            "/usr/bin/taskset",
+                            "-c",
+                            "10-17",
+                            "/usr/local/bin/echo_grpc"
+                        ],
+                        "env": [
+                            {
+                                "name": "DPUMESH_SERVICE",
+                                "value": "echo-dpumesh-native"
+                            },
+                            {
+                                "name": "DPUMESH_RINGS_PER_POD",
+                                "value": "8"
+                            },
+                            {
+                                "name": "BENCH_TRANSPORT",
+                                "value": "dmesh"
+                            },
+                            {
+                                "name": "BENCH_REACTORS",
+                                "value": "8"
+                            }
+                        ],
+                        "image": "docker.io/bench/echo-grpc:direct-tx",
+                        "imagePullPolicy": "Never",
+                        "name": "app",
+                        "resources": {
+                            "limits": {
+                                "dpumesh.io/channel": "1",
+                                "memory": "256Mi"
+                            },
+                            "requests": {
+                                "cpu": "10m",
+                                "dpumesh.io/channel": "1",
+                                "memory": "32Mi"
+                            }
+                        },
+                        "securityContext": {
+                            "allowPrivilegeEscalation": false,
+                            "capabilities": {
+                                "drop": [
+                                    "ALL"
+                                ]
+                            },
+                            "readOnlyRootFilesystem": true
+                        },
+                        "terminationMessagePath": "/dev/termination-log",
+                        "terminationMessagePolicy": "File"
+                    }
+                ],
+                "dnsPolicy": "ClusterFirst",
+                "enableServiceLinks": true,
+                "nodeName": "rapids4",
+                "preemptionPolicy": "PreemptLowerPriority",
+                "priority": 0,
+                "restartPolicy": "Always",
+                "schedulerName": "default-scheduler",
+                "securityContext": {
+                    "runAsGroup": 65532,
+                    "runAsNonRoot": true,
+                    "runAsUser": 65532,
+                    "seccompProfile": {
+                        "type": "RuntimeDefault"
+                    }
+                },
+                "serviceAccount": "default",
+                "serviceAccountName": "default",
+                "terminationGracePeriodSeconds": 30,
+                "tolerations": [
+                    {
+                        "effect": "NoExecute",
+                        "key": "node.kubernetes.io/not-ready",
+                        "operator": "Exists",
+                        "tolerationSeconds": 300
+                    },
+                    {
+                        "effect": "NoExecute",
+                        "key": "node.kubernetes.io/unreachable",
+                        "operator": "Exists",
+                        "tolerationSeconds": 300
+                    }
+                ]
+            },
+            "status": {
+                "conditions": [
+                    {
+                        "lastProbeTime": null,
+                        "lastTransitionTime": "2026-09-06T07:55:22Z",
+                        "status": "True",
+                        "type": "PodReadyToStartContainers"
+                    },
+                    {
+                        "lastProbeTime": null,
+                        "lastTransitionTime": "2026-09-06T07:55:21Z",
+                        "status": "True",
+                        "type": "Initialized"
+                    },
+                    {
+                        "lastProbeTime": null,
+                        "lastTransitionTime": "2026-09-06T07:55:22Z",
+                        "status": "True",
+                        "type": "Ready"
+                    },
+                    {
+                        "lastProbeTime": null,
+                        "lastTransitionTime": "2026-09-06T07:55:22Z",
+                        "status": "True",
+                        "type": "ContainersReady"
+                    },
+                    {
+                        "lastProbeTime": null,
+                        "lastTransitionTime": "2026-09-06T07:55:21Z",
+                        "status": "True",
+                        "type": "PodScheduled"
+                    }
+                ],
+                "containerStatuses": [
+                    {
+                        "containerID": "containerd://4015f0fdfd1dd74da1486197e366a77ab4c14927c09b9c5c9283adbf1c879ab9",
+                        "image": "docker.io/bench/echo-grpc:direct-tx",
+                        "imageID": "sha256:6a2042fe18293cdbf7f9e23e0cc97dbe5bab09e3bf09fb5cd0cfcaaa794a5f37",
+                        "lastState": {},
+                        "name": "app",
+                        "ready": true,
+                        "restartCount": 0,
+                        "started": true,
+                        "state": {
+                            "running": {
+                                "startedAt": "2026-09-06T07:55:21Z"
+                            }
+                        }
+                    }
+                ],
+                "hostIP": "147.46.78.169",
+                "hostIPs": [
+                    {
+                        "ip": "147.46.78.169"
+                    }
+                ],
+                "phase": "Running",
+                "podIP": "10.244.0.90",
+                "podIPs": [
+                    {
+                        "ip": "10.244.0.90"
+                    }
+                ],
+                "qosClass": "Burstable",
+                "startTime": "2026-09-06T07:55:21Z"
+            }
+        }
+    ],
+    "kind": "List",
+    "metadata": {
+        "resourceVersion": ""
+    }
+}

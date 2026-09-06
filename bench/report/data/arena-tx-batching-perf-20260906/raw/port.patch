@@ -1,0 +1,1016 @@
+diff --git a/linkerd/doca/src/io.rs b/linkerd/doca/src/io.rs
+index a96b359d..d552e20f 100644
+--- a/linkerd/doca/src/io.rs
++++ b/linkerd/doca/src/io.rs
+@@ -1,13 +1,13 @@
+ //! `DmeshIo`: an `AsyncRead + AsyncWrite` endpoint backed by DMesh DMA
+ //! buffers instead of a TCP socket.
+ //!
+-//! Received bytes are read **zero-copy** directly out of the per-connection DMA
++//! Received bytes are read directly out of the per-connection DMA
+ //! staging buffer: the driver pushes `(pos, len)` segments (offsets into the
+ //! mapped staging region) via [`DmeshIoHandle::push_segment`], and
+ //! [`DmeshIo::poll_read`] copies straight from `staging_base + pos` into the
+ //! caller's `ReadBuf` (the single copy every `AsyncRead` performs; no extra
+-//! intermediate buffer on the DPU). The stack's writes are collected in `tx`
+-//! and picked up by the driver via [`DmeshIoHandle::take_tx`].
++//! intermediate buffer on the DPU). Writes synchronously copy into a reserved
++//! arena through the bound writer; Pending never retains caller bytes.
+ //!
+ //! Because linkerd stacks are generic over `I: AsyncRead + AsyncWrite + Peek +
+ //! PeerAddr`, implementing those traits here is what lets a DMA-backed
+@@ -38,14 +38,72 @@ pub enum BackendRoute {
+     Remote(String),
+ }
+ 
+-/// Default cap on buffered-but-unsent bytes before writers see backpressure.
+-const DEFAULT_TX_CAPACITY: usize = 256 * 1024;
++/// Write result. Retry accepts no new caller bytes; an earlier batch may remain owned.
++pub enum TxAttempt {
++    Accepted(usize),
++    /// Copied once into an unpublished arena batch.
++    Buffered(usize),
++    Retry {
++        copied: usize,
++    },
++    Failed {
++        error: io::Error,
++        copied: usize,
++    },
++}
+ 
+-/// How large the consumed prefix of `tx` may grow before it is reclaimed. One
+-/// publication consumes at most an egress chunk, so a smaller bound would move
+-/// the queue tail on nearly every publication, which is the copy the cursor
+-/// exists to avoid.
+-const TX_COMPACT_THRESHOLD: usize = 64 * 1024;
++pub trait TxWriter: Send + Sync {
++    /// Some(n): published bytes, None: retry with existing ownership intact.
++    fn flush(&self) -> io::Result<Option<usize>> {
++        Ok(Some(0))
++    }
++    fn cancel(&self) {}
++
++    fn try_write(&self, route: &BackendRoute, bytes: &[u8]) -> TxAttempt;
++    fn try_write_vectored(
++        &self,
++        route: &BackendRoute,
++        bufs: &[io::IoSlice<'_>],
++        limit: usize,
++    ) -> TxAttempt {
++        let first = bufs
++            .iter()
++            .find(|b| !b.is_empty())
++            .map(|b| &b[..])
++            .unwrap_or_default();
++        self.try_write(route, &first[..first.len().min(limit)])
++    }
++}
++
++/// Shared worker quota; epoch prevents a side carrying unused quota forward.
++#[derive(Default)]
++pub struct TxBudget(Mutex<(u64, usize)>);
++impl TxBudget {
++    pub fn refill(&self, bytes: usize) -> u64 {
++        let mut b = self.0.lock();
++        b.0 = b.0.checked_add(1).expect("TX epoch exhausted");
++        b.1 = bytes;
++        b.0
++    }
++}
++
++#[derive(Default, Clone, Copy)]
++pub struct TxStats {
++    pub accepted: u64,
++    pub publications: u64,
++    pub reserve_attempts: u64,
++    pub copied: u64,
++    pub retries: u64,
++    pub budget_wait: u64,
++    pub wakes: u64,
++    pub errors: u64,
++}
++
++struct WriterBinding {
++    writer: Arc<dyn TxWriter>,
++    owner: std::thread::ThreadId,
++    budget: Arc<TxBudget>,
++}
+ 
+ /// Every `DmeshIo`/`DmeshIoHandle` operation takes the same per-connection lock.
+ fn lock(inner: &Mutex<Inner>) -> MutexGuard<'_, Inner> {
+@@ -70,69 +128,29 @@ struct Inner {
+     rx_closed: bool,
+     rx_waker: Option<Waker>,
+ 
+-    /// Bytes written by the stack, awaiting pickup by the driver. The queue is
+-    /// `tx[tx_read..]`; everything before the cursor has been published, and
+-    /// that prefix is reclaimed in one move once it reaches
+-    /// `TX_COMPACT_THRESHOLD`.
+-    tx: Vec<u8>,
+-    tx_read: usize,
++    writer: Option<Arc<WriterBinding>>,
++    epoch: u64,
++    remaining: usize,
++    attempts: usize,
++    tx_error: Option<io::ErrorKind>,
++    tx_event: bool,
++    tx_buffered: bool,
++    tx_flush_blocked: bool,
++    tx_stats: TxStats,
+     /// Local half shut down: further writes fail.
+     tx_closed: bool,
+     /// The stack dropped the endpoint without an orderly poll_shutdown.
+     tx_aborted: bool,
+     tx_waker: Option<Waker>,
+-    tx_capacity: usize,
+ 
+     /// Driver-side waker: signalled when new tx bytes (or shutdown) appear.
+     driver_waker: Option<Waker>,
+ }
+ 
+ impl Inner {
+-    fn wake_reader(&mut self) {
+-        if let Some(w) = self.rx_waker.take() {
+-            w.wake();
+-        }
+-    }
+-    fn wake_writer(&mut self) {
+-        if let Some(w) = self.tx_waker.take() {
+-            w.wake();
+-        }
+-    }
+-    fn wake_driver(&mut self) {
+-        if let Some(w) = self.driver_waker.take() {
+-            w.wake();
+-        }
+-    }
+     fn rx_has_data(&self) -> bool {
+         !self.rx.is_empty() || !self.segs.is_empty()
+     }
+-
+-    /// Output the driver has not published yet.
+-    fn tx_pending(&self) -> &[u8] {
+-        &self.tx[self.tx_read..]
+-    }
+-
+-    fn tx_queued(&self) -> usize {
+-        self.tx.len() - self.tx_read
+-    }
+-
+-    /// Advance the cursor over `n` published bytes and reclaim the prefix once
+-    /// it is worth moving what is left.
+-    fn tx_consume(&mut self, n: usize) {
+-        self.tx_read += n;
+-        if self.tx_read == self.tx.len() {
+-            self.tx.clear();
+-            self.tx_read = 0;
+-        } else if self.tx_read >= TX_COMPACT_THRESHOLD {
+-            self.tx.drain(..self.tx_read);
+-            self.tx_read = 0;
+-        }
+-    }
+-
+-    fn tx_clear(&mut self) {
+-        self.tx.clear();
+-        self.tx_read = 0;
+-    }
+ }
+ 
+ /// Stack-facing endpoint (the `TcpStream` analogue).
+@@ -173,10 +191,7 @@ unsafe impl Sync for DmeshIoHandle {}
+ /// `peer` is the flow's source address, reported via `PeerAddr`; `session`
+ /// names the DMA session the flow belongs to, reported via `DmeshSession`.
+ pub fn dmesh_io_pair(peer: SocketAddr, session: Option<SessionToken>) -> (DmeshIo, DmeshIoHandle) {
+-    let inner = Arc::new(Mutex::new(Inner {
+-        tx_capacity: DEFAULT_TX_CAPACITY,
+-        ..Inner::default()
+-    }));
++    let inner = Arc::new(Mutex::new(Inner::default()));
+     (
+         DmeshIo {
+             inner: inner.clone(),
+@@ -247,40 +262,173 @@ impl AsyncRead for DmeshIo {
+     }
+ }
+ 
+-impl AsyncWrite for DmeshIo {
+-    fn poll_write(
+-        self: Pin<&mut Self>,
++impl DmeshIo {
++    fn poll_transmit(
++        &self,
+         cx: &mut Context<'_>,
+-        data: &[u8],
++        offered: usize,
++        publish: impl FnOnce(&dyn TxWriter, &BackendRoute, usize) -> TxAttempt,
+     ) -> Poll<io::Result<usize>> {
+-        let mut inner = lock(&self.inner);
+-        if inner.tx_closed {
+-            return Poll::Ready(Err(io::Error::new(
+-                io::ErrorKind::BrokenPipe,
+-                "dmesh connection is shut down",
+-            )));
++        if offered == 0 {
++            return Poll::Ready(Ok(0));
+         }
+-        let room = inner.tx_capacity.saturating_sub(inner.tx_queued());
+-        if room == 0 {
++        let (binding, route, n, epoch) = {
++            let mut inner = lock(&self.inner);
++            if inner.tx_closed || inner.tx_error.is_some() {
++                return Poll::Ready(Err(io::Error::new(
++                    inner.tx_error.unwrap_or(io::ErrorKind::BrokenPipe),
++                    "dmesh writer closed",
++                )));
++            }
++            // Register before checking availability so a grant cannot race past us.
+             inner.tx_waker = Some(cx.waker().clone());
+-            return Poll::Pending;
++            let Some(binding) = inner.writer.clone() else {
++                return Poll::Pending;
++            };
++            if binding.owner != std::thread::current().id() {
++                inner.tx_error = Some(io::ErrorKind::BrokenPipe);
++                inner.tx_stats.errors += 1;
++                inner.tx_event = true;
++                let wake = inner.driver_waker.take();
++                drop(inner);
++                if let Some(w) = wake {
++                    w.wake();
++                }
++                return Poll::Ready(Err(io::Error::other("dmesh writer polled on wrong thread")));
++            }
++            let mut budget = binding.budget.0.lock();
++            let n = offered.min(inner.remaining).min(budget.1);
++            let reserve = !inner.tx_buffered;
++            if n == 0 || (reserve && inner.attempts == 0) || inner.epoch != budget.0 {
++                inner.tx_stats.budget_wait += 1;
++                return Poll::Pending;
++            }
++            budget.1 -= n;
++            if reserve {
++                inner.attempts -= 1;
++                inner.tx_stats.reserve_attempts += 1;
++            }
++            let epoch = inner.epoch;
++            drop(budget);
++            (binding, inner.backend_route.clone(), n, epoch)
++        };
++        // Neither the endpoint nor quota mutex crosses publication/FFI.
++        let attempt = publish(binding.writer.as_ref(), &route, n);
++        let mut inner = lock(&self.inner);
++        let (accepted, result) = match attempt {
++            TxAttempt::Accepted(got) if got > 0 && got <= n => {
++                inner.remaining -= got;
++                inner.tx_stats.accepted += got as u64;
++                inner.tx_stats.publications += 1;
++                inner.tx_stats.copied += got as u64;
++                inner.tx_event = true;
++                inner.tx_waker = None;
++                (got, Poll::Ready(Ok(got)))
++            }
++            TxAttempt::Buffered(got) if got > 0 && got <= n => {
++                inner.remaining -= got;
++                inner.tx_stats.copied += got as u64;
++                inner.tx_buffered = true;
++                inner.tx_event = true;
++                inner.tx_waker = None;
++                (got, Poll::Ready(Ok(got)))
++            }
++            TxAttempt::Retry { copied } => {
++                inner.tx_stats.copied += copied as u64;
++                inner.tx_stats.retries += 1;
++                // A refused publication gets a new opportunity from the driver.
++                inner.attempts = 0;
++                (0, Poll::Pending)
++            }
++            other => {
++                let err = match other {
++                    TxAttempt::Failed { error, copied } => {
++                        inner.tx_stats.copied += copied as u64;
++                        error
++                    }
++                    _ => io::Error::other("invalid direct publication length"),
++                };
++                inner.tx_error = Some(err.kind());
++                inner.tx_stats.errors += 1;
++                inner.tx_event = true;
++                (0, Poll::Ready(Err(err)))
++            }
++        };
++        let mut budget = binding.budget.0.lock();
++        if budget.0 == epoch {
++            budget.1 += n - accepted;
++        }
++        drop(budget);
++        let wake = if inner.tx_event {
++            inner.driver_waker.take()
++        } else {
++            None
++        };
++        drop(inner);
++        if let Some(w) = wake {
++            w.wake();
+         }
++        result
++    }
++}
+ 
+-        let n = data.len().min(room);
+-        inner.tx.extend_from_slice(&data[..n]);
+-        inner.wake_driver();
+-        Poll::Ready(Ok(n))
++impl AsyncWrite for DmeshIo {
++    fn poll_write(
++        self: Pin<&mut Self>,
++        cx: &mut Context<'_>,
++        data: &[u8],
++    ) -> Poll<io::Result<usize>> {
++        self.poll_transmit(cx, data.len(), |writer, route, limit| {
++            writer.try_write(route, &data[..limit])
++        })
++    }
++    fn poll_write_vectored(
++        self: Pin<&mut Self>,
++        cx: &mut Context<'_>,
++        bufs: &[io::IoSlice<'_>],
++    ) -> Poll<io::Result<usize>> {
++        let offered = bufs.iter().fold(0usize, |n, b| n.saturating_add(b.len()));
++        self.poll_transmit(cx, offered, |writer, route, limit| {
++            writer.try_write_vectored(route, bufs, limit)
++        })
++    }
++    fn is_write_vectored(&self) -> bool {
++        true
+     }
+ 
+     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+-        Poll::Ready(Ok(()))
++        // Accepted bytes already belong to the C transport, like bytes queued
++        // by a socket send. Request driver progress without forcing a separate
++        // DMA unit at every H2 frame's internal flush boundary.
++        let mut inner = lock(&self.inner);
++        let result = inner.tx_error.map_or(Ok(()), |kind| {
++            Err(io::Error::new(kind, "dmesh transport failed"))
++        });
++        let wake = if inner.tx_event && !inner.tx_flush_blocked {
++            inner.driver_waker.take()
++        } else {
++            None
++        };
++        drop(inner);
++        if let Some(w) = wake {
++            w.wake();
++        }
++        Poll::Ready(result)
+     }
+ 
+-    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+-        let mut inner = lock(&self.inner);
+-        inner.tx_closed = true;
+-        inner.wake_driver();
+-        Poll::Ready(Ok(()))
++    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
++        // Close admission immediately, but FIN remains ineligible until the
++        // transport has submitted the buffered DATA to DMA/peer custody.
++        lock(&self.inner).tx_closed = true;
++        let result = DmeshIoHandle {
++            inner: self.inner.clone(),
++        }
++        .flush_tx(Some(cx.waker()));
++        let wake = lock(&self.inner).driver_waker.take();
++        if let Some(w) = wake {
++            w.wake();
++        }
++        result
+     }
+ }
+ 
+@@ -312,7 +460,11 @@ impl Drop for DmeshIo {
+             inner.tx_aborted = true;
+         }
+         inner.tx_closed = true;
+-        inner.wake_driver();
++        let wake = inner.driver_waker.take();
++        drop(inner);
++        if let Some(w) = wake {
++            w.wake();
++        }
+     }
+ }
+ 
+@@ -336,21 +488,33 @@ impl DmeshIoHandle {
+     pub fn push_segment(&self, pos: u32, len: u32) {
+         let mut inner = lock(&self.inner);
+         inner.segs.push_back((pos, len));
+-        inner.wake_reader();
++        let wake = inner.rx_waker.take();
++        drop(inner);
++        if let Some(w) = wake {
++            w.wake();
++        }
+     }
+ 
+     /// Deliver owned bytes to the reading stack (copy path; tests / non-DMA).
+     pub fn push_rx(&self, bytes: &[u8]) {
+         let mut inner = lock(&self.inner);
+         inner.rx.extend_from_slice(bytes);
+-        inner.wake_reader();
++        let wake = inner.rx_waker.take();
++        drop(inner);
++        if let Some(w) = wake {
++            w.wake();
++        }
+     }
+ 
+     /// Signal peer half-close: pending data drains, then reads return EOF.
+     pub fn close_rx(&self) {
+         let mut inner = lock(&self.inner);
+         inner.rx_closed = true;
+-        inner.wake_reader();
++        let wake = inner.rx_waker.take();
++        drop(inner);
++        if let Some(w) = wake {
++            w.wake();
++        }
+     }
+ 
+     /// Abort both halves and discard all buffered data.
+@@ -366,83 +530,148 @@ impl DmeshIoHandle {
+         inner.staging_base = 0;
+         inner.staging_len = 0;
+         inner.rx_closed = true;
+-        inner.tx_clear();
++        let binding = inner.writer.take();
++        inner.tx_buffered = false;
++        inner.tx_flush_blocked = false;
+         inner.tx_closed = true;
+         inner.tx_aborted = true;
+-        inner.wake_reader();
+-        inner.wake_writer();
+-        inner.wake_driver();
+-    }
+-
+-    /// Copy up to `out.len()` queued output bytes into `out` without consuming
+-    /// them, and answer how many were copied.
+-    ///
+-    /// This is the reservation path's read: the caller copies straight into the
+-    /// egress arena and consumes only the prefix the datapath accepted, so a
+-    /// refused reservation leaves the queue exactly as it was.
+-    pub fn copy_tx_into(&self, out: &mut [u8]) -> usize {
+-        let inner = lock(&self.inner);
+-        let pending = inner.tx_pending();
+-        let n = pending.len().min(out.len());
+-        out[..n].copy_from_slice(&pending[..n]);
+-        n
++        inner.tx_error = Some(io::ErrorKind::BrokenPipe);
++        let wakes = [
++            inner.rx_waker.take(),
++            inner.tx_waker.take(),
++            inner.driver_waker.take(),
++        ];
++        drop(inner);
++        if let Some(binding) = binding {
++            if binding.owner == std::thread::current().id() {
++                binding.writer.cancel();
++            }
++        }
++        for w in wakes.into_iter().flatten() {
++            w.wake();
++        }
+     }
+ 
+-    /// Drop the first `n` output bytes, which the datapath has accepted.
+-    pub fn consume_tx(&self, n: usize) {
+-        if n == 0 {
+-            return;
++    /// Install once on the owning worker; late orphan registrations are aborted.
++    pub fn bind_writer(&self, writer: Arc<dyn TxWriter>, budget: Arc<TxBudget>, origin: bool) {
++        let wake = {
++            let mut inner = lock(&self.inner);
++            if inner.tx_closed || inner.writer.is_some() {
++                return;
++            }
++            if origin {
++                inner.backend_route = BackendRoute::Origin;
++            }
++            inner.writer = Some(Arc::new(WriterBinding {
++                writer,
++                budget,
++                owner: std::thread::current().id(),
++            }));
++            inner.tx_waker.take()
++        };
++        if let Some(w) = wake {
++            w.wake();
+         }
+-        let mut inner = lock(&self.inner);
+-        let n = n.min(inner.tx_queued());
+-        inner.tx_consume(n);
+-        inner.wake_writer();
+     }
+ 
+-    /// Queued output bytes.
+-    pub fn tx_len(&self) -> usize {
+-        lock(&self.inner).tx_queued()
++    /// Driver grants a bounded opportunity; payload storage belongs to the C arena.
++    pub fn grant(&self, epoch: u64, bytes: usize, attempts: usize) {
++        let wake = {
++            let mut inner = lock(&self.inner);
++            inner.epoch = epoch;
++            inner.tx_flush_blocked = false;
++            inner.remaining = bytes;
++            inner.attempts = attempts;
++            let wake = inner.tx_waker.take();
++            if wake.is_some() {
++                inner.tx_stats.wakes += 1;
++            }
++            wake
++        };
++        if let Some(w) = wake {
++            w.wake();
++        }
+     }
+ 
+-    /// Take up to `max` bytes written by the stack (to post as DMA sends).
+-    pub fn take_tx(&self, max: usize) -> Vec<u8> {
++    /// Flush at most one owned batch. A refused flush is retried on the next
++    /// driver grant, so a permanently blocked peer cannot keep the runtime busy.
++    pub fn flush_tx(&self, waiter: Option<&Waker>) -> Poll<io::Result<()>> {
++        let binding = {
++            let mut inner = lock(&self.inner);
++            if let Some(kind) = inner.tx_error {
++                return Poll::Ready(Err(io::Error::new(kind, "dmesh batch failed")));
++            }
++            if inner.tx_aborted {
++                return Poll::Ready(Err(io::Error::new(
++                    io::ErrorKind::BrokenPipe,
++                    "dmesh endpoint dropped",
++                )));
++            }
++            if !inner.tx_buffered {
++                return Poll::Ready(Ok(()));
++            }
++            if let Some(w) = waiter {
++                inner.tx_waker = Some(w.clone());
++            }
++            if inner.tx_flush_blocked {
++                return Poll::Pending;
++            }
++            let Some(binding) = inner.writer.clone() else {
++                return Poll::Pending;
++            };
++            if binding.owner != std::thread::current().id() {
++                inner.tx_error = Some(io::ErrorKind::BrokenPipe);
++                inner.tx_stats.errors += 1;
++                inner.tx_event = true;
++                let wake = inner.driver_waker.take();
++                drop(inner);
++                if let Some(w) = wake {
++                    w.wake();
++                }
++                return Poll::Ready(Err(io::Error::other("dmesh flush on wrong thread")));
++            }
++            binding
++        };
++        let result = binding.writer.flush();
+         let mut inner = lock(&self.inner);
+-        let n = inner.tx_queued().min(max);
+-        let out = inner.tx_pending()[..n].to_vec();
+-        inner.tx_consume(n);
+-        if n > 0 {
+-            inner.wake_writer();
++        let result = match result {
++            Ok(Some(n)) => {
++                inner.tx_stats.accepted += n as u64;
++                inner.tx_stats.publications += u64::from(n > 0);
++                inner.tx_buffered = false;
++                inner.tx_event = true;
++                Poll::Ready(Ok(()))
++            }
++            Ok(None) => {
++                inner.tx_stats.retries += 1;
++                inner.tx_flush_blocked = true;
++                return Poll::Pending;
++            }
++            Err(error) => {
++                inner.tx_stats.errors += 1;
++                inner.tx_error = Some(error.kind());
++                inner.tx_event = true;
++                Poll::Ready(Err(error))
++            }
++        };
++        let wakes = [inner.tx_waker.take(), inner.driver_waker.take()];
++        drop(inner);
++        for w in wakes.into_iter().flatten() {
++            w.wake();
+         }
+-        out
++        result
+     }
+ 
+-    /// Return unsent bytes to the front of the tx queue (the DMA ring was full,
+-    /// or the reverse path was not ready). They are re-sent on a later tick.
+-    pub fn untake_tx(&self, data: &[u8]) {
+-        if data.is_empty() {
+-            return;
+-        }
++    pub fn take_tx_stats(&self) -> TxStats {
+         let mut inner = lock(&self.inner);
+-        // The bytes came off the front of this queue, so the room they left is
+-        // still in front of the cursor unless it was reclaimed meanwhile.
+-        if data.len() <= inner.tx_read {
+-            let at = inner.tx_read - data.len();
+-            let end = inner.tx_read;
+-            inner.tx[at..end].copy_from_slice(data);
+-            inner.tx_read = at;
+-            return;
+-        }
+-        let mut merged = Vec::with_capacity(data.len() + inner.tx_queued());
+-        merged.extend_from_slice(data);
+-        merged.extend_from_slice(inner.tx_pending());
+-        inner.tx = merged;
+-        inner.tx_read = 0;
++        inner.tx_event = false;
++        std::mem::take(&mut inner.tx_stats)
+     }
+ 
+     /// True once the stack shut down its write half and tx is fully drained.
+     pub fn tx_finished(&self) -> bool {
+         let inner = lock(&self.inner);
+-        inner.tx_closed && inner.tx_queued() == 0
++        inner.tx_closed && !inner.tx_buffered
+     }
+ 
+     /// True while the reader still has undelivered/undrained data.
+@@ -456,15 +685,15 @@ impl DmeshIoHandle {
+         let inner = lock(&self.inner);
+         DrainState {
+             has_rx: inner.rx_has_data(),
+-            tx_finished: inner.tx_closed && inner.tx_queued() == 0,
+-            tx_aborted: inner.tx_aborted,
++            tx_finished: inner.tx_closed && !inner.tx_buffered,
++            tx_aborted: inner.tx_aborted || inner.tx_error.is_some(),
+         }
+     }
+ 
+     /// Poll for bytes waiting in the tx queue.
+     pub fn poll_tx_ready(&self, cx: &mut Context<'_>) -> Poll<()> {
+         let mut inner = lock(&self.inner);
+-        if inner.tx_queued() > 0 {
++        if inner.tx_event {
+             return Poll::Ready(());
+         }
+         inner.driver_waker = Some(cx.waker().clone());
+@@ -513,7 +742,11 @@ mod tests {
+     async fn abort_discards_buffers_and_closes_both_halves() {
+         let (mut io, handle) = pair();
+         handle.push_rx(b"unread");
+-        io.write_all(b"unsent").await.unwrap();
++        assert!(
++            poll_fn(|cx| Poll::Ready(Pin::new(&mut io).poll_write(cx, b"unsent")))
++                .await
++                .is_pending()
++        );
+ 
+         handle.abort();
+ 
+@@ -523,7 +756,7 @@ mod tests {
+             io.write_all(b"late").await.unwrap_err().kind(),
+             io::ErrorKind::BrokenPipe
+         );
+-        assert!(handle.take_tx(usize::MAX).is_empty());
++        assert_eq!(handle.take_tx_stats().accepted, 0);
+         assert!(handle.tx_finished());
+     }
+ 
+@@ -553,95 +786,154 @@ mod tests {
+         assert_eq!(io.peer_addr().unwrap(), "127.0.0.1:40000".parse().unwrap());
+     }
+ 
++    #[derive(Default)]
++    struct Recording {
++        bytes: Mutex<Vec<u8>>,
++        cap: usize,
++        refuse: std::sync::atomic::AtomicBool,
++        calls: std::sync::atomic::AtomicUsize,
++    }
++    impl TxWriter for Recording {
++        fn try_write(&self, _: &BackendRoute, bytes: &[u8]) -> TxAttempt {
++            use std::sync::atomic::Ordering::SeqCst;
++            self.calls.fetch_add(1, SeqCst);
++            if self.refuse.load(SeqCst) {
++                return TxAttempt::Retry { copied: 0 };
++            }
++            let n = bytes.len().min(self.cap);
++            self.bytes.lock().extend_from_slice(&bytes[..n]);
++            TxAttempt::Accepted(n)
++        }
++    }
++    fn bind(handle: &DmeshIoHandle, cap: usize) -> (Arc<Recording>, Arc<TxBudget>) {
++        let writer = Arc::new(Recording {
++            cap,
++            ..Recording::default()
++        });
++        let budget = Arc::new(TxBudget::default());
++        handle.bind_writer(writer.clone(), budget.clone(), false);
++        handle.grant(budget.refill(65536), 65536, 4);
++        (writer, budget)
++    }
++    async fn write_once(io: &mut DmeshIo, data: &[u8]) -> Poll<io::Result<usize>> {
++        poll_fn(|cx| Poll::Ready(Pin::new(&mut *io).poll_write(cx, data))).await
++    }
++
+     #[tokio::test]
+-    async fn copy_tx_leaves_the_queue_until_it_is_consumed() {
++    async fn direct_partial_write_owns_prefix_and_never_republishes() {
+         let (mut io, handle) = pair();
+-        io.write_all(b"0123456789").await.unwrap();
+-
+-        let mut out = [0u8; 4];
+-        assert_eq!(handle.copy_tx_into(&mut out), 4);
+-        assert_eq!(&out, b"0123");
+-        // A refused reservation consumes nothing.
+-        handle.consume_tx(0);
+-        assert_eq!(handle.tx_len(), 10);
+-
+-        handle.consume_tx(4);
+-        assert_eq!(handle.tx_len(), 6);
+-        let mut rest = [0u8; 16];
+-        assert_eq!(handle.copy_tx_into(&mut rest), 6);
+-        assert_eq!(&rest[..6], b"456789");
+-
+-        handle.consume_tx(usize::MAX);
+-        assert_eq!(handle.tx_len(), 0);
+-        assert_eq!(handle.copy_tx_into(&mut rest), 0);
++        let (writer, _) = bind(&handle, 4);
++        let mut source = b"0123456789".to_vec();
++        assert!(matches!(
++            write_once(&mut io, &source).await,
++            Poll::Ready(Ok(4))
++        ));
++        source[..4].fill(99);
++        io.write_all(&source[4..]).await.unwrap();
++        assert_eq!(&*writer.bytes.lock(), b"0123456789");
++        assert_eq!(handle.take_tx_stats().accepted, 10);
++        assert_eq!(handle.take_tx_stats().accepted, 0);
+     }
+ 
+     #[tokio::test]
+-    async fn a_requeued_suffix_returns_to_the_front_in_order() {
++    async fn pending_cancellation_does_not_keep_old_bytes() {
++        use std::sync::atomic::Ordering::SeqCst;
+         let (mut io, handle) = pair();
+-        io.write_all(b"0123456789").await.unwrap();
+-
+-        let taken = handle.take_tx(6);
+-        assert_eq!(taken, b"012345");
+-        // The datapath accepted only "012"; the rest goes back ahead of "6789".
+-        handle.untake_tx(&taken[3..]);
+-        assert_eq!(handle.tx_len(), 7);
+-        assert_eq!(handle.take_tx(usize::MAX), b"3456789");
+-        assert_eq!(handle.tx_len(), 0);
++        assert!(write_once(&mut io, b"unbound").await.is_pending());
++        let (writer, budget) = bind(&handle, 64);
++        writer.refuse.store(true, SeqCst);
++        assert!(write_once(&mut io, b"cancelled").await.is_pending());
++        writer.refuse.store(false, SeqCst);
++        handle.grant(budget.refill(65536), 65536, 4);
++        io.write_all(b"replacement").await.unwrap();
++        assert_eq!(&*writer.bytes.lock(), b"replacement");
++        io.shutdown().await.unwrap();
++        assert!(handle.tx_finished());
++        assert!(!handle.drain_state().tx_aborted);
+     }
+ 
+     #[tokio::test]
+-    async fn the_consumed_prefix_does_not_count_against_capacity() {
++    async fn empty_write_and_shared_quota_are_bounded() {
++        use std::sync::atomic::Ordering::SeqCst;
+         let (mut io, handle) = pair();
+-        // Fill the queue, then publish more than the compaction threshold so
+-        // the cursor has run well ahead of the buffer's start.
+-        let big = vec![7u8; super::DEFAULT_TX_CAPACITY];
+-        io.write_all(&big).await.unwrap();
+-        let published = super::TX_COMPACT_THRESHOLD / 2;
+-        let mut sink = vec![0u8; published];
+-        assert_eq!(handle.copy_tx_into(&mut sink), published);
+-        assert!(sink.iter().all(|&b| b == 7));
+-        handle.consume_tx(published);
+-        assert_eq!(handle.tx_len(), super::DEFAULT_TX_CAPACITY - published);
+-
+-        // Room freed by publication is room a writer may use again.
+-        io.write_all(&vec![9u8; published]).await.unwrap();
+-        assert_eq!(handle.tx_len(), super::DEFAULT_TX_CAPACITY);
+-
+-        let drained = handle.take_tx(usize::MAX);
+-        assert_eq!(drained.len(), super::DEFAULT_TX_CAPACITY);
+-        assert_eq!(
+-            &drained[drained.len() - published..],
+-            &vec![9u8; published][..]
++        let (writer, budget) = bind(&handle, 64);
++        io.write_all(b"").await.unwrap();
++        assert!(matches!(write_once(&mut io, b"").await, Poll::Ready(Ok(0))));
++        assert_eq!(writer.calls.load(SeqCst), 0);
++        let epoch = budget.refill(3);
++        handle.grant(epoch, 64, 4);
++        assert!(matches!(
++            write_once(&mut io, b"abcdef").await,
++            Poll::Ready(Ok(3))
++        ));
++        assert!(write_once(&mut io, b"def").await.is_pending());
++        assert_eq!(&*writer.bytes.lock(), b"abc");
++        // Refill without granting this side cannot revive an old ticket.
++        budget.refill(64);
++        assert!(write_once(&mut io, b"def").await.is_pending());
++    }
++
++    #[test]
++    fn wrong_thread_never_enters_writer() {
++        use std::sync::atomic::Ordering::SeqCst;
++        let (mut io, handle) = pair();
++        let (writer, _) = bind(&handle, 64);
++        std::thread::spawn(move || {
++            let w = std::task::Waker::noop();
++            let mut cx = Context::from_waker(w);
++            assert!(matches!(
++                Pin::new(&mut io).poll_write(&mut cx, b"wrong"),
++                Poll::Ready(Err(_))
++            ));
++        })
++        .join()
++        .unwrap();
++        assert_eq!(writer.calls.load(SeqCst), 0);
++        assert!(handle.drain_state().tx_aborted);
++    }
++    #[tokio::test]
++    async fn writer_callback_can_reenter_endpoint_without_deadlock() {
++        struct Reentrant(Arc<Mutex<Inner>>);
++        impl TxWriter for Reentrant {
++            fn try_write(&self, _: &BackendRoute, bytes: &[u8]) -> TxAttempt {
++                assert!(
++                    self.0.try_lock().is_some(),
++                    "publication held the endpoint lock"
++                );
++                TxAttempt::Accepted(bytes.len())
++            }
++        }
++        let (mut io, handle) = pair();
++        let budget = Arc::new(TxBudget::default());
++        handle.bind_writer(
++            Arc::new(Reentrant(handle.inner.clone())),
++            budget.clone(),
++            false,
+         );
+-        assert_eq!(handle.tx_len(), 0);
++        handle.grant(budget.refill(64), 64, 4);
++        io.write_all(b"no-lock-held").await.unwrap();
+     }
+ 
+     #[tokio::test]
+-    async fn write_reaches_driver_and_backpressure_releases() {
++    async fn attempt_budget_and_one_shot_progress_allow_parking() {
+         let (mut io, handle) = pair();
+-
+-        io.write_all(b"ping").await.unwrap();
+-        poll_fn(|cx| handle.poll_tx_ready(cx)).await;
+-        assert_eq!(handle.take_tx(usize::MAX), b"ping");
+-
+-        let big = vec![0u8; super::DEFAULT_TX_CAPACITY];
+-        io.write_all(&big).await.unwrap();
+-
+-        let mut blocked = tokio::spawn(async move {
+-            io.write_all(b"x").await.unwrap();
+-            io
+-        });
+-        tokio::task::yield_now().await;
+-        assert!(!blocked.is_finished());
+-
+-        let drained = handle.take_tx(usize::MAX);
+-        assert_eq!(drained.len(), super::DEFAULT_TX_CAPACITY);
+-
+-        let mut io = (&mut blocked).await.unwrap();
+-        assert_eq!(handle.take_tx(usize::MAX), b"x");
+-
+-        io.shutdown().await.unwrap();
+-        assert!(handle.tx_finished());
++        let (writer, budget) = bind(&handle, 1);
++        for _ in 0..4 {
++            assert!(matches!(
++                write_once(&mut io, b"x").await,
++                Poll::Ready(Ok(1))
++            ));
++        }
++        assert!(write_once(&mut io, b"wait").await.is_pending());
++        let mut cx = Context::from_waker(std::task::Waker::noop());
++        assert!(handle.poll_tx_ready(&mut cx).is_ready());
++        assert_eq!(handle.take_tx_stats().accepted, 4);
++        assert!(handle.poll_tx_ready(&mut cx).is_pending());
++        handle.grant(budget.refill(64), 64, 4);
++        assert!(matches!(
++            write_once(&mut io, b"new").await,
++            Poll::Ready(Ok(1))
++        ));
++        assert_eq!(&*writer.bytes.lock(), b"xxxxn");
+     }
+ }
+diff --git a/linkerd/doca/src/lib.rs b/linkerd/doca/src/lib.rs
+index 2b09a960..e4f2c564 100644
+--- a/linkerd/doca/src/lib.rs
++++ b/linkerd/doca/src/lib.rs
+@@ -25,5 +25,8 @@ pub struct Dmesh {
+     pub metrics: std::sync::Arc<SessionMetrics>,
+ }
+ 
+-pub use io::{dmesh_io_pair, BackendRoute, DmeshIo, DmeshIoHandle, DrainState};
++pub use io::{
++    dmesh_io_pair, BackendRoute, DmeshIo, DmeshIoHandle, DrainState, TxAttempt, TxBudget, TxStats,
++    TxWriter,
++};
+ pub use metrics::{record_control_event, SessionMetrics};
+diff --git a/linkerd/doca/src/metrics.rs b/linkerd/doca/src/metrics.rs
+index df54709a..8ec5b16a 100644
+--- a/linkerd/doca/src/metrics.rs
++++ b/linkerd/doca/src/metrics.rs
+@@ -43,6 +43,15 @@ pub fn record_control_event(kind: &str, reason: &str) {
+ 
+ #[derive(Debug, Default)]
+ pub struct SessionMetrics {
++    pub tx_accepted_bytes: Counter,
++    pub tx_arena_copy_bytes: Counter,
++    pub tx_publications: Counter,
++    pub tx_reserve_attempts: Counter,
++    pub tx_retries: Counter,
++    pub tx_budget_wait: Counter,
++    pub tx_writer_wakes: Counter,
++    pub tx_errors: Counter,
++
+     /// Sessions the adapter opened.
+     pub sessions_opened: Counter,
+     /// Sessions the adapter closed.
+@@ -151,6 +160,47 @@ impl SessionMetrics {
+     /// same counters.
+     pub fn register(registry: &mut Registry) -> Arc<Self> {
+         let metrics = Self::default();
++        registry.register(
++            "tx_accepted_bytes",
++            "Bytes published to C DMA or peer custody (excludes buffered arena bytes)",
++            metrics.tx_accepted_bytes.clone(),
++        );
++        registry.register(
++            "tx_arena_copy_bytes",
++            "Bytes copied into the TX arena including rejected attempts",
++            metrics.tx_arena_copy_bytes.clone(),
++        );
++        registry.register(
++            "tx_publications",
++            "Arena batches transferred to C DMA or peer custody",
++            metrics.tx_publications.clone(),
++        );
++        registry.register(
++            "tx_reserve_attempts",
++            "Attempts to acquire a new endpoint arena batch",
++            metrics.tx_reserve_attempts.clone(),
++        );
++        registry.register(
++            "tx_retries",
++            "TX reserve or commit retries",
++            metrics.tx_retries.clone(),
++        );
++        registry.register(
++            "tx_budget_wait",
++            "TX polls waiting for quota",
++            metrics.tx_budget_wait.clone(),
++        );
++        registry.register(
++            "tx_writer_wakes",
++            "Blocked writers granted a new opportunity",
++            metrics.tx_writer_wakes.clone(),
++        );
++        registry.register(
++            "tx_errors",
++            "Terminal direct TX errors",
++            metrics.tx_errors.clone(),
++        );
++
+         registry.register(
+             "sessions_opened",
+             "DPUmesh sessions opened",
+@@ -487,14 +537,8 @@ mod tests {
+         prometheus_client::encoding::text::encode(&mut encoded, &registry).unwrap();
+         assert!(encoded.contains("sessions_opened_total 1"), "{encoded}");
+         assert!(encoded.contains("sessions_active 1"), "{encoded}");
+-        assert!(
+-            encoded.contains("worker_drain_calls_total 0"),
+-            "{encoded}"
+-        );
+-        assert!(
+-            encoded.contains("worker_dma_tasks_inflight 0"),
+-            "{encoded}"
+-        );
++        assert!(encoded.contains("worker_drain_calls_total 0"), "{encoded}");
++        assert!(encoded.contains("worker_dma_tasks_inflight 0"), "{encoded}");
+         assert!(
+             encoded.contains("session_stack_builds_total 1"),
+             "{encoded}"
