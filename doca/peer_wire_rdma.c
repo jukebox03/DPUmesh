@@ -25,6 +25,7 @@
 #include <netinet/in.h>
 #include <rdma/rdma_cma.h>
 #include <stdio.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/epoll.h>
@@ -58,6 +59,9 @@
 
 enum { RC_FREE = 0, RC_RESOLVING, RC_CONNECTING, RC_READY, RC_DEAD };
 
+enum { TX_FREE, TX_RESERVED, TX_POSTED };
+enum { RX_EMPTY, RX_POSTED, RX_READY, RX_LEASED };
+static atomic_uint_fast64_t lease_epoch_next = 1;
 struct rdma_ctx;
 
 struct rdma_conn {
@@ -72,7 +76,13 @@ struct rdma_conn {
     uint8_t            inbound;
     uint8_t            handout_queued;
     uint8_t            handed_out;
-    uint8_t            send_busy[RDMA_SEND_RING];
+    uint8_t            send_busy[RDMA_SEND_RING]; /* TX state */
+    uint8_t            recv_state[RDMA_RECV_RING];
+    uint64_t           lease_epoch;
+    uint64_t           tx_generation[RDMA_SEND_RING];
+    uint64_t           rx_generation[RDMA_RECV_RING];
+    uint8_t            tx_leased, rx_leased;
+    uint32_t           rx_lease_slot, rx_lease_len;
     uint32_t           send_next;    /* where the free-slot scan starts */
     /* Receives that completed and have not been handed up yet, oldest first. */
     uint16_t           rq_slot[RDMA_RECV_RING];
@@ -140,6 +150,15 @@ static struct rdma_conn *rdma_slot_take(struct rdma_ctx *ctx)
         struct rdma_conn *c = &ctx->conns[i];
         if (c->in_use)
             continue;
+        if (ctx->epoch_next == WR_EPOCH_MASK) {
+            ctx->dead = 1; /* Never let old CQ epochs name a replacement. */
+            return NULL;
+        }
+        uint64_t lease_epoch = atomic_load(&lease_epoch_next);
+        for (;;) {
+            if (lease_epoch == UINT64_MAX) return NULL;
+            if (atomic_compare_exchange_weak(&lease_epoch_next, &lease_epoch, lease_epoch + 1)) break;
+        }
         uint8_t *buf = malloc((size_t)(RDMA_SEND_RING + RDMA_RECV_RING) * RDMA_SLOT);
         if (!buf)
             return NULL;
@@ -147,6 +166,7 @@ static struct rdma_conn *rdma_slot_take(struct rdma_ctx *ctx)
         c->ctx = ctx;
         c->index = i;
         c->epoch = (++ctx->epoch_next) & WR_EPOCH_MASK;
+        c->lease_epoch = lease_epoch;
         c->buf = buf;
         c->in_use = 1;
         c->state = RC_RESOLVING;
@@ -204,7 +224,9 @@ static int rdma_post_recv(struct rdma_conn *c, uint32_t slot)
         .num_sge = 1,
     };
     struct ibv_recv_wr *bad = NULL;
-    return ibv_post_recv(c->id->qp, &wr, &bad) == 0 ? 0 : -1;
+    if (ibv_post_recv(c->id->qp, &wr, &bad) != 0) return -1;
+    c->recv_state[slot] = RX_POSTED;
+    return 0;
 }
 
 /* Build the queue pair and fill its receive ring. Both sides do this before
@@ -259,73 +281,151 @@ static void rdma_set_ack_timeout(struct rdma_cm_id *id)
 
 /* ---- transfer ----------------------------------------------------------- */
 
-static int rdma_send_msg(void *wc, const void *buf, size_t len)
+static int rdma_tx_reserve(void *wc, struct peer_wire_tx_lease *out)
 {
     struct rdma_conn *c = wc;
-    if (!c || !c->in_use || c->state == RC_DEAD)
-        return -1;
-    if (len == 0 || len > PEER_WIRE_MSG_MAX)
-        return -1;
-    if (c->state != RC_READY)
-        return 0;
-
-    uint32_t slot = RDMA_SEND_RING;
+    if (!out) return -1;
+    memset(out, 0, sizeof(*out));
+    if (!c || !c->in_use || c->state == RC_DEAD) return -1;
+    if (c->state != RC_READY || c->tx_leased) return 0;
     for (uint32_t i = 0; i < RDMA_SEND_RING; i++) {
-        uint32_t s = (c->send_next + i) % RDMA_SEND_RING;
-        if (!c->send_busy[s]) {
-            slot = s;
-            break;
-        }
+        uint32_t slot = (c->send_next + i) % RDMA_SEND_RING;
+        if (c->send_busy[slot] != TX_FREE) continue;
+        if (c->tx_generation[slot] == UINT64_MAX) { c->state = RC_DEAD; return -1; }
+        c->send_busy[slot] = TX_RESERVED;
+        c->tx_leased = 1;
+        *out = (struct peer_wire_tx_lease) {
+            .data = send_slot(c, slot), .cap = RDMA_SLOT,
+            .token = { c->lease_epoch, ++c->tx_generation[slot], slot, PEER_WIRE_TX },
+        };
+        return 1;
     }
-    if (slot == RDMA_SEND_RING)
-        return 0;                    /* every slot is still with the adapter */
+    return 0;
+}
 
-    uint8_t *p = send_slot(c, slot);
-    memcpy(p, buf, len);
+static int valid_tx(struct rdma_conn *c, const struct peer_wire_tx_lease *l)
+{
+    return c && c->in_use && l && l->token.kind == PEER_WIRE_TX &&
+        l->token.conn_epoch == c->lease_epoch && l->token.slot < RDMA_SEND_RING &&
+        c->tx_leased && c->send_busy[l->token.slot] == TX_RESERVED &&
+        c->tx_generation[l->token.slot] == l->token.lease_generation &&
+        l->data == send_slot(c, l->token.slot) && l->cap == RDMA_SLOT;
+}
+
+static int rdma_tx_cancel(void *wc, struct peer_wire_tx_lease *l)
+{
+    struct rdma_conn *c = wc;
+    if (!valid_tx(c, l)) return -1;
+    c->send_busy[l->token.slot] = TX_FREE;
+    c->tx_leased = 0;
+    memset(l, 0, sizeof(*l));
+    return c->state == RC_DEAD ? -1 : 0;
+}
+
+static int rdma_tx_commit(void *wc, struct peer_wire_tx_lease *l, size_t len)
+{
+    struct rdma_conn *c = wc;
+    if (!valid_tx(c, l)) return -1;
+    uint32_t slot = l->token.slot;
+    c->tx_leased = 0;
+    memset(l, 0, sizeof(*l));
+    if (!len || len > RDMA_SLOT || c->state != RC_READY) {
+        c->send_busy[slot] = TX_FREE;
+        c->state = RC_DEAD;
+        return -1;
+    }
     struct ibv_sge sge = {
-        .addr   = (uintptr_t)p,
-        .length = (uint32_t)len,
-        .lkey   = c->mr->lkey,
+        .addr = (uintptr_t)send_slot(c, slot), .length = (uint32_t)len,
+        .lkey = c->mr->lkey,
     };
     struct ibv_send_wr wr = {
-        .wr_id      = wr_pack(0, c->epoch, c->index, slot),
-        .sg_list    = &sge,
-        .num_sge    = 1,
-        .opcode     = IBV_WR_SEND,
-        /* Signalled because the completion is what returns the slot. */
+        .wr_id = wr_pack(0, c->epoch, c->index, slot),
+        .sg_list = &sge, .num_sge = 1, .opcode = IBV_WR_SEND,
         .send_flags = IBV_SEND_SIGNALED,
     };
     struct ibv_send_wr *bad = NULL;
     if (ibv_post_send(c->id->qp, &wr, &bad) != 0) {
+        c->send_busy[slot] = TX_FREE;
         c->state = RC_DEAD;
         return -1;
     }
-    c->send_busy[slot] = 1;
+    c->send_busy[slot] = TX_POSTED;
     c->send_next = (slot + 1) % RDMA_SEND_RING;
     return 1;
 }
 
-static long rdma_recv_msg(void *wc, void *buf, size_t cap)
+static int rdma_rx_acquire(void *wc, struct peer_wire_rx_lease *out)
 {
     struct rdma_conn *c = wc;
-    if (!c || !c->in_use || c->state == RC_DEAD)
-        return -1;
-    if (c->rq_count == 0)
-        return 0;
-    uint32_t slot = c->rq_slot[c->rq_head];
-    uint32_t len  = c->rq_len[c->rq_head];
-    if (len > cap) {
+    if (!out) return -1;
+    memset(out, 0, sizeof(*out));
+    if (!c || !c->in_use || c->state == RC_DEAD) return -1;
+    if (c->rx_leased || !c->rq_count) return 0;
+    uint32_t slot = c->rq_slot[c->rq_head], len = c->rq_len[c->rq_head];
+    if (slot >= RDMA_RECV_RING || c->recv_state[slot] != RX_READY ||
+        !len || len > RDMA_SLOT || c->rx_generation[slot] == UINT64_MAX) {
         c->state = RC_DEAD;
         return -1;
     }
-    memcpy(buf, recv_slot(c, slot), len);
+    c->recv_state[slot] = RX_LEASED;
+    c->rx_leased = 1;
+    *out = (struct peer_wire_rx_lease) {
+        .data = recv_slot(c, slot), .len = len,
+        .token = { c->lease_epoch, ++c->rx_generation[slot], slot, PEER_WIRE_RX },
+    };
+    c->rx_lease_slot = slot;
+    c->rx_lease_len = len;
     c->rq_head = (c->rq_head + 1) % RDMA_RECV_RING;
     c->rq_count--;
-    if (rdma_post_recv(c, slot) != 0) {
+    return 1;
+}
+
+static int rdma_rx_release(void *wc, struct peer_wire_rx_lease *l)
+{
+    struct rdma_conn *c = wc;
+    if (!c || !c->in_use || !l || l->token.kind != PEER_WIRE_RX ||
+        l->token.conn_epoch != c->lease_epoch || l->token.slot >= RDMA_RECV_RING ||
+        !c->rx_leased || c->recv_state[l->token.slot] != RX_LEASED ||
+        c->rx_generation[l->token.slot] != l->token.lease_generation ||
+        l->data != recv_slot(c, l->token.slot) ||
+        c->rx_lease_slot != l->token.slot || c->rx_lease_len != l->len)
+        return -1;
+    uint32_t slot = l->token.slot;
+    memset(l, 0, sizeof(*l));
+    c->rx_leased = 0;
+    c->rx_lease_len = 0;
+    c->recv_state[slot] = RX_EMPTY;
+    if (c->state == RC_DEAD || rdma_post_recv(c, slot) != 0) {
         c->state = RC_DEAD;
         return -1;
     }
-    return (long)len;
+    return 0;
+}
+
+/* Whole-message senders keep copy-in ownership and message ordering. */
+static int rdma_send_msg(void *wc, const void *buf, size_t len)
+{
+    if (!buf || !len || len > PEER_WIRE_MSG_MAX) return -1;
+    struct peer_wire_tx_lease l;
+    int r = rdma_tx_reserve(wc, &l);
+    if (r != 1) return r;
+    memcpy(l.data, buf, len);
+    return rdma_tx_commit(wc, &l, len);
+}
+
+static long rdma_recv_msg(void *wc, void *buf, size_t cap)
+{
+    struct peer_wire_rx_lease l;
+    int r = rdma_rx_acquire(wc, &l);
+    if (r != 1) return r;
+    if (!buf || l.len > cap) {
+        ((struct rdma_conn *)wc)->state = RC_DEAD;
+        (void)rdma_rx_release(wc, &l);
+        return -1;
+    }
+    size_t len = l.len;
+    memcpy(buf, l.data, len);
+    return rdma_rx_release(wc, &l) == 0 ? (long)len : -1;
 }
 
 /* ---- completions -------------------------------------------------------- */
@@ -383,7 +483,7 @@ static int rdma_poll_cq(struct rdma_ctx *ctx)
             if (recv) {
                 if (slot >= RDMA_RECV_RING || wcs[i].byte_len == 0 ||
                     wcs[i].byte_len > RDMA_SLOT ||
-                    c->rq_count >= RDMA_RECV_RING) {
+                    c->rq_count >= RDMA_RECV_RING || c->recv_state[slot] != RX_POSTED) {
                     c->state = RC_DEAD;
                     continue;
                 }
@@ -391,8 +491,11 @@ static int rdma_poll_cq(struct rdma_ctx *ctx)
                 c->rq_slot[tail] = (uint16_t)slot;
                 c->rq_len[tail] = wcs[i].byte_len;
                 c->rq_count++;
-            } else if (slot < RDMA_SEND_RING) {
-                c->send_busy[slot] = 0;
+                c->recv_state[slot] = RX_READY;
+            } else if (slot < RDMA_SEND_RING && c->send_busy[slot] == TX_POSTED) {
+                c->send_busy[slot] = TX_FREE;
+            } else {
+                c->state = RC_DEAD;
             }
         }
         if (n < RDMA_POLL_BATCH)
@@ -688,6 +791,11 @@ static const struct peer_wire_ops RDMA_OPS = {
     .close       = rdma_close,
     .epfd        = rdma_epfd,
     .ctx_free    = rdma_ctx_free,
+    .tx_reserve  = rdma_tx_reserve,
+    .tx_commit   = rdma_tx_commit,
+    .tx_cancel   = rdma_tx_cancel,
+    .rx_acquire  = rdma_rx_acquire,
+    .rx_release  = rdma_rx_release,
 };
 
 /* ---- construction ------------------------------------------------------- */

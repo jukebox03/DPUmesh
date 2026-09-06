@@ -866,8 +866,23 @@ static void test_handshake_carrier_fault(void)
     node_stop(&b);
 }
 
+static int incomplete_reserve(void *wc, struct peer_wire_tx_lease *out)
+{ (void)wc; (void)out; assert(0 && "must reject before entering carrier"); return -1; }
+static void test_incomplete_lease_group(void)
+{
+    const uint8_t seed[32] = {1};
+    struct peer_wire_ops wire = {.tx_reserve = incomplete_reserve};
+    struct peer_transport_config config = {.node_name = NODE_A, .seed = seed,
+        .wire = &wire, .wire_ctx = &wire};
+    struct peer_transport_rt *rt = (void *)(uintptr_t)1;
+    char error[256];
+    assert(dmesh_peer_transport_new(&config, &rt, error, sizeof(error)) == -1);
+    assert(rt == NULL && error[0]);
+}
+
 int main(void)
 {
+    test_incomplete_lease_group();
     test_handshake();
     test_stream_roundtrip();
     test_fin_and_pod_gone();

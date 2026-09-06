@@ -19,6 +19,26 @@
  * tags, and slack. */
 #define PEER_WIRE_MSG_MAX 73728u
 
+/* Worker-confined synchronous leases. Never access a pointer or call an op
+ * after wire close. Each direction permits one outstanding lease. */
+enum { PEER_WIRE_TX = 1, PEER_WIRE_RX = 2 };
+struct peer_wire_token {
+    uint64_t conn_epoch;
+    uint64_t lease_generation;
+    uint32_t slot;
+    uint32_t kind;
+};
+struct peer_wire_tx_lease {
+    uint8_t *data;
+    size_t cap;
+    struct peer_wire_token token;
+};
+struct peer_wire_rx_lease {
+    const uint8_t *data;
+    size_t len;
+    struct peer_wire_token token;
+};
+
 struct peer_wire_ops {
     /* Start a connection. Returns 0 with *wc set even when the connect has not
      * completed, which is the common case: `established` reports when it has. */
@@ -41,7 +61,27 @@ struct peer_wire_ops {
      * this carrier holds, or -1 when it has none. */
     int  (*epfd)(void *wctx);
     void (*ctx_free)(void *wctx);
+    /* Optional complete groups: TX three ops, RX two ops. Reserve/acquire:
+     * 1 grants ownership, 0 unavailable, -1 fault; outputs cleared on 0/-1.
+     * Commit: 1 posts the whole nonempty prefix, -1 terminal, never 0.
+     * Valid commit/cancel/release consume and clear the lease, even on fault.
+     * Invalid tokens return -1 without touching another owner's slot.
+     * Cancel/release: 0 success, -1 fault. SEND CQ returns posted TX memory;
+     * RX is reposted only on release, never while borrowed. */
+    int (*tx_reserve)(void *wc, struct peer_wire_tx_lease *out);
+    int (*tx_commit)(void *wc, struct peer_wire_tx_lease *lease, size_t len);
+    int (*tx_cancel)(void *wc, struct peer_wire_tx_lease *lease);
+    int (*rx_acquire)(void *wc, struct peer_wire_rx_lease *out);
+    int (*rx_release)(void *wc, struct peer_wire_rx_lease *lease);
 };
+
+static inline int peer_wire_ops_valid(const struct peer_wire_ops *ops)
+{
+    if (!ops) return 0;
+    int tx = !!ops->tx_reserve + !!ops->tx_commit + !!ops->tx_cancel;
+    int rx = !!ops->rx_acquire + !!ops->rx_release;
+    return (tx == 0 || tx == 3) && (rx == 0 || rx == 2);
+}
 
 /* The TCP carrier: what CI runs and what bring-up falls back to. It binds and
  * listens before returning, so a port that cannot be taken is reported here

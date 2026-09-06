@@ -547,7 +547,7 @@ int dmesh_peer_transport_new(const struct peer_transport_config *config,
         return -1;
     *out = NULL;
     if (!config || !config->node_name || !*config->node_name || !config->seed ||
-        !config->wire || !config->wire_ctx) {
+        !peer_wire_ops_valid(config->wire) || !config->wire_ctx) {
         snprintf(error, error_len, "peer transport: incomplete configuration");
         return -1;
     }
