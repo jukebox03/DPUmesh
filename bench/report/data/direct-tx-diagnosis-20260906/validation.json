@@ -1,0 +1,60 @@
+{
+  "samples": 114,
+  "kinds": {
+    "clean": 72,
+    "profile": 12,
+    "trace": 24,
+    "stat": 6
+  },
+  "validity": "all retained samples OK; fail/drops/overflow/worker_fail=0",
+  "histogram_dropped": 0,
+  "perf_lost_samples": 0,
+  "final_l7_residue": {
+    "dmesh_sessions_active": {
+      "workers": 8,
+      "sum": 0.0
+    },
+    "dmesh_registrations_pending": {
+      "workers": 8,
+      "sum": 0.0
+    },
+    "dmesh_tasks_live": {
+      "workers": 8,
+      "sum": 0.0
+    },
+    "dmesh_worker_completion_queue_depth": {
+      "workers": 8,
+      "sum": 0.0
+    },
+    "dmesh_worker_cross_queue_depth": {
+      "workers": 8,
+      "sum": 0.0
+    },
+    "dmesh_worker_dma_tasks_inflight": {
+      "workers": 8,
+      "sum": 0.0
+    },
+    "dmesh_worker_stalled_connections": {
+      "workers": 8,
+      "sum": 0.0
+    },
+    "dmesh_worker_emit_pending": {
+      "workers": 8,
+      "sum": 0.0
+    },
+    "dmesh_worker_ack_release_depth": {
+      "workers": 8,
+      "sum": 0.0
+    },
+    "dmesh_worker_ack_retry_pending": {
+      "workers": 8,
+      "sum": 0.0
+    },
+    "dmesh_worker_remote_fin_pending": {
+      "workers": 8,
+      "sum": 0.0
+    }
+  },
+  "after_retries": 0,
+  "after_copy_equals_accepted": true
+}

@@ -1,0 +1,26 @@
+2200fc9207e01b7e07e3aa0d45f26d55fef6f9aee07fb4a61cdfd3169389422e  /proc/3322650/exe
+[l7_linkerd] worker 1: Service test-bench/echo-dpumesh-native now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/http1-dpumesh now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/preload-bench now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/echo-grpc-dpumesh now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/preload-dpumesh now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/echo-dpumesh now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/preload-sock now resolves in the held topology
+[l7_linkerd] worker 1: Service linkerd/linkerd-proxy-injector now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/http1-bench now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/bench-grpc-dpumesh now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/inject-sock now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/echo-grpc-alt now resolves in the held topology
+[l7_linkerd] worker 1: Service linkerd/linkerd-dst now resolves in the held topology
+[l7_linkerd] worker 1: Service default/kubernetes now resolves in the held topology
+[l7_linkerd] worker 1: Service linkerd/linkerd-policy-validator now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/loopback-dpumesh now resolves in the held topology
+[l7_linkerd] worker 1: Service istio-system/istiod-revision-tag-default now resolves in the held topology
+[l7_linkerd] worker 1: Service kube-system/kube-dns now resolves in the held topology
+[l7_linkerd] worker 1: Service istio-system/istiod now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/bench-dpumesh now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/inject-bench now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/plain-bench now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/dpumesh-controller now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/verbs-dpumesh now resolves in the held topology
+[l7_linkerd] worker 1: Service test-bench/plain-sock now resolves in the held topology

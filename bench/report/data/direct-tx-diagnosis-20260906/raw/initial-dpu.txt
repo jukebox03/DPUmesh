@@ -1,0 +1,70 @@
+2200fc9207e01b7e07e3aa0d45f26d55fef6f9aee07fb4a61cdfd3169389422e  /proc/2986280/exe
+4273f0148b78346c83a2922db86d5a6a981fa8217fdd3cf148eb980faa76b62e  /tmp/dpumesh-before-direct-tx
+available_events
+available_filter_functions
+available_tracers
+buffer_percent
+buffer_size_kb
+buffer_total_size_kb
+current_tracer
+dynamic_events
+dyn_ftrace_total_info
+enabled_functions
+error_log
+events
+free_buffer
+function_profile_enabled
+hwlat_detector
+instances
+kprobe_events
+kprobe_profile
+max_graph_depth
+options
+osnoise
+per_cpu
+printk_formats
+README
+saved_cmdlines
+saved_cmdlines_size
+saved_tgids
+set_event
+set_event_notrace_pid
+set_event_pid
+set_ftrace_filter
+set_ftrace_notrace
+set_ftrace_notrace_pid
+set_ftrace_pid
+set_graph_function
+set_graph_notrace
+snapshot
+stack_max_size
+stack_trace
+stack_trace_filter
+synthetic_events
+timestamp_mode
+trace
+trace_clock
+trace_marker
+trace_marker_raw
+trace_options
+trace_pipe
+trace_stat
+tracing_cpumask
+tracing_max_latency
+tracing_on
+tracing_thresh
+uprobe_events
+uprobe_profile
+
+ Performance counter stats for 'sleep 0.1':
+
+         1,595,896      cycles                    #    2.108 GHz                    
+           900,291      instructions              #    0.56  insn per cycle         
+              0.76 msec task-clock                #    0.007 CPUs utilized          
+
+       0.101480329 seconds time elapsed
+
+       0.001495000 seconds user
+       0.000000000 seconds sys
+
+

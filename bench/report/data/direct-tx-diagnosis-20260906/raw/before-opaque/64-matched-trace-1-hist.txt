@@ -1,0 +1,87 @@
+EVENT=commit
+# event histogram
+#
+# trigger info: hist:keys=len,common_pid:vals=hitcount:sort=hitcount:size=4096 [paused]
+#
+
+{ len:        240, common_pid:    3315940 } hitcount:          1
+{ len:        240, common_pid:    3315934 } hitcount:          1
+{ len:        400, common_pid:    3315936 } hitcount:          1
+{ len:        320, common_pid:    3315940 } hitcount:          1
+{ len:        560, common_pid:    3315942 } hitcount:          1
+{ len:        400, common_pid:    3315932 } hitcount:          1
+{ len:        400, common_pid:    3315944 } hitcount:          1
+{ len:        400, common_pid:    3315940 } hitcount:          1
+{ len:        240, common_pid:    3315932 } hitcount:          1
+{ len:       1200, common_pid:    3315936 } hitcount:          1
+{ len:        480, common_pid:    3315940 } hitcount:          1
+{ len:       1040, common_pid:    3315940 } hitcount:          2
+{ len:        320, common_pid:    3315946 } hitcount:          2
+{ len:        880, common_pid:    3315938 } hitcount:          2
+{ len:        240, common_pid:    3315944 } hitcount:          2
+{ len:       1040, common_pid:    3315944 } hitcount:          2
+{ len:        400, common_pid:    3315942 } hitcount:          2
+{ len:        960, common_pid:    3315946 } hitcount:          2
+{ len:        960, common_pid:    3315944 } hitcount:          2
+{ len:        960, common_pid:    3315942 } hitcount:          2
+{ len:        960, common_pid:    3315936 } hitcount:          2
+{ len:        320, common_pid:    3315932 } hitcount:          2
+{ len:        960, common_pid:    3315932 } hitcount:          2
+{ len:        240, common_pid:    3315938 } hitcount:          3
+{ len:        480, common_pid:    3315942 } hitcount:          3
+{ len:        400, common_pid:    3315934 } hitcount:          3
+{ len:        160, common_pid:    3315944 } hitcount:          4
+{ len:        400, common_pid:    3315946 } hitcount:          4
+{ len:        240, common_pid:    3315936 } hitcount:          4
+{ len:        960, common_pid:    3315938 } hitcount:          4
+{ len:        960, common_pid:    3315934 } hitcount:          4
+{ len:        160, common_pid:    3315940 } hitcount:         13
+{ len:        160, common_pid:    3315946 } hitcount:         15
+{ len:        160, common_pid:    3315942 } hitcount:         16
+{ len:        160, common_pid:    3315934 } hitcount:         17
+{ len:        160, common_pid:    3315932 } hitcount:         17
+{ len:        160, common_pid:    3315936 } hitcount:         23
+{ len:        160, common_pid:    3315938 } hitcount:         34
+{ len:         80, common_pid:    3315938 } hitcount:      39871
+{ len:         80, common_pid:    3315936 } hitcount:      39916
+{ len:         80, common_pid:    3315934 } hitcount:      39918
+{ len:         80, common_pid:    3315942 } hitcount:      39927
+{ len:         80, common_pid:    3315946 } hitcount:      39936
+{ len:         80, common_pid:    3315932 } hitcount:      39944
+{ len:         80, common_pid:    3315940 } hitcount:      39948
+{ len:         80, common_pid:    3315944 } hitcount:      39949
+
+Totals:
+    Hits: 319608
+    Entries: 46
+    Dropped: 0
+EVENT=commit_remote
+# event histogram
+#
+# trigger info: hist:keys=len,common_pid:vals=hitcount:sort=hitcount:size=4096 [paused]
+#
+
+
+Totals:
+    Hits: 0
+    Entries: 0
+    Dropped: 0
+EVENT=write
+# event histogram
+#
+# trigger info: hist:keys=common_pid:vals=hitcount:sort=hitcount:size=4096 [paused]
+#
+
+{ common_pid:    3315938 } hitcount:      39914
+{ common_pid:    3315934 } hitcount:      39943
+{ common_pid:    3315936 } hitcount:      39947
+{ common_pid:    3315942 } hitcount:      39951
+{ common_pid:    3315946 } hitcount:      39959
+{ common_pid:    3315944 } hitcount:      39960
+{ common_pid:    3315940 } hitcount:      39967
+{ common_pid:    3315932 } hitcount:      39967
+
+Totals:
+    Hits: 319608
+    Entries: 8
+    Dropped: 0

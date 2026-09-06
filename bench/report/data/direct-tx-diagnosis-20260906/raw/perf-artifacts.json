@@ -1,0 +1,74 @@
+[
+  {
+    "path": "after-grpc/1024-capacity-profile-1.data.gz",
+    "raw_bytes": 1430156,
+    "gzip_bytes": 196712,
+    "raw_sha256": "0e6a92b1747e215897417d89876a81bb8459b7ef60abc4125f2bdecd9cb39fcf"
+  },
+  {
+    "path": "after-grpc/64-capacity-profile-1.data.gz",
+    "raw_bytes": 1401180,
+    "gzip_bytes": 193317,
+    "raw_sha256": "f4765b5c21dcbe89303108ab3ec53ae381cb6aee3e28559d1cf4bebe4338bea7"
+  },
+  {
+    "path": "after-grpc/65536-capacity-profile-1.data.gz",
+    "raw_bytes": 1600500,
+    "gzip_bytes": 226760,
+    "raw_sha256": "87f74af6eb94c38b652d6295a917522c4db04a59c7308d5702dcbba536d7b205"
+  },
+  {
+    "path": "after-grpc/8192-capacity-profile-1.data.gz",
+    "raw_bytes": 1481852,
+    "gzip_bytes": 208087,
+    "raw_sha256": "5b94de89a50360a5795bd54082358feaea031953eb7218e597a84a9c7004fad8"
+  },
+  {
+    "path": "after-opaque/1024-capacity-profile-1.data.gz",
+    "raw_bytes": 600928,
+    "gzip_bytes": 73332,
+    "raw_sha256": "5d82bab1a5244bc8dcdfd65d4c6ff818933c1d3f0bd2832c82a5e2922ce53299"
+  },
+  {
+    "path": "after-opaque/64-capacity-profile-1.data.gz",
+    "raw_bytes": 664552,
+    "gzip_bytes": 81475,
+    "raw_sha256": "8adff767f05a7eff296dc1a7e00412fb8e67bffb646eefe4afbff4e4dddd4e3d"
+  },
+  {
+    "path": "before-grpc/1024-capacity-profile-1.data.gz",
+    "raw_bytes": 1392052,
+    "gzip_bytes": 192109,
+    "raw_sha256": "a512437e6535bf1405dfddf623f19d9c27a1718340e7451cd2a4a6a4f8ebe79b"
+  },
+  {
+    "path": "before-grpc/64-capacity-profile-1.data.gz",
+    "raw_bytes": 1367324,
+    "gzip_bytes": 189014,
+    "raw_sha256": "6c3248135bf2b5f594c0bf031e5608175f1a20940b563760bca6166ccefd4571"
+  },
+  {
+    "path": "before-grpc/65536-capacity-profile-1.data.gz",
+    "raw_bytes": 1580356,
+    "gzip_bytes": 225421,
+    "raw_sha256": "93e8a39c7d506c2e53defb29bb108fc75248004464d54889bd87f6c811d786f1"
+  },
+  {
+    "path": "before-grpc/8192-capacity-profile-1.data.gz",
+    "raw_bytes": 1415532,
+    "gzip_bytes": 199231,
+    "raw_sha256": "76a8f091fc2cc3d4b8b216f40e5dfb3e272c73c95b03b833589d5997cbd724e1"
+  },
+  {
+    "path": "before-opaque/1024-capacity-profile-1.data.gz",
+    "raw_bytes": 665736,
+    "gzip_bytes": 81976,
+    "raw_sha256": "273c0842e493d74387f22f170ce1b2decc3a2f76b1e708b75f8517b799334630"
+  },
+  {
+    "path": "before-opaque/64-capacity-profile-1.data.gz",
+    "raw_bytes": 622576,
+    "gzip_bytes": 76170,
+    "raw_sha256": "42ceb80bc9c20bc45b534a0ba54fa2cfcbe23f58d7f77391bc3aec7514c1aa6f"
+  }
+]

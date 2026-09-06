@@ -1,0 +1,13 @@
+arm,protocol,size,mode,rep,atomic_helpers_all_layers,copy_all_layers,kernel,other,allocator,runtime,dmesh_poll_write_self,c_commit_self,reported_sum
+after,grpc,1024,capacity,1,10.36,3.4,11.72,66.08,2.49,5.31,0.16,0.12,99.64
+after,grpc,64,capacity,1,10.82,2.73,12.85,65.78,2.52,5.1,0.22,0.04,100.06
+after,grpc,65536,capacity,1,10.06,5.99,6.75,67.33,2.92,5.69,0.4,0.11,99.25
+after,grpc,8192,capacity,1,8.8,4.18,6.33,71.12,2.63,6.12,0.29,0.15,99.62
+after,opaque,1024,capacity,1,15.54,1.15,37.45,41.26,,4.36,0.11,0.2,100.07
+after,opaque,64,capacity,1,16.01,0.79,38.1,41.26,,3.6,0.17,0.05,99.98
+before,grpc,1024,capacity,1,9.18,3.78,13.0,65.93,2.42,5.46,0.09,0.01,99.87
+before,grpc,64,capacity,1,9.56,3.41,11.43,67.5,2.42,5.22,0.14,,99.68
+before,grpc,65536,capacity,1,10.32,6.73,6.53,66.5,3.59,5.48,0.13,0.04,99.32
+before,grpc,8192,capacity,1,8.74,4.25,6.06,71.46,3.1,6.01,0.08,0.01,99.71
+before,opaque,1024,capacity,1,14.89,2.41,36.99,41.94,,3.68,0.04,0.12,100.07
+before,opaque,64,capacity,1,15.69,0.56,38.46,40.89,,4.19,,0.23,100.02

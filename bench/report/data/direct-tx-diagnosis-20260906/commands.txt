@@ -1,0 +1,56 @@
+Working directory: /home/jukebox/DPUmesh
+Production source and binary builds: unchanged by this diagnostic campaign.
+
+Harness preparation and initial inspection:
+python3 diagnose.py inspect
+  diagnose.py lives in bench/report/data/direct-tx-diagnosis-20260906/;
+  all invocations below use that path from the repository root.
+  .env is read in memory for the existing SSH/sudo credentials, never printed.
+  Original workloads and worker state are retained in raw/initial-*.
+
+Temporary control relay: existing /tmp/direct-linkerd-cp-relay.py, started by this
+campaign only, forwarding 192.168.100.1:28086/28087/28088 to the same destination,
+policy, and identity endpoints as the prior campaign. The pre-existing 28089
+controller relay is not part of this temporary relay.
+
+Main gRPC matrix (all sizes: 64 1024 8192 65536):
+for arm in before after:
+  python3 diagnose.py deploy --arm ARM --protocol grpc
+  python3 diagnose.py sample --arm ARM --kind clean --reps 3
+  python3 diagnose.py sample --arm ARM --kind profile --duration 16
+  python3 diagnose.py sample --arm ARM --kind trace --duration 12
+  python3 diagnose.py sample --arm ARM --mode matched --kind clean --reps 3
+  python3 diagnose.py sample --arm ARM --mode matched --kind trace --duration 12
+
+The first before deploy completed but its immediate worker count check was too
+early. The harness was changed to wait for 8 workers, then `ready --arm before`
+performed the warmup. No deployment was silently counted as a measurement.
+The first trace pilot truncated the histogram trigger on continue and failed;
+after switching to append, the entire trace matrix was collected successfully.
+
+The first four profiles were re-rendered with `diagnose.py reports` to aggregate
+self symbols across workers and include entries below the default threshold.
+This was done between measurement phases, not during a timed point.
+
+PMU and opaque stages:
+bash bench/report/data/direct-tx-diagnosis-20260906/campaign_tail.sh
+  PMU: after/grpc then before/grpc, 64 KiB, 12 seconds x 3, middle 8 seconds.
+  opaque: before then after; 64 B and 1 KiB; clean capacity/matched x 3,
+          one profile per size, one capacity and one matched trace per size.
+
+No compiled binary was replaced. Deployment scripts are copies of the preceding
+campaign's scripts with the receipt destination changed to this directory.
+
+Final L7 metrics, workers and DPU hash/log are in raw/final-l7-*.
+python3 diagnose.py restore
+  restores native images, Service port and L4 DPU profile, then runs native smoke.
+  raw/restored-native-* contains the manifest, pods, smoke and running hash.
+
+Local aggregation (no rig needed):
+python3 bench/report/data/direct-tx-diagnosis-20260906/summarize.py
+taskset -c 0 python3 bench/report/data/direct-tx-diagnosis-20260906/plot.py
+python3 bench/report/data/direct-tx-diagnosis-20260906/write_report.py
+
+Raw perf .data files are retained losslessly compressed as .data.gz after the
+campaign. Decompress a copy before using perf report with the matching binary.
+Per-symbol CSVs and text reports remain readable without the DPU.
