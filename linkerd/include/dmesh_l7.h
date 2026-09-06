@@ -119,11 +119,19 @@ void l7_inbound_forget(int worker_id, const char *workload);
 void l7_control_event(const char *kind, const char *reason);
 
 /* DPUmesh data-path entry points. */
-uint8_t *dmesh_l7_tx_reserve(int worker_id, uint64_t conn, uint32_t *cap);
-int dmesh_l7_tx_commit(int worker_id, uint64_t conn, int32_t backend_pod,
-                       uint32_t len);
-int dmesh_l7_tx_commit_remote(int worker_id, uint64_t conn,
-                              const char *pod_uid, uint32_t len);
+/* Endpoint-owned unpublished batch. write copies an ordered prefix once into
+ * arena memory (positive), or accepts nothing (0 blocked / -1 invalid).
+ * token=0 allocates; otherwise it must name a live batch on this connection.
+ * flush: positive transfers the whole batch, 0 retains it for retry, -1 fails.
+ * cancel or connection close reclaims unpublished batches. No caller pointer
+ * survives write. Keep one token per endpoint and a fixed route until flush. */
+struct dmesh_l7_tx_slice { const uint8_t *data; size_t len; };
+int dmesh_l7_tx_batch_write(int worker_id, uint64_t conn, uint64_t *token,
+                          const struct dmesh_l7_tx_slice *bufs, size_t count,
+                          uint32_t limit);
+int dmesh_l7_tx_batch_flush(int worker_id, uint64_t conn, uint64_t token,
+                          int32_t backend_pod, const char *pod_uid);
+int dmesh_l7_tx_batch_cancel(int worker_id, uint64_t conn, uint64_t token);
 /* Publish one ordered output FIN after Linkerd drained that direction. Origin
  * ignores pod_uid. A remote backend supplies its exact Pod UID; local/Any use
  * backend_pod and pass NULL. Returns 1 accepted, 0 backpressured, -1 terminal. */
@@ -175,7 +183,12 @@ int dmesh_l7_driver_notification_fds(void *driver, int *completion_fd,
                                      int *dma_fd, int *wake_fd);
 int dmesh_l7_driver_arm(void *driver);
 int dmesh_l7_driver_drain(void *driver, int budget);
-int dmesh_l7_driver_clear_notifications(void *driver);
+/* `fired` names the notification sources the wait saw readable; only those are
+ * cleared. A source that fires later is seen by the next wait. */
+#define DMESH_L7_NOTIFY_COMPLETION 1u
+#define DMESH_L7_NOTIFY_DMA        2u
+#define DMESH_L7_NOTIFY_WAKE       4u
+int dmesh_l7_driver_clear_notifications(void *driver, unsigned fired);
 int dmesh_l7_driver_maintenance(void *driver);
 int dmesh_l7_driver_stopped(void *driver);
 void dmesh_l7_driver_ready(void *driver);

@@ -482,49 +482,79 @@ int main(void)
     px_cur_worker = &px->workers[0];
 
     uint64_t tx_handle = px_conn_handle(downstream);
-    uint32_t cap = 123;
-    assert(dmesh_l7_tx_reserve(1, tx_handle, &cap) == NULL);
-    assert(dmesh_l7_tx_reserve(0, UINT64_C(0x001f0001), &cap) == NULL);
-
-    uint8_t *reserved = dmesh_l7_tx_reserve(0, tx_handle, &cap);
-    assert(reserved != NULL && cap == PX_ARENA_CHUNK);
-    assert(downstream->l7_tx_chunk != NULL);
-    assert(dmesh_l7_tx_reserve(0, tx_handle, &cap) == NULL);
-    assert(dmesh_l7_tx_commit(0, tx_handle, DMESH_L7_ORIGIN, 0) == 0);
-    assert(downstream->l7_tx_chunk == NULL);
-
-    reserved = dmesh_l7_tx_reserve(0, tx_handle, &cap);
-    assert(reserved != NULL);
-    assert(dmesh_l7_tx_commit(0, tx_handle, DMESH_L7_ORIGIN,
-                              PX_ARENA_CHUNK + 1u) == -1);
-    assert(downstream->l7_tx_chunk == NULL);
-
-    static const uint8_t payload[] = "reserved-output";
-    reserved = dmesh_l7_tx_reserve(0, tx_handle, &cap);
-    assert(reserved != NULL && cap >= sizeof(payload));
-    memcpy(reserved, payload, sizeof(payload));
-    assert(dmesh_l7_tx_commit(0, tx_handle, DMESH_L7_ORIGIN,
-                              sizeof(payload)) == (int)sizeof(payload));
-    assert(downstream->l7_tx_chunk == NULL);
     struct px_lane *tx_lane = &px->lanes[0][0];
-    assert(tx_lane->qhead != NULL && tx_lane->qhead == tx_lane->qtail);
-    struct px_unit *tx_unit = tx_lane->qhead;
-    assert(tx_unit->total_len == sizeof(payload));
-    assert(tx_unit->pieces && tx_unit->pieces->chunk);
-    assert(tx_unit->pieces->len == sizeof(payload));
-    assert(memcmp(px->arena + tx_unit->pieces->staging_off,
-                  payload, sizeof(payload)) == 0);
+    struct px_unit *tx_unit;
+    struct px_chunk *held0, *held1;
+
+    /* A dry arena refuses a new batch without failing the connection. */
+    held0 = px_chunk_alloc(px);
+    held1 = px_chunk_alloc(px);
+    assert(held0 && held1);
+    uint64_t dry = 0;
+    const struct dmesh_l7_tx_slice probe = { (const uint8_t *)"tail", 4 };
+    assert(dmesh_l7_tx_batch_write(0, tx_handle, &dry, &probe, 1, 4) == 0 && dry == 0);
+    px_chunk_free(px, held0);
+    px_chunk_free(px, held1);
+
+    /* Endpoint batches share a request, but never payload or ownership. */
+    uint64_t batch_a = 0, batch_b = 0;
+    uint8_t first_bytes[] = "head";
+    const struct dmesh_l7_tx_slice first_slices[] = {
+        { NULL, 0 }, { first_bytes, 4 }, { (const uint8_t *)"body", 4 },
+    };
+    assert(dmesh_l7_tx_batch_write(0, tx_handle, &batch_a, first_slices, 3, 8) == 8);
+    memset(first_bytes, 'x', 4); /* caller bytes may immediately disappear */
+    const struct dmesh_l7_tx_slice tail = { (const uint8_t *)"tail", 4 };
+    assert(dmesh_l7_tx_batch_write(0, tx_handle, &batch_a, &tail, 1, 4) == 4);
+    assert(dmesh_l7_tx_batch_write(0, tx_handle, &batch_b, &tail, 1, 4) == 4);
+    assert(batch_a && batch_b && batch_a != batch_b);
+    assert(dmesh_l7_tx_batch_write(1, tx_handle, &batch_a, &tail, 1, 4) == -1);
+    assert(dmesh_l7_tx_batch_write(0, UINT64_C(0x001f0001), &batch_a, &tail, 1, 4) == -1);
+    assert(tx_lane->qhead == NULL);
+
+    /* Pool pressure after acceptance must retain the lease and bytes. */
+    struct px_unit *held_unit0 = px_unit_alloc_node(px);
+    struct px_unit *held_unit1 = px_unit_alloc_node(px);
+    assert(held_unit0 && held_unit1);
+    assert(dmesh_l7_tx_batch_flush(0, tx_handle, batch_a, DMESH_L7_ORIGIN, NULL) == 0);
+    struct px_chunk *batch_chunk = *px_l7_batch_find(downstream, batch_a);
+    assert(batch_chunk && batch_chunk->l7_len == 12);
+    assert(memcmp(px->arena + batch_chunk->off, "headbodytail", 12) == 0);
+    px_unit_free(px, held_unit0);
+    px_unit_free(px, held_unit1);
+    assert(dmesh_l7_tx_batch_flush(0, tx_handle, batch_a, DMESH_L7_ORIGIN, NULL) == 12);
+    assert(dmesh_l7_tx_batch_flush(0, tx_handle, batch_a, DMESH_L7_ORIGIN, NULL) == -1);
+    tx_unit = tx_lane->qhead;
+    assert(tx_unit && tx_unit->total_len == 12);
+    assert(memcmp(px->arena + tx_unit->pieces->staging_off, "headbodytail", 12) == 0);
     tx_lane->qhead = tx_lane->qtail = NULL;
     px_unit_free_node(px, tx_unit);
-    assert(dmesh_l7_tx_commit(0, tx_handle, DMESH_L7_ORIGIN, 1) == -1);
+    assert(dmesh_l7_tx_batch_cancel(0, tx_handle, batch_b) == 0);
+    assert(dmesh_l7_tx_batch_cancel(0, tx_handle, batch_b) == -1);
 
-    reserved = dmesh_l7_tx_reserve(0, tx_handle, &cap);
-    assert(reserved != NULL);
+    /* Partial acceptance at the chunk boundary never touches the suffix. */
+    uint64_t full_batch = 0;
+    uint8_t *large = malloc(PX_ARENA_CHUNK + 7);
+    assert(large);
+    memset(large, 0xa5, PX_ARENA_CHUNK + 7);
+    const struct dmesh_l7_tx_slice large_slice = { large, PX_ARENA_CHUNK + 7 };
+    assert(dmesh_l7_tx_batch_write(0, tx_handle, &full_batch, &large_slice, 1,
+                                    PX_ARENA_CHUNK + 7) == PX_ARENA_CHUNK);
+    assert(dmesh_l7_tx_batch_write(0, tx_handle, &full_batch, &tail, 1, 4) == 0);
+    free(large);
     px_l7_close(objs, downstream, 0);
-    assert(downstream->l7_tx_chunk == NULL);
-    reserved = dmesh_l7_tx_reserve(0, tx_handle, &cap);
-    assert(reserved != NULL);
-    assert(dmesh_l7_tx_commit(0, tx_handle, DMESH_L7_ORIGIN, 0) == 0);
+    assert(downstream->l7_tx_batches == NULL);
+    assert(dmesh_l7_tx_batch_write(0, tx_handle, &full_batch, &tail, 1, 4) == -1);
+    uint64_t replacement = 0;
+    assert(dmesh_l7_tx_batch_write(0, tx_handle, &replacement, &tail, 1, 4) == 4);
+    assert(replacement != full_batch);
+    assert(dmesh_l7_tx_batch_cancel(0, tx_handle, full_batch) == -1);
+    assert(dmesh_l7_tx_batch_cancel(0, tx_handle, replacement) == 0);
+    held0 = px_chunk_alloc(px);
+    held1 = px_chunk_alloc(px);
+    assert(held0 && held1 && px_chunk_alloc(px) == NULL);
+    px_chunk_free(px, held0);
+    px_chunk_free(px, held1);
 
     /* One extent is acknowledged by one reverse entry naming its whole run,
      * whatever the run's length. */

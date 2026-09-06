@@ -21,7 +21,6 @@ use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 #[cfg(not(test))]
 use std::ffi::c_void;
-#[cfg(not(test))]
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::os::raw::{c_char, c_int};
@@ -150,13 +149,6 @@ const DECLINE_UNKNOWN_REPLY: c_int = -5;
 /// Maximum pod staging span.
 const STAGING_SPAN: usize = 64 * 1024 * 1024;
 
-/// Per-connection output budget for one drain pass.
-const TX_DRAIN_MAX: usize = 64 * 1024;
-
-/// Reservations one connection may publish in a drain pass. A reservation is one
-/// egress chunk, so this bounds one reservation-path drain pass.
-const TX_RESERVATIONS_MAX: usize = 4;
-
 /// Aggregate output and session budgets for one drain pass.
 const DRAIN_MAX: usize = 256 * 1024;
 const DRAIN_SESSIONS_MAX: usize = 64;
@@ -229,7 +221,7 @@ thread_local! {
 /// DPUmesh ABI calls with a recording test implementation.
 mod datapath {
     #[cfg(test)]
-    pub use fake::{release, session_failed, tx_finish, tx_publish};
+    pub use fake::{batch_cancel, batch_flush, batch_write, release, session_failed, tx_finish};
 
     #[cfg(not(test))]
     use std::os::raw::c_int;
@@ -237,14 +229,22 @@ mod datapath {
     #[cfg(not(test))]
     extern "C" {
         fn dmesh_l7_release(worker_id: c_int, conn: u64, pos: u32, len: u32);
-        fn dmesh_l7_tx_reserve(worker_id: c_int, conn: u64, cap: *mut u32) -> *mut u8;
-        fn dmesh_l7_tx_commit(worker_id: c_int, conn: u64, backend_pod: i32, len: u32) -> c_int;
-        fn dmesh_l7_tx_commit_remote(
-            worker_id: c_int,
+        fn dmesh_l7_tx_batch_write(
+            worker: c_int,
             conn: u64,
-            pod_uid: *const std::os::raw::c_char,
-            len: u32,
+            token: *mut u64,
+            bufs: *const TxSlice,
+            count: usize,
+            limit: u32,
         ) -> c_int;
+        fn dmesh_l7_tx_batch_flush(
+            worker: c_int,
+            conn: u64,
+            token: u64,
+            backend: i32,
+            uid: *const std::os::raw::c_char,
+        ) -> c_int;
+        fn dmesh_l7_tx_batch_cancel(worker: c_int, conn: u64, token: u64) -> c_int;
         fn dmesh_l7_tx_fin(
             worker_id: c_int,
             conn: u64,
@@ -278,45 +278,72 @@ mod datapath {
             .collect()
     }
 
-    /// Write output straight into the connection's egress chunk.
-    ///
-    /// `fill` is handed the reservation and answers how many bytes it wrote;
-    /// the reservation is always committed, with length 0 cancelling it.
-    /// `None` means the datapath had no chunk to lend.
     #[cfg(not(test))]
-    pub fn tx_publish(
-        worker_id: c_int,
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct TxSlice {
+        data: *const u8,
+        len: usize,
+    }
+
+    #[cfg(not(test))]
+    pub fn batch_write(
+        worker: c_int,
         conn: u64,
-        route: &dmesh_doca::BackendRoute,
-        fill: impl FnOnce(&mut [u8]) -> usize,
-    ) -> Option<c_int> {
-        let mut cap: u32 = 0;
-        let base = unsafe { dmesh_l7_tx_reserve(worker_id, conn, &mut cap) };
-        if base.is_null() || cap == 0 {
-            return None;
+        token: &mut u64,
+        bufs: &[std::io::IoSlice<'_>],
+    ) -> c_int {
+        // A bounded stack descriptor array; returning a shorter prefix is legal.
+        let mut slices = [TxSlice {
+            data: std::ptr::null(),
+            len: 0,
+        }; 16];
+        let mut count = 0;
+        for b in bufs.iter().filter(|b| !b.is_empty()).take(slices.len()) {
+            slices[count] = TxSlice {
+                data: b.as_ptr(),
+                len: b.len(),
+            };
+            count += 1;
         }
-        // SAFETY: the datapath lends `cap` writable bytes of its egress arena
-        // until the commit below, and this thread owns the reservation.
-        let reservation = unsafe { std::slice::from_raw_parts_mut(base, cap as usize) };
-        let len = fill(reservation).min(cap as usize) as u32;
-        Some(unsafe {
-            match route {
-                dmesh_doca::BackendRoute::Any => dmesh_l7_tx_commit(worker_id, conn, -1, len),
-                dmesh_doca::BackendRoute::Origin => {
-                    dmesh_l7_tx_commit(worker_id, conn, super::BACKEND_ORIGIN, len)
-                }
-                dmesh_doca::BackendRoute::Local(pod) => {
-                    dmesh_l7_tx_commit(worker_id, conn, *pod, len)
-                }
-                dmesh_doca::BackendRoute::Remote(uid) => {
-                    let Ok(uid) = std::ffi::CString::new(uid.as_str()) else {
-                        let _ = dmesh_l7_tx_commit(worker_id, conn, -1, 0);
-                        return Some(-1);
-                    };
-                    dmesh_l7_tx_commit_remote(worker_id, conn, uid.as_ptr(), len)
-                }
+        // The batch itself bounds the copy; no caller-side limit applies.
+        unsafe { dmesh_l7_tx_batch_write(worker, conn, token, slices.as_ptr(), count, u32::MAX) }
+    }
+
+    #[cfg(not(test))]
+    pub fn batch_flush(
+        worker: c_int,
+        conn: u64,
+        token: u64,
+        route: &dmesh_doca::BackendRoute,
+    ) -> c_int {
+        let (backend, uid) = match route {
+            dmesh_doca::BackendRoute::Any => (-1, None),
+            dmesh_doca::BackendRoute::Origin => (super::BACKEND_ORIGIN, None),
+            dmesh_doca::BackendRoute::Local(pod) => (*pod, None),
+            dmesh_doca::BackendRoute::Remote(uid) => {
+                let Ok(uid) = std::ffi::CString::new(uid.as_str()) else {
+                    return -1;
+                };
+                (-1, Some(uid))
             }
-        })
+        };
+        unsafe {
+            dmesh_l7_tx_batch_flush(
+                worker,
+                conn,
+                token,
+                backend,
+                uid.as_ref().map_or(std::ptr::null(), |u| u.as_ptr()),
+            )
+        }
+    }
+
+    #[cfg(not(test))]
+    pub fn batch_cancel(worker: c_int, conn: u64, token: u64) {
+        unsafe {
+            dmesh_l7_tx_batch_cancel(worker, conn, token);
+        }
     }
 
     #[cfg(not(test))]
@@ -356,6 +383,7 @@ mod datapath {
         #[derive(Default)]
         pub struct Recorded {
             pub sent: Vec<(u64, i32, Vec<u8>)>,
+            pub remote_sent: Vec<(u64, String, Vec<u8>)>,
             pub fins: Vec<(u64, i32, Option<String>)>,
             pub failed_sessions: Vec<u64>,
             pub released: Vec<(u64, u32, u32)>,
@@ -373,6 +401,8 @@ mod datapath {
             pub chunk: usize,
             /// Reservations cancelled with a zero-length commit.
             pub cancels: usize,
+            pub batches: std::collections::HashMap<u64, (u64, Vec<u8>)>,
+            pub batch_serial: u64,
         }
 
         thread_local! {
@@ -387,54 +417,97 @@ mod datapath {
             STATE.with(|s| s.borrow_mut().released.push((conn, pos, len)));
         }
 
-        /// Lend a reservation, then answer as the C commit would.
-        pub fn tx_publish(
-            _worker_id: c_int,
+        pub fn batch_write(
+            _worker: c_int,
             conn: u64,
-            route: &dmesh_doca::BackendRoute,
-            fill: impl FnOnce(&mut [u8]) -> usize,
-        ) -> Option<c_int> {
-            let cap = STATE.with(|s| {
-                let s = s.borrow();
-                if s.no_chunk {
-                    return 0;
-                }
-                if s.chunk == 0 {
-                    16 * 1024
-                } else {
-                    s.chunk
-                }
-            });
-            if cap == 0 {
-                return None;
-            }
-            let mut reservation = vec![0u8; cap];
-            let len = fill(&mut reservation).min(cap);
-            Some(STATE.with(|s| {
+            token: &mut u64,
+            bufs: &[std::io::IoSlice<'_>],
+        ) -> c_int {
+            STATE.with(|s| {
                 let mut s = s.borrow_mut();
                 if s.fail {
                     return -1;
                 }
-                if len == 0 {
-                    s.cancels += 1;
+                if s.over_accept {
+                    return bufs.iter().map(|b| b.len()).sum::<usize>() as c_int + 1;
+                }
+                let cap = if s.chunk == 0 { 64 * 1024 } else { s.chunk };
+                if *token == 0 {
+                    if s.no_chunk {
+                        return 0;
+                    }
+                    s.batch_serial += 1;
+                    *token = s.batch_serial;
+                    s.batches.insert(*token, (conn, Vec::new()));
+                }
+                let Some((owner, bytes)) = s.batches.get_mut(token) else {
+                    return -1;
+                };
+                if *owner != conn {
+                    return -1;
+                }
+                let mut room = cap - bytes.len();
+                let mut copied = 0;
+                for b in bufs.iter().filter(|b| !b.is_empty()).take(16) {
+                    let n = room.min(b.len());
+                    bytes.extend_from_slice(&b[..n]);
+                    copied += n;
+                    room -= n;
+                }
+                copied as c_int
+            })
+        }
+
+        pub fn batch_flush(
+            _worker: c_int,
+            conn: u64,
+            token: u64,
+            route: &dmesh_doca::BackendRoute,
+        ) -> c_int {
+            STATE.with(|s| {
+                let mut s = s.borrow_mut();
+                if s.fail {
+                    return -1;
+                }
+                let Some((owner, bytes)) = s.batches.get(&token) else {
+                    return -1;
+                };
+                if *owner != conn {
+                    return -1;
+                }
+                let len = bytes.len();
+                if s.accept.unwrap_or(len) < len {
                     return 0;
                 }
                 if s.over_accept {
                     return len as c_int + 1;
                 }
-                if s.accept.unwrap_or(len) < len {
-                    // The datapath publishes a whole reservation or none of it.
-                    return 0;
-                }
+                let (_, bytes) = s.batches.remove(&token).unwrap();
                 let backend = match route {
                     dmesh_doca::BackendRoute::Any => -1,
                     dmesh_doca::BackendRoute::Origin => super::super::BACKEND_ORIGIN,
                     dmesh_doca::BackendRoute::Local(pod) => *pod,
-                    dmesh_doca::BackendRoute::Remote(_) => -3,
+                    dmesh_doca::BackendRoute::Remote(uid) => {
+                        s.remote_sent.push((conn, uid.clone(), bytes.clone()));
+                        -3
+                    }
                 };
-                s.sent.push((conn, backend, reservation[..len].to_vec()));
+                s.sent.push((conn, backend, bytes));
                 len as c_int
-            }))
+            })
+        }
+
+        pub fn batch_cancel(_worker: c_int, conn: u64, token: u64) {
+            STATE.with(|s| {
+                let mut s = s.borrow_mut();
+                if s.batches
+                    .get(&token)
+                    .is_some_and(|(owner, _)| *owner == conn)
+                {
+                    s.batches.remove(&token);
+                    s.cancels += 1;
+                }
+            });
         }
 
         pub fn tx_finish(_worker_id: c_int, conn: u64, route: &dmesh_doca::BackendRoute) -> c_int {
@@ -494,7 +567,10 @@ extern "C" {
     ) -> c_int;
     fn dmesh_l7_driver_arm(driver: *mut c_void) -> c_int;
     fn dmesh_l7_driver_drain(driver: *mut c_void, budget: c_int) -> c_int;
-    fn dmesh_l7_driver_clear_notifications(driver: *mut c_void) -> c_int;
+    fn dmesh_l7_driver_clear_notifications(
+        driver: *mut c_void,
+        fired: std::os::raw::c_uint,
+    ) -> c_int;
     fn dmesh_l7_driver_maintenance(driver: *mut c_void) -> c_int;
     fn dmesh_l7_driver_stopped(driver: *mut c_void) -> c_int;
     fn dmesh_l7_driver_ready(driver: *mut c_void);
@@ -651,9 +727,12 @@ impl dmesh_doca::runtime::RuntimeBackend for ExternalBackend {
         }
     }
 
-    fn clear_notifications(&mut self) -> io::Result<()> {
+    fn clear_notifications(&mut self, fired: dmesh_doca::runtime::Fired) -> io::Result<()> {
+        // `DMESH_L7_NOTIFY_*` ABI bits.
+        let mask =
+            u32::from(fired.completion) | u32::from(fired.dma) << 1 | u32::from(fired.wake) << 2;
         driver_result(
-            unsafe { dmesh_l7_driver_clear_notifications(self.driver) },
+            unsafe { dmesh_l7_driver_clear_notifications(self.driver, mask) },
             "clear_notifications",
         )
         .map(|_| ())
@@ -685,6 +764,7 @@ impl dmesh_doca::runtime::RuntimeBackend for ExternalBackend {
             .min(i64::MAX as u128) as i64;
         let gauge = |value: u64| value.min(i64::MAX as u64) as i64;
         with_worker(self.worker_id, (), |worker| {
+            worker.publish_tx_metrics();
             macro_rules! add_delta {
                 ($metric:ident, $field:ident) => {
                     worker
@@ -784,7 +864,7 @@ impl dmesh_doca::runtime::RuntimeBackend for ExternalBackend {
 }
 
 /// Per-worker adapter counters.
-#[derive(Default)]
+#[derive(Default, Clone, Copy)]
 struct Counters {
     connections_opened: u64,
     connections_closed: u64,
@@ -794,6 +874,8 @@ struct Counters {
     bytes_to_backend: u64,
     bytes_to_origin: u64,
     segments_released: u64,
+    tx_arena_copy_bytes: u64,
+    tx_publications: u64,
     send_retries: u64,
     send_errors: u64,
     registrations_orphaned: u64,
@@ -860,6 +942,9 @@ struct Side {
     input_eof: bool,
     /// The datapath accepted the ordered FIN for this output direction.
     fin_published: bool,
+    /// A refused publication or FIN; pump again on the next pass even if the
+    /// stack was quiet.
+    pump_again: bool,
     /// Extents handed to Linkerd and not released.
     outstanding: Vec<(u32, u32)>,
 }
@@ -944,11 +1029,6 @@ impl Session {
                 .iter()
                 .all(|side| side.conn.is_none() || side.input_eof)
     }
-
-    #[cfg(not(test))]
-    fn sides(&self) -> impl Iterator<Item = &Side> {
-        std::iter::once(&self.client).chain(self.backends.iter())
-    }
 }
 
 /// Service targets and their ready endpoints as the controller feed names them:
@@ -985,6 +1065,11 @@ struct Worker {
     /// Fair drain order and cursor.
     order: Vec<u64>,
     drain_next: usize,
+    /// Raised by any endpoint the driver should look at; the driver parks on it.
+    signal: Arc<dmesh_doca::DriverSignal>,
+    /// Counter values already moved into the exported metrics.
+    #[cfg_attr(test, allow(dead_code))]
+    published: Counters,
     /// Session tokens, and the sessions awaiting their client endpoint.
     slots: Slots,
     pending: HashMap<SessionToken, u64>,
@@ -1130,44 +1215,83 @@ fn with_worker<R: Copy>(worker_id: c_int, refused: R, f: impl FnOnce(&mut Worker
     result
 }
 
-/// Copy queued output straight into the egress arena.
-///
-/// One copy: from the endpoint's queue into the chunk the datapath will DMA.
-/// A reservation the datapath refuses to publish is cancelled and the bytes
-/// stay queued, so nothing is offered twice and nothing is lost.
-fn publish_reserved(
-    worker_id: c_int,
-    handle: &DmeshIoHandle,
-    out: u64,
-    route: &dmesh_doca::BackendRoute,
-    want: usize,
-    counters: &mut Counters,
-) -> Result<Option<usize>, ()> {
-    let mut copied = 0usize;
-    let Some(rc) = datapath::tx_publish(worker_id, out, route, |chunk| {
-        let room = chunk.len().min(want);
-        copied = handle.copy_tx_into(&mut chunk[..room]);
-        copied
-    }) else {
-        // No chunk to lend: the arena is dry. Retry on a later pass.
-        return Ok(None);
-    };
-    if rc < 0 || rc as usize > copied {
-        counters.send_errors += 1;
-        return Err(());
-    }
-    let accepted = rc as usize;
-    if accepted == 0 {
-        if copied > 0 {
-            counters.send_retries += 1;
+/// One unpublished arena chunk per endpoint. C owns the payload and validates
+/// tokens; Rust retains only its length and exact route, never a caller pointer.
+#[derive(Default)]
+struct TxBatch {
+    token: u64,
+    len: usize,
+    route: Option<dmesh_doca::BackendRoute>,
+    sealed: bool,
+}
+struct DirectWriter {
+    worker: c_int,
+    request: u64,
+    /// Serialized by the endpoint lock the writer is called under.
+    batch: TxBatch,
+}
+impl DirectWriter {
+    fn new(worker: c_int, request: u64) -> Self {
+        Self {
+            worker,
+            request,
+            batch: TxBatch::default(),
         }
-        return Ok(Some(0));
     }
-    handle.consume_tx(accepted);
-    if accepted < copied {
-        counters.send_retries += 1;
+}
+impl dmesh_doca::TxWriter for DirectWriter {
+    fn write(
+        &mut self,
+        route: &dmesh_doca::BackendRoute,
+        bufs: &[io::IoSlice<'_>],
+    ) -> dmesh_doca::TxAttempt {
+        let batch = &mut self.batch;
+        if batch.route.as_ref().is_some_and(|held| held != route) {
+            return dmesh_doca::TxAttempt::Failed(io::Error::other("batch route changed"));
+        }
+        if batch.sealed {
+            return dmesh_doca::TxAttempt::Retry;
+        }
+        let n = datapath::batch_write(self.worker, self.request, &mut batch.token, bufs);
+        if n > 0 {
+            if batch.route.is_none() {
+                batch.route = Some(route.clone());
+            }
+            batch.len += n as usize;
+            dmesh_doca::TxAttempt::Buffered(n as usize)
+        } else if n == 0 {
+            dmesh_doca::TxAttempt::Retry
+        } else {
+            dmesh_doca::TxAttempt::Failed(io::Error::other("arena batch append failed"))
+        }
     }
-    Ok(Some(accepted))
+    fn flush(&mut self) -> io::Result<Option<usize>> {
+        let batch = &mut self.batch;
+        if batch.token == 0 {
+            return Ok(Some(0));
+        }
+        batch.sealed = true;
+        let n = datapath::batch_flush(
+            self.worker,
+            self.request,
+            batch.token,
+            batch.route.as_ref().unwrap(),
+        );
+        if n == 0 {
+            return Ok(None);
+        }
+        if n < 0 || n as usize != batch.len {
+            return Err(io::Error::other("arena batch publication failed"));
+        }
+        *batch = TxBatch::default();
+        Ok(Some(n as usize))
+    }
+    fn cancel(&mut self) {
+        if self.batch.token != 0 {
+            datapath::batch_cancel(self.worker, self.request, self.batch.token);
+        }
+        self.batch = TxBatch::default();
+    }
 }
 
 /// What one pass over an endpoint did, and what the caller must decide on next.
@@ -1179,57 +1303,47 @@ struct Pumped {
     finished: bool,
 }
 
-/// Publish endpoint output and release fully consumed input.
+/// Publish endpoint output and release fully consumed input. An endpoint the
+/// stack left untouched since the last pass, and that owes no retry, is
+/// skipped without taking its lock. The client endpoint publishes to the
+/// origin; every backend endpoint carries its own exact route.
 fn pump_side(
     worker_id: c_int,
     side: &mut Side,
     out_conn: Option<u64>,
-    route: dmesh_doca::BackendRoute,
+    is_client: bool,
     budget: &mut usize,
     counters: &mut Counters,
 ) -> Result<Pumped, ()> {
-    let mut did = false;
-    let state = {
+    let pumped = {
         let Some(handle) = side.handle.as_ref() else {
             return Ok(Pumped {
                 progressed: false,
                 finished: false,
             });
         };
-        if let Some(out) = out_conn {
-            let want = TX_DRAIN_MAX.min(*budget);
-            let accepted = if want == 0 || handle.tx_len() == 0 {
-                0
-            } else {
-                let mut total = 0;
-                for _ in 0..TX_RESERVATIONS_MAX {
-                    if total == want || handle.tx_len() == 0 {
-                        break;
-                    }
-                    // `None` is an arena with no chunk to lend, so the bytes
-                    // wait for the next pass. `Some(0)` is a refused
-                    // publication.
-                    match publish_reserved(worker_id, handle, out, &route, want - total, counters)?
-                    {
-                        Some(n) if n > 0 => total += n,
-                        _ => break,
-                    }
-                }
-                total
-            };
-            if accepted > 0 {
-                *budget -= accepted;
-                if route == dmesh_doca::BackendRoute::Origin {
-                    counters.bytes_to_origin += accepted as u64;
-                } else {
-                    counters.bytes_to_backend += accepted as u64;
-                }
-                did = true;
-            }
+        if !handle.take_dirty() && !side.pump_again {
+            return Ok(Pumped {
+                progressed: false,
+                finished: side.fin_published,
+            });
         }
-        // Both answers are read after publishing, so one lock serves both.
-        handle.drain_state()
+        handle.pump()
     };
+    side.pump_again = pumped.blocked;
+    let stats = pumped.stats;
+    counters.send_retries += stats.retries;
+    counters.send_errors += stats.errors;
+    counters.tx_arena_copy_bytes += stats.copied;
+    counters.tx_publications += stats.publications;
+    if is_client {
+        counters.bytes_to_origin += stats.accepted;
+    } else {
+        counters.bytes_to_backend += stats.accepted;
+    }
+    *budget = budget.saturating_sub(stats.accepted as usize);
+    let mut did = stats.accepted > 0;
+    let state = pumped.state;
     // Release a fully consumed input queue.
     if !state.has_rx
         && !side.outstanding.is_empty()
@@ -1244,13 +1358,24 @@ fn pump_side(
         if side.fin_published {
             true
         } else {
+            let route = if is_client {
+                dmesh_doca::BackendRoute::Origin
+            } else {
+                side.handle
+                    .as_ref()
+                    .map(DmeshIoHandle::backend_route)
+                    .unwrap_or_default()
+            };
             match datapath::tx_finish(worker_id, out_conn.ok_or(())?, &route) {
                 n if n > 0 => {
                     side.fin_published = true;
                     did = true;
                     true
                 }
-                0 => false,
+                0 => {
+                    side.pump_again = true;
+                    false
+                }
                 _ => return Err(()),
             }
         }
@@ -1459,18 +1584,11 @@ impl Worker {
     /// pass of a session another side keeps open, and the pass has nothing left
     /// to do about it.
     #[cfg(not(test))]
+    /// Ready once an endpoint raised the worker's signal. Refused publications
+    /// and FINs are retried on the passes other progress or maintenance
+    /// brings, so a blocked endpoint never keeps the driver awake.
     fn poll_internal(&mut self, cx: &mut Context<'_>) -> Poll<()> {
-        for session in self.sessions.values() {
-            for side in session.sides() {
-                let fin_published = side.fin_published;
-                if side.handle.as_ref().is_some_and(|handle| {
-                    (!fin_published && handle.tx_finished()) || handle.poll_tx_ready(cx).is_ready()
-                }) {
-                    return Poll::Ready(());
-                }
-            }
-        }
-        Poll::Pending
+        self.signal.poll(cx)
     }
 
     fn collect_registrations(&mut self) -> bool {
@@ -1487,6 +1605,11 @@ impl Worker {
                 if session.client.input_eof {
                     handle.close_rx();
                 }
+                handle.bind_writer(
+                    Box::new(DirectWriter::new(self.id, session.client.conn.unwrap())),
+                    self.signal.clone(),
+                    true,
+                );
                 session.client.handle = Some(handle);
                 did = true;
                 continue;
@@ -1510,6 +1633,11 @@ impl Worker {
                 .filter(|session| session.token == token);
             match bound {
                 Some(session) => {
+                    handle.bind_writer(
+                        Box::new(DirectWriter::new(self.id, session.client.conn.unwrap())),
+                        self.signal.clone(),
+                        false,
+                    );
                     session.backends.push(Side {
                         handle: Some(handle),
                         ..Side::default()
@@ -1528,6 +1656,27 @@ impl Worker {
             .registrations_pending
             .set(self.pending.len() as i64);
         did
+    }
+
+    /// Move the adapter's TX counters into the exported metrics, off the drain
+    /// pass: maintenance runs every millisecond, which is as often as anyone
+    /// reads them.
+    #[cfg_attr(test, allow(dead_code))]
+    fn publish_tx_metrics(&mut self) {
+        let cur = self.counters;
+        let prev = self.published;
+        let m = &self.metrics;
+        m.tx_accepted_bytes.inc_by(
+            (cur.bytes_to_origin + cur.bytes_to_backend)
+                - (prev.bytes_to_origin + prev.bytes_to_backend),
+        );
+        m.tx_arena_copy_bytes
+            .inc_by(cur.tx_arena_copy_bytes - prev.tx_arena_copy_bytes);
+        m.tx_publications
+            .inc_by(cur.tx_publications - prev.tx_publications);
+        m.tx_retries.inc_by(cur.send_retries - prev.send_retries);
+        m.tx_errors.inc_by(cur.send_errors - prev.send_errors);
+        self.published = cur;
     }
 
     /// Publish what the stack wrote, and return custody for what it has read.
@@ -1562,7 +1711,7 @@ impl Worker {
                 worker_id,
                 &mut s.client,
                 request,
-                dmesh_doca::BackendRoute::Origin,
+                true,
                 &mut budget,
                 counters,
             );
@@ -1577,12 +1726,7 @@ impl Worker {
                 finished &= client.finished;
             }
             for side in s.backends.iter_mut() {
-                let route = side
-                    .handle
-                    .as_ref()
-                    .map(DmeshIoHandle::backend_route)
-                    .unwrap_or_default();
-                match pump_side(worker_id, side, request, route, &mut budget, counters) {
+                match pump_side(worker_id, side, request, false, &mut budget, counters) {
                     Ok(pumped) => {
                         progressed |= pumped.progressed;
                         finished &= pumped.finished;
@@ -1776,6 +1920,11 @@ impl Worker {
 
         // Publish the DPUmesh backend endpoint for the Linkerd connector.
         let (backend_io, backend_handle) = dmesh_doca::dmesh_io_pair(backend_addr, Some(token));
+        backend_handle.bind_writer(
+            Box::new(DirectWriter::new(self.id, conn)),
+            self.signal.clone(),
+            false,
+        );
         let session = Session {
             token,
             request_route,
@@ -2145,6 +2294,8 @@ async fn build_worker(worker_id: c_int) -> Result<Option<Worker>, String> {
         by_token: HashMap::new(),
         order: Vec::new(),
         drain_next: 0,
+        signal: Arc::default(),
+        published: Counters::default(),
         slots: Slots::new(worker_id.max(0) as u16),
         pending: HashMap::new(),
         backends,
@@ -2597,7 +2748,8 @@ mod tests {
     use super::datapath::fake;
     use super::*;
     use dmesh_doca::DmeshIo;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use std::task::{Context, Poll};
+    use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
     #[test]
     fn worker_selection_is_strict_and_supports_all() {
@@ -2874,6 +3026,8 @@ mod tests {
             by_token: HashMap::new(),
             order: Vec::new(),
             drain_next: 0,
+            signal: Arc::default(),
+            published: Counters::default(),
             slots: Slots::new(id.max(0) as u16),
             pending: HashMap::new(),
             backends: backends.clone(),
@@ -2970,7 +3124,23 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        rt.block_on(async { io.write_all(bytes).await.unwrap() });
+        rt.block_on(async {
+            let mut at = 0;
+            while at < bytes.len() {
+                with_test_worker(|w| {
+                    w.collect_registrations();
+                    w.drain();
+                });
+                match std::future::poll_fn(|cx| {
+                    Poll::Ready(std::pin::Pin::new(&mut *io).poll_write(cx, &bytes[at..]))
+                })
+                .await
+                {
+                    Poll::Ready(Ok(n)) if n > 0 => at += n,
+                    other => panic!("write_to unexpectedly blocked or failed: {other:?}"),
+                }
+            }
+        });
     }
 
     fn read_eof(io: &mut DmeshIo) {
@@ -3467,6 +3637,78 @@ mod tests {
     }
 
     #[test]
+    fn direct_writer_binds_origin_first_and_minted_remote_routes_before_reply() {
+        let tw = install_worker(0);
+        let key = (7u64 << 24) | session_key(3, 4003);
+        let flow = request_flow(21, 3, 4003);
+        assert_eq!(unsafe { l7_conn_open(0, key, &flow) }, 0);
+        let token = token_of(key);
+        let mut client = register_client(&tw, token);
+        tw.backends.set_endpoint_resolver(Arc::new(|addr, _| {
+            if addr.port() == 9001 {
+                dmesh_doca::EndpointVerdict::Live(7)
+            } else {
+                dmesh_doca::EndpointVerdict::Remote(format!("pod-{}", addr.port()))
+            }
+        }));
+        let mut first = tw
+            .backends
+            .take_session(token, "10.244.0.11:9001".parse().unwrap())
+            .unwrap();
+        let mut remote = tw
+            .backends
+            .take_session(token, "10.244.0.12:9002".parse().unwrap())
+            .unwrap();
+        with_test_worker(|w| {
+            w.collect_registrations();
+            w.drain();
+        });
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        for (endpoint, data) in [
+            (&mut client, &b"reply"[..]),
+            (&mut first, &b"local"[..]),
+            (&mut remote, &b"remote"[..]),
+        ] {
+            assert!(
+                matches!(std::pin::Pin::new(endpoint).poll_write(&mut cx, data),
+                            Poll::Ready(Ok(n)) if n == data.len())
+            );
+        }
+        fake::STATE.with(|s| assert_eq!(s.borrow().batches.len(), 3));
+        drain_worker(0);
+        assert_eq!(
+            sent(),
+            vec![
+                (key, BACKEND_ORIGIN, b"reply".to_vec()),
+                (key, 7, b"local".to_vec()),
+                (key, -3, b"remote".to_vec())
+            ]
+        );
+        fake::STATE.with(|state| {
+            assert_eq!(
+                state.borrow().remote_sent,
+                vec![(key, "pod-9002".to_string(), b"remote".to_vec())]
+            )
+        });
+        with_test_worker(|w| {
+            assert!(w.sessions[&key]
+                .backends
+                .iter()
+                .all(|side| side.conn.is_none()));
+            // Publication must not reborrow WORKER, even if the driver holds it.
+            let mut cx = Context::from_waker(std::task::Waker::noop());
+            assert!(matches!(
+                std::pin::Pin::new(&mut first).poll_write(&mut cx, b"nested"),
+                Poll::Ready(Ok(6))
+            ));
+            w.close_session(key);
+        });
+        read_eof(&mut first);
+        read_eof(&mut remote);
+        read_eof(&mut client);
+    }
+
+    #[test]
     fn each_backend_gets_its_own_reply_direction() {
         // Several backends reply to one client on one route. Keyed by the
         // client alone they would collide on one side, and one backend's bytes
@@ -3576,8 +3818,142 @@ mod tests {
         let flow = request_flow(service, 5, 5000);
         assert_eq!(unsafe { l7_conn_open(0, conn, &flow) }, 0);
         let mut io = take_backend(tw, service, conn);
-        write_to(&mut io, bytes);
+        if !bytes.is_empty() {
+            write_to(&mut io, bytes);
+        }
         io
+    }
+
+    fn poll_write_test(io: &mut DmeshIo, data: &[u8]) -> Poll<io::Result<usize>> {
+        with_test_worker(|w| {
+            w.drain();
+        });
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        std::pin::Pin::new(io).poll_write(&mut cx, data)
+    }
+
+    #[test]
+    fn vectored_batch_owns_prefix_and_flush_retries_without_copying() {
+        let tw = install_worker(0);
+        let mut io = session_with_backend_output(&tw, 24, 1, b"");
+        fake::STATE.with(|s| s.borrow_mut().chunk = 6);
+        with_test_worker(|w| {
+            w.drain();
+        });
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        let bufs = [
+            io::IoSlice::new(b""),
+            io::IoSlice::new(b"head"),
+            io::IoSlice::new(b"body"),
+        ];
+        assert!(matches!(
+            std::pin::Pin::new(&mut io).poll_write_vectored(&mut cx, &bufs),
+            Poll::Ready(Ok(6))
+        ));
+        assert!(sent().is_empty());
+        fake::STATE.with(|s| s.borrow_mut().accept = Some(0));
+        drain_worker(0); // Transport flush refused; the accepted prefix stays owned.
+        with_test_worker(|w| {
+            assert!(
+                w.signal.poll(&mut cx).is_ready(),
+                "the accepted write summoned the driver"
+            );
+        });
+        for _ in 0..8 {
+            assert!(std::pin::Pin::new(&mut io).poll_flush(&mut cx).is_ready());
+            with_test_worker(|w| {
+                assert!(
+                    w.signal.poll(&mut cx).is_pending(),
+                    "a blocked batch does not keep the driver awake"
+                );
+            });
+        }
+        // No new bytes were accepted while the previous prefix was blocked.
+        assert!(std::pin::Pin::new(&mut io)
+            .poll_write(&mut cx, b"cancelled")
+            .is_pending());
+        assert!(sent().is_empty());
+        fake::STATE.with(|s| s.borrow_mut().accept = None);
+        write_to(&mut io, b"new");
+        drain_worker(0);
+        assert_eq!(
+            sent(),
+            vec![
+                (1, BACKEND_ANY, b"headbo".to_vec()),
+                (1, BACKEND_ANY, b"new".to_vec())
+            ]
+        );
+        with_test_worker(|w| {
+            assert_eq!(w.counters.tx_arena_copy_bytes, 9);
+            assert_eq!(w.counters.bytes_to_backend, 9);
+            w.close_session(1);
+        });
+        fake::STATE.with(|s| assert!(s.borrow().batches.is_empty()));
+    }
+
+    #[test]
+    fn many_small_writes_share_one_chunk_and_one_reservation_attempt() {
+        let tw = install_worker(0);
+        let mut io = session_with_backend_output(&tw, 24, 1, b"");
+        with_test_worker(|w| {
+            w.drain();
+        });
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        let mut data = [0u8; 32];
+        for i in 0..20u8 {
+            data.fill(i);
+            assert!(matches!(
+                std::pin::Pin::new(&mut io).poll_write(&mut cx, &data),
+                Poll::Ready(Ok(32))
+            ));
+            assert!(matches!(
+                std::pin::Pin::new(&mut io).poll_flush(&mut cx),
+                Poll::Ready(Ok(()))
+            ));
+        }
+        data.fill(0xff);
+        assert!(sent().is_empty());
+        fake::STATE.with(|s| assert_eq!(s.borrow().batch_serial, 1));
+        assert!(std::pin::Pin::new(&mut io).poll_flush(&mut cx).is_ready());
+        assert!(sent().is_empty());
+        drain_worker(0);
+        let expected: Vec<u8> = (0..20u8).flat_map(|i| [i; 32]).collect();
+        assert_eq!(sent(), vec![(1, BACKEND_ANY, expected)]);
+        drain_worker(0);
+        with_test_worker(|w| {
+            assert_eq!(w.counters.tx_arena_copy_bytes, 640);
+            assert_eq!(w.counters.tx_publications, 1);
+            assert_eq!(w.counters.bytes_to_backend, 640);
+            w.close_session(1);
+        });
+    }
+
+    #[test]
+    fn shutdown_waits_for_buffered_data_before_fin_and_abort_returns_lease() {
+        let tw = install_worker(0);
+        let mut io = session_with_backend_output(&tw, 24, 1, b"before-fin");
+        fake::STATE.with(|s| s.borrow_mut().accept = Some(0));
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        assert!(std::pin::Pin::new(&mut io)
+            .poll_shutdown(&mut cx)
+            .is_ready());
+        drain_worker(0);
+        assert!(sent().is_empty(), "refused DATA stays owned");
+        fake::STATE.with(|s| assert!(s.borrow().fins.is_empty()));
+        fake::STATE.with(|s| s.borrow_mut().accept = None);
+        with_test_worker(|w| {
+            w.drain();
+        });
+        assert_eq!(sent(), vec![(1, BACKEND_ANY, b"before-fin".to_vec())]);
+        fake::STATE.with(|s| assert_eq!(s.borrow().fins.len(), 1));
+        with_test_worker(|w| w.close_session(1));
+        let mut io = session_with_backend_output(&tw, 24, 2, b"aborted");
+        with_test_worker(|w| w.close_session(2));
+        fake::STATE.with(|s| assert!(s.borrow().batches.is_empty()));
+        assert!(matches!(
+            std::pin::Pin::new(&mut io).poll_write(&mut cx, b"late"),
+            Poll::Ready(Err(_))
+        ));
     }
 
     #[test]
@@ -3596,29 +3972,9 @@ mod tests {
         });
     }
 
-    /// A refused publication cancels the reservation and leaves every byte
-    /// queued, in order, for the next pass.
+    /// Output larger than one chunk is published in order, one chunk per pass.
     #[test]
-    fn a_refused_reservation_requeues_every_byte() {
-        let tw = install_worker(0);
-        let _io = session_with_backend_output(&tw, 25, 1, b"0123456789");
-        fake::STATE.with(|s| s.borrow_mut().accept = Some(0));
-        drain_worker(0);
-        assert!(sent().is_empty());
-        assert_eq!(cancels(), 0, "the datapath refused, it was not cancelled");
-
-        fake::STATE.with(|s| s.borrow_mut().accept = None);
-        drain_worker(0);
-        assert_eq!(sent(), vec![(1, BACKEND_ANY, b"0123456789".to_vec())]);
-        with_test_worker(|w| {
-            assert_eq!(w.counters.send_retries, 1);
-            w.close_session(1);
-        });
-    }
-
-    /// Output larger than one chunk is published in order, within one pass.
-    #[test]
-    fn a_pass_fills_several_reservations_in_order() {
+    fn output_beyond_one_chunk_is_published_in_order() {
         let tw = install_worker(0);
         fake::STATE.with(|s| s.borrow_mut().chunk = 4);
         let _io = session_with_backend_output(&tw, 45, 1, b"0123456789");
@@ -3653,10 +4009,11 @@ mod tests {
 
     /// A chunk the arena cannot lend is a stall, not a loss.
     #[test]
-    fn an_exhausted_arena_keeps_the_bytes() {
+    fn an_exhausted_arena_keeps_no_cancelled_bytes() {
         let tw = install_worker(0);
-        let _io = session_with_backend_output(&tw, 44, 1, b"0123456789");
+        let mut io = session_with_backend_output(&tw, 44, 1, b"");
         fake::STATE.with(|s| s.borrow_mut().no_chunk = true);
+        assert!(poll_write_test(&mut io, b"cancelled-old").is_pending());
         drain_worker(0);
         assert!(sent().is_empty());
         with_test_worker(|w| {
@@ -3665,6 +4022,7 @@ mod tests {
         });
 
         fake::STATE.with(|s| s.borrow_mut().no_chunk = false);
+        write_to(&mut io, b"0123456789");
         drain_worker(0);
         assert_eq!(sent(), vec![(1, BACKEND_ANY, b"0123456789".to_vec())]);
         with_test_worker(|w| w.close_session(1));
@@ -3673,8 +4031,12 @@ mod tests {
     #[test]
     fn over_accept_is_terminal() {
         let tw = install_worker(0);
-        let _io = session_with_backend_output(&tw, 27, 1, b"0123456789");
+        let mut io = session_with_backend_output(&tw, 27, 1, b"");
         fake::STATE.with(|s| s.borrow_mut().over_accept = true);
+        assert!(matches!(
+            poll_write_test(&mut io, b"invalid"),
+            Poll::Ready(Err(_))
+        ));
         drain_worker(0);
         with_test_worker(|w| {
             assert_eq!(w.counters.send_errors, 1);

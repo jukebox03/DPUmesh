@@ -656,7 +656,7 @@ dmesh_l7_driver_drain(void *driver, int budget)
 }
 
 int
-dmesh_l7_driver_clear_notifications(void *driver)
+dmesh_l7_driver_clear_notifications(void *driver, unsigned fired)
 {
     struct dpu_data_worker *worker_state = driver;
     doca_notification_handle_t completion = 0;
@@ -665,16 +665,24 @@ dmesh_l7_driver_clear_notifications(void *driver)
         return -1;
     atomic_store_explicit(&worker_state->parked, 0, memory_order_release);
     /* The eventfd holds a tick only after a waker posted one; an empty read
-     * costs a syscall per pass. */
+     * costs a syscall per pass. One read returns and zeroes the whole
+     * counter. The posted flag decides, not the caller's view of the wait:
+     * a tick posted after the wait returned is read now. */
     if (atomic_exchange_explicit(&worker_state->wake_posted, 0,
                                  memory_order_acq_rel)) {
         uint64_t value;
-        while (read(worker_state->wake_fd, &value, sizeof(value)) == sizeof(value)) {}
+        ssize_t n = read(worker_state->wake_fd, &value, sizeof(value));
+        (void)n;
     }
-    (void)doca_pe_clear_notification(worker_state->pe, completion);
-    int dma_fd = px_worker_notification_fd(worker_state->objs, worker_state->id);
-    if (dma_fd >= 0)
-        px_worker_clear_notification(worker_state->objs, worker_state->id, dma_fd);
+    /* Each progress-engine clear is a read on its event channel; one that did
+     * not fire only returns EAGAIN. */
+    if (fired & DMESH_L7_NOTIFY_COMPLETION)
+        (void)doca_pe_clear_notification(worker_state->pe, completion);
+    if (fired & DMESH_L7_NOTIFY_DMA) {
+        int dma_fd = px_worker_notification_fd(worker_state->objs, worker_state->id);
+        if (dma_fd >= 0)
+            px_worker_clear_notification(worker_state->objs, worker_state->id, dma_fd);
+    }
     worker_state->stat_notification_clears++;
     return 0;
 }

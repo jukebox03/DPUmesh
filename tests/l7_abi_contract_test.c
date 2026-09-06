@@ -75,11 +75,10 @@ CHECK_FN(l7_conn_segment,
          int (*)(int, uint64_t, const uint8_t *, uint32_t, uint32_t));
 CHECK_FN(l7_conn_eof, void (*)(int, uint64_t));
 CHECK_FN(l7_conn_close, void (*)(int, uint64_t));
-CHECK_FN(dmesh_l7_tx_reserve,
-         uint8_t *(*)(int, uint64_t, uint32_t *));
-CHECK_FN(dmesh_l7_tx_commit, int (*)(int, uint64_t, int32_t, uint32_t));
-CHECK_FN(dmesh_l7_tx_commit_remote,
-         int (*)(int, uint64_t, const char *, uint32_t));
+CHECK_FN(dmesh_l7_tx_batch_write,
+         int (*)(int, uint64_t, uint64_t *, const struct dmesh_l7_tx_slice *, size_t, uint32_t));
+CHECK_FN(dmesh_l7_tx_batch_flush, int (*)(int, uint64_t, uint64_t, int32_t, const char *));
+CHECK_FN(dmesh_l7_tx_batch_cancel, int (*)(int, uint64_t, uint64_t));
 CHECK_FN(dmesh_l7_tx_fin,
          int (*)(int, uint64_t, int32_t, const char *));
 CHECK_FN(dmesh_l7_session_failed, void (*)(int, uint64_t));
@@ -89,7 +88,7 @@ CHECK_FN(dmesh_l7_driver_notification_fds,
          int (*)(void *, int *, int *, int *));
 CHECK_FN(dmesh_l7_driver_arm, int (*)(void *));
 CHECK_FN(dmesh_l7_driver_drain, int (*)(void *, int));
-CHECK_FN(dmesh_l7_driver_clear_notifications, int (*)(void *));
+CHECK_FN(dmesh_l7_driver_clear_notifications, int (*)(void *, unsigned));
 CHECK_FN(dmesh_l7_driver_maintenance, int (*)(void *));
 CHECK_FN(dmesh_l7_driver_stopped, int (*)(void *));
 CHECK_FN(dmesh_l7_driver_ready, void (*)(void *));
