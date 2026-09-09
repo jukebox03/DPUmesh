@@ -43,7 +43,7 @@ def generate_control_plane():
         ("Pods, Services,", "EndpointSlices", "get/list only"),
         edge=GRAY, face=GRAY_BG, body_size=7.6)
     box(ax, 3.45, 8.35, 2.55, 1.45, "Controller Pod",
-        ("uid/gid 65532", "topology + feeds", "WorkloadGrant v3"),
+        ("uid/gid 65532", "topology + feeds", "grant: signed assertion"),
         edge=PURPLE, face=PURPLE_BG, body_size=7.6)
     box(ax, 0.4, 4.75, 2.5, 1.45, "kubelet",
         ("Device Plugin API", "slot allocation", "one socket mount"),
@@ -54,7 +54,8 @@ def generate_control_plane():
 
     box(ax, 6.9, 7.85, 5.9, 2.15, "dpumeshd.service",
         ("Device Plugin + slot generation", "SO_PEERCRED + cgroup v2 + starttime",
-         "node mTLS + signed-feed delivery", "worker cgroups + broker supervision"),
+         "node mTLS, signed feeds, DPU control session",
+         "worker cgroups + broker supervision"),
         edge=PURPLE, face=PURPLE_BG, body_size=7.65)
     box(ax, 6.9, 4.4, 5.9, 2.15, "Per-slot broker child",
         ("directly supervised outside Kubernetes", "private PID/mount/network/cgroup namespaces",
@@ -69,10 +70,12 @@ def generate_control_plane():
         ("unprivileged bounded installer", "digest check + fsync + atomic rename",
          "serves DPU public key"),
         edge=GREEN, face=GREEN_BG, body_size=7.55)
-    box(ax, 13.7, 4.75, 5.85, 2.15, "dpumesh_dpu",
-        ("nonce-bound grant verification", "topology / membership / target verification",
-         "slot + incarnation + generation fences", "routing, policy and peer-channel enforcement"),
-        edge=ORANGE, face=ORANGE_BG, body_size=7.55)
+    box(ax, 13.7, 4.65, 5.85, 2.25, "dpumesh_dpu — system service or DaemonSet Pod",
+        ("nonce-bound identity verification", "topology / membership / target verification",
+         "slot + incarnation + generation fences",
+         "one hardware lock; readiness from the control loop",
+         "routing, policy and peer-channel enforcement"),
+        edge=ORANGE, face=ORANGE_BG, body_size=7.55, title_size=10)
     box(ax, 15.25, 1.25, 4.3, 1.65, "Remote DPU",
         ("TLS 1.3 peer carrier", "node key bound by topology", "bounded stream custody"),
         edge=GREEN, face=GREEN_BG, body_size=7.35)
@@ -110,11 +113,15 @@ def generate_control_plane():
           label_dy=0.31)
     arrow(ax, (13.7, 5.02), (12.8, 5.02), label="READY / doorbell",
           color=ORANGE, label_dy=-0.30)
+    line(ax, [(12.8, 8.05), (13.2, 8.05), (13.2, 6.75)], color=PURPLE)
+    arrow(ax, (13.2, 6.75), (13.7, 6.75),
+          label="control session: REGISTER / STATUS",
+          color=PURPLE, label_dx=1.55, label_dy=0.30)
 
     line(ax, [(15.1, 6.90), (15.1, 7.35), (12.2, 7.35)],
          color=PURPLE, dashed=True)
     arrow(ax, (12.2, 7.35), (12.2, 7.85), color=PURPLE, dashed=True)
-    ax.text(13.65, 7.53, "scope HTTP → protocol-blind tunnel → node mTLS",
+    ax.text(15.60, 7.53, "scope HTTP → protocol-blind tunnel → node mTLS",
             fontsize=7.4, color="#626262", ha="center",
             bbox=dict(fc="white", ec="none", pad=0.7))
     arrow(ax, (16.65, 4.75), (16.65, 2.90), label="authenticated stream frames",
@@ -123,7 +130,7 @@ def generate_control_plane():
           color=GREEN, label_dx=1.30, label_dy=0)
 
     terms(ax, 0.4, -2.10, 19.15, 1.75, [
-        ("grant", "controller-signed Pod/container/slot/nonce binding"),
+        ("assertion", "Pod/container/slot/nonce binding the DPU cannot observe"),
         ("slot", "one Device Plugin resource and one Unix socket"),
         ("broker", "one isolated host child owning DOCA objects"),
         ("feed", "complete signed document installed atomically"),

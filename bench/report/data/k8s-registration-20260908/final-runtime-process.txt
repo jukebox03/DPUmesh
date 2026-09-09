@@ -1,0 +1,5 @@
+inactive
+inactive
+inactive
+241705 /usr/local/bin/dpumesh_dpu -p 03:00.0 -r 94:00.0 -l 40
+ca004eaee2cb64a5f6fb2c1af10936e9674ef4484076bbb7616a95b53c2b7b51  /home/jukebox/DPUmesh/doca/build/dpumesh_dpu

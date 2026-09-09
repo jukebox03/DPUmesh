@@ -1,0 +1,145 @@
+cc -O2 -g -Wall -Wextra -fPIC -DDOCA_ALLOW_EXPERIMENTAL_API -Iinclude -I. -Ilinkerd/include -DFLEXIO_ALLOW_EXPERIMENTAL_API -DALLOW_EXPERIMENTAL_API -I/opt/mellanox/flexio/include -I/opt/mellanox/doca/include -I/usr/include/libnl3 -I/opt/mellanox/doca/include -MMD -MP -MF build/dep/libdpumesh.so.5.d -shared -Wl,-soname,libdpumesh.so.5 -o build/lib/libdpumesh.so.5 src/core/dmesh_core.c src/facade/dmesh_api.c src/core/dmesh_grant.c src/broker/dmesh_brokerlink.c src/core/dmesh_resolve.c doca/common.c doca/object.c doca/buffer.c doca/ring.c doca/comch_common.c doca/comch_client.c doca/comch_server.c doca/comch_msgq.c doca/workload_grant.c doca/pod_membership.c doca/topology.c doca/peer_channel.c doca/control_scope.c doca/dpa.c \
+	-L/opt/mellanox/doca/lib/x86_64-linux-gnu -ldoca_common -ldoca_comch -ldoca_dpa -lcrypto -lpthread -Wl,-rpath,/usr/local/lib -Wl,-rpath,/home/jukebox/DPUmesh/build/lib -Wl,-rpath,/opt/mellanox/doca/lib/x86_64-linux-gnu -Wl,-rpath,/opt/mellanox/flexio/lib
+cc -O2 -g -Wall -Wextra -fPIC -DDOCA_ALLOW_EXPERIMENTAL_API -Iinclude -I. -Ilinkerd/include -DFLEXIO_ALLOW_EXPERIMENTAL_API -DALLOW_EXPERIMENTAL_API -I/opt/mellanox/flexio/include -I/opt/mellanox/doca/include -I/usr/include/libnl3 -I/opt/mellanox/doca/include -ffunction-sections -fdata-sections -Wl,--gc-sections \
+	-o build/test/native_api_contract_test tests/native_api_contract_test.c src/facade/dmesh_api.c
+cc -O2 -g -Wall -Wextra -fPIC -DDOCA_ALLOW_EXPERIMENTAL_API -Iinclude -I. -Ilinkerd/include -DFLEXIO_ALLOW_EXPERIMENTAL_API -DALLOW_EXPERIMENTAL_API -I/opt/mellanox/flexio/include -I/opt/mellanox/doca/include -I/usr/include/libnl3 -I/opt/mellanox/doca/include -ffunction-sections -fdata-sections -Wl,--gc-sections \
+	-o build/test/native_control_state_test tests/native_control_state_test.c doca/comch_server.c doca/workload_grant.c \
+	doca/topology.c doca/control_scope.c \
+	-L/opt/mellanox/doca/lib/x86_64-linux-gnu -ldoca_common -ldoca_comch -ldoca_dpa -lcrypto -lpthread -Wl,-rpath,/usr/local/lib -Wl,-rpath,/home/jukebox/DPUmesh/build/lib -Wl,-rpath,/opt/mellanox/doca/lib/x86_64-linux-gnu -Wl,-rpath,/opt/mellanox/flexio/lib
+cc -O2 -g -Wall -Wextra -fPIC -DDOCA_ALLOW_EXPERIMENTAL_API -Iinclude -I. -Ilinkerd/include -DFLEXIO_ALLOW_EXPERIMENTAL_API -DALLOW_EXPERIMENTAL_API -I/opt/mellanox/flexio/include -I/opt/mellanox/doca/include -I/usr/include/libnl3 -I/opt/mellanox/doca/include -ffunction-sections -fdata-sections -Wl,--gc-sections \
+	-o build/test/comch_cleanup_test tests/comch_cleanup_test.c doca/object.c -L/opt/mellanox/doca/lib/x86_64-linux-gnu -ldoca_common -ldoca_comch -ldoca_dpa -Wl,-rpath,/usr/local/lib -Wl,-rpath,/home/jukebox/DPUmesh/build/lib -Wl,-rpath,/opt/mellanox/doca/lib/x86_64-linux-gnu -Wl,-rpath,/opt/mellanox/flexio/lib
+cc -O2 -g -Wall -Wextra -fPIC -DDOCA_ALLOW_EXPERIMENTAL_API -Iinclude -I. -Ilinkerd/include -DFLEXIO_ALLOW_EXPERIMENTAL_API -DALLOW_EXPERIMENTAL_API -I/opt/mellanox/flexio/include -I/opt/mellanox/doca/include -I/usr/include/libnl3 -I/opt/mellanox/doca/include -D_GNU_SOURCE -ffunction-sections -fdata-sections -Wl,--gc-sections \
+	-o build/test/broker_quiesce_test tests/broker_quiesce_test.c -L/opt/mellanox/doca/lib/x86_64-linux-gnu -ldoca_common -ldoca_comch -ldoca_dpa -lpthread -Wl,-rpath,/usr/local/lib -Wl,-rpath,/home/jukebox/DPUmesh/build/lib -Wl,-rpath,/opt/mellanox/doca/lib/x86_64-linux-gnu -Wl,-rpath,/opt/mellanox/flexio/lib
+cc -O2 -g -Wall -Wextra -fPIC -DDOCA_ALLOW_EXPERIMENTAL_API -Iinclude -I. -Ilinkerd/include -DFLEXIO_ALLOW_EXPERIMENTAL_API -DALLOW_EXPERIMENTAL_API -I/opt/mellanox/flexio/include -I/opt/mellanox/doca/include -I/usr/include/libnl3 -I/opt/mellanox/doca/include -ffunction-sections -fdata-sections -Wl,--gc-sections \
+	-o build/test/comch_send_state_test tests/comch_send_state_test.c -L/opt/mellanox/doca/lib/x86_64-linux-gnu -ldoca_common -ldoca_comch -ldoca_dpa -Wl,-rpath,/usr/local/lib -Wl,-rpath,/home/jukebox/DPUmesh/build/lib -Wl,-rpath,/opt/mellanox/doca/lib/x86_64-linux-gnu -Wl,-rpath,/opt/mellanox/flexio/lib
+cc -O2 -g -Wall -Wextra -fPIC -DDOCA_ALLOW_EXPERIMENTAL_API -Iinclude -I. -Ilinkerd/include -DFLEXIO_ALLOW_EXPERIMENTAL_API -DALLOW_EXPERIMENTAL_API -I/opt/mellanox/flexio/include -I/opt/mellanox/doca/include -I/usr/include/libnl3 -I/opt/mellanox/doca/include -o build/test/workload_grant_test tests/workload_grant_test.c doca/workload_grant.c \
+	-L/opt/mellanox/doca/lib/x86_64-linux-gnu -ldoca_common -ldoca_comch -ldoca_dpa -lcrypto -Wl,-rpath,/usr/local/lib -Wl,-rpath,/home/jukebox/DPUmesh/build/lib -Wl,-rpath,/opt/mellanox/doca/lib/x86_64-linux-gnu -Wl,-rpath,/opt/mellanox/flexio/lib
+cc -O2 -g -Wall -Wextra -fPIC -DDOCA_ALLOW_EXPERIMENTAL_API -Iinclude -I. -Ilinkerd/include -DFLEXIO_ALLOW_EXPERIMENTAL_API -DALLOW_EXPERIMENTAL_API -I/opt/mellanox/flexio/include -I/opt/mellanox/doca/include -I/usr/include/libnl3 -I/opt/mellanox/doca/include -ffunction-sections -fdata-sections -Wl,--gc-sections \
+	-o build/test/pod_membership_test tests/pod_membership_test.c doca/pod_membership.c \
+	doca/comch_server.c doca/workload_grant.c doca/topology.c doca/control_scope.c \
+	-L/opt/mellanox/doca/lib/x86_64-linux-gnu -ldoca_common -ldoca_comch -ldoca_dpa -lcrypto -lpthread -Wl,-rpath,/usr/local/lib -Wl,-rpath,/home/jukebox/DPUmesh/build/lib -Wl,-rpath,/opt/mellanox/doca/lib/x86_64-linux-gnu -Wl,-rpath,/opt/mellanox/flexio/lib
+cc -O2 -g -Wall -Wextra -fPIC -DDOCA_ALLOW_EXPERIMENTAL_API -Iinclude -I. -Ilinkerd/include -DFLEXIO_ALLOW_EXPERIMENTAL_API -DALLOW_EXPERIMENTAL_API -I/opt/mellanox/flexio/include -I/opt/mellanox/doca/include -I/usr/include/libnl3 -I/opt/mellanox/doca/include -D_GNU_SOURCE -ffunction-sections -fdata-sections -Wl,--gc-sections \
+	-o build/test/native_tx_batch_policy_test tests/native_tx_batch_policy_test.c -L/opt/mellanox/doca/lib/x86_64-linux-gnu -ldoca_common -ldoca_comch -ldoca_dpa -lpthread -Wl,-rpath,/usr/local/lib -Wl,-rpath,/home/jukebox/DPUmesh/build/lib -Wl,-rpath,/opt/mellanox/doca/lib/x86_64-linux-gnu -Wl,-rpath,/opt/mellanox/flexio/lib
+cc -O2 -g -Wall -Wextra -fPIC -DDOCA_ALLOW_EXPERIMENTAL_API -Iinclude -I. -Ilinkerd/include -DFLEXIO_ALLOW_EXPERIMENTAL_API -DALLOW_EXPERIMENTAL_API -I/opt/mellanox/flexio/include -I/opt/mellanox/doca/include -I/usr/include/libnl3 -I/opt/mellanox/doca/include -D_GNU_SOURCE -ffunction-sections -fdata-sections -Wl,--gc-sections \
+	-o build/test/native_writable_test tests/native_writable_test.c -L/opt/mellanox/doca/lib/x86_64-linux-gnu -ldoca_common -ldoca_comch -ldoca_dpa -lpthread -Wl,-rpath,/usr/local/lib -Wl,-rpath,/home/jukebox/DPUmesh/build/lib -Wl,-rpath,/opt/mellanox/doca/lib/x86_64-linux-gnu -Wl,-rpath,/opt/mellanox/flexio/lib
+cc -O2 -g -Wall -Wextra -fPIC -DDOCA_ALLOW_EXPERIMENTAL_API -Iinclude -I. -Ilinkerd/include -DFLEXIO_ALLOW_EXPERIMENTAL_API -DALLOW_EXPERIMENTAL_API -I/opt/mellanox/flexio/include -I/opt/mellanox/doca/include -I/usr/include/libnl3 -I/opt/mellanox/doca/include -o build/test/preload_api_contract_test tests/preload_api_contract_test.c -lpthread -ldl
+cc -O2 -g -Wall -Wextra -fPIC -DDOCA_ALLOW_EXPERIMENTAL_API -Iinclude -I. -Ilinkerd/include -DFLEXIO_ALLOW_EXPERIMENTAL_API -DALLOW_EXPERIMENTAL_API -I/opt/mellanox/flexio/include -I/opt/mellanox/doca/include -I/usr/include/libnl3 -I/opt/mellanox/doca/include -ffunction-sections -fdata-sections -Wl,--gc-sections \
+	-o build/test/lb_policy_test tests/lb_policy_test.c -L/opt/mellanox/doca/lib/x86_64-linux-gnu -ldoca_common -ldoca_comch -ldoca_dpa -lpthread -Wl,-rpath,/usr/local/lib -Wl,-rpath,/home/jukebox/DPUmesh/build/lib -Wl,-rpath,/opt/mellanox/doca/lib/x86_64-linux-gnu -Wl,-rpath,/opt/mellanox/flexio/lib
+In file included from tests/lb_policy_test.c:26:
+tests/../doca/dpu_worker.c: In function ‘run_dpu_worker’:
+tests/../doca/dpu_worker.c:1395:9: warning: implicit declaration of function ‘cleanup_dpa_objects’; did you mean ‘cleanup_objects’? [-Wimplicit-function-declaration]
+ 1395 |     if (cleanup_dpa_objects(objs) != DOCA_SUCCESS ||
+      |         ^~~~~~~~~~~~~~~~~~~
+      |         cleanup_objects
+cc -O2 -g -Wall -Wextra -fPIC -DDOCA_ALLOW_EXPERIMENTAL_API -Iinclude -I. -Ilinkerd/include -DFLEXIO_ALLOW_EXPERIMENTAL_API -DALLOW_EXPERIMENTAL_API -I/opt/mellanox/flexio/include -I/opt/mellanox/doca/include -I/usr/include/libnl3 -I/opt/mellanox/doca/include -D_GNU_SOURCE -ffunction-sections -fdata-sections -Wl,--gc-sections \
+	-o build/test/proxy_lane_queue_test tests/proxy_lane_queue_test.c doca/peer_channel.c \
+	doca/peer_transport.c doca/peer_tls.c doca/topology.c \
+	doca/workload_grant.c \
+	-L/opt/mellanox/doca/lib/x86_64-linux-gnu -ldoca_common -ldoca_comch -ldoca_dpa -lssl -lcrypto -lpthread -Wl,-rpath,/usr/local/lib -Wl,-rpath,/home/jukebox/DPUmesh/build/lib -Wl,-rpath,/opt/mellanox/doca/lib/x86_64-linux-gnu -Wl,-rpath,/opt/mellanox/flexio/lib
+cc -O2 -g -Wall -Wextra -fPIC -DDOCA_ALLOW_EXPERIMENTAL_API -Iinclude -I. -Ilinkerd/include -DFLEXIO_ALLOW_EXPERIMENTAL_API -DALLOW_EXPERIMENTAL_API -I/opt/mellanox/flexio/include -I/opt/mellanox/doca/include -I/usr/include/libnl3 -I/opt/mellanox/doca/include -o build/test/worker_mpsc_queue_test tests/worker_mpsc_queue_test.c -lpthread
+cc -O2 -g -Wall -Wextra -fPIC -DDOCA_ALLOW_EXPERIMENTAL_API -Iinclude -I. -Ilinkerd/include -DFLEXIO_ALLOW_EXPERIMENTAL_API -DALLOW_EXPERIMENTAL_API -I/opt/mellanox/flexio/include -I/opt/mellanox/doca/include -I/usr/include/libnl3 -I/opt/mellanox/doca/include -o build/test/topology_gen_test tests/topology_gen_test.c doca/topology.c doca/workload_grant.c \
+	doca/control_scope.c \
+	-L/opt/mellanox/doca/lib/x86_64-linux-gnu -ldoca_common -ldoca_comch -ldoca_dpa -lcrypto -Wl,-rpath,/usr/local/lib -Wl,-rpath,/home/jukebox/DPUmesh/build/lib -Wl,-rpath,/opt/mellanox/doca/lib/x86_64-linux-gnu -Wl,-rpath,/opt/mellanox/flexio/lib
+cc -O2 -g -Wall -Wextra -fPIC -DDOCA_ALLOW_EXPERIMENTAL_API -Iinclude -I. -Ilinkerd/include -DFLEXIO_ALLOW_EXPERIMENTAL_API -DALLOW_EXPERIMENTAL_API -I/opt/mellanox/flexio/include -I/opt/mellanox/doca/include -I/usr/include/libnl3 -I/opt/mellanox/doca/include -D_GNU_SOURCE -o build/test/peer_channel_test tests/peer_channel_test.c doca/peer_channel.c \
+	-lcrypto -Wl,-rpath,/usr/local/lib -Wl,-rpath,/home/jukebox/DPUmesh/build/lib -Wl,-rpath,/opt/mellanox/doca/lib/x86_64-linux-gnu -Wl,-rpath,/opt/mellanox/flexio/lib
+  -> build/lib/libdpumesh.so.5
+cc -O2 -g -Wall -Wextra -fPIC -DDOCA_ALLOW_EXPERIMENTAL_API -Iinclude -I. -Ilinkerd/include -DFLEXIO_ALLOW_EXPERIMENTAL_API -DALLOW_EXPERIMENTAL_API -I/opt/mellanox/flexio/include -I/opt/mellanox/doca/include -I/usr/include/libnl3 -I/opt/mellanox/doca/include -D_GNU_SOURCE -o build/test/peer_transport_test tests/peer_transport_test.c \
+	doca/peer_transport.c doca/peer_wire_tcp.c doca/peer_tls.c doca/peer_channel.c \
+	-lssl -lcrypto -Wl,-rpath,/usr/local/lib -Wl,-rpath,/home/jukebox/DPUmesh/build/lib -Wl,-rpath,/opt/mellanox/doca/lib/x86_64-linux-gnu -Wl,-rpath,/opt/mellanox/flexio/lib
+cc -O2 -g -Wall -Wextra -fPIC -DDOCA_ALLOW_EXPERIMENTAL_API -Iinclude -I. -Ilinkerd/include -DFLEXIO_ALLOW_EXPERIMENTAL_API -DALLOW_EXPERIMENTAL_API -I/opt/mellanox/flexio/include -I/opt/mellanox/doca/include -I/usr/include/libnl3 -I/opt/mellanox/doca/include -MMD -MP -MF build/dep/dmesh_broker.d -o build/bin/dmesh_broker src/broker/dmesh_broker.c -Lbuild/lib -ldpumesh \
+	-L/opt/mellanox/doca/lib/x86_64-linux-gnu -ldoca_common -ldoca_comch -ldoca_dpa -lpthread -Wl,-rpath,/usr/local/lib -Wl,-rpath,/home/jukebox/DPUmesh/build/lib -Wl,-rpath,/opt/mellanox/doca/lib/x86_64-linux-gnu -Wl,-rpath,/opt/mellanox/flexio/lib
+cc -O2 -g -MMD -MP -MF build/dep/bench_dpumesh.d -Iinclude -Isrc -o build/bin/bench_dpumesh bench/apps/bench_dpumesh.c -Lbuild/lib -ldpumesh -lpthread -lm -Wl,-rpath,/usr/local/lib -Wl,-rpath,/home/jukebox/DPUmesh/build/lib -Wl,-rpath,/opt/mellanox/doca/lib/x86_64-linux-gnu -Wl,-rpath,/opt/mellanox/flexio/lib
+cc -O2 -g -MMD -MP -MF build/dep/echo_dpumesh.d -Iinclude -Isrc -o build/bin/echo_dpumesh bench/apps/echo_dpumesh.c -Lbuild/lib -ldpumesh -lpthread  -Wl,-rpath,/usr/local/lib -Wl,-rpath,/home/jukebox/DPUmesh/build/lib -Wl,-rpath,/opt/mellanox/doca/lib/x86_64-linux-gnu -Wl,-rpath,/opt/mellanox/flexio/lib
+  -> build/bin/echo_dpumesh
+cc -O2 -g -MMD -MP -MF build/dep/loopback_dpumesh.d -Iinclude -Isrc -o build/bin/loopback_dpumesh bench/validators/loopback_dpumesh.c -Lbuild/lib -ldpumesh -lpthread  -Wl,-rpath,/usr/local/lib -Wl,-rpath,/home/jukebox/DPUmesh/build/lib -Wl,-rpath,/opt/mellanox/doca/lib/x86_64-linux-gnu -Wl,-rpath,/opt/mellanox/flexio/lib
+  -> build/bin/loopback_dpumesh
+cc -O2 -g -MMD -MP -MF build/dep/verbs_dpumesh.d -Iinclude -Isrc -o build/bin/verbs_dpumesh bench/validators/verbs_dpumesh.c -Lbuild/lib -ldpumesh -lpthread  -Wl,-rpath,/usr/local/lib -Wl,-rpath,/home/jukebox/DPUmesh/build/lib -Wl,-rpath,/opt/mellanox/doca/lib/x86_64-linux-gnu -Wl,-rpath,/opt/mellanox/flexio/lib
+  -> build/bin/bench_dpumesh
+cc -O2 -g -MMD -MP -MF build/dep/hello_dpumesh.d -Iinclude -Isrc -o build/bin/hello_dpumesh bench/examples/hello_dpumesh.c -Lbuild/lib -ldpumesh -lpthread  -Wl,-rpath,/usr/local/lib -Wl,-rpath,/home/jukebox/DPUmesh/build/lib -Wl,-rpath,/opt/mellanox/doca/lib/x86_64-linux-gnu -Wl,-rpath,/opt/mellanox/flexio/lib
+cc -O2 -g -MMD -MP -MF build/dep/hello_dpumesh_server.d -Iinclude -Isrc -o build/bin/hello_dpumesh_server bench/examples/hello_dpumesh_server.c -Lbuild/lib -ldpumesh -lpthread  -Wl,-rpath,/usr/local/lib -Wl,-rpath,/home/jukebox/DPUmesh/build/lib -Wl,-rpath,/opt/mellanox/doca/lib/x86_64-linux-gnu -Wl,-rpath,/opt/mellanox/flexio/lib
+  -> build/bin/hello_dpumesh
+cc -O2 -g -MMD -MP -MF build/dep/libdmesh_preload.so.d -fPIC -shared -Iinclude -I. -o build/lib/libdmesh_preload.so src/facade/dmesh_preload.c \
+	-Lbuild/lib -ldpumesh -lpthread -ldl -Wl,-rpath,/usr/local/lib -Wl,-rpath,/home/jukebox/DPUmesh/build/lib -Wl,-rpath,/opt/mellanox/doca/lib/x86_64-linux-gnu -Wl,-rpath,/opt/mellanox/flexio/lib
+  -> build/bin/verbs_dpumesh
+cc -O2 -g -Wall -Wextra -fPIC -DDOCA_ALLOW_EXPERIMENTAL_API -Iinclude -I. -Ilinkerd/include -DFLEXIO_ALLOW_EXPERIMENTAL_API -DALLOW_EXPERIMENTAL_API -I/opt/mellanox/flexio/include -I/opt/mellanox/doca/include -I/usr/include/libnl3 -I/opt/mellanox/doca/include -o build/test/hw_comch_peer_loss tests/hw_comch_peer_loss.c -Lbuild/lib -ldpumesh -L/opt/mellanox/doca/lib/x86_64-linux-gnu -ldoca_common -ldoca_comch -ldoca_dpa -Wl,-rpath,/usr/local/lib -Wl,-rpath,/home/jukebox/DPUmesh/build/lib -Wl,-rpath,/opt/mellanox/doca/lib/x86_64-linux-gnu -Wl,-rpath,/opt/mellanox/flexio/lib
+  -> build/bin/hello_dpumesh_server
+  -> build/lib/libdmesh_preload.so
+build/test/native_api_contract_test
+native_api_contract_test: PASS
+build/test/native_control_state_test
+native_control_state_test: PASS
+build/test/comch_send_state_test
+comch_send_state_test: PASS
+build/test/broker_quiesce_test
+broker_quiesce_test: PASS
+build/test/comch_cleanup_test
+comch_cleanup_test: PASS
+build/test/workload_grant_test
+workload_grant_test: PASS
+build/test/pod_membership_test
+pod_membership_test: PASS
+build/test/native_tx_batch_policy_test
+native_tx_batch_policy_test: PASS
+build/test/native_writable_test
+native_writable_test: PASS
+build/test/preload_api_contract_test
+preload_api_contract_test: PASS
+build/test/l4_pin_policy_test
+l4_pin_policy_test: PASS
+build/test/lb_policy_test
+lb_policy_test: PASS
+build/test/proxy_lane_queue_test
+proxy_lane_queue_test: PASS
+build/test/worker_mpsc_queue_test
+worker_mpsc_queue_test: PASS
+build/test/topology_test
+topology_test: PASS
+build/test/topology_gen_test
+topology_gen_test: PASS
+build/test/peer_channel_test
+peer_channel_test: PASS
+build/test/peer_tls_test
+peer_tls_test: PASS
+build/test/peer_transport_test
+peer_transport_test: PASS
+build/test/peer_wire_test
+peer_wire_test
+  tcp: roundtrip max burst backpressure close reuse ok
+  rdma: skipped (no local address resolves to an rdma device)
+peer_wire_test: PASS
+build/test/peer_wire_lease_test
+peer_wire_lease_test: PASS
+build/test/ring_counter_test
+ring_counter_test: PASS
+build/test/l7_abi_contract_test
+l7_abi_contract_test: PASS
+build/test/benchmark_result_contract_test
+benchmark_result_contract_test: PASS
+sh tests/dma_fault_scope_test.sh
+dma_fault_scope_test: PASS
+sh tests/abi_contract_test.sh build/lib/libdpumesh.so.5 build/lib/libdmesh_preload.so 5
+abi_contract_test: PASS
+sh tests/generator_selftest_test.sh build/bin/bench_dpumesh build/bin/bench_sock
+generator_selftest_test: PASS
+python3 tests/dpumesh_controller_test.py
+dpumesh-controller: skipping endpoint test-bench/echo-dpumesh -> abcdef01-2345-6789-abcd-ef0123456789: pod not placed yet
+dpumesh-controller: skipping endpoint test-bench/echo-dpumesh -> abcdef01-2345-6789-abcd-ef0123456789: pod not placed yet
+dpumesh-controller: node rapids4 reported 192.168.100.2:4791 abababababababab...
+dpumesh_controller_test: PASS
+python3 tests/workload_grant_controller_test.py
+workload_grant_controller_test: PASS
+build/registration-venv/bin/python tests/dpumeshd_test.py
+dpumeshd: reaping remaining broker cgroup pid=123
+dpumeshd: broker exited pid=123 signal=9 pod=c92d7333-854d-47ca-84c6-c6e257f0f9ad
+dpumeshd: broker grace expired pid=123; killing worker cgroup
+dpumeshd: Device Plugin registration failed: kubelet Device Plugin socket is absent
+dpumeshd: registered dpumesh.io/channel with kubelet
+dpumeshd_test: PASS
+build/registration-venv/bin/python tests/dpu_feed_test.py
+dpumesh-feed-receiver: installed topology (31 bytes)
+dpumesh-feed-receiver: refused: unknown feed
+dpu_feed_test: PASS
+python3 tests/health_page_test.py
+health_page_test: PASS
+bash tests/bench_geometry_test.sh
+bench_geometry_test: PASS

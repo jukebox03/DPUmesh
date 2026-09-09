@@ -56,10 +56,12 @@ POD_REGISTER → POD_ASSIGNED → import TX and ring mappings
 → POD_INIT_RESULT(READY, L)
 ```
 
-Registration carries a signed WorkloadGrant, a connection-bound nonce, the
+Registration carries an identity assertion bound to this connection's nonce: the
 broker incarnation, the Pod UID, the authorized Service, and the requested ring
-geometry. The DPU admits the channel only when the grant and node-scoped control
-state agree.
+geometry. It reaches the DPU either signed over Comch or over the paired host's
+authenticated control session, as [`CONTROL.md`](CONTROL.md) §2-1 defines. The
+DPU admits the channel only when that assertion and node-scoped control state
+agree.
 
 The channel exports these data structures:
 

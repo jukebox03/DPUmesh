@@ -1,0 +1,19 @@
+Sep 08 17:46:54 rapids4 systemd[1]: Stopping DPUmesh host runtime and Kubernetes Device Plugin...
+Sep 08 17:46:55 rapids4 systemd[1]: dpumeshd.service: Deactivated successfully.
+Sep 08 17:46:55 rapids4 systemd[1]: Stopped DPUmesh host runtime and Kubernetes Device Plugin.
+Sep 08 17:46:55 rapids4 systemd[1]: dpumeshd.service: Consumed 8.287s CPU time.
+Sep 08 17:46:56 rapids4 systemd[1]: Starting DPUmesh host runtime and Kubernetes Device Plugin...
+Sep 08 17:46:56 rapids4 systemd[1]: Started DPUmesh host runtime and Kubernetes Device Plugin.
+Sep 08 17:46:57 rapids4 python[2102375]: dpumeshd: local runtime started incarnation=9d10ccab22b9648b8a091a41fd7b8de1 slots=2
+Sep 08 17:46:57 rapids4 python[2102375]: dpumeshd: registered dpumesh.io/channel with kubelet
+Sep 08 17:47:02 rapids4 python[2102375]: dpumeshd: local control unavailable: _ssl.c:990: The handshake operation timed out
+Sep 08 17:47:36 rapids4 python[2102375]: dpumeshd: broker pid=2103747 slot=channel-000 generation=1 pod=24c98405-f250-4a9b-8fd3-bbdf16b36650
+Sep 08 17:47:36 rapids4 python[2103747]: [dpumesh] Opening DOCA device at 94:00.0...
+Sep 08 17:47:36 rapids4 python[2103747]: [dpumesh] Connecting comch client...
+Sep 08 17:47:36 rapids4 python[2103758]: [dpumesh] Opening DOCA device at 94:00.0...
+Sep 08 17:47:36 rapids4 python[2102375]: dpumeshd: broker pid=2103758 slot=channel-001 generation=1 pod=eef6936a-f2b7-48b1-9662-f1af6d58e27c
+Sep 08 17:47:36 rapids4 python[2103758]: [dpumesh] Connecting comch client...
+Sep 08 17:47:38 rapids4 python[2102375]: dpumeshd: direct REGISTER pod=eef6936a-f2b7-48b1-9662-f1af6d58e27c slot=1 generation=1
+Sep 08 17:47:38 rapids4 python[2102375]: dpumeshd: direct REGISTER pod=24c98405-f250-4a9b-8fd3-bbdf16b36650 slot=0 generation=1
+Sep 08 17:47:38 rapids4 python[2103758]: dmesh_broker: READY sent pod_id=1 fds=19
+Sep 08 17:47:38 rapids4 python[2103747]: dmesh_broker: READY sent pod_id=0 fds=19

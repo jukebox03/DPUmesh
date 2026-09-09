@@ -1,0 +1,153 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  annotations:
+    deprecated.daemonset.template.generation: "5"
+    meta.helm.sh/release-name: dpumesh-runtime
+    meta.helm.sh/release-namespace: dpumesh-system
+  creationTimestamp: "2026-09-08T08:40:44Z"
+  generation: 5
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  name: dpumesh-runtime
+  namespace: dpumesh-system
+  resourceVersion: "39882924"
+  uid: 63e36cec-8f4e-4c7e-b262-cf09de18775f
+spec:
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: dpumesh-runtime
+  template:
+    metadata:
+      annotations:
+        linkerd.io/inject: disabled
+        sidecar.istio.io/inject: "false"
+      creationTimestamp: null
+      labels:
+        app.kubernetes.io/instance: dpumesh-runtime
+    spec:
+      automountServiceAccountToken: false
+      containers:
+      - env:
+        - name: DPUMESH_CLUSTER_ID
+          value: dpumesh-test
+        - name: DPUMESH_NODE_NAME
+          value: rapids4
+        - name: DPUMESH_DPU_PCI
+          value: "03:00.0"
+        - name: DPUMESH_DPU_REPRESENTOR
+          value: "94:00.0"
+        - name: DPUMESH_REGISTRATION_MODE
+          value: direct
+        - name: DPUMESH_LOCAL_BIND
+          value: 192.168.100.2
+        - name: DPUMESH_READY_FILE
+          value: /run/dpumesh-runtime/ready
+        - name: DPUMESH_DPU_NODE
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: spec.nodeName
+        - name: DPUMESH_ARM_CPU_LIST
+          value: 13,3,4,1,6,2,12,5,15
+        - name: DPUMESH_ARM_WORKERS
+          value: "8"
+        - name: DPUMESH_CONTROLLER_KEY_DIR
+          value: /etc/dpumesh/controller.pub.keys
+        - name: DPUMESH_CONTROLLER_SCOPE_URL
+          value: http://192.168.100.1:28089
+        - name: DPUMESH_DPA_THREADS
+          value: "32"
+        - name: DPUMESH_FEED_KEY_DIR
+          value: /etc/dpumesh/feed.keys
+        - name: DPUMESH_IDENTITY_TRUST_DOMAIN
+          value: linkerd.cluster.local
+        - name: DPUMESH_L7_LINKERD_WORKER
+          value: all
+        - name: DPUMESH_L7_OPAQUE_SVC
+        - name: DPUMESH_L7_SVC
+        - name: DPUMESH_LOCAL_CA
+          value: /etc/dpumesh/local-tls/ca.crt
+        - name: DPUMESH_LOCAL_CERT
+          value: /etc/dpumesh/local-tls/dpu-server.crt
+        - name: DPUMESH_LOCAL_KEY
+          value: /etc/dpumesh/local-tls/dpu-server.key
+        - name: DPUMESH_MEMBERSHIP_FILE
+          value: /etc/dpumesh/feeds/membership.v1
+        - name: DPUMESH_NODE_KEY_FILE
+          value: /etc/dpumesh/node-static.key
+        - name: DPUMESH_NODE_KEY_PUBLIC_FILE
+          value: /etc/dpumesh/node-static.pub
+        - name: DPUMESH_PEER_BIND
+        - name: DPUMESH_PEER_PORT
+          value: "47900"
+        - name: DPUMESH_PEER_TRANSPORT
+        - name: DPUMESH_RINGS_PER_POD
+          value: "8"
+        - name: DPUMESH_TOPOLOGY_FILE
+          value: /etc/dpumesh/feeds/topology.v1
+        image: bench/dpumesh-dpu:kubernetes-v4
+        imagePullPolicy: IfNotPresent
+        name: runtime
+        readinessProbe:
+          exec:
+            command:
+            - sh
+            - -ec
+            - test -f /run/dpumesh-runtime/ready && test $(($(date +%s)-$(stat -c
+              %Y /run/dpumesh-runtime/ready))) -lt 5
+          failureThreshold: 3
+          periodSeconds: 2
+          successThreshold: 1
+          timeoutSeconds: 1
+        resources:
+          limits:
+            memory: 8Gi
+          requests:
+            cpu: "4"
+            memory: 2Gi
+        securityContext:
+          privileged: true
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /etc/dpumesh
+          name: config
+        - mountPath: /run/dpumesh-runtime
+          name: runtime
+      dnsPolicy: ClusterFirstWithHostNet
+      hostNetwork: true
+      nodeSelector:
+        kubernetes.io/arch: arm64
+        kubernetes.io/hostname: rapids4-dpu
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext: {}
+      serviceAccount: dpumesh-runtime
+      serviceAccountName: dpumesh-runtime
+      terminationGracePeriodSeconds: 40
+      tolerations:
+      - effect: NoSchedule
+        key: dpumesh.io/dpu
+        operator: Equal
+        value: "true"
+      volumes:
+      - hostPath:
+          path: /etc/dpumesh
+          type: Directory
+        name: config
+      - hostPath:
+          path: /run/dpumesh-runtime
+          type: DirectoryOrCreate
+        name: runtime
+  updateStrategy:
+    type: OnDelete
+status:
+  currentNumberScheduled: 1
+  desiredNumberScheduled: 1
+  numberAvailable: 1
+  numberMisscheduled: 0
+  numberReady: 1
+  observedGeneration: 5
+  updatedNumberScheduled: 1

@@ -71,6 +71,7 @@ typedef struct dmesh_proxy_conn {
 
 /* Create the engine: the SG-DMA DPU→host data path. */
 int px_init(struct objects *objs);
+int px_cleanup_hardware(struct objects *objs);
 
 /* Re-derive the interned-id → L7 mode table from the DPUMESH_L7_SVC and
  * DPUMESH_L7_OPAQUE_SVC name lists against the held generation. Called by

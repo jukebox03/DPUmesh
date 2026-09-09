@@ -1,0 +1,13 @@
+    PID     TID PSR COMMAND
+ 227297  227297  15 dpumesh_dpu
+ 227297  227298   5 dpumesh_dpu
+ 227297  227299  14 dpumesh_dpu
+ 227297  227320  13 dmesh-w0
+ 227297  227321   3 dmesh-w1
+ 227297  227322   4 dmesh-w2
+ 227297  227323   1 dmesh-w3
+ 227297  227324   6 dmesh-w4
+ 227297  227325   2 dmesh-w5
+ 227297  227326  12 dmesh-w6
+ 227297  227327   5 dmesh-w7
+DPUMESH_ARM_CPU_LIST=13,3,4,1,6,2,12,5,15

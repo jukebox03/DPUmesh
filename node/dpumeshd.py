@@ -4,7 +4,8 @@
 There is deliberately one node process.  The kubelet-facing Device Plugin,
 allocation socket registry, kernel-evidence verifier, controller mTLS client,
 worker cgroup owner, and broker supervisor all share the same slot state.
-Neither this process nor a workload receives a Kubernetes bearer token.
+Direct registration uses a dedicated Kubernetes client credential in dpumeshd.
+Neither a broker nor a workload receives that credential.
 """
 
 from __future__ import annotations
@@ -46,9 +47,14 @@ PLUGIN_ENDPOINT = "dpumesh.sock"
 CONTAINER_SOCKET = "/run/dpumesh/channel.sock"
 BROKER_HELLO = struct.Struct("<8sBB2x64s")
 GRANT_REQUEST = struct.Struct("<8sB3x64s32s")
+# Mirrors DMESH_LOCAL_MAGIC/DMESH_LOCAL_VERSION: the broker reports its DPU
+# connection nonce under them when the launch selected direct registration.
+LOCAL_MAGIC = b"DMESHLC1"
+LOCAL_VERSION = 4
 ASSERT_SIZE = 1545
 BROKER_IPC_VERSION = 3
 MAX_CHANNEL_SLOTS = 127
+OBSERVE_ATTEMPTS = 15  # kubelet/API observation retries during direct registration
 PEERCRED = struct.Struct("3i")
 POD_UID_RE = re.compile(
     r"[0-9a-f]{8}[-_][0-9a-f]{4}[-_][0-9a-f]{4}[-_]"
@@ -100,6 +106,8 @@ class Worker:
     cgroup: Path
     private_root: Path
     registered: bool = False
+    connection_id: bytes | None = None
+    control_session: bytes | None = None
 
 
 def process_starttime(pid: int, proc_root: Path = Path("/proc")) -> str:
@@ -450,6 +458,24 @@ class CgroupManager:
         return leaf
 
     @staticmethod
+    def populated(leaf: Path) -> bool:
+        try:
+            events = dict(line.split() for line in
+                          (leaf / "cgroup.events").read_text(encoding="ascii").splitlines())
+            return events["populated"] != "0"
+        except FileNotFoundError:
+            return False
+
+    @staticmethod
+    def kill(leaf: Path) -> None:
+        # Address the owned cgroup, not a possibly recycled PID or just the
+        # wrapper (which lives outside this leaf).
+        try:
+            (leaf / "cgroup.kill").write_text("1", encoding="ascii")
+        except FileNotFoundError:
+            pass
+
+    @staticmethod
     def remove(leaf: Path) -> None:
         try:
             leaf.rmdir()
@@ -485,16 +511,20 @@ class SlotRegistry:
         self.slots = [Slot(index, directory / f"channel-{index:03d}.sock")
                       for index in range(count)]
         self.runtime_ready = False
+        self.control_ready = True
+        self.feed_ready = False
         self.changed = threading.Condition()
 
     def set_ready(self, ready: bool) -> None:
         with self.changed:
+            self.feed_ready = ready
+            ready = ready and self.control_ready
             self.runtime_ready = ready
             for slot in self.slots:
                 with slot.lock:
                     if slot.state == "UNHEALTHY" and ready:
                         slot.state = "FREE_LISTENING"
-                    elif not ready and slot.worker is None:
+                    elif not ready and slot.worker is None and slot.state != "CLEANUP_WAIT":
                         slot.state = "UNHEALTHY"
             self.changed.notify_all()
 
@@ -655,6 +685,8 @@ class BrokerSupervisor:
         self.launch_timeout = launch_timeout
         self.pci_addr = pci_addr
         self.rings_per_pod = rings_per_pod
+        self.local = None
+        self.verifier = None
         self.workers: dict[int, Worker] = {}
         self.lock = threading.Lock()
 
@@ -718,12 +750,59 @@ class BrokerSupervisor:
             worker.registered = True
         return result
 
+    def register_private(self, worker: Worker, private: socket.socket) -> None:
+        try:
+            with private:
+                private.settimeout(15)
+                packet = private.recv(GRANT_REQUEST.size + 1)
+                if len(packet) != GRANT_REQUEST.size:
+                    raise RuntimeError_("invalid private registration report")
+                magic, version, service_field, connection_id = GRANT_REQUEST.unpack(packet)
+                service = service_field.split(b"\0", 1)[0].decode("ascii")
+                if (magic != LOCAL_MAGIC or version != LOCAL_VERSION or
+                        service != worker.service or not any(connection_id)):
+                    raise RuntimeError_("private registration report mismatch")
+                # Container status can still be converging when the broker
+                # reports; observe across a bounded window before refusing.
+                for attempt in range(OBSERVE_ATTEMPTS):
+                    try:
+                        metadata = self.verifier.metadata(worker, connection_id, self.incarnation)
+                        break
+                    except Exception:
+                        if attempt + 1 == OBSERVE_ATTEMPTS:
+                            raise
+                        time.sleep(0.5)
+                with self.lock:
+                    if self.workers.get(worker.pid) is not worker or process_starttime(worker.pid) != worker.starttime:
+                        raise RuntimeError_("broker exited during registration")
+                    worker.connection_id = connection_id
+                    worker.control_session = self.local.session
+                    worker.registered = True  # Includes uncertain ACK; always require cleanup proof.
+                status = self.local.request(2, connection_id, metadata,
+                                            expected_session=worker.control_session)
+                if status:
+                    raise RuntimeError_(f"DPU refused REGISTER: {status}")
+                private.sendall(b"\0")
+                print(f"dpumeshd: direct REGISTER pod={worker.pod_uid} slot={worker.slot} "
+                      f"generation={worker.generation}", flush=True)
+        except Exception as exc:
+            print(f"dpumeshd: direct registration failed: {exc}", file=sys.stderr, flush=True)
+
     def _watch(self, worker: Worker) -> None:
         status: int | None = None
         try:
             _pid, status = os.waitpid(worker.wrapper_pid, 0)
         except ChildProcessError:
             pass
+        # Reaping the wrapper is not proof that its broker has exited. Retain
+        # the worker and its slot until the owned cgroup is empty, and only
+        # then ask the DPU for cleanup proof.
+        if self.cgroups.populated(worker.cgroup):
+            print(f"dpumeshd: reaping remaining broker cgroup pid={worker.pid}",
+                  file=sys.stderr, flush=True)
+            self.cgroups.kill(worker.cgroup)
+            while self.cgroups.populated(worker.cgroup):
+                time.sleep(0.05)
         with self.lock:
             self.workers.pop(worker.pid, None)
             registered = worker.registered
@@ -736,9 +815,27 @@ class BrokerSupervisor:
         # DPU disconnect handling is bounded; delay reuse until the previous
         # Comch mapping has drained.
         if registered:
-            time.sleep(5.0)
+            cleaned = False
+            if self.local is not None and worker.connection_id is not None:
+                # A cleanup query may run on a replacement session: the DPU
+                # admits one only after retiring the previous session, and never
+                # reuses a connection ID. REGISTER stays fenced to the session
+                # captured before it. Retry until cleanup is proven, since a DPU
+                # can sit in restart backoff and giving up strands the slot.
+                while True:
+                    try:
+                        self.local.request(3, worker.connection_id)
+                        if self.local.request(4, worker.connection_id) == 0:
+                            cleaned = True
+                            break
+                    except (OSError, ValueError):
+                        pass
+                    time.sleep(1.0)
+            elif self.local is None:
+                time.sleep(5.0)  # Grant mode: fixed reuse barrier.
+                cleaned = True
             with slot.lock:
-                if slot.worker is None and slot.state == "CLEANUP_WAIT":
+                if cleaned and slot.worker is None and slot.state == "CLEANUP_WAIT":
                     slot.state = "FREE_LISTENING"
         self.cgroups.remove(worker.cgroup)
         self.registry.notify()
@@ -821,7 +918,13 @@ class BrokerSupervisor:
                     slot.worker = worker
                     slot.state = "REGISTERING"
                 try:
-                    peer.sendall(b"G")
+                    if self.local is not None:
+                        private = peer.dup()
+                        peer.sendall(b"D")
+                        threading.Thread(target=self.register_private,
+                                         args=(worker, private), daemon=True).start()
+                    else:
+                        peer.sendall(b"G")
                 except OSError:
                     with self.lock:
                         self.workers.pop(final_pid, None)
@@ -861,7 +964,9 @@ class BrokerSupervisor:
                 os.kill(worker.pid, signal.SIGTERM)
             except ProcessLookupError:
                 pass
-        deadline = time.monotonic() + 5.0
+        # Broker teardown has separate 5 s remote-quiesce and 5 s Comch-drain
+        # bounds. Leave time for both and final memory/device destruction.
+        deadline = time.monotonic() + 15.0
         while time.monotonic() < deadline:
             with self.lock:
                 if not self.workers:
@@ -870,10 +975,17 @@ class BrokerSupervisor:
         with self.lock:
             workers = list(self.workers.values())
         for worker in workers:
-            try:
-                os.kill(worker.wrapper_pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+            print(f"dpumeshd: broker grace expired pid={worker.pid}; killing worker cgroup",
+                  file=sys.stderr, flush=True)
+            self.cgroups.kill(worker.cgroup)
+        # cgroup.kill queues SIGKILL; it waits for neither exit nor driver fd
+        # teardown. Return only once _watch has proven the leaf empty, so systemd
+        # cannot restart the delegated unit while a broker still occupies it.
+        while workers:
+            with self.lock:
+                if not any(self.workers.get(worker.pid) is worker for worker in workers):
+                    break
+            time.sleep(0.05)
 
 
 class Daemon:
@@ -903,6 +1015,15 @@ class Daemon:
             incarnation=self.incarnation, launch_timeout=args.launch_timeout,
             pci_addr=args.pci_addr, rings_per_pod=args.rings_per_pod,
         )
+        if args.registration_mode == "direct":
+            from node.local_registration import LocalControl, WorkloadVerifier
+            self.registry.control_ready = False
+            self.supervisor.local = LocalControl(
+                (args.dpu_feed_host, args.local_control_port), args.local_server_name,
+                args.local_ca, args.controller_cert, args.controller_key)
+            self.supervisor.verifier = WorkloadVerifier(
+                args.kube_api, args.kube_ca, args.kube_cert, args.kube_key,
+                args.node_name, args.cluster_id, str(args.podresources_socket))
         self.plugin = PluginServer(self.registry, args.device_plugin_dir)
         self.feed = DPUFeed(
             controller=self.controller, registry=self.registry,
@@ -1004,6 +1125,52 @@ class Daemon:
                             else "UNHEALTHY"
                     self.registry.notify()
 
+        # Linux parent-death signals follow the thread that created the
+        # wrapper, so during shutdown this launch thread must outlive its
+        # broker: leaving here early kills the wrapper mid-grace.
+        if self.stop.is_set():
+            while True:
+                with slot.lock:
+                    if slot.worker is None:
+                        break
+                time.sleep(0.05)
+
+    def _local_loop(self) -> None:
+        local, verifier = self.supervisor.local, self.supervisor.verifier
+        while not self.stop.is_set():
+            try:
+                local.connect()
+                if local.request(1):
+                    raise RuntimeError_("DPU heartbeat refused")
+                self.registry.control_ready = True
+                self.registry.set_ready(self.registry.feed_ready)
+                try:
+                    snapshot = verifier.snapshot()
+                except Exception as exc:
+                    print(f"dpumeshd: Kubernetes observation unavailable: {exc}", file=sys.stderr)
+                    self.stop.wait(2)
+                    continue  # Existing bindings retained on API outage.
+                with self.supervisor.lock:
+                    workers = list(self.supervisor.workers.values())
+                for worker in workers:
+                    if worker.connection_id is None:
+                        continue
+                    try:
+                        verifier.resolve(worker, snapshot, check_allocation=False)
+                    except Exception:
+                        local.request(3, worker.connection_id, expected_session=worker.control_session)
+                        try:
+                            os.kill(worker.pid, signal.SIGTERM)
+                        except ProcessLookupError:
+                            pass
+            except Exception as exc:
+                print(f"dpumeshd: local control unavailable: {exc}", file=sys.stderr, flush=True)
+                local.close()
+                self.registry.control_ready = False
+                self.registry.set_ready(self.registry.feed_ready)
+                self.supervisor.terminate_all()
+            self.stop.wait(2)
+
     def start(self) -> None:
         if os.geteuid() != 0:
             raise RuntimeError_("dpumeshd must start as root")
@@ -1012,8 +1179,11 @@ class Daemon:
                 broker_stat.st_mode & 0o022 or not broker_stat.st_mode & 0o111):
             raise RuntimeError_("broker binary must be immutable to non-root users")
         self.cgroups.initialize()
-        self.manager_listener = self._bind(self.args.manager_socket, 0o600)
-        threading.Thread(target=self._serve_manager, daemon=True).start()
+        if self.supervisor.local is None:
+            self.manager_listener = self._bind(self.args.manager_socket, 0o600)
+            threading.Thread(target=self._serve_manager, daemon=True).start()
+        else:
+            threading.Thread(target=self._local_loop, daemon=True).start()
         for slot in self.registry.slots:
             slot.listener = self._bind(slot.path, 0o666)
             threading.Thread(target=self._serve_slot, args=(slot,), daemon=True).start()
@@ -1032,6 +1202,8 @@ class Daemon:
             self.scope_tunnel.close()
         self.plugin.close()
         self.supervisor.terminate_all()
+        if self.supervisor.local is not None:
+            self.supervisor.local.close()
         for slot in self.registry.slots:
             if slot.listener is not None:
                 slot.listener.close()
@@ -1078,7 +1250,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--worker-memory-high", type=int, default=768 * 1024 * 1024)
     parser.add_argument("--worker-memory-max", type=int, default=1024 * 1024 * 1024)
     parser.add_argument("--worker-pids-max", type=int, default=64)
+    parser.add_argument("--registration-mode", choices=("grant", "direct"),
+                        default=os.getenv("DPUMESH_REGISTRATION_MODE", "grant"))
+    parser.add_argument("--cluster-id", default=os.getenv("DPUMESH_CLUSTER_ID", "dpumesh-test"))
+    parser.add_argument("--local-control-port", type=int, default=4791)
+    parser.add_argument("--local-server-name", default=os.getenv("DPUMESH_LOCAL_SERVER_NAME", ""))
+    parser.add_argument("--local-ca", type=Path, default=Path("/etc/dpumesh/tls/controller-ca.crt"))
+    parser.add_argument("--kube-api", default=os.getenv("DPUMESH_KUBE_API", ""))
+    parser.add_argument("--kube-ca", type=Path, default=Path("/etc/dpumesh/kube/ca.crt"))
+    parser.add_argument("--kube-cert", type=Path, default=Path("/etc/dpumesh/kube/client.crt"))
+    parser.add_argument("--kube-key", type=Path, default=Path("/etc/dpumesh/kube/client.key"))
+    parser.add_argument("--podresources-socket", type=Path,
+                        default=Path("/var/lib/kubelet/pod-resources/kubelet.sock"))
     args = parser.parse_args(argv)
+    if args.registration_mode == "direct" and (not args.kube_api or not args.local_server_name):
+        parser.error("direct registration requires Kubernetes API and paired DPU TLS name")
     if NODE_RE.fullmatch(args.node_name) is None or len(args.node_name) > 253:
         parser.error("--node-name must be a DNS subdomain of at most 253 bytes")
     if not 1 <= args.slots <= MAX_CHANNEL_SLOTS:

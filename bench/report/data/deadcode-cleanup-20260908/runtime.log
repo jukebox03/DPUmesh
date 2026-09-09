@@ -1,0 +1,77 @@
+[14:44:42:059162][2744369184][DOCA][INF][doca_log.cpp:628] DOCA version 3.1.0105
+[14:44:42:059382][2744369184][DOCA][INF][control_scope.c:61][dmesh_scope_configure] control-plane scope mediated by 192.168.100.1:28089
+[14:44:42:083598][2744369184][DOCA][WRN][dpu_worker.c:126][dpu_arm_affinity_init] Explicit ARM CPU order: 13,3,4,1,6,2,12,5,15
+[14:44:42:083628][2744369184][DOCA][WRN][dpu_worker.c:1163][run_dpu_worker] Requested data topology: K/A=8/8 (N finalized after DPA query)
+[14:44:42:083632][2744369184][DOCA][WRN][dpu_worker.c:1165][run_dpu_worker] ARM DATA WORKERS = 8
+[14:44:42:384182][2744369184][DOCA][WRN][dpa.c:473][init_dpa_objects] Connection-affine topology active: N/K/A=32/8/8 (EU%A == ring%A == port%A)
+[14:44:43:273626][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab16a23810: ctx DPA ops are empty
+[14:44:43:369050][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab16b07250: ctx DPA ops are empty
+[14:44:43:411895][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab16b08c40: ctx DPA ops are empty
+[14:44:43:468557][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab16bc1400: ctx DPA ops are empty
+[14:44:43:511011][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab16bbfca0: ctx DPA ops are empty
+[14:44:43:569003][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab16c795f0: ctx DPA ops are empty
+[14:44:43:611380][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab16c7e090: ctx DPA ops are empty
+[14:44:43:668242][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab16c7be60: ctx DPA ops are empty
+[14:44:43:710930][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab16d39090: ctx DPA ops are empty
+[14:44:43:768053][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab16df11a0: ctx DPA ops are empty
+[14:44:43:811005][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab16df4090: ctx DPA ops are empty
+[14:44:43:868708][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab16def720: ctx DPA ops are empty
+[14:44:43:911690][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab16eb0090: ctx DPA ops are empty
+[14:44:43:968805][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab16f3da70: ctx DPA ops are empty
+[14:44:44:011531][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab16ea8670: ctx DPA ops are empty
+[14:44:44:068384][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab1701c7b0: ctx DPA ops are empty
+[14:44:44:110900][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab16f685a0: ctx DPA ops are empty
+[14:44:44:167681][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab17058830: ctx DPA ops are empty
+[14:44:44:210309][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab170db6b0: ctx DPA ops are empty
+[14:44:44:343415][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab170d9710: ctx DPA ops are empty
+[14:44:44:387183][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab1718fce0: ctx DPA ops are empty
+[14:44:44:444895][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab171ca7c0: ctx DPA ops are empty
+[14:44:44:488090][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab17247b90: ctx DPA ops are empty
+[14:44:44:545932][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab17284bf0: ctx DPA ops are empty
+[14:44:44:588772][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab17305750: ctx DPA ops are empty
+[14:44:44:646284][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab1733cb70: ctx DPA ops are empty
+[14:44:44:689097][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab173bd970: ctx DPA ops are empty
+[14:44:44:746671][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab17471300: ctx DPA ops are empty
+[14:44:44:789269][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab16f4f010: ctx DPA ops are empty
+[14:44:44:847343][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab174ac290: ctx DPA ops are empty
+[14:44:44:890470][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab17529b50: ctx DPA ops are empty
+[14:44:44:948305][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab175e1300: ctx DPA ops are empty
+[14:44:44:991475][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab175e5c20: ctx DPA ops are empty
+[14:44:45:050330][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab1761c290: ctx DPA ops are empty
+[14:44:45:093230][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab1769d050: ctx DPA ops are empty
+[14:44:45:150628][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab17751120: ctx DPA ops are empty
+[14:44:45:193667][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab17755c30: ctx DPA ops are empty
+[14:44:45:251379][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab1778c290: ctx DPA ops are empty
+[14:44:45:369804][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab1780d050: ctx DPA ops are empty
+[14:44:45:427734][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab178c1260: ctx DPA ops are empty
+[14:44:45:470683][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab1745d010: ctx DPA ops are empty
+[14:44:45:528524][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab17979090: ctx DPA ops are empty
+[14:44:45:571284][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab1797dbd0: ctx DPA ops are empty
+[14:44:45:628710][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab175cdbc0: ctx DPA ops are empty
+[14:44:45:671724][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab17a355a0: ctx DPA ops are empty
+[14:44:45:729801][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab17a6c770: ctx DPA ops are empty
+[14:44:45:773296][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab17aef6b0: ctx DPA ops are empty
+[14:44:45:832154][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab17aedc20: ctx DPA ops are empty
+[14:44:45:875848][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab17ba7200: ctx DPA ops are empty
+[14:44:45:933302][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab17c36a70: ctx DPA ops are empty
+[14:44:45:976301][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab17c607c0: ctx DPA ops are empty
+[14:44:46:033737][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab17d15300: ctx DPA ops are empty
+[14:44:46:076715][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab17d19cb0: ctx DPA ops are empty
+[14:44:46:134740][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab17d50290: ctx DPA ops are empty
+[14:44:46:177592][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab17dcdaa0: ctx DPA ops are empty
+[14:44:46:235003][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab17e08c40: ctx DPA ops are empty
+[14:44:46:277955][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab17e898b0: ctx DPA ops are empty
+[14:44:46:335624][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab17ec0b10: ctx DPA ops are empty
+[14:44:46:454083][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab17f418d0: ctx DPA ops are empty
+[14:44:46:511842][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab17fcf790: ctx DPA ops are empty
+[14:44:46:555153][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab17ff94e0: ctx DPA ops are empty
+[14:44:46:613231][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab180ad530: ctx DPA ops are empty
+[14:44:46:656615][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab17a334a0: ctx DPA ops are empty
+[14:44:46:714436][2744369184][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab180e84c0: ctx DPA ops are empty
+[14:44:47:315489][2744369184][DOCA][WRN][dpu_proxy.c:5853][px_init] DPU PROXY MODE ON (run-to-completion SG-DMA, N/K/A=32/8/8; l7-mode-lists=0, l7-layer=off, l7-worker=all, l7-policy=fail-closed, lb=round-robin; passthru=conn-pinned, sg_pieces=64)
+[14:44:47:384490][2744369184][DOCA][WRN][dpu_worker.c:1297][run_dpu_worker] ARM DATA WORKER THREADS = 8
+[14:44:47:384541][2744369184][DOCA][WRN][dpu_worker.c:1328][run_dpu_worker] MAIN CONTROL/DOORBELL: workers=8, notification-driven (1 ms backstop tick)
+[14:45:06:149101][2744369184][DOCA][WRN][comch_server.c:1540][server_local_dispatch] local REGISTER accepted pod=f8cff91a-b8b2-401a-b5c0-704dbd6418d9 container=36d64649685f1b3dcc5f4ab1747afd2948508eccda86912728ed4a28b3e0734b slot=1 generation=5
+[14:45:07:155160][2744369184][DOCA][WRN][comch_server.c:1540][server_local_dispatch] local REGISTER accepted pod=f6ebb5e4-8cf3-4439-a434-d037703aefb3 container=20cca00b8358f8ed6a9c9c8a972eeaf39585a5c6ddcafd15befeed28c118f0dd slot=0 generation=6
+[14:45:27:374981][2025840640][DOCA][WRN][dpu_proxy.c:2640][px_peer_stats_report] proxy: worker 5 peer poison=0 refused=none inbound admitted=0 denied=0 no-policy=1 mixed-callee-unprotected=0 peer-pin-conflict=0
+[14:45:37:375512][1809833984][DOCA][WRN][dpu_proxy.c:2640][px_peer_stats_report] proxy: worker 6 peer poison=0 refused=none inbound admitted=0 denied=0 no-policy=2 mixed-callee-unprotected=0 peer-pin-conflict=0

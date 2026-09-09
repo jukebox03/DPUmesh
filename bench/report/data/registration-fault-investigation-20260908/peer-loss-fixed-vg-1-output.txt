@@ -1,0 +1,5 @@
+connected pid=2552730; kill peer then send SIGUSR1
+send returned 0
+[22:23:09:973015][89574464][DOCA][ERR][comch_client.c:62][client_send_task_completion_err_callback] Comch client send completion failed: DOCA_ERROR_CONNECTION_ABORTED
+before cleanup state=3 owned=0
+peer-loss cleanup: PASS

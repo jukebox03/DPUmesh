@@ -1,41 +1,41 @@
 # Linkerd arena TX batching
 
-기준일: 2026-09-06
+This receipt records the working tree's Linkerd TX ownership and its software
+verification. BlueField performance and the publication distribution are in the
+[hardware receipt](../arena-tx-batching-perf-20260906/SUMMARY.md).
 
-이 receipt는 working tree의 Linkerd TX ownership과 software 검증 결과를 기록한다.
-BlueField 성능과 publication 분포는
-[hardware receipt](../arena-tx-batching-perf-20260906/SUMMARY.md)에 있다.
+## Transmit contract
 
-## 전송 계약
+Each `DmeshIo` endpoint owns at most one unpublished 64 KiB arena batch. Scalar
+and vectored writes copy the accepted prefix straight into the C-owned arena.
+Rust keeps no payload pointer, only the token, the length, the exact route and
+the sealed state. The origin, local backend and remote backend endpoints hold
+independent batches even when they share a request connection.
 
-각 `DmeshIo` endpoint는 최대 하나의 미게시 64 KiB arena batch를 소유한다.
-scalar 및 vectored write는 accepted prefix를 C-owned arena에 직접 복사한다. Rust는
-payload pointer를 보관하지 않고 token, 길이, exact route와 sealed 상태만 유지한다.
-origin, local backend와 remote backend endpoint는 request connection을 공유해도
-독립된 batch를 가진다.
+The first accepted write fixes the route. A full batch is published before the
+next write; a partial batch is published by the worker drain. `poll_flush`
+requests driver progress and does not force a publication per HTTP/2 frame.
+`poll_shutdown` allows FIN only after DATA publication completes.
 
-첫 accepted write가 route를 고정한다. full batch는 다음 write 전에 게시되고,
-partial batch는 worker drain에서 게시된다. `poll_flush`는 driver progress를 요청하며
-HTTP/2 frame마다 publication을 강제하지 않는다. `poll_shutdown`은 DATA publication을
-완료한 뒤 FIN을 허용한다.
-
-backpressure가 발생하면 sealed batch와 accepted bytes를 보존하고 다음 driver grant에서
-같은 token을 재시도한다. byte quota와 새 reservation 횟수는 epoch 단위로 제한된다.
-endpoint lock과 quota lock은 C callback 전에 해제된다. abort와 connection close는
-미게시 token을 취소하고 arena chunk를 반환한다.
+Under backpressure the sealed batch and the accepted bytes are retained and the
+same token is retried on the next driver grant. The byte quota and the number of
+new reservations are bounded per epoch. The endpoint lock and the quota lock are
+released before any C callback. Abort and connection close cancel the unpublished
+token and return the arena chunk.
 
 ## Correctness
 
-- 32 B write 20회와 각 write 사이 `poll_flush`: 640 B, reservation 1회,
-  publication 1회
-- scalar/vectored partial prefix의 byte order 유지
-- blocked flush 재시도에서 accepted payload 재복사 없음
-- 취소된 `Pending` write의 caller bytes 미보존
-- origin, local, remote endpoint batch의 독립 token 및 exact route 유지
-- DATA publication 전 FIN 차단, publication 뒤 FIN 순서 유지
-- wrong worker, handle, route와 token 거부
-- abort, close와 connection 재사용에서 stale token 격리
-- arena chunk 경계의 partial acceptance와 전체 chunk 반환
+- 20 writes of 32 B with `poll_flush` between each: 640 B, one reservation, one
+  publication
+- byte order preserved across scalar and vectored partial prefixes
+- no re-copy of the accepted payload when a blocked flush is retried
+- caller bytes not retained for a cancelled `Pending` write
+- origin, local and remote endpoint batches keep independent tokens and exact
+  routes
+- FIN blocked before DATA publication and ordered after it
+- wrong worker, handle, route and token all refused
+- stale tokens isolated across abort, close and connection reuse
+- partial acceptance at an arena chunk boundary, with the whole chunk returned
 
 ## Software gates
 
@@ -50,22 +50,24 @@ endpoint lock과 quota lock은 C callback 전에 해제된다. abort와 connecti
 | C proxy-lane ASAN+UBSAN | PASS |
 | repository and submodule whitespace | PASS |
 
-`make test`는 repository `tests/requirements.txt`로 만든 Python environment에서
-실행했다. 모든 batch correctness fixture는 accepted bytes, copied bytes,
-publication, reservation, retry, error와 arena 반환을 함께 검사한다.
+`make test` ran in a Python environment built from the repository's
+`tests/requirements.txt`. Every batch correctness fixture checks accepted bytes,
+copied bytes, publications, reservations, retries, errors and arena return
+together.
 
-## 관측 계약
+## Observation contract
 
-| Metric | 의미 |
+| Metric | Meaning |
 |---|---|
-| `tx_arena_copy_bytes` | arena batch에 복사된 bytes |
-| `tx_accepted_bytes` | DMA 또는 peer custody로 이전된 bytes |
-| `tx_reserve_attempts` | 새 batch 확보 시도 |
-| `tx_publications` | custody가 이전된 batch 수 |
-| `tx_retries` | reserve 또는 publication 재시도 |
-| `tx_budget_wait` | quota epoch를 기다린 write poll |
-| `tx_writer_wakes` | 새 grant로 깨어난 writer |
-| `tx_errors` | terminal TX error |
+| `tx_arena_copy_bytes` | bytes copied into an arena batch |
+| `tx_accepted_bytes` | bytes handed to DMA or peer custody |
+| `tx_reserve_attempts` | attempts to acquire a new batch |
+| `tx_publications` | batches whose custody transferred |
+| `tx_retries` | reserve or publication retries |
+| `tx_budget_wait` | write polls that waited for a quota epoch |
+| `tx_writer_wakes` | writers woken by a new grant |
+| `tx_errors` | terminal TX errors |
 
-clean hardware 표본에서는 arena copy bytes와 accepted bytes가 일치했고 retry와
-error는 0이었다. traffic 종료 후 arena는 1,024/1,024 free, live chunk 0이었다.
+In the clean hardware samples the arena copy bytes matched the accepted bytes,
+with 0 retries and 0 errors. After traffic stopped the arena read 1,024/1,024
+free with 0 live chunks.

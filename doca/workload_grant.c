@@ -406,11 +406,11 @@ dmesh_registration_configure(struct objects *objs, char *error, size_t error_len
     objs->registration_grants_replayed = 0;
 
     key_dir = getenv("DPUMESH_REGISTRATION_KEY_DIR");
-    if (key_dir == NULL || *key_dir == '\0') {
+    if (!objs->local_registration && (key_dir == NULL || *key_dir == '\0')) {
         CONFIG_ERROR("registration needs DPUMESH_REGISTRATION_KEY_DIR");
         return -1;
     }
-    if (strlen(key_dir) + DMESH_GRANT_KEY_ID_MAX + 8 >= sizeof(objs->registration_key_dir)) {
+    if (key_dir && strlen(key_dir) + DMESH_GRANT_KEY_ID_MAX + 8 >= sizeof(objs->registration_key_dir)) {
         CONFIG_ERROR("DPUMESH_REGISTRATION_KEY_DIR is too long");
         return -1;
     }
@@ -445,6 +445,7 @@ dmesh_registration_configure(struct objects *objs, char *error, size_t error_len
         snprintf(objs->feed_key_dir, sizeof(objs->feed_key_dir), "%s", feed_dir);
     }
 
+    if (objs->local_registration) return 0; /* Direct TLS registration needs no grant key. */
     directory = opendir(key_dir);
     if (directory == NULL) {
         CONFIG_ERROR("opendir(%s): %s", key_dir, strerror(errno));
@@ -758,6 +759,31 @@ dmesh_assert_verify_v3(const struct dmesh_workload_assert_msg *assertion,
     if (!verified)
         return DMESH_GRANT_BAD_SIG;
 
+    return dmesh_assert_decode_local(assertion, expected_cluster, expected_node,
+                                     expected_nonce, now_sec, claims, 0);
+}
+
+enum dmesh_grant_result
+dmesh_assert_decode_local(const struct dmesh_workload_assert_msg *assertion,
+                         const char *expected_cluster, const char *expected_node,
+                         const uint8_t expected_nonce[DMESH_REG_NONCE_SIZE],
+                         uint64_t now_sec, struct dmesh_assert_claims *claims,
+                         int require_unsigned)
+{
+    enum dmesh_grant_result result = validate_canonical(assertion);
+    if (result != DMESH_GRANT_OK) return result;
+    if (!expected_cluster || !expected_node ||
+        strcmp(assertion->cluster_id, expected_cluster) ||
+        strcmp(assertion->node_name, expected_node)) return DMESH_GRANT_WRONG_NODE;
+    if (require_unsigned && (strcmp(assertion->key_id, "local-control") ||
+        !all_zero(assertion->sig, sizeof(assertion->sig)))) return DMESH_GRANT_BAD_SIG;
+    uint64_t issued = dmesh_grant_get_u64_le(assertion->issued_at_le);
+    uint64_t expires = dmesh_grant_get_u64_le(assertion->expires_at_le);
+    if (issued > expires || expires - issued > DMESH_ASSERT_MAX_LIFETIME_SEC ||
+        issued > now_sec + DMESH_ASSERT_CLOCK_SKEW_SEC || expires <= now_sec)
+        return DMESH_GRANT_BAD_TIME;
+    if (memcmp(assertion->nonce, expected_nonce, DMESH_REG_NONCE_SIZE))
+        return DMESH_GRANT_BAD_NONCE;
     int written = snprintf(claims->workload, sizeof(claims->workload),
                            "{\"ns\":\"%s\",\"pod\":\"%s\"}",
                            assertion->namespace_name, assertion->pod_name);

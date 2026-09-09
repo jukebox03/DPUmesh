@@ -1,0 +1,6 @@
+dpumeshd: reaping remaining broker cgroup pid=123
+dpumeshd: broker exited pid=123 signal=9 pod=c92d7333-854d-47ca-84c6-c6e257f0f9ad
+dpumeshd: broker grace expired pid=123; killing worker cgroup
+dpumeshd: Device Plugin registration failed: kubelet Device Plugin socket is absent
+dpumeshd: registered dpumesh.io/channel with kubelet
+dpumeshd_test: PASS

@@ -1,0 +1,16 @@
+Functional confirmation after the dead-code and simplification pass.
+Two point runs per case, 5 s each, reply 8 B, geometry N/K/A=32/8/8, direct
+registration, DPU runtime as a DaemonSet Pod.
+
+latency64   (64 B, conc 1)
+OK p50=132.00 p95=303.00 p99=441.00 gbps=0.0047 fail=0 drops=0 worker_fail=0
+OK p50=132.00 p95=302.00 p99=437.00 gbps=0.0051 fail=0 drops=0 worker_fail=0
+
+bandwidth8192 (8 KiB, conc 32)
+OK p50=271.00 p95=590.00 p99=744.00 gbps=6.5309 fail=0 drops=0 worker_fail=0
+OK p50=269.00 p95=533.00 p99=690.00 gbps=6.8982 fail=0 drops=0 worker_fail=0
+
+Reference band from the preceding build
+(registration-fault-investigation-20260908/cleanup-v2-performance.json):
+latency64      p50 132.00 x3
+bandwidth8192  p50 268-273, gbps 6.46-6.92

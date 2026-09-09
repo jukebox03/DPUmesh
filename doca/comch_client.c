@@ -48,7 +48,7 @@ static void client_send_task_completion_callback(struct doca_comch_task_send *ta
 	doca_task_free(doca_comch_task_send_as_task(task));
 }
 
-/* Client send failed: release resources and stop the client context. */
+/* Client send failed: release resources and defer context stop to the owner. */
 static void client_send_task_completion_err_callback(struct doca_comch_task_send *task,
 						     union doca_data task_user_data,
 						     union doca_data ctx_user_data)
@@ -61,11 +61,14 @@ static void client_send_task_completion_err_callback(struct doca_comch_task_send
 		doca_comch_task_send_as_task(task));
 	DOCA_LOG_ERR("Comch client send completion failed: %s",
 	             doca_error_get_name(status));
+	/* Stopping the context here frees the connection object the SDK writes to
+	 * when this callback returns into PE progress. Only record the failure:
+	 * the owner cleans up after progress returns, and sends are refused. */
+	objs->client_send_failed = 1;
 	doca_pool_release(&objs->send_tasks_in_flight);
 	if (payload_copy != NULL)
 		free(payload_copy);
 	doca_task_free(doca_comch_task_send_as_task(task));
-	(void)doca_ctx_stop(doca_comch_client_as_ctx(objs->cc_client));
 }
 
 /* Handle a message received by the Comch client. */
@@ -139,11 +142,12 @@ static void client_message_recv_callback(struct doca_comch_event_msg_recv *event
 		if (msg_len == sizeof(struct dmesh_registration_challenge_msg)) {
 			const struct dmesh_registration_challenge_msg *challenge =
 				(const struct dmesh_registration_challenge_msg *)recv_buffer;
-			if (challenge->version != DMESH_ASSERT_VERSION ||
+			if ((challenge->version != DMESH_ASSERT_VERSION && challenge->version != 4) ||
 			    challenge->reserved != 0) {
 				DOCA_LOG_ERR("Invalid registration challenge version/reserved");
 				break;
 			}
+			objs->registration_protocol = challenge->version;
 			memcpy(objs->registration_challenge, challenge->nonce,
 			       sizeof(objs->registration_challenge));
 			__atomic_store_n(&objs->registration_trusted_required,
@@ -214,10 +218,24 @@ doca_error_t client_send_msg(struct objects *objs, const char *msg, size_t len)
 	union doca_data task_user_data;
 	struct doca_task *task_obj;
 
-	/* Capacity check: gate on our mirror of DOCA's send pool, progressing
-	 * the PE while waiting for room. */
+	/* The Comch pool is gone once the PE moves its context out of RUNNING,
+	 * and progress itself can deliver that transition. Recheck the state on
+	 * every pass before acquiring. The caller owns the PE, so nothing else
+	 * progresses between the check and the acquire. */
 	int acq_retry = 0;
-	while (!doca_pool_try_acquire(&objs->send_tasks_in_flight, objs->send_tasks_max)) {
+	for (;;) {
+		if (objs->client_send_failed)
+			return DOCA_ERROR_CONNECTION_ABORTED;
+		if (objs->cc_client == NULL || objs->connection == NULL)
+			return DOCA_ERROR_NOT_CONNECTED;
+		enum doca_ctx_states state;
+		result = doca_ctx_get_state(doca_comch_client_as_ctx(objs->cc_client), &state);
+		if (result != DOCA_SUCCESS)
+			return result;
+		if (state != DOCA_CTX_STATE_RUNNING)
+			return DOCA_ERROR_CONNECTION_ABORTED;
+		if (doca_pool_try_acquire(&objs->send_tasks_in_flight, objs->send_tasks_max))
+			break;
 		if (objs->pe)
 			doca_pe_progress(objs->pe);
 		if (++acq_retry > 10000) {
@@ -274,6 +292,7 @@ doca_error_t init_comch_ctrl_path_client(const char *server_name,
 		.tv_nsec = SLEEP_IN_NANOS,
 	};
 
+    objs->client_send_failed = 0;
     /* Prime task-pool counters before anything that can submit. */
     objects_init_task_pools(objs);
 

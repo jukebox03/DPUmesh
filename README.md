@@ -13,10 +13,12 @@ transport, proxy, control-plane, and API contracts.
 
 ## Architecture
 
-Kubernetes runs the read-only controller and application Pods. The BlueField
-process, feed receiver and the single host service `dpumeshd` run as system
-services. Workloads declare one Device Plugin resource in their PodSpec and
-receive one allocated Unix socket.
+Kubernetes runs the read-only controller and application Pods. `dpumeshd` and
+its brokers are host system services, and the BlueField feed receiver is one
+too; the DPU runtime itself runs either as a BlueField system service or as a
+DaemonSet Pod on a DPU node joined to the same cluster, and an exclusive
+hardware lock admits only one of them. Workloads declare one Device Plugin
+resource in their PodSpec and receive one allocated Unix socket.
 
 ```text
 Kubernetes: controller(read-only) + workload Pods
@@ -101,11 +103,13 @@ POD_REGISTER → POD_ASSIGNED → memory and ring import → all DPA RING_ADD_AC
              → POD_INIT_RESULT(READY, L)
 ```
 
-Before every `POD_REGISTER`, `dpumeshd` presents kernel-derived Pod/container
-evidence to the controller over node mTLS. The controller checks live
-Kubernetes state and signs the grant; neither `dpumeshd`, the broker, nor the
-workload has a Kubernetes bearer token. The DPU admits only the Service that
-grant authorizes.
+Before every `POD_REGISTER`, kernel-derived Pod and container evidence is
+checked against live Kubernetes state, and the resulting identity is bound to
+the exact Comch connection the DPU opened. The registration mode names who does
+that: the controller, which signs a grant the broker carries over Comch, or
+`dpumeshd` itself, which states the identity over a mutually authenticated
+session with its paired DPU. The workload takes part in neither, and the DPU
+admits only the Service the identity authorizes.
 [design/CONTROL.md](design/CONTROL.md) is the contract.
 
 The host retries registration while either assignment or readiness is pending;
@@ -120,7 +124,9 @@ destruction begins. The steady-state data plane uses the imported rings and
 reverse DMA path.
 
 Each registration of a pod slot carries a generation number, so a DMA completion
-that arrives late cannot be attributed to the slot's next occupant. A connection
+that arrives late cannot be attributed to the slot's next occupant. A slot
+returns to the pool only on proof that its worker processes are gone and the
+DPU has finished tearing the registration down. A connection
 is fenced the same way at its own scale: its close is acknowledged only once the
 DPU has retired the proxy session, and its port leaves the pool until then, so a
 new stream cannot arrive in the one it replaced. A DMA fault restarts that
@@ -138,7 +144,7 @@ src/broker/            the per-Pod broker and its pod<->broker IPC
 doca/                  BlueField ARM process and DPA kernel
 controller/            read-only cluster controller and WorkloadGrant encoder
 node/                  host dpumeshd and Kubernetes Device Plugin API
-packaging/             host systemd unit, installer, and fixed node reserve
+packaging/             host systemd unit and installer; DPU runtime image and chart
 integrations/grpc/     gRPC C++ runtime, reactor, tests
 linkerd/               DPU-side L7 layer: adapter ABI, the Rust adapter, port submodule
 bench/                 deployment, examples, workloads, validators, measurement records
@@ -321,10 +327,10 @@ spec:
 `DPUMESH_SERVICE` is required only for a server and must name a Service whose
 selector matches the Pod. `DPUMESH_RINGS_PER_POD` must equal the host and DPU
 geometry. A native or gRPC image links its adapter; a POSIX image additionally
-sets `LD_PRELOAD=/usr/local/lib/libdmesh_preload.so`. The controller rejects a
-registration when the token is mounted, the resource request/limit is not
-exactly one, the requesting process is not the resource-owning container, or
-the Service does not select that Pod. The complete contract is
+sets `LD_PRELOAD=/usr/local/lib/libdmesh_preload.so`. A registration is refused
+when the token is mounted, the resource request/limit is not exactly one, the
+requesting process is not the resource-owning container, or the Service does
+not select that Pod. The complete contract is
 [design/CONTROL.md §5.5](design/CONTROL.md#55-configuration), and
 [bench/k8s/native-hw.yaml](bench/k8s/native-hw.yaml) is an executable PodSpec.
 
@@ -349,8 +355,27 @@ the Service does not select that Pod. The complete contract is
   the workload cannot address. There is no per-hop proxy TLS. Confidentiality
   between nodes is the peer channel's mutually authenticated TLS 1.3 session.
 
-Building the library and bringing up a cluster are covered in
-[bench/README.md](bench/README.md).
+## Bringing up the mesh
+
+An application declares one resource and nothing else. Everything the transport
+needs underneath it belongs to the cluster administrator, and none of it is
+reachable from a workload Pod.
+
+| What the administrator provides | Where it lives |
+|---|---|
+| a BlueField per meshed node, and the `dpumesh_dpu` runtime on it | BlueField system service, or a DaemonSet on a DPU node joined to the cluster |
+| `dpumeshd` and the immutable broker binary on each host | host systemd, with delegated `cpu`, `memory` and `pids` cgroups and reserved CPUs |
+| the read-only controller and its three signing keyrings | a Kubernetes Deployment and its Secrets |
+| the registration mode, chosen once and set identically on host and DPU | `grant` uses the controller's signature; `direct` uses a host↔DPU control session and a read-only Kubernetes client certificate |
+| the node PKI: node client certificates, DPU node keys, and — under `direct` — the control-session certificates | operator PKI; issuance and rotation are the administrator's existing procedures |
+| the ring geometry `K`, matched between host and DPU | `DPUMESH_RINGS_PER_POD` on both, and in each meshed PodSpec |
+
+None of it is created on a workload's behalf. A node without it advertises no
+`dpumesh.io/channel`, so a Pod that requests one is simply not scheduled there.
+
+[bench/README.md](bench/README.md) is the one-node build and deployment
+workflow. [packaging/README-dpu-kubernetes.md](packaging/README-dpu-kubernetes.md)
+covers running the DPU runtime as a DaemonSet with direct registration.
 
 ## Documentation
 
@@ -372,6 +397,7 @@ whitepapers for the code and manifests in this tree.
 | Document | Covers |
 |---|---|
 | [bench/README.md](bench/README.md) | deployment, the experiment commands, the measurement rules, and the host-only and hardware validation gates |
+| [packaging/README-dpu-kubernetes.md](packaging/README-dpu-kubernetes.md) | running the DPU runtime as a DaemonSet: provisioning, credentials, update and rollback |
 | [bench/report/REPORT.md](bench/report/REPORT.md) | what the deployment measures: policy, routing, balancing, latency, throughput and cost |
 | [PLAN.md](PLAN.md) | implementation gates, open function/defect/cost items, and validation receipts |
 | [ci/README.md](ci/README.md) | which checks run where, and what each one protects |

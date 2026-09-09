@@ -98,4 +98,11 @@ int
 pods_register(struct objects *objs, struct doca_comch_connection *conn,
               int32_t pod_id, const char *service_name);
 
+/* Direct-registration callbacks for the paired-host control session. All three
+ * execute on the Comch control PE owner thread. */
+struct dmesh_local_request;
+unsigned server_local_dispatch(void *, const struct dmesh_local_request *);
+void server_local_retire(void *);
+int server_local_available(void *);
+
 #endif // COMCH_SERVER_H

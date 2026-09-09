@@ -1,0 +1,7 @@
+dpumeshd: reaping remaining broker cgroup pid=123
+dpumeshd: broker exited pid=123 signal=9 pod=c92d7333-854d-47ca-84c6-c6e257f0f9ad
+dpumeshd: broker grace expired pid=123; killing worker cgroup
+I0908 22:25:30.153324 2557317 chttp2_transport.cc:1402] unix://///tmp/tmpv9qyyydt/restart-plugins/kubelet.sock: Got goaway [2] err=UNAVAILABLE:GOAWAY received; Error code: 2; Debug Text: Cancelling all calls {http2_error:2}
+dpumeshd: Device Plugin registration failed: kubelet restarted during Device Plugin registration
+dpumeshd: registered dpumesh.io/channel with kubelet
+dpumeshd_test: PASS

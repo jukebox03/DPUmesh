@@ -1,34 +1,36 @@
-# Driver park/arm cost — lean → lean2 → lean3
+# Driver park/arm cost — lean to lean2 to lean3
 
-기준일: 2026-09-06
+## Verdict
 
-## 판정
+lean3, which cuts the syscalls around the driver loop's park and arm, runs gRPC
+at 1.3–3.0% lower CPU/RPC at capacity and 1.7–3.3% lower at matched rate than
+lean on the same BlueField. The CPU/RPC ranges are disjoint in all eight
+conditions. Capacity RPC/s gains only +0.5 to +1.9%, and the 64 B and 8 KiB
+ranges overlap. On opaque TCP the lean2 to lean3 step is larger, −9.7 to −12.0%
+CPU/RPC: with so little CPU per request, the saved syscalls show through
+directly.
 
-driver 루프의 park/arm 주변 syscall을 줄인 lean3은 같은 BlueField에서 lean보다 gRPC
-CPU/RPC가 capacity 1.3~3.0%, matched 1.7~3.3% 낮다. CPU/RPC 범위는 여덟 조건 모두
-겹치지 않는다. capacity RPC/s는 +0.5~+1.9%로 작고 64 B/8 KiB는 범위가 겹친다. opaque
-TCP에서는 lean2→lean3이 CPU/RPC −9.7~−12.0%로 더 크다. 요청당 CPU가 작아 syscall
-절감이 그대로 드러난다.
+lean2 alone — dropping the epoll in the driver yield and reading the wake
+eventfd once — barely moved epoll, 8.30 to 8.18 per RPC. The caller of
+`park_yield` was not our yield but the `defer` of an h2/hyper task that had spent
+its tokio coop budget of 128 operations. What lean3 actually removed is the tokio
+timer waker write (0.6 per RPC) and the epoll(0) inside the PE clear (1.0 per
+RPC).
 
-lean2(driver yield의 epoll 제거, wake eventfd 1회 읽기)만으로는 epoll이 RPC당 8.30→8.18로
-거의 안 줄었다. `park_yield`의 발신자는 우리 yield가 아니라 tokio coop 예산(128연산)을
-소진한 h2/hyper task의 `defer`였다. lean3이 얻은 것은 tokio 타이머 waker write(RPC당 0.6)와
-PE clear 안의 epoll(0)(RPC당 1.0)이다.
+## Arms
 
-## 변경
-
-| arm | 내용 | SHA256 |
+| Arm | Change | SHA256 |
 |---|---|---|
-| lean | 고정비 제거 빌드(직전 캠페인) | `1577c3cc…e270` |
-| lean2 | runtime 루프 yield를 self-wake로 교체(`park_yield` 회피 의도), wake eventfd read 1회 | `1f4507c9…5fe9` |
-| lean3 | + maintenance `Sleep` 하나를 고정하고 `reset`만 수행, `clear_notifications(fired)`로 울린 PE만 clear, `dpu_main.c` fatal signal/`atexit` trace | `d511d0c0…b543` |
+| lean | the fixed-overhead removal build from the preceding campaign | `1577c3cc…e270` |
+| lean2 | runtime loop yield replaced by a self-wake (intended to avoid `park_yield`), wake eventfd read once | `1f4507c9…5fe9` |
+| lean3 | plus one pinned maintenance `Sleep` that is only `reset`, `clear_notifications(fired)` clearing only the PEs that fired, and fatal-signal/`atexit` traces in `dpu_main.c` | `d511d0c0…b543` |
 
-ABI: `dmesh_l7_driver_clear_notifications(void *, unsigned fired)`와
-`DMESH_L7_NOTIFY_{COMPLETION,DMA,WAKE}` 추가. C 데이터 경로는 무변경.
+ABI: `dmesh_l7_driver_clear_notifications(void *, unsigned fired)` and
+`DMESH_L7_NOTIFY_{COMPLETION,DMA,WAKE}` were added. The C data path is unchanged.
 
-## clean capacity (3회 중앙값)
+## Clean capacity (median of three)
 
-| protocol | payload | RPC/s lean / lean2 / lean3 | CPU µs/RPC lean / lean2 / lean3 | lean3 vs lean | p99 µs lean→lean3 |
+| Protocol | Payload | RPC/s lean / lean2 / lean3 | CPU µs/RPC lean / lean2 / lean3 | lean3 vs lean | p99 µs lean→lean3 |
 |---|---:|---:|---:|---:|---:|
 | gRPC | 64 B | 35,724 / 36,276 / 36,121 | 179.14 / 176.72 / 175.15 | −2.22% | 2,725→2,662 |
 | gRPC | 1 KiB | 34,518 / 34,930 / 34,833 | 186.21 / 183.54 / 181.69 | −2.43% | 3,452→3,102 |
@@ -37,14 +39,15 @@ ABI: `dmesh_l7_driver_clear_notifications(void *, unsigned fired)`와
 | opaque | 64 B | — / 141,854 / 141,604 | — / 21.95 / 19.83 | lean3 vs lean2 −9.68% | 1,088→1,107 |
 | opaque | 1 KiB | — / 125,647 / 131,095 | — / 24.59 / 21.64 | lean3 vs lean2 −12.01% | 1,149→1,120 |
 
-CPU/RPC 범위(3회): 64 B 178.3–179.6 vs 174.1–175.2, 1 KiB 186.2–186.6 vs 180.6–181.9,
-8 KiB 307.6–308.2 vs 303.3–305.2, 64 KiB 594.9–597.7 vs 578.1–578.6. RPC/s 범위는 1 KiB와
-64 KiB만 분리된다. opaque 1 KiB capacity는 lean2 122,169–131,259 vs lean3
-130,805–134,756로 분리되고 64 B는 겹친다.
+CPU/RPC ranges across the three runs: 64 B 178.3–179.6 against 174.1–175.2,
+1 KiB 186.2–186.6 against 180.6–181.9, 8 KiB 307.6–308.2 against 303.3–305.2,
+64 KiB 594.9–597.7 against 578.1–578.6. Only the 1 KiB and 64 KiB RPC/s ranges
+separate. Opaque 1 KiB capacity separates as well — lean2 122,169–131,259 against
+lean3 130,805–134,756 — while 64 B overlaps.
 
-## matched rate
+## Matched rate
 
-| protocol | payload | CPU µs/RPC lean / lean2 / lean3 | lean3 vs lean | p50 µs lean→lean3 | p99 µs lean→lean3 |
+| Protocol | Payload | CPU µs/RPC lean / lean2 / lean3 | lean3 vs lean | p50 µs lean→lean3 | p99 µs lean→lean3 |
 |---|---:|---:|---:|---:|---:|
 | gRPC | 64 B | 331.38 / 331.06 / 325.62 | −1.74% | 963→969 | 1,986→1,965 |
 | gRPC | 1 KiB | 333.31 / 332.19 / 327.56 | −1.73% | 1,003→1,000 | 2,007→2,011 |
@@ -53,11 +56,12 @@ CPU/RPC 범위(3회): 64 B 178.3–179.6 vs 174.1–175.2, 1 KiB 186.2–186.6 v
 | opaque | 64 B | — / 73.69 / 66.50 | lean3 vs lean2 −9.75% | 249→259 | 489→484 |
 | opaque | 1 KiB | — / 76.06 / 68.56 | lean3 vs lean2 −9.86% | 257→247 | 483→489 |
 
-## syscall이 어디서 줄었나
+## Where the syscalls went
 
-`perf trace -s`로 워커 8개의 12초 run 가운데 6초를 셌다(RPC당, gRPC).
+`perf trace -s` counted six of the twelve seconds of a run across all eight
+workers (per RPC, gRPC).
 
-| payload | syscall | lean | lean2 | lean3 |
+| Payload | Syscall | lean | lean2 | lean3 |
 |---|---|---:|---:|---:|
 | 64 B | epoll_pwait | 8.30 | 8.18 | 7.01 |
 | 64 B | read (EAGAIN) | 2.37 (1.04) | 2.33 (1.03) | 2.73 (1.21) |
@@ -66,73 +70,91 @@ CPU/RPC 범위(3회): 64 B 178.3–179.6 vs 174.1–175.2, 1 KiB 186.2–186.6 v
 | 64 KiB | read (EAGAIN) | 1.51 (0.68) | 1.52 (0.68) | 1.65 (0.73) |
 | 64 KiB | write | 1.17 | 1.16 | 0.92 |
 
-호출 경로(`perf record -e syscalls:*` + callchain, 64 B):
+Call paths (`perf record -e syscalls:*` with callchains, 64 B):
 
-- epoll_pwait: lean 61%가 tokio `Driver::turn`(그중 `park_yield` 53%, 실제 `park` 8%),
-  39%가 DOCA 내부(`doca_pe_clear_notification` 22%, `doca_pe_request_notification` 9%).
-  lean3에서 DOCA 몫이 RPC당 3.2→2.2로 줄었다. tokio `park_yield`는 4.4회 그대로다.
-- write: lean 50%가 `Sleep::poll → Handle::reregister → mio Waker::wake`(매 select!의
-  `sleep_until` 재등록), 25%가 `dpu_request_host_doorbell`(DMA 완료 콜백이 main을 깨움),
-  25%가 `doca_pe_request_notification`의 eventfd write. lean3에서 tokio 몫이 0.59→0.03이다.
-- read: 87%가 `mlx5dv_devx_get_event`. lean에서는 전부 clear 경로였고 lean3에서는
-  clear 60%, `request_notification` 26%다. clear를 건너뛴 PE의 밀린 event를 DOCA가 다음
-  arm 때 읽어 치우므로 read 총수는 줄지 않았다. 이 캠페인 이전에 wake eventfd의
-  두 번째 read가 EAGAIN의 원인이라고 본 것은 틀렸다.
+- epoll_pwait: in lean, 61% comes from tokio's `Driver::turn` (of which
+  `park_yield` is 53% and a real `park` 8%) and 39% from inside DOCA
+  (`doca_pe_clear_notification` 22%, `doca_pe_request_notification` 9%). In lean3
+  the DOCA share falls from 3.2 to 2.2 per RPC, while tokio's `park_yield` stays
+  at 4.4.
+- write: in lean, 50% is `Sleep::poll → Handle::reregister → mio Waker::wake`
+  (the `sleep_until` re-registration on every `select!`), 25% is
+  `dpu_request_host_doorbell` (a DMA completion callback waking main), and 25% is
+  the eventfd write inside `doca_pe_request_notification`. In lean3 the tokio
+  share drops from 0.59 to 0.03.
+- read: 87% is `mlx5dv_devx_get_event`. In lean this was entirely the clear path;
+  in lean3 it is 60% clear and 26% `request_notification`. DOCA drains the
+  backlog of a PE whose clear was skipped on the next arm, so the total read
+  count does not fall. The pre-campaign belief that a second read of the wake
+  eventfd caused the EAGAINs was wrong.
 
-driver 루프 카운터(RPC당, capacity 중앙값): 64 B drain 8.87→8.04, idle 3.37→2.52,
-arm 2.17→1.77; 64 KiB arm 1.43→1.31. 타이머 재등록이 깨우던 헛 pass가 사라진 결과다.
+Driver loop counters (per RPC, capacity median): 64 B drain 8.87→8.04, idle
+3.37→2.52, arm 2.17→1.77; 64 KiB arm 1.43→1.31. This is the wasted pass that the
+timer re-registration used to wake, now gone.
 
-64 KiB PMU(별도 12초 run 3회, 가운데 8초): cycles/RPC 1,274,785→1,230,955(−3.4%),
-instructions/RPC 546,334→536,301(−1.8%), IPC 0.429→0.435. lean3의 worker core는
-7.76→6.75, context switch/RPC 0.187→0.294로 실제 스레드 park가 길어졌다(epoll 평균
-7→12.7 µs).
+64 KiB PMU (three separate 12 s runs, middle 8 s): cycles/RPC
+1,274,785→1,230,955 (−3.4%), instructions/RPC 546,334→536,301 (−1.8%), IPC
+0.429→0.435. lean3's worker core goes 7.76→6.75 and context switches per RPC
+0.187→0.294, i.e. the thread genuinely parks for longer (mean epoll 7→12.7 µs).
 
-## 남은 것
+## What is left
 
-- tokio `park_yield` epoll(0) 4.4회/RPC(64 B), 약 20회/RPC(64 KiB): h2/hyper task의 coop
-  예산 소진이 원인이라 driver 쪽에서는 못 없앤다. hyper가 spawn하는 H2 연결 task를
-  `tokio::task::unconstrained`로 감싸면 사라지지만 task 공정성을 끄는 변경이다.
-- arm 1.8회/RPC 중 실제 스레드 park는 0.4~0.7회다. select!가 Pending을 낸 뒤 stack task가
-  signal을 올려 바로 깨우는 "헛 park"이며, arm 하나당 DOCA syscall 약 1회가 낭비된다.
-  arm 전에 self-wake yield를 한 번 더 두면 줄일 수 있다.
-- `dpu_request_host_doorbell → dpu_wake_main` write 0.3회/RPC는 main 스레드의 doorbell
-  소유권 설계 문제라 이번 범위 밖이다.
+- tokio `park_yield` epoll(0), 4.4 per RPC at 64 B and about 20 per RPC at
+  64 KiB: caused by h2/hyper tasks exhausting their coop budget, so the driver
+  cannot remove it. Wrapping the H2 connection task hyper spawns in
+  `tokio::task::unconstrained` removes it, but that turns off task fairness.
+- Of the 1.8 arms per RPC, only 0.4–0.7 are a real thread park. The rest are
+  "empty parks": `select!` returns Pending and a stack task raises a signal that
+  wakes it immediately, wasting roughly one DOCA syscall per arm. One more
+  self-wake yield before the arm would reduce them.
+- The 0.3 writes per RPC from `dpu_request_host_doorbell → dpu_wake_main` follow
+  from the main thread owning the doorbell and are out of scope here.
 
-## 사고
+## Incidents
 
-- lean2 64 KiB capacity 3회(11.7~12.1K RPC/s, CPU/RPC는 낮음)는 측정 중 호스트(rapids4)에서
-  lean3의 `cargo test`/`cargo check`를 돌린 시간과 겹쳤다. 호스트가 부하 생성기이므로
-  `raw/lean2-grpc/*.json.contaminated`로 격리하고 reps 4–6으로 재측정했다.
-- lean2 런타임(PID 3472082 이전 프로세스)이 64 B matched run 시작 직후 로그·dmesg·journal·
-  core 없이 사라졌다. 이 캠페인 전 batch 런타임도 같은 방식으로 사라졌다. sudo journal에
-  kill 기록이 없고 apport는 전날 crash core는 저장했으므로 시그널 crash가 아닐 수 있다.
-  lean3부터 `dpu_main.c`가 fatal signal backtrace와 `atexit` 흔적을 stderr에 남긴다.
-  lean3 이후 배포 7회에서는 재현되지 않았다(`raw/lean2-grpc/dpu-log-died.txt`,
-  `64-matched-clean-1.json.died`).
-- `raw/lean2-grpc/65536-capacity-clean-6.json`에 `eq_budget_exhausted=1`이 있다. 표본은
-  유효하고 A/B에는 reps 4–6이 쓰였다.
+- Three lean2 64 KiB capacity runs (11.7–12.1K RPC/s with low CPU/RPC) overlapped
+  a `cargo test`/`cargo check` of lean3 running on the host (rapids4). The host
+  is the load generator, so those runs were quarantined as
+  `raw/lean2-grpc/*.json.contaminated` and re-measured as reps 4–6.
+- The lean2 runtime (the process before PID 3472082) disappeared just after the
+  64 B matched run started, leaving no log, dmesg, journal or core. The batch
+  runtime of the preceding campaign vanished the same way. There is no kill
+  record in the sudo journal and apport did save the previous day's crash core,
+  so it may not have been a signal crash. From lean3 onwards `dpu_main.c` leaves
+  a fatal-signal backtrace and an `atexit` trace on stderr. It did not recur
+  across seven deployments after lean3
+  (`raw/lean2-grpc/dpu-log-died.txt`, `64-matched-clean-1.json.died`).
+- `raw/lean2-grpc/65536-capacity-clean-6.json` carries
+  `eq_budget_exhausted=1`. The sample is valid, and reps 4–6 were the ones used
+  for the A/B.
 
-## 최종 트리와의 차이
+## Difference from the final tree
 
-측정 뒤 트리를 정리했다. driver yield는 효과가 없어 `tokio::task::yield_now`로
-되돌렸고, Rust가 더 이상 쓰지 않는 `dmesh_l7_tx_{try_reserve,reserve,commit,commit_remote}`
-와 `px_conn.l7_tx_chunk`, `TxAttempt::Accepted`, `tx_reserve_attempts`/`tx_writer_wakes`
-metric을 제거했다. lean3의 나머지(고정 maintenance 타이머, 울린 PE만 clear, wake eventfd
-1회 읽기, exit trace)는 그대로다. 정리 뒤 재측정은 하지 않았다.
+The tree was cleaned up after measuring. The driver yield had no effect and was
+reverted to `tokio::task::yield_now`, and the now-unused
+`dmesh_l7_tx_{try_reserve,reserve,commit,commit_remote}`, `px_conn.l7_tx_chunk`,
+`TxAttempt::Accepted` and the `tx_reserve_attempts`/`tx_writer_wakes` metrics were
+removed. The rest of lean3 — the pinned maintenance timer, clearing only the PEs
+that fired, the single wake-eventfd read, and the exit traces — is unchanged. No
+re-measurement was made after that cleanup.
 
-## 방법과 품질 gate
+## Method and quality gates
 
-- 같은 BlueField-3, N/K/A=32/8/8, client CPU 4–9, server CPU 10–17, closed-loop
-  8 threads × conc 8, gRPC image `direct-tx`. 배포마다 `/proc/<pid>/exe` 해시 대조.
-- 표본 112개(clean 99, PMU 9, profile 4) 전부 `OK`, fail/drop/overflow/worker_fail/reorder 0.
-  syscall/callchain run은 성능 표에 쓰지 않았다.
-- 모든 L7 arm 종료 전 arena 1,024/1,024 free, live chunk 0을 10회 확인했다.
-- lean 64 KiB 재측정(reps 4–6): 13,000/12,920/12,538 RPC/s, CPU/RPC 595.0/598.4/596.9로
-  main과 같다.
-- host software gate: dmesh-doca 35/35, adapter 41/41, `l7_abi_contract_test` PASS,
-  `cargo check` OK.
+- Same BlueField-3, N/K/A = 32/8/8, client CPUs 4–9, server CPUs 10–17,
+  closed loop of 8 threads at concurrency 8, gRPC image `direct-tx`. Every
+  deployment was checked by hashing `/proc/<pid>/exe`.
+- All 112 samples (99 clean, 9 PMU, 4 profile) are `OK` with fail, drop,
+  overflow, worker_fail and reorder 0. Syscall and callchain runs were not used
+  in the performance tables.
+- Before every L7 arm shut down, the arena read 1,024/1,024 free with 0 live
+  chunks, confirmed ten times.
+- lean 64 KiB re-measurement (reps 4–6): 13,000/12,920/12,538 RPC/s at CPU/RPC
+  595.0/598.4/596.9, matching the main samples.
+- Host software gates: dmesh-doca 35/35, adapter 41/41, `l7_abi_contract_test`
+  PASS, `cargo check` OK.
 
-복원은 [RESTORATION.md](RESTORATION.md)에, 파생 데이터는 [comparison3.csv](comparison3.csv),
-[syscalls.csv](syscalls.csv), [pmu-summary.csv](pmu-summary.csv), [summary.csv](summary.csv),
-그림은 [comparison.png](comparison.png)에 있다. 절차는 `commands.txt`, `campaign.py`,
-`run_matrix.sh`, `run_matrix3.sh`다.
+Restoration is in [RESTORATION.md](RESTORATION.md); derived data in
+[comparison3.csv](comparison3.csv), [syscalls.csv](syscalls.csv),
+[pmu-summary.csv](pmu-summary.csv) and [summary.csv](summary.csv); the figure in
+[comparison.png](comparison.png). The procedure is `commands.txt`, `campaign.py`,
+`run_matrix.sh` and `run_matrix3.sh`.

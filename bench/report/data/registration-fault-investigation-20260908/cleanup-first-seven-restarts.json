@@ -1,0 +1,332 @@
+[
+  {
+    "round": 1,
+    "mode": "graceful",
+    "start_utc": "2026-09-08T13:10:36.200521+00:00",
+    "action": "pod \"dpumesh-runtime-sqdnh\" deleted\n",
+    "action_rc": 0,
+    "samples": [
+      {
+        "elapsed_s": 6.174,
+        "raw": ""
+      },
+      {
+        "elapsed_s": 8.256,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 10.402,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 12.545,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 14.692,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 16.848,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 18.926,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 22.111,
+        "raw": "ERR mrps=0.000000 gbps=0.0000 req_gbps=0.0000 resp_gbps=0.0000 p50=0.00 p95=0.00 p99=0.00 p999=0.00 p9999=0.00 avg=0.00 min=0.00 max=0.00 rcnt=0 scheduled=1 pending=1 fail=1 conc=1 threads=1 reqsz=64 repsz=8 reqframe=80 respframe=24 durs=1.000 offered_mrps=0.000000 drops=0 overflow=0 worker_fail=1 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=1 rets=1 recyc=0 waits=0 pads=0 reorder=0 dist=-"
+      },
+      {
+        "elapsed_s": 25.371,
+        "raw": "OK mrps=0.006614 gbps=0.0055 req_gbps=0.0042 resp_gbps=0.0013 p50=132.00 p95=301.00 p99=397.00 p999=611.00 p9999=1963.00 avg=150.94 min=67.05 max=4389.61 rcnt=6492 scheduled=6593 pending=1 fail=0 conc=1 threads=1 reqsz=64 repsz=8 reqframe=80 respframe=24 durs=1.000 offered_mrps=0.006614 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=1 rets=1 recyc=1 waits=0 pads=0 reorder=0 dist=1:6592"
+      }
+    ],
+    "recovered": true
+  },
+  {
+    "round": 2,
+    "mode": "sigkill",
+    "start_utc": "2026-09-08T13:11:10.197938+00:00",
+    "action": "",
+    "action_rc": 0,
+    "samples": [
+      {
+        "elapsed_s": 6.638,
+        "raw": ""
+      },
+      {
+        "elapsed_s": 8.723,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 10.806,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 12.888,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 15.029,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 17.11,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 19.219,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 21.301,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 24.488,
+        "raw": "OK mrps=0.005781 gbps=0.0048 req_gbps=0.0037 resp_gbps=0.0011 p50=141.00 p95=321.00 p99=461.00 p999=605.00 p9999=641.00 avg=172.12 min=66.98 max=1005.79 rcnt=5675 scheduled=5776 pending=1 fail=0 conc=1 threads=1 reqsz=64 repsz=8 reqframe=80 respframe=24 durs=1.000 offered_mrps=0.005781 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=1 rets=1 recyc=1 waits=0 pads=0 reorder=0 dist=1:5775"
+      }
+    ],
+    "recovered": true
+  },
+  {
+    "round": 3,
+    "mode": "sigkill",
+    "start_utc": "2026-09-08T13:11:44.374942+00:00",
+    "action": "",
+    "action_rc": 0,
+    "samples": [
+      {
+        "elapsed_s": 5.178,
+        "raw": ""
+      },
+      {
+        "elapsed_s": 7.251,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 9.399,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 11.533,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 13.617,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 15.701,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 17.793,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 19.886,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 21.955,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 25.148,
+        "raw": "OK mrps=0.005531 gbps=0.0046 req_gbps=0.0035 resp_gbps=0.0011 p50=142.00 p95=324.00 p99=480.00 p999=692.00 p9999=1251.00 avg=179.96 min=71.29 max=1336.86 rcnt=5415 scheduled=5516 pending=1 fail=0 conc=1 threads=1 reqsz=64 repsz=8 reqframe=80 respframe=24 durs=1.000 offered_mrps=0.005531 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=1 rets=1 recyc=1 waits=0 pads=0 reorder=0 dist=1:5515"
+      }
+    ],
+    "recovered": true
+  },
+  {
+    "round": 4,
+    "mode": "sigkill",
+    "start_utc": "2026-09-08T13:12:18.248484+00:00",
+    "action": "",
+    "action_rc": 0,
+    "samples": [
+      {
+        "elapsed_s": 6.465,
+        "raw": ""
+      },
+      {
+        "elapsed_s": 8.617,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 10.761,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 12.901,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 14.981,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 17.134,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 19.217,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 21.364,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 23.453,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 25.603,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 27.738,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 29.823,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 31.892,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 33.976,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 36.06,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 38.191,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 40.278,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 42.363,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 44.505,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 47.698,
+        "raw": "ERR mrps=0.000000 gbps=0.0000 req_gbps=0.0000 resp_gbps=0.0000 p50=0.00 p95=0.00 p99=0.00 p999=0.00 p9999=0.00 avg=0.00 min=0.00 max=0.00 rcnt=0 scheduled=1 pending=1 fail=1 conc=1 threads=1 reqsz=64 repsz=8 reqframe=80 respframe=24 durs=1.000 offered_mrps=0.000000 drops=0 overflow=0 worker_fail=1 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=1 rets=1 recyc=0 waits=0 pads=0 reorder=0 dist=-"
+      },
+      {
+        "elapsed_s": 50.89,
+        "raw": "ERR mrps=0.000000 gbps=0.0000 req_gbps=0.0000 resp_gbps=0.0000 p50=0.00 p95=0.00 p99=0.00 p999=0.00 p9999=0.00 avg=0.00 min=0.00 max=0.00 rcnt=0 scheduled=1 pending=1 fail=1 conc=1 threads=1 reqsz=64 repsz=8 reqframe=80 respframe=24 durs=1.000 offered_mrps=0.000000 drops=0 overflow=0 worker_fail=1 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=1 rets=1 recyc=0 waits=0 pads=0 reorder=0 dist=-"
+      },
+      {
+        "elapsed_s": 54.235,
+        "raw": "ERR mrps=0.000000 gbps=0.0000 req_gbps=0.0000 resp_gbps=0.0000 p50=0.00 p95=0.00 p99=0.00 p999=0.00 p9999=0.00 avg=0.00 min=0.00 max=0.00 rcnt=0 scheduled=1 pending=1 fail=1 conc=1 threads=1 reqsz=64 repsz=8 reqframe=80 respframe=24 durs=1.000 offered_mrps=0.000000 drops=0 overflow=0 worker_fail=1 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=1 rets=1 recyc=0 waits=0 pads=0 reorder=0 dist=-"
+      },
+      {
+        "elapsed_s": 57.421,
+        "raw": "OK mrps=0.005651 gbps=0.0047 req_gbps=0.0036 resp_gbps=0.0011 p50=141.00 p95=326.00 p99=459.00 p999=702.00 p9999=2371.00 avg=176.16 min=67.29 max=2432.76 rcnt=5525 scheduled=5626 pending=1 fail=0 conc=1 threads=1 reqsz=64 repsz=8 reqframe=80 respframe=24 durs=1.000 offered_mrps=0.005651 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=1 rets=1 recyc=1 waits=0 pads=0 reorder=0 dist=1:5625"
+      }
+    ],
+    "recovered": true
+  },
+  {
+    "round": 5,
+    "mode": "wrapper_kill",
+    "start_utc": "2026-09-08T13:13:26.846438+00:00",
+    "action": "{\"broker_pid\": 2528626, \"wrapper_pid\": 2528625}\n{\"broker_gone\": true, \"elapsed_s\": 0.13175644911825657}\n",
+    "action_rc": 0,
+    "samples": [
+      {
+        "elapsed_s": 5.433,
+        "raw": "ERR mrps=0.000000 gbps=0.0000 req_gbps=0.0000 resp_gbps=0.0000 p50=0.00 p95=0.00 p99=0.00 p999=0.00 p9999=0.00 avg=0.00 min=0.00 max=0.00 rcnt=0 scheduled=1 pending=1 fail=1 conc=1 threads=1 reqsz=64 repsz=8 reqframe=80 respframe=24 durs=1.000 offered_mrps=0.000000 drops=0 overflow=0 worker_fail=1 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=1 rets=1 recyc=0 waits=0 pads=0 reorder=0 dist=-"
+      },
+      {
+        "elapsed_s": 8.627,
+        "raw": "OK mrps=0.005779 gbps=0.0048 req_gbps=0.0037 resp_gbps=0.0011 p50=141.00 p95=320.00 p99=460.00 p999=680.00 p9999=2024.00 avg=172.39 min=64.78 max=3256.59 rcnt=5660 scheduled=5761 pending=1 fail=0 conc=1 threads=1 reqsz=64 repsz=8 reqframe=80 respframe=24 durs=1.000 offered_mrps=0.005779 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=1 rets=1 recyc=1 waits=0 pads=0 reorder=0 dist=0:5760"
+      }
+    ],
+    "recovered": true
+  },
+  {
+    "round": 6,
+    "mode": "stuck_broker_restart",
+    "start_utc": "2026-09-08T13:13:40.700394+00:00",
+    "action": "{\"broker_pid\": 2530102, \"wrapper_pid\": 2530101}\n{\"broker_gone\": true}\n",
+    "action_rc": 0,
+    "samples": [
+      {
+        "elapsed_s": 5.639,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 7.723,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 9.814,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 11.955,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 14.032,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 17.284,
+        "raw": "ERR mrps=0.000000 gbps=0.0000 req_gbps=0.0000 resp_gbps=0.0000 p50=0.00 p95=0.00 p99=0.00 p999=0.00 p9999=0.00 avg=0.00 min=0.00 max=0.00 rcnt=0 scheduled=1 pending=1 fail=1 conc=1 threads=1 reqsz=64 repsz=8 reqframe=80 respframe=24 durs=1.000 offered_mrps=0.000000 drops=0 overflow=0 worker_fail=1 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=1 rets=1 recyc=0 waits=0 pads=0 reorder=0 dist=-"
+      },
+      {
+        "elapsed_s": 20.478,
+        "raw": "OK mrps=0.006117 gbps=0.0051 req_gbps=0.0039 resp_gbps=0.0012 p50=142.00 p95=314.00 p99=388.00 p999=551.00 p9999=694.00 avg=163.12 min=70.08 max=1098.25 rcnt=5984 scheduled=6085 pending=1 fail=0 conc=1 threads=1 reqsz=64 repsz=8 reqframe=80 respframe=24 durs=1.000 offered_mrps=0.006117 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=1 rets=1 recyc=1 waits=0 pads=0 reorder=0 dist=1:6084"
+      }
+    ],
+    "recovered": true
+  },
+  {
+    "round": 7,
+    "mode": "manager_restart",
+    "start_utc": "2026-09-08T13:14:10.052409+00:00",
+    "action": "",
+    "action_rc": 0,
+    "samples": [
+      {
+        "elapsed_s": 4.644,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 7.898,
+        "raw": "ERR mrps=0.000000 gbps=0.0000 req_gbps=0.0000 resp_gbps=0.0000 p50=0.00 p95=0.00 p99=0.00 p999=0.00 p9999=0.00 avg=0.00 min=0.00 max=0.00 rcnt=0 scheduled=1 pending=1 fail=1 conc=1 threads=1 reqsz=64 repsz=8 reqframe=80 respframe=24 durs=1.000 offered_mrps=0.000000 drops=0 overflow=0 worker_fail=1 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=1 rets=1 recyc=0 waits=0 pads=0 reorder=0 dist=-"
+      },
+      {
+        "elapsed_s": 11.139,
+        "raw": "ERR mrps=0.000000 gbps=0.0000 req_gbps=0.0000 resp_gbps=0.0000 p50=0.00 p95=0.00 p99=0.00 p999=0.00 p9999=0.00 avg=0.00 min=0.00 max=0.00 rcnt=0 scheduled=1 pending=1 fail=1 conc=1 threads=1 reqsz=64 repsz=8 reqframe=80 respframe=24 durs=1.000 offered_mrps=0.000000 drops=0 overflow=0 worker_fail=1 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=1 rets=1 recyc=0 waits=0 pads=0 reorder=0 dist=-"
+      },
+      {
+        "elapsed_s": 14.473,
+        "raw": "ERR mrps=0.000000 gbps=0.0000 req_gbps=0.0000 resp_gbps=0.0000 p50=0.00 p95=0.00 p99=0.00 p999=0.00 p9999=0.00 avg=0.00 min=0.00 max=0.00 rcnt=0 scheduled=1 pending=1 fail=1 conc=1 threads=1 reqsz=64 repsz=8 reqframe=80 respframe=24 durs=1.000 offered_mrps=0.000000 drops=0 overflow=0 worker_fail=1 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=1 rets=1 recyc=0 waits=0 pads=0 reorder=0 dist=-"
+      },
+      {
+        "elapsed_s": 17.664,
+        "raw": "OK mrps=0.006869 gbps=0.0057 req_gbps=0.0044 resp_gbps=0.0013 p50=132.00 p95=271.00 p99=334.00 p999=481.00 p9999=1699.00 avg=145.31 min=65.25 max=1980.95 rcnt=6726 scheduled=6827 pending=1 fail=0 conc=1 threads=1 reqsz=64 repsz=8 reqframe=80 respframe=24 durs=1.000 offered_mrps=0.006869 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=1 rets=1 recyc=1 waits=0 pads=0 reorder=0 dist=1:6826"
+      }
+    ],
+    "recovered": true
+  }
+]

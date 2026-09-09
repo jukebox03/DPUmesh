@@ -1,12 +1,20 @@
 #ifndef DPU_WORKER_H
 #define DPU_WORKER_H
 
+#include <signal.h>
+
 #include "object.h"
 #include "topology.h"
 
 /* ====== DPU Worker ====== */
 
-void run_dpu_worker(struct objects *objs);
+/* Set by SIGTERM and SIGINT. The worker loop leaves on it and then drains and
+ * releases hardware; nothing ends the process from the handler. */
+extern volatile sig_atomic_t dmesh_dpu_stop;
+
+/* Runs the control loop until that request, then tears the runtime down.
+ * Returns 0 only when every resource was released. */
+int run_dpu_worker(struct objects *objs);
 
 /* SG-DMA egress hooks. */
 

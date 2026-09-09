@@ -1,0 +1,130 @@
+[
+  {
+    "action": "pod \"dpumesh-runtime-4jpc8\" deleted\n"
+  },
+  {
+    "elapsed_s": 6.232292001135647,
+    "raw": "",
+    "stderr": ""
+  },
+  {
+    "elapsed_s": 8.386679328046739,
+    "raw": "ERR nc",
+    "stderr": ""
+  },
+  {
+    "elapsed_s": 10.482072453014553,
+    "raw": "ERR nc",
+    "stderr": ""
+  },
+  {
+    "elapsed_s": 12.573217122117057,
+    "raw": "ERR nc",
+    "stderr": ""
+  },
+  {
+    "elapsed_s": 14.710356211056933,
+    "raw": "ERR nc",
+    "stderr": ""
+  },
+  {
+    "elapsed_s": 16.797842285130173,
+    "raw": "ERR nc",
+    "stderr": ""
+  },
+  {
+    "elapsed_s": 18.87561199394986,
+    "raw": "ERR nc",
+    "stderr": ""
+  },
+  {
+    "elapsed_s": 21.021342324092984,
+    "raw": "ERR nc",
+    "stderr": ""
+  },
+  {
+    "elapsed_s": 23.108937724027783,
+    "raw": "ERR nc",
+    "stderr": ""
+  },
+  {
+    "elapsed_s": 25.192142311949283,
+    "raw": "ERR nc",
+    "stderr": ""
+  },
+  {
+    "elapsed_s": 27.271939733996987,
+    "raw": "ERR nc",
+    "stderr": ""
+  },
+  {
+    "elapsed_s": 29.416082673938945,
+    "raw": "ERR nc",
+    "stderr": ""
+  },
+  {
+    "elapsed_s": 31.493932534009218,
+    "raw": "ERR nc",
+    "stderr": ""
+  },
+  {
+    "elapsed_s": 33.575997665990144,
+    "raw": "ERR nc",
+    "stderr": ""
+  },
+  {
+    "elapsed_s": 35.65671034902334,
+    "raw": "ERR nc",
+    "stderr": ""
+  },
+  {
+    "elapsed_s": 37.74841879797168,
+    "raw": "ERR nc",
+    "stderr": ""
+  },
+  {
+    "elapsed_s": 39.823969366028905,
+    "raw": "ERR nc",
+    "stderr": ""
+  },
+  {
+    "elapsed_s": 41.90855002705939,
+    "raw": "ERR nc",
+    "stderr": ""
+  },
+  {
+    "elapsed_s": 43.99079443607479,
+    "raw": "ERR nc",
+    "stderr": ""
+  },
+  {
+    "elapsed_s": 46.05923691904172,
+    "raw": "ERR nc",
+    "stderr": ""
+  },
+  {
+    "elapsed_s": 48.139103207038715,
+    "raw": "ERR nc",
+    "stderr": ""
+  },
+  {
+    "elapsed_s": 50.23363705002703,
+    "raw": "ERR nc",
+    "stderr": ""
+  },
+  {
+    "elapsed_s": 52.379511818056926,
+    "raw": "ERR nc",
+    "stderr": ""
+  },
+  {
+    "elapsed_s": 54.46798897907138,
+    "raw": "ERR nc",
+    "stderr": ""
+  },
+  {
+    "elapsed_after_additional_poll_start_s": 1.1760722510516644,
+    "raw": "OK mrps=0.006771 gbps=0.0056 req_gbps=0.0043 resp_gbps=0.0013 p50=132.00 p95=237.00 p99=333.00 p999=599.00 p9999=2094.00 avg=147.41 min=66.60 max=3761.42 rcnt=6656 scheduled=6757 pending=1 fail=0 conc=1 threads=1 reqsz=64 repsz=8 reqframe=80 respframe=24 durs=1.000 offered_mrps=0.006771 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=1 rets=1 recyc=1 waits=0 pads=0 reorder=0 dist=0:6756",
+    "stderr": ""
+  }
+]

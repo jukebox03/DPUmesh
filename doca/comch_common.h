@@ -217,10 +217,12 @@ struct dmesh_workload_assert_msg {
 _Static_assert(sizeof(struct dmesh_workload_assert_msg) == 1545,
                "dmesh_workload_assert_msg ABI drift");
 
-/* Broker→dpumeshd request, transported over a root-owned AF_UNIX
- * SOCK_SEQPACKET socket. SO_PEERCRED, not request data, identifies the caller.
- * The Service is requested by name; the controller authorizes it against the Pod's
- * labels and the authoritative Service object. */
+/* Broker→dpumeshd report of the DPU's connection challenge, on a root-owned
+ * AF_UNIX SOCK_SEQPACKET socket. SO_PEERCRED, not request data, identifies the
+ * caller. Under `grant` dpumeshd answers with the signed assertion for this
+ * Service; under `direct` it registers the connection itself and answers with
+ * an approval byte. The Service name is authorized against the Pod's labels and
+ * the Service object, never taken on the broker's word. */
 #define DMESH_GRANT_REQUEST_MAGIC "DMESHGR1"
 struct dmesh_grant_request {
     uint8_t magic[8];

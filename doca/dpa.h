@@ -74,6 +74,7 @@ void dmesh_doca_dpa_comch_msgq_ctx_state_changed_cb(const union doca_data user_d
 #ifdef DOCA_ARCH_DPU
 doca_error_t
 init_dpa_objects(struct objects *objs);
+doca_error_t cleanup_dpa_objects(struct objects *objs);
 
 doca_error_t
 dmesh_doca_dpa_msgq_create(const struct dmesh_doca_dpa_msgq_create_attr *attr,

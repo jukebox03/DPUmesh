@@ -1,0 +1,86 @@
+[
+  {
+    "round": 1,
+    "mode": "stuck_broker_restart",
+    "start_utc": "2026-09-08T13:31:55.990160+00:00",
+    "action": "{\"broker_pid\": 2576509, \"wrapper_pid\": 2576508}\nJob for dpumeshd.service failed because the control process exited with error code.\nSee \"systemctl status dpumeshd.service\" and \"journalctl -xeu dpumeshd.service\" for details.\nTraceback (most recent call last):\n  File \"<string>\", line 12, in <module>\n  File \"/usr/lib/python3.10/subprocess.py\", line 526, in run\n    raise CalledProcessError(retcode, process.args,\nsubprocess.CalledProcessError: Command '['systemctl', 'restart', 'dpumeshd']' returned non-zero exit status 1.\n",
+    "action_rc": 1,
+    "samples": [
+      {
+        "elapsed_s": 19.508,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 21.595,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 23.674,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 25.755,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 27.839,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 29.929,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 32.013,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 35.197,
+        "raw": "OK mrps=0.006789 gbps=0.0056 req_gbps=0.0043 resp_gbps=0.0013 p50=132.00 p95=264.00 p99=343.00 p999=470.00 p9999=1032.00 avg=147.04 min=66.80 max=1852.98 rcnt=6675 scheduled=6776 pending=1 fail=0 conc=1 threads=1 reqsz=64 repsz=8 reqframe=80 respframe=24 durs=1.000 offered_mrps=0.006789 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=1 rets=1 recyc=1 waits=0 pads=0 reorder=0 dist=0:6775"
+      }
+    ],
+    "recovered": true
+  },
+  {
+    "round": 2,
+    "mode": "manager_restart",
+    "start_utc": "2026-09-08T13:32:39.161204+00:00",
+    "action": "",
+    "action_rc": 0,
+    "samples": [
+      {
+        "elapsed_s": 4.566,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 6.655,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 8.802,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 10.945,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 13.029,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 15.121,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 17.195,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 20.389,
+        "raw": "OK mrps=0.005865 gbps=0.0049 req_gbps=0.0038 resp_gbps=0.0011 p50=140.00 p95=321.00 p99=463.00 p999=634.00 p9999=1548.00 avg=169.95 min=66.51 max=2046.33 rcnt=5755 scheduled=5856 pending=1 fail=0 conc=1 threads=1 reqsz=64 repsz=8 reqframe=80 respframe=24 durs=1.000 offered_mrps=0.005865 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=1 rets=1 recyc=1 waits=0 pads=0 reorder=0 dist=0:5855"
+      }
+    ],
+    "recovered": true
+  }
+]

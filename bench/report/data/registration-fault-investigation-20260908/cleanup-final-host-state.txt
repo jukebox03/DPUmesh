@@ -1,0 +1,13 @@
+TimeoutStopUSec=25s
+MainPID=2590666
+KillMode=mixed
+ActiveState=active
+SubState=running
+6d34ba1c7220fdfba8ba01cfc12b1712670741a1b593b479b4ead9eeef61e328  /opt/dpumesh/bin/dmesh_broker
+5ee5b70daf24441891610847c023c33f66c16d729a132658aa0731f7ce8d2fa8  /opt/dpumesh/lib/libdpumesh.so.5
+4607c0daf988ef62a377374b507fb1c30e36330e9f8a709dc1648e5e8fe42908  /opt/dpumesh/python/node/dpumeshd.py
+worker cgroups:
+pod6e5fab53-5fd8-43d4-aba1-ae6936f44a63.g1 populated 1
+frozen 0 2591226
+pod5da48cfb-034a-42d6-b8f4-e4a8abbafd8c.g1 populated 1
+frozen 0 2591236

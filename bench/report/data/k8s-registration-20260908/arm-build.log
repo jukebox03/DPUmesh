@@ -1,0 +1,4 @@
+[0;34m[STEP][0m Syncing DPU sources
+[0;34m[STEP][0m Building DPU runtime
+    Finished `release` profile [optimized] target(s) in 0.44s
+[0;32m[INFO][0m DPU build complete

@@ -1,0 +1,152 @@
+[
+  {
+    "attempt": 1,
+    "raw": "OK mrps=0.102645 gbps=6.7598 req_gbps=6.7401 resp_gbps=0.0197 p50=272.00 p95=547.00 p99=695.00 p999=925.00 p9999=1280.00 avg=304.62 min=68.21 max=1531.74 rcnt=512074 scheduled=513106 pending=32 fail=0 conc=32 threads=1 reqsz=8192 repsz=8 reqframe=8208 respframe=24 durs=5.000 offered_mrps=0.102645 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=25 rets=25 recyc=8120 waits=0 pads=8121 reorder=0 dist=1:513074",
+    "stderr": ""
+  },
+  {
+    "attempt": 2,
+    "raw": "OK mrps=0.102854 gbps=6.7735 req_gbps=6.7538 resp_gbps=0.0197 p50=272.00 p95=538.00 p99=696.00 p999=939.00 p9999=1250.00 avg=305.15 min=68.22 max=2101.67 rcnt=513144 scheduled=514176 pending=32 fail=0 conc=32 threads=1 reqsz=8192 repsz=8 reqframe=8208 respframe=24 durs=5.000 offered_mrps=0.102854 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=17 rets=17 recyc=8145 waits=0 pads=8146 reorder=0 dist=1:514144",
+    "stderr": ""
+  },
+  {
+    "attempt": 3,
+    "raw": "OK mrps=0.100981 gbps=6.6502 req_gbps=6.6308 resp_gbps=0.0194 p50=273.00 p95=545.00 p99=702.00 p999=979.00 p9999=2672.00 avg=307.37 min=68.37 max=4197.01 rcnt=503132 scheduled=504164 pending=32 fail=0 conc=32 threads=1 reqsz=8192 repsz=8 reqframe=8208 respframe=24 durs=5.000 offered_mrps=0.100981 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=24 rets=24 recyc=7979 waits=0 pads=7980 reorder=0 dist=1:504132",
+    "stderr": ""
+  },
+  {
+    "attempt": 4,
+    "raw": "OK mrps=0.104620 gbps=6.8898 req_gbps=6.8697 resp_gbps=0.0201 p50=271.00 p95=520.00 p99=660.00 p999=836.00 p9999=1543.00 avg=299.40 min=68.33 max=1861.19 rcnt=521576 scheduled=522608 pending=32 fail=0 conc=32 threads=1 reqsz=8192 repsz=8 reqframe=8208 respframe=24 durs=5.000 offered_mrps=0.104620 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=21 rets=21 recyc=8275 waits=0 pads=8276 reorder=0 dist=1:522576",
+    "stderr": ""
+  },
+  {
+    "attempt": 5,
+    "raw": "OK mrps=0.104604 gbps=6.8888 req_gbps=6.8687 resp_gbps=0.0201 p50=270.00 p95=532.00 p99=674.00 p999=924.00 p9999=1533.00 avg=299.59 min=69.46 max=2914.12 rcnt=522052 scheduled=523084 pending=32 fail=0 conc=32 threads=1 reqsz=8192 repsz=8 reqframe=8208 respframe=24 durs=5.000 offered_mrps=0.104604 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=21 rets=21 recyc=8282 waits=0 pads=8282 reorder=0 dist=1:523052",
+    "stderr": ""
+  },
+  {
+    "attempt": 6,
+    "raw": "OK mrps=0.095866 gbps=6.3133 req_gbps=6.2949 resp_gbps=0.0184 p50=282.00 p95=597.00 p99=729.00 p999=1013.00 p9999=3837.00 avg=320.67 min=71.08 max=4868.43 rcnt=477954 scheduled=478986 pending=32 fail=0 conc=32 threads=1 reqsz=8192 repsz=8 reqframe=8208 respframe=24 durs=5.000 offered_mrps=0.095866 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=23 rets=23 recyc=7580 waits=0 pads=7581 reorder=0 dist=1:478954",
+    "stderr": ""
+  },
+  {
+    "attempt": 7,
+    "raw": "OK mrps=0.092867 gbps=6.1158 req_gbps=6.0980 resp_gbps=0.0178 p50=283.00 p95=634.00 p99=752.00 p999=1104.00 p9999=6686.00 avg=327.73 min=76.17 max=10873.46 rcnt=462975 scheduled=464007 pending=32 fail=0 conc=32 threads=1 reqsz=8192 repsz=8 reqframe=8208 respframe=24 durs=5.000 offered_mrps=0.092867 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=20 rets=20 recyc=7346 waits=0 pads=7347 reorder=0 dist=1:463975",
+    "stderr": ""
+  },
+  {
+    "attempt": 8,
+    "raw": "OK mrps=0.093599 gbps=6.1641 req_gbps=6.1461 resp_gbps=0.0180 p50=284.00 p95=603.00 p99=733.00 p999=1005.00 p9999=2261.00 avg=324.84 min=74.18 max=3290.38 rcnt=467006 scheduled=468038 pending=32 fail=0 conc=32 threads=1 reqsz=8192 repsz=8 reqframe=8208 respframe=24 durs=5.000 offered_mrps=0.093599 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=22 rets=22 recyc=7408 waits=0 pads=7409 reorder=0 dist=1:468006",
+    "stderr": ""
+  },
+  {
+    "attempt": 9,
+    "raw": "OK mrps=0.093958 gbps=6.1877 req_gbps=6.1697 resp_gbps=0.0180 p50=284.00 p95=600.00 p99=728.00 p999=1018.00 p9999=2498.00 avg=325.11 min=69.02 max=3882.75 rcnt=468588 scheduled=469620 pending=32 fail=0 conc=32 threads=1 reqsz=8192 repsz=8 reqframe=8208 respframe=24 durs=5.000 offered_mrps=0.093958 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=25 rets=25 recyc=7430 waits=0 pads=7431 reorder=0 dist=1:469588",
+    "stderr": ""
+  },
+  {
+    "attempt": 10,
+    "raw": "OK mrps=0.103293 gbps=6.8025 req_gbps=6.7827 resp_gbps=0.0198 p50=271.00 p95=534.00 p99=676.00 p999=915.00 p9999=2577.00 avg=303.34 min=67.72 max=5000.16 rcnt=514894 scheduled=515926 pending=32 fail=0 conc=32 threads=1 reqsz=8192 repsz=8 reqframe=8208 respframe=24 durs=5.000 offered_mrps=0.103293 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=26 rets=26 recyc=8164 waits=0 pads=8164 reorder=0 dist=1:515894",
+    "stderr": ""
+  },
+  {
+    "attempt": 11,
+    "raw": "OK mrps=0.103798 gbps=6.8357 req_gbps=6.8158 resp_gbps=0.0199 p50=271.00 p95=531.00 p99=685.00 p999=947.00 p9999=2435.00 avg=301.90 min=68.87 max=3490.26 rcnt=517512 scheduled=518544 pending=32 fail=0 conc=32 threads=1 reqsz=8192 repsz=8 reqframe=8208 respframe=24 durs=5.000 offered_mrps=0.103798 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=21 rets=21 recyc=8210 waits=0 pads=8211 reorder=0 dist=1:518512",
+    "stderr": ""
+  },
+  {
+    "attempt": 12,
+    "raw": "OK mrps=0.100821 gbps=6.6396 req_gbps=6.6203 resp_gbps=0.0194 p50=273.00 p95=549.00 p99=698.00 p999=947.00 p9999=1831.00 avg=309.17 min=58.83 max=2885.02 rcnt=503038 scheduled=504070 pending=32 fail=0 conc=32 threads=1 reqsz=8192 repsz=8 reqframe=8208 respframe=24 durs=5.000 offered_mrps=0.100821 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=24 rets=24 recyc=7978 waits=0 pads=7979 reorder=0 dist=1:504038",
+    "stderr": ""
+  },
+  {
+    "attempt": 13,
+    "raw": "OK mrps=0.095205 gbps=6.2698 req_gbps=6.2516 resp_gbps=0.0183 p50=283.00 p95=574.00 p99=725.00 p999=932.00 p9999=1348.00 avg=320.02 min=77.66 max=2149.52 rcnt=475069 scheduled=476101 pending=32 fail=0 conc=32 threads=1 reqsz=8192 repsz=8 reqframe=8208 respframe=24 durs=5.000 offered_mrps=0.095205 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=31 rets=31 recyc=7527 waits=0 pads=7528 reorder=0 dist=1:476069",
+    "stderr": ""
+  },
+  {
+    "attempt": 14,
+    "raw": "OK mrps=0.092761 gbps=6.1089 req_gbps=6.0911 resp_gbps=0.0178 p50=286.00 p95=630.00 p99=752.00 p999=999.00 p9999=1612.00 avg=328.96 min=73.30 max=3656.81 rcnt=462663 scheduled=463695 pending=32 fail=0 conc=32 threads=1 reqsz=8192 repsz=8 reqframe=8208 respframe=24 durs=5.000 offered_mrps=0.092761 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=31 rets=31 recyc=7330 waits=0 pads=7331 reorder=0 dist=1:463663",
+    "stderr": ""
+  },
+  {
+    "attempt": 15,
+    "raw": "OK mrps=0.100149 gbps=6.5954 req_gbps=6.5762 resp_gbps=0.0192 p50=274.00 p95=565.00 p99=718.00 p999=978.00 p9999=1458.00 avg=308.72 min=68.80 max=2242.02 rcnt=499189 scheduled=500221 pending=32 fail=0 conc=32 threads=1 reqsz=8192 repsz=8 reqframe=8208 respframe=24 durs=5.000 offered_mrps=0.100149 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=23 rets=23 recyc=7918 waits=0 pads=7919 reorder=0 dist=1:500189",
+    "stderr": ""
+  },
+  {
+    "attempt": 16,
+    "raw": "OK mrps=0.101151 gbps=6.6614 req_gbps=6.6420 resp_gbps=0.0194 p50=276.00 p95=544.00 p99=693.00 p999=901.00 p9999=1363.00 avg=307.58 min=69.15 max=2364.64 rcnt=504375 scheduled=505407 pending=32 fail=0 conc=32 threads=1 reqsz=8192 repsz=8 reqframe=8208 respframe=24 durs=5.000 offered_mrps=0.101151 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=29 rets=29 recyc=7994 waits=0 pads=7995 reorder=0 dist=1:505375",
+    "stderr": ""
+  },
+  {
+    "attempt": 17,
+    "raw": "OK mrps=0.092591 gbps=6.0977 req_gbps=6.0799 resp_gbps=0.0178 p50=286.00 p95=623.00 p99=740.00 p999=1017.00 p9999=2384.00 avg=330.08 min=72.79 max=4731.66 rcnt=461568 scheduled=462600 pending=32 fail=0 conc=32 threads=1 reqsz=8192 repsz=8 reqframe=8208 respframe=24 durs=5.000 offered_mrps=0.092591 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=24 rets=24 recyc=7319 waits=0 pads=7320 reorder=0 dist=1:462568",
+    "stderr": ""
+  },
+  {
+    "attempt": 18,
+    "raw": "OK mrps=0.095421 gbps=6.2840 req_gbps=6.2657 resp_gbps=0.0183 p50=286.00 p95=571.00 p99=719.00 p999=1066.00 p9999=4483.00 avg=322.93 min=73.63 max=8338.37 rcnt=475977 scheduled=477009 pending=32 fail=0 conc=32 threads=1 reqsz=8192 repsz=8 reqframe=8208 respframe=24 durs=5.000 offered_mrps=0.095421 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=21 rets=21 recyc=7551 waits=0 pads=7552 reorder=0 dist=1:476977",
+    "stderr": ""
+  },
+  {
+    "attempt": 19,
+    "raw": "OK mrps=0.098023 gbps=6.4554 req_gbps=6.4366 resp_gbps=0.0188 p50=276.00 p95=575.00 p99=721.00 p999=991.00 p9999=2220.00 avg=315.71 min=68.19 max=4577.89 rcnt=488867 scheduled=489899 pending=32 fail=0 conc=32 threads=1 reqsz=8192 repsz=8 reqframe=8208 respframe=24 durs=5.000 offered_mrps=0.098023 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=30 rets=30 recyc=7747 waits=0 pads=7746 reorder=0 dist=1:489867",
+    "stderr": ""
+  },
+  {
+    "attempt": 20,
+    "raw": "OK mrps=0.102489 gbps=6.7495 req_gbps=6.7299 resp_gbps=0.0197 p50=273.00 p95=531.00 p99=686.00 p999=890.00 p9999=1357.00 avg=304.41 min=68.66 max=4270.65 rcnt=511014 scheduled=512046 pending=32 fail=0 conc=32 threads=1 reqsz=8192 repsz=8 reqframe=8208 respframe=24 durs=5.000 offered_mrps=0.102489 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=19 rets=19 recyc=8109 waits=0 pads=8110 reorder=0 dist=1:512014",
+    "stderr": ""
+  },
+  {
+    "attempt": 21,
+    "raw": "OK mrps=0.093275 gbps=6.1427 req_gbps=6.1248 resp_gbps=0.0179 p50=286.00 p95=625.00 p99=746.00 p999=1080.00 p9999=1968.00 avg=328.57 min=74.19 max=3083.26 rcnt=465295 scheduled=466327 pending=32 fail=0 conc=32 threads=1 reqsz=8192 repsz=8 reqframe=8208 respframe=24 durs=5.000 offered_mrps=0.093275 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=24 rets=24 recyc=7379 waits=0 pads=7380 reorder=0 dist=1:466295",
+    "stderr": ""
+  },
+  {
+    "attempt": 22,
+    "raw": "OK mrps=0.092331 gbps=6.0805 req_gbps=6.0628 resp_gbps=0.0177 p50=287.00 p95=618.00 p99=742.00 p999=1095.00 p9999=2812.00 avg=330.30 min=75.72 max=7422.75 rcnt=460463 scheduled=461495 pending=32 fail=0 conc=32 threads=1 reqsz=8192 repsz=8 reqframe=8208 respframe=24 durs=5.000 offered_mrps=0.092331 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=27 rets=27 recyc=7299 waits=0 pads=7299 reorder=0 dist=1:461463",
+    "stderr": ""
+  },
+  {
+    "attempt": 23,
+    "raw": "OK mrps=0.093612 gbps=6.1649 req_gbps=6.1470 resp_gbps=0.0180 p50=285.00 p95=631.00 p99=752.00 p999=1148.00 p9999=7007.00 avg=327.80 min=73.20 max=15034.65 rcnt=466988 scheduled=468020 pending=32 fail=0 conc=32 threads=1 reqsz=8192 repsz=8 reqframe=8208 respframe=24 durs=5.000 offered_mrps=0.093612 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=24 rets=24 recyc=7405 waits=0 pads=7406 reorder=0 dist=1:467988",
+    "stderr": ""
+  },
+  {
+    "attempt": 24,
+    "raw": "OK mrps=0.092626 gbps=6.1000 req_gbps=6.0822 resp_gbps=0.0178 p50=285.00 p95=622.00 p99=742.00 p999=1022.00 p9999=3328.00 avg=328.48 min=80.19 max=7174.78 rcnt=461866 scheduled=462898 pending=32 fail=0 conc=32 threads=1 reqsz=8192 repsz=8 reqframe=8208 respframe=24 durs=5.000 offered_mrps=0.092626 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=30 rets=30 recyc=7318 waits=0 pads=7319 reorder=0 dist=1:462866",
+    "stderr": ""
+  },
+  {
+    "attempt": 25,
+    "raw": "OK mrps=0.090710 gbps=5.9738 req_gbps=5.9564 resp_gbps=0.0174 p50=289.00 p95=634.00 p99=754.00 p999=1052.00 p9999=3242.00 avg=335.26 min=75.56 max=3661.99 rcnt=452103 scheduled=453135 pending=32 fail=0 conc=32 threads=1 reqsz=8192 repsz=8 reqframe=8208 respframe=24 durs=5.000 offered_mrps=0.090710 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=24 rets=24 recyc=7169 waits=0 pads=7170 reorder=0 dist=1:453103",
+    "stderr": ""
+  },
+  {
+    "attempt": 26,
+    "raw": "OK mrps=0.093094 gbps=6.1308 req_gbps=6.1129 resp_gbps=0.0179 p50=284.00 p95=617.00 p99=742.00 p999=1065.00 p9999=2093.00 avg=326.63 min=75.17 max=3088.79 rcnt=464261 scheduled=465293 pending=32 fail=0 conc=32 threads=1 reqsz=8192 repsz=8 reqframe=8208 respframe=24 durs=5.000 offered_mrps=0.093094 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=25 rets=25 recyc=7361 waits=0 pads=7362 reorder=0 dist=1:465261",
+    "stderr": ""
+  },
+  {
+    "attempt": 27,
+    "raw": "OK mrps=0.091387 gbps=6.0184 req_gbps=6.0008 resp_gbps=0.0175 p50=286.00 p95=634.00 p99=756.00 p999=1065.00 p9999=2587.00 avg=332.90 min=73.84 max=4743.21 rcnt=455896 scheduled=456928 pending=32 fail=0 conc=32 threads=1 reqsz=8192 repsz=8 reqframe=8208 respframe=24 durs=5.000 offered_mrps=0.091387 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=30 rets=30 recyc=7223 waits=0 pads=7224 reorder=0 dist=1:456896",
+    "stderr": ""
+  },
+  {
+    "attempt": 28,
+    "raw": "OK mrps=0.097480 gbps=6.4197 req_gbps=6.4010 resp_gbps=0.0187 p50=279.00 p95=568.00 p99=720.00 p999=983.00 p9999=2204.00 avg=315.39 min=66.05 max=7478.73 rcnt=486112 scheduled=487136 pending=24 fail=0 conc=32 threads=1 reqsz=8192 repsz=8 reqframe=8208 respframe=24 durs=5.000 offered_mrps=0.097480 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=17 rets=17 recyc=7716 waits=0 pads=7717 reorder=0 dist=1:487112",
+    "stderr": ""
+  },
+  {
+    "attempt": 29,
+    "raw": "OK mrps=0.103665 gbps=6.8269 req_gbps=6.8070 resp_gbps=0.0199 p50=271.00 p95=535.00 p99=681.00 p999=932.00 p9999=1433.00 avg=302.26 min=67.51 max=1757.03 rcnt=516968 scheduled=517999 pending=31 fail=0 conc=32 threads=1 reqsz=8192 repsz=8 reqframe=8208 respframe=24 durs=5.000 offered_mrps=0.103665 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=22 rets=22 recyc=8201 waits=0 pads=8202 reorder=0 dist=1:517968",
+    "stderr": ""
+  },
+  {
+    "attempt": 30,
+    "raw": "OK mrps=0.102700 gbps=6.7634 req_gbps=6.7437 resp_gbps=0.0197 p50=272.00 p95=537.00 p99=683.00 p999=943.00 p9999=2434.00 avg=305.03 min=68.92 max=4187.15 rcnt=512457 scheduled=513489 pending=32 fail=0 conc=32 threads=1 reqsz=8192 repsz=8 reqframe=8208 respframe=24 durs=5.000 offered_mrps=0.102700 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=16 rets=16 recyc=8135 waits=0 pads=8136 reorder=0 dist=1:513457",
+    "stderr": ""
+  }
+]

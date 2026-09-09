@@ -1,0 +1,114 @@
+[
+  {
+    "case": "bandwidth8192",
+    "attempt": 1,
+    "raw": "OK mrps=0.105117 gbps=6.9226 req_gbps=6.9024 resp_gbps=0.0202 p50=269.00 p95=533.00 p99=679.00 p999=907.00 p9999=2808.00 avg=296.44 min=68.17 max=5599.29 rcnt=524341 scheduled=525373 pending=32 fail=0 conc=32 threads=1 reqsz=8192 repsz=8 reqframe=8208 respframe=24 durs=5.000 offered_mrps=0.105117 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=23 rets=23 recyc=8317 waits=0 pads=8318 reorder=0 dist=0:525341",
+    "stderr": "",
+    "rc": 0
+  },
+  {
+    "case": "bandwidth8192",
+    "attempt": 2,
+    "raw": "OK mrps=0.101881 gbps=6.7095 req_gbps=6.6899 resp_gbps=0.0196 p50=268.00 p95=581.00 p99=761.00 p999=1136.00 p9999=2012.00 avg=306.94 min=66.47 max=2350.53 rcnt=508309 scheduled=509341 pending=32 fail=0 conc=32 threads=1 reqsz=8192 repsz=8 reqframe=8208 respframe=24 durs=5.000 offered_mrps=0.101881 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=32 rets=32 recyc=8053 waits=0 pads=8053 reorder=0 dist=0:509309",
+    "stderr": "",
+    "rc": 0
+  },
+  {
+    "case": "bandwidth8192",
+    "attempt": 3,
+    "raw": "OK mrps=0.099691 gbps=6.5653 req_gbps=6.5461 resp_gbps=0.0191 p50=270.00 p95=594.00 p99=760.00 p999=1030.00 p9999=1964.00 avg=314.92 min=69.49 max=3924.75 rcnt=496809 scheduled=497841 pending=32 fail=0 conc=32 threads=1 reqsz=8192 repsz=8 reqframe=8208 respframe=24 durs=5.000 offered_mrps=0.099691 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=44 rets=44 recyc=7859 waits=0 pads=7860 reorder=0 dist=0:497809",
+    "stderr": "",
+    "rc": 0
+  },
+  {
+    "case": "bandwidth8192",
+    "attempt": 4,
+    "raw": "OK mrps=0.098445 gbps=6.4832 req_gbps=6.4643 resp_gbps=0.0189 p50=271.00 p95=603.00 p99=778.00 p999=1085.00 p9999=3724.00 avg=318.97 min=63.49 max=9365.56 rcnt=491064 scheduled=492092 pending=28 fail=0 conc=32 threads=1 reqsz=8192 repsz=8 reqframe=8208 respframe=24 durs=5.000 offered_mrps=0.098445 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=30 rets=30 recyc=7781 waits=0 pads=7781 reorder=0 dist=0:492064",
+    "stderr": "",
+    "rc": 0
+  },
+  {
+    "case": "bandwidth8192",
+    "attempt": 5,
+    "raw": "OK mrps=0.101501 gbps=6.6845 req_gbps=6.6650 resp_gbps=0.0195 p50=268.00 p95=571.00 p99=745.00 p999=1091.00 p9999=2537.00 avg=308.49 min=68.32 max=5361.39 rcnt=506087 scheduled=507119 pending=32 fail=0 conc=32 threads=1 reqsz=8192 repsz=8 reqframe=8208 respframe=24 durs=5.000 offered_mrps=0.101501 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=28 rets=28 recyc=8022 waits=0 pads=8023 reorder=0 dist=0:507087",
+    "stderr": "",
+    "rc": 0
+  },
+  {
+    "case": "bandwidth8192",
+    "attempt": 6,
+    "raw": "OK mrps=0.099677 gbps=6.5643 req_gbps=6.5452 resp_gbps=0.0191 p50=270.00 p95=595.00 p99=763.00 p999=1050.00 p9999=2153.00 avg=314.20 min=73.03 max=4417.87 rcnt=497020 scheduled=498052 pending=32 fail=0 conc=32 threads=1 reqsz=8192 repsz=8 reqframe=8208 respframe=24 durs=5.000 offered_mrps=0.099677 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=34 rets=34 recyc=7872 waits=0 pads=7873 reorder=0 dist=0:498020",
+    "stderr": "",
+    "rc": 0
+  },
+  {
+    "case": "bandwidth8192",
+    "attempt": 7,
+    "raw": "OK mrps=0.099285 gbps=6.5385 req_gbps=6.5195 resp_gbps=0.0191 p50=270.00 p95=597.00 p99=773.00 p999=1083.00 p9999=2692.00 avg=316.29 min=69.41 max=3447.85 rcnt=494912 scheduled=495944 pending=32 fail=0 conc=32 threads=1 reqsz=8192 repsz=8 reqframe=8208 respframe=24 durs=5.000 offered_mrps=0.099285 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=34 rets=34 recyc=7839 waits=0 pads=7840 reorder=0 dist=0:495912",
+    "stderr": "",
+    "rc": 0
+  },
+  {
+    "case": "bandwidth8192",
+    "attempt": 8,
+    "raw": "OK mrps=0.099813 gbps=6.5733 req_gbps=6.5541 resp_gbps=0.0192 p50=271.00 p95=583.00 p99=752.00 p999=1046.00 p9999=2427.00 avg=314.73 min=68.63 max=5762.67 rcnt=497942 scheduled=498974 pending=32 fail=0 conc=32 threads=1 reqsz=8192 repsz=8 reqframe=8208 respframe=24 durs=5.000 offered_mrps=0.099813 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=35 rets=35 recyc=7886 waits=0 pads=7886 reorder=0 dist=0:498942",
+    "stderr": "",
+    "rc": 0
+  },
+  {
+    "case": "bandwidth8192",
+    "attempt": 9,
+    "raw": "OK mrps=0.098096 gbps=6.4602 req_gbps=6.4413 resp_gbps=0.0188 p50=271.00 p95=606.00 p99=807.00 p999=1109.00 p9999=2388.00 avg=320.23 min=68.98 max=4699.25 rcnt=489412 scheduled=490444 pending=32 fail=0 conc=32 threads=1 reqsz=8192 repsz=8 reqframe=8208 respframe=24 durs=5.000 offered_mrps=0.098096 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=37 rets=37 recyc=7748 waits=0 pads=7749 reorder=0 dist=0:490412",
+    "stderr": "",
+    "rc": 0
+  },
+  {
+    "case": "bandwidth8192",
+    "attempt": 10,
+    "raw": "OK mrps=0.098375 gbps=6.4786 req_gbps=6.4597 resp_gbps=0.0189 p50=273.00 p95=592.00 p99=761.00 p999=1085.00 p9999=3700.00 avg=319.21 min=76.88 max=15704.90 rcnt=490205 scheduled=491237 pending=32 fail=0 conc=32 threads=1 reqsz=8192 repsz=8 reqframe=8208 respframe=24 durs=5.000 offered_mrps=0.098375 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=31 rets=31 recyc=7767 waits=0 pads=7768 reorder=0 dist=0:491205",
+    "stderr": "",
+    "rc": 0
+  },
+  {
+    "case": "latency64",
+    "attempt": 1,
+    "raw": "OK mrps=0.005737 gbps=0.0048 req_gbps=0.0037 resp_gbps=0.0011 p50=132.00 p95=302.00 p99=438.00 p999=606.00 p9999=2086.00 avg=174.04 min=66.82 max=5591.35 rcnt=27654 scheduled=28655 pending=1 fail=0 conc=1 threads=1 reqsz=64 repsz=8 reqframe=80 respframe=24 durs=5.000 offered_mrps=0.005737 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=1 rets=1 recyc=6 waits=0 pads=0 reorder=0 dist=0:28654",
+    "stderr": "",
+    "rc": 0
+  },
+  {
+    "case": "latency64",
+    "attempt": 2,
+    "raw": "OK mrps=0.005575 gbps=0.0046 req_gbps=0.0036 resp_gbps=0.0011 p50=132.00 p95=306.00 p99=449.00 p999=695.00 p9999=1925.00 avg=179.11 min=66.70 max=14542.83 rcnt=26871 scheduled=27872 pending=1 fail=0 conc=1 threads=1 reqsz=64 repsz=8 reqframe=80 respframe=24 durs=5.000 offered_mrps=0.005575 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=1 rets=1 recyc=6 waits=0 pads=0 reorder=0 dist=0:27871",
+    "stderr": "",
+    "rc": 0
+  },
+  {
+    "case": "latency64",
+    "attempt": 3,
+    "raw": "OK mrps=0.005565 gbps=0.0046 req_gbps=0.0036 resp_gbps=0.0011 p50=132.00 p95=306.00 p99=459.00 p999=1000.00 p9999=2819.00 avg=179.44 min=66.30 max=3726.24 rcnt=26871 scheduled=27872 pending=1 fail=0 conc=1 threads=1 reqsz=64 repsz=8 reqframe=80 respframe=24 durs=5.000 offered_mrps=0.005565 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=1 rets=1 recyc=6 waits=0 pads=0 reorder=0 dist=0:27871",
+    "stderr": "",
+    "rc": 0
+  },
+  {
+    "case": "rate32",
+    "attempt": 1,
+    "raw": "OK mrps=0.557189 gbps=0.3209 req_gbps=0.2140 resp_gbps=0.1070 p50=431.00 p95=807.00 p99=1023.00 p999=1325.00 p9999=3250.00 avg=456.52 min=64.22 max=8951.90 rcnt=2776724 scheduled=2784980 pending=256 fail=0 conc=32 threads=8 reqsz=32 repsz=8 reqframe=48 respframe=24 durs=5.000 offered_mrps=0.557189 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=23 rets=23 recyc=259 waits=0 pads=201 reorder=0 dist=0:2784724",
+    "stderr": "",
+    "rc": 0
+  },
+  {
+    "case": "rate32",
+    "attempt": 2,
+    "raw": "OK mrps=0.552824 gbps=0.3184 req_gbps=0.2123 resp_gbps=0.1061 p50=431.00 p95=828.00 p99=1033.00 p999=1394.00 p9999=4100.00 avg=460.08 min=58.64 max=5831.91 rcnt=2754144 scheduled=2762395 pending=251 fail=0 conc=32 threads=8 reqsz=32 repsz=8 reqframe=48 respframe=24 durs=5.000 offered_mrps=0.552824 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=18 rets=18 recyc=262 waits=0 pads=184 reorder=0 dist=0:2762144",
+    "stderr": "",
+    "rc": 0
+  },
+  {
+    "case": "rate32",
+    "attempt": 3,
+    "raw": "OK mrps=0.555558 gbps=0.3200 req_gbps=0.2133 resp_gbps=0.1067 p50=431.00 p95=814.00 p99=1034.00 p999=1410.00 p9999=3660.00 avg=457.72 min=59.75 max=13066.99 rcnt=2768957 scheduled=2777190 pending=233 fail=0 conc=32 threads=8 reqsz=32 repsz=8 reqframe=48 respframe=24 durs=5.000 offered_mrps=0.555558 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=22 rets=22 recyc=258 waits=0 pads=195 reorder=0 dist=0:2776957",
+    "stderr": "",
+    "rc": 0
+  }
+]

@@ -126,4 +126,11 @@ dmesh_assert_verify_v3(const struct dmesh_workload_assert_msg *assertion,
                        uint64_t now_sec,
                        struct dmesh_assert_claims *claims);
 
+/* Metadata decoder. Never authorizes a Comch message. The direct-registration
+ * caller must already be an authenticated paired-host control session. */
+enum dmesh_grant_result dmesh_assert_decode_local(
+    const struct dmesh_workload_assert_msg *, const char *, const char *,
+    const uint8_t [DMESH_REG_NONCE_SIZE], uint64_t,
+    struct dmesh_assert_claims *, int require_unsigned);
+
 #endif /* DMESH_WORKLOAD_GRANT_H */

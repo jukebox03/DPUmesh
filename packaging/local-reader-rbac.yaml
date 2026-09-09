@@ -1,0 +1,24 @@
+# Replace HOST_NODE in the binding and certificate subject before applying.
+# Kubernetes RBAC cannot field-filter list access by node; the trusted daemon
+# applies that filter itself. No write or Secret permissions are granted.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: dpumesh-local-reader
+rules:
+  - apiGroups: [""]
+    resources: [pods, services]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dpumesh-local-reader-HOST_NODE
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: dpumesh-local-reader
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: User
+    name: dpumeshd:HOST_NODE

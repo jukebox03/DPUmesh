@@ -1,0 +1,1 @@
+comch_send_state_test: tests/comch_send_state_test.c:34: main: Assertion `client_send_msg(&objs, "x", 1) == DOCA_ERROR_CONNECTION_ABORTED' failed.

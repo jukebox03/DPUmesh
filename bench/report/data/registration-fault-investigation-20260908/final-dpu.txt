@@ -1,0 +1,2 @@
+NAME                    READY   STATUS    RESTARTS       AGE     IP              NODE          NOMINATED NODE   READINESS GATES
+dpumesh-runtime-srcf5   1/1     Running   1 (105s ago)   2m16s   192.168.100.2   rapids4-dpu   <none>           <none>

@@ -1,0 +1,20 @@
+image: bench/dpumesh-dpu:kubernetes
+imagePullPolicy: IfNotPresent
+# This release describes one host/DPU pair. Use separate releases for different
+# hardware/configuration; never load balance the local registration endpoint.
+dpuNode: ""
+hostNode: ""
+clusterID: ""
+pci: ""
+representor: ""
+registrationMode: grant
+localBind: ""
+configDirectory: /etc/dpumesh
+runtimeDirectory: /run/dpumesh-runtime
+env: {}
+resources:
+  requests:
+    cpu: "4"
+    memory: 2Gi
+  limits:
+    memory: 8Gi

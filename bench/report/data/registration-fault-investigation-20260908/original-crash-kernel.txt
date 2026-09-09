@@ -1,0 +1,3 @@
+Sep 08 18:23:28 rapids4 kernel: dmesh_broker[2163539]: segfault at 24 ip 00007f3672848fa8 sp 00007ffd5146bb00 error 4 in libdoca_common.so.3.1.0105[7f36727e3000+a6000]
+Sep 08 18:23:28 rapids4 kernel: Code: 05 00 bf 1e 00 00 00 31 c0 e8 74 f2 fa ff b8 06 00 00 00 48 83 c4 08 c3 66 2e 0f 1f 84 00 00 00 00 00 f3 0f 1e fa 53 48 89 fb <8b> 47 24 39 47 20 73 20 48 8b 07 80 48 3c 01 48 8b 17 48 8b 12 83
+/opt/mellanox/doca/lib/x86_64-linux-gnu/libdoca_common.so.3.1.0105

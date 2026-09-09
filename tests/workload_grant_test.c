@@ -237,6 +237,19 @@ main(void)
     assertion.assert_id[0] ^= 0xff;
     assert(dmesh_registration_consume_grant(&verifier, assertion.assert_id) == 0);
 
+    /* The direct metadata decoder never replaces signature verification on Comch. */
+    fill_assert(&changed, nonce, now);
+    memset(changed.key_id, 0, sizeof(changed.key_id));
+    strcpy(changed.key_id, "local-control");
+    assert(dmesh_assert_decode_local(&changed, "test-cluster", "worker-1", nonce,
+                                    now, &claims, 1) == DMESH_GRANT_OK);
+    assert(dmesh_assert_verify_v3(&changed, public_key, "test-cluster", "worker-1", nonce,
+                                 now, &claims) == DMESH_GRANT_BAD_SIG);
+    assert(dmesh_assert_decode_local(&changed, "test-cluster", "worker-2", nonce,
+                                    now, &claims, 1) == DMESH_GRANT_WRONG_NODE);
+    changed.sig[0] = 1;
+    assert(dmesh_assert_decode_local(&changed, "test-cluster", "worker-1", nonce,
+                                    now, &claims, 1) == DMESH_GRANT_BAD_SIG);
     test_feed_verify();
     puts("workload_grant_test: PASS");
     return 0;

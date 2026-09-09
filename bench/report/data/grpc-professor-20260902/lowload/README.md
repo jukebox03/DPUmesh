@@ -1,4 +1,4 @@
-# Low-load diagnosis receipts (2026-09-02, N/K/A=32/8/8, 64 B)
+# Low-load diagnosis receipts (N/K/A=32/8/8, 64 B)
 
 Why one open request costs a DPU worker 0.7 ms of CPU and 1.6 ms of latency at
 100 RPS when the same request costs 87 µs and 0.6 ms at the knee. All runs use
@@ -17,4 +17,4 @@ the professor-report geometry and pins; `baseline` is the committed source,
 | `e5-probes-100rps.txt` | uprobe counts per RPC on the e5-1 build: hyper server-connection poll 2.0, h2 client-connection poll 4.0, drain 21, wake 1.2 |
 | `sched-100rps-clusters.txt` | `sched:sched_switch` trace at 100 RPS: each request is two continuous on-CPU runs (forward ≈450 µs, reverse ≈320 µs) separated by the server-side gap |
 
-Commands are in [`../EXPERIMENT.md`](../EXPERIMENT.md#e-사전-등록-실험).
+Commands are in [`../EXPERIMENT.md`](../EXPERIMENT.md#e-pre-registered-experiments).

@@ -1,0 +1,24 @@
+Sep 08 09:16:34 localhost.localdomain dpumesh_dpu[227297]: [09:16:34:273634][2757619744][DOCA][ERR][doca_comm_channel_2.cpp:1120] got send cqe for unknown peer_address
+Sep 08 09:16:34 localhost.localdomain dpumesh_dpu[227297]: [09:16:34:273640][2757619744][DOCA][ERR][comch_server.c:150][server_send_task_completion_err_callback] Server send task failed: DOCA_ERROR_UNEXPECTED
+Sep 08 09:16:34 localhost.localdomain dpumesh_dpu[227297]: [09:16:34:273796][2757619744][DOCA][ERR][doca_comm_channel_2.cpp:1120] got send cqe for unknown peer_address
+Sep 08 09:16:34 localhost.localdomain dpumesh_dpu[227297]: [09:16:34:273800][2757619744][DOCA][ERR][comch_server.c:150][server_send_task_completion_err_callback] Server send task failed: DOCA_ERROR_UNEXPECTED
+Sep 08 09:16:34 localhost.localdomain dpumesh_dpu[227297]: [09:16:34:273957][2757619744][DOCA][ERR][doca_comm_channel_2.cpp:1120] got send cqe for unknown peer_address
+Sep 08 09:16:34 localhost.localdomain dpumesh_dpu[227297]: [09:16:34:273962][2757619744][DOCA][ERR][comch_server.c:150][server_send_task_completion_err_callback] Server send task failed: DOCA_ERROR_UNEXPECTED
+Sep 08 09:16:34 localhost.localdomain dpumesh_dpu[227297]: [09:16:34:274119][2757619744][DOCA][ERR][doca_comm_channel_2.cpp:1120] got send cqe for unknown peer_address
+Sep 08 09:16:34 localhost.localdomain dpumesh_dpu[227297]: [09:16:34:274122][2757619744][DOCA][ERR][comch_server.c:150][server_send_task_completion_err_callback] Server send task failed: DOCA_ERROR_UNEXPECTED
+Sep 08 09:16:34 localhost.localdomain dpumesh_dpu[227297]: [09:16:34:274278][2757619744][DOCA][ERR][doca_comm_channel_2.cpp:1120] got send cqe for unknown peer_address
+Sep 08 09:16:34 localhost.localdomain dpumesh_dpu[227297]: [09:16:34:274283][2757619744][DOCA][ERR][comch_server.c:150][server_send_task_completion_err_callback] Server send task failed: DOCA_ERROR_UNEXPECTED
+Sep 08 09:16:34 localhost.localdomain dpumesh_dpu[227297]: [09:16:34:274439][2757619744][DOCA][ERR][doca_comm_channel_2.cpp:1120] got send cqe for unknown peer_address
+Sep 08 09:16:34 localhost.localdomain dpumesh_dpu[227297]: [09:16:34:274443][2757619744][DOCA][ERR][comch_server.c:150][server_send_task_completion_err_callback] Server send task failed: DOCA_ERROR_UNEXPECTED
+Sep 08 09:16:34 localhost.localdomain dpumesh_dpu[227297]: [09:16:34:274599][2757619744][DOCA][ERR][doca_comm_channel_2.cpp:1120] got send cqe for unknown peer_address
+Sep 08 09:16:34 localhost.localdomain dpumesh_dpu[227297]: [09:16:34:300742][2757619744][DOCA][ERR][linux_devx_adapter.cpp:555] devx_obj_destroy failed for pd_handle=0xaaaae1c1fbf0. errno=EINVAL (22)
+Sep 08 09:16:34 localhost.localdomain dpumesh_dpu[227297]: [09:16:34:300779][2757619744][DOCA][ERR][protection_domain.cpp:89] PD 0xaaaae1c1fbc0: Failed to destroy PD. err=DOCA_ERROR_DRIVER
+Sep 08 09:16:34 localhost.localdomain dpumesh_dpu[227297]: [09:16:34:300785][2757619744][DOCA][ERR][doca_dev.cpp:104] Device 0xaaaae1c234a0: Failed to destroy device: failed to deallocate PD for dev mlx5_0. err=DOCA_ERROR_DRIVER
+Sep 08 09:16:34 localhost.localdomain dpumesh_dpu[227297]: [09:16:34:300790][2757619744][DOCA][ERR][doca_dev.cpp:137] Device 0xaaaae1c234a0: Failed to destroy device. err=DOCA_ERROR_IN_USE
+Sep 08 09:16:34 localhost.localdomain dpumesh_dpu[227297]: [09:16:34:300793][2757619744][DOCA][ERR][doca_dev.cpp:1058] Device 0xaaaae1c234a0: Failed to close local device. err=DOCA_ERROR_IN_USE
+Sep 08 09:16:34 localhost.localdomain dpumesh_dpu[227297]: [09:16:34:300796][2757619744][DOCA][ERR][object.c:126][cleanup_objects] Failed to close device properly with error = DOCA_ERROR_IN_USE
+Sep 08 09:16:34 localhost.localdomain dpumesh_dpu[227297]: [09:16:34:300801][2757619744][DOCA][WRN][dpu_worker.c:1401][run_dpu_worker] runtime hardware cleanup completed
+Sep 08 09:16:34 localhost.localdomain dpumesh_dpu[227297]: dpumesh_dpu: exit() called
+Sep 08 09:16:34 localhost.localdomain systemd[1]: dpumesh-native-final.service: Deactivated successfully.
+Sep 08 09:16:34 localhost.localdomain systemd[1]: Stopped /home/jukebox/DPUmesh/doca/build/dpumesh_dpu -p 03:00.0 -r 94:00.0 -l 40.
+Sep 08 09:16:34 localhost.localdomain systemd[1]: dpumesh-native-final.service: Consumed 1min 7.675s CPU time.

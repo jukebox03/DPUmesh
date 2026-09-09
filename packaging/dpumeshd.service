@@ -28,15 +28,17 @@ ExecStart=/opt/dpumesh/venv/bin/python -m node.dpumeshd \
 WorkingDirectory=/opt/dpumesh/python
 Restart=on-failure
 RestartSec=2s
-TimeoutStopSec=10s
-KillMode=control-group
+TimeoutStopSec=25s
+# Let dpumeshd stop and reap brokers first; final timeout kills the whole group.
+KillMode=mixed
 Delegate=yes
 TasksMax=infinity
 LimitMEMLOCK=infinity
 UMask=0077
 
 # The manager needs namespace/cgroup setup and the DOCA device. It receives no
-# Kubernetes credential and cannot write the immutable package/config trees.
+# workload credential. In direct mode its dedicated Kubernetes client has read-only
+# Pod/Service access; the manager cannot write immutable package/config trees.
 CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_IPC_LOCK CAP_KILL CAP_SETGID CAP_SETPCAP CAP_SETUID CAP_SYS_ADMIN CAP_SYS_RESOURCE
 AmbientCapabilities=
 NoNewPrivileges=no

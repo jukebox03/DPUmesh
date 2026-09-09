@@ -6,6 +6,11 @@
  */
 
 #include <execinfo.h>
+#include <fcntl.h>
+#include <sys/file.h>
+#include <sys/stat.h>
+#include "local_control.h"
+#include "comch_server.h"
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -28,9 +33,14 @@
 
 DOCA_LOG_REGISTER(DPU_MAIN);
 
+/* A termination request leaves the worker loop, which then drains and releases
+ * hardware; it does not end the process from the handler. */
+volatile sig_atomic_t dmesh_dpu_stop;
+static void request_stop(int sig) { (void)sig; dmesh_dpu_stop = 1; }
+
 /* The process log is the only record of how this process ended: a fatal
- * signal leaves its frames here before the default action runs, and a
- * termination request or an exit call leaves a line. */
+ * signal leaves its frames here before the default action runs, and an exit
+ * call leaves a line. */
 static void trace_fatal_signal(int sig)
 {
     void *frames[64];
@@ -56,23 +66,37 @@ static void install_exit_traces(void)
     sa.sa_handler = trace_fatal_signal;
     sa.sa_flags = SA_RESETHAND | SA_NODEFER;
     sigemptyset(&sa.sa_mask);
-    const int fatal[] = {SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT, SIGTERM, SIGHUP, SIGINT};
+    const int fatal[] = {SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT};
     for (size_t i = 0; i < sizeof(fatal) / sizeof(fatal[0]); i++)
         sigaction(fatal[i], &sa, NULL);
+    sa.sa_handler = request_stop; sa.sa_flags = 0;
+    sigaction(SIGTERM, &sa, NULL); sigaction(SIGINT, &sa, NULL);
     atexit(trace_exit);
 }
 
 int main(int argc, char **argv)
 {
     install_exit_traces();
+    /* One runtime owns the device. The lock is held for the life of the
+     * process, so a service and a Pod can never drive the same BlueField. */
+    const char *lock_path = getenv("DPUMESH_RUNTIME_LOCK");
+    if (!lock_path) lock_path = "/run/dpumesh-runtime/runtime.lock";
+    (void)mkdir("/run/dpumesh-runtime", 0700);
+    int lock_fd = open(lock_path, O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (lock_fd < 0 || flock(lock_fd, LOCK_EX | LOCK_NB) != 0) {
+        fprintf(stderr, "dpumesh_dpu: another runtime owns hardware or lock unavailable\n");
+        return 1;
+    }
+    const char *ready_file = getenv("DPUMESH_READY_FILE");
+    if (ready_file) unlink(ready_file);
+
     /* A write to a socket whose peer has gone must return EPIPE, not end the
      * process. The embedded Rust proxy is a static library, so the runtime
      * start-up that would ignore SIGPIPE never runs; do it here, before
      * anything opens a socket. */
     signal(SIGPIPE, SIG_IGN);
 
-    /* Heap-allocated (struct objects is large); never freed — the process runs
-     * until killed and run_dpu_worker() below blocks forever. */
+    /* Heap-allocated: the large runtime state lives until the worker drains. */
     struct objects *objs = calloc(1, sizeof(*objs));
     struct global_config gcfg = {0};
     doca_error_t result;
@@ -112,6 +136,11 @@ int main(int argc, char **argv)
     snprintf(objs->cluster_id, sizeof(objs->cluster_id), "%s", cluster_id);
     snprintf(objs->node_name, sizeof(objs->node_name), "%s", node_name);
 
+    const char *mode = getenv("DPUMESH_REGISTRATION_MODE");
+    if (mode && strcmp(mode, "grant") && strcmp(mode, "direct")) {
+        result = DOCA_ERROR_INVALID_VALUE; goto exit;
+    }
+    objs->local_registration = mode && !strcmp(mode, "direct");
     char registration_error[256] = {0};
     if (dmesh_registration_configure(objs, registration_error,
                                      sizeof(registration_error)) != 0) {
@@ -204,8 +233,24 @@ int main(int argc, char **argv)
         }
     }
 
-    /* Run DPU worker (blocking) */
-    run_dpu_worker(objs);
+    if (objs->local_registration) {
+        char host_uri[320];
+        snprintf(host_uri, sizeof(host_uri), "spiffe://dpumesh.io/node/%s", objs->node_name);
+        const char *port = getenv("DPUMESH_LOCAL_PORT");
+        objs->local_control = dmesh_local_control_create(
+            getenv("DPUMESH_LOCAL_BIND"), port ? (unsigned)strtoul(port, NULL, 10) : 4791,
+            getenv("DPUMESH_LOCAL_CA"), getenv("DPUMESH_LOCAL_CERT"),
+            getenv("DPUMESH_LOCAL_KEY"), host_uri, server_local_dispatch,
+            server_local_retire, server_local_available, objs);
+        if (!objs->local_control) {
+            DOCA_LOG_ERR("paired-host control TLS configuration failed");
+            result = DOCA_ERROR_INVALID_VALUE; cleanup_objects(objs); goto argp_cleanup;
+        }
+    }
+    result = run_dpu_worker(objs) == 0 ? DOCA_SUCCESS : DOCA_ERROR_BAD_STATE;
+    dmesh_local_control_destroy(objs->local_control);
+    objs->local_control = NULL;
+    if (ready_file) unlink(ready_file);
 
 argp_cleanup:
     clean_argp();

@@ -1,38 +1,42 @@
-# Fixed-overhead TX (lean) vs arena batching (batch) — hardware A/B
+# Fixed-overhead TX (lean) against arena batching (batch) — hardware A/B
 
-기준일: 2026-09-06
+## Verdict
 
-## 판정
+The lean build, which removes the fixed cost per write and per drain pass, runs
+gRPC at 2.9–4.4% lower CPU/RPC and 3.1–4.4% higher capacity than the batch build
+on the same BlueField, at all four sizes. The RPC/s ranges over three repeats are
+disjoint at every size. At matched input rate CPU/RPC is also 0.8–5.0% lower with
+both p50 and p99 lower. Publication size is identical in the two arms, so the
+difference comes from the fixed cost and not from batching.
 
-write당·drain pass당 고정비를 없앤 lean 빌드는 같은 BlueField에서 batch 빌드보다
-gRPC 네 크기 모두 CPU/RPC가 2.9~4.4% 낮고 capacity가 3.1~4.4% 높다. 세 반복의
-RPC/s 범위가 네 크기 모두 겹치지 않는다. 같은 입력 부하(matched)에서도 CPU/RPC는
-0.8~5.0% 낮고 p50/p99가 모두 낮다. publication 크기는 두 arm이 같으므로 이 차이는
-batching이 아니라 고정비에서 왔다.
+Opaque TCP shows −0.7% and −3.0% capacity RPC/s with widely overlapping ranges,
+and −2.0% and −0.2% matched CPU/RPC. No improvement or regression is claimed for
+opaque.
 
-opaque TCP는 capacity RPC/s가 −0.7%/−3.0%지만 범위가 넓게 겹치고 matched CPU/RPC는
-−2.0%/−0.2%다. opaque는 개선도 회귀도 판정하지 않는다.
+This receipt answers the question left open after direct TX: "the copy went away
+but CPU went up". Against the Vec (before) arm of the morning campaign on
+2026-09-06, batch was +2% CPU/RPC at 64 KiB; lean turns that into −3.8%. That
+comparison spans campaigns on different days and therefore includes rig
+variation.
 
-이 receipt는 direct TX 이후 열려 있던 "복사를 줄였는데 CPU가 늘었다"는 문제에 대한
-답이다. 2026-09-06 아침 캠페인의 Vec(before) 대비 batch가 64 KiB에서 +2%였던 CPU/RPC를
-lean은 −3.8%로 뒤집었다(다른 날 캠페인 간 비교이므로 rig 편차를 포함한다).
+## What lean changed
 
-## 변경 요약(lean)
+The C side is unchanged; only two Rust crates moved. The writer-side quota
+(epoch, remaining, attempts, `TxBudget`, grant, the 1 ms gate) is deleted and the
+chunk itself is the backpressure. The writer lives inside the endpoint as a
+`Box<dyn TxWriter>` and the C call happens under the endpoint lock, cutting five
+lock pairs per write to one. The waker is cloned only on the Pending path and the
+owner check is a thread_local. A per-worker `DriverSignal` plus a per-endpoint
+dirty bit let the driver skip idle endpoints without locking, and the prometheus
+refresh moved to the 1 ms maintenance pass. `poll_shutdown` returns immediately
+and the driver preserves FIN ordering. The `tx_budget_wait` metric is deleted.
 
-C는 그대로이고 Rust 두 crate만 바뀌었다. writer 쪽 quota(epoch·remaining·attempts·
-`TxBudget`·grant·1 ms 게이트)를 삭제하고 chunk 자체를 역압으로 쓴다. writer를
-`Box<dyn TxWriter>`로 endpoint 안에 두고 C 호출을 endpoint lock 아래서 수행해 write당
-lock 5쌍을 1쌍으로 줄였다. waker는 Pending 경로에서만 clone하고 owner 검사는
-thread_local이다. worker당 `DriverSignal`과 endpoint별 dirty 비트로 driver가 idle
-endpoint를 lock 없이 건너뛰고, prometheus 갱신은 1 ms maintenance로 옮겼다.
-`poll_shutdown`은 즉시 반환하고 FIN 순서는 driver가 지킨다. `tx_budget_wait` metric은
-삭제했다.
+## Clean capacity
 
-## clean capacity
+Median of three 8 s runs. CPU is the summed utime+stime of the eight Arm workers
+divided by scheduled RPCs.
 
-8초 run 세 번의 중앙값. CPU는 ARM worker 8개의 utime+stime 합을 scheduled RPC로 나눈 값.
-
-| protocol | payload | RPC/s batch→lean | CPU µs/RPC batch→lean | p50 µs | p99 µs |
+| Protocol | Payload | RPC/s batch→lean | CPU µs/RPC batch→lean | p50 µs | p99 µs |
 |---|---:|---:|---:|---:|---:|
 | gRPC | 64 B | 35,154→36,694 (+4.38%) | 183.01→174.92 (−4.42%) | 1,822→1,768 | 3,083→2,553 |
 | gRPC | 1 KiB | 33,790→34,828 (+3.07%) | 190.14→183.61 (−3.43%) | 1,878→1,829 | 4,156→3,233 |
@@ -41,19 +45,20 @@ endpoint를 lock 없이 건너뛰고, prometheus 갱신은 1 ms maintenance로 �
 | opaque | 64 B | 135,303→134,353 (−0.70%) | 23.71→23.35 (−1.51%) | 441→443 | 1,103→1,116 |
 | opaque | 1 KiB | 120,658→117,052 (−2.99%) | 25.57→25.98 (+1.60%) | 483→502 | 1,178→1,177 |
 
-RPC/s 범위(3회): gRPC 64 B 34,872–35,627 vs 36,665–36,937, 1 KiB 33,536–34,227 vs
-34,638–35,227, 8 KiB 20,774–21,059 vs 21,580–21,621, 64 KiB 12,645–12,713 vs
-13,013–13,169로 모두 분리된다. opaque 64 B 134,772–135,901 vs 131,532–139,349, 1 KiB
-118,888–125,753 vs 116,617–123,579로 겹친다.
+RPC/s ranges over the three runs separate everywhere for gRPC: 64 B
+34,872–35,627 against 36,665–36,937, 1 KiB 33,536–34,227 against 34,638–35,227,
+8 KiB 20,774–21,059 against 21,580–21,621, 64 KiB 12,645–12,713 against
+13,013–13,169. Opaque overlaps: 64 B 134,772–135,901 against 131,532–139,349,
+1 KiB 118,888–125,753 against 116,617–123,579.
 
-총 worker CPU는 64 KiB에서 batch 7.78코어, lean 7.74코어로 같다. 같은 CPU로 3.5% 더
-많은 RPC를 처리했다.
+Total worker CPU at 64 KiB is the same, 7.78 cores for batch and 7.74 for lean:
+the same CPU handled 3.5% more RPCs.
 
-## matched rate
+## Matched rate
 
-gRPC 64 B/1 KiB 20k, 8 KiB 10k, 64 KiB 2k RPC/s. opaque 20k RPC/s.
+gRPC 20k RPC/s at 64 B and 1 KiB, 10k at 8 KiB, 2k at 64 KiB. Opaque 20k RPC/s.
 
-| protocol | payload | CPU µs/RPC batch→lean | p50 µs | p99 µs |
+| Protocol | Payload | CPU µs/RPC batch→lean | p50 µs | p99 µs |
 |---|---:|---:|---:|---:|
 | gRPC | 64 B | 333.00→330.06 (−0.88%) | 998→963 | 2,003→1,941 |
 | gRPC | 1 KiB | 334.75→332.06 (−0.80%) | 1,040→1,003 | 2,093→2,040 |
@@ -62,11 +67,12 @@ gRPC 64 B/1 KiB 20k, 8 KiB 10k, 64 KiB 2k RPC/s. opaque 20k RPC/s.
 | opaque | 64 B | 79.31→77.75 (−1.97%) | 263→259 | 490→483 |
 | opaque | 1 KiB | 80.81→80.69 (−0.15%) | 265→251 | 491→476 |
 
-## publication 모양은 그대로
+## Publication shape is unchanged
 
-uprobe로 `dmesh_l7_tx_batch_flush`의 성공 반환만 센 별도 12초 run이다.
+A separate 12 s run counted only the successful returns of
+`dmesh_l7_tx_batch_flush` with a uprobe.
 
-| protocol | payload | 평균 publication bytes batch→lean | publications/MiB batch→lean |
+| Protocol | Payload | Mean publication bytes batch→lean | Publications/MiB batch→lean |
 |---|---:|---:|---:|
 | gRPC | 64 B | 320.5→321.9 | 3,272→3,257 |
 | gRPC | 1 KiB | 2,879.5→2,872.7 | 364→365 |
@@ -75,16 +81,17 @@ uprobe로 `dmesh_l7_tx_batch_flush`의 성공 반환만 센 별도 12초 run이�
 | opaque | 64 B | 266.1→266.2 | 3,941→3,939 |
 | opaque | 1 KiB | 3,449.0→3,451.8 | 304.0→303.8 |
 
-64 KiB full publication은 두 arm 모두 0이다. clean 표본 전체에서 arena copy bytes와
-accepted bytes가 같고 publication 수와 reserve attempt 수가 같다. lean의 TX retry는
-clean 30개 run 합계 26회(chunk 가득 참 또는 arena 대기)이며 writer wake 26회와
-일치한다. batch의 retry는 0, budget-wait wake는 60회다.
+Full 64 KiB publications are 0 in both arms. Across every clean sample the arena
+copy bytes equal the accepted bytes and the publication count equals the reserve
+attempt count. lean's TX retries total 26 across all 30 clean runs (a full chunk
+or an arena wait), matching its 26 writer wakes. batch has 0 retries and 60
+budget-wait wakes.
 
-## 어디서 줄었나
+## Where the saving came from
 
-64 KiB PMU(별도 12초 run 3회, 가운데 8초):
+64 KiB PMU (three separate 12 s runs, middle 8 s):
 
-| metric | batch | lean | 변화 |
+| Metric | batch | lean | Change |
 |---|---:|---:|---:|
 | cycles/RPC | 1,308,634 | 1,262,728 | −3.51% |
 | instructions/RPC | 573,421 | 545,137 | −4.93% |
@@ -92,67 +99,80 @@ clean 30개 run 합계 26회(chunk 가득 참 또는 arena 대기)이며 writer 
 | cache-misses/RPC | 10,008 | 9,786 | −2.22% |
 | context-switches/RPC | 0.227 | 0.195 | −14.2% |
 
-batch의 PMU 2·3회차는 처리량 11.0K RPC/s·6.8코어로 1회차(12.7K·7.8코어)와 lean 3회
-(13.0K·7.7코어)보다 낮았다. RPC당 값은 이 저하에 크게 흔들리지 않았고, 저하 자체는
-batch arm에서만 나타난 변동이므로 표본을 그대로 보존했다(`pmu-samples.csv`).
-direct TX 때와 달리 이번에는 instruction 수 자체가 줄었다.
+batch's second and third PMU runs sat at 11.0K RPC/s on 6.8 cores, below the
+first (12.7K on 7.8 cores) and below all three lean runs (13.0K on 7.7 cores).
+The per-RPC values are not much affected by that dip, and the dip appeared only
+in the batch arm, so the samples were kept as they are (`pmu-samples.csv`).
+Unlike the direct TX campaign, this time the instruction count itself fell.
 
-profile(별도 16초 run, 8 worker 합산 exclusive self %):
+Profile (separate 16 s run, exclusive self % summed over the eight workers):
 
-| payload | 원자 연산 helper | `ExternalBackend::drain` self | memcpy | kernel |
+| Payload | Atomic helpers | `ExternalBackend::drain` self | memcpy | kernel |
 |---|---:|---:|---:|---:|
 | 64 B | 10.75→10.40 | — | 2.78→2.88 | 11.07→12.54 |
 | 1 KiB | 10.56→9.69 | — | 2.91→3.58 | 10.93→12.04 |
 | 64 KiB | 11.09→10.17 | 1.27→0.80 | 5.23→5.94 | 5.78→5.49 |
 
-64 KiB에서 `__aarch64_cas1_acq` 1.26→0.81, `ldadd4_acq_rel` 1.45→1.19, `ldadd8_rel`
-1.13→0.89로 줄었고 `poll_write_vectored` self 0.35는 `poll_transmit` 0.23과
-`DirectWriter::write` 0.22로 갈라졌다. memcpy 비중 상승은 절대량이 아니라 나머지가
-줄어 생긴 비중 변화다(publication 모양과 copy bytes가 같다).
+At 64 KiB `__aarch64_cas1_acq` fell 1.26→0.81, `ldadd4_acq_rel` 1.45→1.19 and
+`ldadd8_rel` 1.13→0.89, and the 0.35 self of `poll_write_vectored` split into
+0.23 for `poll_transmit` and 0.22 for `DirectWriter::write`. The rise in the
+memcpy share is a share change, not an absolute one: everything else shrank while
+the publication shape and copy bytes stayed the same.
 
-작은 크기에서 kernel 비중이 1.5pp 올랐다. clean counter로 보면 lean은 RPC당 drain
-pass가 7.9→8.9회, park/arm 전환이 1.6→2.2회로 늘었다. pass가 가벼워져 driver가 stack을
-더 자주 따라잡고 더 자주 park한다. 다음 레버는 이 park/arm 횟수다.
+The kernel share rose 1.5pp at the small sizes. The clean counters show why: in
+lean, drain passes per RPC rise 7.9→8.9 and park/arm transitions 1.6→2.2. Passes
+became cheaper, so the driver catches up with the stack more often and parks more
+often. That park/arm count is the next lever.
 
-## rig drift 확인
+## Rig drift check
 
-main A/B 뒤 batch gRPC 64 KiB를 다시 3회 측정했다: 12,659/12,626/12,602 RPC/s,
-CPU/RPC 612.6/612.7/616.3 µs. main의 batch(12,645–12,713, 610.6–613.4)와 같고 lean
-(13,013–13,169, 587.1–591.5)과 겹치지 않는다. 이번 campaign 안에서는 drift가 없다.
+After the main A/B, batch gRPC 64 KiB was measured three more times:
+12,659/12,626/12,602 RPC/s at CPU/RPC 612.6/612.7/616.3 µs. That matches the main
+batch samples (12,645–12,713 at 610.6–613.4) and does not overlap lean
+(13,013–13,169 at 587.1–591.5). There is no drift within this campaign.
 
-## 사고 두 건
+## Two incidents
 
-첫 `run_matrix.sh`는 setup에서 멈췄다. sudo로 만든 scratch 디렉터리가 root 소유라
-비특권 arena 레이아웃 컴파일이 쓰지 못했다. 배포 전이라 rig는 변하지 않았다
+The first `run_matrix.sh` stopped during setup: the scratch directory created
+under sudo was root-owned, so the unprivileged arena-layout compile could not
+write into it. Nothing had been deployed, so the rig was unchanged
 (`raw/matrix-attempt1-setup-permission.log`).
 
-두 번째 실행은 batch/opaque 배포의 warmup에서 멈췄다. echo Pod 등록 150 ms 뒤에
-첫 dial이 들어가 Linkerd가 "No dmesh backend channel … no live registration"으로
-거절했고, C가 세션 8개를 poison한 직후 **batch runtime(PID 3447022)이 로그 없이
-사라졌다**. dmesg에 segfault/OOM 기록이 없고 core_pattern이 apport라 core도 없다
-(`raw/batch-opaque/dpu-log-3447022-died.txt`). 이 binary는 직전 캠페인의 batch와
-동일하므로 lean 변경과 무관하지만, "거절된 dial → poison → 조용한 종료"는 열린
-결함이다. 재현 조건은 controller feed가 새 Pod를 싣기 전의 첫 dial이며, 재시도
-배포에서는 나타나지 않았다. `campaign.py deploy`는 이후 rollout 뒤 5초를 기다리고
-warmup을 최대 4회 재시도한다. 6개 배포 중 나머지 5개는 첫 warmup에서 통과했다.
+The second run stopped in the warmup of the batch/opaque deployment. The first
+dial arrived 150 ms after the echo Pod registered, Linkerd refused it with
+"No dmesh backend channel … no live registration", and right after C poisoned
+eight sessions the **batch runtime (PID 3447022) disappeared without a log**.
+dmesg records no segfault or OOM, and `core_pattern` is apport, so there is no
+core either (`raw/batch-opaque/dpu-log-3447022-died.txt`). That binary is
+identical to the preceding campaign's batch and so is unrelated to the lean
+changes, but "refused dial → poison → silent exit" is an open defect. The
+reproduction condition is a first dial before the controller feed carries the new
+Pod, and it did not appear on the retried deployment. `campaign.py deploy` now
+waits five seconds after the rollout and retries the warmup up to four times;
+five of the six deployments passed on the first warmup.
 
-## 방법과 품질 gate
+## Method and quality gates
 
-- binary: batch `b62194f1…36eb`(직전 캠페인이 DPU에 보존), lean `1577c3cc…e270`
-  (`bench/bench.sh build`, Rust release LTO+jemalloc, C debugoptimized). 두 binary를
-  `/tmp/tx-fixed-overhead-20260906/`에 두고 배포마다 `/proc/<pid>/exe` 해시를 대조했다.
-- 같은 BlueField-3, N/K/A=32/8/8, Linkerd all workers, client CPU 4–9, server CPU 10–17,
-  closed-loop 8 threads × conc 8, gRPC image `direct-tx`.
-- gRPC는 batch→lean, opaque는 lean→batch 순서다.
-- 표본 99개(clean 75, PMU 6, trace 12, profile 6) 전부 `OK`이고 fail/drop/overflow/
-  worker_fail/reorder/eq_budget_exhausted 최대값이 0이다.
-- 모든 L7 arm 종료 전 arena 1,024/1,024 free, live chunk 0을 7회 확인했고 L7 metric
-  gauge(session/task/DMA/queue/ACK/FIN)도 0이었다.
-- lean tree software gate: dmesh-doca 35/35, adapter 41/41, production `cargo check` OK.
+- Binaries: batch `b62194f1…36eb` (kept on the DPU by the preceding campaign),
+  lean `1577c3cc…e270` (`bench/bench.sh build`, Rust release LTO+jemalloc, C
+  debugoptimized). Both were staged in `/tmp/tx-fixed-overhead-20260906/` and
+  every deployment was checked by hashing `/proc/<pid>/exe`.
+- Same BlueField-3, N/K/A = 32/8/8, Linkerd on all workers, client CPUs 4–9,
+  server CPUs 10–17, closed loop of 8 threads at concurrency 8, gRPC image
+  `direct-tx`.
+- gRPC ran batch then lean; opaque ran lean then batch.
+- All 99 samples (75 clean, 6 PMU, 12 trace, 6 profile) are `OK`, with a maximum
+  of 0 for fail, drop, overflow, worker_fail, reorder and eq_budget_exhausted.
+- Before every L7 arm shut down, the arena read 1,024/1,024 free with 0 live
+  chunks, confirmed seven times, and the L7 gauges (session, task, DMA, queue,
+  ACK, FIN) were 0.
+- lean tree software gates: dmesh-doca 35/35, adapter 41/41, production
+  `cargo check` OK.
 
-복원은 [RESTORATION.md](RESTORATION.md)에 있다. 파생 데이터는 [comparison.csv](comparison.csv),
-[summary.csv](summary.csv), [trace-summary.csv](trace-summary.csv),
-[pmu-summary.csv](pmu-summary.csv), [profile-summary.csv](profile-summary.csv),
-[report-tables.md](report-tables.md)이고 그림은 [comparison.png](comparison.png)이다.
-원시 표본과 절차는 `raw/`, `campaign.py`, `run_matrix.sh`, `resume_matrix.sh`,
-`commands.txt`에 있다.
+Restoration is in [RESTORATION.md](RESTORATION.md). Derived data is in
+[comparison.csv](comparison.csv), [summary.csv](summary.csv),
+[trace-summary.csv](trace-summary.csv), [pmu-summary.csv](pmu-summary.csv),
+[profile-summary.csv](profile-summary.csv) and
+[report-tables.md](report-tables.md); the figure is
+[comparison.png](comparison.png). Raw samples and the procedure are in `raw/`,
+`campaign.py`, `run_matrix.sh`, `resume_matrix.sh` and `commands.txt`.

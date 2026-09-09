@@ -1,0 +1,11 @@
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+Comch reached IDLE; attempting the selected send path
+
+Program received signal SIGSEGV, Segmentation fault.
+0x00007ffff7e6ffa8 in priv_doca_task_pool_allocate_task () from /opt/mellanox/doca/lib/x86_64-linux-gnu/libdoca_common.so.2
+#0  0x00007ffff7e6ffa8 in priv_doca_task_pool_allocate_task () from /opt/mellanox/doca/lib/x86_64-linux-gnu/libdoca_common.so.2
+#1  0x00007ffff7dcdb42 in doca_comch_client_task_send_alloc_init () from /opt/mellanox/doca/lib/x86_64-linux-gnu/libdoca_comch.so.2
+#2  0x00005555555556b6 in main (argc=3, argv=0x7fffffffe558) at tests/hw_comch_idle_send.c:38
+rdi            0x0                 0
+rip            0x7ffff7e6ffa8      0x7ffff7e6ffa8 <priv_doca_task_pool_allocate_task+8>

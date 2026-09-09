@@ -122,6 +122,25 @@ $(TESTDIR)/native_control_state_test: tests/native_control_state_test.c doca/com
 		doca/topology.c doca/control_scope.c \
 		$(DOCA_LIBS) $(CRYPTO_LIBS) -lpthread $(RPATHS)
 
+# Manual hardware reproducer; intentionally excluded from the test suites.
+$(TESTDIR)/hw_comch_idle_send: tests/hw_comch_idle_send.c $(LIB) $(LIB_HDRS) | dirs
+	$(CC) $(CFLAGS) -o $@ tests/hw_comch_idle_send.c -L$(LIBDIR) -ldpumesh $(DOCA_LIBS) $(RPATHS)
+
+$(TESTDIR)/hw_comch_peer_loss: tests/hw_comch_peer_loss.c $(LIB_LINK) $(LIB_HDRS) | dirs
+	$(CC) $(CFLAGS) -o $@ tests/hw_comch_peer_loss.c -L$(LIBDIR) -ldpumesh $(DOCA_LIBS) $(RPATHS)
+
+$(TESTDIR)/comch_cleanup_test: tests/comch_cleanup_test.c doca/object.c $(LIB_HDRS) | dirs
+	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -Wl,--gc-sections \
+		-o $@ tests/comch_cleanup_test.c doca/object.c $(DOCA_LIBS) $(RPATHS)
+
+$(TESTDIR)/broker_quiesce_test: tests/broker_quiesce_test.c src/core/dmesh_core.c $(LIB_HDRS) | dirs
+	$(CC) $(CFLAGS) -D_GNU_SOURCE -ffunction-sections -fdata-sections -Wl,--gc-sections \
+		-o $@ tests/broker_quiesce_test.c $(DOCA_LIBS) -lpthread $(RPATHS)
+
+$(TESTDIR)/comch_send_state_test: tests/comch_send_state_test.c doca/comch_client.c $(LIB_HDRS) | dirs
+	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -Wl,--gc-sections \
+		-o $@ tests/comch_send_state_test.c $(DOCA_LIBS) $(RPATHS)
+
 $(TESTDIR)/workload_grant_test: tests/workload_grant_test.c doca/workload_grant.c $(LIB_HDRS) | dirs
 	$(CC) $(CFLAGS) -o $@ tests/workload_grant_test.c doca/workload_grant.c \
 		$(DOCA_LIBS) $(CRYPTO_LIBS) $(RPATHS)
@@ -226,7 +245,7 @@ test-hostfree: $(HOSTFREE_TESTS)
 	bash tests/bench_geometry_test.sh
 
 test: $(TESTDIR)/native_api_contract_test $(TESTDIR)/native_control_state_test \
-	$(TESTDIR)/workload_grant_test $(TESTDIR)/pod_membership_test \
+	$(TESTDIR)/comch_cleanup_test $(TESTDIR)/broker_quiesce_test $(TESTDIR)/comch_send_state_test $(TESTDIR)/workload_grant_test $(TESTDIR)/pod_membership_test \
 	$(TESTDIR)/native_tx_batch_policy_test $(TESTDIR)/native_writable_test \
 	$(TESTDIR)/preload_api_contract_test $(TESTDIR)/l4_pin_policy_test \
 	$(TESTDIR)/lb_policy_test \
@@ -238,6 +257,9 @@ test: $(TESTDIR)/native_api_contract_test $(TESTDIR)/native_control_state_test \
 	$(BINDIR)/bench_dpumesh $(BINDIR)/bench_sock
 	$(TESTDIR)/native_api_contract_test
 	$(TESTDIR)/native_control_state_test
+	$(TESTDIR)/comch_send_state_test
+	$(TESTDIR)/broker_quiesce_test
+	$(TESTDIR)/comch_cleanup_test
 	$(TESTDIR)/workload_grant_test
 	$(TESTDIR)/pod_membership_test
 	$(TESTDIR)/native_tx_batch_policy_test
@@ -306,3 +328,11 @@ clean:
 	rm -rf $(BUILD)
 
 -include $(wildcard $(DEPDIR)/*.d)
+
+# Authentication/session tests run the production TLS server without hardware.
+$(TESTDIR)/local_control_server: tests/local_control_server.c doca/local_control.c doca/local_control.h | dirs
+	$(CC) $(CFLAGS) -o $@ tests/local_control_server.c doca/local_control.c $(TLS_LIBS) $(CRYPTO_LIBS)
+
+.PHONY: test-local-registration
+test-local-registration: $(TESTDIR)/local_control_server
+	$(DPUMESHD_PYTHON) tests/local_registration_test.py

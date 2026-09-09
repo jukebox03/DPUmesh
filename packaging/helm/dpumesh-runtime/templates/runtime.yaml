@@ -1,0 +1,68 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Release.Name }}
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ .Release.Name }}
+spec:
+  updateStrategy:
+    type: OnDelete
+  selector:
+    matchLabels: {app.kubernetes.io/instance: {{ .Release.Name }}}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/instance: {{ .Release.Name }}}
+      annotations:
+        linkerd.io/inject: disabled
+        sidecar.istio.io/inject: "false"
+    spec:
+      serviceAccountName: {{ .Release.Name }}
+      automountServiceAccountToken: false
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      terminationGracePeriodSeconds: 40
+      nodeSelector:
+        kubernetes.io/hostname: {{ required "dpuNode is required" .Values.dpuNode | quote }}
+        kubernetes.io/arch: arm64
+      tolerations:
+        - key: dpumesh.io/dpu
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+      containers:
+        - name: runtime
+          image: {{ .Values.image | quote }}
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          # Initial hardware profile. This is an infrastructure-only Pod, not
+          # an application privilege requirement. Narrow after device testing.
+          securityContext:
+            privileged: true
+          env:
+            - {name: DPUMESH_CLUSTER_ID, value: {{ required "clusterID is required" .Values.clusterID | quote }}}
+            - {name: DPUMESH_NODE_NAME, value: {{ required "hostNode is required" .Values.hostNode | quote }}}
+            - {name: DPUMESH_DPU_PCI, value: {{ required "pci is required" .Values.pci | quote }}}
+            - {name: DPUMESH_DPU_REPRESENTOR, value: {{ required "representor is required" .Values.representor | quote }}}
+            - {name: DPUMESH_REGISTRATION_MODE, value: {{ .Values.registrationMode | quote }}}
+            - {name: DPUMESH_LOCAL_BIND, value: {{ .Values.localBind | quote }}}
+            - {name: DPUMESH_READY_FILE, value: /run/dpumesh-runtime/ready}
+            {{- range $name, $value := .Values.env }}
+            - {name: {{ $name }}, value: {{ $value | quote }}}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          readinessProbe:
+            exec:
+              command: [sh, -ec, 'test -f /run/dpumesh-runtime/ready && test $(($(date +%s)-$(stat -c %Y /run/dpumesh-runtime/ready))) -lt 5']
+            periodSeconds: 2
+          volumeMounts:
+            - {name: config, mountPath: /etc/dpumesh}
+            - {name: runtime, mountPath: /run/dpumesh-runtime}
+      volumes:
+        - name: config
+          hostPath: {path: {{ .Values.configDirectory | quote }}, type: Directory}
+        - name: runtime
+          hostPath: {path: {{ .Values.runtimeDirectory | quote }}, type: DirectoryOrCreate}

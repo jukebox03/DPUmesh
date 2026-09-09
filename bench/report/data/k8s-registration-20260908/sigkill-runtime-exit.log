@@ -1,0 +1,4 @@
+[09:25:19:068626][2975600672][DOCA][ERR][comch_server.c:150][server_send_task_completion_err_callback] Server send task failed: DOCA_ERROR_CONNECTION_ABORTED
+[09:25:19:068646][2975600672][DOCA][WRN][comch_server.c:575][server_disconnection_event_callback] disconnect: no pod slot matched the disconnected connection
+[09:25:19:385487][2975600672][DOCA][WRN][comch_server.c:1534][server_local_dispatch] local REGISTER accepted pod=e9b0da49-a56e-4d3a-b2f1-aa0d1938728e container=62ee0d9f31c38fdb62ae5358d149ecc887e2245d33bc4ce1403c67f0ec5f0bd2 slot=1 generation=4
+[09:25:20:140094][2975600672][DOCA][WRN][comch_server.c:1534][server_local_dispatch] local REGISTER accepted pod=7ef34906-0259-4360-a7df-c93d964becfc container=23062f92a1f9e67c9feeb93d1665a3b098d9f24c6abd799f53de0232987c8808 slot=0 generation=5

@@ -15,9 +15,13 @@ Kubernetes controller                 Kubernetes workload Pods
           └──── signed feed delivery ─────► BlueField Arm OS services
 ```
 
-The DPU and `dpumeshd` are system services outside Kubernetes. Kubernetes runs
-the controller and workloads. The DPU binary also contains the optional Linkerd
-adapter; it starts only when an L7 Service list is configured.
+In this profile the DPU runtime and `dpumeshd` are system services and
+registration is `grant`: Kubernetes runs the controller and the workloads only.
+[`packaging/README-dpu-kubernetes.md`](../packaging/README-dpu-kubernetes.md) is
+the other supplied profile, where the DPU runtime is a DaemonSet on a DPU node
+and registration is `direct`. Both use the same workload contract and the same
+DPU binary, which also contains the optional Linkerd adapter; the adapter starts
+only when an L7 Service list is configured.
 
 ## Directory map
 
@@ -132,9 +136,12 @@ spec:
 
 Kubelet mounts only the assigned socket at `/run/dpumesh/channel.sock`. The Pod
 receives no Kubernetes token, DPU device, PCI address, host directory, signing
-key, privileged init container or added capability. The controller grants
-`DPUMESH_SERVICE` only when its latest Kubernetes snapshot contains the Pod as
-a ready selected endpoint of that Service.
+key, privileged init container or added capability. This manifest is the same
+under either profile; the registration mode changes only who authorizes it.
+`DPUMESH_SERVICE` is granted when the Pod is a selected endpoint of that
+Service. Under `grant` it must also be a ready endpoint, so a server whose
+readiness depends on the channel it is registering cannot use that mode; under
+`direct` readiness governs routing only.
 The complete worked manifest is [`k8s/native-hw.yaml`](k8s/native-hw.yaml); the
 minimal server is [`examples/k8s.yaml`](examples/k8s.yaml).
 
@@ -192,8 +199,9 @@ name and RDMA address match the configured row.
 ```
 
 `build` synchronizes DPU sources, builds the pinned Linkerd static library and
-links `dpumesh_dpu`. `restart` starts that binary with the configured keys,
-feeds and geometry. The native hardware profile sets both L7 Service lists
+links `dpumesh_dpu`. `restart` starts that binary directly with the configured
+keys, feeds and geometry; a runtime deployed as a DaemonSet is managed through
+Kubernetes instead. The native hardware profile sets both L7 Service lists
 empty, so the linked L7 runtime is inactive.
 
 The `point` command sends:
@@ -288,14 +296,14 @@ smoke latency as a performance series.
 
 Lifecycle invariants are:
 
-- `dpumeshd` advertises slots Healthy only while controller-to-DPU delivery and
-  node registration succeed;
+- `dpumeshd` advertises slots Healthy only while controller-to-DPU delivery,
+  node registration and — under `direct` — the DPU control session succeed;
 - one slot generation owns at most one connected workload and one broker;
 - broker exit completes DPU unregister/quiescence before the slot is reused;
 - a DPU or controller delivery failure closes admission for new allocations;
 - workloads never receive authority beyond their allocated socket;
-- restarting `dpumeshd` terminates its direct broker children through the
-  systemd control group;
+- stopping `dpumeshd` terminates its brokers and waits for their worker cgroups
+  to empty before returning;
 - L7 selection changes only DPU processing; no workload-side proxy is added;
 - measurement output is retained only with its exact geometry, deployed object
   set and separated Pod/host-service/DPU CPU accounting.

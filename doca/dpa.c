@@ -22,6 +22,7 @@
 #include <time.h>
 
 DOCA_LOG_REGISTER(DPA);
+#include "shutdown.h"
 
 #ifdef DOCA_ARCH_DPU
 
@@ -226,6 +227,7 @@ static void dmesh_doca_dpa_msgq_recv_cb(struct doca_comch_consumer_task_post_rec
     }
 
 resubmit_recv_task:
+    if (objs->shutting_down == 2) { doca_task_free(task); return; }
     /* Backpressure: if comp_queue is nearly full, defer recv task resubmission
      * so DPA sees consumer_empty and pauses; the owning data worker's PE pass
      * resubmits when the queue drops below BP_LOW. On submit failure also stash
@@ -276,6 +278,11 @@ static void dmesh_doca_dpa_msgq_recv_error_cb(struct doca_comch_consumer_task_po
 	struct dmesh_doca_dpa_msgq *recv_msgq = task_user_data.ptr;
 	if (recv_msgq != NULL)
 		__atomic_fetch_sub(&recv_msgq->recv_posted, 1, __ATOMIC_RELAXED);
+
+	if (((struct objects *)ctx_user_data.ptr)->shutting_down == 2) {
+		doca_task_free(task);
+		return;
+	}
 
 	DOCA_LOG_ERR("DPA MsgQ recv ERROR callback: status=%s(%d)",
 	             doca_error_get_descr(status), (int)status);
@@ -349,7 +356,8 @@ void dmesh_doca_dpa_comch_msgq_ctx_state_changed_cb(const union doca_data user_d
 
 	switch (next_state) {
 	case DOCA_CTX_STATE_IDLE:
-        DOCA_LOG_ERR("DPA comch msgQ state is idle.");
+        if (!((struct objects *)user_data.ptr)->shutting_down)
+            DOCA_LOG_ERR("DPA comch msgQ state is idle.");
 		break;
     case DOCA_CTX_STATE_STARTING:
         break;
@@ -1380,3 +1388,57 @@ progress_teardown_pod_dma(struct objects *objs, struct pod_state *pod)
 }
 
 #endif /* DOCA_ARCH_DPU */
+
+#ifdef DOCA_ARCH_DPU
+/* Requires every per-Pod DEL_ACK and DMA barrier to have completed and the
+ * ARM workers to have joined. */
+doca_error_t cleanup_dpa_objects(struct objects *objs)
+{
+    objs->shutting_down = 2;
+    for (int s = 0; s < objs->n_data_workers; s++) {
+        struct dpu_data_worker *w = &objs->data_workers[s];
+        for (int i = 0; i < w->num_deferred_recv; i++)
+            doca_task_free(w->deferred_recv[i]);
+        w->num_deferred_recv = 0;
+    }
+    for (int k = 0; k < objs->num_dpa_threads; k++) {
+        struct dmesh_doca_dpa_comch *c = objs->dpa_comches[k];
+        struct dmesh_doca_dpa_thread *t = objs->dpa_threads[k];
+        dpu_worker_id = k % objs->n_data_workers;
+        DMESH_STOP_CHECK(dmesh_stop_context(doca_comch_producer_as_ctx(c->send.producer), objs->pe));
+        DMESH_STOP_CHECK(dmesh_stop_context(doca_comch_producer_as_ctx(c->recv.producer), NULL));
+        DMESH_STOP_CHECK(dmesh_stop_context(doca_comch_consumer_as_ctx(c->recv.consumer), objs->consumer_pes[dpu_worker_id]));
+        DMESH_STOP_CHECK(dmesh_stop_context(doca_comch_consumer_as_ctx(c->send.consumer), NULL));
+        DMESH_STOP_CHECK(doca_comch_producer_destroy(c->send.producer));
+        DMESH_STOP_CHECK(doca_comch_producer_destroy(c->recv.producer));
+        DMESH_STOP_CHECK(doca_comch_consumer_destroy(c->send.consumer));
+        DMESH_STOP_CHECK(doca_comch_consumer_destroy(c->recv.consumer));
+        DMESH_STOP_CHECK(doca_comch_msgq_stop(c->send.msgq));
+        DMESH_STOP_CHECK(doca_comch_msgq_stop(c->recv.msgq));
+        DMESH_STOP_CHECK(doca_comch_msgq_destroy(c->send.msgq));
+        DMESH_STOP_CHECK(doca_comch_msgq_destroy(c->recv.msgq));
+        DMESH_STOP_CHECK(doca_comch_consumer_completion_stop(c->consumer_comp));
+        DMESH_STOP_CHECK(doca_comch_consumer_completion_destroy(c->consumer_comp));
+        DMESH_STOP_CHECK(doca_dpa_completion_stop(c->producer_comp));
+        DMESH_STOP_CHECK(doca_dpa_completion_destroy(c->producer_comp));
+        DMESH_STOP_CHECK(doca_dpa_notification_completion_stop(t->resume_completion));
+        DMESH_STOP_CHECK(doca_dpa_notification_completion_destroy(t->resume_completion));
+        DMESH_STOP_CHECK(doca_dpa_notification_completion_stop(t->yield_completion));
+        DMESH_STOP_CHECK(doca_dpa_notification_completion_destroy(t->yield_completion));
+        DMESH_STOP_CHECK(doca_dpa_thread_stop(t->thread));
+        DMESH_STOP_CHECK(doca_dpa_thread_stop(t->yield_thread));
+        DMESH_STOP_CHECK(doca_dpa_thread_destroy(t->thread));
+        DMESH_STOP_CHECK(doca_dpa_thread_destroy(t->yield_thread));
+        DMESH_STOP_CHECK(doca_dpa_mem_free(objs->dpa, t->arg));
+    }
+    for (int s = 0; s < objs->n_data_workers; s++) {
+        DMESH_STOP_CHECK(doca_pe_destroy(objs->consumer_pes[s]));
+        objs->consumer_pes[s] = NULL;
+    }
+    objs->consumer_pe = NULL;
+    DMESH_STOP_CHECK(doca_dpa_stop(objs->dpa));
+    DMESH_STOP_CHECK(doca_dpa_destroy(objs->dpa));
+    objs->dpa = NULL;
+    return DOCA_SUCCESS;
+}
+#endif

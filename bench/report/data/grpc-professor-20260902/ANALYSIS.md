@@ -1,59 +1,68 @@
-# DPUmesh gRPC 정확성·성능·병목 보고 — 2026-09-02
+# DPUmesh gRPC correctness, performance and bottlenecks
 
-한 node, 한 BlueField, `N/K/A=32/8/8`, Host client/server 각 9 core. 모든 frame
-크기는 request와 response 각각의 logical frame이다(64 B/1 KiB/8 KiB, protobuf body
-48/1,008/8,176 B). 절차와 명령은 [`EXPERIMENT.md`](EXPERIMENT.md), 원자료는
-`*-raw.csv`, [`knee-followup-raw/`](knee-followup-raw/), [`lowload/`](lowload/),
-파생값은 `derive.py`가 만드는 `derived-*.csv`다.
+One node, one BlueField, `N/K/A=32/8/8`, nine host cores each for client and
+server. Every frame size is the logical frame of the request and of the response
+each (64 B / 1 KiB / 8 KiB, with protobuf bodies of 48/1,008/8,176 B). The
+procedure and commands are in [`EXPERIMENT.md`](EXPERIMENT.md), the raw data in
+`*-raw.csv`, [`knee-followup-raw/`](knee-followup-raw/) and
+[`lowload/`](lowload/), and the derived values in the `derived-*.csv` that
+`derive.py` produces.
 
-## 결론
+## Conclusions
 
-1. **정확성 gate는 전부 통과했다.** §1.
-2. **용량은 정의에 따라 둘이다.** 전달 기준(achieved ≥ 0.99·offered, 오류 0)으로
-   64 B **90k**, 1 KiB **75k**, 8 KiB **29.75k** RPC/s. p99 ≤ 5 ms 기준으로는
-   **80k / 70k / 20k**다. 전달 기준 점의 p99는 24 ms / 10 ms / 318 ms라서 지연
-   목표가 있는 배포에는 두 번째 정의를 써야 한다. §2.
-3. **저부하 DPU 비용의 정체는 요청당 이벤트 처리 고정비다.** worker 하나의 PMU를
-   직접 재면 64 B 요청 하나가 100 RPS에서는 instructions 467k, cache miss 4.9k,
-   IPC 0.30으로 **747 µs**, knee(worker당 6,250 RPS)에서는 173k, 1.7k, 0.54로
-   **154 µs**다. 요청 하나는 runtime loop 패스 약 8회와 wake 1–2회로 처리되고,
-   부하가 오르면 한 패스가 여러 요청을 처리해 고정비가 나뉜다. spin, 타이머 gating,
-   세션 재구축, Host coalescer는 모두 측정으로 배제됐다. 따라서 40k RPS부터 8 core가
-   차 보이는 것은 결함이 아니라 **이벤트당 비용이 큰 구현**이며, knee는 worker
-   수가 정한다. §3.
-4. **단일 요청의 지연 바닥은 0.94 ms(폐루프 1 in flight), 100 RPS open loop에서는
-   1.6 ms다.** 그중 DPU worker on-CPU가 정방향 약 450 µs와 역방향 약 320 µs이고
-   나머지가 Host 양쪽의 wake 체인이다. Host tail coalescer는 원인이 아니다(E2). 같은
-   10k RPS에서 표준 Linkerd sidecar는 403 µs, DPUmesh는 617 µs다. §2, §3.
-5. **비교는 코어당으로 읽어야 한다.** 같은 application의 closed loop에서 DPUmesh는
-   direct-TCP의 0.39배(64 B), Linkerd sidecar의 4.3배다. 그러나 Linkerd는 sidecar당
-   1 core(`LINKERD2_PROXY_CORES=1`)이고 DPUmesh는 ARM 8 core라서, proxy core당
-   처리량은 13.3k 대 12.5k로 같다. 10k RPS에서 Host 1.36 core를 아끼는 대가로 ARM
-   4.11 core를 쓴다. §6.
-6. **payload가 커질수록 DPUmesh가 가장 크게 잃는다.** 64 B→8 KiB에서 direct는
-   0.75배, Linkerd는 0.61배, DPUmesh는 0.32배로 떨어진다. ARM 비용은 payload byte당
-   14.6 ns로 memcpy의 수십 배다. §4.
-7. **과부하 거동은 포화가 아니라 손실이다.** peak 뒤 처리량 감소, RPC failure와
-   drop, 단일 worker 정지, 11시간 배포의 열화가 있다. §5.
-8. **worker 수는 용량을 결정한다.** A=4/6/8/12에서 40k/70k/80k/130k, worker당
-   10.0–11.7k RPC/s다. §7.
+1. **Every correctness gate passed.** §1.
+2. **There are two capacities, depending on the definition.** By delivery
+   (achieved ≥ 0.99 x offered, zero errors) they are **90k** at 64 B, **75k** at
+   1 KiB and **29.75k** RPC/s at 8 KiB. Under a p99 ≤ 5 ms criterion they are
+   **80k / 70k / 20k**. The p99 at the delivery points is 24 ms / 10 ms / 318 ms,
+   so a deployment with a latency target must use the second definition. §2.
+3. **The low-load DPU cost is a fixed cost of processing one event.** Measuring a
+   single worker's PMU directly, one 64 B request costs 467k instructions, 4.9k
+   cache misses and IPC 0.30 — **747 µs** — at 100 RPS, against 173k, 1.7k and
+   0.54 — **154 µs** — at the knee (6,250 RPS per worker). One request is handled
+   by roughly eight runtime loop passes and one or two wakes; as load rises a
+   single pass serves several requests and the fixed cost is divided. Spin, timer
+   gating, session rebuilding and the host coalescer were all excluded by
+   measurement. So eight cores appearing full from 40k RPS is not a defect but an
+   **implementation with a large per-event cost**, and the knee is set by the
+   worker count. §3.
+4. **The single-request latency floor is 0.94 ms (closed loop, 1 in flight) and
+   1.6 ms in a 100 RPS open loop.** Of that, DPU worker on-CPU is about 450 µs
+   forward and 320 µs reverse, and the rest is the wake chains on both host sides.
+   The host tail coalescer is not the cause (E2). At the same 10k RPS a stock
+   Linkerd sidecar is 403 µs against DPUmesh's 617 µs. §2, §3.
+5. **The comparison must be read per core.** In a closed loop with the same
+   application, DPUmesh reaches 0.39x direct TCP at 64 B and 4.3x the Linkerd
+   sidecar. But Linkerd runs one core per sidecar
+   (`LINKERD2_PROXY_CORES=1`) while DPUmesh uses eight Arm cores, so throughput
+   per proxy core is level: 13.3k against 12.5k. At 10k RPS, saving 1.36 host
+   cores costs 4.11 Arm cores. §6.
+6. **DPUmesh loses the most as the payload grows.** From 64 B to 8 KiB, direct
+   falls to 0.75x, Linkerd to 0.61x and DPUmesh to 0.32x. The Arm cost is 14.6 ns
+   per payload byte, tens of times a memcpy. §4.
+7. **Overload behaviour is loss, not saturation.** Past the peak, throughput
+   falls, and there are RPC failures and drops, a single worker stalling, and
+   degradation in an 11-hour-old deployment. §5.
+8. **The worker count sets the capacity.** A = 4/6/8/12 gives 40k/70k/80k/130k,
+   i.e. 10.0–11.7k RPC/s per worker. §7.
 
-## 1. 정확성
+## 1. Correctness
 
-| gate | 결과 |
+| Gate | Result |
 |---|---:|
-| Host transport/ABI/fault/analyzer (`make test-hostfree`) | PASS |
-| 실제 DPU lane·SG-DMA queue contract | PASS |
+| host transport/ABI/fault/analyzer (`make test-hostfree`) | PASS |
+| real DPU lane and SG-DMA queue contract | PASS |
 | release cHTTP2 adapter CTest | 4/4 |
 | Clang ASAN+UBSAN cHTTP2 CTest | 4/4 |
 | embedded Rust tests | 38/38 |
-| 실제 DPU shutdown/slot reuse | opened=closed 22/22 |
-| gRPC policy/routing surfaces | 19/19 ([`policy-stages.csv`](policy-stages.csv)) |
-| 최종 Pod restart / live task | 0 / 0 |
+| real DPU shutdown and slot reuse | opened = closed 22/22 |
+| gRPC policy and routing surfaces | 19/19 ([`policy-stages.csv`](policy-stages.csv)) |
+| final Pod restarts / live tasks | 0 / 0 |
 
-원자료 [`correctness.txt`](correctness.txt), 판정 기준 [`design/GRPC.md`](../../../../design/GRPC.md#verification-contract).
+Raw output [`correctness.txt`](correctness.txt); acceptance criteria
+[`design/GRPC.md`](../../../../design/GRPC.md#verification-contract).
 
-## 2. 용량과 지연
+## 2. Capacity and latency
 
 ![Offered against achieved](graphs/01_offered_achieved.png)
 
@@ -61,188 +70,216 @@
 
 ![p99 by payload](graphs/03_p99_latency.png)
 
-| frame | 전달 기준 용량 | 그 점의 p99 | p99 ≤ 5 ms 용량 | 그 점의 p99 | 10k RPS p50 |
+| Frame | Delivery capacity | p99 there | p99 ≤ 5 ms capacity | p99 there | 10k RPS p50 |
 |---:|---:|---:|---:|---:|---:|
 | 64 B | 90k | 24.2 ms | 80k | 4.97 ms | 611 µs |
 | 1 KiB | 75k | 10.3 ms | 70k | 4.73 ms | 625 µs |
 | 8 KiB | 29.75k | 318 ms | 20k | 2.29 ms | 1,552 µs |
 
-전달 기준은 한 배포에서 3/3 clean이고, 그보다 낮거나 같은 rate의 fresh 재배포
-반복에 mixed/bad가 없는 가장 높은 offered rate다. 64 B는 한 campaign에서 100k까지
-clean이었지만 fresh 재배포에서 92k mixed, 98/99k bad가 나와 90k만 인정한다
-([`knee-followup-summary.csv`](knee-followup-summary.csv), [`derived-capacity.csv`](derived-capacity.csv)).
+The delivery criterion is the highest offered rate that is 3/3 clean in one
+deployment and has no mixed or bad fresh-redeploy repeat at or below it. 64 B was
+clean up to 100k in one campaign, but fresh redeployments produced mixed at 92k
+and bad at 98k and 99k, so only 90k is granted
+([`knee-followup-summary.csv`](knee-followup-summary.csv),
+[`derived-capacity.csv`](derived-capacity.csv)).
 
-지연 바닥은 부하와 반대로 움직인다. 64 B p50은 500/1k/2.5k/5k/10k RPS에서
-983/988/739/643/611 µs이고, 8 KiB p50은 10k 1,556 µs에서 15k 1,239 µs로 내려간
-뒤 오른다. 바닥 자체를 재면 다음과 같다([`lowload/`](lowload/)).
+The latency floor moves against load. 64 B p50 is 983/988/739/643/611 µs at
+500/1k/2.5k/5k/10k RPS, and 8 KiB p50 falls from 1,556 µs at 10k to 1,239 µs at
+15k before rising. Measuring the floor itself gives ([`lowload/`](lowload/)):
 
-| 조건 | p50 | 비고 |
+| Condition | p50 | Note |
 |---|---:|---|
-| closed loop, 총 1 in flight (thread 1) | 936 µs | 따뜻한 단일 요청 왕복 |
-| closed loop, 총 2 / 4 in flight | 1,494 / 2,064 µs | worker 하나에 직렬, 요청당 약 550 µs |
-| open loop, channel 1, 100 RPS | 1,611 µs | 요청 사이 10 ms 유휴 |
-| open loop, channel 1, 1,000 RPS | 985 µs | 요청 사이 1 ms |
-| Host `TX_TAIL_DELAY_NS` 500→50 µs 빌드, 100 RPS | 1,605 µs | 변화 없음; 10k RPS는 611→1,456 µs로 악화 |
+| closed loop, 1 in flight total (1 thread) | 936 µs | a warm single round trip |
+| closed loop, 2 / 4 in flight total | 1,494 / 2,064 µs | serialized on one worker, about 550 µs per request |
+| open loop, 1 channel, 100 RPS | 1,611 µs | 10 ms idle between requests |
+| open loop, 1 channel, 1,000 RPS | 985 µs | 1 ms between requests |
+| host `TX_TAIL_DELAY_NS` 500→50 µs build, 100 RPS | 1,605 µs | unchanged; 10k RPS got worse, 611→1,456 µs |
 
-같은 node의 DMA 왕복은 수십 µs이므로 이 바닥은 하드웨어가 아니라 양쪽 소프트웨어
-경로다. 100 RPS에서 DPU worker가 요청 하나에 쓰는 on-CPU 시간은 정방향 약 450 µs와
-역방향 약 320 µs이고(§3), 나머지 약 800 µs가 client와 server 쪽 Host의 wake 체인과
-application이다. Host tail coalescer는 바닥에 관여하지 않으며 줄이면 중부하가 나빠진다.
+A same-node DMA round trip is tens of microseconds, so this floor is the software
+path on both sides, not the hardware. At 100 RPS the DPU worker spends about
+450 µs forward and 320 µs reverse of on-CPU time on one request (§3), and the
+remaining ~800 µs is the wake chains and applications on the client and server
+hosts. The host tail coalescer plays no part in the floor, and reducing it makes
+mid-load worse.
 
-## 3. 저부하 DPU 비용의 정체
+## 3. What the low-load DPU cost really is
 
 ![CPU against load](graphs/05_cpu_attribution.png)
 
 ![CPU against in-flight](graphs/09_inflight_cpu.png)
 
-캠페인 데이터에서 worker core는 초당 요청 수가 아니라 **열려 있는 요청 수**에
-비례한다(요청 하나가 in flight인 동안 0.69 core, 500 RPS부터 closed conc 8까지
-0.67–0.74, [`derived-inflight-cpu.csv`](derived-inflight-cpu.csv)). 그 이유를 worker
-하나에 channel 하나를 붙여 직접 쟀다.
+In the campaign data, worker core tracks the **number of open requests**, not
+requests per second: 0.69 core while one request is in flight, 0.67–0.74 from 500
+RPS through closed concurrency 8
+([`derived-inflight-cpu.csv`](derived-inflight-cpu.csv)). The reason was measured
+directly with one channel bound to one worker.
 
 ![Per-RPC PMU](graphs/11_per_rpc_pmu.png)
 
-| worker당 RPS | 조건 | p50 | cycles/RPC | instr/RPC | cache miss/RPC | IPC | ARM µs/RPC | syscall/RPC | wake/RPC |
+| RPS per worker | Condition | p50 | cycles/RPC | instr/RPC | cache miss/RPC | IPC | Arm µs/RPC | syscall/RPC | wake/RPC |
 |---:|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| 100 | channel 1, 100 RPS | 1,611 µs | 1.56 M | 467 k | 4,926 | 0.30 | 747 | 47 | 1.2 |
-| 1,250 | channel 8, 10k RPS | 617 µs | 1.07 M | 348 k | 4,080 | 0.33 | 520 | 46 | 1.9 |
-| 6,250 | channel 8, 50k RPS | 1,565 µs | 0.32 M | 173 k | 1,672 | 0.54 | 154 | 8 | 0.1 |
+| 100 | 1 channel, 100 RPS | 1,611 µs | 1.56 M | 467 k | 4,926 | 0.30 | 747 | 47 | 1.2 |
+| 1,250 | 8 channels, 10k RPS | 617 µs | 1.07 M | 348 k | 4,080 | 0.33 | 520 | 46 | 1.9 |
+| 6,250 | 8 channels, 50k RPS | 1,565 µs | 0.32 M | 173 k | 1,672 | 0.54 | 154 | 8 | 0.1 |
 
-`perf stat -t`로 channel을 든 worker thread만 잰 값이다(유휴 worker의 maintenance
-tick은 뺐다, [`lowload/pmu-per-rpc.csv`](lowload/pmu-per-rpc.csv)). 요청 하나의 비용이
-knee 대비 instructions 2.7배, cache miss 2.9배, IPC 절반이라서 cycles가 4.9배다.
+`perf stat -t` measured only the worker thread holding the channel, so the
+maintenance ticks of idle workers are excluded
+([`lowload/pmu-per-rpc.csv`](lowload/pmu-per-rpc.csv)). One request costs 2.7x the
+instructions and 2.9x the cache misses of the knee at half the IPC, hence 4.9x the
+cycles.
 
-무엇이 그 비용인지:
+What that cost is:
 
-- **loop 패스가 요청당 약 8회다.** `DPUMESH_PERF_STATS=1` 카운터로 100–1,000 RPS의
-  drain 패스는 요청당 7.4–8.1회이고 그중 절반은 아무것도 찾지 못한 Idle 패스다
-  ([`lowload/drain-passes.txt`](lowload/drain-passes.txt)). 한 패스는 DOCA progress,
-  engine pump/emit, ack release, 등록 수집, 모든 session의 양쪽 pump, hyper/H2
-  connection poll, notification arm과 clear, `select` 재등록을 다 지나므로 세션이
-  열린 worker의 유휴 tick 하나가 30–70 µs다.
-- **syscall이 요청당 47회다.** `epoll_pwait` 29, `read` 12(그중 8은 EAGAIN),
-  `write` 7이고 context switch는 1.2회다([`lowload/syscalls-500rps.txt`](lowload/syscalls-500rps.txt),
-  [`lowload/wakes-500rps.txt`](lowload/wakes-500rps.txt)). 잠들지 않고 도는 spin이
-  아니라, 깬 뒤 tokio 스케줄러가 매 yield마다 I/O driver를 도는 비용이다.
-- **요청 하나는 두 덩어리의 연속 on-CPU다.** `sched_switch` 트레이스에서 100 RPS의
-  요청은 정방향 약 450 µs 실행, 서버 쪽 공백 200–550 µs, 역방향 약 320 µs 실행으로
-  나타나고 202개 요청의 중앙값이 on-CPU 686 µs, span 1,265 µs다
-  ([`lowload/sched-100rps-clusters.txt`](lowload/sched-100rps-clusters.txt)). 이벤트를
-  기다리며 도는 구간은 없다.
-- **태스크 poll은 요청당 6회이고 그 하나하나가 비싸다.** 실행 중 바이너리에 uprobe를
-  걸어 세면 요청당 hyper 서버 connection poll 2.0회, h2 클라이언트 connection poll
-  4.0회, drain 21회다([`lowload/e5-probes-100rps.txt`](lowload/e5-probes-100rps.txt)).
-  inclusive profile에서 태스크가 64%, loop가 30%이므로 poll 한 번이 cold 상태에서
-  약 80 µs다. 과잉 poll이 아니라 poll 하나가 지나는 L7 스택의 폭이 비용이다.
-- **배제된 가설.** 세션 없는 유휴는 0.043 core이고 유휴 worker의 tick은 8.7 µs다
-  (spin 아님). DPU에는 cpufreq/cpuidle이 없어 클럭은 2.05–2.09 GHz로 일정하다(DVFS
-  아님). session/stack 관련 메트릭은 5,000 요청 동안 0 증가다(세션 재구축 아님).
-  Host tail 지연 500→50 µs는 100 RPS p50을 바꾸지 못했다(coalescer 아님).
-  generator는 `nanosleep`으로 도착 시각을 지킨다(측정 artifact 아님).
+- **About eight loop passes per request.** The `DPUMESH_PERF_STATS=1` counters
+  show 7.4–8.1 drain passes per request at 100–1,000 RPS, half of them Idle passes
+  that found nothing ([`lowload/drain-passes.txt`](lowload/drain-passes.txt)). One
+  pass runs through DOCA progress, engine pump and emit, ack release, registration
+  collection, both pumps of every session, the hyper/H2 connection poll,
+  notification arm and clear, and `select` re-registration, so a single idle tick
+  on a worker with an open session is 30–70 µs.
+- **47 syscalls per request.** `epoll_pwait` 29, `read` 12 (8 of them EAGAIN) and
+  `write` 7, with 1.2 context switches
+  ([`lowload/syscalls-500rps.txt`](lowload/syscalls-500rps.txt),
+  [`lowload/wakes-500rps.txt`](lowload/wakes-500rps.txt)). This is not a spin that
+  never sleeps; it is the cost of the tokio scheduler visiting the I/O driver on
+  every yield after waking.
+- **One request is two continuous on-CPU blocks.** In the `sched_switch` trace, a
+  100 RPS request shows about 450 µs of forward execution, a 200–550 µs gap on the
+  server side, and about 320 µs of reverse execution; over 202 requests the median
+  is 686 µs on-CPU within a 1,265 µs span
+  ([`lowload/sched-100rps-clusters.txt`](lowload/sched-100rps-clusters.txt)).
+  There is no interval spent spinning for an event.
+- **Six task polls per request, each expensive.** Uprobes on the running binary
+  count 2.0 hyper server connection polls, 4.0 h2 client connection polls and 21
+  drains per request
+  ([`lowload/e5-probes-100rps.txt`](lowload/e5-probes-100rps.txt)). The inclusive
+  profile puts tasks at 64% and the loop at 30%, so one poll is about 80 µs from
+  cold. The cost is not excess polls but the width of the L7 stack each poll
+  traverses.
+- **Hypotheses excluded.** Idle with no session is 0.043 core and an idle worker's
+  tick is 8.7 µs (not a spin). The DPU has no cpufreq or cpuidle, so the clock is
+  a steady 2.05–2.09 GHz (not DVFS). Session and stack metrics grew by 0 over
+  5,000 requests (not session rebuilding). Cutting the host tail delay 500→50 µs
+  did not change the 100 RPS p50 (not the coalescer). The generator honours
+  arrival times with `nanosleep` (not a measurement artifact).
 
-`perf stat` 64 B 50k: 7.591 core, 321.6k cycles/RPC, 181.2k instructions/RPC,
-IPC 0.56. exclusive profile은 `memcpy` 3.41%, atomic 3.35%+2.16%, syscall 2.11%,
-HPACK encode 1.80%로 상위 13개 합이 20%다. 100 RPS에서 channel worker만 떠도 같은
-모양이다. 비용은 한 함수가 아니라 이벤트마다 반복되는 긴 경로 전체에 있다.
+`perf stat` at 64 B 50k: 7.591 cores, 321.6k cycles/RPC, 181.2k instructions/RPC,
+IPC 0.56. The exclusive profile is `memcpy` 3.41%, atomics 3.35% + 2.16%, syscalls
+2.11% and HPACK encode 1.80%, with the top thirteen summing to 20%. At 100 RPS,
+with only the channel worker awake, the shape is the same. The cost is not in one
+function but spread across the long path repeated for every event.
 
 ![DPU perf](graphs/07_perf.png)
 
-결론: 저부하 CPU와 지연 바닥은 같은 원인, 즉 **이벤트마다 cold 상태로 지나는
-L7 스택의 폭**이다. loop 쪽(패스 수, syscall)은 전체의 30%라서 그것만 줄이면
-수 % 단위이고(E5 1차: −2~6%), 나머지 64%는 요청당 6회의 connection poll과 linkerd
-service 스택 자체다. 이를 줄이는 레버는 §8 E5에 적었다.
+Conclusion: the low-load CPU and the latency floor share one cause — **the width
+of the L7 stack traversed cold on every event**. The loop side (pass count,
+syscalls) is 30% of the total, so reducing only that is worth single-digit
+percent (E5 first pass: −2 to −6%), and the other 64% is the six connection polls
+per request and the linkerd service stack itself. The levers for that are in §8
+E5.
 
-## 4. payload 스케일링
+## 4. Payload scaling
 
 ![Payload scaling](graphs/10_payload_scaling.png)
 
-| frame | knee ARM µs/RPC | 64 B 대비 증가 | byte당 |
+| Frame | Knee Arm µs/RPC | Increase over 64 B | Per byte |
 |---:|---:|---:|---:|
 | 64 B | 79 | — | — |
 | 1 KiB | 104 | +25 µs | 12.8 ns |
 | 8 KiB | 317 | +237 µs | 14.6 ns |
 
-8 KiB 29.75k RPC/s는 양방향 합 3.9 Gbit/s다. ARM 8 core가 그 대역폭에서 포화하는
-것은 복사(byte당 0.1–0.3 ns)로 설명되지 않고, 전달 단위당 고정 비용(H2 frame,
-DMA descriptor, flow-control window, 두 번째 copy)으로 설명된다
-([`derived-knee-cost.csv`](derived-knee-cost.csv)).
+29.75k RPC/s at 8 KiB is 3.9 Gbit/s in both directions combined. Eight Arm cores
+saturating at that bandwidth is not explained by copying (0.1–0.3 ns per byte) but
+by the fixed cost per delivery unit — H2 frames, DMA descriptors, the flow-control
+window and a second copy ([`derived-knee-cost.csv`](derived-knee-cost.csv)).
 
-## 5. 과부하와 재현성
+## 5. Overload and repeatability
 
 ![Closed loop](graphs/04_inflight.png)
 
-- closed loop 처리량은 peak 뒤 감소한다: 64 B 118.9k(2,048)→102.1k(8,192),
-  1 KiB 88.7k(1,024)→77.4k(8,192). 포화한 서버는 평탄해야 한다.
-- 과부하가 backpressure가 아니라 오류로 나타난다: 1 KiB 80k에서 408 drop,
-  8 KiB 30k에서 7,765 failure와 credit loss 64, 8 KiB 총 2,048 in flight에서 반복마다
-  767 failure([`saturation-rejected.csv`](saturation-rejected.csv)).
-- fresh 배포의 64 B 92k 두 번째 반복에서 worker 5만 0.15 core로 멈추고 73,587
-  schedule drop이 났다. 다른 7개 worker는 정상이었다.
-- 11시간 된 배포는 80k에서 ratio 0.9878, p99 904 ms였고 재배포 후 같은 점이
-  3/3 clean, p99 4.97 ms였다([`stability-observation.csv`](stability-observation.csv)).
-- worker 8개에 channel 24개(3 session/worker)는 80k에서 43.7k만 전달하고 p50이
-  5.5 s다. worker 12개에 channel 24개는 정상이다([`session-scaling-summary.csv`](session-scaling-summary.csv)).
+- Closed-loop throughput falls past the peak: 64 B 118.9k (2,048) → 102.1k
+  (8,192), 1 KiB 88.7k (1,024) → 77.4k (8,192). A saturated server should stay
+  flat.
+- Overload appears as errors rather than backpressure: 408 drops at 1 KiB 80k;
+  7,765 failures and 64 credit losses at 8 KiB 30k; 767 failures per repeat at
+  8 KiB with 2,048 in flight
+  ([`saturation-rejected.csv`](saturation-rejected.csv)).
+- In the second repeat of 64 B 92k on a fresh deployment, worker 5 alone stalled
+  at 0.15 core with 73,587 schedule drops. The other seven workers were fine.
+- An 11-hour-old deployment gave ratio 0.9878 and p99 904 ms at 80k, while after
+  redeploying the same point was 3/3 clean with p99 4.97 ms
+  ([`stability-observation.csv`](stability-observation.csv)).
+- Eight workers with 24 channels (3 sessions per worker) delivered only 43.7k of
+  80k with a p50 of 5.5 s. Twelve workers with 24 channels was fine
+  ([`session-scaling-summary.csv`](session-scaling-summary.csv)).
 
-## 6. 같은 application의 세 transport
+## 6. Three transports for the same application
 
 ![Comparison](graphs/06_comparison.png)
 
-| frame | direct-TCP | DPUmesh (direct 대비) | Linkerd (direct 대비) | proxy core당 DPUmesh / Linkerd |
+| Frame | direct TCP | DPUmesh (vs direct) | Linkerd (vs direct) | per proxy core, DPUmesh / Linkerd |
 |---:|---:|---:|---:|---:|
 | 64 B | 272.4k | 106.8k (0.39) | 25.0k (0.09) | 13.3k / 12.5k |
 | 1 KiB | 259.2k | 89.1k (0.34) | 19.3k (0.07) | 11.1k / 9.7k |
 | 8 KiB | 204.6k | 34.3k (0.17) | 15.2k (0.07) | 4.3k / 7.6k |
 
-closed loop, 총 1,024 in flight, 10 s, 3회 중앙값. proxy core는 설정값이다(DPUmesh
-ARM worker 8, Linkerd sidecar 1 core × 2). 코어당으로는 두 mesh가 같은 급이고
-8 KiB에서는 Linkerd가 앞선다([`derived-comparison.csv`](derived-comparison.csv)).
+Closed loop, 1,024 in flight total, 10 s, median of three. Proxy cores are the
+configured values (8 DPUmesh Arm workers; Linkerd 1 core x 2 sidecars). Per core
+the two meshes are in the same class, and at 8 KiB Linkerd is ahead
+([`derived-comparison.csv`](derived-comparison.csv)).
 
-| frame | Linkerd Host core | DPUmesh Host core | 절감 | ARM 소비 | p50 Linkerd / DPUmesh |
+| Frame | Linkerd host cores | DPUmesh host cores | Saved | Arm consumed | p50 Linkerd / DPUmesh |
 |---:|---:|---:|---:|---:|---:|
 | 64 B | 3.24 | 1.87 | 1.36 | 4.11 | 403 / 611 µs |
 | 1 KiB | 3.52 | 1.90 | 1.62 | 4.21 | 433 / 625 µs |
 | 8 KiB | 3.80 | 2.38 | 1.42 | 5.24 | 514 / 1,552 µs |
 
-achieved 10k RPS, Host는 application+broker 또는 application+sidecar의 recursive
-Pod cgroup. Host 1 core를 아끼는 데 ARM 2.6–3.7 core가 들고 p50은 1.4–3.0배
-느리다([`derived-exchange-10k.csv`](derived-exchange-10k.csv)). 10k RPS의 ARM 520 µs/RPC
-중 knee 비용 154 µs를 넘는 부분이 §3의 이벤트당 고정비이므로, 그 고정비를 줄이면
-교환비와 지연 역전이 함께 바뀐다.
+At 10k RPS achieved, with the host measured as the recursive Pod cgroup of
+application plus broker or application plus sidecar. Saving one host core costs
+2.6–3.7 Arm cores and p50 is 1.4–3.0x slower
+([`derived-exchange-10k.csv`](derived-exchange-10k.csv)). Of the 520 µs/RPC of Arm
+at 10k RPS, everything above the knee cost of 154 µs is the per-event fixed cost
+of §3, so reducing that fixed cost moves both the exchange ratio and the latency
+inversion.
 
-## 7. worker 스케일링
+## 7. Worker scaling
 
 ![Worker scaling](graphs/08_worker_scaling.png)
 
-| workers | N/K/A | 최고 3/3 clean | first bad | worker당 | knee worker CPU |
+| Workers | N/K/A | Highest 3/3 clean | First bad | Per worker | Knee worker CPU |
 |---:|---|---:|---:|---:|---:|
 | 4 | 32/4/4 | 40k | 50k | 10.0k | 3.97/4 |
 | 6 | 30/6/6 | 70k | 80k | 11.7k | 5.95/6 |
-| 8 | 32/8/8 | 80k | 90k 반복 실패 | 10.0k | 7.79/8 |
+| 8 | 32/8/8 | 80k | 90k repeatedly failed | 10.0k | 7.79/8 |
 | 12 | 24/12/12 | 130k | 140k | 10.8k | 11.37/12 |
 
-`threads=channels=workers`로 worker당 session 1개. 130k에서 12 worker의 사용률은
-97.4–98.9%로 균형이다. A=6의 첫 배포는 broker READY reset으로 실패했고 재배포에서
-통과했다([`worker-scale-deploy-retry.txt`](worker-scale-deploy-retry.txt)).
+With `threads=channels=workers`, so one session per worker. At 130k the twelve
+workers sit at 97.4–98.9% utilization, i.e. balanced. The first A=6 deployment
+failed with a broker READY reset and passed on redeployment
+([`worker-scale-deploy-retry.txt`](worker-scale-deploy-retry.txt)).
 
-## 8. 판정을 가른 실험과 남은 실험
+## 8. The experiments that decided the verdicts, and what is left
 
-조건과 통과 기준은 [`EXPERIMENT.md`](EXPERIMENT.md#e-사전-등록-실험)에 있다.
+Conditions and pass criteria are in
+[`EXPERIMENT.md`](EXPERIMENT.md#e-pre-registered-experiments).
 
-| ID | 질문 | 결과 |
+| ID | Question | Result |
 |---|---|---|
-| E1 | worker CPU가 열린 요청 수를 따르는 이유 | **측정 완료.** channel 1개 100 RPS에서 747 µs/RPC(≥ 400)이지만 spin이 아니라 이벤트당 고정비(§3) |
-| E2 | 0.6–1 ms 지연 바닥의 위치 | **측정 완료, 기각.** `TX_TAIL_DELAY_NS` 50 µs 빌드에서 100 RPS p50 1,605 µs(불변), 10k RPS 1,456 µs(악화); 바닥은 DPU 이벤트 경로와 Host wake 체인 |
-| E3 | 코어를 맞춘 비교 | 미측정: Linkerd sidecar 4 core와 direct-TCP 10k RPS p50 |
-| E4 | 단일 worker 정지와 열화 | 미측정: fresh 배포 5회 × 90/92k와 24시간 80k probe |
-| E5 | 이벤트당 고정비 절감 | **1차 측정 완료.** Rust drain을 C engine drain보다 먼저 두고(publish한 바이트를 같은 패스에서 DMA 제출), wake eventfd는 tick이 게시됐을 때만 읽게 한 빌드. worker CPU −2~6%(1ch 100/500/1k RPS 695→680, 641→616, 617→601 µs/RPC; 8ch 10k 411→406), syscall/RPC 47→32, 지연 불변(폐루프 936→930 µs), 64 B 90k 3/3 clean, `grpcshutdown`과 policy 19/19 통과([`lowload/e5-ab.csv`](lowload/e5-ab.csv), [`policy-route-20260902-184855/`](../policy-route-20260902-184855/)). 사전 목표(≤200 µs)에는 loop 정리로 도달 불가 |
+| E1 | why worker CPU follows the number of open requests | **complete.** 747 µs/RPC (≥ 400) at 1 channel and 100 RPS, but a per-event fixed cost rather than a spin (§3) |
+| E2 | where the 0.6–1 ms latency floor lives | **complete, rejected.** With the 50 µs `TX_TAIL_DELAY_NS` build, 100 RPS p50 was 1,605 µs (unchanged) and 10k RPS 1,456 µs (worse); the floor is the DPU event path and the host wake chains |
+| E3 | a core-matched comparison | not measured: a 4-core Linkerd sidecar and direct TCP p50 at 10k RPS |
+| E4 | a single worker stalling and degradation | not measured: five fresh deployments x 90/92k, and a 24-hour 80k probe |
+| E5 | cutting the fixed cost per event | **first pass complete.** A build that puts the Rust drain ahead of the C engine drain (so published bytes are submitted to DMA in the same pass) and reads the wake eventfd only when a tick was posted. Worker CPU −2 to −6% (1 channel at 100/500/1k RPS: 695→680, 641→616, 617→601 µs/RPC; 8 channels at 10k: 411→406), syscalls/RPC 47→32, latency unchanged (closed loop 936→930 µs), 64 B 90k 3/3 clean, `grpcshutdown` and policy 19/19 passing ([`lowload/e5-ab.csv`](lowload/e5-ab.csv), [`policy-route-20260902-184855/`](../policy-route-20260902-184855/)). The pre-registered target (≤ 200 µs) is unreachable by loop tidying |
 
-E5 1차가 보여준 것은 loop 정리의 상한이 수 %라는 사실이다. 남은 레버는 요청당 6회의
-connection poll을 줄이거나(h2 클라이언트 4회→2회), 이벤트 뒤 짧은 bounded spin으로
-wake 체인과 cold 재진입을 피하거나, linkerd service 스택의 깊이를 줄이는 것이며,
-셋 다 loop가 아니라 L7 스택 쪽 작업이다. 이 보고서의 병목 판정은 "knee는 worker
-수가 정한다(§7)", 저부하 CPU와 지연은 "이벤트마다 cold로 지나는 L7 스택(§3)"이다.
+What the first E5 pass showed is that loop tidying is capped at a few percent. The
+remaining levers are cutting the six connection polls per request (h2 client 4→2),
+a short bounded spin after an event to avoid the wake chain and cold re-entry, and
+reducing the depth of the linkerd service stack — all three on the L7 stack rather
+than the loop. This report's bottleneck verdicts are that the knee is set by the
+worker count (§7), and that the low-load CPU and latency are the L7 stack
+traversed cold on every event (§3).
 
-## 재현
+## Reproduction
 
 ```sh
 python3 bench/report/data/grpc-professor-20260902/derive.py   # derived-*.csv
@@ -250,6 +287,8 @@ python3 bench/report/data/grpc-professor-20260902/plot.py     # graphs/*.{svg,pn
 bash bench/suite/grpc_correctness.sh all                       # §1
 ```
 
-측정 arm별 배포·pin·sweep 명령은 [`EXPERIMENT.md`](EXPERIMENT.md)의 각 행에 있고,
-§3의 저부하 진단 명령은 같은 문서의 E1/E2에 있다. 외적 범위는 단일 node, 한
-BlueField, A=4/6/8/12이며 cross-node와 24시간 안정성은 측정하지 않았다.
+The deploy, pin and sweep commands for each measurement arm are in the rows of
+[`EXPERIMENT.md`](EXPERIMENT.md), and the low-load diagnosis commands of §3 are in
+E1 and E2 of the same document. The external scope is a single node, one
+BlueField, and A = 4/6/8/12; cross-node traffic and 24-hour stability were not
+measured.

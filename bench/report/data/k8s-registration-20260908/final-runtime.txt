@@ -1,0 +1,2 @@
+NAME                    READY   STATUS    RESTARTS      AGE     IP              NODE          NOMINATED NODE   READINESS GATES
+dpumesh-runtime-t6r8z   1/1     Running   1 (85s ago)   3m40s   192.168.100.2   rapids4-dpu   <none>           <none>

@@ -1,0 +1,17 @@
+Sep 08 18:23:28 rapids4 python[2163977]: dmesh_broker: RESOLVE_ACK timeout request=2 pod_id=1
+Sep 08 18:23:28 rapids4 python[2163977]: dmesh_broker: initialization failed: invalid RESOLVE or relay failure (code=74)
+Sep 08 18:23:28 rapids4 python[2163977]: [09:23:28:866077][1586423616][DOCA][WRN][dmesh_core.c:2733][request_remote_pod_quiesce] Control path stopped while awaiting POD_QUIESCED: DOCA_ERROR_CONNECTION_ABORTED
+Sep 08 18:23:28 rapids4 python[2159992]: dpumeshd: local control unavailable: DPU control connection closed
+Sep 08 18:23:28 rapids4 python[2163539]: dmesh_broker: Comch control path stopped pod_id=0
+Sep 08 18:23:35 rapids4 python[2159992]: dpumeshd: broker exited pid=2163539 exit=139 pod=9fbed321-4ce6-44e7-af28-8a058d2b1f18
+Sep 08 18:23:35 rapids4 python[2159992]: dpumeshd: broker exited pid=2163977 exit=0 pod=45203e79-b8a6-423f-8686-99797692a861
+Sep 08 18:23:56 rapids4 python[2159992]: dpumeshd: broker pid=2166048 slot=channel-001 generation=3 pod=9fbed321-4ce6-44e7-af28-8a058d2b1f18
+Sep 08 18:23:56 rapids4 python[2166048]: [dpumesh] Opening DOCA device at 94:00.0...
+Sep 08 18:23:56 rapids4 python[2166048]: [dpumesh] Connecting comch client...
+Sep 08 18:23:57 rapids4 python[2159992]: dpumeshd: direct REGISTER pod=9fbed321-4ce6-44e7-af28-8a058d2b1f18 slot=1 generation=3
+Sep 08 18:23:58 rapids4 python[2166048]: dmesh_broker: READY sent pod_id=0 fds=19
+Sep 08 18:24:22 rapids4 python[2159992]: dpumeshd: broker pid=2167021 slot=channel-000 generation=4 pod=45203e79-b8a6-423f-8686-99797692a861
+Sep 08 18:24:22 rapids4 python[2167021]: [dpumesh] Opening DOCA device at 94:00.0...
+Sep 08 18:24:22 rapids4 python[2167021]: [dpumesh] Connecting comch client...
+Sep 08 18:24:24 rapids4 python[2159992]: dpumeshd: direct REGISTER pod=45203e79-b8a6-423f-8686-99797692a861 slot=0 generation=4
+Sep 08 18:24:24 rapids4 python[2167021]: dmesh_broker: READY sent pod_id=1 fds=19

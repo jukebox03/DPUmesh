@@ -45,6 +45,7 @@
 #include "doca/comch_client.h"
 #include "doca/comch_common.h"
 #include "doca/comch_msgq.h"
+#include "doca/local_control.h"
 #include "doca/dpa_common.h"
 #include "dmesh_grant.h"
 #include "src/broker/dmesh_broker_internal.h"
@@ -68,7 +69,7 @@ static const char *doca_err_str(doca_error_t rc) {
     return doca_error_get_descr(rc);
 }
 
-static void cleanup_ctx(struct dpumesh_ctx *ctx);
+static int cleanup_ctx(struct dpumesh_ctx *ctx);
 static int drain_rev_rings_span(struct dpumesh_ctx *ctx, int shard, int nshards,
                                 uint32_t budget);
 static int dmesh_drain_tx_locked(dmesh_qp_t *c, int flush_partial);
@@ -631,8 +632,13 @@ static int64_t eq_tx_armed_wait_ns(struct dmesh_eq *eq, uint64_t now)
 {
     uint64_t earliest = atomic_load_explicit(&eq->tx_earliest_ns,
                                              memory_order_relaxed);
-    if (earliest == 0)
-        return -1;
+    if (earliest == 0) {
+        /* The retained-bit count, not the cached deadline, says whether work
+         * exists: ACK-side arming can race the owner clearing that cache. Wake
+         * the owner to rescan rather than stranding committed bytes. */
+        return atomic_load_explicit(&eq->tx_armed_count, memory_order_acquire)
+                   ? 0 : -1;
+    }
     return earliest <= now ? 0 : (int64_t)(earliest - now);
 }
 
@@ -1755,6 +1761,8 @@ static int init_elapsed_ms(const struct timespec *start, const struct timespec *
 }
 
 static doca_error_t require_running_control_path(dpumesh_ctx_t *ctx) {
+    if (ctx->doca_objs.client_send_failed)
+        return DOCA_ERROR_CONNECTION_ABORTED;
     if (ctx->doca_objs.cc_client == NULL)
         return DOCA_ERROR_NOT_CONNECTED;
     enum doca_ctx_states state;
@@ -1853,7 +1861,7 @@ static doca_error_t wait_for_pod_init_result(dpumesh_ctx_t *ctx) {
 }
 
 static doca_error_t init_control_path(dpumesh_ctx_t *ctx,
-                                     const char *manager_socket) {
+                                     const char *manager_socket, int manager_fd) {
     doca_error_t result;
 
     /* Initialize challenge publication before connecting: the DPU may submit
@@ -1901,23 +1909,52 @@ static doca_error_t init_control_path(dpumesh_ctx_t *ctx,
         return DOCA_ERROR_BAD_STATE;
     }
 
-    struct dmesh_workload_assert_msg assertion;
-    char grant_error[256] = {0};
-    if (dmesh_request_workload_grant(
-            manager_socket, ctx->service_name,
-            ctx->doca_objs.registration_challenge, &assertion,
-            grant_error, sizeof(grant_error)) != 0) {
-        DOCA_LOG_ERR("Host runtime rejected registration: %s",
-                     grant_error);
-        return DOCA_ERROR_INITIALIZATION;
-    }
-    result = client_send_msg(&ctx->doca_objs, (const char *)&assertion,
-                             sizeof(assertion));
-    memset(&assertion, 0, sizeof(assertion));
-    if (result != DOCA_SUCCESS) {
-        DOCA_LOG_ERR("WORKLOAD_ASSERT send failed: %s",
-                     doca_error_get_name(result));
-        return result;
+    /* The challenge names the DPU's registration mode. Under `direct` the
+     * report goes to the supervisor on the retained launch socket and it
+     * registers this connection; under `grant` the signed assertion travels
+     * here on Comch. A mode the launch did not set up fails the channel. */
+    if (manager_fd >= 0) {
+        if (ctx->doca_objs.registration_protocol != DMESH_LOCAL_VERSION) {
+            DOCA_LOG_ERR("direct registration requires challenge version %d",
+                         DMESH_LOCAL_VERSION);
+            return DOCA_ERROR_BAD_STATE;
+        }
+        struct dmesh_grant_request request = {0};
+        memcpy(request.magic, DMESH_LOCAL_MAGIC, sizeof(request.magic));
+        request.version = DMESH_LOCAL_VERSION;
+        snprintf(request.service_name, sizeof(request.service_name), "%s", ctx->service_name);
+        memcpy(request.nonce, ctx->doca_objs.registration_challenge, sizeof(request.nonce));
+        struct timeval deadline = { .tv_sec = 15 };
+        setsockopt(manager_fd, SOL_SOCKET, SO_RCVTIMEO, &deadline, sizeof(deadline));
+        uint8_t status = 255;
+        if (send(manager_fd, &request, sizeof(request), MSG_NOSIGNAL) != sizeof(request) ||
+            recv(manager_fd, &status, sizeof(status), MSG_TRUNC) != 1 || status != 0) {
+            DOCA_LOG_ERR("paired-host REGISTER was refused");
+            return DOCA_ERROR_INITIALIZATION;
+        }
+    } else {
+        if (ctx->doca_objs.registration_protocol != DMESH_ASSERT_VERSION) {
+            DOCA_LOG_ERR("grant registration requires challenge version %d",
+                         DMESH_ASSERT_VERSION);
+            return DOCA_ERROR_BAD_STATE;
+        }
+        struct dmesh_workload_assert_msg assertion;
+        char grant_error[256] = {0};
+        if (dmesh_request_workload_grant(
+                manager_socket, ctx->service_name,
+                ctx->doca_objs.registration_challenge, &assertion,
+                grant_error, sizeof(grant_error)) != 0) {
+            DOCA_LOG_ERR("Host runtime rejected registration: %s", grant_error);
+            return DOCA_ERROR_INITIALIZATION;
+        }
+        result = client_send_msg(&ctx->doca_objs, (const char *)&assertion,
+                                 sizeof(assertion));
+        memset(&assertion, 0, sizeof(assertion));
+        if (result != DOCA_SUCCESS) {
+            DOCA_LOG_ERR("WORKLOAD_ASSERT send failed: %s",
+                         doca_error_get_name(result));
+            return result;
+        }
     }
 
     ctx->reg_msg.type = DMESH_MSG_POD_REGISTER;
@@ -2257,6 +2294,10 @@ static int broker_harden_process(void)
     };
     struct __user_cap_data_struct caps[2] = {{0}, {0}};
     if (syscall(SYS_capset, &header, caps) != 0 ||
+        /* Credential changes clear the parent-death signal armed at fork.
+         * The supervisor also fences reuse on an empty worker cgroup, covering
+         * wrapper death during the credential-change/rearm interval. */
+        prctl(PR_SET_PDEATHSIG, SIGKILL, 0, 0, 0) != 0 ||
         prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0)
         return -1;
 
@@ -2307,7 +2348,7 @@ static int broker_enter_private_root(const char *root)
 /* Entry point used only by the host-side per-Pod broker executable. It owns
  * the device, Comch client, registered mmaps and their backing memfds. No data
  * bytes cross the Unix socket. */
-int dmesh_broker_run(int socket_fd, const char *manager_socket,
+int dmesh_broker_run(int socket_fd, const char *manager_socket, int manager_fd,
                      const char *private_root,
                      volatile sig_atomic_t *stop_requested)
 {
@@ -2344,7 +2385,7 @@ int dmesh_broker_run(int socket_fd, const char *manager_socket,
         dmesh_broker_send_error(socket_fd, EIO, "DOCA device open failed");
         goto out;
     }
-    result = init_control_path(ctx, manager_socket);
+    result = init_control_path(ctx, manager_socket, manager_fd);
     if (result != DOCA_SUCCESS) {
         dmesh_broker_send_error(socket_fd, EACCES, "DPU registration failed");
         goto out;
@@ -2497,7 +2538,8 @@ int dmesh_broker_run(int socket_fd, const char *manager_socket,
     close(ep);
     rc = 0;
 out:
-    cleanup_ctx(ctx);
+    if (cleanup_ctx(ctx) != 0)
+        rc = -1;
     close(socket_fd);
     return rc;
 out_free:
@@ -2692,8 +2734,14 @@ static int request_remote_pod_quiesce(dpumesh_ctx_t *ctx) {
     struct timespec last_send = {0};
     for (;;) {
         clock_gettime(CLOCK_MONOTONIC, &now);
-        if (last_send.tv_sec == 0 ||
-            init_elapsed_ms(&last_send, &now) >= DPUMESH_CONTROL_RETRY_MS) {
+        /* A disconnected peer can take seconds to fail a send, so hold the
+         * next UNREGISTER until the previous one completes; otherwise retries
+         * accumulate behind a dead connection and outlive the bounded Comch
+         * drain. This PE has a single owner during teardown. */
+        if (atomic_load_explicit(&objs->send_tasks_in_flight,
+                                 memory_order_acquire) == 0 &&
+            (last_send.tv_sec == 0 ||
+             init_elapsed_ms(&last_send, &now) >= DPUMESH_CONTROL_RETRY_MS)) {
             doca_error_t send_result = client_send_msg(
                 objs, (const char *)&msg, sizeof(msg));
             last_send = now;
@@ -2723,8 +2771,8 @@ static int request_remote_pod_quiesce(dpumesh_ctx_t *ctx) {
     }
 }
 
-static void cleanup_ctx(dpumesh_ctx_t *ctx) {
-    if (!ctx) return;
+static int cleanup_ctx(dpumesh_ctx_t *ctx) {
+    if (!ctx) return 0;
 
     /* No publisher may race remote quiesce or destruction of per-port state. */
     tx_timer_stop(ctx);
@@ -2773,8 +2821,16 @@ static void cleanup_ctx(dpumesh_ctx_t *ctx) {
     /* Disconnect first. Reaching Comch IDLE causes the DPU to unpublish this pod
      * before any host-exported address is released. cleanup_objects is delayed
      * until after mmap teardown so PE/device remain valid for doca_mmap_destroy. */
-    if (!ctx->broker_attached)
+    if (!ctx->broker_attached) {
         cleanup_comch_object(&ctx->doca_objs);
+        if (ctx->doca_objs.cc_client != NULL) {
+            /* Exported memory stays mapped while the context still owns work.
+             * The broker exits with failure, and process teardown plus the
+             * supervisor's cgroup and DPU fences reclaim the rest. */
+            DOCA_LOG_ERR("Broker Comch cleanup failed; retaining resources until process exit");
+            return -1;
+        }
+    }
 
     /* Per-conn TX block chains need no drain at teardown — in-flight bytes die with
      * the ctx. The drain threads are joined, so no reserve/reclaim can race this. */
@@ -2903,7 +2959,9 @@ next_dma_ring:
     }
     pthread_mutex_destroy(&ctx->resolve_lock);
 
+    int result = ctx->doca_objs.cleanup_failed ? -1 : 0;
     free(ctx);
+    return result;
 }
 
 void dpumesh_destroy(dpumesh_ctx_t *ctx) {

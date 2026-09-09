@@ -1,0 +1,25 @@
+[09:22:38:789877][2993078304][DOCA][WRN][dpu_worker.c:1328][run_dpu_worker] MAIN CONTROL/DOORBELL: workers=8, notification-driven (1 ms backstop tick)
+[09:22:47:170060][2993078304][DOCA][WRN][comch_server.c:1534][server_local_dispatch] local REGISTER accepted pod=9fbed321-4ce6-44e7-af28-8a058d2b1f18 container=2002e4662cdf06d420d64c8ec6a3ae791c9e77fb0d46d645813cbf5f7fd5a2a5 slot=1 generation=2
+[09:22:57:215851][2993078304][DOCA][WRN][comch_server.c:1534][server_local_dispatch] local REGISTER accepted pod=45203e79-b8a6-423f-8686-99797692a861 container=5b8dbb1f4280ea020cd11ee69f7b4bad6b466a7c9266827f2273bdfb260b3845 slot=0 generation=3
+[09:23:08:786861][2404683776][DOCA][WRN][dpu_proxy.c:2640][px_peer_stats_report] proxy: worker 1 peer poison=0 refused=none inbound admitted=0 denied=0 no-policy=1 mixed-callee-unprotected=0 peer-pin-conflict=0
+[09:23:22:437509][2993078304][DOCA][ERR][dpa.c:340][dmesh_doca_dpa_msgq_send_error_cb] Failed to send msg
+[09:23:22:614565][2993078304][DOCA][ERR][dpa.c:340][dmesh_doca_dpa_msgq_send_error_cb] Failed to send msg
+[09:23:22:790547][2993078304][DOCA][ERR][dpa.c:340][dmesh_doca_dpa_msgq_send_error_cb] Failed to send msg
+[09:23:22:966402][2993078304][DOCA][ERR][dpa.c:340][dmesh_doca_dpa_msgq_send_error_cb] Failed to send msg
+[09:23:23:142431][2993078304][DOCA][ERR][dpa.c:340][dmesh_doca_dpa_msgq_send_error_cb] Failed to send msg
+[09:23:23:319008][2993078304][DOCA][ERR][dpa.c:340][dmesh_doca_dpa_msgq_send_error_cb] Failed to send msg
+[09:23:23:495515][2993078304][DOCA][ERR][dpa.c:340][dmesh_doca_dpa_msgq_send_error_cb] Failed to send msg
+[09:23:23:671448][2993078304][DOCA][ERR][dpa.c:340][dmesh_doca_dpa_msgq_send_error_cb] Failed to send msg
+[09:23:23:848169][2993078304][DOCA][ERR][dpa.c:340][dmesh_doca_dpa_msgq_send_error_cb] Failed to send msg
+[09:23:24:028529][2993078304][DOCA][ERR][dpa.c:340][dmesh_doca_dpa_msgq_send_error_cb] Failed to send msg
+[09:23:24:204040][2993078304][DOCA][ERR][dpa.c:340][dmesh_doca_dpa_msgq_send_error_cb] Failed to send msg
+[09:23:24:378793][2993078304][DOCA][ERR][dpa.c:340][dmesh_doca_dpa_msgq_send_error_cb] Failed to send msg
+[09:23:24:554370][2993078304][DOCA][ERR][dpa.c:340][dmesh_doca_dpa_msgq_send_error_cb] Failed to send msg
+[09:23:24:730699][2993078304][DOCA][ERR][dpa.c:340][dmesh_doca_dpa_msgq_send_error_cb] Failed to send msg
+[09:23:24:906437][2993078304][DOCA][ERR][dpa.c:340][dmesh_doca_dpa_msgq_send_error_cb] Failed to send msg
+[09:23:25:083122][2993078304][DOCA][ERR][dpa.c:340][dmesh_doca_dpa_msgq_send_error_cb] Failed to send msg
+[09:23:28:793085][2993078304][DOCA][ERR][doca_pe.cpp:192] Task 0xffffb18ecf20: Failed to submit task: ctx=0xaaab162cc830 is not started. state=STOPPING
+[09:23:28:793116][2993078304][DOCA][ERR][comch_server.c:742][server_send_msg_to_conn] server_send_msg_to_conn: submit failed: DOCA_ERROR_BAD_STATE
+[09:23:28:793120][2993078304][DOCA][ERR][comch_server.c:443][server_message_recv_callback] RESOLVE_ACK send failed: DOCA_ERROR_BAD_STATE
+[09:23:28:821692][2993078304][DOCA][WRN][dpu_worker.c:1402][run_dpu_worker] runtime hardware cleanup completed
+dpumesh_dpu: exit() called

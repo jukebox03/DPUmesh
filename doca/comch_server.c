@@ -1,4 +1,5 @@
 #include "comch_server.h"
+#include "local_control.h"
 
 #include <time.h>
 #include <stdlib.h>
@@ -215,6 +216,7 @@ static void server_message_recv_callback(struct doca_comch_event_msg_recv *event
 		break;
 
 	case DMESH_MSG_WORKLOAD_ASSERT: {
+        if (objs->local_registration) return; /* Direct mode admits no assertion from Comch. */
 		const struct dmesh_workload_assert_msg *assertion =
 			(const struct dmesh_workload_assert_msg *)recv_buffer;
 		if (msg_len != sizeof(*assertion)) {
@@ -483,7 +485,7 @@ server_send_registration_challenge(struct objects *objs, struct pod_state *pod)
 
 	struct dmesh_registration_challenge_msg challenge = {
 		.type = DMESH_MSG_REG_CHALLENGE,
-		.version = DMESH_ASSERT_VERSION,
+		.version = objs->local_registration ? DMESH_LOCAL_VERSION : DMESH_ASSERT_VERSION,
 		.trusted_required = 1,
 	};
 	memcpy(challenge.nonce, pod->registration_nonce,
@@ -580,7 +582,7 @@ init_comch_ctrl_path_server(const char *server_name, struct objects *objs)
     struct doca_ctx *ctx;
     union doca_data user_data;
     uint32_t max_msg_size, max_rq_size;
-	struct timespec ts = {
+	struct timespec ts __attribute__((unused)) = {
 		.tv_nsec = SLEEP_IN_NANOS,
 	};
 
@@ -683,10 +685,6 @@ init_comch_ctrl_path_server(const char *server_name, struct objects *objs)
         goto setup_failed;
     }
 
-	while (objs->connection == NULL) {
-		if (doca_pe_progress(objs->pe) == 0)
-			nanosleep(&ts, &ts);
-	}
 
     return DOCA_SUCCESS;
 
@@ -851,6 +849,7 @@ server_flush_pod_init_results(struct objects *objs)
 int
 pods_add_connection(struct objects *objs, struct doca_comch_connection *conn)
 {
+    if (objs->shutting_down) return -1;
 	/* Reuse an unpublished, disconnected slot when available. The control PE is
 	 * the sole writer, and num_pods publishes newly appended slots. */
 	int n = __atomic_load_n(&objs->num_pods, __ATOMIC_ACQUIRE);
@@ -891,6 +890,7 @@ pods_add_connection(struct objects *objs, struct doca_comch_connection *conn)
 			  (uint64_t)connected.tv_nsec
 			: 1;
 	objs->pods[idx].registration_disconnect_pending = 0;
+    objs->pods[idx].local_registration_closed = 0;
 	objs->pods[idx].pod_id = -1;  /* not yet registered */
 	objs->pods[idx].service_id = DMESH_SVC_NONE;
 	objs->pods[idx].workload[0] = '\0';   /* the new tenant states its own */
@@ -1021,6 +1021,7 @@ server_progress_membership(struct objects *objs)
 	}
 	l7_control_event("membership", "ok");
 
+	if (objs->local_registration) return 0; /* dpumeshd owns local revocation. */
 	int revoked = 0;
 	int n = __atomic_load_n(&objs->num_pods, __ATOMIC_ACQUIRE);
 	for (int i = 0; i < n; i++) {
@@ -1352,7 +1353,8 @@ pods_register(struct objects *objs, struct doca_comch_connection *conn,
 		}
 		/* The Service name is authoritative for identity: it must equal the
 		 * one the connection's assertion named. */
-		if (!objs->pods[i].registration_grant_verified ||
+		if (objs->shutting_down || objs->pods[i].local_registration_closed ||
+            !objs->pods[i].registration_grant_verified ||
 		    objs->pods[i].registration_grant_consumed ||
 		    strcmp(service_name, objs->pods[i].granted_service) != 0) {
 			DOCA_LOG_ERR("pods_register: trusted assertion missing/consumed or Service mismatch "
@@ -1463,4 +1465,80 @@ find_pod_by_connection(struct objects *objs, struct doca_comch_connection *conn)
 			return &objs->pods[i];
 	}
 	return NULL;
+}
+
+/* Direct-registration callbacks. The main control loop is their only caller,
+ * so they share the Comch control PE's single-threaded access to pods[]. */
+
+/* A slot the host may not yet reuse: it still holds a registration, or the
+ * hardware teardown that follows one has not finished. */
+static int local_registration_outstanding(const struct pod_state *p)
+{
+    return p->registered || p->cleanup_pending ||
+           (p->registration_grant_verified && !p->local_registration_closed);
+}
+
+/* Close one slot's registration and start the teardown its reuse waits on. */
+static void local_registration_close(struct objects *objs, struct pod_state *p)
+{
+    p->local_registration_closed = 1;
+    if (p->connection || p->registered) pod_begin_cleanup(objs, p);
+}
+
+int server_local_available(void *owner)
+{
+    struct objects *objs = owner;
+    if (objs->shutting_down) return 0;
+    for (int i = 0; i < objs->num_pods; i++)
+        if (local_registration_outstanding(&objs->pods[i])) return 0;
+    return 1;
+}
+void server_local_retire(void *owner)
+{
+    struct objects *objs = owner;
+    for (int i = 0; i < objs->num_pods; i++)
+        local_registration_close(objs, &objs->pods[i]);
+}
+unsigned server_local_dispatch(void *owner, const struct dmesh_local_request *r)
+{
+    struct objects *objs = owner;
+    if (!objs->local_registration || objs->shutting_down) return DMESH_LOCAL_STALE;
+    struct pod_state *p = NULL;
+    for (int i = 0; i < objs->num_pods; i++)
+        if (objs->pods[i].registration_challenge_issued &&
+            !memcmp(objs->pods[i].registration_nonce, r->connection_id, 32)) {
+            p = &objs->pods[i]; break;
+        }
+    if (r->operation == DMESH_LOCAL_STATUS || r->operation == DMESH_LOCAL_UNREGISTER) {
+        if (!bytes_are_zero((const uint8_t *)&r->identity, sizeof(r->identity)))
+            return DMESH_LOCAL_INVALID;
+        if (!p) return DMESH_LOCAL_OK; /* Slot only recycled after hardware cleanup. */
+        if (r->operation == DMESH_LOCAL_UNREGISTER && !p->local_registration_closed)
+            local_registration_close(objs, p);
+        return local_registration_outstanding(p) ? DMESH_LOCAL_PENDING : DMESH_LOCAL_OK;
+    }
+    if (r->operation != DMESH_LOCAL_REGISTER) return DMESH_LOCAL_INVALID;
+    if (!p || !p->connection || p->local_registration_closed || p->cleanup_pending ||
+        p->registration_grant_verified || p->registration_disconnect_pending)
+        return DMESH_LOCAL_STALE;
+    struct dmesh_assert_claims c;
+    enum dmesh_grant_result result = dmesh_assert_decode_local(
+        &r->identity, objs->cluster_id, objs->node_name, p->registration_nonce,
+        (uint64_t)time(NULL), &c, 1);
+    if (result == DMESH_GRANT_OK) result = grant_lifecycle_accept(objs, p, &c);
+    if (result != DMESH_GRANT_OK) {
+        DOCA_LOG_WARN("local REGISTER refused: %s", dmesh_grant_result_name(result));
+        return DMESH_LOCAL_INVALID;
+    }
+    memcpy(p->workload, c.workload, sizeof(p->workload));
+    memcpy(p->pod_uid, c.pod_uid, sizeof(p->pod_uid));
+    memcpy(p->namespace_name, c.namespace_name, sizeof(p->namespace_name));
+    memcpy(p->service_account, c.service_account, sizeof(p->service_account));
+    memcpy(p->granted_service, c.service_name, sizeof(p->granted_service));
+    memcpy(p->pod_ip, c.pod_ip, sizeof(p->pod_ip));
+    p->registration_grant_verified = 1;
+    DOCA_LOG_WARN("local REGISTER accepted pod=%s container=%s slot=%u generation=%lu",
+                 p->pod_uid, r->identity.container_id, c.channel_slot,
+                 (unsigned long)c.channel_generation);
+    return DMESH_LOCAL_OK;
 }

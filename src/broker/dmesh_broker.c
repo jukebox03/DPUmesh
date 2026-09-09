@@ -146,8 +146,8 @@ static int run_launch(const char *launch_socket, const char *manager_socket,
     do {
         n = recv(launch_fd, &final_go, 1, 0);
     } while (n < 0 && errno == EINTR);
-    close(launch_fd);
-    if (n != 1 || final_go != 'G') {
+    if (n != 1 || (final_go != 'G' && final_go != 'D')) {
+        close(launch_fd);
         fprintf(stderr, "dmesh_broker: invalid final barrier\n");
         close(socket_fd);
         return 1;
@@ -160,8 +160,12 @@ static int run_launch(const char *launch_socket, const char *manager_socket,
         close(socket_fd);
         return 1;
     }
-    return dmesh_broker_run(socket_fd, manager_socket, private_root,
-                            &stop_requested) == 0 ? 0 : 1;
+    int manager_fd = final_go == 'D' ? launch_fd : -1;
+    if (manager_fd < 0) close(launch_fd);
+    int rc = dmesh_broker_run(socket_fd, manager_socket, manager_fd, private_root,
+                              &stop_requested);
+    if (manager_fd >= 0) close(manager_fd);
+    return rc == 0 ? 0 : 1;
 }
 
 /* The short-lived supervisor is a direct child of dpumeshd. Both parent-death

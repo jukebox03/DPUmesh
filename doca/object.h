@@ -205,6 +205,7 @@ struct pod_state {
      * pending prevents duplicate submissions while its callback is pending. */
     uint64_t connected_ns;
     int registration_disconnect_pending;
+    int local_registration_closed;
     int32_t pod_id;
     int32_t service_id;     /* this pod's service id (an LB backend of that service; the live
                              * set is derived from pods[] by service_id); SVC_NONE if none */
@@ -521,6 +522,10 @@ struct dpu_data_worker {
 };
 
 struct objects {
+    struct dmesh_local_control *local_control;
+    int local_registration;
+    int shutting_down;
+    int cleanup_failed; /* Cleanup must not report a successful runtime exit on error. */
     struct doca_dev *dev;
     struct doca_dev_rep *rep_dev;
     struct doca_pe *pe;
@@ -549,6 +554,7 @@ struct objects {
      * publishes `registration_challenge_ready` last. */
     uint8_t registration_challenge[DMESH_REG_NONCE_SIZE];
     int32_t registration_trusted_required;
+    int registration_protocol;
     int32_t registration_challenge_ready;
     /* DPU-interned id of this registration's Service, from POD_ASSIGNED. */
     int32_t assigned_service_id;
@@ -676,6 +682,9 @@ struct objects {
      * PE threads while submits may come from other threads. */
     atomic_int send_tasks_in_flight;   /* comch send task pool (server or client) */
     int        send_tasks_max;          /* CC_SEND_TASK_NUM */
+    /* Host Comch PE owner only. Error callbacks mark failure; the owning
+     * loop stops the context after doca_pe_progress has returned. */
+    int client_send_failed;
 
     int main_wake_fd;
     atomic_int main_parked;

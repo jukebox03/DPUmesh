@@ -1,0 +1,81 @@
+Sep 08 09:13:59 localhost.localdomain systemd[1]: Started /home/jukebox/DPUmesh/doca/build/dpumesh_dpu -p 03:00.0 -r 94:00.0 -l 40.
+Sep 08 09:13:59 localhost.localdomain dpumesh_dpu[226716]: [09:13:59:738139][2528624672][DOCA][INF][doca_log.cpp:628] DOCA version 3.1.0105
+Sep 08 09:13:59 localhost.localdomain dpumesh_dpu[226716]: [09:13:59:738468][2528624672][DOCA][INF][control_scope.c:61][dmesh_scope_configure] control-plane scope mediated by 192.168.100.1:28089
+Sep 08 09:13:59 localhost.localdomain dpumesh_dpu[226716]: [09:13:59:776430][2528624672][DOCA][WRN][dpu_worker.c:126][dpu_arm_affinity_init] Explicit ARM CPU order: 13,3,4,1,6,2,12,5,15
+Sep 08 09:13:59 localhost.localdomain dpumesh_dpu[226716]: [09:13:59:776471][2528624672][DOCA][WRN][dpu_worker.c:1163][run_dpu_worker] Requested data topology: K/A=8/8 (N finalized after DPA query)
+Sep 08 09:13:59 localhost.localdomain dpumesh_dpu[226716]: [09:13:59:776477][2528624672][DOCA][WRN][dpu_worker.c:1165][run_dpu_worker] ARM DATA WORKERS = 8
+Sep 08 09:14:00 localhost.localdomain dpumesh_dpu[226716]: [09:14:00:090508][2528624672][DOCA][WRN][dpa.c:473][init_dpa_objects] Connection-affine topology active: N/K/A=32/8/8 (EU%A == ring%A == port%A)
+Sep 08 09:14:01 localhost.localdomain dpumesh_dpu[226716]: [09:14:01:008044][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab26a96810: ctx DPA ops are empty
+Sep 08 09:14:01 localhost.localdomain dpumesh_dpu[226716]: [09:14:01:112772][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab26b78a90: ctx DPA ops are empty
+Sep 08 09:14:01 localhost.localdomain dpumesh_dpu[226716]: [09:14:01:155276][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab26b7d090: ctx DPA ops are empty
+Sep 08 09:14:01 localhost.localdomain dpumesh_dpu[226716]: [09:14:01:212133][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab26c33570: ctx DPA ops are empty
+Sep 08 09:14:01 localhost.localdomain dpumesh_dpu[226716]: [09:14:01:254570][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab26c38090: ctx DPA ops are empty
+Sep 08 09:14:01 localhost.localdomain dpumesh_dpu[226716]: [09:14:01:311468][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab26cee300: ctx DPA ops are empty
+Sep 08 09:14:01 localhost.localdomain dpumesh_dpu[226716]: [09:14:01:354278][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab26cf3090: ctx DPA ops are empty
+Sep 08 09:14:01 localhost.localdomain dpumesh_dpu[226716]: [09:14:01:411878][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab26d81a40: ctx DPA ops are empty
+Sep 08 09:14:01 localhost.localdomain dpumesh_dpu[226716]: [09:14:01:454773][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab26da9560: ctx DPA ops are empty
+Sep 08 09:14:01 localhost.localdomain dpumesh_dpu[226716]: [09:14:01:511841][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab26de2de0: ctx DPA ops are empty
+Sep 08 09:14:01 localhost.localdomain dpumesh_dpu[226716]: [09:14:01:554602][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab26e617a0: ctx DPA ops are empty
+Sep 08 09:14:01 localhost.localdomain dpumesh_dpu[226716]: [09:14:01:611896][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab26f18300: ctx DPA ops are empty
+Sep 08 09:14:01 localhost.localdomain dpumesh_dpu[226716]: [09:14:01:654729][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab26f1d110: ctx DPA ops are empty
+Sep 08 09:14:01 localhost.localdomain dpumesh_dpu[226716]: [09:14:01:711653][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab26fd0010: ctx DPA ops are empty
+Sep 08 09:14:01 localhost.localdomain dpumesh_dpu[226716]: [09:14:01:754232][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab26fd96e0: ctx DPA ops are empty
+Sep 08 09:14:01 localhost.localdomain dpumesh_dpu[226716]: [09:14:01:811389][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab2708c010: ctx DPA ops are empty
+Sep 08 09:14:01 localhost.localdomain dpumesh_dpu[226716]: [09:14:01:853916][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab27095710: ctx DPA ops are empty
+Sep 08 09:14:01 localhost.localdomain dpumesh_dpu[226716]: [09:14:01:911017][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab27123a80: ctx DPA ops are empty
+Sep 08 09:14:01 localhost.localdomain dpumesh_dpu[226716]: [09:14:01:953739][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab270947c0: ctx DPA ops are empty
+Sep 08 09:14:02 localhost.localdomain dpumesh_dpu[226716]: [09:14:02:086041][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab27184c40: ctx DPA ops are empty
+Sep 08 09:14:02 localhost.localdomain dpumesh_dpu[226716]: [09:14:02:128985][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab272054e0: ctx DPA ops are empty
+Sep 08 09:14:02 localhost.localdomain dpumesh_dpu[226716]: [09:14:02:186682][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab272b9230: ctx DPA ops are empty
+Sep 08 09:14:02 localhost.localdomain dpumesh_dpu[226716]: [09:14:02:229331][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab272bdc50: ctx DPA ops are empty
+Sep 08 09:14:02 localhost.localdomain dpumesh_dpu[226716]: [09:14:02:286571][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab272f43f0: ctx DPA ops are empty
+Sep 08 09:14:02 localhost.localdomain dpumesh_dpu[226716]: [09:14:02:329468][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab27375050: ctx DPA ops are empty
+Sep 08 09:14:02 localhost.localdomain dpumesh_dpu[226716]: [09:14:02:387123][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab274292c0: ctx DPA ops are empty
+Sep 08 09:14:02 localhost.localdomain dpumesh_dpu[226716]: [09:14:02:430028][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab2742dc70: ctx DPA ops are empty
+Sep 08 09:14:02 localhost.localdomain dpumesh_dpu[226716]: [09:14:02:487559][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab270923a0: ctx DPA ops are empty
+Sep 08 09:14:02 localhost.localdomain dpumesh_dpu[226716]: [09:14:02:529988][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab274e1d00: ctx DPA ops are empty
+Sep 08 09:14:02 localhost.localdomain dpumesh_dpu[226716]: [09:14:02:587117][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab2751c420: ctx DPA ops are empty
+Sep 08 09:14:02 localhost.localdomain dpumesh_dpu[226716]: [09:14:02:629982][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab2759d050: ctx DPA ops are empty
+Sep 08 09:14:02 localhost.localdomain dpumesh_dpu[226716]: [09:14:02:687220][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab27651260: ctx DPA ops are empty
+Sep 08 09:14:02 localhost.localdomain dpumesh_dpu[226716]: [09:14:02:729983][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab272a5010: ctx DPA ops are empty
+Sep 08 09:14:02 localhost.localdomain dpumesh_dpu[226716]: [09:14:02:787131][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab2768c480: ctx DPA ops are empty
+Sep 08 09:14:02 localhost.localdomain dpumesh_dpu[226716]: [09:14:02:830151][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab27709c10: ctx DPA ops are empty
+Sep 08 09:14:02 localhost.localdomain dpumesh_dpu[226716]: [09:14:02:887499][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab277444c0: ctx DPA ops are empty
+Sep 08 09:14:02 localhost.localdomain dpumesh_dpu[226716]: [09:14:02:930250][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab277c5050: ctx DPA ops are empty
+Sep 08 09:14:02 localhost.localdomain dpumesh_dpu[226716]: [09:14:02:987366][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab277fc6f0: ctx DPA ops are empty
+Sep 08 09:14:03 localhost.localdomain dpumesh_dpu[226716]: [09:14:03:105102][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab2787d4e0: ctx DPA ops are empty
+Sep 08 09:14:03 localhost.localdomain dpumesh_dpu[226716]: [09:14:03:162461][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab27931500: ctx DPA ops are empty
+Sep 08 09:14:03 localhost.localdomain dpumesh_dpu[226716]: [09:14:03:205473][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab27585010: ctx DPA ops are empty
+Sep 08 09:14:03 localhost.localdomain dpumesh_dpu[226716]: [09:14:03:263234][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab279e95b0: ctx DPA ops are empty
+Sep 08 09:14:03 localhost.localdomain dpumesh_dpu[226716]: [09:14:03:305866][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab2763d4a0: ctx DPA ops are empty
+Sep 08 09:14:03 localhost.localdomain dpumesh_dpu[226716]: [09:14:03:363821][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab276f5620: ctx DPA ops are empty
+Sep 08 09:14:03 localhost.localdomain dpumesh_dpu[226716]: [09:14:03:407239][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab27aa54e0: ctx DPA ops are empty
+Sep 08 09:14:03 localhost.localdomain dpumesh_dpu[226716]: [09:14:03:465112][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab27adc500: ctx DPA ops are empty
+Sep 08 09:14:03 localhost.localdomain dpumesh_dpu[226716]: [09:14:03:507975][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab27b59c70: ctx DPA ops are empty
+Sep 08 09:14:03 localhost.localdomain dpumesh_dpu[226716]: [09:14:03:565508][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab27b94500: ctx DPA ops are empty
+Sep 08 09:14:03 localhost.localdomain dpumesh_dpu[226716]: [09:14:03:608461][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab27c11cc0: ctx DPA ops are empty
+Sep 08 09:14:03 localhost.localdomain dpumesh_dpu[226716]: [09:14:03:665575][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab27c4c500: ctx DPA ops are empty
+Sep 08 09:14:03 localhost.localdomain dpumesh_dpu[226716]: [09:14:03:708321][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab27ccd050: ctx DPA ops are empty
+Sep 08 09:14:03 localhost.localdomain dpumesh_dpu[226716]: [09:14:03:765688][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab27d81230: ctx DPA ops are empty
+Sep 08 09:14:03 localhost.localdomain dpumesh_dpu[226716]: [09:14:03:808738][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab272034a0: ctx DPA ops are empty
+Sep 08 09:14:03 localhost.localdomain dpumesh_dpu[226716]: [09:14:03:866571][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab279eba90: ctx DPA ops are empty
+Sep 08 09:14:03 localhost.localdomain dpumesh_dpu[226716]: [09:14:03:909816][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab27e3d4e0: ctx DPA ops are empty
+Sep 08 09:14:03 localhost.localdomain dpumesh_dpu[226716]: [09:14:03:967709][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab27b458d0: ctx DPA ops are empty
+Sep 08 09:14:04 localhost.localdomain dpumesh_dpu[226716]: [09:14:04:010616][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab27ef54e0: ctx DPA ops are empty
+Sep 08 09:14:04 localhost.localdomain dpumesh_dpu[226716]: [09:14:04:067847][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab27f2cc10: ctx DPA ops are empty
+Sep 08 09:14:04 localhost.localdomain dpumesh_dpu[226716]: [09:14:04:185674][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab27fad8b0: ctx DPA ops are empty
+Sep 08 09:14:04 localhost.localdomain dpumesh_dpu[226716]: [09:14:04:243435][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab27fe4a80: ctx DPA ops are empty
+Sep 08 09:14:04 localhost.localdomain dpumesh_dpu[226716]: [09:14:04:286218][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab280654e0: ctx DPA ops are empty
+Sep 08 09:14:04 localhost.localdomain dpumesh_dpu[226716]: [09:14:04:344169][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab281185b0: ctx DPA ops are empty
+Sep 08 09:14:04 localhost.localdomain dpumesh_dpu[226716]: [09:14:04:387782][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab27d834a0: ctx DPA ops are empty
+Sep 08 09:14:04 localhost.localdomain dpumesh_dpu[226716]: [09:14:04:445890][2528624672][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab281d0520: ctx DPA ops are empty
+Sep 08 09:14:05 localhost.localdomain dpumesh_dpu[226716]: [09:14:05:028230][2528624672][DOCA][WRN][dpu_proxy.c:5853][px_init] DPU PROXY MODE ON (run-to-completion SG-DMA, N/K/A=32/8/8; l7-mode-lists=0, l7-layer=off, l7-worker=all, l7-policy=fail-closed, lb=round-robin; passthru=conn-pinned, sg_pieces=64)
+Sep 08 09:14:05 localhost.localdomain dpumesh_dpu[226716]: [09:14:05:033505][2528624672][DOCA][WRN][dpu_worker.c:1297][run_dpu_worker] ARM DATA WORKER THREADS = 8
+Sep 08 09:14:05 localhost.localdomain dpumesh_dpu[226716]: [09:14:05:033561][2528624672][DOCA][WRN][dpu_worker.c:1328][run_dpu_worker] MAIN CONTROL/DOORBELL: workers=8, notification-driven (1 ms backstop tick)
+Sep 08 09:14:16 localhost.localdomain systemd[1]: Stopping /home/jukebox/DPUmesh/doca/build/dpumesh_dpu -p 03:00.0 -r 94:00.0 -l 40...
+Sep 08 09:14:22 localhost.localdomain dpumesh_dpu[226716]: [09:14:22:584168][2528624672][DOCA][WRN][dpu_worker.c:1401][run_dpu_worker] runtime hardware cleanup completed
+Sep 08 09:14:22 localhost.localdomain dpumesh_dpu[226716]: dpumesh_dpu: exit() called
+Sep 08 09:14:22 localhost.localdomain systemd[1]: dpumesh-cleanup-check2.service: Deactivated successfully.
+Sep 08 09:14:22 localhost.localdomain systemd[1]: Stopped /home/jukebox/DPUmesh/doca/build/dpumesh_dpu -p 03:00.0 -r 94:00.0 -l 40.
+Sep 08 09:14:22 localhost.localdomain systemd[1]: dpumesh-cleanup-check2.service: Consumed 1.788s CPU time.
+7b9b2f5b8d2be48ce76f5f24b7456d917a26ce4f0f689af71650fe23af652d44  /home/jukebox/DPUmesh/doca/build/dpumesh_dpu

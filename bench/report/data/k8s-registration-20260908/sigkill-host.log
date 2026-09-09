@@ -1,0 +1,33 @@
+Sep 08 18:25:15 rapids4 python[2159992]: dpumeshd: broker exited pid=2166048 exit=0 pod=9fbed321-4ce6-44e7-af28-8a058d2b1f18
+Sep 08 18:25:15 rapids4 python[2159992]: dpumeshd: broker exited pid=2167021 exit=0 pod=45203e79-b8a6-423f-8686-99797692a861
+Sep 08 18:25:16 rapids4 python[2159992]: dpumeshd: broker pid=2168786 slot=channel-001 generation=4 pod=e9b0da49-a56e-4d3a-b2f1-aa0d1938728e
+Sep 08 18:25:16 rapids4 python[2168786]: [dpumesh] Opening DOCA device at 94:00.0...
+Sep 08 18:25:16 rapids4 python[2168786]: [dpumesh] Connecting comch client...
+Sep 08 18:25:18 rapids4 python[2159992]: dpumeshd: broker pid=2169010 slot=channel-000 generation=5 pod=7ef34906-0259-4360-a7df-c93d964becfc
+Sep 08 18:25:18 rapids4 python[2169010]: [dpumesh] Opening DOCA device at 94:00.0...
+Sep 08 18:25:18 rapids4 python[2169010]: [dpumesh] Connecting comch client...
+Sep 08 18:25:19 rapids4 python[2159992]: dpumeshd: direct REGISTER pod=e9b0da49-a56e-4d3a-b2f1-aa0d1938728e slot=1 generation=4
+Sep 08 18:25:20 rapids4 python[2168786]: dmesh_broker: READY sent pod_id=0 fds=19
+Sep 08 18:25:20 rapids4 python[2159992]: dpumeshd: direct REGISTER pod=7ef34906-0259-4360-a7df-c93d964becfc slot=0 generation=5
+Sep 08 18:25:20 rapids4 python[2169010]: dmesh_broker: READY sent pod_id=1 fds=19
+Sep 08 18:25:44 rapids4 python[2159992]: dpumeshd: local control unavailable: DPU control connection closed
+Sep 08 18:25:48 rapids4 python[2169010]: [09:25:48:420310][1493776192][DOCA][ERR][comch_client.c:62][client_send_task_completion_err_callback] Comch client send completion failed: DOCA_ERROR_CONNECTION_ABORTED
+Sep 08 18:25:48 rapids4 python[2168786]: [09:25:48:420321][1044666176][DOCA][ERR][comch_client.c:62][client_send_task_completion_err_callback] Comch client send completion failed: DOCA_ERROR_CONNECTION_ABORTED
+Sep 08 18:25:48 rapids4 python[2169010]: [09:25:48:420392][1493776192][DOCA][WRN][dmesh_core.c:2733][request_remote_pod_quiesce] Control path stopped while awaiting POD_QUIESCED: DOCA_ERROR_CONNECTION_ABORTED
+Sep 08 18:25:48 rapids4 python[2168786]: [09:25:48:420403][1044666176][DOCA][WRN][dmesh_core.c:2733][request_remote_pod_quiesce] Control path stopped while awaiting POD_QUIESCED: DOCA_ERROR_CONNECTION_ABORTED
+Sep 08 18:25:51 rapids4 python[2159992]: dpumeshd: broker exited pid=2169010 signal=9 pod=7ef34906-0259-4360-a7df-c93d964becfc
+Sep 08 18:25:51 rapids4 python[2159992]: dpumeshd: broker exited pid=2168786 exit=0 pod=e9b0da49-a56e-4d3a-b2f1-aa0d1938728e
+Sep 08 18:25:53 rapids4 python[2169010]: [09:25:53:420424][1493776192][DOCA][ERR][object.c:76][cleanup_comch_object] CC context did not reach IDLE before cleanup
+Sep 08 18:25:53 rapids4 python[2169010]: [09:25:53:420477][1493776192][DOCA][ERR][object.c:97][cleanup_comch_object] Failed to destroy cc client properly with error = DOCA_ERROR_IN_USE
+Sep 08 18:25:53 rapids4 python[2169010]: [09:25:53:467995][1493776192][DOCA][ERR][object.c:116][cleanup_objects] Failed to destroy pe properly with error = DOCA_ERROR_IN_USE
+Sep 08 18:25:53 rapids4 python[2169010]: [09:25:53:468278][1493776192][DOCA][ERR][object.c:134][cleanup_objects] Failed to close device properly with error = DOCA_ERROR_IN_USE
+Sep 08 18:25:54 rapids4 python[2159992]: dpumeshd: broker pid=2170170 slot=channel-000 generation=6 pod=7ef34906-0259-4360-a7df-c93d964becfc
+Sep 08 18:25:54 rapids4 python[2170170]: [dpumesh] Opening DOCA device at 94:00.0...
+Sep 08 18:25:54 rapids4 python[2170170]: [dpumesh] Connecting comch client...
+Sep 08 18:25:56 rapids4 python[2159992]: dpumeshd: direct REGISTER pod=7ef34906-0259-4360-a7df-c93d964becfc slot=0 generation=6
+Sep 08 18:25:56 rapids4 python[2170170]: dmesh_broker: READY sent pod_id=0 fds=19
+Sep 08 18:26:04 rapids4 python[2159992]: dpumeshd: broker pid=2170620 slot=channel-001 generation=5 pod=e9b0da49-a56e-4d3a-b2f1-aa0d1938728e
+Sep 08 18:26:04 rapids4 python[2170620]: [dpumesh] Opening DOCA device at 94:00.0...
+Sep 08 18:26:04 rapids4 python[2170620]: [dpumesh] Connecting comch client...
+Sep 08 18:26:05 rapids4 python[2159992]: dpumeshd: direct REGISTER pod=e9b0da49-a56e-4d3a-b2f1-aa0d1938728e slot=1 generation=5
+Sep 08 18:26:05 rapids4 python[2170620]: dmesh_broker: READY sent pod_id=1 fds=19

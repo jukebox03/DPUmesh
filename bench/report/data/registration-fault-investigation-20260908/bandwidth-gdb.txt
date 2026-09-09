@@ -1,0 +1,48 @@
+time="2026-09-08T21:44:10+09:00" level=warning msg="runtime connect using default endpoints: [unix:///run/containerd/containerd.sock unix:///run/crio/crio.sock unix:///var/run/cri-dockerd.sock]. As the default settings are now deprecated, you should set the endpoint instead."
+[New LWP 2461473]
+[New LWP 2461474]
+[New LWP 2461475]
+warning: Target and debugger are in different PID namespaces; thread lists and other data are likely unreliable.  Connect to gdbserver inside the container.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x00007feb3392c49f in __libc_accept (fd=fd@entry=24, addr=..., addr@entry=..., len=len@entry=0x0) at ../sysdeps/unix/sysv/linux/accept.c:26
+26	../sysdeps/unix/sysv/linux/accept.c: No such file or directory.
+Breakpoint 1 at 0x564e73908eb4: file bench/apps/bench_dpumesh.c, line 439.
+[New Thread 0x7feb252c0640 (LWP 2463597)]
+[New Thread 0x7feb24dbc640 (LWP 2463598)]
+[Thread 0x7feb252c0640 (LWP 2463597) exited]
+[Thread 0x7feb24dbc640 (LWP 2463598) exited]
+[New Thread 0x7feb252c0640 (LWP 2463730)]
+[New Thread 0x7feb24dbc640 (LWP 2463731)]
+[Thread 0x7feb252c0640 (LWP 2463730) exited]
+[Thread 0x7feb24dbc640 (LWP 2463731) exited]
+[New Thread 0x7feb252c0640 (LWP 2463890)]
+[New Thread 0x7feb24dbc640 (LWP 2463891)]
+[Thread 0x7feb252c0640 (LWP 2463890) exited]
+[Thread 0x7feb24dbc640 (LWP 2463891) exited]
+[New Thread 0x7feb252c0640 (LWP 2464059)]
+[New Thread 0x7feb24dbc640 (LWP 2464060)]
+[Thread 0x7feb252c0640 (LWP 2464059) exited]
+[Thread 0x7feb24dbc640 (LWP 2464060) exited]
+[New Thread 0x7feb252c0640 (LWP 2464195)]
+[New Thread 0x7feb24dbc640 (LWP 2464196)]
+[Thread 0x7feb252c0640 (LWP 2464195) exited]
+[Thread 0x7feb24dbc640 (LWP 2464196) exited]
+[New Thread 0x7feb252c0640 (LWP 2464370)]
+[New Thread 0x7feb24dbc640 (LWP 2464371)]
+[Switching to Thread 0x7feb252c0640 (LWP 2464370)]
+
+Thread 15 "bench_dpumesh" hit Breakpoint 1, worker_fn (arg=0x564e7fefecd0) at bench/apps/bench_dpumesh.c:439
+439	        atomic_store(&w->broken, 1);
+#0  worker_fn (arg=0x564e7fefecd0) at bench/apps/bench_dpumesh.c:439
+#1  0x00007feb33899a83 in start_thread (arg=<optimized out>) at ./nptl/pthread_create.c:442
+#2  0x00007feb3392aa44 in clone () at ../sysdeps/unix/sysv/linux/x86_64/clone.S:100
+$1 = 1
+$2 = 0
+$3 = 8208
+$4 = 6
+$5 = {role = 1 '\001', peer_pod = -1, peer_port = 0, user = 0x7feb20010bd0, eq = 0x7feb204dc490, inbox = 0x7feb205306e0, inbox_ring = 1024, tx_w = 4053582432, tx_s = 4053581824, tx_c = 4053582432, resv_len = 0, resv_moff = 0, tail_blk = 7730, head_blk_next = 7732, pblk = {-1, -1, 1, 0, -1, -1, -1, -1}, recyc = {0, 0, 0, 0, 0, 0, 0, 0}, blk_used = {517104, 517104, 517104, 311904, 517104, 517104, 517104, 517104}, nblk_owned = 2, nrec = 0, su_seq = 0x7feb205366f0, su_end = 0x7feb20537700, su_done = 0x7feb2053b710 "", tx_deadline_ns = 0, tx_gate = 0, tx_error = 0, _cl_tx_wait = '\000' <repeats 63 times>, tx_wait_state = 0, tx_wait_reason = 0, tx_wait_tail_blk = 0, tx_wait_tx_w = 0, tx_wait_pool_epoch = 0, tx_wait_su_tail = 0, _cl_prod = '\000' <repeats 63 times>, in_tail = 45275, tx_f = 4053581824, su_tail = 55265, rx_seq = 45275, rx_next_pos = 54071688, rx_seq_valid = 1 '\001', _cl_arm = '\000' <repeats 63 times>, on_ready = 0, _cl_cons = '\000' <repeats 63 times>, in_head = 45275, su_head = 55265, _cl_end = '\000' <repeats 63 times>}
+$6 = 1
+$7 = 0
+$8 = 0
+[Inferior 1 (process 2461444) detached]

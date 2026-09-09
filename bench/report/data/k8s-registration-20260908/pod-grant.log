@@ -1,0 +1,10 @@
+[08:43:44:213144][2795991072][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab1dc57050: ctx DPA ops are empty
+[08:43:44:270925][2795991072][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab1dc8e2e0: ctx DPA ops are empty
+[08:43:44:313827][2795991072][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab1dd0f050: ctx DPA ops are empty
+[08:43:44:372107][2795991072][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab1dd464c0: ctx DPA ops are empty
+[08:43:44:415532][2795991072][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab1ddc7050: ctx DPA ops are empty
+[08:43:44:473779][2795991072][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaab1ddfe7b0: ctx DPA ops are empty
+[08:43:45:065849][2795991072][DOCA][WRN][dpu_proxy.c:5851][px_init] DPU PROXY MODE ON (run-to-completion SG-DMA, N/K/A=32/8/8; l7-mode-lists=0, l7-layer=off, l7-worker=all, l7-policy=fail-closed, lb=round-robin; passthru=conn-pinned, sg_pieces=64)
+[08:43:45:102318][2795991072][DOCA][WRN][dpu_worker.c:1270][run_dpu_worker] ARM DATA WORKER THREADS = 8
+[08:43:45:102381][2795991072][DOCA][WRN][dpu_worker.c:1301][run_dpu_worker] MAIN CONTROL/DOORBELL: workers=8, notification-driven (1 ms backstop tick)
+[08:44:55:068597][2178932736][DOCA][WRN][dpu_proxy.c:2638][px_peer_stats_report] proxy: worker 3 peer poison=0 refused=none inbound admitted=0 denied=0 no-policy=1 mixed-callee-unprotected=0 peer-pin-conflict=0

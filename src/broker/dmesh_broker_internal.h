@@ -3,7 +3,7 @@
 
 #include <signal.h>
 
-int dmesh_broker_run(int socket_fd, const char *manager_socket,
+int dmesh_broker_run(int socket_fd, const char *manager_socket, int manager_fd,
                      const char *private_root,
                      volatile sig_atomic_t *stop_requested);
 

@@ -1,0 +1,320 @@
+[
+  {
+    "round": 1,
+    "mode": "sigkill",
+    "start_utc": "2026-09-08T13:03:55.392381+00:00",
+    "action": "",
+    "samples": [
+      {
+        "elapsed_s": 6.044,
+        "raw": ""
+      },
+      {
+        "elapsed_s": 8.131,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 10.214,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 12.291,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 14.373,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 16.521,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 18.592,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 20.676,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 22.753,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 24.843,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 26.928,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 29.08,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 31.221,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 33.3,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 35.387,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 37.473,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 39.545,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 41.621,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 43.707,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 45.79,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 47.865,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 49.952,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 52.046,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 54.134,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 57.382,
+        "raw": "OK mrps=0.005469 gbps=0.0046 req_gbps=0.0035 resp_gbps=0.0011 p50=142.00 p95=329.00 p99=460.00 p999=614.00 p9999=696.00 avg=181.99 min=71.57 max=965.86 rcnt=5367 scheduled=5468 pending=1 fail=0 conc=1 threads=1 reqsz=64 repsz=8 reqframe=80 respframe=24 durs=1.000 offered_mrps=0.005469 drops=0 overflow=0 worker_fail=0 mode=closed arr=const reconns=0 reconn_us=0.00 grabs=1 rets=1 recyc=1 waits=0 pads=0 reorder=0 dist=0:5467"
+      }
+    ],
+    "recovered": true
+  },
+  {
+    "round": 2,
+    "mode": "sigkill",
+    "start_utc": "2026-09-08T13:05:00.692237+00:00",
+    "action": "",
+    "samples": [
+      {
+        "elapsed_s": 6.231,
+        "raw": ""
+      },
+      {
+        "elapsed_s": 8.313,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 10.395,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 12.547,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 14.702,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 16.783,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 18.869,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 20.954,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 23.043,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 25.132,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 27.226,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 29.314,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 31.407,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 33.49,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 35.572,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 37.717,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 39.807,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 41.939,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 44.015,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 46.089,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 48.177,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 50.256,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 52.341,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 54.487,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 56.561,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 58.631,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 60.704,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 62.779,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 64.86,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 66.944,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 69.029,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 71.178,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 73.26,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 75.343,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 77.428,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 79.543,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 81.612,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 83.7,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 85.778,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 87.872,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 90.025,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 92.171,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 94.323,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 96.454,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 98.535,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 100.611,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 102.685,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 104.764,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 106.849,
+        "raw": "ERR nc"
+      },
+      {
+        "elapsed_s": 108.932,
+        "raw": "ERR nc"
+      }
+    ],
+    "recovered": false
+  }
+]

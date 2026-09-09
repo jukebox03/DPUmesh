@@ -1,0 +1,4 @@
+NAME                                    READY   STATUS    RESTARTS      AGE    IP             NODE      NOMINATED NODE   READINESS GATES
+bench-dpumesh-native-6477bb6b4b-xlrlv   1/1     Running   2 (97s ago)   105s   10.244.0.219   rapids4   <none>           <none>
+dpumesh-controller-68c67ffd64-8qxcp     1/1     Running   0             3d4h   10.244.0.44    rapids4   <none>           <none>
+echo-dpumesh-native-59d5d9bd98-p9qgl    1/1     Running   2 (97s ago)   105s   10.244.0.220   rapids4   <none>           <none>

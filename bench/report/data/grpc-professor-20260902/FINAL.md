@@ -1,58 +1,63 @@
-# DPUmesh gRPC 정확성·성능 — 2026-09-02
+# DPUmesh gRPC correctness and performance
 
-한 node, BlueField-3 하나, `N/K/A=32/8/8`, Host client/server Pod 각 9 core. 비교 대상은
-같은 client/server binary를 per-Pod Linkerd sidecar(`edge-26.8.1`, 표준 설치값
-`LINKERD2_PROXY_CORES=1`, mTLS 확인)로 돌린 것이다. frame 64 B / 1 KiB / 8 KiB는
-request와 response 각각의 크기다. 절차는 [`EXPERIMENT.md`](EXPERIMENT.md), 원자료는
-`*-raw.csv`, 표의 값은 `*-summary.csv`다.
+One node, one BlueField-3, `N/K/A=32/8/8`, nine cores each for the host client
+and server Pods. The comparison arm runs the same client and server binaries
+behind a per-Pod Linkerd sidecar (`edge-26.8.1`, stock `LINKERD2_PROXY_CORES=1`,
+mTLS confirmed). The 64 B / 1 KiB / 8 KiB frame sizes are the request and the
+response size each. The procedure is [`EXPERIMENT.md`](EXPERIMENT.md), the raw
+data is `*-raw.csv`, and the table values come from `*-summary.csv`.
 
-## 결론
+## Conclusions
 
-1. **정확성 gate 전부 통과.** 계약 테스트, sanitizer, 실제 DPU shutdown/재사용, gRPC
-   정책·라우팅 19 stage. §1.
-2. **최대 RPS는 per-Pod Linkerd의 4.3× / 4.6× / 2.2×** (64 B / 1 KiB / 8 KiB),
-   RPC failure와 drop 0. §2.
-3. **같은 10k RPS의 지연은 p50 +0.2 ms(64 B·1 KiB), p99는 Linkerd 이하.** 8 KiB만 p50이
-   3배(1.55 ms 대 0.51 ms)이고 p99는 +10%다. §2.
+1. **Every correctness gate passes**: contract tests, sanitizers, a real DPU
+   shutdown and slot reuse, and 19 gRPC policy and routing stages. §1.
+2. **Peak RPS is 4.3x / 4.6x / 2.2x the per-Pod Linkerd arm** (64 B / 1 KiB /
+   8 KiB) with 0 RPC failures and 0 drops. §2.
+3. **At the same 10k RPS, p50 is +0.2 ms (64 B and 1 KiB) and p99 is at or below
+   Linkerd.** Only 8 KiB shows a 3x p50 (1.55 ms against 0.51 ms), with p99
+   +10%. §2.
 
-## 1. 정확성
+## 1. Correctness
 
-| gate | 결과 |
+| Gate | Result |
 |---|---:|
-| Host transport/ABI/fault 계약 테스트 (`make test-hostfree`) | PASS |
-| 실제 DPU lane·SG-DMA queue 계약 | PASS |
+| host transport/ABI/fault contract tests (`make test-hostfree`) | PASS |
+| real DPU lane and SG-DMA queue contract | PASS |
 | gRPC cHTTP2 adapter CTest, release | 4/4 |
-| 같은 CTest, Clang ASAN+UBSAN | 4/4 |
-| embedded Linkerd(Rust) adapter tests | 38/38 |
-| 실제 DPU channel shutdown·slot 재사용 | opened=closed 22/22, 재사용 후 exchange 손실 0 |
-| gRPC 정책·라우팅 (timeout, retry, method/header match, GRPCRoute, AuthorizationPolicy, circuit breaker) | 19/19 |
-| 측정 종료 시 Pod restart / 잔여 session·task | 0 / 0 |
+| the same CTest under Clang ASAN+UBSAN | 4/4 |
+| embedded Linkerd (Rust) adapter tests | 38/38 |
+| real DPU channel shutdown and slot reuse | opened = closed 22/22, 0 exchanges lost after reuse |
+| gRPC policy and routing (timeout, retry, method/header match, GRPCRoute, AuthorizationPolicy, circuit breaker) | 19/19 |
+| Pod restarts / residual sessions and tasks at the end of measurement | 0 / 0 |
 
-원자료 [`correctness.txt`](correctness.txt), stage별 판정 [`policy-stages.csv`](policy-stages.csv),
-판정 기준 [`design/GRPC.md`](../../../../design/GRPC.md#verification-contract).
+Raw output [`correctness.txt`](correctness.txt), per-stage verdicts
+[`policy-stages.csv`](policy-stages.csv), acceptance criteria
+[`design/GRPC.md`](../../../../design/GRPC.md#verification-contract).
 
-## 2. 성능
+## 2. Performance
 
 ![Summary](graphs/00_summary.png)
 
 | | 64 B | 1 KiB | 8 KiB |
 |---|---:|---:|---:|
-| DPUmesh 최대 RPS | 106.8k | 89.1k | 34.3k |
-| Linkerd 최대 RPS | 25.0k | 19.3k | 15.2k |
+| DPUmesh peak RPS | 106.8k | 89.1k | 34.3k |
+| Linkerd peak RPS | 25.0k | 19.3k | 15.2k |
 | p50 at 10k RPS, DPUmesh / Linkerd | 611 / 403 µs | 625 / 433 µs | 1,552 / 514 µs |
 | p99 at 10k RPS, DPUmesh / Linkerd | 965 / 1,162 µs | 1,148 / 1,220 µs | 1,864 / 1,691 µs |
 
-최대 RPS는 closed loop(8 thread × 8 channel, 총 1,024 in flight, 10 s) 3회 중앙값이고
-두 arm 모두 failure 0이다([`mesh-closed-summary.csv`](mesh-closed-summary.csv)).
-지연은 open loop 10k RPS 3회 중앙값, 두 arm 모두 achieved 10k·failure 0이다
-([`mesh-cpu-summary.csv`](mesh-cpu-summary.csv)). DPUmesh는 ARM worker 8개, Linkerd는
-sidecar당 1 core다.
+Peak RPS is the median of three closed-loop runs (8 threads x 8 channels, 1,024
+in flight, 10 s) with 0 failures in both arms
+([`mesh-closed-summary.csv`](mesh-closed-summary.csv)). Latency is the median of
+three open-loop runs at 10k RPS, both arms achieving 10k with 0 failures
+([`mesh-cpu-summary.csv`](mesh-cpu-summary.csv)). DPUmesh uses eight Arm workers;
+Linkerd uses one core per sidecar.
 
-## 재현
+## Reproducing
 
 ```sh
 bash bench/suite/grpc_correctness.sh all                       # §1
 python3 bench/report/data/grpc-professor-20260902/plot.py     # graphs/00_summary
 ```
 
-측정 arm별 배포·pin·sweep 명령은 [`EXPERIMENT.md`](EXPERIMENT.md)의 C, P4, P5, R1, R2 행이다.
+The deploy, pin and sweep commands for each measurement arm are rows C, P4, P5,
+R1 and R2 of [`EXPERIMENT.md`](EXPERIMENT.md).

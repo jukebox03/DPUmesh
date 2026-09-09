@@ -1,0 +1,881 @@
+{
+    "apiVersion": "v1",
+    "items": [
+        {
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {
+                "annotations": {
+                    "kubectl.kubernetes.io/restartedAt": "2026-09-08T15:26:42+09:00"
+                },
+                "creationTimestamp": "2026-09-08T09:17:29Z",
+                "generateName": "bench-dpumesh-native-6d78b8f967-",
+                "labels": {
+                    "app": "bench-dpumesh-native",
+                    "pod-template-hash": "6d78b8f967"
+                },
+                "name": "bench-dpumesh-native-6d78b8f967-5t9qm",
+                "namespace": "test-bench",
+                "ownerReferences": [
+                    {
+                        "apiVersion": "apps/v1",
+                        "blockOwnerDeletion": true,
+                        "controller": true,
+                        "kind": "ReplicaSet",
+                        "name": "bench-dpumesh-native-6d78b8f967",
+                        "uid": "9a2ccdff-a017-417b-86bb-e82f9e5930c7"
+                    }
+                ],
+                "resourceVersion": "39881182",
+                "uid": "9f874288-5700-4129-b2cf-686da9ab9ab0"
+            },
+            "spec": {
+                "automountServiceAccountToken": false,
+                "containers": [
+                    {
+                        "env": [
+                            {
+                                "name": "BENCH_DST_SERVICE",
+                                "value": "echo-dpumesh-native"
+                            },
+                            {
+                                "name": "DPUMESH_RINGS_PER_POD",
+                                "value": "8"
+                            }
+                        ],
+                        "image": "docker.io/bench/bench-dpumesh:native",
+                        "imagePullPolicy": "Never",
+                        "name": "app",
+                        "resources": {
+                            "limits": {
+                                "dpumesh.io/channel": "1",
+                                "memory": "256Mi"
+                            },
+                            "requests": {
+                                "cpu": "10m",
+                                "dpumesh.io/channel": "1",
+                                "memory": "32Mi"
+                            }
+                        },
+                        "securityContext": {
+                            "allowPrivilegeEscalation": false,
+                            "capabilities": {
+                                "drop": [
+                                    "ALL"
+                                ]
+                            },
+                            "readOnlyRootFilesystem": true
+                        },
+                        "terminationMessagePath": "/dev/termination-log",
+                        "terminationMessagePolicy": "File"
+                    }
+                ],
+                "dnsPolicy": "ClusterFirst",
+                "enableServiceLinks": true,
+                "nodeName": "rapids4",
+                "preemptionPolicy": "PreemptLowerPriority",
+                "priority": 0,
+                "restartPolicy": "Always",
+                "schedulerName": "default-scheduler",
+                "securityContext": {
+                    "runAsGroup": 65532,
+                    "runAsNonRoot": true,
+                    "runAsUser": 65532,
+                    "seccompProfile": {
+                        "type": "RuntimeDefault"
+                    }
+                },
+                "serviceAccount": "default",
+                "serviceAccountName": "default",
+                "terminationGracePeriodSeconds": 30,
+                "tolerations": [
+                    {
+                        "effect": "NoExecute",
+                        "key": "node.kubernetes.io/not-ready",
+                        "operator": "Exists",
+                        "tolerationSeconds": 300
+                    },
+                    {
+                        "effect": "NoExecute",
+                        "key": "node.kubernetes.io/unreachable",
+                        "operator": "Exists",
+                        "tolerationSeconds": 300
+                    }
+                ]
+            },
+            "status": {
+                "message": "Pod was rejected: Allocate failed due to no healthy devices present; cannot allocate unhealthy devices dpumesh.io/channel, which is unexpected",
+                "phase": "Failed",
+                "reason": "UnexpectedAdmissionError",
+                "startTime": "2026-09-08T09:17:29Z"
+            }
+        },
+        {
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {
+                "annotations": {
+                    "kubectl.kubernetes.io/restartedAt": "2026-09-08T15:26:42+09:00"
+                },
+                "creationTimestamp": "2026-09-08T09:17:29Z",
+                "generateName": "bench-dpumesh-native-6d78b8f967-",
+                "labels": {
+                    "app": "bench-dpumesh-native",
+                    "pod-template-hash": "6d78b8f967"
+                },
+                "name": "bench-dpumesh-native-6d78b8f967-cb2t5",
+                "namespace": "test-bench",
+                "ownerReferences": [
+                    {
+                        "apiVersion": "apps/v1",
+                        "blockOwnerDeletion": true,
+                        "controller": true,
+                        "kind": "ReplicaSet",
+                        "name": "bench-dpumesh-native-6d78b8f967",
+                        "uid": "9a2ccdff-a017-417b-86bb-e82f9e5930c7"
+                    }
+                ],
+                "resourceVersion": "39881204",
+                "uid": "a1b3a232-9e72-484e-91a9-20d705674270"
+            },
+            "spec": {
+                "automountServiceAccountToken": false,
+                "containers": [
+                    {
+                        "env": [
+                            {
+                                "name": "BENCH_DST_SERVICE",
+                                "value": "echo-dpumesh-native"
+                            },
+                            {
+                                "name": "DPUMESH_RINGS_PER_POD",
+                                "value": "8"
+                            }
+                        ],
+                        "image": "docker.io/bench/bench-dpumesh:native",
+                        "imagePullPolicy": "Never",
+                        "name": "app",
+                        "resources": {
+                            "limits": {
+                                "dpumesh.io/channel": "1",
+                                "memory": "256Mi"
+                            },
+                            "requests": {
+                                "cpu": "10m",
+                                "dpumesh.io/channel": "1",
+                                "memory": "32Mi"
+                            }
+                        },
+                        "securityContext": {
+                            "allowPrivilegeEscalation": false,
+                            "capabilities": {
+                                "drop": [
+                                    "ALL"
+                                ]
+                            },
+                            "readOnlyRootFilesystem": true
+                        },
+                        "terminationMessagePath": "/dev/termination-log",
+                        "terminationMessagePolicy": "File"
+                    }
+                ],
+                "dnsPolicy": "ClusterFirst",
+                "enableServiceLinks": true,
+                "nodeName": "rapids4",
+                "preemptionPolicy": "PreemptLowerPriority",
+                "priority": 0,
+                "restartPolicy": "Always",
+                "schedulerName": "default-scheduler",
+                "securityContext": {
+                    "runAsGroup": 65532,
+                    "runAsNonRoot": true,
+                    "runAsUser": 65532,
+                    "seccompProfile": {
+                        "type": "RuntimeDefault"
+                    }
+                },
+                "serviceAccount": "default",
+                "serviceAccountName": "default",
+                "terminationGracePeriodSeconds": 30,
+                "tolerations": [
+                    {
+                        "effect": "NoExecute",
+                        "key": "node.kubernetes.io/not-ready",
+                        "operator": "Exists",
+                        "tolerationSeconds": 300
+                    },
+                    {
+                        "effect": "NoExecute",
+                        "key": "node.kubernetes.io/unreachable",
+                        "operator": "Exists",
+                        "tolerationSeconds": 300
+                    }
+                ]
+            },
+            "status": {
+                "message": "Pod was rejected: Allocate failed due to no healthy devices present; cannot allocate unhealthy devices dpumesh.io/channel, which is unexpected",
+                "phase": "Failed",
+                "reason": "UnexpectedAdmissionError",
+                "startTime": "2026-09-08T09:17:29Z"
+            }
+        },
+        {
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {
+                "annotations": {
+                    "kubectl.kubernetes.io/restartedAt": "2026-09-08T15:26:42+09:00"
+                },
+                "creationTimestamp": "2026-09-08T09:17:29Z",
+                "generateName": "bench-dpumesh-native-6d78b8f967-",
+                "labels": {
+                    "app": "bench-dpumesh-native",
+                    "pod-template-hash": "6d78b8f967"
+                },
+                "name": "bench-dpumesh-native-6d78b8f967-sfwsn",
+                "namespace": "test-bench",
+                "ownerReferences": [
+                    {
+                        "apiVersion": "apps/v1",
+                        "blockOwnerDeletion": true,
+                        "controller": true,
+                        "kind": "ReplicaSet",
+                        "name": "bench-dpumesh-native-6d78b8f967",
+                        "uid": "9a2ccdff-a017-417b-86bb-e82f9e5930c7"
+                    }
+                ],
+                "resourceVersion": "39881220",
+                "uid": "7a18d817-6220-4712-a7bc-e878c067e282"
+            },
+            "spec": {
+                "automountServiceAccountToken": false,
+                "containers": [
+                    {
+                        "env": [
+                            {
+                                "name": "BENCH_DST_SERVICE",
+                                "value": "echo-dpumesh-native"
+                            },
+                            {
+                                "name": "DPUMESH_RINGS_PER_POD",
+                                "value": "8"
+                            }
+                        ],
+                        "image": "docker.io/bench/bench-dpumesh:native",
+                        "imagePullPolicy": "Never",
+                        "name": "app",
+                        "resources": {
+                            "limits": {
+                                "dpumesh.io/channel": "1",
+                                "memory": "256Mi"
+                            },
+                            "requests": {
+                                "cpu": "10m",
+                                "dpumesh.io/channel": "1",
+                                "memory": "32Mi"
+                            }
+                        },
+                        "securityContext": {
+                            "allowPrivilegeEscalation": false,
+                            "capabilities": {
+                                "drop": [
+                                    "ALL"
+                                ]
+                            },
+                            "readOnlyRootFilesystem": true
+                        },
+                        "terminationMessagePath": "/dev/termination-log",
+                        "terminationMessagePolicy": "File"
+                    }
+                ],
+                "dnsPolicy": "ClusterFirst",
+                "enableServiceLinks": true,
+                "nodeName": "rapids4",
+                "preemptionPolicy": "PreemptLowerPriority",
+                "priority": 0,
+                "restartPolicy": "Always",
+                "schedulerName": "default-scheduler",
+                "securityContext": {
+                    "runAsGroup": 65532,
+                    "runAsNonRoot": true,
+                    "runAsUser": 65532,
+                    "seccompProfile": {
+                        "type": "RuntimeDefault"
+                    }
+                },
+                "serviceAccount": "default",
+                "serviceAccountName": "default",
+                "terminationGracePeriodSeconds": 30,
+                "tolerations": [
+                    {
+                        "effect": "NoExecute",
+                        "key": "node.kubernetes.io/not-ready",
+                        "operator": "Exists",
+                        "tolerationSeconds": 300
+                    },
+                    {
+                        "effect": "NoExecute",
+                        "key": "node.kubernetes.io/unreachable",
+                        "operator": "Exists",
+                        "tolerationSeconds": 300
+                    }
+                ]
+            },
+            "status": {
+                "message": "Pod was rejected: Allocate failed due to no healthy devices present; cannot allocate unhealthy devices dpumesh.io/channel, which is unexpected",
+                "phase": "Failed",
+                "reason": "UnexpectedAdmissionError",
+                "startTime": "2026-09-08T09:17:29Z"
+            }
+        },
+        {
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {
+                "annotations": {
+                    "kubectl.kubernetes.io/restartedAt": "2026-09-08T15:26:42+09:00"
+                },
+                "creationTimestamp": "2026-09-08T09:17:29Z",
+                "generateName": "bench-dpumesh-native-6d78b8f967-",
+                "labels": {
+                    "app": "bench-dpumesh-native",
+                    "pod-template-hash": "6d78b8f967"
+                },
+                "name": "bench-dpumesh-native-6d78b8f967-wctqp",
+                "namespace": "test-bench",
+                "ownerReferences": [
+                    {
+                        "apiVersion": "apps/v1",
+                        "blockOwnerDeletion": true,
+                        "controller": true,
+                        "kind": "ReplicaSet",
+                        "name": "bench-dpumesh-native-6d78b8f967",
+                        "uid": "9a2ccdff-a017-417b-86bb-e82f9e5930c7"
+                    }
+                ],
+                "resourceVersion": "39881235",
+                "uid": "9bfec430-be1c-44a5-bd7b-54a30cabc10b"
+            },
+            "spec": {
+                "automountServiceAccountToken": false,
+                "containers": [
+                    {
+                        "env": [
+                            {
+                                "name": "BENCH_DST_SERVICE",
+                                "value": "echo-dpumesh-native"
+                            },
+                            {
+                                "name": "DPUMESH_RINGS_PER_POD",
+                                "value": "8"
+                            }
+                        ],
+                        "image": "docker.io/bench/bench-dpumesh:native",
+                        "imagePullPolicy": "Never",
+                        "name": "app",
+                        "resources": {
+                            "limits": {
+                                "dpumesh.io/channel": "1",
+                                "memory": "256Mi"
+                            },
+                            "requests": {
+                                "cpu": "10m",
+                                "dpumesh.io/channel": "1",
+                                "memory": "32Mi"
+                            }
+                        },
+                        "securityContext": {
+                            "allowPrivilegeEscalation": false,
+                            "capabilities": {
+                                "drop": [
+                                    "ALL"
+                                ]
+                            },
+                            "readOnlyRootFilesystem": true
+                        },
+                        "terminationMessagePath": "/dev/termination-log",
+                        "terminationMessagePolicy": "File"
+                    }
+                ],
+                "dnsPolicy": "ClusterFirst",
+                "enableServiceLinks": true,
+                "nodeName": "rapids4",
+                "preemptionPolicy": "PreemptLowerPriority",
+                "priority": 0,
+                "restartPolicy": "Always",
+                "schedulerName": "default-scheduler",
+                "securityContext": {
+                    "runAsGroup": 65532,
+                    "runAsNonRoot": true,
+                    "runAsUser": 65532,
+                    "seccompProfile": {
+                        "type": "RuntimeDefault"
+                    }
+                },
+                "serviceAccount": "default",
+                "serviceAccountName": "default",
+                "terminationGracePeriodSeconds": 30,
+                "tolerations": [
+                    {
+                        "effect": "NoExecute",
+                        "key": "node.kubernetes.io/not-ready",
+                        "operator": "Exists",
+                        "tolerationSeconds": 300
+                    },
+                    {
+                        "effect": "NoExecute",
+                        "key": "node.kubernetes.io/unreachable",
+                        "operator": "Exists",
+                        "tolerationSeconds": 300
+                    }
+                ]
+            },
+            "status": {
+                "message": "Pod was rejected: Allocate failed due to no healthy devices present; cannot allocate unhealthy devices dpumesh.io/channel, which is unexpected",
+                "phase": "Failed",
+                "reason": "UnexpectedAdmissionError",
+                "startTime": "2026-09-08T09:17:29Z"
+            }
+        },
+        {
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {
+                "annotations": {
+                    "kubectl.kubernetes.io/restartedAt": "2026-09-08T15:26:42+09:00"
+                },
+                "creationTimestamp": "2026-09-08T09:17:29Z",
+                "generateName": "echo-dpumesh-native-7564bfbbf-",
+                "labels": {
+                    "app": "echo-dpumesh-native",
+                    "pod-template-hash": "7564bfbbf"
+                },
+                "name": "echo-dpumesh-native-7564bfbbf-5mssg",
+                "namespace": "test-bench",
+                "ownerReferences": [
+                    {
+                        "apiVersion": "apps/v1",
+                        "blockOwnerDeletion": true,
+                        "controller": true,
+                        "kind": "ReplicaSet",
+                        "name": "echo-dpumesh-native-7564bfbbf",
+                        "uid": "da9a182b-a091-4f25-bc87-24a075eee5d4"
+                    }
+                ],
+                "resourceVersion": "39881201",
+                "uid": "f7368f1b-8645-4164-aeaf-ffda3454f734"
+            },
+            "spec": {
+                "automountServiceAccountToken": false,
+                "containers": [
+                    {
+                        "env": [
+                            {
+                                "name": "DPUMESH_SERVICE",
+                                "value": "echo-dpumesh-native"
+                            },
+                            {
+                                "name": "DPUMESH_RINGS_PER_POD",
+                                "value": "8"
+                            }
+                        ],
+                        "image": "docker.io/bench/echo-dpumesh:native",
+                        "imagePullPolicy": "Never",
+                        "name": "app",
+                        "resources": {
+                            "limits": {
+                                "dpumesh.io/channel": "1",
+                                "memory": "256Mi"
+                            },
+                            "requests": {
+                                "cpu": "10m",
+                                "dpumesh.io/channel": "1",
+                                "memory": "32Mi"
+                            }
+                        },
+                        "securityContext": {
+                            "allowPrivilegeEscalation": false,
+                            "capabilities": {
+                                "drop": [
+                                    "ALL"
+                                ]
+                            },
+                            "readOnlyRootFilesystem": true
+                        },
+                        "terminationMessagePath": "/dev/termination-log",
+                        "terminationMessagePolicy": "File"
+                    }
+                ],
+                "dnsPolicy": "ClusterFirst",
+                "enableServiceLinks": true,
+                "nodeName": "rapids4",
+                "preemptionPolicy": "PreemptLowerPriority",
+                "priority": 0,
+                "restartPolicy": "Always",
+                "schedulerName": "default-scheduler",
+                "securityContext": {
+                    "runAsGroup": 65532,
+                    "runAsNonRoot": true,
+                    "runAsUser": 65532,
+                    "seccompProfile": {
+                        "type": "RuntimeDefault"
+                    }
+                },
+                "serviceAccount": "default",
+                "serviceAccountName": "default",
+                "terminationGracePeriodSeconds": 30,
+                "tolerations": [
+                    {
+                        "effect": "NoExecute",
+                        "key": "node.kubernetes.io/not-ready",
+                        "operator": "Exists",
+                        "tolerationSeconds": 300
+                    },
+                    {
+                        "effect": "NoExecute",
+                        "key": "node.kubernetes.io/unreachable",
+                        "operator": "Exists",
+                        "tolerationSeconds": 300
+                    }
+                ]
+            },
+            "status": {
+                "message": "Pod was rejected: Allocate failed due to no healthy devices present; cannot allocate unhealthy devices dpumesh.io/channel, which is unexpected",
+                "phase": "Failed",
+                "reason": "UnexpectedAdmissionError",
+                "startTime": "2026-09-08T09:17:29Z"
+            }
+        },
+        {
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {
+                "annotations": {
+                    "kubectl.kubernetes.io/restartedAt": "2026-09-08T15:26:42+09:00"
+                },
+                "creationTimestamp": "2026-09-08T09:17:29Z",
+                "generateName": "echo-dpumesh-native-7564bfbbf-",
+                "labels": {
+                    "app": "echo-dpumesh-native",
+                    "pod-template-hash": "7564bfbbf"
+                },
+                "name": "echo-dpumesh-native-7564bfbbf-8k6lj",
+                "namespace": "test-bench",
+                "ownerReferences": [
+                    {
+                        "apiVersion": "apps/v1",
+                        "blockOwnerDeletion": true,
+                        "controller": true,
+                        "kind": "ReplicaSet",
+                        "name": "echo-dpumesh-native-7564bfbbf",
+                        "uid": "da9a182b-a091-4f25-bc87-24a075eee5d4"
+                    }
+                ],
+                "resourceVersion": "39881238",
+                "uid": "8c973897-a8b6-48d0-91aa-7f94832db976"
+            },
+            "spec": {
+                "automountServiceAccountToken": false,
+                "containers": [
+                    {
+                        "env": [
+                            {
+                                "name": "DPUMESH_SERVICE",
+                                "value": "echo-dpumesh-native"
+                            },
+                            {
+                                "name": "DPUMESH_RINGS_PER_POD",
+                                "value": "8"
+                            }
+                        ],
+                        "image": "docker.io/bench/echo-dpumesh:native",
+                        "imagePullPolicy": "Never",
+                        "name": "app",
+                        "resources": {
+                            "limits": {
+                                "dpumesh.io/channel": "1",
+                                "memory": "256Mi"
+                            },
+                            "requests": {
+                                "cpu": "10m",
+                                "dpumesh.io/channel": "1",
+                                "memory": "32Mi"
+                            }
+                        },
+                        "securityContext": {
+                            "allowPrivilegeEscalation": false,
+                            "capabilities": {
+                                "drop": [
+                                    "ALL"
+                                ]
+                            },
+                            "readOnlyRootFilesystem": true
+                        },
+                        "terminationMessagePath": "/dev/termination-log",
+                        "terminationMessagePolicy": "File"
+                    }
+                ],
+                "dnsPolicy": "ClusterFirst",
+                "enableServiceLinks": true,
+                "nodeName": "rapids4",
+                "preemptionPolicy": "PreemptLowerPriority",
+                "priority": 0,
+                "restartPolicy": "Always",
+                "schedulerName": "default-scheduler",
+                "securityContext": {
+                    "runAsGroup": 65532,
+                    "runAsNonRoot": true,
+                    "runAsUser": 65532,
+                    "seccompProfile": {
+                        "type": "RuntimeDefault"
+                    }
+                },
+                "serviceAccount": "default",
+                "serviceAccountName": "default",
+                "terminationGracePeriodSeconds": 30,
+                "tolerations": [
+                    {
+                        "effect": "NoExecute",
+                        "key": "node.kubernetes.io/not-ready",
+                        "operator": "Exists",
+                        "tolerationSeconds": 300
+                    },
+                    {
+                        "effect": "NoExecute",
+                        "key": "node.kubernetes.io/unreachable",
+                        "operator": "Exists",
+                        "tolerationSeconds": 300
+                    }
+                ]
+            },
+            "status": {
+                "message": "Pod was rejected: Allocate failed due to no healthy devices present; cannot allocate unhealthy devices dpumesh.io/channel, which is unexpected",
+                "phase": "Failed",
+                "reason": "UnexpectedAdmissionError",
+                "startTime": "2026-09-08T09:17:29Z"
+            }
+        },
+        {
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {
+                "annotations": {
+                    "kubectl.kubernetes.io/restartedAt": "2026-09-08T15:26:42+09:00"
+                },
+                "creationTimestamp": "2026-09-08T09:17:29Z",
+                "generateName": "echo-dpumesh-native-7564bfbbf-",
+                "labels": {
+                    "app": "echo-dpumesh-native",
+                    "pod-template-hash": "7564bfbbf"
+                },
+                "name": "echo-dpumesh-native-7564bfbbf-hqts5",
+                "namespace": "test-bench",
+                "ownerReferences": [
+                    {
+                        "apiVersion": "apps/v1",
+                        "blockOwnerDeletion": true,
+                        "controller": true,
+                        "kind": "ReplicaSet",
+                        "name": "echo-dpumesh-native-7564bfbbf",
+                        "uid": "da9a182b-a091-4f25-bc87-24a075eee5d4"
+                    }
+                ],
+                "resourceVersion": "39881225",
+                "uid": "e876439a-ef4d-46b0-8315-a8f9bb0e155a"
+            },
+            "spec": {
+                "automountServiceAccountToken": false,
+                "containers": [
+                    {
+                        "env": [
+                            {
+                                "name": "DPUMESH_SERVICE",
+                                "value": "echo-dpumesh-native"
+                            },
+                            {
+                                "name": "DPUMESH_RINGS_PER_POD",
+                                "value": "8"
+                            }
+                        ],
+                        "image": "docker.io/bench/echo-dpumesh:native",
+                        "imagePullPolicy": "Never",
+                        "name": "app",
+                        "resources": {
+                            "limits": {
+                                "dpumesh.io/channel": "1",
+                                "memory": "256Mi"
+                            },
+                            "requests": {
+                                "cpu": "10m",
+                                "dpumesh.io/channel": "1",
+                                "memory": "32Mi"
+                            }
+                        },
+                        "securityContext": {
+                            "allowPrivilegeEscalation": false,
+                            "capabilities": {
+                                "drop": [
+                                    "ALL"
+                                ]
+                            },
+                            "readOnlyRootFilesystem": true
+                        },
+                        "terminationMessagePath": "/dev/termination-log",
+                        "terminationMessagePolicy": "File"
+                    }
+                ],
+                "dnsPolicy": "ClusterFirst",
+                "enableServiceLinks": true,
+                "nodeName": "rapids4",
+                "preemptionPolicy": "PreemptLowerPriority",
+                "priority": 0,
+                "restartPolicy": "Always",
+                "schedulerName": "default-scheduler",
+                "securityContext": {
+                    "runAsGroup": 65532,
+                    "runAsNonRoot": true,
+                    "runAsUser": 65532,
+                    "seccompProfile": {
+                        "type": "RuntimeDefault"
+                    }
+                },
+                "serviceAccount": "default",
+                "serviceAccountName": "default",
+                "terminationGracePeriodSeconds": 30,
+                "tolerations": [
+                    {
+                        "effect": "NoExecute",
+                        "key": "node.kubernetes.io/not-ready",
+                        "operator": "Exists",
+                        "tolerationSeconds": 300
+                    },
+                    {
+                        "effect": "NoExecute",
+                        "key": "node.kubernetes.io/unreachable",
+                        "operator": "Exists",
+                        "tolerationSeconds": 300
+                    }
+                ]
+            },
+            "status": {
+                "message": "Pod was rejected: Allocate failed due to no healthy devices present; cannot allocate unhealthy devices dpumesh.io/channel, which is unexpected",
+                "phase": "Failed",
+                "reason": "UnexpectedAdmissionError",
+                "startTime": "2026-09-08T09:17:29Z"
+            }
+        },
+        {
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {
+                "annotations": {
+                    "kubectl.kubernetes.io/restartedAt": "2026-09-08T15:26:42+09:00"
+                },
+                "creationTimestamp": "2026-09-08T09:17:29Z",
+                "generateName": "echo-dpumesh-native-7564bfbbf-",
+                "labels": {
+                    "app": "echo-dpumesh-native",
+                    "pod-template-hash": "7564bfbbf"
+                },
+                "name": "echo-dpumesh-native-7564bfbbf-sswpt",
+                "namespace": "test-bench",
+                "ownerReferences": [
+                    {
+                        "apiVersion": "apps/v1",
+                        "blockOwnerDeletion": true,
+                        "controller": true,
+                        "kind": "ReplicaSet",
+                        "name": "echo-dpumesh-native-7564bfbbf",
+                        "uid": "da9a182b-a091-4f25-bc87-24a075eee5d4"
+                    }
+                ],
+                "resourceVersion": "39881177",
+                "uid": "146f7ad2-06c0-4c1a-9890-9f94182dbbed"
+            },
+            "spec": {
+                "automountServiceAccountToken": false,
+                "containers": [
+                    {
+                        "env": [
+                            {
+                                "name": "DPUMESH_SERVICE",
+                                "value": "echo-dpumesh-native"
+                            },
+                            {
+                                "name": "DPUMESH_RINGS_PER_POD",
+                                "value": "8"
+                            }
+                        ],
+                        "image": "docker.io/bench/echo-dpumesh:native",
+                        "imagePullPolicy": "Never",
+                        "name": "app",
+                        "resources": {
+                            "limits": {
+                                "dpumesh.io/channel": "1",
+                                "memory": "256Mi"
+                            },
+                            "requests": {
+                                "cpu": "10m",
+                                "dpumesh.io/channel": "1",
+                                "memory": "32Mi"
+                            }
+                        },
+                        "securityContext": {
+                            "allowPrivilegeEscalation": false,
+                            "capabilities": {
+                                "drop": [
+                                    "ALL"
+                                ]
+                            },
+                            "readOnlyRootFilesystem": true
+                        },
+                        "terminationMessagePath": "/dev/termination-log",
+                        "terminationMessagePolicy": "File"
+                    }
+                ],
+                "dnsPolicy": "ClusterFirst",
+                "enableServiceLinks": true,
+                "nodeName": "rapids4",
+                "preemptionPolicy": "PreemptLowerPriority",
+                "priority": 0,
+                "restartPolicy": "Always",
+                "schedulerName": "default-scheduler",
+                "securityContext": {
+                    "runAsGroup": 65532,
+                    "runAsNonRoot": true,
+                    "runAsUser": 65532,
+                    "seccompProfile": {
+                        "type": "RuntimeDefault"
+                    }
+                },
+                "serviceAccount": "default",
+                "serviceAccountName": "default",
+                "terminationGracePeriodSeconds": 30,
+                "tolerations": [
+                    {
+                        "effect": "NoExecute",
+                        "key": "node.kubernetes.io/not-ready",
+                        "operator": "Exists",
+                        "tolerationSeconds": 300
+                    },
+                    {
+                        "effect": "NoExecute",
+                        "key": "node.kubernetes.io/unreachable",
+                        "operator": "Exists",
+                        "tolerationSeconds": 300
+                    }
+                ]
+            },
+            "status": {
+                "message": "Pod was rejected: Allocate failed due to no healthy devices present; cannot allocate unhealthy devices dpumesh.io/channel, which is unexpected",
+                "phase": "Failed",
+                "reason": "UnexpectedAdmissionError",
+                "startTime": "2026-09-08T09:17:29Z"
+            }
+        }
+    ],
+    "kind": "List",
+    "metadata": {
+        "resourceVersion": ""
+    }
+}

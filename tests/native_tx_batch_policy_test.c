@@ -397,6 +397,27 @@ test_tail_retained_when_the_stream_falls_quiet(void)
     fixture_free(f);
 }
 
+/* Hardware timeout snapshot: a committed tail remains, armed_count=1, but
+ * both cached earliest and the per-port stamp are zero. An ACK-side arm can
+ * race owner-side clearing of the old tail. The bitmap is authoritative: a
+ * lost cache must never turn a retained tail into an infinite timer sleep. */
+static void test_armed_tail_without_cached_deadline(void)
+{
+    struct fixture *f = fixture_new(8, 16, -1);
+    assert(fixture_commit(f, 64) == 0);
+    assert(fixture_commit(f, 64) == 0);
+    assert(armed_count(f) == 1);
+    atomic_store(&f->psl->tx_deadline_ns, 0);
+    atomic_store(&f->eq.tx_earliest_ns, 0);
+    assert(dmesh_eq_next_deadline_ns(&f->eq) == 0);
+    mark_due(f); /* timer consumes the due result, wakes the owning EQ */
+    dpumesh_publish_due_tails(&f->eq);
+    assert(atomic_load(&f->psl->tx_s) == atomic_load(&f->psl->tx_c));
+    assert(armed_count(f) == 0);
+    assert(dmesh_eq_next_deadline_ns(&f->eq) == -1);
+    fixture_free(f);
+}
+
 /* The final ACK may make a stamped stream idle before the next partial commit.
  * No later ACK then exists to arm that tail, so the commit itself must recognize
  * the idle stream instead of retaining bytes behind the stale stamp. */
@@ -1012,6 +1033,7 @@ main(void)
 
     free(ports);
     free(ctx);
+    test_armed_tail_without_cached_deadline();
     test_tail_publication_policy();
     test_tail_retained_when_the_stream_falls_quiet();
     test_tail_committed_after_the_stream_goes_idle();

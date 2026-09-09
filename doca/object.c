@@ -51,46 +51,62 @@ cleanup_comch_object(struct objects *objs)
 #endif
     if (comch_ctx != NULL) {
         enum doca_ctx_states state;
+        size_t pending = 0;
         result = doca_ctx_get_state(comch_ctx, &state);
-        if (result == DOCA_SUCCESS && state != DOCA_CTX_STATE_IDLE) {
-            result = doca_ctx_stop(comch_ctx);
-            if (result != DOCA_SUCCESS && result != DOCA_ERROR_IN_PROGRESS) {
-                DOCA_LOG_ERR("Failed to stop cc context with error = %s",
-                             doca_error_get_name(result));
-            } else {
-                const struct timespec pause = { .tv_sec = 0, .tv_nsec = 100000 };
-                struct timespec start, now;
-                clock_gettime(CLOCK_MONOTONIC, &start);
-                do {
-                    if (objs->pe != NULL)
-                        (void)doca_pe_progress(objs->pe);
-                    nanosleep(&pause, NULL);
-                    result = doca_ctx_get_state(comch_ctx, &state);
-                    if (result != DOCA_SUCCESS || state == DOCA_CTX_STATE_IDLE)
-                        break;
-                    clock_gettime(CLOCK_MONOTONIC, &now);
-                } while (!elapsed_at_least(&start, &now, 5));
-                if (result != DOCA_SUCCESS || state != DOCA_CTX_STATE_IDLE) {
-                    DOCA_LOG_ERR("CC context did not reach IDLE before cleanup");
-                }
-            }
-        } else if (result != DOCA_SUCCESS) {
+        if (result != DOCA_SUCCESS) {
+            objs->cleanup_failed = 1;
             DOCA_LOG_ERR("Failed to query cc context state with error = %s",
                          doca_error_get_name(result));
+            return;
+        }
+        if (state != DOCA_CTX_STATE_IDLE) {
+            (void)doca_ctx_get_num_inflight_tasks(comch_ctx, &pending);
+            DOCA_LOG_DBG("CC cleanup start state=%d tasks=%zu owned=%d", state, pending,
+                         atomic_load(&objs->send_tasks_in_flight));
+            result = doca_ctx_stop(comch_ctx);
+            if (result != DOCA_SUCCESS && result != DOCA_ERROR_IN_PROGRESS) {
+                objs->cleanup_failed = 1;
+                DOCA_LOG_ERR("Failed to stop cc context with error = %s",
+                             doca_error_get_name(result));
+                return;
+            }
+            const struct timespec pause = { .tv_sec = 0, .tv_nsec = 100000 };
+            struct timespec start, now;
+            clock_gettime(CLOCK_MONOTONIC, &start);
+            do {
+                if (objs->pe != NULL)
+                    (void)doca_pe_progress(objs->pe);
+                nanosleep(&pause, NULL);
+                result = doca_ctx_get_state(comch_ctx, &state);
+                if (result != DOCA_SUCCESS || state == DOCA_CTX_STATE_IDLE)
+                    break;
+                clock_gettime(CLOCK_MONOTONIC, &now);
+            } while (!elapsed_at_least(&start, &now, 5));
+            if (result != DOCA_SUCCESS || state != DOCA_CTX_STATE_IDLE) {
+                objs->cleanup_failed = 1;
+                (void)doca_ctx_get_num_inflight_tasks(comch_ctx, &pending);
+                DOCA_LOG_ERR("CC context did not reach IDLE before cleanup state=%d tasks=%zu owned=%d",
+                             state, pending, atomic_load(&objs->send_tasks_in_flight));
+                return; /* Still owns tasks: retain context, PE and device. */
+            }
         }
 
 #ifdef DOCA_ARCH_DPU
         result = doca_comch_server_destroy(objs->cc_server);
         if (result != DOCA_SUCCESS) {
+            objs->cleanup_failed = 1;
             DOCA_LOG_ERR("Failed to destroy cc server properly with error = %s",
                          doca_error_get_name(result));
+            return;
         }
         objs->cc_server = NULL;
 #else
         result = doca_comch_client_destroy(objs->cc_client);
         if (result != DOCA_SUCCESS) {
+            objs->cleanup_failed = 1;
             DOCA_LOG_ERR("Failed to destroy cc client properly with error = %s",
                          doca_error_get_name(result));
+            return;
         }
         objs->cc_client = NULL;
 #endif
@@ -103,11 +119,15 @@ cleanup_objects(struct objects *objs)
     doca_error_t result;
 
     cleanup_comch_object(objs);
+    if (objs->cc_client != NULL) /* Shared union: server on DPU, client on host. */
+        return;
 
     if (objs->pe) {
         result = doca_pe_destroy(objs->pe);
         if(result != DOCA_SUCCESS) {
+            objs->cleanup_failed = 1;
             DOCA_LOG_ERR("Failed to destroy pe properly with error = %s", doca_error_get_name(result));
+            return;
         }
         objs->pe = NULL;
     }
@@ -115,7 +135,9 @@ cleanup_objects(struct objects *objs)
     if (objs->rep_dev) {
         result = doca_dev_rep_close(objs->rep_dev);
         if (result != DOCA_SUCCESS) {
+            objs->cleanup_failed = 1;
             DOCA_LOG_ERR("Failed to close rep device properly with error = %s", doca_error_get_name(result));
+            return;
         }
         objs->rep_dev = NULL;
     }
@@ -123,7 +145,9 @@ cleanup_objects(struct objects *objs)
     if (objs->dev) {
         result = doca_dev_close(objs->dev);
         if (result != DOCA_SUCCESS) {
+            objs->cleanup_failed = 1;
             DOCA_LOG_ERR("Failed to close device properly with error = %s", doca_error_get_name(result));
+            return;
         }
         objs->dev = NULL;
     }

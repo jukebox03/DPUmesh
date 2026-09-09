@@ -1,0 +1,1 @@
+native_tx_batch_policy_test: PASS

@@ -3,6 +3,7 @@
 #endif
 
 #include "dpu_worker.h"
+#include "local_control.h"
 
 #include "comch_server.h"
 #include "comch_common.h"
@@ -85,7 +86,7 @@ dpu_arm_irq_load(unsigned long long *per_cpu, int ncpu)
 }
 
 static void
-dpu_arm_affinity_init(void)
+dpu_arm_affinity_init(int workers)
 {
     CPU_ZERO(&g_arm_allowed);
     if (sched_getaffinity(0, sizeof(g_arm_allowed), &g_arm_allowed) != 0) {
@@ -98,6 +99,33 @@ dpu_arm_affinity_init(void)
     if (!g_arm_affinity_ready)
         return;
 
+    const char *requested = getenv("DPUMESH_ARM_CPU_LIST");
+    if (requested && *requested) {
+        const char *cursor = requested;
+        cpu_set_t seen;
+        CPU_ZERO(&seen);
+        g_arm_order_n = 0;
+        while (*cursor) {
+            char *end;
+            long cpu = strtol(cursor, &end, 10);
+            if (end == cursor || cpu < 0 || cpu >= CPU_SETSIZE ||
+                !CPU_ISSET(cpu, &g_arm_allowed) || CPU_ISSET(cpu, &seen) ||
+                (*end && *end != ',') || (*end == ',' && !end[1])) {
+                DOCA_LOG_ERR("invalid or unavailable CPU in DPUMESH_ARM_CPU_LIST");
+                exit(EXIT_FAILURE);
+            }
+            CPU_SET(cpu, &seen);
+            g_arm_order[g_arm_order_n++] = (int)cpu;
+            cursor = *end ? end + 1 : end;
+        }
+        if (g_arm_order_n < workers + 1) {
+            DOCA_LOG_ERR("DPUMESH_ARM_CPU_LIST needs one CPU per worker plus main");
+            exit(EXIT_FAILURE);
+        }
+        g_arm_allowed_n = g_arm_order_n;
+        DOCA_LOG_WARN("Explicit ARM CPU order: %s", requested);
+        return;
+    }
     int ncpu = (int)sysconf(_SC_NPROCESSORS_CONF);
     if (ncpu <= 0 || ncpu > CPU_SETSIZE)
         return;
@@ -382,6 +410,7 @@ dpu_finalize_pending_pod_inits(struct objects *objs)
 static int
 dpu_drain_iteration(struct objects *objs)
 {
+    int local_control = dmesh_local_control_progress(objs->local_control);
     uint8_t did_ctrl     = doca_pe_progress(objs->pe);  /* new conns, REGISTER, MMAP_EXPORT, RESOLVE */
     int finalized_init   = dpu_finalize_pending_pod_inits(objs);
     int sent_init_result = server_flush_pod_init_results(objs);
@@ -394,7 +423,7 @@ dpu_drain_iteration(struct objects *objs)
     if (topology > 0 && px_l7_resolve_modes(objs) != 0)
         DOCA_LOG_WARN("L7 mode lists conflict against the adopted generation; "
                       "previous mode table kept");
-    return (did_ctrl || cleaned_pods > 0 || finalized_init > 0 ||
+    return (local_control || did_ctrl || cleaned_pods > 0 || finalized_init > 0 ||
             sent_init_result > 0 || sent_doorbell > 0 || revoked > 0 ||
             admission > 0 || topology > 0);
 }
@@ -1045,7 +1074,7 @@ dpu_peer_bringup(struct objects *objs)
                   port_base + (unsigned)objs->n_data_workers - 1);
 }
 
-void
+int
 run_dpu_worker(struct objects *objs)
 {
     doca_error_t result;
@@ -1130,7 +1159,7 @@ run_dpu_worker(struct objects *objs)
             DOCA_LOG_WARN("ARM worker count adjusted: requested A=%d, active A=%d, K=%d",
                           requested, objs->n_data_workers, objs->k_rings);
     }
-    dpu_arm_affinity_init();
+    dpu_arm_affinity_init(objs->n_data_workers);
     DOCA_LOG_WARN("Requested data topology: K/A=%d/%d (N finalized after DPA query)",
                   objs->k_rings, objs->n_data_workers);
     DOCA_LOG_WARN("ARM DATA WORKERS = %d", objs->n_data_workers);
@@ -1141,7 +1170,7 @@ run_dpu_worker(struct objects *objs)
         DOCA_LOG_ERR("Failed to init comch control path server: %s",
                      doca_error_get_descr(result));
         cleanup_objects(objs);
-        return;
+        return -1;
     }
 
     /* 2. ARM consumer PEs for DPA completion channels. */
@@ -1150,7 +1179,7 @@ run_dpu_worker(struct objects *objs)
         DOCA_LOG_ERR("Failed to create the first DPA completion PE: %s",
                      doca_error_get_descr(result));
         cleanup_objects(objs);
-        return;
+        return -1;
     }
 
     /* Create one consumer PE per ARM data worker. */
@@ -1174,7 +1203,7 @@ run_dpu_worker(struct objects *objs)
         DOCA_LOG_ERR("Failed to init DPA objects: %s",
                      doca_error_get_descr(result));
         cleanup_objects(objs);
-        return;
+        return -1;
     }
 
     /* 4. DPA threads create (one per EU on the shared device; not run yet —
@@ -1186,7 +1215,7 @@ run_dpu_worker(struct objects *objs)
             DOCA_LOG_ERR("Failed to create DPA thread EU %d: %s",
                          k, doca_error_get_descr(result));
             cleanup_objects(objs);
-            return;
+            return -1;
         }
     }
 
@@ -1196,7 +1225,7 @@ run_dpu_worker(struct objects *objs)
         DOCA_LOG_ERR("Failed to init comch DPA msgq: %s",
                      doca_error_get_descr(result));
         cleanup_objects(objs);
-        return;
+        return -1;
     }
 
     /* Pin workers to [0,A) and main to A when available. */
@@ -1208,7 +1237,7 @@ run_dpu_worker(struct objects *objs)
         DOCA_LOG_ERR("Failed to init L7-proxy L4 engine: %s",
                      doca_error_get_descr(result));
         cleanup_objects(objs);
-        return;
+        return -1;
     }
 
     /* The inter-node carrier, once the proxy holds the tables it binds into
@@ -1225,7 +1254,7 @@ run_dpu_worker(struct objects *objs)
                 DOCA_LOG_ERR("ARM worker %d eventfd creation failed", s);
                 stop_data_workers(objs);
                 cleanup_objects(objs);
-                return;
+                return -1;
             }
             /* A worker with a peer carrier has two things that wake it from
              * outside its own engine, and its runtime waits on one descriptor.
@@ -1243,14 +1272,14 @@ run_dpu_worker(struct objects *objs)
                     DOCA_LOG_ERR("ARM worker %d peer wake set-up failed", s);
                     stop_data_workers(objs);
                     cleanup_objects(objs);
-                    return;
+                    return -1;
                 }
             }
             if (pthread_create(&worker_state->thread, NULL, dpu_data_worker_main, worker_state) != 0) {
                 DOCA_LOG_ERR("ARM worker %d thread creation failed", s);
                 stop_data_workers(objs);
                 cleanup_objects(objs);
-                return;
+                return -1;
             }
             worker_state->running = 1;
             const struct timespec init_pause = { .tv_sec = 0, .tv_nsec = 100000 };
@@ -1262,7 +1291,7 @@ run_dpu_worker(struct objects *objs)
                 DOCA_LOG_ERR("ARM worker %d polling loop did not initialize", s);
                 stop_data_workers(objs);
                 cleanup_objects(objs);
-                return;
+                return -1;
             }
         }
         DOCA_LOG_WARN("ARM DATA WORKER THREADS = %d", objs->n_data_workers);
@@ -1290,7 +1319,7 @@ run_dpu_worker(struct objects *objs)
                          objs->n_data_workers);
             stop_data_workers(objs);
             cleanup_objects(objs);
-            return;
+            return -1;
         }
 
         dpu_publish_ready_and_setup_pods(objs);
@@ -1303,7 +1332,17 @@ run_dpu_worker(struct objects *objs)
             health_period = 1;
         uint64_t health_deadline = dpu_wake_clock_now() + health_period;
         int dpa_fatal_reported = 0;
-        while (true) {
+        /* Readiness is this loop's own signal: the file is restamped once a
+         * second while the loop runs, and removed when it leaves. */
+        const char *ready_file = getenv("DPUMESH_READY_FILE");
+        time_t last_ready = 0;
+        while (!dmesh_dpu_stop) {
+            time_t tick = time(NULL);
+            if (ready_file && tick != last_ready) {
+                FILE *f = fopen(ready_file, "w");
+                if (f) { fprintf(f, "%ld\n", (long)getpid()); fclose(f); }
+                last_ready = tick;
+            }
             uint64_t now = dpu_wake_clock_now();
             if (!dpa_fatal_reported &&
                 (int64_t)(now - health_deadline) >= 0) {
@@ -1334,5 +1373,36 @@ run_dpu_worker(struct objects *objs)
             (void)rn;
             (void)doca_pe_clear_notification(objs->pe, pfd);
         }
+        if (ready_file) unlink(ready_file);
+        /* Retire every registration, then drain their DMA on this thread. A
+         * slot is reused only on proof of teardown, so a drain that does not
+         * finish within its bound ends the process instead of releasing. */
+        objs->shutting_down = 1;
+        server_local_retire(objs);
+        struct timespec start, now, pause = { .tv_nsec = 1000000 };
+        clock_gettime(CLOCK_MONOTONIC, &start);
+        for (;;) {
+            dpu_drain_iteration(objs);
+            int pending = 0;
+            for (int i = 0; i < objs->num_pods; i++) pending |= objs->pods[i].cleanup_pending;
+            if (!pending) break;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            if (now.tv_sec - start.tv_sec >= 20) {
+                DOCA_LOG_ERR("shutdown DMA drain timed out; abnormal exit");
+                _exit(75);
+            }
+            nanosleep(&pause, NULL);
+        }
+        close(rep);
     }
+    stop_data_workers(objs);
+    if (cleanup_dpa_objects(objs) != DOCA_SUCCESS ||
+        px_cleanup_hardware(objs) != DOCA_SUCCESS) {
+        DOCA_LOG_ERR("runtime resource cleanup failed; abnormal exit");
+        _exit(75);
+    }
+    cleanup_objects(objs);
+    if (objs->cleanup_failed) return 75;
+    DOCA_LOG_WARN("runtime hardware cleanup completed");
+    return 0;
 }

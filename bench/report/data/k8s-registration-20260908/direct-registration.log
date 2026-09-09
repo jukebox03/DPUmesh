@@ -1,0 +1,10 @@
+[08:47:01:436311][2850086944][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaec5984e0: ctx DPA ops are empty
+[08:47:01:494679][2850086944][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaec5cf500: ctx DPA ops are empty
+[08:47:01:537988][2850086944][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaec64cc70: ctx DPA ops are empty
+[08:47:01:596797][2850086944][DOCA][WRN][doca_ctx.cpp:204] CTX 0xaaaaec687760: ctx DPA ops are empty
+[08:47:02:189968][2850086944][DOCA][WRN][dpu_proxy.c:5851][px_init] DPU PROXY MODE ON (run-to-completion SG-DMA, N/K/A=32/8/8; l7-mode-lists=0, l7-layer=off, l7-worker=all, l7-policy=fail-closed, lb=round-robin; passthru=conn-pinned, sg_pieces=64)
+[08:47:02:225986][2850086944][DOCA][WRN][dpu_worker.c:1270][run_dpu_worker] ARM DATA WORKER THREADS = 8
+[08:47:02:226053][2850086944][DOCA][WRN][dpu_worker.c:1301][run_dpu_worker] MAIN CONTROL/DOORBELL: workers=8, notification-driven (1 ms backstop tick)
+[08:47:37:992129][2850086944][DOCA][WRN][comch_server.c:1534][server_local_dispatch] local REGISTER accepted pod=eef6936a-f2b7-48b1-9662-f1af6d58e27c container=4db1d3f4b66378b6973abd810e5a5612ebe561b3100d6e0a0ca9412cfd2b3109 slot=1 generation=1
+[08:47:38:044043][2850086944][DOCA][WRN][comch_server.c:1534][server_local_dispatch] local REGISTER accepted pod=24c98405-f250-4a9b-8fd3-bbdf16b36650 container=ff1a6c03a00cd4ea01885b4b5f4d100b9035c136b2fae74c6dc69e88a93601d9 slot=0 generation=1
+[08:47:52:222957][1969217536][DOCA][WRN][dpu_proxy.c:2638][px_peer_stats_report] proxy: worker 7 peer poison=0 refused=none inbound admitted=0 denied=0 no-policy=1 mixed-callee-unprotected=0 peer-pin-conflict=0

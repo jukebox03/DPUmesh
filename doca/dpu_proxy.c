@@ -40,7 +40,9 @@
 #include <time.h>
 #include <unistd.h>
 
+
 DOCA_LOG_REGISTER(DPU_PROXY);
+#include "shutdown.h"
 
 /* ====== tunables ====== */
 
@@ -5878,4 +5880,33 @@ fail:
     }
     free(px);
     return ret;
+}
+
+/* Called only after the per-Pod DMA drain and joining data workers. */
+int px_cleanup_hardware(struct objects *objs)
+{
+    struct dmesh_proxy *px = objs->proxy;
+    if (!px) return DOCA_SUCCESS;
+    for (int e = 0; e < px->n_workers; e++) {
+        struct px_engine *eng = &px->engines[e];
+        if (eng->dma_tasks_inflight) return DOCA_ERROR_IN_USE;
+        DMESH_STOP_CHECK(dmesh_stop_context(eng->dma_ctx, eng->pe));
+        DMESH_STOP_CHECK(doca_dma_destroy(eng->dma));
+        DMESH_STOP_CHECK(doca_buf_inventory_destroy(eng->inv));
+        DMESH_STOP_CHECK(doca_pe_destroy(eng->pe));
+    }
+    /* Slot-local staging survives workload reuse, but not runtime shutdown.
+     * Engines must be destroyed first: they cache references to these mmaps. */
+    for (int i = 0; i < objs->num_pods; i++) {
+        if (objs->pods[i].local_mmap) {
+            DMESH_STOP_CHECK(doca_mmap_destroy(objs->pods[i].local_mmap));
+            objs->pods[i].local_mmap = NULL;
+            free(objs->pods[i].dma_buffer);
+            objs->pods[i].dma_buffer = NULL;
+        }
+    }
+    DMESH_STOP_CHECK(doca_mmap_destroy(px->scratch_mmap));
+    DMESH_STOP_CHECK(doca_mmap_destroy(px->rev_scratch_mmap));
+    DMESH_STOP_CHECK(doca_mmap_destroy(px->arena_mmap));
+    return DOCA_SUCCESS;
 }

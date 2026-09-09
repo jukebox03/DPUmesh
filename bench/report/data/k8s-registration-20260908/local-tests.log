@@ -1,0 +1,3 @@
+cc -O2 -g -Wall -Wextra -fPIC -DDOCA_ALLOW_EXPERIMENTAL_API -Iinclude -I. -Ilinkerd/include -DFLEXIO_ALLOW_EXPERIMENTAL_API -DALLOW_EXPERIMENTAL_API -I/opt/mellanox/flexio/include -I/opt/mellanox/doca/include -I/usr/include/libnl3 -I/opt/mellanox/doca/include -o build/test/local_control_server tests/local_control_server.c doca/local_control.c -lssl -lcrypto
+build/registration-venv/bin/python tests/local_registration_test.py
+local_registration_test: PASS

@@ -304,12 +304,100 @@ def test_kubelet_reregistration(root: Path) -> None:
         server.stop(0).wait(2.0)
 
 
+def test_broker_cleanup_fence(root: Path) -> None:
+    from types import SimpleNamespace
+    worker = dpumeshd.Worker(
+        slot=0, generation=1, pod_uid=UID, container_id=CONTAINER,
+        service="echo", pid=123, starttime="1", wrapper_pid=122,
+        cgroup=root / "worker", private_root=root / "private",
+    )
+    worker.registered = True
+    worker.connection_id = bytes([1]) * 32
+    supervisor = object.__new__(dpumeshd.BrokerSupervisor)
+    supervisor.lock = threading.Lock()
+    supervisor.workers = {worker.pid: worker}
+    slot = dpumeshd.Slot(0, root / "slot")
+    slot.worker = worker
+    slot.state = "REGISTERING"
+    supervisor.registry = SimpleNamespace(slots=[slot], notify=lambda: None)
+    killed, dead = threading.Event(), threading.Event()
+    supervisor.cgroups = SimpleNamespace(
+        populated=lambda leaf: not dead.is_set(),
+        kill=lambda leaf: killed.set(), remove=lambda leaf: None,
+    )
+    calls = []
+    def request(op, connection_id):
+        assert dead.is_set() and worker.pid not in supervisor.workers
+        assert slot.state == "CLEANUP_WAIT"
+        calls.append(op)
+        # Simulate a DPU restart that outlasts a short retry window.
+        if len(calls) < 36:
+            raise OSError("DPU still restarting")
+        return 0
+    supervisor.local = SimpleNamespace(request=request)
+    with mock.patch.object(dpumeshd.os, "waitpid", return_value=(122, 9)):
+        thread = threading.Thread(target=supervisor._watch, args=(worker,))
+        thread.start()
+        assert killed.wait(2)
+        assert supervisor.workers[123] is worker and slot.worker is worker
+        assert not calls  # Wrapper exit alone must not release host/DPU fences.
+        elapsed = [0.0]
+        def advance(delay):
+            elapsed[0] += delay
+        with mock.patch.object(dpumeshd.time, "sleep", side_effect=advance), mock.patch.object(
+                dpumeshd.time, "monotonic", side_effect=lambda: elapsed[0]):
+            dead.set()
+            thread.join(2)
+        assert not thread.is_alive()
+    assert slot.state == "FREE_LISTENING" and slot.worker is None
+    assert calls[-2:] == [3, 4] and len(calls) == 37
+    assert elapsed[0] >= 35
+
+    # A stuck broker is killed by its owned cgroup, not by killing its wrapper.
+    supervisor.workers = {123: worker}
+    killed.clear()
+    def reap_after_kill(_delay):
+        assert killed.is_set() and supervisor.workers[123] is worker
+        supervisor.workers.pop(123)  # Simulate _watch completing the exit fence.
+    with mock.patch.object(dpumeshd.os, "kill") as kill, mock.patch.object(
+            dpumeshd.time, "monotonic", side_effect=[0, 16]), mock.patch.object(
+            dpumeshd.time, "sleep", side_effect=reap_after_kill) as sleep:
+        supervisor.terminate_all()
+    kill.assert_called_once_with(123, dpumeshd.signal.SIGTERM)
+    sleep.assert_called_once_with(0.05)
+    assert killed.is_set() and not supervisor.workers
+
+
+def test_launch_thread_survives_shutdown() -> None:
+    daemon = object.__new__(dpumeshd.Daemon)
+    daemon.stop = threading.Event()
+    daemon.stop.set()
+    slot = dpumeshd.Slot(0, Path("/unused"))
+    slot.listener = object()
+    slot.worker = object()
+    entered, release = threading.Event(), threading.Event()
+    def wait_for_reap(_delay):
+        entered.set()
+        assert release.wait(2)
+    with mock.patch.object(dpumeshd.time, "sleep", side_effect=wait_for_reap):
+        thread = threading.Thread(target=daemon._serve_slot, args=(slot,))
+        thread.start()
+        assert entered.wait(2) and thread.is_alive()
+        with slot.lock:
+            slot.worker = None
+        release.set()
+        thread.join(2)
+        assert not thread.is_alive()
+
+
 def main() -> None:
     test_identity()
     test_configuration_validation()
+    test_launch_thread_survives_shutdown()
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
         test_kernel_evidence(root / "proc")
+        test_broker_cleanup_fence(root / "cleanup")
         test_v3_grant_request()
         test_private_root_cleanup(root / "private-root")
         test_plugin(root)

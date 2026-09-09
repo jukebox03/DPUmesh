@@ -1,0 +1,15 @@
+==2552730== Memcheck, a memory error detector
+==2552730== Copyright (C) 2002-2017, and GNU GPL'd, by Julian Seward et al.
+==2552730== Using Valgrind-3.18.1 and LibVEX; rerun with -h for copyright info
+==2552730== Command: /home/jukebox/DPUmesh/build/test/hw_comch_peer_loss 94:00.0
+==2552730== Parent PID: 2552723
+==2552730== 
+==2552730== 
+==2552730== HEAP SUMMARY:
+==2552730==     in use at exit: 3,448 bytes in 5 blocks
+==2552730==   total heap usage: 252 allocs, 247 frees, 126,405,754 bytes allocated
+==2552730== 
+==2552730== For a detailed leak analysis, rerun with: --leak-check=full
+==2552730== 
+==2552730== For lists of detected and suppressed errors, rerun with: -s
+==2552730== ERROR SUMMARY: 0 errors from 0 contexts (suppressed: 0 from 0)

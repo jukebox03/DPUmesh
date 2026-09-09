@@ -29,6 +29,7 @@ deps += dependency('libibverbs')
 
 srcs = [
     'dpu_main.c',
+    'local_control.c',
     'dpu_worker.c',
     'config.c',
     'object.c',

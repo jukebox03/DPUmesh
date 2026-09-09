@@ -1,0 +1,4 @@
+connected pid=2545335; kill peer then send SIGUSR1
+send returned 0
+before cleanup state=2 owned=0
+peer-loss cleanup: PASS

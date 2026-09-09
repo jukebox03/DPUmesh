@@ -2,6 +2,12 @@
 
 기준일: 2026-09-05
 
+**2026-09-08 배치 갱신:** DPU를 같은 Kubernetes cluster의 별도 node로 등록하고
+`dpumesh_dpu`를 DaemonSet Pod로 운영한다. Host `dpumeshd`의 신뢰 가정과 별도 broker
+process는 유지한다. 아래 본문의 과거 배치·WorkloadGrant 서술과 충돌하면 §0.4가 우선한다.
+현재 계약은 [design/CONTROL.md](design/CONTROL.md), 배포 절차는
+[packaging/README-dpu-kubernetes.md](packaging/README-dpu-kubernetes.md)에 있다.
+
 코드 기준선: main / d2b42a2
 
 이 문서는 DPUmesh에서 아직 끝나지 않은 일을 정하는 단일 작업 문서다.
@@ -81,11 +87,37 @@ P4  기능과 정확성을 바꾸지 않는 성능·규모 최적화를 진행�
 - DRA와 Device Plugin을 동시에 운영하지 않는다. 현재 v1.31 기준 구현은 Device
   Plugin 하나만 사용한다.
 - broker를 보이게 만들기 위해 privileged sidecar나 broker Pod를 추가하지 않는다.
-- BlueField DPU와 `dpumeshd`를 Kubernetes Pod로 배치하지 않는다.
+- Host `dpumeshd`와 broker는 OS process로 유지한다. DPU runtime은 §0.4대로 Pod로 운영한다.
 - 목표 구조에는 mutating webhook, library init container와 DPUmesh 전용
   RuntimeClass를 두지 않는다.
 - `dpumeshd`와 별도 node-agent DaemonSet에 같은 registry와 lifecycle 판단을
   중복하지 않는다.
+
+## 0.4 DPU Kubernetes 배치와 direct 등록
+
+두 요구사항은 workload identity와 실제 DPU channel의 trusted binding, 그리고 workload에서
+DOCA/Comch/memory registration 및 infrastructure credential 제어권을 분리하는 것이다.
+DPU Pod 배치는 여기에 배포·설정·로그·업데이트의 사용자 편의를 더한다.
+
+- **배치:** 동일 cluster의 별도 DPU node + `dpumesh_dpu` DaemonSet. Host의 trusted
+  `dpumeshd`와 per-workload broker를 유지한다. App에 DOCA device를 주지 않는다.
+- **등록:** `direct`에서 dpumeshd가 host evidence·kubelet allocation·Kubernetes 정보를
+  직접 대조하고, paired DPU의 authenticated session으로 실제 Comch 연결을 REGISTER한다.
+  `grant`는 controller-signed 경로로 유지하며 둘 사이의 자동 fallback은 없다. Controller는
+  DPU 공개키·signed topology와 cross-node 역할을 유지하고, workload mTLS 목표도 그대로다.
+- **범위 밖:** custom DPU enrollment, 새 ResolveWorkload API, 등록 시 DPU의 controller
+  revision 일치 대기, 새 membership lease 체계. Infrastructure credential은 설치 절차로 공급한다.
+
+구현·실기 배포 결과와 남은 제한은
+[배포 기록](bench/report/data/k8s-registration-20260908/SUMMARY.md), 이후 발견한 TX tail
+누락·Comch 오류 callback use-after-free·종료 task 누적·wrapper/cgroup 종료 판정·slot 정체의
+원인과 회귀 검증은 [오류 조사](bench/report/data/registration-fault-investigation-20260908/SUMMARY.md)에 있다.
+
+남은 일:
+
+- [ ] 두 DPU 실기와 controller 장애 전체 조합, 장시간 soak. peer 인증·topology·policy
+      CPU 회귀 테스트는 통과했다.
+- [ ] Direct state/policy feed 경로 전환.
 
 ---
 
@@ -348,6 +380,8 @@ application container │ kernel │ dpumeshd   │ broker │ local DPU
 이 모델에는 application end-to-end TLS, tenant별 dataplane 또는 TEE가 필요하다.
 
 ## 3.4 2026-09-05에 확정한 목표 배치
+
+이 절은 이전 결정 기록이다. DPU의 배치는 §0.4가 대체한다.
 
 현재 구현을 그대로 동결하지 않는다. per-Pod broker가 제공하는 fault/address-space
 격리는 유지하되 Kubernetes에는 controller와 workload만 둔다. BlueField DPU와
@@ -1988,7 +2022,8 @@ kubelet은 어떤 container가 virtual device를 받는지 결정한다.
 
 ### Kubernetes integration — 확정
 
-- BlueField DPU는 Kubernetes Node/Pod가 아니며 별도 BlueField OS package로 운영한다.
+- DPU ARM OS를 같은 cluster의 node로 등록하고 runtime을 DaemonSet Pod로 운영한다.
+  OS/BFB/driver 준비는 별도이며 host dpumeshd/broker 배치는 유지한다 (§0.4).
 - v1.31 기준 `dpumesh.io/channel` Device Plugin 하나만 allocation authority로 쓴다.
 - DRA와 CSI를 병행하지 않는다.
 - workload image가 library를 포함하고, target container가 channel resource를
@@ -2011,8 +2046,9 @@ mapping/QP를 새 generation 아래 자동 replay하지 않는다.
 ### Workload identity — 확정
 
 policy identity인 namespace/ServiceAccount와 workload incarnation인 cluster/node/Pod
-UID를 구분한다. local registration의 `daemon_incarnation`, slot/generation과 DPU
-nonce까지 controller-signed `WorkloadGrant`에 묶는다. cross-node certificate는
+UID를 구분한다. `grant`는 `daemon_incarnation`, slot/generation과 DPU nonce까지
+controller-signed `WorkloadGrant`에 묶고, `direct`는 trusted dpumeshd의 authenticated
+REGISTER로 같은 대응을 session/generation으로 유지한다 (§0.4). cross-node certificate는
 ServiceAccount principal과 exact Pod incarnation을 함께 인증하며 §11.4~§11.5가
 issuance와 rotation을 정한다.
 

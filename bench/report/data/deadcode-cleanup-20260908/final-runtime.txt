@@ -1,0 +1,5 @@
+NAME                             DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE   NODE SELECTOR                                                 AGE    CONTAINERS   IMAGES                                SELECTOR
+daemonset.apps/dpumesh-runtime   1         1         1       1            1           kubernetes.io/arch=arm64,kubernetes.io/hostname=rapids4-dpu   6h5m   runtime      bench/dpumesh-dpu:deadcode-20260908   app.kubernetes.io/instance=dpumesh-runtime
+
+NAME                        READY   STATUS    RESTARTS   AGE   IP              NODE          NOMINATED NODE   READINESS GATES
+pod/dpumesh-runtime-vgk4k   1/1     Running   0          84s   192.168.100.2   rapids4-dpu   <none>           <none>

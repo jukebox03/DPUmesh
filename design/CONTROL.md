@@ -3,34 +3,44 @@
 ## Abstract
 
 DPUmesh places the Kubernetes-facing authority in one controller Pod, the
-host-local evidence and device allocation in one `dpumeshd` system service,
-and packet processing on a BlueField DPU outside Kubernetes. The split follows
-the evidence each component can obtain. Kubernetes knows desired and observed
-cluster state; the host kernel knows which process owns a connection; the DPU
-owns transport state and enforcement. A workload supplies neither credentials
-nor identity claims.
+host-local evidence and device allocation in one `dpumeshd` system service, and
+packet processing on a BlueField DPU. The split follows the evidence each
+component can obtain. Kubernetes knows desired and observed cluster state; the
+host kernel knows which process owns a connection; the DPU owns transport state
+and enforcement. A workload supplies neither credentials nor identity claims.
 
-The controller reads Pods, Services, and EndpointSlices and publishes bounded,
-signed documents. `dpumeshd` identifies a caller with `SO_PEERCRED`, cgroup v2,
+The controller reads Pods, Services, and EndpointSlices and publishes bounded
+signed documents. `dpumeshd` identifies a caller with `SO_PEERCRED`, cgroup v2
 and `/proc`, authenticates to the controller with a node certificate, supervises
-one broker for the allocated channel, and relays signed bytes to the DPU. The
-DPU verifies the controller-issued `WorkloadGrant` before importing workload
-memory. This document specifies those authority, registration, distribution,
-peer, authorization, lifetime, configuration, and operating contracts.
+one broker for the allocated channel, and delivers signed documents to the DPU.
+
+The registration mode selects who states the workload identity the DPU cannot
+observe for itself. Under `grant` the controller states it: `dpumeshd` presents
+the kernel evidence over node mTLS and relays a signed, nonce-bound
+`WorkloadGrant` that the broker carries to the DPU on its own Comch connection.
+Under `direct` the host states it: `dpumeshd` checks the same evidence against
+Kubernetes and kubelet itself, then names the connection the DPU already holds
+over a mutually authenticated host–DPU control session. Both modes bind one
+identity to one Comch connection, one slot generation and one daemon
+incarnation before any workload memory is imported. Neither falls back to the
+other, and the DPU refuses the mode it is not configured for.
+
+This document specifies those authority, registration, distribution, peer,
+authorization, lifetime, configuration and operating contracts.
 
 ## Architecture
 
 ```text
-Kubernetes API ── get/list ──▶ dpumesh-controller Pod
-                                     ▲
-                                     │ TLS 1.3 + node client certificate
-                                     │
-kubelet ◀── Device Plugin ──▶ dpumeshd.service ── signed-feed delivery ──▶ BlueField
-                                  │                                      Linux
-                                  └── broker process per allocated slot ── DOCA Comch
-                                       ▲
-                                       │ one allocation socket
-                                  workload Pod
+Kubernetes API ──── get/list ────▶ dpumesh-controller Pod
+      ▲                                   ▲
+      │ get/list, direct mode only        │ TLS 1.3 + node client certificate
+      │                                   │
+kubelet ◀─ Device Plugin ─▶ dpumeshd.service ─── signed feeds ────▶ dpumesh_dpu
+                                 │           ─── control session ─▶ (BlueField)
+                                 └── broker process per allocated slot ── DOCA Comch
+                                      ▲
+                                      │ one allocation socket
+                                 workload Pod
 ```
 
 ![Implemented control-plane authority and placement](figures/control_plane.png)
@@ -38,10 +48,12 @@ kubelet ◀── Device Plugin ──▶ dpumeshd.service ── signed-feed de
 [PDF](figures/control_plane.pdf)
 
 Kubernetes runs the controller and workload Pods. `dpumeshd` and its brokers
-run under host systemd; the feed receiver and `dpumesh_dpu` run under BlueField
-systemd. A workload Pod declares the
-transport by requesting and limiting exactly one `dpumesh.io/channel` on one
-regular container. Kubelet calls the Device Plugin and mounts that slot's Unix
+run under host systemd. The feed receiver runs under BlueField systemd, and
+`dpumesh_dpu` runs on the same Arm OS either as a system service or as a
+DaemonSet Pod on a DPU node joined to the cluster; one runtime lock admits a
+single runtime to the device. A workload Pod declares the transport by
+requesting and limiting exactly one `dpumesh.io/channel` on one regular
+container. Kubelet calls the Device Plugin and mounts that slot's Unix
 socket at `/run/dpumesh/channel.sock`. The PodSpec names no host device or host
 path, and the workload receives no DPUmesh or Kubernetes credential.
 
@@ -83,13 +95,16 @@ mandatory after authentication because an authenticated peer is not trusted.
 |---|---|
 | controller | `controller/dpumesh_controller.py`, the cluster reader and document issuer |
 | `dpumeshd` | the root-owned host service containing the Device Plugin, slot registry, evidence reader, controller client, feed relay, scope tunnel, cgroup manager, and broker supervisor |
+| registration mode | `grant` or `direct`; it selects which authority states the workload identity to the DPU |
 | slot | one advertised `dpumesh.io/channel` device and its host Unix socket |
 | broker | one host process for one live slot generation; it owns DOCA objects and exported memory |
-| `WorkloadGrant` | the fixed-size, controller-signed v3 assertion binding kernel evidence, allocation lifecycle, DPU nonce, and expiry |
+| `WorkloadGrant` | the fixed-size, controller-signed assertion of `grant` mode, binding kernel evidence, allocation lifecycle, DPU nonce, and expiry |
+| control session | the mutually authenticated TLS 1.3 connection of `direct` mode, carrying `dpumeshd`'s registration commands to its paired DPU |
+| connection id | the DPU's per-connection challenge, named by a control-session command to select the Comch connection it applies to |
 | feed | a complete signed document installed atomically on the DPU: topology, node membership, or Service targets |
 | generation | the monotonic version of one feed; consumers adopt a complete newer document or retain the held one |
 | topology | the cluster-scoped generation containing nodes, Pod placements, Services, endpoints, and protection classes |
-| workload | the calling Pod identity built from a verified grant or adopted topology, never from request bytes |
+| workload | the calling Pod identity built from a verified registration or adopted topology, never from request bytes |
 | node credential | a static Ed25519 keypair generated and retained on one DPU for peer TLS |
 | node certificate | a TLS client certificate whose single URI SAN is `spiffe://dpumesh.io/node/<node>` |
 | peer channel | one worker-local authenticated connection between a DPU pair |
@@ -106,11 +121,11 @@ single DPU may be compromised while other nodes remain honest.
 
 | Party | Trusted input or privilege | Security consequence |
 |---|---|---|
-| workload | request bytes only | cannot state its Pod, container, node, Service membership, slot, or grant |
+| workload | request bytes only | cannot state its Pod, container, node, Service membership, slot, or registration |
 | Kubernetes API | Pods, Services, EndpointSlices | supplies placement, selected container, Service membership, and routing facts |
 | kubelet | Device Plugin allocation | mounts exactly one allocated socket into the resource-owning container |
 | host kernel | peer PID and cgroup | binds the socket connection to a Pod UID and container ID |
-| `dpumeshd` | root, `/proc`, delegated cgroups, DOCA device access, node TLS key | verifies local evidence, owns slot state, and supervises brokers; holds no Kubernetes token or grant-signing key |
+| `dpumeshd` | root, `/proc`, delegated cgroups, DOCA device access, node TLS key, and in `direct` mode a read-only Kubernetes client certificate and the paired-DPU client certificate | verifies local evidence, owns slot state, and supervises brokers; holds no signing key, and its Kubernetes credential can neither write nor read Secrets |
 | controller | read-only Kubernetes token and signing keys | validates its latest Kubernetes snapshot and issues topology, feeds, and WorkloadGrants |
 | broker | trusted bootstrap, confined steady state | owns device, Comch, mappings, and one workload channel |
 | one DPU | its node's memory and traffic | cannot authenticate as a different configured node or place foreign Pods on its channel |
@@ -133,8 +148,8 @@ identity into unbounded destination or source retention.
 | Scope | Component | Creates | Consumes |
 |---|---|---|---|
 | cluster | controller | topology, membership, Service targets, WorkloadGrants | Kubernetes objects, operator node file |
-| node host | `dpumeshd` | kernel evidence, slot generations, broker lifecycle, DPU public-key report | kubelet allocation, node mTLS, signed controller responses |
-| node DPU | `dpumesh_dpu` | registration nonce, static peer keypair, enforcement decisions | WorkloadGrant, topology and node feeds |
+| node host | `dpumeshd` | kernel evidence, slot generations, broker lifecycle, DPU public-key report, registration commands | kubelet allocation, node mTLS, signed controller responses, and in `direct` mode Kubernetes and kubelet PodResources reads |
+| node DPU | `dpumesh_dpu` | registration nonce, control-session id, static peer keypair, enforcement decisions | WorkloadGrant or control-session command, topology and node feeds |
 | workload | application adapter | Service request and stream bytes | one allocated socket and broker-exported mappings |
 
 Key roles are deliberately disjoint:
@@ -145,10 +160,15 @@ Key roles are deliberately disjoint:
 | per-node grant key | Ed25519 | controller | the named node's DPU; public key also appears in topology |
 | feed key | HMAC-SHA256 | controller and each DPU | membership and Service-target consumers |
 | DPU node key | Ed25519 | one DPU | remote DPU, bound through topology |
-| node client certificate | TLS 1.3, P-256 certificate | one host's `dpumeshd` | controller client CA and URI SAN mapping |
+| node client certificate | TLS 1.3 certificate | one host's `dpumeshd` | controller client CA and URI SAN mapping; the paired DPU applies the same URI SAN rule |
+| DPU control certificate | TLS 1.3 certificate | one DPU runtime | the paired `dpumeshd`, by configured server name |
+| Kubernetes client certificate | TLS 1.3 certificate | one host's `dpumeshd` | Kubernetes API, bound to a read-only role |
 | Linkerd workload key | P-256 | DPU Linkerd runtime | Linkerd identity service |
 
 The topology, grant, and feed key directories contain distinct key material.
+Control and Kubernetes certificates are operator-provisioned infrastructure
+credentials and carry no workload identity; membership of a Kubernetes cluster
+confers none of them.
 Rotation is selected by each directory's root-owned `active` file. A DPU keeps
 bounded public-key overlap so a complete newer generation can move consumers to
 a new key without accepting an unknown key id.
@@ -176,8 +196,8 @@ host Linux
 
 BlueField Linux
 ├─ dpumesh-feed-receiver.service: unprivileged file installer
-└─ dpumesh_dpu
-   ├─ ARM control thread
+└─ dpumesh_dpu, as a system service or as a DaemonSet Pod on a DPU node
+   ├─ ARM control thread and paired-host control listener
    ├─ pinned ARM data workers and configured Linkerd runtimes
    └─ DPA execution contexts
 ```
@@ -187,14 +207,29 @@ Pods, Services, and EndpointSlices. Its Pod uses a read-only root filesystem,
 drops every capability, and satisfies the Restricted security context in the
 supplied manifest. It does not mount a host path.
 
+The DPU runtime owns hardware, so exactly one instance may hold it. Every
+runtime takes an exclusive lock on a shared runtime file before touching the
+device and refuses to start if another holds it; a Pod and a system service
+therefore cannot both drive one BlueField. The runtime republishes a readiness
+file from its control loop, so readiness reports hardware initialization and a
+live loop rather than the arrival of a first workload. A termination request
+leaves the loop, retires registrations, drains each Pod's DMA within a bounded
+window, and destroys DPA, Comch, DMA and mapping objects before exit; a
+resource that cannot be released fails the exit rather than being abandoned.
+As a Pod the runtime is an infrastructure DaemonSet on a tainted DPU node with
+host networking and operator-supplied configuration; workload Pods are
+scheduled on host nodes and never on it.
+
 `dpumeshd.service` runs as root because Device Plugin registration, kernel
 process evidence, namespace creation, cgroup delegation, and DOCA device setup
 are host operations. Its systemd unit bounds capabilities, address families,
 devices, CPU, and memory; protects the filesystem; and makes writable only
-`/run/dpumesh` and kubelet's Device Plugin directory. It receives a node TLS
-key but no ServiceAccount token. CPUs assigned to the service are inside
-kubelet's `reservedSystemCPUs`, and `systemReserved.memory` covers the service's
-fixed host budget.
+`/run/dpumesh` and kubelet's Device Plugin directory. Its credentials are TLS
+key files, never a ServiceAccount token, and no broker or workload receives one
+of them. CPUs assigned to the service are inside kubelet's
+`reservedSystemCPUs`, and `systemReserved.memory` covers the service's fixed
+host budget. `KillMode=mixed` lets the service stop its own brokers before
+systemd signals the group, so a stop drains rather than truncates.
 
 The service moves itself into a `manager` cgroup, enables `cpu`, `memory`, and
 `pids` controllers on the delegated subtree, and creates one worker leaf named
@@ -236,11 +271,12 @@ spec:
       limits:   { dpumesh.io/channel: 1 }
 ```
 
-Exactly one regular container may request the resource. The controller rejects
-init-container ownership, unequal request/limit values, a mounted projected
-ServiceAccount token, a kernel container ID different from the resource owner,
-a terminating Pod, a foreign node, or a server Service whose selector does not
-match the Pod. Native and gRPC programs link their adapter. A POSIX program sets
+Exactly one regular container may request the resource. Whichever authority
+states the identity — the controller or `dpumeshd` — rejects init-container
+ownership, unequal request/limit values, a mounted projected ServiceAccount
+token, a kernel container ID different from the resource owner, a terminating
+Pod, a foreign node, or a server Service whose selector does not match the
+Pod. Native and gRPC programs link their adapter. A POSIX program sets
 `LD_PRELOAD` explicitly. Traffic outside those integration surfaces is outside
 the DPUmesh data path; admission is fail-closed once a stream enters DPUmesh.
 
@@ -251,16 +287,20 @@ the DPUmesh data path; admission is fail-closed once a stream enters DPUmesh.
 Kubernetes ─▶ controller ◀──────── dpumeshd ─────────────────────────▶ DPU
                  │                    │                                 │
                  │ WorkloadGrant      │ SO_PEERCRED + cgroup            │ nonce
-                 └────────────────────┴──── broker manager socket ───────┘
+                 └────────────────────┴──── broker report socket ────────┘
 
+Kubernetes ◀── get/list, direct mode ── dpumeshd ── control session ──▶ DPU
 kubelet ── Register/ListAndWatch/Allocate ──▶ dpumeshd
+kubelet ── PodResources List, direct mode ──▶ dpumeshd
 workload ── HELLO ──▶ allocated slot socket ──▶ broker ── Comch ──▶ DPU
 DPU ── plaintext HTTP ──▶ local tunnel ── node mTLS ──▶ controller scope API
 ```
 
 The node certificate's single URI SAN selects the exact configured node for all
-controller routes except `/healthz`. Source addresses and caller-supplied node
-names are not authorization inputs. `dpumeshd` delivers the topology,
+controller routes except `/healthz`, and the paired DPU applies the identical
+rule to the host that opens its control session. Source addresses and
+caller-supplied node names are not authorization inputs. One control session
+serves one host/DPU pair: the endpoint is never load balanced across DPUs. `dpumeshd` delivers the topology,
 membership, and Service-target documents without parsing them. The DPU feed
 receiver bounds each payload, compares its SHA-256 digest for idempotent
 transfer, writes a temporary file, calls `fsync`, and atomically renames it.
@@ -276,11 +316,12 @@ certificate's node.
 
 ## 1.1 The controller
 
-The controller is the only Kubernetes API reader. It lists Pods, Services, and
-EndpointSlices, builds one topology snapshot, derives node membership and
-Service targets from the same object snapshots, and signs WorkloadGrants after
-validating host-kernel evidence against the latest successfully polled Pod,
-Service, and EndpointSlice objects. It has no host-local
+The controller lists Pods, Services, and EndpointSlices, builds one topology
+snapshot, derives node membership and Service targets from the same object
+snapshots, and under `grant` signs WorkloadGrants after validating host-kernel
+evidence against the latest successfully polled Pod, Service, and EndpointSlice
+objects. It is the only reader of cluster-wide state; under `direct` a host
+additionally reads its own node's Pods and Services for its own registrations. It has no host-local
 visibility and accepts evidence only from a configured node certificate.
 
 The supplied Deployment has one replica. The process has no leader election or
@@ -544,7 +585,7 @@ are cached per key for one generation interval
 (`src/core/dmesh_resolve.c`) and re-resolved after that or on a connection
 error, so the cache is never staler than the generation.
 
-## 1.9 When the controller is unavailable
+## 1.9 When an authority is unavailable
 
 Held data remains fail-static; new identity issuance stops.
 
@@ -553,17 +594,29 @@ Held data remains fail-static; new identity issuance stops.
         ├─ established streams            unaffected
         ├─ new streams, existing Pods     unaffected
         ├─ new streams, intra-node        unaffected (registration is node-local)
-        ├─ a new Pod registration          refused: no WorkloadGrant can be issued
+        ├─ a new Pod registration          refused under `grant`: none can be issued
         ├─ feed delivery readiness         Unhealthy after the next failed cycle
         ├─ mediated policy lookups         use no answer for an unavailable route
         └─ topology/membership revocation  stops at the last verified generations
+
+   Kubernetes API down, `direct` mode
+        ├─ a new Pod registration          refused: the evidence cannot be checked
+        ├─ established registrations       retained; reconciliation resumes on recovery
+        └─ control session                 unaffected
+
+   control session down, `direct` mode
+        ├─ free slots                      Unhealthy; no new channel is allocated
+        └─ established registrations       retired, and their brokers terminated
 ```
 
-`dpumeshd` marks free slots unhealthy after a controller/DPU delivery failure,
-so kubelet does not allocate a channel whose authority cannot be refreshed.
-Already allocated slots keep their broker and mappings. A rejected, absent, or
-unavailable document never becomes an empty document and therefore never
-revokes state accidentally.
+`dpumeshd` marks free slots unhealthy after a controller, DPU delivery or
+control-session failure, so kubelet does not allocate a channel whose authority
+cannot be refreshed. Already allocated slots keep their broker and mappings for
+as long as the authority that admitted them is still speaking for them. A
+rejected, absent, or unavailable document never becomes an empty document and
+therefore never revokes state accidentally. An API outage is a pause in
+observation, not a revocation: it blocks admission and defers reconciliation
+rather than tearing down an identity it can no longer see.
 
 ---
 
@@ -706,16 +759,38 @@ twice.
   does not      that the node is honest              ← "authenticated ≠ trusted"
   establish     that the Pods it names are real      ← chapter 2-2
                 that it consumes resources politely  ← chapter 4
+                a credential held by a workload      ← this is node authentication
 ```
+
+Node authentication plus topology-checked workload metadata is not per-workload
+mutual TLS, and this document does not call it that. The distinction matters
+because it names what a compromised node can still do: speak for the workloads
+the generation places on it.
 
 ---
 
 # 2-1. Pod registration
 
 Registration binds one allocated slot and Comch connection to one live
-Kubernetes Pod and container. The host kernel supplies process evidence; the
-controller supplies cluster authority; the DPU supplies the connection nonce.
-None of those values is accepted from the workload as identity.
+Kubernetes Pod and container. The host kernel supplies process evidence,
+Kubernetes supplies cluster authority, and the DPU supplies the connection
+nonce. None of those values is accepted from the workload as identity.
+
+The registration mode selects only which authority states that identity and how
+it reaches the DPU. Evidence collection, the connection nonce, the
+`POD_REGISTER` gate, quiescence and slot reuse are identical in both.
+
+```text
+common   kernel evidence ─ dpumeshd ─ broker Comch connection ─ DPU nonce
+
+grant    dpumeshd ─▶ controller ─▶ signed assertion ─▶ broker ─▶ Comch ──▶ DPU
+direct   dpumeshd ─▶ Kubernetes + kubelet ─▶ assertion ─▶ control session ─▶ DPU
+```
+
+The challenge the DPU issues for each connection names its mode, so the host
+learns which one it faces before committing to either. A mismatch fails the
+channel: a DPU in `direct` mode refuses a Comch assertion, a DPU in `grant`
+mode requires a real signature, and neither mode falls back to the other.
 
 ## 2-1.1 Allocation and evidence
 
@@ -728,27 +803,30 @@ workload             dpumeshd host service       broker                  DPU
    │                         │                      │                      │
    │ HELLO(Service)          │                      │                      │
    ├── allocated slot ──────▶│ MSG_PEEK framing     │                      │
-   │                         │ SO_PEERCRED PID       │                      │
-   │                         │ starttime/cgroup/     │                      │
-   │                         │ starttime → Pod UID,  │                      │
-   │                         │ container ID          │                      │
-   │                         │ create worker cgroup  │                      │
-   │                         │ fork + namespace      │                      │
-   │                         ├─ socket+cgroup fd ───▶│ consume HELLO         │
-   │                         │ verify PID/parent/    │ open DOCA + Comch     │
-   │                         │ cgroup, final GO      │                      │
-   │                         │                      │◀─ REG_CHALLENGE(nonce)│
-   │                         │◀─ grant request ─────│                      │
+   │                         │ SO_PEERCRED PID      │                      │
+   │                         │ starttime/cgroup/    │                      │
+   │                         │ starttime → Pod UID, │                      │
+   │                         │ container ID         │                      │
+   │                         │ create worker cgroup │                      │
+   │                         │ fork + namespace     │                      │
+   │                         ├─ socket+cgroup fd ──▶│ consume HELLO        │
+   │                         │ verify PID/parent/   │ open DOCA + Comch    │
+   │                         │ cgroup, final GO     │                      │
+   │                         │                      │◀─ REG_CHALLENGE ─────│
+   │                         │◀── nonce report ─────│                      │
    │                         │  broker SO_PEERCRED, retained evidence      │
-   │                         ├── node-mTLS ───────────────▶ controller     │
-   │                         │◀── signed WorkloadGrant ──── controller     │
-   │                         ├─ fixed grant bytes ──▶│                      │
+   │                         │                                             │
+   │                         │ grant: controller signs over node mTLS      │
+   │                         ├─ signed assertion ──▶│                      │
    │                         │                      ├─ WORKLOAD_ASSERT ───▶│
+   │                         │ direct: Kubernetes get/list + PodResources  │
+   │                         ├─ REGISTER(connection id, assertion) ───────▶│
+   │                         ├─ approval ──────────▶│                      │
    │                         │                      ├─ POD_REGISTER ──────▶│
    │                         │                      │◀─ POD_ASSIGNED ──────│
    │                         │                      ├─ MMAP_EXPORT × N ───▶│
    │                         │                      │◀─ INIT READY ────────│
-   │◀── READY + SCM_RIGHTS ────────────────────────│                      │
+   │◀── READY + SCM_RIGHTS ─────────────────────────│                      │
 ```
 
 `dpumeshd` reads `SO_PEERCRED`, then reads `/proc/<pid>/stat`, cgroup v2, and
@@ -757,10 +835,10 @@ after the last `)` because a process name may contain spaces and parentheses.
 The cgroup must contain both a canonical Pod UID and one 64-hex container ID in
 the Kubernetes hierarchy.
 
-The controller resolves exactly one Pod with that UID and requires all of the
-following:
+The authority for the mode resolves exactly one Pod with that UID and requires
+all of the following:
 
-1. the Pod is not terminating and `spec.nodeName` equals the node certificate;
+1. the Pod is not terminating and `spec.nodeName` equals the served node;
 2. `automountServiceAccountToken` is explicitly false and no projected volume
    contains a ServiceAccount token;
 3. exactly one regular container requests and limits
@@ -769,16 +847,25 @@ following:
 5. the Pod has a canonical IPv4 address;
 6. a non-empty requested Service is unique in the Pod namespace, has a
    non-empty selector matching the Pod labels, and has a usable IPv4 ClusterIP
-   and first port;
-7. an EndpointSlice for that Service names the Pod UID with
-   `conditions.ready: true`.
+   and first port.
 
-The broker asks for the grant only after receiving the DPU nonce. `dpumeshd`
-recognizes the broker by its `SO_PEERCRED` PID, uid, retained start time, and
-supervision table, and requires its Service to equal the launch record. It
-retries the same nonce across a bounded controller-observation window when the
-container status is still converging. Exactly one successful grant is issued
-and presented to the DPU.
+The modes differ in the seventh requirement, because they observe the
+allocation from different sides. Under `grant` the controller requires an
+EndpointSlice for that Service to name the Pod UID with `conditions.ready:
+true`; the node identity it signs is the certificate's. Under `direct`
+`dpumeshd` asks kubelet's PodResources listing whether the resource-owning
+container holds exactly this slot's device id, which is the allocation fact
+itself rather than a Kubernetes projection of it. Endpoint readiness is then a
+routing property alone: an unready Pod may register and receives traffic only
+once it becomes a ready endpoint.
+
+The broker reports the DPU nonce only after receiving it, over a root-owned
+socket no workload can reach — the manager socket under `grant`, the retained
+private launch socket under `direct`. `dpumeshd` recognizes the broker by its
+`SO_PEERCRED` PID, uid, retained start time, and supervision table, and requires
+its Service to equal the launch record. It retries the same nonce across a
+bounded observation window while the container status is still converging.
+Exactly one identity is produced per connection and presented to the DPU.
 
 The slot listener is mode 0666 because kubelet bind-mounts the inode into a
 non-root container. Its parent directory is mode 0755, but a Pod sees only its
@@ -786,11 +873,11 @@ allocation mount. Slot state serializes one worker per slot. Unbounded request
 threads are not created: each slot owns one accept loop, the broker manager owns
 one loop, and all sockets have request deadlines.
 
-## 2-1.2 The WorkloadGrant
+## 2-1.2 The identity assertion
 
 `struct dmesh_workload_assert_msg` is a fixed 1545-byte version-3 record.
 Numeric fields are little-endian byte arrays; every text field is ASCII,
-NUL-terminated, and zero-padded; Ed25519 covers every byte preceding `sig`.
+NUL-terminated, and zero-padded; the signature covers every preceding byte.
 
 ```text
  offset  size  field                    authority
@@ -798,38 +885,88 @@ NUL-terminated, and zero-padded; Ed25519 covers every byte preceding `sig`.
       0     1  type                     WORKLOAD_ASSERT
       1     1  version                  3
       2     2  flags, reserved          zero
-      4     8  issued_at                controller clock
+      4     8  issued_at                issuing clock
      12     8  expires_at               issued + bounded TTL
-     20    16  assert_id                controller randomness; replay key
+     20    16  assert_id                issuer randomness; replay key
      36    32  nonce                    DPU connection challenge
      68     4  channel_slot             Device Plugin slot
      72     8  channel_generation       dpumeshd monotonic slot reuse fence
      80    16  daemon_incarnation       random per dpumeshd process
-     96    32  key_id                   per-node grant public-key selector
-    128    64  cluster_id               controller configuration
-    192   254  node_name                node certificate mapping
+     96    32  key_id                   grant public-key selector, or `local-control`
+    128    64  cluster_id               node configuration
+    192   254  node_name                served Kubernetes node
     446    64  pod_uid                  kernel evidence + Kubernetes object
     510    64  namespace                Kubernetes Pod
     574   254  pod_name                 Kubernetes Pod
     828   254  service_account          Kubernetes Pod
    1082   254  container_name           extended-resource owner
    1336    65  container_id             kernel evidence + container status
-   1401    64  service_name             ready, dialable selected Service or empty
+   1401    64  service_name             authorized selected Service or empty
    1465    16  pod_ip                   Kubernetes status
-   1481    64  sig                      Ed25519 over bytes [0,1481)
+   1481    64  sig                      Ed25519 over bytes [0,1481), or zero
 ```
 
-The grant binds three independent freshness dimensions: expiry bounds controller
-observation age, the nonce binds the exact Comch connection, and
+The record binds three independent freshness dimensions: expiry bounds the age
+of the observation, the nonce binds the exact Comch connection, and
 `(daemon_incarnation, channel_slot, channel_generation)` prevents an allocation
-from crossing a daemon or slot reuse. Changing any field invalidates the
-signature.
+from crossing a daemon or slot reuse.
+
+What the mode changes is who fills the record in and how it travels:
+
+| | `grant` | `direct` |
+|---|---|---|
+| issuer | controller, from its Kubernetes snapshot | `dpumeshd`, from its own reads |
+| signature | Ed25519 under the node's grant key | zero; `key_id` is `local-control` |
+| carrier | Comch `WORKLOAD_ASSERT` from the broker | `REGISTER` on the control session |
+| challenge version | 3 | 4 |
+
+A signed record can travel through the untrusted broker because the signature is
+what the DPU trusts. An unsigned one carries no authority of its own and is
+meaningful only on a channel that has already authenticated the single party
+permitted to send it. That channel is the subject of the next section, and its
+authentication is why the DPU never accepts an unsigned record from Comch.
+
+### The paired control session
+
+The DPU listens on one TLS 1.3 endpoint for its paired host. It requires a
+client certificate whose single URI SAN is exactly
+`spiffe://dpumesh.io/node/<served node>`, and the host requires the configured
+DPU server name. Session cache, tickets and early data are disabled, so every
+connection is a full fresh handshake, and Kubernetes membership grants neither
+side anything.
+
+Frames are fixed size — 1609 bytes inbound, 36 outbound — so no length is
+parsed from the network. On acceptance the DPU draws a random 16-byte session
+id and returns it; every later command repeats it and carries a strictly
+increasing sequence. A byte-identical repeat of the current sequence returns
+the cached response, which is what makes a lost reply safe to retry. Any other
+sequence conflict, a foreign session id, a nonzero reserved field, an
+unfinished handshake past its deadline, or an idle session past its deadline
+closes the connection.
+
+The DPU admits one session at a time, and only while no registration from a
+previous one is outstanding. Losing a session retires every registration it
+established and starts cleanup of the corresponding brokers. A replacement
+session may therefore ask whether an old connection id has finished cleaning
+up, but can never register against one: the host fences `REGISTER` to the
+session that was live when it captured that connection id.
+
+| Command | Identity record | Effect |
+|---|---|---|
+| `PING` | zero | liveness; the host gates slot advertisement on it |
+| `REGISTER` | the assertion | install the identity on the pending connection that issued this nonce |
+| `UNREGISTER` | zero | close that registration and begin its teardown |
+| `STATUS` | zero | `PENDING` until teardown completes, then `OK` |
+
+`OK` from `STATUS` is the host's only proof that a slot may be reused. The DPU
+answers `OK` for a connection id it no longer knows, because a slot is recycled
+only after that teardown has finished.
 
 ## 2-1.3 Verification
 
-The DPU selects the grant public key by `(its own node name, key_id)` from the
-held topology; the configured registration keyring is available during initial
-bring-up. Verification and lifecycle checks produce
+Under `grant` the DPU selects the public key by `(its own node name, key_id)`
+from the held topology; the configured registration keyring is available during
+initial bring-up. Verification and lifecycle checks produce
 `dmesh_control_events_total{kind="assert",reason}`.
 
 | Order | Check | Refusal |
@@ -838,8 +975,8 @@ bring-up. Verification and lifecycle checks produce
 | 2 | signed cluster and node equal local configuration | `wrong-node` |
 | 3 | issue/expiry order, maximum 300-second lifetime, one-sided 30-second issue skew, unexpired | `bad-time` |
 | 4 | nonce equals this connection's challenge, constant time | `bad-nonce` |
-| 5 | Ed25519 signature over the canonical prefix | `bad-sig` |
-| 6 | assertion id has not been consumed | `replay` |
+| 5 | signature: Ed25519 over the canonical prefix, or zero under `local-control` | `bad-sig` |
+| 6 | assertion id has not been consumed (`grant` only) | `replay` |
 | 7 | slot is in range and equals this Comch registration slot | `wrong-channel` |
 | 8 | daemon incarnation is current and no live registration belongs to another incarnation | `wrong-incarnation` |
 | 9 | channel generation is newer than the accepted generation for that slot | `wrong-channel` |
@@ -848,7 +985,9 @@ Canonical and arithmetic checks precede asymmetric verification. The
 successfully verified assertion id is consumed before the registration retains
 claims. Verification occurs once per Comch connection and never on the data
 path. A grant signed for another node cannot select a usable local public key,
-and its signed node field independently fails the node comparison.
+and its signed node field independently fails the node comparison. A record
+arriving on the control session is additionally refused unless that connection
+is still pending, unregistered, and not already carrying a verified identity.
 
 ## 2-1.4 Replay
 
@@ -859,23 +998,26 @@ and its signed node field independently fails the node comparison.
    consumed ring     ASSERT_REPLAY_SLOTS ids, evicting.  The per-connection
                      nonce is what makes eviction safe.
    consumed flag     an assertion used by one registration is not reusable.
+   session sequence  on the control session, a command is accepted once; only
+                     its byte-identical repeat is answered, from cache.
 ```
 
-The ring needs no lock: the Comch control PE is its only caller.
+The ring needs no lock: the Comch control PE is its only caller, and the control
+session is dispatched from that same thread.
 
 ## 2-1.5 What the registration retains
 
-A successful verification builds the Linkerd workload JSON from the signed
-namespace and Pod name and keeps the signed Pod UID, namespace, ServiceAccount,
-Pod IP and Service with the registration.
+A successful verification builds the Linkerd workload JSON from the asserted
+namespace and Pod name and keeps the asserted Pod UID, namespace,
+ServiceAccount, Pod IP and Service with the registration.
 
 ```text
    pod->workload          {"ns":…,"pod":…}     source_workload for outbound discovery
-   pod->pod_uid           signed
-   pod->namespace_name    signed  ┐
-   pod->service_account   signed  ├─ the inbound verdict's inputs (chapter 3)
-   pod->pod_ip            signed  ┘
-   pod->granted_service   signed
+   pod->pod_uid           asserted
+   pod->namespace_name    asserted  ┐
+   pod->service_account   asserted  ├─ the inbound verdict's inputs (chapter 3)
+   pod->pod_ip            asserted  ┘
+   pod->granted_service   asserted
 ```
 
 These are retained because intra-node the placement step of 2-2 is satisfied by
@@ -884,8 +1026,8 @@ registration is what the generation is across one.** One admission path serves
 both. A re-tenanted slot clears all of it — the new tenant states its own.
 
 A Pod may request a Service name in its channel HELLO, but that request carries
-no authority. The controller includes it in the grant only when the observed
-Pod is a selected endpoint of that Service. The Pod enters backend selection after
+no authority. The issuing authority puts it in the assertion only when the
+observed Pod is selected by that Service. The Pod enters backend selection after
 `POD_INIT_RESULT(READY)`.
 
 ## 2-1.6 The second gate: `POD_REGISTER`
@@ -893,6 +1035,7 @@ Pod is a selected endpoint of that Service. The Pod enters backend selection aft
 ```text
    POD_REGISTER(service_name)
       ├─ the slot is still quiescing                      → refused
+      ├─ the runtime is stopping, or the session retired  → refused
       ├─ already registered, same connection and Service  → the existing id (idempotent)
       ├─ already registered, different Service            → conflicting replay, refused
       ├─ no verified assertion, or one already consumed   → refused
@@ -910,7 +1053,15 @@ needs no id. The idempotent path lets a host that lost `POD_ASSIGNED` or
 
 ## 2-1.7 Membership and revocation
 
-The controller publishes the grant-eligible `(Pod UID, Service)` pairs for the
+Revocation follows the authority that stated the identity. Under `grant` the
+controller withdraws it through the membership feed described here. Under
+`direct` `dpumeshd` owns it: it re-resolves each live worker against Kubernetes
+on its control loop, and a worker that no longer resolves is unregistered on the
+control session and its broker terminated. The DPU consumes the same feed for
+topology in both modes but revokes from it only under `grant`, so one authority
+and not two decides that a registration ends.
+
+The controller publishes the eligible `(Pod UID, Service)` pairs for the
 certificate's node:
 
 ```text
@@ -918,10 +1069,10 @@ member=<pod-uid>,<service-name>
 member=<pod-uid>,-              ← client-only registration is authorized
 ```
 
-Names, not node-local numbers, cross this feed. The grant checks decide both an
+Names, not node-local numbers, cross this feed. The same checks decide both an
 assertion and a membership entry, so deleting a Pod, changing its labels, losing
 endpoint readiness, or losing its running container status withdraws its pair.
-Every grant-eligible Pod also contributes the bare form, which is what a Pod
+Every eligible Pod also contributes the bare form, which is what a Pod
 registering without Service membership holds.
 
 The Comch control thread adopts each newer generation and closes the exact
@@ -966,6 +1117,12 @@ ring acknowledgement when the channel has no posted receive and receives are
 withheld while a worker's completion queue is above its backpressure mark. Until
 it passes, the slot and its imported mappings are held.
 
+A runtime stop runs the same path for every registration at once, then joins the
+data workers and destroys the DPA, Comch, DMA and mapping objects it owns. A
+drain or a release that does not complete within its bound ends the process with
+a failure status instead of dropping the resource, because the host reuses a
+slot only on proof of teardown, never on the runtime's disappearance.
+
 ## 2-1.9 The per-Pod broker
 
 A workload that owns `/dev/infiniband` can program DMA, so every DOCA object is
@@ -976,7 +1133,9 @@ allocation socket from kubelet and never receives a device descriptor.
 `dpumeshd` creates one broker and one empty private-root mountpoint for one slot
 generation. A root-only launch socket
 carries exactly two descriptors: the already accepted workload connection and
-an opened worker-cgroup directory. The launched supervisor must be a direct
+an opened worker-cgroup directory. Under `direct` the broker keeps that socket
+open afterwards and reports its connection nonce on it, so the report reaches
+the supervisor over a channel the workload never had. The launched supervisor must be a direct
 child of `dpumeshd`; its child must present uid 0, the expected parent PID, and a
 fresh PID/start-time identity before the final launch barrier opens. No token or
 command-line secret is used.
@@ -988,8 +1147,9 @@ The broker's privilege reduction is ordered around device initialization:
    `dpumeshd.service/workers/pod<uid>.g<generation>`;
 3. unshare mount, cgroup, and network namespaces and create a private tmpfs;
 4. consume the fixed 76-byte workload `HELLO`;
-5. open the DOCA device, create Comch, obtain the DPU challenge, acquire and
-   present the WorkloadGrant, and export all mappings;
+5. open the DOCA device, create Comch, obtain the DPU challenge, report it and
+   receive either the assertion to present or the supervisor's approval, and
+   export all mappings;
 6. pivot into the empty tmpfs, detach the host root, drop supplementary groups,
    uid/gid and capabilities, set `no_new_privs`, and deny both exec syscalls;
 7. send `READY` and progress the channel as uid/gid 65532.
@@ -1036,31 +1196,38 @@ the application drains and interprets reverse rings. The IPC has no operation
 that accepts an application-created memfd or eventfd.
 
 One slot owns at most one broker. `dpumeshd` stores the worker by final PID and
-rechecks its start time on every manager request. A broker exit removes that
-entry, closes the slot's worker reference, and holds a five-second cleanup reuse
-barrier when registration reached the DPU. Only then does the same slot return
-to `FREE_LISTENING`. The slot generation increases before each authorization,
-so late grants and completions cannot enter its next tenant.
+rechecks its start time on every manager request. Reaping the supervisor is not
+proof that the broker is gone, so a slot returns to `FREE_LISTENING` only on two
+positive facts: its worker cgroup is empty, and the registration it reached has
+been cleaned up — proven under `direct` by `STATUS` answering `OK`, and bounded
+under `grant` by a fixed reuse barrier. The cleanup query is retried for as long
+as the DPU is unreachable rather than abandoned, because abandoning it would
+strand the slot. The slot generation increases before each authorization, so
+late assertions and completions cannot enter its next tenant.
 
 The broker is a child of the `dpumeshd` service rather than an independently
-persistent unit. A daemon stop terminates every broker; parent-death signals
-also kill the supervisor and its namespace-init child. Unexpected broker-control
-EOF or `TRANSPORT_DOWN` makes the application raise `SIGTERM` and exit with
-status 75. Kubernetes restart policy creates a new application process, slot
-generation, broker, nonce, and grant.
+persistent unit. A daemon stop terminates every broker, waits out its quiesce
+and drain bounds, then kills the worker cgroup and waits for the leaf to empty;
+addressing the cgroup rather than a PID is what makes that terminal. Parent-death
+signals are rearmed after the credential change that clears them, and the launch
+thread that armed them outlives its broker. Unexpected broker-control EOF or
+`TRANSPORT_DOWN` makes the application raise `SIGTERM` and exit with status 75.
+Kubernetes restart policy creates a new application process, slot generation,
+broker, nonce, and identity.
 
 | Event | Result |
 |---|---|
 | normal channel destruction or application EOF | broker sends `POD_UNREGISTER`, waits for `POD_QUIESCED`, destroys Host exports, and exits |
-| broker or Comch failure | control socket becomes terminal; application exits; slot observes the cleanup barrier before reuse |
-| `dpumeshd` stop or restart | all child brokers terminate and free slots are advertised only after feed/controller readiness returns |
+| broker or Comch failure | control socket becomes terminal; application exits; the slot waits for an empty worker cgroup and proven DPU cleanup |
+| `dpumeshd` stop or restart | all child brokers terminate and free slots are advertised only after feed, controller and — under `direct` — control-session readiness returns |
 | membership withdrawal | DPU removes routing and starts ring/mapping quiescence for the registration |
 | process signal | broker leaves its progress loop and executes unregister/cleanup |
 
-The launch itself constrains which process can reach Comch, while the signed,
-nonce-bound WorkloadGrant proves the Kubernetes and allocation identity the DPU
+The launch itself constrains which process can reach Comch, while the
+nonce-bound assertion proves the Kubernetes and allocation identity the DPU
 cannot observe. Both gates are required: device confinement does not establish
-a Service, and a signed claim does not transfer device ownership to a workload.
+a Service, and an identity claim does not transfer device ownership to a
+workload.
 
 ---
 
@@ -1747,11 +1914,12 @@ workload identity; it is a transport identifier for one node's slot table.
 | internal routing fields | `int32_t` |
 
 `POD_REGISTER` is a fixed 72-byte message carrying the requested Service name
-beside the pod id, where `-1` asks the DPU to assign one. WorkloadGrant v3 is a
-1545-byte canonical message whose numeric fields are explicit little-endian
+beside the pod id, where `-1` asks the DPU to assign one. The identity assertion
+is a 1545-byte canonical message whose numeric fields are explicit little-endian
 bytes, whose text is NUL-terminated and zero-padded, and whose final 64 bytes
-are an Ed25519 signature over every preceding byte. Section 2-1.2 gives its
-complete layout. Forward and reverse descriptors use fixed-width fields and
+are an Ed25519 signature over every preceding byte or, on the control session,
+zero. Section 2-1.2 gives its complete layout, and the control session frames
+it in a fixed 1609-byte request answered by a fixed 36-byte response. Forward and reverse descriptors use fixed-width fields and
 compile-time layout assertions. Host and DPU endpoints are little-endian.
 
 ## 5.2 gRPC authority
@@ -1769,8 +1937,9 @@ injection API. Protobuf messages, stubs and handlers are unchanged.
 | Input | State supplied |
 |---|---|
 | DOCA Comch | pod registration, resolution, mappings, readiness, teardown, doorbells |
+| control session | under `direct`, the paired host's registration, unregistration and cleanup commands |
 | signed feeds | node membership; Service targets and ready endpoints; the topology generation |
-| root-only files | the registration, feed and controller keyrings; the DPU's own node credential; the admission switch |
+| root-only files | the registration, feed and controller keyrings; the DPU's own node credential; its control-session certificate; the admission switch |
 | delivered files | Linkerd identity material, authenticated by the certificate issued against it |
 
 Resolution answers follow the topology generation, so nothing reloads out of
@@ -1823,9 +1992,10 @@ Identity and verified state:
 
 | Name | Required/default | Meaning |
 |---|---|---|
-| `DPUMESH_CLUSTER_ID` | required | cluster identifier bound into every WorkloadGrant |
-| `DPUMESH_NODE_NAME` | required | Kubernetes node served by this DPU |
-| `DPUMESH_REGISTRATION_KEY_DIR` | required | per-node Ed25519 public keys used to verify WorkloadGrant v3 |
+| `DPUMESH_CLUSTER_ID` | required | cluster identifier bound into every assertion |
+| `DPUMESH_NODE_NAME` | required | Kubernetes node served by this DPU, which is not the DPU's own node name when the runtime is a Pod |
+| `DPUMESH_REGISTRATION_MODE` | `grant` | `grant` or `direct`; any other value refuses startup |
+| `DPUMESH_REGISTRATION_KEY_DIR` | required under `grant` | per-node Ed25519 public keys used to verify a signed assertion |
 | `DPUMESH_FEED_KEY_DIR` | unset | HMAC keyring for membership and Service-target feeds |
 | `DPUMESH_CONTROLLER_KEY_DIR` | unset | Ed25519 public keys for topology generations |
 | `DPUMESH_MEMBERSHIP_FILE` | unset | signed node membership document; the deployment uses `/etc/dpumesh/feeds/membership.v1`; unset disables membership revocation input |
@@ -1835,6 +2005,26 @@ Identity and verified state:
 | `DPUMESH_ADMISSION_FILE` | unset | optional protected-session switch; `drain` closes new protected admission |
 | `DPUMESH_CONTROLLER_SCOPE_URL` | unset | HTTP endpoint for mediated workload-scope lookup |
 | `DPUMESH_IDENTITY_TRUST_DOMAIN` | `linkerd.cluster.local` | trust domain used for workload identities |
+
+Under `direct`, the paired-host control listener adds:
+
+| Name | Required/default | Meaning |
+|---|---|---|
+| `DPUMESH_LOCAL_BIND` | required | IPv4 address the control listener binds |
+| `DPUMESH_LOCAL_PORT` | 4791 | control listener port |
+| `DPUMESH_LOCAL_CA` | required | issuer trust root for the paired host's client certificate |
+| `DPUMESH_LOCAL_CERT`, `DPUMESH_LOCAL_KEY` | required | the runtime's own server certificate and key |
+
+The accepted client URI SAN is derived from `DPUMESH_NODE_NAME`, so the served
+node and the admitted host are one setting and cannot drift apart.
+
+Process lifecycle is the same whether the runtime is a service or a Pod:
+
+| Name | Required/default | Meaning |
+|---|---|---|
+| `DPUMESH_RUNTIME_LOCK` | `/run/dpumesh-runtime/runtime.lock` | exclusive hardware lock; startup fails while another runtime holds it |
+| `DPUMESH_READY_FILE` | unset | file the control loop republishes each second as its readiness signal |
+| `DPUMESH_ARM_CPU_LIST` | unset | explicit CPU order, one per Arm data worker plus one for the control thread; an unavailable or repeated CPU refuses startup |
 
 Execution geometry is expressed as `N/K/A` as defined in
 [`DATA.md`](DATA.md):
@@ -1910,8 +2100,8 @@ spec:
 ```
 
 `DPUMESH_SERVICE` is the unqualified Kubernetes Service served by this Pod; it
-is omitted for a pure client. The controller resolves it in the Pod namespace
-and verifies that the Pod is a ready endpoint of that Service.
+is omitted for a pure client. The registering authority resolves it in the Pod
+namespace and verifies that the Service selects the Pod.
 `DPUMESH_RINGS_PER_POD` must match the node runtime. The POSIX adapter additionally
 uses `DPUMESH_PORT` for the intercepted listening port and
 `DMESH_PRELOAD_DEBUG` for diagnostics. `LD_PRELOAD` is supplied in the image or
@@ -1993,6 +2183,19 @@ counter and one lock domain.
 | `--worker-memory-high` | 768 MiB | cgroup `memory.high` |
 | `--worker-memory-max` | 1 GiB | cgroup `memory.max` |
 | `--worker-pids-max` | 64 | cgroup `pids.max` |
+| `--registration-mode` | `grant` | `grant` or `direct`; must equal the DPU setting |
+
+Under `direct` the service also states who it registers with and what it reads:
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--cluster-id` | `dpumesh-test` | cluster identifier written into each assertion |
+| `--local-control-port` | 4791 | control port on the paired DPU, reached at `--dpu-feed-host` |
+| `--local-server-name` | required | expected DPU server certificate name |
+| `--local-ca` | `/etc/dpumesh/tls/controller-ca.crt` | issuer trust root for that certificate |
+| `--kube-api` | required | HTTPS Kubernetes API endpoint |
+| `--kube-ca`, `--kube-cert`, `--kube-key` | `/etc/dpumesh/kube/` | read-only Kubernetes client credential |
+| `--podresources-socket` | `/var/lib/kubelet/pod-resources/kubelet.sock` | kubelet allocation listing |
 
 The packaged unit reads `/etc/dpumesh/dpumeshd.env` and maps its fields to the
 flags above. This is the complete service configuration surface:
@@ -2009,6 +2212,10 @@ flags above. This is the complete service configuration surface:
 | `DPUMESH_WORKER_CPU_MAX` | `--worker-cpu-max` |
 | `DPUMESH_WORKER_MEMORY_HIGH`, `DPUMESH_WORKER_MEMORY_MAX` | `--worker-memory-high`, `--worker-memory-max` |
 | `DPUMESH_WORKER_PIDS_MAX` | `--worker-pids-max` |
+| `DPUMESH_REGISTRATION_MODE` | `--registration-mode` |
+| `DPUMESH_CLUSTER_ID` | `--cluster-id` |
+| `DPUMESH_LOCAL_SERVER_NAME` | `--local-server-name` |
+| `DPUMESH_KUBE_API` | `--kube-api` |
 
 The supplied systemd unit delegates `cpu`, `memory` and `pids`, bounds the
 manager to reserved CPUs and 2.5 GiB, grants only the capabilities required for
@@ -2016,7 +2223,10 @@ namespace/cgroup/device setup, and makes package/config trees read-only. Worker
 leaves live at
 `/sys/fs/cgroup/system.slice/dpumeshd.service/workers/pod<uid>.g<generation>`.
 They are host infrastructure and are accounted through kubelet's system
-reservation rather than a workload Pod cgroup.
+reservation rather than a workload Pod cgroup. `KillMode=mixed` and a stop
+timeout longer than the broker quiesce, drain and kill bounds let the service
+finish that teardown itself; the unit's final timeout is the backstop, not the
+mechanism.
 
 ### 5.5.5 DPU feed receiver
 
@@ -2052,19 +2262,41 @@ digest differs.
 | `/etc/dpumesh/feed.keys/` | DPU, root-readable | membership and Service-target verification |
 | `/etc/dpumesh/node-static.key` | DPU only | peer-channel private identity |
 | `/etc/dpumesh/node-static.pub` | DPU | public identity returned to `dpumeshd` |
+| `/etc/dpumesh/tls/{local-ca.crt,dpu.crt,dpu.key}` | DPU root | control-listener trust root and server identity |
 | `/etc/dpumesh/feeds/{membership.v1,topology.v1,service-targets.v1}` | DPU feed user writes; DPU runtime reads | atomically installed control documents |
-| `/etc/dpumesh/tls/{controller-ca.crt,node.crt,node.key}` | host root | `dpumeshd` mTLS identity |
+| `/etc/dpumesh/tls/{controller-ca.crt,node.crt,node.key}` | host root | `dpumeshd` mTLS identity, presented to the controller and to the paired DPU |
+| `/etc/dpumesh/kube/{ca.crt,client.crt,client.key}` | host root | read-only Kubernetes client credential |
 | `/etc/dpumesh/dpumeshd.env` | host root | systemd runtime configuration |
+| `/run/dpumesh-runtime/{runtime.lock,ready}` | DPU root | exclusive hardware lock and runtime readiness signal |
 | `/run/dpumesh/slots/channel-NNN.sock` | host root; one is bind-mounted read-only into a Pod | allocation endpoint |
 | `/run/dpumesh/manager.sock` | host root | internal manager endpoint |
 | `/opt/dpumesh/bin/dmesh_broker` | host immutable package | broker executable |
 
 Controller, grant and feed keys are different material. The DPU receives public
 keys for the two Ed25519 roles and the symmetric key only for its node-scoped
-feed verification. `dpumeshd` holds no signing key and no Kubernetes bearer
-token.
+feed verification. `dpumeshd` holds no signing key; its Kubernetes credential is
+a client certificate bound to a role with `get`, `list` and `watch` on Pods and
+Services and nothing else. Kubernetes RBAC cannot restrict a list to one node,
+so the node filter is applied by the trusted daemon rather than claimed as a
+permission boundary.
 
 ## 5.6 Deployment, operation and validation
+
+A workload declares one extended resource. Everything under it is operator
+state, and a node missing any of it advertises no channel at all:
+
+| Operator provides | Consumed by |
+|---|---|
+| `dpumesh_dpu` on each meshed node's BlueField, as a system service or a DaemonSet on a DPU node | the exclusive runtime lock; one instance per device |
+| `dpumeshd` and an immutable broker binary on each host | systemd, with delegated `cpu`, `memory` and `pids` and reserved CPUs |
+| the controller Deployment and its topology, grant and feed keyrings | §1.1 and §5.5.3 |
+| one registration mode, set identically on host and DPU | §2-1; there is no negotiation and no fallback |
+| node client certificates and DPU node keys, plus control-session certificates under `direct` | §2-0.1, §2-1.2 and §5.5.6 |
+| a read-only Kubernetes client certificate for each host under `direct` | §2-1.1 |
+| `K`, matched across host, DPU and every meshed PodSpec | §5.5.1 |
+
+Certificate issuance, rotation and revocation use the operator's existing PKI.
+No component of DPUmesh enrolls a node or mints an infrastructure credential.
 
 The one-node hardware workflow is executable documentation:
 
@@ -2117,13 +2349,24 @@ geometry, deployed workload set and client CPU affinity, then runs a bounded
 native data-path probe. `native_deploy.sh all` performs the controller, host
 service, Device Plugin, DPU, workload rollout and smoke checks.
 
+The DPU runtime is also deployable as a DaemonSet on a DPU node joined to the
+cluster. `packaging/build-dpu-image.sh` packages the Arm executable with the
+libraries its loader actually resolves, `packaging/helm/dpumesh-runtime` places
+one Pod on one tainted DPU node for one served host, and
+[`packaging/README-dpu-kubernetes.md`](../packaging/README-dpu-kubernetes.md)
+is the operator procedure. The chart uses `OnDelete`, so replacing the runtime
+is a deliberate act rather than a side effect of editing values, and the
+runtime lock keeps a system service and a Pod from ever holding the device at
+once.
+
 Operational state is fail-closed for new allocations. `dpumeshd` advertises
-slots Healthy only while controller fetch, DPU delivery and node-key report all
-succeed. Existing brokers keep their held transport state, while new slot use
-is unavailable. Deleting a workload closes its slot connection; the supervised
-broker unregisters at the DPU, exits, and only then releases its worker cgroup
-and slot generation for reuse. A `dpumeshd` stop marks devices unhealthy,
-stops listeners and terminates its broker children through the service cgroup.
+slots Healthy only while controller fetch, DPU delivery, node-key report and —
+under `direct` — the control-session heartbeat all succeed. Existing brokers
+keep their held transport state, while new slot use is unavailable. Deleting a
+workload closes its slot connection; the supervised broker unregisters at the
+DPU, exits, and only then releases its worker cgroup and slot generation for
+reuse. A `dpumeshd` stop marks devices unhealthy, stops listeners, terminates
+its broker children and waits for their cgroups to empty.
 
 The optional admission file accepts `drain` to refuse new protected sessions;
 any other readable content opens admission, and an unreadable file is treated
@@ -2141,9 +2384,12 @@ remaining values bound resource cost.
 | `GENERATION_INTERVAL` | 5 s | controller publication cadence |
 | `CONTROLLER_REQUEST_MAX` | 32 | concurrent controller request handlers |
 | `CONTROLLER_REQUEST_TIMEOUT` | 10 s | TLS handshake and HTTP connection deadline |
-| `DMESH_ASSERT_MAX_LIFETIME_SEC` | 300 s | maximum WorkloadGrant lifetime |
-| `DMESH_ASSERT_CLOCK_SKEW_SEC` | 30 s | tolerated controller-to-DPU future skew |
+| `DMESH_ASSERT_MAX_LIFETIME_SEC` | 300 s | maximum assertion lifetime |
+| `DMESH_ASSERT_CLOCK_SKEW_SEC` | 30 s | tolerated issuer-to-DPU future skew |
 | `DMESH_REGISTRATION_REPLAY_SLOTS` | 4096 | consumed assertion identifiers retained |
+| control frame sizes | 1609 / 36 B | fixed control-session request and response |
+| control handshake / idle deadline | 3 s / 15 s | unauthenticated and established session lifetime |
+| runtime shutdown drain | 20 s | per-runtime bound on retiring every registration |
 | `MAX_PODS` | 127 | DPU Pod table and Device Plugin slot ceiling |
 | `DMESH_CHANNEL_IDLE_NS` | 60 s | idle peer-channel eviction threshold |
 | `DMESH_CHANNEL_MAX` | 256 | peer channels held by one DPU |
@@ -2167,17 +2413,22 @@ are never silently truncated.
 
 ## 5.8 Architectural invariants
 
-- Kubernetes contains the controller and application workloads. `dpumeshd` runs
-  on the host; the DPU runtime and feed receiver run on BlueField. All three are
-  system services outside Kubernetes.
+- Kubernetes contains the controller and application workloads. `dpumeshd` and
+  its brokers are host system services. The DPU runtime is a single instance on
+  BlueField, held by an exclusive hardware lock whether it runs as a system
+  service or as a DaemonSet Pod.
 - Workloads hold no Kubernetes token, DPU device node, host path, PCI address,
   signing key or privileged capability. Their complete DPUmesh capability is one
   allocated Unix socket.
 - `dpumeshd` derives Pod UID and container ID from `SO_PEERCRED`, cgroup v2 and a
-  PID-starttime fence. The controller binds that evidence to its latest Pod,
-  container, resource, node, Service and EndpointSlice state.
-- A WorkloadGrant is bound to cluster, node, Pod, container, Service, slot,
+  PID-starttime fence. The registering authority binds that evidence to its
+  latest Pod, container, resource, node and Service state.
+- An assertion is bound to cluster, node, Pod, container, Service, slot,
   generation, daemon incarnation, DPU nonce, issue/expiry time and assertion id.
+  It is signed when it crosses an untrusted carrier, and unsigned only on a
+  mutually authenticated session that has already established who may send it.
+- A slot is reused only on proof: an empty worker cgroup and a completed DPU
+  teardown. Neither a timer nor the disappearance of a process is that proof.
 - One broker is a direct child of `dpumeshd`, runs in a bounded worker cgroup and
   private namespaces, pivots to an empty root, uses uid/gid 65532, has no
   capabilities, sets `no_new_privs` and applies an exec-deny seccomp filter.
@@ -2214,5 +2465,15 @@ connection-level bytes, streams, verdicts and identities.
 One DPU, `dpumeshd` and its broker population form one node trust domain. A
 compromised node credential can speak for workloads that the signed generation
 places on that node, but not for workloads assigned to another node. Isolation
-between local workloads is enforced by controller grants, per-slot generations,
-DPU mapping tables, broker processes and worker cgroups.
+between local workloads is enforced by the registering authority, per-slot
+generations, DPU mapping tables, broker processes and worker cgroups.
+Impersonation of a local workload after the host root, `dpumeshd` or the local
+DPU runtime is compromised is outside this boundary, because each of them is
+already the authority for that node.
+
+The broker is a host process for the same reason. It needs the DOCA device, one
+workload's registered memory, and nothing else; node-wide administration,
+credentials and lifetime belong to `dpumeshd`. Placing it in the workload's own
+Pod as a sidecar would hand the device and its registrations to the party the
+whole boundary exists to confine, so the infrastructure operator, not the
+application owner, controls where it runs.
