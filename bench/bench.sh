@@ -35,7 +35,6 @@ CTRL_PORT="${CTRL_PORT:-9092}"
 OUT="${OUT:-/tmp/dpumesh-bench}"
 DPU_PROJ="${DPU_PROJ:-DPUmesh}"
 DPU_BUILD="$DPU_PROJ/doca/build"
-DPU_LOG="/tmp/dpumesh_dpu_bench.log"
 LINKERD_BUILD="${DPU_L7_BUILD:-l7build}"
 LINKERD_TOOLCHAIN="${LINKERD_TOOLCHAIN:-1.90.0}"
 LINKERD_CARGO="${LINKERD_CARGO:-\$HOME/.cargo/bin/cargo}"
@@ -133,55 +132,10 @@ build_dpu() {
     info "DPU build complete"
 }
 
-stop_dpu() {
-    ssh_dpu "echo '$DPU_PASS' | sudo -S -p '' bash -c \"pids=\\\$(pgrep -f '[d]pumesh_dpu'); [ -z \\\"\\\$pids\\\" ] || kill -9 \\\$pids\"" >/dev/null 2>&1 || true
-    sleep 5
-}
-
 start_dpu() {
-    local home node_name log_level cluster_id relay_bind
-    [[ "$DPU_PCI" =~ ^-p[[:space:]][0-9A-Fa-f:.]+[[:space:]]+-r[[:space:]][0-9A-Fa-f:.]+$ ]] || {
-        err "DPU_PCI must be '-p PCI_ADDRESS -r REPRESENTOR_ADDRESS'"
-        exit 2
-    }
-    home=$(dpu_home)
-    node_name="${DPUMESH_NODE_NAME:-$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')}"
-    [ -n "$node_name" ] || { err "cannot resolve Kubernetes node name"; exit 1; }
-    log_level="${DPUMESH_LOG_LEVEL:-40}"
-    cluster_id="${DPUMESH_CLUSTER_ID:-dpumesh-test}"
-    relay_bind="${LINKERD_GATEWAY_BIND:-192.168.100.1}"
-    stop_dpu
-    step "Starting DPU runtime"
-    ssh_dpu "cat >/tmp/start-dpumesh.sh <<'LAUNCH'
-#!/bin/bash
-ulimit -c unlimited
-screen -dmS dpumesh bash -c \"cd '$home/$DPU_BUILD' && \
-DPUMESH_CLUSTER_ID='$cluster_id' \
-DPUMESH_NODE_NAME='$node_name' \
-DPUMESH_REGISTRATION_KEY_DIR='${DPUMESH_REGISTRATION_KEY_DIR_DPU:-/etc/dpumesh/registration.keys}' \
-DPUMESH_FEED_KEY_DIR='${DPUMESH_FEED_KEY_DIR_DPU:-/etc/dpumesh/feed.keys}' \
-DPUMESH_MEMBERSHIP_FILE='${DPUMESH_MEMBERSHIP_FILE:-/etc/dpumesh/feeds/membership.v1}' \
-DPUMESH_TOPOLOGY_FILE='${DPUMESH_TOPOLOGY_FILE:-/etc/dpumesh/feeds/topology.v1}' \
-DPUMESH_CONTROLLER_KEY_DIR='${DPUMESH_CONTROLLER_KEY_DIR_DPU:-/etc/dpumesh/controller.pub.keys}' \
-DPUMESH_NODE_KEY_FILE='${DPUMESH_NODE_KEY_FILE:-/etc/dpumesh/node-static.key}' \
-DPUMESH_NODE_KEY_PUBLIC_FILE='${DPUMESH_NODE_KEY_PUBLIC_FILE:-/etc/dpumesh/node-static.pub}' \
-DPUMESH_CONTROLLER_SCOPE_URL='${DPUMESH_CONTROLLER_SCOPE_URL:-http://$relay_bind:28089}' \
-DPUMESH_IDENTITY_TRUST_DOMAIN='${DPUMESH_IDENTITY_TRUST_DOMAIN:-linkerd.cluster.local}' \
-DPUMESH_L7_OPAQUE_SVC= DPUMESH_L7_SVC= \
-DPUMESH_L7_LINKERD_WORKER='$DPUMESH_L7_LINKERD_WORKER' \
-DPUMESH_DPA_THREADS='$DPUMESH_DPA_THREADS' \
-DPUMESH_RINGS_PER_POD='$DPUMESH_RINGS_PER_POD' \
-DPUMESH_ARM_WORKERS='$DPUMESH_ARM_WORKERS' \
-DPUMESH_PEER_TRANSPORT='${DPUMESH_PEER_TRANSPORT:-}' \
-DPUMESH_PEER_BIND='${DPUMESH_PEER_BIND:-}' \
-DPUMESH_PEER_PORT='${DPUMESH_PEER_PORT:-47900}' \
-./dpumesh_dpu $DPU_PCI -l '$log_level' >'$DPU_LOG' 2>&1\"
-sleep 2
-pgrep -x dpumesh_dpu | head -1
-LAUNCH
-chmod +x /tmp/start-dpumesh.sh
-echo '$DPU_PASS' | sudo -S -p '' /tmp/start-dpumesh.sh" >/dev/null
-    info "DPU runtime started"
+    local ns="${RUNTIME_NS:-dpumesh-system}" release="${DPU_RELEASE:-dpumesh-runtime}"
+    kubectl -n "$ns" delete pod -l "app.kubernetes.io/instance=$release" --wait=true
+    kubectl -n "$ns" wait --for=jsonpath='{.status.numberReady}'=1 "daemonset/$release" --timeout=240s
 }
 
 running_client_ip() {
@@ -247,8 +201,8 @@ case "$CMD" in
     ping) [ $# -eq 0 ] || { err "ping takes no arguments"; exit 2; }; run_ping ;;
     latency|bandwidth|rate) benchmark "$CMD" ;;
     all) benchmark latency; benchmark bandwidth; benchmark rate ;;
-    dpulog) need_rig; dpu_sudo "tail -${1:-40} '$DPU_LOG'" ;;
-    dpubanner) need_rig; dpu_sudo "grep -h 'DPU PROXY MODE ON' '$DPU_LOG' | tail -1" ;;
+    dpulog) kubectl -n "${RUNTIME_NS:-dpumesh-system}" logs "daemonset/${DPU_RELEASE:-dpumesh-runtime}" -c runtime --tail="${1:-40}" ;;
+    dpubanner) kubectl -n "${RUNTIME_NS:-dpumesh-system}" logs "daemonset/${DPU_RELEASE:-dpumesh-runtime}" -c runtime | rg "DPU PROXY MODE ON" | tail -1 ;;
     dpucpu) need_rig; dpu_sudo 'pid=$(pgrep -x dpumesh_dpu | head -1); [ -n "$pid" ] || { echo "dpumesh_dpu not running"; exit; }; top -bH -d 1 -n 2 -p "$pid" | awk "/ PID +USER/{n++} n==2{print}"' ;;
     *)
         echo "usage: $0 geometry|build|restart|point|ping|latency|bandwidth|rate|all|dpulog|dpubanner|dpucpu" >&2

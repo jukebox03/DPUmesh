@@ -1,7 +1,11 @@
+{{- $identity := printf "%s.%s.serviceaccount.identity.%s.%s" .Values.serviceAccountName .Release.Namespace .Values.linkerd.namespace .Values.linkerd.trustDomain -}}
+{{- if and .Values.linkerd.enabled (gt (len $identity) 64) -}}
+{{- fail "Linkerd identity exceeds the 64-byte CSR CommonName limit; shorten serviceAccountName or namespace" -}}
+{{- end -}}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: {{ .Release.Name }}
+  name: {{ .Values.serviceAccountName }}
 automountServiceAccountToken: false
 ---
 apiVersion: apps/v1
@@ -15,12 +19,16 @@ spec:
     matchLabels: {app.kubernetes.io/instance: {{ .Release.Name }}}
   template:
     metadata:
-      labels: {app.kubernetes.io/instance: {{ .Release.Name }}}
+      labels:
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        {{- if .Values.linkerd.enabled }}
+        linkerd.io/control-plane-ns: {{ .Values.linkerd.namespace }}
+        {{- end }}
       annotations:
         linkerd.io/inject: disabled
         sidecar.istio.io/inject: "false"
     spec:
-      serviceAccountName: {{ .Release.Name }}
+      serviceAccountName: {{ .Values.serviceAccountName }}
       automountServiceAccountToken: false
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
@@ -33,6 +41,25 @@ spec:
           operator: Equal
           value: "true"
           effect: NoSchedule
+      initContainers:
+        {{- if .Values.linkerd.enabled }}
+        - name: linkerd-identity
+          image: {{ .Values.image | quote }}
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          command: [/usr/local/bin/dpumesh-linkerd-init]
+          env:
+            - name: LINKERD2_PROXY_IDENTITY_LOCAL_NAME
+              value: {{ printf "%s.%s.serviceaccount.identity.%s.%s" .Values.serviceAccountName .Release.Namespace .Values.linkerd.namespace .Values.linkerd.trustDomain | quote }}
+          volumeMounts:
+            - {name: linkerd-identity, mountPath: /identity}
+        {{- end }}
+        - name: feed-permissions
+          image: {{ .Values.image | quote }}
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          command: [sh, -ec, 'chown -R 65532:65532 /feeds; chmod 0755 /feeds']
+          securityContext: {runAsUser: 0}
+          volumeMounts:
+            - {name: feeds, mountPath: /feeds}
       containers:
         - name: runtime
           image: {{ .Values.image | quote }}
@@ -46,12 +73,43 @@ spec:
             - {name: DPUMESH_NODE_NAME, value: {{ required "hostNode is required" .Values.hostNode | quote }}}
             - {name: DPUMESH_DPU_PCI, value: {{ required "pci is required" .Values.pci | quote }}}
             - {name: DPUMESH_DPU_REPRESENTOR, value: {{ required "representor is required" .Values.representor | quote }}}
-            - {name: DPUMESH_REGISTRATION_MODE, value: {{ .Values.registrationMode | quote }}}
+
             - {name: DPUMESH_LOCAL_BIND, value: {{ .Values.localBind | quote }}}
             - {name: DPUMESH_READY_FILE, value: /run/dpumesh-runtime/ready}
+            {{- if .Values.linkerd.enabled }}
+            - {name: LINKERD2_PROXY_INBOUND_LISTEN_ADDR, value: "127.0.0.1:0"}
+            - {name: LINKERD2_PROXY_OUTBOUND_LISTEN_ADDR, value: "127.0.0.1:0"}
+            - {name: LINKERD2_PROXY_CONTROL_LISTEN_ADDR, value: "127.0.0.1:0"}
+            - {name: LINKERD2_PROXY_ADMIN_LISTEN_ADDR, value: "0.0.0.0:4191"}
+            - {name: LINKERD2_PROXY_INBOUND_DEFAULT_POLICY, value: all-unauthenticated}
+            - name: DPUMESH_RUNTIME_POD_NAME
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+            - {name: LINKERD2_PROXY_POLICY_WORKLOAD, value: {{ printf "{\"ns\":\"%s\",\"pod\":\"$(DPUMESH_RUNTIME_POD_NAME)\"}" .Release.Namespace | quote }}}
+            - {name: LINKERD2_PROXY_DESTINATION_CONTEXT, value: {{ printf "{\"ns\":\"%s\",\"nodeName\":\"%s\"}" .Release.Namespace .Values.hostNode | quote }}}
+            - {name: LINKERD2_PROXY_DESTINATION_PROFILE_NETWORKS, value: "10.0.0.0/8,192.168.0.0/16"}
+            - {name: LINKERD2_PROXY_DESTINATION_PROFILE_SUFFIXES, value: svc.cluster.local.}
+            - {name: LINKERD2_PROXY_IDENTITY_DIR, value: /var/run/linkerd/identity}
+            - {name: LINKERD2_PROXY_IDENTITY_TOKEN_FILE, value: /var/run/linkerd/token/identity-token}
+            - name: LINKERD2_PROXY_IDENTITY_TRUST_ANCHORS
+              valueFrom:
+                configMapKeyRef: {name: {{ .Values.linkerd.trustRootsConfigMap }}, key: ca-bundle.crt}
+            - {name: LINKERD2_PROXY_IDENTITY_LOCAL_NAME, value: {{ printf "%s.%s.serviceaccount.identity.%s.%s" .Values.serviceAccountName .Release.Namespace .Values.linkerd.namespace .Values.linkerd.trustDomain | quote }}}
+            - {name: LINKERD2_PROXY_IDENTITY_SVC_ADDR, value: {{ printf "linkerd-identity-headless.%s.svc.cluster.local.:8080" .Values.linkerd.namespace | quote }}}
+            - {name: LINKERD2_PROXY_IDENTITY_SVC_NAME, value: {{ printf "linkerd-identity.%s.serviceaccount.identity.%s.%s" .Values.linkerd.namespace .Values.linkerd.namespace .Values.linkerd.trustDomain | quote }}}
+            - {name: LINKERD2_PROXY_DESTINATION_SVC_ADDR, value: {{ printf "linkerd-dst-headless.%s.svc.cluster.local.:8086" .Values.linkerd.namespace | quote }}}
+            - {name: LINKERD2_PROXY_DESTINATION_SVC_NAME, value: {{ printf "linkerd-destination.%s.serviceaccount.identity.%s.%s" .Values.linkerd.namespace .Values.linkerd.namespace .Values.linkerd.trustDomain | quote }}}
+            - {name: LINKERD2_PROXY_POLICY_SVC_ADDR, value: {{ printf "linkerd-policy.%s.svc.cluster.local.:8090" .Values.linkerd.namespace | quote }}}
+            - {name: LINKERD2_PROXY_POLICY_SVC_NAME, value: {{ printf "linkerd-destination.%s.serviceaccount.identity.%s.%s" .Values.linkerd.namespace .Values.linkerd.namespace .Values.linkerd.trustDomain | quote }}}
+            {{- end }}
             {{- range $name, $value := .Values.env }}
             - {name: {{ $name }}, value: {{ $value | quote }}}
             {{- end }}
+          {{- if .Values.linkerd.enabled }}
+          ports:
+            {{- range $i := until 16 }}
+            - {name: {{ printf "admin-%d" $i }}, containerPort: {{ add 4191 $i }}}
+            {{- end }}
+          {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           readinessProbe:
@@ -61,8 +119,43 @@ spec:
           volumeMounts:
             - {name: config, mountPath: /etc/dpumesh}
             - {name: runtime, mountPath: /run/dpumesh-runtime}
+            {{- if .Values.linkerd.enabled }}
+            - {name: linkerd-identity, mountPath: /var/run/linkerd/identity}
+            - {name: linkerd-token, mountPath: /var/run/linkerd/token, readOnly: true}
+            {{- end }}
+        - name: feed-receiver
+          image: {{ .Values.image | quote }}
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          command: [python3, /usr/local/bin/dpumesh-feed-receiver]
+          args: [--bind, {{ .Values.localBind | quote }}]
+          securityContext:
+            runAsUser: 65532
+            runAsGroup: 65532
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          resources:
+            requests: {cpu: 10m, memory: 32Mi}
+            limits: {cpu: 100m, memory: 128Mi}
+          readinessProbe:
+            tcpSocket: {port: 4788}
+            periodSeconds: 2
+          volumeMounts:
+            - {name: config, mountPath: /etc/dpumesh, readOnly: true}
+            - {name: feeds, mountPath: /etc/dpumesh/feeds}
       volumes:
+        {{- if .Values.linkerd.enabled }}
+        - name: linkerd-identity
+          emptyDir: {medium: Memory}
+        - name: linkerd-token
+          projected:
+            sources:
+              - serviceAccountToken: {path: identity-token, audience: identity.l5d.io, expirationSeconds: 3600}
+        {{- end }}
         - name: config
           hostPath: {path: {{ .Values.configDirectory | quote }}, type: Directory}
         - name: runtime
           hostPath: {path: {{ .Values.runtimeDirectory | quote }}, type: DirectoryOrCreate}
+        - name: feeds
+          hostPath: {path: {{ .Values.configDirectory }}/feeds, type: DirectoryOrCreate}

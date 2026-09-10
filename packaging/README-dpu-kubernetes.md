@@ -1,138 +1,143 @@
-# DPU runtime on Kubernetes
+# DPUmesh deployment
 
-This profile runs one DPU ARM runtime per explicitly paired host/DPU node. Host
-`dpumeshd` and its per-workload brokers remain OS processes. Only brokers open
-DOCA resources and progress the host PE. Applications retain the existing IPC ABI.
+Host and DPU join the same Kubernetes cluster as separate nodes. This is the
+single supported placement:
 
-## Installation
+| Component | Runs as |
+|---|---|
+| Application | unprivileged Pod on a host node |
+| DPU runtime | privileged DaemonSet Pod on each paired DPU node |
+| DPUmesh controller | unprivileged Deployment on a designated node |
+| Node admin (dpumeshd) | root systemd service on each host |
+| Per-pod broker | child process on the application's host |
+| Feed receiver | unprivileged sidecar in the DPU runtime Pod |
 
-1. Back up existing DPU kubelet configuration and runtime/configuration files.
-   `prepare-dpu-node.sh` installs a kubelet/kubeadm matching the cluster; it does
-   not assume the standalone kubelet can be reused. Join using a short-lived
-   kubeadm token supplied through a root-only configuration, then delete it.
-2. Configure a working CNI on the DPU management interface. A cluster CNI that
-   hardcodes the host NIC name needs a separate DPU configuration. Taint the DPU
-   `dpumesh.io/dpu=true:NoSchedule`; leave application placement on host nodes.
-3. Keep the existing DPU node key, signed topology/membership feed receivers and
-   their trust configuration under `/etc/dpumesh`. Controller/feed availability
-   and existing peer authentication remain required for their existing roles.
-4. Provision infrastructure TLS credentials: DPU server certificate with its
-   configured DNS SAN and serverAuth, host client certificate with clientAuth and
-   URI `spiffe://dpumesh.io/node/HOST_NODE`, plus the issuer trust roots. The
-   DPU requires that exact host URI; the host validates the configured DPU name.
-   Kubernetes membership alone supplies neither credential nor authentication.
-5. Provision a dedicated Kubernetes read-only client certificate to host
-   dpumeshd, subject `dpumeshd:HOST_NODE`. Replace HOST_NODE in
-   `local-reader-rbac.yaml` and apply. Keep keys root-only. Configure the
-   direct options in `dpumeshd.env.example`, including kubelet PodResources
-   socket and `DPUMESH_LOCAL_SERVER_NAME`. Broker/application receive none of
-   these credentials. Certificate issuance/rotation uses operator PKI; this
-   profile does not introduce an enrollment controller.
-6. Build ARM sources using `bench/bench.sh build`. On the DPU, run
-   `packaging/build-dpu-image.sh PROJECT_ROOT IMAGE`. Push to a reachable registry
-   or import `docker save IMAGE` with `ctr -n k8s.io images import -`.
-7. Set the required chart values (DPU node, served host node, cluster, PCI,
-   representor, image), existing feed/peer environment, and local TLS paths.
-   Stop any runtime running outside Kubernetes before installing:
+Node admin contains the Device Plugin, kernel evidence reader, read-only API
+client, feed relay, scope tunnel and broker supervisor. Its service and broker
+parent-death behavior are retained: admin replacement closes brokers and
+connections. Supervisor separation is not implemented.
 
-   ```sh
-   helm upgrade --install dpumesh-runtime packaging/helm/dpumesh-runtime \
-     -n dpumesh-system --create-namespace -f site-values.yaml
-   kubectl -n dpumesh-system wait --for=condition=Ready pod \
-     -l app.kubernetes.io/instance=dpumesh-runtime --timeout=120s
-   ```
+## Prerequisites
 
-Host and DPU must select the same `registrationMode`. `grant` keeps the
-controller-signed path and needs the matching host configuration; `direct` uses
-the paired control session. There is no automatic fallback between them: the
-broker accepts only the challenge version of the configured mode.
+Use a working kubeconfig for the intended cluster. Both nodes must be Ready,
+with a working CNI and enough filesystem space to avoid DiskPressure. The
+existing Linkerd control plane supplies identity, destination and policy APIs.
+DOCA, the paired PCI functions, containerd, Docker, Helm, OpenSSL, Python, SSH and
+the build toolchains must be installed.
 
-## Updates, diagnosis, rollback
+For a DPU joining a different cluster, back up its kubelet/CNI configuration,
+stop the previous runtime, install a kubelet/kubeadm matching the cluster with
+[prepare-dpu-node.sh](prepare-dpu-node.sh), and join using a short-lived bootstrap
+token. The script prepares binaries; it does not reset or automatically join
+the node. Remove bootstrap files and tokens after a successful join.
 
-The DaemonSet uses OnDelete: applying new values or a new image does not
-replace the running Pod, so delete it deliberately once the values are in
-place. The 40-second grace period covers the runtime's bounded DMA drain and
-context cleanup. A hostPath flock admits one runtime to the device; a runtime
-started outside Kubernetes must use the same lock path.
+Configure [.env.example](../.env.example) as .env. Explicitly set the host and
+DPU node names for each pair. A DPU is tainted dpumesh.io/dpu=true:NoSchedule.
+Applications are scheduled on the host. Hardware pairing is not load balanced.
 
-Check node Ready/DiskPressure, runtime Ready, runtime logs, host
-`journalctl -u dpumeshd`, and application restart counts. Runtime readiness
-requires hardware initialization and a recent control-loop heartbeat, not a
-first application connection. Direct registration verifies caller evidence,
-Pod/container/Service and kubelet channel allocation; Pod Ready is not an
-identity requirement. Endpoint readiness still controls routing.
+## Build and deploy
 
-Control loss closes admission, retires registrations, and terminates affected
-brokers. Their applications must reconnect/restart; seamless stream migration
-is not provided. A slot with unproven cleanup stays quarantined. After a long
-outage, inspect cleanup status before restarting the host daemon to reconcile
-allocations. API outage rejects fresh registration while established identities
-are retained until reconciliation/control loss; this is not an immediate
-revocation guarantee during API failure.
+From the host:
 
-For rollback, stop the DPU DaemonSet before starting a runtime outside
-Kubernetes, restore the matching host registration mode, binaries and
-configuration, then restart workloads. Drive the lifecycle with deployment
-commands rather than `bench/bench.sh restart`, which does not know about the
-DaemonSet. Image and standalone binary must match when comparing performance.
+```sh
+export KUBECONFIG=/path/to/current/kubeconfig
+export DPUMESH_NODE_NAME=rapids4
+export DPUMESH_DPU_NODE_NAME=rapids4-dpu
+export IMG_DPU=bench/dpumesh-dpu:YOUR_VERSION
+export IMG_CONTROLLER_NATIVE=bench/dpumesh-controller:YOUR_VERSION
+export IMG_ECHO_NATIVE=bench/echo-dpumesh:YOUR_VERSION
+export IMG_BENCH_NATIVE=bench/bench-dpumesh:YOUR_VERSION
+bench/native_deploy.sh all
+```
 
-## What this profile assumes
+The command builds native/controller/application images and the ARM/DPA runtime,
+imports images into each node's containerd, provisions controller trust,
+installs the host systemd service and read-only Kubernetes client certificate,
+deploys the DPU Helm release, and starts the two application Pods. The supplied
+host budget is two channels with eight rings each, CPUs 0–2 and a 3 GiB kubelet
+system memory reservation. Choose resource budgets deliberately before
+increasing channel count.
 
-Joining the DPU to the cluster changes how the runtime is delivered. It supplies
-neither device access nor identity, and these constraints hold whether or not
-the runtime runs as a Pod.
+[provision-host-reader.sh](provision-host-reader.sh) uses the Kubernetes CSR API
+and binds dpumeshd:HOST_NODE to read-only Pods/Services access. It requires
+operator CSR approval rights. Credentials stay under /etc/dpumesh/kube.
+[deploy-dpu.sh](deploy-dpu.sh) configures the paired DPU certificate, copies
+Linkerd trust roots, and deploys the chart using [runtime-values.py](runtime-values.py).
 
-- The DPU kubelet must not be newer than the cluster's API server. Pick a
-  supported pair before joining; a join token does not make a skewed kubelet
-  work.
-- The DPU is its own Kubernetes node with its own name, and that name is not the
-  host node this runtime serves. `DPUMESH_NODE_NAME` is the served host node,
-  and the mapping between the two is operator-owned; no scheduler derives it
-  from the physical PCIe pairing.
-- kubelet must reach the API server over a path that does not depend on
-  DPUmesh, or the node cannot boot into the cluster that is supposed to manage
-  it.
-- `hostNetwork` with `ClusterFirstWithHostNet` preserves the NIC, representor
-  and peer addresses, but it does not by itself make the DNS server or the
-  Service network reachable from the DPU. Verify both. A peer RDMA address is
-  never a Pod IP or a ClusterIP: control-plane TCP reachability is not evidence
-  that the RDMA path works.
-- The DPU node taint keeps ordinary workloads off the node. It is a scheduling
-  control, not a security boundary, and a Pod rescheduled onto a different DPU
-  cannot stand in for the original host's PCIe channel.
-- Node identity and installed feeds live on the DPU host filesystem. Moving them
-  to `emptyDir` changes the node key every time the Pod is recreated; pointing
-  the runtime's writable paths at a read-only Secret volume breaks start-up.
-- A credential issued to the DPU runtime authenticates the runtime, never an
-  application. Workload identity reaches the DPU only through registration, and
-  policy is watched for the host workload rather than for this Pod.
+The host verifies the DPU server certificate name; the DPU accepts only the
+configured host URI spiffe://dpumesh.io/node/HOST_NODE. Cluster membership
+does not replace this authentication. Registration uses one TLS control path;
+there is no grant keyring or registration mode setting. Update host, broker and
+DPU together when changing the internal protocol (currently version 5,
+1433-byte identity, 1497-byte request). The application IPC remains version 3.
 
-## Hardware profile limits
+## Linkerd
 
-The initial chart is privileged, hostNetwork, uses hostPath configuration, and
-has no CPU quota. It isolates infrastructure from application Pods, but is not a
-least-privilege container profile. Admission to the DPU node/configuration must
-remain operator controlled. It does not automatically deploy device plugins,
-feed receivers, controller, PKI rotation, or node-specific CNI.
+The runtime embeds Linkerd workers; it does not inject a proxy into application
+Pods. The chart generates a P-256 identity key and CSR in memory-backed storage
+with matching CommonName and DNS SAN (the short default ServiceAccount is dpu)
+and projects a token with audience identity.l5d.io into the runtime container.
+The feed sidecar and applications receive no token. The controller's API token
+is separately restricted by RBAC.
 
-Set `DPUMESH_ARM_CPU_LIST` to worker cores followed by the main core for a
-controlled performance comparison. Without it, IRQ-based placement can differ
-between native and container environments. Reserve equivalent cores in a
-production scheduler profile before interpreting interference as Pod overhead.
+The supplied native echo Service uses Linkerd opaque processing. Service
+protocol selection is independent of deployment placement. Select HTTP/gRPC
+Services with DPUMESH_L7_SVC; DPUMESH_L7_OPAQUE_SVC selects byte-stream
+processing. Both lists use namespace/Service keys from the signed topology.
+Service targets are refreshed through the signed Service-target feed.
+The native Pod manifests declare port 9092 and a Linkerd Server selects the echo
+Pod with opaque protocol and all-unauthenticated access. Change its accessPolicy
+to deny to verify policy enforcement, then restore it. Port declarations are
+required for Linkerd Server selection.
 
-## Host broker shutdown
+Verify requests and DPU worker metrics, not merely Running Pods or the Linkerd
+control plane's health. Worker 0 serves admin port 4191; all-worker placement
+increments the port for each worker. Access these infrastructure ports only
+from trusted management networks.
 
-The systemd unit uses `KillMode=mixed` so dpumeshd stops its own brokers first.
-Each broker has a 5-second remote quiesce bound and a 5-second Comch drain
-bound; the supervisor gives it 15 seconds before killing its owned cgroup, then
-waits for confirmed exit. The unit's 25-second stop timeout is the backstop.
-`KillMode=control-group` would signal the wrapper processes first and cut that
-sequence short, so the unit requires `mixed`.
+## Operations and failure behavior
 
-The daemon keeps each wrapper's creating thread alive until its broker is
-reaped, because Linux parent-death signals follow the creating thread.
+```sh
+systemctl status dpumeshd
+journalctl -u dpumeshd
+kubectl -n test-bench get pods -o wide
+kubectl -n dpumesh-system get pods -o wide
+bench/bench.sh dpulog 60
+bench/native_deploy.sh smoke
+bench/bench.sh restart
+```
 
-A reaped wrapper is not evidence for slot reuse: the host worker cgroup must be
-empty and the paired DPU must confirm cleanup. Cleanup queries continue across
-Kubernetes restart backoff, so a long DPU outage delays reuse without stranding
-the slot. Applications still reconnect or restart after the DPU returns.
+The DPU DaemonSet uses OnDelete; restart explicitly deletes the Pod and waits
+for its replacement. Runtime and feed receiver share that Pod. The runtime
+owns one hardware lock and readiness file on the DPU host filesystem.
+Certificates, feed verification keys and the peer node key persist under
+/etc/dpumesh; the feed sidecar writes only its feeds mount.
+
+dpumeshd.service uses KillMode=mixed. Admin stops and reaps brokers, with bounded
+quiesce/drain and a final cgroup kill. Each broker owns private namespaces,
+drops to uid/gid 65532 after trusted device bootstrap, clears capabilities and
+denies exec. Its root supervisor wrapper remains in the admin's manager cgroup
+to wait for that child; it does not run the data path or outlive the admin.
+A slot is reusable only after its worker cgroup is empty and the
+DPU confirms cleanup. Unexpected transport loss terminates the application;
+Kubernetes restarts it and registration starts anew.
+
+The DPU runtime is privileged and uses hostNetwork/hostPath for hardware. The
+node admin is a privileged host service with a systemd capability/device bound.
+Application, controller and feed-receiver containers are unprivileged.
+Privileged bootstrap and infrastructure permissions are not granted to apps.
+
+## Reference
+
+[CONTROL](../design/CONTROL.md) defines authority and lifecycle.
+[API](../design/API.md) defines the application contract.
+Kubernetes documents [CSR issuance](https://kubernetes.io/docs/tasks/tls/managing-tls-in-a-cluster/)
+and Linkerd documents [proxy configuration](https://linkerd.io/2-edge/reference/proxy-configuration/).
+
+## Native endpoint policy metadata
+
+The Pod label `linkerd.io/control-plane-ns: linkerd` enables policy-controller
+observation. The `config.linkerd.io/skip-inbound-ports` annotation names the native
+application port so stock destination discovery does not advertise a nonexistent
+in-Pod proxy or TLS listener. DPU-side Server policy is still enforced; it is
+verified by the deny/restore traffic test. Keep proxy injection disabled.

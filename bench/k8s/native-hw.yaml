@@ -10,8 +10,12 @@ spec:
     matchLabels: { app: echo-dpumesh-native }
   template:
     metadata:
-      labels: { app: echo-dpumesh-native }
+      annotations: {linkerd.io/inject: disabled, sidecar.istio.io/inject: "false", config.linkerd.io/skip-inbound-ports: "9092"}
+      labels: { app: echo-dpumesh-native, linkerd.io/control-plane-ns: linkerd }
     spec:
+      nodeSelector: {kubernetes.io/hostname: "${DPUMESH_NODE_NAME}"}
+      tolerations:
+      - {key: node-role.kubernetes.io/control-plane, operator: Exists, effect: NoSchedule}
       automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
@@ -22,6 +26,7 @@ spec:
       - name: app
         image: docker.io/${IMG_ECHO}
         imagePullPolicy: Never
+        ports: [{name: dmesh, containerPort: 9092}]
         env:
         - { name: DPUMESH_SERVICE, value: echo-dpumesh-native }
         - { name: DPUMESH_RINGS_PER_POD, value: "${RINGS}" }
@@ -60,8 +65,12 @@ spec:
     matchLabels: { app: bench-dpumesh-native }
   template:
     metadata:
-      labels: { app: bench-dpumesh-native }
+      annotations: {linkerd.io/inject: disabled, sidecar.istio.io/inject: "false", config.linkerd.io/skip-inbound-ports: "9092"}
+      labels: { app: bench-dpumesh-native, linkerd.io/control-plane-ns: linkerd }
     spec:
+      nodeSelector: {kubernetes.io/hostname: "${DPUMESH_NODE_NAME}"}
+      tolerations:
+      - {key: node-role.kubernetes.io/control-plane, operator: Exists, effect: NoSchedule}
       automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
@@ -72,6 +81,7 @@ spec:
       - name: app
         image: docker.io/${IMG_BENCH}
         imagePullPolicy: Never
+        ports: [{name: dmesh, containerPort: 9092}]
         env:
         - { name: BENCH_DST_SERVICE, value: echo-dpumesh-native }
         - { name: DPUMESH_RINGS_PER_POD, value: "${RINGS}" }
@@ -87,3 +97,14 @@ spec:
           limits:
             dpumesh.io/channel: 1
             memory: 256Mi
+---
+apiVersion: policy.linkerd.io/v1beta3
+kind: Server
+metadata:
+  name: echo-dpumesh-native
+  namespace: ${NS}
+spec:
+  podSelector: {matchLabels: {app: echo-dpumesh-native}}
+  port: dmesh
+  proxyProtocol: opaque
+  accessPolicy: all-unauthenticated

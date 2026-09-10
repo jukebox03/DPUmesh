@@ -9,6 +9,8 @@ install -d "$context/rootfs/usr/local/bin" "$context/rootfs/usr/local/lib/dpumes
 binary="$project/doca/build/dpumesh_dpu"
 install -m 0755 "$binary" "$context/rootfs/usr/local/bin/"
 install -m 0755 "$project/packaging/dpu-entrypoint.sh" "$context/rootfs/usr/local/bin/dpumesh-dpu-entrypoint"
+install -m 0555 "$project/dpu/feed_receiver.py" "$context/rootfs/usr/local/bin/dpumesh-feed-receiver"
+install -m 0555 "$project/packaging/linkerd-init.sh" "$context/rootfs/usr/local/bin/dpumesh-linkerd-init"
 # Include transitive dependencies resolved by the ARM dynamic loader. The
 # loader/glibc remain from the matching Ubuntu base rather than being replaced.
 ldd "$binary" > "$context/ldd.txt"

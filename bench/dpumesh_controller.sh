@@ -13,20 +13,20 @@ fi
 NS="${NS:-test-bench}"
 HOST_CONTROLLER_KEYS="${DPUMESH_CONTROLLER_KEY_DIR_HOST:-/etc/dpumesh/controller.keys}"
 DPU_CONTROLLER_KEYS="${DPUMESH_CONTROLLER_KEY_DIR_DPU:-/etc/dpumesh/controller.pub.keys}"
-HOST_GRANT_KEYS="${DPUMESH_REGISTRATION_KEY_DIR_HOST:-/etc/dpumesh/registration.keys}"
-DPU_GRANT_KEYS="${DPUMESH_REGISTRATION_KEY_DIR_DPU:-/etc/dpumesh/registration.keys}"
+
+
 HOST_FEED_KEYS="${DPUMESH_FEED_KEY_DIR_HOST:-/etc/dpumesh/feed.keys}"
 DPU_FEED_KEYS="${DPUMESH_FEED_KEY_DIR_DPU:-/etc/dpumesh/feed.keys}"
 CONTROLLER_KEY_ID="${DPUMESH_CONTROLLER_KEY_ID:-controller-v1}"
-GRANT_KEY_ID="${DPUMESH_REGISTRATION_KEY_ID:-node-ed25519-v1}"
+
 FEED_KEY_ID="${DPUMESH_FEED_KEY_ID:-feed-hmac-v1}"
 NODE_RDMA_ADDR="${DPUMESH_NODE_RDMA_ADDR:-${DPUMESH_PEER_BIND:-192.168.100.2}:${DPUMESH_PEER_PORT:-47900}}"
 NODES_FILE="${DPUMESH_NODES_FILE:-}"
 CLUSTER_ID="${DPUMESH_CLUSTER_ID:-dpumesh-test}"
 PKI_DIR="${DPUMESH_PKI_DIR:-$PROJ_ROOT/build/pki}"
-FEED_USER="${DPUMESH_FEED_USER:-dpumesh-feed}"
-FEED_BIND="${DPUMESH_DPU_FEED_HOST:-192.168.100.2}"
-FEED_PORT="${DPUMESH_DPU_FEED_PORT:-4788}"
+
+
+
 
 valid_key_id() { [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9_.:-]{0,30}[A-Za-z0-9]$ ]]; }
 need_host() { : "${HOST_PASS:?HOST_PASS is required}"; }
@@ -83,75 +83,30 @@ install_dpu_key() {
 }
 
 assert_key_roles() {
-    [ "$HOST_CONTROLLER_KEYS" != "$HOST_GRANT_KEYS" ] &&
-        [ "$HOST_CONTROLLER_KEYS" != "$HOST_FEED_KEYS" ] &&
-        [ "$HOST_GRANT_KEYS" != "$HOST_FEED_KEYS" ] || {
-        echo "controller, grant, and feed key directories must be distinct" >&2
-        exit 1
-    }
-    local a b c
+    [ "$HOST_CONTROLLER_KEYS" != "$HOST_FEED_KEYS" ] || { echo "topology/feed keys must be separate" >&2; exit 1; }
+    local a b
     a=$(sudo_host sha256sum "$HOST_CONTROLLER_KEYS/$1.key" | cut -d' ' -f1)
-    b=$(sudo_host sha256sum "$HOST_GRANT_KEYS/$2.key" | cut -d' ' -f1)
-    c=$(sudo_host sha256sum "$HOST_FEED_KEYS/$3.key" | cut -d' ' -f1)
-    [ "$a" != "$b" ] && [ "$a" != "$c" ] && [ "$b" != "$c" ] || {
-        echo "controller, grant, and feed keys must contain distinct material" >&2
-        exit 1
-    }
-}
-
-install_feed_receiver() {
-    scp -o ConnectTimeout=8 -q "$PROJ_ROOT/dpu/feed_receiver.py" \
-        "$PROJ_ROOT/packaging/dpumesh-feed-receiver.service" "$DPU_HOST:/tmp/"
-    ssh -o ConnectTimeout=8 "$DPU_HOST" "
-        set -e
-        echo '$DPU_PASS' | sudo -S -p '' id -u '$FEED_USER' >/dev/null 2>&1 ||
-            echo '$DPU_PASS' | sudo -S -p '' useradd --system --no-create-home \
-                --shell /usr/sbin/nologin '$FEED_USER'
-        echo '$DPU_PASS' | sudo -S -p '' install -d -o root -g root -m 0755 /etc/dpumesh
-        echo '$DPU_PASS' | sudo -S -p '' install -d -o '$FEED_USER' -g '$FEED_USER' -m 0755 /etc/dpumesh/feeds
-        echo '$DPU_PASS' | sudo -S -p '' install -o root -g root -m 0555 \
-            /tmp/feed_receiver.py /usr/local/bin/dpumesh-feed-receiver
-        echo '$DPU_PASS' | sudo -S -p '' install -o root -g root -m 0644 \
-            /tmp/dpumesh-feed-receiver.service /etc/systemd/system/dpumesh-feed-receiver.service
-        printf '%s\n' \
-            'DPUMESH_FEED_BIND=$FEED_BIND' \
-            'DPUMESH_FEED_PORT=$FEED_PORT' >/tmp/feed-receiver.env
-        echo '$DPU_PASS' | sudo -S -p '' install -o root -g root -m 0600 \
-            /tmp/feed-receiver.env /etc/dpumesh/feed-receiver.env
-        rm -f /tmp/feed_receiver.py /tmp/dpumesh-feed-receiver.service /tmp/feed-receiver.env
-        echo '$DPU_PASS' | sudo -S -p '' systemctl daemon-reload
-        echo '$DPU_PASS' | sudo -S -p '' systemctl enable dpumesh-feed-receiver.service
-        echo '$DPU_PASS' | sudo -S -p '' systemctl restart dpumesh-feed-receiver.service
-        echo '$DPU_PASS' | sudo -S -p '' rm -f /etc/dpumesh/membership.v1 \
-            /etc/dpumesh/topology.v1 /etc/dpumesh/service-targets.v1
-        echo '$DPU_PASS' | sudo -S -p '' systemctl is-active --quiet dpumesh-feed-receiver.service
-    "
+    b=$(sudo_host sha256sum "$HOST_FEED_KEYS/$2.key" | cut -d' ' -f1)
+    [ "$a" != "$b" ] || { echo "topology/feed keys must differ" >&2; exit 1; }
 }
 
 prepare() {
     need_dpu
-    local controller_id grant_id feed_id
+    local controller_id feed_id
     controller_id=$(ensure_host_key "$HOST_CONTROLLER_KEYS" "$CONTROLLER_KEY_ID")
-    grant_id=$(ensure_host_key "$HOST_GRANT_KEYS" "$GRANT_KEY_ID")
+
     feed_id=$(ensure_host_key "$HOST_FEED_KEYS" "$FEED_KEY_ID")
-    assert_key_roles "$controller_id" "$grant_id" "$feed_id"
+    assert_key_roles "$controller_id" "$feed_id"
     install_dpu_key "$HOST_CONTROLLER_KEYS" "$DPU_CONTROLLER_KEYS" "$controller_id" public
-    install_dpu_key "$HOST_GRANT_KEYS" "$DPU_GRANT_KEYS" "$grant_id" public
+
     install_dpu_key "$HOST_FEED_KEYS" "$DPU_FEED_KEYS" "$feed_id" secret
-    install_feed_receiver
-    echo "controller trust and DPU feed receiver are ready"
+
+    echo "controller trust is ready; Kubernetes manages the feed receiver"
 }
 
 node_record() {
-    need_host
-    local node_name key_id grant_public
-    node_name="${1:-${DPUMESH_NODE_NAME:-$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')}}"
-    [ -n "$node_name" ] || { echo "cannot resolve the Kubernetes node name" >&2; exit 1; }
-    key_id=$(sudo_host cat "$HOST_GRANT_KEYS/active" | tr -d '[:space:]')
-    valid_key_id "$key_id" || { echo "no active grant key" >&2; exit 1; }
-    grant_public=$(sudo_host cat "$HOST_GRANT_KEYS/$key_id.key" | derive_public_hex)
-    printf '%s %s %s %s %064d\n' "$node_name" "${2:-$NODE_RDMA_ADDR}" \
-        "$key_id" "$grant_public" 0
+    local node_name="${1:-${DPUMESH_NODE_NAME:-$(hostname)}}"
+    printf '%s %s %064d\n' "$node_name" "${2:-$NODE_RDMA_ADDR}" 0
 }
 
 nodes_config() {
@@ -201,18 +156,13 @@ prepare_pki() {
 }
 
 apply_secrets() {
-    local temporary="$1" controller_id="$2" grant_id="$3" feed_id="$4"
+    local temporary="$1" controller_id="$2" feed_id="$3"
     sudo_host install -o "$(id -u)" -g "$(id -g)" -m 0600 \
         "$HOST_CONTROLLER_KEYS/$controller_id.key" "$temporary/controller.key"
-    sudo_host install -o "$(id -u)" -g "$(id -g)" -m 0600 \
-        "$HOST_GRANT_KEYS/$grant_id.key" "$temporary/grant.key"
     sudo_host install -o "$(id -u)" -g "$(id -g)" -m 0600 \
         "$HOST_FEED_KEYS/$feed_id.key" "$temporary/feed.key"
     kubectl -n "$NS" create secret generic dpumesh-controller-signing \
         --from-literal=active="$controller_id" --from-file=signing-key="$temporary/controller.key" \
-        --dry-run=client -o yaml | kubectl apply -f -
-    kubectl -n "$NS" create secret generic dpumesh-registration-signing \
-        --from-literal=active="$grant_id" --from-file=signing-key="$temporary/grant.key" \
         --dry-run=client -o yaml | kubectl apply -f -
     kubectl -n "$NS" create secret generic dpumesh-feed-signing \
         --from-literal=active="$feed_id" --from-file=signing-key="$temporary/feed.key" \
@@ -227,10 +177,10 @@ apply_secrets() {
 deploy() {
     need_host
     : "${IMG_CONTROLLER:?IMG_CONTROLLER is required}"
-    local node_name controller_id grant_id feed_id service_ip temporary
-    node_name="${DPUMESH_NODE_NAME:-$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')}"
+    local node_name controller_id feed_id service_ip temporary
+    node_name="${DPUMESH_NODE_NAME:-$(hostname)}"
     controller_id=$(sudo_host cat "$HOST_CONTROLLER_KEYS/active" | tr -d '[:space:]')
-    grant_id=$(sudo_host cat "$HOST_GRANT_KEYS/active" | tr -d '[:space:]')
+
     feed_id=$(sudo_host cat "$HOST_FEED_KEYS/active" | tr -d '[:space:]')
     kubectl -n "$NS" apply -f - >/dev/null <<EOF
 apiVersion: v1
@@ -244,10 +194,10 @@ EOF
     prepare_pki "$node_name" "$service_ip"
     temporary=$(mktemp -d)
     trap 'rm -rf "$temporary"' EXIT
-    apply_secrets "$temporary" "$controller_id" "$grant_id" "$feed_id"
+    apply_secrets "$temporary" "$controller_id" "$feed_id"
     export NS IMG_CONTROLLER
     export DPUMESH_CLUSTER_ID="$CLUSTER_ID" DPUMESH_NODE_NAME="$node_name"
-    export DPUMESH_CONTROLLER_KEY_ID="$controller_id" DPUMESH_REGISTRATION_KEY_ID="$grant_id"
+    export DPUMESH_CONTROLLER_KEY_ID="$controller_id"
     export DPUMESH_FEED_KEY_ID="$feed_id"
     DPUMESH_CONTROLLER_NODES_YAML=$(nodes_config | sed 's/^/    /')
     export DPUMESH_CONTROLLER_NODES_YAML
@@ -270,7 +220,7 @@ case "${1:-status}" in
     node-record) node_record "${2:-}" "${3:-}" ;;
     nodes-config) nodes_config ;;
     topology-show) need_dpu; ssh "$DPU_HOST" "cat /etc/dpumesh/feeds/topology.v1" ;;
-    receiver-status) need_dpu; ssh "$DPU_HOST" "systemctl status dpumesh-feed-receiver --no-pager" ;;
+    receiver-status) kubectl -n "${RUNTIME_NS:-dpumesh-system}" logs daemonset/dpumesh-runtime -c feed-receiver --tail=30 ;;
     status) kubectl get deployment,pod -n "$NS" -l app=dpumesh-controller -o wide ;;
     *) echo "usage: $0 prepare|deploy|node-record [node address]|nodes-config|topology-show|receiver-status|status" >&2; exit 2 ;;
 esac

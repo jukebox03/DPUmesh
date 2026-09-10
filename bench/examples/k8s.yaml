@@ -10,7 +10,11 @@ spec:
   selector: { matchLabels: { app: hello-dpumesh } }
   template:
     metadata:
-      labels: { app: hello-dpumesh }
+      labels: { app: hello-dpumesh, linkerd.io/control-plane-ns: linkerd }
+      annotations:
+        linkerd.io/inject: disabled
+        sidecar.istio.io/inject: "false"
+        config.linkerd.io/skip-inbound-ports: "9099"
     spec:
       automountServiceAccountToken: false
       securityContext:

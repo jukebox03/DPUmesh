@@ -14,10 +14,11 @@ if [ -e "$ENV_FILE" ]; then
 fi
 
 NS="${NS:-test-bench}"
-NODE_NAME="${DPUMESH_NODE_NAME:-$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')}"
+NODE_NAME="${DPUMESH_NODE_NAME:-$(hostname)}"
 SLOTS="${DPUMESH_SLOTS:-2}"
 RINGS="${DPUMESH_RINGS_PER_POD:-8}"
-IMG_CONTROLLER="${IMG_CONTROLLER_NATIVE:-bench/dpumesh-controller:native}"
+IMG_CONTROLLER="${IMG_CONTROLLER_NATIVE:-bench/dpumesh-controller:kubernetes}"
+IMG_DPU="${IMG_DPU:-bench/dpumesh-dpu:kubernetes}"
 IMG_ECHO="${IMG_ECHO_NATIVE:-bench/echo-dpumesh:native}"
 IMG_BENCH="${IMG_BENCH_NATIVE:-bench/bench-dpumesh:native}"
 [ "$SLOTS" = 2 ] || { echo "native deployment requires DPUMESH_SLOTS=2" >&2; exit 2; }
@@ -71,6 +72,9 @@ build_images() {
 }
 
 stop_workloads() {
+    if [ -z "$(kubectl -n "$NS" get pods -l 'app in (echo-dpumesh-native,bench-dpumesh-native)' -o name 2>/dev/null)" ]; then
+        return
+    fi
     kubectl -n "$NS" scale deployment/echo-dpumesh-native \
         deployment/bench-dpumesh-native --replicas=0 >/dev/null 2>&1 || true
     kubectl -n "$NS" wait --for=delete pod \
@@ -84,11 +88,11 @@ deploy_controller() {
     kubectl get namespace "$NS" >/dev/null 2>&1 || kubectl create namespace "$NS"
     kubectl label namespace "$NS" \
         pod-security.kubernetes.io/enforce=restricted \
-        pod-security.kubernetes.io/enforce-version=v1.31 \
+        pod-security.kubernetes.io/enforce-version=latest \
         pod-security.kubernetes.io/audit=restricted \
-        pod-security.kubernetes.io/audit-version=v1.31 \
+        pod-security.kubernetes.io/audit-version=latest \
         pod-security.kubernetes.io/warn=restricted \
-        pod-security.kubernetes.io/warn-version=v1.31 --overwrite >/dev/null
+        pod-security.kubernetes.io/warn-version=latest --overwrite >/dev/null
     "$BENCH_DIR/dpumesh_controller.sh" prepare
     IMG_CONTROLLER="$IMG_CONTROLLER" "$BENCH_DIR/dpumesh_controller.sh" deploy
 }
@@ -109,6 +113,9 @@ configure_host() {
         printf 'DPUMESH_DPU_FEED_PORT=4788\n'
         printf 'DPUMESH_NODE_RDMA_ADDR=%s\n' \
             "${DPUMESH_NODE_RDMA_ADDR:-$dpu_feed:47900}"
+        printf 'DPUMESH_CLUSTER_ID=%s\n' "${DPUMESH_CLUSTER_ID:-dpumesh-test}"
+        printf 'DPUMESH_LOCAL_SERVER_NAME=%s\n' "${DPUMESH_DPU_NODE_NAME:-$NODE_NAME-dpu}"
+        printf 'DPUMESH_KUBE_API=%s\n' "$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')"
         printf 'DPUMESH_PCI_ADDR=%s\n' "$pci"
         printf 'DPUMESH_RINGS_PER_POD=%s\n' "$RINGS"
         printf 'DPUMESH_WORKER_CPU_MAX=50000\n'
@@ -118,6 +125,7 @@ configure_host() {
     } > "$temporary"
     sudo "$PROJ_ROOT/packaging/configure-kubelet-reserve.sh" \
         /var/lib/kubelet/config.yaml 0-2 3Gi
+    "$PROJ_ROOT/packaging/provision-host-reader.sh" "$NODE_NAME"
     sudo "$PROJ_ROOT/packaging/install-host.sh" "$PROJ_ROOT"
     sudo install -o root -g root -m 0600 "$temporary" /etc/dpumesh/dpumeshd.env
     sudo systemctl enable --now dpumeshd
@@ -126,14 +134,21 @@ configure_host() {
     trap - RETURN
 }
 
-start_dpu() {
+build_dpu_image() {
     DPUMESH_RINGS_PER_POD="$RINGS" "$BENCH_DIR/bench.sh" build
-    DPUMESH_RINGS_PER_POD="$RINGS" "$BENCH_DIR/bench.sh" restart
+    rsync -az --delete "$PROJ_ROOT/packaging/" "$DPU_HOST:~/DPUmesh/packaging/"
+    rsync -az --delete "$PROJ_ROOT/dpu/" "$DPU_HOST:~/DPUmesh/dpu/"
+    printf '%s\n' "$DPU_PASS" | ssh "$DPU_HOST" "sudo -S -p '' /home/${DPU_HOST%%@*}/DPUmesh/packaging/build-dpu-image.sh /home/${DPU_HOST%%@*}/DPUmesh '$IMG_DPU'"
+    printf '%s\n' "$DPU_PASS" | ssh "$DPU_HOST" "sudo -S -p '' sh -ec 'docker save $IMG_DPU | ctr -n k8s.io images import -'"
+}
+start_dpu() {
+    IMG_DPU="$IMG_DPU" "$PROJ_ROOT/packaging/deploy-dpu.sh"
 }
 
 deploy_workloads() {
     local manifest
     export NS RINGS IMG_ECHO IMG_BENCH
+    export DPUMESH_NODE_NAME="$NODE_NAME"
     manifest=$(envsubst < "$BENCH_DIR/k8s/native-hw.yaml")
     printf '%s\n' "$manifest" | kubectl apply --dry-run=server -f - >/dev/null
     printf '%s\n' "$manifest" | kubectl apply -f - >/dev/null
@@ -203,8 +218,8 @@ status() {
 }
 
 case "${1:-all}" in
-    all) build_images; deploy; smoke ;;
-    build) build_images; DPUMESH_RINGS_PER_POD="$RINGS" "$BENCH_DIR/bench.sh" build ;;
+    all) build_images; build_dpu_image; deploy; smoke ;;
+    build) build_images; build_dpu_image ;;
     deploy) deploy ;;
     smoke) smoke ;;
     status) require_rig; sudo_auth; status ;;
