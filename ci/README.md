@@ -1,5 +1,7 @@
 # CI
 
+The host checks cover the single paired-DPU registration protocol, identity metadata and signed feeds. Run `make test-local-registration` for the real TLS/framing test in addition to the targets below. Live DPU logs now come from the Kubernetes runtime container; host admin remains systemd.
+
 Checks live here as scripts and Makefile targets; the workflows in
 `.github/workflows/` only decide when to run them. Anything CI fails on can be
 reproduced at a terminal with the same command.

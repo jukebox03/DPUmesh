@@ -1,3 +1,5 @@
+> Historical measurement record. Deployment and registration descriptions below apply to the recorded revision, not the current implementation. Current placement and protocol: [CONTROL](../../../../design/CONTROL.md) (updated 2026-09-10). Measurements are unchanged.
+
 # Linkerd direct TX and the shared RDMA lease — deployment and comparison
 
 The two implementations were applied in the requested order, built on the

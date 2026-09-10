@@ -1,0 +1,87 @@
+port=4191 ready=200
+control_identity_cert_refreshes_total{result="ok"} 1
+control_identity_cert_refreshes_total{result="error"} 0
+dmesh_control_events_total{kind="registration",reason="ungraded"} 1
+dmesh_control_events_total{kind="peer",reason="poison"} 4
+dmesh_control_events_total{kind="inbound",reason="admitted"} 4
+dmesh_control_events_total{kind="inbound",reason="denied"} 1
+dmesh_control_events_total{kind="registration",reason="unprotected"} 1
+dmesh_control_events_total{kind="topology",reason="adopted"} 2
+dmesh_control_events_total{kind="topology",reason="unchanged"} 1
+
+port=4192 ready=200
+control_identity_cert_refreshes_total{result="ok"} 1
+control_identity_cert_refreshes_total{result="error"} 0
+dmesh_control_events_total{kind="registration",reason="ungraded"} 1
+dmesh_control_events_total{kind="peer",reason="poison"} 4
+dmesh_control_events_total{kind="inbound",reason="admitted"} 4
+dmesh_control_events_total{kind="inbound",reason="denied"} 1
+dmesh_control_events_total{kind="registration",reason="unprotected"} 1
+dmesh_control_events_total{kind="topology",reason="adopted"} 2
+dmesh_control_events_total{kind="topology",reason="unchanged"} 1
+
+port=4193 ready=200
+control_identity_cert_refreshes_total{result="error"} 0
+control_identity_cert_refreshes_total{result="ok"} 1
+dmesh_control_events_total{kind="registration",reason="ungraded"} 1
+dmesh_control_events_total{kind="peer",reason="poison"} 4
+dmesh_control_events_total{kind="inbound",reason="admitted"} 4
+dmesh_control_events_total{kind="inbound",reason="denied"} 1
+dmesh_control_events_total{kind="registration",reason="unprotected"} 1
+dmesh_control_events_total{kind="topology",reason="adopted"} 2
+dmesh_control_events_total{kind="topology",reason="unchanged"} 1
+
+port=4194 ready=200
+control_identity_cert_refreshes_total{result="ok"} 1
+control_identity_cert_refreshes_total{result="error"} 0
+dmesh_control_events_total{kind="registration",reason="ungraded"} 1
+dmesh_control_events_total{kind="peer",reason="poison"} 4
+dmesh_control_events_total{kind="inbound",reason="admitted"} 4
+dmesh_control_events_total{kind="inbound",reason="denied"} 1
+dmesh_control_events_total{kind="registration",reason="unprotected"} 1
+dmesh_control_events_total{kind="topology",reason="adopted"} 2
+dmesh_control_events_total{kind="topology",reason="unchanged"} 1
+
+port=4195 ready=200
+control_identity_cert_refreshes_total{result="error"} 0
+control_identity_cert_refreshes_total{result="ok"} 1
+dmesh_control_events_total{kind="registration",reason="ungraded"} 1
+dmesh_control_events_total{kind="peer",reason="poison"} 4
+dmesh_control_events_total{kind="inbound",reason="admitted"} 4
+dmesh_control_events_total{kind="inbound",reason="denied"} 1
+dmesh_control_events_total{kind="registration",reason="unprotected"} 1
+dmesh_control_events_total{kind="topology",reason="adopted"} 2
+dmesh_control_events_total{kind="topology",reason="unchanged"} 1
+
+port=4196 ready=200
+control_identity_cert_refreshes_total{result="ok"} 1
+control_identity_cert_refreshes_total{result="error"} 0
+dmesh_control_events_total{kind="registration",reason="ungraded"} 1
+dmesh_control_events_total{kind="peer",reason="poison"} 4
+dmesh_control_events_total{kind="inbound",reason="admitted"} 4
+dmesh_control_events_total{kind="inbound",reason="denied"} 1
+dmesh_control_events_total{kind="registration",reason="unprotected"} 1
+dmesh_control_events_total{kind="topology",reason="adopted"} 2
+dmesh_control_events_total{kind="topology",reason="unchanged"} 1
+
+port=4197 ready=200
+control_identity_cert_refreshes_total{result="error"} 0
+control_identity_cert_refreshes_total{result="ok"} 1
+dmesh_control_events_total{kind="registration",reason="ungraded"} 1
+dmesh_control_events_total{kind="peer",reason="poison"} 4
+dmesh_control_events_total{kind="inbound",reason="admitted"} 4
+dmesh_control_events_total{kind="inbound",reason="denied"} 1
+dmesh_control_events_total{kind="registration",reason="unprotected"} 1
+dmesh_control_events_total{kind="topology",reason="adopted"} 2
+dmesh_control_events_total{kind="topology",reason="unchanged"} 1
+
+port=4198 ready=200
+control_identity_cert_refreshes_total{result="ok"} 1
+control_identity_cert_refreshes_total{result="error"} 0
+dmesh_control_events_total{kind="registration",reason="ungraded"} 1
+dmesh_control_events_total{kind="peer",reason="poison"} 4
+dmesh_control_events_total{kind="inbound",reason="admitted"} 4
+dmesh_control_events_total{kind="inbound",reason="denied"} 1
+dmesh_control_events_total{kind="registration",reason="unprotected"} 1
+dmesh_control_events_total{kind="topology",reason="adopted"} 2
+dmesh_control_events_total{kind="topology",reason="unchanged"} 1

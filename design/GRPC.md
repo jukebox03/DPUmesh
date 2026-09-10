@@ -353,7 +353,7 @@ HTTP/2 framing and multiplexing remain entirely inside chttp2.
 
 Each `DmeshRuntime` opens one native channel. Channel creation connects through
 the allocated slot socket to the Pod's supervised host broker. The broker
-performs controller-granted DPU registration and hands back the sealed
+performs host-verified DPU registration over paired-node TLS and hands back the sealed
 ring/TX/RX descriptors plus the channel doorbell eventfd.
 The workload maps those objects and starts the native drain side; the runtime
 still sees the same public `dmesh_create_channel()` contract. `$DPUMESH_SERVICE`
@@ -560,3 +560,12 @@ Capacity and matched-rate results are evaluated separately. Instrumented trace
 runs establish publication shape, while clean runs establish throughput,
 latency, and CPU/RPC. Measurement records and derivation scripts live under
 `bench/report/data`.
+
+## Kubernetes policy metadata
+
+The Pod label `linkerd.io/control-plane-ns: linkerd` enables policy-controller
+observation. The `config.linkerd.io/skip-inbound-ports` annotation names the native
+application port so stock destination discovery does not advertise a nonexistent
+in-Pod proxy or TLS listener. DPU-side Server policy is still enforced; it is
+verified by the deny/restore traffic test. Keep proxy injection disabled.
+Use the gRPC Service port in the annotation and Pod port declaration.

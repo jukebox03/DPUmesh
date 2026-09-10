@@ -1,5 +1,7 @@
 # Kubernetes host prerequisites
 
+The host and paired DPU join the same cluster as separate nodes. These are OS prerequisites; they do not turn node admin or brokers into Pods. Admin is installed as dpumeshd.service, while [the DPU runtime](../../packaging/README-dpu-kubernetes.md) is a DaemonSet Pod. Keep enough disk space for kubelet image and node filesystem thresholds.
+
 Install the two versioned host settings once on every DPUmesh Kubernetes node:
 
 ```sh

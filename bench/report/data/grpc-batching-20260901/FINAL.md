@@ -1,3 +1,5 @@
+> Historical measurement record. Deployment and registration descriptions below apply to the recorded revision, not the current implementation. Current placement and protocol: [CONTROL](../../../../design/CONTROL.md) (updated 2026-09-10). Measurements are unchanged.
+
 # gRPC batching, Host headroom and DPU hot-path analysis — 2026-09-01
 
 ## Verdict
@@ -144,7 +146,7 @@ reactors, eight channels, fixed 2.5 GHz Host clocks and 9+9 Host CPUs.
 
 The maintained checklist and executable gate are in
 [`design/GRPC.md`](../../../../design/GRPC.md) and
-[`grpc_correctness.sh`](../../../suite/grpc_correctness.sh).
+`bench/suite/grpc_correctness.sh` (historical script; no longer present in the current tree).
 
 ## Receipt files
 

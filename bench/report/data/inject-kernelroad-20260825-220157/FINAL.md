@@ -1,3 +1,5 @@
+> Historical measurement record. Deployment and registration descriptions below apply to the recorded revision, not the current implementation. Current placement and protocol: [CONTROL](../../../../design/CONTROL.md) (updated 2026-09-10). Measurements are unchanged.
+
 # F8 kernel-road closure — inject.sh I0–I7, 2026-08-25
 
 ## Question

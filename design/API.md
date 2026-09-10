@@ -107,7 +107,7 @@ dmesh_destroy_channel(channel);
 For a server, set `DPUMESH_SERVICE` in the PodSpec and create the channel and
 EQ without a client QP. Each `DMESH_EVENT_CONN_REQ` supplies an accepted QP;
 store per-connection state in `event.qp->user_data` and process it through the
-same send, receive and close calls. The controller grants the declared Service
+same send, receive and close calls. The node admin authorizes the declared Service
 only when its latest Kubernetes snapshot contains the Pod as a ready selected
 endpoint.
 
@@ -131,7 +131,7 @@ These steps run in the Pod's broker, which owns the DOCA objects
 
 A pod id — and the compact service id `POD_ASSIGNED` carries beside it — is a
 node-local transport identifier for one node's slot tables, never workload
-identity. Identity is the Service *name*, authenticated by WorkloadGrant v3
+identity. Identity is the Service *name*, verified by the node admin and bound through paired-DPU TLS
 and resolved against the cluster topology generation; the numbers are the
 DPU's own interning of it and travel only on this node's wire.
 
@@ -485,3 +485,11 @@ Adapter-internal ownership and threading are specified in
   is no runtime switch that restores that fallback.
 - Services named by `DPUMESH_L7_SVC` or `DPUMESH_L7_OPAQUE_SVC` enter the
   corresponding Linkerd path. Other Services use the native L4 path.
+
+## Kubernetes policy metadata
+
+The Pod label `linkerd.io/control-plane-ns: linkerd` enables policy-controller
+observation. The `config.linkerd.io/skip-inbound-ports` annotation names the native
+application port so stock destination discovery does not advertise a nonexistent
+in-Pod proxy or TLS listener. DPU-side Server policy is still enforced; it is
+verified by the deny/restore traffic test. Keep proxy injection disabled.

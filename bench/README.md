@@ -2,26 +2,18 @@
 
 This directory contains the runnable deployment, application examples,
 benchmark programs and hardware validation surface for DPUmesh. The supplied
-one-node profile uses the native L4 data path:
+one-pair deployment uses this placement:
 
 ```text
-Kubernetes controller                 Kubernetes workload Pods
-(read-only cluster objects)           (unprivileged, no token)
-          │                                      │
-          │ mTLS                         allocated Unix socket
-          ▼                                      ▼
- host dpumeshd.service ── broker children ── Host↔DPU DMA ── DPU routing
-          │                                      │
-          └──── signed feed delivery ─────► BlueField Arm OS services
+Same Kubernetes cluster: host app Pods + designated controller Pod + DPU runtime Pod
+Host systemd: dpumeshd → per-pod broker processes → PCIe/DOCA → DPU runtime
+DPU runtime Pod: privileged ARM/DPA runtime + unprivileged feed-receiver sidecar
 ```
 
-In this profile the DPU runtime and `dpumeshd` are system services and
-registration is `grant`: Kubernetes runs the controller and the workloads only.
-[`packaging/README-dpu-kubernetes.md`](../packaging/README-dpu-kubernetes.md) is
-the other supplied profile, where the DPU runtime is a DaemonSet on a DPU node
-and registration is `direct`. Both use the same workload contract and the same
-DPU binary, which also contains the optional Linkerd adapter; the adapter starts
-only when an L7 Service list is configured.
+Registration uses host kernel evidence, Kubernetes and kubelet allocation checks,
+then paired-DPU TLS. The controller still supplies signed topology, Service
+targets and workload scope. The supplied echo Service exercises embedded Linkerd
+opaque processing. See [the deployment guide](../packaging/README-dpu-kubernetes.md).
 
 ## Directory map
 
@@ -77,16 +69,12 @@ Run the complete path with:
 
 `all` performs these gates in order:
 
-1. builds `libdpumesh.so.5`, `dmesh_broker`, native applications and the
-   controller/workload images;
-2. imports the images into the local containerd namespace;
-3. creates separate topology, WorkloadGrant and feed keys plus node mTLS PKI;
-4. installs and starts `dpumesh-feed-receiver.service` on the DPU;
-5. configures kubelet system reservation and installs `dpumeshd.service`;
-6. builds and starts `dpumesh_dpu` on the BlueField Arm OS;
-7. applies the Restricted controller and workload manifests;
-8. waits for both native workloads and requires a real DPU request to return
-   `OK`, `fail=0` and `drops=0`.
+1. builds the host library/broker/apps and controller/workload images;
+2. builds ARM/DPA and imports the runtime image on the DPU;
+3. provisions two signing roles, node mTLS and the controller Deployment;
+4. provisions read-only host API credentials, kubelet reservation and systemd;
+5. deploys the DPU runtime/feed receiver Pod with embedded Linkerd identity;
+6. starts application Pods and requires actual requests with fail=0, drops=0.
 
 The profile is fixed at `N/K/A/L=32/8/8/8`, two Device Plugin slots, reserved
 host CPUs `0-2`, 3 GiB kubelet system memory and per-broker limits of 0.5 CPU,
@@ -136,12 +124,10 @@ spec:
 
 Kubelet mounts only the assigned socket at `/run/dpumesh/channel.sock`. The Pod
 receives no Kubernetes token, DPU device, PCI address, host directory, signing
-key, privileged init container or added capability. This manifest is the same
-under either profile; the registration mode changes only who authorizes it.
-`DPUMESH_SERVICE` is granted when the Pod is a selected endpoint of that
-Service. Under `grant` it must also be a ready endpoint, so a server whose
-readiness depends on the channel it is registering cannot use that mode; under
-`direct` readiness governs routing only.
+key, privileged init container or added capability. The node admin authorizes
+DPUMESH_SERVICE against the Pod's labels and the Service selector; it verifies
+the exact kubelet allocation. Endpoint readiness governs routing and does not
+block registration.
 The complete worked manifest is [`k8s/native-hw.yaml`](k8s/native-hw.yaml); the
 minimal server is [`examples/k8s.yaml`](examples/k8s.yaml).
 
@@ -160,9 +146,8 @@ IMG_CONTROLLER=bench/dpumesh-controller:native \
 ./bench/dpumesh_controller.sh status
 ```
 
-`prepare` creates or reuses three distinct root-owned keyrings, copies only
-verification material needed by the DPU, and installs the unprivileged feed
-receiver. `deploy` creates a TLS 1.3 server identity, a node client certificate
+`prepare` creates or reuses two distinct root-owned keyrings, copies only
+verification material needed by the DPU, for the runtime and its feed-receiver sidecar. `deploy` creates a TLS 1.3 server identity, a node client certificate
 whose URI SAN is `spiffe://dpumesh.io/node/<node>`, Kubernetes Secrets and the
 controller Deployment. The controller's ServiceAccount may only get/list Pods,
 Services and EndpointSlices.
@@ -170,11 +155,10 @@ Services and EndpointSlices.
 A node-file row is:
 
 ```text
-<k8s-node> <dpu-rdma-ip>:<base-port> <grant-key-id> \
-<grant-public-key> <dpu-public-key>
+<host-node> <dpu-rdma-ip>:<base-port> <dpu-public-key>
 ```
 
-The operator supplies name, address and grant public key. `dpumeshd` reads the
+The operator supplies name and address. `dpumeshd` reads the
 DPU public key from the paired feed receiver and reports it over node mTLS. The
 controller accepts that report only for the certificate's node and only when
 name and RDMA address match the configured row.
@@ -199,10 +183,10 @@ name and RDMA address match the configured row.
 ```
 
 `build` synchronizes DPU sources, builds the pinned Linkerd static library and
-links `dpumesh_dpu`. `restart` starts that binary directly with the configured
-keys, feeds and geometry; a runtime deployed as a DaemonSet is managed through
-Kubernetes instead. The native hardware profile sets both L7 Service lists
-empty, so the linked L7 runtime is inactive.
+links `dpumesh_dpu`. `restart` replaces the runtime DaemonSet Pod and waits for
+its replacement to become ready. To deploy a newly built binary, build/import
+its runtime image first. The native hardware profile selects its echo Service
+for Linkerd opaque processing.
 
 The `point` command sends:
 
@@ -236,7 +220,7 @@ DPUMESH_PEER_PORT=47900
 DPUMESH_NODE_RDMA_ADDR=10.77.0.1:47900
 ```
 
-Each node has its own WorkloadGrant private key and DPU static private key; do
+Each DPU has its own static private key and paired-control certificate; do
 not copy private keys between nodes. Both DPUs use the same Arm-worker count and
 base port. Worker `w` listens at `base-port+w`. `DPUMESH_PEER_BIND` must resolve
 to the RDMA device used by that DPU. Validate each physical/RoCE path with
@@ -287,9 +271,9 @@ ci/health-check.sh
 ```
 
 The Make targets validate C/Python contracts, protocol layouts, topology,
-WorkloadGrant signing, Device Plugin behavior, feed delivery, facades and
+identity decoding and feed verification, Device Plugin behavior, feed delivery, facades and
 transport state machines. `native_deploy.sh all` installs and starts the
-controller, host runtime, DPU services and workloads before requiring a live DPU
+controller, host systemd admin, DPU runtime Pod and workloads before requiring a live DPU
 byte exchange. `ci/health-check.sh` records DPU geometry, deployed workloads and
 client CPU affinity, then exercises the live native path without treating one
 smoke latency as a performance series.
@@ -297,7 +281,7 @@ smoke latency as a performance series.
 Lifecycle invariants are:
 
 - `dpumeshd` advertises slots Healthy only while controller-to-DPU delivery,
-  node registration and — under `direct` — the DPU control session succeed;
+  node registration and the paired-DPU control session succeed;
 - one slot generation owns at most one connected workload and one broker;
 - broker exit completes DPU unregister/quiescence before the slot is reused;
 - a DPU or controller delivery failure closes admission for new allocations;
@@ -307,3 +291,11 @@ Lifecycle invariants are:
 - L7 selection changes only DPU processing; no workload-side proxy is added;
 - measurement output is retained only with its exact geometry, deployed object
   set and separated Pod/host-service/DPU CPU accounting.
+
+## Native endpoint policy metadata
+
+The Pod label `linkerd.io/control-plane-ns: linkerd` enables policy-controller
+observation. The `config.linkerd.io/skip-inbound-ports` annotation names the native
+application port so stock destination discovery does not advertise a nonexistent
+in-Pod proxy or TLS listener. DPU-side Server policy is still enforced; it is
+verified by the deny/restore traffic test. Keep proxy injection disabled.

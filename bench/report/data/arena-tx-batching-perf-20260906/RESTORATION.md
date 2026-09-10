@@ -1,3 +1,5 @@
+> Historical measurement record. Deployment and registration descriptions below apply to the recorded revision, not the current implementation. Current placement and protocol: [CONTROL](../../../../design/CONTROL.md) (updated 2026-09-10). Measurements are unchanged.
+
 # Restoration
 
 - Both native Deployments were restored to their exact pre-campaign Pod

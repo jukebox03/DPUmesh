@@ -1,3 +1,5 @@
+> Historical measurement record. Deployment and registration descriptions below apply to the recorded revision, not the current implementation. Current placement and protocol: [CONTROL](../../../../design/CONTROL.md) (updated 2026-09-10). Measurements are unchanged.
+
 # gRPC evaluation procedure
 
 This document alone must be enough to reproduce every number in
@@ -77,7 +79,7 @@ per-repeat) and `$OUT/sweep.log`; the `*-raw.csv` files here concatenate those
 | P6 | DPU profile | during a 64 B 50k open loop, on the DPU: `pid=$(pgrep -x dpumesh_dpu); perf stat -p $pid -- sleep 8; perf record -F 49 -e cycles --call-graph fp -p $pid -- sleep 8; perf report --no-children`; idle is the same `perf stat` with no session | [`perf-stat.csv`](perf-stat.csv), [`perf-self.csv`](perf-self.csv) |
 | P7 | worker count | `for w in 4 6 8 12; do WORKERS=$w OUT=/tmp/p7-a$w bash bench/suite/grpc_worker_scale.sh; done` (`threads=channels=workers`, geometry 32/4/4, 30/6/6, 32/8/8, 24/12/12) | [`worker-scale-raw.csv`](worker-scale-raw.csv) |
 | P8 | session fan-in | on the W=8 deployment `CHANNELS=24 THREADS=24 FRAME=64 RATES=80000`; the same command on a W=12 deployment | [`session-scaling-summary.csv`](session-scaling-summary.csv) |
-| R1 | Linkerd sidecar closed loop | Pods from [`bench/k8s/grpc-linkerd-pods.yaml`](../../../k8s/grpc-linkerd-pods.yaml) (`linkerd.io/inject: enabled`, `skip-inbound-ports: $CTRL_PORT`, `BENCH_TRANSPORT=tcp`, `BENCH_TARGET=echo-grpc-linkerd:9091`), brought up by deploy. `bash bench/suite/grpc_closed_sweep.sh --configs grpc-linkerd --frames "64 1024 8192" --concs 128 --out /tmp/r1` | [`mesh-closed-raw.csv`](mesh-closed-raw.csv), [`linkerd-receipt.txt`](linkerd-receipt.txt) |
+| R1 | Linkerd sidecar closed loop | Pods from `bench/k8s/grpc-linkerd-pods.yaml` (historical manifest, no longer present) (`linkerd.io/inject: enabled`, `skip-inbound-ports: $CTRL_PORT`, `BENCH_TRANSPORT=tcp`, `BENCH_TARGET=echo-grpc-linkerd:9091`), brought up by deploy. `bash bench/suite/grpc_closed_sweep.sh --configs grpc-linkerd --frames "64 1024 8192" --concs 128 --out /tmp/r1` | [`mesh-closed-raw.csv`](mesh-closed-raw.csv), [`linkerd-receipt.txt`](linkerd-receipt.txt) |
 | R2 | matched 10k RPS host CPU | `CLIENT_APP=bench-grpc-linkerd SERVER_APP=echo-grpc-linkerd RATES=10000` for `FRAME=64/1024/8192`; the DPUmesh side is P5's 10k point | [`mesh-cpu-raw.csv`](mesh-cpu-raw.csv) |
 | R3 | direct TCP (no mesh) | the same two Pods with the sidecar removed (`linkerd.io/inject: disabled`), `BENCH_TRANSPORT=tcp BENCH_TARGET=echo-grpc-linkerd:9091`, and the same closed sweep as R1. Acceptance: the DPU process must stay ≤ 0.05 core (the DPU is not on the path) | the `direct-tcp` rows of [`closed-raw.csv`](closed-raw.csv) |
 | L | low-load diagnosis (E1, E2) | the E1 and E2 commands below | [`lowload/`](lowload/) |

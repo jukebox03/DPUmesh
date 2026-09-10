@@ -1,3 +1,5 @@
+> Historical measurement record. Deployment and registration descriptions below apply to the recorded revision, not the current implementation. Current placement and protocol: [CONTROL](../../../../design/CONTROL.md) (updated 2026-09-10). Measurements are unchanged.
+
 # E5 — two of the four h2 client connection polls per request (2026-09-02)
 
 Same rig and geometry as [`grpc-professor-20260902/`](../grpc-professor-20260902/EXPERIMENT.md)

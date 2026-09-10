@@ -1,5 +1,7 @@
 # DPUmesh Data Plane
 
+Placement (2026-09-10): applications are host Pods; ARM/DPA runtime and the feed receiver share a DPU Pod. Node admin is a host systemd service and each broker is its host-process child. The current registration and lifecycle contract is [CONTROL](CONTROL.md).
+
 DPUmesh is a reliable full-duplex byte transport for Kubernetes Services. A
 workload publishes descriptors over registered host memory; BlueField DPA and
 ARM workers route the stream to a local registered mapping or an authenticated
@@ -56,11 +58,12 @@ POD_REGISTER → POD_ASSIGNED → import TX and ring mappings
 → POD_INIT_RESULT(READY, L)
 ```
 
-Registration carries an identity assertion bound to this connection's nonce: the
-broker incarnation, the Pod UID, the authorized Service, and the requested ring
-geometry. It reaches the DPU either signed over Comch or over the paired host's
-authenticated control session, as [`CONTROL.md`](CONTROL.md) §2-1 defines. The
-DPU admits the channel only when that assertion and node-scoped control state
+Registration carries identity metadata bound to this connection's nonce: the
+daemon incarnation, slot generation, Pod UID and authorized Service.
+The host also checks that requested ring geometry matches its allocation.
+Identity metadata reaches the DPU over the paired host's mutually authenticated
+control session, as [`CONTROL.md`](CONTROL.md) §2-1 defines. The
+DPU admits the channel only when that identity and node-scoped control state
 agree.
 
 The channel exports these data structures:

@@ -1,3 +1,5 @@
+> Historical measurement record. Deployment and registration descriptions below apply to the recorded revision, not the current implementation. Current placement and protocol: [CONTROL](../../design/CONTROL.md) (updated 2026-09-10). Measurements are unchanged.
+
 # Broker lifecycle and worker progress evidence — 2026-09-04
 
 This record covers the broker-failure and worker-progress fixes exercised on

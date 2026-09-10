@@ -1,3 +1,5 @@
+> Historical measurement record. Deployment and registration descriptions below apply to the recorded revision, not the current implementation. Current placement and protocol: [CONTROL](../../../../design/CONTROL.md) (updated 2026-09-10). Measurements are unchanged.
+
 # DPU runtime on Kubernetes, direct registration — deployment record
 
 The BlueField Arm OS joined the existing cluster as the node `rapids4-dpu` and

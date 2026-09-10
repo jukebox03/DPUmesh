@@ -13,19 +13,17 @@ transport, proxy, control-plane, and API contracts.
 
 ## Architecture
 
-Kubernetes runs the read-only controller and application Pods. `dpumeshd` and
-its brokers are host system services, and the BlueField feed receiver is one
-too; the DPU runtime itself runs either as a BlueField system service or as a
-DaemonSet Pod on a DPU node joined to the same cluster, and an exclusive
-hardware lock admits only one of them. Workloads declare one Device Plugin
-resource in their PodSpec and receive one allocated Unix socket.
+Host and DPU are separate nodes in the same Kubernetes cluster. Applications
+run in host Pods, the controller in a designated node's Pod, and the DPU runtime
+with its feed receiver in a DPU DaemonSet Pod. Node admin (dpumeshd) remains a
+host systemd service; brokers remain its host-process children. Workloads
+declare one Device Plugin resource and receive one allocated Unix socket.
 
 ```text
-Kubernetes: controller(read-only) + workload Pods
-                                  │ dpumesh.io/channel=1
-Host:       kubelet Device Plugin ─┤─ dpumeshd ─ per-Pod broker
-                                                    │ PCIe/DOCA
-BlueField:                                      dpumesh_dpu
+Host node: application Pod → allocation socket → broker process → PCIe/DOCA
+           kubelet ↔ dpumeshd.service               │
+DPU node:                       runtime Pod ←───────┘
+Designated node: controller Pod → signed feeds and workload scope
 ```
 
 The workload image contains `libdpumesh.so.5`, disables its ServiceAccount
@@ -105,11 +103,10 @@ POD_REGISTER → POD_ASSIGNED → memory and ring import → all DPA RING_ADD_AC
 
 Before every `POD_REGISTER`, kernel-derived Pod and container evidence is
 checked against live Kubernetes state, and the resulting identity is bound to
-the exact Comch connection the DPU opened. The registration mode names who does
-that: the controller, which signs a grant the broker carries over Comch, or
-`dpumeshd` itself, which states the identity over a mutually authenticated
-session with its paired DPU. The workload takes part in neither, and the DPU
-admits only the Service the identity authorizes.
+the exact Comch connection the DPU opened. dpumeshd checks Kubernetes and
+kubelet PodResources, then sends identity metadata over the mutually
+authenticated session with its paired DPU. The broker reports the challenge
+through its private launch socket. Applications receive no credentials.
 [design/CONTROL.md](design/CONTROL.md) is the contract.
 
 The host retries registration while either assignment or readiness is pending;
@@ -138,11 +135,11 @@ tearing its mappings down remains the control connection's decision.
 
 ```text
 include/dpumesh/       public C API
-src/core/              host transport engine, resolver, grant and broker IPC
+src/core/              host transport engine, resolver and broker IPC
 src/facade/            the native and preload API surfaces over that core
 src/broker/            the per-Pod broker and its pod<->broker IPC
 doca/                  BlueField ARM process and DPA kernel
-controller/            read-only cluster controller and WorkloadGrant encoder
+controller/            read-only topology/feed controller and workload scope API
 node/                  host dpumeshd and Kubernetes Device Plugin API
 packaging/             host systemd unit and installer; DPU runtime image and chart
 integrations/grpc/     gRPC C++ runtime, reactor, tests
@@ -164,7 +161,7 @@ application already is.
 | new, or already event-loop shaped | `<dpumesh/dmesh.h>` | writes against the native API |
 | gRPC C++ | `integrations/grpc` | channel and server bootstrap only |
 
-All three register the same way, under the same signed grant, and share the same
+All three register the same way, through the same authenticated registration, and share the same
 send core. Mixing them in one process is not a supported arrangement: one
 process holds one channel.
 
@@ -357,25 +354,29 @@ not select that Pod. The complete contract is
 
 ## Bringing up the mesh
 
-An application declares one resource and nothing else. Everything the transport
-needs underneath it belongs to the cluster administrator, and none of it is
-reachable from a workload Pod.
+Host and DPU join the same Kubernetes cluster as separate nodes.
 
-| What the administrator provides | Where it lives |
+| Component | Placement |
 |---|---|
-| a BlueField per meshed node, and the `dpumesh_dpu` runtime on it | BlueField system service, or a DaemonSet on a DPU node joined to the cluster |
-| `dpumeshd` and the immutable broker binary on each host | host systemd, with delegated `cpu`, `memory` and `pids` cgroups and reserved CPUs |
-| the read-only controller and its three signing keyrings | a Kubernetes Deployment and its Secrets |
-| the registration mode, chosen once and set identically on host and DPU | `grant` uses the controller's signature; `direct` uses a host↔DPU control session and a read-only Kubernetes client certificate |
-| the node PKI: node client certificates, DPU node keys, and — under `direct` — the control-session certificates | operator PKI; issuance and rotation are the administrator's existing procedures |
-| the ring geometry `K`, matched between host and DPU | `DPUMESH_RINGS_PER_POD` on both, and in each meshed PodSpec |
+| Application | unprivileged Pod on a host node |
+| DPU runtime | privileged DaemonSet Pod on each paired DPU node |
+| DPUmesh controller | unprivileged Deployment Pod on a designated node |
+| Node admin (dpumeshd) | root systemd service on each host |
+| Per-pod broker | supervised process on the Pod's host |
+| Feed receiver | unprivileged sidecar in the DPU runtime Pod |
 
-None of it is created on a workload's behalf. A node without it advertises no
-`dpumesh.io/channel`, so a Pod that requests one is simply not scheduled there.
+Admin restart terminates its brokers and established connections. Broker
+supervision remains inside the node admin. There are no selectable deployment
+architectures or grant/direct registration modes.
 
-[bench/README.md](bench/README.md) is the one-node build and deployment
-workflow. [packaging/README-dpu-kubernetes.md](packaging/README-dpu-kubernetes.md)
-covers running the DPU runtime as a DaemonSet with direct registration.
+The controller still publishes signed topology and Service targets and mediates
+workload scope. The DPU embeds Linkerd; its projected identity token and TLS
+credential authenticate infrastructure, while workload identity comes from
+registration.
+
+Use [the deployment guide](packaging/README-dpu-kubernetes.md) and
+[bench/native_deploy.sh](bench/native_deploy.sh) to build, deploy and smoke-test.
+The existing cluster, paired hardware and Linkerd control plane are prerequisites.
 
 ## Documentation
 

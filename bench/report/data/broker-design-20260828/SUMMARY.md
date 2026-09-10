@@ -1,3 +1,5 @@
+> Historical measurement record. Deployment and registration descriptions below apply to the recorded revision, not the current implementation. Current placement and protocol: [CONTROL](../../../../design/CONTROL.md) (updated 2026-09-10). Measurements are unchanged.
+
 # Per-Pod broker design receipts
 
 Appendices A, C and D moved here from `CONTROL_REPORT.md`, an uncommitted design

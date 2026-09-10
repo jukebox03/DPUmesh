@@ -5,9 +5,9 @@ point. They show one client QP, one server accept path, byte-stream send,
 zero-copy receive, backpressure, and ownership-ordered teardown.
 
 Deploy DPUmesh, then apply the example. `RINGS` must equal the host and DPU
-geometry; the native hardware profile uses eight. Nothing below depends on how
-the DPU runtime was deployed or which registration mode it uses: an application
-declares one `dpumesh.io/channel` and reads its allocated socket either way.
+geometry; the native hardware profile uses eight. Applications declare one
+dpumesh.io/channel and read the allocated socket. Registration is performed by
+the host systemd admin over paired-DPU TLS; apps hold no credentials.
 
 ```sh
 ./bench/native_deploy.sh deploy

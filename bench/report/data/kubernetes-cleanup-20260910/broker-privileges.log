@@ -1,0 +1,50 @@
+Name:	dmesh_broker
+Pid:	1426449
+PPid:	1417479
+Uid:	0	0	0	0
+Gid:	0	0	0	0
+CapEff:	00000000012041eb
+CapBnd:	00000000012041eb
+NoNewPrivs:	0
+Seccomp:	2
+
+0::/system.slice/dpumeshd.service/manager
+
+
+Name:	dmesh_broker
+Pid:	1426450
+PPid:	1426449
+Uid:	65532	65532	65532	65532
+Gid:	65532	65532	65532	65532
+CapEff:	0000000000000000
+CapBnd:	00000000012041eb
+NoNewPrivs:	1
+Seccomp:	2
+
+0::/system.slice/dpumeshd.service/workers/pod6fd2f0d7-05e0-49e9-a869-83606d3b504e.g5
+
+
+Name:	dmesh_broker
+Pid:	1426459
+PPid:	1417479
+Uid:	0	0	0	0
+Gid:	0	0	0	0
+CapEff:	00000000012041eb
+CapBnd:	00000000012041eb
+NoNewPrivs:	0
+Seccomp:	2
+
+0::/system.slice/dpumeshd.service/manager
+
+
+Name:	dmesh_broker
+Pid:	1426460
+PPid:	1426459
+Uid:	65532	65532	65532	65532
+Gid:	65532	65532	65532	65532
+CapEff:	0000000000000000
+CapBnd:	00000000012041eb
+NoNewPrivs:	1
+Seccomp:	2
+
+0::/system.slice/dpumeshd.service/workers/pod9762f402-85b9-44d6-b191-e22d6edebf84.g5

@@ -1,0 +1,123 @@
+[
+  {
+    "namespace": "test-bench",
+    "name": "bench-dpumesh-native-5d54d7f56-56b7p",
+    "node": "rapids4",
+    "podSecurityContext": {
+      "runAsGroup": 65532,
+      "runAsNonRoot": true,
+      "runAsUser": 65532,
+      "seccompProfile": {
+        "type": "RuntimeDefault"
+      }
+    },
+    "automountServiceAccountToken": false,
+    "containers": [
+      {
+        "name": "app",
+        "image": "docker.io/bench/bench-dpumesh:kubernetes-20260910",
+        "securityContext": {
+          "allowPrivilegeEscalation": false,
+          "capabilities": {
+            "drop": [
+              "ALL"
+            ]
+          },
+          "readOnlyRootFilesystem": true
+        }
+      }
+    ]
+  },
+  {
+    "namespace": "test-bench",
+    "name": "dpumesh-controller-5f47bf8f67-m9k7w",
+    "node": "rapids4",
+    "podSecurityContext": {
+      "fsGroup": 65532,
+      "fsGroupChangePolicy": "OnRootMismatch",
+      "runAsGroup": 65532,
+      "runAsNonRoot": true,
+      "runAsUser": 65532,
+      "seccompProfile": {
+        "type": "RuntimeDefault"
+      }
+    },
+    "automountServiceAccountToken": true,
+    "containers": [
+      {
+        "name": "controller",
+        "image": "docker.io/bench/dpumesh-controller:kubernetes-20260910",
+        "securityContext": {
+          "allowPrivilegeEscalation": false,
+          "capabilities": {
+            "drop": [
+              "ALL"
+            ]
+          },
+          "readOnlyRootFilesystem": true
+        }
+      }
+    ]
+  },
+  {
+    "namespace": "test-bench",
+    "name": "echo-dpumesh-native-84bb66fb66-s92fz",
+    "node": "rapids4",
+    "podSecurityContext": {
+      "runAsGroup": 65532,
+      "runAsNonRoot": true,
+      "runAsUser": 65532,
+      "seccompProfile": {
+        "type": "RuntimeDefault"
+      }
+    },
+    "automountServiceAccountToken": false,
+    "containers": [
+      {
+        "name": "app",
+        "image": "docker.io/bench/echo-dpumesh:kubernetes-20260910",
+        "securityContext": {
+          "allowPrivilegeEscalation": false,
+          "capabilities": {
+            "drop": [
+              "ALL"
+            ]
+          },
+          "readOnlyRootFilesystem": true
+        }
+      }
+    ]
+  },
+  {
+    "namespace": "dpumesh-system",
+    "name": "dpumesh-runtime-xfnfw",
+    "node": "rapids4-dpu",
+    "podSecurityContext": {},
+    "automountServiceAccountToken": false,
+    "containers": [
+      {
+        "name": "runtime",
+        "image": "bench/dpumesh-dpu:kubernetes-linkerd-20260910",
+        "securityContext": {
+          "privileged": true
+        }
+      },
+      {
+        "name": "feed-receiver",
+        "image": "bench/dpumesh-dpu:kubernetes-linkerd-20260910",
+        "securityContext": {
+          "allowPrivilegeEscalation": false,
+          "capabilities": {
+            "drop": [
+              "ALL"
+            ]
+          },
+          "readOnlyRootFilesystem": true,
+          "runAsGroup": 65532,
+          "runAsNonRoot": true,
+          "runAsUser": 65532
+        }
+      }
+    ]
+  }
+]

@@ -1,0 +1,95 @@
+linkerd-before-roll-4191.log
+control_identity_cert_refreshes_total{result="ok"} 1
+control_identity_cert_refreshes_total{result="error"} 0
+dmesh_control_events_total{kind="topology",reason="adopted"} 4
+dmesh_control_events_total{kind="inbound",reason="no-policy"} 3
+dmesh_control_events_total{kind="inbound",reason="denied"} 1
+dmesh_control_events_total{kind="peer",reason="poison"} 1
+dmesh_control_events_total{kind="inbound",reason="admitted"} 3
+dmesh_control_events_total{kind="registration",reason="unprotected"} 2
+dmesh_control_events_total{kind="topology",reason="unchanged"} 6
+dmesh_control_events_total{kind="registration",reason="ungraded"} 2
+
+linkerd-before-roll-4192.log
+control_identity_cert_refreshes_total{result="ok"} 1
+control_identity_cert_refreshes_total{result="error"} 0
+dmesh_control_events_total{kind="topology",reason="adopted"} 4
+dmesh_control_events_total{kind="inbound",reason="no-policy"} 3
+dmesh_control_events_total{kind="inbound",reason="denied"} 1
+dmesh_control_events_total{kind="peer",reason="poison"} 1
+dmesh_control_events_total{kind="inbound",reason="admitted"} 3
+dmesh_control_events_total{kind="registration",reason="unprotected"} 2
+dmesh_control_events_total{kind="topology",reason="unchanged"} 6
+dmesh_control_events_total{kind="registration",reason="ungraded"} 2
+
+linkerd-before-roll-4193.log
+control_identity_cert_refreshes_total{result="ok"} 1
+control_identity_cert_refreshes_total{result="error"} 0
+dmesh_control_events_total{kind="topology",reason="adopted"} 4
+dmesh_control_events_total{kind="inbound",reason="no-policy"} 3
+dmesh_control_events_total{kind="inbound",reason="denied"} 1
+dmesh_control_events_total{kind="peer",reason="poison"} 1
+dmesh_control_events_total{kind="inbound",reason="admitted"} 3
+dmesh_control_events_total{kind="registration",reason="unprotected"} 2
+dmesh_control_events_total{kind="topology",reason="unchanged"} 6
+dmesh_control_events_total{kind="registration",reason="ungraded"} 2
+
+linkerd-before-roll-4194.log
+control_identity_cert_refreshes_total{result="ok"} 1
+control_identity_cert_refreshes_total{result="error"} 0
+dmesh_control_events_total{kind="topology",reason="adopted"} 4
+dmesh_control_events_total{kind="inbound",reason="no-policy"} 3
+dmesh_control_events_total{kind="inbound",reason="denied"} 1
+dmesh_control_events_total{kind="peer",reason="poison"} 1
+dmesh_control_events_total{kind="inbound",reason="admitted"} 3
+dmesh_control_events_total{kind="registration",reason="unprotected"} 2
+dmesh_control_events_total{kind="topology",reason="unchanged"} 6
+dmesh_control_events_total{kind="registration",reason="ungraded"} 2
+
+linkerd-before-roll-4195.log
+control_identity_cert_refreshes_total{result="error"} 0
+control_identity_cert_refreshes_total{result="ok"} 1
+dmesh_control_events_total{kind="topology",reason="adopted"} 4
+dmesh_control_events_total{kind="inbound",reason="no-policy"} 3
+dmesh_control_events_total{kind="inbound",reason="denied"} 1
+dmesh_control_events_total{kind="peer",reason="poison"} 1
+dmesh_control_events_total{kind="inbound",reason="admitted"} 3
+dmesh_control_events_total{kind="registration",reason="unprotected"} 2
+dmesh_control_events_total{kind="topology",reason="unchanged"} 6
+dmesh_control_events_total{kind="registration",reason="ungraded"} 2
+
+linkerd-before-roll-4196.log
+control_identity_cert_refreshes_total{result="ok"} 1
+control_identity_cert_refreshes_total{result="error"} 0
+dmesh_control_events_total{kind="topology",reason="adopted"} 4
+dmesh_control_events_total{kind="inbound",reason="no-policy"} 3
+dmesh_control_events_total{kind="inbound",reason="denied"} 1
+dmesh_control_events_total{kind="peer",reason="poison"} 1
+dmesh_control_events_total{kind="inbound",reason="admitted"} 3
+dmesh_control_events_total{kind="registration",reason="unprotected"} 2
+dmesh_control_events_total{kind="topology",reason="unchanged"} 6
+dmesh_control_events_total{kind="registration",reason="ungraded"} 2
+
+linkerd-before-roll-4197.log
+control_identity_cert_refreshes_total{result="error"} 0
+control_identity_cert_refreshes_total{result="ok"} 1
+dmesh_control_events_total{kind="topology",reason="adopted"} 4
+dmesh_control_events_total{kind="inbound",reason="no-policy"} 3
+dmesh_control_events_total{kind="inbound",reason="denied"} 1
+dmesh_control_events_total{kind="peer",reason="poison"} 1
+dmesh_control_events_total{kind="inbound",reason="admitted"} 3
+dmesh_control_events_total{kind="registration",reason="unprotected"} 2
+dmesh_control_events_total{kind="topology",reason="unchanged"} 6
+dmesh_control_events_total{kind="registration",reason="ungraded"} 2
+
+linkerd-before-roll-4198.log
+control_identity_cert_refreshes_total{result="ok"} 1
+control_identity_cert_refreshes_total{result="error"} 0
+dmesh_control_events_total{kind="topology",reason="adopted"} 4
+dmesh_control_events_total{kind="inbound",reason="no-policy"} 3
+dmesh_control_events_total{kind="inbound",reason="denied"} 1
+dmesh_control_events_total{kind="peer",reason="poison"} 1
+dmesh_control_events_total{kind="inbound",reason="admitted"} 3
+dmesh_control_events_total{kind="registration",reason="unprotected"} 2
+dmesh_control_events_total{kind="topology",reason="unchanged"} 6
+dmesh_control_events_total{kind="registration",reason="ungraded"} 2

@@ -1,3 +1,5 @@
+> Historical measurement record. Deployment and registration descriptions below apply to the recorded revision, not the current implementation. Current placement and protocol: [CONTROL](../../../../design/CONTROL.md) (updated 2026-09-10). Measurements are unchanged.
+
 # DPUmesh gRPC correctness, performance and bottlenecks
 
 One node, one BlueField, `N/K/A=32/8/8`, nine host cores each for client and

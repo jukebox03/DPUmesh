@@ -1,3 +1,5 @@
+> Historical measurement record. Deployment and registration descriptions below apply to the recorded revision, not the current implementation. Current placement and protocol: [CONTROL](../../../../../design/CONTROL.md) (updated 2026-09-10). Measurements are unchanged.
+
 # Knee follow-up raw receipts
 
 All points use the same A8 expanded binary, `N/K/A=32/8/8`, Host 9+9 pin,

@@ -1,3 +1,5 @@
+> Historical measurement record. Deployment and registration descriptions below apply to the recorded revision, not the current implementation. Current placement and protocol: [CONTROL](../../../../../design/CONTROL.md) (updated 2026-09-10). Measurements are unchanged.
+
 # Low-load diagnosis receipts (N/K/A=32/8/8, 64 B)
 
 Why one open request costs a DPU worker 0.7 ms of CPU and 1.6 ms of latency at

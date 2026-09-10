@@ -35,15 +35,15 @@ def generate_control_plane():
     for xsep in (6.5, 13.3):
         ax.plot([xsep, xsep], [0.2, 10.75], color="#ddddda", lw=1,
                 ls=(0, (2, 3)))
-    ax.text(3.25, 10.72, "KUBERNETES", fontsize=11, color="#555555", ha="center")
+    ax.text(3.25, 10.72, "CLUSTER API / HOST PODS", fontsize=11, color="#555555", ha="center")
     ax.text(9.9, 10.72, "HOST LINUX / SYSTEMD", fontsize=11, color="#555555", ha="center")
-    ax.text(16.6, 10.72, "BLUEFIELD ARM OS", fontsize=11, color="#555555", ha="center")
+    ax.text(16.6, 10.72, "DPU NODE / SAME CLUSTER", fontsize=11, color="#555555", ha="center")
 
     box(ax, 0.4, 8.35, 2.5, 1.45, "Kubernetes API",
         ("Pods, Services,", "EndpointSlices", "get/list only"),
         edge=GRAY, face=GRAY_BG, body_size=7.6)
     box(ax, 3.45, 8.35, 2.55, 1.45, "Controller Pod",
-        ("uid/gid 65532", "topology + feeds", "grant: signed assertion"),
+        ("uid/gid 65532", "topology + feeds", "workload scope mediation"),
         edge=PURPLE, face=PURPLE_BG, body_size=7.6)
     box(ax, 0.4, 4.75, 2.5, 1.45, "kubelet",
         ("Device Plugin API", "slot allocation", "one socket mount"),
@@ -66,12 +66,12 @@ def generate_control_plane():
          "cpu.max + memory.high/max + pids.max", "covered by kubelet system reservation"),
         edge=GRAY, face=GRAY_BG, body_size=7.25)
 
-    box(ax, 13.7, 8.35, 5.85, 1.45, "Feed receiver service",
+    box(ax, 13.7, 8.35, 5.85, 1.45, "Feed receiver sidecar (runtime Pod)",
         ("unprivileged bounded installer", "digest check + fsync + atomic rename",
          "serves DPU public key"),
         edge=GREEN, face=GREEN_BG, body_size=7.55)
-    box(ax, 13.7, 4.65, 5.85, 2.25, "dpumesh_dpu — system service or DaemonSet Pod",
-        ("nonce-bound identity verification", "topology / membership / target verification",
+    box(ax, 13.7, 4.65, 5.85, 2.25, "dpumesh_dpu — privileged DaemonSet Pod",
+        ("nonce-bound identity verification", "topology / target verification",
          "slot + incarnation + generation fences",
          "one hardware lock; readiness from the control loop",
          "routing, policy and peer-channel enforcement"),
@@ -103,7 +103,7 @@ def generate_control_plane():
           color=GRAY, label_dx=0.75)
 
     arrow(ax, (12.8, 9.62), (13.7, 9.62),
-          label="topology / membership / targets", color=GREEN, label_dy=0.30)
+          label="topology / targets", color=GREEN, label_dy=0.30)
     arrow(ax, (13.7, 8.55), (12.8, 8.55), label="DPU public key",
           color=GREEN, label_dy=-0.30)
     arrow(ax, (16.62, 8.35), (16.62, 6.90), label="atomic feed files",

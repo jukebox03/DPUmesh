@@ -1,0 +1,50 @@
+$ git diff --check
+exit=0
+
+$ bash ci/check-doc-links.sh
+all relative links resolve
+exit=0
+
+$ helm lint packaging/helm/dpumesh-runtime -f build/kubernetes-migration/runtime-values.json
+==> Linting packaging/helm/dpumesh-runtime
+[INFO] Chart.yaml: icon is recommended
+
+1 chart(s) linted, 0 chart(s) failed
+exit=0
+
+$ kubectl apply --dry-run=server -f build/kubernetes-migration/native-hw-final.yaml
+deployment.apps/echo-dpumesh-native configured (server dry run)
+service/echo-dpumesh-native unchanged (server dry run)
+deployment.apps/bench-dpumesh-native configured (server dry run)
+server.policy.linkerd.io/echo-dpumesh-native unchanged (server dry run)
+exit=0
+
+$ bash -n bench/bench.sh
+exit=0
+
+$ bash -n bench/dpumesh_controller.sh
+exit=0
+
+$ bash -n bench/native_deploy.sh
+exit=0
+
+$ bash -n packaging/build-dpu-image.sh
+exit=0
+
+$ bash -n packaging/deploy-dpu.sh
+exit=0
+
+$ bash -n packaging/linkerd-init.sh
+exit=0
+
+$ bash -n packaging/provision-host-reader.sh
+exit=0
+
+Helm render -> Kubernetes server dry-run
+serviceaccount/dpu created (server dry run)
+daemonset.apps/dpumesh-runtime created (server dry run)
+exit=0
+All 52 repository Markdown files checked (excluding vendored submodule).
+All relative Markdown links resolve.
+Historical deleted script/manifest references are marked as historical plain text.
+Final git diff --check: PASS

@@ -1,3 +1,5 @@
+> Historical measurement record. Deployment and registration descriptions below apply to the recorded revision, not the current implementation. Current placement and protocol: [CONTROL](../../../../design/CONTROL.md) (updated 2026-09-10). Measurements are unchanged.
+
 # Doorbell-relay broker + gated drain result (2026-09-01)
 
 Architecture under test (supersedes minimal-pe-broker-20260901):

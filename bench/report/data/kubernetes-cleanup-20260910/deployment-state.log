@@ -1,0 +1,74 @@
+[nodes] exit=0
+NAME          STATUS   ROLES           AGE   VERSION    INTERNAL-IP     EXTERNAL-IP   OS-IMAGE             KERNEL-VERSION          CONTAINER-RUNTIME
+jet1          Ready    worker          13d   v1.34.11   147.46.78.187   <none>        Ubuntu 24.04.4 LTS   6.8.0-138-generic       containerd://2.3.3
+rapids4       Ready    control-plane   10h   v1.34.11   147.46.78.169   <none>        Ubuntu 22.04.5 LTS   5.15.0-190-generic      containerd://2.2.4
+rapids4-dpu   Ready    <none>          46m   v1.34.11   192.168.100.2   <none>        Ubuntu 22.04.5 LTS   5.15.0-1074-bluefield   containerd://1.7.27
+
+[applications] exit=0
+NAME                                   READY   UP-TO-DATE   AVAILABLE   AGE   CONTAINERS   IMAGES                                                   SELECTOR
+deployment.apps/bench-dpumesh-native   1/1     1            1           19m   app          docker.io/bench/bench-dpumesh:kubernetes-20260910        app=bench-dpumesh-native
+deployment.apps/dpumesh-controller     1/1     1            1           30m   controller   docker.io/bench/dpumesh-controller:kubernetes-20260910   app=dpumesh-controller
+deployment.apps/echo-dpumesh-native    1/1     1            1           19m   app          docker.io/bench/echo-dpumesh:kubernetes-20260910         app=echo-dpumesh-native
+
+NAME                                       READY   STATUS    RESTARTS   AGE   IP             NODE      NOMINATED NODE   READINESS GATES
+pod/bench-dpumesh-native-5d54d7f56-56b7p   1/1     Running   0          86s   10.244.1.253   rapids4   <none>           <none>
+pod/dpumesh-controller-5f47bf8f67-m9k7w    1/1     Running   0          19m   10.244.1.114   rapids4   <none>           <none>
+pod/echo-dpumesh-native-84bb66fb66-s92fz   1/1     Running   0          86s   10.244.1.203   rapids4   <none>           <none>
+
+[runtime] exit=0
+NAME                             DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE   NODE SELECTOR                                                 AGE   CONTAINERS              IMAGES                                                                                        SELECTOR
+daemonset.apps/dpumesh-runtime   1         1         1       1            1           kubernetes.io/arch=arm64,kubernetes.io/hostname=rapids4-dpu   28m   runtime,feed-receiver   bench/dpumesh-dpu:kubernetes-linkerd-20260910,bench/dpumesh-dpu:kubernetes-linkerd-20260910   app.kubernetes.io/instance=dpumesh-runtime
+
+NAME                        READY   STATUS    RESTARTS   AGE   IP              NODE          NOMINATED NODE   READINESS GATES
+pod/dpumesh-runtime-xfnfw   2/2     Running   0          95s   192.168.100.2   rapids4-dpu   <none>           <none>
+
+[linkerd-control-plane] exit=0
+NAME                                     READY   UP-TO-DATE   AVAILABLE   AGE
+deployment.apps/linkerd-destination      1/1     1            1           6d2h
+deployment.apps/linkerd-identity         1/1     1            1           6d2h
+deployment.apps/linkerd-proxy-injector   1/1     1            1           6d2h
+
+NAME                                         READY   STATUS    RESTARTS   AGE
+pod/linkerd-destination-6d44dd56cf-mpvt9     4/4     Running   0          10h
+pod/linkerd-identity-66bb9fbf5d-wdl8j        2/2     Running   0          10h
+pod/linkerd-proxy-injector-579b98974-wbgwk   2/2     Running   0          10h
+
+[policy] exit=0
+apiVersion: policy.linkerd.io/v1beta3
+kind: Server
+metadata:
+  annotations:
+    kubectl.kubernetes.io/last-applied-configuration: |
+      {"apiVersion":"policy.linkerd.io/v1beta3","kind":"Server","metadata":{"annotations":{},"name":"echo-dpumesh-native","namespace":"test-bench"},"spec":{"accessPolicy":"all-unauthenticated","podSelector":{"matchLabels":{"app":"echo-dpumesh-native"}},"port":"dmesh","proxyProtocol":"opaque"}}
+  creationTimestamp: "2026-09-10T08:00:26Z"
+  generation: 9
+  name: echo-dpumesh-native
+  namespace: test-bench
+  resourceVersion: "3163172"
+  uid: 5b896fa6-656f-4462-9a2c-f9eea8920b52
+spec:
+  accessPolicy: all-unauthenticated
+  podSelector:
+    matchLabels:
+      app: echo-dpumesh-native
+  port: dmesh
+  proxyProtocol: opaque
+
+[host-service] exit=0
+MainPID=1417479
+AllowedCPUs=0-2
+MemoryMax=2684354560
+CapabilityBoundingSet=cap_chown cap_dac_override cap_fowner cap_kill cap_setgid cap_setuid cap_setpcap cap_ipc_lock cap_sys_admin cap_sys_resource
+User=root
+KillMode=mixed
+ActiveState=active
+SubState=running
+
+[reader-get-pods] exit=0
+yes
+
+[reader-write-pods] exit=1
+no
+
+[reader-get-secrets] exit=1
+no
