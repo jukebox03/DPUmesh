@@ -89,7 +89,7 @@ def test_eligibility():
     for change in ({'node_name': 'worker-2'}, {'container_id': 'b'*64}, {'service_name': 'other'}):
         try:
             identity.resolve_authorized_pod(**(args | change))
-        except identity.GrantError:
+        except identity.IdentityError:
             pass
         else:
             raise AssertionError('accepted wrong workload identity')
@@ -118,7 +118,7 @@ def test_eligibility():
     invalid = copy.deepcopy(pod); invalid['metadata']['deletionTimestamp'] = 'now'
     try:
         identity.resolve_authorized_pod(**(args | {'pods': [invalid]}))
-    except identity.GrantError:
+    except identity.IdentityError:
         pass
     else:
         raise AssertionError('accepted deleted Pod')

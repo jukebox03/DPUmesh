@@ -77,9 +77,9 @@ main(void)
     assert(pods_add_connection(objs, conn) == 0);
 
     /* The slot lifecycle below runs on an admitted registration. */
-    objs->pods[0].registration_grant_verified = 1;
-    snprintf(objs->pods[0].granted_service,
-             sizeof(objs->pods[0].granted_service), "echo-dpumesh");
+    objs->pods[0].registration_verified = 1;
+    snprintf(objs->pods[0].registered_service,
+             sizeof(objs->pods[0].registered_service), "echo-dpumesh");
     snprintf(objs->pods[0].namespace_name,
              sizeof(objs->pods[0].namespace_name), "test-bench");
 
@@ -126,9 +126,9 @@ main(void)
     assert(pods_add_connection(objs, conn) == 0);
     install_generation(objs);
     assert(pods_register(objs, conn, -1, "echo-dpumesh") == -1);
-    objs->pods[0].registration_grant_verified = 1;
-    snprintf(objs->pods[0].granted_service,
-             sizeof(objs->pods[0].granted_service), "echo-dpumesh");
+    objs->pods[0].registration_verified = 1;
+    snprintf(objs->pods[0].registered_service,
+             sizeof(objs->pods[0].registered_service), "echo-dpumesh");
     snprintf(objs->pods[0].namespace_name,
              sizeof(objs->pods[0].namespace_name), "test-bench");
     /* The name is the identity: a Service other than the asserted one is
@@ -136,7 +136,7 @@ main(void)
     assert(pods_register(objs, conn, -1, "another-svc") == -1);
     assert(pods_register(objs, conn, -1, "") == -1);
     assert(pods_register(objs, conn, -1, "echo-dpumesh") == 0);
-    assert(objs->pods[0].registration_grant_consumed == 1);
+    assert(objs->pods[0].registration_consumed == 1);
     assert(pods_register(objs, conn, -1, "echo-dpumesh") == 0);
     dmesh_topology_tables_free(objs->topology.tables);
     free(objs);

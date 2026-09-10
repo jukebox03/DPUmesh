@@ -39,9 +39,9 @@ def main() -> None:
         else:
             raise AssertionError(f"accepted malformed header {malformed!r}")
 
-    over = receiver.FEEDS["membership"][1] + 1
+    over = receiver.FEEDS["service-targets"][1] + 1
     try:
-        receiver.parse_header(f"DMESHFEED1 membership {over} {'0' * 64}")
+        receiver.parse_header(f"DMESHFEED1 service-targets {over} {'0' * 64}")
     except receiver.FeedError:
         pass
     else:

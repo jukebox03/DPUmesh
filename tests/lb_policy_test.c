@@ -14,6 +14,7 @@
  * build discards their callers with section GC, but the compiler still parses
  * the full worker source before link-time collection. */
 doca_error_t init_dpa_objects(struct objects *objs);
+doca_error_t cleanup_dpa_objects(struct objects *objs);
 doca_error_t dmesh_doca_dpa_thread_create(
     struct dmesh_doca_dpa_thread *dpa_thread, int eu_id);
 doca_error_t dmesh_doca_dpa_msgq_send_try(

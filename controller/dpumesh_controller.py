@@ -5,13 +5,13 @@ Publishes one signed, versioned topology generation carrying every
 cluster-wide fact a DPU needs: node identities and keys, Pod placements,
 Services with their ClusterIPs, ready endpoints, and the protected-Service
 set. It does not infer host-local evidence; `dpumeshd` supplies the kernel
-binding used for a WorkloadGrant. The generation is Ed25519-signed; DPUs hold
+binding used for paired-DPU registration. The generation is Ed25519-signed; DPUs hold
 public keys only.
 
 The document grammar is design/CONTROL.md's, one record per line:
 
     version=<u64, strictly increasing>
-    node=<name>,<rdma-ip>:<port>,<grant-key-id>,<grant-pub-hex64>,<dpu-pub-hex64>
+    node=<name>,<rdma-ip>:<port>,<dpu-pub-hex64>
     pod=<pod-uid>,<node>,<namespace>,<service-account>,<pod-ipv4>
     service=<namespace>/<name>,<cluster-ipv4>:<port>
     endpoint=<namespace>/<name>,<pod-uid>
@@ -56,7 +56,7 @@ from typing import Any
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import workload_grant                                      # noqa: E402
+
 
 GENERATION_INTERVAL = 5.0
 # The consumer's generation bounds (doca/topology.h), enforced at the
@@ -69,14 +69,15 @@ GEN_ENDPOINT_MAX = 65536
 TOPOLOGY_MAX_BYTES = 16 * 1024 * 1024
 # A node report is three short JSON fields.
 NODE_REPORT_MAX = 4096
-WORKLOAD_GRANT_REQUEST_MAX = 8192
-MEMBERSHIP_MAX_BYTES = 256 * 1024
+
+
 SERVICE_TARGETS_MAX_BYTES = 1024 * 1024
 CONTROLLER_REQUEST_MAX = 32
 CONTROLLER_REQUEST_TIMEOUT = 10.0
 ZERO_KEY = "0" * 64
 POD_UID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 KEY_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,30}[A-Za-z0-9]")
+SERVICE_NAME_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
 DNS_RE = re.compile(r"[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*")
 HEX64_RE = re.compile(r"[0-9a-f]{64}")
 
@@ -149,38 +150,35 @@ def valid_rdma(address: str) -> bool:
     return bool(separator) and valid_ipv4(ip) and port.isdigit() and 0 < int(port) < 65536
 
 
-def valid_node_record(name: str, rdma: str, key_id: str, grant_pub: str, dpu_pub: str) -> bool:
+def valid_node_record(name: str, rdma: str, dpu_pub: str) -> bool:
     return (
         DNS_RE.fullmatch(name) is not None and len(name) <= 253
         and all(len(label) <= 63 for label in name.split("."))
         and valid_rdma(rdma)
-        and KEY_ID_RE.fullmatch(key_id) is not None
-        and HEX64_RE.fullmatch(grant_pub) is not None
         and HEX64_RE.fullmatch(dpu_pub) is not None
     )
 
 
-def read_nodes_file(path: Path) -> dict[str, tuple[str, str, str, str]]:
+def read_nodes_file(path: Path) -> dict[str, tuple[str, str]]:
     """The operator's per-node input, keyed by node name:
-    `<node-name> <rdma-ip:port> <grant-key-id> <grant-pub-hex64> <dpu-pub-hex64>`.
+    `<node-name> <rdma-ip:port> <dpu-pub-hex64>`.
 
-    The grant key is operator material that binds grants to this node. The host
-    runtime may report only the public half of the static key its DPU generated.
+    The host runtime may report only the public half of the static key its DPU generated.
     """
-    records: dict[str, tuple[str, str, str, str]] = {}
+    records: dict[str, tuple[str, str]] = {}
     for line_no, raw in enumerate(path.read_text(encoding="ascii").splitlines(), 1):
         line = raw.split("#", 1)[0].strip()
         if not line:
             continue
         fields = line.split()
-        if len(fields) != 5:
-            raise ControllerError(f"{path}:{line_no}: expected 5 fields")
-        name, rdma, key_id, grant_pub, dpu_pub = fields
-        if not valid_node_record(name, rdma, key_id, grant_pub, dpu_pub):
+        if len(fields) != 3:
+            raise ControllerError(f"{path}:{line_no}: expected 3 fields")
+        name, rdma, dpu_pub = fields
+        if not valid_node_record(name, rdma, dpu_pub):
             raise ControllerError(f"{path}:{line_no}: malformed node record")
         if name in records:
             raise ControllerError(f"{path}:{line_no}: duplicate node {name}")
-        records[name] = (rdma, key_id, grant_pub, dpu_pub)
+        records[name] = (rdma, dpu_pub)
     return records
 
 
@@ -188,7 +186,7 @@ class NodeRegistry:
     """The operator-owned node set and the DPU keys host runtimes report.
 
     The file is the anchor: a node the operator did not configure is not
-    published, so a report can add nothing. Addresses and grant keys are
+    published, so a report can add nothing. Addresses are
     operator facts and cannot be changed by a node. A report supplies only
     the DPU static handshake key generated at first boot.
     """
@@ -223,11 +221,11 @@ class NodeRegistry:
             reports = dict(self.reports)
         lines: list[str] = []
         for name in sorted(configured):
-            rdma, key_id, grant_pub, dpu_pub = configured[name]
+            rdma, dpu_pub = configured[name]
             reported = reports.get(name)
             if reported is not None:
                 dpu_pub = reported
-            lines.append(f"node={name},{rdma},{key_id},{grant_pub},{dpu_pub}")
+            lines.append(f"node={name},{rdma},{dpu_pub}")
         return lines
 
 
@@ -368,45 +366,6 @@ def sign_feed(body: str, key_id: str, key: bytes) -> str:
     return f"{body}signature={key_id},{signature}\n"
 
 
-def membership_body(version: int, node_name: str,
-                    pods: list[dict[str, Any]],
-                    services: list[dict[str, Any]],
-                    endpoint_slices: list[dict[str, Any]],
-                    resource_name: str) -> str:
-    """Controller-authorized (Pod UID, Service) pairs for exactly one node."""
-    lines = [f"version={version}"]
-    for pod in sorted(pods, key=lambda item: str(item.get("metadata", {}).get("uid") or "")):
-        metadata = pod.get("metadata", {}) or {}
-        if (metadata.get("deletionTimestamp") or
-                pod.get("spec", {}).get("nodeName") != node_name or
-                workload_grant.POD_UID_RE.fullmatch(str(metadata.get("uid") or "")) is None or
-                not workload_grant.service_account_token_disabled(pod)):
-            continue
-        try:
-            target = workload_grant.resource_target(pod, resource_name)
-            workload_grant.running_container_id(pod, str(target.get("name") or ""))
-            workload_grant.pod_ipv4(pod)
-        except workload_grant.GrantError:
-            continue
-        uid = str(metadata["uid"])
-        lines.append(f"member={uid},-")
-        names = {
-            str(service.get("metadata", {}).get("name") or "")
-            for service in services
-            if service.get("metadata", {}).get("namespace") == metadata.get("namespace")
-        }
-        for name in sorted(names):
-            if workload_grant.SERVICE_NAME_RE.fullmatch(name) is None:
-                continue
-            try:
-                workload_grant.authorize_service(name, pod, services)
-                workload_grant.require_ready_endpoint(name, pod, endpoint_slices)
-            except workload_grant.GrantError:
-                continue
-            lines.append(f"member={uid},{name}")
-    return "".join(line + "\n" for line in lines)
-
-
 def service_targets_body(version: int, topology: str) -> str:
     """Build the Linkerd adapter's Service map from one signed topology."""
     services: dict[str, str] = {}
@@ -503,10 +462,8 @@ class Controller:
         self.state_lock = threading.Lock()
         self.document = ""
         self.placements: dict[str, str] = {}
-        self.pod_snapshot: list[dict[str, Any]] = []
-        self.service_snapshot: list[dict[str, Any]] = []
-        self.slice_snapshot: list[dict[str, Any]] = []
-        self.membership_cache: dict[str, tuple[str, str, str, int]] = {}
+
+
         self.service_targets_cache: tuple[str, str, str, int] | None = None
         try:
             installed = args.output.read_text(encoding="ascii")
@@ -539,10 +496,6 @@ class Controller:
         # held document must never outlive the key that signed it.
         if held and generation_records(body) == generation_records(held) \
                 and signature_key_id(held) == key_id:
-            with self.state_lock:
-                self.pod_snapshot = pods
-                self.service_snapshot = services
-                self.slice_snapshot = slices
             return None
         document = sign_document(body, key_id, key)
         if len(document) > TOPOLOGY_MAX_BYTES:
@@ -560,92 +513,14 @@ class Controller:
         with self.state_lock:
             self.document = document
             self.placements = pod_placements(document)
-            self.pod_snapshot = pods
-            self.service_snapshot = services
-            self.slice_snapshot = slices
+
+
         return version
 
     def held(self) -> tuple[str, dict[str, str]]:
         with self.state_lock:
             return self.document, dict(self.placements)
 
-    def objects(self) -> tuple[
-        list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]
-    ]:
-        with self.state_lock:
-            return (
-                list(self.pod_snapshot),
-                list(self.service_snapshot),
-                list(self.slice_snapshot),
-            )
-
-    def issue_workload_grant(self, node_name: str, request: dict[str, Any]) -> bytes:
-        try:
-            pod_uid = str(request["pod_uid"])
-            container_id = str(request["container_id"])
-            service_name = str(request.get("service") or "")
-            nonce = bytes.fromhex(str(request["nonce"]))
-            channel_slot = int(request["slot"])
-            channel_generation = int(request["generation"])
-            daemon_incarnation = bytes.fromhex(str(request["daemon_incarnation"]))
-        except (KeyError, TypeError, ValueError) as exc:
-            raise workload_grant.GrantError("malformed workload grant request") from exc
-        if workload_grant.POD_UID_RE.fullmatch(pod_uid) is None:
-            raise workload_grant.GrantError("malformed Pod UID")
-        pods, services, endpoint_slices = self.objects()
-        pod = workload_grant.resolve_authorized_pod(
-            pod_uid=pod_uid,
-            node_name=node_name,
-            container_id=container_id,
-            service_name=service_name,
-            pods=pods,
-            services=services,
-            endpoint_slices=endpoint_slices,
-            resource_name=self.args.resource_name,
-        )
-        container = workload_grant.resource_target(pod, self.args.resource_name)
-        key_id, key = workload_grant.load_private_seed(
-            self.args.registration_key_dir, node_name, load_active_key
-        )
-        configured = read_nodes_file(self.args.nodes_file).get(node_name)
-        if configured is None or configured[1] != key_id:
-            raise workload_grant.GrantError(
-                "registration signing key does not match the configured node key id"
-            )
-        return workload_grant.build_grant(
-            key=key,
-            key_id=key_id,
-            cluster_id=self.args.cluster_id,
-            service_name=service_name,
-            nonce=nonce,
-            pod=pod,
-            container=container,
-            container_id=container_id,
-            channel_slot=channel_slot,
-            channel_generation=channel_generation,
-            daemon_incarnation=daemon_incarnation,
-            ttl=self.args.grant_ttl,
-        )
-
-    def membership(self, node_name: str) -> str:
-        # Compare only semantic records. A fetch does not advance a generation
-        # unless membership changed or the signing key rotated.
-        key_id, key = load_active_key(self.args.feed_key_dir)
-        with self.state_lock:
-            records = membership_body(
-                1, node_name, self.pod_snapshot, self.service_snapshot,
-                self.slice_snapshot, self.args.resource_name,
-            ).partition("\n")[2]
-            held = self.membership_cache.get(node_name)
-            if held is not None and held[0] == records and held[1] == key_id:
-                return held[2]
-            previous = 0 if held is None else held[3]
-            version = max(time.time_ns(), previous + 1)
-            document = sign_feed(f"version={version}\n{records}", key_id, key)
-            if len(document) > MEMBERSHIP_MAX_BYTES:
-                raise ControllerError("node membership exceeds its protocol bound")
-            self.membership_cache[node_name] = (records, key_id, document, version)
-            return document
 
     def service_targets(self) -> str:
         key_id, key = load_active_key(self.args.feed_key_dir)
@@ -724,18 +599,6 @@ class ControllerHandler(http.server.BaseHTTPRequestHandler):
                 return
             self.reply(200, document.encode("ascii"))
             return
-        if parsed.path == "/membership.v1":
-            node = self.reporter()
-            if node is None:
-                self.reply(403, b"a configured node client certificate is required\n")
-                return
-            try:
-                document = self.server.controller.membership(node)
-            except (ControllerError, OSError) as exc:
-                self.reply(503, f"{exc}\n".encode("ascii", "replace"))
-                return
-            self.reply(200, document.encode("ascii"))
-            return
         if parsed.path == "/service-targets.v1":
             if self.reporter() is None:
                 self.reply(403, b"a configured node client certificate is required\n")
@@ -774,9 +637,6 @@ class ControllerHandler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:                  # noqa: N802 - BaseHTTPRequestHandler
         path = urllib.parse.urlparse(self.path).path
-        if path == "/workload-grant":
-            self.workload_grant()
-            return
         if path != "/node":
             self.reply(404, b"no such route\n")
             return
@@ -814,35 +674,6 @@ class ControllerHandler(http.server.BaseHTTPRequestHandler):
         print(f"dpumesh-controller: node {name} reported {rdma} {dpu_public_key[:16]}...",
               flush=True)
         self.reply(200, b"ok\n")
-
-    def workload_grant(self) -> None:
-        node = self.reporter()
-        if node is None:
-            self.reply(403, b"a node client certificate is required\n")
-            return
-        try:
-            length = int(self.headers.get("Content-Length", "0"))
-        except ValueError:
-            self.reply(400, b"malformed Content-Length\n")
-            return
-        if not 0 < length <= WORKLOAD_GRANT_REQUEST_MAX:
-            self.reply(413, b"grant request over bound\n")
-            return
-        try:
-            request = json.loads(self.rfile.read(length))
-            if not isinstance(request, dict):
-                raise TypeError
-            grant = self.server.controller.issue_workload_grant(node, request)
-        except (json.JSONDecodeError, UnicodeDecodeError, TypeError) as exc:
-            self.reply(400, f"malformed grant request: {exc}\n".encode("ascii", "replace"))
-            return
-        except workload_grant.GrantError as exc:
-            self.reply(403, f"{exc}\n".encode("ascii", "replace"))
-            return
-        except (ControllerError, OSError) as exc:
-            self.reply(503, f"{exc}\n".encode("ascii", "replace"))
-            return
-        self.reply(200, grant, "application/octet-stream")
 
 
 def node_from_peer_certificate(connection: Any) -> str | None:
@@ -899,8 +730,6 @@ class ControllerServer(socketserver.ThreadingTCPServer):
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--key-dir", type=Path, required=True)
-    parser.add_argument("--registration-key-dir", type=Path, required=True,
-                        help="per-node Ed25519 grant key directories")
     parser.add_argument("--feed-key-dir", type=Path, required=True,
                         help="controller-only HMAC keys for node-scoped feeds")
     parser.add_argument("--nodes-file", type=Path, required=True)
@@ -917,9 +746,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--tls-cert", type=Path, required=True)
     parser.add_argument("--tls-key", type=Path, required=True)
     parser.add_argument("--client-ca", type=Path, required=True)
-    parser.add_argument("--resource-name", default="dpumesh.io/channel")
-    parser.add_argument("--cluster-id", required=True)
-    parser.add_argument("--grant-ttl", type=int, default=60)
     parser.add_argument("--api-server", default="https://kubernetes.default.svc")
     parser.add_argument(
         "--api-token-file", type=Path,
@@ -934,15 +760,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--interval must be between 1 and 300 seconds")
     if not 1 <= args.listen_port <= 65535:
         parser.error("--listen-port out of range")
-    if not 1 <= args.grant_ttl <= workload_grant.MAX_TTL:
-        parser.error(f"--grant-ttl must be between 1 and {workload_grant.MAX_TTL}")
-    if (len(args.cluster_id) > 63 or
-            workload_grant.CLUSTER_ID_RE.fullmatch(args.cluster_id) is None):
-        parser.error("--cluster-id must be a DNS subdomain of at most 63 bytes")
     for key in args.protected:
         fields = key.split("/")
         if (len(fields) != 2 or any(
-                workload_grant.SERVICE_NAME_RE.fullmatch(field) is None
+                SERVICE_NAME_RE.fullmatch(field) is None
                 for field in fields)):
             parser.error(f"--protected takes namespace/name, got {key!r}")
     return args

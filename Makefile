@@ -34,7 +34,6 @@ RPATHS  := -Wl,-rpath,/usr/local/lib \
 LIB_SRCS := \
 	src/core/dmesh_core.c \
 	src/facade/dmesh_api.c \
-	src/core/dmesh_grant.c \
 	src/broker/dmesh_brokerlink.c \
 	src/core/dmesh_resolve.c \
 	doca/common.c \
@@ -45,8 +44,7 @@ LIB_SRCS := \
 	doca/comch_client.c \
 	doca/comch_server.c \
 	doca/comch_msgq.c \
-	doca/workload_grant.c \
-	doca/pod_membership.c \
+	doca/workload_identity.c \
 	doca/topology.c \
 	doca/peer_channel.c \
 	doca/control_scope.c \
@@ -116,9 +114,9 @@ $(TESTDIR)/native_api_contract_test: tests/native_api_contract_test.c src/facade
 	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -Wl,--gc-sections \
 		-o $@ tests/native_api_contract_test.c src/facade/dmesh_api.c
 
-$(TESTDIR)/native_control_state_test: tests/native_control_state_test.c doca/comch_server.c doca/workload_grant.c doca/topology.c doca/control_scope.c $(LIB_HDRS) | dirs
+$(TESTDIR)/native_control_state_test: tests/native_control_state_test.c doca/comch_server.c doca/workload_identity.c doca/topology.c doca/control_scope.c $(LIB_HDRS) | dirs
 	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -Wl,--gc-sections \
-		-o $@ tests/native_control_state_test.c doca/comch_server.c doca/workload_grant.c \
+		-o $@ tests/native_control_state_test.c doca/comch_server.c doca/workload_identity.c \
 		doca/topology.c doca/control_scope.c \
 		$(DOCA_LIBS) $(CRYPTO_LIBS) -lpthread $(RPATHS)
 
@@ -141,15 +139,11 @@ $(TESTDIR)/comch_send_state_test: tests/comch_send_state_test.c doca/comch_clien
 	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -Wl,--gc-sections \
 		-o $@ tests/comch_send_state_test.c $(DOCA_LIBS) $(RPATHS)
 
-$(TESTDIR)/workload_grant_test: tests/workload_grant_test.c doca/workload_grant.c $(LIB_HDRS) | dirs
-	$(CC) $(CFLAGS) -o $@ tests/workload_grant_test.c doca/workload_grant.c \
+$(TESTDIR)/workload_identity_test: tests/workload_identity_test.c doca/workload_identity.c $(LIB_HDRS) | dirs
+	$(CC) $(CFLAGS) -o $@ tests/workload_identity_test.c doca/workload_identity.c \
 		$(DOCA_LIBS) $(CRYPTO_LIBS) $(RPATHS)
 
-$(TESTDIR)/pod_membership_test: tests/pod_membership_test.c doca/pod_membership.c doca/comch_server.c doca/workload_grant.c doca/topology.c doca/control_scope.c $(LIB_HDRS) | dirs
-	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -Wl,--gc-sections \
-		-o $@ tests/pod_membership_test.c doca/pod_membership.c \
-		doca/comch_server.c doca/workload_grant.c doca/topology.c doca/control_scope.c \
-		$(DOCA_LIBS) $(CRYPTO_LIBS) -lpthread $(RPATHS)
+
 
 $(TESTDIR)/native_tx_batch_policy_test: tests/native_tx_batch_policy_test.c src/core/dmesh_core.c $(LIB_HDRS) | dirs
 	$(CC) $(CFLAGS) -D_GNU_SOURCE -ffunction-sections -fdata-sections -Wl,--gc-sections \
@@ -169,11 +163,11 @@ $(TESTDIR)/lb_policy_test: tests/lb_policy_test.c doca/dpu_worker.c $(LIB_HDRS) 
 	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -Wl,--gc-sections \
 		-o $@ tests/lb_policy_test.c $(DOCA_LIBS) -lpthread $(RPATHS)
 
-$(TESTDIR)/proxy_lane_queue_test: tests/proxy_lane_queue_test.c doca/dpu_proxy.c doca/peer_channel.c doca/peer_transport.c doca/peer_tls.c doca/topology.c doca/workload_grant.c $(LIB_HDRS) | dirs
+$(TESTDIR)/proxy_lane_queue_test: tests/proxy_lane_queue_test.c doca/dpu_proxy.c doca/peer_channel.c doca/peer_transport.c doca/peer_tls.c doca/topology.c doca/workload_identity.c $(LIB_HDRS) | dirs
 	$(CC) $(CFLAGS) -D_GNU_SOURCE -ffunction-sections -fdata-sections -Wl,--gc-sections \
 		-o $@ tests/proxy_lane_queue_test.c doca/peer_channel.c \
 		doca/peer_transport.c doca/peer_tls.c doca/topology.c \
-		doca/workload_grant.c \
+		doca/workload_identity.c \
 		$(DOCA_LIBS) $(TLS_LIBS) $(CRYPTO_LIBS) -lpthread $(RPATHS)
 
 $(TESTDIR)/worker_mpsc_queue_test: tests/worker_mpsc_queue_test.c doca/object.h | dirs
@@ -204,8 +198,8 @@ $(TESTDIR)/peer_wire_test: tests/peer_wire_test.c doca/peer_wire_tcp.c \
 $(TESTDIR)/peer_wire_lease_test: tests/peer_wire_lease_test.c doca/peer_wire_rdma.c doca/peer_wire.h | dirs
 	$(CC) $(CFLAGS) -D_GNU_SOURCE -o $@ tests/peer_wire_lease_test.c $(RDMA_LIBS) $(RPATHS)
 
-$(TESTDIR)/topology_gen_test: tests/topology_gen_test.c doca/topology.c doca/workload_grant.c doca/control_scope.c $(LIB_HDRS) | dirs
-	$(CC) $(CFLAGS) -o $@ tests/topology_gen_test.c doca/topology.c doca/workload_grant.c \
+$(TESTDIR)/topology_gen_test: tests/topology_gen_test.c doca/topology.c doca/workload_identity.c doca/control_scope.c $(LIB_HDRS) | dirs
+	$(CC) $(CFLAGS) -o $@ tests/topology_gen_test.c doca/topology.c doca/workload_identity.c \
 		doca/control_scope.c \
 		$(DOCA_LIBS) $(CRYPTO_LIBS) $(RPATHS)
 
@@ -238,14 +232,13 @@ test-hostfree: $(HOSTFREE_TESTS)
 	$(TESTDIR)/peer_tls_test
 	sh tests/dma_fault_scope_test.sh
 	python3 tests/dpumesh_controller_test.py
-	python3 tests/workload_grant_controller_test.py
 	$(DPUMESHD_PYTHON) tests/dpumeshd_test.py
 	$(DPUMESHD_PYTHON) tests/dpu_feed_test.py
 	python3 tests/health_page_test.py
 	bash tests/bench_geometry_test.sh
 
 test: $(TESTDIR)/native_api_contract_test $(TESTDIR)/native_control_state_test \
-	$(TESTDIR)/comch_cleanup_test $(TESTDIR)/broker_quiesce_test $(TESTDIR)/comch_send_state_test $(TESTDIR)/workload_grant_test $(TESTDIR)/pod_membership_test \
+	$(TESTDIR)/comch_cleanup_test $(TESTDIR)/broker_quiesce_test $(TESTDIR)/comch_send_state_test $(TESTDIR)/workload_identity_test \
 	$(TESTDIR)/native_tx_batch_policy_test $(TESTDIR)/native_writable_test \
 	$(TESTDIR)/preload_api_contract_test $(TESTDIR)/l4_pin_policy_test \
 	$(TESTDIR)/lb_policy_test \
@@ -260,8 +253,7 @@ test: $(TESTDIR)/native_api_contract_test $(TESTDIR)/native_control_state_test \
 	$(TESTDIR)/comch_send_state_test
 	$(TESTDIR)/broker_quiesce_test
 	$(TESTDIR)/comch_cleanup_test
-	$(TESTDIR)/workload_grant_test
-	$(TESTDIR)/pod_membership_test
+	$(TESTDIR)/workload_identity_test
 	$(TESTDIR)/native_tx_batch_policy_test
 	$(TESTDIR)/native_writable_test
 	$(TESTDIR)/preload_api_contract_test
@@ -283,7 +275,6 @@ test: $(TESTDIR)/native_api_contract_test $(TESTDIR)/native_control_state_test \
 	sh tests/abi_contract_test.sh $(LIB) $(PRELOAD) $(ABI_MAJOR)
 	sh tests/generator_selftest_test.sh $(BINDIR)/bench_dpumesh $(BINDIR)/bench_sock
 	python3 tests/dpumesh_controller_test.py
-	python3 tests/workload_grant_controller_test.py
 	$(DPUMESHD_PYTHON) tests/dpumeshd_test.py
 	$(DPUMESHD_PYTHON) tests/dpu_feed_test.py
 	python3 tests/health_page_test.py

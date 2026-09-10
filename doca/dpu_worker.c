@@ -206,7 +206,7 @@ dpu_arm_name_current(const char *role, int logical_id)
  * than generation-derived, and that is deliberate: a Pod that registered
  * between a generation's snapshot and its publication is absent from that one
  * generation without having stopped serving, and a node's own registrations
- * are the node's own grant-verified truth. What the generation adds is the half a
+ * are the node's own registration-verified truth. What the generation adds is the half a
  * node cannot see for itself — the replicas somewhere else. */
 int
 collect_live_hosts(struct objects *objs, int16_t svc, int32_t *out)
@@ -416,7 +416,6 @@ dpu_drain_iteration(struct objects *objs)
     int sent_init_result = server_flush_pod_init_results(objs);
     int sent_doorbell    = dpu_flush_host_doorbells(objs);
     int cleaned_pods = server_progress_pod_cleanup(objs);
-    int revoked = server_progress_membership(objs);
     int admission = server_progress_admission(objs);
     int topology = dmesh_topology_progress(objs);
     /* A new generation can re-intern Services, so the L7 mode table follows. */
@@ -424,7 +423,7 @@ dpu_drain_iteration(struct objects *objs)
         DOCA_LOG_WARN("L7 mode lists conflict against the adopted generation; "
                       "previous mode table kept");
     return (local_control || did_ctrl || cleaned_pods > 0 || finalized_init > 0 ||
-            sent_init_result > 0 || sent_doorbell > 0 || revoked > 0 ||
+            sent_init_result > 0 || sent_doorbell > 0 ||
             admission > 0 || topology > 0);
 }
 
@@ -1323,7 +1322,7 @@ run_dpu_worker(struct objects *objs)
         }
 
         dpu_publish_ready_and_setup_pods(objs);
-        /* The 1 ms tick is a backstop for control/membership progress only; a
+        /* The 1 ms tick is a backstop for control progress only; a
          * live DPA EU hands its watchdog to a same-EU helper and needs no ARM tick. */
         DOCA_LOG_WARN("MAIN CONTROL/DOORBELL: workers=%d, notification-driven "
                       "(1 ms backstop tick)", objs->n_data_workers);

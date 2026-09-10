@@ -47,7 +47,7 @@
 #include "doca/comch_msgq.h"
 #include "doca/local_control.h"
 #include "doca/dpa_common.h"
-#include "dmesh_grant.h"
+#include "dmesh_channel_socket.h"
 #include "src/broker/dmesh_broker_internal.h"
 #include "src/broker/dmesh_brokerlink.h"
 #include <dpumesh/dmesh_topology.h>
@@ -1861,7 +1861,7 @@ static doca_error_t wait_for_pod_init_result(dpumesh_ctx_t *ctx) {
 }
 
 static doca_error_t init_control_path(dpumesh_ctx_t *ctx,
-                                     const char *manager_socket, int manager_fd) {
+                                     int manager_fd) {
     doca_error_t result;
 
     /* Initialize challenge publication before connecting: the DPU may submit
@@ -1887,7 +1887,7 @@ static doca_error_t init_control_path(dpumesh_ctx_t *ctx,
                      __ATOMIC_RELAXED);
     __atomic_store_n(&ctx->doca_objs.pod_quiesced, 0, __ATOMIC_RELEASE);
     /* The broker relays the connection-bound nonce. dpumeshd authenticated the
-     * workload from kernel evidence; the controller signs the grant. */
+     * workload from kernel evidence; the admin verifies and registers the identity. */
     struct timespec challenge_start, challenge_now;
     struct timespec challenge_pause = { .tv_sec = 0, .tv_nsec = 10000 };
     clock_gettime(CLOCK_MONOTONIC, &challenge_start);
@@ -1909,52 +1909,24 @@ static doca_error_t init_control_path(dpumesh_ctx_t *ctx,
         return DOCA_ERROR_BAD_STATE;
     }
 
-    /* The challenge names the DPU's registration mode. Under `direct` the
-     * report goes to the supervisor on the retained launch socket and it
-     * registers this connection; under `grant` the signed assertion travels
-     * here on Comch. A mode the launch did not set up fails the channel. */
-    if (manager_fd >= 0) {
-        if (ctx->doca_objs.registration_protocol != DMESH_LOCAL_VERSION) {
-            DOCA_LOG_ERR("direct registration requires challenge version %d",
-                         DMESH_LOCAL_VERSION);
-            return DOCA_ERROR_BAD_STATE;
-        }
-        struct dmesh_grant_request request = {0};
-        memcpy(request.magic, DMESH_LOCAL_MAGIC, sizeof(request.magic));
-        request.version = DMESH_LOCAL_VERSION;
-        snprintf(request.service_name, sizeof(request.service_name), "%s", ctx->service_name);
-        memcpy(request.nonce, ctx->doca_objs.registration_challenge, sizeof(request.nonce));
-        struct timeval deadline = { .tv_sec = 15 };
-        setsockopt(manager_fd, SOL_SOCKET, SO_RCVTIMEO, &deadline, sizeof(deadline));
-        uint8_t status = 255;
-        if (send(manager_fd, &request, sizeof(request), MSG_NOSIGNAL) != sizeof(request) ||
-            recv(manager_fd, &status, sizeof(status), MSG_TRUNC) != 1 || status != 0) {
-            DOCA_LOG_ERR("paired-host REGISTER was refused");
-            return DOCA_ERROR_INITIALIZATION;
-        }
-    } else {
-        if (ctx->doca_objs.registration_protocol != DMESH_ASSERT_VERSION) {
-            DOCA_LOG_ERR("grant registration requires challenge version %d",
-                         DMESH_ASSERT_VERSION);
-            return DOCA_ERROR_BAD_STATE;
-        }
-        struct dmesh_workload_assert_msg assertion;
-        char grant_error[256] = {0};
-        if (dmesh_request_workload_grant(
-                manager_socket, ctx->service_name,
-                ctx->doca_objs.registration_challenge, &assertion,
-                grant_error, sizeof(grant_error)) != 0) {
-            DOCA_LOG_ERR("Host runtime rejected registration: %s", grant_error);
-            return DOCA_ERROR_INITIALIZATION;
-        }
-        result = client_send_msg(&ctx->doca_objs, (const char *)&assertion,
-                                 sizeof(assertion));
-        memset(&assertion, 0, sizeof(assertion));
-        if (result != DOCA_SUCCESS) {
-            DOCA_LOG_ERR("WORKLOAD_ASSERT send failed: %s",
-                         doca_error_get_name(result));
-            return result;
-        }
+    if (manager_fd < 0) return DOCA_ERROR_BAD_STATE;
+    if (ctx->doca_objs.registration_protocol != DMESH_LOCAL_VERSION) {
+        DOCA_LOG_ERR("direct registration requires challenge version %d",
+                     DMESH_LOCAL_VERSION);
+        return DOCA_ERROR_BAD_STATE;
+    }
+    struct dmesh_registration_report request = {0};
+    memcpy(request.magic, DMESH_LOCAL_MAGIC, sizeof(request.magic));
+    request.version = DMESH_LOCAL_VERSION;
+    snprintf(request.service_name, sizeof(request.service_name), "%s", ctx->service_name);
+    memcpy(request.nonce, ctx->doca_objs.registration_challenge, sizeof(request.nonce));
+    struct timeval deadline = { .tv_sec = 15 };
+    setsockopt(manager_fd, SOL_SOCKET, SO_RCVTIMEO, &deadline, sizeof(deadline));
+    uint8_t status = 255;
+    if (send(manager_fd, &request, sizeof(request), MSG_NOSIGNAL) != sizeof(request) ||
+        recv(manager_fd, &status, sizeof(status), MSG_TRUNC) != 1 || status != 0) {
+        DOCA_LOG_ERR("paired-host REGISTER was refused");
+        return DOCA_ERROR_INITIALIZATION;
     }
 
     ctx->reg_msg.type = DMESH_MSG_POD_REGISTER;
@@ -2348,7 +2320,7 @@ static int broker_enter_private_root(const char *root)
 /* Entry point used only by the host-side per-Pod broker executable. It owns
  * the device, Comch client, registered mmaps and their backing memfds. No data
  * bytes cross the Unix socket. */
-int dmesh_broker_run(int socket_fd, const char *manager_socket, int manager_fd,
+int dmesh_broker_run(int socket_fd, int manager_fd,
                      const char *private_root,
                      volatile sig_atomic_t *stop_requested)
 {
@@ -2385,7 +2357,7 @@ int dmesh_broker_run(int socket_fd, const char *manager_socket, int manager_fd,
         dmesh_broker_send_error(socket_fd, EIO, "DOCA device open failed");
         goto out;
     }
-    result = init_control_path(ctx, manager_socket, manager_fd);
+    result = init_control_path(ctx, manager_fd);
     if (result != DOCA_SUCCESS) {
         dmesh_broker_send_error(socket_fd, EACCES, "DPU registration failed");
         goto out;
@@ -3986,7 +3958,7 @@ dmesh_channel_t *dmesh_create_channel(void) {
     dmesh_channel_t *s = (dmesh_channel_t *)calloc(1, sizeof(*s));
     if (!s) return NULL;
     /* $DPUMESH_SERVICE names the Kubernetes Service this Pod serves. The DPU
-     * authenticates it against the controller grant and interns the id. An
+     * authenticates it against the registered identity and interns the id. An
      * unset value creates a pure-client channel. */
     dpumesh_config_t cfg = DPUMESH_CONFIG_DEFAULT;
     if (dpumesh_init(&s->ctx, getenv("DPUMESH_SERVICE"), &cfg) != 0 || !s->ctx) {

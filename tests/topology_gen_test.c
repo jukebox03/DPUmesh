@@ -9,18 +9,36 @@
 #include <openssl/evp.h>
 
 #include "doca/topology.h"
-#include "doca/workload_grant.h"
+#include "doca/workload_identity.h"
 #include "doca/object.h"
 
-static uint8_t controller_seed[DMESH_GRANT_KEY_SIZE];
+static int
+test_public_key(const uint8_t seed[DMESH_KEY_SIZE],
+                        uint8_t public_key[DMESH_KEY_SIZE])
+{
+    int rc = -1;
+    size_t public_len = DMESH_KEY_SIZE;
+    if (seed == NULL || public_key == NULL)
+        return -1;
+    EVP_PKEY *pkey = EVP_PKEY_new_raw_private_key(EVP_PKEY_ED25519, NULL,
+                                                  seed, DMESH_KEY_SIZE);
+    if (pkey == NULL)
+        return -1;
+    if (EVP_PKEY_get_raw_public_key(pkey, public_key, &public_len) == 1 &&
+        public_len == DMESH_KEY_SIZE)
+        rc = 0;
+    EVP_PKEY_free(pkey);
+    return rc;
+}
+
+static uint8_t controller_seed[DMESH_KEY_SIZE];
 static char key_dir[] = "/tmp/dpumesh-topology-keys-XXXXXX";
 static char gen_path[256];
 
 static const char UID_A[] = "12345678-1234-1234-1234-123456789abc";
 static const char UID_B[] = "abcdef01-2345-6789-abcd-ef0123456789";
 static const char NODE_LINE_A[] =
-    "node=rapids4,192.168.100.2:4791,node-ed25519-v1,"
-    "62b8205a7e8ee63039adca07a1e9aa6d069605ce54648314ee77ca74b457b5bd,"
+    "node=rapids4,192.168.100.2:4791,"
     "0000000000000000000000000000000000000000000000000000000000000000";
 
 static void
@@ -30,8 +48,8 @@ make_keyring(void)
     assert(chmod(key_dir, 0700) == 0);
     for (size_t i = 0; i < sizeof(controller_seed); i++)
         controller_seed[i] = (uint8_t)(0x60 + i);
-    uint8_t public_key[DMESH_GRANT_KEY_SIZE];
-    assert(dmesh_assert_public_key(controller_seed, public_key) == 0);
+    uint8_t public_key[DMESH_KEY_SIZE];
+    assert(test_public_key(controller_seed, public_key) == 0);
     char path[512];
     snprintf(path, sizeof(path), "%s/controller-v1.key", key_dir);
     FILE *out = fopen(path, "w");
@@ -167,8 +185,7 @@ test_parse_refusals(void)
     size_t off = (size_t)snprintf(big, cap, "version=2\n");
     for (size_t i = 0; i <= DMESH_GEN_NODE_MAX; i++)
         off += (size_t)snprintf(big + off, cap - off,
-                                "node=n%zu,10.0.0.1:4791,k,"
-                                "62b8205a7e8ee63039adca07a1e9aa6d069605ce54648314ee77ca74b457b5bd,"
+                                "node=n%zu,10.0.0.1:4791,"
                                 "62b8205a7e8ee63039adca07a1e9aa6d069605ce54648314ee77ca74b457b5bd\n",
                                 i);
     assert(dmesh_topology_parse(big, off, NULL, &tables) ==
@@ -229,16 +246,6 @@ main(void)
     int bench_id = dmesh_topology_interned_id(objs, "ns-a/bench");
     assert(echo_id >= 0 && bench_id >= 0 && echo_id != bench_id);
 
-    /* The generation resolves this node's grant key by key id. */
-    const uint8_t *grant_key = NULL;
-    assert(dmesh_topology_grant_key(objs, "rapids4", "node-ed25519-v1",
-                                    &grant_key) == 1);
-    assert(grant_key != NULL && grant_key[0] == 0x62);
-    assert(dmesh_topology_grant_key(objs, "rapids4", "unknown-key",
-                                    &grant_key) == 1);
-    assert(grant_key == NULL);
-    assert(dmesh_topology_grant_key(objs, "worker-9", "node-ed25519-v1",
-                                    &grant_key) == 0);
 
     /* Reach: a Service with replicas elsewhere is routable across the boundary
      * rather than unroutable. The local half stays this node's own live
@@ -334,8 +341,7 @@ main(void)
      * what a handshake is checked against. */
     n = snprintf(body, sizeof(body),
                  "version=500\n"
-                 "node=worker-2,192.168.100.9:4791,node-ed25519-v1,"
-                 "62b8205a7e8ee63039adca07a1e9aa6d069605ce54648314ee77ca74b457b5bd,"
+                 "node=worker-2,192.168.100.9:4791,"
                  "aabbccddeeff00112233445566778899aabbccddeeff001122334455667788aa\n");
     assert(n > 0 && (size_t)n < sizeof(body));
     install_signed(body);

@@ -1,7 +1,6 @@
 /* Topology generation consumer. One signed, versioned document carries every
  * cluster-wide fact a DPU needs; adoption is all-or-nothing into freshly
- * allocated tables that are swapped only on success, exactly as the membership
- * consumer stages. The Comch control thread is the single owner. */
+ * allocated tables that are swapped only on success. The Comch control thread is the single owner. */
 #include "topology.h"
 #include "dpu_proxy.h"
 #include "control_scope.h"
@@ -19,7 +18,7 @@
 #include <doca_log.h>
 
 #include "object.h"
-#include "workload_grant.h"
+#include "workload_identity.h"
 #include "dmesh_l7.h"
 
 DOCA_LOG_REGISTER(TOPOLOGY);
@@ -193,19 +192,6 @@ span_u64(const char *s, size_t len, uint64_t *out)
     return 1;
 }
 
-static int
-span_key_id(const char *s, size_t len)
-{
-    if (len == 0 || len >= DMESH_GRANT_KEY_ID_MAX || s[0] == '.')
-        return 0;
-    for (size_t i = 0; i < len; i++) {
-        unsigned char c = (unsigned char)s[i];
-        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-              (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.'))
-            return 0;
-    }
-    return 1;
-}
 
 static int
 span_hex_bytes(const char *s, size_t len, uint8_t *out, size_t out_size)
@@ -474,8 +460,8 @@ dmesh_topology_parse(const char *document, size_t length,
             continue;
         }
         if (memcmp(line, "node=", 5) == 0) {
-            /* node-name,rdma-ip:port,grant-key-id,grant-pub,dpu-static-pub */
-            if (split_fields(body, body_len, f, fl, 8) != 5)
+            /* node-name,rdma-ip:port,dpu-static-pub */
+            if (split_fields(body, body_len, f, fl, 8) != 3)
                 goto malformed;
             struct dmesh_gen_node *node = &tables->nodes[tables->node_count];
             const char *colon = memchr(f[1], ':', fl[1]);
@@ -485,12 +471,7 @@ dmesh_topology_parse(const char *document, size_t length,
                 !span_ipv4(f[1], (size_t)(colon - f[1]), &node->rdma_ip_be) ||
                 !span_port(colon + 1, fl[1] - (size_t)(colon - f[1]) - 1,
                            &node->rdma_port) ||
-                !span_key_id(f[2], fl[2]) ||
-                !span_copy(node->grant_key_id, sizeof(node->grant_key_id),
-                           f[2], fl[2]) ||
-                !span_hex_bytes(f[3], fl[3], node->grant_public_key,
-                                sizeof(node->grant_public_key)) ||
-                !span_hex_bytes(f[4], fl[4], node->dpu_static_public_key,
+                !span_hex_bytes(f[2], fl[2], node->dpu_static_public_key,
                                 sizeof(node->dpu_static_public_key)))
                 goto malformed;
             tables->node_count++;
@@ -656,7 +637,7 @@ dmesh_topology_configure(struct objects *objs, char *error, size_t error_len)
         CONFIG_ERROR("DPUMESH_TOPOLOGY_FILE needs DPUMESH_CONTROLLER_KEY_DIR to verify it");
         return -1;
     }
-    if (strlen(key_dir) + DMESH_GRANT_KEY_ID_MAX + 8 >=
+    if (strlen(key_dir) + DMESH_KEY_ID_MAX + 8 >=
         sizeof(objs->topology.key_dir)) {
         CONFIG_ERROR("DPUMESH_CONTROLLER_KEY_DIR is too long");
         return -1;
@@ -712,7 +693,7 @@ dmesh_topology_refresh(struct objects *objs)
     if ((size_t)st.st_size > DMESH_TOPOLOGY_MAX_BYTES)
         return DMESH_TOPOLOGY_OVERFLOW;
     /* Skipping the read is an optimization, never a decision (see the
-     * membership consumer for the inode/timestamp granularity argument). */
+     * timestamp-settling check below). */
     struct timespec wall;
     if (clock_gettime(CLOCK_REALTIME, &wall) == 0 &&
         wall.tv_sec - st.st_mtim.tv_sec > TOPOLOGY_STAMP_SETTLE_SEC &&
@@ -1048,24 +1029,6 @@ dmesh_topology_node_peer(const struct objects *objs, const char *node_name,
             *ip_be = node->rdma_ip_be;
         if (port != NULL)
             *port = node->rdma_port;
-        return 1;
-    }
-    return 0;
-}
-
-int
-dmesh_topology_grant_key(const struct objects *objs, const char *node_name,
-                         const char *key_id, const uint8_t **key)
-{
-    *key = NULL;
-    const struct dmesh_topology_tables *tables = topology_tables_acquire(objs);
-    if (tables == NULL || node_name == NULL || key_id == NULL)
-        return 0;
-    for (size_t n = 0; n < tables->node_count; n++) {
-        if (strcmp(tables->nodes[n].name, node_name) != 0)
-            continue;
-        if (strcmp(tables->nodes[n].grant_key_id, key_id) == 0)
-            *key = tables->nodes[n].grant_public_key;
         return 1;
     }
     return 0;

@@ -10,14 +10,14 @@ struct objects;
 
 /* Bounds a generation may not exceed; a larger one is refused rather than
  * truncated, because a truncated table would read as withdrawal. The byte
- * bound is the topology's own — the 256 KiB membership bound is one node's. */
+ * bound applies to one complete topology document. */
 #define DMESH_GEN_POD_MAX 65536u
 #define DMESH_GEN_NODE_MAX 1024u
 #define DMESH_GEN_SERVICE_MAX 4096u
 #define DMESH_GEN_ENDPOINT_MAX 65536u
 #define DMESH_TOPOLOGY_MAX_BYTES (16u * 1024u * 1024u)
 /* Controller public keys held for rotation overlap, enforced at load like the
- * registration keyring's cap. */
+ * configured topology key overlap. */
 #define DMESH_CONTROLLER_KEYS_MAX 4u
 /* Node-local compact Service ids the DPU may intern ([0, 127]). */
 #define DMESH_TOPOLOGY_INTERN_MAX 128
@@ -26,8 +26,8 @@ struct dmesh_gen_node {
     char name[DMESH_K8S_NAME_MAX];
     uint32_t rdma_ip_be;
     uint16_t rdma_port;
-    char grant_key_id[DMESH_GRANT_KEY_ID_MAX];
-    uint8_t grant_public_key[32];
+
+
     uint8_t dpu_static_public_key[32];
 };
 
@@ -57,7 +57,7 @@ struct dmesh_gen_endpoint {
 };
 
 /* One adopted generation, heap-allocated whole and swapped on success, exactly
- * as the membership consumer stages. pods are sorted by uid and services by
+ * during adoption. pods are sorted by uid and services by
  * key, so lookups are bsearch. */
 struct dmesh_topology_tables {
     uint64_t version;
@@ -76,7 +76,7 @@ struct dmesh_topology_intern {
     uint8_t in_use;
 };
 
-/* Consumer state, owned by the Comch control thread like membership. Worker
+/* Consumer state, owned by the Comch control thread. Worker
  * threads read `tables` through one acquire load (the interning FFI); the
  * displaced generation is therefore parked in `retired` and freed only on the
  * next adoption, so a reader's brief use of the old pointer stays valid across
@@ -123,7 +123,7 @@ int dmesh_topology_configure(struct objects *objs, char *error, size_t error_len
  * the live tables. */
 enum dmesh_topology_result dmesh_topology_refresh(struct objects *objs);
 
-/* Poll DPUMESH_TOPOLOGY_FILE at the membership cadence and count each outcome
+/* Poll DPUMESH_TOPOLOGY_FILE at the topology cadence and count each outcome
  * as dmesh_control_events_total{kind="topology",reason=...}. Runs on the Comch
  * control thread. Returns nonzero when a new generation was adopted. */
 int dmesh_topology_progress(struct objects *objs);
@@ -163,7 +163,7 @@ int dmesh_topology_remote_endpoint(const struct objects *objs, int16_t svc,
  * generation's `protected=` set names it, 0 when the generation names the
  * Service and does not protect it, -1 when no generation decides. What the
  * feed grades is the interaction rules, not registration validity — every
- * registration is grant-verified either way — and no Pod input reaches
+ * registration is registration-verified either way — and no Pod input reaches
  * this, so a Pod cannot opt its Service out. */
 int dmesh_topology_service_protection(const struct objects *objs, int16_t svc);
 
@@ -191,12 +191,6 @@ int dmesh_topology_node_peer(const struct objects *objs, const char *node_name,
                              const uint8_t **static_key, uint32_t *ip_be,
                              uint16_t *port);
 
-/* Resolve the controller grant public key. Returns 1 when the held
- * generation names `node_name` — then *key is its grant key when key_id
- * matches, NULL otherwise (refuse as bad-key-id). Returns 0 when no held
- * generation decides, and the caller falls back to the installed keyring. */
-int dmesh_topology_grant_key(const struct objects *objs, const char *node_name,
-                             const char *key_id, const uint8_t **key);
 
 /* Parse one verified document body into freshly allocated tables. Exposed for
  * unit tests; `interned` carries the stable-id state across adoptions. */

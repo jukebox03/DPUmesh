@@ -132,7 +132,7 @@ def routes_and_publishing(temporary):
     (feed_key_dir / "feed-v1.key").chmod(0o600)
     nodes_file = Path(temporary) / "nodes"
     nodes_file.write_text(
-        f"rapids4 192.168.100.2:4791 node-ed25519-v1 {PUB_HEX} {'0' * 64}\n",
+        f"rapids4 192.168.100.2:4791 {'0' * 64}\n",
         encoding="ascii",
     )
     args = argparse.Namespace(
@@ -175,14 +175,8 @@ def routes_and_publishing(temporary):
     threading.Thread(target=server.serve_forever, daemon=True).start()
     base = f"http://127.0.0.1:{server.server_address[1]}"
     try:
-        status, membership = http_status(f"{base}/membership.v1")
-        assert status == 200
-        prefix, envelope = membership.rsplit(b"signature=", 1)
-        key_id, mac = envelope.strip().split(b",", 1)
-        assert key_id == b"feed-v1"
-        assert hmac.new(feed_key, prefix, hashlib.sha256).hexdigest().encode() == mac
-        assert f"member={UID_A},-\n".encode() in membership
-        assert f"member={UID_A},echo-dpumesh\n".encode() in membership
+        assert http_status(f"{base}/membership.v1")[0] == 404
+        assert http_status(f"{base}/workload-grant", {})[0] == 404
 
         assert http_status(f"{base}/healthz")[0] == 200
 
@@ -259,7 +253,7 @@ def main():
         )
     })) is None
 
-    node_line = f"node=rapids4,192.168.100.2:4791,node-ed25519-v1,{PUB_HEX},{'0' * 64}"
+    node_line = f"node=rapids4,192.168.100.2:4791,{'0' * 64}"
     body = controller.build_body(
         7,
         [node_line],
@@ -318,7 +312,7 @@ def main():
 
         nodes = Path(temporary) / "nodes"
         nodes.write_text(
-            f"# comment\nrapids4 192.168.100.2:4791 node-ed25519-v1 {PUB_HEX} {'0' * 64}\n",
+            f"# comment\nrapids4 192.168.100.2:4791 {'0' * 64}\n",
             encoding="ascii",
         )
         registry = controller.NodeRegistry(nodes)
@@ -329,7 +323,7 @@ def main():
         # address and host-runtime identity.
         registry.report("rapids4", "192.168.100.2:4791", "ab" * 32)
         assert registry.lines() == [
-            f"node=rapids4,192.168.100.2:4791,node-ed25519-v1,{PUB_HEX},{'ab' * 32}"
+            f"node=rapids4,192.168.100.2:4791,{'ab' * 32}"
         ]
         for rdma, key in (("no-port", "ab" * 32),
                           ("192.168.100.9:4791", "ab" * 32),
@@ -351,8 +345,8 @@ def main():
             raise AssertionError("a malformed node record was accepted")
 
         nodes.write_text(
-            f"rapids4 192.168.100.2:4791 node-ed25519-v1 {PUB_HEX} {'0' * 64}\n"
-            f"rapids4 192.168.100.3:4791 node-ed25519-v1 {PUB_HEX} {'0' * 64}\n",
+            f"rapids4 192.168.100.2:4791 {'0' * 64}\n"
+            f"rapids4 192.168.100.3:4791 {'0' * 64}\n",
             encoding="ascii",
         )
         try:

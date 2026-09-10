@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import secrets
 import socket
 import ssl
 import struct
@@ -16,10 +15,10 @@ from node import workload_identity as identity
 from node.podresources import api_pb2, api_pb2_grpc
 
 MAGIC = b'DMESHLC1'          # mirrors DMESH_LOCAL_MAGIC
-ASSERT_TTL_SECONDS = 30
-REQUEST = struct.Struct('<B7xQ16s32s1545s')
+IDENTITY_TTL_SECONDS = 30
+REQUEST = struct.Struct('<B7xQ16s32s1433s')
 RESPONSE = struct.Struct('<8s16sQI')
-ZERO_IDENTITY = bytes(1545)
+ZERO_IDENTITY = bytes(1433)
 
 
 def receive(stream, count):
@@ -99,7 +98,9 @@ class WorkloadVerifier:
         while True:
             suffix = ('&' if '?' in path else '?') + urllib.parse.urlencode(
                 {'limit': '500', **({'continue': continuation} if continuation else {})})
-            with urllib.request.urlopen(self.server + path + suffix,
+            headers = {"Accept": "application/json"}
+            request = urllib.request.Request(self.server + path + suffix, headers=headers)
+            with urllib.request.urlopen(request,
                                         context=self.context, timeout=5) as response:
                 data = json.load(response)
             if not isinstance(data.get('items'), list):
@@ -137,11 +138,11 @@ class WorkloadVerifier:
         pod, target = self.resolve(worker)
         text = identity.fixed_text
         now = int(time.time())
-        return identity.ASSERT.pack(
-            identity.MSG_WORKLOAD_ASSERT, identity.ASSERT_VERSION, 0, 0,
-            now, now + ASSERT_TTL_SECONDS, secrets.token_bytes(16), connection_id,
+        return identity.IDENTITY.pack(
+            identity.IDENTITY_TYPE, identity.IDENTITY_VERSION, 0, 0,
+            now, now + IDENTITY_TTL_SECONDS, connection_id,
             worker.slot, worker.generation, bytes.fromhex(incarnation),
-            text('local-control', 32, 'encoding'), text(self.cluster, 64, 'cluster'),
+            text(self.cluster, 64, 'cluster'),
             text(self.node, 254, 'node'), text(worker.pod_uid, 64, 'Pod UID'),
             text(pod['metadata']['namespace'], 64, 'namespace'),
             text(pod['metadata']['name'], 254, 'Pod name'),
@@ -149,4 +150,4 @@ class WorkloadVerifier:
             text(target['name'], 254, 'container name'),
             text(worker.container_id, 65, 'container ID'),
             text(worker.service, 64, 'Service', allow_empty=True),
-            text(identity.pod_ipv4(pod), 16, 'Pod IP'), bytes(64))
+            text(identity.pod_ipv4(pod), 16, 'Pod IP'))

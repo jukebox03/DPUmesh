@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import array
 import dataclasses
+import fcntl
 import hashlib
 import json
 import os
@@ -46,12 +47,11 @@ PLUGIN_API_VERSION = "v1beta1"
 PLUGIN_ENDPOINT = "dpumesh.sock"
 CONTAINER_SOCKET = "/run/dpumesh/channel.sock"
 BROKER_HELLO = struct.Struct("<8sBB2x64s")
-GRANT_REQUEST = struct.Struct("<8sB3x64s32s")
+LOCAL_REPORT = struct.Struct("<8sB3x64s32s")
 # Mirrors DMESH_LOCAL_MAGIC/DMESH_LOCAL_VERSION: the broker reports its DPU
-# connection nonce under them when the launch selected direct registration.
+# connection nonce under them on its retained launch socket.
 LOCAL_MAGIC = b"DMESHLC1"
-LOCAL_VERSION = 4
-ASSERT_SIZE = 1545
+LOCAL_VERSION = 5
 BROKER_IPC_VERSION = 3
 MAX_CHANNEL_SLOTS = 127
 OBSERVE_ATTEMPTS = 15  # kubelet/API observation retries during direct registration
@@ -198,33 +198,6 @@ class ControllerClient:
         self.context.minimum_version = ssl.TLSVersion.TLSv1_3
         self.context.load_cert_chain(str(certificate), str(key))
 
-    def grant(self, pod_uid: str, container_id: str, service: str, nonce: bytes,
-              *, slot: int, generation: int, incarnation: str) -> bytes:
-        if len(nonce) != 32 or not any(nonce):
-            raise RuntimeError_("grant nonce must be nonzero and 32 bytes")
-        body = json.dumps({
-            "pod_uid": pod_uid,
-            "container_id": container_id,
-            "service": service,
-            "nonce": nonce.hex(),
-            "slot": slot,
-            "generation": generation,
-            "daemon_incarnation": incarnation,
-        }, separators=(",", ":")).encode("ascii")
-        request = urllib.request.Request(
-            f"{self.base_url}/workload-grant", data=body,
-            headers={"Content-Type": "application/json"}, method="POST",
-        )
-        try:
-            with urllib.request.urlopen(
-                request, timeout=self.timeout, context=self.context
-            ) as response:
-                result = response.read(4097)
-        except (OSError, urllib.error.URLError) as exc:
-            raise RuntimeError_(f"controller denied/unavailable: {exc}") from exc
-        if len(result) != ASSERT_SIZE:
-            raise RuntimeError_("controller returned a noncanonical grant")
-        return result
 
     def get(self, path: str, bound: int) -> bytes:
         request = urllib.request.Request(
@@ -305,10 +278,8 @@ class DPUFeed:
 
     def once(self) -> None:
         topology = self.controller.get("/topology.v1", 16 * 1024 * 1024)
-        membership = self.controller.get("/membership.v1", 256 * 1024)
         service_targets = self.controller.get("/service-targets.v1", 1024 * 1024)
         deliver_feed(self.address, "topology", topology, self.timeout)
-        deliver_feed(self.address, "membership", membership, self.timeout)
         deliver_feed(self.address, "service-targets", service_targets, self.timeout)
         key = dpu_node_key(self.address, self.timeout)
         self.controller.report_node(self.node_name, self.node_rdma, key)
@@ -400,7 +371,7 @@ class NodeMTLSTunnel:
 
 
 class CgroupManager:
-    """Own the systemd-delegated subtree and bounded worker leaves."""
+    """Own the delegated systemd service subtree and bounded broker leaves."""
 
     def __init__(self, root: Path, cpu_max: str, memory_high: int,
                  memory_max: int, pids_max: int) -> None:
@@ -425,14 +396,14 @@ class CgroupManager:
             self.workers.mkdir(exist_ok=True)
         except OSError as exc:
             raise RuntimeError_("cannot create delegated cgroup children") from exc
-        # A service starts at its root.  Move the daemon into a leaf before
+        # The service starts at its root. Move the daemon into a leaf before
         # enabling domain controllers for sibling worker leaves.
         self._write(self.manager / "cgroup.procs", str(os.getpid()))
         available = set((self.root / "cgroup.controllers").read_text(
             encoding="ascii").split())
         required = {"cpu", "memory", "pids"}
         if not required.issubset(available):
-            raise RuntimeError_("systemd did not delegate cpu,memory,pids")
+            raise RuntimeError_("runtime cgroup lacks cpu,memory,pids controllers")
         self._write(self.root / "cgroup.subtree_control", "+cpu +memory +pids")
         self._write(self.workers / "cgroup.subtree_control", "+cpu +memory +pids")
 
@@ -672,14 +643,12 @@ class PluginServer:
 
 class BrokerSupervisor:
     def __init__(self, *, registry: SlotRegistry, cgroups: CgroupManager,
-                 controller: ControllerClient, broker: Path, manager_socket: Path,
+                 broker: Path,
                  runtime_dir: Path, incarnation: str, launch_timeout: float,
                  pci_addr: str, rings_per_pod: int) -> None:
         self.registry = registry
         self.cgroups = cgroups
-        self.controller = controller
         self.broker = broker
-        self.manager_socket = manager_socket
         self.runtime_dir = runtime_dir
         self.incarnation = incarnation
         self.launch_timeout = launch_timeout
@@ -700,64 +669,16 @@ class BrokerSupervisor:
             print(f"dpumeshd: private root cleanup failed for {path}: {exc}",
                   file=sys.stderr, flush=True)
 
-    def _worker_for_peer(self, pid: int, uid: int) -> Worker:
-        if uid not in (0, 65532):
-            raise RuntimeError_("grant requester has an unexpected uid")
-        with self.lock:
-            worker = self.workers.get(pid)
-        if worker is None or process_starttime(pid) != worker.starttime:
-            raise RuntimeError_("grant requester is not a live owned broker")
-        return worker
 
-    def grant_for_broker(self, connection: socket.socket) -> bytes:
-        pid, uid, _gid = PEERCRED.unpack(connection.getsockopt(
-            socket.SOL_SOCKET, socket.SO_PEERCRED, PEERCRED.size
-        ))
-        packet = connection.recv(GRANT_REQUEST.size + 1)
-        if len(packet) != GRANT_REQUEST.size:
-            raise RuntimeError_("invalid broker grant request length")
-        magic, version, service_field, nonce = GRANT_REQUEST.unpack(packet)
-        if (magic != b"DMESHGR1" or version != BROKER_IPC_VERSION or
-                not any(nonce)):
-            raise RuntimeError_("invalid broker grant request")
-        if b"\0" not in service_field:
-            raise RuntimeError_("unterminated broker Service field")
-        try:
-            service = service_field.split(b"\0", 1)[0].decode("ascii")
-        except UnicodeDecodeError as exc:
-            raise RuntimeError_("broker Service is not ASCII") from exc
-        worker = self._worker_for_peer(pid, uid)
-        if service != worker.service:
-            raise RuntimeError_("broker requested a Service outside its authorization")
-        # containerStatuses.containerID can appear shortly after the process
-        # enters cgroupfs. Retry the same nonce across two controller snapshots;
-        # the DPU accepts only the one signed, connection-bound grant returned.
-        for attempt in range(15):
-            try:
-                result = self.controller.grant(
-                    worker.pod_uid, worker.container_id, service, nonce,
-                    slot=worker.slot, generation=worker.generation,
-                    incarnation=self.incarnation,
-                )
-                break
-            except RuntimeError_:
-                if attempt == 14:
-                    raise
-                time.sleep(0.5)
-        with self.lock:
-            if self.workers.get(worker.pid) is not worker:
-                raise RuntimeError_("broker exited before its grant was delivered")
-            worker.registered = True
-        return result
 
     def register_private(self, worker: Worker, private: socket.socket) -> None:
         try:
             with private:
                 private.settimeout(15)
-                packet = private.recv(GRANT_REQUEST.size + 1)
-                if len(packet) != GRANT_REQUEST.size:
+                packet = private.recv(LOCAL_REPORT.size + 1)
+                if len(packet) != LOCAL_REPORT.size:
                     raise RuntimeError_("invalid private registration report")
-                magic, version, service_field, connection_id = GRANT_REQUEST.unpack(packet)
+                magic, version, service_field, connection_id = LOCAL_REPORT.unpack(packet)
                 service = service_field.split(b"\0", 1)[0].decode("ascii")
                 if (magic != LOCAL_MAGIC or version != LOCAL_VERSION or
                         service != worker.service or not any(connection_id)):
@@ -831,9 +752,6 @@ class BrokerSupervisor:
                     except (OSError, ValueError):
                         pass
                     time.sleep(1.0)
-            elif self.local is None:
-                time.sleep(5.0)  # Grant mode: fixed reuse barrier.
-                cleaned = True
             with slot.lock:
                 if cleaned and slot.worker is None and slot.state == "CLEANUP_WAIT":
                     slot.state = "FREE_LISTENING"
@@ -877,7 +795,6 @@ class BrokerSupervisor:
             process = subprocess.Popen([
                 str(self.broker), "--expected-parent", str(os.getpid()),
                 "--launch-sock", str(launch_path),
-                "--manager-sock", str(self.manager_socket),
                 "--private-root", str(private_root),
             ], env=environment, stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL, stderr=None, close_fds=True)
@@ -918,13 +835,10 @@ class BrokerSupervisor:
                     slot.worker = worker
                     slot.state = "REGISTERING"
                 try:
-                    if self.local is not None:
-                        private = peer.dup()
-                        peer.sendall(b"D")
-                        threading.Thread(target=self.register_private,
-                                         args=(worker, private), daemon=True).start()
-                    else:
-                        peer.sendall(b"G")
+                    private = peer.dup()
+                    peer.sendall(b"D")
+                    threading.Thread(target=self.register_private,
+                                     args=(worker, private), daemon=True).start()
                 except OSError:
                     with self.lock:
                         self.workers.pop(final_pid, None)
@@ -994,6 +908,11 @@ class Daemon:
         self.stop = threading.Event()
         self.incarnation = secrets.token_hex(16)
         args.runtime_dir.mkdir(mode=0o755, parents=True, exist_ok=True)
+        self.runtime_lock = (args.runtime_dir / "runtime.lock").open("a")
+        try:
+            fcntl.flock(self.runtime_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError_("another runtime owns this host's channel sockets") from exc
         for private_root in args.runtime_dir.glob(".broker-root.*"):
             if private_root.is_dir() and not private_root.is_symlink():
                 BrokerSupervisor.remove_private_root(private_root)
@@ -1010,20 +929,19 @@ class Daemon:
         )
         self.supervisor = BrokerSupervisor(
             registry=self.registry, cgroups=self.cgroups,
-            controller=self.controller, broker=args.broker_bin,
-            manager_socket=args.manager_socket, runtime_dir=args.runtime_dir,
+            broker=args.broker_bin,
+            runtime_dir=args.runtime_dir,
             incarnation=self.incarnation, launch_timeout=args.launch_timeout,
             pci_addr=args.pci_addr, rings_per_pod=args.rings_per_pod,
         )
-        if args.registration_mode == "direct":
-            from node.local_registration import LocalControl, WorkloadVerifier
-            self.registry.control_ready = False
-            self.supervisor.local = LocalControl(
-                (args.dpu_feed_host, args.local_control_port), args.local_server_name,
-                args.local_ca, args.controller_cert, args.controller_key)
-            self.supervisor.verifier = WorkloadVerifier(
-                args.kube_api, args.kube_ca, args.kube_cert, args.kube_key,
-                args.node_name, args.cluster_id, str(args.podresources_socket))
+        from node.local_registration import LocalControl, WorkloadVerifier
+        self.registry.control_ready = False
+        self.supervisor.local = LocalControl(
+            (args.dpu_feed_host, args.local_control_port), args.local_server_name,
+            args.local_ca, args.controller_cert, args.controller_key)
+        self.supervisor.verifier = WorkloadVerifier(
+            args.kube_api, args.kube_ca, args.kube_cert, args.kube_key,
+            args.node_name, args.cluster_id, str(args.podresources_socket))
         self.plugin = PluginServer(self.registry, args.device_plugin_dir)
         self.feed = DPUFeed(
             controller=self.controller, registry=self.registry,
@@ -1034,7 +952,6 @@ class Daemon:
         self.scope_tunnel = NodeMTLSTunnel(
             (args.scope_listen_address, args.scope_listen_port), self.controller
         ) if args.scope_listen_port else None
-        self.manager_listener: socket.socket | None = None
 
     @staticmethod
     def _bind(path: Path, mode: int) -> socket.socket:
@@ -1069,22 +986,6 @@ class Daemon:
             temporary.unlink(missing_ok=True)
             raise
 
-    def _serve_manager(self) -> None:
-        assert self.manager_listener is not None
-        while not self.stop.is_set():
-            try:
-                connection, _ = self.manager_listener.accept()
-            except socket.timeout:
-                continue
-            except OSError:
-                break
-            try:
-                with connection:
-                    connection.settimeout(self.args.request_timeout)
-                    connection.sendall(self.supervisor.grant_for_broker(connection))
-            except Exception as exc:
-                print(f"dpumeshd: broker grant failed: {exc}",
-                      file=sys.stderr, flush=True)
 
     def _serve_slot(self, slot: Slot) -> None:
         assert slot.listener is not None
@@ -1179,11 +1080,7 @@ class Daemon:
                 broker_stat.st_mode & 0o022 or not broker_stat.st_mode & 0o111):
             raise RuntimeError_("broker binary must be immutable to non-root users")
         self.cgroups.initialize()
-        if self.supervisor.local is None:
-            self.manager_listener = self._bind(self.args.manager_socket, 0o600)
-            threading.Thread(target=self._serve_manager, daemon=True).start()
-        else:
-            threading.Thread(target=self._local_loop, daemon=True).start()
+        threading.Thread(target=self._local_loop, daemon=True).start()
         for slot in self.registry.slots:
             slot.listener = self._bind(slot.path, 0o666)
             threading.Thread(target=self._serve_slot, args=(slot,), daemon=True).start()
@@ -1202,18 +1099,14 @@ class Daemon:
             self.scope_tunnel.close()
         self.plugin.close()
         self.supervisor.terminate_all()
-        if self.supervisor.local is not None:
-            self.supervisor.local.close()
+        self.supervisor.local.close()
         for slot in self.registry.slots:
             if slot.listener is not None:
                 slot.listener.close()
-        if self.manager_listener is not None:
-            self.manager_listener.close()
 
     def run(self) -> None:
         self.start()
-        while not self.stop.wait(1.0):
-            pass
+        self.stop.wait()
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -1223,11 +1116,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--runtime-dir", type=Path, default=Path("/run/dpumesh"))
     parser.add_argument("--slot-dir", type=Path,
                         default=Path("/run/dpumesh/slots"))
-    parser.add_argument("--manager-socket", type=Path,
-                        default=Path("/run/dpumesh/manager.sock"))
     parser.add_argument("--device-plugin-dir", type=Path,
                         default=Path("/var/lib/kubelet/device-plugins"))
-    parser.add_argument("--cgroup-root", type=Path, required=True)
+    parser.add_argument("--cgroup-root", type=Path,
+                        default=Path("/sys/fs/cgroup/system.slice/dpumeshd.service"))
     parser.add_argument("--controller-url", required=True)
     parser.add_argument("--controller-ca", type=Path, required=True)
     parser.add_argument("--controller-cert", type=Path, required=True)
@@ -1250,8 +1142,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--worker-memory-high", type=int, default=768 * 1024 * 1024)
     parser.add_argument("--worker-memory-max", type=int, default=1024 * 1024 * 1024)
     parser.add_argument("--worker-pids-max", type=int, default=64)
-    parser.add_argument("--registration-mode", choices=("grant", "direct"),
-                        default=os.getenv("DPUMESH_REGISTRATION_MODE", "grant"))
     parser.add_argument("--cluster-id", default=os.getenv("DPUMESH_CLUSTER_ID", "dpumesh-test"))
     parser.add_argument("--local-control-port", type=int, default=4791)
     parser.add_argument("--local-server-name", default=os.getenv("DPUMESH_LOCAL_SERVER_NAME", ""))
@@ -1263,7 +1153,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--podresources-socket", type=Path,
                         default=Path("/var/lib/kubelet/pod-resources/kubelet.sock"))
     args = parser.parse_args(argv)
-    if args.registration_mode == "direct" and (not args.kube_api or not args.local_server_name):
+    if not args.kube_api or not args.local_server_name:
         parser.error("direct registration requires Kubernetes API and paired DPU TLS name")
     if NODE_RE.fullmatch(args.node_name) is None or len(args.node_name) > 253:
         parser.error("--node-name must be a DNS subdomain of at most 253 bytes")

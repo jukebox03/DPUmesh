@@ -7,19 +7,19 @@
  * canonical metadata encoding; direct REGISTER requires a zero signature and
  * is accepted exclusively on the authenticated host control connection. */
 #define DMESH_LOCAL_MAGIC "DMESHLC1"
-#define DMESH_LOCAL_VERSION 4
+#define DMESH_LOCAL_VERSION 5
 enum { DMESH_LOCAL_PING = 1, DMESH_LOCAL_REGISTER, DMESH_LOCAL_UNREGISTER,
        DMESH_LOCAL_STATUS };
 enum { DMESH_LOCAL_OK = 0, DMESH_LOCAL_INVALID, DMESH_LOCAL_STALE,
        DMESH_LOCAL_PENDING };
 struct dmesh_local_request {
     uint8_t operation, reserved[7], sequence[8], session[16], connection_id[32];
-    struct dmesh_workload_assert_msg identity;
+    struct dmesh_workload_identity identity;
 };
 struct dmesh_local_response {
     uint8_t magic[8], session[16], sequence[8], status[4];
 };
-_Static_assert(sizeof(struct dmesh_local_request) == 1609, "local request ABI");
+_Static_assert(sizeof(struct dmesh_local_request) == 1497, "local request ABI");
 _Static_assert(sizeof(struct dmesh_local_response) == 36, "local response ABI");
 struct dmesh_local_control;
 typedef unsigned (*dmesh_local_dispatch)(void *, const struct dmesh_local_request *);

@@ -11,7 +11,7 @@
 #include <dmesh_l7.h>
 
 #include "object.h"
-#include "workload_grant.h"
+#include "workload_identity.h"
 #include "dpu_worker.h"
 #include "comch_server.h"
 #include "peer_channel.h"
@@ -1469,9 +1469,9 @@ static int px_peer_stream_ready(struct objects *objs, struct px_conn *c,
              source->pod_uid);
     snprintf(open.dst_pod_uid, sizeof(open.dst_pod_uid), "%s",
              c->peer_pod_uid);
-    if (source->granted_service[0] && source->namespace_name[0])
+    if (source->registered_service[0] && source->namespace_name[0])
         snprintf(open.src_service_key, sizeof(open.src_service_key), "%s/%s",
-                 source->namespace_name, source->granted_service);
+                 source->namespace_name, source->registered_service);
     open.dst_port = dmesh_topology_service_port(objs, c->pub.dst_service);
     if (open.dst_port == 0)
         return -1;
@@ -2707,7 +2707,7 @@ static uint32_t px_pod_ipv4(const struct pod_state *pod) {
 }
 
 /* The verified source identity, from the signed claims a registration
- * retained. Every part comes from the controller-signed grant. */
+ * retained. Every part comes from the host-verified identity. */
 static void px_fill_source_identity(const struct pod_state *pod, char *out, size_t len) {
     out[0] = '\0';
     if (!pod || pod->service_account[0] == '\0' || pod->namespace_name[0] == '\0')
@@ -2756,7 +2756,7 @@ void px_protection_refresh(struct objects *objs)
 
 /* Is this Service protected?
  *
- * Every registration is grant-verified, so protection grades the interaction
+ * Every registration is registration-verified, so protection grades the interaction
  * rules rather than registration validity. A Service the generation grades
  * carries its own class; one it does not grade is strict. No Pod input reaches
  * here, so a Pod cannot place its Service on the relaxed side. */

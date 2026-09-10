@@ -95,50 +95,6 @@ def test_kernel_evidence(root: Path) -> None:
         right.close()
 
 
-def test_v3_grant_request() -> None:
-    class Controller:
-        calls = 0
-
-        def grant(self, pod_uid, container_id, service, nonce, **lifecycle):
-            self.calls += 1
-            assert pod_uid == UID
-            assert container_id == CONTAINER
-            assert service == "echo-native"
-            assert len(nonce) == 32 and any(nonce)
-            assert lifecycle == {
-                "slot": 1,
-                "generation": 7,
-                "incarnation": "11" * 16,
-            }
-            if self.calls < 3:
-                raise dpumeshd.RuntimeError_("container status is not published")
-            return b"G" * dpumeshd.ASSERT_SIZE
-
-    worker = dpumeshd.Worker(
-        slot=1, generation=7, pod_uid=UID, container_id=CONTAINER,
-        service="echo-native", pid=123, starttime="1", wrapper_pid=122,
-        cgroup=Path("/not-used"), private_root=Path("/not-used-root"),
-    )
-    supervisor = object.__new__(dpumeshd.BrokerSupervisor)
-    supervisor.controller = Controller()
-    supervisor.incarnation = "11" * 16
-    supervisor.lock = threading.Lock()
-    supervisor.workers = {worker.pid: worker}
-    supervisor._worker_for_peer = lambda _pid, _uid: worker
-    left, right = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
-    try:
-        request = dpumeshd.GRANT_REQUEST.pack(
-            b"DMESHGR1", dpumeshd.BROKER_IPC_VERSION,
-            b"echo-native\0".ljust(64, b"\0"), bytes(range(1, 33)),
-        )
-        right.sendall(request)
-        with mock.patch.object(dpumeshd.time, "sleep"):
-            assert supervisor.grant_for_broker(left) == b"G" * dpumeshd.ASSERT_SIZE
-        assert supervisor.controller.calls == 3
-        assert worker.registered
-    finally:
-        left.close()
-        right.close()
 
 
 def test_configuration_validation() -> None:
@@ -151,6 +107,8 @@ def test_configuration_validation() -> None:
         "--controller-key", "/keys/key",
         "--dpu-feed-host", "192.168.100.2",
         "--node-rdma-addr", "192.168.100.2:47900",
+        "--kube-api", "https://api.example",
+        "--local-server-name", "dpu.example",
     ]
     args = dpumeshd.parse_args(required + ["--worker-cpu-max", "50000"])
     assert args.worker_cpu_max == "50000 100000"
@@ -398,7 +356,6 @@ def main() -> None:
         root = Path(temporary)
         test_kernel_evidence(root / "proc")
         test_broker_cleanup_fence(root / "cleanup")
-        test_v3_grant_request()
         test_private_root_cleanup(root / "private-root")
         test_plugin(root)
         test_atomic_socket_replacement(root / "atomic")

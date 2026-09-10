@@ -1,4 +1,5 @@
 #include "comch_client.h"
+#include "local_control.h"
 
 #include <time.h>
 #include <stdlib.h>
@@ -142,7 +143,7 @@ static void client_message_recv_callback(struct doca_comch_event_msg_recv *event
 		if (msg_len == sizeof(struct dmesh_registration_challenge_msg)) {
 			const struct dmesh_registration_challenge_msg *challenge =
 				(const struct dmesh_registration_challenge_msg *)recv_buffer;
-			if ((challenge->version != DMESH_ASSERT_VERSION && challenge->version != 4) ||
+			if (challenge->version != DMESH_LOCAL_VERSION ||
 			    challenge->reserved != 0) {
 				DOCA_LOG_ERR("Invalid registration challenge version/reserved");
 				break;

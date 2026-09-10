@@ -539,7 +539,7 @@ mod datapath {
 
 // Length of the signed prefix of an authoritative feed document, or -1 when it
 // is unsigned or its signature does not verify against the feed keyring the DPU
-// holds (`DPUMESH_FEED_KEY_DIR`, disjoint from the registration keyring). The
+// holds (`DPUMESH_FEED_KEY_DIR`, disjoint from the topology signing key). The
 // crypto stays on the C side, so the adapter keeps no key material of its own.
 #[cfg(not(test))]
 extern "C" {
@@ -547,7 +547,7 @@ extern "C" {
 }
 
 /// Test stand-in: the envelope handling and the failure paths are what the
-/// adapter owns; the MAC itself is covered by `tests/workload_grant_test.c`.
+/// adapter owns; the MAC itself is covered by `tests/workload_identity_test.c`.
 #[cfg(test)]
 unsafe fn dmesh_l7_verify_feed(document: *const u8, length: usize) -> isize {
     let text = std::str::from_utf8(std::slice::from_raw_parts(document, length)).unwrap();

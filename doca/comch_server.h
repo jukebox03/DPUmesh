@@ -22,6 +22,8 @@ int dmesh_registration_should_expire(uint64_t connected_ns, uint64_t now_ns,
 
 #ifndef SLEEP_IN_NANOS
 #define SLEEP_IN_NANOS (10 * 1000)	       /* Sample tasks every 10 microseconds */
+int dmesh_admission_configure(struct objects *, char *, size_t);
+
 #endif
 
 doca_error_t
@@ -45,12 +47,6 @@ server_flush_pod_init_results(struct objects *objs);
  * pod resources. Called once per DPU main-loop pass; never blocks. */
 int
 server_progress_pod_cleanup(struct objects *objs);
-
-/* Adopt the authoritative node membership generation and close registrations
- * it no longer authorizes. Called once per DPU main-loop pass; it consults the
- * feed on its own interval and never blocks. */
-int
-server_progress_membership(struct objects *objs);
 
 /* Track the protected-admission switch. Called once per DPU main-loop pass; it
  * consults the file on its own interval and never blocks. */
@@ -104,5 +100,7 @@ struct dmesh_local_request;
 unsigned server_local_dispatch(void *, const struct dmesh_local_request *);
 void server_local_retire(void *);
 int server_local_available(void *);
+
+int dmesh_admission_configure(struct objects *, char *, size_t);
 
 #endif // COMCH_SERVER_H

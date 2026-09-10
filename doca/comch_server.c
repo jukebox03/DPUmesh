@@ -10,7 +10,7 @@
 #include "comch_common.h"
 #include "dpa.h"      /* teardown_pod_dma (DOCA_ARCH_DPU only) */
 #include "dpu_proxy.h"
-#include "workload_grant.h"
+#include "workload_identity.h"
 #include "control_scope.h"
 #include "dmesh_l7.h"   /* l7_control_event, l7_inbound_forget */
 
@@ -75,12 +75,12 @@ static int bytes_are_zero(const uint8_t *bytes, size_t length)
  * node runtime. Keep one incarnation fence and one monotonic generation per
  * advertised slot. A new daemon cannot overlap registrations from the old
  * daemon, and a slot generation can never be replayed even with a fresh nonce. */
-static enum dmesh_grant_result
-grant_lifecycle_accept(struct objects *objs, struct pod_state *current,
-			 const struct dmesh_assert_claims *claims)
+static enum dmesh_identity_result
+registration_lifecycle_accept(struct objects *objs, struct pod_state *current,
+			 const struct dmesh_identity_claims *claims)
 {
 	if (claims->channel_slot >= MAX_PODS)
-		return DMESH_GRANT_WRONG_CHANNEL;
+		return DMESH_IDENTITY_WRONG_CHANNEL;
 	if (bytes_are_zero(objs->active_daemon_incarnation,
 	                   sizeof(objs->active_daemon_incarnation)) ||
 	    CRYPTO_memcmp(objs->active_daemon_incarnation,
@@ -90,8 +90,8 @@ grant_lifecycle_accept(struct objects *objs, struct pod_state *current,
 		                                      __ATOMIC_ACQUIRE); i++) {
 			struct pod_state *other = &objs->pods[i];
 			if (other != current && other->connection != NULL &&
-			    other->registration_grant_verified)
-				return DMESH_GRANT_WRONG_INCARNATION;
+			    other->registration_verified)
+				return DMESH_IDENTITY_WRONG_INCARNATION;
 		}
 		memcpy(objs->active_daemon_incarnation,
 		       claims->daemon_incarnation,
@@ -101,10 +101,10 @@ grant_lifecycle_accept(struct objects *objs, struct pod_state *current,
 	}
 	if (claims->channel_generation <=
 	    objs->channel_generations[claims->channel_slot])
-		return DMESH_GRANT_WRONG_CHANNEL;
+		return DMESH_IDENTITY_WRONG_CHANNEL;
 	objs->channel_generations[claims->channel_slot] =
 		claims->channel_generation;
-	return DMESH_GRANT_OK;
+	return DMESH_IDENTITY_OK;
 }
 
 int dmesh_resolve_service_key(const char *namespace_name, const char *query,
@@ -215,86 +215,6 @@ static void server_message_recv_callback(struct doca_comch_event_msg_recv *event
 		}
 		break;
 
-	case DMESH_MSG_WORKLOAD_ASSERT: {
-        if (objs->local_registration) return; /* Direct mode admits no assertion from Comch. */
-		const struct dmesh_workload_assert_msg *assertion =
-			(const struct dmesh_workload_assert_msg *)recv_buffer;
-		if (msg_len != sizeof(*assertion)) {
-			DOCA_LOG_ERR("Received invalid WORKLOAD_ASSERT size: %u", msg_len);
-			return;
-		}
-		struct pod_state *pod = find_pod_by_connection(objs, comch_connection);
-		if (pod == NULL || !pod->registration_challenge_issued) {
-			DOCA_LOG_ERR("WORKLOAD_ASSERT rejected: no connection challenge");
-			return;
-		}
-		if (pod->registration_grant_verified ||
-		    __atomic_load_n(&pod->registered, __ATOMIC_ACQUIRE)) {
-			DOCA_LOG_ERR("WORKLOAD_ASSERT rejected: duplicate for slot %d",
-			             (int)(pod - objs->pods));
-			return;
-		}
-
-		struct dmesh_assert_claims claims;
-		/* The held generation is authoritative for this node's grant key;
-		 * the installed keyring is only the bring-up fallback for a DPU
-		 * that has not adopted any generation yet. */
-		const uint8_t *node_public_key = NULL;
-		if (!dmesh_topology_grant_key(objs, objs->node_name,
-		                             assertion->key_id, &node_public_key))
-			node_public_key =
-				dmesh_registration_find_key(objs, assertion->key_id);
-		enum dmesh_grant_result vr = node_public_key == NULL ?
-			DMESH_GRANT_BAD_KEY_ID : dmesh_assert_verify_v3(
-				assertion, node_public_key, objs->cluster_id, objs->node_name,
-				pod->registration_nonce, (uint64_t)time(NULL),
-				&claims);
-		if (vr == DMESH_GRANT_OK &&
-		    dmesh_registration_consume_grant(objs, assertion->assert_id) != 0) {
-			vr = DMESH_GRANT_REPLAY;
-			objs->registration_grants_replayed++;
-		}
-		if (vr == DMESH_GRANT_OK)
-			vr = grant_lifecycle_accept(objs, pod, &claims);
-		if (vr != DMESH_GRANT_OK) {
-			objs->registration_grants_rejected++;
-			l7_control_event("assert", dmesh_grant_result_name(vr));
-			DOCA_LOG_ERR("workload_assert result=reject reason=%s slot=%d key_id=%.*s "
-			             "assert=%02x%02x%02x%02x rejected=%lu replayed=%lu",
-			             dmesh_grant_result_name(vr), (int)(pod - objs->pods),
-			             DMESH_GRANT_KEY_ID_MAX, assertion->key_id,
-			             assertion->assert_id[0], assertion->assert_id[1],
-			             assertion->assert_id[2], assertion->assert_id[3],
-			             (unsigned long)objs->registration_grants_rejected,
-			             (unsigned long)objs->registration_grants_replayed);
-			return;
-		}
-
-		memcpy(pod->workload, claims.workload, sizeof(pod->workload));
-		memcpy(pod->pod_uid, claims.pod_uid, sizeof(pod->pod_uid));
-		memcpy(pod->namespace_name, claims.namespace_name,
-		       sizeof(pod->namespace_name));
-		memcpy(pod->service_account, claims.service_account,
-		       sizeof(pod->service_account));
-		memcpy(pod->pod_ip, claims.pod_ip, sizeof(pod->pod_ip));
-		memcpy(pod->granted_service, claims.service_name,
-		       sizeof(pod->granted_service));
-		memcpy(pod->registration_grant_id, assertion->assert_id,
-		       sizeof(pod->registration_grant_id));
-		pod->registration_grant_verified = 1;
-		objs->registration_grants_accepted++;
-		l7_control_event("assert", "ok");
-		DOCA_LOG_INFO("workload_assert result=accept slot=%d service='%s/%s' key_id=%.*s "
-		              "assert=%02x%02x%02x%02x pod_uid=%s pod_ip=%s workload='%s' accepted=%lu",
-		              (int)(pod - objs->pods), pod->namespace_name,
-		              pod->granted_service[0] ? pod->granted_service : "(none)",
-		              DMESH_GRANT_KEY_ID_MAX, assertion->key_id,
-		              assertion->assert_id[0], assertion->assert_id[1],
-		              assertion->assert_id[2], assertion->assert_id[3],
-		              pod->pod_uid, pod->pod_ip, pod->workload,
-		              (unsigned long)objs->registration_grants_accepted);
-		break;
-	}
 
 	case DMESH_MSG_POD_REGISTER: {
 		struct dmesh_register_msg *reg = (struct dmesh_register_msg *)recv_buffer;
@@ -485,7 +405,7 @@ server_send_registration_challenge(struct objects *objs, struct pod_state *pod)
 
 	struct dmesh_registration_challenge_msg challenge = {
 		.type = DMESH_MSG_REG_CHALLENGE,
-		.version = objs->local_registration ? DMESH_LOCAL_VERSION : DMESH_ASSERT_VERSION,
+		.version = DMESH_LOCAL_VERSION,
 		.trusted_required = 1,
 	};
 	memcpy(challenge.nonce, pod->registration_nonce,
@@ -898,18 +818,15 @@ pods_add_connection(struct objects *objs, struct doca_comch_connection *conn)
 	objs->pods[idx].namespace_name[0] = '\0';
 	objs->pods[idx].service_account[0] = '\0';
 	objs->pods[idx].pod_ip[0] = '\0';
-	objs->pods[idx].granted_service[0] = '\0';
+	objs->pods[idx].registered_service[0] = '\0';
 	memset(objs->pods[idx].registration_nonce, 0,
 	       sizeof(objs->pods[idx].registration_nonce));
-	memset(objs->pods[idx].registration_grant_id, 0,
-	       sizeof(objs->pods[idx].registration_grant_id));
 	objs->pods[idx].registration_challenge_issued = 0;
 	objs->pods[idx].registration_challenge_sent = 0;
-	objs->pods[idx].registration_grant_verified = 0;
-	objs->pods[idx].registration_grant_consumed = 0;
-	objs->pods[idx].membership_generation = 0;
-	objs->pods[idx].membership_absences = 0;
-	objs->pods[idx].revoked = 0;
+	objs->pods[idx].registration_verified = 0;
+	objs->pods[idx].registration_consumed = 0;
+
+
 	objs->pods[idx].landing_stripes = objs->n_data_workers;
 	objs->pods[idx].rev_ring_mmap_count = 0;
 	objs->pods[idx].rev_doorbell_pending_epoch = 0;
@@ -986,81 +903,40 @@ pod_begin_cleanup(struct objects *objs, struct pod_state *pod)
 #endif
 }
 
-/* Membership is consulted on its own cadence: the control loop runs on a 1 ms
- * backstop and the publisher installs generations far more slowly. */
-#define MEMBERSHIP_CHECK_INTERVAL_NS 1000000000ull
 
 /* How long a quiescence may run before it is reported as stalled. */
 #define DMESH_CLEANUP_STALL_NS 5000000000ull
 
-int
-server_progress_membership(struct objects *objs)
-{
-	if (objs == NULL || !objs->membership_enabled)
-		return 0;
-
-	struct timespec now;
-	if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
-		return 0;
-	uint64_t now_ns = (uint64_t)now.tv_sec * 1000000000ull + (uint64_t)now.tv_nsec;
-	if (now_ns < objs->membership_next_check_ns)
-		return 0;
-	objs->membership_next_check_ns = now_ns + MEMBERSHIP_CHECK_INTERVAL_NS;
-
-	enum dmesh_membership_result result = dmesh_membership_refresh(objs);
-	if (result == DMESH_MEMBERSHIP_UNCHANGED)
-		return 0;
-	if (result != DMESH_MEMBERSHIP_ADOPTED) {
-		objs->membership_rejected++;
-		l7_control_event("membership", dmesh_membership_result_name(result));
-		DOCA_LOG_WARN("membership generation rejected: reason=%s generation=%lu rejected=%lu",
-		              dmesh_membership_result_name(result),
-		              (unsigned long)objs->membership_generation,
-		              (unsigned long)objs->membership_rejected);
-		return 0;
-	}
-	l7_control_event("membership", "ok");
-
-	if (objs->local_registration) return 0; /* dpumeshd owns local revocation. */
-	int revoked = 0;
-	int n = __atomic_load_n(&objs->num_pods, __ATOMIC_ACQUIRE);
-	for (int i = 0; i < n; i++) {
-		struct pod_state *pod = &objs->pods[i];
-		if (!__atomic_load_n(&pod->registered, __ATOMIC_ACQUIRE) ||
-		    __atomic_load_n(&pod->cleanup_pending, __ATOMIC_ACQUIRE) ||
-		    pod->revoked || pod->pod_uid[0] == '\0')
-			continue;
-		/* A generation no newer than the one this registration was last
-		 * judged against says nothing new about it. */
-		if (objs->membership_generation <= pod->membership_generation)
-			continue;
-		pod->membership_generation = objs->membership_generation;
-		if (dmesh_membership_contains(objs, pod->pod_uid,
-		                              pod->granted_service)) {
-			pod->membership_absences = 0;
-			continue;
-		}
-		if (++pod->membership_absences < DMESH_MEMBERSHIP_ABSENCES_TO_REVOKE) {
-			DOCA_LOG_INFO("membership absence %u for slot %d pod_id=%d pod_uid=%s",
-			              pod->membership_absences, i, pod->pod_id, pod->pod_uid);
-			continue;
-		}
-		pod->revoked = 1;
-		objs->membership_revocations++;
-		l7_control_event("revocation", "membership-withdrawn");
-		DOCA_LOG_WARN("registration revoked: slot=%d pod_id=%d service_id=%d "
-		              "pod_uid=%s generation=%lu revocations=%lu",
-		              i, pod->pod_id, pod->service_id, pod->pod_uid,
-		              (unsigned long)objs->membership_generation,
-		              (unsigned long)objs->membership_revocations);
-		pod_begin_cleanup(objs, pod);
-		revoked++;
-	}
-	return revoked;
-}
 
 /* `drain` refuses new protected sessions; anything else opens admission. The
  * switch is a file so it can be set without restarting the proxy. */
+/* Admission is polled independently of the 1 ms control-loop backstop. */
+#define ADMISSION_CHECK_INTERVAL_NS 1000000000ull
+
+int
+dmesh_admission_configure(struct objects *objs, char *error, size_t error_len)
+{
+    const char *path = getenv("DPUMESH_ADMISSION_FILE");
+
+    if (objs == NULL)
+        return -1;
+    objs->admission_path[0] = '\0';
+    objs->admission_enabled = 0;
+    objs->admission_drain = 0;
+    objs->admission_drain_refusals = 0;
+    objs->admission_next_check_ns = 0;
+
+    if (path == NULL || *path == '\0')
+        return 0;
+    if (strlen(path) >= sizeof(objs->admission_path)) {
+        if (error && error_len)
+            snprintf(error, error_len, "DPUMESH_ADMISSION_FILE is too long");
+        return -1;
+    }
+    snprintf(objs->admission_path, sizeof(objs->admission_path), "%s", path);
+    objs->admission_enabled = 1;
+    return 0;
+}
 int
 server_progress_admission(struct objects *objs)
 {
@@ -1073,7 +949,7 @@ server_progress_admission(struct objects *objs)
 	uint64_t now_ns = (uint64_t)now.tv_sec * 1000000000ull + (uint64_t)now.tv_nsec;
 	if (now_ns < objs->admission_next_check_ns)
 		return 0;
-	objs->admission_next_check_ns = now_ns + MEMBERSHIP_CHECK_INTERVAL_NS;
+	objs->admission_next_check_ns = now_ns + ADMISSION_CHECK_INTERVAL_NS;
 
 	char state[32] = {0};
 	int drain = 0;
@@ -1346,7 +1222,7 @@ pods_register(struct objects *objs, struct doca_comch_connection *conn,
 			 * The host uses this to recover a lost ASSIGNED/INIT_RESULT reply. */
 			int32_t current_id = objs->pods[i].pod_id;
 			if ((pod_id < 0 || pod_id == current_id) &&
-			    strcmp(service_name, objs->pods[i].granted_service) == 0)
+			    strcmp(service_name, objs->pods[i].registered_service) == 0)
 				return current_id;
 			DOCA_LOG_ERR("pods_register: conflicting replay on slot %d", i);
 			return -1;
@@ -1354,12 +1230,12 @@ pods_register(struct objects *objs, struct doca_comch_connection *conn,
 		/* The Service name is authoritative for identity: it must equal the
 		 * one the connection's assertion named. */
 		if (objs->shutting_down || objs->pods[i].local_registration_closed ||
-            !objs->pods[i].registration_grant_verified ||
-		    objs->pods[i].registration_grant_consumed ||
-		    strcmp(service_name, objs->pods[i].granted_service) != 0) {
+            !objs->pods[i].registration_verified ||
+		    objs->pods[i].registration_consumed ||
+		    strcmp(service_name, objs->pods[i].registered_service) != 0) {
 			DOCA_LOG_ERR("pods_register: trusted assertion missing/consumed or Service mismatch "
 			             "on slot %d (requested='%s' asserted='%s')",
-			             i, service_name, objs->pods[i].granted_service);
+			             i, service_name, objs->pods[i].registered_service);
 			return -1;
 		}
 		/* The node-local compact id is the DPU's own: interned from the
@@ -1395,11 +1271,11 @@ pods_register(struct objects *objs, struct doca_comch_connection *conn,
 		 * to see the prior pod_id write. */
 		objs->pods[i].pod_id = pod_id;
 		objs->pods[i].service_id = service_id;
-		objs->pods[i].registration_grant_consumed = 1;
+		objs->pods[i].registration_consumed = 1;
 		/* Judge this registration only against generations newer than the one
 		 * the node published before it existed. */
-		objs->pods[i].membership_generation = objs->membership_generation;
-		objs->pods[i].membership_absences = 0;
+
+
 		/* This timestamp belongs only to the unauthenticated handshake.  Clear
 		 * it before publishing registration so a later UNREGISTER/cleanup (which
 		 * clears registered) cannot be mistaken for a 30-second auth timeout. */
@@ -1475,7 +1351,7 @@ find_pod_by_connection(struct objects *objs, struct doca_comch_connection *conn)
 static int local_registration_outstanding(const struct pod_state *p)
 {
     return p->registered || p->cleanup_pending ||
-           (p->registration_grant_verified && !p->local_registration_closed);
+           (p->registration_verified && !p->local_registration_closed);
 }
 
 /* Close one slot's registration and start the teardown its reuse waits on. */
@@ -1502,7 +1378,7 @@ void server_local_retire(void *owner)
 unsigned server_local_dispatch(void *owner, const struct dmesh_local_request *r)
 {
     struct objects *objs = owner;
-    if (!objs->local_registration || objs->shutting_down) return DMESH_LOCAL_STALE;
+    if (objs->shutting_down) return DMESH_LOCAL_STALE;
     struct pod_state *p = NULL;
     for (int i = 0; i < objs->num_pods; i++)
         if (objs->pods[i].registration_challenge_issued &&
@@ -1519,24 +1395,24 @@ unsigned server_local_dispatch(void *owner, const struct dmesh_local_request *r)
     }
     if (r->operation != DMESH_LOCAL_REGISTER) return DMESH_LOCAL_INVALID;
     if (!p || !p->connection || p->local_registration_closed || p->cleanup_pending ||
-        p->registration_grant_verified || p->registration_disconnect_pending)
+        p->registration_verified || p->registration_disconnect_pending)
         return DMESH_LOCAL_STALE;
-    struct dmesh_assert_claims c;
-    enum dmesh_grant_result result = dmesh_assert_decode_local(
+    struct dmesh_identity_claims c;
+    enum dmesh_identity_result result = dmesh_identity_decode(
         &r->identity, objs->cluster_id, objs->node_name, p->registration_nonce,
-        (uint64_t)time(NULL), &c, 1);
-    if (result == DMESH_GRANT_OK) result = grant_lifecycle_accept(objs, p, &c);
-    if (result != DMESH_GRANT_OK) {
-        DOCA_LOG_WARN("local REGISTER refused: %s", dmesh_grant_result_name(result));
+        (uint64_t)time(NULL), &c);
+    if (result == DMESH_IDENTITY_OK) result = registration_lifecycle_accept(objs, p, &c);
+    if (result != DMESH_IDENTITY_OK) {
+        DOCA_LOG_WARN("local REGISTER refused: %s", dmesh_identity_result_name(result));
         return DMESH_LOCAL_INVALID;
     }
     memcpy(p->workload, c.workload, sizeof(p->workload));
     memcpy(p->pod_uid, c.pod_uid, sizeof(p->pod_uid));
     memcpy(p->namespace_name, c.namespace_name, sizeof(p->namespace_name));
     memcpy(p->service_account, c.service_account, sizeof(p->service_account));
-    memcpy(p->granted_service, c.service_name, sizeof(p->granted_service));
+    memcpy(p->registered_service, c.service_name, sizeof(p->registered_service));
     memcpy(p->pod_ip, c.pod_ip, sizeof(p->pod_ip));
-    p->registration_grant_verified = 1;
+    p->registration_verified = 1;
     DOCA_LOG_WARN("local REGISTER accepted pod=%s container=%s slot=%u generation=%lu",
                  p->pod_uid, r->identity.container_id, c.channel_slot,
                  (unsigned long)c.channel_generation);

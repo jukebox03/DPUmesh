@@ -36,7 +36,6 @@ enum dmesh_msg_type {
     DMESH_MSG_REV_DOORBELL=9,  /* DPU→Host: reverse-ring wake notification */
     DMESH_MSG_REG_CHALLENGE=11,/* DPU→Host: connection-bound trusted-registration nonce */
     /* 12 is reserved and must never be assigned to a new type. */
-    DMESH_MSG_WORKLOAD_ASSERT=13,/* Host→DPU: controller-signed workload grant */
     DMESH_MSG_RESOLVE      = 14, /* Host→DPU: name/ClusterIP → interned service id */
     DMESH_MSG_RESOLVE_ACK  = 15, /* DPU→Host: the answer, from the held generation */
 };
@@ -152,7 +151,7 @@ struct dmesh_register_msg {
 _Static_assert(sizeof(struct dmesh_register_msg) == 72,
                "dmesh_register_msg ABI drift");
 
-/* Bound on the Linkerd workload a registration is attributed to: the grant's
+/* Bound on the Linkerd workload a registration is attributed to: the verified identity's
  * namespace and Pod name as injector-compatible JSON. */
 #define DMESH_WORKLOAD_MAX 384
 
@@ -160,12 +159,11 @@ _Static_assert(sizeof(struct dmesh_register_msg) == 72,
  * creates a fresh challenge for every Comch connection. The Host relays it to
  * the controller through dpumeshd; neither the workload nor broker holds a
  * signing key. */
-#define DMESH_ASSERT_VERSION 3u
+#define DMESH_IDENTITY_VERSION 1u
+#define DMESH_IDENTITY_TYPE 1u
 #define DMESH_REG_NONCE_SIZE 32u
-#define DMESH_GRANT_ID_SIZE 16u
-#define DMESH_GRANT_MAC_SIZE 32u
-#define DMESH_ASSERT_SIG_SIZE 64u
-#define DMESH_GRANT_KEY_ID_MAX 32u
+#define DMESH_FEED_MAC_SIZE 32u
+#define DMESH_KEY_ID_MAX 32u
 #define DMESH_POD_UID_MAX 64u
 #define DMESH_K8S_NAMESPACE_MAX 64u
 #define DMESH_K8S_NAME_MAX 254u
@@ -177,7 +175,7 @@ _Static_assert(sizeof(struct dmesh_register_msg) == 72,
 
 struct dmesh_registration_challenge_msg {
     uint8_t type;               /* = DMESH_MSG_REG_CHALLENGE */
-    uint8_t version;            /* = DMESH_ASSERT_VERSION */
+    uint8_t version;            /* = DMESH_LOCAL_VERSION */
     uint8_t trusted_required;   /* always 1; a Host that reads 0 refuses to register */
     uint8_t reserved;           /* must be zero */
     uint8_t nonce[DMESH_REG_NONCE_SIZE];
@@ -185,23 +183,21 @@ struct dmesh_registration_challenge_msg {
 _Static_assert(sizeof(struct dmesh_registration_challenge_msg) == 36,
                "dmesh_registration_challenge_msg ABI drift");
 
-/* Canonical v3 WorkloadGrant. The controller binds its Kubernetes snapshot,
- * host-kernel evidence and allocation lifecycle to this connection's nonce.
- * Numeric fields are explicit little-endian byte strings; text fields are
- * NUL-terminated/zero-padded. Ed25519 covers every byte before `sig`. */
-struct dmesh_workload_assert_msg {
-    uint8_t  type;                     /* = DMESH_MSG_WORKLOAD_ASSERT */
-    uint8_t  version;                  /* = DMESH_ASSERT_VERSION */
+/* Canonical identity metadata, accepted only from the authenticated paired-host
+ * control session. Numeric fields are little-endian and text is zero-padded. */
+struct dmesh_workload_identity {
+    uint8_t  type;                     /* = DMESH_IDENTITY_TYPE */
+    uint8_t  version;                  /* = DMESH_IDENTITY_VERSION */
     uint8_t  flags;                    /* zero */
     uint8_t  reserved;                 /* zero */
     uint8_t  issued_at_le[8];
     uint8_t  expires_at_le[8];
-    uint8_t  assert_id[DMESH_GRANT_ID_SIZE];   /* replay window key */
+
     uint8_t  nonce[DMESH_REG_NONCE_SIZE];      /* the DPU's connection challenge */
     uint8_t  channel_slot_le[4];
     uint8_t  channel_generation_le[8];
     uint8_t  daemon_incarnation[DMESH_DAEMON_INCARNATION_SIZE];
-    char     key_id[DMESH_GRANT_KEY_ID_MAX];   /* selects this node's public key */
+
     char     cluster_id[DMESH_CLUSTER_ID_MAX];
     char     node_name[DMESH_K8S_NAME_MAX];    /* checked against the verifier's node */
     char     pod_uid[DMESH_POD_UID_MAX];       /* RFC 4122 text, 36 used */
@@ -212,27 +208,23 @@ struct dmesh_workload_assert_msg {
     char     container_id[DMESH_CONTAINER_ID_MAX];
     char     service_name[DMESH_SVC_NAME_MAX]; /* label; empty = no Service */
     char     pod_ip[DMESH_POD_IP_MAX];         /* dotted IPv4, e.g. "10.244.1.17" */
-    uint8_t  sig[DMESH_ASSERT_SIG_SIZE];       /* Ed25519 over every preceding byte */
-};
-_Static_assert(sizeof(struct dmesh_workload_assert_msg) == 1545,
-               "dmesh_workload_assert_msg ABI drift");
 
-/* Broker→dpumeshd report of the DPU's connection challenge, on a root-owned
- * AF_UNIX SOCK_SEQPACKET socket. SO_PEERCRED, not request data, identifies the
- * caller. Under `grant` dpumeshd answers with the signed assertion for this
- * Service; under `direct` it registers the connection itself and answers with
- * an approval byte. The Service name is authorized against the Pod's labels and
- * the Service object, never taken on the broker's word. */
-#define DMESH_GRANT_REQUEST_MAGIC "DMESHGR1"
-struct dmesh_grant_request {
+};
+_Static_assert(sizeof(struct dmesh_workload_identity) == 1433,
+               "dmesh_workload_identity ABI drift");
+
+/* Broker report on the private launch socket retained by dpumeshd. The admin
+ * verifies the launch evidence, registers this challenge over paired-DPU TLS,
+ * and returns an approval byte. Service eligibility comes from Kubernetes. */
+struct dmesh_registration_report {
     uint8_t magic[8];
     uint8_t version;
     uint8_t reserved[3];
     char    service_name[DMESH_SVC_NAME_MAX];  /* empty = client-only */
     uint8_t nonce[DMESH_REG_NONCE_SIZE];
 };
-_Static_assert(sizeof(struct dmesh_grant_request) == 108,
-               "dmesh_grant_request ABI drift");
+_Static_assert(sizeof(struct dmesh_registration_report) == 108,
+               "dmesh_registration_report ABI drift");
 
 /* DPU→Host: the pod_id the DPU allocated for a pod_id==-1 registration. Byte
  * `type` at offset 0 (the host dispatches DPU→host messages by recv_buffer[0]).

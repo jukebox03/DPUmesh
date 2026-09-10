@@ -25,8 +25,7 @@
 #include "common.h"
 #include "object.h"
 #include "dpu_worker.h"
-#include "workload_grant.h"
-#include "pod_membership.h"
+#include "workload_identity.h"
 #include "topology.h"
 #include "peer_channel.h"
 #include "control_scope.h"
@@ -120,7 +119,7 @@ int main(int argc, char **argv)
     if (result != DOCA_SUCCESS)
         goto exit;
 
-    /* A grant is scoped to one cluster and node. A DPU that does not know both
+    /* A registration is scoped to one cluster and node. A DPU that does not know both
      * refuses every registration. */
     const char *cluster_id = getenv("DPUMESH_CLUSTER_ID");
     const char *node_name = getenv("DPUMESH_NODE_NAME");
@@ -136,41 +135,29 @@ int main(int argc, char **argv)
     snprintf(objs->cluster_id, sizeof(objs->cluster_id), "%s", cluster_id);
     snprintf(objs->node_name, sizeof(objs->node_name), "%s", node_name);
 
-    const char *mode = getenv("DPUMESH_REGISTRATION_MODE");
-    if (mode && strcmp(mode, "grant") && strcmp(mode, "direct")) {
-        result = DOCA_ERROR_INVALID_VALUE; goto exit;
-    }
-    objs->local_registration = mode && !strcmp(mode, "direct");
     char registration_error[256] = {0};
-    if (dmesh_registration_configure(objs, registration_error,
+    if (dmesh_feed_configure(objs, registration_error,
                                      sizeof(registration_error)) != 0) {
         DOCA_LOG_ERR("Trusted registration configuration failed: %s",
                      registration_error);
         result = DOCA_ERROR_INVALID_VALUE;
         goto exit;
     }
-    char membership_error[256] = {0};
-    if (dmesh_membership_configure(objs, membership_error,
-                                   sizeof(membership_error)) != 0) {
-        DOCA_LOG_ERR("Membership configuration failed: %s", membership_error);
+    char configuration_error[256] = {0};
+    if (dmesh_admission_configure(objs, configuration_error, sizeof(configuration_error)) != 0) {
+        DOCA_LOG_ERR("Admission configuration failed: %s", configuration_error);
         result = DOCA_ERROR_INVALID_VALUE;
         goto exit;
     }
-    if (dmesh_admission_configure(objs, membership_error,
-                                  sizeof(membership_error)) != 0) {
-        DOCA_LOG_ERR("Admission configuration failed: %s", membership_error);
+    if (dmesh_topology_configure(objs, configuration_error,
+                                 sizeof(configuration_error)) != 0) {
+        DOCA_LOG_ERR("Topology configuration failed: %s", configuration_error);
         result = DOCA_ERROR_INVALID_VALUE;
         goto exit;
     }
-    if (dmesh_topology_configure(objs, membership_error,
-                                 sizeof(membership_error)) != 0) {
-        DOCA_LOG_ERR("Topology configuration failed: %s", membership_error);
-        result = DOCA_ERROR_INVALID_VALUE;
-        goto exit;
-    }
-    if (dmesh_scope_configure(objs, membership_error,
-                              sizeof(membership_error)) != 0) {
-        DOCA_LOG_ERR("Control-plane scope configuration failed: %s", membership_error);
+    if (dmesh_scope_configure(objs, configuration_error,
+                              sizeof(configuration_error)) != 0) {
+        DOCA_LOG_ERR("Control-plane scope configuration failed: %s", configuration_error);
         result = DOCA_ERROR_INVALID_VALUE;
         goto exit;
     }
@@ -233,7 +220,7 @@ int main(int argc, char **argv)
         }
     }
 
-    if (objs->local_registration) {
+    {
         char host_uri[320];
         snprintf(host_uri, sizeof(host_uri), "spiffe://dpumesh.io/node/%s", objs->node_name);
         const char *port = getenv("DPUMESH_LOCAL_PORT");

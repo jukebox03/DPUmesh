@@ -5,9 +5,8 @@ The host runtime is the DPU's only control peer, and this is the door it puts
 feeds through. The daemon holds no authentication authority of its own: every
 feed it installs is signed and every consumer refuses what it cannot verify.
 What it does hold is the least privilege that installing them needs — it can
-write the three feed files below and nothing else, it runs as an unprivileged
-account under a system unit (so a node reboot restores it with no operator
-session), it bounds each payload at the door, and it installs by rename, which
+write the two feed files below and nothing else, it runs as an unprivileged
+container in the runtime Pod, it bounds each payload at the door, and it installs by rename, which
 is the contract every consumer already assumes.
 
 Wire framing, one feed per connection:
@@ -53,13 +52,8 @@ HEADER_MAX = 160
 NAME_RE = re.compile(r"[a-z][a-z0-9-]{0,31}")
 HEX64_RE = re.compile(r"[0-9a-f]{64}")
 
-# Feed name -> (relative target, byte bound, mode). Membership (256 KiB,
-# doca/pod_membership.c) and topology (16 MiB, doca/topology.h) carry their
-# consumers' own bounds; the Service-target feed is bounded here at 1 MiB, above
-# the adapter's 256 KiB. A payload over the bound is refused at the door rather
-# than written and rejected later.
+# Feed name -> (relative target, byte bound, mode). Consumers verify signatures.
 FEEDS: dict[str, tuple[str, int, int]] = {
-    "membership": ("membership.v1", 256 * 1024, 0o644),
     "topology": ("topology.v1", 16 * 1024 * 1024, 0o644),
     "service-targets": ("service-targets.v1", 1024 * 1024, 0o644),
 }

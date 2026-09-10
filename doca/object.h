@@ -12,7 +12,6 @@
 #include <doca_comch.h>
 
 #include "comch_server.h"
-#include "pod_membership.h"
 #include "topology.h"
 #include "comch_common.h"
 #include <dpumesh/dmesh_common.h>
@@ -189,13 +188,6 @@ struct dpu_worker_counter {
     _Alignas(64) uint32_t v;
 };
 
-#define DMESH_REGISTRATION_MAX_KEYS 4
-#define DMESH_REGISTRATION_REPLAY_SLOTS 4096
-
-struct dmesh_registration_key {
-    uint8_t bytes[32];
-    char key_id[DMESH_GRANT_KEY_ID_MAX];
-};
 
 /* Per-pod state (DPU only) */
 struct pod_state {
@@ -211,33 +203,26 @@ struct pod_state {
                              * set is derived from pods[] by service_id); SVC_NONE if none */
     /* Linkerd workload bound to this connection by its verified assertion. */
     char workload[DMESH_WORKLOAD_MAX];
-    /* Signed Kubernetes Pod UID of the asserted registration. It names the
-     * exact live registration a membership withdrawal has to close. */
+    /* Verified Kubernetes Pod UID, retained for registration teardown. */
     char pod_uid[DMESH_POD_UID_MAX];
-    /* Signed claims retained from the assertion: the inbound policy verdict
+    /* Claims retained from authenticated registration: the inbound policy verdict
      * consumes the identity and source address, and the Service pair is what
      * a registration request is compared against. */
     char namespace_name[DMESH_K8S_NAMESPACE_MAX];
     char service_account[DMESH_K8S_NAME_MAX];
     char pod_ip[DMESH_POD_IP_MAX];
-    char granted_service[DMESH_SVC_NAME_MAX];
+    char registered_service[DMESH_SVC_NAME_MAX];
     uint8_t registration_nonce[DMESH_REG_NONCE_SIZE];
-    uint8_t registration_grant_id[DMESH_GRANT_ID_SIZE];
-    /* Newest membership generation this registration has been judged against,
-     * and how many consecutive generations have omitted it. A registration
-     * accepted between a generation's snapshot and its publication is absent
-     * from that one generation without having lost membership. */
-    uint64_t membership_generation;
-    uint32_t membership_absences;
+
+
     /* Whether the controller says this node may act for this Pod on the
      * control plane. Written by the control thread, read by a data worker
      * before it asks for an inbound verdict. */
     int8_t scope_state;
-    int revoked;
     int registration_challenge_issued;
     int registration_challenge_sent;
-    int registration_grant_verified;
-    int registration_grant_consumed;
+    int registration_verified;
+    int registration_consumed;
     int registered;         /* 1 = DMESH_MSG_POD_REGISTER received */
     int dma_ready;          /* 1 = all mmaps + worker barrier + DPA ADD ACKs complete */
     enum dmesh_pod_init_result init_result;   /* terminal once non-PENDING */
@@ -523,7 +508,7 @@ struct dpu_data_worker {
 
 struct objects {
     struct dmesh_local_control *local_control;
-    int local_registration;
+
     int shutting_down;
     int cleanup_failed; /* Cleanup must not report a successful runtime exit on error. */
     struct doca_dev *dev;
@@ -569,43 +554,19 @@ struct objects {
 
     /* DPU-only verifier configuration, installed by
      * dmesh_registration_configure() before the Comch server starts. */
-    struct dmesh_registration_key registration_keys[DMESH_REGISTRATION_MAX_KEYS];
-    size_t registration_key_count;
-    char registration_key_dir[4096];
+
+
     /* Feed-signing keyring (DPUMESH_FEED_KEY_DIR). Disjoint from the
-     * registration keyring, so a feed publisher holds no key that can mint
-     * identity. Empty when unconfigured: every feed is then refused. */
+     * topology signing key, so a feed publisher cannot mint cluster identity. Empty when unconfigured: every feed is then refused. */
     char feed_key_dir[4096];
-    /* This DPU's own Kubernetes node name (DPUMESH_NODE_NAME). A grant's signed
-     * node_name must equal it, so an assertion minted for another node's Pods
+    /* This DPU's own Kubernetes node name (DPUMESH_NODE_NAME). The identity's
+     * node_name must equal it, so a registration for another node's Pods
      * is refused here. */
     char node_name[DMESH_K8S_NAME_MAX];
     char cluster_id[DMESH_CLUSTER_ID_MAX];
     uint8_t active_daemon_incarnation[DMESH_DAEMON_INCARNATION_SIZE];
     uint64_t channel_generations[MAX_PODS];
-    uint8_t consumed_grant_ids[DMESH_REGISTRATION_REPLAY_SLOTS][DMESH_GRANT_ID_SIZE];
-    size_t consumed_grant_count;
-    size_t consumed_grant_cursor;
-    uint64_t registration_grants_accepted;
-    uint64_t registration_grants_rejected;
-    uint64_t registration_grants_replayed;
 
-    /* Authoritative node membership. The controller publishes the (Pod UID,
-     * Service) pairs this node may hold; a registration that leaves the set is
-     * closed on the Comch control thread, which is the single owner of all of
-     * this state. An unset DPUMESH_MEMBERSHIP_FILE leaves revocation off. */
-    char membership_path[4096];
-    int membership_enabled;
-    struct dmesh_membership_entry membership[DMESH_MEMBERSHIP_MAX_ENTRIES];
-    size_t membership_count;
-    uint64_t membership_generation;
-    uint64_t membership_stamp_ino;
-    int64_t membership_stamp_sec;
-    int64_t membership_stamp_nsec;
-    uint64_t membership_stamp_size;
-    uint64_t membership_rejected;
-    uint64_t membership_revocations;
-    uint64_t membership_next_check_ns;
 
     /* The node credential's public half. The private half is generated at
      * first boot into a 0400 file and never leaves the DPU; this is what the
@@ -621,7 +582,7 @@ struct objects {
 
     /* Cluster topology generation (DPUMESH_TOPOLOGY_FILE), signed by the
      * controller and verified with public keys only. The Comch control thread
-     * owns it, like membership. */
+     * owns it. */
     struct dmesh_topology topology;
 
     /* Protected admission. A drain refuses new L7 sessions while established
