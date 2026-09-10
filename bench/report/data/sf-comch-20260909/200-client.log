@@ -1,0 +1,18 @@
+contexts_started=25
+contexts_started=50
+contexts_started=75
+contexts_started=100
+contexts_started=125
+contexts_started=150
+contexts_started=175
+contexts_started=200
+live=199 peak=199 errors=0
+ALL_CONNECTED=200
+live=200 peak=200 errors=0
+live=200 peak=200 errors=0
+live=200 peak=200 errors=0
+live=200 peak=200 errors=0
+live=200 peak=200 errors=0
+live=200 peak=200 errors=0
+RESULT role=client requested=200 peak=200 min_live_after_all=200 hold_s=30.009 sent=119800 received=119800 min_received_per_sf=599 errors=0
+cleanup_idle=200/200

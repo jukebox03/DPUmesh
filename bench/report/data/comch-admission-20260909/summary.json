@@ -1,0 +1,38 @@
+{
+  "idle": {
+    "sample_count": 8,
+    "elapsed_end_range": [
+      1.001,
+      8.004
+    ],
+    "duration_seconds": 8.004,
+    "connections": 0,
+    "connections_per_second": 0.0,
+    "mean_process_cpu_percent_one_core": 0.9803871814092954,
+    "progress_cpu_ms_per_second": 2.258745627186407
+  },
+  "target20": {
+    "sample_count": 11,
+    "elapsed_end_range": [
+      10.005,
+      20.011
+    ],
+    "duration_seconds": 11.005999999999998,
+    "connections": 218,
+    "connections_per_second": 19.807377793930588,
+    "mean_process_cpu_percent_one_core": 1.2057196983463563,
+    "progress_cpu_ms_per_second": 4.819007813919681
+  },
+  "target200": {
+    "sample_count": 11,
+    "elapsed_end_range": [
+      27.015,
+      37.02
+    ],
+    "duration_seconds": 11.005000000000003,
+    "connections": 1077,
+    "connections_per_second": 97.8646069968196,
+    "mean_process_cpu_percent_one_core": 2.079266424352567,
+    "progress_cpu_ms_per_second": 13.53657428441617
+  }
+}

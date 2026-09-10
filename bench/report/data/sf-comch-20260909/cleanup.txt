@@ -1,0 +1,8 @@
+experiment_sf_ports_remaining=0
+host_sf_devices_remaining=0
+experiment_probe_processes_remaining=0
+existing_dpumesh_dpu_pid=600626 (same as before test)
+firmware_configuration_changes=none
+cleanup_wait_initially_timed_out_at_60s=true
+DPU_ports_disappeared_before_host_auxiliary_devices=true
+subsequent_state_verification=all_experiment_SFs_removed

@@ -1,0 +1,6 @@
+DPU_test_SF800_ports 0
+DPU_test_processes: none
+ 600626 /usr/local/bin/dpumesh_dpu -p 03:00.0 -r 94:00.0 -l 40
+
+Host_test_SF800_auxiliary_devices: []
+Host_test_processes: none

@@ -1,0 +1,14 @@
+READY role=client
+SAMPLE elapsed=1.001 cpu_pct=1.244 progress_cpu_ms=3.811 connects=19 disconnect_events=19 pending_disconnects=0 errors=0
+SAMPLE elapsed=2.002 cpu_pct=1.333 progress_cpu_ms=4.131 connects=20 disconnect_events=20 pending_disconnects=0 errors=0
+SAMPLE elapsed=3.004 cpu_pct=1.344 progress_cpu_ms=3.731 connects=20 disconnect_events=20 pending_disconnects=0 errors=0
+SAMPLE elapsed=4.005 cpu_pct=1.315 progress_cpu_ms=3.883 connects=20 disconnect_events=20 pending_disconnects=0 errors=0
+SAMPLE elapsed=5.014 cpu_pct=1.277 progress_cpu_ms=3.832 connects=20 disconnect_events=19 pending_disconnects=0 errors=0
+SAMPLE elapsed=6.025 cpu_pct=1.388 progress_cpu_ms=4.240 connects=20 disconnect_events=20 pending_disconnects=0 errors=0
+SAMPLE elapsed=7.036 cpu_pct=1.261 progress_cpu_ms=3.902 connects=20 disconnect_events=20 pending_disconnects=0 errors=0
+SAMPLE elapsed=8.047 cpu_pct=1.255 progress_cpu_ms=3.885 connects=20 disconnect_events=20 pending_disconnects=0 errors=0
+SAMPLE elapsed=9.058 cpu_pct=1.287 progress_cpu_ms=4.204 connects=19 disconnect_events=20 pending_disconnects=0 errors=0
+SAMPLE elapsed=10.067 cpu_pct=1.355 progress_cpu_ms=3.918 connects=21 disconnect_events=20 pending_disconnects=0 errors=0
+SAMPLE elapsed=11.067 cpu_pct=1.302 progress_cpu_ms=3.655 connects=19 disconnect_events=20 pending_disconnects=0 errors=0
+RESULT role=client starts=237 connects=237 disconnect_events=237 disconnect_calls=0 disconnect_accepted=0 retries=0 peak_pending_disconnects=0 errors=0 progress_cpu_ms=47.039
+cleanup_idle=8/8

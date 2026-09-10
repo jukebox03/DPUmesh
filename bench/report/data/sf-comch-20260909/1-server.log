@@ -1,0 +1,7 @@
+representors=2
+contexts_started=1
+live=0 peak=0 errors=0
+ALL_CONNECTED=1
+live=1 peak=1 errors=0
+RESULT role=server requested=1 peak=1 min_live_after_all=0 hold_s=4.999 sent=100 received=100 min_received_per_sf=100 errors=0
+cleanup_idle=1/1

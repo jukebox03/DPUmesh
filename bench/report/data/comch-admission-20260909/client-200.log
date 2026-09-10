@@ -1,0 +1,14 @@
+READY role=client
+SAMPLE elapsed=1.000 cpu_pct=3.874 progress_cpu_ms=14.299 connects=98 disconnect_events=94 pending_disconnects=0 errors=0
+SAMPLE elapsed=2.003 cpu_pct=2.939 progress_cpu_ms=12.523 connects=97 disconnect_events=98 pending_disconnects=0 errors=0
+SAMPLE elapsed=3.010 cpu_pct=2.735 progress_cpu_ms=11.804 connects=98 disconnect_events=99 pending_disconnects=0 errors=0
+SAMPLE elapsed=4.012 cpu_pct=2.886 progress_cpu_ms=12.377 connects=97 disconnect_events=96 pending_disconnects=0 errors=0
+SAMPLE elapsed=5.018 cpu_pct=2.934 progress_cpu_ms=12.798 connects=97 disconnect_events=97 pending_disconnects=0 errors=0
+SAMPLE elapsed=6.024 cpu_pct=2.871 progress_cpu_ms=12.413 connects=102 disconnect_events=103 pending_disconnects=0 errors=0
+SAMPLE elapsed=7.024 cpu_pct=2.830 progress_cpu_ms=11.963 connects=97 disconnect_events=96 pending_disconnects=0 errors=0
+SAMPLE elapsed=8.031 cpu_pct=2.807 progress_cpu_ms=11.982 connects=101 disconnect_events=99 pending_disconnects=0 errors=0
+SAMPLE elapsed=9.033 cpu_pct=2.830 progress_cpu_ms=12.116 connects=98 disconnect_events=101 pending_disconnects=0 errors=0
+SAMPLE elapsed=10.037 cpu_pct=2.760 progress_cpu_ms=11.949 connects=96 disconnect_events=96 pending_disconnects=0 errors=0
+SAMPLE elapsed=11.039 cpu_pct=2.990 progress_cpu_ms=12.720 connects=97 disconnect_events=96 pending_disconnects=0 errors=0
+RESULT role=client starts=1175 connects=1172 disconnect_events=1171 disconnect_calls=0 disconnect_accepted=0 retries=0 peak_pending_disconnects=0 errors=0 progress_cpu_ms=148.740
+cleanup_idle=8/8
