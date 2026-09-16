@@ -142,8 +142,9 @@ int px_peer_configure(struct objects *objs, int worker_id,
 struct dmesh_peer_table *px_peer_table(struct objects *objs, int worker_id);
 /* Undo `px_peer_configure`: close what the table holds and leave it without a
  * transport, which is how a worker that never had one looks. The caller still
- * owns the transport context and frees it after this returns. */
-void px_peer_detach(struct objects *objs, int worker_id);
+ * owns the transport context. Returns -1 while custody/retirement references
+ * remain; in that case retain both table and transport and retry after drain. */
+int px_peer_detach(struct objects *objs, int worker_id);
 /* Close the channels that have been idle past DMESH_CHANNEL_IDLE_NS. Called on
  * the worker's own maintenance cadence, not per pass. */
 void px_peer_evict_idle(struct objects *objs, int worker_id);

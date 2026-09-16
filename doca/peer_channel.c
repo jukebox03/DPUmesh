@@ -1,4 +1,5 @@
 #include "peer_channel.h"
+#include "peer_pair_wire.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -25,6 +26,8 @@ static const char *const PEER_REFUSAL_NAME[DMESH_PEER_REFUSE_MAX] = {
     [DMESH_PEER_REFUSE_NODE_UNBOUND] = "node-unbound",
     [DMESH_PEER_REFUSE_NODE_KEY]     = "node-key",
     [DMESH_PEER_REFUSE_TRANSPORT]    = "transport",
+    [DMESH_PEER_REFUSE_PAIR]         = "pod-pair",
+    [DMESH_PEER_REFUSE_REGISTRATION] = "registration",
 };
 
 const char *dmesh_peer_refusal_name(enum dmesh_peer_refusal reason)
@@ -199,6 +202,11 @@ static void peer_channel_free(struct dmesh_peer_table *table,
     free(channel->rx);
     free(channel->rx_frame);
     free(channel->tx_frame);
+    peer_pair_wire_free(channel->pair_wire);
+    free(channel->pair_tx_frame);
+    free(channel->pair_rx_payload);
+    channel->pair_wire = NULL;
+    channel->pair_tx_frame = channel->pair_rx_payload = NULL;
     channel->handles = NULL;
     channel->tx = NULL;
     channel->rx = NULL;
@@ -210,11 +218,51 @@ static void peer_channel_free(struct dmesh_peer_table *table,
     channel->state = DMESH_PEER_CLOSED;
 }
 
-void dmesh_peer_table_fini(struct dmesh_peer_table *table)
+int dmesh_peer_channel_hold(struct dmesh_peer_channel *c, uint32_t incarnation)
 {
+    if (!c || !c->in_use || c->state != DMESH_PEER_OPEN || c->incarnation != incarnation)
+        return -1;
+    uint32_t n = __atomic_load_n(&c->local_refs, __ATOMIC_ACQUIRE);
+    do {
+        if (n == UINT32_MAX) return -1;
+    } while (!__atomic_compare_exchange_n(&c->local_refs, &n, n + 1, 0,
+                                          __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE));
+    return 0;
+}
+int dmesh_peer_channel_release(struct dmesh_peer_channel *c, uint32_t incarnation)
+{
+    if (!c || !c->in_use || c->incarnation != incarnation) return -1;
+    uint32_t n = __atomic_load_n(&c->local_refs, __ATOMIC_ACQUIRE);
+    do {
+        if (!n) return -1;
+    } while (!__atomic_compare_exchange_n(&c->local_refs, &n, n - 1, 0,
+                                          __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE));
+    return 0;
+}
+int dmesh_peer_channel_dma_fenced(void *ctx, struct dmesh_peer_channel *c, uint32_t incarnation)
+{
+    (void)ctx;
+    return c && c->in_use && c->incarnation == incarnation &&
+        !__atomic_load_n(&c->local_refs, __ATOMIC_ACQUIRE);
+}
+static int peer_channel_referenced(const struct dmesh_peer_channel *c)
+{
+    return c->retirement_refs || __atomic_load_n(&c->local_refs, __ATOMIC_ACQUIRE);
+}
+int dmesh_peer_table_fini(struct dmesh_peer_table *table)
+{
+    int held = 0;
+    for (uint32_t i = 0; i < DMESH_CHANNEL_MAX; i++) {
+        struct dmesh_peer_channel *c = &table->channels[i];
+        if (c->in_use && (c->state != DMESH_PEER_CLOSED || c->conn))
+            dmesh_peer_reset(table, c, "peer table shutdown");
+        if (peer_channel_referenced(c)) held = 1;
+    }
+    if (held) return -1;
     for (uint32_t i = 0; i < DMESH_CHANNEL_MAX; i++)
         if (table->channels[i].in_use)
             peer_channel_free(table, &table->channels[i]);
+    return 0;
 }
 
 struct dmesh_peer_channel *dmesh_peer_find(struct dmesh_peer_table *table,
@@ -222,10 +270,82 @@ struct dmesh_peer_channel *dmesh_peer_find(struct dmesh_peer_table *table,
 {
     for (uint32_t i = 0; i < DMESH_CHANNEL_MAX; i++) {
         struct dmesh_peer_channel *channel = &table->channels[i];
-        if (channel->in_use && strcmp(channel->node_name, node_name) == 0)
+        if (channel->in_use && !channel->pair_scoped &&
+            strcmp(channel->node_name, node_name) == 0)
             return channel;
     }
     return NULL;
+}
+
+struct dmesh_peer_channel *dmesh_peer_find_pair(struct dmesh_peer_table *table,
+    const char *node_name, const char *local_uid, const char *remote_uid)
+{
+    for (uint32_t i = 0; i < DMESH_CHANNEL_MAX; i++) {
+        struct dmesh_peer_channel *c = &table->channels[i];
+        if (c->in_use && c->pair_scoped && !strcmp(c->node_name, node_name) &&
+            !strcmp(c->pair.local_uid, local_uid) && !strcmp(c->pair.remote_uid, remote_uid))
+            return c;
+    }
+    return NULL;
+}
+
+static enum dmesh_peer_refusal peer_pair_local(struct dmesh_peer_table *t,
+    const char *node, const struct dmesh_peer_pair *p)
+{
+    if (!peer_text_ok(p->local_uid, sizeof(p->local_uid)) ||
+        !peer_text_ok(p->remote_uid, sizeof(p->remote_uid)) ||
+        !strcmp(p->local_uid, p->remote_uid)) return DMESH_PEER_REFUSE_PAIR;
+    if (!t->ops || !t->ops->pod_on_node ||
+        !t->ops->pod_on_node(t->ops_ctx, p->local_uid, t->node_name) ||
+        !t->ops->pod_on_node(t->ops_ctx, p->remote_uid, node))
+        return DMESH_PEER_REFUSE_NOT_ON_PEER;
+    struct dmesh_peer_registration current = {0};
+    if (!t->ops->local_registration ||
+        t->ops->local_registration(t->ops_ctx, p->local_uid, &current) != 1 ||
+        !dmesh_peer_registration_valid(&current) ||
+        !dmesh_peer_registration_equal(&current, &p->local))
+        return DMESH_PEER_REFUSE_REGISTRATION;
+    return DMESH_PEER_OK;
+}
+
+/* Recheck the live registration even on an already open channel. A UID may
+ * survive a broker restart; it must not inherit the previous registration's SA. */
+static enum dmesh_peer_refusal peer_pair_live(struct dmesh_peer_table *t,
+                                              struct dmesh_peer_channel *c)
+{
+    if (!c->pair_scoped) return DMESH_PEER_OK;
+    enum dmesh_peer_refusal r = peer_pair_local(t, c->node_name, &c->pair);
+    if (r != DMESH_PEER_OK) return r;
+    const uint8_t *key = NULL;
+    uint32_t ip = 0;
+    uint16_t port = 0;
+    if (!t->ops->node_binding ||
+        !t->ops->node_binding(t->ops_ctx, c->node_name, &key, &ip, &port) || !key)
+        return DMESH_PEER_REFUSE_NODE_UNBOUND;
+    if (memcmp(key, c->bound_key, 32)) return DMESH_PEER_REFUSE_NODE_KEY;
+    struct dmesh_peer_pair certified = {0};
+    if (!t->transport || !t->transport->pair_ready || !t->transport->pair_admit || !c->conn ||
+        t->transport->pair_ready(c->conn, &certified) != 1)
+        return DMESH_PEER_REFUSE_STATE;
+    if (memcmp(certified.local_uid, c->pair.local_uid, sizeof(certified.local_uid)) ||
+        memcmp(certified.remote_uid, c->pair.remote_uid, sizeof(certified.remote_uid)) ||
+        !dmesh_peer_registration_equal(&certified.local, &c->pair.local) ||
+        !dmesh_peer_registration_valid(&certified.remote) ||
+        (dmesh_peer_registration_valid(&c->pair.remote) &&
+         !dmesh_peer_registration_equal(&certified.remote, &c->pair.remote)))
+        return DMESH_PEER_REFUSE_PAIR;
+    uint8_t association = 0, previous = 0;
+    for (unsigned i = 0; i < 16; i++) {
+        association |= certified.association[i]; previous |= c->pair.association[i];
+    }
+    if (!association || !certified.lane_id || !certified.lane_generation ||
+        (previous && (memcmp(certified.association, c->pair.association, 16) ||
+         certified.lane_id != c->pair.lane_id || certified.lane_generation != c->pair.lane_generation)))
+        return DMESH_PEER_REFUSE_PAIR;
+    c->pair.remote = certified.remote;
+    memcpy(c->pair.association, certified.association, 16);
+    c->pair.lane_id = certified.lane_id; c->pair.lane_generation = certified.lane_generation;
+    return DMESH_PEER_OK;
 }
 
 int dmesh_peer_prologue(const char *local_node, const char *peer_node,
@@ -297,6 +417,8 @@ void dmesh_peer_reset(struct dmesh_peer_table *table,
         table->transport->close(channel->conn);
     channel->conn = NULL;
     channel->state = DMESH_PEER_CLOSED;
+    peer_pair_wire_free(channel->pair_wire);
+    channel->pair_wire = NULL;
 }
 
 void dmesh_peer_transport_failed(struct dmesh_peer_table *table,
@@ -360,13 +482,16 @@ static struct dmesh_peer_channel *peer_channel_slot(struct dmesh_peer_table *tab
         struct dmesh_peer_channel *channel = &table->channels[i];
         if (!channel->in_use)
             return channel;
-        if (channel->handle_count || channel->inflight_bytes)
+        if (channel->handle_count || channel->inflight_bytes ||
+            __atomic_load_n(&channel->local_refs, __ATOMIC_ACQUIRE) ||
+            (channel->state == DMESH_PEER_CLOSED && channel->retirement_refs))
             continue;
         if (!oldest || channel->last_active_ns < oldest->last_active_ns)
             oldest = channel;
     }
     if (oldest) {
         dmesh_peer_reset(table, oldest, "peer channel evicted");
+        if (peer_channel_referenced(oldest)) return NULL;
         peer_channel_free(table, oldest);
         table->evictions++;
     }
@@ -383,9 +508,11 @@ void dmesh_peer_evict_idle(struct dmesh_peer_table *table)
         if (now - channel->last_active_ns < DMESH_CHANNEL_IDLE_NS)
             continue;
         /* An idle channel with streams on it is not idle. */
-        if (channel->handle_count || channel->inflight_bytes)
+        if (channel->handle_count || channel->inflight_bytes ||
+            __atomic_load_n(&channel->local_refs, __ATOMIC_ACQUIRE))
             continue;
         dmesh_peer_reset(table, channel, "peer channel idle");
+        if (peer_channel_referenced(channel)) continue;
         peer_channel_free(table, channel);
         table->evictions++;
     }
@@ -411,12 +538,23 @@ void dmesh_peer_table_rebind(struct dmesh_peer_table *table)
         if (memcmp(channel->bound_key, key, 32) != 0) {
             peer_refuse(table, channel, DMESH_PEER_REFUSE_NODE_KEY);
             dmesh_peer_reset(table, channel, "the generation re-keyed the peer");
+            continue;
+        }
+        if (channel->pair_scoped) {
+            enum dmesh_peer_refusal r = peer_pair_local(table, channel->node_name,
+                                                       &channel->pair);
+            if (r != DMESH_PEER_OK) {
+                peer_refuse(table, channel, r);
+                dmesh_peer_reset(table, channel, "Pod pair authority changed");
+            }
         }
     }
 }
 
-struct dmesh_peer_channel *dmesh_peer_open(struct dmesh_peer_table *table,
+static struct dmesh_peer_channel *peer_open(struct dmesh_peer_table *table,
                                            const char *node_name,
+                                           const struct dmesh_peer_pair *pair,
+                                           const struct dmesh_peer_stream_open *intent,
                                            enum dmesh_peer_refusal *reason)
 {
     enum dmesh_peer_refusal ignored;
@@ -424,13 +562,22 @@ struct dmesh_peer_channel *dmesh_peer_open(struct dmesh_peer_table *table,
         reason = &ignored;
     *reason = DMESH_PEER_OK;
 
-    struct dmesh_peer_channel *channel = dmesh_peer_find(table, node_name);
+    struct dmesh_peer_channel *channel = pair
+        ? dmesh_peer_find_pair(table, node_name, pair->local_uid, pair->remote_uid)
+        : dmesh_peer_find(table, node_name);
+    if (channel && pair && !dmesh_peer_registration_equal(&pair->local, &channel->pair.local)) {
+        dmesh_peer_reset(table, channel, "local Pod re-registered");
+    }
     if (channel && channel->state == DMESH_PEER_OPEN) {
         channel->last_active_ns = peer_now(table);
         return channel;
     }
     if (channel && channel->state == DMESH_PEER_AUTHENTICATING)
         return channel;                  /* callers poll; never replace a live handshake */
+    if (channel && peer_channel_referenced(channel)) {
+        *reason = peer_refuse(table, channel, DMESH_PEER_REFUSE_STATE);
+        return NULL;
+    }
 
     /* The binding decides whether a channel may exist at all: a name the held
      * generation does not bind has no key to authenticate against, and no
@@ -453,6 +600,7 @@ struct dmesh_peer_channel *dmesh_peer_open(struct dmesh_peer_table *table,
         memset(channel, 0, sizeof(*channel));
         snprintf(channel->node_name, sizeof(channel->node_name), "%s", node_name);
         channel->in_use = 1;
+        if (pair) { channel->pair = *pair; channel->pair_scoped = 1; }
         /* A full bucket at creation, refilled at PEER_OPEN_RATE per second. */
         channel->open_tokens_milli = (uint64_t)DMESH_PEER_OPEN_RATE * 1000ull;
         channel->open_refill_ns = peer_now(table);
@@ -462,8 +610,13 @@ struct dmesh_peer_channel *dmesh_peer_open(struct dmesh_peer_table *table,
         return NULL;
     }
     memcpy(channel->bound_key, key, 32);
+    if (pair) channel->pair = *pair;
     channel->ip_be = ip_be;
     channel->port = port;
+    if (channel->incarnation == UINT32_MAX) {
+        *reason = peer_refuse(table, channel, DMESH_PEER_REFUSE_INCARNATION);
+        return NULL;
+    }
     channel->incarnation++;                 /* on entry to AUTHENTICATING */
     channel->initiated_local = 1;
     channel->state = DMESH_PEER_AUTHENTICATING;
@@ -485,9 +638,17 @@ struct dmesh_peer_channel *dmesh_peer_open(struct dmesh_peer_table *table,
         return NULL;
     }
     void *conn = NULL;
-    if (!table->transport || !table->transport->connect ||
-        table->transport->connect(table->transport_ctx, ip_be, port, prologue,
-                                  (size_t)prologue_len, &conn) != 0) {
+    int connected = -1;
+    if (table->transport) {
+        if (pair && table->transport->connect_pair && table->transport->pair_ready &&
+            table->transport->pair_admit)
+            connected = table->transport->connect_pair(table->transport_ctx, node_name,
+                key, ip_be, port, channel->incarnation, pair, intent, &conn);
+        else if (!pair && table->transport->connect && !table->transport->pair_ready)
+            connected = table->transport->connect(table->transport_ctx, ip_be, port,
+                prologue, (size_t)prologue_len, &conn);
+    }
+    if (connected != 0 || !conn) {
         if (conn && table->transport && table->transport->close)
             table->transport->close(conn);
         *reason = peer_refuse(table, channel, DMESH_PEER_REFUSE_TRANSPORT);
@@ -499,9 +660,48 @@ struct dmesh_peer_channel *dmesh_peer_open(struct dmesh_peer_table *table,
     return channel;
 }
 
-struct dmesh_peer_channel *
-dmesh_peer_accept(struct dmesh_peer_table *table, const char *node_name,
+struct dmesh_peer_channel *dmesh_peer_open(struct dmesh_peer_table *t,
+    const char *node, enum dmesh_peer_refusal *reason)
+{
+    if (!t || !node || !*node ||
+        (t->transport && (t->transport->connect_pair || t->transport->pair_ready || t->transport->pair_admit))) {
+        if (reason) *reason = DMESH_PEER_REFUSE_PAIR;
+        return NULL;
+    }
+    return peer_open(t, node, NULL, NULL, reason);
+}
+
+struct dmesh_peer_channel *dmesh_peer_open_stream(struct dmesh_peer_table *t,
+    const char *node, const struct dmesh_peer_stream_open *intent, enum dmesh_peer_refusal *reason)
+{
+    if (!t || !t->transport || (!t->transport->connect_pair && !t->transport->pair_ready &&
+                               !t->transport->pair_admit))
+        return dmesh_peer_open(t, node, reason);
+    struct dmesh_peer_pair pair = {0};
+    enum dmesh_peer_refusal r = DMESH_PEER_REFUSE_PAIR;
+    if (!node || !*node || !intent || !intent->dst_port || intent->reserved ||
+        !peer_text_ok(intent->src_pod_uid, sizeof(intent->src_pod_uid)) ||
+        !peer_text_ok(intent->dst_pod_uid, sizeof(intent->dst_pod_uid)) ||
+        !peer_text_ok(intent->src_service_key, sizeof(intent->src_service_key)))
+        goto fail;
+    strcpy(pair.local_uid, intent->src_pod_uid); strcpy(pair.remote_uid, intent->dst_pod_uid);
+    if (!t->transport->connect_pair || !t->transport->pair_ready || !t->transport->pair_admit) goto fail;
+    r = DMESH_PEER_REFUSE_REGISTRATION;
+    if (!t->ops || !t->ops->local_registration ||
+        t->ops->local_registration(t->ops_ctx, pair.local_uid, &pair.local) != 1 ||
+        intent->src_generation != pair.local.generation) goto fail;
+    r = peer_pair_local(t, node, &pair);
+    if (r != DMESH_PEER_OK) goto fail;
+    return peer_open(t, node, &pair, intent, reason);
+fail:
+    if (reason) *reason = peer_refuse(t, NULL, r);
+    return NULL;
+}
+
+static struct dmesh_peer_channel *
+peer_accept(struct dmesh_peer_table *table, const char *node_name,
                   uint32_t incarnation, void *conn, const uint8_t peer_key[32],
+                  const struct dmesh_peer_pair *pair,
                   enum dmesh_peer_refusal *reason)
 {
     enum dmesh_peer_refusal ignored;
@@ -529,7 +729,15 @@ dmesh_peer_accept(struct dmesh_peer_table *table, const char *node_name,
             table->transport->close(conn);
         return NULL;
     }
-    struct dmesh_peer_channel *channel = dmesh_peer_find(table, node_name);
+    /* An unauthenticated candidate must not evict a legitimate channel. */
+    if (memcmp(bound, peer_key, 32) != 0) {
+        *reason = peer_refuse(table, NULL, DMESH_PEER_REFUSE_NODE_KEY);
+        if (table->transport && table->transport->close) table->transport->close(conn);
+        return NULL;
+    }
+    struct dmesh_peer_channel *channel = pair
+        ? dmesh_peer_find_pair(table, node_name, pair->local_uid, pair->remote_uid)
+        : dmesh_peer_find(table, node_name);
     if (channel && channel->state != DMESH_PEER_CLOSED) {
         /* Simultaneous opens converge on the connection initiated by the
          * lexicographically smaller node. Both ends retain the same transport
@@ -545,6 +753,11 @@ dmesh_peer_accept(struct dmesh_peer_table *table, const char *node_name,
         }
         dmesh_peer_reset(table, channel,
                          "canonical peer connection replaced local open");
+    }
+    if (channel && peer_channel_referenced(channel)) {
+        *reason = peer_refuse(table, channel, DMESH_PEER_REFUSE_STATE);
+        if (table->transport && table->transport->close) table->transport->close(conn);
+        return NULL;
     }
     if (!channel) {
         channel = peer_channel_slot(table);
@@ -567,6 +780,7 @@ dmesh_peer_accept(struct dmesh_peer_table *table, const char *node_name,
         return NULL;
     }
     memcpy(channel->bound_key, bound, 32);
+    if (pair) { channel->pair = *pair; channel->pair_scoped = 1; }
     channel->ip_be = ip_be;
     channel->port = port;
     channel->incarnation = incarnation;
@@ -577,6 +791,37 @@ dmesh_peer_accept(struct dmesh_peer_table *table, const char *node_name,
     channel->handshakes++;
     *reason = dmesh_peer_authenticated(table, channel, peer_key);
     return *reason == DMESH_PEER_OK ? channel : NULL;
+}
+
+struct dmesh_peer_channel *dmesh_peer_accept(struct dmesh_peer_table *t,
+    const char *node, uint32_t incarnation, void *conn, const uint8_t key[32],
+    enum dmesh_peer_refusal *reason)
+{
+    if (t && t->transport && (t->transport->connect_pair || t->transport->pair_ready || t->transport->pair_admit)) {
+        if (t->transport->close && conn) t->transport->close(conn);
+        if (reason) *reason = peer_refuse(t, NULL, DMESH_PEER_REFUSE_PAIR);
+        return NULL;
+    }
+    return peer_accept(t, node, incarnation, conn, key, NULL, reason);
+}
+
+struct dmesh_peer_channel *dmesh_peer_accept_pair(struct dmesh_peer_table *t,
+    const char *node, uint32_t incarnation, void *conn, const uint8_t key[32],
+    enum dmesh_peer_refusal *reason)
+{
+    struct dmesh_peer_pair pair = {0};
+    enum dmesh_peer_refusal r = DMESH_PEER_REFUSE_PAIR;
+    if (!t || !node || !conn || !t->transport || !t->transport->connect_pair ||
+        !t->transport->pair_ready || !t->transport->pair_admit ||
+        t->transport->pair_ready(conn, &pair) != 1 ||
+        !dmesh_peer_registration_valid(&pair.remote)) goto fail;
+    r = peer_pair_local(t, node, &pair);
+    if (r != DMESH_PEER_OK) goto fail;
+    return peer_accept(t, node, incarnation, conn, key, &pair, reason);
+fail:
+    if (t && t->transport && t->transport->close && conn) t->transport->close(conn);
+    if (reason) *reason = t ? peer_refuse(t, NULL, r) : r;
+    return NULL;
 }
 
 enum dmesh_peer_refusal dmesh_peer_authenticated(struct dmesh_peer_table *table,
@@ -591,6 +836,23 @@ enum dmesh_peer_refusal dmesh_peer_authenticated(struct dmesh_peer_table *table,
         peer_refuse(table, channel, DMESH_PEER_REFUSE_NODE_KEY);
         dmesh_peer_reset(table, channel, "peer static key is not the bound one");
         return DMESH_PEER_REFUSE_NODE_KEY;
+    }
+    enum dmesh_peer_refusal pair = peer_pair_live(table, channel);
+    if (pair != DMESH_PEER_OK) {
+        peer_refuse(table, channel, pair);
+        dmesh_peer_reset(table, channel, "Pod pair activation refused");
+        return pair;
+    }
+    if (channel->pair_scoped) {
+        channel->pair_wire = peer_pair_wire_new(&channel->pair);
+        if (!channel->pair_tx_frame)
+            channel->pair_tx_frame = malloc(sizeof(struct dmesh_peer_msg_header) + DMESH_PEER_FRAME_MAX);
+        if (!channel->pair_rx_payload)
+            channel->pair_rx_payload = malloc(DMESH_PEER_FRAME_MAX);
+        if (!channel->pair_wire || !channel->pair_tx_frame || !channel->pair_rx_payload) {
+            dmesh_peer_reset(table, channel, "Pod pair frame allocation failed");
+            return peer_refuse(table, channel, DMESH_PEER_REFUSE_STATE);
+        }
     }
     channel->state = DMESH_PEER_OPEN;
     channel->last_active_ns = peer_now(table);
@@ -610,6 +872,12 @@ peer_live(struct dmesh_peer_table *table, struct dmesh_peer_channel *channel,
         return peer_refuse(table, channel, DMESH_PEER_REFUSE_STATE);
     if (incarnation != channel->incarnation)
         return peer_refuse(table, channel, DMESH_PEER_REFUSE_INCARNATION);
+    enum dmesh_peer_refusal pair = peer_pair_live(table, channel);
+    if (pair != DMESH_PEER_OK) {
+        peer_refuse(table, channel, pair);
+        dmesh_peer_reset(table, channel, "Pod pair authority retired");
+        return pair;
+    }
     return DMESH_PEER_OK;
 }
 
@@ -654,6 +922,11 @@ dmesh_peer_stream_open(struct dmesh_peer_table *table,
         return peer_refuse(table, channel, DMESH_PEER_REFUSE_MALFORMED);
     if (!peer_open_allowed(table, channel))
         return peer_refuse(table, channel, DMESH_PEER_REFUSE_RATE);
+    if (channel->pair_scoped &&
+        (strcmp(open->src_pod_uid, channel->pair.remote_uid) ||
+         strcmp(open->dst_pod_uid, channel->pair.local_uid) ||
+         open->src_generation != channel->pair.remote.generation))
+        return peer_refuse(table, channel, DMESH_PEER_REFUSE_PAIR);
     if (channel->handle_count >= DMESH_PEER_STREAMS_MAX)
         return peer_refuse(table, channel, DMESH_PEER_REFUSE_STREAMS);
 
@@ -757,6 +1030,17 @@ static void peer_handle_release(struct dmesh_peer_channel *channel,
         channel->handle_count--;
 }
 
+static void peer_handle_maybe_release(struct dmesh_peer_channel *channel,
+                                      struct dmesh_peer_handle *handle)
+{
+    if (!handle || !handle->in_use || !handle->rx_fin || !handle->tx_fin || handle->staging_bytes)
+        return;
+    /* A v2 handle cannot acquire a new stream generation while an ACK for the
+     * old generation remains unencoded, or reply custody still awaits an ACK. */
+    if (channel->pair_scoped && (handle->tx_inflight_bytes || handle->rx_ack_pending)) return;
+    peer_handle_release(channel, handle);
+}
+
 /* Acknowledge only once the bytes have landed in the destination Pod's host
  * RX mapping. Batching them is the same economy the reverse ring already
  * applies: one acknowledgement per released extent. */
@@ -796,6 +1080,8 @@ peer_rx_alloc(struct dmesh_peer_channel *channel, uint32_t handle,
     slot->bytes = bytes;
     slot->source_side = (uint8_t)(source_side != 0);
     slot->in_use = 1;
+    struct dmesh_peer_handle *owner = !source_side ? peer_handle_of(channel, handle) : NULL;
+    if (owner) owner->rx_ack_pending++;
     return slot;
 }
 
@@ -803,6 +1089,8 @@ static void peer_rx_free_slot(struct dmesh_peer_channel *channel,
                               struct dmesh_peer_rxslot *slot)
 {
     uint32_t index = (uint32_t)(slot - channel->rx);
+    struct dmesh_peer_handle *owner = !slot->source_side ? peer_handle_of(channel, slot->handle) : NULL;
+    if (owner && !slot->completed && owner->rx_ack_pending) owner->rx_ack_pending--;
     memset(slot, 0, sizeof(*slot));
     slot->next = channel->rx_free;
     channel->rx_free = index;
@@ -965,8 +1253,7 @@ void dmesh_peer_delivered(struct dmesh_peer_table *table,
     channel->staging_bytes -= len;
     rx->completed = 1;
     peer_ack_drain(table, channel);
-    if (slot->rx_fin && slot->tx_fin && slot->staging_bytes == 0)
-        peer_handle_release(channel, slot);
+    peer_handle_maybe_release(channel, slot);
     channel->last_active_ns = peer_now(table);
 }
 
@@ -991,6 +1278,16 @@ void dmesh_peer_source_delivered(struct dmesh_peer_table *table,
 /* One channel has one ordered writer. A transport-level would-block retains
  * the complete frame here; the next progress pass flushes it before receiving
  * more input or admitting another source frame. */
+static long peer_encode_frame(struct dmesh_peer_channel *channel, long length)
+{
+    if (length < 0 || !channel->pair_scoped) return length;
+    long encoded = peer_pair_wire_encode(channel->pair_wire, channel->tx_frame,
+        (size_t)length, channel->pair_tx_frame,
+        sizeof(struct dmesh_peer_msg_header) + DMESH_PEER_FRAME_MAX);
+    if (encoded > 0) memcpy(channel->tx_frame, channel->pair_tx_frame, (size_t)encoded);
+    return encoded;
+}
+
 static int peer_wire_send(struct dmesh_peer_table *table,
                           struct dmesh_peer_channel *channel,
                           uint8_t type, uint32_t handle,
@@ -1003,6 +1300,11 @@ static int peer_wire_send(struct dmesh_peer_table *table,
                                             DMESH_PEER_FRAME_MAX,
                                         type, channel->incarnation, handle,
                                         payload, payload_len);
+    built = peer_encode_frame(channel, built);
+    if (built < 0 && channel->pair_scoped) {
+        dmesh_peer_transport_failed(table, channel, "pair frame encoding failed");
+        return -1;
+    }
     if (built < 0 || !table->transport || !table->transport->send ||
         !channel->conn)
         return -1;
@@ -1026,8 +1328,17 @@ int dmesh_peer_ack_flush(struct dmesh_peer_table *table,
                      (uint32_t)sizeof(struct dmesh_peer_ack_entry);
     int sent = peer_wire_send(table, channel, DMESH_PEER_MSG_STREAM_ACK, 0,
                               channel->ack_stage, bytes);
-    if (sent == 0)
+    if (sent == 0) {
+        for (unsigned i = 0; i < channel->ack_staged; i++) {
+            struct dmesh_peer_ack_entry *entry = &channel->ack_stage[i];
+            struct dmesh_peer_handle *owner = peer_handle_of(channel, entry->handle);
+            if (owner && owner->rx_ack_pending >= entry->seq_count) {
+                owner->rx_ack_pending -= entry->seq_count;
+                peer_handle_maybe_release(channel, owner);
+            }
+        }
         channel->ack_staged = 0;
+    }
     return sent;
 }
 
@@ -1048,8 +1359,7 @@ dmesh_peer_stream_fin(struct dmesh_peer_table *table,
     if (table->ops && table->ops->destination_fin &&
         table->ops->destination_fin(table->ops_ctx, slot) < 0)
         return peer_refuse(table, channel, DMESH_PEER_REFUSE_NO_POD);
-    if (slot->tx_fin && slot->staging_bytes == 0)
-        peer_handle_release(channel, slot);
+    peer_handle_maybe_release(channel, slot);
     channel->last_active_ns = peer_now(table);
     return DMESH_PEER_OK;
 }
@@ -1066,6 +1376,12 @@ dmesh_peer_pod_gone(struct dmesh_peer_table *table,
         return live;
     if (!pod_uid || !*pod_uid)
         return peer_refuse(table, channel, DMESH_PEER_REFUSE_MALFORMED);
+    if (channel->pair_scoped) {
+        if (strcmp(pod_uid, channel->pair.remote_uid))
+            return peer_refuse(table, channel, DMESH_PEER_REFUSE_PAIR);
+        dmesh_peer_reset(table, channel, "peer pair registration ended");
+        return DMESH_PEER_OK;
+    }
     for (uint32_t i = 0; i < DMESH_PEER_STREAMS_MAX; i++) {
         struct dmesh_peer_handle *slot = &channel->handles[i];
         if (!slot->in_use || strcmp(slot->src_pod_uid, pod_uid) != 0)
@@ -1112,6 +1428,8 @@ dmesh_peer_tx_charge(struct dmesh_peer_channel *channel, uint32_t handle,
     slot->kind = kind;
     slot->in_use = 1;
     channel->inflight_bytes += bytes;
+    struct dmesh_peer_handle *owner = peer_handle_of(channel, handle);
+    if (owner) owner->tx_inflight_bytes += bytes;
     return DMESH_PEER_OK;
 }
 
@@ -1119,6 +1437,11 @@ static void peer_tx_free_slot(struct dmesh_peer_channel *channel,
                               struct dmesh_peer_txslot *slot)
 {
     channel->inflight_bytes -= slot->bytes;
+    struct dmesh_peer_handle *owner = peer_handle_of(channel, slot->handle);
+    if (owner && owner->tx_inflight_bytes >= slot->bytes) {
+        owner->tx_inflight_bytes -= slot->bytes;
+        peer_handle_maybe_release(channel, owner);
+    }
     slot->in_use = 0;
     slot->cookie = NULL;
     slot->next = channel->tx_free;
@@ -1198,11 +1521,20 @@ dmesh_peer_stream_request(struct dmesh_peer_table *table,
         return DMESH_PEER_REFUSE_STATE;
     if (!channel || !open || channel->state != DMESH_PEER_OPEN)
         return peer_refuse(table, channel, DMESH_PEER_REFUSE_STATE);
+    enum dmesh_peer_refusal live = peer_live(table, channel, channel->incarnation);
+    if (live != DMESH_PEER_OK) return live;
+    if (channel->pair_scoped && table->transport->pair_admit(channel->conn) != 1)
+        return peer_refuse(table, channel, DMESH_PEER_REFUSE_INFLIGHT);
     if (!peer_text_ok(open->src_pod_uid, sizeof(open->src_pod_uid)) ||
         !peer_text_ok(open->dst_pod_uid, sizeof(open->dst_pod_uid)) ||
         !peer_text_ok(open->src_service_key, sizeof(open->src_service_key)) ||
         open->reserved != 0 || open->source_token == 0 || open->dst_port == 0)
         return peer_refuse(table, channel, DMESH_PEER_REFUSE_MALFORMED);
+    if (channel->pair_scoped &&
+        (strcmp(open->src_pod_uid, channel->pair.local_uid) ||
+         strcmp(open->dst_pod_uid, channel->pair.remote_uid) ||
+         open->src_generation != channel->pair.local.generation))
+        return peer_refuse(table, channel, DMESH_PEER_REFUSE_PAIR);
     int sent = peer_wire_send(table, channel, DMESH_PEER_MSG_STREAM_OPEN, 0,
                               open, sizeof(*open));
     if (sent == 0)
@@ -1223,6 +1555,10 @@ dmesh_peer_stream_data_send(struct dmesh_peer_table *table,
         return DMESH_PEER_REFUSE_STATE;
     if (!channel || channel->state != DMESH_PEER_OPEN)
         return peer_refuse(table, channel, DMESH_PEER_REFUSE_STATE);
+    enum dmesh_peer_refusal live = peer_live(table, channel, channel->incarnation);
+    if (live != DMESH_PEER_OK) return live;
+    if (channel->pair_scoped && table->transport->pair_admit(channel->conn) != 1)
+        return peer_refuse(table, channel, DMESH_PEER_REFUSE_INFLIGHT);
     if (!peer_handle_wire_ok(handle) || !bytes || len == 0 ||
         len > DMESH_PEER_EXTENT_MAX ||
         custody_kind > DMESH_PEER_CUSTODY_L7 || !cookie)
@@ -1254,6 +1590,13 @@ dmesh_peer_stream_data_send(struct dmesh_peer_table *table,
     };
     memcpy(channel->tx_frame, &header, sizeof(header));
     uint32_t frame_len = (uint32_t)sizeof(header) + header.length;
+    long encoded = peer_encode_frame(channel, frame_len);
+    if (encoded < 0) {
+        peer_tx_uncharge(channel, handle, seq, cookie);
+        dmesh_peer_transport_failed(table, channel, "pair data encoding failed");
+        return DMESH_PEER_REFUSE_TRANSPORT;
+    }
+    frame_len = (uint32_t)encoded;
     long sent = table->transport && table->transport->send && channel->conn
                     ? table->transport->send(channel->conn, channel->tx_frame,
                                              frame_len)
@@ -1291,8 +1634,7 @@ dmesh_peer_stream_fin_send(struct dmesh_peer_table *table,
         struct dmesh_peer_handle *local = peer_handle_of(channel, handle);
         if (local) {
             local->tx_fin = 1;
-            if (local->rx_fin && local->staging_bytes == 0)
-                peer_handle_release(channel, local);
+            peer_handle_maybe_release(channel, local);
         }
         return DMESH_PEER_OK;
     }
@@ -1510,11 +1852,22 @@ int dmesh_peer_channel_progress(struct dmesh_peer_table *table,
             return -1;
         if (table->transport->peer_key(channel->conn, key) < 0)
             return 0;
+        if (channel->pair_scoped) {
+            struct dmesh_peer_pair pair = {0};
+            int ready = table->transport->pair_ready(channel->conn, &pair);
+            if (!ready) return 0;
+            if (ready < 0) {
+                dmesh_peer_transport_failed(table, channel, "Pod pair setup failed");
+                return -1;
+            }
+        }
         if (dmesh_peer_authenticated(table, channel, key) != DMESH_PEER_OK)
             return -1;
     }
     if (channel->state != DMESH_PEER_OPEN)
         return 0;
+    if (peer_live(table, channel, channel->incarnation) != DMESH_PEER_OK)
+        return -1;
 
     if (channel->tx_len != 0) {
         long sent = table->transport && table->transport->send
@@ -1536,8 +1889,14 @@ int dmesh_peer_channel_progress(struct dmesh_peer_table *table,
     while (progressed < frame_budget) {
         struct dmesh_peer_msg_header header;
         const uint8_t *payload = NULL;
-        long parsed = dmesh_peer_frame_parse(channel->rx_frame, channel->rx_len,
-                                             &header, &payload);
+        long parsed;
+        if (channel->pair_scoped) {
+            parsed = peer_pair_wire_decode(channel->pair_wire, channel->rx_frame, channel->rx_len,
+                channel->incarnation, &header, channel->pair_rx_payload, DMESH_PEER_FRAME_MAX);
+            payload = channel->pair_rx_payload;
+        } else {
+            parsed = dmesh_peer_frame_parse(channel->rx_frame, channel->rx_len, &header, &payload);
+        }
         if (parsed < 0) {
             peer_refuse(table, channel, DMESH_PEER_REFUSE_MALFORMED);
             dmesh_peer_reset(table, channel, "malformed peer frame");
@@ -1568,6 +1927,7 @@ int dmesh_peer_channel_progress(struct dmesh_peer_table *table,
             dmesh_peer_reset(table, channel, "peer frame was refused");
             return -1;
         }
+        if (channel->state == DMESH_PEER_CLOSED) return progressed + 1;
         channel->rx_len -= (uint32_t)parsed;
         if (channel->rx_len)
             memmove(channel->rx_frame, channel->rx_frame + parsed, channel->rx_len);

@@ -1,10 +1,24 @@
 # DPUmesh 실행 계획
 
-기준일: 2026-09-10. 현재 구현 계약은 [CONTROL](design/CONTROL.md),
+현재 구현 계약은 [CONTROL](design/CONTROL.md),
 [DATA](design/DATA.md), [API](design/API.md), [GRPC](design/GRPC.md)에 있다.
 이 문서는 남은 작업과 향후 설계를 다룬다.
 
-## 확정한 배치
+### inter-node 보안: Pod 쌍별 RDMA + inline IPsec
+
+노드 간 데이터는 Pod 쌍마다 독립 키와 SA로 보호한다. node crypto manager가 노드 TLS 제어
+연결로 두 노드를 자동 협상시키고, 별도 crypto owner 프로세스가 NIC의 DOCA Flow IPsec 상태를
+설치한다. 계약은 [RDMA + inline IPsec](design/RDMA_IPSEC.md), 하드웨어 결과는
+[OWNER_RESULTS](inline-crypto/coexist/OWNER_RESULTS.md)에 있다.
+
+남은 작업:
+
+- 두 Pod 쌍을 동시에 열어 키·SA 격리를 확인한다.
+- replay와 평문 주입이 거부되는지 주입 시험으로 확인한다.
+- live rekey를 무손실로 통과시킨다.
+- authority·policy·control 세 lease의 임시 값을 서명된 security feed와 policy watch로
+  대체한다.
+- 실 Kubernetes Pod 등록과 broker를 통과하는 host 데이터 경로 전체를 연다.
 
 Host와 DPU는 같은 Kubernetes cluster의 별도 node다.
 Application은 host Pod, DPU runtime은 DPU DaemonSet Pod, controller는
@@ -125,9 +139,8 @@ skip된다. 이는 v1의 host contract가 보존됐다는 뜻이지 v2가 구현
 
 ## 11.3 동결 결정: DPU edge-terminated workload mTLS
 
-2026-09-05 재검토 메모: 이 절은 기존 workload mTLS 설계 기준이다. **RoCEv2 IPsec
-packet offload 대안은 §11.19에 별도 기록했으며, 2026-09-07 월요일 미팅에서 채택 여부를
-결정한다.** 아직 이 절의 요구사항을 변경하거나 IPsec 구현을 승인한 것은 아니다.
+이 절은 workload mTLS 설계다. 노드 간 구간은 Pod 쌍별 inline IPsec이 담당하므로,
+여기 남은 것은 workload 신원을 DPU edge에서 종단하려는 경우의 계약이다.
 
 ### 왜 workload mTLS를 선택하는가
 
@@ -1146,232 +1159,12 @@ host-only 완료 gate:
   관측되고 application/broker crypto call은 0이며 software backend와 wire interop한다.
 - [ ] TCP host receipt와 raw two-node RDMA receipt가 모두 보존된다.
 
-## 11.19 미결정 대안: inter-node RoCEv2 + IPsec inline hardware offload
-
-상태: **DISCUSSION ONLY / 구현·배포 미착수**. 2026-09-05 논의 내용을 보존한다.
-2026-09-07 월요일 미팅에서 요구사항과 feasibility 확인 순서를 결정한다. 이 절은
-§11.3~§11.18을 대체하는 확정 설계가 아니며, 현재 TLS를 끄라는 작업 지시도 아니다.
-이번 작업에서는 문서만 기록하고 종료한다.
-
-### 11.19.1 원하는 경로와 세 가지 방식의 차이
-
-목표는 같은 node 내부 전송에는 추가 암호화를 넣지 않고, **node 밖으로 나가는 peer
-traffic만 DPU/NIC의 전용 hardware에서 암호화해 RDMA로 전송**하는 것이다. 여기서
-검토하는 IPsec 대상은 Ethernet/IP 기반 **RoCEv2**다. native InfiniBand나 RoCEv1에
-같은 설정이 적용된다고 가정하지 않는다.
-
-| 방식 | 인증·암호화 단위 | 암호화 위치 | 현재 상태 / 한계 |
-|---|---|---|---|
-| 현재 v1 node TLS + RDMA | node TLS session | DPU ARM OpenSSL, ciphertext를 verbs로 전송 | 구현됨. 전용 inline crypto offload가 아님 |
-| 기존 v2 workload mTLS + DOCA AES-GCM 후보 | Pod credential별 TLS association | TLS record buffer를 async crypto에 제출한 뒤 RDMA 송신 | §11.15의 미구현 integration. buffer 기반 lookaside이지 packet inline이 아님 |
-| 이번 IPsec 후보 | DPU/node 사이 IPsec SA와 packet | NIC packet pipeline에서 ESP 암·복호화 | RoCEv2 full offload 지원 근거는 있음. 우리 ARM-origin QP 경로는 미검증 |
-
-IPsec 후보의 개념 경로:
-
-```text
-Pod A → 기존 node-local DMA/처리 → DPU A의 등록된 송신 buffer
-     → NIC DMA read → NIC ESP 암호화 → 암호화된 RoCEv2 traffic
-     → NIC ESP 검증·복호화 → DPU B receive buffer → 기존 DMA/처리 → Pod B
-```
-
-이는 암호화를 위해 CPU가 별도 ciphertext buffer를 만들 필요가 없는 경로의 후보다.
-DMA 자체가 없어지는 것은 아니며, 현재 구현에 이미 있는 frame 조립/SEND/RECV 복사도
-자동으로 사라지지 않는다. TCP용 TLS offload 설정을 verbs QP에 적용하는 방식도 아니다.
-
-IPsec은 TLS가 아니다. IKEv2 certificate 인증으로 양쪽 node를 인증하더라도 정확한
-명칭은 **node-authenticated IPsec**이지 node-to-node mTLS가 아니다. control lane에
-mTLS를 유지할 수 있지만, 그것만으로 IPsec data lane이 pod-to-pod mTLS가 되지는 않는다.
-문자 그대로 per-Pod TLS session이 요구사항이면 IPsec 단독 대안은 충족하지 못한다.
-
-### 11.19.2 근거와 아직 증명되지 않은 부분
-
-- [NVIDIA IPsec Full Offload — RDMA traffic](https://docs.nvidia.com/networking/display/mlnxofedv23102131201lts/ipsec-full-offload.pdf):
-  RoCEv2와 SR-IOV VF의 full offload를 명시하며, `ip xfrm`의 `offload packet` 또는
-  동등한 packet-offload 설정을 안내한다. kernel network stack을 우회하는 RDMA에는
-  crypto-only offload와 full packet offload를 구분해야 한다. **우리 DPU ARM의 실제
-  PF/VF/SF·QP·netdev 조합에서 된다는 실측 근거는 아직 아니다.**
-- [NVIDIA DOCA East-West Overlay Encryption](https://docs.nvidia.com/doca/sdk/DOCA-East-West-Overlay-Encryption-Application/index.html):
-  DPU의 strongSwan 제어와 hardware packet 암호화의 구현 참고다. host에서 OVS/VXLAN을
-  통과하는 예제이므로 설정을 그대로 ARM-origin RoCE에 복사하지 않는다. 특히 예제의
-  VXLAN selector와 software stack 조건은 해당 경로의 조건이지 모든 RoCE의 조건이 아니다.
-- [ReDMArk, USENIX Security 2021, §7.3](https://www.usenix.org/system/files/sec21-rothenberger.pdf):
-  RoCE의 IPsec 보호를 논의하는 논문 근거다. IPsec endpoint 보호와 RDMA QP의 source
-  binding을 구분한다. 다른 인증된 endpoint의 QP 사칭까지 자동으로 해결한다고 읽으면
-  안 된다. 이 논문은 현재 BlueField 구성의 inline 성능이나 zero-copy 완료 증거가 아니다.
-
-따라서 “RDMA는 IPsec inline 암호화가 원천적으로 불가능하다”도, “BlueField니까 현재
-코드 그대로 반드시 된다”도 결론으로 쓰지 않는다. 아래 절차는 이 근거에서 도출한
-**DPUmesh용 설계 제안**이며, vendor가 DPUmesh integration을 보증한 내용이 아니다.
-
-### 11.19.3 node 단위 보호가 충분하다고 판단할 수 있는 조건
-
-§3.3처럼 host kernel, 등록 경로, broker, DPU와 controller/CA를 신뢰하고 일반 workload와
-외부 network를 신뢰하지 않는 모델이라면, 다음을 모두 만족하는 **IPsec + workload
-authorization** 조합은 검토할 수 있다. 단순히 “node끼리 암호화했으니 충분”은 근거가 아니다.
-
-1. 외부 network의 도청·변조·replay는 인증된 peer 사이 ESP와 anti-replay가 막는다.
-   unprotected ingress/egress는 차단하며 같은 node 내부 plaintext는 신뢰 경계 안에 둔다.
-2. source Pod는 자기 UID/namespace/ServiceAccount를 임의로 claim하지 못한다. 신뢰된
-   local registration에서 얻은 identity만 사용하고, remote에서는 controller가 승인한
-   node 소유권과 exact Pod incarnation, destination policy를 검증한다.
-3. workload claim은 **실제로 인증된 node와 현재 data channel**에 결합한다. 필요한 경우
-   controller-signed short-lived capability를 사용하며 대상 node/service, Pod incarnation,
-   expiry와 replay 범위를 명시한다. IPsec source IP만으로 Pod identity를 만들지 않는다.
-4. Pod 삭제·재생성·이동, node credential 회수, policy 변경 때 기존 권한과 stream을
-   철회한다. 다른 node 또는 이전 incarnation의 claim은 application delivery 전에 거부한다.
-5. 한 node/DPU가 침해되면 그 node의 workload를 사칭할 수 있다는 한계를 수용한다.
-   기존 DPU-terminated workload TLS도 DPU가 해당 Pod private key를 보유하므로 이 위협을
-   독립적으로 해결하지는 못한다. 다른 node의 workload까지 사칭할 수 있어서는 안 된다.
-
-위 조건은 network confidentiality/integrity와 workload authorization을 분리해 만족시키는
-논거다. **per-Pod TLS proof of possession, 독립 traffic key, TLS association 단위 audit와
-동일한 기능을 제공한다는 뜻은 아니다.** 이 차이를 수용하지 못하면 기존 workload mTLS
-설계를 유지한다. 수용한다면 §1.2의 workload 상호 인증 invariant와 §11의 TLS-specific
-계약을 명시적으로 개정해야 하며, 이 메모만으로 기존 요구사항을 완화하지 않는다.
-
-### 11.19.4 구현 전에 닫아야 하는 hardware feasibility gate
-
-아래는 미팅 후 승인받아 수행할 순서다. 지금 장비 설정, service restart, firmware 변경은
-하지 않는다. 실제 2-node 준비 절차는 별도 로컬 운영 문서를 따른다.
-
-1. 양쪽 장비의 crypto-enabled SKU, firmware, BFB/DOCA, kernel, mlx5 driver와 iproute2,
-   IKE daemon 버전을 기록한다. 기존 장비 메모를 현재 capability 측정치로 간주하지 않는다.
-2. `peer_wire_rdma.c`가 사용하는 RDMA device/port/GID와 실제 netdev·PF/VF/SF·physical
-   egress를 대응시킨다. **DPU ARM process가 만든 QP의 traffic**이 packet offload 경로에
-   들어가는지 확인한다. host VF의 성공이나 host-transit OVS 예제로 대신하지 않는다.
-3. 그 조합의 vendor-supported full-offload recipe를 고른다. DMFS/switchdev/function
-   capability, kernel/backport 조건은 해당 버전 문서로 확인한다. 서로 다른 문서의
-   kernel 6.6 조건과 BlueField BFB kernel 5.15 예제를 한 가지 설치 절차로 섞지 않는다.
-4. 승인된 격리 fabric에서 synthetic payload로 양방향 RoCEv2 baseline을 확보한 뒤,
-   동일 ARM-origin QP 경로에 IPsec packet offload를 설정한다. test용 static SA는 packet
-   처리 확인용일 뿐이며 production 인증·key lifecycle의 완료로 인정하지 않는다.
-5. 양방향 SA(Security Association), ingress/egress policy, selector, replay window,
-   sequence exhaustion/ESN, rekey 지원과 ESP overhead를 포함한 MTU를 확인한다. NIC의
-   RDMA header/ICRC 처리까지 지원되는 경로를 사용하며 소프트웨어에서 임의 패킷 변환하지 않는다.
-6. 외부 link capture와 양쪽 NIC IPsec/RDMA counter를 함께 남긴다. DPU 내부 capture는
-   암호화 전/복호화 후 지점일 수 있으므로 plaintext가 보였다는 이유만으로 wire 유출로
-   단정하지 않는다. 반대로 연결 성공이나 ARM CPU 감소만으로 hardware offload를 입증하지 않는다.
-
-selector 주의: 현재 `bench/bench.sh`의 `DPUMESH_PEER_PORT` 기본값 `47900`은 peer
-service/RDMA CM 설정이고 RoCEv2 wire UDP destination port `4791`과 다르다. 실제
-생성되는 packet을 기준으로 RoCEv2 flow 또는 전용 DPU IP pair를 보호한다. overlay 예제의
-UDP `4789`를 무조건 사용하지 않는다. CM/control packet 보호 범위도 별도로 확인한다.
-여러 Pod stream이 하나의 peer/QP에 multiplex되므로 node IP pair SA가 자동으로
-per-Pod SA가 되지 않는다. per-Pod SA를 원하면 별도의 flow 식별·steering 설계가 필요하다.
-
-### 11.19.5 IPsec 제어와 fail-closed 구현 후보
-
-첫 후보는 DPU의 privileged node service가 IKEv2와 Linux XFRM packet-offload policy를
-관리하고, mesh process는 그 service의 검증된 상태를 받아 admission하는 분리 구조다.
-DOCA packet/flow API 기반 별도 구현은 대안이며 동일 flow를 두 관리자가 동시에 소유하지
-않는다. 구체적인 service/API 이름은 아직 정하지 않았다.
-
-- production은 양쪽 node certificate와 명시적 peer identity 검증을 설계한다. IKE credential과
-  현재 TLS node key의 관계는 controller가 승인한 mapping으로 정한다. CA private key를
-  DPU에 배포하거나 TLS session secret을 임의로 IPsec key로 전용하지 않는다.
-- 선택한 stack에서 `offload packet` / `hw_offload = packet` 등 **packet offload 필수**
-  설정을 사용한다. 정확한 문법과 지원은 해당 stack에서 검증한다. software/crypto-only로
-  내려갈 수 있는 `auto`는 이번 hardware 요구의 성공 조건으로 쓰지 않는다.
-- policy가 설치되어 unprotected traffic을 차단하고, 양방향 인증·SA·실제 hardware 설치가
-  확인된 뒤에만 peer DATA를 허용한다. XFRM state가 보인다는 사실만으로 끝내지 않는다.
-- SA 부재/expiry, rekey 실패, daemon/NIC restart에서도 hardware/driver 경로 자체가
-  plaintext를 차단해야 한다. user-space 상태 polling은 이 차단을 대신할 수 없다.
-  장애 때 QP/admission을 닫고, policy 제거 순서 때문에 plaintext가 나갈 틈도 없게 한다.
-- rekey 중 old/new SA overlap, anti-replay, certificate 회수, node 재시작과 connection
-  incarnation의 관계를 명시한다. SPI 변경마다 application stream을 반드시 끊을 필요는
-  없지만, 동일한 인증 peer와 보호 상태의 연속성을 입증하지 못하면 fail-closed한다.
-- application Pod에 XFRM, SA 또는 DPU flow 변경 권한을 주지 않는다. 제어 service의 API와
-  socket도 local caller를 인증한다. key material을 log나 benchmark receipt에 남기지 않는다.
-
-IPsec 미지원·설치 실패 시 plaintext RDMA로 fallback하지 않는다. 기존 TLS를 별도 운영
-모드로 유지하는 선택은 가능하지만, 그것을 hardware inline 목표 달성으로 보고하지 않는다.
-
-### 11.19.6 실제 코드 기준 integration 변경 지점
-
-IPsec 설정만 설치하면 현재 코드는 **TLS ciphertext를 다시 IPsec으로 암호화**한다.
-아래 분리가 필요하며, `peer_tls_*` 호출만 삭제하면 인증까지 사라지므로 그렇게 수정하지 않는다.
-
-| 현재 파일 / symbol | 현재 역할 | IPsec안을 채택했을 때 필요한 변경 |
-|---|---|---|
-| [doca/peer_transport.c](doca/peer_transport.c), `conn_feed`, `conn_drain`, `transport_peer_key` | 모든 carrier 위에 TLS와 node-key 인증을 제공 | carrier와 security mode를 분리. IPsec data 경로는 검증된 보호·identity binding 이후에만 plaintext frame을 carrier에 넘김 |
-| [doca/peer_transport.h](doca/peer_transport.h), `peer_transport_config` | TLS seed와 wire 설정 | 인증된 node, IPsec 보호 상태, channel binding과 fault notification 계약 추가. 기존 TLS config/default 보존 |
-| [doca/peer_channel.c](doca/peer_channel.c), `dmesh_peer_authenticated`, `bound_key` | TLS에서 얻은 key를 topology의 expected key와 비교 | IKE identity↔mesh node identity mapping과 실제 data channel 증명을 검증하는 별도 admission 설계 |
-| [doca/peer_wire_rdma.c](doca/peer_wire_rdma.c), `rdma_send_msg`, `rdma_recv_msg` | RC SEND/RECV와 등록된 slot pool | verbs carrier는 유지. 보호 대상 device/flow를 제어 계층과 연결하고 IPsec fault 때 connection을 중단 |
-| [doca/dpu_proxy.c](doca/dpu_proxy.c), remote delivery/policy 경로 | source/destination와 host DMA/custody 관리 | workload claim 검증과 incarnation 철회를 보존. IPsec이라는 이유로 destination policy나 ACK gate를 생략하지 않음 |
-| [bench/bench.sh](bench/bench.sh), peer 설정 전달 | transport/bind/port 설정 | 향후 명시적인 security mode와 capability receipt를 연결. 기존 환경변수만으로 IPsec이 활성화됐다고 취급하지 않음 |
-
-인증 seam의 핵심 미결정 사항:
-
-1. 현재 `peer_key()`는 TLS handshake가 입증한 key를 반환한다. IPsec 경로에서 topology의
-   expected key를 그냥 복사해 반환하면 **expected identity를 인증 결과로 위조**하는 셈이다.
-   인증 evidence의 종류를 구분하는 API와 negative test부터 설계한다.
-2. node mTLS control lane을 유지한다면 그 lane에서 승인한 양쪽 node/incarnation과
-   fresh challenge를 실제 IPsec-protected data channel에 결합하는 bootstrap이 필요하다.
-   data channel의 주소/QP 정보, local policy 소유권과 검증된 IKE identity를 함께 확인한다.
-   metadata에 IP나 QPN을 적는 것만으로 결합이 입증되는 것은 아니다.
-3. 다른 정상 인증 node의 SA/QP로 claim을 재사용하거나 old connection의 bootstrap을
-   replay하지 못하게 해야 한다. bootstrap field/증명 방식/timeout/rekey 연속성은 미팅 후
-   별도 protocol review와 fixture로 동결한다. 이 메모는 완성된 channel-binding protocol이 아니다.
-4. DATA뿐 아니라 OPEN/ACK/FIN/RESET 등 data channel 제어 frame도 보호한다. 별도 control
-   mTLS의 소량 이중 암호화는 허용 여부를 정하되, bulk payload에서 TLS를 제거할지는 요구사항
-   결정 뒤에만 바꾼다. remote direct WRITE로 host memory를 노출하는 변경은 포함하지 않는다.
-
-### 11.19.7 memcpy와 성능 검증은 별도 항목
-
-현재 `dmesh_peer_stream_data_send()`는 payload를 `channel->tx_frame`으로 복사하고,
-`rdma_send_msg()`는 다시 registered SEND slot으로 `memcpy()`한다. `rdma_recv_msg()`도
-receive slot에서 caller buffer로 복사한다. TLS 경로에는 memory BIO와 `c->in/out` staging이
-추가된다. 따라서 **IPsec inline 도입 = 현재 RDMA 경로 전체 zero-copy**가 아니다.
-
-IPsec data mode가 채택되면 TLS-specific staging 제거를 검토할 수 있다. frame/SEND 복사
-제거는 registered buffer 소유권과 scatter/gather, RX 복사 제거는 receive buffer lease와
-repost 시점까지 바꾸는 독립 작업이다. 현재 QP의 `max_send_sge = 1`도 고려해야 한다.
-local SEND CQ 완료 전에 buffer를 재사용하지 않으며, source custody의 `DELIVERED`는 여전히
-destination `REV_DONE` 뒤 `STREAM_ACK` 수신으로만 확정한다. SEND CQ는 전달 ACK가 아니다.
-
-공통 RDMA buffer API와 현재 TLS 연결의 구체적인 복사 제거 절차는 §11.20에 기록한다.
-§13.4의 Linkerd TX 중간 복사 제거 계획은 그대로 유지하며, 이 IPsec 검토와 별도로 평가한다.
-IPsec 또는 복사 제거만으로 성능 향상률을 사전에 약속하지 않는다.
-
-향후 검증 순서:
-
-1. host-only fixture: 보호 미완료 admission, 다른 node/Pod claim, bootstrap replay,
-   policy 철회, SA fault 때 delivery 0과 custody terminal 처리를 검증한다. mock의 성공은
-   hardware pass가 아니다.
-2. 2-DPU synthetic traffic: 실제 ARM-origin QP에서 plaintext baseline 대비 IPsec packet
-   offload의 wire/counter receipt를 확보한다. plaintext baseline은 격리된 test에 한정한다.
-3. production 인증 후보: certificate 기반 IKE, rekey/expiry/회수, daemon/NIC restart,
-   잘못된 SA와 plaintext injection 때 유출·application delivery가 없는지 확인한다.
-4. mesh 연결: node binding, Pod churn과 destination policy를 유지하면서 양방향 L4/L7
-   traffic을 검증한다. 현재 TLS 경로와 동일 payload·concurrency·MTU 조건에서 throughput,
-   p50/p99 latency, ARM CPU, memory bandwidth, packet/drop/replay counter를 기록한다.
-5. 복사 최적화는 별도 전후 결과로 분리한다. workload TLS안과 node IPsec안은 인증 단위가
-   다르므로 성능 수치만으로 “동일한 보안에 더 빠름”이라고 결론 내리지 않는다.
-
-### 11.19.8 2026-09-07 월요일 미팅 결정 항목
-
-- [ ] 요구사항은 실제 per-Pod TLS association인가, 아니면 workload authorization을
-  보존한 node 경계 암호화인가? IPsec을 mTLS라고 부르지 않는 용어에도 합의한다.
-- [ ] §11.19.3의 신뢰 경계와 보안상 차이를 수용하는가? capability/channel binding의
-  검증 책임과 credential 발급·철회 주체는 누구인가?
-- [ ] ARM-origin RoCEv2 full-offload feasibility 실험을 진행할 것인가? 양쪽 장비 접근,
-  설정 변경 권한, 복구 방법과 담당자를 정한다.
-- [ ] node pair SA로 충분한가? per-Pod key isolation이 필요하면 기존 workload TLS 또는
-  별도 per-Pod flow 설계를 유지해야 한다.
-- [ ] full-offload 미지원이면 기존 TLS를 유지할 것인가, 장비/경로를 바꿀 것인가?
-  software fallback을 hardware 목표 달성으로 인정하지 않는다.
-- [ ] 채택 후에만 §1.2·§11.3~§11.18의 요구사항/구현 순서를 일관되게 개정한다.
-  미채택이면 본 절은 검토 기록으로 남기고 기존 workload mTLS 계획을 유지한다.
-
----
-
 ## 11.20 RDMA 중간 복사 제거 — 공통 buffer lease와 TLS 전용 연결
 
 상태: **A 공통 TX/RX lease 구현·software 회귀 완료 / B TLS 연결 미착수**.
-A는 [direct-tx-rdma-20260905](bench/report/data/direct-tx-rdma-20260905/SUMMARY.md)에서
-배포·측정했다. 실제 두 DPU fabric gate는 계속 별도다. 2026-09-05 실제 코드를
-기준으로 작성했다. §11.19의 IPsec 채택 결정과 독립적으로 구현할 수 있다. 현재 TLS 인증과
-wire protocol을 유지한다. A의 API/type은 구현됐으며, B의 TLS 직접 연결은 아래 설계로 남는다.
+A의 측정 기록은 [direct-tx-rdma](bench/report/data/direct-tx-rdma-20260905/SUMMARY.md)에
+있고, 두 DPU fabric gate는 별도다. Pod 쌍 inline IPsec과 독립적으로 구현할 수 있으며 TLS
+인증과 wire protocol을 유지한다. A의 API/type은 구현돼 있고 B의 TLS 직접 연결이 남는다.
 
 ### 11.20.1 무엇을 없애고 무엇은 유지하는가
 

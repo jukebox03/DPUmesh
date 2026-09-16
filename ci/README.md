@@ -1,6 +1,6 @@
 # CI
 
-The host checks cover the single paired-DPU registration protocol, identity metadata and signed feeds. Run `make test-local-registration` for the real TLS/framing test in addition to the targets below. Live DPU logs now come from the Kubernetes runtime container; host admin remains systemd.
+The host checks cover the single paired-DPU registration protocol, identity metadata and signed feeds. Run `make test-local-registration` for the real TLS/framing test in addition to the targets below. Live DPU logs come from the Kubernetes runtime container; host admin remains systemd.
 
 Checks live here as scripts and Makefile targets; the workflows in
 `.github/workflows/` only decide when to run them. Anything CI fails on can be
@@ -54,12 +54,24 @@ call is missing.
 ```
 make test-hostfree     the contracts that need no DOCA and no BlueField
 make test              every contract
+make test-peer-security  Pod-pair control/key/QP foundations; localhost and fake verbs only
 ```
 
 The difference between them is the definition of "needs the DOCA SDK". Hosted CI
 runs the first; only rapids4 can run the second. `test-hostfree` refuses to run
 under `-DNDEBUG`, because these tests are built on `assert()` and would all pass
 silently without it.
+
+`test-peer-security` requires OpenSSL and rdma-core development libraries but
+never opens an RDMA device or contacts a DPU. Its exporter, codec, association
+and localhost TLS tests also run under `test-hostfree`; the fake verbs provider
+test additionally runs under `make test`. See the [RDMA/IPsec design](../design/RDMA_IPSEC.md)
+for the remaining production integration and hardware gates.
+
+`peer_pair_transport_test` also runs without DOCA: it checks worker/control queue
+backpressure (including 20,000 messages across two threads), pre-QP policy queries,
+activation/rekey barriers, delayed DMA fences, stale references and quarantine.
+The proxy test checks the real preallocation policy and custody release paths.
 
 Both targets require the Python packages in `tests/requirements.txt`. To run
 them locally in an isolated environment:

@@ -380,7 +380,7 @@ The existing cluster, paired hardware and Linkerd control plane are prerequisite
 
 ## Documentation
 
-Four design documents define the contracts, reports retain measurement
+Five design documents define the contracts, reports retain measurement
 evidence, and `PLAN.md` alone contains future work. The design documents are
 whitepapers for the code and manifests in this tree.
 
@@ -392,6 +392,7 @@ whitepapers for the code and manifests in this tree.
 | [design/DATA.md](design/DATA.md) | the data plane: host/DPA/ARM custody, rings, replay barriers, and the DPU-side Linkerd runtime that rides on them |
 | [design/CONTROL.md](design/CONTROL.md) | the control plane at both scopes: naming, trusted registration, signed feeds, the Linkerd control plane, the cluster controller and the peer channel |
 | [design/GRPC.md](design/GRPC.md) | the gRPC adapter: how it maps chttp2 onto the transport, how an application bootstraps against it, and its workloads |
+| [design/RDMA_IPSEC.md](design/RDMA_IPSEC.md) | per-Pod-pair RDMA with inline IPsec: the node crypto manager and its control session, the crypto owner that installs the DOCA Flow SAs, rekey and revocation |
 
 **Measurement and work**
 

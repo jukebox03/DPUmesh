@@ -14,6 +14,7 @@
 #include "comch_server.h"
 #include "topology.h"
 #include "comch_common.h"
+#include "peer_identity.h"
 #include <dpumesh/dmesh_common.h>
 
 struct dmesh_doca_dpa_thread;
@@ -213,6 +214,7 @@ struct pod_state {
     char pod_ip[DMESH_POD_IP_MAX];
     char registered_service[DMESH_SVC_NAME_MAX];
     uint8_t registration_nonce[DMESH_REG_NONCE_SIZE];
+    struct dmesh_peer_registration peer_registration;
 
 
     /* Whether the controller says this node may act for this Pod on the
@@ -462,8 +464,13 @@ static inline void dpu_upstream_free(struct dpu_conntrack *ct, uint16_t uP) {
 }
 
 /* The inter-node carrier's runtime, created at bring-up and owned by the
- * worker it serves. Opaque here: only dpu_worker.c drives it. */
+ * worker it serves. Opaque here: only dpu_worker.c drives it. The Pod-pair
+ * transport is the inline alternative; a worker holds one or the other. */
 struct peer_transport_rt;
+struct peer_pair_transport;
+struct peer_manager;
+struct peer_crypto_ipc;
+struct ibv_context;
 
 struct dpu_data_worker {
     struct objects *objs;
@@ -496,6 +503,7 @@ struct dpu_data_worker {
      * carrier's connections are waited on. -1 leaves wake_fd as the only one. */
     int wake_epfd;
     struct peer_transport_rt *peer_rt;  /* NULL when no peer carrier is configured */
+    struct peer_pair_transport *pair_rt; /* the Pod-pair lanes, when inline security is on */
     uint64_t peer_evict_deadline;       /* next idle-channel sweep */
     uint64_t dpa_nudge_deadline; /* next optional DPA nudge; 0 while disabled */
     atomic_int parked;           /* worker is entering or blocked in epoll_wait */
@@ -652,6 +660,19 @@ struct objects {
 
     int n_data_workers;                         /* A */
     struct dpu_data_worker data_workers[MAX_ARM_WORKERS];
+
+    /* The node crypto manager and the verbs device its lanes share, present
+     * only when the Pod-pair inline path is configured. The control thread
+     * reports registrations ending through the hook so the Comch server never
+     * links the manager itself, and renews the manager's authority lease on
+     * its own cadence until the signed security feed replaces that. */
+    struct peer_manager *peer_manager;
+    struct peer_crypto_ipc *peer_crypto_ipc;
+    struct ibv_context *peer_verbs;
+    void (*peer_unregister_hook)(struct objects *objs, const char *pod_uid);
+    uint64_t peer_lease_ns;
+    uint64_t peer_authority_generation;
+    uint64_t peer_authority_next_ns;
 };
 
 /* ====== Task-pool helpers ======

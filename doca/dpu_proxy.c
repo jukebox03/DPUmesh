@@ -456,6 +456,7 @@ struct px_worker_state {
      * applying it there would unlink arrivals the walk still holds. */
     int in_l7_parse;
     struct dmesh_peer_table *peers;
+    atomic_int peer_rebind_pending;
     struct px_remote_upstream *remote_upstreams; /* indexed by local uP */
     /* Which upstream ports hold a peer FIN the landing lane could not take.
      * Bit i stands for port DMESH_UPORT_BASE + i, so the retry pass walks the
@@ -772,6 +773,8 @@ static void px_unit_free_node(struct dmesh_proxy *px, struct px_unit *u) {
             px_chunk_free(px, p->chunk);
         px_piece_free(px, p);
     }
+    if (u->peer_channel)
+        (void)dmesh_peer_channel_release(u->peer_channel, u->peer_incarnation);
     px_unit_free(px, u);
 }
 static struct px_batch *px_batch_alloc(struct px_engine *eng) {
@@ -821,6 +824,7 @@ static void px_arrival_release(struct objects *objs, struct px_arrival *a) {
                                         a->peer_handle, a->peer_seq, a->len);
         if (a->peer_chunk)
             px_chunk_free(objs->proxy, a->peer_chunk);
+        (void)dmesh_peer_channel_release(a->peer_channel, a->peer_incarnation);
         px_arrival_free(objs->proxy, a);
         return;
     }
@@ -1107,6 +1111,8 @@ static int px_conn_admitted(struct objects *objs, struct px_conn *c, int32_t dst
 static uint16_t px_peer_destination_opened(
     void *ctx, struct dmesh_peer_channel *channel, uint32_t handle,
     const struct dmesh_peer_stream_open *open, int32_t dst_pod_idx);
+static int px_peer_pair_authorize(void *ctx, const struct dmesh_peer_pair *,
+                                   const struct dmesh_peer_stream_open *);
 static int px_l7_open_conn(struct objects *objs, struct px_conn *c);
 static void px_parse_l7(struct objects *objs, struct px_conn *c);
 static struct px_conn *px_request_for_reply(struct objects *objs,
@@ -1445,23 +1451,8 @@ static int px_peer_stream_ready(struct objects *objs, struct px_conn *c,
         return 1;
     if (!px_peer_pin_endpoint(objs, c, selected_pod_uid))
         return -1;
-    enum dmesh_peer_refusal reason = DMESH_PEER_OK;
-    struct dmesh_peer_channel *channel =
-        dmesh_peer_open(worker->peers, c->peer_node, &reason);
-    if (!channel) {
-        px_peer_event(objs, dmesh_peer_refusal_name(reason));
-        return -1;
-    }
-    c->peer_channel = channel;
-    if (channel->state != DMESH_PEER_OPEN)
-        return 0;                              /* handshake progresses on this worker */
-    if (c->peer_open_pending)
-        return 0;
-    if (channel->tx_len != 0)
-        return 0;
-
     struct pod_state *source = find_pod_by_id(objs, c->pub.src_pod);
-    if (!source || source->pod_uid[0] == '\0')
+    if (!source || !pod_data_ready(source) || source->pod_uid[0] == '\0')
         return -1;
     struct dmesh_peer_stream_open open;
     memset(&open, 0, sizeof(open));
@@ -1475,6 +1466,22 @@ static int px_peer_stream_ready(struct objects *objs, struct px_conn *c,
     open.dst_port = dmesh_topology_service_port(objs, c->pub.dst_service);
     if (open.dst_port == 0)
         return -1;
+    open.src_generation = source->peer_registration.generation;
+    enum dmesh_peer_refusal reason = DMESH_PEER_OK;
+    struct dmesh_peer_channel *channel =
+        dmesh_peer_open_stream(worker->peers, c->peer_node, &open, &reason);
+    if (!channel) {
+        px_peer_event(objs, dmesh_peer_refusal_name(reason));
+        return -1;
+    }
+    c->peer_channel = channel;
+    if (channel->state != DMESH_PEER_OPEN)
+        return 0;                              /* handshake progresses on this worker */
+    if (c->peer_open_pending)
+        return 0;
+    if (channel->tx_len != 0)
+        return 0;
+
     uint32_t token = 0;
     /* Tokens correlate OPEN_ACK before a wire handle exists. Wrap must not
      * let a late ACK bind to another pending connection on this channel. */
@@ -2047,7 +2054,8 @@ static int px_peer_node_binding(void *ctx, const char *node_name,
      * carrier on that port plus its index. A worker therefore reaches the peer
      * worker with the same index, which is what keeps a channel's two ends on
      * one connection instead of funnelling every worker into index 0. */
-    if (port) {
+    if (port && !(worker->peers && worker->peers->transport &&
+                  worker->peers->transport->connect_pair)) {
         unsigned peer_port = (unsigned)*port + (unsigned)worker->id;
         if (*port == 0 || peer_port > UINT16_MAX)
             return 0;
@@ -2090,6 +2098,21 @@ static uint32_t px_peer_pod_generation(void *ctx, int32_t pod_idx)
         return 0;
     return __atomic_load_n(&worker->objs->pods[pod_idx].dma_generation,
                            __ATOMIC_ACQUIRE);
+}
+
+static int px_peer_local_registration(void *ctx, const char *uid,
+                                      struct dmesh_peer_registration *out)
+{
+    struct px_worker_state *worker = ctx;
+    if (!out) return 0;
+    memset(out, 0, sizeof(*out));
+    int32_t slot = px_peer_local_pod(ctx, uid, NULL);
+    if (slot < 0) return 0;
+    struct pod_state *pod = &worker->objs->pods[slot];
+    if (!pod->registration_verified || pod->local_registration_closed ||
+        !dmesh_peer_registration_valid(&pod->peer_registration)) return 0;
+    *out = pod->peer_registration;
+    return 1;
 }
 
 static struct px_conn *
@@ -2151,6 +2174,10 @@ px_peer_queue_delivery(struct px_worker_state *worker,
     unit->seq = (uint16_t)peer_seq;
     unit->total_len = len;
     unit->dst_pod_idx = (int8_t)(dst - objs->pods);
+    if (dmesh_peer_channel_hold(channel, incarnation)) {
+        px_unit_free_node(px, unit);
+        return -1;
+    }
     unit->peer_channel = channel;
     unit->peer_incarnation = incarnation;
     unit->peer_handle = handle;
@@ -2243,6 +2270,11 @@ static int px_peer_source_deliver(void *ctx,
                 px_chunk_free(px, chunk);
             if (arrival)
                 px_arrival_free(px, arrival);
+            return -1;
+        }
+        if (dmesh_peer_channel_hold(channel, channel->incarnation)) {
+            px_chunk_free(px, chunk);
+            px_arrival_free(px, arrival);
             return -1;
         }
         memcpy(px->arena + chunk->off, bytes, len);
@@ -2460,6 +2492,8 @@ static const struct dmesh_peer_ops PX_PEER_OPS = {
     .node_binding = px_peer_node_binding,
     .pod_on_node = px_peer_pod_on_node,
     .local_pod = px_peer_local_pod,
+    .local_registration = px_peer_local_registration,
+    .pair_authorize = px_peer_pair_authorize,
     .destination_opened = px_peer_destination_opened,
     .pod_generation = px_peer_pod_generation,
     .deliver = px_peer_deliver,
@@ -2480,14 +2514,17 @@ int px_peer_configure(struct objects *objs, int worker_id,
 {
     struct dmesh_proxy *px = objs ? objs->proxy : NULL;
     if (!px || worker_id < 0 || worker_id >= px->n_workers || !transport ||
-        !transport->connect || !transport->peer_key || !transport->send ||
+        (!transport->connect && !transport->connect_pair) ||
+        (!!transport->connect_pair != !!transport->pair_ready) ||
+        (!!transport->connect_pair != !!transport->pair_admit) ||
+        !transport->peer_key || !transport->send ||
         !transport->recv || !transport->close || !objs->node_key_ready ||
         objs->node_name[0] == '\0')
         return -1;
     struct px_worker_state *worker = &px->workers[worker_id];
     if (!worker->peers || !worker->remote_upstreams)
         return -1;
-    dmesh_peer_table_fini(worker->peers);
+    if (dmesh_peer_table_fini(worker->peers)) return -1;
     dmesh_peer_table_init(worker->peers, objs->node_name,
                           objs->node_public_key, transport, transport_ctx,
                           &PX_PEER_OPS, worker);
@@ -2503,15 +2540,16 @@ struct dmesh_peer_table *px_peer_table(struct objects *objs, int worker_id)
     return peers && peers->transport ? peers : NULL;
 }
 
-void px_peer_detach(struct objects *objs, int worker_id)
+int px_peer_detach(struct objects *objs, int worker_id)
 {
     struct dmesh_proxy *px = objs ? objs->proxy : NULL;
     struct dmesh_peer_table *peers = px_peer_table(objs, worker_id);
     if (!peers)
-        return;
-    dmesh_peer_table_fini(peers);
+        return 0;
+    if (dmesh_peer_table_fini(peers)) return -1;
     dmesh_peer_table_init(peers, objs->node_name, objs->node_public_key,
                           NULL, NULL, &PX_PEER_OPS, &px->workers[worker_id]);
+    return 0;
 }
 
 void px_peer_evict_idle(struct objects *objs, int worker_id)
@@ -2532,8 +2570,9 @@ px_peer_accept(struct objects *objs, int worker_id, const char *node_name,
     if (!worker->peers || !worker->peers->transport)
         return NULL;
     enum dmesh_peer_refusal reason = DMESH_PEER_OK;
-    struct dmesh_peer_channel *channel = dmesh_peer_accept(
-        worker->peers, node_name, incarnation, conn, peer_key, &reason);
+    struct dmesh_peer_channel *channel = worker->peers->transport->connect_pair
+        ? dmesh_peer_accept_pair(worker->peers, node_name, incarnation, conn, peer_key, &reason)
+        : dmesh_peer_accept(worker->peers, node_name, incarnation, conn, peer_key, &reason);
     if (!channel)
         px_peer_event(objs, dmesh_peer_refusal_name(reason));
     return channel;
@@ -2548,17 +2587,35 @@ static void px_peer_pod_gone(struct objects *objs, int32_t pod_id)
     struct dmesh_proxy *px = objs ? objs->proxy : NULL;
     if (!px)
         return;
-    struct pod_state *pod = find_pod_by_id(objs, pod_id);
+    /* Routing has already withdrawn registered/pod_id_to_slot at this point.
+     * The teardown barrier still owns the slot and its retained identity. */
+    struct pod_state *pod = NULL;
+    int npods = __atomic_load_n(&objs->num_pods, __ATOMIC_ACQUIRE);
+    for (int i = 0; i < npods; i++)
+        if (objs->pods[i].pod_id == pod_id && pod_id >= 0) {
+            pod = &objs->pods[i];
+            break;
+        }
     if (!pod || pod->pod_uid[0] == '\0')
         return;
-    for (int w = 0; w < px->n_workers; w++) {
-        struct dmesh_peer_table *peers = px->workers[w].peers;
+    /* Each worker runs its own quiescence pass. Walking all workers here used
+     * to race their channel writers and could close another worker's QP. */
+    struct px_worker_state *worker = px_cur_worker;
+    if (!worker || worker->objs != objs) return;
+    {
+        struct dmesh_peer_table *peers = worker->peers;
         if (!peers)
-            continue;
+            return;
         for (uint32_t i = 0; i < DMESH_CHANNEL_MAX; i++) {
             struct dmesh_peer_channel *channel = &peers->channels[i];
-            if (!channel->in_use || channel->state != DMESH_PEER_OPEN)
+            if (!channel->in_use || channel->state == DMESH_PEER_CLOSED)
                 continue;
+            if (channel->pair_scoped) {
+                if (!strcmp(channel->pair.local_uid, pod->pod_uid))
+                    dmesh_peer_reset(peers, channel, "local pair registration ended");
+                continue;
+            }
+            if (channel->state != DMESH_PEER_OPEN) continue;
             enum dmesh_peer_refusal sent =
                 dmesh_peer_pod_gone_send(peers, channel, pod->pod_uid);
             if (sent != DMESH_PEER_OK && sent != DMESH_PEER_REFUSE_INFLIGHT)
@@ -2572,9 +2629,10 @@ void px_peer_generation_changed(struct objects *objs)
     struct dmesh_proxy *px = objs ? objs->proxy : NULL;
     if (!px)
         return;
-    for (int w = 0; w < px->n_workers; w++)
-        if (px->workers[w].peers)
-            dmesh_peer_table_rebind(px->workers[w].peers);
+    for (int w = 0; w < px->n_workers; w++) {
+        atomic_store_explicit(&px->workers[w].peer_rebind_pending, 1, memory_order_release);
+        px_engine_wake(&px->engines[w]);
+    }
 }
 
 /* Release one extent whose destination was remote.
@@ -2887,17 +2945,14 @@ static int px_conn_admitted(struct objects *objs, struct px_conn *c, int32_t dst
     return admitted;
 }
 
-/* Complete a peer OPEN at the destination: verify the source Service claim,
- * evaluate the destination's inbound policy from generation-owned identity,
- * and allocate the local upstream that returns replies to this handle. */
-static uint16_t px_peer_destination_opened(
-    void *ctx, struct dmesh_peer_channel *channel, uint32_t handle,
-    const struct dmesh_peer_stream_open *open, int32_t dst_pod_idx)
+/* Shared by pre-QP authorization and each destination OPEN. Does not reserve
+ * an upstream or stream. The result is the source Service id, or -1 refused. */
+static int px_peer_inbound_authorize(struct px_worker_state *worker,
+    const struct dmesh_peer_stream_open *open, int32_t dst_pod_idx,
+    uint16_t source_port, int require_explicit)
 {
-    struct px_worker_state *worker = ctx;
-    if (!worker || !channel || !open || !worker->remote_upstreams ||
-        dst_pod_idx < 0 || dst_pod_idx >= MAX_PODS || handle == 0)
-        return 0;
+    if (!worker || !open || dst_pod_idx < 0 || dst_pod_idx >= MAX_PODS)
+        return -1;
     struct objects *objs = worker->objs;
     struct pod_state *dst = &objs->pods[dst_pod_idx];
     if (!pod_data_ready(dst) || dst->service_id < 0 ||
@@ -2905,18 +2960,18 @@ static uint16_t px_peer_destination_opened(
                                        open->src_service_key) ||
         dmesh_topology_service_port(objs, (int16_t)dst->service_id) !=
             open->dst_port)
-        return 0;
+        return -1;
     const struct dmesh_gen_pod *source =
         dmesh_topology_pod(objs, open->src_pod_uid);
     if (!source || __atomic_load_n(&dst->scope_state, __ATOMIC_ACQUIRE) !=
                        DMESH_SCOPE_ALLOWED)
-        return 0;
+        return -1;
 
     struct dmesh_l7_flow flow;
     memset(&flow, 0, sizeof(flow));
     flow.src_ip = source->ip_be;
     flow.dst_ip = px_pod_ipv4(dst);
-    flow.src_port = (uint16_t)handle;
+    flow.src_port = source_port;
     flow.dst_port = open->dst_port;
     flow.src_pod = DMESH_POD_REMOTE;
     flow.peer_pod = DMESH_POD_REMOTE;
@@ -2946,7 +3001,11 @@ static uint16_t px_peer_destination_opened(
     int source_service = dmesh_topology_interned_id(objs,
                                                      open->src_service_key);
     if (source_service < 0 || source_service >= POD_ID_SPACE)
-        return 0;
+        return -1;
+    /* Inline pair protection never turns absence of policy into permission,
+     * including for a Service whose legacy protection class is relaxed. */
+    if (require_explicit && verdict != DMESH_L7_VERDICT_ADMIT)
+        return -1;
     int mixed = 0;
     if (!dmesh_inbound_admits(
             verdict, px_inbound_strict(objs, (int16_t)dst->service_id),
@@ -2955,8 +3014,46 @@ static uint16_t px_peer_destination_opened(
             px_stat_inc(&objs->proxy->stat_mixed_callee_unprotected);
             l7_control_event("inbound", "mixed-callee-unprotected");
         }
-        return 0;
+        return -1;
     }
+    return source_service;
+}
+
+static int px_peer_pair_authorize(void *ctx, const struct dmesh_peer_pair *pair,
+                                   const struct dmesh_peer_stream_open *open)
+{
+    struct px_worker_state *worker = ctx;
+    if (!worker || !pair || !open || !open->dst_port ||
+        __atomic_load_n(&worker->objs->admission_drain, __ATOMIC_ACQUIRE)) return 0;
+    int32_t slot = px_peer_local_pod(ctx, pair->local_uid, NULL);
+    if (slot < 0 || __atomic_load_n(&worker->objs->pods[slot].scope_state,
+                                   __ATOMIC_ACQUIRE) != DMESH_SCOPE_ALLOWED) return 0;
+    if (!strcmp(open->src_pod_uid, pair->local_uid) &&
+        !strcmp(open->dst_pod_uid, pair->remote_uid)) {
+        /* The source attests only its own registered workload and Service;
+         * the remote destination separately grants its inbound policy. */
+        return open->src_generation == pair->local.generation &&
+            dmesh_topology_pod_in_service(worker->objs, open->src_pod_uid,
+                                           open->src_service_key) == 1;
+    }
+    if (strcmp(open->src_pod_uid, pair->remote_uid) ||
+        strcmp(open->dst_pod_uid, pair->local_uid) ||
+        open->src_generation != pair->remote.generation) return 0;
+    return px_peer_inbound_authorize(worker, open, slot, 0, 1) >= 0;
+}
+
+/* Allocate the return mapping only after this OPEN has passed policy. */
+static uint16_t px_peer_destination_opened(
+    void *ctx, struct dmesh_peer_channel *channel, uint32_t handle,
+    const struct dmesh_peer_stream_open *open, int32_t dst_pod_idx)
+{
+    struct px_worker_state *worker = ctx;
+    if (!worker || !channel || !worker->remote_upstreams || !handle) return 0;
+    int source_service = px_peer_inbound_authorize(worker, open, dst_pod_idx,
+                                                    (uint16_t)handle, channel->pair_scoped);
+    if (source_service < 0) return 0;
+    struct objects *objs = worker->objs;
+    struct pod_state *dst = &objs->pods[dst_pod_idx];
 
     ptrdiff_t channel_index = channel - worker->peers->channels;
     if (channel_index < 0 || channel_index >= DMESH_CHANNEL_MAX)
@@ -5194,19 +5291,6 @@ static int px_engine_pump(struct objects *objs, struct px_engine *eng,
     return progressed;
 }
 
-/* The carrier runtime bound into a worker's peer table. The table holds it as
- * an opaque context because `dmesh_peer_channel` only ever calls the five
- * transport callbacks; the worker, which also has to drive connects and
- * handshakes, needs the runtime itself. The vtable identity is what says the
- * context is one. */
-static struct peer_transport_rt *px_peer_rt(struct px_worker_state *worker)
-{
-    struct dmesh_peer_table *peers = worker ? worker->peers : NULL;
-    if (!peers || peers->transport != dmesh_peer_transport_ops())
-        return NULL;
-    return peers->transport_ctx;
-}
-
 static int
 px_worker_has_pending(struct px_engine *eng)
 {
@@ -5214,13 +5298,14 @@ px_worker_has_pending(struct px_engine *eng)
         eng->retry_batches > 0 || eng->retry_probe != NULL)
         return 1;
     struct px_worker_state *worker = &eng->objs->proxy->workers[eng->id];
+    if (atomic_load_explicit(&worker->peer_rebind_pending, memory_order_acquire))
+        return 1;
     if (worker->fin_pending_count)
         return 1;
     struct dmesh_peer_table *peers = worker->peers;
     if (!peers || !peers->transport)
         return 0;
-    struct peer_transport_rt *rt = px_peer_rt(worker);
-    if (rt && dmesh_peer_transport_pending(rt))
+    if (peers->transport->pending && peers->transport->pending(peers->transport_ctx))
         return 1;
     for (uint32_t i = 0; i < DMESH_CHANNEL_MAX; i++) {
         struct dmesh_peer_channel *channel = &peers->channels[i];
@@ -5278,6 +5363,9 @@ static int px_remote_fin_retry(struct px_worker_state *worker, int *budget)
 
 static int px_peer_progress_worker(struct px_worker_state *worker, int budget)
 {
+    if (atomic_exchange_explicit(&worker->peer_rebind_pending, 0, memory_order_acq_rel))
+        if (worker->peers && worker->peers->transport)
+            dmesh_peer_table_rebind(worker->peers);
     if (!worker->peers || !worker->peers->transport || budget <= 0)
         return 0;
     /* Connects, handshakes and arriving connections first, then the channels.
@@ -5286,8 +5374,8 @@ static int px_peer_progress_worker(struct px_worker_state *worker, int budget)
      * the channel's own recv below that consumes them. Gating the walk on the
      * step above would leave those bytes unread and spin the worker between
      * waking and finding nothing moved. */
-    struct peer_transport_rt *rt = px_peer_rt(worker);
-    int progressed = rt ? dmesh_peer_transport_progress(rt) : 0;
+    const struct dmesh_peer_transport *transport = worker->peers->transport;
+    int progressed = transport->progress ? transport->progress(worker->peers->transport_ctx) : 0;
     progressed |= px_remote_fin_retry(worker, &budget);
     for (uint32_t i = 0; i < DMESH_CHANNEL_MAX && budget > 0; i++) {
         struct dmesh_peer_channel *channel = &worker->peers->channels[i];
@@ -5887,6 +5975,14 @@ int px_cleanup_hardware(struct objects *objs)
 {
     struct dmesh_proxy *px = objs->proxy;
     if (!px) return DOCA_SUCCESS;
+    for (int s = 0; s < px->n_workers; s++) {
+        struct dmesh_peer_table *t = px->workers[s].peers;
+        if (!t) continue;
+        for (unsigned i = 0; i < DMESH_CHANNEL_MAX; i++)
+            if (t->channels[i].retirement_refs ||
+                __atomic_load_n(&t->channels[i].local_refs, __ATOMIC_ACQUIRE))
+                return DOCA_ERROR_IN_USE;
+    }
     for (int e = 0; e < px->n_workers; e++) {
         struct px_engine *eng = &px->engines[e];
         if (eng->dma_tasks_inflight) return DOCA_ERROR_IN_USE;

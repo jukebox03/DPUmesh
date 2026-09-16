@@ -14,6 +14,8 @@
 
 static int l7_close_calls;
 static int l7_segment_calls;
+static int inbound_result = DMESH_L7_VERDICT_NO_POLICY;
+static struct dmesh_l7_flow inbound_flow;
 
 /* This white-box test links only dpu_proxy.c. Keep the production lookup and
  * routing dependencies deterministic for the reserve/commit cases below. */
@@ -83,8 +85,8 @@ void l7_control_event(const char *kind, const char *reason)
 int l7_inbound_verdict(int worker_id, const struct dmesh_l7_flow *flow)
 {
     (void)worker_id;
-    (void)flow;
-    return DMESH_L7_VERDICT_NO_POLICY;
+    inbound_flow = *flow;
+    return inbound_result;
 }
 
 void l7_conn_close(int worker_id, uint64_t conn)
@@ -122,8 +124,101 @@ static void *producer_main(void *opaque)
     return NULL;
 }
 
+static void test_peer_worker_ownership(void)
+{
+    struct objects *objs = calloc(1, sizeof(*objs));
+    struct dmesh_proxy *px = calloc(1, sizeof(*px));
+    assert(objs && px);
+    objs->proxy = px; px->n_workers = 2; objs->num_pods = 1;
+    objs->pods[0].pod_id = 3;
+    strcpy(objs->pods[0].pod_uid, "retiring-pod");
+    /* The routing gate is already down; identity is held until all workers
+     * finish their quiescence passes. */
+    objs->pods[0].registered = 0; objs->pods[0].cleanup_pending = 1;
+    static const struct dmesh_peer_transport transport = {0};
+    for (unsigned i = 0; i < 2; i++) {
+        struct px_worker_state *w = &px->workers[i];
+        w->objs = objs; w->id = (int)i;
+        w->peers = calloc(1, sizeof(*w->peers)); assert(w->peers);
+        w->peers->transport = &transport;
+        struct dmesh_peer_channel *c = &w->peers->channels[0];
+        c->in_use = c->pair_scoped = 1;
+        c->state = DMESH_PEER_AUTHENTICATING;
+        strcpy(c->pair.local_uid, "retiring-pod");
+    }
+    px_cur_worker = &px->workers[0]; px_peer_pod_gone(objs, 3);
+    assert(px->workers[0].peers->channels[0].state == DMESH_PEER_CLOSED);
+    assert(px->workers[1].peers->channels[0].state == DMESH_PEER_AUTHENTICATING);
+    px_cur_worker = &px->workers[1]; px_peer_pod_gone(objs, 3);
+    assert(px->workers[1].peers->channels[0].state == DMESH_PEER_CLOSED);
+    px_peer_generation_changed(objs);
+    for (unsigned i = 0; i < 2; i++) assert(atomic_load(&px->workers[i].peer_rebind_pending));
+    assert(!px_peer_progress_worker(&px->workers[0], 1));
+    assert(!atomic_load(&px->workers[0].peer_rebind_pending));
+    assert(atomic_load(&px->workers[1].peer_rebind_pending));
+    /* Disabled transports consume the notification too, without a busy loop. */
+    px->workers[1].peers->transport = NULL;
+    assert(!px_peer_progress_worker(&px->workers[1], 1));
+    assert(!atomic_load(&px->workers[1].peer_rebind_pending));
+    for (unsigned i = 0; i < 2; i++) free(px->workers[i].peers);
+    px_cur_worker = NULL; free(px); free(objs);
+}
+
+static void test_peer_preallocation_policy(void)
+{
+    struct objects *o = calloc(1, sizeof(*o));
+    struct dmesh_proxy *px = calloc(1, sizeof(*px)); assert(o && px);
+    o->proxy = px; o->num_pods = 1;
+    struct px_worker_state *w = &px->workers[0]; w->objs = o;
+    struct dmesh_gen_service sv[2] = {{.port=8080,.interned=0,.endpoint_count=1},
+                                     {.port=9000,.interned=1,.endpoint_first=1,.endpoint_count=1}};
+    strcpy(sv[0].key,"ns/dst"); strcpy(sv[1].key,"ns/src");
+    struct dmesh_gen_pod pods[2] = {0};
+    strcpy(pods[0].uid,"pod-a"); strcpy(pods[1].uid,"pod-b");
+    strcpy(pods[1].namespace_name,"ns"); strcpy(pods[1].service_account,"client");
+    pods[1].ip_be=0x0a000002;
+    struct dmesh_gen_endpoint eps[2] = {{.service=0,.pod=0},{.service=1,.pod=1}};
+    struct dmesh_topology_tables tables = {.services=sv,.service_count=2,.pods=pods,.pod_count=2,.endpoints=eps,.endpoint_count=2};
+    o->topology.tables=&tables;
+    o->pods[0].dma_ready=1; o->pods[0].scope_state=DMESH_SCOPE_ALLOWED;
+    strcpy(o->pods[0].pod_uid,"pod-a"); strcpy(o->pods[0].pod_ip,"10.0.0.1");
+    struct dmesh_peer_pair pair={0}; strcpy(pair.local_uid,"pod-a"); strcpy(pair.remote_uid,"pod-b");
+    pair.local.generation=7; pair.remote.generation=8;
+    struct dmesh_peer_stream_open in={.dst_port=8080,.src_generation=8};
+    strcpy(in.src_pod_uid,"pod-b"); strcpy(in.dst_pod_uid,"pod-a"); strcpy(in.src_service_key,"ns/src");
+    assert(!px_peer_pair_authorize(w,&pair,&in)); /* absent policy always denies */
+    inbound_result=DMESH_L7_VERDICT_REFUSE; assert(!px_peer_pair_authorize(w,&pair,&in));
+    inbound_result=DMESH_L7_VERDICT_ADMIT; assert(px_peer_pair_authorize(w,&pair,&in));
+    assert(inbound_flow.src_ip==pods[1].ip_be && inbound_flow.dst_port==8080);
+    assert(strstr(inbound_flow.source_identity,"client.ns.serviceaccount.identity.") == inbound_flow.source_identity);
+    assert(!w->ct && !w->remote_upstreams); /* no upstream/handle allocation */
+    in.dst_port++; assert(!px_peer_pair_authorize(w,&pair,&in)); in.dst_port--;
+    strcpy(in.src_service_key,"ns/dst"); assert(!px_peer_pair_authorize(w,&pair,&in));
+    strcpy(in.src_pod_uid,"pod-a"); strcpy(in.dst_pod_uid,"pod-b"); in.src_generation=7;
+    assert(px_peer_pair_authorize(w,&pair,&in)); /* only source claim attestation */
+    o->admission_drain=1; assert(!px_peer_pair_authorize(w,&pair,&in));
+    inbound_result=DMESH_L7_VERDICT_NO_POLICY; free(px); free(o);
+}
+
+static void test_peer_proxy_custody_release(void)
+{
+    struct objects *o = calloc(1,sizeof(*o)); struct dmesh_proxy *px=calloc(1,sizeof(*px));
+    assert(o && px); o->proxy=px;
+    struct dmesh_peer_channel ch={.in_use=1,.state=DMESH_PEER_OPEN,.incarnation=17};
+    assert(!dmesh_peer_channel_hold(&ch,17)); assert(!dmesh_peer_channel_hold(&ch,17));
+    struct px_unit u={.peer_channel=&ch,.peer_incarnation=17};
+    struct px_arrival a={.peer_channel=&ch,.peer_incarnation=17};
+    ch.state=DMESH_PEER_CLOSED; /* completions/cancellation follow reset */
+    px_unit_free_node(px,&u); assert(ch.local_refs==1);
+    px_arrival_release(o,&a); assert(dmesh_peer_channel_dma_fenced(NULL,&ch,17));
+    tls_unit_mag=NULL; tls_unit_mag_n=0; tls_arr_mag=NULL; tls_arr_mag_n=0;
+    free(px); free(o);
+}
+
 int main(void)
 {
+    test_peer_worker_ownership();
+    test_peer_preallocation_policy(); test_peer_proxy_custody_release();
     /* Adjacent, unclaimed DPA completions share one custody object and extend its
      * exact-ACK range. Claimed or oversized tails must remain separate. */
     struct px_arrival arr;

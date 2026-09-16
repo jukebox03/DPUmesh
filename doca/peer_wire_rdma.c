@@ -17,6 +17,7 @@
 #define _GNU_SOURCE
 #endif
 #include "peer_wire.h"
+#include "peer_wire_verbs.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -29,6 +30,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/epoll.h>
+#include <sys/random.h>
 #include <unistd.h>
 
 /* One per peer node per worker, plus the inbound connections still proving who
@@ -68,6 +70,8 @@ struct rdma_conn {
     struct rdma_ctx   *ctx;
     struct rdma_cm_id *id;
     struct ibv_mr     *mr;
+    struct ibv_qp     *manual_qp;
+    struct peer_verbs_endpoint local_endpoint;
     uint8_t           *buf;          /* the send ring, then the receive ring */
     uint32_t           index;
     uint32_t           epoch;
@@ -104,6 +108,11 @@ struct rdma_ctx {
     uint8_t                    armed;
     uint8_t                    dead;
     uint8_t                    ec_nonblock;
+    uint8_t                    manual;
+    uint8_t                    verbs_port;
+    uint32_t                   gid_index;
+    uint16_t                   mtu;
+    uint8_t                    gid[16];
     uint32_t                   epoch_next;
     /* Connections that finished arriving but did not fit the caller's batch. */
     uint16_t                   handout[RDMA_CONN_MAX];
@@ -179,6 +188,15 @@ static void rdma_release(struct rdma_conn *c)
 {
     if (!c->in_use)
         return;
+    if (c->ctx->manual) {
+        c->state = RC_DEAD;
+        if (c->manual_qp && ibv_destroy_qp(c->manual_qp) != 0)
+            return; /* Failed fence: retain MR and memory, including slot identity. */
+        c->manual_qp = NULL;
+        if (c->mr && ibv_dereg_mr(c->mr) != 0)
+            return;
+        c->mr = NULL;
+    }
     if (c->id) {
         /* An explicit rdma_disconnect would create a DISCONNECTED event that
          * must be read and acknowledged before rdma_destroy_id. This carrier
@@ -224,7 +242,8 @@ static int rdma_post_recv(struct rdma_conn *c, uint32_t slot)
         .num_sge = 1,
     };
     struct ibv_recv_wr *bad = NULL;
-    if (ibv_post_recv(c->id->qp, &wr, &bad) != 0) return -1;
+    struct ibv_qp *qp = c->manual_qp ? c->manual_qp : c->id->qp;
+    if (ibv_post_recv(qp, &wr, &bad) != 0) return -1;
     c->recv_state[slot] = RX_POSTED;
     return 0;
 }
@@ -344,7 +363,8 @@ static int rdma_tx_commit(void *wc, struct peer_wire_tx_lease *l, size_t len)
         .send_flags = IBV_SEND_SIGNALED,
     };
     struct ibv_send_wr *bad = NULL;
-    if (ibv_post_send(c->id->qp, &wr, &bad) != 0) {
+    struct ibv_qp *qp = c->manual_qp ? c->manual_qp : c->id->qp;
+    if (ibv_post_send(qp, &wr, &bad) != 0) {
         c->send_busy[slot] = TX_FREE;
         c->state = RC_DEAD;
         return -1;
@@ -646,7 +666,7 @@ static int rdma_connect_op(void *wctx, uint32_t ip_be, uint16_t port, void **wc)
     if (!wc)
         return -1;
     *wc = NULL;
-    if (!ctx || ctx->dead)
+    if (!ctx || ctx->dead || ctx->manual)
         return -1;
     struct rdma_conn *c = rdma_slot_take(ctx);
     if (!c)
@@ -681,7 +701,8 @@ static int rdma_progress(void *wctx, void **accepted, int max, int *n_accepted)
     if (!ctx)
         return 0;
 
-    progressed |= rdma_drain_cm(ctx);
+    if (!ctx->manual)
+        progressed |= rdma_drain_cm(ctx);
     rdma_drain_comp(ctx);
     /* The notification is only wanted when the queue has run dry, and it must
      * be requested before the poll: a completion already sitting in the queue
@@ -760,6 +781,12 @@ static void rdma_ctx_free(void *wctx)
         (void)rdma_drain_cm(ctx);
     for (uint32_t i = 0; i < RDMA_CONN_MAX; i++)
         rdma_release(&ctx->conns[i]);
+    /* A manual QP/MR destroy failure leaves device access possible. Keep the
+     * owning PD/CQ/context and buffers until an explicit retry succeeds. */
+    if (ctx->manual)
+        for (uint32_t i = 0; i < RDMA_CONN_MAX; i++)
+            if (ctx->conns[i].in_use)
+                return;
     /* Destroying QPs flushes their work requests and may produce one last CQ
      * notification. A CQ destroy waits for every delivered event to be
      * acknowledged, so consume and acknowledge those before tearing it down. */
@@ -936,4 +963,133 @@ uint16_t peer_wire_rdma_port(void *wctx)
 {
     struct rdma_ctx *ctx = wctx;
     return ctx ? ctx->port : 0;
+}
+
+static enum ibv_mtu verbs_mtu(uint16_t bytes)
+{
+    switch (bytes) {
+    case 256: return IBV_MTU_256;
+    case 512: return IBV_MTU_512;
+    case 1024: return IBV_MTU_1024;
+    case 2048: return IBV_MTU_2048;
+    case 4096: return IBV_MTU_4096;
+    default: return 0;
+    }
+}
+
+int peer_wire_verbs_new(struct ibv_context *verbs, uint8_t port, uint32_t gid_index,
+                        uint16_t mtu, const struct peer_wire_ops **ops, void **wctx,
+                        char *error, size_t error_len)
+{
+    if (!ops || !wctx) return -1;
+    *ops = NULL; *wctx = NULL;
+    if (error && error_len) error[0] = 0;
+    struct ibv_port_attr attr;
+    struct ibv_gid_entry entry;
+    static const uint8_t ipv4_prefix[12] = {0,0,0,0,0,0,0,0,0,0,0xff,0xff};
+    if (!verbs || !port || gid_index > 255 || !verbs_mtu(mtu) ||
+        ibv_query_port(verbs, port, &attr) || attr.state != IBV_PORT_ACTIVE ||
+        attr.link_layer != IBV_LINK_LAYER_ETHERNET || attr.active_mtu < verbs_mtu(mtu) ||
+        ibv_query_gid_ex(verbs, port, gid_index, &entry, 0) ||
+        entry.gid_type != IBV_GID_TYPE_ROCE_V2 || memcmp(entry.gid.raw, ipv4_prefix, 12)) {
+        if (error && error_len) snprintf(error, error_len, "manual RDMA requires active IPv4 RoCEv2 GID and valid path MTU");
+        return -1;
+    }
+    struct rdma_ctx *ctx = calloc(1, sizeof(*ctx));
+    if (!ctx) return -1;
+    ctx->epfd = -1; ctx->manual = 1; ctx->verbs = verbs; ctx->verbs_port = port;
+    ctx->gid_index = gid_index; ctx->mtu = mtu; memcpy(ctx->gid, entry.gid.raw, 16);
+    ctx->pd = ibv_alloc_pd(verbs);
+    if (!ctx->pd) goto fail;
+    ctx->cc = ibv_create_comp_channel(verbs);
+    if (!ctx->cc || fd_nonblock(ctx->cc->fd)) goto fail;
+    ctx->cq = ibv_create_cq(verbs, RDMA_CQ_DEPTH, ctx, ctx->cc, 0);
+    if (!ctx->cq || ibv_req_notify_cq(ctx->cq, 0)) goto fail;
+    ctx->armed = 1; ctx->epfd = epoll_create1(EPOLL_CLOEXEC);
+    if (ctx->epfd < 0 || epoll_add(ctx->epfd, ctx->cc->fd)) goto fail;
+    *ops = &RDMA_OPS; *wctx = ctx; return 0;
+fail:
+    if (error && error_len) snprintf(error, error_len, "manual RDMA resource setup: %s", strerror(errno));
+    rdma_ctx_free(ctx); return -1;
+}
+
+int peer_wire_verbs_prepare(void *wctx, void **wc, struct peer_verbs_endpoint *local)
+{
+    if (!wc || !local) return -1;
+    *wc = NULL; memset(local, 0, sizeof(*local));
+    struct rdma_ctx *ctx = wctx;
+    if (!ctx || !ctx->manual || ctx->dead) return -1;
+    struct rdma_conn *c = rdma_slot_take(ctx);
+    if (!c) return -1;
+    /* Give the owner a cleanup handle even on a failure whose destroy cannot
+     * complete. A NULL output always means no resources remain owned. */
+    struct ibv_qp_init_attr attr = {
+        .send_cq = ctx->cq, .recv_cq = ctx->cq, .qp_type = IBV_QPT_RC,
+        .cap = {.max_send_wr = RDMA_SEND_RING, .max_recv_wr = RDMA_RECV_RING,
+                .max_send_sge = 1, .max_recv_sge = 1}
+    };
+    c->manual_qp = ibv_create_qp(ctx->pd, &attr);
+    if (!c->manual_qp) goto fail;
+    struct ibv_qp_attr init = {.qp_state = IBV_QPS_INIT, .port_num = ctx->verbs_port,
+                              .pkey_index = 0, .qp_access_flags = 0};
+    if (ibv_modify_qp(c->manual_qp, &init,
+                      IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT | IBV_QP_ACCESS_FLAGS)) goto fail;
+    c->mr = ibv_reg_mr(ctx->pd, c->buf,
+                       (size_t)(RDMA_SEND_RING + RDMA_RECV_RING) * RDMA_SLOT, IBV_ACCESS_LOCAL_WRITE);
+    if (!c->mr) goto fail;
+    for (unsigned i = 0; i < RDMA_RECV_RING; i++) if (rdma_post_recv(c, i)) goto fail;
+    uint32_t psn;
+    ssize_t n;
+    do { n = getrandom(&psn, sizeof(psn), 0); } while (n < 0 && errno == EINTR);
+    if (n != sizeof(psn)) goto fail;
+    c->local_endpoint.qpn = c->manual_qp->qp_num; c->local_endpoint.psn = psn & 0xffffff;
+    c->local_endpoint.mtu = ctx->mtu; memcpy(c->local_endpoint.gid, ctx->gid, 16);
+    c->state = RC_CONNECTING; *wc = c; *local = c->local_endpoint; return 0;
+fail:
+    rdma_release(c); if (c->in_use) *wc = c; return -1;
+}
+
+int peer_wire_verbs_activate(void *wc, const struct peer_verbs_endpoint *remote, int protected)
+{
+    struct rdma_conn *c = wc;
+    static const uint8_t ipv4_prefix[12] = {0,0,0,0,0,0,0,0,0,0,0xff,0xff};
+    if (!c || !c->in_use || !c->ctx->manual || c->ctx->dead || c->state != RC_CONNECTING ||
+        !c->manual_qp || !remote || protected != 1 || !remote->qpn || remote->qpn > 0xffffff ||
+        remote->psn > 0xffffff || !verbs_mtu(remote->mtu) || remote->mtu != c->local_endpoint.mtu ||
+        memcmp(remote->gid, ipv4_prefix, 12)) return -1;
+    struct ibv_qp_attr attr = {
+        .qp_state = IBV_QPS_RTR, .path_mtu = verbs_mtu(remote->mtu),
+        .dest_qp_num = remote->qpn, .rq_psn = remote->psn,
+        .max_dest_rd_atomic = 0, .min_rnr_timer = 12,
+        .ah_attr = {.is_global = 1, .port_num = c->ctx->verbs_port,
+                    .grh = {.sgid_index = (uint8_t)c->ctx->gid_index, .hop_limit = 64}}
+    };
+    memcpy(attr.ah_attr.grh.dgid.raw, remote->gid, 16);
+    if (ibv_modify_qp(c->manual_qp, &attr,
+                      IBV_QP_STATE | IBV_QP_AV | IBV_QP_PATH_MTU | IBV_QP_DEST_QPN |
+                      IBV_QP_RQ_PSN | IBV_QP_MAX_DEST_RD_ATOMIC | IBV_QP_MIN_RNR_TIMER)) goto fail;
+    memset(&attr, 0, sizeof(attr));
+    attr.qp_state = IBV_QPS_RTS; attr.sq_psn = c->local_endpoint.psn;
+    attr.timeout = RDMA_ACK_TIMEOUT; attr.retry_cnt = RDMA_RETRY_COUNT;
+    attr.rnr_retry = RDMA_RNR_RETRY; attr.max_rd_atomic = 0;
+    if (ibv_modify_qp(c->manual_qp, &attr,
+                      IBV_QP_STATE | IBV_QP_TIMEOUT | IBV_QP_RETRY_CNT | IBV_QP_RNR_RETRY |
+                      IBV_QP_SQ_PSN | IBV_QP_MAX_QP_RD_ATOMIC)) goto fail;
+    c->state = RC_READY; return 0;
+fail:
+    c->state = RC_DEAD; return -1;
+}
+int peer_wire_verbs_send_drained(void *wc)
+{
+    struct rdma_conn *c = wc;
+    if (!c || !c->in_use || !c->ctx->manual || c->state == RC_DEAD) return -1;
+    if (c->tx_leased) return 0;
+    for (unsigned i = 0; i < RDMA_SEND_RING; i++) if (c->send_busy[i] != TX_FREE) return 0;
+    return 1;
+}
+int peer_wire_verbs_close(void *wc)
+{
+    struct rdma_conn *c = wc;
+    if (!c || !c->in_use || !c->ctx->manual) return -1;
+    rdma_release(c); return c->in_use ? -1 : 0;
 }

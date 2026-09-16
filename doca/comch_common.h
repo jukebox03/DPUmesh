@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "workload_limits.h"
 #include <doca_error.h>
 #include <doca_mmap.h>
 
@@ -161,17 +162,11 @@ _Static_assert(sizeof(struct dmesh_register_msg) == 72,
  * signing key. */
 #define DMESH_IDENTITY_VERSION 1u
 #define DMESH_IDENTITY_TYPE 1u
-#define DMESH_REG_NONCE_SIZE 32u
 #define DMESH_FEED_MAC_SIZE 32u
 #define DMESH_KEY_ID_MAX 32u
-#define DMESH_POD_UID_MAX 64u
-#define DMESH_K8S_NAMESPACE_MAX 64u
-#define DMESH_K8S_NAME_MAX 254u
-#define DMESH_SVC_NAME_MAX 64u
 #define DMESH_POD_IP_MAX 16u
 #define DMESH_CLUSTER_ID_MAX 64u
 #define DMESH_CONTAINER_ID_MAX 65u
-#define DMESH_DAEMON_INCARNATION_SIZE 16u
 
 struct dmesh_registration_challenge_msg {
     uint8_t type;               /* = DMESH_MSG_REG_CHALLENGE */

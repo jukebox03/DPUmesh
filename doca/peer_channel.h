@@ -4,7 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "comch_common.h"
+#include "peer_identity.h"
 
 /* The DPU-to-DPU channel: what one DPU is allowed to believe from another.
  *
@@ -41,7 +41,7 @@
  * halving either one's 4096-stream capacity. Which node owns the high half is
  * deterministic from the authenticated node names. */
 #define DMESH_PEER_HANDLE_OWNER_BIT  0x80000000u
-#define DMESH_PEER_HANDLE_INDEX_MASK 0x00000FFFu
+#define DMESH_PEER_HANDLE_INDEX_MASK 0x00001FFFu
 /* The unit that crosses is a staging extent, and nothing is re-segmented at
  * the boundary, so the largest frame is the arrival coalescing bound. */
 #define DMESH_PEER_EXTENT_MAX       (64u * 1024u)
@@ -92,8 +92,8 @@ struct dmesh_peer_stream_open {
     /* Source-local correlation token. The destination never interprets it;
      * STREAM_OPEN_ACK returns it so several opens may be in flight together. */
     uint32_t source_token;
-    /* Not an identity input; carried on the wire and not yet consulted by the
-     * destination. */
+    /* Pair channels require the authenticated source registration generation.
+     * Legacy node channels do not use this field as identity evidence. */
     uint64_t src_generation;
 };
 _Static_assert(sizeof(struct dmesh_peer_stream_open) == 272,
@@ -149,6 +149,8 @@ enum dmesh_peer_refusal {
     DMESH_PEER_REFUSE_NODE_UNBOUND,  /* the generation binds no such node */
     DMESH_PEER_REFUSE_NODE_KEY,      /* the static key is not the bound one */
     DMESH_PEER_REFUSE_TRANSPORT,     /* the transport faulted */
+    DMESH_PEER_REFUSE_PAIR,          /* stream does not belong to this Pod pair */
+    DMESH_PEER_REFUSE_REGISTRATION,  /* registration retired or replaced */
     DMESH_PEER_REFUSE_MAX
 };
 
@@ -172,6 +174,8 @@ struct dmesh_peer_handle {
     uint8_t  in_use;
     uint8_t  reserved[3];
     uint32_t staging_bytes;    /* what this stream holds of the peer's bound */
+    uint32_t tx_inflight_bytes; /* reply custody still awaiting STREAM_ACK */
+    uint32_t rx_ack_pending;    /* landed or in-flight extents not yet ACK-staged to wire */
     uint32_t rx_seq;            /* newest ordered DATA sequence */
     uint8_t  rx_seq_valid;
     uint8_t  rx_fin;             /* peer ended source -> destination */
@@ -231,6 +235,24 @@ struct dmesh_peer_transport {
     long (*send)(void *conn, const void *buf, size_t len);   /* <0 fault, 0 would-block */
     long (*recv)(void *conn, void *buf, size_t len);         /* <0 fault, 0 empty */
     void (*close)(void *conn);
+    /* Optional pair transport. All three callbacks must be present together.
+     * connect_pair starts from a verified LOCAL registration and a topology
+     * selected remote UID; remote registration is learned over pinned TLS.
+     * No legacy connect fallback is allowed when this group is present.
+     * pair_ready: 1 after hardware RX/TX, QP and peer barriers; 0 pending;
+     * -1 terminal. It copies the authenticated pair and remains 1 during an
+     * authorized rekey drain; expired authority/policy/control is terminal.
+     * pair_admit: 1 accepts new OPEN/DATA, 0 pauses them for rekey. Existing
+     * queued frames, ACK and FIN must continue progressing during that pause. */
+    int (*connect_pair)(void *ctx, const char *node, const uint8_t key[32],
+                        uint32_t ip_be, uint16_t port, uint32_t incarnation,
+                        const struct dmesh_peer_pair *pair,
+                        const struct dmesh_peer_stream_open *intent, void **conn);
+    int (*pair_ready)(void *conn, struct dmesh_peer_pair *pair);
+    int (*pair_admit)(void *conn);
+    /* Driven only by the owning worker, for either transport implementation. */
+    int (*progress)(void *ctx);
+    int (*pending)(void *ctx);
 };
 
 struct dmesh_peer_channel;
@@ -247,6 +269,13 @@ struct dmesh_peer_ops {
     /* A live local registration for `pod_uid`: its slot and pod generation, or
      * -1 when nothing here serves it. */
     int32_t (*local_pod)(void *ctx, const char *pod_uid, uint32_t *pod_generation);
+    int (*local_registration)(void *ctx, const char *pod_uid,
+                              struct dmesh_peer_registration *registration);
+    /* Owner-worker preflight, before pair QP/SA allocation. Verify the local
+     * source Service claim or explicitly admit the local destination port.
+     * No stream/upstream resources may be allocated. 1 allowed, 0 refused. */
+    int (*pair_authorize)(void *ctx, const struct dmesh_peer_pair *,
+                           const struct dmesh_peer_stream_open *);
     /* The intra-node upstream a stream to (slot, port) feeds. */
     uint16_t (*upstream_for)(void *ctx, int32_t dst_pod_idx, uint16_t dst_port);
     /* Finish destination-side stream setup after the peer handle is known.
@@ -301,10 +330,8 @@ struct dmesh_peer_ops {
 
 /* ---- channel ---------------------------------------------------------- */
 
-/* Teardown is synchronous — the reset poisons every stream and releases every
- * pinned extent before it returns — so there is no draining state to dwell in:
- * idle eviction applies only to a channel with no streams and nothing in
- * flight, and every other teardown cause is immediate. */
+/* Reset stops stream admission synchronously. Proxy DMA/arrival custody and
+ * transport retirement may outlive it; their references prevent slot reuse. */
 enum dmesh_peer_state {
     DMESH_PEER_CLOSED = 0,
     DMESH_PEER_AUTHENTICATING,
@@ -313,6 +340,10 @@ enum dmesh_peer_state {
 
 struct dmesh_peer_channel {
     char     node_name[DMESH_K8S_NAME_MAX];
+    struct dmesh_peer_pair pair;
+    uint8_t pair_scoped;
+    struct peer_pair_wire *pair_wire;
+    uint8_t *pair_tx_frame, *pair_rx_payload;
     uint8_t  bound_key[32];          /* what the generation binds to that name */
     uint32_t ip_be;
     uint16_t port;
@@ -324,6 +355,8 @@ struct dmesh_peer_channel {
      * completion belonging to the previous incarnation is refused rather than
      * applied to this one. */
     uint32_t incarnation;
+    uint32_t local_refs;             /* atomic proxy DMA/arrival custody */
+    uint32_t retirement_refs;        /* worker-owned transport retirement pins */
     uint64_t last_active_ns;
     void    *conn;                   /* the transport's own object */
 
@@ -387,7 +420,16 @@ void dmesh_peer_table_init(struct dmesh_peer_table *table, const char *node_name
                            const struct dmesh_peer_transport *transport,
                            void *transport_ctx,
                            const struct dmesh_peer_ops *ops, void *ops_ctx);
-void dmesh_peer_table_fini(struct dmesh_peer_table *table);
+/* Resets channels; -1 retains the table until custody and transport retirement
+ * are fenced. A failed fini must not be followed by init/free of the table. */
+int dmesh_peer_table_fini(struct dmesh_peer_table *table);
+/* Acquire on the owner worker before handing bytes to asynchronous proxy work.
+ * Each successful hold needs exactly one release, including canceled work.
+ * Release may follow reset. The table remains alive until all references end. */
+int dmesh_peer_channel_hold(struct dmesh_peer_channel *, uint32_t incarnation);
+int dmesh_peer_channel_release(struct dmesh_peer_channel *, uint32_t incarnation);
+/* Suitable for the pair transport's dma_fenced callback; ctx is unused. */
+int dmesh_peer_channel_dma_fenced(void *ctx, struct dmesh_peer_channel *, uint32_t incarnation);
 
 /* Format the prologue that names both nodes and the incarnation; the transport
  * sends it as the first bytes inside the authenticated session. Returns the
@@ -399,6 +441,13 @@ int dmesh_peer_prologue(const char *local_node, const char *peer_node,
 struct dmesh_peer_channel *dmesh_peer_open(struct dmesh_peer_table *table,
                                            const char *node_name,
                                            enum dmesh_peer_refusal *reason);
+/* Runtime source entry point: chooses pair lookup for a pair transport and
+ * the existing node channel for TLS. Identity always comes from ops. */
+struct dmesh_peer_channel *dmesh_peer_open_stream(struct dmesh_peer_table *table,
+    const char *node_name, const struct dmesh_peer_stream_open *intent,
+    enum dmesh_peer_refusal *reason);
+struct dmesh_peer_channel *dmesh_peer_find_pair(struct dmesh_peer_table *table,
+    const char *node_name, const char *local_uid, const char *remote_uid);
 /* Adopt a connection the transport runtime accepted and authenticated. The
  * prologue supplies the peer node and incarnation; the session supplies the
  * static key. */
@@ -406,6 +455,9 @@ struct dmesh_peer_channel *
 dmesh_peer_accept(struct dmesh_peer_table *table, const char *node_name,
                   uint32_t incarnation, void *conn, const uint8_t peer_key[32],
                   enum dmesh_peer_refusal *reason);
+struct dmesh_peer_channel *dmesh_peer_accept_pair(struct dmesh_peer_table *table,
+    const char *node_name, uint32_t incarnation, void *conn,
+    const uint8_t peer_key[32], enum dmesh_peer_refusal *reason);
 /* The one rule added on top of the stock protocol: the peer's static key must
  * equal the one the held generation binds to the node name it claims. */
 enum dmesh_peer_refusal dmesh_peer_authenticated(struct dmesh_peer_table *table,

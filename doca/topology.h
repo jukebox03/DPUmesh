@@ -190,6 +190,11 @@ int dmesh_topology_pod_in_service(const struct objects *objs,
 int dmesh_topology_node_peer(const struct objects *objs, const char *node_name,
                              const uint8_t **static_key, uint32_t *ip_be,
                              uint16_t *port);
+/* The node name the held generation binds to `static_key`, for an inbound
+ * peer that authenticated with that key before naming itself. 1 when exactly
+ * one node carries the key, 0 otherwise. */
+int dmesh_topology_node_by_key(const struct objects *objs, const uint8_t static_key[32],
+                               char node_name[DMESH_K8S_NAME_MAX]);
 
 
 /* Parse one verified document body into freshly allocated tables. Exposed for

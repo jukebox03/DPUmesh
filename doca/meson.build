@@ -43,7 +43,15 @@ srcs = [
     'workload_identity.c',
     'topology.c',
     'peer_channel.c',
+    'peer_pair_wire.c',
     'peer_tls.c',
+    'peer_security_wire.c',
+    'peer_control.c',
+    'peer_association.c',
+    'peer_manager.c',
+    'peer_crypto_ipc.c',
+    'peer_pair_transport.c',
+    'peer_pair_verbs.c',
     'peer_transport.c',
     'peer_wire_tcp.c',
     'peer_wire_rdma.c',
@@ -95,3 +103,24 @@ executable('dpumesh_dpu', srcs,
   link_depends : [dpacc_lib],
   install : false,
 )
+
+# The crypto owner: the separate process that holds the NIC's DOCA Flow IPsec
+# state for Pod pairs and answers the runtime over a UNIX socket. Built only
+# where DOCA Flow and DPDK are installed; the runtime itself never links them.
+flow_dep = dependency('doca-flow', required : false)
+dpdk_dep = dependency('libdpdk', required : false)
+bridge_dep = dependency('doca-dpdk-bridge', required : false)
+if flow_dep.found() and dpdk_dep.found() and bridge_dep.found()
+  owner_args = ['-Wno-deprecated-declarations']
+  if flow_dep.version().version_compare('>=3.5')
+    owner_args += '-DDMESH_DOCA35'
+  endif
+  executable('dpumesh_crypto_owner', ['peer_crypto_owner.c', 'peer_crypto_ipc.c'],
+    dependencies : [dependency('doca-common'), flow_dep, bridge_dep, dpdk_dep, dependency('libcrypto')],
+    c_args : owner_args,
+    include_directories : inc_dirs,
+    install : false,
+  )
+else
+  message('dpumesh_crypto_owner skipped: doca-flow, doca-dpdk-bridge or libdpdk not found')
+endif

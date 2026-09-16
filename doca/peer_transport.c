@@ -522,12 +522,17 @@ static void transport_close(void *cv)
     conn_free(cv);
 }
 
+static int transport_progress(void *ctx) { return dmesh_peer_transport_progress(ctx); }
+static int transport_pending(void *ctx) { return dmesh_peer_transport_pending(ctx); }
+
 static const struct dmesh_peer_transport TRANSPORT_OPS = {
     .connect  = transport_connect,
     .peer_key = transport_peer_key,
     .send     = transport_send,
     .recv     = transport_recv,
     .close    = transport_close,
+    .progress = transport_progress,
+    .pending  = transport_pending,
 };
 
 const struct dmesh_peer_transport *dmesh_peer_transport_ops(void)

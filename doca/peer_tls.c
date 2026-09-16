@@ -30,8 +30,10 @@ struct peer_tls_conn {
     BIO     *rbio;                  /* ciphertext in; owned by ssl */
     BIO     *wbio;                  /* ciphertext out; owned by ssl */
     uint8_t  peer_key[32];
+    uint8_t  local_key[32];
     uint8_t  established;
     uint8_t  faulted;
+    uint8_t  pinned;
 };
 
 #define PEER_TLS_ERROR(...)                                                    \
@@ -185,6 +187,7 @@ int peer_tls_conn_new(struct peer_tls_ctx *ctx, int initiator,
     struct peer_tls_conn *conn = calloc(1, sizeof(*conn));
     if (!conn)
         return -1;
+    memcpy(conn->local_key, ctx->public_key, sizeof(conn->local_key));
     conn->ssl = SSL_new(ctx->ssl_ctx);
     conn->rbio = BIO_new(BIO_s_mem());
     conn->wbio = BIO_new(BIO_s_mem());
@@ -279,6 +282,51 @@ int peer_tls_peer_key(const struct peer_tls_conn *conn, uint8_t key[32])
     return 0;
 }
 
+int peer_tls_pin(struct peer_tls_conn *conn, const uint8_t expected[32])
+{
+    if (!peer_tls_established(conn) || !expected)
+        return -1;
+    if (CRYPTO_memcmp(conn->peer_key, expected, 32) != 0) {
+        conn->faulted = 1;
+        conn->pinned = 0;
+        return -1;
+    }
+    conn->pinned = 1;
+    return 0;
+}
+
+int peer_tls_local_key(const struct peer_tls_conn *conn, uint8_t key[32])
+{
+    if (!conn || conn->faulted || !key)
+        return -1;
+    memcpy(key, conn->local_key, 32);
+    return 0;
+}
+
+int peer_tls_export_ipsec(struct peer_tls_conn *conn, const void *context,
+                         size_t context_len, uint8_t out[20])
+{
+    static const char label[] = "EXPORTER-DPUmesh-IPsec-v1";
+    if (!out)
+        return -1;
+    /* Derive into a temporary so failure cannot expose partial key material. */
+    uint8_t material[20] = {0};
+    int ok = peer_tls_established(conn) && conn->pinned && context &&
+             context_len > 0 && context_len <= PEER_TLS_IPSEC_CONTEXT_MAX;
+    if (ok) {
+        ERR_clear_error();
+        ok = SSL_export_keying_material(conn->ssl, material, sizeof(material),
+                                       label, sizeof(label) - 1, context,
+                                       context_len, 1) == 1;
+    }
+    if (ok)
+        memcpy(out, material, sizeof(material));
+    else
+        OPENSSL_cleanse(out, sizeof(material));
+    OPENSSL_cleanse(material, sizeof(material));
+    return ok ? 0 : -1;
+}
+
 int peer_tls_write(struct peer_tls_conn *conn, const void *buf, size_t len)
 {
     if (!conn || conn->faulted || !conn->established || !buf || len == 0 ||
@@ -343,4 +391,10 @@ int peer_tls_in(struct peer_tls_conn *conn, const void *buf, size_t len)
         return -1;
     }
     return 0;
+}
+
+size_t peer_tls_in_pending(struct peer_tls_conn *conn)
+{
+    if (!conn || conn->faulted) return 0;
+    return BIO_ctrl_pending(conn->rbio) + (size_t)SSL_pending(conn->ssl);
 }

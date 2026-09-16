@@ -16,6 +16,11 @@
 #include "peer_channel.h"
 #include "peer_transport.h"
 #include "peer_wire.h"
+#include "peer_manager.h"
+#include "peer_pair_transport.h"
+#include "peer_crypto_ipc.h"
+#include <infiniband/verbs.h>
+#include <openssl/rand.h>
 #include <dpumesh/dmesh_common.h>
 #include <dpumesh/dmesh_topology.h>
 #include <dmesh_l7.h>
@@ -422,6 +427,21 @@ dpu_drain_iteration(struct objects *objs)
     if (topology > 0 && px_l7_resolve_modes(objs) != 0)
         DOCA_LOG_WARN("L7 mode lists conflict against the adopted generation; "
                       "previous mode table kept");
+    /* The manager's authority lease is renewed while a verified generation is
+     * held. This is not freshness: the same document renews it until the
+     * signed security feed carries an issued-at and not-after of its own. */
+    if (objs->peer_manager && objs->topology.tables) {
+        struct timespec ts;
+        if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0) {
+            uint64_t now = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+            if ((int64_t)(now - objs->peer_authority_next_ns) >= 0 &&
+                peer_manager_notify_authority(objs->peer_manager, objs->peer_authority_generation + 1,
+                                              now + objs->peer_lease_ns) == 1) {
+                objs->peer_authority_generation++;
+                objs->peer_authority_next_ns = now + objs->peer_lease_ns / 3;
+            }
+        }
+    }
     return (local_control || did_ctrl || cleaned_pods > 0 || finalized_init > 0 ||
             sent_init_result > 0 || sent_doorbell > 0 ||
             admission > 0 || topology > 0);
@@ -726,7 +746,7 @@ dmesh_l7_driver_maintenance(void *driver)
     /* Idle peer channels are swept on their own cadence: a channel is idle for
      * a minute before it is worth closing, and maintenance runs every
      * millisecond. */
-    if (worker_state->peer_rt) {
+    if (worker_state->peer_rt || worker_state->pair_rt) {
         uint64_t now = dpu_wake_clock_now();
         if ((int64_t)(now - worker_state->peer_evict_deadline) >= 0) {
             px_peer_evict_idle(worker_state->objs, worker_state->id);
@@ -819,6 +839,9 @@ dmesh_l7_driver_failed(void *driver)
 static void
 stop_data_workers(struct objects *objs)
 {
+    /* The manager stops issuing lane commands before any worker leaves. */
+    if (objs->peer_manager)
+        peer_manager_stop(objs->peer_manager);
     for (int s = 0; s < objs->n_data_workers; s++) {
         struct dpu_data_worker *worker_state = &objs->data_workers[s];
         if (!worker_state->running)
@@ -834,9 +857,15 @@ stop_data_workers(struct objects *objs)
         }
         /* The table owns its connection handles; detach it before freeing the
          * runtime whose connection pool those handles point into. */
-        if (worker_state->peer_rt) {
-            px_peer_detach(objs, s);
-            dmesh_peer_transport_attach(worker_state->peer_rt, NULL);
+        if (worker_state->peer_rt || worker_state->pair_rt) {
+            if (px_peer_detach(objs, s)) {
+                DOCA_LOG_ERR("PEER: worker %d retains proxy custody; transport quarantined", s);
+                continue;
+            }
+            if (worker_state->peer_rt)
+                dmesh_peer_transport_attach(worker_state->peer_rt, NULL);
+            else
+                peer_pair_transport_attach(worker_state->pair_rt, NULL);
         }
         if (worker_state->wake_epfd >= 0) {
             close(worker_state->wake_epfd);
@@ -850,6 +879,30 @@ stop_data_workers(struct objects *objs)
          * listening port before the threads are created. */
         dmesh_peer_transport_free(worker_state->peer_rt);
         worker_state->peer_rt = NULL;
+        /* A lane still owned by a pair (a quarantined QP, an unfenced DMA)
+         * keeps its transport; the hardware adapter's restart reconciliation
+         * is what retires what a process could not. */
+        if (worker_state->pair_rt) {
+            if (peer_pair_transport_free(worker_state->pair_rt))
+                DOCA_LOG_ERR("PEER: worker %d retains Pod-pair lanes; transport retained", s);
+            else
+                worker_state->pair_rt = NULL;
+        }
+    }
+    if (objs->peer_manager) {
+        if (peer_manager_free(objs->peer_manager))
+            DOCA_LOG_ERR("PEER: crypto manager retains associations; not freed");
+        else {
+            objs->peer_manager = NULL;
+            peer_crypto_ipc_free(objs->peer_crypto_ipc); objs->peer_crypto_ipc = NULL;
+        }
+    }
+    if (objs->peer_verbs) {
+        int lanes_left = 0;
+        for (int s = 0; s < objs->n_data_workers; s++)
+            lanes_left |= objs->data_workers[s].pair_rt != NULL;
+        if (!lanes_left && !ibv_close_device(objs->peer_verbs))
+            objs->peer_verbs = NULL;
     }
 }
 
@@ -920,6 +973,204 @@ dpu_peer_wire_new(const char *kind, uint32_t bind_ip_be, uint16_t port,
     return -1;
 }
 
+/* ---- Pod-pair inline path ------------------------------------------------ */
+
+/* Node-level lookups the crypto manager makes on its own thread, against the
+ * held generation. */
+static int
+dpu_manager_node_binding(void *ctx, const char *node, const uint8_t **key,
+                         uint32_t *ip_be, uint16_t *port)
+{
+    return dmesh_topology_node_peer(ctx, node, key, ip_be, port);
+}
+static int
+dpu_manager_node_by_key(void *ctx, const uint8_t key[32], char node[DMESH_K8S_NAME_MAX])
+{
+    return dmesh_topology_node_by_key(ctx, key, node);
+}
+static const struct peer_manager_ops DPU_MANAGER_OPS = {
+    .node_binding = dpu_manager_node_binding,
+    .node_by_key = dpu_manager_node_by_key,
+};
+
+static void
+dpu_peer_unregister_hook(struct objects *objs, const char *pod_uid)
+{
+    if (objs->peer_manager && peer_manager_notify_unregister(objs->peer_manager, pod_uid) != 1)
+        DOCA_LOG_WARN("PEER: unregistration of %s could not reach the crypto manager; "
+                      "its lanes retire on lease expiry", pod_uid);
+}
+
+/* The hardware adapter DPUMESH_PEER_CRYPTO names: `unix:PATH` reaches the
+ * crypto-owner process on that socket. Any other value is refused, so the
+ * Pod-pair path never starts without hardware enforcement behind it. */
+static int
+dpu_peer_crypto_adapter(struct objects *objs, const char *name, struct peer_crypto_adapter *out,
+                        char *error, size_t error_len)
+{
+    if (strncmp(name, "unix:", 5) != 0 || !name[5]) {
+        snprintf(error, error_len, "DPUMESH_PEER_CRYPTO='%s' names no hardware adapter "
+                                   "(unix:PATH)", name);
+        return -1;
+    }
+    if (peer_crypto_ipc_new(name + 5, &objs->peer_crypto_ipc, error, error_len))
+        return -1;
+    *out = peer_crypto_ipc_adapter(objs->peer_crypto_ipc);
+    return 0;
+}
+
+static struct ibv_context *
+dpu_peer_verbs_open(const char *name, char *error, size_t error_len)
+{
+    int count = 0;
+    struct ibv_device **list = ibv_get_device_list(&count);
+    struct ibv_context *verbs = NULL;
+    if (!list) {
+        snprintf(error, error_len, "RDMA device list: %s", strerror(errno));
+        return NULL;
+    }
+    for (int i = 0; i < count && !verbs; i++)
+        if (!strcmp(ibv_get_device_name(list[i]), name))
+            verbs = ibv_open_device(list[i]);
+    ibv_free_device_list(list);
+    if (!verbs)
+        snprintf(error, error_len, "DPUMESH_PEER_RDMA_DEVICE='%s' is not an RDMA device "
+                                   "this process can open", name);
+    return verbs;
+}
+
+/* The inline bring-up: manual-verbs lanes on every worker, one node control
+ * carrier, and the crypto manager that turns a worker's Pod-pair OPEN into
+ * hardware protection and back into a grant. Nothing here falls back to node
+ * TLS: a missing piece leaves remote destinations refused. */
+static void
+dpu_peer_pair_bringup(struct objects *objs, const uint8_t seed[32],
+                      uint32_t bind_ip_be, uint16_t port)
+{
+    char error[256] = {0};
+    struct peer_crypto_adapter adapter = {0};
+    const char *crypto = getenv("DPUMESH_PEER_CRYPTO");
+    const char *device = getenv("DPUMESH_PEER_RDMA_DEVICE");
+    const char *gid_env = getenv("DPUMESH_PEER_GID_INDEX");
+    const char *mtu_env = getenv("DPUMESH_PEER_MTU");
+    const char *lease_env = getenv("DPUMESH_PEER_LEASE_MS");
+    unsigned long gid = 0, mtu = 1024, lease_ms = 30000;
+    if (!crypto || !*crypto) {
+        DOCA_LOG_WARN("Pod-pair inline path not started: DPUMESH_PEER_CRYPTO is unset; "
+                      "there is no plaintext fallback");
+        return;
+    }
+    const char *rekey_env = getenv("DPUMESH_PEER_REKEY_S");
+    unsigned long rekey_s = 0;
+    if (rekey_env && *rekey_env && dpu_parse_ulong(rekey_env, 0, 86400, &rekey_s)) {
+        DOCA_LOG_WARN("Pod-pair inline path not started: DPUMESH_PEER_REKEY_S must be 0-86400");
+        return;
+    }
+    if (dpu_peer_crypto_adapter(objs, crypto, &adapter, error, sizeof(error))) {
+        DOCA_LOG_WARN("Pod-pair inline path not started: %s", error);
+        return;
+    }
+    if (!device || !*device ||
+        (gid_env && *gid_env && dpu_parse_ulong(gid_env, 0, 255, &gid)) ||
+        (mtu_env && *mtu_env && dpu_parse_ulong(mtu_env, 256, 4096, &mtu)) ||
+        (lease_env && *lease_env && dpu_parse_ulong(lease_env, 1000, 600000, &lease_ms))) {
+        DOCA_LOG_WARN("Pod-pair inline path not started: DPUMESH_PEER_RDMA_DEVICE, "
+                      "DPUMESH_PEER_GID_INDEX (0-255), DPUMESH_PEER_MTU (256-4096) and "
+                      "DPUMESH_PEER_LEASE_MS (1000-600000) must be valid");
+        return;
+    }
+    struct ibv_context *verbs = dpu_peer_verbs_open(device, error, sizeof(error));
+    if (!verbs) {
+        peer_crypto_ipc_free(objs->peer_crypto_ipc); objs->peer_crypto_ipc = NULL;
+        DOCA_LOG_WARN("Pod-pair inline path not started: %s", error);
+        return;
+    }
+    struct peer_pair_transport *lanes[MAX_ARM_WORKERS] = {0};
+    int built = 0;
+    for (; built < objs->n_data_workers; built++) {
+        struct peer_pair_transport_config cfg = {
+            .worker = (unsigned)built, .connections = DMESH_CHANNEL_MAX,
+            .setup_timeout_ns = 30ull * 1000000000ull,
+            .dma_fenced = dmesh_peer_channel_dma_fenced,
+        };
+        if (peer_pair_transport_new(&cfg, verbs, 1, (uint32_t)gid, (uint16_t)mtu,
+                                    &lanes[built], error, sizeof(error)))
+            break;
+    }
+    if (built < objs->n_data_workers) {
+        for (int s = 0; s < built; s++)
+            peer_pair_transport_free(lanes[s]);
+        ibv_close_device(verbs);
+        peer_crypto_ipc_free(objs->peer_crypto_ipc); objs->peer_crypto_ipc = NULL;
+        DOCA_LOG_WARN("Pod-pair inline path not started: worker %d lanes: %s", built, error);
+        return;
+    }
+    for (int s = 0; s < objs->n_data_workers; s++) {
+        if (px_peer_configure(objs, s, peer_pair_transport_ops(), lanes[s]) != 0) {
+            for (int t = 0; t < s; t++)
+                if (!px_peer_detach(objs, t))
+                    peer_pair_transport_attach(lanes[t], NULL);
+            for (int t = 0; t < objs->n_data_workers; t++)
+                peer_pair_transport_free(lanes[t]);
+            ibv_close_device(verbs);
+            peer_crypto_ipc_free(objs->peer_crypto_ipc); objs->peer_crypto_ipc = NULL;
+            DOCA_LOG_WARN("Pod-pair inline path not started: lanes could not be bound to the proxy");
+            return;
+        }
+        peer_pair_transport_attach(lanes[s], px_peer_table(objs, s));
+    }
+    const struct peer_wire_ops *control_ops = NULL;
+    void *control_ctx = NULL;
+    struct peer_manager *manager = NULL;
+    struct peer_manager_config cfg = {
+        .seed = seed, .workers = (unsigned)objs->n_data_workers, .mtu = (uint16_t)mtu,
+        .crypto = adapter, .lease_ns = lease_ms * 1000000ull,
+        .rekey_ns = rekey_s * 1000000000ull,
+        .ops = &DPU_MANAGER_OPS, .ops_ctx = objs,
+    };
+    snprintf(cfg.node, sizeof(cfg.node), "%s", objs->node_name);
+    snprintf(cfg.cluster, sizeof(cfg.cluster), "%s", objs->cluster_id);
+    if (peer_wire_tcp_new(bind_ip_be, port, &control_ops, &control_ctx, error, sizeof(error)) == 0) {
+        cfg.wire = control_ops; cfg.wire_ctx = control_ctx;
+        if (RAND_bytes(cfg.boot, sizeof(cfg.boot)) != 1 ||
+            peer_manager_new(&cfg, &manager, error, sizeof(error))) {
+            control_ops->ctx_free(control_ctx);
+            manager = NULL;
+        }
+    }
+    for (int s = 0; manager && s < objs->n_data_workers; s++)
+        if (peer_manager_attach_worker(manager, (unsigned)s, lanes[s])) {
+            snprintf(error, sizeof(error), "worker %d could not be attached to the manager", s);
+            peer_manager_free(manager); manager = NULL;
+        }
+    if (manager && peer_manager_start(manager)) {
+        snprintf(error, sizeof(error), "manager thread could not start");
+        peer_manager_free(manager); manager = NULL;
+    }
+    if (!manager) {
+        for (int s = 0; s < objs->n_data_workers; s++)
+            if (!px_peer_detach(objs, s))
+                peer_pair_transport_attach(lanes[s], NULL);
+        for (int s = 0; s < objs->n_data_workers; s++)
+            peer_pair_transport_free(lanes[s]);
+        ibv_close_device(verbs);
+        peer_crypto_ipc_free(objs->peer_crypto_ipc); objs->peer_crypto_ipc = NULL;
+        DOCA_LOG_WARN("Pod-pair inline path not started: %s", error);
+        return;
+    }
+    for (int s = 0; s < objs->n_data_workers; s++)
+        objs->data_workers[s].pair_rt = lanes[s];
+    objs->peer_manager = manager;
+    objs->peer_verbs = verbs;
+    objs->peer_unregister_hook = dpu_peer_unregister_hook;
+    objs->peer_lease_ns = cfg.lease_ns;
+    objs->peer_authority_generation = 0;
+    objs->peer_authority_next_ns = 0;
+    DOCA_LOG_WARN("PEER CARRIER: Pod-pair inline on %s (gid %lu, mtu %lu), %d worker lane set(s), "
+                  "control on port %u, crypto adapter '%s'",
+                  device, gid, mtu, objs->n_data_workers, (unsigned)port, crypto);
+}
+
 /* Give every ARM worker its own carrier and authenticated-session runtime, so
  * a peer connection is driven by the thread that already owns the streams it
  * carries and no peer state crosses workers.
@@ -934,6 +1185,22 @@ dpu_peer_bringup(struct objects *objs)
     const char *kind = getenv("DPUMESH_PEER_TRANSPORT");
     if (!kind || !*kind)
         return;
+
+    /* The v1 adapter below always uses node TLS records. The Pod-pair inline
+     * path is a different bring-up entirely; any other value refuses remote
+     * traffic rather than silently taking the legacy path. */
+    const char *security = getenv("DPUMESH_PEER_SECURITY");
+    int inline_pair = security && !strcmp(security, "ipsec-pod-pair");
+    if (security && *security && !inline_pair && strcmp(security, "tls") != 0) {
+        DOCA_LOG_WARN("peer carrier '%s' not started: DPUMESH_PEER_SECURITY='%s' "
+                      "names no security mode (tls, ipsec-pod-pair)", kind, security);
+        return;
+    }
+    if (inline_pair && strcmp(kind, "rdma") != 0) {
+        DOCA_LOG_WARN("peer carrier '%s' not started: ipsec-pod-pair requires "
+                      "DPUMESH_PEER_TRANSPORT=rdma", kind);
+        return;
+    }
 
     const char *credential = getenv("DPUMESH_NODE_KEY_FILE");
     if (!objs->node_key_ready || !credential || !*credential) {
@@ -1008,6 +1275,12 @@ dpu_peer_bringup(struct objects *objs)
         handshake_timeout_ns = (uint64_t)ms * 1000000ull;
     }
 
+    if (inline_pair) {
+        dpu_peer_pair_bringup(objs, seed, bind_ip_be, (uint16_t)port_base);
+        explicit_bzero(seed, sizeof(seed));
+        return;
+    }
+
     /* Every worker or none: a node whose workers are only partly reachable
      * would carry the streams that landed on one worker and refuse the ones
      * that landed on another, for the same pair of Pods. The runtimes are
@@ -1056,7 +1329,10 @@ dpu_peer_bringup(struct objects *objs)
             for (int t = s; t < objs->n_data_workers; t++)
                 dmesh_peer_transport_free(runtimes[t]);
             for (int t = 0; t < s; t++) {
-                px_peer_detach(objs, t);
+                if (px_peer_detach(objs, t)) {
+                    DOCA_LOG_ERR("PEER: worker %d could not detach; transport retained", t);
+                    continue;
+                }
                 dmesh_peer_transport_free(objs->data_workers[t].peer_rt);
                 objs->data_workers[t].peer_rt = NULL;
             }
@@ -1134,6 +1410,7 @@ run_dpu_worker(struct objects *objs)
         worker_state->wake_fd = -1;
         worker_state->wake_epfd = -1;
         worker_state->peer_rt = NULL;
+        worker_state->pair_rt = NULL;
         worker_state->peer_evict_deadline = 0;
         atomic_store_explicit(&worker_state->parked, 0, memory_order_relaxed);
         atomic_store_explicit(&worker_state->wake_posted, 0, memory_order_relaxed);
@@ -1258,8 +1535,10 @@ run_dpu_worker(struct objects *objs)
             /* A worker with a peer carrier has two things that wake it from
              * outside its own engine, and its runtime waits on one descriptor.
              * Collect both here rather than widening that contract. */
-            if (worker_state->peer_rt) {
-                int carrier = dmesh_peer_transport_epfd(worker_state->peer_rt);
+            if (worker_state->peer_rt || worker_state->pair_rt) {
+                int carrier = worker_state->pair_rt
+                    ? peer_pair_transport_epfd(worker_state->pair_rt)
+                    : dmesh_peer_transport_epfd(worker_state->peer_rt);
                 struct epoll_event wake = { .events = EPOLLIN, .data = { .u32 = 1 } };
                 struct epoll_event peer = { .events = EPOLLIN, .data = { .u32 = 2 } };
                 worker_state->wake_epfd = epoll_create1(EPOLL_CLOEXEC);

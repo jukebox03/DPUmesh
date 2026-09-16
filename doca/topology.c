@@ -1006,6 +1006,32 @@ dmesh_topology_pod_in_service(const struct objects *objs, const char *pod_uid,
 }
 
 int
+dmesh_topology_node_by_key(const struct objects *objs, const uint8_t static_key[32],
+                           char node_name[DMESH_K8S_NAME_MAX])
+{
+    const struct dmesh_topology_tables *tables = topology_tables_acquire(objs);
+    static const uint8_t zero[32] = {0};
+    if (node_name != NULL)
+        node_name[0] = '\0';
+    if (tables == NULL || static_key == NULL || node_name == NULL ||
+        memcmp(static_key, zero, sizeof(zero)) == 0)
+        return 0;
+    const struct dmesh_gen_node *found = NULL;
+    for (size_t n = 0; n < tables->node_count; n++) {
+        const struct dmesh_gen_node *node = &tables->nodes[n];
+        if (memcmp(node->dpu_static_public_key, static_key, 32) != 0)
+            continue;
+        if (found != NULL)
+            return 0;             /* two nodes claiming one key bind neither */
+        found = node;
+    }
+    if (found == NULL)
+        return 0;
+    snprintf(node_name, DMESH_K8S_NAME_MAX, "%s", found->name);
+    return 1;
+}
+
+int
 dmesh_topology_node_peer(const struct objects *objs, const char *node_name,
                          const uint8_t **static_key, uint32_t *ip_be,
                          uint16_t *port)

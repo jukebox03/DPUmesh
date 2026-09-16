@@ -2,7 +2,7 @@
 
 # DPUmesh Evaluation
 
-현재 배포 및 코드 정리 검증은 [2026-09-10 완료 기록](data/kubernetes-cleanup-20260910/SUMMARY.md)을 참조한다.
+Deployment and code-cleanup validation is recorded in the [Kubernetes cleanup summary](data/kubernetes-cleanup-20260910/SUMMARY.md).
 
 > **Current gRPC build note (2026-09-02).** The cross-adapter tables below are
 > retained receipts for their 2026-08-25 build. Commit `36d095d` subsequently

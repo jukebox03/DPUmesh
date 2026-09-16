@@ -55,6 +55,20 @@ int  peer_tls_faulted(const struct peer_tls_conn *conn);
  * completed. Negative before then. */
 int  peer_tls_peer_key(const struct peer_tls_conn *conn, uint8_t key[32]);
 
+/* Pin only after the mutual handshake, against a trusted topology snapshot.
+ * A mismatch permanently faults this connection. Exporting is impossible
+ * before pinning; merely completing TLS does not authorize key derivation. */
+int peer_tls_pin(struct peer_tls_conn *conn, const uint8_t expected[32]);
+int peer_tls_local_key(const struct peer_tls_conn *conn, uint8_t key[32]);
+#define PEER_TLS_IPSEC_MATERIAL_LEN 20u /* AES-128 key followed by 4 salt bytes */
+#define PEER_TLS_IPSEC_CONTEXT_MAX 4096u
+/* Fixed purpose/length, RFC exporter (never early data). On failure a non-NULL
+ * output is cleansed. The caller owns and must cleanse successful output.
+ * Context must be the canonical Pod-pair binding, not a local tx/rx string. */
+int peer_tls_export_ipsec(struct peer_tls_conn *conn, const void *context,
+                         size_t context_len,
+                         uint8_t out[PEER_TLS_IPSEC_MATERIAL_LEN]);
+
 /* Plaintext in. All-or-nothing by construction: the record layer writes into a
  * memory buffer that grows, so a write that is refused was refused by TLS, not
  * by backpressure. 0 accepted the whole buffer, -1 fault. */
@@ -67,6 +81,7 @@ long peer_tls_out(struct peer_tls_conn *conn, void *buf, size_t cap);
 /* How much ciphertext is waiting, so a caller can tell pending work from idle
  * without attempting a read. */
 size_t peer_tls_out_pending(struct peer_tls_conn *conn);
+size_t peer_tls_in_pending(struct peer_tls_conn *conn);
 /* Ciphertext in, as the wire delivers it. Order must be preserved; the split
  * into calls need not be. 0 accepted, -1 fault. */
 int  peer_tls_in(struct peer_tls_conn *conn, const void *buf, size_t len);

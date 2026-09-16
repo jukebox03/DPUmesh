@@ -821,6 +821,8 @@ pods_add_connection(struct objects *objs, struct doca_comch_connection *conn)
 	objs->pods[idx].registered_service[0] = '\0';
 	memset(objs->pods[idx].registration_nonce, 0,
 	       sizeof(objs->pods[idx].registration_nonce));
+	memset(&objs->pods[idx].peer_registration, 0,
+	       sizeof(objs->pods[idx].peer_registration));
 	objs->pods[idx].registration_challenge_issued = 0;
 	objs->pods[idx].registration_challenge_sent = 0;
 	objs->pods[idx].registration_verified = 0;
@@ -898,6 +900,10 @@ pod_begin_cleanup(struct objects *objs, struct pod_state *pod)
 		? (uint64_t)started.tv_sec * 1000000000ull + (uint64_t)started.tv_nsec
 		: 0;
 	__atomic_store_n(&pod->cleanup_pending, 1, __ATOMIC_RELEASE);
+	/* A Pod pair keyed on this registration ends with it; the manager fences
+	 * remote lanes while the local DMA teardown below runs. */
+	if (objs->peer_unregister_hook && pod->pod_uid[0])
+		objs->peer_unregister_hook(objs, pod->pod_uid);
 #ifdef DOCA_ARCH_DPU
 	teardown_pod_dma(objs, pod);
 #endif
@@ -1412,6 +1418,12 @@ unsigned server_local_dispatch(void *owner, const struct dmesh_local_request *r)
     memcpy(p->service_account, c.service_account, sizeof(p->service_account));
     memcpy(p->registered_service, c.service_name, sizeof(p->registered_service));
     memcpy(p->pod_ip, c.pod_ip, sizeof(p->pod_ip));
+    memcpy(p->peer_registration.daemon, c.daemon_incarnation,
+           sizeof(p->peer_registration.daemon));
+    p->peer_registration.slot = c.channel_slot;
+    p->peer_registration.generation = c.channel_generation;
+    memcpy(p->peer_registration.nonce, p->registration_nonce,
+           sizeof(p->peer_registration.nonce));
     p->registration_verified = 1;
     DOCA_LOG_WARN("local REGISTER accepted pod=%s container=%s slot=%u generation=%lu",
                  p->pod_uid, r->identity.container_id, c.channel_slot,

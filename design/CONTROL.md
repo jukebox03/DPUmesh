@@ -448,6 +448,10 @@ dmesh_scope_refresh(objs);          /* mediated workload scope; chapter 3 */
 px_peer_generation_changed(objs);   /* rebind or reset peer channels; chapter 2-0 */
 ```
 
+The peer notification publishes a pending flag and wakes each data worker.
+Only that worker walks its channel table and performs rebind/reset; the control
+thread does not close another worker's transport or release its custody.
+
 ## 1.6 What a rejected generation does: nothing
 
 A missing, malformed, oversized, unsigned or rolled-back generation changes
@@ -614,7 +618,8 @@ which is closed rather than overwritten.
 
 ## 2-0.5 Rebinding on adoption
 
-`dmesh_peer_table_rebind` re-checks every live channel on every adoption and
+Each worker consumes the adoption notification before peer progress.
+`dmesh_peer_table_rebind` re-checks every live channel and
 resets one whose peer the generation dropped or re-keyed. This is where node
 eviction takes effect: when the controller drops a node, every DPU refuses it at
 once and consistently. It is the counterpart of 2-2's rule that an individual

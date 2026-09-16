@@ -1,6 +1,6 @@
 # DPUmesh Data Plane
 
-Placement (2026-09-10): applications are host Pods; ARM/DPA runtime and the feed receiver share a DPU Pod. Node admin is a host systemd service and each broker is its host-process child. The current registration and lifecycle contract is [CONTROL](CONTROL.md).
+Placement: applications are host Pods; ARM/DPA runtime and the feed receiver share a DPU Pod. Node admin is a host systemd service and each broker is its host-process child. The current registration and lifecycle contract is [CONTROL](CONTROL.md).
 
 DPUmesh is a reliable full-duplex byte transport for Kubernetes Services. A
 workload publishes descriptors over registered host memory; BlueField DPA and
@@ -288,6 +288,11 @@ Linkerd calls the C data plane through:
 ## 5. Cross-node path
 
 ### 5.1 Channel and stream
+
+`DPUMESH_PEER_TRANSPORT` selects the carrier under these frames: `tcp` uses the
+node TLS channel described here, `rdma` uses per-Pod-pair RDMA lanes with inline
+IPsec, documented in [RDMA/IPsec](RDMA_IPSEC.md). The frames and custody rules
+below are the same on both.
 
 One peer transport per ARM worker carries multiple application streams. The
 wire is an ordered sequence of `STREAM_OPEN`, `STREAM_OPEN_ACK`, `DATA`,

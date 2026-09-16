@@ -47,6 +47,9 @@ LIB_SRCS := \
 	doca/workload_identity.c \
 	doca/topology.c \
 	doca/peer_channel.c \
+	doca/peer_pair_wire.c \
+	doca/peer_security_wire.c \
+	doca/peer_tls.c \
 	doca/control_scope.c \
 	doca/dpa.c
 LIB_HDRS := $(shell find include src doca -name '*.h' 2>/dev/null)
@@ -92,9 +95,9 @@ dirs:
 	@mkdir -p $(LIBDIR) $(BINDIR) $(DEPDIR) $(TESTDIR)
 
 lib: dirs $(LIB) $(LIB_LINK)
-$(LIB): $(LIB_SRCS) $(LIB_HDRS) | dirs
-	$(CC) $(CFLAGS) $(DEPFLAGS) -shared -Wl,-soname,libdpumesh.so.$(ABI_MAJOR) -o $@ $(LIB_SRCS) \
-		$(DOCA_LIBS) $(CRYPTO_LIBS) -lpthread $(RPATHS)
+$(LIB): $(LIB_SRCS) $(LIB_HDRS) Makefile | dirs
+	$(CC) $(CFLAGS) $(DEPFLAGS) -shared -Wl,-z,defs -Wl,-soname,libdpumesh.so.$(ABI_MAJOR) -o $@ $(LIB_SRCS) \
+		$(DOCA_LIBS) $(CRYPTO_LIBS) $(TLS_LIBS) -lpthread $(RPATHS)
 	@echo "  -> $@"
 
 # The unversioned name is the LINKER's entry point only (-ldpumesh). What a binary
@@ -161,11 +164,13 @@ $(TESTDIR)/l4_pin_policy_test: tests/l4_pin_policy_test.c doca/dpu_proxy.h | dir
 
 $(TESTDIR)/lb_policy_test: tests/lb_policy_test.c doca/dpu_worker.c $(LIB_HDRS) | dirs
 	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -Wl,--gc-sections \
-		-o $@ tests/lb_policy_test.c $(DOCA_LIBS) -lpthread $(RPATHS)
+		-o $@ tests/lb_policy_test.c $(DOCA_LIBS) $(RDMA_LIBS) -lpthread $(RPATHS)
 
-$(TESTDIR)/proxy_lane_queue_test: tests/proxy_lane_queue_test.c doca/dpu_proxy.c doca/peer_channel.c doca/peer_transport.c doca/peer_tls.c doca/topology.c doca/workload_identity.c $(LIB_HDRS) | dirs
+PEER_PAIR_SRCS := doca/peer_pair_wire.c doca/peer_security_wire.c
+
+$(TESTDIR)/proxy_lane_queue_test: tests/proxy_lane_queue_test.c doca/dpu_proxy.c doca/peer_channel.c doca/peer_transport.c doca/peer_tls.c doca/topology.c doca/workload_identity.c $(PEER_PAIR_SRCS) $(LIB_HDRS) | dirs
 	$(CC) $(CFLAGS) -D_GNU_SOURCE -ffunction-sections -fdata-sections -Wl,--gc-sections \
-		-o $@ tests/proxy_lane_queue_test.c doca/peer_channel.c \
+		-o $@ tests/proxy_lane_queue_test.c doca/peer_channel.c $(PEER_PAIR_SRCS) \
 		doca/peer_transport.c doca/peer_tls.c doca/topology.c \
 		doca/workload_identity.c \
 		$(DOCA_LIBS) $(TLS_LIBS) $(CRYPTO_LIBS) -lpthread $(RPATHS)
@@ -176,27 +181,77 @@ $(TESTDIR)/worker_mpsc_queue_test: tests/worker_mpsc_queue_test.c doca/object.h 
 $(TESTDIR)/topology_test: tests/topology_test.c include/dpumesh/dmesh_topology.h | dirs
 	$(CC) $(CFLAGS) -o $@ tests/topology_test.c
 
-$(TESTDIR)/peer_channel_test: tests/peer_channel_test.c doca/peer_channel.c $(LIB_HDRS) | dirs
-	$(CC) $(CFLAGS) -D_GNU_SOURCE -o $@ tests/peer_channel_test.c doca/peer_channel.c \
-		$(CRYPTO_LIBS) $(RPATHS)
+$(TESTDIR)/peer_channel_test: tests/peer_channel_test.c doca/peer_channel.c $(PEER_PAIR_SRCS) doca/peer_tls.c $(LIB_HDRS) | dirs
+	$(CC) $(CFLAGS) -D_GNU_SOURCE -o $@ tests/peer_channel_test.c doca/peer_channel.c $(PEER_PAIR_SRCS) doca/peer_tls.c \
+		$(TLS_LIBS) $(CRYPTO_LIBS) $(RPATHS)
+
+$(TESTDIR)/peer_pair_channel_test: tests/peer_pair_channel_test.c doca/peer_channel.c $(PEER_PAIR_SRCS) doca/peer_tls.c $(LIB_HDRS) | dirs
+	$(CC) $(CFLAGS) -D_GNU_SOURCE -o $@ tests/peer_pair_channel_test.c doca/peer_channel.c $(PEER_PAIR_SRCS) doca/peer_tls.c \
+		$(TLS_LIBS) $(CRYPTO_LIBS) $(RPATHS)
+
+$(TESTDIR)/peer_pair_transport_test: tests/peer_pair_transport_test.c doca/peer_pair_transport.c doca/peer_channel.c $(PEER_PAIR_SRCS) doca/peer_tls.c $(LIB_HDRS) doca/peer_pair_transport.h doca/peer_association.h doca/peer_wire_verbs.h | dirs
+	$(CC) $(CFLAGS) -o $@ tests/peer_pair_transport_test.c doca/peer_pair_transport.c doca/peer_channel.c $(PEER_PAIR_SRCS) doca/peer_tls.c \
+		$(TLS_LIBS) $(CRYPTO_LIBS) -lpthread $(RPATHS)
+
+$(TESTDIR)/peer_pair_wire_test: tests/peer_pair_wire_test.c doca/peer_channel.c $(PEER_PAIR_SRCS) doca/peer_tls.c $(LIB_HDRS) | dirs
+	$(CC) $(CFLAGS) -D_GNU_SOURCE -o $@ tests/peer_pair_wire_test.c doca/peer_channel.c $(PEER_PAIR_SRCS) doca/peer_tls.c \
+		$(TLS_LIBS) $(CRYPTO_LIBS) $(RPATHS)
 
 $(TESTDIR)/peer_tls_test: tests/peer_tls_test.c doca/peer_tls.c doca/peer_tls.h | dirs
 	$(CC) $(CFLAGS) -o $@ tests/peer_tls_test.c doca/peer_tls.c \
 		$(TLS_LIBS) $(CRYPTO_LIBS) $(RPATHS)
 
+PEER_SECURITY_SRCS := doca/peer_security_wire.c doca/peer_association.c doca/peer_control.c doca/peer_tls.c
+PEER_SECURITY_HDRS := doca/workload_limits.h doca/peer_security_wire.h doca/peer_identity.h doca/peer_association.h doca/peer_control.h doca/peer_tls.h doca/peer_wire.h tests/peer_security_fixture.h
+$(TESTDIR)/peer_security_test: tests/peer_security_test.c $(PEER_SECURITY_SRCS) $(PEER_SECURITY_HDRS) | dirs
+	$(CC) $(CFLAGS) -o $@ tests/peer_security_test.c $(PEER_SECURITY_SRCS) \
+		$(TLS_LIBS) $(CRYPTO_LIBS) $(RPATHS)
+
+$(TESTDIR)/peer_control_test: tests/peer_control_test.c $(PEER_SECURITY_SRCS) $(PEER_SECURITY_HDRS) doca/peer_wire_tcp.c | dirs
+	$(CC) $(CFLAGS) -o $@ tests/peer_control_test.c $(PEER_SECURITY_SRCS) doca/peer_wire_tcp.c \
+		$(TLS_LIBS) $(CRYPTO_LIBS) $(RPATHS)
+
+PEER_MANAGER_SRCS := doca/peer_manager.c doca/peer_pair_transport.c doca/peer_channel.c doca/peer_pair_wire.c $(PEER_SECURITY_SRCS) doca/peer_wire_tcp.c
+$(TESTDIR)/peer_crypto_ipc_test: tests/peer_crypto_ipc_test.c doca/peer_crypto_ipc.c doca/peer_crypto_ipc.h doca/peer_crypto.h | dirs
+	$(CC) $(CFLAGS) -o $@ tests/peer_crypto_ipc_test.c doca/peer_crypto_ipc.c $(CRYPTO_LIBS) -lpthread $(RPATHS)
+$(TESTDIR)/peer_crypto_owner_probe: tests/peer_crypto_owner_probe.c doca/peer_crypto_ipc.c doca/peer_crypto_ipc.h doca/peer_crypto.h | dirs
+	$(CC) $(CFLAGS) -o $@ tests/peer_crypto_owner_probe.c doca/peer_crypto_ipc.c $(CRYPTO_LIBS) $(RPATHS)
+$(TESTDIR)/peer_e2e_probe: tests/peer_e2e_probe.c doca/peer_manager.c doca/peer_pair_transport.c doca/peer_pair_verbs.c doca/peer_channel.c doca/peer_pair_wire.c doca/peer_security_wire.c doca/peer_association.c doca/peer_control.c doca/peer_tls.c doca/peer_wire_tcp.c doca/peer_wire_rdma.c doca/peer_crypto_ipc.c $(LIB_HDRS) doca/peer_manager.h doca/peer_crypto_ipc.h | dirs
+	$(CC) $(CFLAGS) -o $@ tests/peer_e2e_probe.c doca/peer_manager.c doca/peer_pair_transport.c doca/peer_pair_verbs.c doca/peer_channel.c doca/peer_pair_wire.c doca/peer_security_wire.c doca/peer_association.c doca/peer_control.c doca/peer_tls.c doca/peer_wire_tcp.c doca/peer_wire_rdma.c doca/peer_crypto_ipc.c $(RDMA_LIBS) $(TLS_LIBS) $(CRYPTO_LIBS) -lpthread $(RPATHS)
+$(TESTDIR)/peer_manager_test: tests/peer_manager_test.c $(PEER_MANAGER_SRCS) $(PEER_SECURITY_HDRS) doca/peer_manager.h doca/peer_crypto.h doca/peer_pair_transport.h $(LIB_HDRS) | dirs
+	$(CC) $(CFLAGS) -o $@ tests/peer_manager_test.c $(PEER_MANAGER_SRCS) \
+		$(TLS_LIBS) $(CRYPTO_LIBS) -lpthread $(RPATHS)
+
 $(TESTDIR)/peer_transport_test: tests/peer_transport_test.c doca/peer_transport.c \
-		doca/peer_wire_tcp.c doca/peer_tls.c doca/peer_channel.c $(LIB_HDRS) | dirs
+		doca/peer_wire_tcp.c doca/peer_tls.c doca/peer_channel.c $(PEER_PAIR_SRCS) $(LIB_HDRS) | dirs
 	$(CC) $(CFLAGS) -D_GNU_SOURCE -o $@ tests/peer_transport_test.c \
-		doca/peer_transport.c doca/peer_wire_tcp.c doca/peer_tls.c doca/peer_channel.c \
+		doca/peer_transport.c doca/peer_wire_tcp.c doca/peer_tls.c doca/peer_channel.c $(PEER_PAIR_SRCS) \
 		$(TLS_LIBS) $(CRYPTO_LIBS) $(RPATHS)
 
 $(TESTDIR)/peer_wire_test: tests/peer_wire_test.c doca/peer_wire_tcp.c \
-		doca/peer_wire_rdma.c doca/peer_wire.h | dirs
+		doca/peer_wire_rdma.c doca/peer_wire.h doca/peer_wire_verbs.h | dirs
 	$(CC) $(CFLAGS) -D_GNU_SOURCE -o $@ tests/peer_wire_test.c \
 		doca/peer_wire_tcp.c doca/peer_wire_rdma.c $(RDMA_LIBS) $(RPATHS)
 
-$(TESTDIR)/peer_wire_lease_test: tests/peer_wire_lease_test.c doca/peer_wire_rdma.c doca/peer_wire.h | dirs
+$(TESTDIR)/peer_wire_lease_test: tests/peer_wire_lease_test.c doca/peer_wire_rdma.c doca/peer_wire.h doca/peer_wire_verbs.h | dirs
 	$(CC) $(CFLAGS) -D_GNU_SOURCE -o $@ tests/peer_wire_lease_test.c $(RDMA_LIBS) $(RPATHS)
+
+$(TESTDIR)/peer_wire_verbs_test: tests/peer_wire_verbs_test.c doca/peer_wire_rdma.c doca/peer_wire.h doca/peer_wire_verbs.h | dirs
+	$(CC) $(CFLAGS) -D_GNU_SOURCE -o $@ tests/peer_wire_verbs_test.c $(RDMA_LIBS) $(RPATHS)
+
+# Deterministic local security checks; never open an RDMA device or contact a DPU.
+.PHONY: test-peer-security
+test-peer-security: $(TESTDIR)/peer_security_test $(TESTDIR)/peer_control_test $(TESTDIR)/peer_wire_verbs_test $(TESTDIR)/peer_pair_channel_test $(TESTDIR)/peer_pair_wire_test $(TESTDIR)/peer_pair_transport_test $(TESTDIR)/peer_manager_test $(TESTDIR)/peer_crypto_ipc_test $(TESTDIR)/peer_crypto_owner_probe $(TESTDIR)/peer_e2e_probe
+	@case "$(CFLAGS)" in *-DNDEBUG*) \
+		echo "test-peer-security: NDEBUG disables assertions" >&2; exit 1;; esac
+	$(TESTDIR)/peer_security_test
+	$(TESTDIR)/peer_control_test
+	$(TESTDIR)/peer_wire_verbs_test
+	$(TESTDIR)/peer_pair_channel_test
+	$(TESTDIR)/peer_pair_wire_test
+	$(TESTDIR)/peer_pair_transport_test
+	$(TESTDIR)/peer_manager_test
+	$(TESTDIR)/peer_crypto_ipc_test
 
 $(TESTDIR)/topology_gen_test: tests/topology_gen_test.c doca/topology.c doca/workload_identity.c doca/control_scope.c $(LIB_HDRS) | dirs
 	$(CC) $(CFLAGS) -o $@ tests/topology_gen_test.c doca/topology.c doca/workload_identity.c \
@@ -218,7 +273,7 @@ $(TESTDIR)/benchmark_result_contract_test: tests/benchmark_result_contract_test.
 # hardware" is an explicit contract instead of tribal knowledge.
 HOSTFREE_TESTS := $(TESTDIR)/topology_test $(TESTDIR)/l7_abi_contract_test \
 	$(TESTDIR)/l4_pin_policy_test $(TESTDIR)/preload_api_contract_test \
-	$(TESTDIR)/benchmark_result_contract_test $(TESTDIR)/peer_tls_test
+	$(TESTDIR)/benchmark_result_contract_test $(TESTDIR)/peer_tls_test $(TESTDIR)/peer_security_test $(TESTDIR)/peer_control_test $(TESTDIR)/peer_pair_channel_test $(TESTDIR)/peer_pair_wire_test $(TESTDIR)/peer_pair_transport_test $(TESTDIR)/peer_manager_test
 
 test-hostfree: $(HOSTFREE_TESTS)
 	@case "$(CFLAGS)" in *-DNDEBUG*) \
@@ -230,6 +285,11 @@ test-hostfree: $(HOSTFREE_TESTS)
 	$(TESTDIR)/preload_api_contract_test
 	$(TESTDIR)/benchmark_result_contract_test
 	$(TESTDIR)/peer_tls_test
+	$(TESTDIR)/peer_security_test
+	$(TESTDIR)/peer_control_test
+	$(TESTDIR)/peer_pair_channel_test
+	$(TESTDIR)/peer_pair_wire_test
+	$(TESTDIR)/peer_pair_transport_test
 	sh tests/dma_fault_scope_test.sh
 	python3 tests/dpumesh_controller_test.py
 	$(DPUMESHD_PYTHON) tests/dpumeshd_test.py
@@ -243,9 +303,9 @@ test: $(TESTDIR)/native_api_contract_test $(TESTDIR)/native_control_state_test \
 	$(TESTDIR)/preload_api_contract_test $(TESTDIR)/l4_pin_policy_test \
 	$(TESTDIR)/lb_policy_test \
 	$(TESTDIR)/proxy_lane_queue_test $(TESTDIR)/worker_mpsc_queue_test \
-	$(TESTDIR)/topology_test $(TESTDIR)/topology_gen_test $(TESTDIR)/peer_channel_test \
-	$(TESTDIR)/peer_tls_test $(TESTDIR)/peer_transport_test \
-	$(TESTDIR)/peer_wire_test $(TESTDIR)/peer_wire_lease_test $(TESTDIR)/ring_counter_test \
+	$(TESTDIR)/topology_test $(TESTDIR)/topology_gen_test $(TESTDIR)/peer_channel_test $(TESTDIR)/peer_pair_channel_test $(TESTDIR)/peer_pair_wire_test $(TESTDIR)/peer_pair_transport_test \
+	$(TESTDIR)/peer_tls_test $(TESTDIR)/peer_security_test $(TESTDIR)/peer_control_test $(TESTDIR)/peer_transport_test \
+	$(TESTDIR)/peer_wire_test $(TESTDIR)/peer_wire_lease_test $(TESTDIR)/peer_wire_verbs_test $(TESTDIR)/ring_counter_test \
 	$(TESTDIR)/l7_abi_contract_test $(TESTDIR)/benchmark_result_contract_test $(PRELOAD) \
 	$(BINDIR)/bench_dpumesh $(BINDIR)/bench_sock
 	$(TESTDIR)/native_api_contract_test
@@ -264,10 +324,16 @@ test: $(TESTDIR)/native_api_contract_test $(TESTDIR)/native_control_state_test \
 	$(TESTDIR)/topology_test
 	$(TESTDIR)/topology_gen_test
 	$(TESTDIR)/peer_channel_test
+	$(TESTDIR)/peer_pair_channel_test
+	$(TESTDIR)/peer_pair_wire_test
+	$(TESTDIR)/peer_pair_transport_test
 	$(TESTDIR)/peer_tls_test
+	$(TESTDIR)/peer_security_test
+	$(TESTDIR)/peer_control_test
 	$(TESTDIR)/peer_transport_test
 	$(TESTDIR)/peer_wire_test
 	$(TESTDIR)/peer_wire_lease_test
+	$(TESTDIR)/peer_wire_verbs_test
 	$(TESTDIR)/ring_counter_test
 	$(TESTDIR)/l7_abi_contract_test
 	$(TESTDIR)/benchmark_result_contract_test
