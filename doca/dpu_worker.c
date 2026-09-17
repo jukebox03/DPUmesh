@@ -755,6 +755,7 @@ dmesh_l7_driver_maintenance(void *driver)
     }
     px_l7_stats_report(worker_state->objs, worker_state->id);
     px_peer_stats_report(worker_state->objs, worker_state->id);
+    px_budget_stats_report(worker_state->objs, worker_state->id);
     return 0;
 }
 

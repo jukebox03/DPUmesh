@@ -395,6 +395,7 @@ arena chunks must be free.
 | peer DATA extent | 64 KiB |
 | peer unacknowledged bytes | 16 MiB |
 | RDMA SEND/RECV slots per connection | 16 / 32 |
+| one Pod's share of units, pieces, arena chunks, peer bytes | 1/4 of each pool |
 
 The implementation preserves these invariants:
 
@@ -406,4 +407,7 @@ The implementation preserves these invariants:
 5. generation and token checks isolate every reusable slot and connection;
 6. teardown revokes stack references before returning mapped memory;
 7. authentication, topology, routing, or transport failure closes the affected
-   scope without opening a kernel or plaintext fallback.
+   scope without opening a kernel or plaintext fallback.;
+8. a Pod's holds on the shared unit, piece, arena and peer-in-flight pools are
+   charged to that Pod at reservation and returned where the hold retires, and
+   a hold past the Pod's ceiling is refused and retried rather than dropped.

@@ -215,10 +215,77 @@ static void test_peer_proxy_custody_release(void)
     free(px); free(o);
 }
 
+/* Pod-budget holds: ceilings refuse and count, releases reopen, and a unit or
+ * chunk gives its holds back on the one path every retirement takes. */
+static void test_pod_budget(void)
+{
+    struct objects *o = calloc(1, sizeof(*o));
+    struct dmesh_proxy *px = calloc(1, sizeof(*px));
+    assert(o && px);
+    o->proxy = px; px->objs = o;
+    px->budget_max.units = 2; px->budget_max.pieces = 3;
+    px->budget_max.arena_chunks = 1; px->budget_max.peer_inflight = 100;
+    o->num_pods = 1; o->pods[0].registered = 1; o->pods[0].pod_id = 7;
+
+    assert(px_budget_take(o, 0, PX_BUDGET_UNITS, 1));
+    assert(px_budget_take(o, 0, PX_BUDGET_UNITS, 1));
+    assert(!px_budget_take(o, 0, PX_BUDGET_UNITS, 1));
+    assert(px_stat_get(&px->stat_budget_refused[PX_BUDGET_UNITS]) == 1);
+    assert(o->pods[0].budget.units == 2);
+    px_budget_give(o, 0, PX_BUDGET_UNITS, 1);
+    assert(px_budget_take(o, 0, PX_BUDGET_UNITS, 1));
+    px_budget_give(o, 0, PX_BUDGET_UNITS, 2);
+    assert(o->pods[0].budget.units == 0);
+
+    /* a hold that would cross the ceiling is refused whole */
+    assert(px_budget_take(o, 0, PX_BUDGET_PEER, 60));
+    assert(!px_budget_take(o, 0, PX_BUDGET_PEER, 41));
+    assert(px_budget_take(o, 0, PX_BUDGET_PEER, 40));
+    assert(o->pods[0].budget.peer_inflight == 100);
+    px_budget_give(o, 0, PX_BUDGET_PEER, 100);
+    assert(o->pods[0].budget.peer_inflight == 0);
+
+    /* no slot: no accounting; ceiling 0: unlimited but still counted */
+    assert(px_budget_take(o, -1, PX_BUDGET_UNITS, 5));
+    px->budget_max.units = 0;
+    for (int i = 0; i < 10; i++)
+        assert(px_budget_take(o, 0, PX_BUDGET_UNITS, 1));
+    assert(o->pods[0].budget.units == 10);
+    px_budget_give(o, 0, PX_BUDGET_UNITS, 10);
+    px->budget_max.units = 2;
+
+    /* a unit returns its own holds when it retires */
+    struct px_unit u; memset(&u, 0, sizeof(u));
+    assert(px_budget_take(o, 0, PX_BUDGET_UNITS, 1));
+    assert(px_budget_take(o, 0, PX_BUDGET_PIECES, 2));
+    u.budget_pod_idx = 0; u.budget_unit = 1; u.budget_pieces = 2;
+    px_unit_free_node(px, &u);
+    assert(o->pods[0].budget.units == 0 && o->pods[0].budget.pieces == 0);
+
+    /* a charged chunk returns its hold on free, an uncharged one holds none */
+    struct px_chunk ch; memset(&ch, 0, sizeof(ch));
+    assert(px_budget_take(o, 0, PX_BUDGET_ARENA, 1));
+    assert(!px_budget_take(o, 0, PX_BUDGET_ARENA, 1));
+    ch.budget_pod_idx = 0; ch.budget_charged = 1;
+    px_chunk_free(px, &ch);
+    assert(o->pods[0].budget.arena_chunks == 0);
+    struct px_chunk plain; memset(&plain, 0, sizeof(plain)); plain.budget_pod_idx = -1;
+    px_chunk_free(px, &plain);
+    assert(o->pods[0].budget.arena_chunks == 0);
+
+    assert(px_budget_slot(o, 7) == 0);
+    assert(px_budget_slot(o, 8) == -1);
+
+    tls_unit_mag = NULL; tls_unit_mag_n = 0;
+    tls_chunk_mag = NULL; tls_chunk_mag_n = 0;
+    free(px); free(o);
+}
+
 int main(void)
 {
     test_peer_worker_ownership();
     test_peer_preallocation_policy(); test_peer_proxy_custody_release();
+    test_pod_budget();
     /* Adjacent, unclaimed DPA completions share one custody object and extend its
      * exact-ACK range. Claimed or oversized tails must remain separate. */
     struct px_arrival arr;

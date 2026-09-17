@@ -853,6 +853,7 @@ pods_add_connection(struct objects *objs, struct doca_comch_connection *conn)
 		                 __ATOMIC_RELEASE);
 	objs->pods[idx].egress_pending_emit = 0;
 	objs->pods[idx].proxy_source_refs = 0;
+	memset(&objs->pods[idx].budget, 0, sizeof(objs->pods[idx].budget));
 	__atomic_store_n(&objs->pods[idx].registered, 0, __ATOMIC_RELEASE);
 	if (idx == n)
 		__atomic_store_n(&objs->num_pods, idx + 1, __ATOMIC_RELEASE);

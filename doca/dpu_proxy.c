@@ -182,6 +182,10 @@ struct px_chunk {
     struct px_chunk *l7_next;     /* unpublished endpoint leases, owner worker only */
     uint64_t l7_token;
     uint32_t l7_len;
+    /* The Pod slot charged for this chunk, or -1: a chunk the L7 layer leased
+     * for a local connection counts against that connection's source Pod. */
+    int8_t   budget_pod_idx;
+    uint8_t  budget_charged;
 };
 
 /* One contiguous SG source piece: either an extent of arrival staging (arr set,
@@ -218,6 +222,11 @@ struct px_unit {
     uint8_t  peer_source_side;
     struct px_piece *pieces, *pieces_tail;
     int npieces;
+    /* Pod-budget holds this unit carries: the slot charged (-1 none), one unit
+     * hold, and the pieces charged so far. Returned by px_unit_free_node. */
+    int8_t   budget_pod_idx;
+    uint8_t  budget_unit;
+    uint16_t budget_pieces;
 };
 
 /* DMA completion dispatch tag. */
@@ -487,6 +496,16 @@ struct dmesh_proxy {
     uint32_t sg_pieces_max;
     uint32_t dma_bytes_max;              /* device limit for one memcpy task */
     int perf_stats;                      /* DPUMESH_PERF_STATS diagnostic log */
+    struct objects *objs;                /* the pools' owner, for hold returns */
+    /* Per-Pod ceilings on the node-shared pools (0 = unlimited). One Pod can
+     * hold this many units, pieces, and arena chunks, and this many bytes in
+     * flight to peer nodes, before its next hold is refused. */
+    struct px_budget_limits {
+        uint32_t units;
+        uint32_t pieces;
+        uint32_t arena_chunks;
+        uint64_t peer_inflight;
+    } budget_max;
 
     /* Per-worker connection and routing tables. */
     struct px_worker_state workers[MAX_ARM_WORKERS];
@@ -546,12 +565,124 @@ struct dmesh_proxy {
     atomic_ullong stat_peer_pin_conflict;
     atomic_ullong peer_report_ns;
     atomic_ullong peer_report_mark;
-
+    /* Holds refused because the Pod was at its ceiling, by pool. */
+    atomic_ullong stat_budget_refused[4];
+    atomic_ullong budget_report_ns;
+    atomic_ullong budget_report_mark;
 };
 
 static inline uint64_t px_stat_inc(atomic_ullong *counter)
 {
     return atomic_fetch_add_explicit(counter, 1, memory_order_relaxed) + 1;
+}
+
+/* ====== Pod budget ======
+ *
+ * The arrival pool is provisioned per Pod by construction (its size is every
+ * Pod's staging divided by the slot size), but units, pieces, arena chunks and
+ * peer in-flight bytes are node-shared: one Pod whose destination stops
+ * receiving could hold all of them and stall every other Pod's forward path.
+ * These holds are therefore charged to the source Pod and refused at a
+ * per-Pod ceiling. A refusal is never a drop: the caller returns 0, which
+ * parks that connection (px_stall) or that L7 writer until the Pod's own
+ * holds come back, and the worker's queue keeps serving other Pods. */
+enum px_budget_kind {
+    PX_BUDGET_UNITS = 0,
+    PX_BUDGET_PIECES,
+    PX_BUDGET_ARENA,
+    PX_BUDGET_PEER,
+    PX_BUDGET_KINDS,
+};
+
+static const char *const px_budget_name[PX_BUDGET_KINDS] = {
+    "units", "pieces", "arena-chunks", "peer-inflight",
+};
+
+static inline uint64_t px_budget_limit(const struct dmesh_proxy *px,
+                                       enum px_budget_kind kind)
+{
+    switch (kind) {
+    case PX_BUDGET_UNITS:  return px->budget_max.units;
+    case PX_BUDGET_PIECES: return px->budget_max.pieces;
+    case PX_BUDGET_ARENA:  return px->budget_max.arena_chunks;
+    case PX_BUDGET_PEER:   return px->budget_max.peer_inflight;
+    default:               return 0;
+    }
+}
+
+static inline uint64_t px_budget_held(const struct px_pod_budget *b,
+                                      enum px_budget_kind kind)
+{
+    switch (kind) {
+    case PX_BUDGET_UNITS:  return __atomic_load_n(&b->units, __ATOMIC_RELAXED);
+    case PX_BUDGET_PIECES: return __atomic_load_n(&b->pieces, __ATOMIC_RELAXED);
+    case PX_BUDGET_ARENA:  return __atomic_load_n(&b->arena_chunks, __ATOMIC_RELAXED);
+    case PX_BUDGET_PEER:   return __atomic_load_n(&b->peer_inflight, __ATOMIC_RELAXED);
+    default:               return 0;
+    }
+}
+
+/* Reserve n of one pool for a Pod slot. 1 taken; 0 refused and counted. A
+ * slot index below zero names no Pod (a peer-origin hold) and is not
+ * accounted. The check and the add are one compare-and-swap, so two workers
+ * charging the same Pod cannot both pass a ceiling they jointly exceed. */
+static int px_budget_take(struct objects *objs, int pod_idx,
+                          enum px_budget_kind kind, uint64_t n)
+{
+    if (!objs || !objs->proxy || pod_idx < 0 || pod_idx >= MAX_PODS || n == 0)
+        return 1;
+    struct px_pod_budget *b = &objs->pods[pod_idx].budget;
+    uint64_t max = px_budget_limit(objs->proxy, kind);
+    if (kind == PX_BUDGET_PEER) {
+        uint64_t cur = __atomic_load_n(&b->peer_inflight, __ATOMIC_RELAXED);
+        for (;;) {
+            if (max && cur + n > max)
+                break;
+            if (__atomic_compare_exchange_n(&b->peer_inflight, &cur, cur + n, 1,
+                                            __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
+                return 1;
+        }
+    } else {
+        uint32_t *field = kind == PX_BUDGET_UNITS  ? &b->units :
+                          kind == PX_BUDGET_PIECES ? &b->pieces : &b->arena_chunks;
+        uint32_t cur = __atomic_load_n(field, __ATOMIC_RELAXED);
+        for (;;) {
+            if ((max && (uint64_t)cur + n > max) || (uint64_t)cur + n > UINT32_MAX)
+                break;
+            if (__atomic_compare_exchange_n(field, &cur, cur + (uint32_t)n, 1,
+                                            __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
+                return 1;
+        }
+    }
+    uint64_t refused = px_stat_inc(&objs->proxy->stat_budget_refused[kind]);
+    if (((refused - 1u) & 0xFFFFu) == 0)
+        DOCA_LOG_WARN("proxy budget: pod slot %d at its %s ceiling (%llu) — "
+                      "holding until its own releases return (refused %llu)",
+                      pod_idx, px_budget_name[kind], (unsigned long long)max,
+                      (unsigned long long)refused);
+    return 0;
+}
+
+static void px_budget_give(struct objects *objs, int pod_idx,
+                           enum px_budget_kind kind, uint64_t n)
+{
+    if (!objs || pod_idx < 0 || pod_idx >= MAX_PODS || n == 0)
+        return;
+    struct px_pod_budget *b = &objs->pods[pod_idx].budget;
+    if (kind == PX_BUDGET_PEER)
+        __atomic_fetch_sub(&b->peer_inflight, n, __ATOMIC_ACQ_REL);
+    else
+        __atomic_fetch_sub(kind == PX_BUDGET_UNITS  ? &b->units :
+                           kind == PX_BUDGET_PIECES ? &b->pieces : &b->arena_chunks,
+                           (uint32_t)n, __ATOMIC_ACQ_REL);
+}
+
+/* The slot a connection's bytes are charged to: its source Pod, or -1 when
+ * that Pod is not registered here (a synthetic peer reply). */
+static inline int px_budget_slot(struct objects *objs, int32_t src_pod)
+{
+    struct pod_state *sp = find_pod_by_id(objs, src_pod);
+    return sp ? (int)(sp - objs->pods) : -1;
 }
 
 /* Destination-lane engine owner. */
@@ -753,18 +884,41 @@ static void free_fn(struct dmesh_proxy *px, struct type *n) {                 \
 PX_POOL_FUNCS(px_arrival, px_arrival_alloc,   px_arrival_free, arr)
 PX_POOL_FUNCS(px_piece,   px_piece_alloc,     px_piece_free,   piece)
 PX_POOL_FUNCS(px_unit,    px_unit_alloc_node, px_unit_free,    unit)
-PX_POOL_FUNCS(px_chunk,   px_chunk_alloc,     px_chunk_free,   chunk)
+PX_POOL_FUNCS(px_chunk,   px_chunk_alloc_node, px_chunk_free_node, chunk)
+
+/* A chunk leaves the pool uncharged; dmesh_l7_tx_batch_write charges the one
+ * it leases for a local connection. Its return is the single place a charged
+ * chunk gives its hold back, wherever the chunk retires. */
+static struct px_chunk *px_chunk_alloc(struct dmesh_proxy *px) {
+    struct px_chunk *ch = px_chunk_alloc_node(px);
+    if (ch) {
+        ch->budget_pod_idx = -1;
+        ch->budget_charged = 0;
+    }
+    return ch;
+}
+static void px_chunk_free(struct dmesh_proxy *px, struct px_chunk *ch) {
+    if (ch->budget_charged) {
+        px_budget_give(px->objs, ch->budget_pod_idx, PX_BUDGET_ARENA, 1);
+        ch->budget_charged = 0;
+        ch->budget_pod_idx = -1;
+    }
+    px_chunk_free_node(px, ch);
+}
 
 /* Units start zeroed; the other node types are fully field-initialized. */
 static struct px_unit *px_unit_alloc(struct dmesh_proxy *px) {
     struct px_unit *u = px_unit_alloc_node(px);
-    if (u)
+    if (u) {
         memset(u, 0, sizeof(*u));
+        u->budget_pod_idx = -1;
+    }
     return u;
 }
 /* Free the unit and its piece chain. Arena chunks return here — the single
  * place every unit passes through, whether it was delivered, dropped, or
- * abandoned before submit — so a chunk cannot be leaked on an error path. */
+ * abandoned before submit — so a chunk cannot be leaked on an error path.
+ * The unit's Pod-budget holds return here for the same reason. */
 static void px_unit_free_node(struct dmesh_proxy *px, struct px_unit *u) {
     while (u->pieces) {
         struct px_piece *p = u->pieces;
@@ -775,6 +929,16 @@ static void px_unit_free_node(struct dmesh_proxy *px, struct px_unit *u) {
     }
     if (u->peer_channel)
         (void)dmesh_peer_channel_release(u->peer_channel, u->peer_incarnation);
+    if (u->budget_pod_idx >= 0) {
+        if (u->budget_pieces)
+            px_budget_give(px->objs, u->budget_pod_idx, PX_BUDGET_PIECES,
+                           u->budget_pieces);
+        if (u->budget_unit)
+            px_budget_give(px->objs, u->budget_pod_idx, PX_BUDGET_UNITS, 1);
+        u->budget_pieces = 0;
+        u->budget_unit = 0;
+        u->budget_pod_idx = -1;
+    }
     px_unit_free(px, u);
 }
 static struct px_batch *px_batch_alloc(struct px_engine *eng) {
@@ -1537,6 +1701,8 @@ static int px_peer_ship_range(struct objects *objs, struct px_conn *c,
         take = DMESH_PEER_EXTENT_MAX;
     const uint8_t *bytes = (const uint8_t *)objs->pods[arrival->pod_idx].dma_buffer +
                            arrival->staging_off + within;
+    if (!px_budget_take(objs, arrival->pod_idx, PX_BUDGET_PEER, take))
+        return 0;                              /* the conn parks until STREAM_ACKs return */
     uint32_t seq = c->peer_tx_seq + 1u;
     enum dmesh_peer_refusal sent = dmesh_peer_stream_data_send(
         px_cur_worker->peers, c->peer_channel, c->peer_handle, seq,
@@ -1544,8 +1710,9 @@ static int px_peer_ship_range(struct objects *objs, struct px_conn *c,
     if (sent == DMESH_PEER_OK) {
         arrival->claimed_round += take;
         c->peer_tx_seq = seq;
-        return (int)take;
+        return (int)take;                      /* px_peer_release returns the hold */
     }
+    px_budget_give(objs, arrival->pod_idx, PX_BUDGET_PEER, take);
     if (sent == DMESH_PEER_REFUSE_INFLIGHT)
         return 0;
     px_peer_event(objs, dmesh_peer_refusal_name(sent));
@@ -1699,6 +1866,15 @@ static int px_unit_prepare(struct objects *objs, struct px_conn *c,
         return 0;                              /* EAGAIN: the egress will free one */
     }
     struct pod_state *sp = find_pod_by_id(objs, c->pub.src_pod);
+    if (sp) {
+        int slot = (int)(sp - objs->pods);
+        if (!px_budget_take(objs, slot, PX_BUDGET_UNITS, 1)) {
+            px_unit_free_node(px, u);
+            return 0;                          /* EAGAIN: this Pod's own holds must return */
+        }
+        u->budget_pod_idx = (int8_t)slot;
+        u->budget_unit = 1;
+    }
     u->src_pod_id = (int8_t)c->pub.src_pod;
     u->src_service = sp ? (int8_t)sp->service_id : (int8_t)DMESH_SVC_NONE;
     /* Where the unit is going, which is only the Service it was addressed to
@@ -1739,6 +1915,13 @@ static int px_build_range(struct objects *objs, struct px_conn *c,
     while (pos < send_ && a) {
         uint64_t aend = a->stream_base + a->len;
         uint64_t take_end = send_ < aend ? send_ : aend;
+        if (u->budget_pod_idx >= 0) {
+            if (!px_budget_take(objs, u->budget_pod_idx, PX_BUDGET_PIECES, 1)) {
+                px_unit_free_node(px, u);      /* returns what it charged so far */
+                return 0;                      /* EAGAIN: the conn parks */
+            }
+            u->budget_pieces++;
+        }
         struct px_piece *p = px_piece_alloc(px);
         if (!p) {
             uint64_t stalls = px_stat_inc(&px->stat_stall_piece);
@@ -1801,6 +1984,11 @@ static int px_ship_range(struct objects *objs, struct px_conn *c,
 /* Attach one arena chunk to a unit as its next SG source piece. */
 static int px_unit_attach_chunk(struct dmesh_proxy *px, struct px_unit *u,
                                 struct px_chunk *ch, uint32_t len) {
+    if (u->budget_pod_idx >= 0) {
+        if (!px_budget_take(px->objs, u->budget_pod_idx, PX_BUDGET_PIECES, 1))
+            return 0;
+        u->budget_pieces++;                    /* returned with the unit */
+    }
     struct px_piece *p = px_piece_alloc(px);
     if (!p)
         return 0;
@@ -2651,10 +2839,15 @@ void px_peer_release(struct objects *objs, uint8_t kind, void *cookie, uint32_t 
     if (!px || !cookie)
         return;
     if (kind == DMESH_PEER_CUSTODY_L7) {
-        px_chunk_free(px, (struct px_chunk *)cookie);
+        struct px_chunk *ch = (struct px_chunk *)cookie;
+        if (ch->budget_charged)
+            px_budget_give(objs, ch->budget_pod_idx, PX_BUDGET_PEER, bytes);
+        px_chunk_free(px, ch);
         return;
     }
-    px_custody_sub(objs, (struct px_arrival *)cookie, bytes);
+    struct px_arrival *a = (struct px_arrival *)cookie;
+    px_budget_give(objs, a->pod_idx, PX_BUDGET_PEER, bytes);
+    px_custody_sub(objs, a, bytes);            /* may free a: nothing after */
 }
 
 /* The worker stat line for the peer surface. Reported when it moves, at most
@@ -3393,6 +3586,9 @@ static int px_l7_tx_publish(struct objects *objs, struct px_conn *c,
         if (ready == 0 || !c->peer_channel || c->peer_channel->tx_len != 0 ||
             c->peer_channel->stalled)
             return 0;
+        int slot = ch->budget_charged ? ch->budget_pod_idx : -1;
+        if (!px_budget_take(objs, slot, PX_BUDGET_PEER, len))
+            return 0;                           /* the batch keeps its bytes */
         uint32_t seq = c->peer_tx_seq + 1u;
         enum dmesh_peer_refusal sent = dmesh_peer_stream_data_send(
             px_cur_worker->peers, c->peer_channel, c->peer_handle, seq,
@@ -3401,6 +3597,7 @@ static int px_l7_tx_publish(struct objects *objs, struct px_conn *c,
             c->peer_tx_seq = seq;
             return (int)len;                    /* STREAM_ACK returns the chunk */
         }
+        px_budget_give(objs, slot, PX_BUDGET_PEER, len);
         if (sent == DMESH_PEER_REFUSE_INFLIGHT)
             return 0;
         px_chunk_free(px, ch);                  /* send retained no custody */
@@ -3441,6 +3638,9 @@ static int px_l7_tx_publish_remote(struct objects *objs, struct px_conn *c,
     if (ready == 0 || !c->peer_channel || c->peer_channel->tx_len != 0 ||
         c->peer_channel->stalled)
         return 0;
+    int slot = ch->budget_charged ? ch->budget_pod_idx : -1;
+    if (!px_budget_take(objs, slot, PX_BUDGET_PEER, len))
+        return 0;
     uint32_t seq = c->peer_tx_seq + 1u;
     enum dmesh_peer_refusal sent = dmesh_peer_stream_data_send(
         px_cur_worker->peers, c->peer_channel, c->peer_handle, seq,
@@ -3449,6 +3649,7 @@ static int px_l7_tx_publish_remote(struct objects *objs, struct px_conn *c,
         c->peer_tx_seq = seq;
         return (int)len;
     }
+    px_budget_give(objs, slot, PX_BUDGET_PEER, len);
     if (sent == DMESH_PEER_REFUSE_INFLIGHT)
         return 0;
     px_chunk_free(px, ch);
@@ -3489,6 +3690,15 @@ int dmesh_l7_tx_batch_write(int worker_id, uint64_t conn, uint64_t *token,
         if (!ch) {
             px_stat_inc(&objs->proxy->stat_stall_arena);
             return 0;
+        }
+        int slot = px_budget_slot(objs, c->pub.src_pod);
+        if (slot >= 0) {
+            if (!px_budget_take(objs, slot, PX_BUDGET_ARENA, 1)) {
+                px_chunk_free(objs->proxy, ch);
+                return 0;                      /* the writer parks; nothing accepted */
+            }
+            ch->budget_pod_idx = (int8_t)slot;
+            ch->budget_charged = 1;
         }
         /* Saturate rather than wrapping and revalidating a stale lease. */
         uint64_t serial = atomic_load_explicit(&px_l7_batch_serial, memory_order_relaxed);
@@ -5672,7 +5882,57 @@ int px_pod_reclaim_ready(struct objects *objs, int pod_idx) {
     return 1;
 }
 
+void px_budget_stats_report(struct objects *objs, int worker_id)
+{
+    struct dmesh_proxy *px = objs ? objs->proxy : NULL;
+    if (!px)
+        return;
+    uint64_t now = px_monotonic_ns();
+    uint64_t last = atomic_load_explicit(&px->budget_report_ns, memory_order_relaxed);
+    if (last && now - last < PX_L7_REPORT_NS)
+        return;
+    uint64_t by[PX_BUDGET_KINDS], mark = 0;
+    for (int k = 0; k < PX_BUDGET_KINDS; k++) {
+        by[k] = px_stat_get(&px->stat_budget_refused[k]);
+        mark += by[k];
+    }
+    uint64_t seen = atomic_load_explicit(&px->budget_report_mark, memory_order_relaxed);
+    atomic_store_explicit(&px->budget_report_ns, now, memory_order_relaxed);
+    if (mark == seen)
+        return;                                /* no new refusal to audit */
+    atomic_store_explicit(&px->budget_report_mark, mark, memory_order_relaxed);
+    DOCA_LOG_WARN("proxy budget: worker=%d refused units=%llu pieces=%llu "
+                  "arena-chunks=%llu peer-inflight=%llu (ceilings %u/%u/%u/%llu)",
+                  worker_id, (unsigned long long)by[PX_BUDGET_UNITS],
+                  (unsigned long long)by[PX_BUDGET_PIECES],
+                  (unsigned long long)by[PX_BUDGET_ARENA],
+                  (unsigned long long)by[PX_BUDGET_PEER],
+                  px->budget_max.units, px->budget_max.pieces,
+                  px->budget_max.arena_chunks,
+                  (unsigned long long)px->budget_max.peer_inflight);
+}
+
 /* ====== init ====== */
+
+/* One per-Pod ceiling from the environment, or its default. 0 disables the
+ * ceiling; anything else must be a whole number. */
+static int px_budget_env(const char *name, uint64_t fallback, uint64_t *out)
+{
+    const char *text = getenv(name);
+    if (!text || !*text) {
+        *out = fallback;
+        return 0;
+    }
+    errno = 0;
+    char *end = NULL;
+    unsigned long long value = strtoull(text, &end, 10);
+    if (errno != 0 || end == text || *end != '\0') {
+        DOCA_LOG_ERR("proxy: %s=%s is not a whole number", name, text);
+        return -1;
+    }
+    *out = value;
+    return 0;
+}
 
 /* Each list names Services by `namespace/name`. A service named twice across
  * the lists is a configuration error rather than a silent precedence rule. */
@@ -5772,6 +6032,31 @@ int px_init(struct objects *objs) {
       } }
     { const char *perf = getenv("DPUMESH_PERF_STATS");
       px->perf_stats = (perf && *perf && *perf != '0'); }
+    px->objs = objs;
+
+    /* Per-Pod ceilings default to a quarter of each shared pool: no Pod can
+     * take more than that share, so at least three quarters of every pool
+     * stay available to the other Pods however one of them behaves. */
+    {
+        uint64_t units, pieces, arena, peer;
+        if (px_budget_env("DPUMESH_POD_UNITS_MAX", PX_UNIT_POOL / 4u, &units) ||
+            px_budget_env("DPUMESH_POD_PIECES_MAX", PX_PIECE_POOL / 4u, &pieces) ||
+            px_budget_env("DPUMESH_POD_ARENA_CHUNKS_MAX", PX_ARENA_CHUNKS / 4u, &arena) ||
+            px_budget_env("DPUMESH_POD_PEER_INFLIGHT_MAX",
+                          (uint64_t)DMESH_PEER_TX_INFLIGHT_MAX / 4u, &peer)) {
+            ret = DOCA_ERROR_INVALID_VALUE;
+            goto fail;
+        }
+        px->budget_max.units = units > UINT32_MAX ? UINT32_MAX : (uint32_t)units;
+        px->budget_max.pieces = pieces > UINT32_MAX ? UINT32_MAX : (uint32_t)pieces;
+        px->budget_max.arena_chunks = arena > UINT32_MAX ? UINT32_MAX : (uint32_t)arena;
+        px->budget_max.peer_inflight = peer;
+        DOCA_LOG_INFO("proxy: per-Pod ceilings units=%u pieces=%u arena-chunks=%u "
+                      "peer-inflight=%llu bytes (0 = unlimited)",
+                      px->budget_max.units, px->budget_max.pieces,
+                      px->budget_max.arena_chunks,
+                      (unsigned long long)px->budget_max.peer_inflight);
+    }
 
     /* Each ARM data worker owns its connection and routing tables. */
     px->n_workers = objs->n_data_workers >= 1 ? objs->n_data_workers : 1;

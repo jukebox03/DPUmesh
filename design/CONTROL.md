@@ -1841,6 +1841,21 @@ Execution geometry is expressed as `N/K/A` as defined in
 largest multiple of `W` not greater than 32 for `N`. `bench/native_deploy.sh`
 uses the validated hardware profile `K=8` and two allocatable slots.
 
+Per-Pod ceilings on the node-shared proxy pools. Each is the most one Pod may
+hold at once; a hold past the ceiling is refused and that connection or L7
+writer waits until the Pod's own holds return, so no Pod can exhaust a pool
+for the others. `0` disables a ceiling. Defaults are one quarter of each pool.
+
+| Name | Default | Bound |
+|---|---|---|
+| `DPUMESH_POD_UNITS_MAX` | pool / 4 | egress units queued or in flight from one Pod |
+| `DPUMESH_POD_PIECES_MAX` | pool / 4 | SG source pieces held by one Pod's units |
+| `DPUMESH_POD_ARENA_CHUNKS_MAX` | 256 | egress arena chunks leased for one Pod's L7 connections |
+| `DPUMESH_POD_PEER_INFLIGHT_MAX` | 4 MiB | one Pod's bytes unacknowledged by peer nodes |
+
+Refusals are counted per pool and logged at the transport diagnostic cadence
+as `proxy budget: … refused …`.
+
 The inter-node carrier is configured per Arm worker. An unset transport leaves
 remote destinations unavailable while preserving node-local service.
 

@@ -124,6 +124,8 @@ void px_l7_stats_report(struct objects *objs, int worker_id);
  * `dmesh_peer_ops.event` reaches this through `px_peer_event_cb`. */
 void px_peer_event(struct objects *objs, const char *reason);
 void px_peer_stats_report(struct objects *objs, int worker_id);
+/* The Pod-budget refusal counters, on the same tick and cadence. */
+void px_budget_stats_report(struct objects *objs, int worker_id);
 /* Release one extent whose destination was remote, now that its STREAM_ACK
  * says the bytes landed. `dmesh_peer_ops.release` reaches this through
  * `px_peer_release_cb`. */

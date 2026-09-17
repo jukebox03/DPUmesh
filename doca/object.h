@@ -277,6 +277,19 @@ struct pod_state {
      * reuse is forbidden until it reaches zero. */
     uint32_t proxy_source_refs;
 
+    /* What this Pod currently holds of the node-shared proxy pools: egress
+     * units and their SG pieces, arena chunks, and bytes in flight to peer
+     * nodes. Charged by the worker that creates the hold and returned by
+     * whichever worker retires it, so every field is updated atomically. A
+     * hold is refused, never dropped, when a limit in dpu_proxy.c is reached,
+     * and the refused connection stalls until the Pod's own holds return. */
+    struct px_pod_budget {
+        uint32_t units;
+        uint32_t pieces;
+        uint32_t arena_chunks;
+        uint64_t peer_inflight;
+    } budget;
+
     /* K forward descriptor rings mapped to K DPA EUs. */
     int k_rings;                                   /* = objs->k_rings */
     int landing_stripes;                           /* L = ARM data workers */
