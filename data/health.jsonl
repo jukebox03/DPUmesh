@@ -32,3 +32,4 @@
 {"commit": "bca0130", "host": "rapids4", "status": "unreachable", "ts": "2026-09-19T21:21:40Z"}
 {"commit": "bca0130", "host": "rapids4", "status": "unreachable", "ts": "2026-09-20T21:19:08Z"}
 {"commit": "c45a3a2", "host": "rapids4", "status": "unreachable", "ts": "2026-09-21T22:31:18Z"}
+{"clients": ["bench-grpc-budget", "bench-grpc-dpumesh"], "commit": "c45a3a2", "host": "rapids4", "load": 1.75, "status": "no_dpu", "ts": "2026-09-22T21:53:31Z"}
