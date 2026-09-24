@@ -34,3 +34,4 @@
 {"commit": "c45a3a2", "host": "rapids4", "status": "unreachable", "ts": "2026-09-21T22:31:18Z"}
 {"clients": ["bench-grpc-budget", "bench-grpc-dpumesh"], "commit": "c45a3a2", "host": "rapids4", "load": 1.75, "status": "no_dpu", "ts": "2026-09-22T21:53:31Z"}
 {"clients": ["bench-grpc-budget", "bench-grpc-dpumesh"], "commit": "c45a3a2", "host": "rapids4", "load": 0.32, "status": "no_dpu", "ts": "2026-09-23T22:08:07Z"}
+{"clients": ["bench-grpc-budget", "bench-grpc-dpumesh"], "commit": "c45a3a2", "host": "rapids4", "load": 0.5, "status": "no_dpu", "ts": "2026-09-24T22:08:59Z"}
