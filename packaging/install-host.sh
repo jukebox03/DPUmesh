@@ -38,6 +38,13 @@ fi
 /opt/dpumesh/venv/bin/pip install --disable-pip-version-check \
     'grpcio>=1.83,<2' 'protobuf>=7.35,<8'
 
+# The unit's namespace setup needs /run/dpumesh (ReadWritePaths). It is a
+# tmpfiles directory rather than RuntimeDirectory= because kubelet bind-mounts
+# the slot sockets beneath it into Pods, which must outlive a daemon restart.
+printf 'd /run/dpumesh 0755 root root -\n' > /etc/tmpfiles.d/dpumesh.conf
+chmod 0644 /etc/tmpfiles.d/dpumesh.conf
+systemd-tmpfiles --create /etc/tmpfiles.d/dpumesh.conf
+
 install -o root -g root -m 0644 "$project/packaging/dpumeshd.service" \
     /etc/systemd/system/dpumeshd.service
 if [ ! -e /etc/dpumesh/dpumeshd.env ]; then
