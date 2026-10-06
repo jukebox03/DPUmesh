@@ -70,16 +70,17 @@ install_dpu_key() {
         material=$(sudo_host xxd -p -c 64 "$host_directory/$key_id.key")
     fi
     [ ${#material} -eq 64 ] || { echo "invalid $mode key material for $key_id" >&2; exit 1; }
-    printf '%s' "$material" | xxd -r -p |
-        ssh -o ConnectTimeout=8 "$DPU_HOST" "
-            set -e
-            umask 077
-            cat >/tmp/dpumesh-key.in
-            echo '$DPU_PASS' | sudo -S -p '' install -d -o root -g root -m 0700 '$dpu_directory'
-            echo '$DPU_PASS' | sudo -S -p '' install -o root -g root -m 0400 \
-                /tmp/dpumesh-key.in '$dpu_directory/$key_id.key'
-            rm -f /tmp/dpumesh-key.in
-        "
+    # The key and the sudo password each travel on stdin, never in a command
+    # line another user's ps could read: first the key into a private file,
+    # then the password to the root install.
+    local staged
+    staged=$(printf '%s' "$material" | xxd -r -p |
+        ssh -o ConnectTimeout=8 "$DPU_HOST" 'set -e; umask 077; f=$(mktemp); cat >"$f"; echo "$f"')
+    printf '%s\n' "$DPU_PASS" | ssh -o ConnectTimeout=8 "$DPU_HOST" "
+            sudo -S -p '' sh -ec 'install -d -o root -g root -m 0700 \"$dpu_directory\"
+                install -o root -g root -m 0400 \"$staged\" \"$dpu_directory/$key_id.key\"'
+        " || { ssh "$DPU_HOST" "rm -f '$staged'"; exit 1; }
+    ssh -o ConnectTimeout=8 "$DPU_HOST" "rm -f '$staged'"
 }
 
 assert_key_roles() {

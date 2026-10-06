@@ -83,8 +83,16 @@ ssh_dpu() {
         sleep $((attempt * 2))
     done
 }
+# The password travels on ssh's stdin, never in the remote command line.
 dpu_sudo() {
-    ssh_dpu "echo '$DPU_PASS' | sudo -S -p '' bash -c '$1'" 2>&1
+    local attempt status
+    for attempt in 1 2 3; do
+        printf '%s\n' "$DPU_PASS" |
+            ssh "${SSH_OPTS[@]}" "$DPU_HOST" "sudo -S -p '' bash -c '$1'" 2>&1 && return 0
+        status=$?
+        [ "$status" -eq 255 ] && [ "$attempt" -lt 3 ] || return "$status"
+        sleep $((attempt * 2))
+    done
 }
 
 dpu_home() { ssh_dpu 'printf %s "$HOME"'; }
