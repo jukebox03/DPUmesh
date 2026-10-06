@@ -97,16 +97,19 @@ one-shot hint, not a reservation. [design/API.md](design/API.md) is the contract
 Channel creation returns only after a replayable two-phase barrier:
 
 ```text
-POD_REGISTER → POD_ASSIGNED → memory and ring import → all DPA RING_ADD_ACKs
+REG_CHALLENGE → REG_ASSERTION → POD_REGISTER → POD_ASSIGNED
+             → memory and ring import → all DPA RING_ADD_ACKs
              → POD_INIT_RESULT(READY, L)
 ```
 
 Before every `POD_REGISTER`, kernel-derived Pod and container evidence is
 checked against live Kubernetes state, and the resulting identity is bound to
-the exact Comch connection the DPU opened. dpumeshd checks Kubernetes and
-kubelet PodResources, then sends identity metadata over the mutually
-authenticated session with its paired DPU. The broker reports the challenge
-through its private launch socket. Applications receive no credentials.
+the exact Comch connection the DPU opened. The broker reports the DPU's
+challenge through its private launch socket; dpumeshd checks Kubernetes and
+kubelet PodResources, then seals the identity under a key derived from its
+mutually authenticated session with the paired DPU. The broker forwards the
+sealed `REG_ASSERTION` on its own Comch connection ahead of `POD_REGISTER`, and
+the DPU verifies the seal. Applications receive no credentials.
 [design/CONTROL.md](design/CONTROL.md) is the contract.
 
 The host retries registration while either assignment or readiness is pending;

@@ -53,7 +53,7 @@ batches remain worker-confined. Reverse rings have a single DPU producer.
 Channel creation completes this barrier before the API returns:
 
 ```text
-POD_REGISTER → POD_ASSIGNED → import TX and ring mappings
+REG_CHALLENGE → REG_ASSERTION → POD_REGISTER → POD_ASSIGNED → import TX and ring mappings
 → import worker-private RX mappings → all RING_ADD_ACK
 → POD_INIT_RESULT(READY, L)
 ```
@@ -61,10 +61,11 @@ POD_REGISTER → POD_ASSIGNED → import TX and ring mappings
 Registration carries identity metadata bound to this connection's nonce: the
 daemon incarnation, slot generation, Pod UID and authorized Service.
 The host also checks that requested ring geometry matches its allocation.
-Identity metadata reaches the DPU over the paired host's mutually authenticated
-control session, as [`CONTROL.md`](CONTROL.md) §2-1 defines. The
-DPU admits the channel only when that identity and node-scoped control state
-agree.
+dpumeshd seals the identity metadata under a key derived from the paired host's
+mutually authenticated control session, and the broker forwards it as
+`REG_ASSERTION` on the connection the DPU challenged, as
+[`CONTROL.md`](CONTROL.md) §2-1 defines. The DPU admits the channel only when
+the seal, that identity and node-scoped control state agree.
 
 The channel exports these data structures:
 

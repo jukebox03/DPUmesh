@@ -85,10 +85,13 @@ Linkerd trust roots, and deploys the chart using [runtime-values.py](runtime-val
 
 The host verifies the DPU server certificate name; the DPU accepts only the
 configured host URI spiffe://dpumesh.io/node/HOST_NODE. Cluster membership
-does not replace this authentication. Registration uses one TLS control path;
-there is no grant keyring or registration mode setting. Update host, broker and
-DPU together when changing the internal protocol (currently version 5,
-1433-byte identity, 1497-byte request). The application IPC remains version 3.
+does not replace this authentication. Registration has one path; there is no
+grant keyring or registration mode setting. dpumeshd seals each identity under
+a key derived from that TLS session, and the broker carries the sealed record to
+the DPU on its own Comch connection. Update host, broker and DPU together when
+changing the internal protocol (currently version 6, magic `DMESHLC2`:
+1433-byte identity in a 1469-byte `REG_ASSERTION`, 64-byte control requests).
+The application IPC remains version 3.
 
 ### Offline DPU builds
 

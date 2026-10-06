@@ -2179,9 +2179,10 @@ are never silently truncated.
   PID-starttime fence. The registering authority binds that evidence to its
   latest Pod, container, resource, node and Service state.
 - Registration identity is bound to cluster, node, Pod, container, Service, slot,
-  generation, daemon incarnation, DPU nonce and issue/expiry time. It travels
-  only on the mutually authenticated paired-host control session. There is no
-  workload signature, assertion id or untrusted registration carrier.
+  generation, daemon incarnation, DPU nonce and issue/expiry time. dpumeshd
+  seals it under a key derived from the mutually authenticated paired-host
+  control session; the broker carries the sealed record on Comch but can
+  neither make nor alter one. There is no workload signature or assertion id.
 - A slot is reused only on proof: an empty worker cgroup and a completed DPU
   teardown. Neither a timer nor the disappearance of a process is that proof.
 - Each broker's root supervisor wrapper is a direct child of `dpumeshd` in its
