@@ -5,7 +5,8 @@
 #include <string.h>
 #include "workload_limits.h"
 
-/* Retained from paired-host REGISTER, never filled from application input.
+/* Retained from the verified registration assertion, never filled from
+ * application input.
  * This is a host representation, not a wire structure. dma_generation fences
  * local DMA callbacks; it does not replace this registration incarnation. */
 struct dmesh_peer_registration {

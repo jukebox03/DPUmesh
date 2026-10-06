@@ -2,6 +2,7 @@
 
 #include <errno.h>
 #include <dirent.h>
+#include <stddef.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -532,4 +533,48 @@ dmesh_identity_decode(const struct dmesh_workload_identity *assertion,
     claims->channel_generation =
         dmesh_wire_get_u64_le(assertion->channel_generation_le);
     return DMESH_IDENTITY_OK;
+}
+
+#define DMESH_REG_KEY_LABEL "dpumesh-registration"
+
+static int
+registration_mac(const uint8_t session[DMESH_CONTROL_SESSION_SIZE],
+                 const struct dmesh_registration_assertion_msg *assertion,
+                 uint8_t out[DMESH_REG_MAC_SIZE])
+{
+    uint8_t key[DMESH_REG_MAC_SIZE];
+    unsigned int key_len = 0, mac_len = 0;
+    int ok = HMAC(EVP_sha256(), session, DMESH_CONTROL_SESSION_SIZE,
+                  (const unsigned char *)DMESH_REG_KEY_LABEL,
+                  sizeof(DMESH_REG_KEY_LABEL) - 1, key, &key_len) != NULL &&
+             key_len == sizeof(key) &&
+             HMAC(EVP_sha256(), key, sizeof(key),
+                  (const unsigned char *)assertion,
+                  offsetof(struct dmesh_registration_assertion_msg, mac),
+                  out, &mac_len) != NULL &&
+             mac_len == DMESH_REG_MAC_SIZE;
+    OPENSSL_cleanse(key, sizeof(key));
+    return ok ? 0 : -1;
+}
+
+int
+dmesh_registration_seal(const uint8_t session[DMESH_CONTROL_SESSION_SIZE],
+                        struct dmesh_registration_assertion_msg *assertion)
+{
+    uint8_t mac[DMESH_REG_MAC_SIZE];
+    if (registration_mac(session, assertion, mac) != 0)
+        return -1;
+    memcpy(assertion->mac, mac, sizeof(mac));
+    return 0;
+}
+
+int
+dmesh_registration_verify(const uint8_t session[DMESH_CONTROL_SESSION_SIZE],
+                          const struct dmesh_registration_assertion_msg *assertion)
+{
+    uint8_t expected[DMESH_REG_MAC_SIZE];
+    int ok = registration_mac(session, assertion, expected) == 0 &&
+             CRYPTO_memcmp(expected, assertion->mac, sizeof(expected)) == 0;
+    OPENSSL_cleanse(expected, sizeof(expected));
+    return ok;
 }

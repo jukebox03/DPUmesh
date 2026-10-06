@@ -39,6 +39,7 @@ enum dmesh_msg_type {
     /* 12 is reserved and must never be assigned to a new type. */
     DMESH_MSG_RESOLVE      = 14, /* Host→DPU: name/ClusterIP → interned service id */
     DMESH_MSG_RESOLVE_ACK  = 15, /* DPU→Host: the answer, from the held generation */
+    DMESH_MSG_REG_ASSERTION= 16, /* Host→DPU: this connection's sealed identity */
 };
 
 /* POD_ASSIGNED only reserves an address. A channel is usable only after the DPU
@@ -157,9 +158,11 @@ _Static_assert(sizeof(struct dmesh_register_msg) == 72,
 #define DMESH_WORKLOAD_MAX 384
 
 /* Trusted workload registration is the only way a Pod enters the mesh. The DPU
- * creates a fresh challenge for every Comch connection. The Host relays it to
- * the controller through dpumeshd; neither the workload nor broker holds a
- * signing key. */
+ * creates a fresh challenge for every Comch connection. The broker relays it
+ * to dpumeshd, which seals the connection's identity under a key derived from
+ * the authenticated paired-host control session; the broker carries the sealed
+ * record back on the same connection. Neither the workload nor the broker holds
+ * that key. */
 #define DMESH_IDENTITY_VERSION 1u
 #define DMESH_IDENTITY_TYPE 1u
 #define DMESH_FEED_MAC_SIZE 32u
@@ -167,6 +170,8 @@ _Static_assert(sizeof(struct dmesh_register_msg) == 72,
 #define DMESH_POD_IP_MAX 16u
 #define DMESH_CLUSTER_ID_MAX 64u
 #define DMESH_CONTAINER_ID_MAX 65u
+#define DMESH_CONTROL_SESSION_SIZE 16u  /* paired-host control session id */
+#define DMESH_REG_MAC_SIZE 32u          /* HMAC-SHA256 seal of an assertion */
 
 struct dmesh_registration_challenge_msg {
     uint8_t type;               /* = DMESH_MSG_REG_CHALLENGE */
@@ -178,8 +183,9 @@ struct dmesh_registration_challenge_msg {
 _Static_assert(sizeof(struct dmesh_registration_challenge_msg) == 36,
                "dmesh_registration_challenge_msg ABI drift");
 
-/* Canonical identity metadata, accepted only from the authenticated paired-host
- * control session. Numeric fields are little-endian and text is zero-padded. */
+/* Canonical identity metadata, accepted only inside an assertion sealed under
+ * the authenticated paired-host control session. Numeric fields are
+ * little-endian and text is zero-padded. */
 struct dmesh_workload_identity {
     uint8_t  type;                     /* = DMESH_IDENTITY_TYPE */
     uint8_t  version;                  /* = DMESH_IDENTITY_VERSION */
@@ -208,9 +214,25 @@ struct dmesh_workload_identity {
 _Static_assert(sizeof(struct dmesh_workload_identity) == 1433,
                "dmesh_workload_identity ABI drift");
 
-/* Broker report on the private launch socket retained by dpumeshd. The admin
- * verifies the launch evidence, registers this challenge over paired-DPU TLS,
- * and returns an approval byte. Service eligibility comes from Kubernetes. */
+/* Host→DPU: the identity of the connection it arrives on. dpumeshd builds and
+ * seals it; the broker forwards the bytes unchanged. `mac` is HMAC-SHA256 over
+ * every byte before it, keyed from the paired-host control session id
+ * (dmesh_registration_seal), so it verifies only while that session is the
+ * authenticated one, and only on the connection whose challenge it names. */
+struct dmesh_registration_assertion_msg {
+    uint8_t type;               /* = DMESH_MSG_REG_ASSERTION */
+    uint8_t version;            /* = DMESH_LOCAL_VERSION */
+    uint8_t reserved[2];        /* must be zero */
+    struct dmesh_workload_identity identity;
+    uint8_t mac[DMESH_REG_MAC_SIZE];
+};
+_Static_assert(sizeof(struct dmesh_registration_assertion_msg) == 1469,
+               "dmesh_registration_assertion_msg ABI drift");
+
+/* Broker report on the private launch socket retained by dpumeshd. dpumeshd
+ * verifies the launch evidence and answers with the sealed assertion, which
+ * the broker forwards on its Comch connection; closing the socket refuses.
+ * Service eligibility comes from Kubernetes. */
 struct dmesh_registration_report {
     uint8_t magic[8];
     uint8_t version;

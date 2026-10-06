@@ -50,8 +50,8 @@ BROKER_HELLO = struct.Struct("<8sBB2x64s")
 LOCAL_REPORT = struct.Struct("<8sB3x64s32s")
 # Mirrors DMESH_LOCAL_MAGIC/DMESH_LOCAL_VERSION: the broker reports its DPU
 # connection nonce under them on its retained launch socket.
-LOCAL_MAGIC = b"DMESHLC1"
-LOCAL_VERSION = 5
+LOCAL_MAGIC = b"DMESHLC2"
+LOCAL_VERSION = 6
 BROKER_IPC_VERSION = 3
 MAX_CHANNEL_SLOTS = 127
 OBSERVE_ATTEMPTS = 15  # kubelet/API observation retries during direct registration
@@ -693,18 +693,17 @@ class BrokerSupervisor:
                         if attempt + 1 == OBSERVE_ATTEMPTS:
                             raise
                         time.sleep(0.5)
+                # Only the live control session can seal, so a lost session
+                # refuses here instead of handing the broker a dead assertion.
+                assertion, session = self.local.seal(metadata)
                 with self.lock:
                     if self.workers.get(worker.pid) is not worker or process_starttime(worker.pid) != worker.starttime:
                         raise RuntimeError_("broker exited during registration")
                     worker.connection_id = connection_id
-                    worker.control_session = self.local.session
-                    worker.registered = True  # Includes uncertain ACK; always require cleanup proof.
-                status = self.local.request(2, connection_id, metadata,
-                                            expected_session=worker.control_session)
-                if status:
-                    raise RuntimeError_(f"DPU refused REGISTER: {status}")
-                private.sendall(b"\0")
-                print(f"dpumeshd: direct REGISTER pod={worker.pod_uid} slot={worker.slot} "
+                    worker.control_session = session
+                    worker.registered = True  # The DPU may accept it; always require cleanup proof.
+                private.sendall(assertion)
+                print(f"dpumeshd: sealed registration pod={worker.pod_uid} slot={worker.slot} "
                       f"generation={worker.generation}", flush=True)
         except Exception as exc:
             print(f"dpumeshd: direct registration failed: {exc}", file=sys.stderr, flush=True)
@@ -740,9 +739,9 @@ class BrokerSupervisor:
             if self.local is not None and worker.connection_id is not None:
                 # A cleanup query may run on a replacement session: the DPU
                 # admits one only after retiring the previous session, and never
-                # reuses a connection ID. REGISTER stays fenced to the session
-                # captured before it. Retry until cleanup is proven, since a DPU
-                # can sit in restart backoff and giving up strands the slot.
+                # reuses a connection ID. A sealed assertion verifies only under
+                # the session that sealed it. Retry until cleanup is proven, since
+                # a DPU can sit in restart backoff and giving up strands the slot.
                 while True:
                     try:
                         self.local.request(3, worker.connection_id)
@@ -1046,7 +1045,9 @@ class Daemon:
                 self.registry.control_ready = True
                 self.registry.set_ready(self.registry.feed_ready)
                 try:
-                    snapshot = verifier.snapshot()
+                    # The watched view when it is synced; the API server
+                    # otherwise, so revocation never waits on the watch.
+                    snapshot = verifier.observed() or verifier.snapshot()
                 except Exception as exc:
                     print(f"dpumeshd: Kubernetes observation unavailable: {exc}", file=sys.stderr)
                     self.stop.wait(2)
@@ -1080,6 +1081,7 @@ class Daemon:
                 broker_stat.st_mode & 0o022 or not broker_stat.st_mode & 0o111):
             raise RuntimeError_("broker binary must be immutable to non-root users")
         self.cgroups.initialize()
+        self.supervisor.verifier.start()
         threading.Thread(target=self._local_loop, daemon=True).start()
         for slot in self.registry.slots:
             slot.listener = self._bind(slot.path, 0o666)
@@ -1100,6 +1102,7 @@ class Daemon:
         self.plugin.close()
         self.supervisor.terminate_all()
         self.supervisor.local.close()
+        self.supervisor.verifier.close()
         for slot in self.registry.slots:
             if slot.listener is not None:
                 slot.listener.close()

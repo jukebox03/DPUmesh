@@ -1886,8 +1886,9 @@ static doca_error_t init_control_path(dpumesh_ctx_t *ctx,
     __atomic_store_n(&ctx->doca_objs.landing_stripes, 0,
                      __ATOMIC_RELAXED);
     __atomic_store_n(&ctx->doca_objs.pod_quiesced, 0, __ATOMIC_RELEASE);
-    /* The broker relays the connection-bound nonce. dpumeshd authenticated the
-     * workload from kernel evidence; the admin verifies and registers the identity. */
+    /* The broker relays the connection-bound nonce to dpumeshd, which judged
+     * the workload from kernel evidence and Kubernetes, and carries back the
+     * identity dpumeshd sealed for this connection. */
     struct timespec challenge_start, challenge_now;
     struct timespec challenge_pause = { .tv_sec = 0, .tv_nsec = 10000 };
     clock_gettime(CLOCK_MONOTONIC, &challenge_start);
@@ -1922,11 +1923,22 @@ static doca_error_t init_control_path(dpumesh_ctx_t *ctx,
     memcpy(request.nonce, ctx->doca_objs.registration_challenge, sizeof(request.nonce));
     struct timeval deadline = { .tv_sec = 15 };
     setsockopt(manager_fd, SOL_SOCKET, SO_RCVTIMEO, &deadline, sizeof(deadline));
-    uint8_t status = 255;
+    struct dmesh_registration_assertion_msg assertion;
     if (send(manager_fd, &request, sizeof(request), MSG_NOSIGNAL) != sizeof(request) ||
-        recv(manager_fd, &status, sizeof(status), MSG_TRUNC) != 1 || status != 0) {
-        DOCA_LOG_ERR("paired-host REGISTER was refused");
+        recv(manager_fd, &assertion, sizeof(assertion), MSG_TRUNC) !=
+            (ssize_t)sizeof(assertion) ||
+        assertion.type != DMESH_MSG_REG_ASSERTION ||
+        assertion.version != DMESH_LOCAL_VERSION) {
+        DOCA_LOG_ERR("dpumeshd refused the registration");
         return DOCA_ERROR_INITIALIZATION;
+    }
+    /* Forwarded unchanged: the seal is dpumeshd's and the DPU checks it. Comch
+     * delivers in order, so the DPU has judged it before POD_REGISTER. */
+    result = client_send_msg(&ctx->doca_objs, (const char *)&assertion,
+                             sizeof(assertion));
+    if (result != DOCA_SUCCESS) {
+        DOCA_LOG_ERR("REG_ASSERTION send failed: %s", doca_error_get_name(result));
+        return result;
     }
 
     ctx->reg_msg.type = DMESH_MSG_POD_REGISTER;

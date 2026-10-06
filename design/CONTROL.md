@@ -694,8 +694,9 @@ nonce. None of those values is accepted from the workload as identity.
 
 The single registration path is:
 kernel evidence → dpumeshd → Kubernetes and kubelet verification →
-REGISTER on paired-host TLS → DPU identity binding → POD_REGISTER.
-The DPU issues protocol version 5 and rejects incompatible broker reports.
+assertion sealed under the paired-host session → the broker forwards it on its
+own Comch connection → DPU identity binding → POD_REGISTER.
+The DPU issues protocol version 6 and rejects incompatible broker reports.
 
 ## 2-1.1 Allocation and evidence
 
@@ -721,9 +722,10 @@ workload             dpumeshd host service       broker                  DPU
    │                         │◀── nonce report ─────│                      │
    │                         │  broker SO_PEERCRED, retained evidence      │
    │                         │                                             │
-   │                         │ Kubernetes get/list         + PodResources  │
-   │                         ├─ REGISTER(connection id, identity) ────────▶│
-   │                         ├─ approval ──────────▶│                      │
+   │                         │ watched Pods/Services       + PodResources  │
+   │                         │ seal under the paired-host session          │
+   │                         ├─ sealed assertion ──▶│                      │
+   │                         │                      ├─ REG_ASSERTION ─────▶│
    │                         │                      ├─ POD_REGISTER ──────▶│
    │                         │                      │◀─ POD_ASSIGNED ──────│
    │                         │                      ├─ MMAP_EXPORT × N ───▶│
@@ -736,6 +738,14 @@ the start time again. The two start-time reads fence PID reuse; parsing begins
 after the last `)` because a process name may contain spaces and parentheses.
 The cgroup must contain both a canonical Pod UID and one 64-hex container ID in
 the Kubernetes hierarchy.
+
+dpumeshd reads Pods and Services from a watched view: one list, then a watch
+that applies every change in order and lists again when the API server no
+longer holds the history it resumes from. It asks the API server directly only
+while the view is not synced, or when the view does not yet show the workload —
+a container that has just started. A decision taken from the view is as current
+as the watch; reconciliation (2-1.7) removes a binding a later view no longer
+supports.
 
 dpumeshd resolves exactly one Pod with that UID and requires
 all of the following:
@@ -761,7 +771,7 @@ retained private launch socket that no workload can reach. `dpumeshd` recognizes
 `SO_PEERCRED` PID, uid, retained start time, and supervision table, and requires
 its Service to equal the launch record. It retries the same nonce across a
 bounded observation window while the container status is still converging.
-Exactly one identity is produced per connection and presented to the DPU.
+Exactly one identity is sealed per connection and handed to its broker.
 
 The slot listener is mode 0666 because kubelet bind-mounts the inode into a
 non-root container. Its parent directory is mode 0755, but a Pod sees only its
@@ -775,14 +785,35 @@ struct dmesh_workload_identity is a canonical 1433-byte version-1 record.
 Numeric fields are little-endian. ASCII text is NUL-terminated and zero-padded.
 The record contains issue/expiry times, the DPU nonce, channel slot/generation,
 daemon incarnation, cluster/node, Pod UID/namespace/name/ServiceAccount,
-container name/id, selected Service and Pod IPv4 address. Removed assertion-id,
-key-id and signature fields are not transmitted.
+container name/id, selected Service and Pod IPv4 address. The record has no key
+or signature field of its own; its authenticity is the seal of the assertion
+that carries it.
 
 dpumeshd checks the caller's SO_PEERCRED, kernel cgroup identity, current Pod and
 Service objects, and exact kubelet PodResources allocation. Only that trusted
-host may send the identity on its paired control session. The broker reports the
-DPU challenge through its retained private launch socket and receives one
-approval byte; it never receives Kubernetes credentials.
+host can seal the identity. The broker reports the DPU challenge through its
+retained private launch socket and receives the sealed assertion back; it never
+receives Kubernetes credentials or the sealing key.
+
+### The sealed assertion
+
+`REG_ASSERTION` is a fixed 1469-byte Comch message: type, protocol version, two
+zero bytes, the identity record and a 32-byte seal. The seal is HMAC-SHA256 over
+every byte before it, under a key derived from the paired-host session id:
+
+```text
+   key  = HMAC-SHA256(session id, "dpumesh-registration")
+   seal = HMAC-SHA256(key, type ‖ version ‖ 0 ‖ 0 ‖ identity)
+```
+
+dpumeshd seals with the session it holds; the DPU verifies with the session it
+authenticated. The broker forwards the bytes unchanged, ahead of `POD_REGISTER`,
+on the connection whose challenge the record names. Three properties follow.
+The broker carries the assertion but cannot make or alter one. A seal is valid
+only under the session that made it: a lost session changes the key, so no
+registration outlives the session that authorized it. And the record binds only
+on arrival: the DPU checks it against the challenge of the connection it came
+on, so what binds a connection is holding it, not knowing its nonce.
 
 ### The paired control session
 
@@ -790,36 +821,48 @@ The listener requires TLS 1.3 and a client certificate with URI SAN
 spiffe://dpumesh.io/node/<served-host-node>. The host verifies the configured DPU
 server name. Tickets, session caching and early data are disabled.
 
-The Comch challenge/broker report protocol is version 5. Control requests are
-1497 bytes and responses 36 bytes. Each request carries the random session id
+The registration protocol is version 6. Control requests are 64 bytes and
+responses 36 bytes. Each request carries the random session id
 and increasing sequence. An identical last request returns the cached response;
 conflicting sequences, foreign sessions and nonzero reserved fields close it.
 
 | Command | Effect |
 |---|---|
 | PING | control-session liveness |
-| REGISTER | bind verified identity to the nonce's pending Comch connection |
 | UNREGISTER | begin registration teardown |
 | STATUS | report PENDING until cleanup is complete, then OK |
 
-Session loss retires its registrations. Replacement sessions cannot register an
-old pending connection; host registration is fenced to the session captured
-with its nonce.
+Operation 2 is retired and never reassigned. Identities do not travel on this
+session; its id keys the seal of the assertions that do.
+
+Session loss retires its registrations, and an assertion sealed under that
+session no longer verifies, so a replacement session cannot authorize an old
+pending connection. Registration therefore needs the session alive: the host's
+two-second PING keeps an otherwise idle session inside its 15-second deadline,
+and without it a new assertion is refused for want of an authenticated
+session.
 
 ## 2-1.3 Verification
 
-The DPU checks canonical type/version/fields, configured cluster and node,
-bounded issue/expiry time, exact nonce, channel slot/generation and daemon
-incarnation. Identity metadata is accepted only through the authenticated
-control dispatcher, never as a Comch workload assertion. Workload memory is
-imported only after this identity gate and POD_REGISTER authorization.
+The DPU checks, in order: the message framing; that the arrival connection is
+awaiting an identity; the seal against its authenticated session; canonical
+type/version/fields; configured cluster and node; bounded issue/expiry time;
+the arrival connection's own nonce; channel slot/generation and daemon
+incarnation. A refused assertion changes nothing. `POD_REGISTER` then fails for
+want of a verified identity, and the unauthenticated-connection timeout
+reclaims the slot.
+
+Comch carries the assertion, but the authority is the paired-host session:
+without a seal made under it, no Comch message is identity. Workload memory is
+imported only after this identity gate and `POD_REGISTER` authorization.
 
 ## 2-1.4 Replay
 
-The fresh connection nonce prevents reuse across connections; the consumed flag
-prevents duplicate identity installation. Session id and sequence fence commands,
+The fresh connection nonce, checked against the arrival connection, prevents
+reuse across connections; the verified flag refuses a second identity on the
+same one. The seal key changes with every session, so an assertion cannot be
+replayed into a later one. Session id and sequence fence control commands,
 while daemon incarnation and increasing channel generations fence slot reuse.
-The removed signed-assertion replay cache has no role in this protocol.
 
 ## 2-1.5 What the registration retains
 
@@ -869,8 +912,9 @@ needs no id. The idempotent path lets a host that lost `POD_ASSIGNED` or
 
 ## 2-1.7 Reconciliation and revocation
 
-dpumeshd periodically rechecks live workers against Kubernetes Pod/container
-identity and Service eligibility. A definite mismatch terminates the worker and
+Every two seconds dpumeshd rechecks live workers for Pod/container identity and
+Service eligibility, against the watched view, or against the API server while
+the view is not synced; revocation never waits on the watch. A definite mismatch terminates the worker and
 unregisters its connection. API observation errors retain existing bindings;
 they do not authorize new registrations. Control-session loss closes the
 session's bindings on the DPU.
@@ -944,9 +988,8 @@ The broker's privilege reduction is ordered around device initialization:
    `dpumeshd.service/workers/pod<uid>.g<generation>`;
 3. unshare mount, cgroup, and network namespaces and create a private tmpfs;
 4. consume the fixed 76-byte workload `HELLO`;
-5. open the DOCA device, create Comch, obtain the DPU challenge, report it and
-   receive the supervisor's paired-DPU registration approval, and
-   export all mappings;
+5. open the DOCA device, create Comch, obtain the DPU challenge, report it,
+   forward the assertion the supervisor sealed for it, and export all mappings;
 6. pivot into the empty tmpfs, detach the host root, drop supplementary groups,
    uid/gid and capabilities, set `no_new_privs`, and deny both exec syscalls;
 7. send `READY` and progress the channel as uid/gid 65532.
@@ -1719,8 +1762,9 @@ workload identity; it is a transport identifier for one node's slot table.
 
 `POD_REGISTER` is a fixed 72-byte message carrying the requested Service name
 beside the pod id, where `-1` asks the DPU to assign one. The identity
-is a 1433-byte canonical metadata record carried only in the authenticated
-1497-byte control request, with a 36-byte response. Forward and reverse
+is a 1433-byte canonical metadata record carried only inside the 1469-byte
+sealed `REG_ASSERTION`. Control-session requests are 64 bytes with a 36-byte
+response. Forward and reverse
 descriptors use fixed-width fields and compile-time layout assertions.
 Host and DPU endpoints are little-endian.
 
@@ -2093,7 +2137,9 @@ remaining values bound resource cost.
 | `CONTROLLER_REQUEST_TIMEOUT` | 10 s | TLS handshake and HTTP connection deadline |
 | `DMESH_ASSERT_MAX_LIFETIME_SEC` | 300 s | maximum registration issue/expiry interval |
 | `DMESH_ASSERT_CLOCK_SKEW_SEC` | 30 s | tolerated host-to-DPU future skew |
-| control frame sizes | 1497 / 36 B | fixed control-session request and response |
+| control frame sizes | 64 / 36 B | fixed control-session request and response |
+| `REG_ASSERTION` | 1469 B | sealed identity record on Comch |
+| `WATCH_SECONDS` | 240 s | server-side lifetime of one Kubernetes watch stream |
 | control handshake / idle deadline | 3 s / 15 s | unauthenticated and established session lifetime |
 | runtime shutdown drain | 20 s | per-runtime bound on retiring every registration |
 | `MAX_PODS` | 127 | DPU Pod table and Device Plugin slot ceiling |

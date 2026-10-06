@@ -17,7 +17,7 @@ struct dmesh_local_control {
     SSL *ssl;
     int listener, fd, authenticated;
     char *host_uri;
-    uint8_t session[16];
+    uint8_t session[DMESH_CONTROL_SESSION_SIZE];
     uint64_t sequence;
     time_t activity;
     size_t received, sent, pending;
@@ -98,7 +98,7 @@ failed:
 static void reply(struct dmesh_local_control *c, uint64_t seq, unsigned status)
 {
     memcpy(c->response.magic, DMESH_LOCAL_MAGIC, 8);
-    memcpy(c->response.session, c->session, 16);
+    memcpy(c->response.session, c->session, sizeof(c->session));
     encode(c->response.sequence, seq, 8); encode(c->response.status, status, 4);
     c->sent = 0; c->pending = sizeof(c->response);
 }
@@ -121,7 +121,7 @@ int dmesh_local_control_progress(struct dmesh_local_control *c)
     if (!c->authenticated) {
         int r = SSL_accept(c->ssl);
         if (r != 1) { if (wants_io(c->ssl, r)) return 0; goto failed; }
-        if (!peer_allowed(c) || !c->available(c->owner) || RAND_bytes(c->session, 16) != 1) goto failed;
+        if (!peer_allowed(c) || !c->available(c->owner) || RAND_bytes(c->session, sizeof(c->session)) != 1) goto failed;
         c->authenticated = 1; c->activity = monotonic_seconds(); reply(c, 0, DMESH_LOCAL_OK);
     }
     if (c->pending) {
@@ -137,14 +137,14 @@ int dmesh_local_control_progress(struct dmesh_local_control *c)
     if (c->received != sizeof(c->request)) return 1;
     c->received = 0;
     uint64_t seq = decode(c->request.sequence, 8);
-    if (memcmp(c->session, c->request.session, 16) || !zeros(c->request.reserved, 7)) goto failed;
+    if (memcmp(c->session, c->request.session, sizeof(c->session)) || !zeros(c->request.reserved, 7)) goto failed;
     if (seq && seq == c->sequence && !memcmp(&c->request, &c->previous, sizeof(c->request))) {
         c->response = c->previous_response; c->pending = sizeof(c->response);
     } else {
         if (!seq || seq <= c->sequence) goto failed;
         unsigned status;
         if (c->request.operation == DMESH_LOCAL_PING)
-            status = zeros(c->request.connection_id, 32) && zeros(&c->request.identity, sizeof(c->request.identity)) ? DMESH_LOCAL_OK : DMESH_LOCAL_INVALID;
+            status = zeros(c->request.connection_id, sizeof(c->request.connection_id)) ? DMESH_LOCAL_OK : DMESH_LOCAL_INVALID;
         else status = c->dispatch(c->owner, &c->request);
         c->sequence = seq; c->previous = c->request;
         reply(c, seq, status); c->previous_response = c->response;
@@ -153,6 +153,13 @@ int dmesh_local_control_progress(struct dmesh_local_control *c)
     return 1;
 failed:
     disconnect_peer(c); return 1;
+}
+int dmesh_local_control_session(const struct dmesh_local_control *c,
+                                uint8_t out[DMESH_CONTROL_SESSION_SIZE])
+{
+    if (!c || !c->ssl || !c->authenticated) return -1;
+    memcpy(out, c->session, sizeof(c->session));
+    return 0;
 }
 void dmesh_local_control_destroy(struct dmesh_local_control *c)
 {

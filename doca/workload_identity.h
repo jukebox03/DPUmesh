@@ -81,11 +81,23 @@ struct dmesh_identity_claims {
     uint64_t channel_generation;
 };
 
-/* Metadata decoder. Never authorizes a Comch message. The direct-registration
- * caller must already be an authenticated paired-host control session. */
+/* Metadata decoder. It authorizes nothing by itself: the caller verifies the
+ * assertion's seal (dmesh_registration_verify) before decoding. */
 enum dmesh_identity_result dmesh_identity_decode(
     const struct dmesh_workload_identity *, const char *, const char *,
     const uint8_t [DMESH_REG_NONCE_SIZE], uint64_t,
     struct dmesh_identity_claims *);
+
+/* Registration seal. The key is HMAC-SHA256 keyed with the paired-host control
+ * session id over the label "dpumesh-registration"; the seal is HMAC-SHA256
+ * under that key over every byte of the assertion before `mac`. dpumeshd seals
+ * with the session it holds and the DPU verifies with the session it
+ * authenticated, so a seal outlives neither. Seal returns 0 on success; verify
+ * returns 1 on a match and compares in constant time. */
+int dmesh_registration_seal(const uint8_t session[DMESH_CONTROL_SESSION_SIZE],
+                            struct dmesh_registration_assertion_msg *assertion);
+int dmesh_registration_verify(
+    const uint8_t session[DMESH_CONTROL_SESSION_SIZE],
+    const struct dmesh_registration_assertion_msg *assertion);
 
 #endif /* DMESH_WORKLOAD_IDENTITY_H */

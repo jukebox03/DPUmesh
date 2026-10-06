@@ -9,6 +9,7 @@
 #include <openssl/hmac.h>
 
 #include "doca/workload_identity.h"
+#include "doca/local_control.h"
 #include "doca/object.h"
 
 static void
@@ -118,6 +119,50 @@ test_feed_verify(void)
     assert(rmdir(dir) == 0);
 }
 
+/* The seal dpumeshd (node/local_registration.py seal) and the DPU compute must
+ * agree byte for byte; tests/local_registration_test.py checks the same vector. */
+static void
+test_registration_seal(void)
+{
+    static const uint8_t expected[DMESH_REG_MAC_SIZE] = {
+        0xba, 0x7d, 0xa0, 0x3c, 0x8e, 0x26, 0xad, 0xb8,
+        0xf0, 0xd7, 0xa7, 0xbc, 0x8c, 0xb4, 0x9e, 0xfe,
+        0x06, 0x92, 0x35, 0x57, 0xae, 0x74, 0xe9, 0x8c,
+        0x30, 0x6c, 0xc4, 0xd1, 0xff, 0x05, 0xed, 0xa3,
+    };
+    uint8_t session[DMESH_CONTROL_SESSION_SIZE];
+    for (size_t i = 0; i < sizeof(session); i++)
+        session[i] = (uint8_t)i;
+    struct dmesh_registration_assertion_msg msg;
+    memset(&msg, 0, sizeof(msg));
+    msg.type = DMESH_MSG_REG_ASSERTION;
+    msg.version = DMESH_LOCAL_VERSION;
+    uint8_t *record = (uint8_t *)&msg.identity;
+    record[0] = 1;
+    record[1] = 1;
+    for (size_t i = 0; i < 32; i++)
+        record[24 + i] = (uint8_t)(0x40 + i);
+
+    assert(dmesh_registration_seal(session, &msg) == 0);
+    assert(memcmp(msg.mac, expected, sizeof(expected)) == 0);
+    assert(dmesh_registration_verify(session, &msg) == 1);
+
+    /* Any byte before the seal is covered: the header and the record. */
+    msg.version ^= 1;
+    assert(dmesh_registration_verify(session, &msg) == 0);
+    msg.version ^= 1;
+    record[100] ^= 1;
+    assert(dmesh_registration_verify(session, &msg) == 0);
+    record[100] ^= 1;
+    msg.mac[0] ^= 1;
+    assert(dmesh_registration_verify(session, &msg) == 0);
+    msg.mac[0] ^= 1;
+
+    /* Another session, including the next one on the same DPU, cannot verify it. */
+    session[15] ^= 1;
+    assert(dmesh_registration_verify(session, &msg) == 0);
+}
+
 int
 main(void)
 {
@@ -149,6 +194,7 @@ main(void)
     assert(dmesh_identity_decode(&assertion, "test-cluster", "worker-1", nonce,
                                     now, &claims) == DMESH_IDENTITY_NONCANONICAL);
     test_feed_verify();
+    test_registration_seal();
     puts("workload_identity_test: PASS");
     return 0;
 }

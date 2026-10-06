@@ -326,6 +326,53 @@ def test_broker_cleanup_fence(root: Path) -> None:
     assert killed.is_set() and not supervisor.workers
 
 
+def test_sealed_registration() -> None:
+    from types import SimpleNamespace
+    from node import local_registration
+    session = bytes(range(16))
+    record = bytes(local_registration.identity.IDENTITY.size)
+    nonce = bytes([9]) * 32
+    report = dpumeshd.LOCAL_REPORT.pack(
+        dpumeshd.LOCAL_MAGIC, dpumeshd.LOCAL_VERSION, b"echo", nonce)
+    worker = dpumeshd.Worker(
+        slot=0, generation=1, pod_uid=UID, container_id=CONTAINER,
+        service="echo", pid=123, starttime="1", wrapper_pid=122,
+        cgroup=Path("/unused"), private_root=Path("/unused"),
+    )
+    supervisor = object.__new__(dpumeshd.BrokerSupervisor)
+    supervisor.lock = threading.Lock()
+    supervisor.workers = {worker.pid: worker}
+    supervisor.incarnation = "00" * 16
+    supervisor.verifier = SimpleNamespace(metadata=lambda _w, _c, _i: record)
+
+    # The broker receives exactly the assertion the DPU will verify.
+    supervisor.local = SimpleNamespace(
+        seal=lambda body: (local_registration.seal(session, body), session))
+    broker, private = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    with broker:
+        broker.send(report)
+        with mock.patch.object(dpumeshd, "process_starttime", return_value="1"):
+            supervisor.register_private(worker, private)
+        sent = broker.recv(local_registration.ASSERTION_SIZE + 1)
+    assert sent == local_registration.seal(session, record)
+    assert worker.registered and worker.connection_id == nonce
+    assert worker.control_session == session
+
+    # Without a control session nothing is sealed and the broker sees EOF.
+    worker.registered, worker.connection_id = False, None
+    def unavailable(_body):
+        raise ConnectionError("DPU control session is unavailable")
+    supervisor.local = SimpleNamespace(seal=unavailable)
+    broker, private = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    with broker:
+        broker.send(report)
+        with redirect_stderr(StringIO()), mock.patch.object(
+                dpumeshd, "process_starttime", return_value="1"):
+            supervisor.register_private(worker, private)
+        assert broker.recv(local_registration.ASSERTION_SIZE + 1) == b""
+    assert not worker.registered and worker.connection_id is None
+
+
 def test_launch_thread_survives_shutdown() -> None:
     daemon = object.__new__(dpumeshd.Daemon)
     daemon.stop = threading.Event()
@@ -352,6 +399,7 @@ def main() -> None:
     test_identity()
     test_configuration_validation()
     test_launch_thread_survives_shutdown()
+    test_sealed_registration()
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
         test_kernel_evidence(root / "proc")

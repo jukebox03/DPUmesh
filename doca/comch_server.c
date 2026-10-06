@@ -107,6 +107,86 @@ registration_lifecycle_accept(struct objects *objs, struct pod_state *current,
 	return DMESH_IDENTITY_OK;
 }
 
+/* Retain what a verified identity grants its connection. */
+static void
+registration_bind(struct pod_state *p, const struct dmesh_identity_claims *c)
+{
+	memcpy(p->workload, c->workload, sizeof(p->workload));
+	memcpy(p->pod_uid, c->pod_uid, sizeof(p->pod_uid));
+	memcpy(p->namespace_name, c->namespace_name, sizeof(p->namespace_name));
+	memcpy(p->service_account, c->service_account, sizeof(p->service_account));
+	memcpy(p->registered_service, c->service_name, sizeof(p->registered_service));
+	memcpy(p->pod_ip, c->pod_ip, sizeof(p->pod_ip));
+	memcpy(p->peer_registration.daemon, c->daemon_incarnation,
+	       sizeof(p->peer_registration.daemon));
+	p->peer_registration.slot = c->channel_slot;
+	p->peer_registration.generation = c->channel_generation;
+	memcpy(p->peer_registration.nonce, p->registration_nonce,
+	       sizeof(p->peer_registration.nonce));
+	p->registration_verified = 1;
+}
+
+/* The session sealed assertions verify under: the paired-host control session
+ * the DPU runtime authenticated. The host build of this file has none. */
+static int
+registration_session(struct objects *objs,
+		     uint8_t session[DMESH_CONTROL_SESSION_SIZE])
+{
+#ifdef DOCA_ARCH_DPU
+	return dmesh_local_control_session(objs->local_control, session);
+#else
+	(void)objs;
+	(void)session;
+	return -1;
+#endif
+}
+
+/* A sealed assertion states the identity of the connection it arrives on. The
+ * seal must verify under the authenticated paired-host session and the record
+ * must carry this connection's own challenge, so it binds nowhere else. A
+ * refusal changes nothing: POD_REGISTER then fails for want of a verified
+ * identity, and the unauthenticated-connection timeout reclaims the slot. */
+static void
+registration_accept_assertion(struct objects *objs,
+			      struct doca_comch_connection *conn,
+			      const struct dmesh_registration_assertion_msg *m)
+{
+	struct pod_state *p = find_pod_by_connection(objs, conn);
+	uint8_t session[DMESH_CONTROL_SESSION_SIZE];
+	struct dmesh_identity_claims c;
+	const char *refused = NULL;
+
+	if (m->version != DMESH_LOCAL_VERSION || m->reserved[0] || m->reserved[1])
+		refused = "framing";
+	else if (objs->shutting_down || p == NULL ||
+		 !p->registration_challenge_issued || p->local_registration_closed ||
+		 p->cleanup_pending || p->registration_verified ||
+		 p->registration_disconnect_pending)
+		refused = "stale connection";
+	else if (registration_session(objs, session) != 0)
+		refused = "no authenticated control session";
+	else if (!dmesh_registration_verify(session, m))
+		refused = "seal";
+	OPENSSL_cleanse(session, sizeof(session));
+	if (refused == NULL) {
+		enum dmesh_identity_result result = dmesh_identity_decode(
+			&m->identity, objs->cluster_id, objs->node_name,
+			p->registration_nonce, (uint64_t)time(NULL), &c);
+		if (result == DMESH_IDENTITY_OK)
+			result = registration_lifecycle_accept(objs, p, &c);
+		if (result != DMESH_IDENTITY_OK)
+			refused = dmesh_identity_result_name(result);
+	}
+	if (refused != NULL) {
+		DOCA_LOG_WARN("REG_ASSERTION refused: %s", refused);
+		return;
+	}
+	registration_bind(p, &c);
+	DOCA_LOG_WARN("REG_ASSERTION accepted pod=%s container=%s slot=%u generation=%lu",
+		      p->pod_uid, m->identity.container_id, c.channel_slot,
+		      (unsigned long)c.channel_generation);
+}
+
 int dmesh_resolve_service_key(const char *namespace_name, const char *query,
 			      char *out, size_t out_len)
 {
@@ -215,6 +295,15 @@ static void server_message_recv_callback(struct doca_comch_event_msg_recv *event
 		}
 		break;
 
+
+	case DMESH_MSG_REG_ASSERTION:
+		if (msg_len != sizeof(struct dmesh_registration_assertion_msg)) {
+			DOCA_LOG_ERR("Received invalid REG_ASSERTION message size: %u", msg_len);
+			return;
+		}
+		registration_accept_assertion(objs, comch_connection,
+			(const struct dmesh_registration_assertion_msg *)recv_buffer);
+		break;
 
 	case DMESH_MSG_POD_REGISTER: {
 		struct dmesh_register_msg *reg = (struct dmesh_register_msg *)recv_buffer;
@@ -1386,48 +1475,17 @@ unsigned server_local_dispatch(void *owner, const struct dmesh_local_request *r)
 {
     struct objects *objs = owner;
     if (objs->shutting_down) return DMESH_LOCAL_STALE;
+    if (r->operation != DMESH_LOCAL_STATUS && r->operation != DMESH_LOCAL_UNREGISTER)
+        return DMESH_LOCAL_INVALID;
     struct pod_state *p = NULL;
     for (int i = 0; i < objs->num_pods; i++)
         if (objs->pods[i].registration_challenge_issued &&
-            !memcmp(objs->pods[i].registration_nonce, r->connection_id, 32)) {
+            !memcmp(objs->pods[i].registration_nonce, r->connection_id,
+                    sizeof(r->connection_id))) {
             p = &objs->pods[i]; break;
         }
-    if (r->operation == DMESH_LOCAL_STATUS || r->operation == DMESH_LOCAL_UNREGISTER) {
-        if (!bytes_are_zero((const uint8_t *)&r->identity, sizeof(r->identity)))
-            return DMESH_LOCAL_INVALID;
-        if (!p) return DMESH_LOCAL_OK; /* Slot only recycled after hardware cleanup. */
-        if (r->operation == DMESH_LOCAL_UNREGISTER && !p->local_registration_closed)
-            local_registration_close(objs, p);
-        return local_registration_outstanding(p) ? DMESH_LOCAL_PENDING : DMESH_LOCAL_OK;
-    }
-    if (r->operation != DMESH_LOCAL_REGISTER) return DMESH_LOCAL_INVALID;
-    if (!p || !p->connection || p->local_registration_closed || p->cleanup_pending ||
-        p->registration_verified || p->registration_disconnect_pending)
-        return DMESH_LOCAL_STALE;
-    struct dmesh_identity_claims c;
-    enum dmesh_identity_result result = dmesh_identity_decode(
-        &r->identity, objs->cluster_id, objs->node_name, p->registration_nonce,
-        (uint64_t)time(NULL), &c);
-    if (result == DMESH_IDENTITY_OK) result = registration_lifecycle_accept(objs, p, &c);
-    if (result != DMESH_IDENTITY_OK) {
-        DOCA_LOG_WARN("local REGISTER refused: %s", dmesh_identity_result_name(result));
-        return DMESH_LOCAL_INVALID;
-    }
-    memcpy(p->workload, c.workload, sizeof(p->workload));
-    memcpy(p->pod_uid, c.pod_uid, sizeof(p->pod_uid));
-    memcpy(p->namespace_name, c.namespace_name, sizeof(p->namespace_name));
-    memcpy(p->service_account, c.service_account, sizeof(p->service_account));
-    memcpy(p->registered_service, c.service_name, sizeof(p->registered_service));
-    memcpy(p->pod_ip, c.pod_ip, sizeof(p->pod_ip));
-    memcpy(p->peer_registration.daemon, c.daemon_incarnation,
-           sizeof(p->peer_registration.daemon));
-    p->peer_registration.slot = c.channel_slot;
-    p->peer_registration.generation = c.channel_generation;
-    memcpy(p->peer_registration.nonce, p->registration_nonce,
-           sizeof(p->peer_registration.nonce));
-    p->registration_verified = 1;
-    DOCA_LOG_WARN("local REGISTER accepted pod=%s container=%s slot=%u generation=%lu",
-                 p->pod_uid, r->identity.container_id, c.channel_slot,
-                 (unsigned long)c.channel_generation);
-    return DMESH_LOCAL_OK;
+    if (!p) return DMESH_LOCAL_OK; /* Slot only recycled after hardware cleanup. */
+    if (r->operation == DMESH_LOCAL_UNREGISTER && !p->local_registration_closed)
+        local_registration_close(objs, p);
+    return local_registration_outstanding(p) ? DMESH_LOCAL_PENDING : DMESH_LOCAL_OK;
 }
