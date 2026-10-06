@@ -210,7 +210,7 @@ case "$CMD" in
     latency|bandwidth|rate) benchmark "$CMD" ;;
     all) benchmark latency; benchmark bandwidth; benchmark rate ;;
     dpulog) kubectl -n "${RUNTIME_NS:-dpumesh-system}" logs "daemonset/${DPU_RELEASE:-dpumesh-runtime}" -c runtime --tail="${1:-40}" ;;
-    dpubanner) kubectl -n "${RUNTIME_NS:-dpumesh-system}" logs "daemonset/${DPU_RELEASE:-dpumesh-runtime}" -c runtime | rg "DPU PROXY MODE ON" | tail -1 ;;
+    dpubanner) kubectl -n "${RUNTIME_NS:-dpumesh-system}" logs "daemonset/${DPU_RELEASE:-dpumesh-runtime}" -c runtime | grep -F "DPU PROXY MODE ON" | tail -1 ;;
     dpucpu) need_rig; dpu_sudo 'pid=$(pgrep -x dpumesh_dpu | head -1); [ -n "$pid" ] || { echo "dpumesh_dpu not running"; exit; }; top -bH -d 1 -n 2 -p "$pid" | awk "/ PID +USER/{n++} n==2{print}"' ;;
     *)
         echo "usage: $0 geometry|build|restart|point|ping|latency|bandwidth|rate|all|dpulog|dpubanner|dpucpu" >&2

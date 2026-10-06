@@ -39,8 +39,8 @@ transport is [`design/DATA.md`](../design/DATA.md), and control/security is
 
 Install the kernel settings in [`system/README.md`](system/README.md), disable
 swap and provide a working Kubernetes node, containerd, Docker, DOCA SDK, SSH
-to the paired BlueField Arm OS, and `kubectl`, `envsubst`, `rsync`, `nc`, `rg`
-and OpenSSL. The host service uses cgroup v2 and requires systemd delegation of
+to the paired BlueField Arm OS, and `kubectl`, `envsubst`, `rsync`, `nc` and
+OpenSSL. The host service uses cgroup v2 and requires systemd delegation of
 `cpu`, `memory` and `pids`.
 
 Copy [`.env.example`](../.env.example) to `.env` and set the rig values:

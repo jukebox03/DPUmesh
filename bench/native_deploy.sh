@@ -218,9 +218,9 @@ smoke() {
     for _attempt in $(seq 1 20); do
         probe=$(printf 'RUN 64 64 1 1 20 1\n' |
             timeout 15 nc -N "$address" 9092 2>/dev/null || true)
-        if printf '%s' "$probe" | rg -q '^OK ' &&
-           printf '%s' "$probe" | rg -q ' fail=0 ' &&
-           printf '%s' "$probe" | rg -q ' drops=0 '; then
+        if printf '%s' "$probe" | grep -q '^OK ' &&
+           printf '%s' "$probe" | grep -qF ' fail=0 ' &&
+           printf '%s' "$probe" | grep -qF ' drops=0 '; then
             route_ready=yes
             break
         fi
@@ -234,9 +234,9 @@ smoke() {
 
     result=$(printf 'RUN 64 64 1 3 100 1\n' | timeout 30 nc -N "$address" 9092)
     printf '%s\n' "$result"
-    printf '%s' "$result" | rg -q '^OK '
-    printf '%s' "$result" | rg -q ' fail=0 '
-    printf '%s' "$result" | rg -q ' drops=0 '
+    printf '%s' "$result" | grep -q '^OK '
+    printf '%s' "$result" | grep -qF ' fail=0 '
+    printf '%s' "$result" | grep -qF ' drops=0 '
 }
 
 deploy() {
