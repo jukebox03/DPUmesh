@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <doca_dev.h>
@@ -71,6 +72,40 @@ static void install_exit_traces(void)
     sa.sa_handler = request_stop; sa.sa_flags = 0;
     sigaction(SIGTERM, &sa, NULL); sigaction(SIGINT, &sa, NULL);
     atexit(trace_exit);
+}
+
+/*
+ * The embedded Linkerd workers read the signed service-target feed when they
+ * start (DPUMESH_L7_SERVICE_TARGETS_FILE, required once an L7 Service list is
+ * set), and the host admin relays it only after it is running. Wait for the
+ * file, unready, instead of failing a worker and sending the Pod into restart
+ * backoff. Returns 0 once the file exists or no L7 layer is configured, -1 if
+ * stopped first.
+ */
+static int wait_for_service_targets(void)
+{
+    const char *opaque = getenv("DPUMESH_L7_OPAQUE_SVC");
+    const char *aware = getenv("DPUMESH_L7_SVC");
+    const char *path = getenv("DPUMESH_L7_SERVICE_TARGETS_FILE");
+    const struct timespec pause = { .tv_sec = 0, .tv_nsec = 500 * 1000 * 1000 };
+    int logged = 0;
+
+    if ((opaque == NULL || *opaque == '\0') && (aware == NULL || *aware == '\0'))
+        return 0;
+    if (path == NULL || *path == '\0')
+        return 0;   /* the worker reports the missing configuration itself */
+    while (access(path, F_OK) != 0) {
+        if (dmesh_dpu_stop)
+            return -1;
+        if (!logged) {
+            DOCA_LOG_WARN("waiting for the service-target feed %s (relayed by the host admin)", path);
+            logged = 1;
+        }
+        nanosleep(&pause, NULL);
+    }
+    if (logged)
+        DOCA_LOG_WARN("service-target feed %s present", path);
+    return 0;
 }
 
 int main(int argc, char **argv)
@@ -197,6 +232,11 @@ int main(int argc, char **argv)
     if (result != DOCA_SUCCESS) {
         DOCA_LOG_ERR("Failed to parse arguments: %s", doca_error_get_descr(result));
         goto exit;
+    }
+
+    if (wait_for_service_targets() != 0) {
+        result = DOCA_ERROR_AGAIN;
+        goto argp_cleanup;
     }
 
     /* Open DOCA device */

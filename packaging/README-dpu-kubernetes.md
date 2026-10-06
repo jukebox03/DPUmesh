@@ -108,7 +108,9 @@ bench/bench.sh restart
 ```
 
 The DPU DaemonSet uses OnDelete; restart explicitly deletes the Pod and waits
-for its replacement. Runtime and feed receiver share that Pod. The runtime
+for its replacement. A runtime with an L7 Service list stays unready until the
+service-target feed that dpumeshd relays exists, so start dpumeshd first;
+`deploy-dpu.sh` refuses to deploy while it is inactive. Runtime and feed receiver share that Pod. The runtime
 owns one hardware lock and readiness file on the DPU host filesystem.
 Certificates, feed verification keys and the peer node key persist under
 /etc/dpumesh; the feed sidecar writes only its feeds mount.

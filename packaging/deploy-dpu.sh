@@ -16,6 +16,12 @@ pki=${DPUMESH_PKI_DIR:-$project/build/pki}
 [[ "$DPU_PCI" =~ ^-p[[:space:]]([0-9A-Fa-f:.]+)[[:space:]]+-r[[:space:]]([0-9A-Fa-f:.]+)$ ]] || exit 2
 pci=${BASH_REMATCH[1]}; representor=${BASH_REMATCH[2]}
 test -s "$pki/ca.key"
+# The runtime starts unready and waits for the service-target feed that this
+# host's dpumeshd relays; without it the readiness wait below can only time out.
+if ! systemctl is-active --quiet dpumeshd.service; then
+    echo "dpumeshd is not active on this host: start it first (the runtime waits for its feeds)" >&2
+    exit 1
+fi
 temporary=$(mktemp -d)
 trap 'rm -rf "$temporary"' EXIT
 umask 077
