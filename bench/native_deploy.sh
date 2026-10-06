@@ -35,6 +35,11 @@ sudo_auth() {
     printf '%s\n' "$HOST_PASS" | sudo -S -p '' true
 }
 
+# The password travels on stdin, so a long build cannot outlive sudo's cache.
+host_sudo() {
+    printf '%s\n' "$HOST_PASS" | sudo -S -p '' "$@"
+}
+
 collect_doca_libs() {
     mkdir -p "$PROJ_ROOT/doca-libs"
     local library
@@ -138,8 +143,41 @@ build_dpu_image() {
     DPUMESH_RINGS_PER_POD="$RINGS" "$BENCH_DIR/bench.sh" build
     rsync -az --delete "$PROJ_ROOT/packaging/" "$DPU_HOST:~/DPUmesh/packaging/"
     rsync -az --delete "$PROJ_ROOT/dpu/" "$DPU_HOST:~/DPUmesh/dpu/"
+    case "${DPUMESH_DPU_IMAGE_BUILD:-dpu}" in
+        dpu) build_dpu_image_on_dpu ;;
+        host) build_dpu_image_on_host ;;
+        *) echo "DPUMESH_DPU_IMAGE_BUILD must be dpu or host" >&2; exit 2 ;;
+    esac
+}
+
+build_dpu_image_on_dpu() {
     printf '%s\n' "$DPU_PASS" | ssh "$DPU_HOST" "sudo -S -p '' /home/${DPU_HOST%%@*}/DPUmesh/packaging/build-dpu-image.sh /home/${DPU_HOST%%@*}/DPUmesh '$IMG_DPU'"
     printf '%s\n' "$DPU_PASS" | ssh "$DPU_HOST" "sudo -S -p '' sh -ec 'docker save $IMG_DPU | ctr -n k8s.io images import -'"
+}
+
+# For a DPU without Docker or without Internet access for the Dockerfile's
+# packages: the DPU only assembles the context, and this host builds the arm64
+# image under emulation and ships it.
+build_dpu_image_on_host() {
+    local home="/home/${DPU_HOST%%@*}" context archive remote
+    [ -e /proc/sys/fs/binfmt_misc/qemu-aarch64 ] || {
+        echo "no arm64 emulation on this host; register it with" >&2
+        echo "  docker run --privileged --rm tonistiigi/binfmt --install arm64" >&2
+        exit 1
+    }
+    ssh "$DPU_HOST" "rm -rf '$home/dpumesh-image-context' && '$home/DPUmesh/packaging/build-dpu-image.sh' '$home/DPUmesh' '$IMG_DPU' '$home/dpumesh-image-context'"
+    context=$(mktemp -d)
+    archive=$(mktemp)
+    trap 'rm -rf "$context" "$archive"' RETURN
+    rsync -a --delete "$DPU_HOST:$home/dpumesh-image-context/" "$context/"
+    host_sudo docker buildx build --platform linux/arm64 --load \
+        -f "$PROJ_ROOT/packaging/dpu.Dockerfile" -t "$IMG_DPU" "$context"
+    host_sudo docker save -o "$archive" "$IMG_DPU"
+    host_sudo chown "$(id -u):$(id -g)" "$archive"
+    remote=$(ssh "$DPU_HOST" mktemp)
+    scp -q "$archive" "$DPU_HOST:$remote"
+    printf '%s\n' "$DPU_PASS" | ssh "$DPU_HOST" "sudo -S -p '' ctr -n k8s.io images import '$remote' >/dev/null"
+    ssh "$DPU_HOST" "rm -f '$remote'; rm -rf '$home/dpumesh-image-context'"
 }
 start_dpu() {
     IMG_DPU="$IMG_DPU" "$PROJ_ROOT/packaging/deploy-dpu.sh"

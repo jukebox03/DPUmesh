@@ -71,6 +71,27 @@ there is no grant keyring or registration mode setting. Update host, broker and
 DPU together when changing the internal protocol (currently version 5,
 1433-byte identity, 1497-byte request). The application IPC remains version 3.
 
+### Offline DPU builds
+
+The build steps fetch sources and packages on the DPU. A DPU without Internet
+access needs them staged:
+
+- The Linkerd port is a submodule; run `git submodule update --init` in this
+  checkout before the first build (`bench.sh build` refuses an empty one).
+- The Rust adapter's crates: run `cargo vendor` in `linkerd/rust` on a connected
+  host, copy the directory to the DPU, and point a `CARGO_HOME` there at it
+  (`[source.crates-io] replace-with = "vendored-sources"`,
+  `[source.vendored-sources] directory = ...`, `[net] offline = true`). Without
+  rustup, give `bench.sh` the toolchain on `PATH` (cargo runs `rustc` from it)
+  and no `+toolchain` selector:
+  `LINKERD_CARGO='PATH=$HOME/opt/rust/bin:$PATH CARGO_HOME=$HOME/cargo-offline cargo' LINKERD_TOOLCHAIN=`.
+- The runtime image: [dpu.Dockerfile](dpu.Dockerfile) installs packages, and
+  the DPU may have no Docker at all. With `DPUMESH_DPU_IMAGE_BUILD=host`,
+  `native_deploy.sh` has the DPU only assemble the image context, builds the
+  arm64 image on this host under emulation and imports it into the DPU's
+  containerd. Register the emulator once:
+  `docker run --privileged --rm tonistiigi/binfmt --install arm64`.
+
 ## Linkerd
 
 The runtime embeds Linkerd workers; it does not inject a proxy into application

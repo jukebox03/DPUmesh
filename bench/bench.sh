@@ -36,7 +36,11 @@ OUT="${OUT:-/tmp/dpumesh-bench}"
 DPU_PROJ="${DPU_PROJ:-DPUmesh}"
 DPU_BUILD="$DPU_PROJ/doca/build"
 LINKERD_BUILD="${DPU_L7_BUILD:-l7build}"
-LINKERD_TOOLCHAIN="${LINKERD_TOOLCHAIN:-1.90.0}"
+# rustup's +toolchain selector; set it empty for a cargo without rustup (an
+# offline DPU's standalone toolchain). LINKERD_CARGO may carry environment,
+# e.g. 'PATH=$HOME/opt/rust/bin:$PATH CARGO_HOME=$HOME/cargo-offline cargo'
+# (cargo finds rustc on PATH).
+LINKERD_TOOLCHAIN="${LINKERD_TOOLCHAIN-1.90.0}"
 LINKERD_CARGO="${LINKERD_CARGO:-\$HOME/.cargo/bin/cargo}"
 
 DPUMESH_THROUGHPUT_WORKERS="${DPUMESH_THROUGHPUT_WORKERS:-}"
@@ -89,6 +93,10 @@ linkerd_lib() { printf '%s/rust/target/release/libdmesh_l7.a' "$(linkerd_dir)"; 
 
 sync_sources() {
     local destination
+    [ -f "$PROJ_ROOT/linkerd/port/linkerd2-proxy/Cargo.toml" ] || {
+        err "linkerd/port/linkerd2-proxy is empty: run git submodule update --init"
+        exit 1
+    }
     destination=$(linkerd_dir)
     step "Syncing DPU sources"
     ssh_dpu "mkdir -p ~/$DPU_PROJ/doca ~/$DPU_PROJ/include ~/$DPU_PROJ/linkerd/include '$destination/rust' '$destination/port/linkerd2-proxy'"
@@ -108,7 +116,7 @@ sync_sources() {
 build_dpu() {
     local destination cargo library buildtype output
     destination=$(linkerd_dir)
-    cargo="$LINKERD_CARGO +$LINKERD_TOOLCHAIN"
+    cargo="$LINKERD_CARGO${LINKERD_TOOLCHAIN:+ +$LINKERD_TOOLCHAIN}"
     step "Building DPU runtime"
     ssh_dpu "test -f '$destination/rust/Cargo.lock'" || {
         err "missing linkerd/rust/Cargo.lock"
