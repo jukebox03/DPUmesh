@@ -314,6 +314,8 @@ static void server_message_recv_callback(struct doca_comch_event_msg_recv *event
 		}
 		int assigned = pods_register(objs, comch_connection, reg->pod_id,
 		                             reg->service_name);
+		if (assigned == DMESH_REGISTER_PENDING)
+			break;      /* unanswered: the host's REGISTER retry asks again */
 		if (assigned >= 0) {
 			/* Reply with the assigned pod_id so the host can address itself.
 			 * Non-blocking send (no PE re-entry from this callback). */
@@ -916,6 +918,7 @@ pods_add_connection(struct objects *objs, struct doca_comch_connection *conn)
 	objs->pods[idx].registration_challenge_sent = 0;
 	objs->pods[idx].registration_verified = 0;
 	objs->pods[idx].registration_consumed = 0;
+	objs->pods[idx].registration_service_wait_logged = 0;
 
 
 	objs->pods[idx].landing_stripes = objs->n_data_workers;
@@ -1336,8 +1339,11 @@ pods_register(struct objects *objs, struct doca_comch_connection *conn,
 		}
 		/* The node-local compact id is the DPU's own: interned from the
 		 * held generation. Serving an identity requires the generation
-		 * that defines it, so a Service the generation does not intern
-		 * fails closed; a client-only registration needs no id. */
+		 * that defines it. A Service created with its Pods reaches the
+		 * signed feed seconds later, so until a generation defines it the
+		 * REGISTER stays unanswered (nothing is assigned) and the host's
+		 * retry asks again; the admission deadline bounds the wait. A
+		 * client-only registration needs no id. */
 		int32_t service_id = DMESH_SVC_NONE;
 		if (service_name[0] != '\0') {
 			char service_key[DMESH_K8S_NAMESPACE_MAX + DMESH_SVC_NAME_MAX];
@@ -1347,10 +1353,13 @@ pods_register(struct objects *objs, struct doca_comch_connection *conn,
 			         (int)DMESH_SVC_NAME_MAX - 1, service_name);
 			service_id = dmesh_topology_interned_id(objs, service_key);
 			if (service_id < 0) {
-				DOCA_LOG_ERR("pods_register: no interned id for %s "
-				             "(no generation defines it): fails closed",
-				             service_key);
-				return -1;
+				if (!objs->pods[i].registration_service_wait_logged) {
+					objs->pods[i].registration_service_wait_logged = 1;
+					DOCA_LOG_WARN("pods_register: no generation defines %s yet; "
+					              "slot %d waits for one (admission deadline)",
+					              service_key, i);
+				}
+				return DMESH_REGISTER_PENDING;
 			}
 		}
 

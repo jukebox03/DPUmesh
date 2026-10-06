@@ -88,8 +88,12 @@ pods_unregister_connection(struct objects *objs,
 /* Register an existing connection. pod_id < 0 → the DPU assigns a free pod_id
  * (the pods[] slot index). `service_name` must equal the Service the
  * connection's assertion granted (empty = client-only); the compact id is
- * interned from the held generation, and a Service it does not define fails
- * closed. Returns the assigned pod_id (>= 0), or -1 on error. */
+ * interned from the held generation. A Service no held generation defines yet
+ * returns DMESH_REGISTER_PENDING and changes nothing: the host's periodic
+ * REGISTER retries until a generation defines it or the admission deadline
+ * (DMESH_REGISTRATION_TIMEOUT_NS) closes the connection. Returns the assigned
+ * pod_id (>= 0), DMESH_REGISTER_PENDING, or -1 on error. */
+#define DMESH_REGISTER_PENDING (-2)
 int
 pods_register(struct objects *objs, struct doca_comch_connection *conn,
               int32_t pod_id, const char *service_name);

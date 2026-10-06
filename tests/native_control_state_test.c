@@ -83,8 +83,14 @@ main(void)
     snprintf(objs->pods[0].namespace_name,
              sizeof(objs->pods[0].namespace_name), "test-bench");
 
-    /* Serving an identity requires the generation that defines it. */
-    assert(pods_register(objs, conn, -1, "echo-dpumesh") == -1);
+    /* Serving an identity requires the generation that defines it. Until one
+     * does, REGISTER is held without changing the slot: the host retries and
+     * the admission deadline bounds the wait. */
+    assert(pods_register(objs, conn, -1, "echo-dpumesh") == DMESH_REGISTER_PENDING);
+    assert(objs->pods[0].registration_service_wait_logged == 1);
+    assert(pods_register(objs, conn, -1, "echo-dpumesh") == DMESH_REGISTER_PENDING);
+    assert(objs->pods[0].registered == 0 && objs->pods[0].pod_id == -1 &&
+           objs->pods[0].registration_consumed == 0 && objs->pod_id_to_slot[0] == -1);
     install_generation(objs);
     int interned = dmesh_topology_interned_id(objs, "test-bench/echo-dpumesh");
     assert(interned >= 0);

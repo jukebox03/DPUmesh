@@ -225,6 +225,7 @@ struct pod_state {
     int registration_challenge_sent;
     int registration_verified;
     int registration_consumed;
+    int registration_service_wait_logged; /* REGISTER awaited a generation defining its Service */
     int registered;         /* 1 = DMESH_MSG_POD_REGISTER received */
     int dma_ready;          /* 1 = all mmaps + worker barrier + DPA ADD ACKs complete */
     enum dmesh_pod_init_result init_result;   /* terminal once non-PENDING */

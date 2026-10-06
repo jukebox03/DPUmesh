@@ -899,16 +899,21 @@ observed Pod is selected by that Service. The Pod enters backend selection after
       ├─ already registered, different Service            → conflicting replay, refused
       ├─ no verified registration, or already consumed    → refused
       ├─ service_name ≠ the asserted Service                → refused
-      ├─ no interned id for <namespace>/<name>            → fails closed, refused
+      ├─ no interned id for <namespace>/<name>            → unanswered: the host retries
       └─ pod_id and service_id assigned                   → POD_ASSIGNED
 ```
 
 The Service name is authoritative for identity, so it must equal the one the
 connection's registered identity named. The compact id is the DPU's own interning of the
 generation: serving an identity requires the generation that defines it, so a
-Service no generation defines cannot be registered. A client-only registration
-needs no id. The idempotent path lets a host that lost `POD_ASSIGNED` or
-`POD_INIT_RESULT` recover by repeating the request.
+Service no generation defines cannot be registered yet. A Service created
+together with its Pods reaches the signed feed seconds after the Pods start, so
+that REGISTER is held without changing the slot: the broker repeats it every
+100 ms, and it succeeds once an adopted generation interns the Service. The
+connection's 30-second admission deadline still closes a registration that no
+generation ever serves. A client-only registration needs no id. The idempotent
+path lets a host that lost `POD_ASSIGNED` or `POD_INIT_RESULT` recover by
+repeating the request.
 
 ## 2-1.7 Reconciliation and revocation
 
