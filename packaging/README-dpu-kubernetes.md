@@ -28,8 +28,27 @@ the build toolchains must be installed.
 For a DPU joining a different cluster, back up its kubelet/CNI configuration,
 stop the previous runtime, install a kubelet/kubeadm matching the cluster with
 [prepare-dpu-node.sh](prepare-dpu-node.sh), and join using a short-lived bootstrap
-token. The script prepares binaries; it does not reset or automatically join
-the node. Remove bootstrap files and tokens after a successful join.
+token. The script prepares binaries, enables IP forwarding and br_netfilter,
+and prints the join command; it does not reset or automatically join the node.
+Remove bootstrap files and tokens after a successful join.
+
+A DPU without Internet access needs everything it would otherwise pull:
+
+- kubelet and kubeadm: the installed ones are reused when they report the
+  cluster's version; otherwise copy them to a directory and set
+  `DPUMESH_K8S_BIN_DIR`.
+- Images, imported into containerd's `k8s.io` namespace before the node can turn
+  Ready: the pause image named by containerd's `sandbox_image` (BlueField's
+  `/etc/containerd/config-mlnx.toml` says `k8s.gcr.io/pause:3.9`; tag it under
+  that name), the cluster's kube-proxy and the CNI's images. Pull the arm64
+  variants on a connected host, for example
+  `crane pull --platform linux/arm64 --format=legacy IMAGE image.tar`, copy the
+  tarballs and run `ctr -n k8s.io images import image.tar` on the DPU.
+- The runtime image and the Linkerd adapter build: see [Offline DPU
+  builds](#offline-dpu-builds).
+
+After the join kubelet reads static Pods from `/etc/kubernetes/manifests`; the
+standalone `/etc/kubelet.d` Pods (DOCA telemetry) no longer start.
 
 Configure [.env.example](../.env.example) as .env. Explicitly set the host and
 DPU node names for each pair. A DPU is tainted dpumesh.io/dpu=true:NoSchedule.
