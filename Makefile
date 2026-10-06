@@ -291,6 +291,7 @@ test-hostfree: $(HOSTFREE_TESTS)
 	$(TESTDIR)/peer_pair_wire_test
 	$(TESTDIR)/peer_pair_transport_test
 	sh tests/dma_fault_scope_test.sh
+	sh tests/kubelet_reserve_test.sh
 	python3 tests/dpumesh_controller_test.py
 	$(DPUMESHD_PYTHON) tests/dpumeshd_test.py
 	$(DPUMESHD_PYTHON) tests/dpu_feed_test.py
@@ -338,6 +339,7 @@ test: $(TESTDIR)/native_api_contract_test $(TESTDIR)/native_control_state_test \
 	$(TESTDIR)/l7_abi_contract_test
 	$(TESTDIR)/benchmark_result_contract_test
 	sh tests/dma_fault_scope_test.sh
+	sh tests/kubelet_reserve_test.sh
 	sh tests/abi_contract_test.sh $(LIB) $(PRELOAD) $(ABI_MAJOR)
 	sh tests/generator_selftest_test.sh $(BINDIR)/bench_dpumesh $(BINDIR)/bench_sock
 	python3 tests/dpumesh_controller_test.py

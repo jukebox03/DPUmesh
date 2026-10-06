@@ -12,6 +12,11 @@ if [ -z "$project" ] || [ ! -f "$project/node/dpumeshd.py" ]; then
     exit 2
 fi
 
+# dpumeshd and its brokers run outside Pods on the unit's AllowedCPUs, which
+# kubelet must keep out of Pods (configure-kubelet-reserve.sh).
+python3 "$project/packaging/check-cpu-reserve.py" "$project/packaging/dpumeshd.service" \
+    "${DPUMESH_KUBELET_CONFIG:-/var/lib/kubelet/config.yaml}"
+
 # Never replace the Python package while systemd is concurrently retrying a
 # failed daemon. The caller starts/restarts the service after installing its
 # environment and credentials.
