@@ -2,7 +2,11 @@
 set -euo pipefail
 project=${1:?usage: build-dpu-image.sh PROJECT_ROOT IMAGE}
 image=${2:?image required}
-[ "$(uname -m)" = aarch64 ]
+[ "$(uname -m)" = aarch64 ] || { echo "build-dpu-image.sh runs on the DPU (aarch64)" >&2; exit 1; }
+# The libraries copied below come from this DPU's OS, so the image's glibc must
+# be the same release; a 24.04 BFB's libstdc++ does not load on 22.04's glibc.
+base=$(. /etc/os-release && [ "$ID" = ubuntu ] && printf 'ubuntu:%s' "$VERSION_ID") ||
+    { echo "unsupported DPU OS; expected Ubuntu in /etc/os-release" >&2; exit 1; }
 context=$(mktemp -d)
 trap 'rm -rf "$context"' EXIT
 install -d "$context/rootfs/usr/local/bin" "$context/rootfs/usr/local/lib/dpumesh"
@@ -24,4 +28,4 @@ for path in /usr/lib/aarch64-linux-gnu/libibverbs/libmlx5*.so /usr/lib/aarch64-l
     [ ! -e "$path" ] || { install -d "$context/rootfs/usr/lib/aarch64-linux-gnu/libibverbs"; cp -L "$path" "$context/rootfs/usr/lib/aarch64-linux-gnu/libibverbs/"; }
 done
 if [ -d /etc/libibverbs.d ]; then cp -a /etc/libibverbs.d "$context/rootfs/etc-libibverbs.d"; install -d "$context/rootfs/etc"; mv "$context/rootfs/etc-libibverbs.d" "$context/rootfs/etc/libibverbs.d"; fi
-docker build -f "$project/packaging/dpu.Dockerfile" -t "$image" "$context"
+docker build --build-arg BASE="$base" -f "$project/packaging/dpu.Dockerfile" -t "$image" "$context"

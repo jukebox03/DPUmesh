@@ -20,7 +20,6 @@ values = dict(
         'DPUMESH_LOCAL_CA': '/etc/dpumesh/local-tls/ca.crt',
         'DPUMESH_LOCAL_CERT': '/etc/dpumesh/local-tls/dpu-server.crt',
         'DPUMESH_LOCAL_KEY': '/etc/dpumesh/local-tls/dpu-server.key',
-        'DPUMESH_IDENTITY_TRUST_DOMAIN': 'linkerd.cluster.local',
         'DPUMESH_CONTROLLER_SCOPE_URL': env.get('DPUMESH_CONTROLLER_SCOPE_URL', 'http://192.168.100.1:28089'),
         'DPUMESH_L7_LINKERD_WORKER': env.get('DPUMESH_L7_LINKERD_WORKER', 'all'),
         'DPUMESH_L7_OPAQUE_SVC': env.get('DPUMESH_L7_OPAQUE_SVC', env.get('NS', 'test-bench') + '/echo-dpumesh-native'),
@@ -28,8 +27,12 @@ values = dict(
         'DPUMESH_ARM_WORKERS': env.get('DPUMESH_ARM_WORKERS', '8'),
         'DPUMESH_RINGS_PER_POD': env.get('DPUMESH_RINGS_PER_POD', '8'),
     })
-for key in ('DPUMESH_ARM_CPU_LIST', 'DPUMESH_L7_SVC', 'DPUMESH_PEER_TRANSPORT',
-            'DPUMESH_PEER_BIND', 'DPUMESH_PEER_PORT', 'DPUMESH_ADMISSION_FILE'):
+# The chart derives DPUMESH_IDENTITY_TRUST_DOMAIN from its linkerd values.
+for key in ('DPUMESH_ARM_CPU_LIST', 'DPUMESH_L7_SVC', 'DPUMESH_ADMISSION_FILE',
+            'DPUMESH_PEER_TRANSPORT', 'DPUMESH_PEER_BIND', 'DPUMESH_PEER_PORT',
+            'DPUMESH_PEER_SECURITY', 'DPUMESH_PEER_CRYPTO', 'DPUMESH_PEER_RDMA_DEVICE',
+            'DPUMESH_PEER_GID_INDEX', 'DPUMESH_PEER_MTU', 'DPUMESH_PEER_LEASE_MS',
+            'DPUMESH_PEER_HANDSHAKE_TIMEOUT_MS', 'DPUMESH_PEER_REKEY_S'):
     if env.get(key):
         values['env'][key] = env[key]
 print(json.dumps(values, indent=2))

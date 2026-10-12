@@ -3,10 +3,13 @@
 set -euo pipefail
 version=${1:?usage: prepare-dpu-node.sh KUBERNETES_VERSION}
 [[ "$version" =~ ^v1\.[0-9]+\.[0-9]+$ ]] || exit 2
-[ "$(id -u)" = 0 ] && [ "$(uname -m)" = aarch64 ]
+[ "$(id -u)" = 0 ] && [ "$(uname -m)" = aarch64 ] || { echo "run as root on the DPU (aarch64)" >&2; exit 1; }
+# The drop-in below overrides the BFB's kubelet.service; it cannot stand alone.
+systemctl cat kubelet >/dev/null 2>&1 || { echo "kubelet.service is not installed" >&2; exit 1; }
 backup="/var/backups/dpumesh-kubelet-$(date -u +%Y%m%dT%H%M%SZ)"
 install -d -m 0700 "$backup"
-cp -a /var/lib/kubelet/config.yaml "$backup/"
+# A DPU that never ran a configured kubelet has no config to keep.
+[ ! -e /var/lib/kubelet/config.yaml ] || cp -a /var/lib/kubelet/config.yaml "$backup/"
 systemctl cat kubelet > "$backup/kubelet.service.txt"
 install -d /opt/dpumesh/kubernetes/bin /etc/systemd/system/kubelet.service.d
 for binary in kubelet kubeadm; do

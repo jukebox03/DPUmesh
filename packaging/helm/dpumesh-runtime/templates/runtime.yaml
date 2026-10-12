@@ -100,6 +100,10 @@ spec:
             - {name: LINKERD2_PROXY_DESTINATION_SVC_NAME, value: {{ printf "linkerd-destination.%s.serviceaccount.identity.%s.%s" .Values.linkerd.namespace .Values.linkerd.namespace .Values.linkerd.trustDomain | quote }}}
             - {name: LINKERD2_PROXY_POLICY_SVC_ADDR, value: {{ printf "linkerd-policy.%s.svc.cluster.local.:8090" .Values.linkerd.namespace | quote }}}
             - {name: LINKERD2_PROXY_POLICY_SVC_NAME, value: {{ printf "linkerd-destination.%s.serviceaccount.identity.%s.%s" .Values.linkerd.namespace .Values.linkerd.namespace .Values.linkerd.trustDomain | quote }}}
+            {{- if not (hasKey .Values.env "DPUMESH_IDENTITY_TRUST_DOMAIN") }}
+            # Source identities must be spelled like the names Linkerd issues above.
+            - {name: DPUMESH_IDENTITY_TRUST_DOMAIN, value: {{ printf "%s.%s" .Values.linkerd.namespace .Values.linkerd.trustDomain | quote }}}
+            {{- end }}
             {{- end }}
             {{- range $name, $value := .Values.env }}
             - {name: {{ $name }}, value: {{ $value | quote }}}
@@ -138,8 +142,11 @@ spec:
           resources:
             requests: {cpu: 10m, memory: 32Mi}
             limits: {cpu: 100m, memory: 128Mi}
+          # The receiver binds localBind only; without host the probe dials the
+          # node's InternalIP, a different address once the DPU joins over a
+          # management network.
           readinessProbe:
-            tcpSocket: {port: 4788}
+            tcpSocket: {port: 4788{{ with .Values.localBind }}, host: {{ . | quote }}{{ end }}}
             periodSeconds: 2
           volumeMounts:
             - {name: config, mountPath: /etc/dpumesh, readOnly: true}
