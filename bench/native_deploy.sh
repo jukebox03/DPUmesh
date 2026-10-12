@@ -36,6 +36,9 @@ sudo_auth() {
 }
 
 collect_doca_libs() {
+    # Start empty: the images COPY the whole directory, so libraries left from
+    # an older DOCA install would ship next to the current ones.
+    rm -rf "$PROJ_ROOT/doca-libs"
     mkdir -p "$PROJ_ROOT/doca-libs"
     local library
     for library in \
@@ -45,7 +48,7 @@ collect_doca_libs() {
         /opt/mellanox/flexio/lib/libflexio.so* \
         /lib/x86_64-linux-gnu/libmlx5.so* \
         /lib/x86_64-linux-gnu/libibverbs.so*; do
-        [ -e "$library" ] && cp -a "$library" "$PROJ_ROOT/doca-libs/"
+        if [ -e "$library" ]; then cp -a "$library" "$PROJ_ROOT/doca-libs/"; fi
     done
 }
 
@@ -60,11 +63,16 @@ build_images() {
     sudo_auth
     make -C "$PROJ_ROOT" -j"$(nproc)" bench
     collect_doca_libs
+    # The application images carry binaries and DOCA libraries built here, so
+    # they need this host's glibc: use its own Ubuntu release as the base.
+    local base
+    base=$(. /etc/os-release && [ "$ID" = ubuntu ] && printf 'ubuntu:%s' "$VERSION_ID") ||
+        { echo "unsupported build host; expected Ubuntu in /etc/os-release" >&2; exit 1; }
     docker build -f "$BENCH_DIR/docker/dpumesh_controller.Dockerfile" \
         -t "$IMG_CONTROLLER" "$PROJ_ROOT"
-    docker build -f "$BENCH_DIR/docker/echo_dpumesh.Dockerfile" \
+    docker build --build-arg BASE="$base" -f "$BENCH_DIR/docker/echo_dpumesh.Dockerfile" \
         -t "$IMG_ECHO" "$PROJ_ROOT"
-    docker build -f "$BENCH_DIR/docker/bench_dpumesh.Dockerfile" \
+    docker build --build-arg BASE="$base" -f "$BENCH_DIR/docker/bench_dpumesh.Dockerfile" \
         -t "$IMG_BENCH" "$PROJ_ROOT"
     import_image "$IMG_CONTROLLER"
     import_image "$IMG_ECHO"
@@ -111,8 +119,7 @@ configure_host() {
         printf 'DPUMESH_CONTROLLER_URL=https://%s:8443\n' "$controller_ip"
         printf 'DPUMESH_DPU_FEED_HOST=%s\n' "$dpu_feed"
         printf 'DPUMESH_DPU_FEED_PORT=4788\n'
-        printf 'DPUMESH_NODE_RDMA_ADDR=%s\n' \
-            "${DPUMESH_NODE_RDMA_ADDR:-$dpu_feed:47900}"
+        printf 'DPUMESH_NODE_RDMA_ADDR=%s\n' "$DPUMESH_NODE_RDMA_ADDR"
         printf 'DPUMESH_CLUSTER_ID=%s\n' "${DPUMESH_CLUSTER_ID:-dpumesh-test}"
         printf 'DPUMESH_LOCAL_SERVER_NAME=%s\n' "${DPUMESH_DPU_NODE_NAME:-$NODE_NAME-dpu}"
         printf 'DPUMESH_KUBE_API=%s\n' "$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')"
@@ -135,10 +142,13 @@ configure_host() {
 }
 
 build_dpu_image() {
+    local project
     DPUMESH_RINGS_PER_POD="$RINGS" "$BENCH_DIR/bench.sh" build
-    rsync -az --delete "$PROJ_ROOT/packaging/" "$DPU_HOST:~/DPUmesh/packaging/"
-    rsync -az --delete "$PROJ_ROOT/dpu/" "$DPU_HOST:~/DPUmesh/dpu/"
-    printf '%s\n' "$DPU_PASS" | ssh "$DPU_HOST" "sudo -S -p '' /home/${DPU_HOST%%@*}/DPUmesh/packaging/build-dpu-image.sh /home/${DPU_HOST%%@*}/DPUmesh '$IMG_DPU'"
+    # The tree bench.sh built: ~/$DPU_PROJ, whatever the DPU login's home is.
+    project="$(ssh "$DPU_HOST" 'printf %s "$HOME"')/${DPU_PROJ:-DPUmesh}"
+    rsync -az --delete "$PROJ_ROOT/packaging/" "$DPU_HOST:$project/packaging/"
+    rsync -az --delete "$PROJ_ROOT/dpu/" "$DPU_HOST:$project/dpu/"
+    printf '%s\n' "$DPU_PASS" | ssh "$DPU_HOST" "sudo -S -p '' '$project/packaging/build-dpu-image.sh' '$project' '$IMG_DPU'"
     printf '%s\n' "$DPU_PASS" | ssh "$DPU_HOST" "sudo -S -p '' sh -ec 'docker save $IMG_DPU | ctr -n k8s.io images import -'"
 }
 start_dpu() {
@@ -180,9 +190,9 @@ smoke() {
     for _attempt in $(seq 1 20); do
         probe=$(printf 'RUN 64 64 1 1 20 1\n' |
             timeout 15 nc -N "$address" 9092 2>/dev/null || true)
-        if printf '%s' "$probe" | rg -q '^OK ' &&
-           printf '%s' "$probe" | rg -q ' fail=0 ' &&
-           printf '%s' "$probe" | rg -q ' drops=0 '; then
+        if printf '%s' "$probe" | grep -q '^OK ' &&
+           printf '%s' "$probe" | grep -q ' fail=0 ' &&
+           printf '%s' "$probe" | grep -q ' drops=0 '; then
             route_ready=yes
             break
         fi
@@ -196,13 +206,21 @@ smoke() {
 
     result=$(printf 'RUN 64 64 1 3 100 1\n' | timeout 30 nc -N "$address" 9092)
     printf '%s\n' "$result"
-    printf '%s' "$result" | rg -q '^OK '
-    printf '%s' "$result" | rg -q ' fail=0 '
-    printf '%s' "$result" | rg -q ' drops=0 '
+    printf '%s' "$result" | grep -q '^OK '
+    printf '%s' "$result" | grep -q ' fail=0 '
+    printf '%s' "$result" | grep -q ' drops=0 '
 }
 
 deploy() {
     require_rig
+    # dpumeshd reports this address and the controller rejects the report unless
+    # it equals the operator nodes record; derive it once for both.
+    local dpu_feed="${DPUMESH_DPU_FEED_HOST:-${DPU_HOST##*@}}"
+    export DPUMESH_NODE_RDMA_ADDR="${DPUMESH_NODE_RDMA_ADDR:-${DPUMESH_PEER_BIND:-$dpu_feed}:${DPUMESH_PEER_PORT:-47900}}"
+    [[ "$DPUMESH_NODE_RDMA_ADDR" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}:[0-9]+$ ]] || {
+        echo "DPUMESH_NODE_RDMA_ADDR must be IPv4:PORT, got $DPUMESH_NODE_RDMA_ADDR; set DPUMESH_DPU_FEED_HOST" >&2
+        exit 2
+    }
     sudo_auth
     stop_workloads
     deploy_controller

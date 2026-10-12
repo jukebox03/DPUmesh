@@ -134,8 +134,14 @@ build_dpu() {
 
 start_dpu() {
     local ns="${RUNTIME_NS:-dpumesh-system}" release="${DPU_RELEASE:-dpumesh-runtime}"
-    kubectl -n "$ns" delete pod -l "app.kubernetes.io/instance=$release" --wait=true
-    kubectl -n "$ns" wait --for=jsonpath='{.status.numberReady}'=1 "daemonset/$release" --timeout=240s
+    local selector="app.kubernetes.io/instance=$release"
+    kubectl -n "$ns" delete pod -l "$selector" --wait=true
+    # DaemonSet numberReady can still count the deleted Pod; wait on its replacement.
+    for _ in $(seq 1 60); do
+        [ -z "$(kubectl -n "$ns" get pod -l "$selector" -o name)" ] || break
+        sleep 1
+    done
+    kubectl -n "$ns" wait --for=condition=Ready pod -l "$selector" --timeout=240s
 }
 
 running_client_ip() {
@@ -202,7 +208,7 @@ case "$CMD" in
     latency|bandwidth|rate) benchmark "$CMD" ;;
     all) benchmark latency; benchmark bandwidth; benchmark rate ;;
     dpulog) kubectl -n "${RUNTIME_NS:-dpumesh-system}" logs "daemonset/${DPU_RELEASE:-dpumesh-runtime}" -c runtime --tail="${1:-40}" ;;
-    dpubanner) kubectl -n "${RUNTIME_NS:-dpumesh-system}" logs "daemonset/${DPU_RELEASE:-dpumesh-runtime}" -c runtime | rg "DPU PROXY MODE ON" | tail -1 ;;
+    dpubanner) kubectl -n "${RUNTIME_NS:-dpumesh-system}" logs "daemonset/${DPU_RELEASE:-dpumesh-runtime}" -c runtime | grep -F "DPU PROXY MODE ON" | tail -1 ;;
     dpucpu) need_rig; dpu_sudo 'pid=$(pgrep -x dpumesh_dpu | head -1); [ -n "$pid" ] || { echo "dpumesh_dpu not running"; exit; }; top -bH -d 1 -n 2 -p "$pid" | awk "/ PID +USER/{n++} n==2{print}"' ;;
     *)
         echo "usage: $0 geometry|build|restart|point|ping|latency|bandwidth|rate|all|dpulog|dpubanner|dpucpu" >&2

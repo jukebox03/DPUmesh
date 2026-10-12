@@ -1,4 +1,7 @@
-FROM ubuntu:22.04
+# BASE is the build host's Ubuntu release: the binary and the copied DOCA
+# libraries need that release's glibc and libstdc++.
+ARG BASE=ubuntu:22.04
+FROM ${BASE}
 
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
