@@ -21,7 +21,9 @@ if systemctl is-active --quiet dpumeshd.service 2>/dev/null ||
 fi
 
 install -d -o root -g root -m 0755 /opt/dpumesh/bin /opt/dpumesh/lib \
-    /opt/dpumesh/python /etc/dpumesh/tls
+    /opt/dpumesh/python
+# Same mode dpumesh_controller.sh gives it; holds the node mTLS key.
+install -d -o root -g root -m 0700 /etc/dpumesh/tls
 install -o root -g root -m 0555 "$project/build/bin/dmesh_broker" \
     /opt/dpumesh/bin/dmesh_broker
 install -o root -g root -m 0555 "$project/build/lib/libdpumesh.so.5" \
@@ -32,7 +34,10 @@ chown -R root:root /opt/dpumesh/python/node
 find /opt/dpumesh/python/node -type d -exec chmod 0555 {} \;
 find /opt/dpumesh/python/node -type f -exec chmod 0444 {} \;
 
-if [ ! -x /opt/dpumesh/venv/bin/python ]; then
+# Without python3-venv, venv creates bin/python and then fails in ensurepip;
+# rebuild such a pip-less environment instead of reusing it.
+if [ ! -x /opt/dpumesh/venv/bin/pip ]; then
+    rm -rf /opt/dpumesh/venv
     python3 -m venv /opt/dpumesh/venv
 fi
 /opt/dpumesh/venv/bin/pip install --disable-pip-version-check \

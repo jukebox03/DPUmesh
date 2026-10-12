@@ -55,11 +55,16 @@ RestrictRealtime=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# /run is empty after boot and read-only under ProtectSystem=strict, so systemd
+# creates the directory; ReadWritePaths= alone fails on a missing path.
+RuntimeDirectory=dpumesh
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
 ReadWritePaths=/run/dpumesh /var/lib/kubelet/device-plugins
 DevicePolicy=closed
 DeviceAllow=/dev/infiniband/rdma_cm rw
-DeviceAllow=/dev/infiniband/uverbs0 rw
-DeviceAllow=/dev/infiniband/uverbs1 rw
+# All uverbs nodes: the BlueField PF's index depends on the host's other RDMA NICs.
+DeviceAllow=char-infiniband_verbs rw
 DeviceAllow=/dev/vfio/vfio rw
 
 # This set must be inside kubelet reservedSystemCPUs. The install receipt checks
